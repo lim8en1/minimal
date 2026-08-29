@@ -5,6 +5,7 @@ add_library(minimal_server_core STATIC
     tools/permission.cpp
     tools/path_confinement.cpp
     llm/sse_parser.cpp
+    llm/http_client.cpp
     llm/token_accounting.cpp
     config/frontmatter.cpp
     plugins/name_registry.cpp

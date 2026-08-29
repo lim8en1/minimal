@@ -19,7 +19,9 @@ const char* minimal_plugin_abi_tag() { return minimal::common::AbiTag(); }
 const char* minimal_plugin_name() { return "provider-openai"; }
 const char* minimal_plugin_version() { return minimal::common::Version(); }
 
-// TODO: minimal_plugin_register_provider_factories -- "openai" -> OpenAiProvider,
-// using core's HttpClient + SseParser from the utilities half of the ABI.
+// TODO: minimal_plugin_register_provider_factories -- "openai" ->
+// minimal::provider_openai::OpenAiProvider (openai_provider.hpp), using core's
+// HttpClient + SseParser from the utilities half of the ABI. Deferred until
+// ProviderFactoryRegistry and the plugin loader exist.
 
 }  // extern "C"

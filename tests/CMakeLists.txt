@@ -16,7 +16,22 @@ add_executable(minimal_tests
     token_accounting_test.cpp
     config_paths_test.cpp
     tool_executor_test.cpp
-    agent_loop_test.cpp)
+    agent_loop_test.cpp
+    http_client_test.cpp
+    openai_request_test.cpp
+    openai_response_test.cpp
+    openai_stream_test.cpp
+    openai_error_mapping_test.cpp
+    # provider-openai's pure translation logic, compiled directly into the test
+    # binary rather than via the plugin .so -- these files have no ABI/plugin
+    # dependency, only core headers, so this is real linkage, not dlopen.
+    "${CMAKE_SOURCE_DIR}/plugins/server/provider-openai/openai_request.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/provider-openai/openai_response.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/provider-openai/openai_stream_reassembler.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/provider-openai/openai_error_mapping.cpp")
+
+target_include_directories(minimal_tests PRIVATE
+    "${CMAKE_SOURCE_DIR}/plugins/server/provider-openai")
 
 # minimal::test_support is the test-dependency bundle: it carries server_core,
 # which carries common publicly. Listing those again here is redundant and makes
