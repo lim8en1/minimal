@@ -8,7 +8,10 @@ add_library(minimal_server_core STATIC
     llm/token_accounting.cpp
     config/frontmatter.cpp
     plugins/name_registry.cpp
-    agent/compaction_boundary.cpp)
+    agent/compaction_boundary.cpp
+    agent/agent_loop.cpp
+    tools/tool_registry.cpp
+    tools/tool_executor.cpp)
 add_library(minimal::server_core ALIAS minimal_server_core)
 
 target_include_directories(minimal_server_core PUBLIC

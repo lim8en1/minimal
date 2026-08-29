@@ -225,7 +225,11 @@ class LlmProvider {
 public:
     virtual ~LlmProvider() = default;
     virtual ChatResponse Complete(const ChatRequest&) = 0;
-    virtual void StreamComplete(const ChatRequest&, const StreamEventSink&) = 0;
+    // Returns the assembled response, not void: the caller needs the final
+    // message to append to history, and the provider already maintains exactly
+    // that state to reassemble streamed tool-call fragments. Returning it stops
+    // every caller re-deriving it from the event stream.
+    virtual ChatResponse StreamComplete(const ChatRequest&, const StreamEventSink&) = 0;
 };
 ```
 
@@ -255,6 +259,8 @@ private:
 ```
 
 `ProviderCacheKey` is the `providers.json` entry **name** plus a config-generation counter — entries are immutable at runtime, so this is sufficient, and it avoids hashing an API key into a map key. `parameters` is not part of the key: it lives on `ChatRequest`, populated fresh per call.
+
+`StopReason` carries a **`Cancelled`** value alongside `EndTurn`/`ToolUse`/`MaxTokens`/`StopSequence`/`ContentFilter`/`Refusal`/`Unknown`. Cancellation is expected, not exceptional, so it must not surface as an `LlmError`: the provider catches its own aborted transfer and returns a partial `ChatResponse` carrying this stop reason, and the loop treats it as a clean exit rather than a failure.
 
 **Token accounting — two distinct quantities, never conflated:**
 

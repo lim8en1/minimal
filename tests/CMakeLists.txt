@@ -14,7 +14,9 @@ add_executable(minimal_tests
     name_registry_test.cpp
     compaction_boundary_test.cpp
     token_accounting_test.cpp
-    config_paths_test.cpp)
+    config_paths_test.cpp
+    tool_executor_test.cpp
+    agent_loop_test.cpp)
 
 # minimal::test_support is the test-dependency bundle: it carries server_core,
 # which carries common publicly. Listing those again here is redundant and makes
