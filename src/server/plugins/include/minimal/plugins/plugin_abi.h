@@ -27,11 +27,28 @@
 #include "minimal/llm/provider.hpp"
 #include "minimal/llm/provider_factory_registry.hpp"
 #include "minimal/llm/sse_parser.hpp"
+#include "minimal/tools/atomic_write.hpp"
+#include "minimal/tools/file_access.hpp"
 #include "minimal/tools/path_confinement.hpp"
 #include "minimal/tools/tool.hpp"
 #include "minimal/tools/tool_registry.hpp"
 
 // --- Half 1: extension points plugins implement -----------------------------
+
+namespace minimal::plugins {
+
+// Everything a tool needs at registration time. A struct rather than loose
+// parameters so a later addition (bash will want a Logger) stays
+// source-compatible instead of forcing another signature change on every
+// plugin author.
+struct ToolRegistrationContext {
+    // The `tools` object from settings.json, verbatim. Core deliberately does
+    // not impose a schema on it: each plugin owns the shape of its own slice,
+    // which is why config::ToolsSettings keeps it as raw JSON.
+    nlohmann::json tools_settings = nlohmann::json::object();
+};
+
+}  // namespace minimal::plugins
 
 extern "C" {
 
@@ -45,7 +62,8 @@ const char* minimal_plugin_name();
 const char* minimal_plugin_version();
 
 // OPTIONAL, additive: many plugins may each contribute tools.
-void minimal_plugin_register_tools(minimal::tools::ToolRegistry&);
+void minimal_plugin_register_tools(minimal::tools::ToolRegistry&,
+                                   const minimal::plugins::ToolRegistrationContext&);
 
 // OPTIONAL, additive: contributes provider kinds addressable from providers.json.
 void minimal_plugin_register_provider_factories(minimal::llm::ProviderFactoryRegistry&);

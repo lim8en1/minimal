@@ -4,9 +4,11 @@
 
 #include <algorithm>
 #include <cstring>
+#include <utility>
 #include <iterator>
 
 #include "minimal/common/abi_tag.hpp"
+#include "minimal/plugins/plugin_abi.h"
 
 namespace minimal::plugins {
 namespace {
@@ -14,7 +16,7 @@ namespace {
 using AbiTagFn = const char* (*)();
 using NameFn = const char* (*)();
 using VersionFn = const char* (*)();
-using RegisterToolsFn = void (*)(tools::ToolRegistry&);
+using RegisterToolsFn = void (*)(tools::ToolRegistry&, const ToolRegistrationContext&);
 using RegisterProviderFactoriesFn = void (*)(llm::ProviderFactoryRegistry&);
 
 template <typename Fn>
@@ -42,8 +44,9 @@ std::string_view ToString(LoadStatus status) {
     return "unknown";
 }
 
-PluginLoader::PluginLoader(tools::ToolRegistry& tools, llm::ProviderFactoryRegistry& providers)
-    : tools_(tools), providers_(providers) {}
+PluginLoader::PluginLoader(tools::ToolRegistry& tools, llm::ProviderFactoryRegistry& providers,
+                            nlohmann::json tools_settings)
+    : tools_(tools), providers_(providers), tools_settings_(std::move(tools_settings)) {}
 
 // Handles are intentionally leaked -- see LIFETIME in the header.
 PluginLoader::~PluginLoader() = default;
@@ -99,7 +102,9 @@ PluginRecord PluginLoader::LoadOne(const PluginCandidate& candidate) {
     tools_.SetAttribution(record.name);
 
     if (auto register_tools = Lookup<RegisterToolsFn>(handle, "minimal_plugin_register_tools")) {
-        register_tools(tools_);
+        ToolRegistrationContext context;
+        context.tools_settings = tools_settings_;
+        register_tools(tools_, context);
     }
 
     tools_.ClearAttribution();

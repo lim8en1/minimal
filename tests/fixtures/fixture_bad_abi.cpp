@@ -10,5 +10,8 @@ const char* minimal_plugin_name() { return "fixture-bad-abi"; }
 const char* minimal_plugin_version() { return "1.0.0"; }
 
 // If the loader ever calls this, the ABI gate failed open.
-void minimal_plugin_register_tools(minimal::tools::ToolRegistry&) { g_registration_ran = true; }
+void minimal_plugin_register_tools(minimal::tools::ToolRegistry&,
+                                   const minimal::plugins::ToolRegistrationContext&) {
+    g_registration_ran = true;
+}
 }

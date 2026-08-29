@@ -1,0 +1,159 @@
+#include "file_editor.hpp"
+
+#include <fstream>
+#include <sstream>
+#include <vector>
+
+#include "minimal/tools/atomic_write.hpp"
+
+namespace minimal::tools_fs {
+namespace {
+
+struct LoadedFile {
+    bool ok = false;
+    std::string error;
+    std::string content;
+};
+
+LoadedFile LoadWholeFile(const std::filesystem::path& path, std::int64_t max_bytes) {
+    LoadedFile loaded;
+
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(path, ec)) {
+        loaded.error = "not a regular file: " + path.string();
+        return loaded;
+    }
+
+    const auto size = std::filesystem::file_size(path, ec);
+    if (ec) {
+        loaded.error = "cannot stat: " + path.string();
+        return loaded;
+    }
+    if (static_cast<std::int64_t>(size) > max_bytes) {
+        loaded.error = "file is " + std::to_string(size) + " bytes, over the " +
+                        std::to_string(max_bytes) +
+                        " byte edit limit -- use a different approach for files this large";
+        return loaded;
+    }
+
+    std::ifstream in(path, std::ios::binary);
+    if (!in) {
+        loaded.error = "cannot open: " + path.string();
+        return loaded;
+    }
+    std::ostringstream buffer;
+    buffer << in.rdbuf();
+    loaded.content = buffer.str();
+    loaded.ok = true;
+    return loaded;
+}
+
+std::size_t CountOccurrences(const std::string& haystack, std::string_view needle) {
+    if (needle.empty()) return 0;
+    std::size_t count = 0;
+    for (std::size_t pos = haystack.find(needle); pos != std::string::npos;
+         pos = haystack.find(needle, pos + needle.size())) {
+        ++count;
+    }
+    return count;
+}
+
+}  // namespace
+
+EditOutcome FileEditor::StrReplace(const std::filesystem::path& path, std::string_view old_str,
+                                    std::string_view new_str, std::int64_t max_bytes) {
+    EditOutcome outcome;
+
+    if (old_str.empty()) {
+        outcome.error = "old_str must not be empty";
+        return outcome;
+    }
+
+    const auto loaded = LoadWholeFile(path, max_bytes);
+    if (!loaded.ok) {
+        outcome.error = loaded.error;
+        return outcome;
+    }
+
+    const std::size_t occurrences = CountOccurrences(loaded.content, old_str);
+    if (occurrences == 0) {
+        outcome.error = "old_str not found in " + path.string();
+        return outcome;
+    }
+    if (occurrences > 1) {
+        // Refusing is the whole point: replacing the first of several matches
+        // edits a line the caller never looked at.
+        outcome.error = "old_str appears " + std::to_string(occurrences) + " times in " +
+                        path.string() + "; it must match exactly once -- include more context";
+        return outcome;
+    }
+
+    const std::size_t pos = loaded.content.find(old_str);
+    std::string updated = loaded.content;
+    updated.replace(pos, old_str.size(), new_str);
+
+    const auto written = tools::write_file(path, updated);
+    if (!written.ok) {
+        outcome.error = written.error;
+        return outcome;
+    }
+
+    outcome.ok = true;
+    outcome.summary = "replaced 1 occurrence in " + path.filename().string();
+    return outcome;
+}
+
+EditOutcome FileEditor::Insert(const std::filesystem::path& path, int insert_line,
+                                std::string_view insert_text, std::int64_t max_bytes) {
+    EditOutcome outcome;
+
+    if (insert_line < 0) {
+        outcome.error = "insert_line must be >= 0";
+        return outcome;
+    }
+
+    const auto loaded = LoadWholeFile(path, max_bytes);
+    if (!loaded.ok) {
+        outcome.error = loaded.error;
+        return outcome;
+    }
+
+    std::vector<std::string> lines;
+    {
+        std::istringstream in(loaded.content);
+        std::string line;
+        while (std::getline(in, line)) lines.push_back(line);
+    }
+
+    if (insert_line > static_cast<int>(lines.size())) {
+        // Usually means the model is working from a stale view; appending
+        // silently would hide that.
+        outcome.error = "insert_line " + std::to_string(insert_line) + " is past the end of " +
+                        path.string() + " (" + std::to_string(lines.size()) + " lines)";
+        return outcome;
+    }
+
+    std::string text(insert_text);
+    if (!text.empty() && text.back() == '\n') text.pop_back();
+
+    lines.insert(lines.begin() + insert_line, std::move(text));
+
+    std::string updated;
+    for (const auto& line : lines) {
+        updated += line;
+        updated += '\n';
+    }
+
+    const auto written = tools::write_file(path, updated);
+    if (!written.ok) {
+        outcome.error = written.error;
+        return outcome;
+    }
+
+    outcome.ok = true;
+    outcome.summary = "inserted after line " + std::to_string(insert_line) + " in " +
+                       path.filename().string();
+    return outcome;
+}
+
+}  // namespace minimal::tools_fs

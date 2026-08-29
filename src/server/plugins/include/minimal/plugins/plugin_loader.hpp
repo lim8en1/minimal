@@ -4,6 +4,8 @@
 #include <string>
 #include <vector>
 
+#include <nlohmann/json.hpp>
+
 #include "minimal/llm/provider_factory_registry.hpp"
 #include "minimal/tools/tool_registry.hpp"
 
@@ -54,7 +56,11 @@ std::string_view ToString(LoadStatus status);
 // surfaces as an unrelated crash much later. Do not "clean this up".
 class PluginLoader {
 public:
-    PluginLoader(tools::ToolRegistry& tools, llm::ProviderFactoryRegistry& providers);
+    // `tools_settings` is the `tools` object from settings.json, forwarded
+    // verbatim to every plugin's tool registration. Core imposes no schema on
+    // it; each plugin owns the shape of its own slice.
+    PluginLoader(tools::ToolRegistry& tools, llm::ProviderFactoryRegistry& providers,
+                 nlohmann::json tools_settings = nlohmann::json::object());
     ~PluginLoader();
 
     PluginLoader(const PluginLoader&) = delete;
@@ -69,6 +75,7 @@ private:
 
     tools::ToolRegistry& tools_;
     llm::ProviderFactoryRegistry& providers_;
+    nlohmann::json tools_settings_;
     std::vector<void*> handles_;  // never closed; see LIFETIME above
 };
 

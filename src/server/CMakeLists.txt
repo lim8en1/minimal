@@ -11,6 +11,8 @@
 add_library(minimal_server_core SHARED
     tools/permission.cpp
     tools/path_confinement.cpp
+    tools/file_access.cpp
+    tools/atomic_write.cpp
     llm/sse_parser.cpp
     llm/http_client.cpp
     llm/token_accounting.cpp

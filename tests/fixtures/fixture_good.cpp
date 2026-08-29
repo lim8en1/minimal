@@ -37,7 +37,8 @@ const char* minimal_plugin_abi_tag() { return minimal::common::AbiTag(); }
 const char* minimal_plugin_name() { return "fixture-good"; }
 const char* minimal_plugin_version() { return "1.0.0"; }
 
-void minimal_plugin_register_tools(minimal::tools::ToolRegistry& registry) {
+void minimal_plugin_register_tools(minimal::tools::ToolRegistry& registry,
+                                   const minimal::plugins::ToolRegistrationContext&) {
     registry.Register(std::make_unique<FixtureTool>());
 }
 void minimal_plugin_register_provider_factories(minimal::llm::ProviderFactoryRegistry& registry) {
