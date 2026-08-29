@@ -26,7 +26,10 @@ minimal/
   ARCHITECTURE.md  LICENSE  .gitignore
   docs/                       # design notes beyond this file
   proto/minimal/v1/{common,session_service}.proto
-  src/
+  plugins/                    # bundled plugin IMPLEMENTATIONS -- what the harness loads
+    server/                       # tools-fs, tools-bash, provider-openai, commands-core
+    client/                       # (none bundled yet)
+  src/                        # the harness ITSELF
     common/                   # shared by server AND client
       config_paths.{hpp,cpp}      # the client reads themes/ + keybindings.json too
       abi_tag.{hpp,cpp}           # both plugin loaders must compute an identical tag
@@ -36,7 +39,9 @@ minimal/
       llm/      # unified model, provider iface, http_client, sse_parser
       tools/    # Tool iface, registry, executor, permission model, path_confinement
       commands/ # Command iface, registry, dispatcher
-      plugins/  # loader, plugin_abi.h, observer/mention/auth registries
+      plugins/  # the plugin HOST: loader, plugin_abi.h, name/collision registry,
+                #   observer/mention/auth registries. Harness code -- distinct from
+                #   the top-level plugins/, which is what gets loaded.
       rpc/      # SessionService impl, pending_requests, auth_interceptor
       config/   # loaders, frontmatter, skill_registry, seeding, sanity_check
       mcp/      # cpp-mcp client wrapper, shared server processes
@@ -46,13 +51,13 @@ minimal/
       render/   # markdown_renderer, streaming_markdown_view, syntax_highlighter, theme
       plugins/  # client loader, view/renderer registries
       session_client.{hpp,cpp}  app.cpp
-    plugins/                  # bundled plugins, built in-tree, installed as MODULE libs
-      tools-fs/  tools-bash/  provider-openai/  commands-core/
   tests/
     support/                  # FakeLlmProvider etc. -- exported for plugin authors
 ```
 
 `common/` is narrowly justified rather than a catch-all: the client resolves the *same* config directory as the server (it reads `themes/*.json` and `keybindings.json`), and both plugin loaders must compute an identical ABI tag. Everything else stays server- or client-private.
+
+**`plugins/` is a top-level peer of `src/`, not a subdirectory of it.** Bundled plugins are not part of the server or client binary — they are separate `.so` artifacts, categorically identical to a third-party plugin and differing only in who publishes them. Nesting them under `src/server/` would assert a containment the linkage specifically avoids (plugins take core's headers but never link its static library). The plugin *host* — loader, ABI header, registries — is genuinely harness code and lives at `src/server/plugins/` and `src/client/plugins/`. Two directories, two meanings: what loads, and what is loaded.
 
 ## Testing
 

@@ -90,7 +90,9 @@ add_subdirectory(src/server)
 if(MINIMAL_BUILD_CLIENT)
     add_subdirectory(src/client)
 endif()
-add_subdirectory(src/plugins)
+# Bundled plugin implementations. A top-level peer of src/, not part of it --
+# they are artifacts the harness loads, not harness code. See plugins/CMakeLists.txt.
+add_subdirectory(plugins)
 
 if(MINIMAL_BUILD_TESTS)
     add_subdirectory(tests)
