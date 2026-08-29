@@ -1,0 +1,178 @@
+syntax = "proto3";
+
+package minimal.v1;
+
+import "google/protobuf/struct.proto";
+
+// Mirrors server/llm/message.hpp's ContentBlock variant. Wire representation
+// of a conversation message — used both for live streaming (reassembled
+// client-side from StreamEvents) and for scrollback backfill (GetMessages).
+
+message TextBlock {
+  string text = 1;
+}
+
+message ThinkingBlock {
+  string text = 1;
+  optional string signature = 2;
+}
+
+message ToolUseBlock {
+  string id = 1;
+  string name = 2;
+  google.protobuf.Struct input = 3;
+}
+
+message ToolResultBlock {
+  string tool_use_id = 1;
+  repeated ContentBlock content = 2;
+  bool is_error = 3;
+}
+
+message ContentBlock {
+  oneof block {
+    TextBlock text = 1;
+    ThinkingBlock thinking = 2;
+    ToolUseBlock tool_use = 3;
+    ToolResultBlock tool_result = 4;
+  }
+}
+
+enum Role {
+  ROLE_UNSPECIFIED = 0;
+  ROLE_USER = 1;
+  ROLE_ASSISTANT = 2;
+}
+
+message Message {
+  Role role = 1;
+  repeated ContentBlock content = 2;
+}
+
+enum StopReason {
+  STOP_REASON_UNSPECIFIED = 0;
+  STOP_REASON_END_TURN = 1;
+  STOP_REASON_TOOL_USE = 2;
+  STOP_REASON_MAX_TOKENS = 3;
+  STOP_REASON_STOP_SEQUENCE = 4;
+  STOP_REASON_CONTENT_FILTER = 5;
+  STOP_REASON_REFUSAL = 6;
+}
+
+message Usage {
+  int32 input_tokens = 1;
+  int32 output_tokens = 2;
+  int32 cache_read_input_tokens = 3;
+  int32 cache_creation_input_tokens = 4;
+}
+
+// --- Streaming events (mirrors server/llm/stream_event.hpp's StreamEvent variant) ---
+// Modeled at Anthropic's event granularity (see ARCHITECTURE.md) so the OpenAI
+// provider's chunk-reassembly work stays server-side; the wire shape never changes
+// when a second provider is added.
+
+message MessageStartEvent {
+  string id = 1;
+  string model = 2;
+}
+
+message TextDeltaEvent {
+  int32 block_index = 1;
+  string text = 2;
+}
+
+message ToolUseStartEvent {
+  int32 block_index = 1;
+  string id = 2;
+  string name = 3;
+}
+
+message ToolUseInputDeltaEvent {
+  int32 block_index = 1;
+  string partial_json = 2; // raw fragment; client concatenates and parses at ContentBlockStop
+}
+
+message ThinkingDeltaEvent {
+  int32 block_index = 1;
+  string text = 2;
+}
+
+message ContentBlockStopEvent {
+  int32 block_index = 1;
+}
+
+message MessageDeltaEvent {
+  StopReason stop_reason = 1;
+}
+
+message UsageEvent {
+  Usage usage = 1;
+}
+
+message MessageStopEvent {}
+
+message StreamEvent {
+  oneof event {
+    MessageStartEvent message_start = 1;
+    TextDeltaEvent text_delta = 2;
+    ToolUseStartEvent tool_use_start = 3;
+    ToolUseInputDeltaEvent tool_use_input_delta = 4;
+    ThinkingDeltaEvent thinking_delta = 5;
+    ContentBlockStopEvent content_block_stop = 6;
+    MessageDeltaEvent message_delta = 7;
+    UsageEvent usage = 8;
+    MessageStopEvent message_stop = 9;
+  }
+}
+
+// --- Tool execution (mirrors server/tools/) ---
+
+enum ToolCategory {
+  TOOL_CATEGORY_UNSPECIFIED = 0;
+  TOOL_CATEGORY_READ_ONLY = 1;
+  TOOL_CATEGORY_FILE_WRITE = 2;
+  TOOL_CATEGORY_EXECUTE = 3;
+}
+
+// Non-gated status push so the client can show "Reading foo.cpp..." live, distinct
+// from PermissionRequest (which blocks and requires a decision). Also feeds the
+// cross-session running-tools panel, which is why it carries a human-readable
+// summary and a start timestamp rather than only the raw input JSON.
+message ToolExecutionEvent {
+  string tool_use_id = 1;
+  string tool_name = 2;
+  google.protobuf.Struct input = 3;
+  bool started = 4;       // true = started, false = finished
+  optional bool is_error = 5; // set only when started == false
+  string summary = 6;         // one-line description, mirrors PermissionRequest.summary
+  int64 started_at_unix_ms = 7;
+}
+
+// Live tool output (currently bash stdout/stderr), produced via
+// ToolContext::emit_output. Deliberately LOSSY: the server coalesces on a timer
+// and sends only the tail that fits the client's ring buffer, so a command
+// emitting tens of MB neither floods the stream nor competes with turn traffic.
+// The authoritative record remains the capped ToolResultBlock persisted to SQLite.
+message ToolOutputDeltaEvent {
+  string tool_use_id = 1;
+  string chunk = 2;
+}
+
+// --- Errors (mirrors server/llm/provider.hpp's LlmError) ---
+
+enum LlmErrorCategory {
+  LLM_ERROR_CATEGORY_UNSPECIFIED = 0;
+  LLM_ERROR_CATEGORY_TRANSPORT = 1;
+  LLM_ERROR_CATEGORY_RATE_LIMIT = 2;
+  LLM_ERROR_CATEGORY_SERVER_ERROR = 3;
+  LLM_ERROR_CATEGORY_AUTH_ERROR = 4;
+  LLM_ERROR_CATEGORY_REQUEST_ERROR = 5;
+  LLM_ERROR_CATEGORY_PARSE_ERROR = 6;
+}
+
+message ErrorEvent {
+  LlmErrorCategory category = 1;
+  string message = 2;
+  optional int32 http_status = 3;
+  bool is_retryable = 4;
+}

@@ -1,0 +1,235 @@
+syntax = "proto3";
+
+package minimal.v1;
+
+import "minimal/v1/common.proto";
+import "google/protobuf/struct.proto";
+
+// --- Client -> server payloads ---
+
+message UserChatTurn {
+  string text = 1; // v1 is text-only; structured content (pasted images, etc.) is future scope
+}
+
+message CommandArgs {
+  repeated string positional = 1;
+  map<string, string> flags = 2;
+  string raw = 3;
+}
+
+message CommandInvocation {
+  string request_id = 1; // client-generated; echoed back on CommandResult
+  string name = 2;       // e.g. "compact", without the leading '/'
+  CommandArgs args = 3;
+}
+
+enum PermissionDecision {
+  PERMISSION_DECISION_UNSPECIFIED = 0;
+  PERMISSION_DECISION_ALLOW = 1;
+  PERMISSION_DECISION_DENY = 2;
+}
+
+message PermissionResponse {
+  string request_id = 1; // echoes the server-generated id from PermissionRequest
+  PermissionDecision decision = 2;
+}
+
+message ConfirmationResponse {
+  string request_id = 1; // echoes the server-generated id from ConfirmationRequest
+  string chosen_option = 2;
+}
+
+message CancelTurn {} // interrupts the in-flight LLM turn for this session, if any
+
+message ClientEvent {
+  // Redundant on every message rather than bound once via stream metadata —
+  // trades a few bytes for messages that are self-describing on their own
+  // (simpler to log/replay/test than reconstructing context from call metadata).
+  string session_id = 1;
+  oneof payload {
+    UserChatTurn chat_turn = 2;
+    CommandInvocation command = 3;
+    PermissionResponse permission_response = 4;
+    ConfirmationResponse confirmation_response = 5;
+    CancelTurn cancel = 6;
+  }
+}
+
+// Note: there is deliberately no EndSession message. Closing the stream
+// terminates the session (see ARCHITECTURE.md -- Session lifetime); detach is
+// not supported in v1, so stream closure is unambiguous. A DETACH mode would
+// slot in here additively if that changes.
+
+// --- Server -> client payloads ---
+
+message PermissionRequest {
+  // Server-generated. Tool dispatch is sequential in v1 so only one is normally
+  // outstanding per session, but correlation is required regardless: a client
+  // multiplexing several sessions (tabs) can hold several at once, and parallel
+  // dispatch is a planned change.
+  string request_id = 1;
+  string tool_name = 2;
+  ToolCategory category = 3;
+  google.protobuf.Struct tool_input = 4;
+  string summary = 5; // one-line human-readable description for the prompt
+}
+
+message ConfirmationRequest {
+  string request_id = 1; // server-generated, same correlation rationale as PermissionRequest
+  string kind = 2;       // "tool_permission" | "command_confirmation"
+  string title = 3;
+  string detail = 4;
+  repeated string options = 5;
+}
+
+enum CommandStatus {
+  COMMAND_STATUS_UNSPECIFIED = 0;
+  COMMAND_STATUS_OK = 1;
+  COMMAND_STATUS_ERROR = 2;
+}
+
+message CommandResult {
+  string request_id = 1; // echoes CommandInvocation.request_id
+  CommandStatus status = 2;
+  string message = 3;
+}
+
+// Emitted on the PARENT session's stream when a subagent is spawned.
+//
+// Attaching to the child session is a CLIENT PROTOCOL OBLIGATION, not a TUI
+// behavior: a session that is never attached is terminated by the initial-attach
+// guard (~10s). Headless clients must attach too, and may merge or discard the
+// child's output. `blocking` drives the TUI's auto-focus rule -- the parent is
+// stuck waiting on a blocking child, so its tab takes focus.
+message SubagentStartedEvent {
+  string child_session_id = 1;
+  string task = 2;
+  bool blocking = 3;
+}
+
+// Session metadata changed server-side (e.g. a SessionObserver plugin replaced
+// the default truncated-first-message name with an LLM-generated title), so
+// tab labels and the session picker must refresh.
+message SessionMetadataEvent {
+  string session_id = 1;
+  string name = 2;
+}
+
+message ServerEvent {
+  // Which session this event belongs to. Required because one client multiplexes
+  // several sessions (tabs), including subagent children of the focused session.
+  string session_id = 1;
+  oneof payload {
+    StreamEvent stream_event = 2;                 // token/tool-call deltas during a turn
+    ToolExecutionEvent tool_execution = 3;          // non-gated "running tool X..." status
+    ToolOutputDeltaEvent tool_output_delta = 4;     // live (tail-only) tool stdout
+    PermissionRequest permission_request = 5;       // blocks server-side until answered
+    ConfirmationRequest confirmation_request = 6;   // blocks server-side until answered
+    CommandResult command_result = 7;
+    SubagentStartedEvent subagent_started = 8;
+    SessionMetadataEvent session_metadata = 9;
+    ErrorEvent error = 10;
+  }
+}
+
+// --- Scrollback (separate from the live bidi stream so paging through a
+// 512k-1M token history never competes with in-flight turn traffic) ---
+
+message StoredMessage {
+  int64 seq = 1;
+  Message message = 2;
+  int32 token_count = 3;
+  int64 created_at_unix_ms = 4;
+}
+
+message GetMessagesRequest {
+  string session_id = 1;
+  int64 before_seq = 2; // exclusive upper bound; 0 = start from most recent
+  int32 limit = 3;
+}
+
+message GetMessagesResponse {
+  repeated StoredMessage messages = 1; // descending by seq
+  bool has_more = 2;
+}
+
+// --- @-mention autocomplete (server-resolved so matching strategy can be
+// overridden by a plugin-registered MentionResolver; see ARCHITECTURE.md) ---
+
+message SuggestPathsRequest {
+  string session_id = 1;
+  string prefix = 2; // text typed after '@' so far
+  int32 limit = 3;
+}
+
+message SuggestPathsResponse {
+  repeated string paths = 1; // relative to project_root
+}
+
+// --- Session lifecycle (maps to the SQLite `sessions` table) ---
+
+message SessionSummary {
+  string session_id = 1;
+  string name = 2;
+  string agent_preset = 3;
+  string project_root = 4;
+  int32 message_count = 5;
+  int64 created_at_unix_ms = 6;
+  int64 updated_at_unix_ms = 7; // doubles as last-activity for picker sorting
+}
+
+message ListSessionsRequest {
+  // Defaults to the caller's cwd; the picker filters to the current project.
+  string project_root = 1;
+  bool include_all_dirs = 2;
+  // Subagent sessions (parent_session_id IS NOT NULL) are excluded unless set;
+  // they belong in their parent's tab group, not the top-level list.
+  bool include_subagents = 3;
+}
+
+message ListSessionsResponse {
+  repeated SessionSummary sessions = 1;
+}
+
+message CreateSessionRequest {
+  string name = 1;
+  string agent_preset = 2;
+  // Per-session, not server-global: the boundary for path confinement,
+  // @-mentions, SuggestPaths, and bash's initial cwd. The client supplies its cwd.
+  string project_root = 3;
+}
+
+message CreateSessionResponse {
+  SessionSummary session = 1;
+}
+
+// --- Generic plugin channel ---
+//
+// A UI plugin is usually a pair: a server-side data source plus a client-side
+// view. Rather than adding a bespoke core RPC per plugin, this carries opaque
+// JSON that core neither defines nor interprets.
+
+message PluginCallRequest {
+  string plugin_name = 1;
+  string method = 2;
+  string json_payload = 3;
+}
+
+message PluginCallResponse {
+  string json_payload = 1;
+}
+
+service SessionService {
+  // Primary channel for one open session: user turns in, streamed model output
+  // and permission/confirmation/command round-trips out, multiplexed over a
+  // single bidirectional stream. Closing the stream terminates the session.
+  rpc OpenSession(stream ClientEvent) returns (stream ServerEvent);
+
+  rpc GetMessages(GetMessagesRequest) returns (GetMessagesResponse);
+  rpc ListSessions(ListSessionsRequest) returns (ListSessionsResponse);
+  rpc CreateSession(CreateSessionRequest) returns (CreateSessionResponse);
+  rpc SuggestPaths(SuggestPathsRequest) returns (SuggestPathsResponse);
+
+  rpc PluginCall(PluginCallRequest) returns (PluginCallResponse);
+  rpc PluginSubscribe(PluginCallRequest) returns (stream PluginCallResponse);
+}

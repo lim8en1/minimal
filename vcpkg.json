@@ -1,0 +1,35 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "minimal",
+  "version": "0.1.0",
+  "description": "Local-first, memory/CPU-efficient coding-agent harness (gRPC server + FTXUI TUI client).",
+  "license": "MIT",
+  "dependencies": [
+    "grpc",
+    "protobuf",
+    "curl",
+    "sqlite3",
+    "nlohmann-json",
+    "yaml-cpp",
+    "spdlog"
+  ],
+  "features": {
+    "client": {
+      "description": "Build the FTXUI TUI client",
+      "dependencies": [
+        "ftxui",
+        "md4c"
+      ]
+    },
+    "tests": {
+      "description": "Build the test suite",
+      "dependencies": [
+        "catch2"
+      ]
+    }
+  },
+  "default-features": [
+    "client",
+    "tests"
+  ]
+}
