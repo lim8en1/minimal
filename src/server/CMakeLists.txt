@@ -2,22 +2,32 @@
 # by directory rather than by CMake target because their headers are already
 # namespaced and the dependency direction is enforced by include paths, not linkage.
 add_library(minimal_server_core STATIC
-    tools/permission.cpp)
+    tools/permission.cpp
+    tools/path_confinement.cpp
+    llm/sse_parser.cpp
+    llm/token_accounting.cpp
+    config/frontmatter.cpp
+    plugins/name_registry.cpp
+    agent/compaction_boundary.cpp)
 add_library(minimal::server_core ALIAS minimal_server_core)
 
 target_include_directories(minimal_server_core PUBLIC
-    "${CMAKE_CURRENT_SOURCE_DIR}/tools/include")
+    "${CMAKE_CURRENT_SOURCE_DIR}/tools/include"
+    "${CMAKE_CURRENT_SOURCE_DIR}/llm/include"
+    "${CMAKE_CURRENT_SOURCE_DIR}/config/include"
+    "${CMAKE_CURRENT_SOURCE_DIR}/plugins/include"
+    "${CMAKE_CURRENT_SOURCE_DIR}/agent/include")
 
 target_link_libraries(minimal_server_core
     PUBLIC
         minimal::common
         minimal::proto
         nlohmann_json::nlohmann_json
+        yaml-cpp::yaml-cpp
     PRIVATE
         spdlog::spdlog
         CURL::libcurl
-        SQLite3::SQLite3
-        yaml-cpp::yaml-cpp)
+        SQLite3::SQLite3)
 
 # Where to look for bundled plugins, relative to the installed executable.
 target_compile_definitions(minimal_server_core

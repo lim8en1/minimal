@@ -64,4 +64,30 @@ struct McpPermissionPolicy {
     PermissionMode mode_for(const std::string& server_name) const;
 };
 
+// --- Permission precedence chains (Config -- "Permission-mode precedence") ---
+//
+// Pure functions over already-parsed config layers -- no file/YAML reading here.
+// Unlike PermissionPolicy (whose fields are always concrete), a layer may leave
+// any field unset, meaning "fall through to the next layer".
+struct PermissionOverrideLayer {
+    std::optional<PermissionMode> read_only, file_write, execute, out_of_workdir;
+    std::unordered_map<std::string, PermissionMode> per_tool_overrides;
+};
+
+// preset per-tool override -> preset category -> global per_tool_overrides ->
+// global fallback.<category> -> hard-coded default (read_only=Allow, others=Ask).
+PermissionMode resolve_permission_chain(const std::string& tool_name, ToolCategory category,
+                                         const PermissionOverrideLayer& preset,
+                                         const PermissionOverrideLayer& global);
+
+// out_of_workdir is a dimension, not a ToolCategory (see PermissionPolicy above),
+// so it gets its own two-layer chain rather than flowing through mode_for().
+// preset.out_of_workdir -> global.out_of_workdir -> hard-coded default (Ask).
+PermissionMode resolve_out_of_workdir_chain(const PermissionOverrideLayer& preset,
+                                             const PermissionOverrideLayer& global);
+
+// preset mcp_permissions[server] -> permissions.json mcp_default_mode -> Ask.
+PermissionMode resolve_mcp_chain(const std::optional<PermissionMode>& preset_per_server,
+                                  PermissionMode global_default_mode);
+
 }  // namespace minimal::tools
