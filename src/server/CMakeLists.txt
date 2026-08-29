@@ -16,7 +16,7 @@ target_link_libraries(minimal_server_core
     PRIVATE
         spdlog::spdlog
         CURL::libcurl
-        SQLite::SQLite3
+        SQLite3::SQLite3
         yaml-cpp::yaml-cpp)
 
 # Where to look for bundled plugins, relative to the installed executable.

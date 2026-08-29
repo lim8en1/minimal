@@ -1,4 +1,6 @@
-cmake_minimum_required(VERSION 3.24)
+# 3.28 for FetchContent_Declare(EXCLUDE_FROM_ALL), used to keep cpp-mcp's bundled
+# examples out of our build.
+cmake_minimum_required(VERSION 3.28)
 
 # The vcpkg toolchain must be set before project(). Pass it on the command line
 # (-DCMAKE_TOOLCHAIN_FILE=...) or use CMakePresets.json, which reads $VCPKG_ROOT.
@@ -55,10 +57,10 @@ find_package(spdlog CONFIG REQUIRED)
 
 if(MINIMAL_BUILD_CLIENT)
     find_package(ftxui CONFIG REQUIRED)
-    # md4c ships as either md4c::md4c or a plain lib depending on the port version.
-    find_package(md4c CONFIG QUIET)
-    if(NOT md4c_FOUND)
-        message(FATAL_ERROR "md4c not found; install via vcpkg or vendor it via FetchContent")
+    find_package(md4c CONFIG REQUIRED)   # exports md4c::md4c (verified: vcpkg + brew agree)
+    find_package(unofficial-tree-sitter CONFIG QUIET)
+    if(NOT unofficial-tree-sitter_FOUND)
+        find_package(tree-sitter CONFIG QUIET)
     endif()
 endif()
 
@@ -68,11 +70,19 @@ if(MINIMAL_BUILD_TESTS)
     include(Catch)
 endif()
 
-# Not vcpkg-packaged: vendored directly.
+# The only dependency not in the vcpkg registry (verified, not assumed -- even
+# tree-sitter is packaged). Vendored directly.
+#
+# Pinned to a SHA, not a branch: cpp-mcp publishes no tags or releases, so `main`
+# is the only moving alternative and would silently change what every contributor
+# builds. EXCLUDE_FROM_ALL because its CMakeLists unconditionally adds an
+# `examples` subdirectory we have no interest in compiling.
 FetchContent_Declare(cpp_mcp
     GIT_REPOSITORY https://github.com/hkr04/cpp-mcp.git
-    GIT_TAG        main)          # TODO: pin to a release SHA before first release
+    GIT_TAG        13a8bef5f1885b10b8d6038c4b319b7024744fa5  # 2026-08-16
+    EXCLUDE_FROM_ALL)
 FetchContent_MakeAvailable(cpp_mcp)
+# Exports a plain, un-namespaced static target: `mcp`.
 
 add_subdirectory(proto)
 add_subdirectory(src/common)
