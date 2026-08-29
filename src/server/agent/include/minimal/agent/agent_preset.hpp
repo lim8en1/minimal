@@ -5,25 +5,29 @@
 
 #include <nlohmann/json.hpp>
 
+#include "minimal/llm/provider.hpp"
 #include "minimal/tools/permission.hpp"
 
 namespace minimal::agent {
 
 // The resolved preset the loop programs against -- config precedence chains are
-// applied once at load/switch time, never re-resolved per tool call.
-//
-// Minimal for now: skills, MCP servers, and compression_prompt land alongside
-// their own subsystems rather than being declared here before anything reads
-// them.
+// applied once at load/switch time, never re-resolved per tool call. Populated
+// by AgentPresetRegistry::Resolve(); see agent_preset_registry.hpp for how each
+// field is computed from providers.json/settings.json/permissions.json/agents/*.md.
 struct AgentPreset {
     std::string name;
+    std::string description;
     std::string system_prompt;  // subagent.md prefix (if any) already concatenated
+    llm::ProviderConfig provider;  // model_name already reflects preset-override-wins-else-entry
     std::vector<std::string> allowed_tools;  // {"*"} means all registered
-    std::string model;
-    nlohmann::json parameters = nlohmann::json::object();
+    std::vector<std::string> allowed_skills;
+    std::vector<std::string> allowed_mcp_servers;
+    nlohmann::json parameters = nlohmann::json::object();  // from the resolved providers.json entry, not preset frontmatter
 
     tools::PermissionPolicy permission_mode;
+    tools::McpPermissionPolicy mcp_permissions;
     tools::PermissionRunMode run_mode = tools::PermissionRunMode::Normal;
+    std::string compression_prompt;  // loaded text, not a filename
 
     // Set for any session with a non-null parent_session_id. Drives the
     // unconditional exclusion of the subagent-spawn tool -- see

@@ -15,6 +15,13 @@ add_library(minimal_server_core SHARED
     llm/http_client.cpp
     llm/token_accounting.cpp
     config/frontmatter.cpp
+    config/permission_codec.cpp
+    config/providers_config.cpp
+    config/settings_config.cpp
+    config/permissions_config.cpp
+    agent/agent_preset_frontmatter.cpp
+    agent/permission_resolution.cpp
+    agent/agent_preset_registry.cpp
     plugins/name_registry.cpp
     agent/compaction_boundary.cpp
     agent/agent_loop.cpp

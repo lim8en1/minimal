@@ -73,7 +73,7 @@ llm::ChatRequest AgentLoop::BuildChatRequest() const {
     llm::ChatRequest request;
     if (!preset_.system_prompt.empty()) request.system = preset_.system_prompt;
     request.messages = history_;
-    request.model = preset_.model;
+    request.model = preset_.provider.model_name;
     request.parameters = preset_.parameters;
     request.stream = true;
 

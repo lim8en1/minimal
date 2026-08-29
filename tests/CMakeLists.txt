@@ -24,6 +24,13 @@ add_executable(minimal_tests
     openai_error_mapping_test.cpp
     plugin_loader_test.cpp
     provider_factory_registry_test.cpp
+    permission_codec_test.cpp
+    providers_config_test.cpp
+    settings_config_test.cpp
+    permissions_config_test.cpp
+    agent_preset_frontmatter_test.cpp
+    permission_resolution_test.cpp
+    agent_preset_registry_test.cpp
     # provider-openai's pure translation logic, compiled directly into the test
     # binary rather than via the plugin .so -- these files have no ABI/plugin
     # dependency, only core headers, so this is real linkage, not dlopen.

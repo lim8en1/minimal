@@ -36,7 +36,7 @@ struct Harness {
     void Build(agent::AgentPreset preset = {}, agent::LoopConfig config = {},
                agent::Compactor compactor = {}) {
         if (preset.allowed_tools.empty()) preset.allowed_tools = {"*"};
-        if (preset.model.empty()) preset.model = "test-model";
+        if (preset.provider.model_name.empty()) preset.provider.model_name = "test-model";
         preset.permission_mode = AllowAllPolicy();
 
         executor = std::make_unique<tools::ToolExecutor>(registry, checker, AllowAllPolicy(),
