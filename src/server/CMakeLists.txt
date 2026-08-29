@@ -1,7 +1,14 @@
 # Core server library. Modules are folded into one target for now; they are split
 # by directory rather than by CMake target because their headers are already
 # namespaced and the dependency direction is enforced by include paths, not linkage.
-add_library(minimal_server_core STATIC
+#
+# SHARED, not STATIC, and that matters for plugins. An archive member is linked
+# into an executable only if something references it, so with a static core a
+# plugin calling e.g. ToolRegistry::Register would find that symbol absent from
+# the host image and fail at dlopen(RTLD_NOW). A shared library gives one copy in
+# memory, one set of globals, and ordinary symbol resolution -- which is what
+# lets plugins link core directly instead of relying on export tricks.
+add_library(minimal_server_core SHARED
     tools/permission.cpp
     tools/path_confinement.cpp
     llm/sse_parser.cpp
@@ -12,7 +19,10 @@ add_library(minimal_server_core STATIC
     agent/compaction_boundary.cpp
     agent/agent_loop.cpp
     tools/tool_registry.cpp
-    tools/tool_executor.cpp)
+    tools/tool_executor.cpp
+    llm/provider_factory_registry.cpp
+    plugins/plugin_loader.cpp
+    plugins/plugin_discovery.cpp)
 add_library(minimal::server_core ALIAS minimal_server_core)
 
 target_include_directories(minimal_server_core PUBLIC
@@ -37,13 +47,21 @@ target_link_libraries(minimal_server_core
 target_compile_definitions(minimal_server_core
     PRIVATE MINIMAL_PLUGIN_DIR="${MINIMAL_PLUGIN_INSTALL_DIR}")
 
+set_target_properties(minimal_server_core PROPERTIES
+    VERSION "${PROJECT_VERSION}"
+    SOVERSION "${PROJECT_VERSION_MAJOR}")
+
 add_executable(minimal-server main.cpp)
 target_link_libraries(minimal-server PRIVATE minimal::server_core)
 
-# Plugins resolve host symbols at dlopen time rather than linking the core static
-# library (which would give each plugin its own copy of every global). That only
-# works if the host exports its symbols: ENABLE_EXPORTS adds -rdynamic on ELF and
-# is a no-op-but-correct on Mach-O. See src/plugins/CMakeLists.txt.
-set_target_properties(minimal-server PROPERTIES ENABLE_EXPORTS ON)
+# Find libminimal_server_core next to us both in the build tree and once
+# installed. Plugins get the same treatment in plugins/CMakeLists.txt.
+if(APPLE)
+    set_target_properties(minimal-server PROPERTIES INSTALL_RPATH "@loader_path/../${CMAKE_INSTALL_LIBDIR}")
+else()
+    set_target_properties(minimal-server PROPERTIES INSTALL_RPATH "$ORIGIN/../${CMAKE_INSTALL_LIBDIR}")
+endif()
 
-install(TARGETS minimal-server RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
+install(TARGETS minimal-server minimal_server_core
+    RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
+    LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}")

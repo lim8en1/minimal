@@ -456,8 +456,15 @@ Native `.dylib`/`.so`, loaded into the server process. No sandboxing is possible
 - Host and plugin bake an ABI tag (compiler id+version + stdlib, computed at build time). Plugin exports `extern "C" const char* minimal_plugin_abi_tag()`; mismatch → refuse to load, log, don't crash. With a matching tag, real C++ types cross the boundary directly — no C-only shim needed.
 - *(distribution)* Ship a pinned reference toolchain (the CI build config doubles as the "build plugins against this" spec) so contributors aren't guessing which compiler/stdlib produces a loadable plugin.
 - *(distribution)* No remote plugin installation or registry in v1; discovery is local-directory-only.
-- `dlopen(path, RTLD_NOW | RTLD_LOCAL)`, held for process lifetime; no hot-unload in v1. `RTLD_LOCAL` governs whether the *plugin's* symbols join the global namespace — it does not stop the plugin resolving *host* symbols, which is what the next point relies on.
-- **A plugin must not link the core static library.** It takes core's headers only and resolves host symbols at load time from the already-loaded server image. Linking `minimal_server_core` into both the host and each plugin would give every plugin its own copy of every global — separate registries, separate logger, separate everything — which fails at runtime in ways that look nothing like a linkage bug. This requires the host to export its symbols (`ENABLE_EXPORTS`, i.e. `-rdynamic` on ELF) and the plugin to tolerate undefined symbols at link time (`-undefined dynamic_lookup` on Mach-O; the ELF default already permits it).
+- `dlopen(path, RTLD_NOW | RTLD_LOCAL)`. `RTLD_NOW` so an unresolved symbol surfaces at load with a name attached rather than as a crash the first time that path runs. `RTLD_LOCAL` governs whether the *plugin's* symbols join the global namespace; it does not stop the plugin resolving *host* symbols.
+- **Handles are held for process lifetime and never `dlclose`d.** A registered `Tool`'s vtable lives inside its `.so`, so unloading a plugin while the registry still holds its objects is a use-after-free that surfaces as an unrelated crash much later. This is the kind of thing someone tidies up in good faith, so it is called out in `plugin_loader.hpp` as well.
+- **`minimal_server_core` is a SHARED library, and plugins link it normally.**
+
+  This reverses an earlier rule ("a plugin must not link core") whose reasoning is worth preserving: while core was *static*, linking it into both the host and each plugin would have given every plugin its own copy of every global — separate registries, separate logger — failing at runtime in ways that look nothing like a linkage bug. That was correct about static libraries.
+
+  But it left a latent failure that only appears once something actually calls `dlopen`: an archive member is pulled into an executable **only if referenced**, so a plugin calling a core function the server itself never calls would find that symbol absent from the host image and fail at `dlopen(RTLD_NOW)`. The arrangement worked only because the stub server happened to reference the little it needed. Making core shared dissolves both problems at once — one copy in memory, one set of globals, ordinary symbol resolution — instead of working around either with `-rdynamic`/`-undefined dynamic_lookup` and forced whole-archive linking.
+
+  Verified rather than assumed: a bundled plugin reports `@rpath/libminimal_server_core.<soversion>.dylib` under `otool -L`, with core symbols undefined in the plugin itself.
 
 **Discovery and enablement split by provenance:**
 
@@ -909,7 +916,16 @@ Also exposed as `/compact` (an `LLMCommand`) for proactive use. No confirmation 
 - **`mcps.json`** — `[{name, transport: "stdio"|"http", command, args[], env{} | url, headers{}, enabled}]`. `env`/`headers` support `${ENV_VAR}` interpolation, resolved once at load and never logged. No per-server risk category — MCP permission is server-scoped, resolved separately.
 - **`permissions.json`** — security config, split from `settings.json` so it can be reviewed and locked down independently: `{default_run_mode: "normal"|"bypass"|"allow-only" (default "normal"), fallback: {read_only, file_write, execute, out_of_workdir}, per_tool_overrides: {}, mcp_default_mode: "allow"|"ask"|"deny" (default "ask")}`. A global floor a preset can still override — no clamping; guardrails presets cannot loosen are future scope.
 - **`settings.json`** — `default_agent_preset, default_provider, default_theme, max_concurrent_subagents (default 4), memory.{auto_compact (default true), context_compaction_trigger_tokens, compaction_keep_recent_tokens, scrollback_page_size}, tools.{read,edit,bash}.*, tools_view.stdout_buffer_lines (default 100), session_db_path, logging.{level, path, max_size_mb, max_files}`. `logging` backs a **spdlog** rotating file sink (no custom rotation code), with `path` alongside `session_db_path` under the platform *data* dir, not the config dir.
-- **`plugins.json`** — `[{file, provenance: "bundled"|"user", enabled}]`.
+- **`plugins.json`** — an object, not a bare array (an earlier draft said array while also placing `command_aliases` at the top level; both cannot hold):
+
+  ```json
+  {
+    "plugins": [ {"file": "tools-fs.so", "provenance": "bundled", "enabled": true} ],
+    "command_aliases": { "bash_over_ssh.bash": "ssh_bash" }
+  }
+  ```
+
+  Newly discovered plugins are appended on startup with enablement defaulted by provenance, so the file is self-maintaining and the user only edits it to change a decision. Malformed content degrades to empty rather than throwing — a broken `plugins.json` should not prevent the server starting.
 - **No `commands/` config dir** — a command's value is its code; a data-only manifest would be a drift-prone shadow copy.
 
 **First-run seeding**: bundled files are compiled into the binary at build time (CMake-generated manifest of `{relative_path, sha256, content}`). A tracked `.bundled_manifest.json` distinguishes "destination missing → install", "on-disk matches last-installed hash and bundled content changed → safe to update", "on-disk hash diverged → user-edited, leave alone and drop `.new` alongside".

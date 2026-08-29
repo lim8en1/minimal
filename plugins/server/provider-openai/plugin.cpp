@@ -11,7 +11,9 @@
 // provider instance cache, so implementations must hold NO mutable state across
 // calls -- one CURL handle per call, stream-reassembly state local to the call.
 
-#include "minimal/common/abi_tag.hpp"
+#include "minimal/plugins/plugin_abi.h"
+
+#include "openai_provider.hpp"
 
 extern "C" {
 
@@ -19,9 +21,10 @@ const char* minimal_plugin_abi_tag() { return minimal::common::AbiTag(); }
 const char* minimal_plugin_name() { return "provider-openai"; }
 const char* minimal_plugin_version() { return minimal::common::Version(); }
 
-// TODO: minimal_plugin_register_provider_factories -- "openai" ->
-// minimal::provider_openai::OpenAiProvider (openai_provider.hpp), using core's
-// HttpClient + SseParser from the utilities half of the ABI. Deferred until
-// ProviderFactoryRegistry and the plugin loader exist.
+void minimal_plugin_register_provider_factories(minimal::llm::ProviderFactoryRegistry& registry) {
+    registry.Register("openai", [](const minimal::llm::ProviderConfig& config) {
+        return std::make_unique<minimal::provider_openai::OpenAiProvider>(config);
+    });
+}
 
 }  // extern "C"

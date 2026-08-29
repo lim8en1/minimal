@@ -22,6 +22,8 @@ add_executable(minimal_tests
     openai_response_test.cpp
     openai_stream_test.cpp
     openai_error_mapping_test.cpp
+    plugin_loader_test.cpp
+    provider_factory_registry_test.cpp
     # provider-openai's pure translation logic, compiled directly into the test
     # binary rather than via the plugin .so -- these files have no ABI/plugin
     # dependency, only core headers, so this is real linkage, not dlopen.
@@ -37,6 +39,12 @@ target_include_directories(minimal_tests PRIVATE
 # which carries common publicly. Listing those again here is redundant and makes
 # CMake emit libminimal_common.a twice on the link line (harmless, but the linker
 # warns about it). Depend on the bundle.
+add_subdirectory(fixtures)
+add_dependencies(minimal_tests
+    fixture-good fixture-bad-abi fixture-minimal fixture-not-a-plugin)
+target_compile_definitions(minimal_tests PRIVATE
+    MINIMAL_FIXTURE_DIR="${CMAKE_CURRENT_BINARY_DIR}/fixtures")
+
 target_link_libraries(minimal_tests PRIVATE
     minimal::test_support
     Catch2::Catch2WithMain)

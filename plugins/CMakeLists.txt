@@ -12,32 +12,35 @@
 # fatal sanity-check result -- losing tools-fs or provider-openai is a useless
 # harness, not a degraded one.
 #
-# LINKAGE, and why it is not the obvious thing:
-# A plugin must NOT link minimal_server_core. It is a static library, so linking it
-# into both the host and each plugin would give every plugin its own copy of every
-# global -- separate registries, separate logger, separate everything. Plugins take
-# the host's headers only, and resolve host symbols at dlopen time from the
-# already-loaded server image. That requires the host to export its symbols
-# (ENABLE_EXPORTS on minimal-server) and the plugin to tolerate undefined symbols
-# at link time. Verified with nm: AbiTag/Version are undefined in each .so and
-# exported from minimal-server.
+# LINKAGE:
+# Plugins link minimal::server_core normally, because it is a SHARED library --
+# one copy in memory, one set of globals, ordinary symbol resolution.
+#
+# This was not always so, and the history is worth keeping: while core was STATIC,
+# plugins deliberately did NOT link it, because a static library linked into both
+# the host and each plugin would give every plugin its own copy of every global --
+# separate registries, separate logger. That reasoning was correct about static
+# libraries, but it left a latent failure that only appears once something actually
+# calls dlopen: an archive member is pulled into an executable only if referenced,
+# so a plugin calling a core function the server itself never calls would find that
+# symbol missing from the host image and fail at dlopen(RTLD_NOW). Making core
+# shared dissolves both problems at once rather than working around either.
 
 function(minimal_add_plugin name)
     add_library(${name} MODULE ${ARGN})
-
-    # Headers only -- deliberately not target_link_libraries(minimal::server_core).
-    target_include_directories(${name} PRIVATE
-        $<TARGET_PROPERTY:minimal_server_core,INTERFACE_INCLUDE_DIRECTORIES>)
-    target_compile_definitions(${name} PRIVATE
-        $<TARGET_PROPERTY:minimal_common,INTERFACE_COMPILE_DEFINITIONS>)
-
-    if(APPLE)
-        target_link_options(${name} PRIVATE -undefined dynamic_lookup)
-    endif()
-    # ELF leaves undefined symbols in a shared object unresolved by default, so
-    # Linux needs no equivalent flag.
-
+    target_link_libraries(${name} PRIVATE minimal::server_core)
     set_target_properties(${name} PROPERTIES PREFIX "" OUTPUT_NAME "${name}")
+
+    # Plugins are installed one directory deeper than the server, so the hop up to
+    # the library dir is correspondingly longer.
+    if(APPLE)
+        set_target_properties(${name} PROPERTIES
+            INSTALL_RPATH "@loader_path/../../../${CMAKE_INSTALL_LIBDIR}")
+    else()
+        set_target_properties(${name} PROPERTIES
+            INSTALL_RPATH "$ORIGIN/../../../${CMAKE_INSTALL_LIBDIR}")
+    endif()
+
     install(TARGETS ${name} LIBRARY DESTINATION "${MINIMAL_PLUGIN_INSTALL_DIR}")
 endfunction()
 
