@@ -16,10 +16,12 @@ add_executable(minimal_tests
     token_accounting_test.cpp
     config_paths_test.cpp)
 
+# minimal::test_support is the test-dependency bundle: it carries server_core,
+# which carries common publicly. Listing those again here is redundant and makes
+# CMake emit libminimal_common.a twice on the link line (harmless, but the linker
+# warns about it). Depend on the bundle.
 target_link_libraries(minimal_tests PRIVATE
     minimal::test_support
-    minimal::common
-    minimal::server_core
     Catch2::Catch2WithMain)
 
 catch_discover_tests(minimal_tests)
