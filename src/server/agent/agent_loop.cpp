@@ -144,6 +144,20 @@ void AgentLoop::MaybeCompact() {
     rebuilt.insert(rebuilt.end(), history_.begin() + cut, history_.end());
     history_.swap(rebuilt);
 
+    // The one number that makes a compaction legible after the fact: how much
+    // was replaced, and by how many messages. There is no wire event for this --
+    // nothing in the protocol specifies one and no client could render it yet --
+    // so the log is the only place it exists. That belongs with the TUI.
+    session_.logger.info("session {}: compacted {} messages (~{} tokens) into one summary",
+                         session_.session_id, cut, result->original_token_count);
+
+    // NO COOLDOWN ON SUCCESS, deliberately. Repeated compaction inside one turn
+    // looks unbounded but is not: each pass replaces the first `cut` ~= size/2
+    // messages with one, so history halves every time and `history_.size() < 2`
+    // is the floor -- it terminates in log2(n) passes. Across turns, compacting
+    // again once new messages have pushed occupancy back over the trigger is the
+    // intended behaviour, not a runaway.
+
     // Deliberately not persisted: compaction changes only what the NEXT request
     // contains. The store keeps the full uncompacted record, so scrollback is
     // unaffected no matter how many times this runs.

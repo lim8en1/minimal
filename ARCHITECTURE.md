@@ -29,6 +29,8 @@ minimal/
   plugins/                    # bundled plugin IMPLEMENTATIONS -- what the harness loads
     server/                       # tools-fs, tools-bash, provider-openai, commands-core
     client/                       # (none bundled yet)
+  bundled/                    # non-code assets that ship WITH the binary
+    prompts/compression.md        # seeded into the config dir on first run
   src/                        # the harness ITSELF
     common/                   # shared by server AND client
       config_paths.{hpp,cpp}      # the client reads themes/ + keybindings.json too
@@ -983,7 +985,7 @@ Triggered from the agent loop when `memory.auto_compact` is on and a session's *
 
 - Everything older than the cut is replaced by one synthetic summary message; the cut is currently half the working history by *message count* (snapped, below). Selecting it by `memory.compaction_keep_recent_tokens` needs per-message token counts, which are not tracked in memory — flagged in the development plan's known gaps.
 - **The boundary must snap backwards to the nearest complete tool-call cycle.** A count-based boundary is oblivious to tool pairing, and cutting between an assistant `ToolUseBlock` and its `ToolResultBlock` orphans the call — a hard 400 on both OpenAI and Anthropic, not a soft degradation. The snap lives in the agent loop (`snap_compaction_boundary`), so the compactor always receives a range that ends on a complete cycle.
-- Summarization goes through the active provider using `prompts/compression.md`, overridable per preset via the `compression_prompt` frontmatter field. The request passes the messages **verbatim, tool blocks included** — both wire formats accept them in history without a `tools` array — with the prompt as `system`. It runs through `StreamComplete` with a sink that polls the session's cancel flag, so `CancelTurn` aborts an in-flight summarization instead of stalling until `request_timeout`.
+- Summarization goes through the active provider using `prompts/compression.md`, overridable per preset via the `compression_prompt` frontmatter field. **A missing prompt disables compaction outright** — `compact_messages` refuses to send a summarization request with no instructions, which would burn tokens to produce garbage — so delivering the default is what makes the feature exist at all rather than a packaging detail. The request passes the messages **verbatim, tool blocks included** — both wire formats accept them in history without a `tools` array — with the prompt as `system`. It runs through `StreamComplete` with a sink that polls the session's cancel flag, so `CancelTurn` aborts an in-flight summarization instead of stalling until `request_timeout`.
 
 ```cpp
 struct CompactionResult { Message summary_message; int64_t original_token_count; };
@@ -1006,6 +1008,27 @@ The summary is a `User` message carrying a fixed framing line plus the model's t
 
 Also exposed as `/compact` (an `LLMCommand`) for proactive use. No confirmation — it touches no persisted data.
 
+## Bundled assets
+
+Files that ship *with the binary* rather than belonging to the user: bundled plugin
+libraries and `bundled/prompts/`. Both are found relative to the running executable
+(`common/bundled_assets.{hpp,cpp}`), which has to handle two layouts — an installed
+tree (`<prefix>/bin/minimal-server`, assets under `<prefix>/lib` and `<prefix>/share`)
+and a build tree (`build/src/server/minimal-server`, assets staged under `build/`).
+The install destinations are compiled in from the same CMake cache variables the
+install rules use, so overriding one moves the install and the lookup together.
+
+**Prompts are seeded, plugins are read in place**, and the difference is deliberate.
+A plugin is code the user does not edit; a prompt is text they should. So on startup
+any bundled prompt the config dir lacks is copied into `<config>/prompts/`, and an
+existing file is **never** overwritten — reverting someone's edited compaction prompt
+on every upgrade would be a worse failure than shipping without a default.
+
+Seeding is best-effort: a read-only config dir or an install that shipped no prompts
+returns empty rather than throwing. The consequence is visible but quiet — compaction
+degrades to "no compaction" with a log line — which is why making an absent prompt
+*loud* belongs to the startup sanity check.
+
 ## Config
 
 **Path resolution** (`src/server/config/config_paths.{hpp,cpp}`): `MINIMAL_CONFIG_DIR` env override → else platform default. Linux/macOS: `$XDG_CONFIG_HOME/minimal` or `~/.config/minimal` (terminal-tool convention, matching `git`/`gh`/`rg`, not macOS's GUI `~/Library/Application Support`). `%APPDATA%\minimal` is reserved for when Windows support lands (2.x) — see Deferred; it is not a supported target today.
@@ -1016,14 +1039,14 @@ Also exposed as `/compact` (an `LLMCommand`) for proactive use. No confirmation 
 
 - **`agents/*.md`** — presets: frontmatter `name, description, provider, model, allowed_tools, allowed_skills, allowed_mcp_servers, permission_mode: {read_only, file_write, execute, out_of_workdir, overrides}, mcp_permissions: {<server>: allow|ask|deny}, compression_prompt?`; **body is the system prompt directly**. Bundled `plan.md`, `build.md`.
 - **`agents/subagent.md`** — plain Markdown, no frontmatter. Prepended to the resolved preset's body whenever `parent_session_id` is non-null.
-- **`prompts/compression.md`** — default compaction prompt; a preset's `compression_prompt` overrides it, resolved relative to this directory.
+- **`prompts/compression.md`** — default compaction prompt; a preset's `compression_prompt` overrides it, resolved relative to this directory. **Seeded from `bundled/prompts/` on first run and never overwritten after** — see *Bundled assets* below.
 - **`skills/<name>/SKILL.md`** (+ supporting files) — lazy-loaded: frontmatter (`name`, `description`) resident in the registry; body loads only on invocation.
 - **`themes/*.json`** — role/category → truecolor RGB.
 - **`keybindings.json`** — action → key. Must accommodate plugin-registered action names unknown at compile time.
 - **`providers.json`** — `[{name, provider: "<kind string>", base_url, api_key | api_key_env, model_name, parameters: {}, context_window_tokens?}]`. `provider` is looked up in `ProviderFactoryRegistry`, so any plugin-registered kind is valid — there is no closed enum. `context_window_tokens` is informational, feeding the status bar's `used/max`.
 - **`mcps.json`** — `[{name, transport: "stdio"|"http", command, args[], env{} | url, headers{}, enabled}]`. `env`/`headers` support `${ENV_VAR}` interpolation, resolved once at load and never logged. No per-server risk category — MCP permission is server-scoped, resolved separately.
 - **`permissions.json`** — security config, split from `settings.json` so it can be reviewed and locked down independently: `{default_run_mode: "normal"|"bypass"|"allow-only" (default "normal"), fallback: {read_only, file_write, execute, out_of_workdir}, per_tool_overrides: {}, mcp_default_mode: "allow"|"ask"|"deny" (default "ask")}`. A global floor a preset can still override — no clamping; guardrails presets cannot loosen are future scope.
-- **`settings.json`** — `default_agent_preset, default_provider, default_theme, max_concurrent_subagents (default 4), memory.{auto_compact (default true), context_compaction_trigger_tokens, compaction_keep_recent_tokens, scrollback_page_size}, tools.{read,edit,bash}.*, tools_view.stdout_buffer_lines (default 100), session_db_path, logging.{level, path, max_size_mb, max_files}`. `logging` backs a **spdlog** rotating file sink (no custom rotation code), with `path` alongside `session_db_path` under the platform *data* dir, not the config dir.
+- **`settings.json`** — `default_agent_preset, default_provider, default_theme, max_concurrent_subagents (default 4), memory.{auto_compact (default true), context_compaction_trigger_tokens, compaction_keep_recent_tokens (NOT YET HONORED — see Context compaction), scrollback_page_size}, tools.{read,edit,bash}.*, tools_view.stdout_buffer_lines (default 100), session_db_path, logging.{level, path, max_size_mb, max_files}`. `logging` backs a **spdlog** rotating file sink (no custom rotation code), with `path` alongside `session_db_path` under the platform *data* dir, not the config dir.
 - **`plugins.json`** — an object, not a bare array (an earlier draft said array while also placing `command_aliases` at the top level; both cannot hold):
 
   ```json

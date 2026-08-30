@@ -2,7 +2,7 @@
 
 Companion to `ARCHITECTURE.md`, which remains the single source of truth for *design*. This document covers only *sequencing*: what is built, what blocks what, and what "done" means for each remaining piece. Every milestone cites the `ARCHITECTURE.md` section that specifies it; where this plan and that document disagree, that document wins and this one is stale.
 
-**Status: Milestones A and B are complete. 418 tests passing, clean build, zero warnings.**
+**Status: Milestones A, B and H are complete. 433 tests passing, clean build, zero warnings.**
 
 `minimal -p` holds real conversations against a local model using `read`, `bash`, and `skill`; a permission prompt round-trips over the wire in both directions; a session grant silences the second prompt; the server exits when the last client detaches. Transcripts persist to SQLite and survive the server process — `GetMessages` and `ListSessions` answer from the database, so a session the server has no live object for still reads back. **Sessions cannot yet be resumed**, only read (§4 B).
 
@@ -51,6 +51,7 @@ Companion to `ARCHITECTURE.md`, which remains the single source of truth for *de
 |---|---|---|
 | `compact_messages` | `src/server/agent/context_compactor.*` | Provider-backed summarization; failure is a value, not an exception. |
 | `bundled/prompts/compression.md` | `bundled/` | The default compaction prompt, seeded into the config dir on first run. |
+| `bundled_assets` | `src/common/` | Executable-relative asset lookup + prompt seeding; absorbed plugin discovery's copy. |
 
 ### Still not built
 
@@ -84,7 +85,7 @@ Test depth was inverted relative to integration risk: every well-tested layer wa
 
 - **B. Session storage (SQLite)** — **Done, and wired.** `src/server/session/`: `SessionDatabase` (one connection, one mutex, WAL, transactional migrations), `SqliteHistoryStore` (the `HistoryStore` the agent loop writes through), `SessionReader` (keyset paging + session metadata). `GetMessages` and `ListSessions` now answer for real; `agent::InMemoryHistoryStore` is deleted.
 - **F. Startup sanity check** — pure config-layer work over already-built loaders. `main.cpp` is already staged for it (`main.cpp:114`).
-- **H. Production compactor** — `Compactor` is an injected `std::function`; the real one calls the provider with `prompts/compression.md`. Both sides already exist.
+- ~~**H. Production compactor**~~ — **done.** `compact_messages` replaces `Session`'s no-op stub, and the bundled prompt is delivered (§4 H).
 - ~~**I. `SessionObserver` registry**~~ — **done**, landed with A2. `minimal_plugin_register_session_observer` is live in the plugin ABI and `tools-bash` implements it.
 
 **Strictly dependent on A:** C, D, E, G, and every RPC beyond `CreateSession`/`OpenSession`. **A is now done, so all of them are unblocked.**
@@ -269,7 +270,7 @@ Bundled-plugin failures are Fatal, user-plugin failures Warning.
 
 ### H. Production compactor — done
 
-> § *Context compaction*. **Status: component built and tested; A2 consumes it.** "Only the wiring was missing" turned out to understate the gap: the injected `Compactor` type could not express failure, so it changed shape (returns `std::optional<CompactionResult>`; prompt/model/provider/cancel are per-call arguments rather than bound at construction, so a future `/agent` switch cannot compact with a stale preset's prompt). The bundled `prompts/compression.md` did not exist anywhere in the tree and is now authored under `bundled/`, staging ground for the (unscheduled) seeding work; until it is installed into a config dir, an empty prompt degrades to logged no-compaction rather than an instructionless request.
+> § *Context compaction*. Built on a branch off `cab3a91`, in parallel with and unaware of A and B, then merged. **Status: built, wired, and delivered.** "Only the wiring was missing" understated the gap twice over. First, the injected `Compactor` type could not express failure, so it changed shape (returns `std::optional<CompactionResult>`; prompt/model/provider/cancel are per-call arguments rather than bound at construction, so a future `/agent` switch cannot compact with a stale preset's prompt). Second, the bundled `prompts/compression.md` did not exist anywhere in the tree.
 
 **Acceptance criteria**
 - [x] Summarises via the provider using `prompts/compression.md`, or a preset's `compression_prompt` override.
@@ -281,6 +282,15 @@ Bundled-plugin failures are Fatal, user-plugin failures Warning.
 - [x] Provider error during compaction leaves history untouched (and cools down for the rest of the turn).
 - [x] Preset-level `compression_prompt` override is used when present.
 - [x] Unit coverage of `compact_messages`: verbatim pass-through of tool blocks, `original_token_count` ground-truth vs bytes/4 fallback, empty-prompt short-circuit (provider never called), non-text response rejection, cancellation via the stream sink.
+- [x] Seeding: a missing prompt is copied into the config dir, an existing one is never overwritten, a missing bundle is a no-op, and a seeded prompt reaches `AgentPreset::compression_prompt`.
+
+#### What the merge with A+B found
+
+1. **`Session` was still injecting the no-op stub.** The draft built the summarizer but nothing consumed it — `session.cpp` returned the range's first message unchanged. One statement, and without it the other ~310 lines are dead code.
+2. **The bundled prompt had no delivery mechanism, which made the whole feature inert.** `AgentPresetRegistry` reads `<config>/prompts/compression.md`; the draft authored the file under a new `bundled/` with no install rule and nothing that copied it anywhere. So `compression_prompt` was `""` on every real install, `compact_messages` short-circuited, and compaction never ran on any session — visible only as one log line. Closed with `common/bundled_assets`, a CMake install rule, a build-tree staging step, and first-run seeding that never overwrites.
+3. **`MINIMAL_PLUGIN_DIR` was defined by CMake and never read.** `BundledPluginDir()` hardcoded `lib/minimal/plugins`, so overriding `MINIMAL_PLUGIN_INSTALL_DIR` moved the install without moving the search. Found while building the parallel mechanism for prompts; both now resolve from the compiled-in cache value.
+4. **`original_token_count` had no consumer** — computed, returned, dropped. Now logged with the message count on each successful compaction. No wire event: nothing in the protocol specifies one and no client could render it, so it belongs with the TUI.
+5. **A concern that did not survive checking.** Repeated compaction within one turn looked unbounded — the cooldown covers failure but not success. It is not: each pass replaces `cut ≈ size/2` messages with one, so history halves every time and `history_.size() < 2` is the floor. It terminates in log2(n) passes. The reasoning is recorded in `MaybeCompact` so the next reader does not re-derive it and "fix" it with an invented threshold.
 
 ### I. `SessionObserver` registry
 

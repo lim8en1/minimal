@@ -5,12 +5,7 @@
 
 #include <nlohmann/json.hpp>
 
-#if defined(__APPLE__)
-#include <mach-o/dyld.h>
-#include <vector>
-#elif defined(__linux__)
-#include <unistd.h>
-#endif
+#include "minimal/common/bundled_assets.hpp"
 
 namespace minimal::plugins {
 namespace {
@@ -21,24 +16,6 @@ constexpr const char* kUser = "user";
 bool IsPluginFile(const std::filesystem::path& path) {
     const auto ext = path.extension().string();
     return ext == ".so" || ext == ".dylib";
-}
-
-std::filesystem::path ExecutablePath() {
-#if defined(__APPLE__)
-    std::uint32_t size = 0;
-    _NSGetExecutablePath(nullptr, &size);
-    std::vector<char> buffer(size + 1, '\0');
-    if (_NSGetExecutablePath(buffer.data(), &size) != 0) return {};
-    std::error_code ec;
-    auto resolved = std::filesystem::weakly_canonical(std::filesystem::path(buffer.data()), ec);
-    return ec ? std::filesystem::path(buffer.data()) : resolved;
-#elif defined(__linux__)
-    std::error_code ec;
-    auto resolved = std::filesystem::read_symlink("/proc/self/exe", ec);
-    return ec ? std::filesystem::path{} : resolved;
-#else
-    return {};
-#endif
 }
 
 }  // namespace
@@ -86,24 +63,9 @@ std::string SerializePluginConfig(const PluginConfig& config) {
     return out.dump(2) + "\n";
 }
 
-std::filesystem::path BundledPluginDir() {
-    const auto exe = ExecutablePath();
-    if (exe.empty()) return {};
-    const auto bin_dir = exe.parent_path();
-
-    // Installed layout: <prefix>/bin/minimal-server -> <prefix>/lib/minimal/plugins
-    const auto installed = bin_dir.parent_path() / "lib" / "minimal" / "plugins";
-    std::error_code ec;
-    if (std::filesystem::is_directory(installed, ec)) return installed;
-
-    // Build-tree layout: build/src/server/minimal-server -> build/plugins/server/*/
-    // Each plugin lands in its own subdirectory there, so the caller scans one
-    // level deeper; returning the parent lets DiscoverPlugins handle both shapes.
-    const auto build_tree = bin_dir.parent_path().parent_path() / "plugins" / "server";
-    if (std::filesystem::is_directory(build_tree, ec)) return build_tree;
-
-    return installed;  // may not exist; discovery treats that as "no bundled plugins"
-}
+// Kept in this namespace because that is where callers look for it; the layout
+// probe itself is shared with the bundled prompt dir in minimal::common.
+std::filesystem::path BundledPluginDir() { return common::BundledPluginDir(); }
 
 std::vector<PluginCandidate> DiscoverPlugins(const std::filesystem::path& bundled_dir,
                                               const std::filesystem::path& user_dir,

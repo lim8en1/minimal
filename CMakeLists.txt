@@ -44,6 +44,15 @@ include(FetchContent)
 set(MINIMAL_PLUGIN_INSTALL_DIR "${CMAKE_INSTALL_LIBDIR}/minimal/plugins"
     CACHE STRING "Install location for bundled plugins")
 
+# Where bundled prompts are installed. Seeded into the config dir on first run
+# rather than read from here at runtime: ARCHITECTURE.md specifies
+# prompts/compression.md as a CONFIG-dir file, so the user has to be able to see
+# and edit it. Same agreement requirement as the plugin dir above.
+set(MINIMAL_PROMPT_INSTALL_DIR "${CMAKE_INSTALL_DATADIR}/minimal/prompts"
+    CACHE STRING "Install location for bundled prompts")
+
+install(DIRECTORY bundled/prompts/ DESTINATION "${MINIMAL_PROMPT_INSTALL_DIR}")
+
 # --- Plugin ABI tag ----------------------------------------------------------
 # Plugins are source-compatible, not binary-compatible: they are rebuilt with the
 # harness. This tag is the "you forgot to rebuild" guard, not a compatibility

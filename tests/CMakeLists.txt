@@ -14,6 +14,7 @@ add_executable(minimal_tests
     name_registry_test.cpp
     compaction_boundary_test.cpp
     context_compactor_test.cpp
+    bundled_assets_test.cpp
     token_accounting_test.cpp
     config_paths_test.cpp
     tool_executor_test.cpp

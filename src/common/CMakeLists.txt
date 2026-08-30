@@ -1,5 +1,6 @@
 add_library(minimal_common STATIC
     abi_tag.cpp
+    bundled_assets.cpp
     config_paths.cpp
     logger.cpp)
 add_library(minimal::common ALIAS minimal_common)
@@ -14,6 +15,13 @@ target_link_libraries(minimal_common PUBLIC spdlog::spdlog)
 target_compile_definitions(minimal_common
     PUBLIC
         MINIMAL_ABI_TAG="${MINIMAL_ABI_TAG}"
-        MINIMAL_VERSION="${PROJECT_VERSION}")
+        MINIMAL_VERSION="${PROJECT_VERSION}"
+    # Prefix-relative install locations for bundled assets. PRIVATE because only
+    # bundled_assets.cpp resolves them, and they must be the SAME values CMake
+    # installs to -- these used to be hardcoded in the lookup, so overriding the
+    # cache variable moved the install without moving the search.
+    PRIVATE
+        MINIMAL_PLUGIN_DIR="${MINIMAL_PLUGIN_INSTALL_DIR}"
+        MINIMAL_PROMPT_DIR="${MINIMAL_PROMPT_INSTALL_DIR}")
 
 target_compile_options(minimal_common PRIVATE ${MINIMAL_WARNING_FLAGS})
