@@ -219,3 +219,118 @@ TEST_CASE("Find returns null for unknown names and LoadBody follows suit", "[ski
     CHECK(FindSkill(registry, "nope") == nullptr);
     CHECK_FALSE(registry.LoadBody("nope").has_value());
 }
+
+// --- diagnostics that used to mislead ---------------------------------------
+
+TEST_CASE("dotfiles under skills/ are skipped, not reported as broken skills",
+          "[skill_registry]") {
+    // .DS_Store appears the moment anyone opens the config directory in Finder.
+    // Reporting it as a failed skill made the startup listing complain on
+    // essentially every macOS machine, and a check that always complains is one
+    // nobody reads. A non-dot stray still gets its error (tested above): that is
+    // a real mistake worth naming.
+    TempConfigDir config;
+    config.Write("skills/good/SKILL.md", "---\nname: good\ndescription: Fine.\n---\nBody\n");
+    config.Write("skills/.DS_Store", "binary junk");
+    config.Write("skills/.hidden/SKILL.md", "---\nname: .hidden\ndescription: d\n---\nB\n");
+
+    const auto registry = SkillRegistry::Load(config.dir);
+
+    REQUIRE(registry.All().size() == 1);
+    CHECK(registry.All().front().name == "good");
+    CHECK(registry.scan_error().empty());
+}
+
+TEST_CASE("an unreadable skills/ is distinguishable from an absent one", "[skill_registry]") {
+    // Both yield an empty registry, so without scan_error() a permissions
+    // problem is indistinguishable from "skills are simply not configured" --
+    // and the operator gets no signal at all.
+    TempConfigDir config;
+    config.Write("skills/alpha/SKILL.md", "---\nname: alpha\ndescription: d\n---\nB\n");
+    std::filesystem::permissions(config.dir / "skills", std::filesystem::perms::none);
+
+    const auto registry = SkillRegistry::Load(config.dir);
+    const std::string error = registry.scan_error();
+
+    std::filesystem::permissions(config.dir / "skills", std::filesystem::perms::owner_all);
+
+    CHECK(registry.All().empty());
+    CHECK_FALSE(error.empty());
+
+    // The absent case must stay silent, or the common "no skills configured"
+    // state raises a warning on every start. A sibling directory with no
+    // skills/ -- not a second TempConfigDir, which shares this one's arena path.
+    const auto without_skills = config.dir / "elsewhere";
+    std::filesystem::create_directories(without_skills);
+    CHECK(SkillRegistry::Load(without_skills).scan_error().empty());
+    CHECK(SkillRegistry::Load(without_skills).All().empty());
+}
+
+TEST_CASE("an unreadable SKILL.md names the read failure, not frontmatter",
+          "[skill_registry]") {
+    // Swallowing the read error produced an empty string, which then failed the
+    // frontmatter check -- sending the operator, and via SkillTool the model, to
+    // fix frontmatter that was never the problem.
+    TempConfigDir config;
+    config.Write("skills/locked/SKILL.md", "---\nname: locked\ndescription: d\n---\nBody\n");
+    std::filesystem::permissions(config.dir / "skills/locked/SKILL.md",
+                                 std::filesystem::perms::none);
+
+    const auto registry = SkillRegistry::Load(config.dir);
+    const SkillMeta* meta = FindSkill(registry, "locked");
+    std::string error = meta == nullptr ? "" : meta->load_error;
+
+    std::filesystem::permissions(config.dir / "skills/locked/SKILL.md",
+                                 std::filesystem::perms::owner_all);
+
+    REQUIRE(meta != nullptr);
+    CHECK_FALSE(meta->loaded);
+    CHECK(error.find("could not be read") != std::string::npos);
+    CHECK(error.find("frontmatter") == std::string::npos);
+}
+
+TEST_CASE("a non-scalar frontmatter name is an error, not a silent skip", "[skill_registry]") {
+    // The name check exists so allowed_skills, the listing, and the file cannot
+    // name a skill three different ways. Skipping it for a malformed name
+    // disabled the check in exactly the case it should fire.
+    TempConfigDir config;
+    config.Write("skills/weird/SKILL.md", "---\nname:\n  - a\n  - b\ndescription: d\n---\nBody\n");
+
+    const auto registry = SkillRegistry::Load(config.dir);
+
+    const SkillMeta* meta = FindSkill(registry, "weird");
+    REQUIRE(meta != nullptr);
+    CHECK_FALSE(meta->loaded);
+    CHECK(meta->load_error.find("must be a string") != std::string::npos);
+}
+
+TEST_CASE("a multi-line description is folded to one line", "[skill_registry]") {
+    // The description becomes one bullet in the system prompt. Embedded newlines
+    // would break that structure inside the cached prefix.
+    TempConfigDir config;
+    config.Write("skills/multi/SKILL.md",
+                 "---\nname: multi\ndescription: |\n  Line one.\n  Line two.\n---\nBody\n");
+
+    const auto registry = SkillRegistry::Load(config.dir);
+
+    const SkillMeta* meta = FindSkill(registry, "multi");
+    REQUIRE(meta != nullptr);
+    CHECK(meta->loaded);
+    CHECK(meta->description == "Line one. Line two.");
+
+}
+
+TEST_CASE("a whitespace-only description is no description at all", "[skill_registry]") {
+    // Folding runs before the emptiness check, so "   " must not slip through as
+    // a valid description that renders an empty bullet.
+    TempConfigDir config;
+    config.Write("skills/blank/SKILL.md",
+                 "---\nname: blank\ndescription: \"   \"\n---\nBody\n");
+
+    const auto registry = SkillRegistry::Load(config.dir);
+
+    const SkillMeta* meta = FindSkill(registry, "blank");
+    REQUIRE(meta != nullptr);  // Find reports unloaded entries too, with a reason
+    CHECK_FALSE(meta->loaded);
+    CHECK(meta->load_error.find("description") != std::string::npos);
+}

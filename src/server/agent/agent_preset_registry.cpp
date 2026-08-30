@@ -37,26 +37,35 @@ std::string ReadFileRequired(const std::filesystem::path& path, const std::strin
 //
 // All() is sorted by name, so the listing is deterministic -- it sits in the
 // cached prefix and must not reorder turn to turn.
-std::string RenderSkillListing(const std::vector<std::string>& allowed_skills,
-                               const config::SkillRegistry& skills) {
+// allowed_skills ∩ loaded, with `*` expanded. Computed ONCE and used for both
+// the listing and AgentPreset::allowed_skills, so the prompt cannot advertise a
+// skill the tool would refuse, nor the tool be offered with nothing listed.
+std::vector<std::string> ResolveAllowedSkills(const std::vector<std::string>& allowed_skills,
+                                              const config::SkillRegistry& skills) {
     const bool allow_all =
         std::find(allowed_skills.begin(), allowed_skills.end(), "*") != allowed_skills.end();
 
-    std::vector<const config::SkillMeta*> listed;
+    std::vector<std::string> resolved;
     for (const auto& meta : skills.All()) {
         if (!meta.loaded) continue;
         const bool in =
             allow_all || std::find(allowed_skills.begin(), allowed_skills.end(), meta.name) !=
                              allowed_skills.end();
-        if (!in) continue;
-        listed.push_back(&meta);
+        if (in) resolved.push_back(meta.name);
     }
-    if (listed.empty()) return {};
+    return resolved;  // All() is sorted, so this is too
+}
+
+std::string RenderSkillListing(const std::vector<std::string>& resolved,
+                               const config::SkillRegistry& skills) {
+    if (resolved.empty()) return {};
 
     std::ostringstream out;
     out << "\n## Available skills\n\n";
     out << "Load a skill's full instructions with the `skill` tool.\n";
-    for (const auto* meta : listed) {
+    for (const auto& name : resolved) {
+        const config::SkillMeta* meta = skills.Find(name);
+        if (meta == nullptr) continue;  // unreachable: resolved came from All()
         out << "- " << meta->name << ": " << meta->description << "\n";
     }
     return out.str();
@@ -113,12 +122,14 @@ AgentPreset AgentPresetRegistry::ResolveUncached(const std::string& preset_name)
     // The skill listing is part of the resolved system prompt, baked in here at
     // resolution time: config is static for the process lifetime, so it cannot
     // drift from what SkillTool will serve on invocation.
-    preset.system_prompt = raw.body + RenderSkillListing(raw.allowed_skills, skills_);
+    const std::vector<std::string> resolved_skills =
+        ResolveAllowedSkills(raw.allowed_skills, skills_);
+    preset.system_prompt = raw.body + RenderSkillListing(resolved_skills, skills_);
     preset.provider.base_url = entry->base_url;
     preset.provider.api_key = entry->api_key;
     preset.provider.model_name = raw.model.empty() ? entry->model_name : raw.model;
     preset.allowed_tools = raw.allowed_tools;
-    preset.allowed_skills = raw.allowed_skills;
+    preset.allowed_skills = resolved_skills;
     preset.allowed_mcp_servers = raw.allowed_mcp_servers;
     preset.parameters = entry->parameters;
     preset.permission_mode = BuildPermissionPolicy(raw.permission_mode, permissions_.global_layer);

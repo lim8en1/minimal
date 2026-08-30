@@ -95,6 +95,11 @@ int main(int argc, char** argv) {
     tools.Register(std::make_unique<minimal::tools::SkillTool>(skills));
 
     std::printf("skills (%zu):\n", skills.All().size());
+    // An empty registry is normal; an unreadable skills/ is not, and the two are
+    // otherwise indistinguishable from here.
+    if (!skills.scan_error().empty()) {
+        std::printf("  WARNING: %s\n", skills.scan_error().c_str());
+    }
     for (const auto& skill : skills.All()) {
         if (skill.loaded) {
             std::printf("  %-16s %s\n", skill.name.c_str(), skill.description.c_str());

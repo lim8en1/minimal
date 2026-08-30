@@ -20,6 +20,13 @@ struct AgentPreset {
     std::string system_prompt;  // subagent.md prefix (if any) already concatenated
     llm::ProviderConfig provider;  // model_name already reflects preset-override-wins-else-entry
     std::vector<std::string> allowed_tools;  // {"*"} means all registered
+    // RESOLVED, not the raw frontmatter list: `*` is already expanded and names
+    // that are unknown or failed to load are already dropped, so this is exactly
+    // the set the system-prompt listing advertises. Keeping it raw let the
+    // listing and the tool-exposure gate be computed from different conditions
+    // in different files, which is how they drifted -- `allowed_skills: [typo]`
+    // offered the model a `skill` tool with nothing listed and no call that
+    // could succeed. Empty means the tool is withheld entirely.
     std::vector<std::string> allowed_skills;
     std::vector<std::string> allowed_mcp_servers;
     nlohmann::json parameters = nlohmann::json::object();  // from the resolved providers.json entry, not preset frontmatter

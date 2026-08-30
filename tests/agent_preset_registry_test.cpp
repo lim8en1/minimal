@@ -362,6 +362,86 @@ TEST_CASE("AgentPresetRegistry: allowed skills render into the system prompt, so
                                                      "- beta: Second skill.\n");
 }
 
+TEST_CASE("AgentPresetRegistry: allowed_skills resolves to exactly what the listing advertises",
+          "[agent_preset_registry][skills]") {
+    // The listing and AgentLoop's tool-exposure gate must be driven by the same
+    // set. They used to be computed separately -- the listing from
+    // allowed_skills ∩ loaded, the gate from allowed_skills being non-empty --
+    // so `allowed_skills: [typo]` produced a preset that advertised nothing and
+    // still offered the model a `skill` tool no call could satisfy.
+    TempConfigDir config;
+    config.WriteDefaults();
+    config.Write("agents/build.md",
+                 "---\n"
+                 "name: build\n"
+                 "provider: openai-main\n"
+                 "allowed_skills:\n"
+                 "  - alpha\n"
+                 "  - typo\n"      // never existed
+                 "  - broken\n"    // exists but failed to load
+                 "---\n"
+                 "You are a build agent.\n");
+    config.Write("skills/alpha/SKILL.md",
+                 "---\nname: alpha\ndescription: First skill.\n---\nAlpha body.\n");
+    config.Write("skills/broken/SKILL.md", "---\nname: broken\n---\nBody.\n");
+
+    auto skills = config::SkillRegistry::Load(config.dir);
+    AgentPresetRegistry registry(config.dir, skills);
+    const auto preset = registry.Resolve("build");
+
+    CHECK(preset.allowed_skills == std::vector<std::string>{"alpha"});
+    CHECK(preset.system_prompt.find("- alpha: First skill.") != std::string::npos);
+    CHECK(preset.system_prompt.find("typo") == std::string::npos);
+    CHECK(preset.system_prompt.find("broken") == std::string::npos);
+}
+
+TEST_CASE("AgentPresetRegistry: allowed_skills naming only unusable skills resolves empty",
+          "[agent_preset_registry][skills]") {
+    // Empty is what withholds the `skill` tool downstream, so this is the case
+    // that must not come back non-empty.
+    TempConfigDir config;
+    config.WriteDefaults();
+    config.Write("agents/build.md",
+                 "---\n"
+                 "name: build\n"
+                 "provider: openai-main\n"
+                 "allowed_skills:\n"
+                 "  - typo\n"
+                 "---\n"
+                 "You are a build agent.\n");
+    config.Write("skills/alpha/SKILL.md",
+                 "---\nname: alpha\ndescription: First skill.\n---\nAlpha body.\n");
+
+    auto skills = config::SkillRegistry::Load(config.dir);
+    AgentPresetRegistry registry(config.dir, skills);
+    const auto preset = registry.Resolve("build");
+
+    CHECK(preset.allowed_skills.empty());
+    CHECK(preset.system_prompt == "You are a build agent.\n");
+}
+
+TEST_CASE("AgentPresetRegistry: allowed_skills ['*'] resolves to the loaded skills by name",
+          "[agent_preset_registry][skills]") {
+    // Expanded at resolution time, not carried through as a literal "*", so
+    // every consumer downstream sees a plain sorted list.
+    TempConfigDir config;
+    config.WriteDefaults();
+    config.Write("agents/build.md",
+                 "---\nname: build\nprovider: openai-main\n"
+                 "allowed_skills:\n  - \"*\"\n---\nYou are a build agent.\n");
+    config.Write("skills/beta/SKILL.md",
+                 "---\nname: beta\ndescription: Second skill.\n---\nBeta body.\n");
+    config.Write("skills/alpha/SKILL.md",
+                 "---\nname: alpha\ndescription: First skill.\n---\nAlpha body.\n");
+    config.Write("skills/broken/SKILL.md", "---\nname: broken\n---\nBody.\n");
+
+    auto skills = config::SkillRegistry::Load(config.dir);
+    AgentPresetRegistry registry(config.dir, skills);
+
+    CHECK(registry.Resolve("build").allowed_skills ==
+          (std::vector<std::string>{"alpha", "beta"}));
+}
+
 TEST_CASE("AgentPresetRegistry: a skill that failed to load is excluded from the listing",
           "[agent_preset_registry][skills]") {
     TempConfigDir config;

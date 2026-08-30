@@ -428,9 +428,14 @@ TEST_CASE("the skill tool is offered only when the preset allows skills", "[agen
 TEST_CASE("invoking a skill the preset does not allow yields an error result",
           "[agent_loop][skills]") {
     Harness h;
-    h.EnableSkills({{"deploy", "body\n"}});
+    // Two real, loaded skills; the preset admits one and the model asks for the
+    // other. Previously this used a preset naming a skill that did not exist,
+    // which AgentPresetRegistry can no longer produce -- it resolves
+    // allowed_skills to allowed ∩ loaded, so an unknown name yields an empty
+    // list and the tool is withheld rather than offered-but-unusable.
+    h.EnableSkills({{"deploy", "body\n"}, {"other", "other body\n"}});
     agent::AgentPreset preset;
-    preset.allowed_skills = {"other"};  // non-empty, so the tool IS offered...
+    preset.allowed_skills = {"other"};
     h.provider.PushResponse(ToolUseResponse("tu1", "skill", {{"name", "deploy"}}));
     h.provider.PushResponse(TextResponse("ok"));
     h.Build(std::move(preset));

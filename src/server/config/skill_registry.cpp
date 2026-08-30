@@ -11,12 +11,40 @@
 namespace minimal::config {
 namespace {
 
-std::string ReadFileOrEmpty(const std::filesystem::path& path) {
+// nullopt distinguishes "could not read" from "read an empty file". Collapsing
+// the two made an unreadable SKILL.md report "missing frontmatter block", which
+// sends the operator (and, via SkillTool, the model) to fix frontmatter that was
+// never the problem.
+std::optional<std::string> ReadFile(const std::filesystem::path& path) {
     std::ifstream in(path);
-    if (!in) return {};
+    if (!in) return std::nullopt;
     std::ostringstream buffer;
     buffer << in.rdbuf();
+    if (in.bad()) return std::nullopt;
     return buffer.str();
+}
+
+// A description goes into the system prompt as one bullet per skill. Embedded
+// newlines -- easy to produce with `description: |` -- would break that
+// structure inside the cached prefix, so they are folded here rather than
+// rejected: the content is fine, only its shape is wrong for the listing.
+std::string SingleLine(std::string text) {
+    for (char& c : text) {
+        if (c == '\n' || c == '\r' || c == '\t') c = ' ';
+    }
+    std::string out;
+    out.reserve(text.size());
+    bool pending_space = false;
+    for (const char c : text) {
+        if (c == ' ') {
+            pending_space = !out.empty();
+            continue;
+        }
+        if (pending_space) out += ' ';
+        pending_space = false;
+        out += c;
+    }
+    return out;
 }
 
 // Evaluates one candidate under skills/. Never throws: every failure mode
@@ -38,9 +66,15 @@ SkillMeta LoadCandidate(const std::filesystem::path& candidate) {
         return meta;
     }
 
+    const std::optional<std::string> contents = ReadFile(skill_md);
+    if (!contents) {
+        meta.load_error = "SKILL.md could not be read (check permissions)";
+        return meta;
+    }
+
     ParsedFrontmatter parsed;
     try {
-        parsed = parse_frontmatter_markdown(ReadFileOrEmpty(skill_md));
+        parsed = parse_frontmatter_markdown(*contents);
     } catch (const std::exception& e) {
         meta.load_error = std::string("frontmatter parse error: ") + e.what();
         return meta;
@@ -54,21 +88,33 @@ SkillMeta LoadCandidate(const std::filesystem::path& candidate) {
 
     // The directory name is the identity. A frontmatter `name` is optional but,
     // when present, must agree -- a disagreement means allowed_skills entries,
-    // the listing, and the file would each name the skill differently.
+    // the listing, and the file would each name the skill differently. A
+    // non-scalar `name` is an error rather than a silent skip: skipping would
+    // bypass the very check that keeps those three in agreement.
     const YAML::Node declared = node["name"];
-    if (declared && declared.IsScalar() && declared.as<std::string>() != meta.name) {
-        meta.load_error = "frontmatter name '" + declared.as<std::string>() + "' does not match '" +
-                          meta.name + "'";
-        return meta;
+    if (declared) {
+        if (!declared.IsScalar()) {
+            meta.load_error = "frontmatter field 'name' must be a string";
+            return meta;
+        }
+        if (declared.as<std::string>() != meta.name) {
+            meta.load_error = "frontmatter name '" + declared.as<std::string>() +
+                              "' does not match '" + meta.name + "'";
+            return meta;
+        }
     }
 
     const YAML::Node description = node["description"];
-    if (!description || !description.IsScalar() || description.as<std::string>().empty()) {
+    if (!description || !description.IsScalar()) {
         meta.load_error = "missing required frontmatter field: description";
         return meta;
     }
 
-    meta.description = description.as<std::string>();
+    meta.description = SingleLine(description.as<std::string>());
+    if (meta.description.empty()) {
+        meta.load_error = "missing required frontmatter field: description";
+        return meta;
+    }
     meta.loaded = true;
     return meta;
 }
@@ -79,11 +125,45 @@ SkillRegistry SkillRegistry::Load(std::filesystem::path config_dir) {
     SkillRegistry registry;
     const std::filesystem::path skills_dir = config_dir / "skills";
 
+    // An absent skills/ is normal and silent. One that exists but cannot be
+    // stat'd or read is not: without this distinction a permissions problem
+    // produces an empty registry indistinguishable from "no skills configured",
+    // and the operator gets no signal at all.
+    // is_directory() reports ENOENT through `ec` rather than a clean false, so
+    // "absent" must be filtered out explicitly -- otherwise the common, correct
+    // case of having no skills at all raises a warning, which is the same false
+    // alarm the dotfile skip exists to prevent.
     std::error_code ec;
-    if (!std::filesystem::is_directory(skills_dir, ec)) return registry;
+    const bool is_dir = std::filesystem::is_directory(skills_dir, ec);
+    if (ec == std::errc::no_such_file_or_directory || ec == std::errc::not_a_directory) {
+        return registry;
+    }
+    if (ec) {
+        registry.scan_error_ = "cannot stat " + skills_dir.string() + ": " + ec.message();
+        return registry;
+    }
+    if (!is_dir) return registry;
 
-    for (const auto& entry : std::filesystem::directory_iterator(skills_dir, ec)) {
-        registry.skills_.push_back(LoadCandidate(entry.path()));
+    std::filesystem::directory_iterator it(skills_dir, ec);
+    if (ec) {
+        registry.scan_error_ = "cannot read " + skills_dir.string() + ": " + ec.message();
+        return registry;
+    }
+
+    for (; it != std::filesystem::directory_iterator(); it.increment(ec)) {
+        if (ec) {
+            registry.scan_error_ = "stopped scanning " + skills_dir.string() + ": " + ec.message();
+            break;
+        }
+        // Dotfiles are never skills. Without this every macOS config directory
+        // that has been opened in Finder reports .DS_Store as a broken skill,
+        // and a startup check that always complains is one nobody reads. A
+        // non-dot stray (skills/foo.md) still gets its error: that is a real
+        // mistake worth naming.
+        const std::string name = it->path().filename().string();
+        if (!name.empty() && name.front() == '.') continue;
+
+        registry.skills_.push_back(LoadCandidate(it->path()));
     }
 
     std::sort(registry.skills_.begin(), registry.skills_.end(),
@@ -102,9 +182,14 @@ std::optional<std::string> SkillRegistry::LoadBody(std::string_view name) const 
     const SkillMeta* meta = Find(name);
     if (meta == nullptr || !meta->loaded) return std::nullopt;
 
+    // Read failure must not fall through as an empty body: that would hand the
+    // model a successful-looking skill with no instructions in it.
+    const std::optional<std::string> contents = ReadFile(meta->body_path);
+    if (!contents) return std::nullopt;
+
     ParsedFrontmatter parsed;
     try {
-        parsed = parse_frontmatter_markdown(ReadFileOrEmpty(meta->body_path));
+        parsed = parse_frontmatter_markdown(*contents);
     } catch (const std::exception&) {
         return std::nullopt;
     }
