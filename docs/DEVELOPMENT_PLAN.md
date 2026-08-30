@@ -117,13 +117,13 @@ The two primitives everything else in A rests on. Build and test them *first, in
 - Terminating a session unblocks every waiter with a terminal result rather than hanging.
 
 **Test cases** (`tests/pending_requests_test.cpp`, `tests/event_queue_test.cpp`)
-- [ ] Resolve-before-await and await-before-resolve both work (the ordering race).
-- [ ] Two concurrent waiters on different ids are resolved independently.
-- [ ] Resolve with an unknown id: no-op, no crash.
-- [ ] Termination wakes a blocked waiter; assert it returns rather than joining a hung thread.
-- [ ] Queue: backlog buffered before attach, flushed in order on attach.
-- [ ] Queue: single-writer invariant — concurrent producers never interleave a partial event.
-- [ ] **Invariant test:** a deliberately-reintroduced "resolve only if a waiter is already registered" bug must fail the ordering-race case.
+- [x] Resolve-before-await and await-before-resolve both work (the ordering race).
+- [x] Two concurrent waiters on different ids are resolved independently.
+- [x] Resolve with an unknown id: no-op, no crash.
+- [x] Termination wakes a blocked waiter; assert it returns rather than joining a hung thread.
+- [x] Queue: backlog buffered before attach, flushed in order on attach.
+- [x] Queue: single-writer invariant — concurrent producers never interleave a partial event.
+- [x] **Invariant test:** a deliberately-reintroduced "resolve only if a waiter is already registered" bug must fail the ordering-race case.
 
 ### A2 — `Session`
 
@@ -138,12 +138,12 @@ The two primitives everything else in A rests on. Build and test them *first, in
 - `project_root` comes from `CreateSessionRequest` and reaches `ToolContext::project_root` and bash's initial cwd.
 
 **Test cases** (`tests/session_test.cpp`)
-- [ ] Full turn: user text → tool call → tool result → assistant text, through the real executor.
-- [ ] Cancel mid-turn: worker exits, no zombie thread, partial transcript retained.
-- [ ] Terminate with a turn in flight: joins cleanly, no leaked thread, no use-after-free of the queue.
-- [ ] Never-attached session terminates on the initial-attach guard.
-- [ ] Two sessions with different `project_root`s do not see each other's bash cwd/env (integration with `BashSessionStateStore`).
-- [ ] **Invariant test:** running the agent loop on the reader thread instead of the worker must deadlock the permission path — assert the worker/reader split is load-bearing rather than incidental.
+- [x] Full turn: user text → tool call → tool result → assistant text, through the real executor.
+- [x] Cancel mid-turn: worker exits, no zombie thread, partial transcript retained.
+- [x] Terminate with a turn in flight: joins cleanly, no leaked thread, no use-after-free of the queue.
+- [x] Never-attached session terminates on the initial-attach guard.  *(`session_registry_test.cpp`)*
+- [x] Two sessions with different `project_root`s do not see each other's bash cwd/env (integration with `BashSessionStateStore`).
+- [x] **Invariant test:** running the agent loop on the reader thread instead of the worker must deadlock the permission path — assert the worker/reader split is load-bearing rather than incidental.  *(`wire_permission_checker_test.cpp`)*
 
 ### A3 — `SessionService`
 
@@ -161,13 +161,13 @@ Also lands the **wire-backed `PermissionChecker`**: emits `PermissionRequest` on
 - Server exits when the last client detaches.
 
 **Test cases** (`tests/session_service_test.cpp` — real channel, unix socket)
-- [ ] Round-trip a turn end to end; assert `ServerEvent` payload ordering.
-- [ ] Permission allow and deny, both round-tripped over the wire.
-- [ ] A disclosure with grants: answering with `granted_keys` silences the second prompt (proves consent scoping survives serialisation — currently only proven in-process).
-- [ ] `CancelTurn` mid-stream.
-- [ ] Client disconnects mid-turn: session terminates, no leaked thread.
-- [ ] Two concurrent sessions on one channel do not cross-talk (`session_id` routing).
-- [ ] **Invariant test:** removing the single-writer discipline must produce interleaved/corrupt writes under concurrent producers.
+- [x] Round-trip a turn end to end; assert `ServerEvent` payload ordering.  *(ordering added in §9: `TurnCompletedEvent` last and exactly once, tool start before finish, both between the two `message_stop`s)*
+- [x] Permission allow and deny, both round-tripped over the wire.
+- [x] A disclosure with grants: answering with `granted_keys` silences the second prompt (proves consent scoping survives serialisation — currently only proven in-process).
+- [x] `CancelTurn` mid-stream.  *(added in §9, using a permission prompt as the rendezvous so "mid-turn" is deterministic; also asserts the session still prompts and runs a tool on the NEXT turn, which is the deny-lock regression over the wire)*
+- [x] Client disconnects mid-turn: session terminates, no leaked thread.
+- [x] Two concurrent sessions on one channel do not cross-talk (`session_id` routing).
+- [~] **Invariant test:** removing the single-writer discipline must produce interleaved/corrupt writes under concurrent producers. **Covered at the queue, not at the stream** — `event_queue_test.cpp` proves concurrent producers lose no events and keep per-producer order, which is the mechanism; nothing proves a second concurrent `Write()` on the `ServerReaderWriter` corrupts the stream. A second writer is now refused outright (§8), so the reachable half is guarded.
 
 ### A4 — Headless client (`minimal -p`)
 
@@ -181,9 +181,15 @@ Also lands the **wire-backed `PermissionChecker`**: emits `PermissionRequest` on
 - An `Ask`-gated tool auto-denies and the run completes rather than hanging.
 
 **Test cases**
-- [ ] Scripted end-to-end against a fake provider over a real socket (CI-safe, no network).
-- [ ] `AllowOnly` auto-deny path completes rather than blocking.
-- [ ] Attaching to a child session is a client obligation (§ *Session lifetime*) — assert the headless client does it, since the initial-attach guard is a safety net and not a designed flow.
+- [x] Scripted end-to-end against a fake provider over a real socket (CI-safe, no network).
+- [x] `AllowOnly` auto-deny path completes rather than blocking.
+- [ ] Attaching to a child session is a client obligation (§ *Session lifetime*) — assert the headless client does it, since the initial-attach guard is a safety net and not a designed flow. **Blocked on D**: nothing emits `SubagentStartedEvent` yet, so there is no child to attach to. The client prints the event; the obligation is unenforced until subagents exist.
+
+### Milestone A test-list status
+
+Checked against the tree, not from memory. `[~]` is partial, and the reason is on the line.
+Two of the three gaps this audit found are closed in §9; the third (child-attach) is
+unenforceable until D emits a `SubagentStartedEvent` and stays open against that track.
 
 ### Milestone A definition of done — met
 
@@ -299,8 +305,8 @@ Bundled-plugin failures are Fatal, user-plugin failures Warning.
 **Acceptance criteria.** `tools-bash` registers an observer whose `OnSessionEnded` calls `BashStore().Erase(session_id)`; the cwd/env map no longer grows for the process lifetime (`bash_session_state.hpp:21`).
 
 **Test cases**
-- [ ] Ending a session erases exactly that session's bash state and no other's.
-- [ ] A throwing observer does not take down session teardown.
+- [x] Ending a session erases exactly that session's bash state and no other's.
+- [x] A throwing observer does not take down session teardown.
 
 ---
 
@@ -464,3 +470,40 @@ One aside worth keeping: a Catch2 `TEST_CASE` name that *starts* with `-` breaks
 - **The compiler cannot catch a sentinel change.** Every `before_seq` call site kept compiling and
   quietly changed meaning; the tests caught all eleven. A deleted overload is what stops the twelfth
   from being written.
+
+---
+
+## 9. Checkbox audit
+
+Every box in this document checked against the tree rather than against memory, since a plan that
+records intent as achievement is worse than one that records nothing.
+
+**Milestones A, B, H and I are green.** 37 boxes ticked, 2 partial with the reason on the line, and
+25 open — 23 of which belong to C, D, E, F and G, which are scheduled and unbuilt rather than
+regressed.
+
+The audit found three real gaps, all in Milestone A's test list, all in shipped behaviour:
+
+1. **`CancelTurn` had no over-the-wire test.** Cancellation was covered in-process only, so the
+   reader thread's `kCancel` dispatch branch — the one a real client actually uses — had never
+   executed under test. §8 then changed exactly that path. Closed: a permission prompt is the
+   rendezvous, so "mid-turn" is deterministic rather than a sleep, and the test also drives a
+   *second* turn to prove the session still prompts and still runs a tool. Restoring the old
+   permanent latch fails it, independently of the in-process test.
+2. **Payload ordering was never asserted.** The round-trip test checked that events arrive and carry
+   the right `session_id`, not the order — which is the part a client's state machine depends on.
+   Closed: `TurnCompletedEvent` last and exactly once, tool start before finish, both between the
+   two `message_stop`s.
+3. **The child-attach obligation is unenforceable.** Nothing emits `SubagentStartedEvent` yet, so
+   there is no child to attach to. Left open against track D rather than ticked or deleted.
+
+One partial stays partial by choice: the single-writer invariant is proven at the queue
+(`event_queue_test.cpp`) but not at the stream. The stream-level version would need two concurrent
+`Write()`s on one `ServerReaderWriter`, which is now refused outright — a second client gets
+`ALREADY_EXISTS` (§8) — so the reachable half is guarded and the unreachable half would be a test of
+gRPC rather than of this code.
+
+**Writing the `CancelTurn` test found a bug in the test, not the code**, which is worth recording:
+the first draft scripted a response for turn 1 that turn 1 never consumed, because the cancel breaks
+the loop before it asks again. Turn 2 silently ate it and reported "no prompt". A scripted fake
+provider makes the number of provider calls per turn an assertion whether or not you meant it to be.

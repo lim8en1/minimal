@@ -1,4 +1,5 @@
 // End-to-end over a real gRPC channel on a unix socket -- the fourth test tier
+#include <algorithm>
 // in ARCHITECTURE.md, and the first tier this project has ever had. Everything
 // below the provider is real: real service, real Session, real worker thread,
 // real ToolExecutor, real permission round-trip.
@@ -710,4 +711,130 @@ TEST_CASE("a second client on the same session is refused, not silently served",
 
     // The first stream is unharmed: it still owns the session and its turn.
     (void)DrainAndFinish(first);
+}
+
+TEST_CASE("CancelTurn over the wire ends the turn and leaves the session usable",
+          "[session_service][invariant]") {
+    // The reader thread's kCancel branch had never executed under test.
+    // Cancellation was covered in-process only, so the one path that matters to a
+    // real client -- a CancelTurn ClientEvent arriving mid-turn on the bidi
+    // stream -- was assumed rather than exercised. The post-merge review then
+    // changed exactly this path (Session::Cancel now bumps a generation instead
+    // of latching a flag), which is the worst possible combination.
+    //
+    // A permission prompt is the rendezvous: it parks the worker at a known
+    // point, so "mid-turn" is deterministic rather than a sleep.
+    ServiceFixture fixture;
+    fixture.tools.Register(
+        std::make_unique<testing::FakeTool>("bash", tools::ToolCategory::Execute, "ran it"));
+    // Turn 1 makes exactly ONE provider call: the cancel breaks the loop right
+    // after the denied tool, before it would ask again. Scripting a second
+    // response for it would silently hand that response to turn 2 instead.
+    fixture.Script(testing::ToolUseResponse("call-1", "bash", {{"command", "make"}}));
+    fixture.Script(testing::ToolUseResponse("call-2", "bash", {{"command", "make"}}));
+    fixture.Script(testing::TextResponse("second turn finished"));
+    fixture.Write("permissions.json", nlohmann::json{{"fallback", {{"execute", "ask"}}}}.dump());
+    fixture.Start();
+
+    const std::string session_id = fixture.CreateSession();
+    grpc::ClientContext context;
+    auto stream = fixture.stub->OpenSession(&context);
+    REQUIRE(stream->Write(ChatTurn(session_id, "build it")));
+
+    // Turn 1: cancel instead of answering the prompt.
+    v1::ServerEvent event;
+    bool cancelled_turn_completed = false;
+    while (stream->Read(&event)) {
+        if (event.has_permission_request()) {
+            v1::ClientEvent cancel;
+            cancel.set_session_id(session_id);
+            cancel.mutable_cancel();
+            REQUIRE(stream->Write(cancel));
+        }
+        if (event.has_turn_completed()) {
+            cancelled_turn_completed = true;
+            break;
+        }
+    }
+    // Emitted on every exit path, cancellation included -- a client that learns a
+    // turn ended only by seeing it succeed hangs here.
+    CHECK(cancelled_turn_completed);
+
+    // Turn 2: the session is still alive AND still able to ask. A cancel that
+    // poisoned the rendezvous would auto-deny here, silently, forever.
+    REQUIRE(stream->Write(ChatTurn(session_id, "try again")));
+    bool prompted_again = false;
+    bool tool_ran = false;
+    while (stream->Read(&event)) {
+        if (event.has_permission_request()) {
+            prompted_again = true;
+            v1::ClientEvent answer;
+            answer.set_session_id(session_id);
+            auto* response = answer.mutable_permission_response();
+            response->set_request_id(event.permission_request().request_id());
+            response->set_decision(v1::PERMISSION_DECISION_ALLOW);
+            REQUIRE(stream->Write(answer));
+        }
+        if (event.has_tool_execution() && !event.tool_execution().started()) {
+            tool_ran = !event.tool_execution().is_error();
+        }
+        if (event.has_turn_completed()) break;
+    }
+    (void)DrainAndFinish(stream);
+    CHECK(prompted_again);
+    CHECK(tool_ran);
+}
+
+TEST_CASE("a turn's ServerEvent payloads arrive in order", "[session_service]") {
+    // The round-trip test checks that events arrive and carry the right
+    // session_id; it never checked the ORDER, which is the part a client's state
+    // machine actually depends on. TurnCompletedEvent arriving before the deltas
+    // it summarises would break any client that treats it as the terminator --
+    // which is the entire reason it exists.
+    ServiceFixture fixture;
+    fixture.tools.Register(
+        std::make_unique<testing::FakeTool>("read", tools::ToolCategory::ReadOnly, "contents"));
+    fixture.Script(testing::ToolUseResponse("call-1", "read", {{"path", "a.txt"}}));
+    fixture.Script(testing::TextResponse("done"));
+    fixture.Start();
+
+    const std::string session_id = fixture.CreateSession();
+    grpc::ClientContext context;
+    auto stream = fixture.stub->OpenSession(&context);
+    REQUIRE(stream->Write(ChatTurn(session_id, "read it")));
+
+    std::vector<std::string> order;
+    v1::ServerEvent event;
+    while (stream->Read(&event)) {
+        if (event.has_stream_event()) {
+            order.push_back(event.stream_event().has_message_stop() ? "message_stop" : "stream");
+        } else if (event.has_tool_execution()) {
+            order.push_back(event.tool_execution().started() ? "tool_start" : "tool_finish");
+        } else if (event.has_turn_completed()) {
+            order.push_back("turn_completed");
+            break;
+        }
+    }
+    (void)DrainAndFinish(stream);
+
+    REQUIRE_FALSE(order.empty());
+    // The terminator is last, and appears once. Everything else is what it
+    // summarises, so anything after it would be unreachable to a conforming
+    // client -- it stops reading here.
+    CHECK(order.back() == "turn_completed");
+    CHECK(std::count(order.begin(), order.end(), "turn_completed") == 1);
+
+    // A tool is bracketed: started before finished, and both before the turn ends.
+    const auto start = std::find(order.begin(), order.end(), "tool_start");
+    const auto finish = std::find(order.begin(), order.end(), "tool_finish");
+    REQUIRE(start != order.end());
+    REQUIRE(finish != order.end());
+    CHECK(start < finish);
+
+    // The tool ran between two provider calls, so a message_stop precedes it and
+    // another follows -- the shape of a turn with one tool round.
+    const auto first_stop = std::find(order.begin(), order.end(), "message_stop");
+    REQUIRE(first_stop != order.end());
+    CHECK(first_stop < start);
+    CHECK(std::count(order.begin(), order.end(), "message_stop") == 2);
 }
