@@ -7,6 +7,7 @@
 #include <variant>
 
 #include "minimal/agent/compaction_boundary.hpp"
+#include "minimal/agent/compaction_trigger.hpp"
 
 namespace minimal::agent {
 namespace {
@@ -138,16 +139,55 @@ llm::ChatRequest AgentLoop::BuildChatRequest() const {
 
 void AgentLoop::MaybeCompact() {
     if (!config_.auto_compact) return;
-    if (config_.compaction_trigger_tokens <= 0) return;
-    if (tokens_.last_occupancy() < config_.compaction_trigger_tokens) return;
+
+    // The strategy is config; the THRESHOLD is per-session, because a
+    // window-relative strategy resolves against the window of the model this
+    // session is currently using -- and /agent or /model can change that
+    // mid-session.
+    const std::int64_t trigger =
+        resolve_compaction_trigger(config_.compaction_trigger, preset_.context_window_tokens);
+    if (trigger <= 0) {
+        using Kind = config::CompactionTriggerSettings::Kind;
+        const bool window_relative = config_.compaction_trigger.kind == Kind::PercentOfWindow ||
+                                     config_.compaction_trigger.kind == Kind::WindowBuffer;
+        if (window_relative && !compaction_trigger_warned_) {
+            compaction_trigger_warned_ = true;
+            if (!preset_.context_window_tokens) {
+                // Not an error state -- a local backend may genuinely not know its
+                // window -- but compaction is now off for this session, and silence
+                // is how that used to go unnoticed.
+                session_.logger.warn(
+                    "session {}: compaction trigger is window-relative but model {} declares no "
+                    "context_window_tokens; auto-compaction is disabled for this session",
+                    session_.session_id, preset_.model_ref.str());
+            } else if (config_.compaction_trigger.kind == Kind::WindowBuffer) {
+                session_.logger.warn(
+                    "session {}: compaction buffer_tokens ({}) is not smaller than model {}'s "
+                    "context_window_tokens ({}); auto-compaction is disabled for this session",
+                    session_.session_id, config_.compaction_trigger.buffer_tokens,
+                    preset_.model_ref.str(), *preset_.context_window_tokens);
+            } else {
+                // A percent can land here too, when it truncates to zero against a
+                // very small window. Rare, but naming buffer_tokens for it -- as
+                // this once did -- sends the reader to a setting they never set.
+                session_.logger.warn(
+                    "session {}: compaction trigger resolves to 0 against model {}'s "
+                    "context_window_tokens ({}); auto-compaction is disabled for this session",
+                    session_.session_id, preset_.model_ref.str(),
+                    *preset_.context_window_tokens);
+            }
+        }
+        return;
+    }
+    if (tokens_.last_occupancy() < trigger) return;
     Compact();
 }
 
 std::optional<std::size_t> AgentLoop::CompactNow() {
-    // The trigger checks above are skipped -- the user asked, so occupancy and
-    // auto_compact are beside the point -- but everything below is not: an empty
-    // history, a missing compactor and a summarizer that already failed this
-    // turn are all just as true when the request is manual.
+    // The TRIGGER is skipped -- the user asked, so occupancy, auto_compact and
+    // the configured strategy are all beside the point. Everything Compact()
+    // checks is not: an empty history, a missing compactor and a summarizer that
+    // already failed this turn are just as true when the request is manual.
     return Compact();
 }
 

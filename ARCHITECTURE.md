@@ -44,7 +44,8 @@ minimal/
       version.hpp
     server/
       agent/    # agent_loop, session, session_registry, context_compactor,
-                #   compaction_boundary, presets, session_observer(_registry)
+                #   compaction_boundary, compaction_trigger, presets,
+                #   session_observer(_registry)
       llm/      # unified model, provider iface, http_client, sse_parser
       tools/    # Tool iface, registry, executor, permission model, path_confinement
       commands/ # Command iface, registry, dispatcher, ConfirmationBroker,
@@ -968,7 +969,8 @@ RunTurn(session, seed_message):
   append + persist seed_message
   loop:
     if cancelled: break
-    if auto_compact && context_occupancy > trigger: compact()   # occupancy = last turn in+out
+    if auto_compact && context_occupancy > trigger: compact()   # occupancy = last turn in+out;
+                                        # trigger resolved per session — §Context compaction
     request = BuildChatRequest(session)
     response = provider.StreamComplete(request, sink)    # sink emits StreamEvents; false => cancel
       on LlmError e:
@@ -1000,7 +1002,23 @@ Two requirements that are easy to miss and expensive to get wrong:
 
 ## Context compaction — `src/server/agent/`
 
-Triggered from the agent loop when `memory.auto_compact` is on and a session's **context occupancy** (see Token accounting) crosses `memory.context_compaction_trigger_tokens`. Setting `auto_compact: false` disables automatic compaction entirely, leaving `/compact` as the only trigger. Compaction only changes what goes into the *next* `ChatRequest.messages` — it never mutates persisted history, so scrollback always shows the full conversation.
+Triggered from the agent loop when `memory.auto_compact` is on and a session's **context occupancy** (see Token accounting) crosses the threshold resolved from `memory.context_compaction_trigger` — a **one-of strategy choice**, not a bag of knobs:
+
+```json
+"memory": { "context_compaction_trigger": { "percent": 80 } }
+```
+
+| Key | Trigger fires when occupancy crosses |
+|---|---|
+| `percent` (1–100) | that percentage of the active provider entry's `context_window_tokens` |
+| `buffer_tokens` (> 0) | `context_window_tokens` minus that many tokens — i.e. the context comes within that distance of the window's edge |
+| `tokens` (> 0) | that absolute count — the original behaviour; also what the pre-strategy flat key `context_compaction_trigger_tokens` still parses as |
+
+Absent means never trigger (only `/compact` then). The loader rejects anything but exactly one key — a typo like `percnet` must not silently disable compaction, which is precisely the failure mode a bare unknown-key policy creates.
+
+The window-relative strategies resolve **per session, against the window of the provider entry that session actually uses** — the window rides on the resolved `AgentPreset`, not on the loop config, because `/agent` can switch provider entries mid-session and the trigger must track the window in use. A provider entry declaring no `context_window_tokens` leaves a window-relative strategy with nothing to be relative to: the trigger then never fires, and the loop says so once per session rather than silently. That is a live state, not a corner case — the seeded `providers.json` is empty and the field is optional; a buffer at least as large as the window degenerates the same way.
+
+Setting `auto_compact: false` disables automatic compaction entirely, leaving `/compact` as the only trigger. Compaction only changes what goes into the *next* `ChatRequest.messages` — it never mutates persisted history, so scrollback always shows the full conversation.
 
 - Everything older than the cut is replaced by one synthetic summary message; the cut is currently half the working history by *message count* (snapped, below). Selecting it by `memory.compaction_keep_recent_tokens` needs per-message token counts, which are not tracked in memory — flagged in the development plan's known gaps.
 - **The boundary must snap backwards to the nearest complete tool-call cycle.** A count-based boundary is oblivious to tool pairing, and cutting between an assistant `ToolUseBlock` and its `ToolResultBlock` orphans the call — a hard 400 on both OpenAI and Anthropic, not a soft degradation. The snap lives in the agent loop (`snap_compaction_boundary`), so the compactor always receives a range that ends on a complete cycle.
@@ -1094,7 +1112,7 @@ variable the install rule uses, so overriding one moves both.
 - **`skills/<name>/SKILL.md`** (+ supporting files) — lazy-loaded: frontmatter (`name`, `description`) resident in the registry; body loads only on invocation.
 - **`themes/*.json`** — role/category → truecolor RGB.
 - **`keybindings.json`** — action → key. Must accommodate plugin-registered action names unknown at compile time.
-- **`providers.json`** — **a provider is a CONNECTION, not a model.** An object keyed by provider name; each carries `backend` (a `ProviderFactoryRegistry` kind, so any plugin-registered kind is valid — no closed enum), `url`, `api_key | api_key_env`, and a nested `models` object keyed by model id. `parameters` and `max_tokens` may sit on the provider as defaults and be overridden per model; `context_window_tokens` is per model, informational, feeding the status bar's `used/max`.
+- **`providers.json`** — **a provider is a CONNECTION, not a model.** An object keyed by provider name; each carries `backend` (a `ProviderFactoryRegistry` kind, so any plugin-registered kind is valid — no closed enum), `url`, `api_key | api_key_env`, and a nested `models` object keyed by model id. `parameters` and `max_tokens` may sit on the provider as defaults and be overridden per model; `context_window_tokens` is per model, and is both informational (the status bar's `used/max`) **and the basis the window-relative compaction triggers resolve against — a model that declares none never fires them** (see *Context compaction*).
 
   ```json
   { "providers": { "local": {
@@ -1109,7 +1127,7 @@ variable the install rule uses, so overriding one moves both.
   `max_tokens` is typed rather than left to `parameters` because the serializer treats it as a structural field and erases whatever `parameters` put there — so it was the only route to an output cap, and it did not exist. It applies to every request the session makes, summarization included: a cap the conversation honours and the compactor ignores is how a summary gets truncated.
 - **`mcps.json`** — `[{name, transport: "stdio"|"http", command, args[], env{} | url, headers{}, enabled}]`. `env`/`headers` support `${ENV_VAR}` interpolation, resolved once at load and never logged. No per-server risk category — MCP permission is server-scoped, resolved separately.
 - **`permissions.json`** — security config, split from `settings.json` so it can be reviewed and locked down independently: `{default_run_mode: "normal"|"bypass"|"allow-only" (default "normal"), fallback: {read_only, file_write, execute, out_of_workdir}, per_tool_overrides: {}, mcp_default_mode: "allow"|"ask"|"deny" (default "ask")}`. A global floor a preset can still override — no clamping; guardrails presets cannot loosen are future scope.
-- **`settings.json`** — `default_agent_preset, default_model (a `<provider>/<model>` reference), default_theme, max_concurrent_subagents (default 4), memory.{auto_compact (default true), context_compaction_trigger_tokens (0 = never; the seeded settings.json sets 120000, and a 0 here means compaction never runs no matter what auto_compact says), compaction_keep_recent_tokens (NOT YET HONORED — see Context compaction), scrollback_page_size (default 100 when unset, applied by the RPC layer to both GetMessages and ListSessions)}, tools.{read,edit,bash}.*, tools_view.stdout_buffer_lines (default 100), session_db_path, logging.{level, path, max_size_mb, max_files}`. `logging` backs a **spdlog** rotating file sink (no custom rotation code), with `path` alongside `session_db_path` under the platform *data* dir, not the config dir.
+- **`settings.json`** — `default_agent_preset, default_model (a `<provider>/<model>` reference), default_theme, max_concurrent_subagents (default 4), memory.{auto_compact (default true), context_compaction_trigger (a one-of object: `{"percent": 1..100}` | `{"tokens": >0}` | `{"buffer_tokens": >0}`; absent = never; exactly one key or the loader rejects the file; the window-relative strategies resolve against the active MODEL's context_window_tokens and never fire without one — see Context compaction; the pre-strategy flat key context_compaction_trigger_tokens still parses as the fixed strategy, and the new object wins when both are present; the seeded settings.json sets `{"percent": 80}`), compaction_keep_recent_tokens (NOT YET HONORED — see Context compaction), scrollback_page_size (default 100 when unset, applied by the RPC layer to both GetMessages and ListSessions)}, tools.{read,edit,bash}.*, tools_view.stdout_buffer_lines (default 100), session_db_path, logging.{level, path, max_size_mb, max_files}`. `logging` backs a **spdlog** rotating file sink (no custom rotation code), with `path` alongside `session_db_path` under the platform *data* dir, not the config dir.
 - **`plugins.json`** — an object, not a bare array (an earlier draft said array while also placing `command_aliases` at the top level; both cannot hold):
 
   ```json

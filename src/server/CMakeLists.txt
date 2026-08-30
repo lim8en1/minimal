@@ -28,6 +28,7 @@ add_library(minimal_server_core SHARED
     plugins/name_registry.cpp
     plugins/collision_check.cpp
     agent/compaction_boundary.cpp
+    agent/compaction_trigger.cpp
     agent/context_compactor.cpp
     agent/agent_loop.cpp
     commands/command_registry.cpp

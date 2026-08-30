@@ -205,7 +205,7 @@ int main(int argc, char** argv) {
 
     minimal::agent::LoopConfig loop_config;
     loop_config.auto_compact = settings.memory.auto_compact;
-    loop_config.compaction_trigger_tokens = settings.memory.context_compaction_trigger_tokens;
+    loop_config.compaction_trigger = settings.memory.context_compaction_trigger;
     loop_config.compaction_keep_recent_tokens = settings.memory.compaction_keep_recent_tokens;
 
     minimal::agent::SessionRegistry sessions(*presets, tools, providers, observers, *session_db,

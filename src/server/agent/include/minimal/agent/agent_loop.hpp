@@ -15,6 +15,7 @@
 #include "minimal/agent/context_compactor.hpp"
 #include "minimal/agent/history_store.hpp"
 #include "minimal/common/logger.hpp"
+#include "minimal/config/settings_config.hpp"
 #include "minimal/llm/chat.hpp"
 #include "minimal/llm/message.hpp"
 #include "minimal/llm/provider.hpp"
@@ -28,7 +29,10 @@ namespace minimal::agent {
 
 struct LoopConfig {
     bool auto_compact = true;
-    std::int64_t compaction_trigger_tokens = 0;      // 0 = never
+    // When to compact. Never (the default) means compaction only ever runs on
+    // explicit /compact. Window-relative strategies resolve against the active
+    // preset's context_window_tokens at trigger time -- see compaction_trigger.
+    config::CompactionTriggerSettings compaction_trigger;
     std::int64_t compaction_keep_recent_tokens = 0;
     int max_retries = 3;
     int max_turns = 0;  // 0 = unbounded; subagents bound their own life
@@ -191,6 +195,11 @@ private:
     // resending half the context to the provider each time. The trigger stays armed
     // for the next turn, where the flag resets.
     bool compaction_failed_this_turn_ = false;
+
+    // Warn-once latch for a window-relative trigger that has no window to resolve
+    // against: MaybeCompact runs on every tool cycle, and the situation is one
+    // actionable line per session, not noise per cycle.
+    bool compaction_trigger_warned_ = false;
 };
 
 }  // namespace minimal::agent

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -44,9 +46,12 @@ struct AgentPreset {
     // connection plus the model id do not identify it: two providers can serve
     // the same model at the same url with different limits.
     config::ModelRef model_ref;
-    // Informational: the status bar's used/max (track E). Carried here so the
-    // resolved preset is a complete description of what the session will send,
-    // rather than something a later reader has to go back to providers.json for.
+    // The window the compaction trigger's window-relative strategies (percent /
+    // buffer) resolve against, and the status bar's used/max (track E). It rides
+    // on the PRESET rather than on LoopConfig because /agent and /model can both
+    // switch models mid-session, and the trigger has to track the window
+    // actually in use. nullopt means the model declared none, and those
+    // strategies never fire -- see compaction_trigger.hpp.
     std::optional<std::int64_t> context_window_tokens;
 
     tools::PermissionPolicy permission_mode;

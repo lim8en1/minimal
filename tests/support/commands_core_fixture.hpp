@@ -63,6 +63,7 @@ public:
                              "slow":{"context_window_tokens":2000}}}}})");
         Write("settings.json", R"({"default_model":"main/fast"})");
         Write("permissions.json", "{}");
+        Write("prompts/compression.md", "SUMMARIZE.\n");
         Write("agents/build.md", "---\nname: build\nmodel: main/fast\n---\nbody\n");
         Write("agents/other.md", "---\nname: other\nmodel: main/fast\n---\nother body\n");
 
@@ -78,7 +79,12 @@ public:
         loop_ = std::make_unique<agent::AgentLoop>(
             provider_, *executor_, tools_, store_, preset_, agent::LoopConfig{}, std::move(context),
             [] { return false; }, [](const llm::StreamEvent&) { return true; },
-            agent::Compactor{});
+            // A real-shaped compactor: /compact must actually fold history, not
+            // just be dispatched. Returns a summary without a provider call.
+            [](const std::vector<llm::Message>&, llm::LlmProvider&,
+               const agent::CompactionRequest&) {
+                return agent::CompactionResult{UserText("[summary]"), 42};
+            });
 
         for (auto& command : commands_core::MakeCoreCommands()) {
             registry.Register(std::move(command));

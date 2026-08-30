@@ -8,9 +8,27 @@
 
 namespace minimal::config {
 
+// When automatic context compaction fires. Exactly one strategy; the loader
+// rejects anything else. Absent means "never trigger".
+// - FixedTokens:      trigger when context occupancy crosses `tokens`.
+// - PercentOfWindow:  trigger when occupancy crosses `percent`% of the active
+//                     provider entry's context_window_tokens.
+// - WindowBuffer:     trigger when occupancy comes within `buffer_tokens` of
+//                     the window (trigger = window - buffer).
+// The window-relative strategies need a window to be relative to: a provider
+// entry without context_window_tokens means the trigger never fires (the
+// agent loop resolves this and says so; see agent/compaction_trigger).
+struct CompactionTriggerSettings {
+    enum class Kind { Never, FixedTokens, PercentOfWindow, WindowBuffer };
+    Kind kind = Kind::Never;
+    std::int64_t tokens = 0;         // valid iff kind == FixedTokens
+    int percent = 0;                 // valid iff kind == PercentOfWindow, 1..100
+    std::int64_t buffer_tokens = 0;  // valid iff kind == WindowBuffer
+};
+
 struct MemorySettings {
     bool auto_compact = true;
-    std::int64_t context_compaction_trigger_tokens = 0;
+    CompactionTriggerSettings context_compaction_trigger;
     std::int64_t compaction_keep_recent_tokens = 0;
     std::int64_t scrollback_page_size = 0;
 };

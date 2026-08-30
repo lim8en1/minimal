@@ -43,7 +43,8 @@ struct TempConfigDir {
                     // the thing the flat schema could not do.
                     {"models",
                      {{"gpt-4o-mini", nlohmann::json::object()},
-                      {"gpt-4.1", {{"max_tokens", 8192}}}}}}}}}};
+                      {"gpt-4.1", {{"max_tokens", 8192}}},
+                      {"small", {{"context_window_tokens", 32768}}}}}}}}}};
     }
 
     // A minimal, valid tree every test can start from and then perturb.
@@ -74,8 +75,28 @@ TEST_CASE("AgentPresetRegistry: happy path resolves provider fields and system p
     CHECK(preset.provider.model_name == "gpt-4o-mini");
     CHECK(preset.provider.api_key.empty());
     CHECK(preset.parameters == nlohmann::json{{"temperature", 0.5}});
+    CHECK_FALSE(preset.context_window_tokens.has_value());
     CHECK(preset.system_prompt == "You are a build agent.\n");
     CHECK_FALSE(preset.is_subagent);
+}
+
+TEST_CASE("AgentPresetRegistry: the model's context_window_tokens reaches the resolved preset",
+          "[agent_preset_registry]") {
+    // Load-bearing for the window-relative compaction triggers: they resolve
+    // against the preset's window, so a value dropped here would silently
+    // disable percent/buffer triggers on every session. PER MODEL, not per
+    // provider entry -- two models on one endpoint have different windows, which
+    // is the case the flat schema could not express at all.
+    TempConfigDir config;
+    config.WriteDefaults();
+    config.Write("agents/build.md",
+                 "---\nname: build\nmodel: openai-main/small\n---\nbody\n");
+    config::SkillRegistry skills = config::SkillRegistry::Load(config.dir);
+    AgentPresetRegistry registry(config.dir, skills);
+
+    const AgentPreset& preset = registry.Resolve("build");
+    REQUIRE(preset.context_window_tokens.has_value());
+    CHECK(*preset.context_window_tokens == 32768);
 }
 
 TEST_CASE("AgentPresetRegistry: a preset picks which of a provider's models it uses",

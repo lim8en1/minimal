@@ -302,3 +302,22 @@ TEST_CASE("an alias naming nothing registered is reported", "[commands][plugins]
     CHECK_FALSE(report.ok());
     CHECK(report.dangling_aliases.size() == 1);
 }
+
+TEST_CASE("/compact works when the automatic trigger is Never", "[commands][invariant]") {
+    // CROSS-FEATURE, and the seam the two branches could not have tested
+    // together: the trigger became a strategy whose default is Never, and
+    // /compact deliberately bypasses it -- the user asked, so occupancy and the
+    // configured strategy are beside the point. Routing /compact through
+    // MaybeCompact instead of Compact would make it silently do nothing on the
+    // default configuration, which is the exact shape of the bug H shipped.
+    CommandFixture fixture;
+    fixture.SeedHistory();
+    fixture.SeedHistory();
+    REQUIRE(fixture.loop().history().size() == 4);
+
+    // LoopConfig's default trigger is Never, so nothing automatic can fire.
+    const auto result = fixture.Run("compact");
+    REQUIRE(result.status == Status::kOk);
+    CHECK(result.message.find("compacted") != std::string::npos);
+    CHECK(fixture.loop().history().size() < 4);
+}
