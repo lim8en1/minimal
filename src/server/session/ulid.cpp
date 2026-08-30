@@ -33,7 +33,12 @@ std::string GenerateUlid() {
     // governed by 2^32, putting birthday risk within reach of a few tens of
     // thousands of sessions. A collision here is a PRIMARY KEY failure thrown
     // out of CreateSession, so the cost of getting this wrong is not cosmetic.
-    std::random_device device;
+    // thread_local: constructing a random_device opens /dev/urandom, and doing
+    // that per call put a syscall pair in front of every session creation for no
+    // benefit -- the object is stateless in the sense that matters here, so one
+    // per thread is enough. Still random_device itself, never a seeded engine,
+    // for the reason above.
+    thread_local std::random_device device;
     for (int i = 0; i < 10; i += 2) {
         const std::uint32_t word = device();
         buf[6 + i] = static_cast<std::uint8_t>(word >> 8);

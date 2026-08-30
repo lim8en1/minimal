@@ -16,6 +16,11 @@ namespace {
 // read "session" and no test below the RPC layer would notice.
 std::string DefaultSessionName(const std::string& requested) { return requested; }
 
+// The floor under both paged RPCs when settings.json leaves scrollback_page_size
+// unset, which is its default. Named rather than repeated as a literal: two
+// call sites drifting apart is how a "default" becomes two different defaults.
+constexpr int kFallbackPageSize = 100;
+
 }  // namespace
 
 SessionServiceImpl::SessionServiceImpl(agent::SessionRegistry& sessions,
@@ -36,6 +41,11 @@ void SessionServiceImpl::set_on_last_client_detached(std::function<void()> callb
 
 std::size_t SessionServiceImpl::attached_clients() const {
     return attached_.load(std::memory_order_acquire);
+}
+
+int SessionServiceImpl::ScrollbackPageSize() const {
+    const auto configured = static_cast<int>(settings_.memory.scrollback_page_size);
+    return configured > 0 ? configured : kFallbackPageSize;
 }
 
 grpc::Status SessionServiceImpl::CreateSession(grpc::ServerContext*,
@@ -132,7 +142,13 @@ bool SessionServiceImpl::Dispatch(const v1::ClientEvent& event, agent::Session& 
             result->set_request_id(event.command().request_id());
             result->set_status(v1::COMMAND_STATUS_ERROR);
             result->set_message("the /-command subsystem is not implemented yet");
-            session.queue().Push(std::move(reply));
+            // TryPush: this runs on the READER thread, which must never block.
+            // A full queue here means the client is not draining, so dropping
+            // one error reply is the right trade against stalling the read loop.
+            if (!session.queue().TryPush(std::move(reply))) {
+                logger_.warn("session {}: outbound queue full, dropped a command result",
+                             session.info().session_id);
+            }
             return true;
         }
 
@@ -208,14 +224,12 @@ grpc::Status SessionServiceImpl::GetMessages(grpc::ServerContext*,
     // Existence is checked separately because an unknown session and a session
     // with no messages both page as empty, and the client needs to tell them
     // apart -- one is a bug, the other is a brand-new tab.
-    if (!db_.GetSession(request->session_id())) {
+    if (!db_.SessionExists(request->session_id())) {
         return grpc::Status(grpc::StatusCode::NOT_FOUND,
                             "no such session: " + request->session_id());
     }
 
-    int limit = request->limit();
-    if (limit <= 0) limit = static_cast<int>(settings_.memory.scrollback_page_size);
-    if (limit <= 0) limit = 100;  // settings.json may legitimately leave it unset
+    const int limit = request->limit() > 0 ? request->limit() : ScrollbackPageSize();
 
     try {
         // has_before_seq(), not a value test: the wire field is optional
@@ -255,6 +269,16 @@ grpc::Status SessionServiceImpl::ListSessions(grpc::ServerContext*,
         filter.project_root = request->project_root();
     }
     filter.include_subagents = request->include_subagents();
+    filter.limit = request->limit() > 0 ? request->limit() : ScrollbackPageSize();
+    // Both halves or neither: the cursor is a (updated_at, id) pair because the
+    // sort key is, and half a cursor would silently page from the wrong place.
+    if (request->has_before_updated_at() && request->has_before_id()) {
+        filter.before_updated_at = request->before_updated_at();
+        filter.before_id = request->before_id();
+    } else if (request->has_before_updated_at() || request->has_before_id()) {
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
+                            "before_updated_at and before_id must be set together");
+    }
 
     try {
         for (const auto& summary : db_.ListSessions(filter)) {

@@ -73,6 +73,11 @@ public:
     std::size_t attached_clients() const;
 
 private:
+    // settings.memory.scrollback_page_size, or the built-in floor when it is
+    // unset. Shared by GetMessages and ListSessions -- both page, both need a
+    // bound, and one default is easier to document than two.
+    int ScrollbackPageSize() const;
+
     // Reader thread. Returns false if the stream should end.
     bool Dispatch(const v1::ClientEvent& event, agent::Session& session);
 

@@ -236,6 +236,20 @@ message ListSessionsRequest {
   // Subagent sessions (parent_session_id IS NOT NULL) are excluded unless set;
   // they belong in their parent's tab group, not the top-level list.
   bool include_subagents = 3;
+
+  // Page size. 0 takes the server's default (memory.scrollback_page_size), the
+  // same treatment GetMessages gives its limit. The list is bounded because it
+  // otherwise returns every session ever created, each carrying a COUNT(*) over
+  // the messages table -- the picker's query grew without bound while the
+  // scrollback query beside it was carefully keyset-paginated.
+  int32 limit = 4;
+
+  // Cursor, exclusive, from the last row of the previous page. Both halves are
+  // required together: the sort key is (updated_at DESC, id ASC) and updated_at
+  // alone is not unique, so a cursor on it would skip or repeat rows at a page
+  // boundary.
+  optional int64 before_updated_at = 5;
+  optional string before_id = 6;
 }
 
 message ListSessionsResponse {

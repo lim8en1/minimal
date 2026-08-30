@@ -399,8 +399,23 @@ std::optional<SessionSummary> SessionDatabase::GetSession(const std::string& ses
     return summary;
 }
 
+bool SessionDatabase::SessionExists(const std::string& session_id) const {
+    std::lock_guard lock(mu_);
+    // Deliberately NOT GetSession(): that carries a COUNT(*) over every message
+    // in the session purely to fill message_count, which a presence check throws
+    // away. Paging a long transcript called this once per page.
+    Stmt query(db_, "SELECT 1 FROM sessions WHERE id = ?;", "failed to check session");
+    sqlite3_bind_text(query.stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
+    return sqlite3_step(query.stmt) == SQLITE_ROW;
+}
+
 std::vector<SessionSummary> SessionDatabase::ListSessions(const ListSessionsFilter& filter) const {
     std::lock_guard lock(mu_);
+    // The cursor is a PAIR, because the sort key is. updated_at alone is not
+    // unique -- two sessions can share a millisecond -- so a cursor on it would
+    // either skip or repeat rows at a page boundary. The row comparison
+    // (updated_at, id) < (?, ?) in lexicographic form is what makes the page
+    // boundary exact, and it matches ORDER BY updated_at DESC, id ASC.
     Stmt query(
         db_,
         "SELECT s.id, s.parent_session_id, s.name, s.project_root, s.agent_preset,"
@@ -408,7 +423,9 @@ std::vector<SessionSummary> SessionDatabase::ListSessions(const ListSessionsFilt
         " (SELECT COUNT(*) FROM messages m WHERE m.session_id = s.id)"
         " FROM sessions s"
         " WHERE (?1 IS NULL OR s.project_root = ?1) AND (?2 OR s.parent_session_id IS NULL)"
-        " ORDER BY s.updated_at DESC, s.id ASC;",
+        " AND (?3 IS NULL OR s.updated_at < ?3 OR (s.updated_at = ?3 AND s.id > ?4))"
+        " ORDER BY s.updated_at DESC, s.id ASC"
+        " LIMIT ?5;",
         "failed to list sessions");
     if (filter.project_root) {
         sqlite3_bind_text(query.stmt, 1, filter.project_root->c_str(), -1, SQLITE_TRANSIENT);
@@ -416,6 +433,19 @@ std::vector<SessionSummary> SessionDatabase::ListSessions(const ListSessionsFilt
         sqlite3_bind_null(query.stmt, 1);
     }
     sqlite3_bind_int(query.stmt, 2, filter.include_subagents ? 1 : 0);
+    if (filter.before_updated_at) {
+        sqlite3_bind_int64(query.stmt, 3, *filter.before_updated_at);
+    } else {
+        sqlite3_bind_null(query.stmt, 3);
+    }
+    if (filter.before_id) {
+        sqlite3_bind_text(query.stmt, 4, filter.before_id->c_str(), -1, SQLITE_TRANSIENT);
+    } else {
+        sqlite3_bind_null(query.stmt, 4);
+    }
+    // -1 is SQLite's "no limit", which keeps the unbounded case expressible for
+    // a caller that genuinely wants every row (the sanity check, a future CLI).
+    sqlite3_bind_int(query.stmt, 5, filter.limit > 0 ? filter.limit : -1);
 
     std::vector<SessionSummary> out;
     while (sqlite3_step(query.stmt) == SQLITE_ROW) {

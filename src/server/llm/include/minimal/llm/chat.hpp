@@ -1,6 +1,7 @@
 #pragma once
 
 #include <optional>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -39,7 +40,21 @@ enum class StopReason {
 
 struct ChatRequest {
     std::optional<std::string> system;
-    std::vector<Message> messages;
+
+    // BORROWED, not owned. The request is assembled once per tool cycle and once
+    // per retry, over a history this project intends to run to 512k-1M tokens --
+    // so owning it meant a full deep copy of every message and every string on
+    // the hottest path there is, and then a second one when a provider copied the
+    // request to normalize it. Measured at ~114 us per call on a 2 MB history,
+    // which is per tool cycle, discarded immediately after serialization.
+    //
+    // LIFETIME CONTRACT, and it is on the caller: the referenced messages must
+    // outlive the Complete/StreamComplete call. Providers serialize during the
+    // call and retain nothing -- that is a requirement on implementations, not an
+    // observation about the one that exists. Anything that stores a ChatRequest
+    // past the call (tests recording requests for assertion) must copy the
+    // messages itself and re-point the span; see tests/support/fakes.hpp.
+    std::span<const Message> messages;
 
     // ALWAYS sorted by name. `tools` sits at the very front of the serialized
     // prefix providers cache on, and the set is rebuilt every turn, so unstable

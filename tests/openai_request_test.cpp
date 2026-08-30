@@ -7,17 +7,40 @@ using namespace minimal::provider_openai;
 
 namespace {
 
-llm::ChatRequest BaseRequest() {
+// ChatRequest BORROWS its messages (see chat.hpp), so a test that builds one has
+// to keep the vector alive alongside it rather than inside it. Pairing the two
+// here is what stops every test from having to remember that. Non-copyable on
+// purpose: a copy would leave the span pointing at the original's buffer.
+struct Fixture {
+    std::vector<llm::Message> messages;
     llm::ChatRequest request;
-    request.model = "gpt-4o-mini";
-    request.messages.push_back(llm::Message{llm::Role::User, {llm::TextBlock{"hi"}}});
-    return request;
+
+    explicit Fixture(std::vector<llm::Message> m) : messages(std::move(m)) {
+        request.messages = messages;
+    }
+    // Copying would leave the span pointing at the original's buffer, so it is
+    // gone. Moving is fine but not free: a moved vector keeps its heap buffer,
+    // yet the span has to be re-pointed at the member that now owns it rather
+    // than left aliasing a moved-from object.
+    Fixture(const Fixture&) = delete;
+    Fixture& operator=(const Fixture&) = delete;
+    Fixture(Fixture&& other) noexcept
+        : messages(std::move(other.messages)), request(std::move(other.request)) {
+        request.messages = messages;
+    }
+};
+
+Fixture BaseRequest() {
+    Fixture fixture({llm::Message{llm::Role::User, {llm::TextBlock{"hi"}}}});
+    fixture.request.model = "gpt-4o-mini";
+    return fixture;
 }
 
 }  // namespace
 
 TEST_CASE("BuildRequestBody: structural fields always win over parameters", "[openai_request]") {
-    llm::ChatRequest request = BaseRequest();
+    Fixture fixture = BaseRequest();
+    auto& request = fixture.request;
     request.parameters = {{"model", "bogus"}, {"temperature", 0.7}, {"stream", true}};
     request.stream = false;
 
@@ -29,7 +52,8 @@ TEST_CASE("BuildRequestBody: structural fields always win over parameters", "[op
 }
 
 TEST_CASE("BuildRequestBody: system prompt is prepended", "[openai_request]") {
-    llm::ChatRequest request = BaseRequest();
+    Fixture fixture = BaseRequest();
+    auto& request = fixture.request;
     request.system = "you are a bot";
 
     nlohmann::json messages = BuildRequestBody(request)["messages"];
@@ -42,11 +66,10 @@ TEST_CASE("BuildRequestBody: system prompt is prepended", "[openai_request]") {
 }
 
 TEST_CASE("ToOpenAiMessages: assistant message with one tool call", "[openai_request]") {
-    llm::ChatRequest request;
-    request.messages.push_back(
-        llm::Message{llm::Role::Assistant, {llm::ToolUseBlock{"call_1", "read", {{"path", "a.txt"}}}}});
+    Fixture fixture({llm::Message{llm::Role::Assistant,
+                                  {llm::ToolUseBlock{"call_1", "read", {{"path", "a.txt"}}}}}});
 
-    nlohmann::json messages = ToOpenAiMessages(request);
+    nlohmann::json messages = ToOpenAiMessages(fixture.request);
 
     REQUIRE(messages.size() == 1);
     CHECK(messages[0]["role"] == "assistant");
@@ -59,13 +82,12 @@ TEST_CASE("ToOpenAiMessages: assistant message with one tool call", "[openai_req
 
 TEST_CASE("ToOpenAiMessages: assistant message with multiple tool calls stays one message",
           "[openai_request]") {
-    llm::ChatRequest request;
-    request.messages.push_back(llm::Message{
+    Fixture fixture({llm::Message{
         llm::Role::Assistant,
         {llm::ToolUseBlock{"call_1", "read", nlohmann::json::object()},
-         llm::ToolUseBlock{"call_2", "write", nlohmann::json::object()}}});
+         llm::ToolUseBlock{"call_2", "write", nlohmann::json::object()}}}});
 
-    nlohmann::json messages = ToOpenAiMessages(request);
+    nlohmann::json messages = ToOpenAiMessages(fixture.request);
 
     REQUIRE(messages.size() == 1);
     REQUIRE(messages[0]["tool_calls"].size() == 2);
@@ -74,12 +96,11 @@ TEST_CASE("ToOpenAiMessages: assistant message with multiple tool calls stays on
 }
 
 TEST_CASE("ToOpenAiMessages: N tool results explode into N tool messages", "[openai_request]") {
-    llm::ChatRequest request;
     llm::ToolResultBlock result1{"call_1", {llm::TextBlock{"result one"}}, false};
     llm::ToolResultBlock result2{"call_2", {llm::TextBlock{"result two"}}, false};
-    request.messages.push_back(llm::Message{llm::Role::User, {result1, result2}});
+    Fixture fixture({llm::Message{llm::Role::User, {result1, result2}}});
 
-    nlohmann::json messages = ToOpenAiMessages(request);
+    nlohmann::json messages = ToOpenAiMessages(fixture.request);
 
     REQUIRE(messages.size() == 2);
     CHECK(messages[0]["role"] == "tool");
@@ -91,11 +112,11 @@ TEST_CASE("ToOpenAiMessages: N tool results explode into N tool messages", "[ope
 }
 
 TEST_CASE("ToOpenAiMessages: ThinkingBlock is dropped silently", "[openai_request]") {
-    llm::ChatRequest request;
-    request.messages.push_back(
-        llm::Message{llm::Role::Assistant, {llm::ThinkingBlock{"pondering", std::nullopt}, llm::TextBlock{"answer"}}});
+    Fixture fixture({llm::Message{
+        llm::Role::Assistant,
+        {llm::ThinkingBlock{"pondering", std::nullopt}, llm::TextBlock{"answer"}}}});
 
-    nlohmann::json messages = ToOpenAiMessages(request);
+    nlohmann::json messages = ToOpenAiMessages(fixture.request);
 
     REQUIRE(messages.size() == 1);
     CHECK(messages[0]["content"] == "answer");
@@ -112,7 +133,8 @@ TEST_CASE("ToOpenAiToolChoice: all four kinds", "[openai_request]") {
 }
 
 TEST_CASE("BuildRequestBody: tools/tool_choice omitted when there are no tools", "[openai_request]") {
-    llm::ChatRequest request = BaseRequest();
+    Fixture fixture = BaseRequest();
+    auto& request = fixture.request;
     request.parameters = {{"tools", nlohmann::json::array({1})}, {"tool_choice", "auto"}};
 
     nlohmann::json body = BuildRequestBody(request);
@@ -122,7 +144,8 @@ TEST_CASE("BuildRequestBody: tools/tool_choice omitted when there are no tools",
 }
 
 TEST_CASE("BuildRequestBody: tool order is preserved, never re-sorted", "[openai_request]") {
-    llm::ChatRequest request = BaseRequest();
+    Fixture fixture = BaseRequest();
+    auto& request = fixture.request;
     request.tools = {{"zzz", "d1", nlohmann::json::object()}, {"aaa", "d2", nlohmann::json::object()}};
 
     nlohmann::json tools = BuildRequestBody(request)["tools"];
@@ -133,22 +156,26 @@ TEST_CASE("BuildRequestBody: tool order is preserved, never re-sorted", "[openai
 }
 
 TEST_CASE("BuildRequestBody: stream_options.include_usage set iff streaming", "[openai_request]") {
-    llm::ChatRequest streaming = BaseRequest();
+    Fixture streaming_fixture = BaseRequest();
+    auto& streaming = streaming_fixture.request;
     streaming.stream = true;
     CHECK(BuildRequestBody(streaming)["stream_options"]["include_usage"] == true);
 
-    llm::ChatRequest non_streaming = BaseRequest();
+    Fixture non_streaming_fixture = BaseRequest();
+    auto& non_streaming = non_streaming_fixture.request;
     non_streaming.stream = false;
     CHECK_FALSE(BuildRequestBody(non_streaming).contains("stream_options"));
 }
 
 TEST_CASE("BuildRequestBody: max_tokens presence and precedence over parameters", "[openai_request]") {
-    llm::ChatRequest with_max = BaseRequest();
+    Fixture with_max_fixture = BaseRequest();
+    auto& with_max = with_max_fixture.request;
     with_max.max_tokens = 256;
     with_max.parameters = {{"max_tokens", 1}};
     CHECK(BuildRequestBody(with_max)["max_tokens"] == 256);
 
-    llm::ChatRequest without_max = BaseRequest();
+    Fixture without_max_fixture = BaseRequest();
+    auto& without_max = without_max_fixture.request;
     without_max.parameters = {{"max_tokens", 1}};
     CHECK_FALSE(BuildRequestBody(without_max).contains("max_tokens"));
 }

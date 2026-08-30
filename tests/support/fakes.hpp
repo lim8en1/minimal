@@ -50,7 +50,19 @@ public:
 
     llm::ChatResponse StreamComplete(const llm::ChatRequest& request,
                                       const llm::StreamEventSink& sink) override {
-        requests_.push_back(request);
+        // ChatRequest::messages is a SPAN, and this outlives the call -- the
+        // whole point of recording is to assert after the fact. So the messages
+        // are copied into storage this owns and the recorded span is re-pointed
+        // at that copy. Storing the request verbatim would dangle the moment the
+        // loop's history reallocated, which is every append.
+        //
+        // A deque, not a vector: recorded spans point INTO the elements, so the
+        // container must not move them when it grows.
+        auto& owned = recorded_messages_.emplace_back(request.messages.begin(),
+                                                      request.messages.end());
+        llm::ChatRequest copy = request;
+        copy.messages = owned;
+        requests_.push_back(std::move(copy));
         if (steps_.empty()) {
             throw llm::LlmError(llm::LlmErrorCategory::RequestError,
                                 "FakeLlmProvider: no scripted step remaining");
@@ -76,6 +88,7 @@ public:
 
 private:
     std::deque<Step> steps_;
+    std::deque<std::vector<llm::Message>> recorded_messages_;
     std::vector<llm::ChatRequest> requests_;
 };
 

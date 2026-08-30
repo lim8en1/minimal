@@ -38,6 +38,15 @@ struct SessionSummary {
 struct ListSessionsFilter {
     std::optional<std::string> project_root;  // nullopt = all dirs (include_all_dirs)
     bool include_subagents = false;           // subagent rows are hidden by default
+
+    // Bounded, because this grows forever otherwise: every session ever created,
+    // each carrying its own COUNT(*) over the messages table, materialized into a
+    // vector and then into a repeated proto field. GetMessages was carefully
+    // keyset-paginated; the query beside it that also grows without bound was
+    // not. Ordering is (updated_at DESC, id ASC), so the cursor is a pair.
+    int limit = 0;                                  // <= 0 means no limit
+    std::optional<std::int64_t> before_updated_at;  // exclusive, with the id below
+    std::optional<std::string> before_id;
 };
 
 // OpenOptions is a test seam: overriding the migration list lets tests inject a
@@ -90,10 +99,16 @@ public:
     bool UpdateSessionName(const std::string& session_id, const std::string& name);
     bool DeleteSession(const std::string& session_id);  // cascades to messages and children
     std::optional<SessionSummary> GetSession(const std::string& session_id) const;
+
+    // Existence only. GetSession carries a COUNT(*) subquery over the whole
+    // messages table, so using it as a presence check made every scrollback page
+    // pay an O(n) count before the keyset seek that was supposed to make paging
+    // independent of transcript length.
+    bool SessionExists(const std::string& session_id) const;
     std::vector<SessionSummary> ListSessions(const ListSessionsFilter& filter) const;
 
     // Keyset page, descending by seq. before_seq is an exclusive upper bound;
-    // <= 0 means "start at the most recent". limit must be > 0.
+    // nullopt means "start at the most recent". limit must be > 0.
     MessagePage GetMessagesPage(const std::string& session_id,
                                 std::optional<std::int64_t> before_seq, int limit) const;
 

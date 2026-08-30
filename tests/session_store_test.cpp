@@ -524,7 +524,7 @@ TEST_CASE("a SIGKILL mid-append leaves an exact committed prefix", "[session][cr
     // Reopen: the WAL recovers, the transcript is an exact prefix, and no row is
     // torn -- strict decoding of every page would throw on a partial write.
     SessionDatabase db(path);
-    const auto sessions = db.ListSessions({std::nullopt, true});
+    const auto sessions = db.ListSessions({.include_subagents = true});
     REQUIRE(sessions.size() == 1);
     const int count = sessions[0].message_count;
     REQUIRE(count >= 20);
@@ -604,6 +604,60 @@ TEST_CASE("keyset paging walks a large transcript in exact order", "[session][pa
     CHECK_THROWS_AS(reader.GetMessages(id, std::nullopt, 0), std::runtime_error);
 }
 
+TEST_CASE("ListSessions pages, and the cursor survives a same-millisecond tie",
+          "[session][listing]") {
+    // Unbounded, this returns every session ever created, each with its own
+    // COUNT(*) over the messages table. The cursor is a (updated_at, id) pair
+    // because the sort key is: NextTimestamp only guarantees monotonicity within
+    // a process, so a database written across restarts can hold ties, and a
+    // cursor on updated_at alone would skip or repeat rows at a page boundary.
+    TempDir dir;
+    SessionDatabase db(dir.path() / "s.db");
+    for (int i = 0; i < 7; ++i) {
+        db.CreateSession("s" + std::to_string(i), std::nullopt, "/p", "build");
+    }
+
+    std::vector<std::string> paged;
+    std::optional<std::int64_t> cursor_ts;
+    std::optional<std::string> cursor_id;
+    while (true) {
+        ListSessionsFilter filter;
+        filter.include_subagents = true;
+        filter.limit = 3;
+        filter.before_updated_at = cursor_ts;
+        filter.before_id = cursor_id;
+        const auto page = db.ListSessions(filter);
+        if (page.empty()) break;
+        CHECK(page.size() <= 3);
+        for (const auto& s : page) paged.push_back(s.session_id);
+        cursor_ts = page.back().updated_at_unix_ms;
+        cursor_id = page.back().session_id;
+    }
+
+    const auto all = db.ListSessions({.include_subagents = true});
+    REQUIRE(all.size() == 7);
+    REQUIRE(paged.size() == all.size());  // no row skipped, none repeated
+    for (std::size_t i = 0; i < all.size(); ++i) {
+        CHECK(paged[i] == all[i].session_id);
+    }
+}
+
+TEST_CASE("SessionExists answers without counting the transcript", "[session][listing]") {
+    // GetSession carries a COUNT(*) over every message, which GetMessages threw
+    // away on every page -- an O(n) count in front of the keyset seek whose whole
+    // purpose is that a page costs the same on a long transcript as a short one.
+    TempDir dir;
+    SessionDatabase db(dir.path() / "s.db");
+    const auto id = db.CreateSession("s", std::nullopt, "/p", "build").session_id;
+    for (int i = 0; i < 50; ++i) db.AppendMessage(id, UserMsg("m"), 0);
+
+    CHECK(db.SessionExists(id));
+    CHECK_FALSE(db.SessionExists("no-such-session"));
+    // The counting version still counts, for the callers that want the number.
+    REQUIRE(db.GetSession(id).has_value());
+    CHECK(db.GetSession(id)->message_count == 50);
+}
+
 TEST_CASE("a cursor of 0 pages before the first message, not from the newest",
           "[session][paging][invariant]") {
     // seq starts at 0, so the old `before_seq <= 0 means no cursor` sentinel was
@@ -646,26 +700,26 @@ TEST_CASE("ListSessions filters by project and hides subagents by default", "[se
 
     // Default: one project, no subagents. a2 is most recently active, so first.
     std::vector<std::string> ids;
-    for (const auto& s : db.ListSessions({"/proj/a", false})) ids.push_back(s.session_id);
+    for (const auto& s : db.ListSessions({.project_root = "/proj/a", .include_subagents = false})) ids.push_back(s.session_id);
     REQUIRE(ids.size() == 2);
     CHECK(ids[0] == a2);
     CHECK(ids[1] == a1);
 
     // include_subagents adds the child.
     ids.clear();
-    for (const auto& s : db.ListSessions({"/proj/a", true})) ids.push_back(s.session_id);
+    for (const auto& s : db.ListSessions({.project_root = "/proj/a", .include_subagents = true})) ids.push_back(s.session_id);
     REQUIRE(ids.size() == 3);
     CHECK(std::find(ids.begin(), ids.end(), child) != ids.end());
 
     // include_all_dirs: every root session, still no subagents.
     ids.clear();
-    for (const auto& s : db.ListSessions({std::nullopt, false})) ids.push_back(s.session_id);
+    for (const auto& s : db.ListSessions({.include_subagents = false})) ids.push_back(s.session_id);
     REQUIRE(ids.size() == 3);
     CHECK(std::find(ids.begin(), ids.end(), child) == ids.end());
     CHECK(std::find(ids.begin(), ids.end(), b1) != ids.end());
 
     // message_count is accurate per row.
-    for (const auto& s : db.ListSessions({std::nullopt, true})) {
+    for (const auto& s : db.ListSessions({.include_subagents = true})) {
         if (s.session_id == a1) CHECK(s.message_count == 1);
         if (s.session_id == child) CHECK(s.message_count == 1);
         if (s.session_id == b1) CHECK(s.message_count == 0);
@@ -684,7 +738,7 @@ TEST_CASE("ListSessions sorts by last activity, newest first", "[session][listin
     // Touch the older session so it becomes most recently active.
     db.AppendMessage(older, UserMsg("third"));
 
-    const auto sessions = db.ListSessions({std::nullopt, false});
+    const auto sessions = db.ListSessions({.include_subagents = false});
     REQUIRE(sessions.size() == 2);
     CHECK(sessions[0].session_id == older);
     CHECK(sessions[1].session_id == newer);
@@ -708,7 +762,7 @@ TEST_CASE("DeleteSession removes the session, its messages, and its children", "
     CHECK(db.GetSession(child).has_value() == false);  // cascade through the FK
     const auto page = db.GetMessagesPage(parent, std::nullopt, 10);
     REQUIRE(page.messages.empty());
-    CHECK(db.ListSessions({std::nullopt, true}).empty());
+    CHECK(db.ListSessions({.include_subagents = true}).empty());
 }
 
 // --- Concurrency ------------------------------------------------------------------------------
