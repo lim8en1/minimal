@@ -33,7 +33,10 @@ std::unordered_map<std::string, std::string> ParseStringMap(const nlohmann::json
     return out;
 }
 
-McpServerEntry ParseEntry(const nlohmann::json& entry, std::size_t index) {
+// No index parameter: the caller catches and labels every failure with
+// EntryLabel(entry, i), so this throws bare reasons and never has to know where
+// it sits in the array.
+McpServerEntry ParseEntry(const nlohmann::json& entry) {
     if (!entry.is_object()) throw std::runtime_error("must be an object");
 
     McpServerEntry result;
@@ -81,7 +84,7 @@ McpsConfig ParseMcpsConfig(const nlohmann::json& doc) {
     std::unordered_set<std::string> seen_names;
     for (std::size_t i = 0; i < doc.size(); ++i) {
         try {
-            McpServerEntry entry = ParseEntry(doc.at(i), i);
+            McpServerEntry entry = ParseEntry(doc.at(i));
             if (!seen_names.insert(entry.name).second) {
                 throw std::runtime_error("duplicate server name '" + entry.name + "'");
             }
