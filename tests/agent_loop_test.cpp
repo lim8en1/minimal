@@ -5,6 +5,7 @@
 #include <fstream>
 #include <memory>
 #include <string>
+#include <unordered_set>
 #include <utility>
 
 #include "fakes.hpp"
@@ -297,9 +298,11 @@ TEST_CASE("compaction fires past the threshold and never touches the store",
     h.provider.PushResponse(TextResponse("three"));
 
     int compactions = 0;
-    auto compactor = [&compactions](const std::vector<llm::Message>&) {
+    auto compactor = [&compactions](const std::vector<llm::Message>&, llm::LlmProvider&,
+                                    std::string_view, std::string_view, std::int64_t,
+                                    std::function<bool()>) {
         ++compactions;
-        return UserText("[summary]");
+        return agent::CompactionResult{UserText("[summary]"), 0};
     };
     // TextResponse reports 10 in + 5 out = occupancy 15.
     h.Build({}, agent::LoopConfig{.auto_compact = true, .compaction_trigger_tokens = 10},
@@ -322,9 +325,11 @@ TEST_CASE("auto_compact off means no compaction regardless of occupancy",
     h.provider.PushResponse(TextResponse("two"));
 
     int compactions = 0;
-    auto compactor = [&compactions](const std::vector<llm::Message>&) {
+    auto compactor = [&compactions](const std::vector<llm::Message>&, llm::LlmProvider&,
+                                    std::string_view, std::string_view, std::int64_t,
+                                    std::function<bool()>) {
         ++compactions;
-        return UserText("[summary]");
+        return agent::CompactionResult{UserText("[summary]"), 0};
     };
     h.Build({}, agent::LoopConfig{.auto_compact = false, .compaction_trigger_tokens = 1},
             compactor);
@@ -333,6 +338,142 @@ TEST_CASE("auto_compact off means no compaction regardless of occupancy",
     h.loop->RunTurn(UserText("b"));
 
     CHECK(compactions == 0);
+}
+
+namespace {
+
+// A response whose reported usage stays below the compaction trigger, so a
+// compacted turn does not immediately re-fire.
+llm::ChatResponse SmallTextResponse(std::string text) {
+    llm::ChatResponse response = TextResponse(std::move(text));
+    response.usage.input_tokens = 2;
+    response.usage.output_tokens = 1;
+    return response;
+}
+
+// Every tool_use in the working set must have its result and vice versa: a
+// compaction cut that separated the two is a hard 400 on both wire formats.
+bool ToolPairsIntact(const std::vector<llm::Message>& messages) {
+    std::unordered_set<std::string> uses, results;
+    for (const auto& message : messages) {
+        for (const auto& block : message.content) {
+            if (const auto* use = std::get_if<llm::ToolUseBlock>(&block)) uses.insert(use->id);
+            if (const auto* result = std::get_if<llm::ToolResultBlock>(&block)) {
+                results.insert(result->tool_use_id);
+            }
+        }
+    }
+    return uses == results;
+}
+
+int CountCompactionRequests(const FakeLlmProvider& provider) {
+    int count = 0;
+    for (const auto& request : provider.requests()) {
+        if (request.system.has_value() && !request.system->empty()) ++count;
+    }
+    return count;
+}
+
+}  // namespace
+
+TEST_CASE("the production compactor runs end to end and never splits a tool pair",
+          "[agent_loop][compaction]") {
+    Harness h;
+    h.AddTool("read");
+    agent::AgentPreset preset;
+    preset.compression_prompt = "DEFAULT PROMPT";
+    // TextResponse/ToolUseResponse report 10 in + 5 out = occupancy 15, past the
+    // trigger of 12, so compaction is armed from the second loop iteration on.
+    h.Build(std::move(preset), agent::LoopConfig{.auto_compact = true, .compaction_trigger_tokens = 12},
+            &agent::compact_messages);
+
+    // Main calls: tu1, tu2, tu3, done. Compaction calls interleave wherever the
+    // trigger fires; the queue is shared, so order matters:
+    h.provider.PushResponse(ToolUseResponse("tu1", "read"));
+    h.provider.PushResponse(TextResponse("SUMMARY ONE"));   // compaction, iter 2
+    h.provider.PushResponse(ToolUseResponse("tu2", "read"));
+    h.provider.PushResponse(TextResponse("SUMMARY TWO"));   // compaction, iter 3
+    h.provider.PushResponse(ToolUseResponse("tu3", "read"));
+    h.provider.PushResponse(TextResponse("SUMMARY THREE"));  // compaction, iter 4
+    h.provider.PushResponse(SmallTextResponse("done"));
+
+    const auto result = h.loop->RunTurn(UserText("go"));
+
+    CHECK(result.stop_reason == llm::StopReason::EndTurn);
+    // Compacted working set: [summary, A2(tu2), U2(tr2), A3(tu3), U3(tr3), A4].
+    const auto& history = h.loop->history();
+    REQUIRE(history.size() == 6);
+    CHECK(history.front().role == llm::Role::User);
+    const auto* summary_text = std::get_if<llm::TextBlock>(&history.front().content.front());
+    REQUIRE(summary_text != nullptr);
+    CHECK(summary_text->text.find("SUMMARY THREE") != std::string::npos);
+    // The load-bearing invariant, end to end through the production path: no cut
+    // may separate a tool_use from its tool_result.
+    CHECK(ToolPairsIntact(history));
+    // Compaction rewrites only the working set; the durable record is complete.
+    CHECK(h.store.messages.size() == 8);
+    // Three compaction calls, each carrying the preset's prompt as system; the
+    // four main-turn calls carry none.
+    CHECK(CountCompactionRequests(h.provider) == 3);
+    for (const auto& request : h.provider.requests()) {
+        if (request.system.has_value()) CHECK(*request.system == "DEFAULT PROMPT");
+    }
+}
+
+TEST_CASE("a provider error during compaction leaves history untouched and cools down",
+          "[agent_loop][compaction]") {
+    Harness h;
+    h.AddTool("read");
+    agent::AgentPreset preset;
+    preset.compression_prompt = "DEFAULT PROMPT";
+    h.Build(std::move(preset), agent::LoopConfig{.auto_compact = true, .compaction_trigger_tokens = 12},
+            &agent::compact_messages);
+
+    // Iter 2's compaction attempt hits the error; without the per-turn cooldown it
+    // would be retried at iter 3 and consume a step that does not exist, which the
+    // fake reports as an exception. The turn must instead complete untouched.
+    h.provider.PushResponse(ToolUseResponse("tu1", "read"));
+    h.provider.PushError(llm::LlmError(llm::LlmErrorCategory::Transport, "summarizer down"));
+    h.provider.PushResponse(ToolUseResponse("tu2", "read"));
+    h.provider.PushResponse(SmallTextResponse("done"));
+
+    const auto result = h.loop->RunTurn(UserText("go"));
+
+    CHECK(result.stop_reason == llm::StopReason::EndTurn);
+    // No summary anywhere: the working set is the full, uncompacted history.
+    const auto& history = h.loop->history();
+    REQUIRE(history.size() == 6);
+    for (const auto& message : history) {
+        for (const auto& block : message.content) {
+            if (const auto* text = std::get_if<llm::TextBlock>(&block)) {
+                CHECK(text->text.find("SUMMARY") == std::string::npos);
+            }
+        }
+    }
+    // Exactly one compaction attempt across the whole turn.
+    CHECK(CountCompactionRequests(h.provider) == 1);
+}
+
+TEST_CASE("the preset's compression_prompt reaches the summarization request",
+          "[agent_loop][compaction]") {
+    Harness h;
+    h.AddTool("read");
+    agent::AgentPreset preset;
+    preset.compression_prompt = "OVERRIDE PROMPT";
+    h.Build(std::move(preset), agent::LoopConfig{.auto_compact = true, .compaction_trigger_tokens = 12},
+            &agent::compact_messages);
+
+    // Iteration 1's tool call pushes occupancy past the trigger, so iteration 2
+    // compacts before its main call.
+    h.provider.PushResponse(ToolUseResponse("tu1", "read"));
+    h.provider.PushResponse(TextResponse("SUMMARY"));  // compaction, iter 2
+    h.provider.PushResponse(SmallTextResponse("done"));
+
+    h.loop->RunTurn(UserText("a"));
+
+    REQUIRE(h.provider.requests().size() == 3);
+    REQUIRE(h.provider.requests()[1].system.has_value());
+    CHECK(*h.provider.requests()[1].system == "OVERRIDE PROMPT");
 }
 
 TEST_CASE("a queued subagent result lands at a turn boundary", "[agent_loop][subagent]") {

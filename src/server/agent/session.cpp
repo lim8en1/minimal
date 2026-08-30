@@ -78,19 +78,14 @@ Session::Session(SessionParams params, AgentPreset preset,
         return true;
     };
 
-    // A no-op compactor: it returns the range's first message unchanged, so the
-    // boundary-snapping machinery still runs and stays exercised while the
-    // provider-backed summariser is unbuilt. Compaction only affects the next
-    // request's messages, never the persisted transcript, so this degrades
-    // context quality and nothing else.
-    Compactor compactor = [](const std::vector<llm::Message>& messages) {
-        return messages.empty() ? llm::Message{llm::Role::User, {}} : messages.front();
-    };
-
+    // The real summarizer. Passed as the plain function rather than wrapped,
+    // because everything it needs -- provider, model, prompt, cancel flag -- is
+    // an argument the loop supplies per call. That is what keeps a mid-session
+    // /agent switch from compacting with the previous preset's prompt.
     loop_ = std::make_unique<AgentLoop>(*provider_, executor_, registry, *store_, preset_,
                                         loop_config, std::move(context),
                                         [this] { return IsCancelled(); }, std::move(event_sink),
-                                        std::move(compactor));
+                                        compact_messages);
 
     observers_.NotifySessionCreated(info_);
     worker_ = std::thread([this] { WorkerMain(); });
