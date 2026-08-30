@@ -2,9 +2,9 @@
 
 Companion to `ARCHITECTURE.md`, which remains the single source of truth for *design*. This document covers only *sequencing*: what is built, what blocks what, and what "done" means for each remaining piece. Every milestone cites the `ARCHITECTURE.md` section that specifies it; where this plan and that document disagree, that document wins and this one is stale.
 
-**Status: Milestones A, B and H are complete. 433 tests passing, clean build, zero warnings.**
+**Status: Milestones A, B and H are complete, and a post-merge review of all three has been actioned (§8). 444 tests passing, clean build, zero warnings.**
 
-`minimal -p` holds real conversations against a local model using `read`, `bash`, and `skill`; a permission prompt round-trips over the wire in both directions; a session grant silences the second prompt; the server exits when the last client detaches. Transcripts persist to SQLite and survive the server process — `GetMessages` and `ListSessions` answer from the database, so a session the server has no live object for still reads back. **Sessions cannot yet be resumed**, only read (§4 B).
+`minimal -p` holds real conversations against a local model using `read`, `bash`, and `skill`; a permission prompt round-trips over the wire in both directions; a session grant silences the second prompt; the server exits when the last client detaches. Transcripts persist to SQLite and survive the server process — `GetMessages` and `ListSessions` answer from the database, so a session the server has no live object for still reads back. `cmake --install` now produces a config dir the server actually starts against (§8). **Sessions cannot yet be resumed**, only read (§4 B).
 
 ---
 
@@ -281,7 +281,7 @@ Bundled-plugin failures are Fatal, user-plugin failures Warning.
 - [x] Real compactor against `FakeLlmProvider`; assert the boundary invariant still holds end to end.
 - [x] Provider error during compaction leaves history untouched (and cools down for the rest of the turn).
 - [x] Preset-level `compression_prompt` override is used when present.
-- [x] Unit coverage of `compact_messages`: verbatim pass-through of tool blocks, `original_token_count` ground-truth vs bytes/4 fallback, empty-prompt short-circuit (provider never called), non-text response rejection, cancellation via the stream sink.
+- [x] Unit coverage of `compact_messages`: verbatim pass-through of tool blocks, `context_tokens_before` ground-truth vs bytes/4 fallback (both over the whole context), empty-prompt short-circuit (provider never called), non-text response rejection, cancellation via the stream sink.
 - [x] Seeding: a missing prompt is copied into the config dir, an existing one is never overwritten, a missing bundle is a no-op, and a seeded prompt reaches `AgentPreset::compression_prompt`.
 
 #### What the merge with A+B found
@@ -289,7 +289,7 @@ Bundled-plugin failures are Fatal, user-plugin failures Warning.
 1. **`Session` was still injecting the no-op stub.** The draft built the summarizer but nothing consumed it — `session.cpp` returned the range's first message unchanged. One statement, and without it the other ~310 lines are dead code.
 2. **The bundled prompt had no delivery mechanism, which made the whole feature inert.** `AgentPresetRegistry` reads `<config>/prompts/compression.md`; the draft authored the file under a new `bundled/` with no install rule and nothing that copied it anywhere. So `compression_prompt` was `""` on every real install, `compact_messages` short-circuited, and compaction never ran on any session — visible only as one log line. Closed with `common/bundled_assets`, a CMake install rule, a build-tree staging step, and first-run seeding that never overwrites.
 3. **`MINIMAL_PLUGIN_DIR` was defined by CMake and never read.** `BundledPluginDir()` hardcoded `lib/minimal/plugins`, so overriding `MINIMAL_PLUGIN_INSTALL_DIR` moved the install without moving the search. Found while building the parallel mechanism for prompts; both now resolve from the compiled-in cache value.
-4. **`original_token_count` had no consumer** — computed, returned, dropped. Now logged with the message count on each successful compaction. No wire event: nothing in the protocol specifies one and no client could render it, so it belongs with the TUI.
+4. **`original_token_count` had no consumer** — computed, returned, dropped. Now logged with the message count on each successful compaction. No wire event: nothing in the protocol specifies one and no client could render it, so it belongs with the TUI. (§8 later found its two branches measured different spans, and renamed it `context_tokens_before`.)
 5. **A concern that did not survive checking.** Repeated compaction within one turn looked unbounded — the cooldown covers failure but not success. It is not: each pass replaces `cut ≈ size/2` messages with one, so history halves every time and `history_.size() < 2` is the floor. It terminates in log2(n) passes. The reasoning is recorded in `MaybeCompact` so the next reader does not re-derive it and "fix" it with an invented threshold.
 
 ### I. `SessionObserver` registry
@@ -378,6 +378,75 @@ Not scheduled, recorded so they are decisions rather than oversights.
 - **Server-wide fd hygiene** — no `CLOEXEC` discipline on gRPC/SQLite/log fds; every bash command inherits them. The bash pipes are handled; the rest is not.
 - **`tree-sitter-bash` for command disclosure** — the hand-rolled scanner is conservative and its failure mode is safe (fewer grants offered). Upgrading raises the hit rate, not the safety floor. The grammar is already a planned client dependency.
 - **Unknown `allowed_skills` entries are silently dropped** — correct behaviour for resolution, but should be *reported* by F.
+- **`themes/*.json` and `keybindings.json` are specified but unread** — nothing outside a comment in `config_paths.hpp` refers to them, so they are deliberately not seeded either. They arrive with the TUI (track E), which is the first thing that would read one.
 - **`compaction_keep_recent_tokens` is parsed but unused** — the compaction cut is half the working history by message count (snapped to a tool-call cycle); selecting it by tokens needs per-message counts that are not tracked in memory (§ *Context compaction*).
-- **Backend `usage: 0`** from some OpenAI-compatible proxies — no fallback estimate designed (§ *Deferred*). Note the production compactor's `original_token_count` falls back to a bytes/4 estimate in exactly this case; it is an admission of roughness, not a precision claim.
+- **Backend `usage: 0`** from some OpenAI-compatible proxies — no fallback estimate designed (§ *Deferred*). Note the production compactor's `context_tokens_before` falls back to a bytes/4 estimate in exactly this case; it is an admission of roughness, not a precision claim.
 - Everything under § *Deferred / open items*: Anthropic provider, Windows, `llamacpp-kv`, parallel tool dispatch, session detach, tab-bar overflow.
+
+---
+
+## 8. Post-merge review of A + B + H
+
+A + B + H were built on three branches off one base and merged in sequence. Each was internally
+green; §1's "risk this creates" predicted that the mismatches would live *between* them, and the
+merges bore that out. This is what a deliberate read of all three against `ARCHITECTURE.md` found
+afterwards, and what was done about it.
+
+**The largest finding was not a bug in any of them.** `bundled/` held exactly one file. The
+`agents/{plan,build,subagent}.md` the architecture calls bundled did not exist anywhere in the tree,
+and neither did `settings.json` or `permissions.json` — so `LoadSettingsConfig` threw on a cold
+config dir and `main.cpp` turned that into exit 1. Fixing that filename revealed the next. Milestone
+H closed the delivery gap for one prompt; it was still open for everything the harness needs to
+start.
+
+### Correctness
+
+| What | Why it mattered |
+|---|---|
+| `PendingRequests` had one permanent cancel latch serving both `Session::Cancel` (ends a turn) and `Session::Terminate` (ends a session) | One `CancelTurn` deny-locked the session: every later permission prompt returned "no answer" instantly, which `WirePermissionChecker` maps to `Deny`. The session kept reporting itself alive and accepting turns while refusing every gated tool, silently. Split into `CancelAll` (generation bump) and `Shutdown` (the latch). |
+| The retry loop never backed off | Both `ARCHITECTURE.md`'s pseudocode and `provider.hpp:82` put backoff in the loop; a 429 was answered with four more requests inside a few milliseconds. Exponential, **equal** jitter (full jitter can draw zero, which both leaves a real 429 unbackoffed and makes the wait unassertable), polling cancellation while it sleeps. |
+| `original_token_count` measured two different spans | Ground truth was the whole request's `input_tokens`; the fallback estimated only the compacted range. The log printed either as "what was replaced". Renamed `context_tokens_before`; both branches now measure the whole context. |
+| A `MaxTokens`-truncated summary was accepted | Cut off mid-sentence, and it permanently replaces half the conversation with a fragment whose only other copy is in SQLite. Refused, same rule the loop already applies to `MaxTokens`. |
+| The compaction call dropped the preset's sampling settings | Chasing it found a wider gap: `ChatRequest::max_tokens` had **no producer anywhere**, and the OpenAI serializer erases any `max_tokens` set through `parameters` because it treats the field as structural. An output cap was unreachable on every request in the system. Added as a typed `providers.json` field. |
+| `OnTurnCompleted` never fired for a failed turn | Both catch blocks returned before it, so an observer holding per-turn state leaked it once per failure — the same defect the tool lifecycle event avoids by emitting finish even on error. |
+| `before_seq <= 0` meant "no cursor", but `seq` starts at 0 | A client paging back to the first message and passing its seq got the newest page again. Now proto3 `optional`. Changing it silently rewrites every call site (`0` converts to an engaged optional), so `GetMessages(id, 0, n)` is a deleted overload. |
+
+### Cold start
+
+`bundled/` gained `agents/{plan,build,subagent}.md`, `settings.json`, `permissions.json`,
+`providers.json` (`[]`) and `providers.example.json`. Seeding moved from first server run to
+`cmake --install` (`cmake/SeedConfig.cmake`), which **deletes** machinery rather than adding it:
+`BundledPromptDir`, `SeedBundledPrompts`, `MINIMAL_PROMPT_INSTALL_DIR`, the `install(DIRECTORY)`
+rule, the POST_BUILD staging step and the `main.cpp` stage-1 call are all gone. Config files have no
+runtime lookup path at all now. Plugins keep the executable-relative probe, because they are code
+the user does not edit.
+
+`providers.json` seeds empty on purpose — a `base_url` that is right on one machine is wrong on the
+next, and a plausible default pointing at nothing is worse than an obviously empty one.
+`context_compaction_trigger_tokens` defaults to `0`, which means *never*, so the seeded
+`settings.json` sets a real value: without it the prompt H delivered still never gets used.
+
+### Efficiency
+
+`BuildChatRequest` deep-copied the whole working history per provider call **and per retry**, and
+`openai_provider.cpp` copied the request again to normalize it — two full copies of every message and
+string per call, against a stated 512k–1M token goal. `ChatRequest::messages` is now a `std::span`
+with an explicit lifetime contract. Measured on a 2 MB history: **113.5 µs/call → 0.06 µs/call**
+(`tests/chat_request_bench.cpp`, tagged `[.bench]`).
+
+Also: `GetMessages` used `GetSession` as an existence check and discarded the `COUNT(*)` it computed,
+putting an O(n) count in front of the keyset seek whose whole purpose is that a page costs the same
+on a long transcript; `ListSessions` had no `LIMIT` at all; `EventQueue` was unbounded, and the
+initial-attach guard bounds *time*, not volume.
+
+### Practice this confirmed
+
+- **The from-scratch build and the sanitizer both earned their keep**, and both required reading the
+  output rather than the exit code. ASan's one report is inside gRPC's own `send_goaway` frame and
+  reproduces with every change stashed — an uninstrumented dependency, not a defect.
+- **A ceiling is not an invariant test.** The first "the retry waited" assertion was `elapsed < 2s`,
+  which passes with the backoff deleted. Under full jitter no single run *can* assert a floor; the
+  fix was to change the algorithm to equal jitter so the floor exists, not to loosen the test.
+- **The compiler cannot catch a sentinel change.** Every `before_seq` call site kept compiling and
+  quietly changed meaning; the tests caught all eleven. A deleted overload is what stops the twelfth
+  from being written.

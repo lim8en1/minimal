@@ -30,15 +30,20 @@ minimal/
     server/                       # tools-fs, tools-bash, provider-openai, commands-core
     client/                       # (none bundled yet)
   bundled/                    # non-code assets that ship WITH the binary
-    prompts/compression.md        # seeded into the config dir on first run
+    prompts/compression.md        # all of it copied into the config dir by
+    agents/{plan,build,subagent}.md   #   `cmake --install` -- never read from here
+    settings.json  permissions.json   #   at runtime, never compiled into the binary
+    providers.json  providers.example.json
+  cmake/SeedConfig.cmake      # the copy: never overwrites an existing file
   src/                        # the harness ITSELF
     common/                   # shared by server AND client
       config_paths.{hpp,cpp}      # the client reads themes/ + keybindings.json too
       abi_tag.{hpp,cpp}           # both plugin loaders must compute an identical tag
+      bundled_assets.{hpp,cpp}    # executable-relative lookup -- PLUGINS ONLY
       version.hpp
     server/
-      agent/    # agent_loop, session, session_registry, compaction, presets,
-                #   session_observer(_registry), in_memory_history_store
+      agent/    # agent_loop, session, session_registry, context_compactor,
+                #   compaction_boundary, presets, session_observer(_registry)
       llm/      # unified model, provider iface, http_client, sse_parser
       tools/    # Tool iface, registry, executor, permission model, path_confinement
       commands/ # Command iface, registry, dispatcher
@@ -47,9 +52,9 @@ minimal/
                 #   the top-level plugins/, which is what gets loaded.
       rpc/      # SessionService impl, server, pending_requests, event_queue,
                 #   wire_permission_checker, proto_convert, auth_interceptor
-      config/   # loaders, frontmatter, skill_registry, seeding, sanity_check
+      config/   # loaders, frontmatter, skill_registry, sanity_check
       mcp/      # cpp-mcp client wrapper, shared server processes
-      session/  # SQLite store, migrations, SessionReader
+      session/  # SQLite store, migrations, SessionReader, message_codec, ulid
     client/
       view/     # tab_bar, chat_view, prompt_editor, status_bar, session_picker, tools_panel
       render/   # markdown_renderer, streaming_markdown_view, syntax_highlighter, theme
@@ -954,7 +959,8 @@ RunTurn(session, seed_message):
     request = BuildChatRequest(session)
     response = provider.StreamComplete(request, sink)    # sink emits StreamEvents; false => cancel
       on LlmError e:
-        if e.is_retryable() && attempts < max: backoff; continue
+        if e.is_retryable() && attempts < max: backoff; continue  # exponential,
+                                        # equal jitter, polls the cancel flag
         emit ErrorEvent; break
     append + persist assistant message
     if stop_reason != tool_use: break
@@ -988,7 +994,7 @@ Triggered from the agent loop when `memory.auto_compact` is on and a session's *
 - Summarization goes through the active provider using `prompts/compression.md`, overridable per preset via the `compression_prompt` frontmatter field. **A missing prompt disables compaction outright** — `compact_messages` refuses to send a summarization request with no instructions, which would burn tokens to produce garbage — so delivering the default is what makes the feature exist at all rather than a packaging detail. The request passes the messages **verbatim, tool blocks included** — both wire formats accept them in history without a `tools` array — with the prompt as `system`. It runs through `StreamComplete` with a sink that polls the session's cancel flag, so `CancelTurn` aborts an in-flight summarization instead of stalling until `request_timeout`.
 
 ```cpp
-struct CompactionResult { Message summary_message; int64_t original_token_count; };
+struct CompactionResult { Message summary_message; int64_t context_tokens_before; };
 
 // Production compactor. nullopt = "no compaction this cycle" -- empty prompt,
 // provider error, cancellation, or a response with no usable text. Failure is a
@@ -996,38 +1002,70 @@ struct CompactionResult { Message summary_message; int64_t original_token_count;
 // summarizer degrades to no compaction, never to a lost transcript. The prompt
 // and model are per-call rather than bound at construction because /agent can
 // switch presets mid-session.
+// Everything that varies per call, including the preset's sampling parameters and
+// max_tokens -- the summarization request is built from the same settings as the
+// conversation it summarizes.
+struct CompactionRequest {
+    std::string_view model_name, compression_prompt;
+    nlohmann::json parameters;
+    std::optional<int> max_tokens;
+    int64_t last_reported_input_tokens;
+    const std::vector<Message>* full_history;   // fallback estimate only
+    std::function<bool()> is_cancelled;
+};
+
 using Compactor = std::function<std::optional<CompactionResult>(
     const std::vector<Message>& messages_to_compact, LlmProvider& provider,
-    std::string_view model_name, std::string_view compression_prompt,
-    int64_t last_reported_input_tokens, std::function<bool()> is_cancelled)>;
+    const CompactionRequest& request)>;
 
 std::optional<CompactionResult> compact_messages(/* same signature */);
 ```
 
-The summary is a `User` message carrying a fixed framing line plus the model's text — the shape both wire formats accept at the head of a history. `original_token_count` is the backend's own count from the last API call when it reported one (ground truth), else a bytes/4 estimate; there is no tokenizer in this codebase. A failed attempt sets a per-turn cooldown so the loop does not re-invoke a failing summarizer on every tool cycle of the same turn — each retry would resend half the context. The trigger stays armed for the next `RunTurn`, where the flag resets.
+The summary is a `User` message carrying a fixed framing line plus the model's text — the shape both wire formats accept at the head of a history. **A summary that stopped on `max_tokens` is refused**, for the same reason the loop refuses to treat `MaxTokens` as normal completion, and with a worse consequence: it is cut off mid-sentence and would permanently replace half the conversation with a fragment whose only other copy is in SQLite, where the loop cannot reach it.
+
+`context_tokens_before` is the size of the **whole context** going into the request that tripped the trigger — not the size of the range replaced. Both branches measure that same span: the backend's own count when it reported one (ground truth), else a bytes/4 estimate over the same history. There is no tokenizer in this codebase. The two used to measure different things, so the logged number overstated what compaction had replaced by roughly the size of everything it kept. A failed attempt sets a per-turn cooldown so the loop does not re-invoke a failing summarizer on every tool cycle of the same turn — each retry would resend half the context. The trigger stays armed for the next `RunTurn`, where the flag resets.
 
 Also exposed as `/compact` (an `LLMCommand`) for proactive use. No confirmation — it touches no persisted data.
 
 ## Bundled assets
 
-Files that ship *with the binary* rather than belonging to the user: bundled plugin
-libraries and `bundled/prompts/`. Both are found relative to the running executable
-(`common/bundled_assets.{hpp,cpp}`), which has to handle two layouts — an installed
-tree (`<prefix>/bin/minimal-server`, assets under `<prefix>/lib` and `<prefix>/share`)
-and a build tree (`build/src/server/minimal-server`, assets staged under `build/`).
-The install destinations are compiled in from the same CMake cache variables the
-install rules use, so overriding one moves the install and the lookup together.
+`bundled/` is the tree that ships with the source and is copied into the user's
+config dir by **`cmake --install`** (`cmake/SeedConfig.cmake`). Prompts, agent
+presets, `settings.json` and `permissions.json` all arrive that way.
 
-**Prompts are seeded, plugins are read in place**, and the difference is deliberate.
-A plugin is code the user does not edit; a prompt is text they should. So on startup
-any bundled prompt the config dir lacks is copied into `<config>/prompts/`, and an
-existing file is **never** overwritten — reverting someone's edited compaction prompt
-on every upgrade would be a worse failure than shipping without a default.
+**Nothing is compiled into the binary, and nothing is read from the install prefix
+at runtime.** That is the rule, and it follows from the product philosophy rather
+than from convenience: a file the user cannot see is a file they cannot change, so
+every default has to land somewhere they can open it. One copy, in the config dir,
+and that copy is the one that runs — no runtime lookup, no build-tree/installed
+precedence, no shadowing question.
 
-Seeding is best-effort: a read-only config dir or an install that shipped no prompts
-returns empty rather than throwing. The consequence is visible but quiet — compaction
-degrades to "no compaction" with a log line — which is why making an absent prompt
-*loud* belongs to the startup sanity check.
+**NEVER OVERWRITES.** An existing file is the user's, edited or not. Silently
+reverting someone's compaction prompt or preset on an upgrade would be a far worse
+failure than shipping without a default — so a bundled file that gains a better
+default in a later release does *not* propagate to anyone who already has one.
+That is the deliberate trade. Seeding is per file, so a config dir missing only
+`agents/` still gets the presets.
+
+Seeding is best-effort and skips entirely under `DESTDIR` (a packaging root has no
+user whose config dir it is). A missing bundle warns rather than failing the
+install.
+
+**`providers.json` seeds as `[]`**, with `providers.example.json` beside it. It is
+the one thing seeding cannot do for you: a `base_url` that is right on the machine
+that built the binary is wrong on the next one, and a plausible-looking default
+pointing at nothing is worse than an empty list that obviously needs filling in.
+The install prints where to edit. The server still *starts* with no providers, so
+the startup sanity check can report every problem at once rather than dying on the
+first one.
+
+**Plugins are the exception, and the only one.** They are code the user does not
+edit, so they install under the prefix and are found relative to the running
+executable (`common/bundled_assets.{hpp,cpp}`), which has to handle two layouts —
+an installed tree (`<prefix>/bin/minimal-server`, libraries under `<prefix>/lib`)
+and a build tree (`build/src/server/minimal-server`, libraries under
+`build/plugins`). The install destination is compiled in from the same CMake cache
+variable the install rule uses, so overriding one moves both.
 
 ## Config
 
@@ -1037,16 +1075,16 @@ degrades to "no compaction" with a log line — which is why making an absent pr
 
 **File format**: agents, skills, and prompts are Markdown with YAML frontmatter — the same convention Claude Code and opencode use: frontmatter for structured metadata, Markdown body for prompt text, loaded verbatim. `src/server/config/frontmatter.{hpp,cpp}` provides `parse_frontmatter_markdown(contents) -> {YAML::Node frontmatter, std::string body}` (split on `---` delimiters, frontmatter to **yaml-cpp**, remainder as body). The `.json` files stay plain JSON — harness config, not prompt content, with no body to split.
 
-- **`agents/*.md`** — presets: frontmatter `name, description, provider, model, allowed_tools, allowed_skills, allowed_mcp_servers, permission_mode: {read_only, file_write, execute, out_of_workdir, overrides}, mcp_permissions: {<server>: allow|ask|deny}, compression_prompt?`; **body is the system prompt directly**. Bundled `plan.md`, `build.md`.
-- **`agents/subagent.md`** — plain Markdown, no frontmatter. Prepended to the resolved preset's body whenever `parent_session_id` is non-null.
-- **`prompts/compression.md`** — default compaction prompt; a preset's `compression_prompt` overrides it, resolved relative to this directory. **Seeded from `bundled/prompts/` on first run and never overwritten after** — see *Bundled assets* below.
+- **`agents/*.md`** — presets: frontmatter `name, description, provider, model, allowed_tools, allowed_skills, allowed_mcp_servers, permission_mode: {read_only, file_write, execute, out_of_workdir, overrides}, mcp_permissions: {<server>: allow|ask|deny}, compression_prompt?`; **body is the system prompt directly**. `plan.md` and `build.md` ship in `bundled/agents/` and are seeded like everything else there.
+- **`agents/subagent.md`** — plain Markdown, no frontmatter. Prepended to the resolved preset's body whenever `parent_session_id` is non-null. Also seeded.
+- **`prompts/compression.md`** — default compaction prompt; a preset's `compression_prompt` overrides it, resolved relative to this directory. **Seeded from `bundled/prompts/` by `cmake --install` and never overwritten after** — see *Bundled assets* below.
 - **`skills/<name>/SKILL.md`** (+ supporting files) — lazy-loaded: frontmatter (`name`, `description`) resident in the registry; body loads only on invocation.
 - **`themes/*.json`** — role/category → truecolor RGB.
 - **`keybindings.json`** — action → key. Must accommodate plugin-registered action names unknown at compile time.
-- **`providers.json`** — `[{name, provider: "<kind string>", base_url, api_key | api_key_env, model_name, parameters: {}, context_window_tokens?}]`. `provider` is looked up in `ProviderFactoryRegistry`, so any plugin-registered kind is valid — there is no closed enum. `context_window_tokens` is informational, feeding the status bar's `used/max`.
+- **`providers.json`** — `[{name, provider: "<kind string>", base_url, api_key | api_key_env, model_name, parameters: {}, context_window_tokens?, max_tokens?}]`. `max_tokens` is typed rather than left to `parameters` because the serializer treats it as a structural field and erases whatever `parameters` put there — so it was the only route to an output cap, and it did not exist. It applies to every request the session makes, summarization included: a cap the conversation honours and the compactor ignores is how a summary gets truncated. `provider` is looked up in `ProviderFactoryRegistry`, so any plugin-registered kind is valid — there is no closed enum. `context_window_tokens` is informational, feeding the status bar's `used/max`.
 - **`mcps.json`** — `[{name, transport: "stdio"|"http", command, args[], env{} | url, headers{}, enabled}]`. `env`/`headers` support `${ENV_VAR}` interpolation, resolved once at load and never logged. No per-server risk category — MCP permission is server-scoped, resolved separately.
 - **`permissions.json`** — security config, split from `settings.json` so it can be reviewed and locked down independently: `{default_run_mode: "normal"|"bypass"|"allow-only" (default "normal"), fallback: {read_only, file_write, execute, out_of_workdir}, per_tool_overrides: {}, mcp_default_mode: "allow"|"ask"|"deny" (default "ask")}`. A global floor a preset can still override — no clamping; guardrails presets cannot loosen are future scope.
-- **`settings.json`** — `default_agent_preset, default_provider, default_theme, max_concurrent_subagents (default 4), memory.{auto_compact (default true), context_compaction_trigger_tokens, compaction_keep_recent_tokens (NOT YET HONORED — see Context compaction), scrollback_page_size}, tools.{read,edit,bash}.*, tools_view.stdout_buffer_lines (default 100), session_db_path, logging.{level, path, max_size_mb, max_files}`. `logging` backs a **spdlog** rotating file sink (no custom rotation code), with `path` alongside `session_db_path` under the platform *data* dir, not the config dir.
+- **`settings.json`** — `default_agent_preset, default_provider, default_theme, max_concurrent_subagents (default 4), memory.{auto_compact (default true), context_compaction_trigger_tokens (0 = never; the seeded settings.json sets 120000, and a 0 here means compaction never runs no matter what auto_compact says), compaction_keep_recent_tokens (NOT YET HONORED — see Context compaction), scrollback_page_size (default 100 when unset, applied by the RPC layer to both GetMessages and ListSessions)}, tools.{read,edit,bash}.*, tools_view.stdout_buffer_lines (default 100), session_db_path, logging.{level, path, max_size_mb, max_files}`. `logging` backs a **spdlog** rotating file sink (no custom rotation code), with `path` alongside `session_db_path` under the platform *data* dir, not the config dir.
 - **`plugins.json`** — an object, not a bare array (an earlier draft said array while also placing `command_aliases` at the top level; both cannot hold):
 
   ```json
@@ -1059,7 +1097,7 @@ degrades to "no compaction" with a log line — which is why making an absent pr
   Newly discovered plugins are appended on startup with enablement defaulted by provenance, so the file is self-maintaining and the user only edits it to change a decision. Malformed content degrades to empty rather than throwing — a broken `plugins.json` should not prevent the server starting.
 - **No `commands/` config dir** — a command's value is its code; a data-only manifest would be a drift-prone shadow copy.
 
-**First-run seeding**: bundled files are compiled into the binary at build time (CMake-generated manifest of `{relative_path, sha256, content}`). A tracked `.bundled_manifest.json` distinguishes "destination missing → install", "on-disk matches last-installed hash and bundled content changed → safe to update", "on-disk hash diverged → user-edited, leave alone and drop `.new` alongside".
+**Seeding**: `cmake --install` copies `bundled/` into the config dir and never overwrites — see *Bundled assets*. Nothing is compiled into the binary and nothing is read from the install prefix at runtime, so every file above is one the user can see and edit, and the copy they edit is the copy that runs.
 
 **Permission-mode precedence** (highest → lowest): preset `permission_mode.overrides[tool]` → preset `permission_mode.<category>` → `permissions.json` `per_tool_overrides[tool]` → `permissions.json` `fallback.<category>` → hard-coded default (`read_only=Allow, file_write=Ask, execute=Ask, out_of_workdir=Ask`). Note `out_of_workdir` is a *dimension* folded in via `most_restrictive`, not a `ToolCategory` value — see Permission model.
 
