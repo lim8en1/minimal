@@ -36,14 +36,14 @@ void Write(const std::filesystem::path& path, const std::string& contents) {
 // the seeded one is deliberately `[]` (see the seed script).
 void WriteSeededConfig(const std::filesystem::path& dir) {
     Write(dir / "providers.json",
-          R"([{"name":"local","provider":"openai","base_url":"http://x/v1",)"
-          R"("model_name":"m","max_tokens":4096}])");
+          R"({"providers":{"local":{"backend":"openai","url":"http://x/v1","max_tokens":4096,)"
+          R"("models":{"m":{}}}}})");
     Write(dir / "settings.json",
-          R"({"default_agent_preset":"build","default_provider":"local",)"
+          R"({"default_agent_preset":"build","default_model":"local/m",)"
           R"("memory":{"auto_compact":true,"context_compaction_trigger_tokens":120000}})");
     Write(dir / "permissions.json", R"({"default_run_mode":"normal"})");
     Write(dir / "agents" / "build.md",
-          "---\nname: build\nprovider: default\n---\nYou are a coding agent.\n");
+          "---\nname: build\n---\nYou are a coding agent.\n");  // takes default_model
 }
 
 }  // namespace
@@ -98,7 +98,7 @@ TEST_CASE("a preset's compression_prompt override wins over the seeded default",
     Write(config.path() / "prompts" / "compression.md", "THE DEFAULT.\n");
     Write(config.path() / "prompts" / "terse.md", "BE BRIEF.\n");
     Write(config.path() / "agents" / "brief.md",
-          "---\nname: brief\nprovider: default\ncompression_prompt: terse\n---\nHi.\n");
+          "---\nname: brief\ncompression_prompt: terse\n---\nHi.\n");
 
     const auto skills = config::SkillRegistry::Load(config.path());
     agent::AgentPresetRegistry registry(config.path(), skills);

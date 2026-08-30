@@ -42,6 +42,12 @@ public:
 
     const std::string& SubagentPrefix() const { return subagent_prefix_; }
 
+    // The parsed providers.json this registry resolved presets against. Exposed
+    // rather than re-loaded by callers who need to resolve a model the USER
+    // named (--model, /model): two loads would be two sources of truth, and the
+    // second could disagree after an edit.
+    const config::ProvidersConfig& providers() const { return providers_; }
+
 private:
     AgentPreset ResolveUncached(const std::string& preset_name) const;
 

@@ -23,6 +23,7 @@ SessionClient::CreateResult SessionClient::CreateSession(const CreateOptions& op
     v1::CreateSessionRequest request;
     request.set_project_root(options.project_root);
     request.set_agent_preset(options.agent_preset);
+    request.set_model(options.model);
     request.set_name(options.name);
     request.set_run_mode(options.run_mode);
 

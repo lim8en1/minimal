@@ -275,6 +275,10 @@ message CreateSessionRequest {
   // @-mentions, SuggestPaths, and bash's initial cwd. The client supplies its cwd.
   string project_root = 3;
   PermissionRunMode run_mode = 4;
+  // "<provider>/<model>", empty = whatever the preset resolves to. A model the
+  // USER chose outranks the preset's, and keeps outranking it after a later
+  // /agent -- the preset supplies a default, not a decision.
+  string model = 5;
 }
 
 message CreateSessionResponse {

@@ -6,6 +6,22 @@
 #include "minimal/session/sqlite_history_store.hpp"
 
 namespace minimal::agent {
+namespace {
+
+// Same shape as the preset registry's message: a miss is answered by showing
+// what exists, because it is nearly always a typo or an unconfigured provider.
+std::string DescribeModels(const config::ProvidersConfig& providers) {
+    const auto refs = providers.ModelRefs();
+    if (refs.empty()) return "no models at all (providers.json is empty)";
+    std::string out;
+    for (const auto& ref : refs) {
+        if (!out.empty()) out += ", ";
+        out += ref;
+    }
+    return out;
+}
+
+}  // namespace
 
 SessionRegistry::SessionRegistry(const AgentPresetRegistry& presets, tools::ToolRegistry& tools,
                                  const llm::ProviderFactoryRegistry& providers,
@@ -37,7 +53,22 @@ std::shared_ptr<Session> SessionRegistry::Create(SessionParams params) {
     // Resolve() throws for an unknown preset, and for a preset naming a provider
     // that providers.json does not define. Both propagate: they are the caller's
     // to report, and a session with no provider could not run a single turn.
-    const AgentPreset& preset = presets_.Resolve(params.agent_preset);
+    // A copy, not the cached reference: a --model override mutates it, and the
+    // registry's cache must keep describing the preset as written.
+    AgentPreset preset = presets_.Resolve(params.agent_preset);
+
+    // The user's model outranks the preset's. Applied here rather than inside
+    // the preset registry because it is a property of this SESSION, not of the
+    // preset -- two sessions on one preset can be running different models.
+    if (params.model_override) {
+        const config::ResolvedModel* model = presets_.providers().Resolve(*params.model_override);
+        if (model == nullptr) {
+            throw std::runtime_error("unknown model '" + params.model_override->str() +
+                                     "'; providers.json defines " +
+                                     DescribeModels(presets_.providers()));
+        }
+        ApplyModel(preset, *model);
+    }
 
     // The kind string is what selects a factory. A preset can only reach this
     // point with a provider entry that parsed, so an unregistered kind means a

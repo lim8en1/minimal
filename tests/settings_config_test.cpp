@@ -10,7 +10,7 @@ TEST_CASE("ParseSettingsConfig: empty doc yields every documented default", "[se
     auto config = ParseSettingsConfig(nlohmann::json::object());
 
     CHECK(config.default_agent_preset.empty());
-    CHECK(config.default_provider.empty());
+    CHECK(config.default_model.empty());
     CHECK(config.default_theme.empty());
     CHECK(config.max_concurrent_subagents == 4);
     CHECK(config.memory.auto_compact == true);
@@ -26,14 +26,14 @@ TEST_CASE("ParseSettingsConfig: empty doc yields every documented default", "[se
 
 TEST_CASE("ParseSettingsConfig: top-level fields overridable individually", "[settings_config]") {
     nlohmann::json doc = {{"default_agent_preset", "build"},
-                           {"default_provider", "openai-main"},
+                           {"default_model", "openai-main"},
                            {"default_theme", "dark"},
                            {"max_concurrent_subagents", 8},
                            {"session_db_path", "/data/sessions.db"}};
 
     auto config = ParseSettingsConfig(doc);
     CHECK(config.default_agent_preset == "build");
-    CHECK(config.default_provider == "openai-main");
+    CHECK(config.default_model == "openai-main");
     CHECK(config.default_theme == "dark");
     CHECK(config.max_concurrent_subagents == 8);
     CHECK(config.session_db_path == "/data/sessions.db");
@@ -76,10 +76,10 @@ TEST_CASE("ParseSettingsConfig: tools_view and logging overridable", "[settings_
 
 TEST_CASE("LoadSettingsConfig: reads and parses a real file", "[settings_config]") {
     const auto path = std::filesystem::temp_directory_path() / "minimal_settings_config_test.json";
-    { std::ofstream(path) << nlohmann::json{{"default_provider", "openai-main"}}.dump(); }
+    { std::ofstream(path) << nlohmann::json{{"default_model", "openai-main"}}.dump(); }
 
     auto config = LoadSettingsConfig(path);
-    CHECK(config.default_provider == "openai-main");
+    CHECK(config.default_model == "openai-main");
 
     std::filesystem::remove(path);
 }

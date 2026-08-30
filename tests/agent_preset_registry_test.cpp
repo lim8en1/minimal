@@ -34,23 +34,29 @@ struct TempConfigDir {
 
     void WriteJson(const std::string& relative, const nlohmann::json& doc) const { Write(relative, doc.dump()); }
 
-    static nlohmann::json DefaultProviderEntry() {
-        return {{"name", "openai-main"},
-                {"provider", "openai"},
-                {"base_url", "https://api.openai.com/v1"},
-                {"model_name", "gpt-4o-mini"},
-                {"parameters", {{"temperature", 0.5}}}};
+    // One provider, one model, addressed as "openai-main/gpt-4o-mini".
+    static nlohmann::json DefaultProviders() {
+        return {{"providers",
+                 {{"openai-main",
+                   {{"backend", "openai"},
+                    {"url", "https://api.openai.com/v1"},
+                    {"parameters", {{"temperature", 0.5}}},
+                    // Two, so a preset choosing between them is expressible --
+                    // the thing the flat schema could not do.
+                    {"models",
+                     {{"gpt-4o-mini", nlohmann::json::object()},
+                      {"gpt-4.1", {{"max_tokens", 8192}}}}}}}}}};
     }
 
     // A minimal, valid tree every test can start from and then perturb.
     void WriteDefaults() const {
-        WriteJson("providers.json", nlohmann::json::array({DefaultProviderEntry()}));
+        WriteJson("providers.json", DefaultProviders());
         WriteJson("settings.json", nlohmann::json::object());
         WriteJson("permissions.json", nlohmann::json::object());
         Write("agents/build.md",
               "---\n"
               "name: build\n"
-              "provider: openai-main\n"
+              "model: openai-main/gpt-4o-mini\n"
               "---\n"
               "You are a build agent.\n");
     }
@@ -74,32 +80,37 @@ TEST_CASE("AgentPresetRegistry: happy path resolves provider fields and system p
     CHECK_FALSE(preset.is_subagent);
 }
 
-TEST_CASE("AgentPresetRegistry: preset model override wins over the provider entry's model_name",
+TEST_CASE("AgentPresetRegistry: a preset picks which of a provider's models it uses",
           "[agent_preset_registry]") {
     TempConfigDir config;
     config.WriteDefaults();
     config.Write("agents/build.md",
                   "---\n"
                   "name: build\n"
-                  "provider: openai-main\n"
-                  "model: gpt-4.1\n"
+                  "model: openai-main/gpt-4.1\n"
                   "---\n"
                   "body\n");
     config::SkillRegistry skills = config::SkillRegistry::Load(config.dir);
     AgentPresetRegistry registry(config.dir, skills);
 
-    CHECK(registry.Resolve("build").provider.model_name == "gpt-4.1");
+    const auto& preset = registry.Resolve("build");
+    CHECK(preset.provider.model_name == "gpt-4.1");
+    // Same connection, that model's own cap.
+    CHECK(preset.provider.base_url == "https://api.openai.com/v1");
+    REQUIRE(preset.max_tokens.has_value());
+    CHECK(*preset.max_tokens == 8192);
 }
 
-TEST_CASE("AgentPresetRegistry: provider \"default\" resolves via settings.json default_provider",
+TEST_CASE("AgentPresetRegistry: a preset with no model takes settings.default_model",
           "[agent_preset_registry]") {
+    // `provider: default` used to spell this. A preset now simply omits `model`,
+    // which is one fewer magic literal and reads as what it means.
     TempConfigDir config;
     config.WriteDefaults();
-    config.WriteJson("settings.json", {{"default_provider", "openai-main"}});
+    config.WriteJson("settings.json", {{"default_model", "openai-main/gpt-4o-mini"}});
     config.Write("agents/build.md",
                   "---\n"
                   "name: build\n"
-                  "provider: default\n"
                   "---\n"
                   "body\n");
     config::SkillRegistry skills = config::SkillRegistry::Load(config.dir);
@@ -108,14 +119,14 @@ TEST_CASE("AgentPresetRegistry: provider \"default\" resolves via settings.json 
     CHECK(registry.Resolve("build").provider.base_url == "https://api.openai.com/v1");
 }
 
-TEST_CASE("AgentPresetRegistry: provider \"default\" with no settings.json default_provider throws",
+TEST_CASE("AgentPresetRegistry: no model and no default_model throws",
           "[agent_preset_registry]") {
     TempConfigDir config;
     config.WriteDefaults();
+    config.WriteJson("settings.json", nlohmann::json::object());
     config.Write("agents/build.md",
                   "---\n"
                   "name: build\n"
-                  "provider: default\n"
                   "---\n"
                   "body\n");
     config::SkillRegistry skills = config::SkillRegistry::Load(config.dir);
@@ -124,19 +135,30 @@ TEST_CASE("AgentPresetRegistry: provider \"default\" with no settings.json defau
     CHECK_THROWS_AS(registry.Resolve("build"), std::runtime_error);
 }
 
-TEST_CASE("AgentPresetRegistry: unknown provider name throws", "[agent_preset_registry]") {
+TEST_CASE("AgentPresetRegistry: an unknown model names what is available",
+          "[agent_preset_registry]") {
+    // A miss here is nearly always a typo or an unconfigured provider, and both
+    // are answered by seeing the list rather than by being told the name was
+    // wrong.
     TempConfigDir config;
     config.WriteDefaults();
     config.Write("agents/build.md",
                   "---\n"
                   "name: build\n"
-                  "provider: nonexistent\n"
+                  "model: nonexistent/model\n"
                   "---\n"
                   "body\n");
     config::SkillRegistry skills = config::SkillRegistry::Load(config.dir);
     AgentPresetRegistry registry(config.dir, skills);
 
-    CHECK_THROWS_AS(registry.Resolve("build"), std::runtime_error);
+    try {
+        registry.Resolve("build");
+        FAIL("expected an unknown model to throw");
+    } catch (const std::runtime_error& error) {
+        const std::string message = error.what();
+        CHECK(message.find("nonexistent/model") != std::string::npos);
+        CHECK(message.find("openai-main/gpt-4o-mini") != std::string::npos);
+    }
 }
 
 TEST_CASE("AgentPresetRegistry: unknown preset name throws", "[agent_preset_registry]") {
@@ -157,7 +179,7 @@ TEST_CASE("AgentPresetRegistry: permission chain layers take effect in priority 
     config.Write("agents/build.md",
                   "---\n"
                   "name: build\n"
-                  "provider: openai-main\n"
+                  "model: openai-main/gpt-4o-mini\n"
                   "permission_mode:\n"
                   "  execute: ask\n"
                   "  overrides:\n"
@@ -203,7 +225,7 @@ TEST_CASE("AgentPresetRegistry: mcp_permissions per-server vs. global default", 
     config.Write("agents/build.md",
                   "---\n"
                   "name: build\n"
-                  "provider: openai-main\n"
+                  "model: openai-main/gpt-4o-mini\n"
                   "mcp_permissions:\n"
                   "  search: allow\n"
                   "---\n"
@@ -223,7 +245,7 @@ TEST_CASE("AgentPresetRegistry: compression_prompt loads the named prompts/<x>.m
     config.Write("agents/build.md",
                   "---\n"
                   "name: build\n"
-                  "provider: openai-main\n"
+                  "model: openai-main/gpt-4o-mini\n"
                   "compression_prompt: custom\n"
                   "---\n"
                   "body\n");
@@ -261,7 +283,7 @@ TEST_CASE("AgentPresetRegistry: an explicitly-named missing compression prompt t
     config.Write("agents/build.md",
                   "---\n"
                   "name: build\n"
-                  "provider: openai-main\n"
+                  "model: openai-main/gpt-4o-mini\n"
                   "compression_prompt: nonexistent\n"
                   "---\n"
                   "body\n");
@@ -339,7 +361,7 @@ TEST_CASE("AgentPresetRegistry: allowed skills render into the system prompt, so
     config.Write("agents/build.md",
                  "---\n"
                  "name: build\n"
-                 "provider: openai-main\n"
+                 "model: openai-main/gpt-4o-mini\n"
                  "allowed_skills:\n"
                  "  - beta\n"
                  "  - alpha\n"
@@ -374,7 +396,7 @@ TEST_CASE("AgentPresetRegistry: allowed_skills resolves to exactly what the list
     config.Write("agents/build.md",
                  "---\n"
                  "name: build\n"
-                 "provider: openai-main\n"
+                 "model: openai-main/gpt-4o-mini\n"
                  "allowed_skills:\n"
                  "  - alpha\n"
                  "  - typo\n"      // never existed
@@ -404,7 +426,7 @@ TEST_CASE("AgentPresetRegistry: allowed_skills naming only unusable skills resol
     config.Write("agents/build.md",
                  "---\n"
                  "name: build\n"
-                 "provider: openai-main\n"
+                 "model: openai-main/gpt-4o-mini\n"
                  "allowed_skills:\n"
                  "  - typo\n"
                  "---\n"
@@ -427,7 +449,7 @@ TEST_CASE("AgentPresetRegistry: allowed_skills ['*'] resolves to the loaded skil
     TempConfigDir config;
     config.WriteDefaults();
     config.Write("agents/build.md",
-                 "---\nname: build\nprovider: openai-main\n"
+                 "---\nname: build\nmodel: openai-main/gpt-4o-mini\n"
                  "allowed_skills:\n  - \"*\"\n---\nYou are a build agent.\n");
     config.Write("skills/beta/SKILL.md",
                  "---\nname: beta\ndescription: Second skill.\n---\nBeta body.\n");
@@ -449,7 +471,7 @@ TEST_CASE("AgentPresetRegistry: a skill that failed to load is excluded from the
     config.Write("agents/build.md",
                  "---\n"
                  "name: build\n"
-                 "provider: openai-main\n"
+                 "model: openai-main/gpt-4o-mini\n"
                  "allowed_skills:\n"
                  "  - broken\n"
                  "---\n"
@@ -471,7 +493,7 @@ TEST_CASE("AgentPresetRegistry: allowed_skills ['*'] lists every loaded skill",
     config.Write("agents/build.md",
                  "---\n"
                  "name: build\n"
-                 "provider: openai-main\n"
+                 "model: openai-main/gpt-4o-mini\n"
                  "allowed_skills:\n"
                  "  - \"*\"\n"
                  "---\n"

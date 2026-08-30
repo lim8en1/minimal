@@ -51,14 +51,15 @@ struct ServiceFixture {
         std::filesystem::create_directories(dir / "work");
 
         Write("providers.json",
-              nlohmann::json::array({{{"name", "main"},
-                                      {"provider", "fake"},
-                                      {"base_url", "http://localhost/v1"},
-                                      {"model_name", "test-model"}}})
+              nlohmann::json{{"providers",
+                              {{"main",
+                                {{"backend", "fake"},
+                                 {"url", "http://localhost/v1"},
+                                 {"models", {{"test-model", nlohmann::json::object()}}}}}}}}
                   .dump());
         Write("settings.json", nlohmann::json{{"default_agent_preset", "main"}}.dump());
         Write("permissions.json", "{}");
-        Write("agents/main.md", "---\nname: main\nprovider: main\nallowed_tools: [\"*\"]\n---\nYou help.\n");
+        Write("agents/main.md", "---\nname: main\nmodel: main/test-model\nallowed_tools: [\"*\"]\n---\nYou help.\n");
 
         script = std::make_shared<ProviderScript>();
         skills = config::SkillRegistry::Load(dir);

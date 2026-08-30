@@ -1,7 +1,6 @@
 ---
 name: plan
 description: Investigates and proposes, without changing anything.
-provider: default
 allowed_tools: ["read", "grep", "glob", "bash", "skill"]
 allowed_skills: ["*"]
 permission_mode:

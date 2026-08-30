@@ -34,6 +34,8 @@ public:
     struct CreateOptions {
         std::string project_root;
         std::string agent_preset;
+        // "<provider>/<model>", empty = the preset's own. Outranks it.
+        std::string model;
         std::string name;
         // UNSPECIFIED lets permissions.json decide. The headless client asks for
         // ALLOW_ONLY explicitly, because it has no human to answer a prompt.

@@ -67,6 +67,19 @@ grpc::Status SessionServiceImpl::CreateSession(grpc::ServerContext*,
     // deliberate client choice with permissions.json.
     params.run_mode_override = FromProto(request->run_mode());
 
+    // Shape-checked here so a malformed reference is INVALID_ARGUMENT rather
+    // than FAILED_PRECONDITION from deep inside session construction -- the
+    // client sent something wrong, which is a different thing from the server
+    // not being able to honour something well-formed.
+    if (!request->model().empty()) {
+        params.model_override = config::ParseModelRef(request->model());
+        if (!params.model_override) {
+            return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
+                                "model '" + request->model() +
+                                    "' must be <provider>/<model>, e.g. local/qwen4");
+        }
+    }
+
     if (params.agent_preset.empty()) {
         return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION,
                             "no agent_preset given and settings.json sets no "

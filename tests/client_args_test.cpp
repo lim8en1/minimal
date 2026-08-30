@@ -13,6 +13,10 @@
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/interfaces/catch_interfaces_testcase.hpp>
+#include <catch2/internal/catch_context.hpp>
+#include <catch2/internal/catch_test_case_registry_impl.hpp>
+#include <catch2/catch_test_case_info.hpp>
 
 #include "minimal/client/cli_args.hpp"
 
@@ -147,4 +151,45 @@ TEST_CASE("the usage text names both halves of the socket pairing", "[client_arg
     const auto usage = UsageText();
     CHECK(usage.find("--listen") != std::string::npos);
     CHECK(usage.find("--flag=value") != std::string::npos);
+}
+
+TEST_CASE("the model flag is validated before a server is contacted", "[client_args]") {
+    // The shape is decidable locally, and failing here keeps a typo from
+    // presenting as an unreachable server -- which is what the -p defect above
+    // did, and took a while to see for exactly that reason.
+    SECTION("a well-formed reference is kept verbatim") {
+        const auto parsed = Parse({"-p", "hi", "--model", "local/qwen4"});
+        REQUIRE(parsed.action == ParsedArgs::Action::Headless);
+        CHECK(parsed.headless.model == "local/qwen4");
+    }
+
+    SECTION("a bare model name is refused, and the message shows the form") {
+        const auto parsed = Parse({"-p", "hi", "--model", "qwen4"});
+        REQUIRE(parsed.action == ParsedArgs::Action::Error);
+        CHECK(parsed.error.find("<provider>/<model>") != std::string::npos);
+        CHECK(parsed.error.find("local/qwen4") != std::string::npos);
+    }
+
+    SECTION("half a reference is refused") {
+        CHECK(Parse({"-p", "hi", "--model", "local/"}).action == ParsedArgs::Action::Error);
+        CHECK(Parse({"-p", "hi", "--model", "/qwen4"}).action == ParsedArgs::Action::Error);
+        CHECK(Parse({"-p", "hi", "--model", "a/b/c"}).action == ParsedArgs::Action::Error);
+    }
+
+    SECTION("no --model leaves it to the preset") {
+        CHECK(Parse({"-p", "hi"}).headless.model.empty());
+    }
+}
+
+TEST_CASE("no test case name starts with a dash", "[client_args][meta]") {
+    // A NOTE WAS NOT ENOUGH. catch_discover_tests registers each case by passing
+    // its name to the binary as an argv token, so a name beginning with '-' is
+    // read back as a flag: the suite passes when run directly and fails under
+    // ctest, with an error about an unrecognised option rather than about the
+    // test. This has now happened twice while writing tests ABOUT argument
+    // parsing, which is exactly the kind of thing a comment does not prevent.
+    for (const auto& info : Catch::getAllTestCasesSorted(*Catch::getCurrentContext().getConfig())) {
+        INFO("test case: " << info.getTestCaseInfo().name);
+        CHECK(info.getTestCaseInfo().name.front() != '-');
+    }
 }

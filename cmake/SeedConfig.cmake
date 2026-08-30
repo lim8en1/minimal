@@ -83,8 +83,8 @@ if(NOT EXISTS "${_config_dir}/providers.json"
     return()
 endif()
 file(READ "${_config_dir}/providers.json" _providers)
-string(STRIP "${_providers}" _providers)
-if(_providers STREQUAL "[]")
+string(REGEX REPLACE "[ \t\r\n]" "" _providers "${_providers}")
+if(_providers STREQUAL "{\"providers\":{}}")
     # The one thing seeding cannot do for you. A base_url that is right on the
     # machine that built this is wrong on the next one, so there is no honest
     # default -- an empty list that plainly needs filling in beats a plausible

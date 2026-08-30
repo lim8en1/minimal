@@ -40,15 +40,17 @@ struct TempConfigDir {
     }
 
     void WriteDefaults(const std::string& provider_kind = "fake") const {
-        Write("providers.json", nlohmann::json::array({{{"name", "main"},
-                                                        {"provider", provider_kind},
-                                                        {"base_url", "http://localhost:8080/v1"},
-                                                        {"model_name", "test-model"}}})
-                                    .dump());
+        Write("providers.json",
+              nlohmann::json{{"providers",
+                              {{"main",
+                                {{"backend", provider_kind},
+                                 {"url", "http://localhost:8080/v1"},
+                                 {"models", {{"test-model", nlohmann::json::object()}}}}}}}}
+                  .dump());
         Write("settings.json", "{}");
         Write("permissions.json", "{}");
         Write("agents/build.md",
-              "---\nname: build\nprovider: main\n---\nYou are a build agent.\n");
+              "---\nname: build\nmodel: main/test-model\n---\nYou are a build agent.\n");
     }
 };
 
@@ -108,6 +110,61 @@ TEST_CASE("creating a session resolves its preset and provider", "[session_regis
     CHECK(fixture.registry->size() == 1);
     CHECK(fixture.registry->Find("s1") == session);
     CHECK(session->info().session_id == "s1");
+}
+
+TEST_CASE("a user-chosen model outranks the preset's", "[session_registry][invariant]") {
+    // THE PRECEDENCE RULE, and the correction that shaped this change: /agent and
+    // /model are two knobs, not one. A preset supplies a DEFAULT model; a model
+    // the user named is a decision, and it wins. Tested here, before /model
+    // exists, because --model already exercises the same path -- and because
+    // /agent will re-resolve the preset and must not quietly undo it.
+    RegistryFixture fixture;
+    fixture.config.Write("providers.json",
+                         nlohmann::json{{"providers",
+                                         {{"main",
+                                           {{"backend", "fake"},
+                                            {"url", "http://localhost:8080/v1"},
+                                            {"max_tokens", 4096},
+                                            {"models",
+                                             {{"test-model", nlohmann::json::object()},
+                                              {"other-model", {{"max_tokens", 512}}}}}}}}}}
+                             .dump());
+    fixture.config.Write("settings.json", "{}");
+    fixture.config.Write("permissions.json", "{}");
+    fixture.config.Write("agents/build.md",
+                         "---\nname: build\nmodel: main/test-model\n---\nbody\n");
+    fixture.Build();
+
+    auto params = Params("s1");
+    params.model_override = minimal::common::ModelRef{"main", "other-model"};
+    auto session = fixture.registry->Create(params);
+    REQUIRE(session != nullptr);
+
+    // The preset still says test-model; this session runs other-model, with that
+    // model's own cap rather than the provider default the preset resolved to.
+    CHECK(fixture.presets->Resolve("build").provider.model_name == "test-model");
+    CHECK(session->preset().provider.model_name == "other-model");
+    REQUIRE(session->preset().max_tokens.has_value());
+    CHECK(*session->preset().max_tokens == 512);
+}
+
+TEST_CASE("an unknown model override is named, with what is available",
+          "[session_registry]") {
+    RegistryFixture fixture;
+    fixture.config.WriteDefaults();
+    fixture.Build();
+
+    auto params = Params("s1");
+    params.model_override = minimal::common::ModelRef{"main", "nope"};
+    try {
+        fixture.registry->Create(params);
+        FAIL("expected an unknown model to throw");
+    } catch (const std::runtime_error& error) {
+        const std::string message = error.what();
+        CHECK(message.find("main/nope") != std::string::npos);
+        CHECK(message.find("main/test-model") != std::string::npos);
+    }
+    CHECK(fixture.registry->size() == 0);
 }
 
 TEST_CASE("an unknown preset fails loudly", "[session_registry]") {

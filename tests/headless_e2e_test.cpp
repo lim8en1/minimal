@@ -38,16 +38,18 @@ struct HeadlessFixture {
         std::filesystem::create_directories(dir / "agents");
         std::filesystem::create_directories(dir / "work");
 
-        Write("providers.json", nlohmann::json::array({{{"name", "main"},
-                                                        {"provider", "fake"},
-                                                        {"base_url", "http://localhost/v1"},
-                                                        {"model_name", "test-model"}}})
-                                    .dump());
+        Write("providers.json",
+              nlohmann::json{{"providers",
+                              {{"main",
+                                {{"backend", "fake"},
+                                 {"url", "http://localhost/v1"},
+                                 {"models", {{"test-model", nlohmann::json::object()}}}}}}}}
+                  .dump());
         Write("settings.json", nlohmann::json{{"default_agent_preset", "main"}}.dump());
         // execute is Ask, so AllowOnly has something to auto-deny.
         Write("permissions.json", nlohmann::json{{"fallback", {{"execute", "ask"}}}}.dump());
         Write("agents/main.md",
-              "---\nname: main\nprovider: main\nallowed_tools: [\"*\"]\n---\nYou help.\n");
+              "---\nname: main\nmodel: main/test-model\nallowed_tools: [\"*\"]\n---\nYou help.\n");
         skills = config::SkillRegistry::Load(dir);
     }
 

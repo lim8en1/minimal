@@ -26,6 +26,9 @@ struct HeadlessOptions {
     std::string prompt;
     std::string server;  // already a gRPC target; empty means the default socket
     std::string agent_preset;
+    // "<provider>/<model>", validated at parse so a typo fails before a server
+    // is contacted. Empty means the preset's own model.
+    std::string model;
     bool jsonl = false;
     bool bypass = false;
 };

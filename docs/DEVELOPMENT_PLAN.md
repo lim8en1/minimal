@@ -312,6 +312,32 @@ Bundled-plugin failures are Fatal, user-plugin failures Warning.
 
 ## 5. Dependent tracks (after A)
 
+### C0. Provider and model addressing — done
+
+> § *Config*. Split out of C because `/model` needs a way to name a model and the schema had none.
+
+`providers.json` made an entry *be* a model, so two models on one endpoint duplicated the connection
+and `parameters`/`max_tokens`/`context_window_tokens` came from the entry regardless of which model a
+preset had selected — one llama.cpp serving a 128k model and a 32k model was **inexpressible**.
+
+Providers are now an object keyed by name carrying a connection plus a nested `models` map, with
+provider-level defaults a model may override. A model is named `<provider>/<model>` in all four
+positions that name one, through a single parser in `common/` (the client validates `--model` too).
+Preset `provider:` + `model:` collapsed into one `model:`; `settings.default_provider` became
+`default_model`. The old top-level array is refused by name rather than misparsed — a hard break, no
+dual-schema path.
+
+**Precedence, which is the point:** a preset supplies a default model; `--model` (and later `/model`)
+outranks it. `/agent` and `/model` are two knobs.
+
+- [x] Two models on one provider share a connection and carry different context windows.
+- [x] A model inherits provider-level `parameters`/`max_tokens` and may override either.
+- [x] `<provider>/<model>` parsing rejects every ambiguous form.
+- [x] **Invariant:** the legacy array is refused, naming the file and the new shape.
+- [x] **Invariant:** a user-chosen model outranks the preset's.
+- [x] Verified end to end: the same endpoint reached as `local/…` (full answer, exit 0) and
+      `capped/…` (`max_tokens: 48` → truncated, exit 2), proving the per-model cap reaches the wire.
+
 ### C. `/`-command system
 
 > § *`/`-command system — `src/server/commands/`*, § *Name collisions and aliases*.

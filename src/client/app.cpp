@@ -71,6 +71,7 @@ int RunHeadless(const HeadlessOptions& options) {
     minimal::client::SessionClient::CreateOptions create;
     create.project_root = std::filesystem::current_path().string();
     create.agent_preset = options.agent_preset;
+    create.model = options.model;
     create.name = options.prompt.substr(0, 60);
     // ALLOW_ONLY unless explicitly overridden. There is no human attached, so an
     // Ask-gated tool must auto-deny rather than block forever on a prompt nobody

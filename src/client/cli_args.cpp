@@ -6,6 +6,7 @@
 #include <system_error>
 
 #include "minimal/common/config_paths.hpp"
+#include "minimal/common/model_ref.hpp"
 
 namespace minimal::client {
 namespace {
@@ -61,6 +62,7 @@ std::string UsageText() {
            "                              (default: unix://<data dir>/server.sock;\n"
            "                               a bare path pairs with minimal-server --listen)\n"
            "      --agent PRESET        agent preset (default: settings.json)\n"
+           "      --model P/M           provider/model, overriding the preset's\n"
            "      --output-format FMT   text (default) or jsonl\n"
            "      --dangerously-bypass  skip every permission check\n"
            "      --version\n"
@@ -138,6 +140,19 @@ ParsedArgs ParseArgs(int argc, const char* const* argv) {
             const auto value = take_value(name);
             if (!value) return parsed;
             parsed.headless.agent_preset = *value;
+        } else if (name == "--model") {
+            const auto value = take_value(name);
+            if (!value) return parsed;
+            // Checked here rather than server-side only: the shape is decidable
+            // locally, and failing before a connection is attempted keeps a typo
+            // from looking like an unreachable server.
+            if (!common::ParseModelRef(*value)) {
+                parsed.action = ParsedArgs::Action::Error;
+                parsed.error = "--model '" + std::string(*value) +
+                               "' must be <provider>/<model>, e.g. local/qwen4";
+                return parsed;
+            }
+            parsed.headless.model = *value;
         } else if (name == "--output-format") {
             const auto value = take_value(name);
             if (!value) return parsed;

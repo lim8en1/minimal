@@ -5,6 +5,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "minimal/config/providers_config.hpp"
 #include "minimal/llm/provider.hpp"
 #include "minimal/tools/permission.hpp"
 
@@ -39,6 +40,10 @@ struct AgentPreset {
     // makes, summarization included -- a cap the conversation honours and the
     // compactor ignores is how a summary gets truncated.
     std::optional<int> max_tokens;
+    // Informational: the status bar's used/max (track E). Carried here so the
+    // resolved preset is a complete description of what the session will send,
+    // rather than something a later reader has to go back to providers.json for.
+    std::optional<std::int64_t> context_window_tokens;
 
     tools::PermissionPolicy permission_mode;
     tools::McpPermissionPolicy mcp_permissions;
@@ -50,6 +55,14 @@ struct AgentPreset {
     // AgentLoop::BuildChatRequest.
     bool is_subagent = false;
 };
+
+// Stamps a resolved model onto a preset, replacing whatever it resolved to.
+//
+// One function because there are two callers with the same obligation: session
+// creation applying --model, and /model applying a mid-session switch. Missing a
+// field in one of them -- carrying the old max_tokens onto a new model, say --
+// is the kind of bug that only shows up as a truncated response much later.
+void ApplyModel(AgentPreset& preset, const config::ResolvedModel& model);
 
 // The one tool name the loop treats specially. Excluding it is a hard rule keyed
 // on is_subagent, not a preset field, so a misconfigured preset cannot reopen

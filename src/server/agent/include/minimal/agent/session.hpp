@@ -38,6 +38,7 @@
 #include "minimal/agent/history_store.hpp"
 #include "minimal/agent/session_observer_registry.hpp"
 #include "minimal/common/logger.hpp"
+#include "minimal/config/providers_config.hpp"
 #include "minimal/llm/provider.hpp"
 #include "minimal/rpc/event_queue.hpp"
 #include "minimal/rpc/pending_requests.hpp"
@@ -57,6 +58,10 @@ struct SessionParams {
     // Set when the client asked for a specific mode (the headless client asks
     // for AllowOnly); unset means the preset's configured mode stands.
     std::optional<tools::PermissionRunMode> run_mode_override;
+    // Set when the user named a model explicitly (--model, later /model). Wins
+    // over whatever the preset resolves to, and is re-applied after a preset
+    // switch -- the preset is where a default comes from, not a decision.
+    std::optional<config::ModelRef> model_override;
 };
 
 class Session {
@@ -96,6 +101,13 @@ public:
     rpc::PendingRequests& pending() { return pending_; }
 
     const SessionInfo& info() const { return info_; }
+
+    // The RESOLVED preset this session is actually running -- the registry's
+    // copy with any --model override already applied, which is why it is not the
+    // same object AgentPresetRegistry::Resolve returns. Mutated only by the
+    // worker thread (a preset or model switch is a non-read-only command, so it
+    // runs there), which is what lets this be read without a lock.
+    const AgentPreset& preset() const { return preset_; }
 
     // The initial-attach guard reads these. A session that has never been
     // attached is reaped after a short grace period -- purely a safety net

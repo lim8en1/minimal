@@ -71,6 +71,21 @@ std::string RenderSkillListing(const std::vector<std::string>& resolved,
     return out.str();
 }
 
+// What providers.json actually offers, for a "no such model" error. A miss here
+// is almost always a typo or a provider the user has not configured yet, and
+// both are answered by seeing the list rather than by being told the name was
+// wrong.
+std::string DescribeAvailableModels(const config::ProvidersConfig& providers) {
+    const auto refs = providers.ModelRefs();
+    if (refs.empty()) return "no models at all (providers.json is empty)";
+    std::ostringstream out;
+    for (std::size_t i = 0; i < refs.size(); ++i) {
+        if (i != 0) out << ", ";
+        out << refs[i];
+    }
+    return out.str();
+}
+
 }  // namespace
 
 AgentPresetRegistry::AgentPresetRegistry(std::filesystem::path config_dir,
@@ -94,6 +109,14 @@ const AgentPreset& AgentPresetRegistry::Resolve(const std::string& preset_name) 
     return it->second;
 }
 
+void ApplyModel(AgentPreset& preset, const config::ResolvedModel& model) {
+    preset.provider_kind = model.backend;
+    preset.provider = model.provider;
+    preset.parameters = model.parameters;
+    preset.max_tokens = model.max_tokens;
+    preset.context_window_tokens = model.context_window_tokens;
+}
+
 AgentPreset AgentPresetRegistry::ResolveUncached(const std::string& preset_name) const {
     if (preset_name.empty() || preset_name == "." || preset_name == ".." ||
         preset_name.find('/') != std::string::npos) {
@@ -106,14 +129,25 @@ AgentPreset AgentPresetRegistry::ResolveUncached(const std::string& preset_name)
     }
     const AgentPresetFrontmatter raw = LoadAgentPresetFrontmatter(preset_path);
 
-    const std::string provider_name = raw.provider == "default" ? settings_.default_provider : raw.provider;
-    if (provider_name.empty()) {
+    // The preset's model, or settings.default_model when it declares none. Both
+    // are already known to be <provider>/<model>-shaped -- the frontmatter parser
+    // checks its own, and an unparseable default_model is caught here rather than
+    // being silently treated as absent.
+    const std::string model_text = raw.model.empty() ? settings_.default_model : raw.model;
+    if (model_text.empty()) {
         throw std::runtime_error("agent preset '" + preset_name +
-                                  "' resolves provider \"default\" but settings.json has no default_provider");
+                                 "' declares no model and settings.json has no default_model");
     }
-    const config::ProviderEntry* entry = providers_.Find(provider_name);
-    if (!entry) {
-        throw std::runtime_error("agent preset '" + preset_name + "' names unknown provider '" + provider_name + "'");
+    const auto ref = config::ParseModelRef(model_text);
+    if (!ref) {
+        throw std::runtime_error("agent preset '" + preset_name + "': model '" + model_text +
+                                 "' must be <provider>/<model>, e.g. local/qwen4");
+    }
+    const config::ResolvedModel* model = providers_.Resolve(*ref);
+    if (!model) {
+        throw std::runtime_error("agent preset '" + preset_name + "' names unknown model '" +
+                                 model_text + "'; providers.json defines " +
+                                 DescribeAvailableModels(providers_));
     }
 
     AgentPreset preset;
@@ -125,15 +159,10 @@ AgentPreset AgentPresetRegistry::ResolveUncached(const std::string& preset_name)
     const std::vector<std::string> resolved_skills =
         ResolveAllowedSkills(raw.allowed_skills, skills_);
     preset.system_prompt = raw.body + RenderSkillListing(resolved_skills, skills_);
-    preset.provider_kind = entry->provider;
-    preset.provider.base_url = entry->base_url;
-    preset.provider.api_key = entry->api_key;
-    preset.provider.model_name = raw.model.empty() ? entry->model_name : raw.model;
+    ApplyModel(preset, *model);
     preset.allowed_tools = raw.allowed_tools;
     preset.allowed_skills = resolved_skills;
     preset.allowed_mcp_servers = raw.allowed_mcp_servers;
-    preset.parameters = entry->parameters;
-    preset.max_tokens = entry->max_tokens;
     preset.permission_mode = BuildPermissionPolicy(raw.permission_mode, permissions_.global_layer);
     preset.mcp_permissions = BuildMcpPermissionPolicy(raw.mcp_permissions, permissions_.mcp_default_mode);
     preset.run_mode = permissions_.default_run_mode;  // apply_run_mode() is applied once, downstream, by ToolExecutor

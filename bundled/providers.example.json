@@ -1,24 +1,47 @@
-[
-  {
-    "//": "A local llama.cpp / llama-server. Nothing is seeded pointing here, because a URL that is right on one machine is wrong on the next.",
-    "name": "local",
-    "provider": "openai",
-    "base_url": "http://localhost:8000/v1",
-    "model_name": "your-model-name",
-    "context_window_tokens": 131072,
-    "max_tokens": 8192,
-    "parameters": {
-      "temperature": 0.3
+{
+  "//": "Copy a block into providers.json and edit it. A PROVIDER is a connection; the models it serves nest under it, and each is addressed as <provider>/<model>. Nothing is seeded pointing anywhere, because a url that is right on one machine is wrong on the next.",
+
+  "providers": {
+    "local": {
+      "//": "A local llama.cpp / llama-server. No api key needed.",
+      "backend": "openai",
+      "url": "http://localhost:8000/v1",
+
+      "//2": "Provider-level values are defaults for every model below; a model may override any of them.",
+      "max_tokens": 4096,
+      "parameters": {
+        "temperature": 0.3
+      },
+
+      "models": {
+        "qwen4": {
+          "context_window_tokens": 131072
+        },
+        "small": {
+          "//": "Same endpoint, different model, its own limits. This is the case a flat one-entry-per-model file could not express.",
+          "context_window_tokens": 32768,
+          "max_tokens": 1024,
+          "parameters": {
+            "temperature": 0.7
+          }
+        }
+      }
+    },
+
+    "hosted": {
+      "//": "A hosted OpenAI-compatible endpoint. Use api_key_env, never api_key, unless this file is outside version control and readable only by you.",
+      "backend": "openai",
+      "url": "https://api.example.com/v1",
+      "api_key_env": "MINIMAL_API_KEY",
+      "max_tokens": 8192,
+
+      "models": {
+        "big": {
+          "context_window_tokens": 200000
+        }
+      }
     }
   },
-  {
-    "//": "A hosted OpenAI-compatible endpoint. Use api_key_env, never api_key, unless this file is outside version control and readable only by you.",
-    "name": "hosted",
-    "provider": "openai",
-    "base_url": "https://api.example.com/v1",
-    "api_key_env": "MINIMAL_API_KEY",
-    "model_name": "some-model",
-    "context_window_tokens": 200000,
-    "max_tokens": 8192
-  }
-]
+
+  "//3": "Then point settings.json at one of them: \"default_model\": \"local/qwen4\". An agent preset may name its own with `model: local/small`, and --model or /model overrides both."
+}

@@ -1,5 +1,7 @@
 #include "minimal/agent/agent_preset_frontmatter.hpp"
 
+#include "minimal/config/providers_config.hpp"
+
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
@@ -73,9 +75,15 @@ AgentPresetFrontmatter ParseAgentPresetFrontmatter(const config::ParsedFrontmatt
 
     AgentPresetFrontmatter result;
     result.name = RequireString(node, "name");
-    result.provider = RequireString(node, "provider");
     result.description = OptionalString(node, "description");
     result.model = OptionalString(node, "model");
+    // Shape-checked here, existence-checked by AgentPresetRegistry: this file
+    // deliberately makes no cross-file lookups, but "local/qwen4" vs "qwen4" is
+    // decidable without one, and catching it at load names the preset.
+    if (!result.model.empty() && !config::ParseModelRef(result.model)) {
+        throw std::runtime_error("agent preset '" + result.name + "': model '" + result.model +
+                                 "' must be <provider>/<model>, e.g. local/qwen4");
+    }
     result.allowed_tools = OptionalStringList(node, "allowed_tools");
     result.allowed_skills = OptionalStringList(node, "allowed_skills");
     result.allowed_mcp_servers = OptionalStringList(node, "allowed_mcp_servers");

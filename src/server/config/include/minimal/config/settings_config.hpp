@@ -37,7 +37,9 @@ struct LoggingSettings {
 
 struct SettingsConfig {
     std::string default_agent_preset;
-    std::string default_provider;
+    // "<provider>/<model>". Was default_provider, which named a connection back
+    // when a connection implied exactly one model.
+    std::string default_model;
     std::string default_theme;
     std::int64_t max_concurrent_subagents = 4;
     MemorySettings memory;
@@ -48,7 +50,7 @@ struct SettingsConfig {
 };
 
 // Pure. Every field is optional; missing fields take the struct's own default.
-// This loader does no cross-field validation (e.g. an empty default_provider is
+// This loader does no cross-field validation (e.g. an empty default_model is
 // only an error later, if a preset actually resolves `provider: "default"`) --
 // that belongs to the future sanity_check, not here.
 SettingsConfig ParseSettingsConfig(const nlohmann::json& doc);

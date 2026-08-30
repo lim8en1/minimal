@@ -52,12 +52,17 @@ endforeach()
 # providers.json is deliberately empty: a base_url that is right on the machine
 # that built this is wrong on the next one. The example beside it carries the
 # shape.
+# Empty means "no providers", not "no file": the server must start so the
+# startup sanity check can report every problem at once.
 file(READ "${_config}/providers.json" _providers)
-string(STRIP "${_providers}" _providers)
-if(NOT _providers STREQUAL "[]")
-    message(FATAL_ERROR "providers.json should seed empty, got: ${_providers}")
+string(REGEX REPLACE "[ \t\r\n]" "" _providers "${_providers}")
+if(NOT _providers STREQUAL "{\"providers\":{}}")
+    message(FATAL_ERROR "providers.json should seed with no providers, got: ${_providers}")
 endif()
-expect_file_contains("${_config}/providers.example.json" "base_url")
+# The example has to show the nesting, which is the part of the schema someone
+# copying it needs to get right.
+expect_file_contains("${_config}/providers.example.json" "\"models\"")
+expect_file_contains("${_config}/providers.example.json" "<provider>/<model>")
 
 # --- Re-seeding never overwrites --------------------------------------------
 # THE INVARIANT. Silently reverting an edited compaction prompt or preset on
@@ -65,7 +70,7 @@ expect_file_contains("${_config}/providers.example.json" "base_url")
 # all -- and an upgrade is exactly when the user is least watching.
 file(WRITE "${_config}/prompts/compression.md" "MY OWN PROMPT\n")
 file(WRITE "${_config}/agents/build.md" "MY OWN PRESET\n")
-file(WRITE "${_config}/providers.json" "[{\"name\":\"mine\"}]\n")
+file(WRITE "${_config}/providers.json" "{\"providers\":{\"mine\":{}}}\n")
 seed()
 expect_file_contains("${_config}/prompts/compression.md" "MY OWN PROMPT")
 expect_file_contains("${_config}/agents/build.md" "MY OWN PRESET")

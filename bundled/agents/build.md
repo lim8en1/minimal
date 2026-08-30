@@ -1,7 +1,6 @@
 ---
 name: build
 description: Reads, writes and runs things. The default preset.
-provider: default
 allowed_tools: ["*"]
 allowed_skills: ["*"]
 permission_mode:

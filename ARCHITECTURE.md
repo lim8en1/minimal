@@ -40,6 +40,7 @@ minimal/
       config_paths.{hpp,cpp}      # the client reads themes/ + keybindings.json too
       abi_tag.{hpp,cpp}           # both plugin loaders must compute an identical tag
       bundled_assets.{hpp,cpp}    # executable-relative lookup -- PLUGINS ONLY
+      model_ref.{hpp,cpp}         # <provider>/<model>; the client validates one too
       version.hpp
     server/
       agent/    # agent_loop, session, session_registry, context_compactor,
@@ -936,7 +937,7 @@ A second, headless client against the same `SessionService` — not a TUI flag. 
 Scope: one turn in; `text` or `jsonl` out; `AllowOnly` by default with an explicit `--dangerously-bypass`; exit code derived from `stop_reason`/`ErrorEvent`. No tabs, themes, or Markdown rendering.
 
 ```
-minimal -p PROMPT [--server TARGET] [--agent PRESET]
+minimal -p PROMPT [--server TARGET] [--agent PRESET] [--model PROVIDER/MODEL]
                   [--output-format text|jsonl] [--dangerously-bypass]
 ```
 
@@ -1053,7 +1054,7 @@ Seeding is best-effort and skips entirely under `DESTDIR` (a packaging root has 
 user whose config dir it is). A missing bundle warns rather than failing the
 install.
 
-**`providers.json` seeds as `[]`**, with `providers.example.json` beside it. It is
+**`providers.json` seeds with no providers**, with `providers.example.json` beside it. It is
 the one thing seeding cannot do for you: a `base_url` that is right on the machine
 that built the binary is wrong on the next one, and a plausible-looking default
 pointing at nothing is worse than an empty list that obviously needs filling in.
@@ -1077,16 +1078,28 @@ variable the install rule uses, so overriding one moves both.
 
 **File format**: agents, skills, and prompts are Markdown with YAML frontmatter — the same convention Claude Code and opencode use: frontmatter for structured metadata, Markdown body for prompt text, loaded verbatim. `src/server/config/frontmatter.{hpp,cpp}` provides `parse_frontmatter_markdown(contents) -> {YAML::Node frontmatter, std::string body}` (split on `---` delimiters, frontmatter to **yaml-cpp**, remainder as body). The `.json` files stay plain JSON — harness config, not prompt content, with no body to split.
 
-- **`agents/*.md`** — presets: frontmatter `name, description, provider, model, allowed_tools, allowed_skills, allowed_mcp_servers, permission_mode: {read_only, file_write, execute, out_of_workdir, overrides}, mcp_permissions: {<server>: allow|ask|deny}, compression_prompt?`; **body is the system prompt directly**. `plan.md` and `build.md` ship in `bundled/agents/` and are seeded like everything else there.
+- **`agents/*.md`** — presets: frontmatter `name, description, model, allowed_tools, allowed_skills, allowed_mcp_servers, permission_mode: {read_only, file_write, execute, out_of_workdir, overrides}, mcp_permissions: {<server>: allow|ask|deny}, compression_prompt?`; **body is the system prompt directly**. `model` is a `<provider>/<model>` reference, or absent to take `settings.default_model`. `plan.md` and `build.md` ship in `bundled/agents/` and are seeded like everything else there.
 - **`agents/subagent.md`** — plain Markdown, no frontmatter. Prepended to the resolved preset's body whenever `parent_session_id` is non-null. Also seeded.
 - **`prompts/compression.md`** — default compaction prompt; a preset's `compression_prompt` overrides it, resolved relative to this directory. **Seeded from `bundled/prompts/` by `cmake --install` and never overwritten after** — see *Bundled assets* below.
 - **`skills/<name>/SKILL.md`** (+ supporting files) — lazy-loaded: frontmatter (`name`, `description`) resident in the registry; body loads only on invocation.
 - **`themes/*.json`** — role/category → truecolor RGB.
 - **`keybindings.json`** — action → key. Must accommodate plugin-registered action names unknown at compile time.
-- **`providers.json`** — `[{name, provider: "<kind string>", base_url, api_key | api_key_env, model_name, parameters: {}, context_window_tokens?, max_tokens?}]`. `max_tokens` is typed rather than left to `parameters` because the serializer treats it as a structural field and erases whatever `parameters` put there — so it was the only route to an output cap, and it did not exist. It applies to every request the session makes, summarization included: a cap the conversation honours and the compactor ignores is how a summary gets truncated. `provider` is looked up in `ProviderFactoryRegistry`, so any plugin-registered kind is valid — there is no closed enum. `context_window_tokens` is informational, feeding the status bar's `used/max`.
+- **`providers.json`** — **a provider is a CONNECTION, not a model.** An object keyed by provider name; each carries `backend` (a `ProviderFactoryRegistry` kind, so any plugin-registered kind is valid — no closed enum), `url`, `api_key | api_key_env`, and a nested `models` object keyed by model id. `parameters` and `max_tokens` may sit on the provider as defaults and be overridden per model; `context_window_tokens` is per model, informational, feeding the status bar's `used/max`.
+
+  ```json
+  { "providers": { "local": {
+        "backend": "openai", "url": "http://localhost:8000/v1",
+        "max_tokens": 4096, "parameters": {"temperature": 0.3},
+        "models": { "qwen4": {"context_window_tokens": 131072},
+                    "small": {"context_window_tokens": 32768, "max_tokens": 1024} } } } }
+  ```
+
+  A map rather than an array because the key *is* the name, so it cannot disagree with a `name` field beside it. The earlier shape made an entry *be* a model, which meant two models on one endpoint duplicated the connection and — since `parameters`/`max_tokens`/`context_window_tokens` lived on the entry — one endpoint serving a 128k model and a 32k model was **inexpressible**. A top-level array is refused by name, not silently misparsed. A model's `parameters` *replaces* its provider's rather than merging key-by-key, so what a model declares is exactly what it sends.
+
+  `max_tokens` is typed rather than left to `parameters` because the serializer treats it as a structural field and erases whatever `parameters` put there — so it was the only route to an output cap, and it did not exist. It applies to every request the session makes, summarization included: a cap the conversation honours and the compactor ignores is how a summary gets truncated.
 - **`mcps.json`** — `[{name, transport: "stdio"|"http", command, args[], env{} | url, headers{}, enabled}]`. `env`/`headers` support `${ENV_VAR}` interpolation, resolved once at load and never logged. No per-server risk category — MCP permission is server-scoped, resolved separately.
 - **`permissions.json`** — security config, split from `settings.json` so it can be reviewed and locked down independently: `{default_run_mode: "normal"|"bypass"|"allow-only" (default "normal"), fallback: {read_only, file_write, execute, out_of_workdir}, per_tool_overrides: {}, mcp_default_mode: "allow"|"ask"|"deny" (default "ask")}`. A global floor a preset can still override — no clamping; guardrails presets cannot loosen are future scope.
-- **`settings.json`** — `default_agent_preset, default_provider, default_theme, max_concurrent_subagents (default 4), memory.{auto_compact (default true), context_compaction_trigger_tokens (0 = never; the seeded settings.json sets 120000, and a 0 here means compaction never runs no matter what auto_compact says), compaction_keep_recent_tokens (NOT YET HONORED — see Context compaction), scrollback_page_size (default 100 when unset, applied by the RPC layer to both GetMessages and ListSessions)}, tools.{read,edit,bash}.*, tools_view.stdout_buffer_lines (default 100), session_db_path, logging.{level, path, max_size_mb, max_files}`. `logging` backs a **spdlog** rotating file sink (no custom rotation code), with `path` alongside `session_db_path` under the platform *data* dir, not the config dir.
+- **`settings.json`** — `default_agent_preset, default_model (a `<provider>/<model>` reference), default_theme, max_concurrent_subagents (default 4), memory.{auto_compact (default true), context_compaction_trigger_tokens (0 = never; the seeded settings.json sets 120000, and a 0 here means compaction never runs no matter what auto_compact says), compaction_keep_recent_tokens (NOT YET HONORED — see Context compaction), scrollback_page_size (default 100 when unset, applied by the RPC layer to both GetMessages and ListSessions)}, tools.{read,edit,bash}.*, tools_view.stdout_buffer_lines (default 100), session_db_path, logging.{level, path, max_size_mb, max_files}`. `logging` backs a **spdlog** rotating file sink (no custom rotation code), with `path` alongside `session_db_path` under the platform *data* dir, not the config dir.
 - **`plugins.json`** — an object, not a bare array (an earlier draft said array while also placing `command_aliases` at the top level; both cannot hold):
 
   ```json
@@ -1105,7 +1118,9 @@ variable the install rule uses, so overriding one moves both.
 
 **MCP permission precedence** (separate chain, server-scoped): preset `mcp_permissions[server]` → `permissions.json` `mcp_default_mode` → `Ask`.
 
-**Provider/model resolution**: preset `model` → resolved provider's `model_name`; provider from preset `provider`, or `settings.json` `default_provider` if the preset says `"default"`.
+**Model addressing — one syntax, four positions.** A model is named `<provider>/<model>` in preset frontmatter (`model:`), in `settings.json` (`default_model`), and by `/model` and `--model`. One parser (`common/model_ref.{hpp,cpp}`, in `common/` because the client validates a `--model` value too and must not accept what the server would reject).
+
+**Precedence: preset supplies a default, the user decides.** A preset's `model` is where a session starts; a model the user named with `--model` (or later `/model`) outranks it, and keeps outranking it across a later `/agent` — `/agent` and `/model` are two knobs, not one.
 
 Both permission chains are then subject to `apply_run_mode()`.
 

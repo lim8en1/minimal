@@ -1,6 +1,6 @@
 {
   "default_agent_preset": "build",
-  "default_provider": "local",
+  "default_model": "local/your-model-name",
   "max_concurrent_subagents": 4,
 
   "memory": {
