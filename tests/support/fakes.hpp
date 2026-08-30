@@ -20,6 +20,8 @@
 #include <vector>
 
 #include "minimal/agent/history_store.hpp"
+#include "minimal/commands/command.hpp"
+#include "minimal/commands/command_context.hpp"
 #include "minimal/llm/provider.hpp"
 #include "minimal/tools/permission.hpp"
 #include "minimal/tools/permission_checker.hpp"
@@ -90,6 +92,32 @@ private:
     std::deque<Step> steps_;
     std::deque<std::vector<llm::Message>> recorded_messages_;
     std::vector<llm::ChatRequest> requests_;
+};
+
+// Read-only, so the dispatcher must answer it beside a live turn.
+class BlockingReadOnlyCommand : public commands::HarnessCommand {
+public:
+    std::string_view Name() const override { return "peek"; }
+    std::string_view Summary() const override { return "answers during a turn"; }
+    std::string_view Usage() const override { return "/peek"; }
+    bool ReadOnly() const override { return true; }
+    commands::CommandResult Execute(commands::CommandContext&,
+                                     const commands::CommandArgs&) override {
+        return commands::CommandResult::Ok("peeked");
+    }
+};
+
+// NOT read-only, so it must be queued for the worker and land at a turn
+// boundary rather than mid-cycle.
+class RecordingCommand : public commands::HarnessCommand {
+public:
+    std::string_view Name() const override { return "record"; }
+    std::string_view Summary() const override { return "records that it ran"; }
+    std::string_view Usage() const override { return "/record"; }
+    commands::CommandResult Execute(commands::CommandContext&,
+                                     const commands::CommandArgs&) override {
+        return commands::CommandResult::Ok("recorded");
+    }
 };
 
 // Configurable tool. Records every invocation; can claim a path so the

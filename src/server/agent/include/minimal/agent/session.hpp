@@ -32,16 +32,23 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <variant>
 
 #include "minimal/agent/agent_loop.hpp"
 #include "minimal/agent/agent_preset.hpp"
 #include "minimal/agent/history_store.hpp"
+#include "minimal/agent/agent_preset_registry.hpp"
 #include "minimal/agent/session_observer_registry.hpp"
+#include "minimal/commands/command_context.hpp"
+#include "minimal/commands/command_dispatcher.hpp"
+#include "minimal/commands/command_registry.hpp"
 #include "minimal/common/logger.hpp"
 #include "minimal/config/providers_config.hpp"
 #include "minimal/llm/provider.hpp"
+#include "minimal/llm/provider_factory_registry.hpp"
 #include "minimal/rpc/event_queue.hpp"
 #include "minimal/rpc/pending_requests.hpp"
+#include "minimal/rpc/wire_confirmation_broker.hpp"
 #include "minimal/rpc/wire_permission_checker.hpp"
 #include "minimal/tools/tool_executor.hpp"
 #include "minimal/tools/tool_registry.hpp"
@@ -64,7 +71,17 @@ struct SessionParams {
     std::optional<config::ModelRef> model_override;
 };
 
-class Session {
+// One item of work for the session worker. A variant rather than two queues,
+// because the ORDER between a turn and a command matters and two queues have no
+// order between them -- `/model x` typed before a turn must apply before it.
+struct QueuedCommand {
+    std::string request_id;  // echoed on CommandResult
+    std::string name;
+    commands::CommandArgs args;
+};
+using WorkItem = std::variant<std::string, QueuedCommand>;  // string = a user turn
+
+class Session : public commands::SessionControl {
 public:
     // `provider` is owned because a session outlives any one turn and the
     // provider is stateless by contract; `registry` and `observers` are
@@ -86,6 +103,17 @@ public:
     // Reader thread. Queues a turn and wakes the worker; never blocks.
     void SubmitTurn(std::string text);
 
+    // Reader thread. Queues a MUTATING command for the worker, which runs it at
+    // a turn boundary -- never between a tool_use and its tool_result, because
+    // the worker only pops between RunTurn calls. Read-only commands do not come
+    // through here; they run on a short-lived task instead (see RunCommandNow).
+    void SubmitCommand(QueuedCommand command);
+
+    // Runs a command immediately on the CALLING thread. For read-only commands
+    // only, dispatched by the RPC layer onto a short-lived task -- never inline
+    // on the reader, which must not block.
+    void RunCommandNow(const QueuedCommand& command);
+
     // Reader thread. Interrupts the in-flight turn, leaving the session alive
     // and able to accept the next one.
     void Cancel();
@@ -102,12 +130,34 @@ public:
 
     const SessionInfo& info() const { return info_; }
 
-    // The RESOLVED preset this session is actually running -- the registry's
-    // copy with any --model override already applied, which is why it is not the
-    // same object AgentPresetRegistry::Resolve returns. Mutated only by the
-    // worker thread (a preset or model switch is a non-read-only command, so it
-    // runs there), which is what lets this be read without a lock.
-    const AgentPreset& preset() const { return preset_; }
+    // --- commands::SessionControl ------------------------------------------
+    // Worker-thread only, which is what makes the mutating half lock-free: a
+    // command that touches this is not ReadOnly(), so it runs on the worker
+    // between turns -- the same thread that reads it while running one.
+    const std::string& session_id() const override { return params_.session_id; }
+    AgentLoop& loop() override { return *loop_; }
+    tools::ToolExecutor& executor() override { return executor_; }
+    const AgentPreset& preset() const override { return preset_; }
+    void ApplyPreset(AgentPreset preset) override;
+    const std::optional<common::ModelRef>& model_override() const override {
+        return model_override_;
+    }
+    void set_model_override(std::optional<common::ModelRef> ref) override {
+        model_override_ = std::move(ref);
+    }
+
+
+
+    // The registry the /agent command re-resolves against. Borrowed; it outlives
+    // every session.
+    const AgentPresetRegistry* presets() const { return presets_; }
+    void set_presets(const AgentPresetRegistry* presets) { presets_ = presets; }
+    void set_commands(const commands::CommandRegistry* commands) { commands_ = commands; }
+    // Needed to rebuild the provider when a preset or model switch crosses
+    // provider entries. Borrowed; process-wide.
+    void set_provider_factories(const llm::ProviderFactoryRegistry* factories) {
+        provider_factories_ = factories;
+    }
 
     // The initial-attach guard reads these. A session that has never been
     // attached is reaped after a short grace period -- purely a safety net
@@ -140,6 +190,10 @@ public:
 private:
     void WorkerMain();
     void RunOneTurn(std::string text);
+    void RunOneCommand(const QueuedCommand& command);
+    // Builds the context and dispatches. Shared by the worker path and the
+    // read-only task path so the two cannot diverge on what a command may reach.
+    void ExecuteCommand(const QueuedCommand& command, bool busy);
     // The turn terminator. Emitted on EVERY exit path, including failures --
     // a client that learns a turn ended only by seeing it succeed hangs on
     // every error.
@@ -159,9 +213,18 @@ private:
     rpc::EventQueue<v1::ServerEvent> queue_;
     rpc::PendingRequests pending_;
     rpc::WirePermissionChecker checker_;
+    rpc::WireConfirmationBroker confirmations_;
 
     tools::ToolExecutor executor_;
     std::unique_ptr<AgentLoop> loop_;
+
+    // The command surface. Borrowed: both outlive every session.
+    const commands::CommandRegistry* commands_ = nullptr;
+    const AgentPresetRegistry* presets_ = nullptr;
+    const llm::ProviderFactoryRegistry* provider_factories_ = nullptr;
+    // The user's explicit model choice. Outranks the preset's, and survives
+    // /agent re-resolving it.
+    std::optional<common::ModelRef> model_override_;
 
     // Two flags, because they mean different things: cancel_ ends the current
     // turn and is cleared for the next one; terminated_ ends the session.
@@ -175,7 +238,7 @@ private:
 
     mutable std::mutex mutex_;
     std::condition_variable turn_cv_;
-    std::deque<std::string> turns_;
+    std::deque<WorkItem> work_;
     bool running_turn_ = false;
 
     std::thread worker_;

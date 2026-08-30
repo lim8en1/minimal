@@ -89,6 +89,39 @@ int RunHeadless(const HeadlessOptions& options) {
     int exit_code = kOk;
     bool saw_error = false;
 
+    if (options.command) {
+        minimal::client::SessionClient::CommandOptions invocation;
+        invocation.name = options.command->name;
+        invocation.positional = options.command->positional;
+        invocation.raw = options.command->raw;
+        // No human is attached, so a confirmation cannot be answered -- the same
+        // situation AllowOnly exists for on the permission side, and the same
+        // answer: decline, and say so, rather than block on a prompt nobody can
+        // see. --dangerously-bypass says "assume yes" here too, consistently.
+        invocation.on_confirm = [&options](const minimal::v1::ConfirmationRequest& request) {
+            if (!options.bypass) return std::string();
+            return request.options_size() > 0 ? request.options(0) : std::string();
+        };
+
+        const auto command_status = client.RunCommand(
+            created.session_id, invocation, [&](const minimal::v1::ServerEvent& event) {
+                if (!event.has_command_result()) return true;
+                const auto& result = event.command_result();
+                if (!result.message().empty()) {
+                    std::fputs(result.message().c_str(), stdout);
+                    if (result.message().back() != '\n') std::fputc('\n', stdout);
+                }
+                if (result.status() == minimal::v1::COMMAND_STATUS_ERROR) saw_error = true;
+                return true;
+            });
+        if (!command_status.ok()) {
+            std::fprintf(stderr, "stream ended with an error: %s\n",
+                         command_status.error_message().c_str());
+            return kUnavailable;
+        }
+        return saw_error ? kModelError : kOk;
+    }
+
     const auto status = client.RunTurn(
         created.session_id, options.prompt, [&](const minimal::v1::ServerEvent& event) {
             if (options.jsonl) {

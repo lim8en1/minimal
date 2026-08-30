@@ -1,0 +1,45 @@
+#include "minimal/rpc/wire_confirmation_broker.hpp"
+
+#include <utility>
+
+namespace minimal::rpc {
+
+WireConfirmationBroker::WireConfirmationBroker(std::string session_id,
+                                               EventQueue<v1::ServerEvent>& queue,
+                                               PendingRequests& pending)
+    : session_id_(std::move(session_id)), queue_(queue), pending_(pending) {}
+
+std::string WireConfirmationBroker::NextRequestId() {
+    return "confirm-" + std::to_string(next_id_.fetch_add(1, std::memory_order_relaxed));
+}
+
+commands::ConfirmationResponse WireConfirmationBroker::RequestConfirmation(
+    const commands::ConfirmationRequest& request) {
+    const std::string request_id = NextRequestId();
+
+    // Before the push, always -- see the header.
+    auto registration = pending_.Register(request_id);
+
+    v1::ServerEvent event;
+    event.set_session_id(session_id_);
+    auto* wire = event.mutable_confirmation_request();
+    wire->set_request_id(request_id);
+    wire->set_kind(request.kind);
+    wire->set_title(request.title);
+    wire->set_detail(request.detail);
+    for (const auto& option : request.options) wire->add_options(option);
+    queue_.Push(std::move(event));
+
+    const auto answer = registration.AwaitResponse();
+    if (!answer) return {};  // cancelled or terminating: no answer, not a choice
+
+    // Only an option that was OFFERED counts. A client cannot invent one, for
+    // the same reason granted_keys is filtered against what the permission
+    // prompt offered: the server decides what the choices were.
+    for (const auto& option : request.options) {
+        if (*answer == option) return commands::ConfirmationResponse{*answer};
+    }
+    return {};
+}
+
+}  // namespace minimal::rpc

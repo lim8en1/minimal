@@ -16,11 +16,19 @@
 //      when the value legitimately starts with a dash.
 //   2. Anything unrecognised is an error. Silence is what let rule 1 hide.
 
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
 
 namespace minimal::client {
+
+// A `/name args` prompt, split. Present only when the prompt was one.
+struct CommandInvocationText {
+    std::string name;
+    std::vector<std::string> positional;
+    std::string raw;
+};
 
 struct HeadlessOptions {
     std::string prompt;
@@ -29,6 +37,8 @@ struct HeadlessOptions {
     // "<provider>/<model>", validated at parse so a typo fails before a server
     // is contacted. Empty means the preset's own model.
     std::string model;
+    // Set when the prompt was a /-command rather than text.
+    std::optional<CommandInvocationText> command;
     bool jsonl = false;
     bool bypass = false;
 };

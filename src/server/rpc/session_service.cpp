@@ -149,30 +149,44 @@ void SessionServiceImpl::Dispatch(const v1::ClientEvent& event, agent::Session& 
             session.Cancel();
             return;
 
-        case v1::ClientEvent::kCommand: {
-            // The command subsystem is not built. Answering explicitly beats
-            // silence: a client waiting on a CommandResult would otherwise hang
-            // on a request the server quietly dropped.
-            v1::ServerEvent reply;
-            reply.set_session_id(session.info().session_id);
-            auto* result = reply.mutable_command_result();
-            result->set_request_id(event.command().request_id());
-            result->set_status(v1::COMMAND_STATUS_ERROR);
-            result->set_message("the /-command subsystem is not implemented yet");
-            // TryPush: this runs on the READER thread, which must never block.
-            // A full queue here means the client is not draining, so dropping
-            // one error reply is the right trade against stalling the read loop.
-            if (!session.queue().TryPush(std::move(reply))) {
-                logger_.warn("session {}: outbound queue full, dropped a command result",
-                             session.info().session_id);
-            }
+        case v1::ClientEvent::kCommand:
+            DispatchCommand(event.command(), session);
             return;
-        }
 
         case v1::ClientEvent::PAYLOAD_NOT_SET:
             logger_.warn("session {}: client event with no payload", session.info().session_id);
             return;
     }
+}
+
+void SessionServiceImpl::DispatchCommand(const v1::CommandInvocation& invocation,
+                                          agent::Session& session) {
+    agent::QueuedCommand queued;
+    queued.request_id = invocation.request_id();
+    queued.name = invocation.name();
+    queued.args = FromProto(invocation.args());
+
+    // THE DISPATCH SPLIT (ARCHITECTURE.md, "/-command system"). Read-only means
+    // "touches no session state", so it may answer while a turn is in flight --
+    // but on a SHORT-LIVED TASK, never inline here: this is the reader thread,
+    // and a command that blocked it would deadlock the very stream its answer
+    // has to travel back down.
+    //
+    // Everything else queues for the worker, which pops only between turns. That
+    // is what keeps a mutation from landing between a tool_use and its
+    // tool_result -- a hard 400 on both wire formats.
+    const commands::Command* command =
+        commands_ != nullptr ? commands_->Find(queued.name) : nullptr;
+    if (command != nullptr && command->ReadOnly()) {
+        // Detached: the session outlives this by refcount, and joining would be
+        // the blocking this branch exists to avoid.
+        auto shared = sessions_.Find(session.info().session_id);
+        if (shared != nullptr) {
+            std::thread([shared, queued] { shared->RunCommandNow(queued); }).detach();
+            return;
+        }
+    }
+    session.SubmitCommand(std::move(queued));
 }
 
 grpc::Status SessionServiceImpl::OpenSession(

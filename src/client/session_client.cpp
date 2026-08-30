@@ -70,4 +70,60 @@ grpc::Status SessionClient::RunTurn(
     return stream->Finish();
 }
 
+grpc::Status SessionClient::RunCommand(
+    const std::string& session_id, const CommandOptions& options,
+    const std::function<bool(const v1::ServerEvent&)>& on_event) {
+    grpc::ClientContext context;
+    auto stream = stub_->OpenSession(&context);
+
+    // Named client-side. The wire carries structured args precisely so the
+    // server never re-splits a command line: this side is the one holding the
+    // text a human typed.
+    v1::ClientEvent invocation;
+    invocation.set_session_id(session_id);
+    auto* command = invocation.mutable_command();
+    command->set_request_id("cmd-1");
+    command->set_name(options.name);
+    for (const auto& value : options.positional) command->mutable_args()->add_positional(value);
+    command->mutable_args()->set_raw(options.raw);
+    if (!stream->Write(invocation)) {
+        stream->WritesDone();
+        return stream->Finish();
+    }
+
+    v1::ServerEvent event;
+    bool half_closed = false;
+    while (stream->Read(&event)) {
+        if (!half_closed && event.has_confirmation_request()) {
+            // Answered on the stream, mid-flight. The server's worker is blocked
+            // in RequestConfirmation until this lands.
+            v1::ClientEvent answer;
+            answer.set_session_id(session_id);
+            auto* response = answer.mutable_confirmation_response();
+            response->set_request_id(event.confirmation_request().request_id());
+            response->set_chosen_option(options.on_confirm
+                                            ? options.on_confirm(event.confirmation_request())
+                                            : std::string());
+            stream->Write(answer);
+        }
+
+        bool done = false;
+        if (!half_closed) {
+            // CommandResult is the terminator here, the way TurnCompletedEvent
+            // is for a turn: a confirming command emits at least one other event
+            // before it, so anything less specific would half-close too early.
+            done = !on_event(event) || event.has_command_result();
+        }
+        if (done && !half_closed) {
+            stream->WritesDone();
+            half_closed = true;
+            // Keep reading, for the same reason RunTurn does: half-closing says
+            // we are done SENDING, and abandoning the read side wedges the
+            // server's writer mid-Write().
+        }
+    }
+    if (!half_closed) stream->WritesDone();
+    return stream->Finish();
+}
+
 }  // namespace minimal::client

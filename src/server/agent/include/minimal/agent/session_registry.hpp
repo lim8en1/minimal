@@ -50,6 +50,10 @@ public:
     // providers.json entry whose `provider` kind no loaded plugin registered.
     // Both are configuration errors the caller must be able to report back as
     // such, not conditions to paper over with a null provider.
+    // Optional: sessions created without one answer every command invocation
+    // with "not available". Set before any session exists.
+    void set_commands(const commands::CommandRegistry* commands) { commands_ = commands; }
+
     std::shared_ptr<Session> Create(SessionParams params);
 
     std::shared_ptr<Session> Find(const std::string& session_id) const;
@@ -65,6 +69,8 @@ private:
     void ReaperMain();
 
     const AgentPresetRegistry& presets_;
+    // Optional and borrowed; every session gets the same one.
+    const commands::CommandRegistry* commands_ = nullptr;
     tools::ToolRegistry& tools_;
     const llm::ProviderFactoryRegistry& providers_;
     SessionObserverRegistry& observers_;

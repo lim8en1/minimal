@@ -338,18 +338,38 @@ outranks it. `/agent` and `/model` are two knobs.
 - [x] Verified end to end: the same endpoint reached as `local/…` (full answer, exit 0) and
       `capped/…` (`max_tokens: 48` → truncated, exit 2), proving the per-model cap reaches the wire.
 
-### C. `/`-command system
+### C. `/`-command system — done
 
 > § *`/`-command system — `src/server/commands/`*, § *Name collisions and aliases*.
+
+`src/server/commands/`: `Command` -> (`HarnessCommand`, `LLMCommand`), registry, dispatcher,
+`ConfirmationBroker` + `rpc/wire_confirmation_broker` (built like `WirePermissionChecker`, register
+before publishing), and `CommandContext` over a `SessionControl` interface — an interface rather than
+`Session&` so `commands/` does not depend on the thing that runs it, and so a command is testable
+without a worker thread, a provider and a transcript store.
+
+**Two things this track fixed that were not on the list.** `NameRegistry` had existed and been
+unit-tested since the plugin work landed while nothing outside its own tests ever *constructed* one,
+so duplicate registrations shadowed silently via `insert_or_assign` and which plugin won depended on
+directory iteration order; `command_aliases` was likewise parsed from `plugins.json` and
+re-serialized without ever being applied. C is the first track with a second registry, which is what
+made connecting them worth more than reimplementing per registry. Collisions are now fatal at
+startup, naming both claimants.
+
+**A bug the manual run caught after the unit tests were green.** `--model` was applied to the preset
+by `SessionRegistry` but never *recorded* on the session, so `/agent` — which re-resolves the preset
+from disk — silently reverted to the preset's own model. It was invisible because the success message
+printed a bare model id, identical for both references in the test config. Making the message print
+the full `<provider>/<model>` reference is what exposed it, and it now has its own test.
 
 Core registry plus `Command` → (`LlmCommand`, `HarnessCommand`) hierarchy; `CommandContext` borrowing session-owned references. Read-only `HarnessCommand`s dispatch to a short-lived task — *not* inline on the reader thread, which must never block; everything else queues for the worker at a turn boundary.
 
 Fills the empty `commands-core` plugin and unblocks `/restart-shell` in `tools-bash` (`plugin.cpp:62`).
 
-- [ ] Read-only commands execute without blocking the reader.
-- [ ] Non-read-only commands land at a turn boundary, never between a `tool_use` and its `tool_result`.
-- [ ] Alias resolution and collision rules match § *Name collisions and aliases*; permission keys are never aliases.
-- [ ] `/restart-shell` resets the same map `restart: true` does — proving plugin-owned state has one owner.
+- [x] Read-only commands execute without blocking the reader.  *(proven over a real channel: the turn is parked on a permission prompt and `/peek` still answers; queueing it instead fails the test)*
+- [x] Non-read-only commands land at a turn boundary, never between a `tool_use` and its `tool_result`.  *(structural — turns and commands share one queue and the worker pops only between `RunTurn` calls)*
+- [x] Alias resolution and collision rules match § *Name collisions and aliases*; permission keys are never aliases.  *(and the collision check now RUNS — `NameRegistry` had never been constructed outside its own tests)*
+- [x] `/restart-shell` resets the same map `restart: true` does — proving plugin-owned state has one owner.
 
 ### D. Subagents
 

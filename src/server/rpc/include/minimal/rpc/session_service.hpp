@@ -31,6 +31,7 @@
 #include <grpcpp/grpcpp.h>
 
 #include "minimal/agent/session_registry.hpp"
+#include "minimal/commands/command_registry.hpp"
 #include "minimal/common/logger.hpp"
 #include "minimal/config/permissions_config.hpp"
 #include "minimal/config/settings_config.hpp"
@@ -70,6 +71,10 @@ public:
     // later auto-spawning client will rely on.
     void set_on_last_client_detached(std::function<void()> callback);
 
+    // Optional: a service without one answers every invocation with "not
+    // available" rather than dropping it. Set before serving.
+    void set_commands(const commands::CommandRegistry* commands) { commands_ = commands; }
+
     std::size_t attached_clients() const;
 
 private:
@@ -82,8 +87,14 @@ private:
     // Reader thread. Every branch is non-blocking -- that is the property the
     // three-thread topology depends on, not an implementation detail.
     void Dispatch(const v1::ClientEvent& event, agent::Session& session);
+    // Read-only commands go to a short-lived task, everything else to the
+    // session's work queue. Reader thread; must not block on either path.
+    void DispatchCommand(const v1::CommandInvocation& invocation, agent::Session& session);
 
     agent::SessionRegistry& sessions_;
+    // Borrowed and optional: a service built without commands answers every
+    // invocation with "not available" rather than dropping it.
+    const commands::CommandRegistry* commands_ = nullptr;
     session::SessionDatabase& db_;
     session::SessionReader reader_;
     config::SettingsConfig settings_;

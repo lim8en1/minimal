@@ -19,6 +19,7 @@ using VersionFn = const char* (*)();
 using RegisterToolsFn = void (*)(tools::ToolRegistry&, const ToolRegistrationContext&);
 using RegisterProviderFactoriesFn = void (*)(llm::ProviderFactoryRegistry&);
 using RegisterSessionObserverFn = void (*)(agent::SessionObserverRegistry&);
+using RegisterCommandsFn = void (*)(commands::CommandRegistry&);
 
 template <typename Fn>
 Fn Lookup(void* handle, const char* symbol) {
@@ -47,11 +48,13 @@ std::string_view ToString(LoadStatus status) {
 
 PluginLoader::PluginLoader(tools::ToolRegistry& tools, llm::ProviderFactoryRegistry& providers,
                             nlohmann::json tools_settings,
-                            agent::SessionObserverRegistry* observers)
+                            agent::SessionObserverRegistry* observers,
+                           commands::CommandRegistry* commands)
     : tools_(tools),
       providers_(providers),
       tools_settings_(std::move(tools_settings)),
-      observers_(observers) {}
+      observers_(observers),
+      commands_(commands) {}
 
 // Handles are intentionally leaked -- see LIFETIME in the header.
 PluginLoader::~PluginLoader() = default;
@@ -126,6 +129,24 @@ PluginRecord PluginLoader::LoadOne(const PluginCandidate& candidate) {
         const auto after = providers_.kinds();
         std::set_difference(after.begin(), after.end(), before.begin(), before.end(),
                             std::back_inserter(record.registered_provider_kinds));
+    }
+
+    if (commands_ != nullptr) {
+        // Same attribution window as tools, and for the same two reasons: a
+        // collision must be able to name both plugins, and an alias is keyed by
+        // "plugin.original_name" so the registry has to know whose it is.
+        const std::size_t commands_before = commands_->attributions().size();
+        commands_->SetAttribution(record.name);
+        if (auto register_commands =
+                Lookup<RegisterCommandsFn>(handle, "minimal_plugin_register_commands")) {
+            register_commands(*commands_);
+        }
+        commands_->ClearAttribution();
+
+        const auto& command_attributions = commands_->attributions();
+        for (std::size_t i = commands_before; i < command_attributions.size(); ++i) {
+            record.registered_commands.push_back(command_attributions[i].surface_name);
+        }
     }
 
     if (observers_ != nullptr) {

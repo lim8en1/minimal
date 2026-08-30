@@ -4,6 +4,9 @@
 // per-session state and therefore belongs to tools-bash. A plugin owns the
 // commands that touch its own state.
 
+#include "core_commands.hpp"
+
+#include "minimal/commands/command_registry.hpp"
 #include "minimal/common/abi_tag.hpp"
 
 extern "C" {
@@ -12,10 +15,13 @@ const char* minimal_plugin_abi_tag() { return minimal::common::AbiTag(); }
 const char* minimal_plugin_name() { return "commands-core"; }
 const char* minimal_plugin_version() { return minimal::common::Version(); }
 
-// TODO: minimal_plugin_register_commands --
-//   /new /attach /sessions /agent /model /permission-mode /compact /clear
-//   /providers /help
-// /compact is an LLMCommand (issues a real provider request); the rest are
-// HarnessCommands, and the read-only ones may run concurrently with a live turn.
+void minimal_plugin_register_commands(minimal::commands::CommandRegistry& registry) {
+    for (auto& command : minimal::commands_core::MakeCoreCommands()) {
+        registry.Register(std::move(command));
+    }
+    // Last, and holding a reference to the registry: /help lists what is
+    // registered when it RUNS, so a plugin loading after this one still appears.
+    registry.Register(minimal::commands_core::MakeHelpCommand(registry));
+}
 
 }  // extern "C"

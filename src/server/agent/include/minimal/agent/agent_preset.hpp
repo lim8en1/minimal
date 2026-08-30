@@ -40,6 +40,10 @@ struct AgentPreset {
     // makes, summarization included -- a cap the conversation honours and the
     // compactor ignores is how a summary gets truncated.
     std::optional<int> max_tokens;
+    // Which <provider>/<model> this resolved from. Carried because the
+    // connection plus the model id do not identify it: two providers can serve
+    // the same model at the same url with different limits.
+    config::ModelRef model_ref;
     // Informational: the status bar's used/max (track E). Carried here so the
     // resolved preset is a complete description of what the session will send,
     // rather than something a later reader has to go back to providers.json for.

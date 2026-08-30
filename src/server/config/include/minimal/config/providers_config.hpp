@@ -61,6 +61,11 @@ using common::ParseModelRef;
 // merged in. This is what a session needs to construct a provider and issue a
 // request; nothing downstream has to know the file's shape.
 struct ResolvedModel {
+    // Its own name. Two providers may point at the same url and serve the same
+    // model id -- one capped, one not -- so the connection and the model id
+    // together do NOT identify which reference a session is running. Only this
+    // does, and /providers needs to say which line is the active one.
+    ModelRef ref;
     std::string backend;           // ProviderFactoryRegistry kind
     llm::ProviderConfig provider;  // url, api_key, model_name, timeouts
     // Provider-level values with the model's own layered on top, resolved at

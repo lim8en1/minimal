@@ -25,6 +25,8 @@
 #include "minimal/config/settings_config.hpp"
 #include "minimal/config/skill_registry.hpp"
 #include "minimal/llm/provider_factory_registry.hpp"
+#include "minimal/commands/command_registry.hpp"
+#include "minimal/plugins/collision_check.hpp"
 #include "minimal/plugins/plugin_discovery.hpp"
 #include "minimal/plugins/plugin_loader.hpp"
 #include "minimal/rpc/server.hpp"
@@ -93,6 +95,11 @@ int main(int argc, char** argv) {
 
     minimal::tools::ToolRegistry tools;
     minimal::llm::ProviderFactoryRegistry providers;
+    minimal::commands::CommandRegistry commands;
+    // Applied at registration, BEFORE the collision check below, so aliasing is
+    // itself a way to resolve a collision rather than only a way to avoid one.
+    commands.SetAliases({plugin_config.command_aliases.begin(),
+                         plugin_config.command_aliases.end()});
     minimal::agent::SessionObserverRegistry observers(minimal::common::DefaultLogger());
 
     // The tools slice of settings.json is forwarded verbatim to every plugin;
@@ -107,7 +114,7 @@ int main(int argc, char** argv) {
     } catch (const std::exception&) {
     }
 
-    minimal::plugins::PluginLoader loader(tools, providers, tools_settings, &observers);
+    minimal::plugins::PluginLoader loader(tools, providers, tools_settings, &observers, &commands);
     const auto records = loader.LoadAll(candidates);
 
     std::printf("plugins (%zu discovered):\n", records.size());
@@ -121,6 +128,9 @@ int main(int argc, char** argv) {
         }
         for (const auto& kind : record.registered_provider_kinds) {
             std::printf("      provider %s\n", kind.c_str());
+        }
+        for (const auto& command : record.registered_commands) {
+            std::printf("      command  /%s\n", command.c_str());
         }
         if (record.registered_session_observer) {
             std::printf("      observer session lifecycle\n");
@@ -147,6 +157,24 @@ int main(int argc, char** argv) {
 
     std::printf("\nregistered: %zu tool(s), %zu provider kind(s)\n", tools.size(),
                 providers.kinds().size());
+
+    // Name collisions are FATAL, and this is the first build in which they are
+    // detected at all: NameRegistry existed and was tested but nothing ever ran
+    // it, so a second plugin registering `bash` silently shadowed the first and
+    // which one won depended on load order. The full startup sanity check (track
+    // F) will fold this in among its other findings; until then it stands alone,
+    // because a harness whose tool set depends on directory iteration order is
+    // not one worth starting.
+    const auto collisions = minimal::plugins::CheckRegistrationNames(
+        tools, commands, plugin_config.command_aliases);
+    if (!collisions.ok()) {
+        std::fprintf(stderr, "\nregistration name conflicts:\n%s\n",
+                     minimal::plugins::DescribeCollisions(collisions).c_str());
+        std::fprintf(stderr,
+                     "resolve by disabling one plugin in plugins.json, or by aliasing one of them "
+                     "under \"command_aliases\" (keys are \"plugin.name\").\n");
+        return 1;
+    }
 
     // TODO: stage 3 sanity check (bundled plugin failures are Fatal, user
     // failures Warning).
@@ -182,8 +210,10 @@ int main(int argc, char** argv) {
 
     minimal::agent::SessionRegistry sessions(*presets, tools, providers, observers, *session_db,
                                              loop_config, minimal::common::DefaultLogger());
+    sessions.set_commands(&commands);
     minimal::rpc::SessionServiceImpl service(sessions, *session_db, settings, permissions,
                                              minimal::common::DefaultLogger());
+    service.set_commands(&commands);
     minimal::rpc::Server server(service, socket_path);
 
     if (!server.listening()) {

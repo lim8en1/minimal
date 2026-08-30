@@ -17,6 +17,8 @@ add_executable(minimal_tests
     bundled_assets_test.cpp
     chat_request_bench.cpp
     client_args_test.cpp
+    commands_test.cpp
+    "${CMAKE_SOURCE_DIR}/plugins/server/commands-core/core_commands.cpp"
     token_accounting_test.cpp
     config_paths_test.cpp
     tool_executor_test.cpp

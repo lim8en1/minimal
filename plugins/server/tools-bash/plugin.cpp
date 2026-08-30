@@ -35,9 +35,10 @@
 
 namespace {
 
-// One store for the whole plugin: the tool, the future /restart-shell command,
-// and the future SessionObserver all operate on this same map. Process-lifetime
-// (plugins are never unloaded), matching the registry objects it feeds.
+// One store for the whole plugin: the tool, /restart-shell and the
+// SessionObserver all operate on this same map -- three callers, one owner,
+// which is what "a plugin owns the commands that touch its own state" buys.
+// Process-lifetime (plugins are never unloaded), matching the registries it feeds.
 minimal::tools_bash::BashSessionStateStore& BashStore() {
     static minimal::tools_bash::BashSessionStateStore store;
     return store;
@@ -47,6 +48,29 @@ minimal::tools_bash::BashSessionStateStore& BashStore() {
 // this .so and nothing outside it can reach the store. Without this hook the
 // cwd/env of every session that ever ran would stay resident for the life of
 // the process.
+// THE PLUGIN-OWNS-ITS-COMMANDS RULE, made concrete. /restart-shell lives here
+// rather than in commands-core because the per-session cwd/env it resets lives
+// inside THIS .so -- another plugin has no way to reach it. That is why
+// minimal_plugin_register_tools and ..._register_commands are independent
+// optional symbols instead of one "kind" of plugin: this one exports both.
+class RestartShellCommand : public minimal::commands::HarnessCommand {
+public:
+    std::string_view Name() const override { return "restart-shell"; }
+    std::string_view Summary() const override {
+        return "Forget this session's shell cwd and environment";
+    }
+    std::string_view Usage() const override { return "/restart-shell"; }
+
+    minimal::commands::CommandResult Execute(minimal::commands::CommandContext& context,
+                                             const minimal::commands::CommandArgs&) override {
+        // Exactly what `restart: true` on a bash call does, and what
+        // OnSessionEnded does at teardown -- one map, one owner, three callers.
+        BashStore().Erase(context.session().session_id());
+        return minimal::commands::CommandResult::Ok(
+            "shell reset; the next command starts in the project root with a fresh environment");
+    }
+};
+
 class BashSessionObserver : public minimal::agent::SessionObserver {
 public:
     void OnSessionEnded(const minimal::agent::SessionInfo& info) override {
@@ -70,12 +94,13 @@ void minimal_plugin_register_tools(minimal::tools::ToolRegistry& registry,
     registry.Register(minimal::tools_bash::MakeBashTool(settings, BashStore()));
 }
 
+void minimal_plugin_register_commands(minimal::commands::CommandRegistry& registry) {
+    registry.Register(std::make_unique<RestartShellCommand>());
+}
+
 void minimal_plugin_register_session_observer(
     minimal::agent::SessionObserverRegistry& registry) {
     registry.Register(std::make_shared<BashSessionObserver>());
 }
-
-// TODO: minimal_plugin_register_commands -- /restart-shell (resets the same map
-//         via BashStore()). Lands with the core commands subsystem.
 
 }  // extern "C"

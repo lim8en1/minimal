@@ -47,7 +47,8 @@ minimal/
                 #   compaction_boundary, presets, session_observer(_registry)
       llm/      # unified model, provider iface, http_client, sse_parser
       tools/    # Tool iface, registry, executor, permission model, path_confinement
-      commands/ # Command iface, registry, dispatcher
+      commands/ # Command iface, registry, dispatcher, ConfirmationBroker,
+                #   CommandContext + the SessionControl interface it borrows
       plugins/  # the plugin HOST: loader, plugin_abi.h, name/collision registry,
                 #   observer/mention/auth registries. Harness code -- distinct from
                 #   the top-level plugins/, which is what gets loaded.
@@ -482,6 +483,9 @@ public:
     virtual std::string_view Summary() const = 0;
     virtual std::string_view Usage() const = 0;
     virtual bool RequiresConfirmation() const { return false; }
+    // Touches no session state, so it may run beside a live turn -- on a
+    // short-lived task, never inline on the reader. Defaults to the safe answer.
+    virtual bool ReadOnly() const { return false; }
     virtual CommandResult Execute(CommandContext&, const CommandArgs&) = 0;
 };
 
@@ -504,13 +508,19 @@ Both `PermissionChecker`'s implementation and `CommandDispatcher` compose the sa
 
 **`CommandContext`** borrows references the session already owns: active `LlmProvider` and its resolved `ProviderConfig`, `SessionStore`, `AgentPresetRegistry` (+ active preset, mutable for `/agent`), `Settings`, plus `EmitStatus`/`EmitError`. It deliberately does **not** expose bash session state: bash is a plugin and owns that itself (see below).
 
-**Bundled commands** (`commands-core` plugin): `/new [name]`, `/attach <session>`, `/sessions`, `/agent <preset>`, `/model <name>`, `/permission-mode <normal|bypass|allow-only>` (confirm), `/compact` (`LLMCommand`), `/clear` (confirm), `/providers`, `/help [command]`.
+**Bundled commands** (`commands-core` plugin): `/help [command]`, `/providers`, `/compact` (`LLMCommand`), `/clear` (confirm), `/agent <preset>`, `/model <provider>/<model>`, `/permission-mode <normal|bypass|allow-only>` (confirm). `/help` and `/providers` are `ReadOnly()`.
+
+`/new`, `/attach` and `/sessions` are **deferred to the TUI** (track E): they drive a tab model, and a command creating a session no client can attach to would be wire surface built ahead of its consumer.
+
+**`/agent` and `/model` are two knobs.** A preset supplies a *default* model; a model the user named outranks it and **survives a later `/agent`**, which re-resolves the preset from disk and must not silently undo the choice. The override lives on the session, not in the preset, which is what makes that possible. Neither takes the searchable picker ARCHITECTURE's UX implies — that arrives with the TUI; until then `/agent <name>` and `/model <provider>/<model>` take exact names, and `--agent`/`--model` cover the headless path.
+
+**The dispatch split, and why it is structural.** Turns and mutating commands share ONE queue on the session, and the worker pops from it only between `RunTurn` calls — so "a command never lands between a `tool_use` and its `tool_result`" is true by construction rather than by a check someone could forget. It also makes a preset or model switch safe to swap the session's `LlmProvider` under `AgentLoop`'s reference: the worker is provably not inside a provider call at that moment.
 
 **A plugin owns the commands that touch its own state.** `/restart-shell` lives in `tools-bash`, not `commands-core`, because bash's per-session cwd/env lives inside that plugin — one `.so` cannot reach into another's state. Registering a tool *and* its associated command from the same plugin is the general pattern, and the reason `minimal_plugin_register_tools` and `..._register_commands` are independent optional symbols rather than a single "kind" of plugin.
 
 ### Name collisions and aliases
 
-**Collisions are fatal.** Two plugins registering the same tool name, command name, `ViewSpec::id`, or `ToolResultRenderer::tool_name` halt startup with a diagnostic naming both. Silent shadowing is the wrong failure mode — it makes behavior depend on plugin load order.
+**Collisions are fatal**, and as of the command system they are actually *detected*: `NameRegistry` existed and was unit-tested from the beginning but nothing outside its own tests ever constructed one, so both registries shadowed duplicates via `insert_or_assign` and which plugin won depended on directory iteration order. `plugins/collision_check.{hpp,cpp}` runs it over what registered, and `main.cpp` refuses to serve. Two plugins registering the same tool name, command name, `ViewSpec::id`, or `ToolResultRenderer::tool_name` halt startup with a diagnostic naming both. Silent shadowing is the wrong failure mode — it makes behavior depend on plugin load order.
 
 Resolution is disabling one plugin, rebuilding, or **aliasing** via an optional `plugins.json` field:
 

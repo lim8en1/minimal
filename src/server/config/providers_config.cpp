@@ -137,6 +137,7 @@ ProvidersConfig ParseProvidersConfig(const nlohmann::json& doc) {
             }
 
             ResolvedModel resolved;
+            resolved.ref = ModelRef{provider_name, model_name};
             resolved.backend = backend;
             resolved.provider.base_url = url;
             resolved.provider.api_key = api_key;
@@ -145,7 +146,11 @@ ProvidersConfig ParseProvidersConfig(const nlohmann::json& doc) {
             resolved.max_tokens = InheritNumber<int>(provider, model, "max_tokens");
             resolved.context_window_tokens =
                 InheritNumber<std::int64_t>(provider, model, "context_window_tokens");
-            config.Add(ModelRef{provider_name, model_name}, std::move(resolved));
+            // The key is copied out FIRST. Passing `resolved.ref` alongside
+            // `std::move(resolved)` in one call is unsequenced -- the move may
+            // run first, and the key is then read from a moved-from string.
+            const ModelRef key = resolved.ref;
+            config.Add(key, std::move(resolved));
         }
     }
     return config;

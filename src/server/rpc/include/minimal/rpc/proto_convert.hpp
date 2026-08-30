@@ -25,6 +25,7 @@
 #include "minimal/llm/chat.hpp"
 #include "minimal/llm/message.hpp"
 #include "minimal/llm/provider.hpp"
+#include "minimal/commands/command.hpp"
 #include "minimal/llm/stream_event.hpp"
 #include "minimal/session/session_database.hpp"
 #include "minimal/session/stored_message.hpp"
@@ -122,5 +123,10 @@ tools::PermissionResponse FromProto(const v1::PermissionResponse& response,
 
 v1::StoredMessage ToProto(const session::StoredMessage& stored);
 v1::SessionSummary ToProto(const session::SessionSummary& summary);
+
+// CommandArgs: already structured on the wire, so this is a straight copy rather
+// than a parse. Splitting a command line is the CLIENT's job -- it is the side
+// that has the raw text a human typed, and the proto carries the result.
+commands::CommandArgs FromProto(const v1::CommandArgs& args);
 
 }  // namespace minimal::rpc

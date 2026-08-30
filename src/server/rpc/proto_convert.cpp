@@ -527,4 +527,12 @@ v1::SessionSummary ToProto(const session::SessionSummary& summary) {
     return out;
 }
 
+commands::CommandArgs FromProto(const v1::CommandArgs& args) {
+    commands::CommandArgs out;
+    out.positional.assign(args.positional().begin(), args.positional().end());
+    for (const auto& [key, value] : args.flags()) out.flags.emplace(key, value);
+    out.raw = args.raw();
+    return out;
+}
+
 }  // namespace minimal::rpc

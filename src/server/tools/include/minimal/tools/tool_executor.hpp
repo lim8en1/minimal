@@ -34,6 +34,12 @@ public:
 
     std::size_t granted_count() const { return session_grants_.size(); }
 
+    // /permission-mode. Worker-thread only: changing it is not a read-only
+    // command, so it runs between turns rather than beside one -- which is what
+    // makes this safe without a lock while a tool dispatch reads it.
+    void SetRunMode(PermissionRunMode mode) { run_mode_ = mode; }
+    PermissionRunMode run_mode() const { return run_mode_; }
+
 private:
     ToolRegistry& registry_;
     PermissionChecker& checker_;

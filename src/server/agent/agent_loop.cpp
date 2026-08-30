@@ -140,9 +140,29 @@ void AgentLoop::MaybeCompact() {
     if (!config_.auto_compact) return;
     if (config_.compaction_trigger_tokens <= 0) return;
     if (tokens_.last_occupancy() < config_.compaction_trigger_tokens) return;
-    if (!compactor_) return;
-    if (history_.size() < 2) return;
-    if (compaction_failed_this_turn_) return;
+    Compact();
+}
+
+std::optional<std::size_t> AgentLoop::CompactNow() {
+    // The trigger checks above are skipped -- the user asked, so occupancy and
+    // auto_compact are beside the point -- but everything below is not: an empty
+    // history, a missing compactor and a summarizer that already failed this
+    // turn are all just as true when the request is manual.
+    return Compact();
+}
+
+void AgentLoop::ClearHistory() {
+    history_.clear();
+    injected_.clear();
+    // Not the store. Compaction established that the in-memory working set and
+    // the durable transcript are different things; /clear drops the first and
+    // leaves scrollback whole.
+}
+
+std::optional<std::size_t> AgentLoop::Compact() {
+    if (!compactor_) return std::nullopt;
+    if (history_.size() < 2) return std::nullopt;
+    if (compaction_failed_this_turn_) return std::nullopt;
 
     // Keep the tail verbatim; summarize everything older. The candidate cut is
     // chosen by count here -- the boundary snap is what makes it safe.
@@ -164,7 +184,7 @@ void AgentLoop::MaybeCompact() {
             "growing",
             session_.session_id, history_.size());
         compaction_failed_this_turn_ = true;
-        return;
+        return std::nullopt;
     }
 
     const std::vector<llm::Message> to_compact(history_.begin(), history_.begin() + cut);
@@ -177,11 +197,11 @@ void AgentLoop::MaybeCompact() {
     params.full_history = &history_;
     params.is_cancelled = is_cancelled_;
 
-    const auto result = compactor_(to_compact, provider_, params);
+    const auto result = compactor_(to_compact, provider_.get(), params);
     if (!result) {
         // No compaction this cycle; do not retry on every tool cycle of this turn.
         compaction_failed_this_turn_ = true;
-        return;
+        return std::nullopt;
     }
 
     std::vector<llm::Message> rebuilt;
@@ -214,6 +234,7 @@ void AgentLoop::MaybeCompact() {
     // Deliberately not persisted: compaction changes only what the NEXT request
     // contains. The store keeps the full uncompacted record, so scrollback is
     // unaffected no matter how many times this runs.
+    return cut;
 }
 
 TurnResult AgentLoop::RunTurn(llm::Message seed_message) {
@@ -240,7 +261,7 @@ TurnResult AgentLoop::RunTurn(llm::Message seed_message) {
         bool got_response = false;
         for (int attempt = 0; attempt <= config_.max_retries; ++attempt) {
             try {
-                response = provider_.StreamComplete(BuildChatRequest(), event_sink_);
+                response = provider_.get().StreamComplete(BuildChatRequest(), event_sink_);
                 got_response = true;
                 break;
             } catch (const llm::LlmError& error) {

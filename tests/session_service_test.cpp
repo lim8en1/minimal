@@ -92,12 +92,15 @@ struct ServiceFixture {
         });
         observers = std::make_unique<agent::SessionObserverRegistry>(common::DefaultLogger());
         db = std::make_unique<session::SessionDatabase>(dir / "sessions.db");
+        sessions_commands = &commands;
         sessions = std::make_unique<agent::SessionRegistry>(
             *presets, tools, providers, *observers, *db, agent::LoopConfig{},
             common::DefaultLogger(), attach_guard);
         service = std::make_unique<rpc::SessionServiceImpl>(
             *sessions, *db, config::SettingsConfig{}, config::PermissionsConfig{},
             common::DefaultLogger());
+        sessions->set_commands(&commands);
+        service->set_commands(&commands);
         service->set_on_last_client_detached([this] { last_detach.store(true); });
 
         socket = dir / "test.sock";
@@ -129,6 +132,8 @@ struct ServiceFixture {
         return response.session().session_id();
     }
 
+    commands::CommandRegistry commands;
+    const commands::CommandRegistry* sessions_commands = nullptr;
     std::filesystem::path dir, socket;
     config::SkillRegistry skills;
     tools::ToolRegistry tools;
@@ -838,4 +843,117 @@ TEST_CASE("a turn's ServerEvent payloads arrive in order", "[session_service]") 
     REQUIRE(first_stop != order.end());
     CHECK(first_stop < start);
     CHECK(std::count(order.begin(), order.end(), "message_stop") == 2);
+}
+
+TEST_CASE("a read-only command answers while a turn is in flight",
+          "[session_service][commands][invariant]") {
+    // THE DISPATCH SPLIT, and the only tier that can show it. A read-only
+    // command runs on a short-lived task rather than on the reader thread --
+    // running it inline would block the very stream its answer has to travel
+    // back down, which is the deadlock the three-thread topology exists to
+    // prevent, and queueing it would make it wait for the turn it is supposed to
+    // run beside.
+    ServiceFixture fixture;
+    fixture.commands.Register(std::make_unique<testing::BlockingReadOnlyCommand>());
+    fixture.tools.Register(
+        std::make_unique<testing::FakeTool>("bash", tools::ToolCategory::Execute, "ran"));
+    fixture.Script(testing::ToolUseResponse("call-1", "bash", {{"command", "make"}}));
+    fixture.Script(testing::TextResponse("done"));
+    fixture.Write("permissions.json", nlohmann::json{{"fallback", {{"execute", "ask"}}}}.dump());
+    fixture.Start();
+
+    const std::string session_id = fixture.CreateSession();
+    grpc::ClientContext context;
+    auto stream = fixture.stub->OpenSession(&context);
+    REQUIRE(stream->Write(ChatTurn(session_id, "build it")));
+
+    // Park the turn on a permission prompt, so "in flight" is a fact rather
+    // than a race.
+    v1::ServerEvent event;
+    std::string permission_id;
+    while (stream->Read(&event)) {
+        if (event.has_permission_request()) {
+            permission_id = event.permission_request().request_id();
+            break;
+        }
+    }
+    REQUIRE_FALSE(permission_id.empty());
+
+    // The turn is blocked. A read-only command must still be answered.
+    v1::ClientEvent invocation;
+    invocation.set_session_id(session_id);
+    invocation.mutable_command()->set_request_id("cmd-1");
+    invocation.mutable_command()->set_name("peek");
+    REQUIRE(stream->Write(invocation));
+
+    bool answered = false;
+    while (stream->Read(&event)) {
+        if (event.has_command_result() && event.command_result().request_id() == "cmd-1") {
+            CHECK(event.command_result().status() == v1::COMMAND_STATUS_OK);
+            answered = true;
+            break;
+        }
+    }
+    CHECK(answered);
+
+    // Release the turn so the fixture tears down cleanly.
+    v1::ClientEvent answer;
+    answer.set_session_id(session_id);
+    answer.mutable_permission_response()->set_request_id(permission_id);
+    answer.mutable_permission_response()->set_decision(v1::PERMISSION_DECISION_DENY);
+    stream->Write(answer);
+    (void)DrainAndFinish(stream);
+}
+
+TEST_CASE("a mutating command lands at a turn boundary, never mid-tool-cycle",
+          "[session_service][commands][invariant]") {
+    // Structural rather than checked: the worker pops one work item at a time
+    // and RunTurn is atomic from its point of view, so a command can only land
+    // between turns. What this asserts is that the queue is actually shared --
+    // dispatching a mutating command straight to a task instead would let it
+    // run between a tool_use and its tool_result, which is a hard 400.
+    ServiceFixture fixture;
+    fixture.commands.Register(std::make_unique<testing::RecordingCommand>());
+    fixture.tools.Register(
+        std::make_unique<testing::FakeTool>("read", tools::ToolCategory::ReadOnly, "contents"));
+    fixture.Script(testing::ToolUseResponse("call-1", "read", {{"path", "a.txt"}}));
+    fixture.Script(testing::TextResponse("done"));
+    fixture.Start();
+
+    const std::string session_id = fixture.CreateSession();
+    grpc::ClientContext context;
+    auto stream = fixture.stub->OpenSession(&context);
+
+    // Both sent before anything is read, so the command is queued while the turn
+    // is still running.
+    REQUIRE(stream->Write(ChatTurn(session_id, "read it")));
+    v1::ClientEvent invocation;
+    invocation.set_session_id(session_id);
+    invocation.mutable_command()->set_request_id("cmd-1");
+    invocation.mutable_command()->set_name("record");
+    REQUIRE(stream->Write(invocation));
+
+    std::vector<std::string> order;
+    v1::ServerEvent event;
+    while (stream->Read(&event)) {
+        if (event.has_tool_execution()) {
+            order.push_back(event.tool_execution().started() ? "tool_start" : "tool_finish");
+        } else if (event.has_turn_completed()) {
+            order.push_back("turn_completed");
+        } else if (event.has_command_result()) {
+            order.push_back("command");
+            break;
+        }
+    }
+    (void)DrainAndFinish(stream);
+
+    // The command ran AFTER the turn ended -- not between the tool's start and
+    // its finish, which is where an immediate dispatch would have put it.
+    REQUIRE(order.size() >= 2);
+    CHECK(order.back() == "command");
+    const auto finish = std::find(order.begin(), order.end(), "tool_finish");
+    const auto completed = std::find(order.begin(), order.end(), "turn_completed");
+    REQUIRE(finish != order.end());
+    REQUIRE(completed != order.end());
+    CHECK(finish < completed);
 }

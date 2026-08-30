@@ -91,6 +91,12 @@ std::shared_ptr<Session> SessionRegistry::Create(SessionParams params) {
     auto session = std::make_shared<Session>(std::move(params), preset, std::move(provider),
                                              std::move(store), tools_, loop_config_, observers_,
                                              logger_);
+    // Wired before the session is findable, so the first command a client sends
+    // cannot arrive at a session that has no registry yet.
+    session->set_presets(&presets_);
+    session->set_commands(commands_);
+    session->set_provider_factories(&providers_);
+
     {
         std::lock_guard<std::mutex> lock(mutex_);
         sessions_[session_id] = session;

@@ -27,12 +27,19 @@ Session::Session(SessionParams params, AgentPreset preset,
       provider_(std::move(provider)),
       store_(std::move(store)),
       checker_(params_.session_id, queue_, pending_),
+      confirmations_(params_.session_id, queue_, pending_),
       // The run mode the client asked for wins over the configured default: it
       // is a property of the CLIENT, not of the config. A headless run has no
       // human to answer a prompt, so it must be able to say so. apply_run_mode()
       // is applied downstream, once, by ToolExecutor.
       executor_(registry, checker_, preset_.permission_mode, preset_.mcp_permissions,
                 params_.run_mode_override.value_or(preset_.run_mode)) {
+    // Seeded from what the client asked for. THE REGISTRY already applied it to
+    // the preset before construction, but applying is not the same as
+    // remembering: /agent re-resolves the preset from disk, and without the
+    // choice recorded HERE it would silently revert to the preset's own model.
+    model_override_ = params_.model_override;
+
     info_.session_id = params_.session_id;
     info_.parent_session_id = params_.parent_session_id;
     info_.name = params_.name;
@@ -101,9 +108,101 @@ void Session::SubmitTurn(std::string text) {
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (terminated_.load(std::memory_order_acquire)) return;
-        turns_.push_back(std::move(text));
+        work_.push_back(std::move(text));
     }
     turn_cv_.notify_one();
+}
+
+void Session::SubmitCommand(QueuedCommand command) {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (terminated_.load(std::memory_order_acquire)) return;
+        // The SAME queue as turns, deliberately. Two queues would have no order
+        // between them, so `/model x` typed before a turn could apply after it.
+        work_.push_back(std::move(command));
+    }
+    turn_cv_.notify_one();
+}
+
+void Session::RunCommandNow(const QueuedCommand& command) {
+    // Read-only only, and the caller guarantees that. Runs on whatever
+    // short-lived task the RPC layer dispatched it to -- never the reader.
+    // `busy` is irrelevant for a read-only command, which is the whole point of
+    // it being allowed to run here.
+    ExecuteCommand(command, /*busy=*/false);
+}
+
+void Session::ApplyPreset(AgentPreset preset) {
+    // THE PROVIDER MAY HAVE CHANGED, and commands must not have to think about
+    // it: /agent to a preset on another backend, or /model across providers,
+    // both land here. Detected by comparing what actually identifies a
+    // connection rather than by asking the caller to say so.
+    const bool provider_changed = preset.provider_kind != preset_.provider_kind ||
+                                  preset.provider.base_url != preset_.provider.base_url ||
+                                  preset.provider.api_key != preset_.provider.api_key;
+
+    // THREE copies of the preset exist -- this one, the loop's, and the
+    // executor's run mode derived from it. A command updating only some is a bug
+    // that surfaces a turn later, so there is one entry point and it updates all
+    // of them.
+    preset_ = std::move(preset);
+    executor_.SetRunMode(params_.run_mode_override.value_or(preset_.run_mode));
+    loop_->SetPreset(preset_);
+
+    if (!provider_changed) return;
+    if (provider_factories_ == nullptr) {
+        logger_.warn("session {}: cannot rebuild the provider; keeping the previous one",
+                     params_.session_id);
+        return;
+    }
+    auto rebuilt = provider_factories_->Create(preset_.provider_kind, preset_.provider);
+    if (rebuilt == nullptr) {
+        // The preset resolved, so the kind was known at that point; failing to
+        // construct is still possible and must not leave the loop holding a
+        // dangling reference. Keeping the old provider is wrong but survivable;
+        // dropping it is not.
+        logger_.warn("session {}: provider kind '{}' failed to construct; keeping the previous one",
+                     params_.session_id, preset_.provider_kind);
+        return;
+    }
+
+    // Worker thread, between turns: the loop is provably not inside a provider
+    // call, so rebinding and then destroying the old object is safe. Rebind
+    // FIRST -- the loop must never hold a reference to the object being freed.
+    auto previous = std::move(provider_);
+    provider_ = std::move(rebuilt);
+    loop_->SetProvider(*provider_);
+}
+
+void Session::ExecuteCommand(const QueuedCommand& command, bool busy) {
+    v1::ServerEvent event = MakeEvent(params_.session_id);
+    auto* result = event.mutable_command_result();
+    result->set_request_id(command.request_id);
+
+    if (commands_ == nullptr || presets_ == nullptr) {
+        // No registry wired: answer rather than drop, or a client waiting on a
+        // CommandResult hangs on a request nobody will ever handle.
+        result->set_status(v1::COMMAND_STATUS_ERROR);
+        result->set_message("the /-command subsystem is not available in this session");
+        queue_.Push(std::move(event));
+        return;
+    }
+
+    commands::CommandContext context(*this, *presets_, confirmations_, logger_);
+    const auto outcome = commands::Dispatch(*commands_, command.name, command.args, context, busy);
+
+    result->set_status(outcome.status == commands::CommandResult::Status::kOk
+                           ? v1::COMMAND_STATUS_OK
+                           : v1::COMMAND_STATUS_ERROR);
+    result->set_message(outcome.message);
+    queue_.Push(std::move(event));
+}
+
+void Session::RunOneCommand(const QueuedCommand& command) {
+    // Reached only from the worker, and only between turns -- so `busy` is
+    // false by construction here too. The parameter exists for the reader-side
+    // refusal path, which checks before queueing.
+    ExecuteCommand(command, /*busy=*/false);
 }
 
 void Session::Cancel() {
@@ -145,15 +244,15 @@ void Session::Terminate() {
 
 void Session::WorkerMain() {
     while (true) {
-        std::string text;
+        WorkItem item;
         {
             std::unique_lock<std::mutex> lock(mutex_);
             turn_cv_.wait(lock, [this] {
-                return !turns_.empty() || terminated_.load(std::memory_order_acquire);
+                return !work_.empty() || terminated_.load(std::memory_order_acquire);
             });
             if (terminated_.load(std::memory_order_acquire)) return;
-            text = std::move(turns_.front());
-            turns_.pop_front();
+            item = std::move(work_.front());
+            work_.pop_front();
             running_turn_ = true;
         }
 
@@ -161,7 +260,15 @@ void Session::WorkerMain() {
         // the session. Terminate() is what ends the session, and it is checked
         // separately above.
         cancel_.store(false, std::memory_order_release);
-        RunOneTurn(std::move(text));
+        // The turn-boundary guarantee, and it is structural rather than checked:
+        // this pops one item at a time and RunOneTurn is atomic from here, so a
+        // command can only ever land BETWEEN turns -- never between a tool_use
+        // and its tool_result.
+        if (auto* text = std::get_if<std::string>(&item)) {
+            RunOneTurn(std::move(*text));
+        } else {
+            RunOneCommand(std::get<QueuedCommand>(item));
+        }
 
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -230,13 +337,13 @@ void Session::EmitTurnCompleted(llm::StopReason stop_reason, const llm::Usage& u
 
 bool Session::idle() const {
     std::lock_guard<std::mutex> lock(mutex_);
-    return turns_.empty() && !running_turn_;
+    return work_.empty() && !running_turn_;
 }
 
 bool Session::WaitForIdleForTesting(std::chrono::milliseconds timeout) {
     std::unique_lock<std::mutex> lock(mutex_);
     return turn_cv_.wait_for(lock, timeout, [this] {
-        return (turns_.empty() && !running_turn_) || terminated_.load(std::memory_order_acquire);
+        return (work_.empty() && !running_turn_) || terminated_.load(std::memory_order_acquire);
     });
 }
 

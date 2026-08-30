@@ -569,3 +569,26 @@ TEST_CASE("sessions keep independent cwd and environment", "[tools_bash][session
     f.store.Erase("s1");
     CHECK(f.store.Snapshot("s1", f.dir.path()).env.count("MINIMAL_TEST_VAR") == 0);
 }
+
+TEST_CASE("/restart-shell resets the same state `restart: true` does",
+          "[tools_bash][commands][invariant]") {
+    // The point of the plugin-owns-its-commands rule, asserted rather than
+    // asserted about: bash's per-session cwd/env has ONE owner, and the tool
+    // flag, the command and the session observer all reach it through that owner
+    // rather than each keeping their own idea of the state.
+    minimal::tools_bash::BashSessionStateStore store;
+    const std::filesystem::path root = std::filesystem::temp_directory_path();
+    store.Snapshot("s1", root);
+    store.SetState("s1", root / "sub", {{"KEEP", "yes"}});
+    store.Snapshot("s2", root);
+    REQUIRE(store.Has("s1"));
+    REQUIRE(store.size() == 2);
+
+    // What /restart-shell does. Erase, not Reset: the next Snapshot re-seeds
+    // from project_root, which is the same end state and one fewer code path.
+    store.Erase("s1");
+
+    CHECK_FALSE(store.Has("s1"));
+    CHECK(store.Has("s2"));  // only that session's, as OnSessionEnded also requires
+    CHECK(store.size() == 1);
+}

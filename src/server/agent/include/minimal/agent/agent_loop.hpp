@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <functional>
 #include <optional>
+#include <functional>
 #include <random>
 #include <string>
 #include <string_view>
@@ -125,16 +126,49 @@ public:
     const std::vector<llm::Message>& history() const { return history_; }
     llm::ChatRequest BuildChatRequest() const;
 
+    // --- /-command seams. WORKER THREAD ONLY -------------------------------
+    //
+    // Safe without a lock because a command that touches session state is not
+    // ReadOnly(), so it is queued and run by the worker BETWEEN turns -- the
+    // same thread that reads all of this while running one. That is also what
+    // makes SetProvider safe: the worker is provably not inside a provider call
+    // at the moment it swaps the reference.
+
+    // /compact. Compacts regardless of occupancy -- the user asked -- but still
+    // respects the per-turn failure cooldown, which exists so a broken
+    // summarizer is not re-invoked repeatedly, and is just as true when the
+    // repeated invocation is manual.
+    //
+    // Returns how many messages were folded away, or nullopt if nothing was.
+    std::optional<std::size_t> CompactNow();
+
+    // /clear. Drops the in-memory working set; the STORE keeps the full record,
+    // the same rule compaction follows. Scrollback is unaffected.
+    void ClearHistory();
+
+    // /agent, /model. The preset carries the model, so both go through here.
+    void SetPreset(AgentPreset preset) { preset_ = std::move(preset); }
+    const AgentPreset& preset() const { return preset_; }
+
+    // /model across providers: the session builds the new provider and rebinds
+    // it. A reference, not an owner -- the session owns the object.
+    void SetProvider(llm::LlmProvider& provider) { provider_ = provider; }
+
 private:
     void AppendAndPersist(llm::Message message, std::optional<int> output_tokens = std::nullopt);
     void MaybeCompact();
+    // The shared body: every guard except the occupancy trigger, which is what
+    // MaybeCompact adds and CompactNow deliberately skips.
+    std::optional<std::size_t> Compact();
     void FlushInjectedMessages();
     bool Cancelled() const;
     // Waits before retry `attempt`, polling cancellation. False means "give up"
     // -- cancelled during the wait -- so the caller stops retrying.
     bool SleepForBackoff(int attempt);
 
-    llm::LlmProvider& provider_;
+    // Rebindable for /model across providers, hence the wrapper rather than a
+    // plain reference member.
+    std::reference_wrapper<llm::LlmProvider> provider_;
     tools::ToolExecutor& executor_;
     tools::ToolRegistry& registry_;
     HistoryStore& store_;

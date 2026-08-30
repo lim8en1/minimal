@@ -110,6 +110,7 @@ const AgentPreset& AgentPresetRegistry::Resolve(const std::string& preset_name) 
 }
 
 void ApplyModel(AgentPreset& preset, const config::ResolvedModel& model) {
+    preset.model_ref = model.ref;
     preset.provider_kind = model.backend;
     preset.provider = model.provider;
     preset.parameters = model.parameters;

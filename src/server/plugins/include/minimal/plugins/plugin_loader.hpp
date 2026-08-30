@@ -7,6 +7,7 @@
 #include <nlohmann/json.hpp>
 
 #include "minimal/agent/session_observer_registry.hpp"
+#include "minimal/commands/command_registry.hpp"
 #include "minimal/llm/provider_factory_registry.hpp"
 #include "minimal/tools/tool_registry.hpp"
 
@@ -43,6 +44,7 @@ struct PluginRecord {
 
     std::vector<std::string> registered_tools;
     std::vector<std::string> registered_provider_kinds;
+    std::vector<std::string> registered_commands;  // surface names, after aliasing
     bool registered_session_observer = false;
 
     bool ok() const { return status == LoadStatus::Loaded; }
@@ -68,7 +70,8 @@ public:
     // offered -- plugins already treat every registration hook as optional.
     PluginLoader(tools::ToolRegistry& tools, llm::ProviderFactoryRegistry& providers,
                  nlohmann::json tools_settings = nlohmann::json::object(),
-                 agent::SessionObserverRegistry* observers = nullptr);
+                 agent::SessionObserverRegistry* observers = nullptr,
+                 commands::CommandRegistry* commands = nullptr);
     ~PluginLoader();
 
     PluginLoader(const PluginLoader&) = delete;
@@ -85,6 +88,10 @@ private:
     llm::ProviderFactoryRegistry& providers_;
     nlohmann::json tools_settings_;
     agent::SessionObserverRegistry* observers_ = nullptr;
+    // Optional for the same reason observers_ is: a test exercising only tool
+    // registration has no command surface to offer, and building one would be
+    // scaffolding for nothing.
+    commands::CommandRegistry* commands_ = nullptr;
     std::vector<void*> handles_;  // never closed; see LIFETIME above
 };
 

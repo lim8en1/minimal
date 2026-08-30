@@ -26,9 +26,12 @@ add_library(minimal_server_core SHARED
     agent/permission_resolution.cpp
     agent/agent_preset_registry.cpp
     plugins/name_registry.cpp
+    plugins/collision_check.cpp
     agent/compaction_boundary.cpp
     agent/context_compactor.cpp
     agent/agent_loop.cpp
+    commands/command_registry.cpp
+    commands/command_dispatcher.cpp
     tools/tool_registry.cpp
     tools/tool_executor.cpp
     tools/skill_tool.cpp
@@ -38,6 +41,7 @@ add_library(minimal_server_core SHARED
     rpc/proto_convert.cpp
     rpc/pending_requests.cpp
     rpc/wire_permission_checker.cpp
+    rpc/wire_confirmation_broker.cpp
     rpc/session_service.cpp
     rpc/server.cpp
     agent/session_observer_registry.cpp
@@ -56,6 +60,7 @@ target_include_directories(minimal_server_core PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/config/include"
     "${CMAKE_CURRENT_SOURCE_DIR}/plugins/include"
     "${CMAKE_CURRENT_SOURCE_DIR}/agent/include"
+    "${CMAKE_CURRENT_SOURCE_DIR}/commands/include"
     "${CMAKE_CURRENT_SOURCE_DIR}/rpc/include"
     "${CMAKE_CURRENT_SOURCE_DIR}/session/include")
 

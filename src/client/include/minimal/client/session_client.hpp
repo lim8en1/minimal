@@ -1,6 +1,7 @@
 #pragma once
 
 #include <functional>
+#include <vector>
 #include <memory>
 #include <optional>
 #include <string>
@@ -57,6 +58,24 @@ public:
     // in flight deadlocks both sides.
     grpc::Status RunTurn(const std::string& session_id, const std::string& text,
                          const std::function<bool(const v1::ServerEvent&)>& on_event);
+
+    struct CommandOptions {
+        std::string name;  // without the leading '/'
+        std::vector<std::string> positional;
+        std::string raw;  // everything after the name, verbatim
+        // Answers a ConfirmationRequest; returning "" declines. Required,
+        // because a command that asks and gets no answer blocks the server's
+        // worker until the stream drops -- the headless client supplies one that
+        // declines, which is the same choice AllowOnly makes for permissions.
+        std::function<std::string(const v1::ConfirmationRequest&)> on_confirm;
+    };
+
+    // Sends one CommandInvocation and pumps events until its CommandResult
+    // arrives. Unlike RunTurn this may WRITE mid-stream: a confirming command
+    // blocks server-side waiting for an answer that has to travel back up the
+    // same stream.
+    grpc::Status RunCommand(const std::string& session_id, const CommandOptions& options,
+                            const std::function<bool(const v1::ServerEvent&)>& on_event);
 
 private:
     std::string server_address_;
