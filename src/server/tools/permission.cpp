@@ -2,9 +2,8 @@
 
 namespace minimal::tools {
 
-PermissionMode PermissionPolicy::mode_for(const std::string& tool_name,
-                                          ToolCategory category) const {
-    if (auto it = per_tool_overrides.find(tool_name); it != per_tool_overrides.end()) {
+PermissionMode PermissionPolicy::mode_for(std::string_view tool_name, ToolCategory category) const {
+    if (auto it = per_tool_overrides.find(std::string(tool_name)); it != per_tool_overrides.end()) {
         return it->second;
     }
     switch (category) {
@@ -15,8 +14,10 @@ PermissionMode PermissionPolicy::mode_for(const std::string& tool_name,
     return PermissionMode::Ask;  // unreachable; fail closed rather than fall through
 }
 
-PermissionMode McpPermissionPolicy::mode_for(const std::string& server_name) const {
-    if (auto it = per_server.find(server_name); it != per_server.end()) return it->second;
+PermissionMode McpPermissionPolicy::mode_for(std::string_view server_name) const {
+    if (auto it = per_server.find(std::string(server_name)); it != per_server.end()) {
+        return it->second;
+    }
     return default_mode;
 }
 

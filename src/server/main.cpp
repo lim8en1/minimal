@@ -4,9 +4,8 @@
 //   config load -> plugin load -> sanity check -> serve
 // Providers and tools are plugin-registered, so "is there at least one usable
 // provider?" cannot be answered before plugins are in. See ARCHITECTURE.md.
-//
-// The sanity check is still absent; everything else is wired.
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <exception>
@@ -22,11 +21,12 @@
 #include "minimal/common/config_paths.hpp"
 #include "minimal/common/logger.hpp"
 #include "minimal/config/permissions_config.hpp"
+#include "minimal/config/sanity_check.hpp"
 #include "minimal/config/settings_config.hpp"
 #include "minimal/config/skill_registry.hpp"
 #include "minimal/llm/provider_factory_registry.hpp"
 #include "minimal/commands/command_registry.hpp"
-#include "minimal/plugins/collision_check.hpp"
+#include "minimal/plugins/name_resolution.hpp"
 #include "minimal/plugins/plugin_discovery.hpp"
 #include "minimal/plugins/plugin_loader.hpp"
 #include "minimal/rpc/server.hpp"
@@ -158,47 +158,66 @@ int main(int argc, char** argv) {
     std::printf("\nregistered: %zu tool(s), %zu provider kind(s)\n", tools.size(),
                 providers.kinds().size());
 
-    // Name collisions are FATAL, and this is the first build in which they are
-    // detected at all: NameRegistry existed and was tested but nothing ever ran
-    // it, so a second plugin registering `bash` silently shadowed the first and
-    // which one won depended on load order. The full startup sanity check (track
-    // F) will fold this in among its other findings; until then it stands alone,
-    // because a harness whose tool set depends on directory iteration order is
-    // not one worth starting.
-    const auto collisions = minimal::plugins::CheckRegistrationNames(
-        tools, commands, plugin_config.command_aliases);
-    if (!collisions.ok()) {
-        std::fprintf(stderr, "\nregistration name conflicts:\n%s\n",
-                     minimal::plugins::DescribeCollisions(collisions).c_str());
-        std::fprintf(stderr,
-                     "resolve by disabling one plugin in plugins.json, or by aliasing one of them "
-                     "under \"command_aliases\" (keys are \"plugin.name\").\n");
+    // --- Stage 3: sanity check -------------------------------------------------
+    // Aliases apply at registration, before collision checking: a tool whose
+    // "plugin.original_name" has an entry in plugins.json command_aliases is
+    // served under its surface name, and permission keys / allowed_tools keep
+    // referencing the non-alias name (ARCHITECTURE.md, "Name collisions and
+    // aliases").
+    tools.ApplyAliases(plugin_config.command_aliases);
+    // Commands alias at REGISTRATION rather than in a second pass: a tool has to
+    // be re-keyed and wrapped so spec() advertises its surface name, which cannot
+    // happen until every registration is in, whereas a command's Name() IS its
+    // surface. Same rule, different amount of machinery to enforce it.
+    auto name_resolution =
+        minimal::plugins::ResolveRegistrationNames(tools, plugin_config.command_aliases, &commands);
+    tools.SetPermissionKeys(name_resolution.permission_keys);
+
+    // A linter, not a fail-fast validator: RunAll() surfaces every problem at
+    // once, then a single Fatal result aborts startup. Warnings degrade and
+    // continue.
+    minimal::config::StartupSanityCheck sanity(minimal::config::SanityCheckInputs{
+        config_dir,
+        records,
+        tools,
+        providers,
+        skills,
+        plugin_config,
+        std::move(name_resolution),
+        &commands,
+    });
+    const auto check_results = sanity.RunAll();
+
+    bool any_fatal = false;
+    if (check_results.empty()) {
+        std::printf("\nsanity check: ok\n");
+    } else {
+        std::printf("\nsanity check:\n");
+        for (const auto& result : check_results) {
+            const char* tag =
+                result.severity == minimal::config::CheckSeverity::Fatal ? "FATAL  " : "warning";
+            std::printf("  %s [%s] %s\n", tag, result.check_name.c_str(), result.message.c_str());
+            if (result.severity == minimal::config::CheckSeverity::Fatal) any_fatal = true;
+        }
+    }
+    if (any_fatal) {
+        std::fprintf(stderr, "\nstartup aborted: fix the fatal problem(s) above and retry\n");
         return 1;
     }
 
-    // TODO: stage 3 sanity check (bundled plugin failures are Fatal, user
-    // failures Warning).
-
     // --- Stage 4: serve ------------------------------------------------------
-    // Config that only the serving stage needs is loaded here rather than at
-    // stage 1, because the loaders throw on a missing file and plugin loading
-    // must not be held hostage to a config problem it does not depend on.
-    minimal::config::SettingsConfig settings;
-    minimal::config::PermissionsConfig permissions;
+    // Settings, permissions and the session database were already loaded and
+    // validated by the sanity check; take them from there rather than re-reading
+    // the same files. The preset registry still loads its own copies -- it is
+    // constructed from the config dir -- which cannot fail now that parsing is
+    // proven; the catch remains defense-in-depth.
+    minimal::config::SettingsConfig settings = sanity.settings();
+    minimal::config::PermissionsConfig permissions = sanity.permissions();
     std::unique_ptr<minimal::agent::AgentPresetRegistry> presets;
-    std::unique_ptr<minimal::session::SessionDatabase> session_db;
+    auto session_db = sanity.take_session_db();
     try {
-        settings = minimal::config::LoadSettingsConfig(config_dir / "settings.json");
-        permissions = minimal::config::LoadPermissionsConfig(config_dir / "permissions.json");
         presets = std::make_unique<minimal::agent::AgentPresetRegistry>(config_dir, skills);
-        // Opening migrates, and refuses a database this binary is too old to
-        // understand. That is a fatal startup condition, not a degraded mode:
-        // running on would silently drop every transcript on the floor.
-        session_db = std::make_unique<minimal::session::SessionDatabase>(
-            minimal::session::ResolveSessionDbPath(settings.session_db_path));
     } catch (const std::exception& e) {
-        // Until the sanity check lands this is the only diagnostic for a broken
-        // or absent config, so it names the directory as well as the error.
         std::fprintf(stderr, "\nconfiguration error (%s): %s\n", config_dir.c_str(), e.what());
         return 1;
     }

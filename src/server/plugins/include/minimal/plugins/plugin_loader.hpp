@@ -42,6 +42,10 @@ struct PluginRecord {
     LoadStatus status = LoadStatus::OpenFailed;
     std::string error;  // human-readable; empty when Loaded or Disabled
 
+    // ORIGINAL names, as the plugin declared them -- not surface names. A tool
+    // that was aliased at registration is still listed under the name it
+    // registered with, because collision detection and permission keys are
+    // computed from "who provided what", which a rename does not change.
     std::vector<std::string> registered_tools;
     std::vector<std::string> registered_provider_kinds;
     std::vector<std::string> registered_commands;  // surface names, after aliasing

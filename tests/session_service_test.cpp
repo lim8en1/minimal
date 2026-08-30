@@ -4,6 +4,9 @@
 // below the provider is real: real service, real Session, real worker thread,
 // real ToolExecutor, real permission round-trip.
 
+#include <sys/stat.h>
+#include <unistd.h>
+
 #include <atomic>
 #include <chrono>
 #include <filesystem>
@@ -240,6 +243,65 @@ TEST_CASE("CreateSession requires a project_root", "[session_service]") {
     v1::CreateSessionResponse response;
     const auto status = fixture.stub->CreateSession(&context, request, &response);
     CHECK(status.error_code() == grpc::StatusCode::INVALID_ARGUMENT);
+}
+
+TEST_CASE("CreateSession refuses a project_root that is not an existing directory",
+          "[session_service]") {
+    // project_root is the confinement boundary; validating it here means a bad
+    // client-supplied path fails fast with a reason instead of surfacing later
+    // as confusing tool errors.
+    ServiceFixture fixture;
+    fixture.Start();
+
+    // A path that does not exist.
+    {
+        grpc::ClientContext context;
+        v1::CreateSessionRequest request;
+        request.set_agent_preset("main");
+        request.set_project_root((fixture.dir / "no-such-dir").string());
+        v1::CreateSessionResponse response;
+        const auto status = fixture.stub->CreateSession(&context, request, &response);
+        CHECK(status.error_code() == grpc::StatusCode::FAILED_PRECONDITION);
+        CHECK(status.error_message().find("not an existing directory") != std::string::npos);
+    }
+    // A path that exists but is a file, not a directory.
+    {
+        const auto file = fixture.dir / "work" / "a-file.txt";
+        { std::ofstream(file) << "x"; }
+        grpc::ClientContext context;
+        v1::CreateSessionRequest request;
+        request.set_agent_preset("main");
+        request.set_project_root(file.string());
+        v1::CreateSessionResponse response;
+        const auto status = fixture.stub->CreateSession(&context, request, &response);
+        CHECK(status.error_code() == grpc::StatusCode::FAILED_PRECONDITION);
+    }
+}
+
+TEST_CASE("CreateSession refuses a project_root it cannot write", "[session_service]") {
+    // POSIX access(2): this libc++ ships no std::filesystem writability probe.
+    // Skipped when the check is meaningless (e.g. root bypasses mode bits).
+    ServiceFixture fixture;
+    fixture.Start();
+
+    const auto ro = fixture.dir / "read-only-work";
+    std::filesystem::create_directories(ro);
+    REQUIRE(::chmod(ro.c_str(), 0555) == 0);
+    if (::access(ro.c_str(), W_OK) == 0) {  // likely root: mode bits do not apply
+        ::chmod(ro.c_str(), 0755);
+        return;
+    }
+
+    grpc::ClientContext context;
+    v1::CreateSessionRequest request;
+    request.set_agent_preset("main");
+    request.set_project_root(ro.string());
+    v1::CreateSessionResponse response;
+    const auto status = fixture.stub->CreateSession(&context, request, &response);
+    ::chmod(ro.c_str(), 0755);  // restore before fixture teardown
+
+    CHECK(status.error_code() == grpc::StatusCode::FAILED_PRECONDITION);
+    CHECK(status.error_message().find("not writable") != std::string::npos);
 }
 
 TEST_CASE("an unknown preset is reported with its reason", "[session_service]") {

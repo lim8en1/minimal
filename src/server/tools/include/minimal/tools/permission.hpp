@@ -2,6 +2,7 @@
 
 #include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -78,14 +79,14 @@ struct PermissionPolicy {
 
     std::unordered_map<std::string, PermissionMode> per_tool_overrides;
 
-    PermissionMode mode_for(const std::string& tool_name, ToolCategory category) const;
+    PermissionMode mode_for(std::string_view tool_name, ToolCategory category) const;
 };
 
 struct McpPermissionPolicy {
     std::unordered_map<std::string, PermissionMode> per_server;
     PermissionMode default_mode = PermissionMode::Ask;
 
-    PermissionMode mode_for(const std::string& server_name) const;
+    PermissionMode mode_for(std::string_view server_name) const;
 };
 
 // --- Permission precedence chains (Config -- "Permission-mode precedence") ---

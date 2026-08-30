@@ -55,6 +55,18 @@ TEST_CASE("an alias naming nothing registered is dangling", "[name_registry]") {
     CHECK(Contains(result.dangling_aliases, "commands-core.typo"));
 }
 
+TEST_CASE("an alias for a kind with no registrations at all is dangling too", "[name_registry]") {
+    // A plugin that is disabled (or a pure typo) contributes no entries, so its
+    // kind never reaches the per-kind loop -- the alias must still be reported,
+    // not silently kept.
+    NameRegistry reg;
+    reg.SetAlias(NameKind::Tool, "ghost-plugin.ghost_tool", "x");
+
+    auto result = reg.Resolve();
+    CHECK(result.entries.empty());
+    CHECK(Contains(result.dangling_aliases, "ghost-plugin.ghost_tool"));
+}
+
 TEST_CASE("permission key stays bare when the original name is unambiguous", "[name_registry]") {
     NameRegistry reg;
     reg.Register(NameKind::Tool, "tools-bash", "bash");

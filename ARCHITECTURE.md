@@ -521,7 +521,7 @@ Both `PermissionChecker`'s implementation and `CommandDispatcher` compose the sa
 
 ### Name collisions and aliases
 
-**Collisions are fatal**, and as of the command system they are actually *detected*: `NameRegistry` existed and was unit-tested from the beginning but nothing outside its own tests ever constructed one, so both registries shadowed duplicates via `insert_or_assign` and which plugin won depended on directory iteration order. `plugins/collision_check.{hpp,cpp}` runs it over what registered, and `main.cpp` refuses to serve. Two plugins registering the same tool name, command name, `ViewSpec::id`, or `ToolResultRenderer::tool_name` halt startup with a diagnostic naming both. Silent shadowing is the wrong failure mode — it makes behavior depend on plugin load order.
+**Collisions are fatal**, and they are now actually *detected*: `NameRegistry` existed and was unit-tested from the beginning but nothing outside its own tests ever constructed one, so a duplicate registration silently shadowed via `insert_or_assign` and which plugin won depended on directory iteration order. `plugins/name_resolution.{hpp,cpp}` (`ResolveRegistrationNames`) feeds it from both the tool and command attributions, applies `command_aliases` routed to whichever kind claims each key, and the startup sanity check reports the result. `ToolRegistry::Register` now *shadows* a duplicate rather than destroying it — destroying the first registrant made a collision unfixable by aliasing, since the object an alias would have renamed was already gone. Two plugins registering the same tool name, command name, `ViewSpec::id`, or `ToolResultRenderer::tool_name` halt startup with a diagnostic naming both. Silent shadowing is the wrong failure mode — it makes behavior depend on plugin load order.
 
 Resolution is disabling one plugin, rebuilding, or **aliasing** via an optional `plugins.json` field:
 
@@ -529,7 +529,7 @@ Resolution is disabling one plugin, rebuilding, or **aliasing** via an optional 
 "command_aliases": { "bash_over_ssh.bash": "ssh_bash", "commands-core.compact": "c" }
 ```
 
-Alias keys are always fully qualified, so they are unambiguous even *before* collision resolution; aliases are applied at registration, **before** the collision check, so aliasing is itself a valid way to resolve one. This is not the command manifest rejected above: that would have *declared* commands as data (a shadow of code, free to drift). This *overrides metadata of code-registered entries*, and a key resolving to nothing is detectable at load.
+Alias keys are always fully qualified, so they are unambiguous even *before* collision resolution; aliases are applied at registration, **before** the collision check, so aliasing is itself a valid way to resolve one. In practice that means `ToolRegistry::ApplyAliases()` — run once after every plugin and core built-in has registered — re-keys each aliased tool under its surface name, wrapping it in `AliasedTool` so `spec()` advertises the surface name the model must call it by. This is not the command manifest rejected above: that would have *declared* commands as data (a shadow of code, free to drift). This *overrides metadata of code-registered entries*, and a key resolving to nothing is detectable at load.
 
 **Three naming levels — this is what keeps a rename from silently breaking a permission rule:**
 
@@ -1270,11 +1270,13 @@ struct CheckResult { CheckSeverity severity; std::string check_name, message; };
 
 class StartupSanityCheck {
 public:
-    std::vector<CheckResult> RunAll() const;   // runs every check regardless of earlier failures
+    std::vector<CheckResult> RunAll();   // runs every check regardless of earlier failures
 };
 ```
 
-Checks: every config file parses; at least one usable `providers.json` entry exists with a resolvable key *and* a registered provider kind; each `mcps.json` entry's `command` resolves on `PATH` (stdio) or `url` is well-formed (http); `project_root` exists and is writable; the SQLite database is accessible and not newer than the binary; each discovered plugin's ABI tag matches; `max_concurrent_subagents` is sane; **no registration-name collisions** (fatal — see Name collisions and aliases); every `command_aliases` key resolves to something registered.
+Checks: every config file parses; at least one usable `providers.json` entry exists with a resolvable key *and* a registered provider kind; at least one agent preset parses and `settings.json`'s `default_agent_preset` resolves end to end; referenced compression prompts exist; each `mcps.json` entry's `command` resolves on `PATH` (stdio) or `url` is well-formed (http); the config and data directories exist and are writable; the SQLite database is accessible and not newer than the binary; each discovered plugin's load status is reported with severity split by provenance; `max_concurrent_subagents` is sane; **no registration-name collisions** (fatal — see Name collisions and aliases); every `command_aliases` key resolves to something registered.
+
+`project_root` is per-session, supplied by the client in `CreateSessionRequest`, so it is **not** a startup check. It is validated in `CreateSession` — it must exist, be a directory, and be writable — with a `FAILED_PRECONDITION` reason rather than failing later inside tool execution.
 
 Two checks specifically for the naming model: warn when a `per_tool_overrides` / `allowed_tools` / `allowed_skills` entry resolves to **nothing** registered (catches typos and entries stranded by a disabled plugin) — for `allowed_skills`, an entry that resolves to a *not-loaded* skill warns too, carrying its `load_error` — and warn when a bare permission key is **ambiguous** because two plugins provide that original name; the intended rule is then undefined and must be written in qualified `plugin.name` form. Every not-loaded skill entry is itself a warning.
 

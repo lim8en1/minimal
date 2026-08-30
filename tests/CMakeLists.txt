@@ -30,9 +30,12 @@ add_executable(minimal_tests
     openai_stream_test.cpp
     openai_error_mapping_test.cpp
     plugin_loader_test.cpp
+    aliased_tool_test.cpp
     provider_factory_registry_test.cpp
     permission_codec_test.cpp
     providers_config_test.cpp
+    mcps_config_test.cpp
+    sanity_check_test.cpp
     settings_config_test.cpp
     permissions_config_test.cpp
     agent_preset_frontmatter_test.cpp
@@ -88,7 +91,7 @@ target_include_directories(minimal_tests PRIVATE
 # warns about it). Depend on the bundle.
 add_subdirectory(fixtures)
 add_dependencies(minimal_tests
-    fixture-good fixture-bad-abi fixture-minimal fixture-not-a-plugin)
+    fixture-good fixture-collision fixture-bad-abi fixture-minimal fixture-not-a-plugin)
 target_compile_definitions(minimal_tests PRIVATE
     MINIMAL_FIXTURE_DIR="${CMAKE_CURRENT_BINARY_DIR}/fixtures")
 

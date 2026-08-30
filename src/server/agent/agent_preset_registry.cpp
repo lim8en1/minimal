@@ -32,8 +32,8 @@ std::string ReadFileRequired(const std::filesystem::path& path, const std::strin
 // Renders the allowed skills' frontmatter (name + description only) into the
 // system prompt -- the entire resident cost of a skill library. Only LOADED
 // skills appear: a failed skill's reason surfaces through SkillTool at
-// invocation time, and unknown names in allowed_skills are skipped here (a
-// future sanity_check makes them loud).
+// invocation time, and unknown names in allowed_skills are skipped here (the
+// startup sanity check reports them at load time).
 //
 // All() is sorted by name, so the listing is deterministic -- it sits in the
 // cached prefix and must not reorder turn to turn.
@@ -95,8 +95,8 @@ AgentPresetRegistry::AgentPresetRegistry(std::filesystem::path config_dir,
       settings_(config::LoadSettingsConfig(config_dir_ / "settings.json")),
       permissions_(config::LoadPermissionsConfig(config_dir_ / "permissions.json")),
       skills_(skills) {
-    // Both optional at this phase -- a real deployment's absence is a future
-    // sanity_check's job to flag, not this constructor's.
+    // Both optional at this phase -- a real deployment's absence is the
+    // startup sanity check's job to flag, not this constructor's.
     subagent_prefix_ = ReadFileOrEmpty(config_dir_ / "agents" / "subagent.md");
     default_compression_prompt_ =
         config::parse_frontmatter_markdown(ReadFileOrEmpty(config_dir_ / "prompts" / "compression.md")).body;
