@@ -2,7 +2,8 @@
 
 namespace minimal::agent {
 
-void InMemoryHistoryStore::Append(const llm::Message& message) {
+void InMemoryHistoryStore::Append(const llm::Message& message, std::optional<int> output_tokens) {
+    (void)output_tokens;  // durability concern; this store has none
     std::lock_guard<std::mutex> lock(mutex_);
     messages_.push_back(StoredMessage{next_seq_++, message});
 }

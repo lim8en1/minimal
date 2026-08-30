@@ -19,6 +19,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <mutex>
+#include <optional>
 #include <vector>
 
 #include "minimal/agent/history_store.hpp"
@@ -32,7 +33,7 @@ struct StoredMessage {
 
 class InMemoryHistoryStore : public HistoryStore {
 public:
-    void Append(const llm::Message& message) override;
+    void Append(const llm::Message& message, std::optional<int> output_tokens) override;
 
     // Descending by seq, matching GetMessagesResponse's contract: scrollback
     // pages backwards from the newest message. `before_seq <= 0` means "start

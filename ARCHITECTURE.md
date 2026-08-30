@@ -1105,14 +1105,16 @@ Core. Server subprocesses are **shared across sessions** (one per `mcps.json` en
 
 
 - **`sessions`**: `id, parent_session_id (nullable, self-FK), name, project_root, agent_preset, created_at, updated_at`.
-- **`messages`**: `id, session_id, seq, role, content_json, token_count, created_at`, indexed `(session_id, seq)`.
+- **`messages`**: `id, session_id, seq, role, content_json, token_count, created_at`, with `UNIQUE (session_id, seq)` — which is the `(session_id, seq)` index keyset pagination queries against.
 - Keyset pagination for scrollback (`WHERE session_id=? AND seq < ? ORDER BY seq DESC LIMIT N`) — no `OFFSET` scans over a 1M-token history. WAL mode for concurrent read-while-write.
+- **`token_count` holds the backend-reported output tokens for assistant messages and 0 otherwise.** There is no per-message input count to store: each turn's `input_tokens` already covers the whole history, so attributing it to one row would be fiction (see Token accounting).
+- **Timestamps are strictly increasing within a process**, even when operations land in the same millisecond: the store issues `max(wall_ms, last_issued + 1)`. `updated_at` is the picker's sort key, and a tie would fall back to id order — random within a millisecond, since ids break same-ms ties with their entropy suffix. Drift from wall clock is at most one ms per operation.
 
 **`project_root` is per-session**, not global — it is the boundary for path confinement, @-mentions, `SuggestPaths`, and bash's initial cwd, and the session picker filters on it. The client supplies its cwd in `CreateSessionRequest`.
 
 **Session naming, layered:**
 
-1. **Core default, free**: name = truncated first user message. No model, no latency, no failure mode.
+1. **Core default, free**: name = the first user message *with text*, whitespace-collapsed and truncated to 60 code points (UTF-8-safe). Set in the same transaction as that append, only while the name is still empty — so an explicit creation name or a later observer-set name is never clobbered. A tool-result-only user message (e.g. an injected subagent completion) is not a name; the search continues with later messages. No model, no latency, no failure mode.
 2. **Optional observer plugin**: async LLM titling after turn 1 through the already-configured provider (~100 tokens), overwriting the default.
 
 A local summarization model (BART/ONNX) was considered and rejected: domain mismatch (`bart-large-cnn` is trained on news prose, emits multi-sentence extractive summaries rather than short titles, and has never seen a code-bearing chat transcript); dependency weight (~400M params — roughly 1.6 GB fp32, ~400 MB int8 — plus ONNX Runtime or libtorch, a *second* inference stack, in a project whose first goal is low footprint and which rejected far lighter dependencies); and redundancy (the configured provider does it better in-domain with zero new dependencies, and is already fully local when pointed at llama.cpp).

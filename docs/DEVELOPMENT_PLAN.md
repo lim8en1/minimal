@@ -33,13 +33,21 @@ Companion to `ARCHITECTURE.md`, which remains the single source of truth for *de
 | `WirePermissionChecker` | `src/server/rpc/` | First real `PermissionChecker`; no gRPC dependency, so testable in-process. |
 | `Session`, `SessionRegistry` | `src/server/agent/` | Three-thread topology, initial-attach guard. |
 | `SessionObserver` + registry | `src/server/agent/` | Track I; closes the `tools-bash` state leak. |
-| `InMemoryHistoryStore` | `src/server/agent/` | Thread-safe, `seq`-keyed; SQLite swaps in behind it. |
 | `SessionServiceImpl`, `Server` | `src/server/rpc/` | `CreateSession` + `OpenSession`; refcounted exit. |
 | `SessionClient`, `minimal -p` | `src/client/` | text and jsonl output, exit codes, `AllowOnly` default. |
 
+### Built in Milestone B
+
+| Piece | Location | Notes |
+|---|---|---|
+| `SessionDatabase` | `src/server/session/` | One connection, one mutex, WAL, transactional migrations. |
+| `SqliteHistoryStore` | `src/server/session/` | The durable `HistoryStore`; replaced `InMemoryHistoryStore`. |
+| `SessionReader` | `src/server/session/` | Keyset paging — what `GetMessages` answers from. |
+| `message_codec`, `ulid` | `src/server/session/` | Strict `llm::Message` ↔ JSON; time-sortable session ids. |
+
 ### Still not built
 
-`src/server/commands/`, `src/server/mcp/`, SQLite session storage, the TUI, subagents, the production compactor, the sanity check. `commands-core` is an empty plugin shell.
+`src/server/commands/`, `src/server/mcp/`, the TUI, subagents, the production compactor, the sanity check, **session resume** (see §4 B). `commands-core` is an empty plugin shell.
 
 ### The risk this creates
 
@@ -67,7 +75,7 @@ Test depth is inverted relative to integration risk: every well-tested layer is 
 
 **Independent — may start now, in any order, by anyone:**
 
-- **B. Session storage (SQLite)** — `HistoryStore` is already an interface with an in-memory fake. A SQLite implementation is a drop-in behind it and needs nothing from A. *Caveat: the `ListSessions`/`GetMessages` RPCs that expose it do need A.*
+- **B. Session storage (SQLite)** — **Done.** `src/server/session/`: `SessionDatabase` (one connection, one mutex, WAL, transactional migrations), `SqliteHistoryStore` (the drop-in behind `HistoryStore`, which gained an optional per-message output-token count), `SessionReader` (keyset paging + session metadata for `ListSessions`). *Caveat: the `ListSessions`/`GetMessages` RPCs that expose it still need A.*
 - **F. Startup sanity check** — pure config-layer work over already-built loaders. `main.cpp` is already staged for it (`main.cpp:114`).
 - **H. Production compactor** — `Compactor` is an injected `std::function`; the real one calls the provider with `prompts/compression.md`. Both sides already exist.
 - ~~**I. `SessionObserver` registry**~~ — **done**, landed with A2. `minimal_plugin_register_session_observer` is live in the plugin ABI and `tools-bash` implements it.
@@ -207,20 +215,22 @@ Items 1, 6, 7, 8 and 9 were each discovered by a hang or a crash rather than by 
 
 ### B. Session storage — SQLite
 
-> § *Session storage — SQLite*. Depends on nothing; the RPCs that expose it depend on A3.
+> § *Session storage — SQLite*. Depends on nothing; the RPCs that expose it depend on A3. **Done** — 31 test cases in `tests/session_store_test.cpp`, all green.
 
-**What.** A `HistoryStore` implementation over SQLite3 (already a `find_package` dependency, currently unused), plus session metadata for `ListSessions`.
+**What.** A `HistoryStore` implementation over SQLite3 (already a `find_package` dependency, currently unused), plus session metadata for `ListSessions`. Landed as `src/server/session/`: `message_codec` (strict `llm::Message` ↔ JSON), `ulid` (time-sortable session ids), `session_database` (connection, pragmas, transactional migrations, lifecycle ops), `sqlite_history_store` (the drop-in adapter), `session_reader` (keyset paging).
 
 **Acceptance criteria**
-- Messages persist and reload byte-identically, including tool-call blocks.
-- A crash mid-turn leaves a readable transcript (no partial-write corruption).
+- Messages persist and reload byte-identically, including tool-call blocks. *(Structural equality of the decoded `Message`; the codec is strict on decode.)*
+- A crash mid-turn leaves a readable transcript (no partial-write corruption). *(Proven with a real fork + SIGKILL mid-append; every append is one transaction.)*
 - Schema version recorded; a database newer than the binary is refused (§ *Startup sanity check*).
 
 **Test cases** (`tests/session_store_test.cpp`)
-- [ ] Round-trip every `Message` content-block variant, including `ToolUseBlock`/`ToolResultBlock` pairs.
-- [ ] Reopen after an abrupt close; assert no partial message is returned.
-- [ ] Schema-version mismatch is refused with a clear error.
-- [ ] Paging: `GetMessages` by `seq` range over a large transcript stays bounded in memory.
+- [x] Round-trip every `Message` content-block variant, including `ToolUseBlock`/`ToolResultBlock` pairs.
+- [x] Reopen after an abrupt close; assert no partial message is returned.
+- [x] Schema-version mismatch is refused with a clear error.
+- [x] Paging: `GetMessages` by `seq` range over a large transcript stays bounded in memory.
+
+Plus, beyond the original list: migration rollback proven load-bearing (fault-injected failing migration via an `OpenOptions` test seam — delete the transaction, watch it fail), default session naming (set once, UTF-8-safe 60-code-point truncation, tool-result-only messages skipped), `ListSessions` filters/sort/`message_count`, cascade delete, and concurrent appends across sessions.
 
 ### F. Startup sanity check
 

@@ -131,7 +131,11 @@ private:
 
 class InMemoryHistoryStore : public agent::HistoryStore {
 public:
-    void Append(const llm::Message& message) override { messages.push_back(message); }
+    // Token counts are a persistence concern; the in-memory fake ignores them.
+    void Append(const llm::Message& message, std::optional<int> output_tokens) override {
+        (void)output_tokens;
+        messages.push_back(message);
+    }
     std::vector<llm::Message> messages;
 };
 

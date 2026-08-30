@@ -42,6 +42,7 @@ add_executable(minimal_tests
     event_queue_test.cpp
     wire_permission_checker_test.cpp
     session_observer_test.cpp
+    session_store_test.cpp
     session_test.cpp
     session_registry_test.cpp
     session_service_test.cpp
@@ -86,10 +87,17 @@ target_compile_definitions(minimal_tests PRIVATE
 
 # The headless client is exercised as a real client here, so the test binary
 # links it -- the E2E tier is the whole point of building -p first.
+#
+# SQLite3 directly: server_core links it PRIVATE (session_database.hpp keeps
+# <sqlite3.h> out of its interface), but the session-store tests build fixtures
+# (a hand-crafted newer-version database) and assert on internals
+# (integrity_check, journal_mode, sqlite_master) that SessionDatabase
+# deliberately does not expose.
 target_link_libraries(minimal_tests PRIVATE
     minimal::test_support
     minimal::client_core
-    Catch2::Catch2WithMain)
+    Catch2::Catch2WithMain
+    SQLite3::SQLite3)
 
 catch_discover_tests(minimal_tests)
 

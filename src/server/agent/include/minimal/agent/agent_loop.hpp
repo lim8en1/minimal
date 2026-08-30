@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -110,7 +111,7 @@ public:
     llm::ChatRequest BuildChatRequest() const;
 
 private:
-    void AppendAndPersist(llm::Message message);
+    void AppendAndPersist(llm::Message message, std::optional<int> output_tokens = std::nullopt);
     void MaybeCompact();
     void FlushInjectedMessages();
     bool Cancelled() const;

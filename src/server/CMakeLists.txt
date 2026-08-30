@@ -42,7 +42,12 @@ add_library(minimal_server_core SHARED
     agent/in_memory_history_store.cpp
     agent/session_observer_registry.cpp
     agent/session.cpp
-    agent/session_registry.cpp)
+    agent/session_registry.cpp
+    session/ulid.cpp
+    session/message_codec.cpp
+    session/session_database.cpp
+    session/sqlite_history_store.cpp
+    session/session_reader.cpp)
 add_library(minimal::server_core ALIAS minimal_server_core)
 
 target_include_directories(minimal_server_core PUBLIC
@@ -51,7 +56,8 @@ target_include_directories(minimal_server_core PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/config/include"
     "${CMAKE_CURRENT_SOURCE_DIR}/plugins/include"
     "${CMAKE_CURRENT_SOURCE_DIR}/agent/include"
-    "${CMAKE_CURRENT_SOURCE_DIR}/rpc/include")
+    "${CMAKE_CURRENT_SOURCE_DIR}/rpc/include"
+    "${CMAKE_CURRENT_SOURCE_DIR}/session/include")
 
 target_link_libraries(minimal_server_core
     PUBLIC
