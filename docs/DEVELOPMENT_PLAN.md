@@ -528,7 +528,7 @@ Not scheduled, recorded so they are decisions rather than oversights.
 - **Server-wide fd hygiene** — no `CLOEXEC` discipline on gRPC/SQLite/log fds; every bash command inherits them. The bash pipes are handled; the rest is not.
 - **`tree-sitter-bash` for command disclosure** — the hand-rolled scanner is conservative and its failure mode is safe (fewer grants offered). Upgrading raises the hit rate, not the safety floor. The grammar is already a planned client dependency.
 - ~~**Unknown `allowed_skills` entries are silently dropped**~~ — still true of resolution (correct for lookup), but now *reported* at startup by F (`naming_model` check).
-- **`themes/*.json` and `keybindings.json` are specified but unread** — nothing outside a comment in `config_paths.hpp` refers to them, so they are deliberately not seeded either. They arrive with the TUI (track E), which is the first thing that would read one.
+- **`themes/*.json` and `keybindings.json` are specified but unread** — `themes/dark.json` and `themes/light.json` now ship in `bundled/` and are seeded (E1); nothing loads them until E4 assembles the frame. `keybindings.json` is still neither seeded nor read: bundling a file whose schema has no loader yet is the drift-prone manifest the command system rejected, so it lands with its loader in E4.
 - **The compaction trigger now follows the model's window** (`{"percent": 80}` by default), so the
   "0 means never, and nothing says so" gap is closed: a window-relative strategy against a model with
   no declared `context_window_tokens` logs once and disables itself rather than staying silent.

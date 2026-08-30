@@ -814,7 +814,9 @@ Three policies complete the surface:
 // src/client/render/markdown_renderer.hpp
 class MarkdownRenderer {
 public:
-    // md_parse() with MD_FLAG_TABLES | MD_FLAG_STRIKETHROUGH | MD_FLAG_TASKLISTS.
+    // md_parse() with MD_DIALECT_GITHUB (tables, strikethrough, tasklists, plus the
+    // permissive autolinks -- chat text contains bare URLs constantly, and models
+    // emit them without <> wrapping).
     // enter_block/leave_block/enter_span/leave_span/text callbacks build ftxui::Elements.
     ftxui::Element Render(std::string_view markdown_text) const;
 };
@@ -835,8 +837,9 @@ private:
     std::chrono::steady_clock::time_point last_reparse_;
     bool finalized_ = false;
     static constexpr auto kReparseDebounce = std::chrono::milliseconds(120);
-    // Re-parses only if !finalized_ && elapsed >= debounce; Finalize() always does one
-    // authoritative reparse, replacing artifacts from mid-stream unclosed spans.
+    // Re-parses only if !finalized_ && text changed && elapsed >= debounce;
+    // Finalize() always does one authoritative reparse, replacing artifacts from
+    // mid-stream unclosed spans.
 };
 ```
 
@@ -851,8 +854,17 @@ class SyntaxHighlighter {
 public:
     // Returns plain text if `language` isn't in the curated set.
     ftxui::Elements Highlight(std::string_view code, std::string_view language) const;
+
+    // The tested seam beneath Highlight: byte-range spans with categories, no
+    // FTXUI. FTXUI render output is not unit-tested (visual, low yield), so the
+    // node-type -> category mapping is asserted here instead. Plain spans are
+    // informational defaults, not claims (a Plain parent covers the whole
+    // input); "later wins" applies only among categorized spans.
+    std::vector<HighlightSpan> HighlightCode(std::string_view code, std::string_view language) const;
 };
 ```
+
+The grammars are pinned and compiled by `cmake/TreeSitterGrammars.cmake` (FetchContent, tag-pinned with the resolved commit recorded; each grammar is just its generated `parser.c` plus an optional external scanner, so the grammar repos' own CMake is deliberately not run). Note that keywords are *anonymous* nodes in tree-sitter grammars (`"return"`, `"if"` — string literals in the grammar), so the rule tables apply to anonymous node types as well; named-node-only matching would color no keyword at all.
 
 The highlighter never hardcodes a color; the theme supplies one per `HighlightCategory`, keeping highlighting and theming separate.
 
@@ -874,7 +886,7 @@ The highlighter never hardcodes a color; the theme supplies one per `HighlightCa
 }
 ```
 
-`src/client/render/color_downsample.{hpp,cpp}` maps truecolor to the nearest 256-/16-color entry, checked once at startup against `COLORTERM`/`TERM` — themes are authored once and degrade automatically. Bundled-theme contrast is validated against both light- and dark-background terminals: a color picked against one silently breaks on the other.
+`src/client/render/color_downsample.{hpp,cpp}` maps truecolor to the nearest 256-/16-color entry, checked once at startup against `COLORTERM`/`TERM` — themes are authored once and degrade automatically. Bundled-theme contrast is validated per family: each bundled theme's text roles must hold WCAG 3.0 against the terminal background the theme is named for (dark against black, light against white). Requiring every color to work against *both* backgrounds would forbid exactly what a theme family exists to express — near-white assistant text in the dark theme, near-black in the light one.
 
 ## TUI layout — `src/client/`
 

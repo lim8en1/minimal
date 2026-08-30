@@ -7,7 +7,7 @@ cmake_minimum_required(VERSION 3.28)
 project(minimal
     VERSION 0.1.0
     DESCRIPTION "Local-first coding-agent harness"
-    LANGUAGES CXX)
+    LANGUAGES C CXX)  # C: the vendored tree-sitter grammars compile parser.c
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -77,6 +77,16 @@ if(MINIMAL_BUILD_CLIENT)
     find_package(unofficial-tree-sitter CONFIG QUIET)
     if(NOT unofficial-tree-sitter_FOUND)
         find_package(tree-sitter CONFIG QUIET)
+    endif()
+    # The vcpkg package has been named both ways; normalize so consumers have
+    # one name. (Written when the first consumer landed -- the client render
+    # layer -- not when the dependency was declared.)
+    if(TARGET unofficial::tree-sitter::tree-sitter)
+        add_library(minimal::tree_sitter ALIAS unofficial::tree-sitter::tree-sitter)
+    elseif(TARGET tree-sitter::tree-sitter)
+        add_library(minimal::tree_sitter ALIAS tree-sitter::tree-sitter)
+    else()
+        message(FATAL_ERROR "tree-sitter core library not found via vcpkg")
     endif()
 endif()
 
