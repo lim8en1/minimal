@@ -4,11 +4,14 @@
 
 namespace minimal::rpc {
 
-PendingRequests::Registration::Registration(PendingRequests* owner, std::string request_id)
-    : owner_(owner), request_id_(std::move(request_id)) {}
+PendingRequests::Registration::Registration(PendingRequests* owner, std::string request_id,
+                                            std::uint64_t epoch)
+    : owner_(owner), request_id_(std::move(request_id)), epoch_(epoch) {}
 
 PendingRequests::Registration::Registration(Registration&& other) noexcept
-    : owner_(std::exchange(other.owner_, nullptr)), request_id_(std::move(other.request_id_)) {}
+    : owner_(std::exchange(other.owner_, nullptr)),
+      request_id_(std::move(other.request_id_)),
+      epoch_(other.epoch_) {}
 
 PendingRequests::Registration& PendingRequests::Registration::operator=(
     Registration&& other) noexcept {
@@ -16,6 +19,7 @@ PendingRequests::Registration& PendingRequests::Registration::operator=(
         if (owner_ != nullptr) owner_->Unregister(request_id_);
         owner_ = std::exchange(other.owner_, nullptr);
         request_id_ = std::move(other.request_id_);
+        epoch_ = other.epoch_;
     }
     return *this;
 }
@@ -33,22 +37,28 @@ std::optional<std::string> PendingRequests::Registration::AwaitResponse() {
     // sitting in the slot, and a notification-based wait would have missed it and
     // blocked forever.
     owner_->cv_.wait(lock, [this] {
-        if (owner_->cancelled_) return true;
+        if (owner_->AnswerIsUnreachable(epoch_)) return true;
         const auto it = owner_->slots_.find(request_id_);
         return it == owner_->slots_.end() || it->second.answer.has_value();
     });
 
+    // Checked again rather than inferred from the predicate: an answer that
+    // landed in the same wakeup as a cancellation is still an answer nobody is
+    // going to act on, since the turn it belonged to is over.
+    if (owner_->AnswerIsUnreachable(epoch_)) return std::nullopt;
     const auto it = owner_->slots_.find(request_id_);
     if (it == owner_->slots_.end()) return std::nullopt;
-    return it->second.answer;  // nullopt when woken by cancellation
+    return it->second.answer;
 }
 
 PendingRequests::Registration PendingRequests::Register(std::string request_id) {
+    std::uint64_t epoch = 0;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         slots_[request_id];  // default-constructs an empty slot
+        epoch = epoch_;
     }
-    return Registration(this, std::move(request_id));
+    return Registration(this, std::move(request_id), epoch);
 }
 
 bool PendingRequests::Resolve(const std::string& request_id, std::string chosen_option) {
@@ -68,14 +78,25 @@ bool PendingRequests::Resolve(const std::string& request_id, std::string chosen_
 void PendingRequests::CancelAll() {
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        cancelled_ = true;
+        // Bumped, not latched. Every waiter registered in the old generation
+        // wakes with nullopt; the next Register() takes the new one and blocks
+        // normally, so the turn after a cancel can still ask its questions.
+        ++epoch_;
     }
     cv_.notify_all();
 }
 
-bool PendingRequests::cancelled() const {
+void PendingRequests::Shutdown() {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        shutdown_ = true;
+    }
+    cv_.notify_all();
+}
+
+bool PendingRequests::shut_down() const {
     std::lock_guard<std::mutex> lock(mutex_);
-    return cancelled_;
+    return shutdown_;
 }
 
 std::size_t PendingRequests::pending_count() const {

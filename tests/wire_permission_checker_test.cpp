@@ -137,7 +137,7 @@ TEST_CASE("cancellation unblocks a waiting check as a denial", "[wire_permission
     REQUIRE(harness->queue.Pop().has_value());
     CHECK_FALSE(answered.WaitFor(50ms));
 
-    harness->pending.CancelAll();
+    harness->pending.Shutdown();
 
     REQUIRE(answered.Ready());
     const auto response = answered.Get();

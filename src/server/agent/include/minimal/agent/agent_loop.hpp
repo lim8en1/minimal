@@ -1,9 +1,11 @@
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <optional>
+#include <random>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -29,6 +31,12 @@ struct LoopConfig {
     std::int64_t compaction_keep_recent_tokens = 0;
     int max_retries = 3;
     int max_turns = 0;  // 0 = unbounded; subagents bound their own life
+
+    // Exponential-with-full-jitter backoff between retries. Zero disables the
+    // wait, which is what the tests that assert on attempt COUNTS want -- they
+    // would otherwise pay the delay for nothing.
+    std::chrono::milliseconds retry_base_delay{500};
+    std::chrono::milliseconds retry_max_delay{8000};
 };
 
 // Brackets one tool invocation, surfaced to the client as ToolExecutionEvent.
@@ -123,6 +131,9 @@ private:
     void MaybeCompact();
     void FlushInjectedMessages();
     bool Cancelled() const;
+    // Waits before retry `attempt`, polling cancellation. False means "give up"
+    // -- cancelled during the wait -- so the caller stops retrying.
+    bool SleepForBackoff(int attempt);
 
     llm::LlmProvider& provider_;
     tools::ToolExecutor& executor_;
@@ -138,6 +149,9 @@ private:
     std::vector<llm::Message> history_;
     std::vector<llm::Message> injected_;
     llm::TokenAccumulator tokens_;
+    // Backoff jitter only. Loop-owned rather than shared, so two sessions
+    // retrying the same failing backend do not draw the same delays.
+    std::mt19937 jitter_{std::random_device{}()};
 
     // Set when a compaction attempt fails, cleared at each RunTurn: without it a
     // failing summarizer would be re-invoked on every tool cycle of the same turn,

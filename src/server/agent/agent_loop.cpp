@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <thread>
 #include <utility>
 #include <variant>
 
@@ -51,6 +52,31 @@ AgentLoop::AgentLoop(llm::LlmProvider& provider, tools::ToolExecutor& executor,
       compactor_(std::move(compactor)) {}
 
 bool AgentLoop::Cancelled() const { return is_cancelled_ && is_cancelled_(); }
+
+bool AgentLoop::SleepForBackoff(int attempt) {
+    if (config_.retry_base_delay.count() <= 0) return !Cancelled();
+
+    // Exponential with EQUAL jitter: half the ceiling fixed, half random.
+    // Jitter matters even for one local user -- several sessions that failed
+    // against the same backend would otherwise retry in lockstep forever -- but
+    // full jitter (drawing from [0, ceiling]) can legally return zero, which
+    // makes "the retry waited" unassertable in a single run and leaves a real
+    // 429 answered immediately every so often. Half the ceiling is the floor.
+    const auto ceiling = std::min(config_.retry_base_delay * (1 << attempt), config_.retry_max_delay);
+    const std::int64_t half = ceiling.count() / 2;
+    std::uniform_int_distribution<std::int64_t> pick(0, ceiling.count() - half);
+    const std::chrono::milliseconds delay{half + pick(jitter_)};
+
+    // Slept in slices, polling cancellation. Sleeping the whole delay would
+    // make CancelTurn wait out a backoff the user just asked to abandon --
+    // the same argument that put a cancel-polling sink in the compactor.
+    constexpr std::chrono::milliseconds kSlice{25};
+    for (std::chrono::milliseconds slept{0}; slept < delay; slept += kSlice) {
+        if (Cancelled()) return false;
+        std::this_thread::sleep_for(std::min(kSlice, delay - slept));
+    }
+    return !Cancelled();
+}
 
 void AgentLoop::AppendAndPersist(llm::Message message, std::optional<int> output_tokens) {
     store_.Append(message, output_tokens);
@@ -196,6 +222,10 @@ TurnResult AgentLoop::RunTurn(llm::Message seed_message) {
                 if (!error.is_retryable() || attempt == config_.max_retries) {
                     throw;
                 }
+                // Backoff, not a bare retry. Without it the four attempts land
+                // inside a few milliseconds, which turns a 429 into four 429s
+                // and is worse for the backend than not retrying at all.
+                if (!SleepForBackoff(attempt)) break;
             }
         }
         if (!got_response) break;

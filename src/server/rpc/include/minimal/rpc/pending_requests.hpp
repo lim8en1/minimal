@@ -14,6 +14,7 @@
 
 #include <condition_variable>
 #include <cstddef>
+#include <cstdint>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -47,19 +48,24 @@ public:
         Registration& operator=(const Registration&) = delete;
 
         // Blocks until Resolve() names this id, or until cancellation.
-        // nullopt means cancelled -- the session is terminating. Callers must
-        // treat that as "no answer", never as a decision: mapping it onto Deny
-        // here would put a policy choice inside a synchronisation primitive.
+        // nullopt means "no answer" -- either the turn was cancelled or the
+        // session is terminating. Callers must treat it as exactly that, never
+        // as a decision: mapping it onto Deny here would put a policy choice
+        // inside a synchronisation primitive.
         std::optional<std::string> AwaitResponse();
 
         const std::string& request_id() const { return request_id_; }
 
     private:
         friend class PendingRequests;
-        Registration(PendingRequests* owner, std::string request_id);
+        Registration(PendingRequests* owner, std::string request_id, std::uint64_t epoch);
 
         PendingRequests* owner_ = nullptr;  // null once moved from
         std::string request_id_;
+        // The cancel generation this registration was made in. CancelAll() bumps
+        // the counter, so every waiter registered before it wakes with nullopt
+        // and every waiter registered after it is unaffected.
+        std::uint64_t epoch_ = 0;
     };
 
     [[nodiscard]] Registration Register(std::string request_id);
@@ -71,17 +77,32 @@ public:
     // without bound by answering requests that were never asked.
     bool Resolve(const std::string& request_id, std::string chosen_option);
 
-    // Wakes every waiter with nullopt. Idempotent, and permanent: registrations
-    // made after cancellation return immediately rather than blocking, so a
-    // worker that reaches a permission gate during teardown does not park on a
-    // reader that has already stopped.
+    // TWO CANCELLATIONS, because the session has two of them and they mean
+    // different things (Session::Cancel ends the TURN, Session::Terminate ends
+    // the SESSION). A single permanent latch served both, which made one
+    // CancelTurn deny-lock the session forever: every subsequent permission
+    // prompt returned "no answer" instantly and WirePermissionChecker mapped
+    // that to Deny, with no log line and no way for the user to tell.
+
+    // Wakes every CURRENT waiter with nullopt and leaves the object usable.
+    // Registrations made after this call block normally, so a cancelled turn
+    // does not poison the next one. Idempotent.
     void CancelAll();
 
-    bool cancelled() const;
+    // Wakes every waiter with nullopt, now and forever. Registrations made after
+    // this return immediately rather than blocking, so a worker that reaches a
+    // permission gate during teardown does not park on a reader that has already
+    // stopped. Idempotent, and deliberately irreversible -- a session that is
+    // terminating never comes back.
+    void Shutdown();
+
+    bool shut_down() const;
     std::size_t pending_count() const;
 
 private:
     void Unregister(const std::string& request_id);
+    // Callers hold mutex_.
+    bool AnswerIsUnreachable(std::uint64_t epoch) const { return shutdown_ || epoch != epoch_; }
 
     struct Slot {
         std::optional<std::string> answer;
@@ -90,7 +111,8 @@ private:
     mutable std::mutex mutex_;
     std::condition_variable cv_;
     std::unordered_map<std::string, Slot> slots_;
-    bool cancelled_ = false;
+    std::uint64_t epoch_ = 0;
+    bool shutdown_ = false;
 };
 
 }  // namespace minimal::rpc

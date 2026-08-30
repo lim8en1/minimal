@@ -1,13 +1,17 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <memory>
 #include <string>
+#include <thread>
 #include <unordered_set>
 #include <utility>
 
+#include "deadline.hpp"
 #include "fakes.hpp"
 #include "minimal/agent/agent_loop.hpp"
 #include "minimal/config/skill_registry.hpp"
@@ -18,6 +22,7 @@ using namespace minimal;
 using namespace minimal::testing;
 using minimal::tools::PermissionRunMode;
 using minimal::tools::ToolCategory;
+using namespace std::chrono_literals;
 
 namespace {
 
@@ -38,7 +43,9 @@ struct Harness {
     std::unique_ptr<tools::ToolExecutor> executor;
     std::unique_ptr<agent::AgentLoop> loop;
     std::vector<llm::StreamEvent> seen_events;
-    bool cancel_flag = false;
+    // Atomic because the backoff test flips it from the main thread while the
+    // loop polls it mid-sleep; every other test sets it from the same thread.
+    std::atomic<bool> cancel_flag{false};
 
     FakeTool& AddTool(std::string name, ToolCategory category = ToolCategory::ReadOnly) {
         auto owned = std::make_unique<FakeTool>(std::move(name), category);
@@ -77,10 +84,10 @@ struct Harness {
 
         loop = std::make_unique<agent::AgentLoop>(
             provider, *executor, registry, store, std::move(preset), config, std::move(session),
-            [this] { return cancel_flag; },
+            [this] { return cancel_flag.load(); },
             [this](const llm::StreamEvent& e) {
                 seen_events.push_back(e);
-                return !cancel_flag;
+                return !cancel_flag.load();
             },
             std::move(compactor));
     }
@@ -147,7 +154,7 @@ TEST_CASE("retryable errors retry, non-retryable propagate", "[agent_loop][retry
         Harness h;
         h.provider.PushError(llm::LlmError(llm::LlmErrorCategory::RateLimit, "429"));
         h.provider.PushResponse(TextResponse("recovered"));
-        h.Build({}, agent::LoopConfig{.max_retries = 3});
+        h.Build({}, agent::LoopConfig{.max_retries = 3, .retry_base_delay = 0ms});
 
         const auto result = h.loop->RunTurn(UserText("hi"));
         CHECK(result.final_text == "recovered");
@@ -158,7 +165,7 @@ TEST_CASE("retryable errors retry, non-retryable propagate", "[agent_loop][retry
         Harness h;
         h.provider.PushError(llm::LlmError(llm::LlmErrorCategory::AuthError, "401"));
         h.provider.PushResponse(TextResponse("never reached"));
-        h.Build({}, agent::LoopConfig{.max_retries = 3});
+        h.Build({}, agent::LoopConfig{.max_retries = 3, .retry_base_delay = 0ms});
 
         CHECK_THROWS_AS(h.loop->RunTurn(UserText("hi")), llm::LlmError);
         CHECK(h.provider.call_count() == 1);
@@ -169,11 +176,77 @@ TEST_CASE("retryable errors retry, non-retryable propagate", "[agent_loop][retry
         for (int i = 0; i < 5; ++i) {
             h.provider.PushError(llm::LlmError(llm::LlmErrorCategory::ServerError, "500"));
         }
-        h.Build({}, agent::LoopConfig{.max_retries = 2});
+        h.Build({}, agent::LoopConfig{.max_retries = 2, .retry_base_delay = 0ms});
 
         CHECK_THROWS_AS(h.loop->RunTurn(UserText("hi")), llm::LlmError);
         CHECK(h.provider.call_count() == 3);  // initial + 2 retries
     }
+
+    SECTION("a retry actually waits") {
+        // The sections above set retry_base_delay to 0 so they measure attempt
+        // counts without paying for them -- which means nothing there would
+        // notice the backoff being deleted. ARCHITECTURE.md's loop pseudocode
+        // and provider.hpp:82 both put backoff here precisely so a 429 is not
+        // answered with four more requests inside a few milliseconds.
+        Harness h;
+        h.provider.PushError(llm::LlmError(llm::LlmErrorCategory::RateLimit, "429"));
+        h.provider.PushResponse(TextResponse("recovered"));
+        h.Build({}, agent::LoopConfig{.max_retries = 1, .retry_base_delay = 200ms});
+
+        const auto started = std::chrono::steady_clock::now();
+        const auto result = h.loop->RunTurn(UserText("hi"));
+        const auto elapsed = std::chrono::steady_clock::now() - started;
+
+        CHECK(result.final_text == "recovered");
+        // Equal jitter draws from [ceiling/2, ceiling], so the floor is exact
+        // and one run is enough to assert on. Full jitter would have made this
+        // a coin flip -- a zero draw is legal there, so the test would pass with
+        // the backoff deleted.
+        CHECK(elapsed >= 100ms);
+        CHECK(elapsed < 2s);
+    }
+
+    SECTION("cancelling during backoff does not wait it out") {
+        // Otherwise CancelTurn is deaf for up to retry_max_delay -- the same
+        // argument that put a cancel-polling sink in the compactor.
+        Harness h;
+        for (int i = 0; i < 4; ++i) {
+            h.provider.PushError(llm::LlmError(llm::LlmErrorCategory::ServerError, "500"));
+        }
+        h.Build({}, agent::LoopConfig{.max_retries = 3, .retry_base_delay = 30s});
+
+        auto run = testing::RunInBackground([&h] {
+            try {
+                h.loop->RunTurn(UserText("hi"));
+            } catch (const llm::LlmError&) {
+            }
+            return true;
+        });
+        std::this_thread::sleep_for(50ms);
+        h.cancel_flag = true;
+        REQUIRE(run.WaitFor(5s));  // not 30s
+    }
+}
+
+TEST_CASE("retry backoff is bounded by retry_max_delay", "[agent_loop][retry]") {
+    // The ceiling is what keeps a long-failing backend from pushing a turn's
+    // last retry minutes out. Doubling is unbounded without it.
+    Harness h;
+    for (int i = 0; i < 12; ++i) {
+        h.provider.PushError(llm::LlmError(llm::LlmErrorCategory::ServerError, "500"));
+    }
+    h.Build({}, agent::LoopConfig{
+                    .max_retries = 10, .retry_base_delay = 1ms, .retry_max_delay = 4ms});
+
+    const auto started = std::chrono::steady_clock::now();
+    CHECK_THROWS_AS(h.loop->RunTurn(UserText("hi")), llm::LlmError);
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+    // Ten retries at an unbounded 1ms doubling would be ~1s of sleeps; capped at
+    // 4ms each it is 20-40ms. The floor proves the sleeps happened at all, so
+    // this cannot pass by the backoff having been removed.
+    CHECK(elapsed >= 20ms);
+    CHECK(elapsed < 1s);
+    CHECK(h.provider.call_count() == 11);
 }
 
 TEST_CASE("max_tokens is surfaced, not collapsed into end_turn", "[agent_loop][invariant]") {

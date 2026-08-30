@@ -126,14 +126,56 @@ TEST_CASE("cancellation wakes a blocked waiter", "[pending_requests]") {
     CHECK_FALSE(waiter.Get().has_value());
 }
 
-TEST_CASE("cancellation is permanent, so a late waiter does not park", "[pending_requests]") {
+TEST_CASE("shutdown is permanent, so a late waiter does not park", "[pending_requests]") {
     // A worker can reach a permission gate while teardown is already running.
-    // If cancellation only woke the waiters that existed at that moment, that
+    // If shutdown only woke the waiters that existed at that moment, that
     // worker would block on a reader thread which has already stopped.
     auto pending = std::make_shared<PendingRequests>();
-    pending->CancelAll();
+    pending->Shutdown();
 
     auto registration = Register(pending, "req-1");
+    auto waiter = AwaitInBackground(pending, registration);
+    REQUIRE(waiter.Ready());
+    CHECK_FALSE(waiter.Get().has_value());
+}
+
+TEST_CASE("cancellation is NOT permanent: the next waiter still blocks and is answerable",
+          "[pending_requests]") {
+    // The counterpart to the shutdown case above, and the reason the two are
+    // separate methods. Session::Cancel ends a TURN and leaves the session able
+    // to accept the next one; if it shared the permanent latch, every permission
+    // prompt after the first CancelTurn would return "no answer" instantly and
+    // WirePermissionChecker would turn that into Deny -- silently, for the life
+    // of the session.
+    auto pending = std::make_shared<PendingRequests>();
+
+    auto cancelled = Register(pending, "req-1");
+    auto abandoned = AwaitInBackground(pending, cancelled);
+    CHECK_FALSE(abandoned.WaitFor(50ms));
+    pending->CancelAll();
+    REQUIRE(abandoned.Ready());
+    CHECK_FALSE(abandoned.Get().has_value());
+
+    // The next turn's prompt: must block for a real answer, not return nullopt.
+    auto next = Register(pending, "req-2");
+    auto waiter = AwaitInBackground(pending, next);
+    CHECK_FALSE(waiter.WaitFor(50ms));
+
+    CHECK(pending->Resolve("req-2", "allow"));
+    REQUIRE(waiter.Ready());
+    CHECK(waiter.Get().value() == "allow");
+}
+
+TEST_CASE("an answer racing its own cancellation is not delivered", "[pending_requests]") {
+    // Resolve and CancelAll can both land before the waiter runs. The turn is
+    // over either way, so the answer belongs to nobody: returning it would let a
+    // tool run for a turn the user already cancelled.
+    auto pending = std::make_shared<PendingRequests>();
+    auto registration = Register(pending, "req-1");
+
+    CHECK(pending->Resolve("req-1", "allow"));
+    pending->CancelAll();
+
     auto waiter = AwaitInBackground(pending, registration);
     REQUIRE(waiter.Ready());
     CHECK_FALSE(waiter.Get().has_value());

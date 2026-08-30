@@ -110,6 +110,12 @@ void Session::Cancel() {
     cancel_.store(true, std::memory_order_release);
     // Wakes a worker parked on a permission prompt. Without this, cancelling
     // during an Ask would set a flag nobody is in a position to read.
+    //
+    // CancelAll, not Shutdown: this ends the TURN. The distinction is
+    // load-bearing -- a permanent cancel here leaves every later permission
+    // prompt in the session answering "no answer" instantly, which
+    // WirePermissionChecker turns into Deny, so one CancelTurn would silently
+    // deny-lock a session that reports itself alive and keeps accepting turns.
     pending_.CancelAll();
 }
 
@@ -122,7 +128,10 @@ void Session::Terminate() {
     }
 
     cancel_.store(true, std::memory_order_release);
-    pending_.CancelAll();
+    // Shutdown, not CancelAll: the session is ending, so a worker that reaches a
+    // gate mid-teardown must return rather than park on a reader that has
+    // already stopped reading.
+    pending_.Shutdown();
     turn_cv_.notify_all();
 
     if (worker_.joinable() && worker_.get_id() != std::this_thread::get_id()) worker_.join();
@@ -177,10 +186,6 @@ void Session::RunOneTurn(std::string text) {
         *event.mutable_error() = rpc::ToProto(error);
         queue_.Push(std::move(event));
         logger_.warn("session {}: turn failed: {}", params_.session_id, error.what());
-        // Still terminated, and terminated explicitly. A client that only ever
-        // learns a turn ended by seeing it succeed would hang on every failure.
-        EmitTurnCompleted(llm::StopReason::Unknown, {}, false);
-        return;
     } catch (const std::exception& e) {
         v1::ServerEvent event = MakeEvent(params_.session_id);
         auto* error = event.mutable_error();
@@ -189,10 +194,18 @@ void Session::RunOneTurn(std::string text) {
         error->set_is_retryable(false);
         queue_.Push(std::move(event));
         logger_.warn("session {}: turn threw: {}", params_.session_id, e.what());
-        EmitTurnCompleted(llm::StopReason::Unknown, {}, false);
-        return;
     }
 
+    // BOTH endings run through here, and that is the point. A failed turn leaves
+    // `result` default-constructed -- StopReason::Unknown, zero usage -- which is
+    // exactly what a failure should report.
+    //
+    // The wire event is emitted on every exit path because a client that learns
+    // a turn ended only by seeing it succeed hangs on every error. The observer
+    // notification is the same obligation on the in-process side: an observer
+    // holding per-turn state has no other signal that the turn is over, so
+    // returning early from a catch block leaked it once per failure. Same
+    // argument as emitting tool-finish even when the tool errored.
     EmitTurnCompleted(result.stop_reason, result.last_usage, result.hit_max_turns);
 
     TurnSummary summary;

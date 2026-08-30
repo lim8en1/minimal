@@ -86,6 +86,21 @@ struct SessionFixture {
     std::unique_ptr<agent::Session> session;
 };
 
+// Drains until a PermissionRequest shows up, returning its request_id. The
+// worker is parked on that prompt by the time this returns, which is the state
+// the caller wants to act on -- so this is a rendezvous, not just a search.
+std::optional<std::string> WaitForPermissionRequest(SessionFixture& fixture,
+                                                    std::chrono::milliseconds timeout = 5s) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        for (const auto& event : fixture.DrainQueue()) {
+            if (event.has_permission_request()) return event.permission_request().request_id();
+        }
+        std::this_thread::sleep_for(5ms);
+    }
+    return std::nullopt;
+}
+
 int CountStreamEvents(const std::vector<v1::ServerEvent>& events) {
     int n = 0;
     for (const auto& event : events) {
@@ -237,6 +252,51 @@ TEST_CASE("cancelling mid-turn stops the worker without killing the session", "[
     CHECK_FALSE(fixture.session->terminated());
 }
 
+TEST_CASE("a cancelled turn does not deny-lock the next one", "[session]") {
+    // THE INVARIANT: Session::Cancel ends a turn, Session::Terminate ends a
+    // session, and PendingRequests has to distinguish them. It once did not --
+    // one permanent latch served both -- so the first CancelTurn made every
+    // later permission prompt return "no answer" instantly, which
+    // WirePermissionChecker maps to Deny. The session went on reporting itself
+    // alive and accepting turns while silently refusing every gated tool, with
+    // no log line and nothing on the wire to explain it.
+    //
+    // Collapse CancelAll() and Shutdown() back into one flag and the second half
+    // of this test fails: the prompt never reaches the queue.
+    auto fixture = std::make_shared<SessionFixture>();
+    fixture->preset.permission_mode = testing::AllowAllPolicy();
+    fixture->preset.permission_mode.execute = tools::PermissionMode::Ask;
+    auto tool = std::make_unique<testing::FakeTool>("bash", tools::ToolCategory::Execute, "ran");
+    auto* tool_ptr = tool.get();
+    fixture->tools_registry.Register(std::move(tool));
+
+    fixture->Script(testing::ToolUseResponse("call-1", "bash"));  // turn 1: cancelled at the gate
+    fixture->Script(testing::ToolUseResponse("call-2", "bash"));  // turn 2: answered at the gate
+    fixture->Script(testing::TextResponse("done"));
+    fixture->Start();
+
+    // Turn 1 parks on the prompt, then the user cancels instead of answering.
+    fixture->session->SubmitTurn("run something");
+    REQUIRE(WaitForPermissionRequest(*fixture).has_value());
+    fixture->session->Cancel();
+    REQUIRE(fixture->session->WaitForIdleForTesting(5s));
+    REQUIRE_FALSE(fixture->session->terminated());
+    CHECK(tool_ptr->calls.empty());  // denied, as a cancelled turn should be
+
+    // Turn 2 must still be able to ask -- and be answered.
+    fixture->session->SubmitTurn("run something else");
+    const auto request_id = WaitForPermissionRequest(*fixture);
+    REQUIRE(request_id.has_value());
+
+    v1::PermissionResponse answer;
+    answer.set_request_id(*request_id);
+    answer.set_decision(v1::PERMISSION_DECISION_ALLOW);
+    REQUIRE(fixture->session->pending().Resolve(*request_id, answer.SerializeAsString()));
+
+    REQUIRE(fixture->session->WaitForIdleForTesting(5s));
+    CHECK(tool_ptr->calls.size() == 1);
+}
+
 TEST_CASE("terminating with a turn in flight joins cleanly", "[session]") {
     // Termination reuses the cancellation path rather than adding a second
     // mechanism. If it hangs, every session teardown leaks its worker.
@@ -348,6 +408,39 @@ TEST_CASE("observers see the session's whole life", "[session]") {
     CHECK(recorder->ended == "sess-obs");
     CHECK(recorder->turns == 1);
     CHECK(recorder->stop_reason == llm::StopReason::EndTurn);
+}
+
+TEST_CASE("observers see a FAILED turn end too", "[session][invariant]") {
+    // The wire's TurnCompletedEvent fires on every exit path because a client
+    // that learns a turn ended only by seeing it succeed hangs on every error.
+    // OnTurnCompleted is the same obligation in-process: an observer holding
+    // per-turn state has no other end-of-turn signal, so an early return from
+    // RunOneTurn's catch blocks leaked it once per failed turn -- and a failing
+    // provider is exactly when an observer most wants to know.
+    struct Recorder : agent::SessionObserver {
+        void OnTurnCompleted(const agent::SessionInfo&, const agent::TurnSummary& s) override {
+            ++turns;
+            stop_reason = s.stop_reason;
+        }
+        int turns = 0;
+        llm::StopReason stop_reason = llm::StopReason::EndTurn;
+    };
+
+    auto recorder = std::make_shared<Recorder>();
+    {
+        SessionFixture fixture;
+        fixture.observers.Register(recorder);
+        // Nothing scripted: the fake provider throws, which is what a provider
+        // that is down looks like from here.
+        fixture.Start("sess-fail");
+
+        fixture.session->SubmitTurn("hello");
+        REQUIRE(fixture.session->WaitForIdleForTesting(5s));
+        fixture.session->Terminate();
+        fixture.observers.WaitForIdleForTesting();
+    }
+    CHECK(recorder->turns == 1);
+    CHECK(recorder->stop_reason == llm::StopReason::Unknown);
 }
 
 TEST_CASE("a client-requested run mode overrides the preset's", "[session]") {
