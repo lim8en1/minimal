@@ -4,6 +4,7 @@
 #include <fstream>
 
 #include "minimal/config/providers_config.hpp"
+#include "temp_dir.hpp"
 
 using namespace minimal::config;
 
@@ -114,14 +115,13 @@ TEST_CASE("ProvidersConfig::Find hit and miss", "[providers_config]") {
 }
 
 TEST_CASE("LoadProvidersConfig: reads and parses a real file", "[providers_config]") {
-    const auto path = std::filesystem::temp_directory_path() / "minimal_providers_config_test.json";
+    minimal::testing::TempDir tempdir;
+    const auto path = tempdir.path() / "providers.json";
     { std::ofstream(path) << nlohmann::json::array({FullEntry()}).dump(); }
 
     auto config = LoadProvidersConfig(path);
     REQUIRE(config.entries.size() == 1);
     CHECK(config.entries[0].name == "openai-main");
-
-    std::filesystem::remove(path);
 }
 
 TEST_CASE("LoadProvidersConfig: missing file throws", "[providers_config]") {

@@ -3,6 +3,7 @@
 #include <fstream>
 
 #include "minimal/tools/path_confinement.hpp"
+#include "temp_dir.hpp"
 
 using namespace minimal::tools;
 
@@ -11,23 +12,20 @@ namespace {
 // One enclosing arena so tests never touch anything in the OS temp dir besides
 // this single directory; project/ and outside_sibling/ are siblings inside it,
 // which is what lets ".." traversal reach "outside" without leaving the arena.
+// The arena is unique per process: catch_discover_tests runs every TEST_CASE as
+// its own ctest entry, so a fixed path would be wiped out from under a
+// concurrent run of this very file (ctest -j).
 struct TempProject {
-    std::filesystem::path arena, root, outside;
+    minimal::testing::TempDir tempdir;
+    std::filesystem::path arena = tempdir.path();
+    std::filesystem::path root = arena / "project";
+    std::filesystem::path outside = arena / "outside_sibling";
 
     TempProject() {
-        arena = std::filesystem::temp_directory_path() / "minimal_path_confinement_test_arena";
-        std::error_code ec;
-        std::filesystem::remove_all(arena, ec);
-        root = arena / "project";
-        outside = arena / "outside_sibling";
         std::filesystem::create_directories(root / "subdir");
         std::filesystem::create_directories(outside);
         { std::ofstream(root / "inside.txt") << "hi"; }
         { std::ofstream(outside / "secret.txt") << "shh"; }
-    }
-    ~TempProject() {
-        std::error_code ec;
-        std::filesystem::remove_all(arena, ec);
     }
 };
 

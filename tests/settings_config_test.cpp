@@ -3,6 +3,7 @@
 #include <fstream>
 
 #include "minimal/config/settings_config.hpp"
+#include "temp_dir.hpp"
 
 using namespace minimal::config;
 
@@ -75,13 +76,12 @@ TEST_CASE("ParseSettingsConfig: tools_view and logging overridable", "[settings_
 }
 
 TEST_CASE("LoadSettingsConfig: reads and parses a real file", "[settings_config]") {
-    const auto path = std::filesystem::temp_directory_path() / "minimal_settings_config_test.json";
+    minimal::testing::TempDir tempdir;
+    const auto path = tempdir.path() / "settings.json";
     { std::ofstream(path) << nlohmann::json{{"default_provider", "openai-main"}}.dump(); }
 
     auto config = LoadSettingsConfig(path);
     CHECK(config.default_provider == "openai-main");
-
-    std::filesystem::remove(path);
 }
 
 TEST_CASE("LoadSettingsConfig: missing file throws", "[settings_config]") {
