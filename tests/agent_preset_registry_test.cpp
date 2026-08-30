@@ -1,6 +1,10 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <atomic>
 #include <fstream>
+#include <string>
+
+#include <unistd.h>
 
 #include "minimal/agent/agent_preset_registry.hpp"
 
@@ -15,7 +19,12 @@ struct TempConfigDir {
     std::filesystem::path dir;
 
     TempConfigDir() {
-        dir = std::filesystem::temp_directory_path() / "minimal_agent_preset_registry_test_arena";
+        // Unique per fixture: ctest runs cases in parallel, and a shared arena
+        // means one case's remove_all() wiping another's config mid-test.
+        static std::atomic<int> counter{0};
+        dir = std::filesystem::temp_directory_path() /
+              ("minimal_agent_preset_registry_test_arena-" + std::to_string(::getpid()) + "-" +
+               std::to_string(counter.fetch_add(1)));
         std::error_code ec;
         std::filesystem::remove_all(dir, ec);
         std::filesystem::create_directories(dir / "agents");

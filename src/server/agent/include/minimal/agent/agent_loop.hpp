@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <mutex>
 #include <optional>
 #include <random>
 #include <string>
@@ -146,6 +147,10 @@ private:
     Compactor compactor_;
 
     std::vector<llm::Message> history_;
+    // Guarded because it crosses threads: a non-blocking subagent's worker
+    // queues its completion here while THIS session's worker flushes at turn
+    // boundaries. Everything else on the loop stays worker-thread-only.
+    std::mutex injected_mu_;
     std::vector<llm::Message> injected_;
     llm::TokenAccumulator tokens_;
     // Backoff jitter only. Loop-owned rather than shared, so two sessions

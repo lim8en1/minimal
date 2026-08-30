@@ -13,6 +13,8 @@
 #include <thread>
 #include <vector>
 
+#include <unistd.h>
+
 #include <catch2/catch_test_macros.hpp>
 #include <grpcpp/create_channel.h>
 
@@ -44,7 +46,12 @@ struct ProviderScript {
 
 struct ServiceFixture {
     ServiceFixture() {
-        dir = std::filesystem::temp_directory_path() / "minimal_session_service_test_arena";
+        // Unique per fixture: ctest runs cases in parallel, and a shared arena
+        // means one case's remove_all() deleting another's socket mid-test.
+        static std::atomic<int> counter{0};
+        dir = std::filesystem::temp_directory_path() /
+              ("minimal_session_service_test_arena-" + std::to_string(::getpid()) + "-" +
+               std::to_string(counter.fetch_add(1)));
         std::error_code ec;
         std::filesystem::remove_all(dir, ec);
         std::filesystem::create_directories(dir / "agents");

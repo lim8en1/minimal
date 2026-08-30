@@ -136,6 +136,13 @@ void SessionServiceImpl::Dispatch(const v1::ClientEvent& event, agent::Session& 
             session.Cancel();
             return;
 
+        case v1::ClientEvent::kAttach:
+            // Nothing to dispatch: naming the stream on its first event IS the
+            // attach. This payload exists so a client can honour its attach
+            // obligation toward a subagent child without submitting a turn to
+            // a session that will never run one.
+            return;
+
         case v1::ClientEvent::kCommand: {
             // The command subsystem is not built. Answering explicitly beats
             // silence: a client waiting on a CommandResult would otherwise hang

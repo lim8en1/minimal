@@ -1,6 +1,10 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <atomic>
 #include <fstream>
+#include <string>
+
+#include <unistd.h>
 
 #include "minimal/tools/path_confinement.hpp"
 
@@ -11,11 +15,16 @@ namespace {
 // One enclosing arena so tests never touch anything in the OS temp dir besides
 // this single directory; project/ and outside_sibling/ are siblings inside it,
 // which is what lets ".." traversal reach "outside" without leaving the arena.
+// Unique per fixture: ctest runs cases in parallel, and a shared arena means
+// one case's remove_all() wiping another's tree mid-test.
 struct TempProject {
     std::filesystem::path arena, root, outside;
 
     TempProject() {
-        arena = std::filesystem::temp_directory_path() / "minimal_path_confinement_test_arena";
+        static std::atomic<int> counter{0};
+        arena = std::filesystem::temp_directory_path() /
+                ("minimal_path_confinement_test_arena-" + std::to_string(::getpid()) + "-" +
+                 std::to_string(counter.fetch_add(1)));
         std::error_code ec;
         std::filesystem::remove_all(arena, ec);
         root = arena / "project";

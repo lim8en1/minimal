@@ -29,6 +29,9 @@ add_library(minimal_server_core SHARED
     agent/compaction_boundary.cpp
     agent/context_compactor.cpp
     agent/agent_loop.cpp
+    agent/subagent_spawn.cpp
+    agent/subagent_manager.cpp
+    agent/spawn_subagent_tool.cpp
     tools/tool_registry.cpp
     tools/tool_executor.cpp
     tools/skill_tool.cpp

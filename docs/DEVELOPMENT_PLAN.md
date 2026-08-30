@@ -2,9 +2,9 @@
 
 Companion to `ARCHITECTURE.md`, which remains the single source of truth for *design*. This document covers only *sequencing*: what is built, what blocks what, and what "done" means for each remaining piece. Every milestone cites the `ARCHITECTURE.md` section that specifies it; where this plan and that document disagree, that document wins and this one is stale.
 
-**Status: Milestones A, B and H are complete, and a post-merge review of all three has been actioned (§8). 444 tests passing, clean build, zero warnings.**
+**Status: Milestones A, B, D and H are complete, and a post-merge review of all three has been actioned (§8). 491 tests passing, clean build, zero warnings.**
 
-`minimal -p` holds real conversations against a local model using `read`, `bash`, and `skill`; a permission prompt round-trips over the wire in both directions; a session grant silences the second prompt; the server exits when the last client detaches. Transcripts persist to SQLite and survive the server process — `GetMessages` and `ListSessions` answer from the database, so a session the server has no live object for still reads back. `cmake --install` now produces a config dir the server actually starts against (§8). **Sessions cannot yet be resumed**, only read (§4 B).
+`minimal -p` holds real conversations against a local model using `read`, `bash`, and `skill`; a permission prompt round-trips over the wire in both directions; a session grant silences the second prompt; the server exits when the last client detaches. Transcripts persist to SQLite and survive the server process — `GetMessages` and `ListSessions` answer from the database, so a session the server has no live object for still reads back. `cmake --install` now produces a config dir the server actually starts against (§8). **Sessions cannot yet be resumed**, only read (§4 B). **Subagents work** (§5 D): a model can spawn blocking and non-blocking children over the `spawn_subagent` tool, permission inheritance is enforced, and the headless client honours its attach obligation over a real socket.
 
 ---
 
@@ -55,7 +55,7 @@ Companion to `ARCHITECTURE.md`, which remains the single source of truth for *de
 
 ### Still not built
 
-`src/server/commands/`, `src/server/mcp/`, the TUI, subagents, the sanity check, **session resume** (see §4 B). `commands-core` is an empty plugin shell.
+`src/server/commands/`, `src/server/mcp/`, the TUI, the sanity check, **session resume** (see §4 B). `commands-core` is an empty plugin shell.
 
 ### The risk this creates
 
@@ -88,7 +88,7 @@ Test depth was inverted relative to integration risk: every well-tested layer wa
 - ~~**H. Production compactor**~~ — **done.** `compact_messages` replaces `Session`'s no-op stub, and the bundled prompt is delivered (§4 H).
 - ~~**I. `SessionObserver` registry**~~ — **done**, landed with A2. `minimal_plugin_register_session_observer` is live in the plugin ABI and `tools-bash` implements it.
 
-**Strictly dependent on A:** C, D, E, G, and every RPC beyond `CreateSession`/`OpenSession`. **A is now done, so all of them are unblocked.**
+**Strictly dependent on A:** C, D, E, G, and every RPC beyond `CreateSession`/`OpenSession`. **A is now done, so all of them were unblocked; D is now done too.**
 
 **Deferred out of A, deliberately:** client auto-spawn of the server (connect-or-spawn with a lock file). The refcounted-exit half it depends on is built and tested.
 
@@ -183,13 +183,13 @@ Also lands the **wire-backed `PermissionChecker`**: emits `PermissionRequest` on
 **Test cases**
 - [x] Scripted end-to-end against a fake provider over a real socket (CI-safe, no network).
 - [x] `AllowOnly` auto-deny path completes rather than blocking.
-- [ ] Attaching to a child session is a client obligation (§ *Session lifetime*) — assert the headless client does it, since the initial-attach guard is a safety net and not a designed flow. **Blocked on D**: nothing emits `SubagentStartedEvent` yet, so there is no child to attach to. The client prints the event; the obligation is unenforced until subagents exist.
+- [x] Attaching to a child session is a client obligation (§ *Session lifetime*) — the headless client does it, since the initial-attach guard is a safety net and not a designed flow. Closed with D: `SubagentStartedEvent` now exists to attach to, an `Attach` client event exists to attach *with* (§5 D), and `subagent_e2e_test.cpp` proves both over a real socket.
 
 ### Milestone A test-list status
 
 Checked against the tree, not from memory. `[~]` is partial, and the reason is on the line.
-Two of the three gaps this audit found are closed in §9; the third (child-attach) is
-unenforceable until D emits a `SubagentStartedEvent` and stays open against that track.
+Two of the three gaps this audit found are closed in §9; the third (child-attach) was
+unenforceable until D emitted a `SubagentStartedEvent`, and is closed with D (§5 D).
 
 ### Milestone A definition of done — met
 
@@ -325,18 +325,24 @@ Fills the empty `commands-core` plugin and unblocks `/restart-shell` in `tools-b
 - [ ] Alias resolution and collision rules match § *Name collisions and aliases*; permission keys are never aliases.
 - [ ] `/restart-shell` resets the same map `restart: true` does — proving plugin-owned state has one owner.
 
-### D. Subagents
+### D. Subagents — done
 
-> § *Subagents*. Only `kSpawnSubagentToolName` and the no-nested-subagents exclusion exist today.
+> § *Subagents*. Built on the merged A+B+H tree. **Status: built, wired, and exercised end to end over a real socket.** `src/server/agent/subagent_spawn.{hpp,cpp}` (request/outcome types, `intersect_allowed`), `subagent_manager.{hpp,cpp}` (the spawn itself), `spawn_subagent_tool.{hpp,cpp}` (the core `Execute`-gated tool). A subagent is a `Session` with a parent pointer — the same entity, not a second implementation. Blocking and non-blocking paths both route through one `AgentLoop::RunTurn`.
 
-A subagent is a `Session` with a parent pointer — the same entity, not a second implementation. Blocking and non-blocking paths both route through one `AgentLoop::RunTurn`.
+- [x] Blocking subagent returns its final text as the parent's `ToolResultBlock`.
+- [x] Non-blocking completion is injected at a turn boundary (`QueueInjectedMessage` already existed for exactly this — and gained a mutex, because its producer is now another session's worker).
+- [x] Terminating a blocking subagent unblocks the parent with an error result rather than hanging (§ *Session lifetime*). Cancelling the parent turn does the same, terminating the child.
+- [x] A subagent cannot spawn subagents — enforced in `agent_loop.cpp` and asserted end to end: a child whose preset allows `"*"` still gets a request with no `spawn_subagent` definition.
+- [x] `clamp_run_mode` holds: a child is never more permissive than its parent. Run mode is clamped at spawn; the parent's policies travel as ceilings the child's `ToolExecutor` folds in via `most_restrictive`; `allowed_tools`/`allowed_skills`/`allowed_mcp_servers` are intersected (`"*"`-aware); held grants are copied.
+- [x] Consent-grant inheritance decided and tested — copy-at-spawn, the lean this plan recorded, now in `ToolExecutor`'s seed-grant constructor argument.
 
-- [ ] Blocking subagent returns its final text as the parent's `ToolResultBlock`.
-- [ ] Non-blocking completion is injected at a turn boundary (`QueueInjectedMessage` already exists for exactly this).
-- [ ] Terminating a blocking subagent unblocks the parent with an error result rather than hanging (§ *Session lifetime*).
-- [ ] A subagent cannot spawn subagents — already enforced in `agent_loop.cpp:85`; assert it end to end.
-- [ ] `clamp_run_mode` holds: a child is never more permissive than its parent.
-- [ ] Consent-grant inheritance decided and tested — plan leans copy-at-spawn, since re-prompting for every binary makes subagents unusable (see § *Consent scoping*, non-interactive note).
+#### What the implementation found
+
+1. **The wire had no way to attach without side effects.** `OpenSession`'s stream is named by its first `ClientEvent`, and every existing payload does something (turn, cancel, answer). Attaching to a subagent child — a session the client never sends work to — was therefore inexpressible, which made the attach obligation (§4 A4) unimplementable, not just untested. Added an `Attach` payload: a no-op whose only job is to name the stream.
+2. **Blocking spawn does not drive the child's loop from the parent's worker, contra the architecture's wording.** The child's own worker runs the single turn in both modes; a blocking `execute()` synchronously waits on a completion signal (`SessionParams::on_turn_finished`, fired on every exit path of `RunOneTurn`) while observing the parent's cancellation. One drive path instead of two, and terminate-unblocks-parent falls out of the existing teardown join rather than needing its own mechanism. `ARCHITECTURE.md` was updated in the same change.
+3. **Non-blocking injection is cross-thread by construction** — the child's worker queues into the parent's loop — so `injected_` gained the mutex it never needed while the feature was unbuilt.
+4. **A completion is an error, not an empty success, when the child stopped with nothing to say** (cancelled, failed, or `max_turns`-capped mid-loop). The parent model adapting to a named reason is the design intent of every spawn error; an empty block reading like success is the failure the bundled `subagent.md` itself warns against.
+5. **Testing infrastructure, again.** Parallel `ctest` runs discovered cases against the same binary sharing fixed temp arenas — one case's constructor `remove_all()` wiping another's socket mid-test. Every multi-case fixture arena is now unique per process and per fixture (`pid` + counter). Also: ASan over the in-process tiers found a pre-existing one-byte out-of-bounds read in `file_access_test.cpp` (a 14-byte `std::string` built from a 13-byte literal); fixed.
 
 ### E. TUI client
 
@@ -478,8 +484,8 @@ One aside worth keeping: a Catch2 `TEST_CASE` name that *starts* with `-` breaks
 Every box in this document checked against the tree rather than against memory, since a plan that
 records intent as achievement is worse than one that records nothing.
 
-**Milestones A, B, H and I are green.** 37 boxes ticked, 2 partial with the reason on the line, and
-25 open — 23 of which belong to C, D, E, F and G, which are scheduled and unbuilt rather than
+**Milestones A, B, D, H and I are green.** 46 boxes ticked, 1 partial with the reason on the line, and
+17 open — all of which belong to C, E, F and G, which are scheduled and unbuilt rather than
 regressed.
 
 The audit found three real gaps, all in Milestone A's test list, all in shipped behaviour:
@@ -494,8 +500,10 @@ The audit found three real gaps, all in Milestone A's test list, all in shipped 
    the right `session_id`, not the order — which is the part a client's state machine depends on.
    Closed: `TurnCompletedEvent` last and exactly once, tool start before finish, both between the
    two `message_stop`s.
-3. **The child-attach obligation is unenforceable.** Nothing emits `SubagentStartedEvent` yet, so
-   there is no child to attach to. Left open against track D rather than ticked or deleted.
+3. **The child-attach obligation was unenforceable** — nothing emitted `SubagentStartedEvent`, so
+   there was no child to attach to. Closed with D: the event is emitted, an `Attach` client event
+   makes the attach expressible (§5 D, finding 1), and `subagent_e2e_test.cpp` proves the
+   obligation over a real socket for both blocking and non-blocking spawns.
 
 One partial stays partial by choice: the single-writer invariant is proven at the queue
 (`event_queue_test.cpp`) but not at the stream. The stream-level version would need two concurrent

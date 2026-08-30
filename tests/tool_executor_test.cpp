@@ -340,3 +340,138 @@ TEST_CASE("an unknown tool is an error result, not a crash", "[tool_executor]") 
     CHECK(block.is_error);
     CHECK(TextOf(block).find("unknown tool") != std::string::npos);
 }
+
+// --- subagent ceilings --------------------------------------------------------
+//
+// A child session may never be more permissive than its parent. The parent's
+// policies arrive as ceilings folded in via most_restrictive() -- remove that
+// fold and every test in this block fails.
+
+TEST_CASE("a policy ceiling tightens an otherwise-allowed category",
+          "[tool_executor][ceiling]") {
+    Fixture f;
+    f.AddTool("bash", ToolCategory::Execute);
+    GrantingPermissionChecker checker;
+
+    // Child preset allows execute outright; the parent's Ask policy is the ceiling.
+    tools::PermissionPolicy ceiling = AllowAllPolicy();
+    ceiling.execute = PermissionMode::Ask;
+
+    tools::ToolExecutor executor(f.registry, checker, AllowAllPolicy(), {},
+                                 PermissionRunMode::Normal, ceiling);
+    auto ctx = f.Context();
+    CHECK_FALSE(executor.Run("tu1", "bash", nlohmann::json::object(), ctx).is_error);
+
+    CHECK(checker.seen.size() == 1);  // the ceiling forced the prompt
+}
+
+TEST_CASE("a child's per-tool override cannot buy back what the ceiling forbids",
+          "[tool_executor][ceiling]") {
+    // The whole reason ceilings fold at resolve time instead of merging policies
+    // up front: mode_for() knows the tool's category, a merged policy no longer
+    // does. A child override of `bash: allow` against a parent whose execute
+    // category is Ask must still prompt.
+    Fixture f;
+    f.AddTool("bash", ToolCategory::Execute);
+    GrantingPermissionChecker checker;
+
+    tools::PermissionPolicy child = AllowAllPolicy();
+    child.per_tool_overrides["bash"] = PermissionMode::AlwaysAllow;
+
+    tools::PermissionPolicy ceiling;  // defaults: file_write/execute/out_of_workdir = Ask
+    ceiling.read_only = PermissionMode::AlwaysAllow;
+
+    tools::ToolExecutor executor(f.registry, checker, child, {}, PermissionRunMode::Normal,
+                                 ceiling);
+    auto ctx = f.Context();
+    CHECK_FALSE(executor.Run("tu1", "bash", nlohmann::json::object(), ctx).is_error);
+
+    CHECK(checker.seen.size() == 1);
+}
+
+TEST_CASE("a ceiling can only tighten, never loosen", "[tool_executor][ceiling]") {
+    // Invariant direction check: a permissive ceiling over a restrictive child
+    // policy changes nothing. If the fold were a substitution this would run
+    // unprompted.
+    Fixture f;
+    f.AddTool("bash", ToolCategory::Execute);
+    GrantingPermissionChecker checker;
+
+    tools::PermissionPolicy child;
+    child.execute = PermissionMode::Ask;
+
+    tools::ToolExecutor executor(f.registry, checker, child, {}, PermissionRunMode::Normal,
+                                 AllowAllPolicy());
+    auto ctx = f.Context();
+    CHECK_FALSE(executor.Run("tu1", "bash", nlohmann::json::object(), ctx).is_error);
+
+    CHECK(checker.seen.size() == 1);
+}
+
+TEST_CASE("an mcp ceiling governs mcp tools, not the policy ceiling",
+          "[tool_executor][ceiling][mcp]") {
+    Fixture f;
+    f.AddTool("mcp__search__query", ToolCategory::Execute);
+    GrantingPermissionChecker checker;
+
+    tools::McpPermissionPolicy mcp;
+    mcp.default_mode = PermissionMode::AlwaysAllow;  // the child would run it freely
+
+    tools::McpPermissionPolicy mcp_ceiling;
+    mcp_ceiling.default_mode = PermissionMode::Ask;  // the parent asked first
+
+    tools::ToolExecutor executor(f.registry, checker, AllowAllPolicy(), mcp,
+                                 PermissionRunMode::Normal, AllowAllPolicy(), mcp_ceiling);
+    auto ctx = f.Context();
+    CHECK_FALSE(executor.Run("tu1", "mcp__search__query", nlohmann::json::object(), ctx).is_error);
+
+    CHECK(checker.seen.size() == 1);
+}
+
+TEST_CASE("seeded grants silence prompts the parent already answered",
+          "[tool_executor][grants]") {
+    // Copy-at-spawn: re-prompting for every binary the parent's operator
+    // approved would make subagents unusable.
+    Fixture f;
+    auto& tool = f.AddTool("bash", ToolCategory::Execute);
+    tool.set_disclosure(Disclosing({"bash:/usr/bin/git"}));
+    GrantingPermissionChecker checker;
+
+    tools::ToolExecutor executor(f.registry, checker, AskExecutePolicy(), {},
+                                 PermissionRunMode::Normal, std::nullopt, std::nullopt,
+                                 {"bash:/usr/bin/git"});
+    auto ctx = f.Context();
+    CHECK_FALSE(executor.Run("tu1", "bash", {{"command", "git status"}}, ctx).is_error);
+
+    CHECK(checker.seen.empty());  // never asked
+    CHECK(executor.granted_keys() == std::vector<std::string>{"bash:/usr/bin/git"});
+}
+
+TEST_CASE("the executor tells the tool which invocation it is running",
+          "[tool_executor]") {
+    // A tool that ties follow-up work to its own call -- the subagent-spawn
+    // completion is injected as a ToolResultBlock keyed to it -- reads
+    // ToolContext::tool_use_id.
+    struct IdCapturingTool : tools::Tool {
+        const tools::ToolSpec& spec() const override { return spec_; }
+        tools::ToolResult execute(const nlohmann::json&, tools::ToolContext& ctx) override {
+            seen = ctx.tool_use_id;
+            return {false, "ok"};
+        }
+        tools::ToolSpec spec_{"capture", ToolCategory::ReadOnly,
+                              {"capture", "captures", nlohmann::json::object()}};
+        std::string seen;
+    };
+
+    Fixture f;
+    auto owned = std::make_unique<IdCapturingTool>();
+    auto* tool = owned.get();
+    f.registry.Register(std::move(owned));
+    UnreachablePermissionChecker checker;
+
+    tools::ToolExecutor executor(f.registry, checker, AllowAllPolicy(), {},
+                                 PermissionRunMode::Normal);
+    auto ctx = f.Context();
+    CHECK_FALSE(executor.Run("tu-42", "capture", nlohmann::json::object(), ctx).is_error);
+    CHECK(tool->seen == "tu-42");
+}

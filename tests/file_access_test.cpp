@@ -128,7 +128,9 @@ TEST_CASE("over-long lines are truncated visibly", "[file_access]") {
 
 TEST_CASE("binary files are refused rather than dumped as mojibake", "[file_access]") {
     TempDir dir;
-    const auto path = WriteFile(dir, "bin.dat", std::string("PNG\x00\x01\x02binary", 14));
+    // 12 content bytes; naming the length explicitly keeps the embedded NULs,
+    // and getting it wrong is an out-of-bounds read that ASan reports.
+    const auto path = WriteFile(dir, "bin.dat", std::string("PNG\x00\x01\x02binary", 12));
 
     const auto window = tools::read_window(path, 1, 10, 2000);
 

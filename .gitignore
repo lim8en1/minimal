@@ -2,6 +2,7 @@
 build/
 build-debug/
 build-server/
+build-asan/
 out/
 cmake-build-*/
 install/

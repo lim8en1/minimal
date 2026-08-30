@@ -84,13 +84,17 @@ void AgentLoop::AppendAndPersist(llm::Message message, std::optional<int> output
 }
 
 void AgentLoop::QueueInjectedMessage(llm::Message message) {
+    std::lock_guard<std::mutex> lock(injected_mu_);
     injected_.push_back(std::move(message));
 }
 
 void AgentLoop::FlushInjectedMessages() {
-    if (injected_.empty()) return;
     std::vector<llm::Message> pending;
-    pending.swap(injected_);
+    {
+        std::lock_guard<std::mutex> lock(injected_mu_);
+        if (injected_.empty()) return;
+        pending.swap(injected_);
+    }
     for (auto& message : pending) {
         AppendAndPersist(std::move(message));
     }

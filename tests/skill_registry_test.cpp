@@ -1,6 +1,10 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <atomic>
 #include <fstream>
+#include <string>
+
+#include <unistd.h>
 
 #include "minimal/config/skill_registry.hpp"
 
@@ -9,13 +13,17 @@ using namespace minimal::config;
 
 namespace {
 
-// A throwaway config directory. Every test writes its skills/ tree fresh, so a
-// fixed arena path (removed up front) is fine and keeps failures inspectable.
+// A throwaway config directory, unique per fixture: ctest runs cases in
+// parallel, and a shared arena would let one case's remove_all() wipe
+// another's tree mid-test. The readable prefix keeps failures inspectable.
 struct TempConfigDir {
     std::filesystem::path dir;
 
     TempConfigDir() {
-        dir = std::filesystem::temp_directory_path() / "minimal_skill_registry_test_arena";
+        static std::atomic<int> counter{0};
+        dir = std::filesystem::temp_directory_path() /
+              ("minimal_skill_registry_test_arena-" + std::to_string(::getpid()) + "-" +
+               std::to_string(counter.fetch_add(1)));
         std::error_code ec;
         std::filesystem::remove_all(dir, ec);
         std::filesystem::create_directories(dir);

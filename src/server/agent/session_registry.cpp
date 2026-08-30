@@ -37,7 +37,18 @@ std::shared_ptr<Session> SessionRegistry::Create(SessionParams params) {
     // Resolve() throws for an unknown preset, and for a preset naming a provider
     // that providers.json does not define. Both propagate: they are the caller's
     // to report, and a session with no provider could not run a single turn.
-    const AgentPreset& preset = presets_.Resolve(params.agent_preset);
+    //
+    // Resolved BEFORE the move: argument evaluation order would otherwise let
+    // the lookup read a moved-from name.
+    AgentPreset preset = presets_.Resolve(params.agent_preset);
+    return CreateResolved(std::move(params), std::move(preset));
+}
+
+std::shared_ptr<Session> SessionRegistry::CreateResolved(SessionParams params,
+                                                          AgentPreset preset,
+                                                          std::optional<int> max_turns_override) {
+    LoopConfig loop_config = loop_config_;
+    if (max_turns_override.has_value()) loop_config.max_turns = *max_turns_override;
 
     // The kind string is what selects a factory. A preset can only reach this
     // point with a provider entry that parsed, so an unregistered kind means a
@@ -57,9 +68,9 @@ std::shared_ptr<Session> SessionRegistry::Create(SessionParams params) {
 
     const std::string session_id = params.session_id;
     auto store = std::make_unique<session::SqliteHistoryStore>(db_, session_id);
-    auto session = std::make_shared<Session>(std::move(params), preset, std::move(provider),
-                                             std::move(store), tools_, loop_config_, observers_,
-                                             logger_);
+    auto session = std::make_shared<Session>(std::move(params), std::move(preset),
+                                             std::move(provider), std::move(store), tools_,
+                                             loop_config, observers_, logger_);
     {
         std::lock_guard<std::mutex> lock(mutex_);
         sessions_[session_id] = session;
@@ -72,6 +83,15 @@ std::shared_ptr<Session> SessionRegistry::Find(const std::string& session_id) co
     std::lock_guard<std::mutex> lock(mutex_);
     const auto it = sessions_.find(session_id);
     return it == sessions_.end() ? nullptr : it->second;
+}
+
+std::size_t SessionRegistry::ChildCount(const std::string& parent_id) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::size_t count = 0;
+    for (const auto& [id, session] : sessions_) {
+        if (session->info().parent_session_id == parent_id) ++count;
+    }
+    return count;
 }
 
 void SessionRegistry::Terminate(const std::string& session_id) {

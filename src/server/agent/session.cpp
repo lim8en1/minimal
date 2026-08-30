@@ -30,9 +30,13 @@ Session::Session(SessionParams params, AgentPreset preset,
       // The run mode the client asked for wins over the configured default: it
       // is a property of the CLIENT, not of the config. A headless run has no
       // human to answer a prompt, so it must be able to say so. apply_run_mode()
-      // is applied downstream, once, by ToolExecutor.
+      // is applied downstream, once, by ToolExecutor. For a subagent the
+      // spawner has already clamped the override against the parent's run mode,
+      // and hands down the parent's policies as ceilings and the parent's
+      // grants as seed -- the whole inheritance lands in this one call.
       executor_(registry, checker_, preset_.permission_mode, preset_.mcp_permissions,
-                params_.run_mode_override.value_or(preset_.run_mode)) {
+                params_.run_mode_override.value_or(preset_.run_mode), params_.policy_ceiling,
+                params_.mcp_policy_ceiling, params_.seed_grants) {
     info_.session_id = params_.session_id;
     info_.parent_session_id = params_.parent_session_id;
     info_.name = params_.name;
@@ -101,9 +105,15 @@ void Session::SubmitTurn(std::string text) {
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (terminated_.load(std::memory_order_acquire)) return;
+        if (subagent_finished_.load(std::memory_order_acquire)) return;
         turns_.push_back(std::move(text));
     }
     turn_cv_.notify_one();
+}
+
+void Session::QueueInjectedMessage(llm::Message message) {
+    if (terminated_.load(std::memory_order_acquire)) return;
+    loop_->QueueInjectedMessage(std::move(message));
 }
 
 void Session::Cancel() {
@@ -216,6 +226,16 @@ void Session::RunOneTurn(std::string text) {
     summary.duration = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - started);
     observers_.NotifyTurnCompleted(info_, std::move(summary));
+
+    // Last, after every wire event and observer notification: a blocking parent
+    // waiting on this result may proceed the instant the callback returns, and
+    // must not observe a session that still has bookkeeping in flight. Fired on
+    // EVERY exit path -- `result` is default-constructed after a failed turn,
+    // which is exactly what a waiter needs to unblock with an error.
+    if (params_.on_turn_finished) {
+        subagent_finished_.store(true, std::memory_order_release);
+        params_.on_turn_finished(result);
+    }
 }
 
 void Session::EmitTurnCompleted(llm::StopReason stop_reason, const llm::Usage& usage,
