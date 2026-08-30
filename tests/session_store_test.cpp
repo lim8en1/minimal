@@ -403,6 +403,98 @@ TEST_CASE("seqs are per-session and independent", "[session][store]") {
     CHECK(page_b.messages[0].seq == 0);
 }
 
+// --- Resume: load-without-appending and seq continuation ---------------------
+
+TEST_CASE("LoadMessages returns the whole transcript ascending", "[session][resume]") {
+    TempDir dir;
+    SessionDatabase db(dir.path() / "load.db");
+    const auto id = db.CreateSession("", std::nullopt, "/p", "build").session_id;
+
+    llm::Message tool_use{llm::Role::Assistant, {}};
+    tool_use.content.push_back(llm::ToolUseBlock{"toolu_1", "read", {{"path", "a.cpp"}}});
+    llm::ToolResultBlock result;
+    result.tool_use_id = "toolu_1";
+    result.content.push_back(llm::TextBlock{"contents"});
+
+    db.AppendMessage(id, UserMsg("first"));
+    db.AppendMessage(id, tool_use);
+    db.AppendMessage(id, llm::Message{llm::Role::User, {result}});
+    db.AppendMessage(id, llm::Message{llm::Role::Assistant, {llm::TextBlock{"last"}}}, 17);
+
+    SessionReader reader(db);
+    const auto loaded = reader.LoadAll(id);
+    REQUIRE(loaded.size() == 4);
+    // Ascending, contiguous, and structurally identical to what went in --
+    // this is what resume seeds the loop's working history with.
+    for (std::size_t i = 0; i < loaded.size(); ++i) {
+        CHECK(loaded[i].seq == static_cast<std::int64_t>(i));
+    }
+    CHECK(MessagesEqual(loaded[0].message, UserMsg("first")));
+    CHECK(MessagesEqual(loaded[1].message, tool_use));
+    CHECK(MessagesEqual(loaded[2].message, llm::Message{llm::Role::User, {result}}));
+    CHECK(MessagesEqual(loaded[3].message,
+                         llm::Message{llm::Role::Assistant, {llm::TextBlock{"last"}}}));
+    CHECK(loaded[3].token_count == 17);
+
+    // Paging and full-load agree on content; they are two views of one table.
+    const auto page = reader.GetMessages(id, std::nullopt, 100);
+    REQUIRE(page.messages.size() == loaded.size());
+    for (std::size_t i = 0; i < loaded.size(); ++i) {
+        CHECK(page.messages[loaded.size() - 1 - i].seq == loaded[i].seq);
+    }
+}
+
+TEST_CASE("LoadMessages on an empty or unknown session is empty, not an error",
+          "[session][resume]") {
+    TempDir dir;
+    SessionDatabase db(dir.path() / "empty.db");
+    const auto id = db.CreateSession("", std::nullopt, "/p", "build").session_id;
+    CHECK(SessionReader(db).LoadAll(id).empty());
+    CHECK(SessionReader(db).LoadAll("no-such-session").empty());
+}
+
+TEST_CASE("LastMessageSeq reports the highest seq, and -1 when there are none",
+          "[session][resume]") {
+    TempDir dir;
+    SessionDatabase db(dir.path() / "lastseq.db");
+    const auto id = db.CreateSession("", std::nullopt, "/p", "build").session_id;
+
+    // -1, not 0: seq 0 is a real first message, so the empty state must not
+    // collide with it.
+    CHECK(db.LastMessageSeq(id) == -1);
+    CHECK(db.LastMessageSeq("no-such-session") == -1);
+
+    db.AppendMessage(id, UserMsg("one"));
+    db.AppendMessage(id, UserMsg("two"));
+    db.AppendMessage(id, UserMsg("three"));
+    CHECK(db.LastMessageSeq(id) == 2);
+}
+
+TEST_CASE("a store opened on a stored transcript continues its sequence",
+          "[session][resume]") {
+    // The resume invariant: reopening a session's store must not restart seq.
+    // Getting this wrong would restart last_appended_seq at -1 while SQL's
+    // MAX(seq)+1 keeps assigning the real continuation -- and TurnSummary's
+    // bounds would describe the previous incarnation of the session.
+    TempDir dir;
+    SessionDatabase db(dir.path() / "continue.db");
+    const auto id = db.CreateSession("", std::nullopt, "/p", "build").session_id;
+    db.AppendMessage(id, UserMsg("stored one"));
+    db.AppendMessage(id, UserMsg("stored two"));
+    db.AppendMessage(id, UserMsg("stored three"));
+
+    SqliteHistoryStore store(db, id);
+    CHECK(store.last_appended_seq() == 2);  // before ANY append of its own
+
+    store.Append(UserMsg("after resume"), std::nullopt);
+    CHECK(store.last_appended_seq() == 3);
+
+    const auto loaded = SessionReader(db).LoadAll(id);
+    REQUIRE(loaded.size() == 4);
+    CHECK(loaded[3].seq == 3);
+    CHECK(MessagesEqual(loaded[3].message, UserMsg("after resume")));
+}
+
 TEST_CASE("appending to an unknown session is an error, not a dropped row", "[session][store]") {
     TempDir dir;
     SessionDatabase db(dir.path() / "unknown.db");

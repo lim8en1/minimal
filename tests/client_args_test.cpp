@@ -193,3 +193,57 @@ TEST_CASE("no test case name starts with a dash", "[client_args][meta]") {
         CHECK(info.getTestCaseInfo().name.front() != '-');
     }
 }
+
+// --- Resume --------------------------------------------------------------------
+
+TEST_CASE("the resume flag carries a session id to a headless turn", "[client_args][resume]") {
+    const auto parsed =
+        Parse({"-p", "what number did I give you?", "--resume", "01ARZ3NDEKTSV4RRFFQ69G5FAV"});
+
+    REQUIRE(parsed.action == ParsedArgs::Action::Headless);
+    CHECK(parsed.headless.prompt == "what number did I give you?");
+    CHECK(parsed.headless.resume_session_id == "01ARZ3NDEKTSV4RRFFQ69G5FAV");
+}
+
+TEST_CASE("the resume flag follows the same value rules as every other flag",
+          "[client_args][resume]") {
+    SECTION("a flag-shaped value is refused") {
+        const auto parsed = Parse({"-p", "hi", "--resume", "--agent"});
+        REQUIRE(parsed.action == ParsedArgs::Action::Error);
+        CHECK(parsed.error.find("--resume") != std::string::npos);
+    }
+    SECTION("a missing value at the end of the line") {
+        const auto parsed = Parse({"-p", "hi", "--resume"});
+        REQUIRE(parsed.action == ParsedArgs::Action::Error);
+    }
+    SECTION("the flag=value form works") {
+        const auto parsed = Parse({"-p", "hi", "--resume=01ARZ3NDEKTSV4RRFFQ69G5FAV"});
+        REQUIRE(parsed.action == ParsedArgs::Action::Headless);
+        CHECK(parsed.headless.resume_session_id == "01ARZ3NDEKTSV4RRFFQ69G5FAV");
+    }
+    SECTION("an empty value is refused") {
+        const auto parsed = Parse({"-p", "hi", "--resume="});
+        REQUIRE(parsed.action == ParsedArgs::Action::Error);
+    }
+}
+
+TEST_CASE("resume without -p is an error", "[client_args][resume]") {
+    // Resume runs one headless turn; without -p there is nowhere for the prompt
+    // to come from, and the TUI that would own an interactive resume does not
+    // exist yet.
+    const auto parsed = Parse({"--resume", "01ARZ3NDEKTSV4RRFFQ69G5FAV"});
+    REQUIRE(parsed.action == ParsedArgs::Action::Error);
+    CHECK(parsed.error.find("-p") != std::string::npos);
+}
+
+TEST_CASE("the resume and agent flags cannot be combined", "[client_args][resume]") {
+    // A resumed session keeps the preset it was stored with; accepting both
+    // would be a silent identity change of someone else's session.
+    const auto parsed = Parse({"-p", "hi", "--resume", "01ARZ3", "--agent", "plan"});
+    REQUIRE(parsed.action == ParsedArgs::Action::Error);
+    CHECK(parsed.error.find("--agent") != std::string::npos);
+}
+
+TEST_CASE("the usage text documents --resume", "[client_args][resume]") {
+    CHECK(UsageText().find("--resume") != std::string::npos);
+}

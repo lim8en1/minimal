@@ -112,6 +112,18 @@ public:
     MessagePage GetMessagesPage(const std::string& session_id,
                                 std::optional<std::int64_t> before_seq, int limit) const;
 
+    // The session's entire transcript, ascending by seq. One-shot O(n) load --
+    // resume is its only caller: the loop's working history is what gets sent
+    // every turn, so a resumed session must hold it in memory exactly as a live
+    // one does, and compaction bounds it from then on. Scrollback deliberately
+    // never calls this; it pages.
+    std::vector<StoredMessage> LoadMessages(const std::string& session_id) const;
+
+    // MAX(seq) of the session's messages, or -1 when it has none. What a
+    // resumed session's HistoryStore initializes its seq tracking from, so the
+    // next append continues the stored sequence instead of restarting it.
+    std::int64_t LastMessageSeq(const std::string& session_id) const;
+
     // See SessionReader::GetMessages for both of these. A real cursor is taken
     // exactly; a bare `0` is rejected, because it used to mean "from the most
     // recent" and now means "before seq 0" -- and the implicit conversion would

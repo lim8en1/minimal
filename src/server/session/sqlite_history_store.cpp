@@ -3,7 +3,15 @@
 namespace minimal::session {
 
 SqliteHistoryStore::SqliteHistoryStore(SessionDatabase& db, std::string session_id)
-    : db_(db), session_id_(std::move(session_id)) {}
+    : db_(db),
+      session_id_(std::move(session_id)),
+      // Read from the database rather than assumed empty: a RESUMED session
+      // starts with its stored transcript already persisted, and its next
+      // append must continue that sequence. Getting this wrong would restart
+      // last_appended_seq at -1, which SQL's MAX(seq)+1 would silently
+      // contradict on the first append -- and TurnSummary's seq bounds would
+      // report values that belong to the previous incarnation of the session.
+      last_seq_(db.LastMessageSeq(session_id_)) {}
 
 void SqliteHistoryStore::Append(const llm::Message& message, std::optional<int> output_tokens) {
     const std::int64_t seq = db_.AppendMessage(session_id_, message, output_tokens.value_or(0));

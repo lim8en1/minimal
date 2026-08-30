@@ -2,9 +2,9 @@
 
 Companion to `ARCHITECTURE.md`, which remains the single source of truth for *design*. This document covers only *sequencing*: what is built, what blocks what, and what "done" means for each remaining piece. Every milestone cites the `ARCHITECTURE.md` section that specifies it; where this plan and that document disagree, that document wins and this one is stale.
 
-**Status: Milestones A, B, C, F and H are complete, and a post-merge review of A+B+H has been actioned (§8). Clean build, zero warnings.**
+**Status: Milestones A, B, C, F and H are complete, a post-merge review of A+B+H has been actioned (§8), and the B gap — session resume — is closed (§4 B). Clean build, zero warnings.**
 
-`minimal -p` holds real conversations against a local model using `read`, `bash`, and `skill`; a permission prompt round-trips over the wire in both directions; a session grant silences the second prompt; the server exits when the last client detaches. Transcripts persist to SQLite and survive the server process — `GetMessages` and `ListSessions` answer from the database, so a session the server has no live object for still reads back. `cmake --install` now produces a config dir the server actually starts against (§8). **Sessions cannot yet be resumed**, only read (§4 B).
+`minimal -p` holds real conversations against a local model using `read`, `bash`, and `skill`; a permission prompt round-trips over the wire in both directions; a session grant silences the second prompt; the server exits when the last client detaches. Transcripts persist to SQLite and survive the server process — and are now **resumable**: `CreateSession` with a `session_id` reopens a stored session, loads its transcript as the loop's working history without re-appending it, and the next turn continues the conversation (`minimal -p --resume <id> PROMPT`). `cmake --install` produces a config dir the server actually starts against (§8).
 
 ---
 
@@ -64,7 +64,7 @@ Companion to `ARCHITECTURE.md`, which remains the single source of truth for *de
 
 ### Still not built
 
-`src/server/commands/`, `src/server/mcp/`, the TUI, subagents, **session resume** (see §4 B). `commands-core` is an empty plugin shell.
+`src/server/mcp/` and the TUI. Subagents are the last track before those.
 
 ### The risk this creates
 
@@ -238,7 +238,7 @@ Items 1, 6, 7, 8 and 9 were each discovered by a hang or a crash rather than by 
 
 ### B. Session storage — SQLite
 
-> § *Session storage — SQLite*. Built on a branch off `cab3a91`, in parallel with and unaware of Milestone A, then merged. **Done** — 31 cases in `tests/session_store_test.cpp` plus 5 integration cases in `tests/session_service_test.cpp`.
+> § *Session storage — SQLite*. Built on a branch off `cab3a91`, in parallel with and unaware of Milestone A, then merged. **Done** — 31 cases in `tests/session_store_test.cpp` plus 5 integration cases in `tests/session_service_test.cpp`. **Resume — the gap ARCHITECTURE.md recorded as "what is not built" — is closed too; see "What resume needed" below.**
 
 **What.** A `HistoryStore` implementation over SQLite3 (already a `find_package` dependency, currently unused), plus session metadata for `ListSessions`. Landed as `src/server/session/`: `message_codec` (strict `llm::Message` ↔ JSON), `ulid` (time-sortable session ids), `session_database` (connection, pragmas, transactional migrations, lifecycle ops), `sqlite_history_store` (the drop-in adapter), `session_reader` (keyset paging).
 
@@ -266,7 +266,25 @@ Two branches off the same base that had never met. Only three files conflicted t
 5. **`GenerateUlid` had 32 bits of real entropy, not 80** — a `mt19937_64` seeded from a single `random_device()` draw. A same-ms collision is a `PRIMARY KEY` failure out of `CreateSession`, so the birthday bound mattered.
 6. **`TurnSummary`'s seq bounds were computed from `InMemoryHistoryStore::size()`.** With the store behind an interface there is no size, and counting locally would be right only for a session that started empty. `HistoryStore` now reports `last_appended_seq()`, cached from what SQL actually assigned.
 
+### B (continued). Session resume — done
+
+> § *Session storage — SQLite*, "What is not built: resume". The gap both documents recorded.
+
+#### What resume needed
+
+The B merge left the database holding conversations that could be *read* but not *resumed*: `AgentLoop` had no seeded-history parameter, so reopening a stored session would have replayed the whole transcript back as duplicate rows. Closing that was two named things — a load-without-appending path and a `session_id` on `CreateSessionRequest` — plus everything they imply:
+
+1. **The wire contract.** `CreateSessionRequest.session_id` set means resume; the stored row's `name`/`agent_preset`/`project_root` govern and the request must not carry its own (refused, not ignored); `run_mode` still applies, being a property of the client. Unknown id → `NOT_FOUND`; already open → `ALREADY_EXISTS`; subagent row → `FAILED_PRECONDITION`; a failed resume never deletes the row (the asymmetry with fresh creation's rollback).
+2. **The load path.** `SessionReader::LoadAll` — the one read allowed to materialize a whole transcript, one-shot and ascending, because the working history is what gets sent every turn. `AgentLoop` takes it constructor-seeded, so a turn can never run against a half-initialized history; the store never sees it again, and appends continue at `MAX(seq) + 1`.
+3. **Seq accounting had to stop assuming "started empty".** `SqliteHistoryStore` initializes `last_appended_seq()` from the database's own `MAX(seq)` — its header already promised exactly this; resume is what makes it true. Reverting the init fails the continuation test.
+4. **A torn tail is not resumable.** A process killed between the assistant append and the results append leaves an unanswered `tool_use` — a hard 400 on both wire formats. (A live cancel does *not* produce this shape: it appends denial results before breaking, which the first draft of the E2E test assumed otherwise and had to be rewritten for.) Resume persists one synthesized user message of error `ToolResultBlock`s for the unmatched calls — a real new row, never a rewrite of the stored tail — before the session starts.
+5. **Compaction had to arm before the first call.** A resumed session has no backend usage yet, so the trigger would stay cold while a 500k-token context 400'd. `TokenAccumulator::SeedOccupancy` records the bytes/4 estimate — last-turn occupancy only, never the cumulative totals, which are genuinely additive — and the first real response replaces it.
+6. **The client.** `minimal -p --resume SESSION_ID PROMPT`, with the parse-time rules the flag needs (requires `-p`, refuses `--agent` alongside, same value-taking rules as every other flag) and E2E coverage through the real `SessionClient`.
+
+All four invariant proofs were run per §6: suppressing the seeded load, the repair, or the seq init each fails its test, independently.
+
 ### F. Startup sanity check — done
+
 
 > § *Startup sanity check — `src/server/config/sanity_check.{hpp,cpp}`*. **Done** — 26 cases in `tests/sanity_check_test.cpp`, plus 11 `mcps_config` cases, 5 alias/collision cases in `plugin_loader_test.cpp`, 4 `AliasedTool` cases, 1 `NameRegistry` regression case, and 2 session-creation `project_root` cases.
 

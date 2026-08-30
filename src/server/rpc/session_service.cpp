@@ -52,6 +52,14 @@ int SessionServiceImpl::ScrollbackPageSize() const {
 grpc::Status SessionServiceImpl::CreateSession(grpc::ServerContext*,
                                                const v1::CreateSessionRequest* request,
                                                v1::CreateSessionResponse* response) {
+    // session_id set means RESUME: reopen the stored session, loading its
+    // transcript as the loop's working history. Distinct enough from creation
+    // -- different validation, no row minting, no rollback-on-failure -- to be
+    // its own path rather than a flag inside this one.
+    if (!request->session_id().empty()) {
+        return ResumeSession(request, response);
+    }
+
     agent::SessionParams params;
     // Passed through EMPTY when the client sent nothing, never defaulted to a
     // placeholder. SessionDatabase names an unnamed session from its first user
@@ -70,18 +78,7 @@ grpc::Status SessionServiceImpl::CreateSession(grpc::ServerContext*,
     // deliberate client choice with permissions.json.
     params.run_mode_override = FromProto(request->run_mode());
 
-    // Shape-checked here so a malformed reference is INVALID_ARGUMENT rather
-    // than FAILED_PRECONDITION from deep inside session construction -- the
-    // client sent something wrong, which is a different thing from the server
-    // not being able to honour something well-formed.
-    if (!request->model().empty()) {
-        params.model_override = config::ParseModelRef(request->model());
-        if (!params.model_override) {
-            return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
-                                "model '" + request->model() +
-                                    "' must be <provider>/<model>, e.g. local/qwen4");
-        }
-    }
+    if (const auto status = ApplyModelOverride(*request, params); !status.ok()) return status;
 
     if (params.agent_preset.empty()) {
         return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION,
@@ -141,6 +138,90 @@ grpc::Status SessionServiceImpl::CreateSession(grpc::ServerContext*,
     }
 
     *response->mutable_session() = ToProto(row);
+    return grpc::Status::OK;
+}
+
+grpc::Status SessionServiceImpl::ApplyModelOverride(const v1::CreateSessionRequest& request,
+                                                    agent::SessionParams& params) const {
+    // Shape-checked here so a malformed reference is INVALID_ARGUMENT rather
+    // than FAILED_PRECONDITION from deep inside session construction -- the
+    // client sent something wrong, which is a different thing from the server
+    // not being able to honour something well-formed.
+    if (request.model().empty()) return grpc::Status::OK;
+    params.model_override = config::ParseModelRef(request.model());
+    if (!params.model_override) {
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
+                            "model '" + request.model() +
+                                "' must be <provider>/<model>, e.g. local/qwen4");
+    }
+    return grpc::Status::OK;
+}
+
+grpc::Status SessionServiceImpl::ResumeSession(const v1::CreateSessionRequest* request,
+                                               v1::CreateSessionResponse* response) {
+    // The stored row already carries name, agent_preset and project_root, and
+    // it governs: a resumed session keeps the identity and confinement
+    // boundary it was created with. Rejecting a conflicting field beats
+    // silently ignoring it -- the client has all three from ListSessions, so
+    // sending one is a bug worth naming. run_mode is the exception: it is a
+    // property of the CLIENT, not of the session.
+    if (!request->name().empty() || !request->agent_preset().empty() ||
+        !request->project_root().empty()) {
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
+                            "resume carries session_id (and run_mode) only; the stored session "
+                            "keeps its name, agent_preset, and project_root");
+    }
+
+    const auto stored = db_.GetSession(request->session_id());
+    if (!stored) {
+        return grpc::Status(grpc::StatusCode::NOT_FOUND,
+                            "no such session: " + request->session_id());
+    }
+    // A subagent belongs to its parent's group and its lifecycle ended with
+    // the parent's turn; resuming one standalone has no meaning in v1.
+    if (stored->parent_session_id) {
+        return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION,
+                            "subagent sessions cannot be resumed: " + request->session_id());
+    }
+    // Two live Sessions on one transcript would interleave appends, so an
+    // already-open session is refused here rather than inside the registry.
+    if (sessions_.Find(stored->session_id) != nullptr) {
+        return grpc::Status(grpc::StatusCode::ALREADY_EXISTS,
+                            "session '" + stored->session_id + "' is already open");
+    }
+
+    agent::SessionParams params;
+    params.session_id = stored->session_id;
+    params.name = stored->name;
+    params.agent_preset = stored->agent_preset;
+    params.project_root = stored->project_root;
+    params.run_mode_override = FromProto(request->run_mode());
+    params.resume = true;
+    // APPLIES ON RESUME TOO, like run_mode and for the same reason: a model the
+    // user names is a property of this invocation, not of the stored session --
+    // and the override is in-memory only, so a resumed session has none of its
+    // own to preserve. "Continue this conversation, but on the big model" is the
+    // obvious thing to want. Silently dropping it would be exactly the failure
+    // the field checks above refuse to make for name/preset/project_root.
+    if (const auto status = ApplyModelOverride(*request, params); !status.ok()) return status;
+
+    try {
+        // Loads the stored transcript, repairs a torn tool-call tail if there
+        // is one, and starts the session.
+        (void)sessions_.Create(params);
+    } catch (const std::exception& e) {
+        // NO ROLLBACK here, unlike fresh creation: the row is the user's
+        // existing session, not one this call just minted. A failure (the
+        // stored preset no longer resolves, its provider kind no longer
+        // registered) is reported with its reason and the transcript survives.
+        logger_.warn("resume of session {} failed: {}", stored->session_id, e.what());
+        return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, e.what());
+    }
+
+    // Re-read rather than reuse `stored`: resume may have appended a repair
+    // message, and the response should carry the current message_count.
+    const auto fresh = db_.GetSession(stored->session_id);
+    *response->mutable_session() = ToProto(*fresh);
     return grpc::Status::OK;
 }
 

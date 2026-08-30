@@ -7,4 +7,8 @@ MessagePage SessionReader::GetMessages(const std::string& session_id,
     return db_.GetMessagesPage(session_id, before_seq, limit);
 }
 
+std::vector<StoredMessage> SessionReader::LoadAll(const std::string& session_id) const {
+    return db_.LoadMessages(session_id);
+}
+
 }  // namespace minimal::session

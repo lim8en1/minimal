@@ -116,7 +116,15 @@ public:
     AgentLoop(llm::LlmProvider& provider, tools::ToolExecutor& executor,
               tools::ToolRegistry& registry, HistoryStore& store, AgentPreset preset,
               LoopConfig config, SessionContext session, std::function<bool()> is_cancelled,
-              llm::StreamEventSink event_sink, Compactor compactor);
+              llm::StreamEventSink event_sink, Compactor compactor,
+              // RESUME: the stored transcript, loaded without being re-appended.
+              // Construction-time seeding (rather than a later setter) means a
+              // turn can never run against a half-initialized history. Empty for
+              // a new session. Seeded history also seeds the occupancy estimate,
+              // so auto-compaction can fire BEFORE the first post-resume
+              // provider call -- without that, a resumed session whose stored
+              // context exceeds the window would fail the call outright.
+              std::vector<llm::Message> seeded_history = {});
 
     // Appends `seed_message`, then runs to a natural stop. A subagent's entire
     // life is one call to this -- there is one loop implementation, not two.

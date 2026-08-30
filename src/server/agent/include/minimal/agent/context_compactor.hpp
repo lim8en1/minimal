@@ -76,4 +76,11 @@ std::optional<CompactionResult> compact_messages(
     const std::vector<llm::Message>& messages_to_compact, llm::LlmProvider& provider,
     const CompactionRequest& request);
 
+// Rough size of a message range in tokens: serialized bytes / 4. The fallback
+// for context_tokens_before when the backend reported no usage -- an estimate
+// that says so on its sleeve beats a precise number computed from nothing.
+// Exposed beyond the compactor because resume has the same problem: it seeds
+// the compaction trigger with a loaded transcript and no backend count either.
+std::int64_t estimate_tokens(const std::vector<llm::Message>& messages);
+
 }  // namespace minimal::agent

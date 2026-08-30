@@ -39,6 +39,9 @@ struct HeadlessOptions {
     std::string model;
     // Set when the prompt was a /-command rather than text.
     std::optional<CommandInvocationText> command;
+    // Non-empty means resume this stored session instead of creating a new one.
+    // Mutually exclusive with agent_preset: the stored session keeps its preset.
+    std::string resume_session_id;
     bool jsonl = false;
     bool bypass = false;
 };

@@ -3,6 +3,8 @@
 #include <stdexcept>
 #include <utility>
 
+#include "minimal/agent/compaction_boundary.hpp"
+#include "minimal/session/session_reader.hpp"
 #include "minimal/session/sqlite_history_store.hpp"
 
 namespace minimal::agent {
@@ -87,10 +89,38 @@ std::shared_ptr<Session> SessionRegistry::Create(SessionParams params) {
     }
 
     const std::string session_id = params.session_id;
+
+    // RESUME: load the stored transcript as the loop's working history. Loaded,
+    // not replayed -- everything below appends NEW messages at MAX(seq) + 1, so
+    // the stored rows must not go through the store again or the transcript
+    // would duplicate itself.
+    std::vector<llm::Message> seeded_history;
+    if (params.resume) {
+        const session::SessionReader reader(db_);
+        for (auto& stored : reader.LoadAll(session_id)) {
+            seeded_history.push_back(std::move(stored.message));
+        }
+
+        // A session cancelled mid-tool-execution -- or a process killed between
+        // the assistant append and the tool-results append -- ends with an
+        // unanswered tool_use, which no provider accepts. Synthesize the
+        // missing error results as one REAL message (persisted like any other
+        // append) rather than refusing to resume: cancellation is ordinary,
+        // and the transcript stays an exact, valid prefix either way.
+        if (auto repair = synthesize_missing_tool_results(seeded_history)) {
+            logger_.info(
+                "session {}: stored transcript ends mid tool call; appending synthesized "
+                "error results before resuming",
+                session_id);
+            db_.AppendMessage(session_id, *repair, 0);
+            seeded_history.push_back(std::move(*repair));
+        }
+    }
+
     auto store = std::make_unique<session::SqliteHistoryStore>(db_, session_id);
     auto session = std::make_shared<Session>(std::move(params), preset, std::move(provider),
                                              std::move(store), tools_, loop_config_, observers_,
-                                             logger_);
+                                             logger_, std::move(seeded_history));
     // Wired before the session is findable, so the first command a client sends
     // cannot arrive at a session that has no registry yet.
     session->set_presets(&presets_);
@@ -99,6 +129,15 @@ std::shared_ptr<Session> SessionRegistry::Create(SessionParams params) {
 
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        // Backstop, checked under the lock: the service layer refuses an
+        // already-open session via Find() before reaching here, but two
+        // concurrent resumes of the same id could both pass that check. A
+        // silent overwrite would leave two live Sessions appending to one
+        // transcript. For a fresh session the database-minted ULID makes a
+        // collision implausible, so this only matters for resume.
+        if (sessions_.count(session_id)) {
+            throw std::runtime_error("session '" + session_id + "' is already open");
+        }
         sessions_[session_id] = session;
     }
     reaper_cv_.notify_all();

@@ -530,6 +530,44 @@ MessagePage SessionDatabase::GetMessagesPage(const std::string& session_id,
     return page;
 }
 
+std::vector<StoredMessage> SessionDatabase::LoadMessages(const std::string& session_id) const {
+    std::lock_guard lock(mu_);
+    // Ascending, no limit: the caller (resume) needs the whole working history
+    // in order. Same strict decode as the paging path -- an undecodable row is
+    // corruption or a newer binary's work, and must surface as an error rather
+    // than as a silently truncated history that would then be re-persisted.
+    Stmt query(
+        db_,
+        "SELECT seq, content_json, token_count, created_at FROM messages"
+        " WHERE session_id = ?1 ORDER BY seq ASC;",
+        "failed to load messages");
+    sqlite3_bind_text(query.stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
+
+    std::vector<StoredMessage> out;
+    while (sqlite3_step(query.stmt) == SQLITE_ROW) {
+        StoredMessage stored;
+        stored.seq = sqlite3_column_int64(query.stmt, 0);
+        const char* json_text = reinterpret_cast<const char*>(sqlite3_column_text(query.stmt, 1));
+        stored.message = JsonToMessage(nlohmann::json::parse(json_text));
+        stored.token_count = sqlite3_column_int(query.stmt, 2);
+        stored.created_at_unix_ms = sqlite3_column_int64(query.stmt, 3);
+        out.push_back(std::move(stored));
+    }
+    return out;
+}
+
+std::int64_t SessionDatabase::LastMessageSeq(const std::string& session_id) const {
+    std::lock_guard lock(mu_);
+    Stmt query(db_, "SELECT MAX(seq) FROM messages WHERE session_id = ?;",
+               "failed to read last message seq");
+    sqlite3_bind_text(query.stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
+    if (sqlite3_step(query.stmt) != SQLITE_ROW || sqlite3_column_type(query.stmt, 0) == SQLITE_NULL) {
+        // MAX() over an empty set is NULL, not 0 -- and 0 is a real seq.
+        return -1;
+    }
+    return sqlite3_column_int64(query.stmt, 0);
+}
+
 std::filesystem::path ResolveSessionDbPath(const std::string& configured) {
     if (configured.empty()) return common::DataDir() / "sessions.db";
     const std::filesystem::path path(configured);

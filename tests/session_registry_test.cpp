@@ -276,3 +276,72 @@ TEST_CASE("sessions are independent", "[session_registry]") {
     CHECK_FALSE(second->terminated());
     CHECK(fixture.registry->Find("s2") == second);
 }
+
+// --- Resume -------------------------------------------------------------------
+
+TEST_CASE("resume loads the stored transcript and repairs a torn tool tail",
+          "[session_registry][resume]") {
+    // A session cancelled mid-tool-execution ends with an unanswered tool_use.
+    // Resume must persist synthesized error results for it BEFORE the session
+    // starts, or the first provider call of the resumed session is a hard 400.
+    RegistryFixture fixture;
+    fixture.config.WriteDefaults();
+    fixture.Build();
+
+    const auto row = fixture.db->CreateSession("torn", std::nullopt, "/proj", "build");
+    fixture.db->AppendMessage(row.session_id,
+                              llm::Message{llm::Role::User, {llm::TextBlock{"run it"}}});
+    llm::Message tool_use{llm::Role::Assistant, {}};
+    tool_use.content.push_back(llm::ToolUseBlock{"call-1", "bash", {{"command", "make"}}});
+    fixture.db->AppendMessage(row.session_id, tool_use);
+    // ...and nothing after it: the session died before results were appended.
+
+    auto params = Params(row.session_id);
+    params.resume = true;
+    auto session = fixture.registry->Create(params);
+    REQUIRE(session != nullptr);
+
+    const auto loaded = fixture.db->LoadMessages(row.session_id);
+    REQUIRE(loaded.size() == 3);
+    REQUIRE(loaded[2].message.role == llm::Role::User);
+    REQUIRE(loaded[2].message.content.size() == 1);
+    const auto* repair = std::get_if<llm::ToolResultBlock>(&loaded[2].message.content.front());
+    REQUIRE(repair != nullptr);
+    CHECK(repair->tool_use_id == "call-1");
+    CHECK(repair->is_error);
+}
+
+TEST_CASE("resume of a clean transcript appends nothing", "[session_registry][resume]") {
+    RegistryFixture fixture;
+    fixture.config.WriteDefaults();
+    fixture.Build();
+
+    const auto row = fixture.db->CreateSession("clean", std::nullopt, "/proj", "build");
+    fixture.db->AppendMessage(row.session_id,
+                              llm::Message{llm::Role::User, {llm::TextBlock{"hi"}}});
+    fixture.db->AppendMessage(
+        row.session_id,
+        llm::Message{llm::Role::Assistant, {llm::TextBlock{"hello"}}}, 5);
+
+    auto params = Params(row.session_id);
+    params.resume = true;
+    auto session = fixture.registry->Create(params);
+    REQUIRE(session != nullptr);
+
+    // Exactly the stored rows -- resume itself never re-appends history.
+    CHECK(fixture.db->LoadMessages(row.session_id).size() == 2);
+}
+
+TEST_CASE("resume of an already-open session is refused", "[session_registry][resume]") {
+    // Backstop: two live Sessions on one transcript would interleave appends.
+    RegistryFixture fixture;
+    fixture.config.WriteDefaults();
+    fixture.Build();
+
+    const auto row = fixture.db->CreateSession("live", std::nullopt, "/proj", "build");
+    auto params = Params(row.session_id);
+    params.resume = true;
+    REQUIRE(fixture.registry->Create(params) != nullptr);
+    CHECK_THROWS_AS(fixture.registry->Create(params), std::runtime_error);
+    CHECK(fixture.registry->size() == 1);
+}

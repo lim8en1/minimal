@@ -41,6 +41,10 @@ public:
         // UNSPECIFIED lets permissions.json decide. The headless client asks for
         // ALLOW_ONLY explicitly, because it has no human to answer a prompt.
         v1::PermissionRunMode run_mode = v1::PERMISSION_RUN_MODE_UNSPECIFIED;
+        // Non-empty means RESUME this stored session instead of creating a new
+        // one. The stored row's name/preset/project_root govern, so the three
+        // fields above are not sent with it; only run_mode still applies.
+        std::string resume_session_id;
     };
 
     // Returns the new session id, or the failure status.

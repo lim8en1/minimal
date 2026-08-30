@@ -373,3 +373,71 @@ TEST_CASE("stopping early still drains the stream", "[headless]") {
     }
     CHECK(fixture.sessions->size() == 0);
 }
+
+TEST_CASE("a stored session resumes headlessly", "[headless][resume]") {
+    // The whole point of the B gap fix, exercised through the real client: a
+    // transcript survives the server-side termination of its session and
+    // becomes the context of the next one.
+    HeadlessFixture fixture;
+    // Both incarnations build their providers from this snapshot, so each
+    // consumes one step -- script them identical.
+    fixture.Script(testing::TextResponse("the answer is 42"),
+                   TextStream("the answer is 42", llm::StopReason::EndTurn));
+    fixture.Script(testing::TextResponse("the answer is 42"),
+                   TextStream("the answer is 42", llm::StopReason::EndTurn));
+    fixture.Start();
+
+    client::SessionClient::CreateOptions options;
+    options.project_root = (fixture.dir / "work").string();
+    options.agent_preset = "main";
+    options.run_mode = v1::PERMISSION_RUN_MODE_ALLOW_ONLY;
+    const auto created = fixture.client->CreateSession(options);
+    REQUIRE(created.status.ok());
+
+    std::string first_text;
+    REQUIRE(fixture.client
+                ->RunTurn(created.session_id, "what is the answer?",
+                          [&](const v1::ServerEvent& event) {
+                              if (event.has_stream_event() &&
+                                  event.stream_event().has_text_delta()) {
+                                  first_text += event.stream_event().text_delta().text();
+                              }
+                              return true;
+                          })
+                .ok());
+    CHECK(first_text == "the answer is 42");
+
+    // RunTurn returned, so the stream closed and the server terminated the
+    // session. Resume it rather than creating a new one.
+    client::SessionClient::CreateOptions resume;
+    resume.resume_session_id = created.session_id;
+    resume.run_mode = v1::PERMISSION_RUN_MODE_ALLOW_ONLY;
+    const auto resumed = fixture.client->CreateSession(resume);
+    REQUIRE(resumed.status.ok());
+    CHECK(resumed.session_id == created.session_id);
+
+    std::string second_text;
+    REQUIRE(fixture.client
+                ->RunTurn(resumed.session_id, "and again?",
+                          [&](const v1::ServerEvent& event) {
+                              if (event.has_stream_event() &&
+                                  event.stream_event().has_text_delta()) {
+                                  second_text += event.stream_event().text_delta().text();
+                              }
+                              return true;
+                          })
+                .ok());
+    CHECK(second_text == "the answer is 42");
+
+    // One transcript across both incarnations: the stored turn, then the resumed
+    // turn, contiguous and unduplicated.
+    const auto loaded = fixture.db->LoadMessages(created.session_id);
+    REQUIRE(loaded.size() == 4);
+    CHECK(std::get<llm::TextBlock>(loaded[0].message.content.front()).text ==
+          "what is the answer?");
+    CHECK(std::get<llm::TextBlock>(loaded[1].message.content.front()).text ==
+          "the answer is 42");
+    CHECK(std::get<llm::TextBlock>(loaded[2].message.content.front()).text == "and again?");
+    CHECK(std::get<llm::TextBlock>(loaded[3].message.content.front()).text ==
+          "the answer is 42");
+}

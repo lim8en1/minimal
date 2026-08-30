@@ -12,4 +12,12 @@ void TokenAccumulator::RecordTurn(const Usage& turn) {
     last_turn_ = turn;
 }
 
+void TokenAccumulator::SeedOccupancy(std::int64_t estimated_input_tokens) {
+    // No cumulative bookkeeping, deliberately -- see the header. The value is
+    // clamped into the Usage field's width; no real context window approaches
+    // INT_MAX tokens, so the cast loses nothing in practice.
+    last_turn_ = Usage{};
+    last_turn_.input_tokens = static_cast<int>(estimated_input_tokens);
+}
+
 }  // namespace minimal::llm
