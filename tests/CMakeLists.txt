@@ -37,6 +37,7 @@ add_executable(minimal_tests
     tools_bash_test.cpp
     skill_registry_test.cpp
     skill_tool_test.cpp
+    session_store_test.cpp
     # provider-openai's pure translation logic, compiled directly into the test
     # binary rather than via the plugin .so -- these files have no ABI/plugin
     # dependency, only core headers, so this is real linkage, not dlopen.
@@ -75,9 +76,13 @@ add_dependencies(minimal_tests
 target_compile_definitions(minimal_tests PRIVATE
     MINIMAL_FIXTURE_DIR="${CMAKE_CURRENT_BINARY_DIR}/fixtures")
 
+# SQLite3 directly: the session-store tests build fixtures (a hand-crafted
+# newer-version database) and assert on internals (integrity_check,
+# journal_mode, sqlite_master) that SessionDatabase deliberately does not expose.
 target_link_libraries(minimal_tests PRIVATE
     minimal::test_support
-    Catch2::Catch2WithMain)
+    Catch2::Catch2WithMain
+    SQLite3::SQLite3)
 
 catch_discover_tests(minimal_tests)
 

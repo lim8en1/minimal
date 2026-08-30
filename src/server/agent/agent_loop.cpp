@@ -51,8 +51,8 @@ AgentLoop::AgentLoop(llm::LlmProvider& provider, tools::ToolExecutor& executor,
 
 bool AgentLoop::Cancelled() const { return is_cancelled_ && is_cancelled_(); }
 
-void AgentLoop::AppendAndPersist(llm::Message message) {
-    store_.Append(message);
+void AgentLoop::AppendAndPersist(llm::Message message, std::optional<int> output_tokens) {
+    store_.Append(message, output_tokens);
     history_.push_back(std::move(message));
 }
 
@@ -184,7 +184,8 @@ TurnResult AgentLoop::RunTurn(llm::Message seed_message) {
         llm::Message assistant{llm::Role::Assistant, response.content};
         result.final_text = TextOf(assistant);
         const auto tool_uses = ToolUsesOf(assistant);
-        AppendAndPersist(std::move(assistant));
+        // The only per-message token count that exists: this response's output.
+        AppendAndPersist(std::move(assistant), response.usage.output_tokens);
 
         if (response.stop_reason == llm::StopReason::Cancelled) break;
 

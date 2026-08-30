@@ -1,5 +1,7 @@
 #pragma once
 
+#include <optional>
+
 #include "minimal/llm/message.hpp"
 
 namespace minimal::agent {
@@ -19,7 +21,12 @@ namespace minimal::agent {
 class HistoryStore {
 public:
     virtual ~HistoryStore() = default;
-    virtual void Append(const llm::Message& message) = 0;
+
+    // output_tokens is the backend-reported output count for an assistant
+    // message (its row's token_count). User messages and tool results carry no
+    // per-message count -- input_tokens covers the whole history, so there is
+    // nothing attributable to one row -- and pass nullopt.
+    virtual void Append(const llm::Message& message, std::optional<int> output_tokens = std::nullopt) = 0;
 };
 
 }  // namespace minimal::agent
