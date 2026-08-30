@@ -37,6 +37,15 @@ add_executable(minimal_tests
     tools_bash_test.cpp
     skill_registry_test.cpp
     skill_tool_test.cpp
+    proto_convert_test.cpp
+    pending_requests_test.cpp
+    event_queue_test.cpp
+    wire_permission_checker_test.cpp
+    session_observer_test.cpp
+    session_test.cpp
+    session_registry_test.cpp
+    session_service_test.cpp
+    headless_e2e_test.cpp
     # provider-openai's pure translation logic, compiled directly into the test
     # binary rather than via the plugin .so -- these files have no ABI/plugin
     # dependency, only core headers, so this is real linkage, not dlopen.
@@ -75,8 +84,11 @@ add_dependencies(minimal_tests
 target_compile_definitions(minimal_tests PRIVATE
     MINIMAL_FIXTURE_DIR="${CMAKE_CURRENT_BINARY_DIR}/fixtures")
 
+# The headless client is exercised as a real client here, so the test binary
+# links it -- the E2E tier is the whole point of building -p first.
 target_link_libraries(minimal_tests PRIVATE
     minimal::test_support
+    minimal::client_core
     Catch2::Catch2WithMain)
 
 catch_discover_tests(minimal_tests)

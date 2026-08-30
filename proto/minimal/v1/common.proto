@@ -57,6 +57,12 @@ enum StopReason {
   STOP_REASON_STOP_SEQUENCE = 4;
   STOP_REASON_CONTENT_FILTER = 5;
   STOP_REASON_REFUSAL = 6;
+  // Cancellation is an expected outcome, not an error: the provider catches its
+  // own aborted transfer and returns a partial response carrying this reason
+  // (see llm/chat.hpp). It needs a wire counterpart because the headless client
+  // derives its exit code from stop_reason -- without one, a cancelled run is
+  // indistinguishable from a malformed one.
+  STOP_REASON_CANCELLED = 7;
 }
 
 message Usage {

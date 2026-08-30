@@ -8,6 +8,8 @@ target_link_libraries(minimal_client_core
     PUBLIC
         minimal::common
         minimal::proto
+    PUBLIC
+        nlohmann_json::nlohmann_json
     PRIVATE
         ftxui::screen
         ftxui::dom

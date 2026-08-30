@@ -67,4 +67,14 @@ void BashSessionStateStore::Erase(const std::string& session_id) {
     states_.erase(session_id);
 }
 
+bool BashSessionStateStore::Has(const std::string& session_id) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return states_.find(session_id) != states_.end();
+}
+
+std::size_t BashSessionStateStore::size() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return states_.size();
+}
+
 }  // namespace minimal::tools_bash

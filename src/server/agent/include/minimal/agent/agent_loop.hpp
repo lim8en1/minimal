@@ -29,6 +29,24 @@ struct LoopConfig {
     int max_turns = 0;  // 0 = unbounded; subagents bound their own life
 };
 
+// Brackets one tool invocation, surfaced to the client as ToolExecutionEvent.
+// Distinct from a permission request, which BLOCKS and needs an answer: this is
+// a non-gated status push, so a client can show "Running bash..." for a call
+// that was never gated at all.
+//
+// Carries no summary line. Producing one means asking the tool to Disclose(),
+// which for bash resolves argv[0] against the session PATH -- worth paying when
+// a human is about to be asked a question, not on every call of an
+// already-allowed tool. Rendering from tool_name + input is the client's job.
+struct ToolLifecycleEvent {
+    std::string tool_use_id;
+    std::string tool_name;
+    nlohmann::json input;
+    bool started = false;
+    bool is_error = false;  // meaningful only when started == false
+    std::int64_t started_at_unix_ms = 0;
+};
+
 // Session-scoped, as distinct from the preset (which is switchable via /agent)
 // and the config (which is tuning). project_root in particular is per-session,
 // not server-global: it is the boundary for path confinement, @-mentions, and
@@ -43,6 +61,10 @@ struct SessionContext {
     // is not part of the LLM stream -- it reaches the client as its own
     // ToolOutputDeltaEvent. Left unset until the RPC layer wires it.
     std::function<void(std::string_view tool_use_id, std::string_view chunk)> tool_output_sink;
+
+    // Start/finish brackets for each tool call. Optional: unset in tests that
+    // only care about the transcript.
+    std::function<void(const ToolLifecycleEvent&)> tool_lifecycle_sink;
 
     // Handed to every ToolContext this session builds. Session-scoped rather than
     // a free function so a later per-session sink (session-id prefix) is an

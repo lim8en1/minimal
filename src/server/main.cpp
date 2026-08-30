@@ -5,21 +5,30 @@
 // Providers and tools are plugin-registered, so "is there at least one usable
 // provider?" cannot be answered before plugins are in. See ARCHITECTURE.md.
 //
-// Only the first two stages exist so far; the sanity check and the gRPC service
-// slot in after them.
+// The sanity check is still absent; everything else is wired.
 
 #include <cstdio>
+#include <cstring>
+#include <exception>
 #include <fstream>
 #include <memory>
 #include <sstream>
 #include <string>
 
+#include "minimal/agent/agent_preset_registry.hpp"
+#include "minimal/agent/session_observer_registry.hpp"
+#include "minimal/agent/session_registry.hpp"
 #include "minimal/common/abi_tag.hpp"
 #include "minimal/common/config_paths.hpp"
+#include "minimal/common/logger.hpp"
+#include "minimal/config/permissions_config.hpp"
+#include "minimal/config/settings_config.hpp"
 #include "minimal/config/skill_registry.hpp"
 #include "minimal/llm/provider_factory_registry.hpp"
 #include "minimal/plugins/plugin_discovery.hpp"
 #include "minimal/plugins/plugin_loader.hpp"
+#include "minimal/rpc/server.hpp"
+#include "minimal/rpc/session_service.hpp"
 #include "minimal/tools/skill_tool.hpp"
 #include "minimal/tools/tool_registry.hpp"
 
@@ -43,8 +52,15 @@ void WriteFile(const std::filesystem::path& path, const std::string& contents) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    (void)argc;
-    (void)argv;
+    std::filesystem::path socket_path = minimal::rpc::DefaultSocketPath();
+    for (int i = 1; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--listen") == 0 && i + 1 < argc) {
+            socket_path = argv[++i];
+        } else if (std::strcmp(argv[i], "--version") == 0) {
+            std::printf("minimal-server %s\n", minimal::common::Version());
+            return 0;
+        }
+    }
 
     const auto config_dir = minimal::common::ConfigDir();
 
@@ -73,7 +89,21 @@ int main(int argc, char** argv) {
 
     minimal::tools::ToolRegistry tools;
     minimal::llm::ProviderFactoryRegistry providers;
-    minimal::plugins::PluginLoader loader(tools, providers);
+    minimal::agent::SessionObserverRegistry observers(minimal::common::DefaultLogger());
+
+    // The tools slice of settings.json is forwarded verbatim to every plugin;
+    // core imposes no schema on it. Loaded defensively because a missing or
+    // malformed settings.json must not stop plugins from loading -- the startup
+    // sanity check is what will report it.
+    nlohmann::json tools_settings = nlohmann::json::object();
+    try {
+        tools_settings =
+            nlohmann::json::parse(ReadFileOrEmpty(config_dir / "settings.json")).value("tools",
+                                                                                       nlohmann::json::object());
+    } catch (const std::exception&) {
+    }
+
+    minimal::plugins::PluginLoader loader(tools, providers, tools_settings, &observers);
     const auto records = loader.LoadAll(candidates);
 
     std::printf("plugins (%zu discovered):\n", records.size());
@@ -87,6 +117,9 @@ int main(int argc, char** argv) {
         }
         for (const auto& kind : record.registered_provider_kinds) {
             std::printf("      provider %s\n", kind.c_str());
+        }
+        if (record.registered_session_observer) {
+            std::printf("      observer session lifecycle\n");
         }
     }
 
@@ -112,6 +145,54 @@ int main(int argc, char** argv) {
                 providers.kinds().size());
 
     // TODO: stage 3 sanity check (bundled plugin failures are Fatal, user
-    // failures Warning), then stage 4 serve SessionService.
+    // failures Warning).
+
+    // --- Stage 4: serve ------------------------------------------------------
+    // Config that only the serving stage needs is loaded here rather than at
+    // stage 1, because the loaders throw on a missing file and plugin loading
+    // must not be held hostage to a config problem it does not depend on.
+    minimal::config::SettingsConfig settings;
+    minimal::config::PermissionsConfig permissions;
+    std::unique_ptr<minimal::agent::AgentPresetRegistry> presets;
+    try {
+        settings = minimal::config::LoadSettingsConfig(config_dir / "settings.json");
+        permissions = minimal::config::LoadPermissionsConfig(config_dir / "permissions.json");
+        presets = std::make_unique<minimal::agent::AgentPresetRegistry>(config_dir, skills);
+    } catch (const std::exception& e) {
+        // Until the sanity check lands this is the only diagnostic for a broken
+        // or absent config, so it names the directory as well as the error.
+        std::fprintf(stderr, "\nconfiguration error (%s): %s\n", config_dir.c_str(), e.what());
+        return 1;
+    }
+
+    minimal::agent::LoopConfig loop_config;
+    loop_config.auto_compact = settings.memory.auto_compact;
+    loop_config.compaction_trigger_tokens = settings.memory.context_compaction_trigger_tokens;
+    loop_config.compaction_keep_recent_tokens = settings.memory.compaction_keep_recent_tokens;
+
+    minimal::agent::SessionRegistry sessions(*presets, tools, providers, observers, loop_config,
+                                             minimal::common::DefaultLogger());
+    minimal::rpc::SessionServiceImpl service(sessions, settings, permissions,
+                                             minimal::common::DefaultLogger());
+    minimal::rpc::Server server(service, socket_path);
+
+    if (!server.listening()) {
+        std::fprintf(stderr, "\ncannot listen on %s (is a server already running?)\n",
+                     socket_path.c_str());
+        return 1;
+    }
+
+    // NO DAEMON: refcounted by attached clients, gone when the last one leaves.
+    // That is what lets a client auto-spawn a server without anyone tuning an
+    // idle timeout or reaping a stray background process.
+    // RequestShutdown, not Shutdown: this fires at the tail of OpenSession, on
+    // the handler thread, and the blocking form would wait for that very RPC.
+    service.set_on_last_client_detached([&server] { server.RequestShutdown(); });
+
+    std::printf("\nlistening on %s\n", server.target().c_str());
+    std::fflush(stdout);
+    server.Wait();
+
+    sessions.TerminateAll();
     return 0;
 }

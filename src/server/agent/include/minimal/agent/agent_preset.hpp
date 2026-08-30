@@ -19,6 +19,11 @@ struct AgentPreset {
     std::string description;
     std::string system_prompt;  // subagent.md prefix (if any) already concatenated
     llm::ProviderConfig provider;  // model_name already reflects preset-override-wins-else-entry
+    // The providers.json `provider` field -- the kind string that selects a
+    // factory from ProviderFactoryRegistry. Carried here because ProviderConfig
+    // holds only connection details (base_url/api_key/model_name), so without it
+    // a resolved preset cannot actually construct the provider it describes.
+    std::string provider_kind;
     std::vector<std::string> allowed_tools;  // {"*"} means all registered
     // RESOLVED, not the raw frontmatter list: `*` is already expanded and names
     // that are unknown or failed to load are already dropped, so this is exactly

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <filesystem>
 #include <map>
 #include <mutex>
@@ -20,9 +21,8 @@ struct SessionShellState {
 
 // Plugin-owned and keyed by session id -- core holds no bash state (see the
 // plugin's header comment). Without OnSessionEnded this map would grow for the
-// process lifetime; Erase() is that hook, to be called from the plugin's
-// SessionObserver once the observer registry lands. Until then nothing else in
-// the process creates or ends sessions, so no entry can leak.
+// process lifetime; Erase() is that hook, called from BashSessionObserver in
+// this plugin's plugin.cpp.
 class BashSessionStateStore {
 public:
     // Existing state, or a fresh one seeded from `project_root` (bash's initial
@@ -41,10 +41,15 @@ public:
 
     void Erase(const std::string& session_id);
 
+    // Observable so a test can assert that OnSessionEnded actually shrank the
+    // map -- "no longer leaks" is not a claim inspection can settle.
+    bool Has(const std::string& session_id) const;
+    std::size_t size() const;
+
 private:
     SessionShellState Seed(const std::filesystem::path& project_root);
 
-    std::mutex mutex_;
+    mutable std::mutex mutex_;
     std::unordered_map<std::string, SessionShellState> states_;
 };
 

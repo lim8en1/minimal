@@ -2,13 +2,15 @@
 
 Companion to `ARCHITECTURE.md`, which remains the single source of truth for *design*. This document covers only *sequencing*: what is built, what blocks what, and what "done" means for each remaining piece. Every milestone cites the `ARCHITECTURE.md` section that specifies it; where this plan and that document disagree, that document wins and this one is stale.
 
-**Status as of the last commit (`c806728`): 284 tests passing, clean build, zero warnings.**
+**Status: Milestone A is complete. 382 tests passing, clean build, zero warnings.**
+
+`minimal -p` holds real conversations against a local model using `read`, `bash`, and `skill`; a permission prompt round-trips over the wire in both directions; a session grant silences the second prompt; the server exits when the last client detaches.
 
 ---
 
 ## 1. Where the project actually is
 
-The tested surface is deep but disconnected. Nothing outside the test suite ever constructs an `AgentLoop` or a `ToolExecutor`; the server binary loads config, loads four plugins, registers five tools, prints its skills, and exits.
+**Milestone A closed the gap this section described.** The server now serves; the headless client is a real client; every layer below has been executed rather than only unit-tested. What follows is updated for that.
 
 ### Built and tested
 
@@ -22,9 +24,22 @@ The tested surface is deep but disconnected. Nothing outside the test suite ever
 | Agent loop: tool cycle, retries, cancellation, compaction trigger + boundary snapping | `src/server/agent/` | 19 |
 | `tools-fs`, `tools-bash`, `provider-openai` | `plugins/server/` | 74 |
 
-### Not built
+### Built in Milestone A
 
-`src/server/rpc/`, `src/server/commands/`, `src/server/mcp/`, session storage, both clients, subagents, the production compactor, the sanity check. `commands-core` is an empty plugin shell.
+| Piece | Location | Notes |
+|---|---|---|
+| Proto ↔ domain conversion | `src/server/rpc/proto_convert.*` | Was unowned by any milestone; found during planning. |
+| `PendingRequests`, `EventQueue` | `src/server/rpc/` | The rendezvous and the outbound queue. |
+| `WirePermissionChecker` | `src/server/rpc/` | First real `PermissionChecker`; no gRPC dependency, so testable in-process. |
+| `Session`, `SessionRegistry` | `src/server/agent/` | Three-thread topology, initial-attach guard. |
+| `SessionObserver` + registry | `src/server/agent/` | Track I; closes the `tools-bash` state leak. |
+| `InMemoryHistoryStore` | `src/server/agent/` | Thread-safe, `seq`-keyed; SQLite swaps in behind it. |
+| `SessionServiceImpl`, `Server` | `src/server/rpc/` | `CreateSession` + `OpenSession`; refcounted exit. |
+| `SessionClient`, `minimal -p` | `src/client/` | text and jsonl output, exit codes, `AllowOnly` default. |
+
+### Still not built
+
+`src/server/commands/`, `src/server/mcp/`, SQLite session storage, the TUI, subagents, the production compactor, the sanity check. `commands-core` is an empty plugin shell.
 
 ### The risk this creates
 
@@ -55,9 +70,11 @@ Test depth is inverted relative to integration risk: every well-tested layer is 
 - **B. Session storage (SQLite)** — `HistoryStore` is already an interface with an in-memory fake. A SQLite implementation is a drop-in behind it and needs nothing from A. *Caveat: the `ListSessions`/`GetMessages` RPCs that expose it do need A.*
 - **F. Startup sanity check** — pure config-layer work over already-built loaders. `main.cpp` is already staged for it (`main.cpp:114`).
 - **H. Production compactor** — `Compactor` is an injected `std::function`; the real one calls the provider with `prompts/compression.md`. Both sides already exist.
-- **I. `SessionObserver` registry** — needed to close bash's per-session state leak (`tools-bash/plugin.cpp:64`). The ABI seam is designed; the registry is not built. Independent of A, but pointless until sessions exist, so schedule it *with* A.
+- ~~**I. `SessionObserver` registry**~~ — **done**, landed with A2. `minimal_plugin_register_session_observer` is live in the plugin ABI and `tools-bash` implements it.
 
-**Strictly dependent on A:** C, D, E, G, and every RPC beyond `CreateSession`/`OpenSession`.
+**Strictly dependent on A:** C, D, E, G, and every RPC beyond `CreateSession`/`OpenSession`. **A is now done, so all of them are unblocked.**
+
+**Deferred out of A, deliberately:** client auto-spawn of the server (connect-or-spawn with a lock file). The refcounted-exit half it depends on is built and tested.
 
 **Rationale for A first** is `ARCHITECTURE.md` § *Non-interactive client*: the headless client is "the natural E2E harness — a second reason to build it before the TUI." It converts the entire existing suite from unit-tested to actually-exercised at the lowest possible cost.
 
@@ -152,12 +169,37 @@ Also lands the **wire-backed `PermissionChecker`**: emits `PermissionRequest` on
 - [ ] `AllowOnly` auto-deny path completes rather than blocking.
 - [ ] Attaching to a child session is a client obligation (§ *Session lifetime*) — assert the headless client does it, since the initial-attach guard is a safety net and not a designed flow.
 
-### Milestone A definition of done
+### Milestone A definition of done — met
 
-- [ ] `minimal -p` holds a real conversation against a local llama server, using `read`, `bash`, and `skill`.
-- [ ] A permission prompt is answered over the wire in both directions.
-- [ ] Full suite green; clean build, zero warnings.
-- [ ] `ARCHITECTURE.md` § *Concurrency model* updated if the implementation diverged — **divergence is the expected outcome of first contact, and recording it is part of the milestone.**
+- [x] `minimal -p` holds a real conversation against a local model, using `read`, `bash`, and `skill`.
+- [x] A permission prompt is answered over the wire in both directions; a session grant silences the second prompt.
+- [x] Full suite green; clean build, zero warnings.
+- [x] `ARCHITECTURE.md` updated where the implementation diverged.
+
+### What first contact actually found
+
+Divergence was the expected outcome, and this is the record of it. Each item is now reflected in `ARCHITECTURE.md`.
+
+**Protocol gaps — the wire could not express things the design assumed.**
+
+1. **No end-of-turn signal.** A turn makes one provider call per tool round, so `stop_reason` arrives repeatedly before the turn is done. A single-turn client had no way to know when to half-close, and hung. Added `TurnCompletedEvent`, emitted on every exit path including failures. An interactive client would never have surfaced this — which is the argument for building `-p` first, made concrete.
+2. **Consent scoping could not cross the wire at all.** `PermissionRequest` carried only a summary string. Added `GrantOffer`/`complete` and `granted_keys`, with the offered-keys filter enforced at the boundary.
+3. **No wire representation for run mode.** `AllowOnly` is a property of the *client*, not of config. Added `PermissionRunMode` to `CreateSessionRequest`.
+4. **`StopReason::Cancelled` had no counterpart**, so a cancelled run reported `UNSPECIFIED` — and the headless exit code derives from `stop_reason`.
+5. **`AgentPreset` dropped the provider kind**, so a resolved preset could not construct the provider it described.
+
+**Design corrections — the doc specified something that does not work.**
+
+6. **`PendingRequests` needed a two-phase API.** The sketched `AwaitResponse(id)` cannot be called correctly: waiting before publishing blocks before the request goes out, publishing before waiting loses a fast client's answer. Registration now returns an RAII handle, making the correct order the only expressible one.
+7. **Observer dispatch had to be serialized, not pooled.** A pool gives no ordering between `OnSessionCreated` and `OnSessionEnded` and makes every observer's state a shared mutable. Caught by a test that aborted on a data race.
+8. **Shutdown cannot be called from an RPC handler.** `grpc::Server::Shutdown()` waits for in-flight RPCs including the caller, so the last-client-detached callback deadlocked the binary on every run — while every test passed, because the test only recorded the callback. Split into `RequestShutdown()` and `Shutdown()`.
+
+**Testing infrastructure.**
+
+9. **`std::async` cannot bound a test whose failure mode is a hang** — its future blocks in the destructor. Added `tests/support/deadline.hpp`.
+10. **A gRPC client must drain before `Finish()`**, or it deadlocks against a server still writing. Cost several test hangs before being isolated.
+
+Items 1, 6, 7, 8 and 9 were each discovered by a hang or a crash rather than by review.
 
 ---
 

@@ -1,6 +1,7 @@
 #include "minimal/agent/agent_loop.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <utility>
 #include <variant>
 
@@ -212,7 +213,29 @@ TurnResult AgentLoop::RunTurn(llm::Message seed_message) {
                     session_.tool_output_sink(tool_use_id, chunk);
                 };
             }
-            results.push_back(executor_.Run(use->id, use->name, use->input, ctx));
+
+            ToolLifecycleEvent lifecycle;
+            lifecycle.tool_use_id = use->id;
+            lifecycle.tool_name = use->name;
+            lifecycle.input = use->input;
+            lifecycle.started = true;
+            lifecycle.started_at_unix_ms =
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::system_clock::now().time_since_epoch())
+                    .count();
+            if (session_.tool_lifecycle_sink) session_.tool_lifecycle_sink(lifecycle);
+
+            llm::ToolResultBlock tool_result = executor_.Run(use->id, use->name, use->input, ctx);
+
+            // Emitted even when Run() reports an error, and before the result is
+            // appended: a client that showed a tool as started must always see it
+            // finish, or its running-tools panel accumulates entries that never
+            // clear.
+            lifecycle.started = false;
+            lifecycle.is_error = tool_result.is_error;
+            if (session_.tool_lifecycle_sink) session_.tool_lifecycle_sink(lifecycle);
+
+            results.push_back(std::move(tool_result));
         }
         AppendAndPersist(llm::Message{llm::Role::User, std::move(results)});
 

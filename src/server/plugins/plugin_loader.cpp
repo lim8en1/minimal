@@ -18,6 +18,7 @@ using NameFn = const char* (*)();
 using VersionFn = const char* (*)();
 using RegisterToolsFn = void (*)(tools::ToolRegistry&, const ToolRegistrationContext&);
 using RegisterProviderFactoriesFn = void (*)(llm::ProviderFactoryRegistry&);
+using RegisterSessionObserverFn = void (*)(agent::SessionObserverRegistry&);
 
 template <typename Fn>
 Fn Lookup(void* handle, const char* symbol) {
@@ -45,8 +46,12 @@ std::string_view ToString(LoadStatus status) {
 }
 
 PluginLoader::PluginLoader(tools::ToolRegistry& tools, llm::ProviderFactoryRegistry& providers,
-                            nlohmann::json tools_settings)
-    : tools_(tools), providers_(providers), tools_settings_(std::move(tools_settings)) {}
+                            nlohmann::json tools_settings,
+                            agent::SessionObserverRegistry* observers)
+    : tools_(tools),
+      providers_(providers),
+      tools_settings_(std::move(tools_settings)),
+      observers_(observers) {}
 
 // Handles are intentionally leaked -- see LIFETIME in the header.
 PluginLoader::~PluginLoader() = default;
@@ -121,6 +126,14 @@ PluginRecord PluginLoader::LoadOne(const PluginCandidate& candidate) {
         const auto after = providers_.kinds();
         std::set_difference(after.begin(), after.end(), before.begin(), before.end(),
                             std::back_inserter(record.registered_provider_kinds));
+    }
+
+    if (observers_ != nullptr) {
+        if (auto register_observer = Lookup<RegisterSessionObserverFn>(
+                handle, "minimal_plugin_register_session_observer")) {
+            register_observer(*observers_);
+            record.registered_session_observer = true;
+        }
     }
 
     record.status = LoadStatus::Loaded;

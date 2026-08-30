@@ -35,14 +35,16 @@ minimal/
       abi_tag.{hpp,cpp}           # both plugin loaders must compute an identical tag
       version.hpp
     server/
-      agent/    # agent_loop, compaction, presets, provider_instance_cache
+      agent/    # agent_loop, session, session_registry, compaction, presets,
+                #   session_observer(_registry), in_memory_history_store
       llm/      # unified model, provider iface, http_client, sse_parser
       tools/    # Tool iface, registry, executor, permission model, path_confinement
       commands/ # Command iface, registry, dispatcher
       plugins/  # the plugin HOST: loader, plugin_abi.h, name/collision registry,
                 #   observer/mention/auth registries. Harness code -- distinct from
                 #   the top-level plugins/, which is what gets loaded.
-      rpc/      # SessionService impl, pending_requests, auth_interceptor
+      rpc/      # SessionService impl, server, pending_requests, event_queue,
+                #   wire_permission_checker, proto_convert, auth_interceptor
       config/   # loaders, frontmatter, skill_registry, seeding, sanity_check
       mcp/      # cpp-mcp client wrapper, shared server processes
       session/  # SQLite store, migrations, SessionReader
@@ -68,7 +70,11 @@ Four tiers, in value order:
 1. **Pure logic**, no I/O or network: `path_confinement` (security-critical — `..`, symlink escape, encoded traversal, embedded NUL), the `most_restrictive` lattice and both permission precedence chains, `SseParser` frame-splitting across write-callback boundaries, frontmatter parsing, alias/collision resolution, compaction boundary snapping to tool-call pairs, occupancy-vs-cumulative token accounting.
 2. **Agent loop against a scripted `FakeLlmProvider`**: the full tool-call cycle, retry-on-`is_retryable`, cancellation, compaction trigger, subagent blocking and non-blocking paths, `max_tokens` surfacing. Deterministic, no network.
 3. **Tools against a temp `project_root`**: read/write/edit on a tmpdir; bash pipelines and redirection, the cwd/env state round-trip through the shell's side channel, command disclosure and grant conjunction, timeout/killpg, bounded reaping, and cancellation behavior.
-4. **End-to-end**: server plus the headless `-p` client over a real gRPC channel on a unix socket. The `-p` client is the natural E2E harness — a second reason to build it before the TUI.
+4. **End-to-end**: server plus the headless `-p` client over a real gRPC channel on a unix socket. The `-p` client is the natural E2E harness — a second reason to build it before the TUI. Covers the turn round-trip, the permission round-trip in both directions, a session grant silencing the second prompt, `AllowOnly` auto-deny, stream-close termination, and refcounted server exit.
+
+**Tests whose failure mode is a hang need a deadline, and `std::async` cannot provide one** — the future it returns blocks in its destructor until the task completes, so a wedged worker takes the whole suite down and reports nothing. `tests/support/deadline.hpp` runs the work on a detached thread with refcounted state instead, so an abandoned thread is leaked rather than joined. The caller's obligation is that the callable owns everything it touches.
+
+The same trap exists on the client side of a bidi stream: gRPC's sync API blocks in `Write()` when the peer is not reading, so a client that calls `Finish()` with events still queued deadlocks both sides. Read to end of stream first.
 
 Not unit-tested: FTXUI render output (visual, low yield) and live provider calls.
 
@@ -100,6 +106,10 @@ gRPC permits one concurrent reader and one concurrent writer on a `ServerReaderW
 
 `OpenSession` attaches a writer to the named session's queue and flushes the backlog.
 
+**Attach happens on the first `ClientEvent`, not at connection setup.** `OpenSession` carries no request message, and `session_id` rides on every `ClientEvent` rather than on stream metadata — so the stream is *named* by its first inbound message. The initial-attach guard therefore covers the window from `CreateSession` until that first event arrives, which makes it a function of client latency rather than of connect time.
+
+**`TurnCompletedEvent` is the end-of-turn signal**, and the stream stays open across it. Nothing else can serve: a turn makes one provider call per tool round, so `stop_reason` arrives several times before the turn is actually finished. Without an explicit terminator a single-turn client cannot know when to half-close, and both sides block — the client waiting for output that will never come, the server waiting for a turn that will never be sent. An interactive client never notices, because a human decides when to stop; `minimal -p` has no human, which is why building it first is what found this. It is emitted on **every** exit path including failures, since a client that learns a turn ended only by seeing it succeed hangs on every error.
+
 **Session lifetime**: stream close **terminates** the session — see "Session lifetime" below. There is no detached state in v1, which is why `PendingRequests` has no grace-timer machinery.
 
 **Inbound dispatch** (reader thread — every branch is non-blocking):
@@ -115,14 +125,41 @@ gRPC permits one concurrent reader and one concurrent writer on a `ServerReaderW
 // src/server/rpc/pending_requests.hpp
 class PendingRequests {
 public:
-    // Worker thread: publishes the outbound request, then blocks here until answered.
-    // A client is present by construction (no detached sessions -- see Session lifetime),
-    // so this waits indefinitely: a human may simply be away, and auto-denying their
-    // work is worse than waiting.
-    std::string AwaitResponse(const std::string& request_id);
-    void Resolve(const std::string& request_id, std::string chosen_option);  // reader thread
+    // Registration is SEPARATE from waiting, and returns the handle you need in
+    // order to wait. That makes the correct order the only expressible one:
+    //
+    //     auto registration = pending.Register(id);
+    //     queue.Push(request_event);              // safe: the slot exists
+    //     auto answer = registration.AwaitResponse();
+    //
+    // A single AwaitResponse(id) call cannot work. Waiting before publishing
+    // blocks before the request goes out; publishing before waiting loses a fast
+    // client's answer, which lands in the gap. RAII on the slot matters too: the
+    // waiter is the session worker running tool dispatch, which can throw.
+    class Registration {
+    public:
+        // nullopt means CANCELLED -- the session is terminating. Callers map that
+        // onto a decision themselves; encoding "deny" here would put a policy
+        // choice inside a synchronization primitive.
+        std::optional<std::string> AwaitResponse();
+    };
+    [[nodiscard]] Registration Register(std::string request_id);
+
+    // Reader thread. False if no slot is registered, which is not an error: a
+    // client may answer a request whose session already terminated. Unknown ids
+    // are never buffered for a future waiter -- that would let a client grow this
+    // map without bound by answering things nobody asked.
+    bool Resolve(const std::string& request_id, std::string chosen_option);
+
+    // Wakes every waiter with nullopt. Permanent, so a worker reaching a gate
+    // DURING teardown returns instead of parking on a stopped reader.
+    void CancelAll();
 };
 ```
+
+Waits indefinitely by design -- no timeout, no fail-closed. A client is present by
+construction (no detached sessions), so a human may simply be away, and
+auto-denying their work is worse than waiting.
 
 **Cancellation** — `CancelTurn` sets one atomic flag, read in two places:
 
@@ -147,6 +184,8 @@ What this gives up: "close the terminal, the agent keeps working, come back late
 **One carve-out.** The rule is *not* "unattached ⇒ terminate," because a subagent session emits events before its tab attaches. Terminate fires on stream drop **after having been attached**; a never-yet-attached session gets a short initial-attach timeout (~10 s) purely as a guard against a non-conforming client. Attaching to child sessions is a **client protocol obligation** (see Non-interactive client), so this is a safety net, not a designed flow.
 
 **Termination reuses the cancellation path** (atomic cancel flag → `bool` stream sink aborts the provider request → tools observe `is_cancelled`), then joins and reaps the worker. No new mechanism.
+
+**Server shutdown must be *requested*, not performed, from an RPC handler.** The last-client-detached callback fires at the tail of `OpenSession`, on the handler thread, and `grpc::Server::Shutdown()` blocks until every in-flight RPC completes — including the one calling it. So `Server::RequestShutdown()` only sets a flag, and a thread inside `Server::Wait()` does the blocking part. Getting this wrong hangs the binary on every run while every unit test still passes, because a test that merely records the callback never exercises it.
 
 - **Confirm when work is in flight.** Closing a tab mid-turn destroys running work, so it routes through the existing `ConfirmationBroker`; closing an idle tab needs no prompt.
 - **Terminating a blocking subagent must unblock its parent** — the parent's `SpawnSubagentTool` is synchronously waiting and receives an error `ToolResultBlock` ("subagent terminated by user") rather than hanging.
@@ -413,6 +452,14 @@ virtual PermissionDisclosure Tool::Disclose(const nlohmann::json&, const ToolCon
 
 **Non-interactive mode is unaffected.** `AllowOnly` still means Ask → auto-deny; grants start empty in a headless session and stay empty, because nothing can prompt to create one. Running bash headless is `per_tool_overrides: {"bash": "allow"}` — containerisation is then the operator's responsibility, which is the contract either way.
 
+
+**On the wire.** `PermissionRequest` carries `repeated GrantOffer grants` and a `bool complete`; `PermissionResponse` carries `repeated string granted_keys`. Two rules hold at the boundary, and both are tested across a real socket rather than only in-process:
+
+- **`granted_keys` is filtered against what the request offered.** A grant is only meaningful as the answer to something a human was shown, so accepting arbitrary keys off the wire would let a client mint permission for a binary no prompt ever displayed — precisely what disclosure exists to prevent.
+- **`complete = false` survives serialization.** If it did not, the wire path would be silently more permissive than the in-process one: an unnameable command would satisfy the conjunction vacuously.
+
+`ToolExecutor` remains the sole owner of the grant set; the checker only reports what the operator chose.
+
 ## `/`-command system — `src/server/commands/`
 
 Harness-level control operations dispatched from the client over the bidi stream and executed as code — they bypass the agent turn loop and the LLM entirely, except `LLMCommand`s which deliberately touch the provider.
@@ -574,7 +621,13 @@ public:
 
 **Every payload is an owned value, never a reference.** Observers run on a detached task, so a `const std::vector<Message>&` would dangle. That is also why payloads are deliberately small: rather than copying turn content for every observer that doesn't want it, observers get **`SessionReader`** in the utilities half of the ABI (read-only, the same path `GetMessages` uses) and query by seq range when they need content. The session-titling observer reads seq 0 through it, instead of the payload special-casing "first user message".
 
-**Hard constraint: observers must never wedge a turn.** They return `void` and cannot veto — vetoing is `PermissionChecker`'s job — and they are dispatched **fire-and-forget onto a thread pool**, never awaited. A hung observer leaks a pool thread; it cannot block the session worker. (Deliberately *not* "run with a timeout": a detached `std::thread` cannot be interrupted in C++, so a timeout there would be decorative. Leaking a thread is the honest failure mode, and it preserves the guarantee that matters.)
+**Hard constraint: observers must never wedge a turn.** They return `void` and cannot veto — vetoing is `PermissionChecker`'s job — and they are dispatched **fire-and-forget**, never awaited. (Deliberately *not* "run with a timeout": a detached task cannot be interrupted in C++, so a timeout there would be decorative.)
+
+**Dispatch is one ordered thread, not a pool.** A pool guarantees no ordering between tasks, and these notifications are inherently ordered — an observer that keys off `OnSessionCreated` and releases on `OnSessionEnded` is broken if those can arrive in either order or concurrently. A pool would also make every observer's own state a shared mutable, so writing a correct observer would demand that plugin authors be concurrency experts. Serializing costs nothing real (observer work is meant to be short) and buys both ordering and the guarantee that an observer never runs concurrently with itself. Verified: a second dispatch thread makes a counting observer drop notifications intermittently.
+
+The failure mode shifts accordingly. A hung observer stalls *further* notifications rather than leaking one pool thread — contained (sessions keep running; only notifications stop), and the right trade against silently racing plugin state.
+
+A throwing observer is expected rather than exceptional, since observers are plugin code: each call is wrapped, and one observer's failure never stops the others.
 
 ### `MentionResolver` and `AuthProvider`
 
@@ -875,6 +928,15 @@ A second, headless client against the same `SessionService` — not a TUI flag. 
 
 Scope: one turn in; `text` or `jsonl` out; `AllowOnly` by default with an explicit `--dangerously-bypass`; exit code derived from `stop_reason`/`ErrorEvent`. No tabs, themes, or Markdown rendering.
 
+```
+minimal -p PROMPT [--server TARGET] [--agent PRESET]
+                  [--output-format text|jsonl] [--dangerously-bypass]
+```
+
+`--server` defaults to `unix://<data dir>/server.sock`. **The client does not yet auto-spawn a server**; it reports how to start one. The refcounted-exit half is implemented, which is what auto-spawn will rely on.
+
+Exit codes are interface, because a script piping `-p` has to tell "the model finished" from "it was cut off" from "the call failed": `0` ok, `2` truncated (`max_tokens`/`stop_sequence`), `3` model error or `ErrorEvent`, `4` cancelled, `64` usage, `69` no reachable server.
+
 **Attaching to child sessions is a client protocol obligation, not a TUI behavior.** Any conforming client must attach on `SubagentStartedEvent` — otherwise the initial-attach guard would kill a subagent spawned during a headless run. The headless client merges child output into its stream, or discards it under `--output-format text`.
 
 ## Agent loop — `src/server/agent/agent_loop.{hpp,cpp}`
@@ -907,6 +969,8 @@ RunTurn(session, seed_message):
 - **tools** = registered tools ∩ `allowed_tools`, + live MCP tools for `allowed_mcp_servers`, + `SkillTool` if any skills are allowed, + `SpawnSubagentTool` **iff `parent_session_id` is null**.
 
 Two requirements that are easy to miss and expensive to get wrong:
+
+**Tool lifecycle events.** The loop brackets each `ToolExecutor::run` with a `ToolLifecycleEvent` (started, then finished-with-`is_error`), surfaced as `ToolExecutionEvent`. The finish is emitted even when the tool failed: a client that showed a tool as started must always see it finish, or its running-tools panel accumulates entries that never clear. It deliberately carries **no summary line** — producing one means calling `Tool::Disclose()`, which for bash resolves `argv[0]` against the session `PATH`. That is worth paying when a human is about to be asked a question, not on every call of an already-allowed tool; rendering from `tool_name` + `input` is the client's job.
 
 - **Tools must be emitted in deterministic (sorted) order.** `tools` sits at the very front of the serialized prefix providers cache on, so non-deterministic ordering would silently destroy prompt-cache hits on every single turn, with no visible symptom other than cost and latency.
 - **`stop_reason == max_tokens` with no pending `tool_use` must be surfaced**, not treated as normal completion. Otherwise output is truncated mid-sentence and the turn looks successful.
@@ -1036,6 +1100,9 @@ Core. Server subprocesses are **shared across sessions** (one per `mcps.json` en
 `ToolRegistry` namespaces MCP-sourced tools as `mcp__<server_name>__<tool_name>` at registration, avoiding collisions with built-ins and across servers. MCP tools flow through the identical registry/executor/permission machinery as every other tool.
 
 ## Session storage — SQLite
+
+**Not yet built.** `HistoryStore` is currently backed by `agent::InMemoryHistoryStore`, so a transcript lives exactly as long as the server process. That store is already thread-safe and already exposes a `seq`-keyed read side, so the SQLite implementation swaps in behind an interface that has the right questions on it. Until it lands, `GetMessages` and `ListSessions` answer `UNIMPLEMENTED`.
+
 
 - **`sessions`**: `id, parent_session_id (nullable, self-FK), name, project_root, agent_preset, created_at, updated_at`.
 - **`messages`**: `id, session_id, seq, role, content_json, token_count, created_at`, indexed `(session_id, seq)`.

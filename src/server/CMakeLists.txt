@@ -33,7 +33,16 @@ add_library(minimal_server_core SHARED
     tools/skill_tool.cpp
     llm/provider_factory_registry.cpp
     plugins/plugin_loader.cpp
-    plugins/plugin_discovery.cpp)
+    plugins/plugin_discovery.cpp
+    rpc/proto_convert.cpp
+    rpc/pending_requests.cpp
+    rpc/wire_permission_checker.cpp
+    rpc/session_service.cpp
+    rpc/server.cpp
+    agent/in_memory_history_store.cpp
+    agent/session_observer_registry.cpp
+    agent/session.cpp
+    agent/session_registry.cpp)
 add_library(minimal::server_core ALIAS minimal_server_core)
 
 target_include_directories(minimal_server_core PUBLIC
@@ -41,7 +50,8 @@ target_include_directories(minimal_server_core PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/llm/include"
     "${CMAKE_CURRENT_SOURCE_DIR}/config/include"
     "${CMAKE_CURRENT_SOURCE_DIR}/plugins/include"
-    "${CMAKE_CURRENT_SOURCE_DIR}/agent/include")
+    "${CMAKE_CURRENT_SOURCE_DIR}/agent/include"
+    "${CMAKE_CURRENT_SOURCE_DIR}/rpc/include")
 
 target_link_libraries(minimal_server_core
     PUBLIC

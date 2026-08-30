@@ -6,6 +6,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "minimal/agent/session_observer_registry.hpp"
 #include "minimal/llm/provider_factory_registry.hpp"
 #include "minimal/tools/tool_registry.hpp"
 
@@ -42,6 +43,7 @@ struct PluginRecord {
 
     std::vector<std::string> registered_tools;
     std::vector<std::string> registered_provider_kinds;
+    bool registered_session_observer = false;
 
     bool ok() const { return status == LoadStatus::Loaded; }
 };
@@ -59,8 +61,14 @@ public:
     // `tools_settings` is the `tools` object from settings.json, forwarded
     // verbatim to every plugin's tool registration. Core imposes no schema on
     // it; each plugin owns the shape of its own slice.
+    // `observers` is a pointer, not a reference, because it is genuinely
+    // optional: a test that only exercises tool or provider registration has no
+    // session lifecycle to observe, and passing a throwaway registry there would
+    // spin up a thread pool for nothing. Null means the seam is simply not
+    // offered -- plugins already treat every registration hook as optional.
     PluginLoader(tools::ToolRegistry& tools, llm::ProviderFactoryRegistry& providers,
-                 nlohmann::json tools_settings = nlohmann::json::object());
+                 nlohmann::json tools_settings = nlohmann::json::object(),
+                 agent::SessionObserverRegistry* observers = nullptr);
     ~PluginLoader();
 
     PluginLoader(const PluginLoader&) = delete;
@@ -76,6 +84,7 @@ private:
     tools::ToolRegistry& tools_;
     llm::ProviderFactoryRegistry& providers_;
     nlohmann::json tools_settings_;
+    agent::SessionObserverRegistry* observers_ = nullptr;
     std::vector<void*> handles_;  // never closed; see LIFETIME above
 };
 

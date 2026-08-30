@@ -125,6 +125,7 @@ AgentPreset AgentPresetRegistry::ResolveUncached(const std::string& preset_name)
     const std::vector<std::string> resolved_skills =
         ResolveAllowedSkills(raw.allowed_skills, skills_);
     preset.system_prompt = raw.body + RenderSkillListing(resolved_skills, skills_);
+    preset.provider_kind = entry->provider;
     preset.provider.base_url = entry->base_url;
     preset.provider.api_key = entry->api_key;
     preset.provider.model_name = raw.model.empty() ? entry->model_name : raw.model;

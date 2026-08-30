@@ -23,6 +23,8 @@
 #include "minimal/common/abi_tag.hpp"
 
 // --- Half 2: utilities plugins consume -------------------------------------
+#include "minimal/agent/session_observer.hpp"
+#include "minimal/agent/session_observer_registry.hpp"
 #include "minimal/common/logger.hpp"
 #include "minimal/llm/http_client.hpp"
 #include "minimal/llm/provider.hpp"
@@ -69,10 +71,17 @@ void minimal_plugin_register_tools(minimal::tools::ToolRegistry&,
 // OPTIONAL, additive: contributes provider kinds addressable from providers.json.
 void minimal_plugin_register_provider_factories(minimal::llm::ProviderFactoryRegistry&);
 
+// OPTIONAL, additive: reacts to session lifecycle events.
+//
+// This is how a plugin holding per-session state releases it. Without it that
+// state grows for the process lifetime -- tools-bash's cwd/env map is the
+// concrete case. Observers are dispatched fire-and-forget and cannot veto
+// anything; see SessionObserver for the constraints they run under.
+void minimal_plugin_register_session_observer(minimal::agent::SessionObserverRegistry&);
+
 // Not yet wired -- declared nowhere until the subsystems they register into
 // exist, so that this ABI is not frozen before it has consumers:
 //   minimal_plugin_register_commands(CommandRegistry&)
-//   minimal_plugin_register_session_observer(SessionObserverRegistry&)
 //   minimal_plugin_register_mention_resolver(MentionResolverRegistry&)
 //   minimal_plugin_register_auth_provider(AuthProviderRegistry&)
 

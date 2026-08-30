@@ -43,6 +43,17 @@ minimal::tools_bash::BashSessionStateStore& BashStore() {
     return store;
 }
 
+// Releases this plugin's per-session state. Core cannot do it: the map lives in
+// this .so and nothing outside it can reach the store. Without this hook the
+// cwd/env of every session that ever ran would stay resident for the life of
+// the process.
+class BashSessionObserver : public minimal::agent::SessionObserver {
+public:
+    void OnSessionEnded(const minimal::agent::SessionInfo& info) override {
+        BashStore().Erase(info.session_id);
+    }
+};
+
 }  // namespace
 
 extern "C" {
@@ -59,10 +70,12 @@ void minimal_plugin_register_tools(minimal::tools::ToolRegistry& registry,
     registry.Register(minimal::tools_bash::MakeBashTool(settings, BashStore()));
 }
 
-// TODO: minimal_plugin_register_commands        -- /restart-shell (resets the
-//         same map via BashStore()). Lands with the core commands subsystem.
-// TODO: minimal_plugin_register_session_observer -- OnSessionEnded calls
-//         BashStore().Erase(session_id). Lands with the observer registry;
-//         until then no session lifecycle exists to leak from.
+void minimal_plugin_register_session_observer(
+    minimal::agent::SessionObserverRegistry& registry) {
+    registry.Register(std::make_shared<BashSessionObserver>());
+}
+
+// TODO: minimal_plugin_register_commands -- /restart-shell (resets the same map
+//         via BashStore()). Lands with the core commands subsystem.
 
 }  // extern "C"

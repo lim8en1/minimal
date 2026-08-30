@@ -32,6 +32,10 @@ enum PermissionDecision {
 message PermissionResponse {
   string request_id = 1; // echoes the server-generated id from PermissionRequest
   PermissionDecision decision = 2;
+  // Grants the operator chose to remember for this session. Every entry must be
+  // a key the corresponding PermissionRequest offered -- the server drops
+  // anything else rather than trusting a client to invent grant keys.
+  repeated string granted_keys = 3;
 }
 
 message ConfirmationResponse {
@@ -62,6 +66,17 @@ message ClientEvent {
 
 // --- Server -> client payloads ---
 
+// A session-scoped grant the prompt may offer ("allow /usr/bin/make * this
+// session"). Mirrors tools::GrantOffer. A grant is BLANKET permission for its
+// key -- any arguments -- and the client's wording must say so; see
+// ARCHITECTURE.md "Consent scoping" for why argument-level patterns are not
+// offered. Grants are never persisted: they live in the server's ToolExecutor
+// for the session and nowhere else.
+message GrantOffer {
+  string key = 1;   // stable, e.g. "bash:/usr/bin/make" -- what gets remembered
+  string label = 2; // human-facing, e.g. "/usr/bin/make *"
+}
+
 message PermissionRequest {
   // Server-generated. Tool dispatch is sequential in v1 so only one is normally
   // outstanding per session, but correlation is required regardless: a client
@@ -72,6 +87,14 @@ message PermissionRequest {
   ToolCategory category = 3;
   google.protobuf.Struct tool_input = 4;
   string summary = 5; // one-line human-readable description for the prompt
+  // What this invocation was able to name, and therefore which grants may be
+  // offered. May be a LOWER BOUND -- `find . | xargs rm` names find and xargs,
+  // never rm -- so a client must not present it as an exhaustive account of what
+  // the command will do.
+  repeated GrantOffer grants = 6;
+  // False when the invocation cannot be named at all (bash: `eval "$X"`). Such a
+  // request can never be satisfied by held grants, so it always prompts.
+  bool complete = 7;
 }
 
 message ConfirmationRequest {
@@ -115,6 +138,24 @@ message SessionMetadataEvent {
   string name = 2;
 }
 
+// One turn reached a natural stop. The stream stays OPEN -- the client may send
+// another turn on it -- so this is not a stream terminator; it is the only thing
+// that tells a client the server is done talking for now.
+//
+// Without it a single-turn client cannot know when to half-close, and both sides
+// block: the client waiting for output that will never come, the server waiting
+// for a turn that will never be sent. An interactive client never notices,
+// because a human decides when the conversation is over; `minimal -p` has no
+// human, which is why building it first is what found this.
+//
+// StopReason alone is not a substitute: a turn contains one message_delta per
+// provider call, so a tool-using turn emits several before it is actually done.
+message TurnCompletedEvent {
+  StopReason stop_reason = 1;
+  Usage usage = 2;
+  bool hit_max_turns = 3;
+}
+
 message ServerEvent {
   // Which session this event belongs to. Required because one client multiplexes
   // several sessions (tabs), including subagent children of the focused session.
@@ -129,6 +170,7 @@ message ServerEvent {
     SubagentStartedEvent subagent_started = 8;
     SessionMetadataEvent session_metadata = 9;
     ErrorEvent error = 10;
+    TurnCompletedEvent turn_completed = 11;
   }
 }
 
@@ -191,12 +233,25 @@ message ListSessionsResponse {
   repeated SessionSummary sessions = 1;
 }
 
+// Mirrors tools::PermissionRunMode. Client-supplied because it is a property of
+// the CLIENT, not of the config: the headless client has no human attached, so
+// it must ask for ALLOW_ONLY (Ask -> Deny) rather than block forever on a prompt
+// nobody can answer, and `--dangerously-bypass` is its explicit opt-out.
+// UNSPECIFIED means "use permissions.json default_run_mode".
+enum PermissionRunMode {
+  PERMISSION_RUN_MODE_UNSPECIFIED = 0;
+  PERMISSION_RUN_MODE_ALLOW_ONLY = 1;
+  PERMISSION_RUN_MODE_NORMAL = 2;
+  PERMISSION_RUN_MODE_BYPASS = 3;
+}
+
 message CreateSessionRequest {
   string name = 1;
   string agent_preset = 2;
   // Per-session, not server-global: the boundary for path confinement,
   // @-mentions, SuggestPaths, and bash's initial cwd. The client supplies its cwd.
   string project_root = 3;
+  PermissionRunMode run_mode = 4;
 }
 
 message CreateSessionResponse {
