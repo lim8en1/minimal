@@ -114,6 +114,7 @@ void AgentLoop::MaybeCompact() {
     if (tokens_.last_occupancy() < config_.compaction_trigger_tokens) return;
     if (!compactor_) return;
     if (history_.size() < 2) return;
+    if (compaction_failed_this_turn_) return;
 
     // Keep the tail verbatim; summarize everything older. The candidate cut is
     // chosen by count here -- the boundary snap is what makes it safe.
@@ -127,11 +128,18 @@ void AgentLoop::MaybeCompact() {
     if (cut == 0 || cut >= history_.size()) return;
 
     const std::vector<llm::Message> to_compact(history_.begin(), history_.begin() + cut);
-    llm::Message summary = compactor_(to_compact);
+    const auto result = compactor_(to_compact, provider_, preset_.provider.model_name,
+                                   preset_.compression_prompt, tokens_.last_input_tokens(),
+                                   is_cancelled_);
+    if (!result) {
+        // No compaction this cycle; do not retry on every tool cycle of this turn.
+        compaction_failed_this_turn_ = true;
+        return;
+    }
 
     std::vector<llm::Message> rebuilt;
     rebuilt.reserve(history_.size() - cut + 1);
-    rebuilt.push_back(std::move(summary));
+    rebuilt.push_back(std::move(result->summary_message));
     rebuilt.insert(rebuilt.end(), history_.begin() + cut, history_.end());
     history_.swap(rebuilt);
 
@@ -142,6 +150,7 @@ void AgentLoop::MaybeCompact() {
 
 TurnResult AgentLoop::RunTurn(llm::Message seed_message) {
     TurnResult result;
+    compaction_failed_this_turn_ = false;
     AppendAndPersist(std::move(seed_message));
 
     int turns = 0;

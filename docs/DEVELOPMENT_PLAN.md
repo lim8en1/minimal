@@ -19,12 +19,12 @@ The tested surface is deep but disconnected. Nothing outside the test suite ever
 | Tools: `Tool`/registry/executor, path confinement, `file_access`, `atomic_write`, `SkillTool` | `src/server/tools/` | 47 |
 | Plugins: discovery, `dlopen` loader + ABI guard, collision/alias registry | `src/server/plugins/` | 16 |
 | LLM: provider interface, chat/stream types, SSE parser, HTTP client, token accounting | `src/server/llm/` | 30 |
-| Agent loop: tool cycle, retries, cancellation, compaction trigger + boundary snapping | `src/server/agent/` | 19 |
+| Agent loop: tool cycle, retries, cancellation, compaction trigger + boundary snapping, production compactor | `src/server/agent/` | 29 |
 | `tools-fs`, `tools-bash`, `provider-openai` | `plugins/server/` | 74 |
 
 ### Not built
 
-`src/server/rpc/`, `src/server/commands/`, `src/server/mcp/`, session storage, both clients, subagents, the production compactor, the sanity check. `commands-core` is an empty plugin shell.
+`src/server/rpc/`, `src/server/commands/`, `src/server/mcp/`, session storage, both clients, subagents, the sanity check. `commands-core` is an empty plugin shell.
 
 ### The risk this creates
 
@@ -197,19 +197,20 @@ Bundled-plugin failures are Fatal, user-plugin failures Warning.
 - [ ] A name collision is fatal — this is the rule that makes tool replacement deliberate (§ *Name collisions and aliases*).
 - [ ] Unknown `allowed_skills` entries are reported (currently silently dropped by design — `agent_preset_registry.cpp` notes "a future sanity_check makes them loud").
 
-### H. Production compactor
+### H. Production compactor — done
 
-> § *Context compaction*. Both sides exist; only the wiring is missing.
+> § *Context compaction*. **Status: component built and tested; A2 consumes it.** "Only the wiring was missing" turned out to understate the gap: the injected `Compactor` type could not express failure, so it changed shape (returns `std::optional<CompactionResult>`; prompt/model/provider/cancel are per-call arguments rather than bound at construction, so a future `/agent` switch cannot compact with a stale preset's prompt). The bundled `prompts/compression.md` did not exist anywhere in the tree and is now authored under `bundled/`, staging ground for the (unscheduled) seeding work; until it is installed into a config dir, an empty prompt degrades to logged no-compaction rather than an instructionless request.
 
 **Acceptance criteria**
-- Summarises via the provider using `prompts/compression.md`, or a preset's `compression_prompt` override.
-- **Never splits a `tool_use`/`tool_result` pair** — already implemented and tested as boundary snapping; the production path must route through it, not around it.
-- Compaction failure degrades to "no compaction" rather than losing the transcript.
+- [x] Summarises via the provider using `prompts/compression.md`, or a preset's `compression_prompt` override.
+- [x] **Never splits a `tool_use`/`tool_result` pair** — already implemented and tested as boundary snapping; the production path must route through it, not around it. Proven load-bearing: removing the snap from `MaybeCompact` fails the end-to-end test.
+- [x] Compaction failure degrades to "no compaction" rather than losing the transcript — `nullopt` result, history untouched, plus a per-turn cooldown so a failing summarizer is not re-invoked on every tool cycle of the same turn.
 
 **Test cases**
-- [ ] Real compactor against `FakeLlmProvider`; assert the boundary invariant still holds end to end.
-- [ ] Provider error during compaction leaves history untouched.
-- [ ] Preset-level `compression_prompt` override is used when present.
+- [x] Real compactor against `FakeLlmProvider`; assert the boundary invariant still holds end to end.
+- [x] Provider error during compaction leaves history untouched (and cools down for the rest of the turn).
+- [x] Preset-level `compression_prompt` override is used when present.
+- [x] Unit coverage of `compact_messages`: verbatim pass-through of tool blocks, `original_token_count` ground-truth vs bytes/4 fallback, empty-prompt short-circuit (provider never called), non-text response rejection, cancellation via the stream sink.
 
 ### I. `SessionObserver` registry
 
@@ -283,6 +284,7 @@ Applies to every milestone. These are existing project practice, recorded so the
 
 - **Invariant tests must be proven load-bearing.** Delete the invariant, watch the test fail, restore. Already applied to the sort comparator, `MaxTokens`, the grant conjunction, the vacuous-truth guard, and every skill-registry diagnostic. A test that passes with the fix removed is not a test.
 - **Verify by execution, not inspection.** Plugin linkage was confirmed with `nm -u`/`otool -L`; the ABI mismatch was demonstrated against a running server; the bash hangs were measured (8008 ms → 0 ms). Claims about behaviour need a run behind them.
+- **The pinned toolchain does not synthesize implicit `operator==` for user-defined classes** (verified against AppleClang 21: even `struct E { bool b; };` has no `==`; an explicit `= default` works). Compare fields explicitly, as the existing tests do — do not add defaulted operators to production types just for test convenience.
 - **Zero warnings.** `-Wall -Wextra` on all first-party targets; the tree is clean and must stay so.
 - **`ARCHITECTURE.md` is updated in the same change that diverges from it.** The bash rework's core finding was a restriction that outlived its rationale because the doc was updated without re-deriving the rule.
 - **Test tiers** (§ *Testing*): pure logic → agent loop against `FakeLlmProvider` → tools against a temp `project_root` → end-to-end over a real socket.
@@ -296,5 +298,6 @@ Not scheduled, recorded so they are decisions rather than oversights.
 - **Server-wide fd hygiene** — no `CLOEXEC` discipline on gRPC/SQLite/log fds; every bash command inherits them. The bash pipes are handled; the rest is not.
 - **`tree-sitter-bash` for command disclosure** — the hand-rolled scanner is conservative and its failure mode is safe (fewer grants offered). Upgrading raises the hit rate, not the safety floor. The grammar is already a planned client dependency.
 - **Unknown `allowed_skills` entries are silently dropped** — correct behaviour for resolution, but should be *reported* by F.
-- **Backend `usage: 0`** from some OpenAI-compatible proxies — no fallback estimate designed (§ *Deferred*).
+- **`compaction_keep_recent_tokens` is parsed but unused** — the compaction cut is half the working history by message count (snapped to a tool-call cycle); selecting it by tokens needs per-message counts that are not tracked in memory (§ *Context compaction*).
+- **Backend `usage: 0`** from some OpenAI-compatible proxies — no fallback estimate designed (§ *Deferred*). Note the production compactor's `original_token_count` falls back to a bytes/4 estimate in exactly this case; it is an admission of roughness, not a precision claim.
 - Everything under § *Deferred / open items*: Anthropic provider, Windows, `llamacpp-kv`, parallel tool dispatch, session detach, tab-bar overflow.

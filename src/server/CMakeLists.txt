@@ -27,6 +27,7 @@ add_library(minimal_server_core SHARED
     agent/agent_preset_registry.cpp
     plugins/name_registry.cpp
     agent/compaction_boundary.cpp
+    agent/context_compactor.cpp
     agent/agent_loop.cpp
     tools/tool_registry.cpp
     tools/tool_executor.cpp

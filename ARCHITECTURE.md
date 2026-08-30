@@ -917,20 +917,28 @@ Two requirements that are easy to miss and expensive to get wrong:
 
 Triggered from the agent loop when `memory.auto_compact` is on and a session's **context occupancy** (see Token accounting) crosses `memory.context_compaction_trigger_tokens`. Setting `auto_compact: false` disables automatic compaction entirely, leaving `/compact` as the only trigger. Compaction only changes what goes into the *next* `ChatRequest.messages` — it never mutates persisted history, so scrollback always shows the full conversation.
 
-- Keeps the most recent `memory.compaction_keep_recent_tokens` verbatim; everything older is replaced by one synthetic summary message.
-- **The boundary must snap backwards to the nearest complete tool-call cycle.** A token-count boundary is oblivious to tool pairing, and cutting between an assistant `ToolUseBlock` and its `ToolResultBlock` orphans the call — a hard 400 on both OpenAI and Anthropic, not a soft degradation.
-- Summarization goes through the active provider using `prompts/compression.md`, overridable per preset via the `compression_prompt` frontmatter field.
+- Everything older than the cut is replaced by one synthetic summary message; the cut is currently half the working history by *message count* (snapped, below). Selecting it by `memory.compaction_keep_recent_tokens` needs per-message token counts, which are not tracked in memory — flagged in the development plan's known gaps.
+- **The boundary must snap backwards to the nearest complete tool-call cycle.** A count-based boundary is oblivious to tool pairing, and cutting between an assistant `ToolUseBlock` and its `ToolResultBlock` orphans the call — a hard 400 on both OpenAI and Anthropic, not a soft degradation. The snap lives in the agent loop (`snap_compaction_boundary`), so the compactor always receives a range that ends on a complete cycle.
+- Summarization goes through the active provider using `prompts/compression.md`, overridable per preset via the `compression_prompt` frontmatter field. The request passes the messages **verbatim, tool blocks included** — both wire formats accept them in history without a `tools` array — with the prompt as `system`. It runs through `StreamComplete` with a sink that polls the session's cancel flag, so `CancelTurn` aborts an in-flight summarization instead of stalling until `request_timeout`.
 
 ```cpp
 struct CompactionResult { Message summary_message; int64_t original_token_count; };
 
-class ContextCompactor {
-public:
-    // messages_to_compact must end on a complete tool-call cycle.
-    CompactionResult Compact(const std::vector<Message>& messages_to_compact,
-                              LlmProvider& provider, std::string_view compression_prompt);
-};
+// Production compactor. nullopt = "no compaction this cycle" -- empty prompt,
+// provider error, cancellation, or a response with no usable text. Failure is a
+// value, not an exception: the caller leaves history untouched, so a broken
+// summarizer degrades to no compaction, never to a lost transcript. The prompt
+// and model are per-call rather than bound at construction because /agent can
+// switch presets mid-session.
+using Compactor = std::function<std::optional<CompactionResult>(
+    const std::vector<Message>& messages_to_compact, LlmProvider& provider,
+    std::string_view model_name, std::string_view compression_prompt,
+    int64_t last_reported_input_tokens, std::function<bool()> is_cancelled)>;
+
+std::optional<CompactionResult> compact_messages(/* same signature */);
 ```
+
+The summary is a `User` message carrying a fixed framing line plus the model's text — the shape both wire formats accept at the head of a history. `original_token_count` is the backend's own count from the last API call when it reported one (ground truth), else a bytes/4 estimate; there is no tokenizer in this codebase. A failed attempt sets a per-turn cooldown so the loop does not re-invoke a failing summarizer on every tool cycle of the same turn — each retry would resend half the context. The trigger stays armed for the next `RunTurn`, where the flag resets.
 
 Also exposed as `/compact` (an `LLMCommand`) for proactive use. No confirmation — it touches no persisted data.
 

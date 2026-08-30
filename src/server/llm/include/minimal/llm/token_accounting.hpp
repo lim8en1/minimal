@@ -22,6 +22,10 @@ public:
     void RecordTurn(const Usage& turn);
     CumulativeTotals cumulative() const { return cumulative_; }
     std::int64_t last_occupancy() const { return context_occupancy(last_turn_); }
+    // The backend's own count of what the last request contained -- ground truth
+    // for "how big is the context right now", as opposed to any estimate. 0 when
+    // no turn has been recorded yet or the backend reports usage: 0.
+    std::int64_t last_input_tokens() const { return last_turn_.input_tokens; }
 
 private:
     CumulativeTotals cumulative_;

@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "minimal/agent/agent_preset.hpp"
+#include "minimal/agent/context_compactor.hpp"
 #include "minimal/agent/history_store.hpp"
 #include "minimal/common/logger.hpp"
 #include "minimal/llm/chat.hpp"
@@ -61,9 +62,16 @@ struct TurnResult {
 };
 
 // Summarizes a message range into one synthetic message. Injected so the
-// compaction path is testable without a live summarizer; production supplies one
-// that calls the provider with prompts/compression.md.
-using Compactor = std::function<llm::Message(const std::vector<llm::Message>&)>;
+// compaction path is testable without a live summarizer; production supplies
+// compact_messages, which calls the provider with the preset's compression prompt.
+// nullopt means "no compaction this cycle" -- failure degrades to no compaction,
+// never to a lost transcript. The prompt and model are per-call rather than bound
+// at construction because /agent can switch presets mid-session; binding them
+// would compact with the previous preset's prompt.
+using Compactor = std::function<std::optional<CompactionResult>(
+    const std::vector<llm::Message>& messages_to_compact, llm::LlmProvider& provider,
+    std::string_view model_name, std::string_view compression_prompt,
+    std::int64_t last_reported_input_tokens, std::function<bool()> is_cancelled)>;
 
 // Runs on the session worker thread. Blocks freely -- permission waits, provider
 // calls, tool subprocesses -- which is safe only because the gRPC reader thread
@@ -107,6 +115,12 @@ private:
     std::vector<llm::Message> history_;
     std::vector<llm::Message> injected_;
     llm::TokenAccumulator tokens_;
+
+    // Set when a compaction attempt fails, cleared at each RunTurn: without it a
+    // failing summarizer would be re-invoked on every tool cycle of the same turn,
+    // resending half the context to the provider each time. The trigger stays armed
+    // for the next turn, where the flag resets.
+    bool compaction_failed_this_turn_ = false;
 };
 
 }  // namespace minimal::agent
