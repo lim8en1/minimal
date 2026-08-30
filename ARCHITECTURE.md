@@ -67,7 +67,7 @@ Four tiers, in value order:
 
 1. **Pure logic**, no I/O or network: `path_confinement` (security-critical — `..`, symlink escape, encoded traversal, embedded NUL), the `most_restrictive` lattice and both permission precedence chains, `SseParser` frame-splitting across write-callback boundaries, frontmatter parsing, alias/collision resolution, compaction boundary snapping to tool-call pairs, occupancy-vs-cumulative token accounting.
 2. **Agent loop against a scripted `FakeLlmProvider`**: the full tool-call cycle, retry-on-`is_retryable`, cancellation, compaction trigger, subagent blocking and non-blocking paths, `max_tokens` surfacing. Deterministic, no network.
-3. **Tools against a temp `project_root`**: read/write/edit on a tmpdir; bash allowlist enforcement, metacharacter rejection, rlimit and timeout behavior.
+3. **Tools against a temp `project_root`**: read/write/edit on a tmpdir; bash pipelines and redirection, the cwd/env state round-trip through the shell's side channel, command disclosure and grant conjunction, timeout/killpg, bounded reaping, and cancellation behavior.
 4. **End-to-end**: server plus the headless `-p` client over a real gRPC channel on a unix socket. The `-p` client is the natural E2E harness — a second reason to build it before the TUI.
 
 Not unit-tested: FTXUI render output (visual, low yield) and live provider calls.
@@ -322,7 +322,17 @@ public:
 
 **Edit**: matches Anthropic's built-in `text_editor_20250728` vocabulary — `view` / `create` / `str_replace` (exact match, error unless exactly one occurrence) / `insert` — so an Anthropic provider can later be handed the native schema-less tool without changing file-mutation semantics.
 
-**Bash**: allowlist (not blocklist) of executables; shell metacharacters (`&& | ; \` $()`) rejected outright, never sanitized; no `sh -c` — commands are tokenized and exec'd directly via `posix_spawn`/argv. **Persistent session state (cwd + env only), stateless process-per-call**: persistent state is what makes operator-rejection tolerable UX-wise (so `cd`/`export` chain across calls) without reintroducing an interpreter that could smuggle metacharacters. `{"restart": true}` resets cwd/env, and `/restart-shell` — registered by the *same* plugin — does the same from the command side. Resource limits via `setrlimit` + `killpg` on timeout. **Streams stdout incrementally through `ToolContext::emit_output`** rather than buffering to `max_output_bytes` — the cap still bounds the persisted result. Every invocation logged (command, resolved argv or rejection reason, decision, exit code, duration).
+**Bash**: **commands run through `/bin/sh -c`.** Pipes, redirection, `&&`, `||`, globs and `$VAR` all work, and that is load-bearing rather than a convenience: without a pipe, `convert_to_json.py big.csv | jq '.rows[0]'` has to round-trip the entire CSV through the context window, so forbidding pipes makes the harness *less* token-efficient — the one thing it exists to be.
+
+**There is no allowlist, and no attempt at one.** A binary list is unmanageable security theatre at every granularity. Keyed on name it dies to `cp /bin/bash /tmp/git`; keyed on resolved path or hash it dies to the interpreters you must allow anyway — `git config alias.x '!sh'`, `make` running a Makefile, `find -exec`, `xargs`, `env`, `npm run`. There is no set of allowed binaries for a coding agent that is not also a set of ways to run arbitrary code. An earlier draft forbade shell metacharacters to protect such a list; when the list went, the restriction was left behind with a new rationale ("approval fidelity") attached to it. It has now gone too, since it bought no boundary — the same paragraph had to concede that `bash -c "rm -rf /"` contains no metacharacters — while costing pipes.
+
+**The permission gate is the boundary.** Bash is category `Execute` (`Ask` by default) and the operator approves the command. This is coherent with the local, single-user server assumption above: the real threat is **model error, not model malice**. Against a mistaken model a prompt works; against an adversarial one holding a shell, only a container does — which is why the swap-out path (a plugin registering `bash` against a container or remote executor) matters more than any character-level rule ever could.
+
+**Consent scoping** makes `Ask` livable without weakening it — see *Consent scoping* below.
+
+**Persistent session state (cwd + env only), stateless process-per-call.** `cd` and `export` inside `sh -c` would die with the subshell, so the wrapper appends a trailer that reports the shell's final `pwd -P` and `env -0` on fd 9, and the session adopts them wholesale (a merge would resurrect variables the command deliberately `unset`). This keeps `cd`/`export` chaining across calls with no long-lived interpreter to hang, corrupt, or leak. The payload is validated, never trusted — a command can write to fd 9 itself — and anything unexpected leaves the previous state untouched, which is also what a command that `exit`s before the trailer runs produces. `{"restart": true}` resets cwd/env, and `/restart-shell` — registered by the *same* plugin — does the same from the command side.
+
+**Limits.** `timeout_ms` is per-invocation, model-supplied and clamped to a configured ceiling; "until it finishes" is deliberately not offered, since the deadline is the only hard bound on a session worker thread. Resource limits via `setrlimit` (child-side, before exec — hence fork + execve rather than posix_spawn, whose pre-exec functions may only call async-signal-safe functions). On timeout or cancellation the child's process group is killed *and* the child itself: the child sets its own pgid via `setsid()`, so between fork and that call `killpg` would find no such group and fail. Reaping is deadline-bounded rather than a blocking `waitpid`, because EOF on the pipes does not mean the process is gone — it can close its stdio and keep running. stdin is `/dev/null`: inherited, a command reading fd 0 blocks until the deadline and competes for the operator's terminal. **Streams stdout incrementally through `ToolContext::emit_output`** rather than buffering to `max_output_bytes` — the cap (head ¼ + tail ¾, marker in the middle) still bounds the persisted result, and with pipes available the model can filter at the source (`| tail -50`) rather than being handed schema knobs to do it. Every invocation logged (command, exit code, duration).
 
 That cwd/env map lives **inside the `tools-bash` plugin**, keyed by session id — core holds no bash state. The plugin therefore also registers a `SessionObserver` purely to implement `OnSessionEnded` and free the entry; without it the map would grow for the process lifetime. This is the canonical example of why plugin-owned per-session state needs a lifecycle signal.
 
@@ -363,7 +373,7 @@ struct McpPermissionPolicy {   // server-scoped, not per-tool
 
 Step 2 must be a *fold*, not a substitution. If `out_of_workdir` replaced the tool's category, then `file_write: deny` + `out_of_workdir: allow` would **permit** writing `/etc/foo` while **denying** `./foo.cpp` — exactly inverted.
 
-**Bash is excluded from out-of-workdir gating.** There is no reliable way to determine which paths an arbitrary shell command touches without parsing shell semantics. Bash's allowlist + operator-rejection model already permits reaching outside `project_root` via absolute paths or `..` in arguments (only `cd` targets are confined) — an accepted asymmetry, not an oversight.
+**Bash is excluded from out-of-workdir gating.** There is no reliable way to determine which paths an arbitrary command touches without parsing shell semantics. Bash reaches outside `project_root` freely — absolute paths, `..`, and `cd` alike — and the operator-approval model is what governs it instead. An accepted asymmetry, not an oversight.
 
 **Permission run mode** — session-level, orthogonal to `PermissionPolicy`, wrapping its output:
 
@@ -376,6 +386,32 @@ PermissionMode apply_run_mode(PermissionMode base, PermissionRunMode run_mode);
 ```
 
 **`AllowOnly` exists specifically to make `Ask` safe non-interactively** — without it a headless run hitting an `Ask`-gated tool blocks forever waiting for a human who was never attached; `AllowOnly` auto-denies instead of hanging. `Bypass` ("trust everything") and `AllowOnly` ("never block, never silently risk it either") are different risk postures, not gradations. Set via `permissions.json`'s `default_run_mode` and mutable per-session via `/permission-mode`, which requires confirmation.
+
+### Consent scoping
+
+A bare `Ask` prompts for every invocation, which trains the operator to click through. So a tool may **disclose** what an invocation reaches, and the prompt offers session grants for it: `make 2>&1 | tail -50` yields *allow once* · *deny* · *allow `/usr/bin/make *` this session* · *allow `/usr/bin/tail *` this session*.
+
+```cpp
+struct GrantOffer { std::string key, label; };  // "bash:/usr/bin/make", "/usr/bin/make *"
+struct PermissionDisclosure { std::string summary; std::vector<GrantOffer> grants; bool complete = true; };
+virtual PermissionDisclosure Tool::Disclose(const nlohmann::json&, const ToolContext&) const;
+```
+
+`ToolExecutor` owns the grant set (it already holds a per-session `PermissionPolicy` by value). The mechanism is not bash-specific — `edit` can disclose `edit:/abs/path.cpp` with no further core change.
+
+**This is a prompt-fatigue mechanism, not a security boundary**, and five rules keep it from decaying into the allowlist deliberately rejected above:
+
+1. **Conjunction.** An invocation runs unprompted only if **every** disclosed key is already granted. `git status; rm -rf /` discloses `{git, rm}`, so a grant on git cannot carry it.
+2. **No vacuous satisfaction.** An empty or incomplete disclosure never satisfies the conjunction. This is logic, not policy: "nothing to check" must not evaluate to "check passed".
+3. **Resolved paths, not names.** Keys use the path resolved against the *session* `PATH`, so `cp /bin/bash /tmp/git` discloses `/tmp/git`. That prevents nothing — nothing at this layer does — but it makes the substitution visible at the moment consent is given, which is the only place it can be.
+4. **Never persisted.** Session-scoped and in-memory; not in `permissions.json`, not in the session store, and never seeded from config. A grant's whole value is a human judging a specific disclosed invocation *at that moment*; serialising it keeps the shape and discards the substance. Remembering grants across sessions is exactly how this would become an allowlist again.
+5. **Blanket by binary, and worded that way.** Argument patterns (`git *` vs `git push --force *`) are a pattern language that fails as an allowlist does. A grant means "this binary, any arguments".
+
+**No interpreter special-casing.** A grant on `/bin/bash` covers `bash -c '…'`; a grant on `/usr/bin/make` covers whatever the Makefile runs. Honouring a grant on git while refusing one on bash would be an interpreter denylist — the same theatre, defeated the same way. The dial for "stop asking entirely" already exists and is honest about what it means: `per_tool_overrides: {"bash": "allow"}`.
+
+**Disclosure is a lower bound**, and the prompt must say so. `complete = false` covers only *syntactic* blindness, where the program is not a literal in the string (`$X args`, `eval "$CMD"`). It cannot cover semantic indirection: `find . | xargs rm` names `find` and `xargs`, never `rm`. No parser fixes that.
+
+**Non-interactive mode is unaffected.** `AllowOnly` still means Ask → auto-deny; grants start empty in a headless session and stay empty, because nothing can prompt to create one. Running bash headless is `per_tool_overrides: {"bash": "allow"}` — containerisation is then the operator's responsibility, which is the contract either way.
 
 ## `/`-command system — `src/server/commands/`
 
@@ -1036,7 +1072,7 @@ public:
 };
 ```
 
-Checks: every config file parses; at least one usable `providers.json` entry exists with a resolvable key *and* a registered provider kind; each `mcps.json` entry's `command` resolves on `PATH` (stdio) or `url` is well-formed (http); `bash.allowlist` is non-empty; `project_root` exists and is writable; the SQLite database is accessible and not newer than the binary; each discovered plugin's ABI tag matches; `max_concurrent_subagents` is sane; **no registration-name collisions** (fatal — see Name collisions and aliases); every `command_aliases` key resolves to something registered.
+Checks: every config file parses; at least one usable `providers.json` entry exists with a resolvable key *and* a registered provider kind; each `mcps.json` entry's `command` resolves on `PATH` (stdio) or `url` is well-formed (http); `project_root` exists and is writable; the SQLite database is accessible and not newer than the binary; each discovered plugin's ABI tag matches; `max_concurrent_subagents` is sane; **no registration-name collisions** (fatal — see Name collisions and aliases); every `command_aliases` key resolves to something registered.
 
 Two checks specifically for the naming model: warn when a `per_tool_overrides` / `allowed_tools` / `allowed_skills` entry resolves to **nothing** registered (catches typos and entries stranded by a disabled plugin), and warn when a bare permission key is **ambiguous** because two plugins provide that original name — the intended rule is then undefined and must be written in qualified `plugin.name` form.
 
@@ -1045,11 +1081,10 @@ Two checks specifically for the naming model: warn when a `per_tool_overrides` /
 ## Deferred / open items
 
 - Anthropic Messages-shape provider (the unified model needs only additive changes: `cache_control` fields and a widened `system`).
-- **Windows support generally — out of scope until 2.x**; WSL is the interim answer. This is broader than plugin loading (`LoadLibrary` vs `dlopen`): the bash tool is `posix_spawn` + `setrlimit` + `killpg`, POSIX by construction rather than by porting accident, so a Windows target needs a genuinely different execution backend, not a shim.
+- **Windows support generally — out of scope until 2.x**; WSL is the interim answer. This is broader than plugin loading (`LoadLibrary` vs `dlopen`): the bash tool is fork + `execve` + `setrlimit` + `killpg`, POSIX by construction rather than by porting accident, so a Windows target needs a genuinely different execution backend, not a shim.
 - `llamacpp-kv` plugin (`/save-session`, `/restore-session`, `/erase-session`) — designed, deliberately not shipped in v1.
 - Parallel tool dispatch (sequential in v1; `request_id` correlation already supports it).
 - Session detach (`EndSession{DETACH}`), deliberately deferred — see Session lifetime.
 - Status-bar segment and panel/picker column slots for client plugins (renderer slot ships in v1).
 - Tab-bar overflow behavior with many sessions × subagents.
 - Backend-reported `usage` of `0` from some OpenAI-compatible proxies — no fallback estimate designed.
-- Bash's no-`$VAR`-expansion restriction (`export PATH=$PATH:/usr/local/bin` does not work under the current rule) — a known rough edge worth a dedicated revisit.

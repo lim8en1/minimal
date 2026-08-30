@@ -1,0 +1,36 @@
+#pragma once
+
+#include <cstdint>
+#include <string>
+
+#include <nlohmann/json.hpp>
+
+namespace minimal::tools_bash {
+
+// This plugin's slice of settings.json's `tools` object, under the `bash` key.
+// Core keeps that object as raw JSON precisely so each plugin owns its own
+// schema -- this is that schema, and nothing outside tools-bash needs to know it.
+struct BashSettings {
+    // Wall-clock cap per invocation; the whole process group is killed at the
+    // deadline. The RLIMIT_CPU backstop derives from this (see bash_tool.cpp).
+    std::int64_t timeout_ms = 120000;
+    // Ceiling on the model-supplied `timeout_ms`. The model may ask for longer
+    // than the default (a build is not `ls`) but not without bound: the deadline
+    // is the only hard limit on a session worker thread.
+    std::int64_t max_timeout_ms = 600000;
+    // Bounds the PERSISTED result (the ToolResultBlock the model sees). Live
+    // streaming through emit_output is uncapped -- that channel is lossy by
+    // design, this one is the record.
+    std::int64_t max_output_bytes = 1024 * 1024;
+    // RLIMIT_FSIZE backstop, reachable now that redirection works (`cmd > big`).
+    std::int64_t max_file_size_bytes = 1024LL * 1024 * 1024;
+    // Operator-swappable, like everything else here: a different POSIX shell, or
+    // a wrapper that enters a container, needs no code change.
+    std::string shell = "/bin/sh";
+};
+
+// Every field optional; missing values keep the struct's defaults, so an absent
+// or partial `bash` object is normal rather than an error.
+BashSettings ParseBashSettings(const nlohmann::json& tools_settings);
+
+}  // namespace minimal::tools_bash

@@ -22,6 +22,12 @@ endif()
 option(MINIMAL_BUILD_CLIENT "Build the FTXUI TUI client" ON)
 option(MINIMAL_BUILD_TESTS  "Build the test suite"       ON)
 
+# Applied to our own targets only -- add_compile_options() would also hit
+# FetchContent'd dependencies, whose warnings we can neither fix nor act on.
+# Measured before enabling: the first-party tree was already clean apart from two
+# sign-compare lines, so this costs nothing to turn on and something to leave off.
+set(MINIMAL_WARNING_FLAGS -Wall -Wextra)
+
 # --- Platform gate -----------------------------------------------------------
 # Windows is out of scope until 2.x: the bash tool is posix_spawn/setrlimit/killpg
 # and plugin loading is dlopen. WSL is the interim answer. See ARCHITECTURE.md.

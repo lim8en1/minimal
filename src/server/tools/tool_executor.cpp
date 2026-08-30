@@ -1,5 +1,6 @@
 #include "minimal/tools/tool_executor.hpp"
 
+#include <algorithm>
 #include <utility>
 
 #include "minimal/tools/path_confinement.hpp"
@@ -82,14 +83,29 @@ llm::ToolResultBlock ToolExecutor::Run(const std::string& tool_use_id,
     }
 
     if (mode == PermissionMode::Ask) {
-        PermissionRequest request;
-        request.session_id = ctx.session_id;
-        request.tool_name = tool_name;
-        request.category = tool->category_for(input).value_or(tool->spec().category);
-        request.tool_input = input;
-        request.summary = tool_name;
-        if (checker_.check(request) == PermissionDecision::Deny) {
-            return ErrorResult(tool_use_id, "permission denied by user for tool: " + tool_name);
+        const PermissionDisclosure disclosure = tool->Disclose(input, ctx);
+        if (!SatisfiedByGrants(disclosure)) {
+            PermissionRequest request;
+            request.session_id = ctx.session_id;
+            request.tool_name = tool_name;
+            request.category = tool->category_for(input).value_or(tool->spec().category);
+            request.tool_input = input;
+            request.summary = disclosure.summary;
+            request.disclosure = disclosure;
+
+            const PermissionResponse response = checker_.check(request);
+            if (response.decision == PermissionDecision::Deny) {
+                return ErrorResult(tool_use_id, "permission denied by user for tool: " + tool_name);
+            }
+            // Only keys this invocation actually disclosed may be remembered: a
+            // checker must not be able to grant something the operator was never
+            // shown.
+            for (const auto& key : response.granted_keys) {
+                const bool disclosed = std::any_of(
+                    disclosure.grants.begin(), disclosure.grants.end(),
+                    [&key](const GrantOffer& offer) { return offer.key == key; });
+                if (disclosed) session_grants_.insert(key);
+            }
         }
     }
 
@@ -102,8 +118,30 @@ llm::ToolResultBlock ToolExecutor::Run(const std::string& tool_use_id,
     llm::ToolResultBlock block;
     block.tool_use_id = tool_use_id;
     block.is_error = result.is_error;
+    // Never emit an empty text block: `touch x` succeeds silently, and an empty
+    // block is a hard 400 on the Anthropic wire format. Systemic here rather than
+    // per-tool, since any tool can produce no output.
+    if (result.content_text.empty()) result.content_text = "(no output)";
     block.content.push_back(llm::TextBlock{std::move(result.content_text)});
     return block;
+}
+
+bool ToolExecutor::SatisfiedByGrants(const PermissionDisclosure& disclosure) const {
+    // An incomplete or empty disclosure never satisfies the conjunction. This is
+    // a logic requirement, not a judgement about which programs are dangerous:
+    // "nothing to check" must not evaluate to "check passed", or an invocation we
+    // could not name would authorise itself while holding no grants at all.
+    //
+    // Note what this deliberately does NOT do: it does not second-guess a grant.
+    // If the operator granted /bin/bash, `bash -c '...'` runs unprompted. Refusing
+    // that while honouring a grant on git would be an interpreter denylist --
+    // the same theatre as an executable allowlist, defeated the same way.
+    if (!disclosure.complete || disclosure.grants.empty()) return false;
+
+    for (const auto& offer : disclosure.grants) {
+        if (session_grants_.find(offer.key) == session_grants_.end()) return false;
+    }
+    return true;
 }
 
 }  // namespace minimal::tools

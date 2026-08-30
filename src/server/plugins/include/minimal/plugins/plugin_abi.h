@@ -23,6 +23,7 @@
 #include "minimal/common/abi_tag.hpp"
 
 // --- Half 2: utilities plugins consume -------------------------------------
+#include "minimal/common/logger.hpp"
 #include "minimal/llm/http_client.hpp"
 #include "minimal/llm/provider.hpp"
 #include "minimal/llm/provider_factory_registry.hpp"
@@ -37,10 +38,10 @@
 
 namespace minimal::plugins {
 
-// Everything a tool needs at registration time. A struct rather than loose
-// parameters so a later addition (bash will want a Logger) stays
-// source-compatible instead of forcing another signature change on every
-// plugin author.
+// Everything a tool needs at REGISTRATION time. A struct rather than loose
+// parameters so a later addition stays source-compatible instead of forcing
+// another signature change on every plugin author. (Per-invocation needs like
+// the Logger travel in ToolContext, not here.)
 struct ToolRegistrationContext {
     // The `tools` object from settings.json, verbatim. Core deliberately does
     // not impose a schema on it: each plugin owns the shape of its own slice,

@@ -19,8 +19,8 @@ struct Fixture {
     tools::ToolRegistry registry;
     FakeTool* tool = nullptr;
 
-    FakeTool& AddTool(std::string name, ToolCategory category) {
-        auto owned = std::make_unique<FakeTool>(std::move(name), category);
+    FakeTool& AddTool(std::string name, ToolCategory category, std::string result_text = "ok") {
+        auto owned = std::make_unique<FakeTool>(std::move(name), category, std::move(result_text));
         FakeTool* raw = owned.get();
         registry.Register(std::move(owned));
         tool = raw;
@@ -28,7 +28,7 @@ struct Fixture {
     }
 
     tools::ToolContext Context(std::filesystem::path root = std::filesystem::temp_directory_path()) {
-        tools::ToolContext ctx;
+        tools::ToolContext ctx{common::DefaultLogger()};
         ctx.session_id = "s1";
         ctx.project_root = std::move(root);
         return ctx;
@@ -190,6 +190,143 @@ TEST_CASE("MCP tools resolve per-server, not per-tool", "[tool_executor][mcp]") 
     CHECK_FALSE(block.is_error);
     CHECK_FALSE(checker.called);
     CHECK(f.tool->calls.size() == 1);
+}
+
+// --- consent scoping ---------------------------------------------------------
+//
+// Session grants exist to stop an `Ask` policy from asking about the same binary
+// forty times. They are not a security boundary: a grant is blanket permission
+// for its key, and for bash a disclosure is only ever a lower bound.
+
+namespace {
+
+tools::PermissionDisclosure Disclosing(std::vector<std::string> keys, bool complete = true) {
+    tools::PermissionDisclosure disclosure;
+    disclosure.summary = "summary";
+    disclosure.complete = complete;
+    for (auto& key : keys) disclosure.grants.push_back(tools::GrantOffer{key, key + " *"});
+    return disclosure;
+}
+
+tools::PermissionPolicy AskExecutePolicy() {
+    tools::PermissionPolicy policy;
+    policy.execute = PermissionMode::Ask;
+    return policy;
+}
+
+}  // namespace
+
+TEST_CASE("a granted key silences later prompts for the same invocation",
+          "[tool_executor][grants]") {
+    Fixture f;
+    auto& tool = f.AddTool("bash", ToolCategory::Execute);
+    tool.set_disclosure(Disclosing({"bash:/usr/bin/git"}));
+    GrantingPermissionChecker checker;
+
+    tools::ToolExecutor executor(f.registry, checker, AskExecutePolicy(), {},
+                                 PermissionRunMode::Normal);
+    auto ctx = f.Context();
+
+    CHECK_FALSE(executor.Run("tu1", "bash", {{"command", "git status"}}, ctx).is_error);
+    CHECK_FALSE(executor.Run("tu2", "bash", {{"command", "git log"}}, ctx).is_error);
+
+    CHECK(checker.seen.size() == 1);  // the second invocation never asked
+    CHECK(f.tool->calls.size() == 2);
+}
+
+TEST_CASE("every disclosed key must be granted, not just one",
+          "[tool_executor][grants]") {
+    // The invariant that stops `git status; rm -rf /` from riding in on a grant
+    // for git: the check is a conjunction over everything disclosed.
+    Fixture f;
+    auto& tool = f.AddTool("bash", ToolCategory::Execute);
+    tool.set_disclosure(Disclosing({"bash:/usr/bin/git"}));
+    GrantingPermissionChecker checker;
+
+    tools::ToolExecutor executor(f.registry, checker, AskExecutePolicy(), {},
+                                 PermissionRunMode::Normal);
+    auto ctx = f.Context();
+    CHECK_FALSE(executor.Run("tu1", "bash", {{"command", "git status"}}, ctx).is_error);
+    REQUIRE(checker.seen.size() == 1);
+
+    // Now an invocation that also reaches rm. git alone cannot cover it.
+    tool.set_disclosure(Disclosing({"bash:/usr/bin/git", "bash:/bin/rm"}));
+    CHECK_FALSE(executor.Run("tu2", "bash", {{"command", "git status; rm -rf /"}}, ctx).is_error);
+    CHECK(checker.seen.size() == 2);
+}
+
+TEST_CASE("an incomplete disclosure always prompts, whatever is held",
+          "[tool_executor][grants]") {
+    // `eval "$X"` names nothing, so there is nothing to check. Vacuous truth is
+    // the trap: "no keys to verify" must not evaluate to "all keys verified".
+    Fixture f;
+    auto& tool = f.AddTool("bash", ToolCategory::Execute);
+    tool.set_disclosure(Disclosing({"bash:/usr/bin/git"}));
+    GrantingPermissionChecker checker;
+
+    tools::ToolExecutor executor(f.registry, checker, AskExecutePolicy(), {},
+                                 PermissionRunMode::Normal);
+    auto ctx = f.Context();
+    CHECK_FALSE(executor.Run("tu1", "bash", nlohmann::json::object(), ctx).is_error);
+    REQUIRE(executor.granted_count() == 1);
+
+    tool.set_disclosure(Disclosing({}, /*complete=*/false));
+    CHECK_FALSE(executor.Run("tu2", "bash", nlohmann::json::object(), ctx).is_error);
+    CHECK(checker.seen.size() == 2);
+
+    // Same for a complete disclosure that simply named nothing.
+    tool.set_disclosure(Disclosing({}, /*complete=*/true));
+    CHECK_FALSE(executor.Run("tu3", "bash", nlohmann::json::object(), ctx).is_error);
+    CHECK(checker.seen.size() == 3);
+}
+
+TEST_CASE("a checker cannot grant a key it was never shown", "[tool_executor][grants]") {
+    Fixture f;
+    auto& tool = f.AddTool("bash", ToolCategory::Execute);
+    tool.set_disclosure(Disclosing({"bash:/usr/bin/git"}));
+    // Claims a grant on rm, which this invocation never disclosed.
+    GrantingPermissionChecker checker({"bash:/bin/rm"});
+
+    tools::ToolExecutor executor(f.registry, checker, AskExecutePolicy(), {},
+                                 PermissionRunMode::Normal);
+    auto ctx = f.Context();
+    CHECK_FALSE(executor.Run("tu1", "bash", nlohmann::json::object(), ctx).is_error);
+
+    CHECK(executor.granted_count() == 0);
+}
+
+TEST_CASE("grants are inert under AllowOnly", "[tool_executor][grants][run_mode]") {
+    // A headless run cannot prompt, so no grant can ever be created -- and none
+    // may be seeded from config either. That is what keeps a consent affordance
+    // from becoming a persisted allowlist.
+    Fixture f;
+    auto& tool = f.AddTool("bash", ToolCategory::Execute);
+    tool.set_disclosure(Disclosing({"bash:/usr/bin/git"}));
+    UnreachablePermissionChecker checker;
+
+    tools::ToolExecutor executor(f.registry, checker, AskExecutePolicy(), {},
+                                 PermissionRunMode::AllowOnly);
+    auto ctx = f.Context();
+    CHECK(executor.Run("tu1", "bash", nlohmann::json::object(), ctx).is_error);
+    CHECK_FALSE(checker.called);
+    CHECK(executor.granted_count() == 0);
+}
+
+TEST_CASE("a tool with no output still yields a non-empty result block", "[tool_executor]") {
+    // `touch x` succeeds silently. An empty text block is a hard 400 on the
+    // Anthropic wire format, so this is fixed centrally rather than per tool.
+    Fixture f;
+    f.AddTool("silent", ToolCategory::ReadOnly, /*result_text=*/"");
+    UnreachablePermissionChecker checker;
+
+    tools::ToolExecutor executor(f.registry, checker, AllowAllPolicy(), {},
+                                 PermissionRunMode::Normal);
+    auto ctx = f.Context();
+    const auto block = executor.Run("tu1", "silent", nlohmann::json::object(), ctx);
+
+    CHECK_FALSE(block.is_error);
+    REQUIRE_FALSE(block.content.empty());
+    CHECK_FALSE(TextOf(block).empty());
 }
 
 TEST_CASE("an unknown tool is an error result, not a crash", "[tool_executor]") {

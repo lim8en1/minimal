@@ -10,6 +10,7 @@
 // This header is an installed target, not test-local code: plugin authors link
 // the same fakes, which matters when most functionality ships as plugins.
 
+#include <algorithm>
 #include <deque>
 #include <functional>
 #include <memory>
@@ -106,8 +107,17 @@ public:
         return input.at(*path_key_).get<std::string>();
     }
 
+    tools::PermissionDisclosure Disclose(const nlohmann::json& input,
+                                         const tools::ToolContext& ctx) const override {
+        if (!disclosure_) return tools::Tool::Disclose(input, ctx);
+        return *disclosure_;
+    }
+
     void set_path_key(std::string key) { path_key_ = std::move(key); }
     void set_is_error(bool value) { is_error_ = value; }
+    void set_disclosure(tools::PermissionDisclosure disclosure) {
+        disclosure_ = std::move(disclosure);
+    }
 
     std::vector<nlohmann::json> calls;
 
@@ -115,6 +125,7 @@ private:
     tools::ToolSpec spec_;
     std::string result_text_;
     std::optional<std::string> path_key_;
+    std::optional<tools::PermissionDisclosure> disclosure_;
     bool is_error_ = false;
 };
 
@@ -126,31 +137,59 @@ public:
 
 class AlwaysAllowPermissionChecker : public tools::PermissionChecker {
 public:
-    tools::PermissionDecision check(const tools::PermissionRequest& request) override {
+    tools::PermissionResponse check(const tools::PermissionRequest& request) override {
         seen.push_back(request);
-        return tools::PermissionDecision::Allow;
+        return {tools::PermissionDecision::Allow, {}};
     }
     std::vector<tools::PermissionRequest> seen;
 };
 
 class AlwaysDenyPermissionChecker : public tools::PermissionChecker {
 public:
-    tools::PermissionDecision check(const tools::PermissionRequest& request) override {
+    tools::PermissionResponse check(const tools::PermissionRequest& request) override {
         seen.push_back(request);
-        return tools::PermissionDecision::Deny;
+        return {tools::PermissionDecision::Deny, {}};
     }
     std::vector<tools::PermissionRequest> seen;
 };
 
 // Never consulted; asserting `called` stayed false proves a decision was reached
-// without a round-trip (Bypass, AlwaysAllow, or AlwaysDeny).
+// without a round-trip (Bypass, AlwaysAllow, AlwaysDeny, or a satisfied grant).
 class UnreachablePermissionChecker : public tools::PermissionChecker {
 public:
-    tools::PermissionDecision check(const tools::PermissionRequest&) override {
+    tools::PermissionResponse check(const tools::PermissionRequest&) override {
         called = true;
-        return tools::PermissionDecision::Allow;
+        return {tools::PermissionDecision::Allow, {}};
     }
     bool called = false;
+};
+
+// Allows, and takes every grant the disclosure offers -- the "operator clicked
+// every 'allow ... this session' button" case, which is what makes the
+// second-invocation-is-silent behaviour testable.
+class GrantingPermissionChecker : public tools::PermissionChecker {
+public:
+    explicit GrantingPermissionChecker(std::vector<std::string> keys_to_grant = {})
+        // grant_all_ reads keys_, not the parameter: the parameter has already
+        // been moved from by the time this initialiser runs.
+        : keys_(std::move(keys_to_grant)), grant_all_(keys_.empty()) {}
+
+    tools::PermissionResponse check(const tools::PermissionRequest& request) override {
+        seen.push_back(request);
+        tools::PermissionResponse response{tools::PermissionDecision::Allow, {}};
+        for (const auto& offer : request.disclosure.grants) {
+            const bool wanted =
+                grant_all_ || std::find(keys_.begin(), keys_.end(), offer.key) != keys_.end();
+            if (wanted) response.granted_keys.push_back(offer.key);
+        }
+        return response;
+    }
+
+    std::vector<tools::PermissionRequest> seen;
+
+private:
+    std::vector<std::string> keys_;
+    bool grant_all_;
 };
 
 inline tools::PermissionPolicy AllowAllPolicy() {

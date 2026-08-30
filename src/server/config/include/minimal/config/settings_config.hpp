@@ -15,9 +15,9 @@ struct MemorySettings {
     std::int64_t scrollback_page_size = 0;
 };
 
-// No consumer yet (tools-fs/tools-bash are still ABI stubs) -- kept as raw
-// pass-through JSON rather than inventing a schema a future phase must then
-// match or break.
+// Kept as raw pass-through JSON: each plugin owns the schema of its own slice
+// (tools-fs parses `read`/`edit`, tools-bash parses `bash`), so core never has
+// to match or break their shapes.
 struct ToolsSettings {
     nlohmann::json read = nlohmann::json::object();
     nlohmann::json edit = nlohmann::json::object();

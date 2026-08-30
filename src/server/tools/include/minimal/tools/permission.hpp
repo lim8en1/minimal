@@ -3,10 +3,34 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 namespace minimal::tools {
 
 enum class ToolCategory { ReadOnly, FileWrite, Execute };
+
+// --- Consent scoping ---------------------------------------------------------
+//
+// A tool may disclose what an invocation will actually reach, so an `Ask` prompt
+// can offer session-scoped grants ("allow /usr/bin/make * this session") instead
+// of asking about every invocation. This is a prompt-fatigue mechanism, NOT a
+// security boundary: a grant is blanket permission for that key, and for bash a
+// disclosure is a lower bound (`find . | xargs rm` names find and xargs, never
+// rm). Nothing here constrains what a tool can do -- the permission mode does.
+struct GrantOffer {
+    std::string key;    // stable, e.g. "bash:/usr/bin/make" -- what gets remembered
+    std::string label;  // human-facing, e.g. "/usr/bin/make *"
+};
+
+struct PermissionDisclosure {
+    std::string summary;             // one line for the prompt
+    std::vector<GrantOffer> grants;  // what could be named; may be a lower bound
+    // False when the invocation cannot be named at all (bash: `eval "$X"`, `$X
+    // args`). Such a disclosure can never satisfy the grant conjunction -- see
+    // ToolExecutor::SatisfiedByGrants for why that is a logic requirement rather
+    // than a policy judgement about which programs are dangerous.
+    bool complete = true;
+};
 
 // Ordered: Deny < Ask < Allow. The ordering is the point -- most_restrictive() is
 // the lattice meet, and several composition rules depend on it.

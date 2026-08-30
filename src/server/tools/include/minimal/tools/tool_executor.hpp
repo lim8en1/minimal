@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <unordered_set>
 
 #include <nlohmann/json.hpp>
 
@@ -27,12 +28,26 @@ public:
     PermissionMode ResolveMode(const Tool& tool, const nlohmann::json& input,
                                 const ToolContext& ctx) const;
 
+    // True when every key this invocation discloses has already been granted, so
+    // the prompt can be skipped. Exposed for testing the invariants directly.
+    bool SatisfiedByGrants(const PermissionDisclosure& disclosure) const;
+
+    std::size_t granted_count() const { return session_grants_.size(); }
+
 private:
     ToolRegistry& registry_;
     PermissionChecker& checker_;
     PermissionPolicy policy_;
     McpPermissionPolicy mcp_policy_;
     PermissionRunMode run_mode_;
+
+    // Session-scoped and in-memory, deliberately: never written to config or to
+    // the session store. A grant's value is a human judging a specific disclosed
+    // invocation at that moment; persisting it keeps the shape and discards the
+    // substance, which is how a consent affordance decays into an allowlist.
+    // ToolExecutor already holds a per-session PermissionPolicy by value, so it
+    // is the natural owner.
+    std::unordered_set<std::string> session_grants_;
 };
 
 // Extracts "<server>" from "mcp__<server>__<tool>". Returns empty for a name

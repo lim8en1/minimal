@@ -21,7 +21,7 @@ struct Fixture {
     tools_fs::FsSettings settings;
 
     tools::ToolContext Context() {
-        tools::ToolContext ctx;
+        tools::ToolContext ctx{common::DefaultLogger()};
         ctx.session_id = "s1";
         ctx.project_root = dir.path();
         return ctx;

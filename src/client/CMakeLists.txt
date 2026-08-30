@@ -19,3 +19,6 @@ target_link_libraries(minimal_client_core
 add_executable(minimal app.cpp)
 target_link_libraries(minimal PRIVATE minimal::client_core)
 install(TARGETS minimal RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
+
+target_compile_options(minimal_client_core PRIVATE ${MINIMAL_WARNING_FLAGS})
+target_compile_options(minimal PRIVATE ${MINIMAL_WARNING_FLAGS})

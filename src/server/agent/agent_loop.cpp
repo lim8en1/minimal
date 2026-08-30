@@ -191,7 +191,7 @@ TurnResult AgentLoop::RunTurn(llm::Message seed_message) {
         std::vector<llm::ContentBlock> results;
         results.reserve(tool_uses.size());
         for (const auto* use : tool_uses) {
-            tools::ToolContext ctx;
+            tools::ToolContext ctx{session_.logger};
             ctx.session_id = session_.session_id;
             ctx.project_root = session_.project_root;
             ctx.is_cancelled = is_cancelled_;

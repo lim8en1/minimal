@@ -34,6 +34,7 @@ add_executable(minimal_tests
     file_access_test.cpp
     atomic_write_test.cpp
     tools_fs_test.cpp
+    tools_bash_test.cpp
     # provider-openai's pure translation logic, compiled directly into the test
     # binary rather than via the plugin .so -- these files have no ABI/plugin
     # dependency, only core headers, so this is real linkage, not dlopen.
@@ -45,13 +46,22 @@ add_executable(minimal_tests
     # linked directly rather than exercised through dlopen.
     "${CMAKE_SOURCE_DIR}/plugins/server/tools-fs/fs_tools.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/tools-fs/fs_settings.cpp"
-    "${CMAKE_SOURCE_DIR}/plugins/server/tools-fs/file_editor.cpp")
+    "${CMAKE_SOURCE_DIR}/plugins/server/tools-fs/file_editor.cpp"
+    # Same pattern for tools-bash. The execution tests fork real processes, so
+    # they need the actual spawn code, not a seam around it.
+    "${CMAKE_SOURCE_DIR}/plugins/server/tools-bash/bash_tool.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/tools-bash/bash_settings.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/tools-bash/bash_session_state.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/tools-bash/command_scanner.cpp")
 
 target_include_directories(minimal_tests PRIVATE
     "${CMAKE_SOURCE_DIR}/plugins/server/tools-fs")
 
 target_include_directories(minimal_tests PRIVATE
     "${CMAKE_SOURCE_DIR}/plugins/server/provider-openai")
+
+target_include_directories(minimal_tests PRIVATE
+    "${CMAKE_SOURCE_DIR}/plugins/server/tools-bash")
 
 # minimal::test_support is the test-dependency bundle: it carries server_core,
 # which carries common publicly. Listing those again here is redundant and makes
@@ -68,3 +78,5 @@ target_link_libraries(minimal_tests PRIVATE
     Catch2::Catch2WithMain)
 
 catch_discover_tests(minimal_tests)
+
+target_compile_options(minimal_tests PRIVATE ${MINIMAL_WARNING_FLAGS})

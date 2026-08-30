@@ -74,3 +74,6 @@ endif()
 install(TARGETS minimal-server minimal_server_core
     RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
     LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}")
+
+target_compile_options(minimal_server_core PRIVATE ${MINIMAL_WARNING_FLAGS})
+target_compile_options(minimal-server PRIVATE ${MINIMAL_WARNING_FLAGS})

@@ -29,6 +29,7 @@
 function(minimal_add_plugin name)
     add_library(${name} MODULE ${ARGN})
     target_link_libraries(${name} PRIVATE minimal::server_core)
+    target_compile_options(${name} PRIVATE ${MINIMAL_WARNING_FLAGS})
     set_target_properties(${name} PROPERTIES PREFIX "" OUTPUT_NAME "${name}")
 
     # Plugins are installed one directory deeper than the server, so the hop up to

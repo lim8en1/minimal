@@ -42,7 +42,7 @@ struct Harness {
         executor = std::make_unique<tools::ToolExecutor>(registry, checker, AllowAllPolicy(),
                                                          tools::McpPermissionPolicy{},
                                                          PermissionRunMode::Normal);
-        agent::SessionContext session;
+        agent::SessionContext session{common::DefaultLogger()};
         session.session_id = "s1";
         session.project_root = ".";
 

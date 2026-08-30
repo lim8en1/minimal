@@ -9,6 +9,7 @@
 
 #include "minimal/agent/agent_preset.hpp"
 #include "minimal/agent/history_store.hpp"
+#include "minimal/common/logger.hpp"
 #include "minimal/llm/chat.hpp"
 #include "minimal/llm/message.hpp"
 #include "minimal/llm/provider.hpp"
@@ -33,6 +34,8 @@ struct LoopConfig {
 // not server-global: it is the boundary for path confinement, @-mentions, and
 // bash's initial cwd.
 struct SessionContext {
+    explicit SessionContext(common::Logger& logger) : logger(logger) {}
+
     std::string session_id;
     std::filesystem::path project_root;
 
@@ -40,6 +43,11 @@ struct SessionContext {
     // is not part of the LLM stream -- it reaches the client as its own
     // ToolOutputDeltaEvent. Left unset until the RPC layer wires it.
     std::function<void(std::string_view tool_use_id, std::string_view chunk)> tool_output_sink;
+
+    // Handed to every ToolContext this session builds. Session-scoped rather than
+    // a free function so a later per-session sink (session-id prefix) is an
+    // implementation detail of the wiring, not of the tools.
+    common::Logger& logger;
 };
 
 struct TurnResult {

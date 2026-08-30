@@ -54,10 +54,10 @@ TEST_CASE("ParseSettingsConfig: memory settings overridable", "[settings_config]
 }
 
 TEST_CASE("ParseSettingsConfig: tools settings pass through as raw JSON", "[settings_config]") {
-    nlohmann::json doc = {{"tools", {{"bash", {{"allowlist", nlohmann::json::array({"ls", "cat"})}}}}}};
+    nlohmann::json doc = {{"tools", {{"bash", {{"timeout_ms", 5000}, {"max_output_bytes", 64}}}}}};
 
     auto config = ParseSettingsConfig(doc);
-    CHECK(config.tools.bash == nlohmann::json{{"allowlist", nlohmann::json::array({"ls", "cat"})}});
+    CHECK(config.tools.bash == nlohmann::json{{"timeout_ms", 5000}, {"max_output_bytes", 64}});
     CHECK(config.tools.read == nlohmann::json::object());
 }
 
