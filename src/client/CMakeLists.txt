@@ -1,4 +1,5 @@
 add_library(minimal_client_core STATIC
+    cli_args.cpp
     session_client.cpp)
 add_library(minimal::client_core ALIAS minimal_client_core)
 

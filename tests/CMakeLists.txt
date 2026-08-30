@@ -16,6 +16,7 @@ add_executable(minimal_tests
     context_compactor_test.cpp
     bundled_assets_test.cpp
     chat_request_bench.cpp
+    client_args_test.cpp
     token_accounting_test.cpp
     config_paths_test.cpp
     tool_executor_test.cpp

@@ -439,6 +439,20 @@ putting an O(n) count in front of the keyset seek whose whole purpose is that a 
 on a long transcript; `ListSessions` had no `LIMIT` at all; `EventQueue` was unbounded, and the
 initial-attach guard bounds *time*, not volume.
 
+### The client's command line
+
+Three defects in twenty lines of `argv` loop, none of them caught by anything, because the parsing had no tests at all — it lived inside `main()` where nothing could reach it. They compounded into one confusing symptom:
+
+```
+minimal -p --server unix:///tmp/x.sock "read the file"
+```
+
+sent the model the prompt `"--server"`, dropped the target, dropped the real prompt, and reported that it could not reach the **default** socket. `-p` consumed the next token unconditionally; unrecognised arguments were silently discarded, which is what kept the first two quiet; and `--server` demanded a full gRPC target while `minimal-server --listen` takes a bare path.
+
+Parsing moved to `client/cli_args.{hpp,cpp}` so it can be tested, with two rules: a value-taking flag never accepts a flag-shaped value (`--flag=value` for values that start with `-`), and anything unrecognised is an error. `--server` now accepts what `--listen` accepts. 11 cases in `tests/client_args_test.cpp`; reverting each defect fails them.
+
+One aside worth keeping: a Catch2 `TEST_CASE` name that *starts* with `-` breaks `catch_discover_tests`, which passes the name to the binary as argv where Catch2 reads it as a flag. The suite passed run directly and failed under `ctest` — the same class of mistake the tests were written about.
+
 ### Practice this confirmed
 
 - **The from-scratch build and the sanitizer both earned their keep**, and both required reading the

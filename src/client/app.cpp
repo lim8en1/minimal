@@ -13,19 +13,14 @@
 
 #include <nlohmann/json.hpp>
 
+#include "minimal/client/cli_args.hpp"
 #include "minimal/client/session_client.hpp"
 #include "minimal/common/abi_tag.hpp"
 #include "minimal/common/config_paths.hpp"
 
 namespace {
 
-struct HeadlessOptions {
-    std::string prompt;
-    std::string server;      // gRPC target; empty means the default socket
-    std::string agent_preset;
-    bool jsonl = false;
-    bool bypass = false;
-};
+using minimal::client::HeadlessOptions;
 
 // Exit codes are part of the interface: a script piping `minimal -p` needs to
 // distinguish "the model finished" from "it was cut off" from "the call failed".
@@ -60,15 +55,16 @@ int ExitCodeFor(minimal::v1::StopReason stop_reason) {
 }
 
 int RunHeadless(const HeadlessOptions& options) {
+    // Already resolved by ParseArgs -- a bare path became a unix:// target
+    // there, so what is printed on failure is what was actually dialled.
     const std::string target =
-        options.server.empty()
-            ? "unix://" + (minimal::common::DataDir() / "server.sock").string()
-            : options.server;
+        options.server.empty() ? minimal::client::DefaultServerTarget() : options.server;
 
     minimal::client::SessionClient client(target);
     if (!client.WaitForConnected(std::chrono::seconds(5))) {
         std::fprintf(stderr, "cannot reach a minimal-server at %s\n", target.c_str());
-        std::fprintf(stderr, "start one with: minimal-server\n");
+        std::fprintf(stderr, "start one with: minimal-server --listen %s\n",
+                     target.rfind("unix://", 0) == 0 ? target.c_str() + 7 : "<socket path>");
         return kUnavailable;
     }
 
@@ -167,68 +163,25 @@ int RunTui(int argc, char** argv) {
     return 0;
 }
 
-void PrintUsage() {
-    std::puts("usage: minimal [-p PROMPT] [options]\n"
-              "\n"
-              "  -p, --print PROMPT        run one turn headlessly and exit\n"
-              "      --server TARGET       gRPC target (default: unix://<data dir>/server.sock)\n"
-              "      --agent PRESET        agent preset (default: settings.json)\n"
-              "      --output-format FMT   text (default) or jsonl\n"
-              "      --dangerously-bypass  skip every permission check\n"
-              "      --version");
-}
-
 }  // namespace
 
 int main(int argc, char** argv) {
-    HeadlessOptions options;
-    bool headless = false;
-
-    for (int i = 1; i < argc; ++i) {
-        const char* arg = argv[i];
-        auto next = [&](const char* what) -> const char* {
-            if (i + 1 >= argc) {
-                std::fprintf(stderr, "%s needs a value\n", what);
-                std::exit(kUsage);
-            }
-            return argv[++i];
-        };
-
-        if (std::strcmp(arg, "--version") == 0) {
+    const auto parsed = minimal::client::ParseArgs(argc, argv);
+    switch (parsed.action) {
+        case minimal::client::ParsedArgs::Action::Version:
             std::printf("minimal %s\n", minimal::common::Version());
-            return 0;
-        }
-        if (std::strcmp(arg, "--help") == 0 || std::strcmp(arg, "-h") == 0) {
-            PrintUsage();
-            return 0;
-        }
-        if (std::strcmp(arg, "-p") == 0 || std::strcmp(arg, "--print") == 0) {
-            headless = true;
-            options.prompt = next("-p");
-        } else if (std::strcmp(arg, "--server") == 0) {
-            options.server = next("--server");
-        } else if (std::strcmp(arg, "--agent") == 0) {
-            options.agent_preset = next("--agent");
-        } else if (std::strcmp(arg, "--output-format") == 0) {
-            const std::string format = next("--output-format");
-            if (format == "jsonl") {
-                options.jsonl = true;
-            } else if (format != "text") {
-                std::fprintf(stderr, "unknown --output-format '%s' (want text or jsonl)\n",
-                             format.c_str());
-                return kUsage;
-            }
-        } else if (std::strcmp(arg, "--dangerously-bypass") == 0) {
-            options.bypass = true;
-        }
-    }
-
-    if (headless) {
-        if (options.prompt.empty()) {
-            std::fprintf(stderr, "-p needs a prompt\n");
+            return kOk;
+        case minimal::client::ParsedArgs::Action::Usage:
+            std::fputs(minimal::client::UsageText().c_str(), stdout);
+            return kOk;
+        case minimal::client::ParsedArgs::Action::Error:
+            std::fprintf(stderr, "%s\n\n", parsed.error.c_str());
+            std::fputs(minimal::client::UsageText().c_str(), stderr);
             return kUsage;
-        }
-        return RunHeadless(options);
+        case minimal::client::ParsedArgs::Action::Headless:
+            return RunHeadless(parsed.headless);
+        case minimal::client::ParsedArgs::Action::Tui:
+            break;
     }
     return RunTui(argc, argv);
 }

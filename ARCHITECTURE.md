@@ -940,7 +940,9 @@ minimal -p PROMPT [--server TARGET] [--agent PRESET]
                   [--output-format text|jsonl] [--dangerously-bypass]
 ```
 
-`--server` defaults to `unix://<data dir>/server.sock`. **The client does not yet auto-spawn a server**; it reports how to start one. The refcounted-exit half is implemented, which is what auto-spawn will rely on.
+`--server` defaults to `unix://<data dir>/server.sock` and accepts **either a bare socket path or a full gRPC target** — `minimal-server --listen` takes a path, and two halves of the same pairing that disagree is a trap rather than a preference (`--server /tmp/x.sock` produced a gRPC resolver error naming neither flag). A value containing `://`, or shaped like `host:port`, is passed through untouched. **The client does not yet auto-spawn a server**; it reports how to start one, naming the `--listen` argument that matches what was dialled. The refcounted-exit half is implemented, which is what auto-spawn will rely on.
+
+**Argument parsing rules, because the failure mode was silence** (`client/cli_args.{hpp,cpp}`): a value-taking flag never accepts a flag-shaped value — write `--flag=value` when the value legitimately starts with `-` — and an unrecognised argument is an error rather than being dropped. Both matter together: `minimal -p --server unix:///x "do the thing"` used to send the model the prompt `"--server"`, discard the target and the real prompt, and then report that it could not reach the *default* socket.
 
 Exit codes are interface, because a script piping `-p` has to tell "the model finished" from "it was cut off" from "the call failed": `0` ok, `2` truncated (`max_tokens`/`stop_sequence`), `3` model error or `ErrorEvent`, `4` cancelled, `64` usage, `69` no reachable server.
 
