@@ -104,3 +104,13 @@ target_link_libraries(minimal_tests PRIVATE
 catch_discover_tests(minimal_tests)
 
 target_compile_options(minimal_tests PRIVATE ${MINIMAL_WARNING_FLAGS})
+
+# Config seeding is CMake, so its test is CMake. Reimplementing the copy in C++
+# to test it would assert that two copies of the logic agree -- which is the
+# class of bug this arrangement exists to avoid.
+add_test(NAME seed_config
+         COMMAND "${CMAKE_COMMAND}"
+                 -DSEED_SCRIPT=${CMAKE_SOURCE_DIR}/cmake/SeedConfig.cmake
+                 -DBUNDLED_DIR=${CMAKE_SOURCE_DIR}/bundled
+                 -DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/seed_config_work
+                 -P "${CMAKE_CURRENT_SOURCE_DIR}/seed_config_test.cmake")

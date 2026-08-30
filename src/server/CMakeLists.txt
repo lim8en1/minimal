@@ -89,16 +89,5 @@ install(TARGETS minimal-server minimal_server_core
     RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
     LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}")
 
-# Stage the bundled prompts where BundledPromptDir()'s build-tree probe looks, so
-# a server run straight out of build/ seeds the same prompt an installed one
-# would. POST_BUILD rather than configure-time so editing a prompt and rebuilding
-# is enough -- re-running cmake to pick up a text edit is the kind of papercut
-# nobody remembers the cause of.
-add_custom_command(TARGET minimal-server POST_BUILD
-    COMMAND "${CMAKE_COMMAND}" -E copy_directory
-            "${CMAKE_SOURCE_DIR}/bundled/prompts"
-            "${CMAKE_BINARY_DIR}/share/minimal/prompts"
-    COMMENT "Staging bundled prompts")
-
 target_compile_options(minimal_server_core PRIVATE ${MINIMAL_WARNING_FLAGS})
 target_compile_options(minimal-server PRIVATE ${MINIMAL_WARNING_FLAGS})

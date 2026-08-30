@@ -44,14 +44,15 @@ include(FetchContent)
 set(MINIMAL_PLUGIN_INSTALL_DIR "${CMAKE_INSTALL_LIBDIR}/minimal/plugins"
     CACHE STRING "Install location for bundled plugins")
 
-# Where bundled prompts are installed. Seeded into the config dir on first run
-# rather than read from here at runtime: ARCHITECTURE.md specifies
-# prompts/compression.md as a CONFIG-dir file, so the user has to be able to see
-# and edit it. Same agreement requirement as the plugin dir above.
-set(MINIMAL_PROMPT_INSTALL_DIR "${CMAKE_INSTALL_DATADIR}/minimal/prompts"
-    CACHE STRING "Install location for bundled prompts")
-
-install(DIRECTORY bundled/prompts/ DESTINATION "${MINIMAL_PROMPT_INSTALL_DIR}")
+# bundled/ is copied into the USER'S CONFIG DIR at install time, not installed
+# under the prefix and read from there. Everything in it -- prompts, presets,
+# settings -- is a file the user owns and edits; a copy sitting in the install
+# tree would either shadow theirs or be dead weight. So there is no
+# MINIMAL_PROMPT_INSTALL_DIR and no runtime lookup: one copy, in the config dir,
+# and that is the one that runs. Never overwrites. See cmake/SeedConfig.cmake.
+configure_file("${CMAKE_CURRENT_SOURCE_DIR}/cmake/SeedConfig.cmake"
+               "${CMAKE_CURRENT_BINARY_DIR}/SeedConfig.cmake" @ONLY)
+install(SCRIPT "${CMAKE_CURRENT_BINARY_DIR}/SeedConfig.cmake")
 
 # --- Plugin ABI tag ----------------------------------------------------------
 # Plugins are source-compatible, not binary-compatible: they are rebuilt with the

@@ -19,7 +19,6 @@
 #include "minimal/agent/session_observer_registry.hpp"
 #include "minimal/agent/session_registry.hpp"
 #include "minimal/common/abi_tag.hpp"
-#include "minimal/common/bundled_assets.hpp"
 #include "minimal/common/config_paths.hpp"
 #include "minimal/common/logger.hpp"
 #include "minimal/config/permissions_config.hpp"
@@ -72,15 +71,9 @@ int main(int argc, char** argv) {
     std::printf("  data dir:   %s\n", minimal::common::DataDir().c_str());
 
     // --- Stage 1: config -----------------------------------------------------
-    // Seed before anything reads the config dir: AgentPresetRegistry loads
-    // prompts/compression.md at construction, and an absent one silently
-    // disables compaction for every session.
-    const auto seeded =
-        minimal::common::SeedBundledPrompts(minimal::common::BundledPromptDir(), config_dir);
-    for (const auto& name : seeded) {
-        std::printf("  seeded prompt: prompts/%s\n", name.c_str());
-    }
-
+    // Nothing is seeded here. `cmake --install` populates the config dir (see
+    // cmake/SeedConfig.cmake); by the time the server runs, those files are the
+    // user's and this process only reads them.
     const auto plugins_json = config_dir / "plugins.json";
     auto plugin_config = minimal::plugins::ParsePluginConfig(ReadFileOrEmpty(plugins_json));
 

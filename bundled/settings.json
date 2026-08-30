@@ -1,0 +1,27 @@
+{
+  "default_agent_preset": "build",
+  "default_provider": "local",
+  "max_concurrent_subagents": 4,
+
+  "memory": {
+    "auto_compact": true,
+    "context_compaction_trigger_tokens": 120000,
+    "scrollback_page_size": 100
+  },
+
+  "tools": {
+    "read": {},
+    "edit": {},
+    "bash": {}
+  },
+
+  "tools_view": {
+    "stdout_buffer_lines": 100
+  },
+
+  "logging": {
+    "level": "info",
+    "max_size_mb": 10,
+    "max_files": 5
+  }
+}

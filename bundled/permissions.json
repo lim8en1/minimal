@@ -1,0 +1,14 @@
+{
+  "default_run_mode": "normal",
+
+  "fallback": {
+    "read_only": "allow",
+    "file_write": "ask",
+    "execute": "ask",
+    "out_of_workdir": "ask"
+  },
+
+  "per_tool_overrides": {},
+
+  "mcp_default_mode": "ask"
+}

@@ -1,0 +1,24 @@
+[
+  {
+    "//": "A local llama.cpp / llama-server. Nothing is seeded pointing here, because a URL that is right on one machine is wrong on the next.",
+    "name": "local",
+    "provider": "openai",
+    "base_url": "http://localhost:8000/v1",
+    "model_name": "your-model-name",
+    "context_window_tokens": 131072,
+    "max_tokens": 8192,
+    "parameters": {
+      "temperature": 0.3
+    }
+  },
+  {
+    "//": "A hosted OpenAI-compatible endpoint. Use api_key_env, never api_key, unless this file is outside version control and readable only by you.",
+    "name": "hosted",
+    "provider": "openai",
+    "base_url": "https://api.example.com/v1",
+    "api_key_env": "MINIMAL_API_KEY",
+    "model_name": "some-model",
+    "context_window_tokens": 200000,
+    "max_tokens": 8192
+  }
+]

@@ -16,12 +16,13 @@ target_compile_definitions(minimal_common
     PUBLIC
         MINIMAL_ABI_TAG="${MINIMAL_ABI_TAG}"
         MINIMAL_VERSION="${PROJECT_VERSION}"
-    # Prefix-relative install locations for bundled assets. PRIVATE because only
-    # bundled_assets.cpp resolves them, and they must be the SAME values CMake
-    # installs to -- these used to be hardcoded in the lookup, so overriding the
-    # cache variable moved the install without moving the search.
+    # The plugin install location, PRIVATE because only bundled_assets.cpp
+    # resolves it, and it must be the SAME value CMake installs to -- it used to
+    # be hardcoded in the lookup, so overriding the cache variable moved the
+    # install without moving the search. Plugins are the only bundled thing with
+    # a runtime lookup at all: they are code the user does not edit, so they stay
+    # in the install tree. Everything else is seeded into the config dir.
     PRIVATE
-        MINIMAL_PLUGIN_DIR="${MINIMAL_PLUGIN_INSTALL_DIR}"
-        MINIMAL_PROMPT_DIR="${MINIMAL_PROMPT_INSTALL_DIR}")
+        MINIMAL_PLUGIN_DIR="${MINIMAL_PLUGIN_INSTALL_DIR}")
 
 target_compile_options(minimal_common PRIVATE ${MINIMAL_WARNING_FLAGS})
