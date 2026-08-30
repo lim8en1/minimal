@@ -34,6 +34,12 @@ struct ToolContext {
     std::string session_id;
     std::filesystem::path project_root;
 
+    // The invocation this context belongs to, set by ToolExecutor::Run before
+    // execute(). A tool that produces a follow-up tied to its own call -- the
+    // subagent-spawn completion is injected as a ToolResultBlock keyed to it --
+    // needs the id, and no tool can know it any other way.
+    std::string tool_use_id;
+
     // The active preset's allowed_skills for this session, as a plain list so
     // the tools layer stays free of agent-layer types. SkillTool validates its
     // input against it at invocation time; empty means no skills are permitted.

@@ -55,7 +55,10 @@ add_executable(minimal_tests
     session_store_test.cpp
     session_test.cpp
     session_registry_test.cpp
+    subagent_spawn_test.cpp
+    subagent_test.cpp
     session_service_test.cpp
+    subagent_e2e_test.cpp
     headless_e2e_test.cpp
     # provider-openai's pure translation logic, compiled directly into the test
     # binary rather than via the plugin .so -- these files have no ABI/plugin

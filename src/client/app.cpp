@@ -10,6 +10,8 @@
 #include <cstring>
 #include <filesystem>
 #include <string>
+#include <thread>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 
@@ -98,6 +100,12 @@ int RunHeadless(const HeadlessOptions& options) {
 
     int exit_code = kOk;
     bool saw_error = false;
+    // One attach stream per spawned child. Attaching is a PROTOCOL OBLIGATION:
+    // a subagent no client attaches to is terminated by the server's
+    // initial-attach guard. Each thread pumps the child's events until the
+    // child's single turn completes, then closes the stream (which terminates
+    // the child session -- its work is done).
+    std::vector<std::thread> child_attaches;
 
     if (options.command) {
         minimal::client::SessionClient::CommandOptions invocation;
@@ -176,17 +184,54 @@ int RunHeadless(const HeadlessOptions& options) {
             }
             if (event.has_error()) saw_error = true;
 
-            // Attaching to a child session is a CLIENT PROTOCOL OBLIGATION, not a
-            // TUI behaviour: an unattached subagent is killed by the server's
-            // initial-attach guard. Subagents are not built yet, so this reports
-            // the obligation rather than silently letting the guard become
-            // load-bearing.
-            if (event.has_subagent_started() && !options.jsonl) {
-                std::fprintf(stderr, "\n[subagent %s started]\n",
-                             event.subagent_started().child_session_id().c_str());
+            // Attaching to a child session is a CLIENT PROTOCOL OBLIGATION, not
+            // a TUI behaviour: an unattached subagent is killed by the server's
+            // initial-attach guard. The attach runs on its own thread so the
+            // parent's stream keeps pumping; jsonl merges the child's events by
+            // session_id, text mode discards them.
+            if (event.has_subagent_started()) {
+                const std::string child_id = event.subagent_started().child_session_id();
+                if (!options.jsonl) {
+                    std::fprintf(stderr, "\n[subagent %s started]\n", child_id.c_str());
+                }
+                child_attaches.emplace_back([&client, child_id, jsonl = options.jsonl] {
+                    client.Attach(child_id, [jsonl](const minimal::v1::ServerEvent& child_event) {
+                        if (jsonl) {
+                            nlohmann::json line;
+                            line["session_id"] = child_event.session_id();
+                            if (child_event.has_stream_event() &&
+                                child_event.stream_event().has_text_delta()) {
+                                line["type"] = "text_delta";
+                                line["text"] = child_event.stream_event().text_delta().text();
+                            } else if (child_event.has_tool_execution()) {
+                                line["type"] = "tool_execution";
+                                line["tool_name"] = child_event.tool_execution().tool_name();
+                                line["started"] = child_event.tool_execution().started();
+                            } else if (child_event.has_error()) {
+                                line["type"] = "error";
+                                line["message"] = child_event.error().message();
+                            } else if (child_event.has_turn_completed()) {
+                                line["type"] = "turn_completed";
+                            } else {
+                                line["type"] = "event";
+                            }
+                            PrintJsonLine(line);
+                        }
+                        // The child's one turn ends at turn_completed; nothing
+                        // follows, and staying attached would hold the session
+                        // open. Closing the stream terminates it.
+                        return !child_event.has_turn_completed();
+                    });
+                });
             }
             return true;
         });
+
+    // Wait out every child before reporting: their streams hold the server's
+    // refcount, and jsonl consumers expect the children's events too.
+    for (auto& thread : child_attaches) {
+        if (thread.joinable()) thread.join();
+    }
 
     if (!options.jsonl) std::fputc('\n', stdout);
 

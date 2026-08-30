@@ -17,6 +17,8 @@
 #include "minimal/agent/agent_preset_registry.hpp"
 #include "minimal/agent/session_observer_registry.hpp"
 #include "minimal/agent/session_registry.hpp"
+#include "minimal/agent/spawn_subagent_tool.hpp"
+#include "minimal/agent/subagent_manager.hpp"
 #include "minimal/common/abi_tag.hpp"
 #include "minimal/common/config_paths.hpp"
 #include "minimal/common/logger.hpp"
@@ -230,6 +232,22 @@ int main(int argc, char** argv) {
     minimal::agent::SessionRegistry sessions(*presets, tools, providers, observers, *session_db,
                                              loop_config, minimal::common::DefaultLogger());
     sessions.set_commands(&commands);
+
+    // Registered by the harness itself, like SkillTool, but only NOW: the
+    // manager needs the SessionRegistry to exist, and no session can build a
+    // tool set before serving starts, so registering here is still before
+    // first use. Core surface by design -- making it a plugin would expose
+    // session CREATION across the ABI to relocate a thin wrapper.
+    auto subagents = std::make_unique<minimal::agent::SubagentManager>(
+        sessions, *session_db, *presets, settings.max_concurrent_subagents,
+        minimal::common::DefaultLogger());
+    minimal::agent::SubagentManager& subagent_manager = *subagents;
+    tools.Register(std::make_unique<minimal::agent::SpawnSubagentTool>(
+        [&subagent_manager](const minimal::agent::SubagentRequest& request,
+                            const minimal::tools::ToolContext& ctx) {
+            return subagent_manager.Spawn(request, ctx);
+        }));
+
     minimal::rpc::SessionServiceImpl service(sessions, *session_db, settings, permissions,
                                              minimal::common::DefaultLogger());
     service.set_commands(&commands);

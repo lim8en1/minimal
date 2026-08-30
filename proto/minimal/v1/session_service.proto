@@ -45,6 +45,15 @@ message ConfirmationResponse {
 
 message CancelTurn {} // interrupts the in-flight LLM turn for this session, if any
 
+// Names the stream without submitting any work. This is how a client ATTACHES
+// to a session it has no turn for -- a subagent child announced by
+// SubagentStartedEvent. Attaching is a client protocol obligation (see
+// ARCHITECTURE.md "Session lifetime"): a child no client attaches to is
+// terminated by the initial-attach guard. Before this message existed the
+// stream could only be named by an event that did something (a turn, a cancel),
+// so the obligation was inexpressible.
+message Attach {}
+
 message ClientEvent {
   // Redundant on every message rather than bound once via stream metadata —
   // trades a few bytes for messages that are self-describing on their own
@@ -56,6 +65,7 @@ message ClientEvent {
     PermissionResponse permission_response = 4;
     ConfirmationResponse confirmation_response = 5;
     CancelTurn cancel = 6;
+    Attach attach = 7;
   }
 }
 

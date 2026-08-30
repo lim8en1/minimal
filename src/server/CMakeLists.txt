@@ -35,6 +35,9 @@ add_library(minimal_server_core SHARED
     agent/agent_loop.cpp
     commands/command_registry.cpp
     commands/command_dispatcher.cpp
+    agent/subagent_spawn.cpp
+    agent/subagent_manager.cpp
+    agent/spawn_subagent_tool.cpp
     tools/tool_registry.cpp
     tools/aliased_tool.cpp
     tools/tool_executor.cpp

@@ -80,6 +80,14 @@ public:
     // same stream.
     grpc::Status RunCommand(const std::string& session_id, const CommandOptions& options,
                             const std::function<bool(const v1::ServerEvent&)>& on_event);
+    // Opens the stream and ATTACHES without submitting a turn -- what a client
+    // owes a subagent child announced by SubagentStartedEvent. Attaching lifts
+    // the initial-attach guard; the session is otherwise untouched, so its
+    // events simply flow to `on_event`. Same read-to-end discipline as RunTurn:
+    // returning false from `on_event` half-closes and drains; the server
+    // terminates the session when the stream closes.
+    grpc::Status Attach(const std::string& session_id,
+                        const std::function<bool(const v1::ServerEvent&)>& on_event);
 
 private:
     std::string server_address_;

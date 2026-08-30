@@ -1,8 +1,11 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <atomic>
 #include <fstream>
 #include <string>
 #include <vector>
+
+#include <unistd.h>
 
 #include "minimal/common/logger.hpp"
 #include "minimal/config/skill_registry.hpp"

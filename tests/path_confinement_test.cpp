@@ -1,6 +1,10 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <atomic>
 #include <fstream>
+#include <string>
+
+#include <unistd.h>
 
 #include "minimal/tools/path_confinement.hpp"
 #include "temp_dir.hpp"

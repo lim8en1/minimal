@@ -16,6 +16,8 @@
 #include <thread>
 #include <vector>
 
+#include <unistd.h>
+
 #include <catch2/catch_test_macros.hpp>
 #include <grpcpp/create_channel.h>
 
@@ -51,6 +53,9 @@ struct ServiceFixture {
         // A unique arena per process: catch_discover_tests runs every TEST_CASE
         // as its own ctest entry, so a fixed path would be wiped out from under
         // a concurrent run of this very file (ctest -j).
+        // TempDir, not a temp_directory_path()/<long-name> arena: the unix
+        // socket lives in here, and macOS caps sun_path at ~104 bytes -- a
+        // readable-but-long arena name silently fails to bind.
         dir = tempdir.path();
         std::filesystem::create_directories(dir / "agents");
         std::filesystem::create_directories(dir / "work");

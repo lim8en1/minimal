@@ -14,6 +14,7 @@
 #include <deque>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <utility>
@@ -118,6 +119,72 @@ public:
                                      const commands::CommandArgs&) override {
         return commands::CommandResult::Ok("recorded");
     }
+};
+
+// Shared script for ScriptedProvider. Unlike FakeLlmProvider's per-instance
+// queue, every provider instance handed the SAME script consumes one queue in
+// real time -- which is what makes multi-session scripting deterministic: a
+// blocking subagent reusing its parent's preset consumes the parent's steps
+// in the order the sessions actually interleave.
+struct ScriptedProviderScript {
+    void Push(llm::ChatResponse response, std::vector<llm::StreamEvent> events = {}) {
+        std::lock_guard<std::mutex> lock(mu);
+        steps.push_back(
+            FakeLlmProvider::Step{std::move(response), std::nullopt, std::move(events)});
+    }
+    void Push(llm::LlmError error) {
+        std::lock_guard<std::mutex> lock(mu);
+        steps.push_back(FakeLlmProvider::Step{std::nullopt, std::move(error), {}});
+    }
+
+    std::mutex mu;
+    std::deque<FakeLlmProvider::Step> steps;
+    // Recorded requests with owned message storage: ChatRequest::messages is a
+    // span into the loop's history, which reallocates on every append. A deque
+    // owns the copies because its elements do not move on growth.
+    std::deque<std::vector<llm::Message>> owned_messages;
+    std::vector<llm::ChatRequest> requests;
+};
+
+class ScriptedProvider : public llm::LlmProvider {
+public:
+    explicit ScriptedProvider(std::shared_ptr<ScriptedProviderScript> script)
+        : script_(std::move(script)) {}
+
+    llm::ChatResponse Complete(const llm::ChatRequest& request) override {
+        return StreamComplete(request, [](const llm::StreamEvent&) { return true; });
+    }
+
+    llm::ChatResponse StreamComplete(const llm::ChatRequest& request,
+                                     const llm::StreamEventSink& sink) override {
+        FakeLlmProvider::Step step;
+        {
+            std::lock_guard<std::mutex> lock(script_->mu);
+            auto& owned = script_->owned_messages.emplace_back(request.messages.begin(),
+                                                               request.messages.end());
+            llm::ChatRequest copy = request;
+            copy.messages = owned;
+            script_->requests.push_back(std::move(copy));
+            if (script_->steps.empty()) {
+                throw llm::LlmError(llm::LlmErrorCategory::RequestError,
+                                    "ScriptedProvider: no scripted step remaining");
+            }
+            step = std::move(script_->steps.front());
+            script_->steps.pop_front();
+        }
+        for (const auto& event : step.events) {
+            if (sink && !sink(event)) {
+                llm::ChatResponse cancelled;
+                cancelled.stop_reason = llm::StopReason::Cancelled;
+                return cancelled;
+            }
+        }
+        if (step.error) throw *step.error;
+        return *step.response;
+    }
+
+private:
+    std::shared_ptr<ScriptedProviderScript> script_;
 };
 
 // Configurable tool. Records every invocation; can claim a path so the

@@ -15,6 +15,7 @@
 #include <cstddef>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -56,7 +57,25 @@ public:
 
     std::shared_ptr<Session> Create(SessionParams params);
 
+    // Same as Create(), but the caller supplies the ALREADY RESOLVED preset
+    // instead of having it looked up by params.agent_preset. Subagent spawning
+    // is the consumer: the spawner adapts the resolved preset first (is_subagent
+    // set, subagent.md prefixed onto the system prompt, allowed lists
+    // intersected with the parent's), and no name-based lookup could express
+    // that. params.agent_preset still names the preset for the database row and
+    // for SessionInfo.
+    //
+    // max_turns_override bounds the child's tool rounds (a subagent's whole life
+    // is one RunTurn); nullopt keeps the registry-wide LoopConfig value, which
+    // is 0 -- unbounded -- unless the spawner says otherwise.
+    std::shared_ptr<Session> CreateResolved(SessionParams params, AgentPreset preset,
+                                            std::optional<int> max_turns_override = std::nullopt);
+
     std::shared_ptr<Session> Find(const std::string& session_id) const;
+
+    // Live sessions whose parent_session_id is `parent_id`. The subagent
+    // concurrency limit is a count of these.
+    std::size_t ChildCount(const std::string& parent_id) const;
 
     // Terminates and forgets. Safe for an id that is already gone.
     void Terminate(const std::string& session_id);

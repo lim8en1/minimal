@@ -55,13 +55,25 @@ std::shared_ptr<Session> SessionRegistry::Create(SessionParams params) {
     // Resolve() throws for an unknown preset, and for a preset naming a provider
     // that providers.json does not define. Both propagate: they are the caller's
     // to report, and a session with no provider could not run a single turn.
-    // A copy, not the cached reference: a --model override mutates it, and the
-    // registry's cache must keep describing the preset as written.
+    //
+    // Resolved BEFORE the move: argument evaluation order would otherwise let
+    // the lookup read a moved-from name. A copy, not the cached reference: a
+    // --model override mutates it, and the registry's cache must keep describing
+    // the preset as written.
     AgentPreset preset = presets_.Resolve(params.agent_preset);
+    return CreateResolved(std::move(params), std::move(preset));
+}
 
+std::shared_ptr<Session> SessionRegistry::CreateResolved(SessionParams params,
+                                                          AgentPreset preset,
+                                                          std::optional<int> max_turns_override) {
+    // Read before params is moved from.
+    const std::string params_parent = params.parent_session_id;
     // The user's model outranks the preset's. Applied here rather than inside
     // the preset registry because it is a property of this SESSION, not of the
-    // preset -- two sessions on one preset can be running different models.
+    // preset -- two sessions on one preset can be running different models. In
+    // CreateResolved rather than Create so a SUBAGENT spawned with an inherited
+    // preset honours it too.
     if (params.model_override) {
         const config::ResolvedModel* model = presets_.providers().Resolve(*params.model_override);
         if (model == nullptr) {
@@ -71,6 +83,9 @@ std::shared_ptr<Session> SessionRegistry::Create(SessionParams params) {
         }
         ApplyModel(preset, *model);
     }
+
+    LoopConfig loop_config = loop_config_;
+    if (max_turns_override.has_value()) loop_config.max_turns = *max_turns_override;
 
     // The kind string is what selects a factory. A preset can only reach this
     // point with a provider entry that parsed, so an unregistered kind means a
@@ -118,13 +133,26 @@ std::shared_ptr<Session> SessionRegistry::Create(SessionParams params) {
     }
 
     auto store = std::make_unique<session::SqliteHistoryStore>(db_, session_id);
-    auto session = std::make_shared<Session>(std::move(params), preset, std::move(provider),
-                                             std::move(store), tools_, loop_config_, observers_,
-                                             logger_, std::move(seeded_history));
+    // loop_config, not loop_config_: CreateResolved may have overridden max_turns
+    // for a subagent, whose whole life is one bounded turn.
+    auto session = std::make_shared<Session>(std::move(params), std::move(preset),
+                                             std::move(provider), std::move(store), tools_,
+                                             loop_config, observers_, logger_,
+                                             std::move(seeded_history));
     // Wired before the session is findable, so the first command a client sends
     // cannot arrive at a session that has no registry yet.
     session->set_presets(&presets_);
-    session->set_commands(commands_);
+    // A SUBAGENT GETS NO COMMAND SURFACE. Commands are a user control channel,
+    // and a child has no user: its client attaches to observe, and the spawn was
+    // driven by the parent's model rather than by a person with a prompt.
+    //
+    // It is also an escape hatch if left open. /agent re-resolves a preset from
+    // disk, and a freshly resolved preset has is_subagent = false and its own
+    // full allowed_tools -- so a child running `/agent build` would get
+    // spawn_subagent back and reopen the recursion ARCHITECTURE.md calls a hard
+    // rule. Closing the surface removes the whole class rather than patching the
+    // one command that happens to reach it today.
+    session->set_commands(params_parent.empty() ? commands_ : nullptr);
     session->set_provider_factories(&providers_);
 
     {
@@ -148,6 +176,15 @@ std::shared_ptr<Session> SessionRegistry::Find(const std::string& session_id) co
     std::lock_guard<std::mutex> lock(mutex_);
     const auto it = sessions_.find(session_id);
     return it == sessions_.end() ? nullptr : it->second;
+}
+
+std::size_t SessionRegistry::ChildCount(const std::string& parent_id) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::size_t count = 0;
+    for (const auto& [id, session] : sessions_) {
+        if (session->info().parent_session_id == parent_id) ++count;
+    }
+    return count;
 }
 
 void SessionRegistry::Terminate(const std::string& session_id) {

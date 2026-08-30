@@ -63,7 +63,9 @@ struct SessionParams {
     std::string agent_preset;
     std::filesystem::path project_root;
     // Set when the client asked for a specific mode (the headless client asks
-    // for AllowOnly); unset means the preset's configured mode stands.
+    // for AllowOnly); unset means the preset's configured mode stands. For a
+    // subagent the spawner has ALREADY clamped it against the parent's via
+    // clamp_run_mode -- a child is never more permissive than its parent.
     std::optional<tools::PermissionRunMode> run_mode_override;
     // Set when the user named a model explicitly (--model, later /model). Wins
     // over whatever the preset resolves to, and is re-applied after a preset
@@ -74,6 +76,23 @@ struct SessionParams {
     // before construction. The session row must already exist either way --
     // the database mints ids -- but a fresh session's transcript is empty.
     bool resume = false;
+
+    // --- Subagent inheritance (empty/unset for a top-level session) ----------
+    // Grants the parent already held at spawn time. Re-prompting for every
+    // binary the parent's operator approved would make subagents unusable; a
+    // copy is the decision the development plan records.
+    std::vector<std::string> seed_grants;
+    // The parent's policies, handed to the child's ToolExecutor as ceilings it
+    // folds in via most_restrictive() -- the per-category "child is never more
+    // permissive than its parent" rule.
+    std::optional<tools::PermissionPolicy> policy_ceiling;
+    std::optional<tools::McpPermissionPolicy> mcp_policy_ceiling;
+    // Subagents only: fired ONCE on the worker when the session's single seeded
+    // turn ends -- every exit path, success or failure, since a blocker waiting
+    // on the result must unblock on failure too. The spawner uses it to capture
+    // the final text, release a blocking parent, and queue a non-blocking
+    // parent's completion injection.
+    std::function<void(const TurnResult&)> on_turn_finished;
 };
 
 // One item of work for the session worker. A variant rather than two queues,
@@ -122,6 +141,10 @@ public:
     // only, dispatched by the RPC layer onto a short-lived task -- never inline
     // on the reader, which must not block.
     void RunCommandNow(const QueuedCommand& command);
+    // Cross-session splice point: a non-blocking subagent's worker queues its
+    // completion here when it finishes; the session's own worker flushes it at
+    // a turn boundary.
+    void QueueInjectedMessage(llm::Message message);
 
     // Reader thread. Interrupts the in-flight turn, leaving the session alive
     // and able to accept the next one.
@@ -167,6 +190,15 @@ public:
     void set_provider_factories(const llm::ProviderFactoryRegistry* factories) {
         provider_factories_ = factories;
     }
+    // What a spawner reads off a PARENT at spawn time to derive the child's
+    // inheritance: permission ceilings, the run mode to clamp against, the
+    // grants to copy, and the preset whose allowed lists the child intersects.
+    // preset() is the SessionControl override above -- one accessor, since the
+    // spawner and a /-command want exactly the same thing.
+    const tools::PermissionPolicy& policy() const { return executor_.policy(); }
+    const tools::McpPermissionPolicy& mcp_policy() const { return executor_.mcp_policy(); }
+    tools::PermissionRunMode run_mode() const { return executor_.run_mode(); }
+    std::vector<std::string> granted_keys() const { return executor_.granted_keys(); }
 
     // The initial-attach guard reads these. A session that has never been
     // attached is reaped after a short grace period -- purely a safety net
@@ -239,6 +271,10 @@ private:
     // turn and is cleared for the next one; terminated_ ends the session.
     std::atomic<bool> cancel_{false};
     std::atomic<bool> terminated_{false};
+    // A subagent's life is one seeded turn; once its completion hook has fired,
+    // a stray client-submitted turn would fire it a second time, so SubmitTurn
+    // stops accepting. Only ever set when on_turn_finished exists.
+    std::atomic<bool> subagent_finished_{false};
     std::atomic<bool> ever_attached_{false};
     // Currently attached, as distinct from ever attached: the guard above is a
     // one-way latch for the reaper, this one goes back down on detach.

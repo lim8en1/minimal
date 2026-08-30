@@ -31,12 +31,18 @@ std::string mcp_server_of(const std::string& tool_name) {
 
 ToolExecutor::ToolExecutor(ToolRegistry& registry, PermissionChecker& checker,
                             PermissionPolicy policy, McpPermissionPolicy mcp_policy,
-                            PermissionRunMode run_mode)
+                            PermissionRunMode run_mode,
+                            std::optional<PermissionPolicy> policy_ceiling,
+                            std::optional<McpPermissionPolicy> mcp_ceiling,
+                            std::vector<std::string> seed_grants)
     : registry_(registry),
       checker_(checker),
       policy_(std::move(policy)),
       mcp_policy_(std::move(mcp_policy)),
-      run_mode_(run_mode) {}
+      run_mode_(run_mode),
+      policy_ceiling_(std::move(policy_ceiling)),
+      mcp_ceiling_(std::move(mcp_ceiling)),
+      session_grants_(seed_grants.begin(), seed_grants.end()) {}
 
 PermissionMode ToolExecutor::ResolveMode(const Tool& tool, const nlohmann::json& input,
                                           const ToolContext& ctx) const {
@@ -69,6 +75,18 @@ PermissionMode ToolExecutor::ResolveMode(const Tool& tool, const nlohmann::json&
         }
     }
 
+    // 2b. Subagent ceiling, when one was handed down: a child is never more
+    //     permissive than its parent. Folds like out_of_workdir -- it can only
+    //     tighten -- and sits before run mode so the clamped run mode still
+    //     wraps the whole decision.
+    if (mode != PermissionMode::AlwaysDeny) {
+        if (mcp_server.empty()) {
+            if (policy_ceiling_) mode = most_restrictive(mode, policy_ceiling_->mode_for(name, category));
+        } else if (mcp_ceiling_) {
+            mode = most_restrictive(mode, mcp_ceiling_->mode_for(mcp_server));
+        }
+    }
+
     // 3. Run mode wraps whatever the policy decided.
     return apply_run_mode(mode, run_mode_);
 }
@@ -80,6 +98,11 @@ llm::ToolResultBlock ToolExecutor::Run(const std::string& tool_use_id,
     if (tool == nullptr) {
         return ErrorResult(tool_use_id, "unknown tool: " + tool_name);
     }
+
+    // The invocation id belongs to the context before anything runs: a tool
+    // that ties follow-up work to its own call (subagent completion injection)
+    // reads it from there.
+    ctx.tool_use_id = tool_use_id;
 
     const PermissionMode mode = ResolveMode(*tool, input, ctx);
 
@@ -147,6 +170,12 @@ bool ToolExecutor::SatisfiedByGrants(const PermissionDisclosure& disclosure) con
         if (session_grants_.find(offer.key) == session_grants_.end()) return false;
     }
     return true;
+}
+
+std::vector<std::string> ToolExecutor::granted_keys() const {
+    std::vector<std::string> keys(session_grants_.begin(), session_grants_.end());
+    std::sort(keys.begin(), keys.end());
+    return keys;
 }
 
 }  // namespace minimal::tools

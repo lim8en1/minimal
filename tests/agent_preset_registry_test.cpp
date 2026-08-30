@@ -1,6 +1,10 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <atomic>
 #include <fstream>
+#include <string>
+
+#include <unistd.h>
 
 #include "minimal/agent/agent_preset_registry.hpp"
 #include "temp_dir.hpp"

@@ -45,7 +45,8 @@ minimal/
     server/
       agent/    # agent_loop, session, session_registry, context_compactor,
                 #   compaction_boundary, compaction_trigger, presets,
-                #   session_observer(_registry)
+                #   session_observer(_registry),
+                #   subagent_manager + spawn_subagent_tool (core, not a plugin)
       llm/      # unified model, provider iface, http_client, sse_parser
       tools/    # Tool iface, registry, executor, permission model, path_confinement
       commands/ # Command iface, registry, dispatcher, ConfirmationBroker,
@@ -198,7 +199,7 @@ What this gives up: "close the terminal, the agent keeps working, come back late
 **Server shutdown must be *requested*, not performed, from an RPC handler.** The last-client-detached callback fires at the tail of `OpenSession`, on the handler thread, and `grpc::Server::Shutdown()` blocks until every in-flight RPC completes — including the one calling it. So `Server::RequestShutdown()` only sets a flag, and a thread inside `Server::Wait()` does the blocking part. Getting this wrong hangs the binary on every run while every unit test still passes, because a test that merely records the callback never exercises it.
 
 - **Confirm when work is in flight.** Closing a tab mid-turn destroys running work, so it routes through the existing `ConfirmationBroker`; closing an idle tab needs no prompt.
-- **Terminating a blocking subagent must unblock its parent** — the parent's `SpawnSubagentTool` is synchronously waiting and receives an error `ToolResultBlock` ("subagent terminated by user") rather than hanging.
+- **Terminating a blocking subagent must unblock its parent** — the parent's `SpawnSubagentTool` is synchronously waiting and receives an error `ToolResultBlock` (the child's completion signal fires on every exit path, teardown included) rather than hanging. Cancelling the parent's turn propagates the same way: the wait observes the parent's cancellation and terminates the child.
 - **Client quit** = closing every tab: terminates all attached sessions, with one confirmation if any have work in flight.
 
 ## LLM provider adapter — `src/server/llm/`
@@ -961,7 +962,7 @@ minimal -p PROMPT [--server TARGET] [--agent PRESET] [--model PROVIDER/MODEL]
 
 Exit codes are interface, because a script piping `-p` has to tell "the model finished" from "it was cut off" from "the call failed": `0` ok, `2` truncated (`max_tokens`/`stop_sequence`), `3` model error or `ErrorEvent`, `4` cancelled, `64` usage, `69` no reachable server.
 
-**Attaching to child sessions is a client protocol obligation, not a TUI behavior.** Any conforming client must attach on `SubagentStartedEvent` — otherwise the initial-attach guard would kill a subagent spawned during a headless run. The headless client merges child output into its stream, or discards it under `--output-format text`.
+**Attaching to child sessions is a client protocol obligation, not a TUI behavior.** Any conforming client must attach on `SubagentStartedEvent` — otherwise the initial-attach guard would kill a subagent spawned during a headless run. Attaching is expressible without submitting work through a dedicated no-op `Attach` `ClientEvent` payload (the stream is named by its first event, and before `Attach` existed every payload did something). The headless client merges child output into its stream, or discards it under `--output-format text`.
 
 ## Agent loop — `src/server/agent/agent_loop.{hpp,cpp}`
 
@@ -1264,7 +1265,7 @@ A subagent is **the same `Session` entity as a top-level conversation** — same
 - **No recursion is a hard rule, not preset config**: if `parent_session_id` is non-null, `SpawnSubagentTool` is unconditionally excluded from that session's tool set regardless of `allowed_tools`. A misconfigured preset cannot reopen recursion. Flat, one level.
 - **Permission inheritance — a child can never be more permissive than its parent**: effective `PermissionPolicy` is `most_restrictive(parent, child_preset)` per category; `allowed_tools`/`allowed_skills`/`allowed_mcp_servers` are **intersected** with the parent's; `PermissionRunMode` is clamped (`AllowOnly < Normal < Bypass`). Without this, a parent at `file_write: ask` could spawn a child preset at `file_write: allow`.
 - **Concurrency limit**: `max_concurrent_subagents` per parent session, default 4. Over-limit spawns return an **error `ToolResultBlock`** ("subagent limit reached") rather than blocking, so the model adapts instead of hanging. The sanity check *warns* above 8 — past that the task has outgrown the harness — but does not block, matching the build-it-yourself philosophy.
-- **Blocking mode**: `execute()` drives the child's loop to completion on the parent's worker thread and returns the child's final text as the `ToolResultBlock`. The child's tab auto-focuses, since the parent is stuck waiting anyway.
+- **Blocking mode**: the child's own worker runs its single turn — one drive path for both modes — while `execute()` blocks the parent's worker on the completion signal, which fires on every exit path of the child's turn, so a failure unblocks the parent exactly like a success. The child's tab auto-focuses, since the parent is stuck waiting anyway.
 - **Non-blocking mode**: `execute()` returns an acknowledgment immediately and the parent's turn continues; the child runs on its own worker. On completion the result is **queued** for the parent and flushed by the parent's worker **at a turn boundary** — after all tool results for the current assistant turn are appended, before the next provider call. Injecting it truly out-of-band could land a `User` message between a `tool_use` and its `tool_result`, which is a hard 400.
 
 ## Startup sanity check — `src/server/config/sanity_check.{hpp,cpp}`

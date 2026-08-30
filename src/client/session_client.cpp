@@ -133,4 +133,35 @@ grpc::Status SessionClient::RunCommand(
     return stream->Finish();
 }
 
+grpc::Status SessionClient::Attach(const std::string& session_id,
+                                   const std::function<bool(const v1::ServerEvent&)>& on_event) {
+    grpc::ClientContext context;
+    auto stream = stub_->OpenSession(&context);
+
+    // The attach payload names the stream and nothing more: the session on the
+    // other end runs its own work (a subagent's single turn), and this client
+    // is here for its events.
+    v1::ClientEvent attach;
+    attach.set_session_id(session_id);
+    attach.mutable_attach();
+    if (!stream->Write(attach)) {
+        stream->WritesDone();
+        return stream->Finish();
+    }
+
+    v1::ServerEvent event;
+    bool half_closed = false;
+    while (stream->Read(&event)) {
+        if (!half_closed && !on_event(event)) {
+            // Consumer is done (a subagent's turn_completed is the ordinary
+            // signal). Half-close, then keep reading to end of stream --
+            // abandoning the read side would wedge the server's writer.
+            stream->WritesDone();
+            half_closed = true;
+        }
+    }
+    if (!half_closed) stream->WritesDone();
+    return stream->Finish();
+}
+
 }  // namespace minimal::client

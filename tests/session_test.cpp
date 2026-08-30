@@ -55,6 +55,9 @@ struct SessionFixture {
         params.name = "test session";
         params.agent_preset = "test";
         params.project_root = project_root;
+        params.seed_grants = seed_grants;
+        params.policy_ceiling = policy_ceiling;
+        params.on_turn_finished = on_turn_finished;
 
         session = std::make_unique<agent::Session>(
             std::move(params), preset, std::move(owned_provider), std::move(owned_store),
@@ -82,6 +85,10 @@ struct SessionFixture {
     tools::ToolRegistry tools_registry;
     agent::SessionObserverRegistry observers;
     std::vector<std::pair<llm::ChatResponse, std::vector<llm::StreamEvent>>> scripted;
+    // Subagent plumbing, forwarded to SessionParams at Start().
+    std::vector<std::string> seed_grants;
+    std::optional<tools::PermissionPolicy> policy_ceiling;
+    std::function<void(const agent::TurnResult&)> on_turn_finished;
     testing::FakeLlmProvider* provider = nullptr;
     testing::InMemoryHistoryStore* store = nullptr;  // owned by the session
     std::unique_ptr<agent::Session> session;
@@ -540,4 +547,165 @@ TEST_CASE("ending a session releases only that session's bash state", "[session]
     CHECK_FALSE(store.Has("sess-a"));
     CHECK(store.Has("sess-b"));
     CHECK(store.size() == 1);
+}
+
+// --- subagent plumbing --------------------------------------------------------
+//
+// A subagent is the same Session entity, distinguished by one field plus
+// restrictions derived from it. These tests cover the Session half of that
+// wiring; the spawn itself is tested in subagent_spawn_test.cpp.
+
+TEST_CASE("a session fires its turn-finished hook with the final text",
+          "[session][subagent]") {
+    // The hook is how the spawner captures a subagent's result -- and what a
+    // blocking parent is ultimately waiting on.
+    SessionFixture fixture;
+    agent::TurnResult captured;
+    bool fired = false;
+    fixture.on_turn_finished = [&](const agent::TurnResult& result) {
+        captured = result;
+        fired = true;
+    };
+    fixture.Script(testing::TextResponse("child result"));
+    fixture.Start();
+
+    fixture.session->SubmitTurn("do the task");
+    REQUIRE(fixture.session->WaitForIdleForTesting(5s));
+
+    CHECK(fired);
+    CHECK(captured.final_text == "child result");
+    CHECK(captured.stop_reason == llm::StopReason::EndTurn);
+    CHECK_FALSE(captured.hit_max_turns);
+}
+
+TEST_CASE("the turn-finished hook fires on a FAILED turn too", "[session][subagent]") {
+    // A blocking parent waiting on a child whose provider died must unblock with
+    // an error, not hang. Default-constructed TurnResult is the failure value.
+    SessionFixture fixture;
+    fixture.loop_config.max_retries = 0;
+    agent::TurnResult captured;
+    bool fired = false;
+    fixture.on_turn_finished = [&](const agent::TurnResult& result) {
+        captured = result;
+        fired = true;
+    };
+    fixture.Start();
+    // Nothing scripted: the fake provider throws a non-retryable RequestError.
+
+    fixture.session->SubmitTurn("do the task");
+    REQUIRE(fixture.session->WaitForIdleForTesting(5s));
+
+    CHECK(fired);
+    CHECK(captured.final_text.empty());
+    CHECK(captured.stop_reason == llm::StopReason::Unknown);
+}
+
+TEST_CASE("a finished subagent session ignores further turns", "[session][subagent]") {
+    // A subagent's life is one seeded turn. Once the completion hook has fired,
+    // a stray client turn would fire it a second time -- so it must not run.
+    SessionFixture fixture;
+    int hook_calls = 0;
+    fixture.on_turn_finished = [&](const agent::TurnResult&) { ++hook_calls; };
+    fixture.Script(testing::TextResponse("done"));
+    fixture.Start();
+
+    fixture.session->SubmitTurn("the task");
+    REQUIRE(fixture.session->WaitForIdleForTesting(5s));
+
+    fixture.session->SubmitTurn("one more thing");
+    fixture.session->WaitForIdleForTesting(5s);
+
+    CHECK(hook_calls == 1);
+    CHECK(fixture.provider->call_count() == 1);
+    CHECK(fixture.store->messages.size() == 2);  // only the first turn's pair
+}
+
+TEST_CASE("seeded grants reach the session's executor", "[session][subagent]") {
+    // Copy-at-spawn: a child holding the parent's grants runs an already-approved
+    // invocation without prompting. The prompt would show up on the queue and
+    // block the turn -- so this test completing at all is part of the assertion.
+    SessionFixture fixture;
+    fixture.preset.permission_mode.execute = tools::PermissionMode::Ask;
+    auto tool = std::make_unique<testing::FakeTool>("bash", tools::ToolCategory::Execute, "ran");
+    tools::PermissionDisclosure disclosure;
+    disclosure.summary = "git status";
+    disclosure.grants.push_back(tools::GrantOffer{"bash:/usr/bin/git", "/usr/bin/git *"});
+    tool->set_disclosure(std::move(disclosure));
+    fixture.tools_registry.Register(std::move(tool));
+    fixture.seed_grants = {"bash:/usr/bin/git"};
+    fixture.Script(testing::ToolUseResponse("call-1", "bash"));
+    fixture.Script(testing::TextResponse("done"));
+    fixture.Start();
+
+    fixture.session->SubmitTurn("run it");
+    REQUIRE(fixture.session->WaitForIdleForTesting(5s));
+
+    for (const auto& event : fixture.DrainQueue()) {
+        CHECK_FALSE(event.has_permission_request());  // never asked
+    }
+}
+
+TEST_CASE("a policy ceiling reaches the session's executor", "[session][subagent]") {
+    // The child preset allows execute outright; the parent's Ask policy is the
+    // ceiling. Under AllowOnly the Ask auto-denies instead of blocking, which is
+    // what makes the denial observable without answering a prompt.
+    SessionFixture fixture;
+    fixture.preset.permission_mode = testing::AllowAllPolicy();
+    fixture.preset.run_mode = tools::PermissionRunMode::Normal;
+    auto tool = std::make_unique<testing::FakeTool>("bash", tools::ToolCategory::Execute, "ran");
+    auto* tool_ptr = tool.get();
+    fixture.tools_registry.Register(std::move(tool));
+    tools::PermissionPolicy ceiling = testing::AllowAllPolicy();
+    ceiling.execute = tools::PermissionMode::Ask;
+    fixture.policy_ceiling = ceiling;
+    fixture.Script(testing::ToolUseResponse("call-1", "bash"));
+    fixture.Script(testing::TextResponse("done"));
+
+    auto provider = std::make_unique<testing::FakeLlmProvider>();
+    provider->PushResponse(testing::ToolUseResponse("call-1", "bash"));
+    provider->PushResponse(testing::TextResponse("done"));
+
+    agent::SessionParams params;
+    params.session_id = "sess-child";
+    params.agent_preset = "test";
+    params.project_root = fixture.project_root;
+    params.policy_ceiling = ceiling;
+    params.run_mode_override = tools::PermissionRunMode::AllowOnly;
+
+    auto owned_store = std::make_unique<testing::InMemoryHistoryStore>();
+    auto* store = owned_store.get();
+    agent::Session session(params, fixture.preset, std::move(provider), std::move(owned_store),
+                           fixture.tools_registry, fixture.loop_config, fixture.observers,
+                           common::DefaultLogger());
+    session.SubmitTurn("run something");
+    REQUIRE(session.WaitForIdleForTesting(5s));  // did not block on a prompt
+    session.Terminate();
+
+    CHECK(tool_ptr->calls.empty());  // the ceiling forced Ask; AllowOnly denied it
+    CHECK(store->messages.size() == 4);
+}
+
+TEST_CASE("a queued injected message is appended at a turn boundary", "[session][subagent]") {
+    // The non-blocking completion path: a child's worker queues its result while
+    // the parent is between turns, and it must land in the transcript whole --
+    // never between a tool_use and its tool_result.
+    SessionFixture fixture;
+    fixture.Script(testing::TextResponse("next answer"));
+    fixture.Start();
+
+    fixture.session->QueueInjectedMessage(
+        llm::Message{llm::Role::User,
+                     {llm::ToolResultBlock{"spawn-1", {llm::TextBlock{"child result"}}, false}}});
+    fixture.session->SubmitTurn("next turn");
+    REQUIRE(fixture.session->WaitForIdleForTesting(5s));
+
+    // Order: injected seed of turn 1 never existed; this turn appended its seed
+    // and response FIRST, then the boundary flush appended the injection.
+    const auto& stored = fixture.store->messages;
+    REQUIRE(stored.size() == 3);
+    CHECK(stored[0].role == llm::Role::User);      // "next turn"
+    CHECK(stored[1].role == llm::Role::Assistant);  // "next answer"
+    REQUIRE(stored[2].role == llm::Role::User);
+    REQUIRE(stored[2].content.size() == 1);
+    CHECK(std::get<llm::ToolResultBlock>(stored[2].content.front()).tool_use_id == "spawn-1");
 }

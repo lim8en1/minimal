@@ -1,9 +1,12 @@
+#include <atomic>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <memory>
 #include <string>
 #include <thread>
+
+#include <unistd.h>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -24,6 +27,7 @@ struct TempConfigDir {
     testing::TempDir tempdir;
     std::filesystem::path dir = tempdir.path();
 
+    // TempDir owns the arena and removes it; no explicit destructor needed.
     TempConfigDir() { std::filesystem::create_directories(dir / "agents"); }
 
     void Write(const std::filesystem::path& relative, const std::string& contents) const {
@@ -277,7 +281,7 @@ TEST_CASE("sessions are independent", "[session_registry]") {
     CHECK(fixture.registry->Find("s2") == second);
 }
 
-// --- Resume -------------------------------------------------------------------
+// --- Resume ------------------------------------------------------------------
 
 TEST_CASE("resume loads the stored transcript and repairs a torn tool tail",
           "[session_registry][resume]") {
@@ -344,4 +348,49 @@ TEST_CASE("resume of an already-open session is refused", "[session_registry][re
     REQUIRE(fixture.registry->Create(params) != nullptr);
     CHECK_THROWS_AS(fixture.registry->Create(params), std::runtime_error);
     CHECK(fixture.registry->size() == 1);
+}
+
+// --- Subagents -------------------------------------------------------------
+
+TEST_CASE("CreateResolved uses the preset it is handed", "[session_registry][subagent]") {
+    // The subagent spawner adapts a resolved preset before the session exists
+    // (is_subagent, subagent.md prefix, intersected allowed lists); no name-based
+    // lookup can express that. The registry must take the preset as given --
+    // here proven by handing it a system prompt no file on disk contains.
+    RegistryFixture fixture;
+    fixture.config.WriteDefaults();
+    fixture.Build();
+
+    agent::AgentPreset adapted = fixture.presets->Resolve("build");
+    adapted.is_subagent = true;
+    adapted.system_prompt = "[subagent] " + adapted.system_prompt;
+
+    auto session = fixture.registry->CreateResolved(Params("s1"), adapted);
+    REQUIRE(session != nullptr);
+    CHECK(session->preset().is_subagent);
+    CHECK(session->preset().system_prompt.rfind("[subagent] ", 0) == 0);
+}
+
+TEST_CASE("ChildCount counts only live sessions of that parent", "[session_registry][subagent]") {
+    RegistryFixture fixture;
+    fixture.config.WriteDefaults();
+    fixture.Build();
+
+    auto parent = fixture.registry->Create(Params("p"));
+    agent::SessionParams child_a = Params("ca");
+    child_a.parent_session_id = "p";
+    agent::SessionParams child_b = Params("cb");
+    child_b.parent_session_id = "p";
+    agent::SessionParams other = Params("other");
+    fixture.registry->Create(child_a);
+    fixture.registry->Create(child_b);
+    fixture.registry->Create(other);
+
+    CHECK(fixture.registry->ChildCount("p") == 2);
+    CHECK(fixture.registry->ChildCount("other") == 0);
+
+    // Terminated children stop counting: the concurrency limit is about live
+    // subagents, not historical ones.
+    fixture.registry->Terminate("ca");
+    CHECK(fixture.registry->ChildCount("p") == 1);
 }
