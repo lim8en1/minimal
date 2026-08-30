@@ -218,7 +218,13 @@ grpc::Status SessionServiceImpl::GetMessages(grpc::ServerContext*,
     if (limit <= 0) limit = 100;  // settings.json may legitimately leave it unset
 
     try {
-        const auto page = reader_.GetMessages(request->session_id(), request->before_seq(), limit);
+        // has_before_seq(), not a value test: the wire field is optional
+        // precisely so "page from the newest" and "page before seq 0" stay
+        // distinguishable.
+        const std::optional<std::int64_t> cursor =
+            request->has_before_seq() ? std::optional<std::int64_t>(request->before_seq())
+                                      : std::nullopt;
+        const auto page = reader_.GetMessages(request->session_id(), cursor, limit);
         for (const auto& stored : page.messages) {
             *response->add_messages() = ToProto(stored);
         }

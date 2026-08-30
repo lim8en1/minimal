@@ -362,7 +362,7 @@ TEST_CASE("appends persist and reload structurally identical", "[session][store]
     {
         SessionDatabase db(path);
         SessionReader reader(db);
-        const auto page = reader.GetMessages(session_id, 0, 100);
+        const auto page = reader.GetMessages(session_id, std::nullopt, 100);
         REQUIRE(page.messages.size() == 4);
         CHECK_FALSE(page.has_more);
 
@@ -394,8 +394,8 @@ TEST_CASE("seqs are per-session and independent", "[session][store]") {
     db.AppendMessage(b, UserMsg("b1"));
     db.AppendMessage(a, UserMsg("a2"));
 
-    const auto page_a = db.GetMessagesPage(a, 0, 10);
-    const auto page_b = db.GetMessagesPage(b, 0, 10);
+    const auto page_a = db.GetMessagesPage(a, std::nullopt, 10);
+    const auto page_b = db.GetMessagesPage(b, std::nullopt, 10);
     REQUIRE(page_a.messages.size() == 2);
     REQUIRE(page_b.messages.size() == 1);
     CHECK(page_a.messages[0].seq == 1);
@@ -531,7 +531,7 @@ TEST_CASE("a SIGKILL mid-append leaves an exact committed prefix", "[session][cr
 
     SessionReader reader(db);
     std::set<int64_t> seen_seqs;
-    int64_t before_seq = 0;
+    std::optional<int64_t> before_seq;  // no cursor: start at the most recent
     while (true) {
         const auto page = reader.GetMessages(sessions[0].session_id, before_seq, 100);
         REQUIRE(!page.messages.empty());
@@ -562,7 +562,7 @@ TEST_CASE("keyset paging walks a large transcript in exact order", "[session][pa
     SessionReader reader(db);
 
     // First page: the 100 most recent, descending.
-    const auto first = reader.GetMessages(id, 0, 100);
+    const auto first = reader.GetMessages(id, std::nullopt, 100);
     REQUIRE(first.messages.size() == 100);
     CHECK(first.has_more);
     CHECK(first.messages[0].seq == kMessages - 1);
@@ -576,7 +576,7 @@ TEST_CASE("keyset paging walks a large transcript in exact order", "[session][pa
 
     // Walk the whole transcript; every seq exactly once, in order.
     std::vector<int64_t> all_seqs;
-    int64_t before_seq = 0;
+    std::optional<int64_t> before_seq;  // no cursor: start at the most recent
     while (true) {
         const auto page = reader.GetMessages(id, before_seq, 100);
         for (const auto& stored : page.messages) all_seqs.push_back(stored.seq);
@@ -589,19 +589,45 @@ TEST_CASE("keyset paging walks a large transcript in exact order", "[session][pa
     }
 
     // A limit of one still reports has_more correctly.
-    const auto single = reader.GetMessages(id, 0, 1);
+    const auto single = reader.GetMessages(id, std::nullopt, 1);
     REQUIRE(single.messages.size() == 1);
     CHECK(single.has_more);
     CHECK(single.messages[0].seq == kMessages - 1);
 
     // Paging an empty session yields an empty page, not an error.
     const auto empty_id = db.CreateSession("", std::nullopt, "/p", "build").session_id;
-    const auto empty = reader.GetMessages(empty_id, 0, 10);
+    const auto empty = reader.GetMessages(empty_id, std::nullopt, 10);
     REQUIRE(empty.messages.empty());
     CHECK_FALSE(empty.has_more);
 
     // A non-positive limit is a caller bug.
-    CHECK_THROWS_AS(reader.GetMessages(id, 0, 0), std::runtime_error);
+    CHECK_THROWS_AS(reader.GetMessages(id, std::nullopt, 0), std::runtime_error);
+}
+
+TEST_CASE("a cursor of 0 pages before the first message, not from the newest",
+          "[session][paging][invariant]") {
+    // seq starts at 0, so the old `before_seq <= 0 means no cursor` sentinel was
+    // drawn from the value space it had to be distinguishable from. A client
+    // that paged back to the first message and passed its seq as the next cursor
+    // got the NEWEST page again -- the read equivalent of a loop that never
+    // terminates. Absence is now carried by the optional, not by a value.
+    TempDir dir;
+    SessionDatabase db(dir.path() / "s.db");
+    const auto id = db.CreateSession("", std::nullopt, "/p", "build").session_id;
+    for (int i = 0; i < 3; ++i) db.AppendMessage(id, UserMsg("m" + std::to_string(i)), 0);
+
+    SessionReader reader(db);
+    const std::int64_t first_seq = 0;
+
+    // The cursor case: strictly before seq 0 is nothing at all.
+    const auto before_first = reader.GetMessages(id, first_seq, 10);
+    CHECK(before_first.messages.empty());
+    CHECK_FALSE(before_first.has_more);
+
+    // The no-cursor case, from the same call, differing only in the optional.
+    const auto newest = reader.GetMessages(id, std::nullopt, 10);
+    REQUIRE(newest.messages.size() == 3);
+    CHECK(newest.messages.front().seq == 2);
 }
 
 // --- Session listing -----------------------------------------------------------------------
@@ -680,7 +706,7 @@ TEST_CASE("DeleteSession removes the session, its messages, and its children", "
 
     CHECK(db.GetSession(parent).has_value() == false);
     CHECK(db.GetSession(child).has_value() == false);  // cascade through the FK
-    const auto page = db.GetMessagesPage(parent, 0, 10);
+    const auto page = db.GetMessagesPage(parent, std::nullopt, 10);
     REQUIRE(page.messages.empty());
     CHECK(db.ListSessions({std::nullopt, true}).empty());
 }
@@ -717,7 +743,7 @@ TEST_CASE("concurrent appends across sessions stay consistent", "[session][concu
     // with contiguous seqs -- the single-writer discipline made visible.
     const int expected = kThreads * kAppendsPerThread / kSessions;
     for (const auto& id : ids) {
-        const auto page = db.GetMessagesPage(id, 0, expected + 1);
+        const auto page = db.GetMessagesPage(id, std::nullopt, expected + 1);
         REQUIRE(page.messages.size() == static_cast<std::size_t>(expected));
         CHECK_FALSE(page.has_more);
         for (int i = 0; i < expected; ++i) {

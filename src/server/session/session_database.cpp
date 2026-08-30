@@ -436,7 +436,8 @@ std::vector<SessionSummary> SessionDatabase::ListSessions(const ListSessionsFilt
     return out;
 }
 
-MessagePage SessionDatabase::GetMessagesPage(const std::string& session_id, std::int64_t before_seq,
+MessagePage SessionDatabase::GetMessagesPage(const std::string& session_id,
+                                             std::optional<std::int64_t> before_seq,
                                              int limit) const {
     if (limit <= 0) {
         throw std::runtime_error("GetMessagesPage: limit must be > 0");
@@ -445,16 +446,22 @@ MessagePage SessionDatabase::GetMessagesPage(const std::string& session_id, std:
     // Keyset pagination: the predicate is an index seek, so a page of a 1M-token
     // history costs the same as a page of a short one. Fetch one probe row past
     // the page to compute has_more without a second COUNT query.
+    // `?2 IS NULL` is the cursor test, not a magic value: seq starts at 0, so
+    // any in-range sentinel would collide with a real row. NULL is outside the
+    // value space by construction.
     Stmt query(
         db_,
         "SELECT seq, content_json, token_count, created_at FROM messages"
-        " WHERE session_id = ? AND (? <= 0 OR seq < ?)"
-        " ORDER BY seq DESC LIMIT ?;",
+        " WHERE session_id = ?1 AND (?2 IS NULL OR seq < ?2)"
+        " ORDER BY seq DESC LIMIT ?3;",
         "failed to page messages");
     sqlite3_bind_text(query.stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_int64(query.stmt, 2, before_seq);
-    sqlite3_bind_int64(query.stmt, 3, before_seq);
-    sqlite3_bind_int(query.stmt, 4, limit + 1);
+    if (before_seq) {
+        sqlite3_bind_int64(query.stmt, 2, *before_seq);
+    } else {
+        sqlite3_bind_null(query.stmt, 2);
+    }
+    sqlite3_bind_int(query.stmt, 3, limit + 1);
 
     MessagePage page;
     while (sqlite3_step(query.stmt) == SQLITE_ROW) {

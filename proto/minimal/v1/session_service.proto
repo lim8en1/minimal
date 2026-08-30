@@ -186,7 +186,12 @@ message StoredMessage {
 
 message GetMessagesRequest {
   string session_id = 1;
-  int64 before_seq = 2; // exclusive upper bound; 0 = start from most recent
+  // Exclusive upper bound. OPTIONAL rather than "0 means most recent", because
+  // seq starts at 0: a client paging backwards that reached the first message
+  // and passed its seq as the next cursor got the newest page back instead of
+  // an empty one. Explicit presence separates "no cursor" from "before the
+  // first message", which a sentinel drawn from the value space cannot.
+  optional int64 before_seq = 2;
   int32 limit = 3;
 }
 

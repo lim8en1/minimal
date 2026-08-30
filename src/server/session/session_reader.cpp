@@ -2,8 +2,8 @@
 
 namespace minimal::session {
 
-MessagePage SessionReader::GetMessages(const std::string& session_id, std::int64_t before_seq,
-                                       int limit) const {
+MessagePage SessionReader::GetMessages(const std::string& session_id,
+                                       std::optional<std::int64_t> before_seq, int limit) const {
     return db_.GetMessagesPage(session_id, before_seq, limit);
 }
 

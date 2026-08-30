@@ -94,7 +94,19 @@ public:
 
     // Keyset page, descending by seq. before_seq is an exclusive upper bound;
     // <= 0 means "start at the most recent". limit must be > 0.
-    MessagePage GetMessagesPage(const std::string& session_id, std::int64_t before_seq, int limit) const;
+    MessagePage GetMessagesPage(const std::string& session_id,
+                                std::optional<std::int64_t> before_seq, int limit) const;
+
+    // See SessionReader::GetMessages for both of these. A real cursor is taken
+    // exactly; a bare `0` is rejected, because it used to mean "from the most
+    // recent" and now means "before seq 0" -- and the implicit conversion would
+    // silently rewrite every old call site rather than failing one.
+    MessagePage GetMessagesPage(const std::string& session_id, std::int64_t before_seq,
+                                int limit) const {
+        return GetMessagesPage(session_id, std::optional<std::int64_t>(before_seq), limit);
+    }
+    MessagePage GetMessagesPage(const std::string& session_id, int before_seq,
+                                int limit) const = delete;
 
     const std::filesystem::path& path() const { return path_; }
 

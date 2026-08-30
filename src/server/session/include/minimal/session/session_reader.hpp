@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <string>
 
 #include "minimal/session/session_database.hpp"
@@ -16,9 +17,27 @@ public:
     explicit SessionReader(SessionDatabase& db) : db_(db) {}
 
     // Keyset page, descending by seq. before_seq is an exclusive upper bound;
-    // <= 0 starts at the most recent message. limit must be > 0 (the RPC layer
-    // applies settings.memory.scrollback_page_size as its default).
-    MessagePage GetMessages(const std::string& session_id, std::int64_t before_seq, int limit) const;
+    // nullopt starts at the most recent message. Not a sentinel value, because
+    // seq starts at 0 and any in-range sentinel would mean "before the first
+    // message" to one caller and "no cursor" to another. limit must be > 0 (the
+    // RPC layer applies settings.memory.scrollback_page_size as its default).
+    MessagePage GetMessages(const std::string& session_id, std::optional<std::int64_t> before_seq,
+                            int limit) const;
+
+    // A real cursor, taken exactly so it does not fall into the deleted overload
+    // below -- `seq` is int64_t and int64_t->int is a standard conversion, which
+    // would otherwise outrank the user-defined conversion to optional.
+    MessagePage GetMessages(const std::string& session_id, std::int64_t before_seq,
+                            int limit) const {
+        return GetMessages(session_id, std::optional<std::int64_t>(before_seq), limit);
+    }
+
+    // Deleted so `GetMessages(id, 0, n)` does not compile. It used to mean "from
+    // the most recent" and now means "before seq 0", which is the empty page --
+    // and `0` converts to an engaged optional silently, so the compiler would
+    // otherwise accept every pre-existing call site and quietly change what it
+    // did. Callers that mean "no cursor" say std::nullopt.
+    MessagePage GetMessages(const std::string& session_id, int before_seq, int limit) const = delete;
 
 private:
     SessionDatabase& db_;
