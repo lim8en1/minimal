@@ -1,10 +1,17 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
+#include <filesystem>
+#include <fstream>
 #include <memory>
 #include <string>
+#include <utility>
 
 #include "fakes.hpp"
 #include "minimal/agent/agent_loop.hpp"
+#include "minimal/config/skill_registry.hpp"
+#include "minimal/tools/skill_tool.hpp"
+#include "temp_dir.hpp"
 
 using namespace minimal;
 using namespace minimal::testing;
@@ -17,6 +24,12 @@ namespace {
 // destruction-safe order: the loop refers to the others, so it is destroyed
 // first.
 struct Harness {
+    // Skill support for tier-2 coverage of the lazy-load path. Declared first so
+    // they are destroyed LAST: the registry below owns a SkillTool that holds a
+    // reference into `skills`.
+    std::unique_ptr<testing::TempDir> skill_arena;
+    std::unique_ptr<config::SkillRegistry> skills;
+
     FakeLlmProvider provider;
     tools::ToolRegistry registry;
     AlwaysAllowPermissionChecker checker;
@@ -31,6 +44,21 @@ struct Harness {
         FakeTool* raw = owned.get();
         registry.Register(std::move(owned));
         return *raw;
+    }
+
+    // Registers a real SkillTool over the given skills (name -> body). Call
+    // before Build().
+    void EnableSkills(const std::vector<std::pair<std::string, std::string>>& bodies) {
+        skill_arena = std::make_unique<testing::TempDir>();
+        for (const auto& [name, body] : bodies) {
+            const auto dir = skill_arena->path() / "skills" / name;
+            std::filesystem::create_directories(dir);
+            std::ofstream(dir / "SKILL.md") << "---\nname: " << name
+                                            << "\ndescription: test skill\n---\n" << body;
+        }
+        skills = std::make_unique<config::SkillRegistry>(
+            config::SkillRegistry::Load(skill_arena->path()));
+        registry.Register(std::make_unique<tools::SkillTool>(*skills));
     }
 
     void Build(agent::AgentPreset preset = {}, agent::LoopConfig config = {},
@@ -337,4 +365,83 @@ TEST_CASE("a queued subagent result lands at a turn boundary", "[agent_loop][sub
         }
         CHECK_FALSE(prev_has_pending_tool_use);
     }
+}
+
+TEST_CASE("the skill tool round-trips a lazy-loaded body through the loop", "[agent_loop][skills]") {
+    Harness h;
+    h.EnableSkills({{"deploy", "Always run the smoke tests first.\n"}});
+    agent::AgentPreset preset;
+    preset.allowed_skills = {"deploy"};
+    preset.system_prompt = "You are a test agent.\n";
+    h.provider.PushResponse(ToolUseResponse("tu1", "skill", {{"name", "deploy"}}));
+    h.provider.PushResponse(TextResponse("done"));
+    h.Build(std::move(preset));
+
+    const auto result = h.loop->RunTurn(UserText("how do I deploy?"));
+
+    CHECK(result.stop_reason == llm::StopReason::EndTurn);
+    // ReadOnly: the permission checker is never consulted for a skill load.
+    CHECK(h.checker.seen.empty());
+    // user, assistant(tool_use), user(tool_result), assistant(text)
+    REQUIRE(h.store.messages.size() == 4);
+    REQUIRE(h.store.messages[2].content.size() == 1);
+    const auto* block = std::get_if<llm::ToolResultBlock>(&h.store.messages[2].content.front());
+    REQUIRE(block != nullptr);
+    CHECK_FALSE(block->is_error);
+    REQUIRE(block->content.size() == 1);
+    CHECK(std::get<llm::TextBlock>(block->content.front()).text ==
+          "Always run the smoke tests first.\n");
+}
+
+TEST_CASE("the skill tool is offered only when the preset allows skills", "[agent_loop][skills]") {
+    const auto has_skill = [](const std::vector<llm::ToolDefinition>& tools) {
+        return std::any_of(tools.begin(), tools.end(),
+                           [](const llm::ToolDefinition& t) { return t.name == "skill"; });
+    };
+
+    SECTION("allowed skills -> offered") {
+        Harness h;
+        h.EnableSkills({{"deploy", "body\n"}});
+        agent::AgentPreset preset;
+        preset.allowed_skills = {"deploy"};
+        h.provider.PushResponse(TextResponse("hi"));
+        h.Build(std::move(preset));
+
+        h.loop->RunTurn(UserText("hi"));
+
+        CHECK(has_skill(h.provider.requests().front().tools));
+    }
+
+    SECTION("no allowed skills -> withheld even under allowed_tools ['*']") {
+        Harness h;
+        h.EnableSkills({{"deploy", "body\n"}});
+        agent::AgentPreset preset;  // allowed_skills empty; Build() defaults allowed_tools to {"*"}
+        h.provider.PushResponse(TextResponse("hi"));
+        h.Build(std::move(preset));
+
+        h.loop->RunTurn(UserText("hi"));
+
+        CHECK_FALSE(has_skill(h.provider.requests().front().tools));
+    }
+}
+
+TEST_CASE("invoking a skill the preset does not allow yields an error result",
+          "[agent_loop][skills]") {
+    Harness h;
+    h.EnableSkills({{"deploy", "body\n"}});
+    agent::AgentPreset preset;
+    preset.allowed_skills = {"other"};  // non-empty, so the tool IS offered...
+    h.provider.PushResponse(ToolUseResponse("tu1", "skill", {{"name", "deploy"}}));
+    h.provider.PushResponse(TextResponse("ok"));
+    h.Build(std::move(preset));
+
+    h.loop->RunTurn(UserText("go"));
+
+    REQUIRE(h.store.messages.size() == 4);
+    REQUIRE(h.store.messages[2].content.size() == 1);
+    const auto* block = std::get_if<llm::ToolResultBlock>(&h.store.messages[2].content.front());
+    REQUIRE(block != nullptr);
+    CHECK(block->is_error);
+    const std::string text = std::get<llm::TextBlock>(block->content.front()).text;
+    CHECK(text.find("not available in this session") != std::string::npos);
 }

@@ -40,4 +40,9 @@ struct AgentPreset {
 // recursion.
 inline constexpr const char* kSpawnSubagentToolName = "spawn_subagent";
 
+// The core skill accessor. Offered only when the preset allows at least one
+// skill -- see AgentLoop::BuildChatRequest. A preset with no skills gets no
+// tool that can only return errors.
+inline constexpr const char* kSkillToolName = "skill";
+
 }  // namespace minimal::agent

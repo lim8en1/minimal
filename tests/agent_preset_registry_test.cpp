@@ -61,7 +61,8 @@ struct TempConfigDir {
 TEST_CASE("AgentPresetRegistry: happy path resolves provider fields and system prompt", "[agent_preset_registry]") {
     TempConfigDir config;
     config.WriteDefaults();
-    AgentPresetRegistry registry(config.dir);
+    config::SkillRegistry skills = config::SkillRegistry::Load(config.dir);
+    AgentPresetRegistry registry(config.dir, skills);
 
     const AgentPreset& preset = registry.Resolve("build");
     CHECK(preset.name == "build");
@@ -84,7 +85,8 @@ TEST_CASE("AgentPresetRegistry: preset model override wins over the provider ent
                   "model: gpt-4.1\n"
                   "---\n"
                   "body\n");
-    AgentPresetRegistry registry(config.dir);
+    config::SkillRegistry skills = config::SkillRegistry::Load(config.dir);
+    AgentPresetRegistry registry(config.dir, skills);
 
     CHECK(registry.Resolve("build").provider.model_name == "gpt-4.1");
 }
@@ -100,7 +102,8 @@ TEST_CASE("AgentPresetRegistry: provider \"default\" resolves via settings.json 
                   "provider: default\n"
                   "---\n"
                   "body\n");
-    AgentPresetRegistry registry(config.dir);
+    config::SkillRegistry skills = config::SkillRegistry::Load(config.dir);
+    AgentPresetRegistry registry(config.dir, skills);
 
     CHECK(registry.Resolve("build").provider.base_url == "https://api.openai.com/v1");
 }
@@ -115,7 +118,8 @@ TEST_CASE("AgentPresetRegistry: provider \"default\" with no settings.json defau
                   "provider: default\n"
                   "---\n"
                   "body\n");
-    AgentPresetRegistry registry(config.dir);
+    config::SkillRegistry skills = config::SkillRegistry::Load(config.dir);
+    AgentPresetRegistry registry(config.dir, skills);
 
     CHECK_THROWS_AS(registry.Resolve("build"), std::runtime_error);
 }
@@ -129,7 +133,8 @@ TEST_CASE("AgentPresetRegistry: unknown provider name throws", "[agent_preset_re
                   "provider: nonexistent\n"
                   "---\n"
                   "body\n");
-    AgentPresetRegistry registry(config.dir);
+    config::SkillRegistry skills = config::SkillRegistry::Load(config.dir);
+    AgentPresetRegistry registry(config.dir, skills);
 
     CHECK_THROWS_AS(registry.Resolve("build"), std::runtime_error);
 }
@@ -137,7 +142,8 @@ TEST_CASE("AgentPresetRegistry: unknown provider name throws", "[agent_preset_re
 TEST_CASE("AgentPresetRegistry: unknown preset name throws", "[agent_preset_registry]") {
     TempConfigDir config;
     config.WriteDefaults();
-    AgentPresetRegistry registry(config.dir);
+    config::SkillRegistry skills = config::SkillRegistry::Load(config.dir);
+    AgentPresetRegistry registry(config.dir, skills);
 
     CHECK_THROWS_AS(registry.Resolve("nonexistent"), std::runtime_error);
 }
@@ -158,7 +164,8 @@ TEST_CASE("AgentPresetRegistry: permission chain layers take effect in priority 
                   "    bash: deny\n"
                   "---\n"
                   "body\n");
-    AgentPresetRegistry registry(config.dir);
+    config::SkillRegistry skills = config::SkillRegistry::Load(config.dir);
+    AgentPresetRegistry registry(config.dir, skills);
 
     const auto& policy = registry.Resolve("build").permission_mode;
     // preset per-tool override beats everything, including global per-tool.
@@ -172,7 +179,8 @@ TEST_CASE("AgentPresetRegistry: global per-tool override applies when preset is 
     TempConfigDir config;
     config.WriteDefaults();
     config.WriteJson("permissions.json", {{"per_tool_overrides", {{"bash", "allow"}}}});
-    AgentPresetRegistry registry(config.dir);
+    config::SkillRegistry skills = config::SkillRegistry::Load(config.dir);
+    AgentPresetRegistry registry(config.dir, skills);
 
     CHECK(registry.Resolve("build").permission_mode.mode_for("bash", ToolCategory::Execute) ==
           PermissionMode::AlwaysAllow);
@@ -181,7 +189,8 @@ TEST_CASE("AgentPresetRegistry: global per-tool override applies when preset is 
 TEST_CASE("AgentPresetRegistry: falls to hard-coded default with no config at all", "[agent_preset_registry]") {
     TempConfigDir config;
     config.WriteDefaults();
-    AgentPresetRegistry registry(config.dir);
+    config::SkillRegistry skills = config::SkillRegistry::Load(config.dir);
+    AgentPresetRegistry registry(config.dir, skills);
 
     CHECK(registry.Resolve("build").permission_mode.mode_for("anything", ToolCategory::Execute) ==
           PermissionMode::Ask);
@@ -199,7 +208,8 @@ TEST_CASE("AgentPresetRegistry: mcp_permissions per-server vs. global default", 
                   "  search: allow\n"
                   "---\n"
                   "body\n");
-    AgentPresetRegistry registry(config.dir);
+    config::SkillRegistry skills = config::SkillRegistry::Load(config.dir);
+    AgentPresetRegistry registry(config.dir, skills);
 
     const auto& mcp = registry.Resolve("build").mcp_permissions;
     CHECK(mcp.mode_for("search") == PermissionMode::AlwaysAllow);
@@ -217,7 +227,8 @@ TEST_CASE("AgentPresetRegistry: compression_prompt loads the named prompts/<x>.m
                   "compression_prompt: custom\n"
                   "---\n"
                   "body\n");
-    AgentPresetRegistry registry(config.dir);
+    config::SkillRegistry skills = config::SkillRegistry::Load(config.dir);
+    AgentPresetRegistry registry(config.dir, skills);
 
     CHECK(registry.Resolve("build").compression_prompt == "Custom compaction prompt.\n");
 }
@@ -227,7 +238,8 @@ TEST_CASE("AgentPresetRegistry: compression_prompt falls back to prompts/compres
     TempConfigDir config;
     config.WriteDefaults();
     config.Write("prompts/compression.md", "Default compaction prompt.\n");
-    AgentPresetRegistry registry(config.dir);
+    config::SkillRegistry skills = config::SkillRegistry::Load(config.dir);
+    AgentPresetRegistry registry(config.dir, skills);
 
     CHECK(registry.Resolve("build").compression_prompt == "Default compaction prompt.\n");
 }
@@ -236,7 +248,8 @@ TEST_CASE("AgentPresetRegistry: missing default compression prompt yields empty 
           "[agent_preset_registry]") {
     TempConfigDir config;
     config.WriteDefaults();
-    AgentPresetRegistry registry(config.dir);
+    config::SkillRegistry skills = config::SkillRegistry::Load(config.dir);
+    AgentPresetRegistry registry(config.dir, skills);
 
     CHECK(registry.Resolve("build").compression_prompt.empty());
 }
@@ -252,7 +265,8 @@ TEST_CASE("AgentPresetRegistry: an explicitly-named missing compression prompt t
                   "compression_prompt: nonexistent\n"
                   "---\n"
                   "body\n");
-    AgentPresetRegistry registry(config.dir);
+    config::SkillRegistry skills = config::SkillRegistry::Load(config.dir);
+    AgentPresetRegistry registry(config.dir, skills);
 
     CHECK_THROWS_AS(registry.Resolve("build"), std::runtime_error);
 }
@@ -260,7 +274,8 @@ TEST_CASE("AgentPresetRegistry: an explicitly-named missing compression prompt t
 TEST_CASE("AgentPresetRegistry: missing agents/subagent.md yields an empty SubagentPrefix", "[agent_preset_registry]") {
     TempConfigDir config;
     config.WriteDefaults();
-    AgentPresetRegistry registry(config.dir);
+    config::SkillRegistry skills = config::SkillRegistry::Load(config.dir);
+    AgentPresetRegistry registry(config.dir, skills);
 
     CHECK(registry.SubagentPrefix().empty());
 }
@@ -269,7 +284,8 @@ TEST_CASE("AgentPresetRegistry: present agents/subagent.md is read verbatim", "[
     TempConfigDir config;
     config.WriteDefaults();
     config.Write("agents/subagent.md", "You are in subagent mode.\n");
-    AgentPresetRegistry registry(config.dir);
+    config::SkillRegistry skills = config::SkillRegistry::Load(config.dir);
+    AgentPresetRegistry registry(config.dir, skills);
 
     CHECK(registry.SubagentPrefix() == "You are in subagent mode.\n");
 }
@@ -279,7 +295,8 @@ TEST_CASE("AgentPresetRegistry: malformed providers.json throws at construction"
     config.WriteDefaults();
     config.Write("providers.json", "{not valid json");
 
-    CHECK_THROWS_AS(AgentPresetRegistry(config.dir), std::runtime_error);
+    config::SkillRegistry skills;  // not referenced: construction throws before the listing renders
+    CHECK_THROWS_AS(AgentPresetRegistry(config.dir, skills), std::runtime_error);
 }
 
 TEST_CASE("AgentPresetRegistry: malformed settings.json throws at construction", "[agent_preset_registry]") {
@@ -287,7 +304,8 @@ TEST_CASE("AgentPresetRegistry: malformed settings.json throws at construction",
     config.WriteDefaults();
     config.Write("settings.json", "{not valid json");
 
-    CHECK_THROWS_AS(AgentPresetRegistry(config.dir), std::runtime_error);
+    config::SkillRegistry skills;  // not referenced: construction throws before the listing renders
+    CHECK_THROWS_AS(AgentPresetRegistry(config.dir, skills), std::runtime_error);
 }
 
 TEST_CASE("AgentPresetRegistry: malformed permissions.json throws at construction", "[agent_preset_registry]") {
@@ -295,17 +313,98 @@ TEST_CASE("AgentPresetRegistry: malformed permissions.json throws at constructio
     config.WriteDefaults();
     config.Write("permissions.json", "{not valid json");
 
-    CHECK_THROWS_AS(AgentPresetRegistry(config.dir), std::runtime_error);
+    config::SkillRegistry skills;  // not referenced: construction throws before the listing renders
+    CHECK_THROWS_AS(AgentPresetRegistry(config.dir, skills), std::runtime_error);
 }
 
 TEST_CASE("AgentPresetRegistry: Resolve() caches -- a second call survives the file being deleted",
           "[agent_preset_registry]") {
     TempConfigDir config;
     config.WriteDefaults();
-    AgentPresetRegistry registry(config.dir);
+    config::SkillRegistry skills = config::SkillRegistry::Load(config.dir);
+    AgentPresetRegistry registry(config.dir, skills);
 
     const std::string first_name = registry.Resolve("build").name;
     std::filesystem::remove(config.dir / "agents" / "build.md");
 
     CHECK(registry.Resolve("build").name == first_name);
+}
+
+TEST_CASE("AgentPresetRegistry: allowed skills render into the system prompt, sorted by name",
+          "[agent_preset_registry][skills]") {
+    TempConfigDir config;
+    config.WriteDefaults();
+    // allowed_skills lists beta FIRST on purpose: the listing must come out
+    // sorted (it sits in the cached prefix and cannot reorder turn to turn).
+    config.Write("agents/build.md",
+                 "---\n"
+                 "name: build\n"
+                 "provider: openai-main\n"
+                 "allowed_skills:\n"
+                 "  - beta\n"
+                 "  - alpha\n"
+                 "---\n"
+                 "You are a build agent.\n");
+    config.Write("skills/alpha/SKILL.md",
+                 "---\nname: alpha\ndescription: First skill.\n---\nAlpha body.\n");
+    config.Write("skills/beta/SKILL.md",
+                 "---\nname: beta\ndescription: Second skill.\n---\nBeta body.\n");
+    config.Write("skills/gamma/SKILL.md",
+                 "---\nname: gamma\ndescription: Not allowed here.\n---\nGamma body.\n");
+
+    auto skills = config::SkillRegistry::Load(config.dir);
+    AgentPresetRegistry registry(config.dir, skills);
+
+    CHECK(registry.Resolve("build").system_prompt == "You are a build agent.\n"
+                                                     "\n## Available skills\n\n"
+                                                     "Load a skill's full instructions with the `skill` tool.\n"
+                                                     "- alpha: First skill.\n"
+                                                     "- beta: Second skill.\n");
+}
+
+TEST_CASE("AgentPresetRegistry: a skill that failed to load is excluded from the listing",
+          "[agent_preset_registry][skills]") {
+    TempConfigDir config;
+    config.WriteDefaults();
+    config.Write("agents/build.md",
+                 "---\n"
+                 "name: build\n"
+                 "provider: openai-main\n"
+                 "allowed_skills:\n"
+                 "  - broken\n"
+                 "---\n"
+                 "You are a build agent.\n");
+    // Missing description -> not loaded. It must not appear in the listing; its
+    // reason surfaces through SkillTool at invocation instead.
+    config.Write("skills/broken/SKILL.md", "---\nname: broken\n---\nBody.\n");
+
+    auto skills = config::SkillRegistry::Load(config.dir);
+    AgentPresetRegistry registry(config.dir, skills);
+
+    CHECK(registry.Resolve("build").system_prompt == "You are a build agent.\n");
+}
+
+TEST_CASE("AgentPresetRegistry: allowed_skills ['*'] lists every loaded skill",
+          "[agent_preset_registry][skills]") {
+    TempConfigDir config;
+    config.WriteDefaults();
+    config.Write("agents/build.md",
+                 "---\n"
+                 "name: build\n"
+                 "provider: openai-main\n"
+                 "allowed_skills:\n"
+                 "  - \"*\"\n"
+                 "---\n"
+                 "You are a build agent.\n");
+    config.Write("skills/alpha/SKILL.md",
+                 "---\nname: alpha\ndescription: First skill.\n---\nAlpha body.\n");
+    config.Write("skills/beta/SKILL.md",
+                 "---\nname: beta\ndescription: Second skill.\n---\nBeta body.\n");
+
+    auto skills = config::SkillRegistry::Load(config.dir);
+    AgentPresetRegistry registry(config.dir, skills);
+
+    const std::string prompt = registry.Resolve("build").system_prompt;
+    CHECK(prompt.find("- alpha: First skill.") != std::string::npos);
+    CHECK(prompt.find("- beta: Second skill.") != std::string::npos);
 }

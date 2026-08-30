@@ -35,6 +35,8 @@ add_executable(minimal_tests
     atomic_write_test.cpp
     tools_fs_test.cpp
     tools_bash_test.cpp
+    skill_registry_test.cpp
+    skill_tool_test.cpp
     # provider-openai's pure translation logic, compiled directly into the test
     # binary rather than via the plugin .so -- these files have no ABI/plugin
     # dependency, only core headers, so this is real linkage, not dlopen.

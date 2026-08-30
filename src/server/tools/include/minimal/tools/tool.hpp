@@ -5,6 +5,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 
@@ -32,6 +33,11 @@ struct ToolContext {
 
     std::string session_id;
     std::filesystem::path project_root;
+
+    // The active preset's allowed_skills for this session, as a plain list so
+    // the tools layer stays free of agent-layer types. SkillTool validates its
+    // input against it at invocation time; empty means no skills are permitted.
+    std::vector<std::string> allowed_skills;
 
     // Checked before each tool runs and polled by long-running tools (bash).
     std::function<bool()> is_cancelled;

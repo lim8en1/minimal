@@ -1,5 +1,6 @@
 #include "minimal/agent/agent_preset_registry.hpp"
 
+#include <algorithm>
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
@@ -28,13 +29,48 @@ std::string ReadFileRequired(const std::filesystem::path& path, const std::strin
     return buffer.str();
 }
 
+// Renders the allowed skills' frontmatter (name + description only) into the
+// system prompt -- the entire resident cost of a skill library. Only LOADED
+// skills appear: a failed skill's reason surfaces through SkillTool at
+// invocation time, and unknown names in allowed_skills are skipped here (a
+// future sanity_check makes them loud).
+//
+// All() is sorted by name, so the listing is deterministic -- it sits in the
+// cached prefix and must not reorder turn to turn.
+std::string RenderSkillListing(const std::vector<std::string>& allowed_skills,
+                               const config::SkillRegistry& skills) {
+    const bool allow_all =
+        std::find(allowed_skills.begin(), allowed_skills.end(), "*") != allowed_skills.end();
+
+    std::vector<const config::SkillMeta*> listed;
+    for (const auto& meta : skills.All()) {
+        if (!meta.loaded) continue;
+        const bool in =
+            allow_all || std::find(allowed_skills.begin(), allowed_skills.end(), meta.name) !=
+                             allowed_skills.end();
+        if (!in) continue;
+        listed.push_back(&meta);
+    }
+    if (listed.empty()) return {};
+
+    std::ostringstream out;
+    out << "\n## Available skills\n\n";
+    out << "Load a skill's full instructions with the `skill` tool.\n";
+    for (const auto* meta : listed) {
+        out << "- " << meta->name << ": " << meta->description << "\n";
+    }
+    return out.str();
+}
+
 }  // namespace
 
-AgentPresetRegistry::AgentPresetRegistry(std::filesystem::path config_dir)
+AgentPresetRegistry::AgentPresetRegistry(std::filesystem::path config_dir,
+                                         const config::SkillRegistry& skills)
     : config_dir_(std::move(config_dir)),
       providers_(config::LoadProvidersConfig(config_dir_ / "providers.json")),
       settings_(config::LoadSettingsConfig(config_dir_ / "settings.json")),
-      permissions_(config::LoadPermissionsConfig(config_dir_ / "permissions.json")) {
+      permissions_(config::LoadPermissionsConfig(config_dir_ / "permissions.json")),
+      skills_(skills) {
     // Both optional at this phase -- a real deployment's absence is a future
     // sanity_check's job to flag, not this constructor's.
     subagent_prefix_ = ReadFileOrEmpty(config_dir_ / "agents" / "subagent.md");
@@ -74,7 +110,10 @@ AgentPreset AgentPresetRegistry::ResolveUncached(const std::string& preset_name)
     AgentPreset preset;
     preset.name = raw.name;
     preset.description = raw.description;
-    preset.system_prompt = raw.body;
+    // The skill listing is part of the resolved system prompt, baked in here at
+    // resolution time: config is static for the process lifetime, so it cannot
+    // drift from what SkillTool will serve on invocation.
+    preset.system_prompt = raw.body + RenderSkillListing(raw.allowed_skills, skills_);
     preset.provider.base_url = entry->base_url;
     preset.provider.api_key = entry->api_key;
     preset.provider.model_name = raw.model.empty() ? entry->model_name : raw.model;

@@ -8,6 +8,7 @@
 #include "minimal/config/permissions_config.hpp"
 #include "minimal/config/providers_config.hpp"
 #include "minimal/config/settings_config.hpp"
+#include "minimal/config/skill_registry.hpp"
 
 namespace minimal::agent {
 
@@ -24,7 +25,12 @@ public:
     // are read once here but treated as OPTIONAL at this phase (empty string if
     // absent) -- a future sanity_check is what makes their absence loud in a
     // real deployment.
-    explicit AgentPresetRegistry(std::filesystem::path config_dir);
+    //
+    // `skills` is shared with SkillTool rather than loaded again: one scan of
+    // skills/, one set of load-status entries, and both consumers agree on what
+    // exists. The listing rendered into each preset's system prompt comes from
+    // it (allowed_skills ∩ loaded, see ResolveUncached).
+    AgentPresetRegistry(std::filesystem::path config_dir, const config::SkillRegistry& skills);
 
     // Throws if agents/<preset_name>.md doesn't exist, or its `provider`
     // doesn't resolve (a providers.json entry, or "default" with no
@@ -43,6 +49,7 @@ private:
     config::ProvidersConfig providers_;
     config::SettingsConfig settings_;
     config::PermissionsConfig permissions_;
+    const config::SkillRegistry& skills_;
     std::string subagent_prefix_;
     std::string default_compression_prompt_;
     mutable std::unordered_map<std::string, AgentPreset> cache_;

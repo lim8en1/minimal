@@ -996,22 +996,32 @@ public:
 
 ## Skills
 
-`allowed_skills` **defaults to empty** — skills are off unless a preset opts in. The resolved preset renders its allowed skills' frontmatter (`name` + `description` only) into the system prompt as a registry listing; that listing is the entire resident cost.
+`allowed_skills` **defaults to empty** — skills are off unless a preset opts in. The resolved preset renders its allowed skills' frontmatter (`name` + `description` only) into the system prompt as a registry listing (sorted by name, so the cached prefix never reorders); that listing is the entire resident cost.
 
-Invocation is a core `SkillTool` (category `ReadOnly`): takes `{name}`, validates it against `allowed_skills`, and returns the `SKILL.md` body as its `ToolResult`. That call is the lazy-load trigger — bodies are never read until invoked.
+Invocation is a core `SkillTool` (category `ReadOnly`): takes `{name}`, validates it against `allowed_skills` (delivered per-invocation via `ToolContext::allowed_skills`, which the agent loop populates from the active preset), and returns the `SKILL.md` body as its `ToolResult`. That call is the lazy-load trigger — bodies are never read until invoked. Its error ladder distinguishes *unknown* (no such candidate), *not loaded* (candidate exists but failed, carrying the reason), and *not allowed in this session* (listing what is).
+
+**The directory name is the identity** — what `allowed_skills` references, what the listing shows, and what `Find()`/`LoadBody()` key on. A frontmatter `name` is optional but must agree with it when present; a disagreement is itself a load failure. This holds even for failed skills, so every entry has one stable name to point at.
 
 ```cpp
 // src/server/config/skill_registry.hpp
-struct SkillMeta { std::string name, description; std::filesystem::path body_path; };
+struct SkillMeta {
+    std::string name;               // directory name under skills/ -- the identity
+    std::string description;        // frontmatter; empty when not loaded
+    std::filesystem::path body_path;  // the SKILL.md candidate path
+    bool loaded = false;
+    std::string load_error;         // reason when !loaded
+};
 
 class SkillRegistry {
 public:
-    const std::vector<SkillMeta>& All() const;                        // frontmatter only, resident
-    std::optional<std::string> LoadBody(std::string_view name) const; // the lazy read
+    static SkillRegistry Load(std::filesystem::path config_dir);      // frontmatter-only scan
+    const std::vector<SkillMeta>& All() const;                        // EVERY candidate, sorted by name
+    const SkillMeta* Find(std::string_view name) const;               // null = no candidate at all
+    std::optional<std::string> LoadBody(std::string_view name) const; // the lazy read; nullopt unless loaded
 };
 ```
 
-`All()` is what the preset filters to build the system-prompt listing; `LoadBody()` is called only from `SkillTool::execute`.
+**Every entry directly under `skills/` becomes an entry in `All()` — including ones that failed to load**, with `loaded=false` and a `load_error` naming the problem (no SKILL.md, stray file, unterminated/malformed frontmatter, missing `description`, name mismatch). Consumers filter on `loaded`: the preset's listing renders only allowed ∩ loaded, and `SkillTool` reports a not-loaded skill's reason at invocation. `Load()` never throws for individual candidate problems — a broken skill degrades to an entry with a reason, not a startup failure (the sanity check surfaces these). `LoadBody()` is called only from `SkillTool::execute` and holds no mutable state, so concurrent calls from multiple session workers are safe.
 
 ## MCP client — `src/server/mcp/`
 
@@ -1074,7 +1084,7 @@ public:
 
 Checks: every config file parses; at least one usable `providers.json` entry exists with a resolvable key *and* a registered provider kind; each `mcps.json` entry's `command` resolves on `PATH` (stdio) or `url` is well-formed (http); `project_root` exists and is writable; the SQLite database is accessible and not newer than the binary; each discovered plugin's ABI tag matches; `max_concurrent_subagents` is sane; **no registration-name collisions** (fatal — see Name collisions and aliases); every `command_aliases` key resolves to something registered.
 
-Two checks specifically for the naming model: warn when a `per_tool_overrides` / `allowed_tools` / `allowed_skills` entry resolves to **nothing** registered (catches typos and entries stranded by a disabled plugin), and warn when a bare permission key is **ambiguous** because two plugins provide that original name — the intended rule is then undefined and must be written in qualified `plugin.name` form.
+Two checks specifically for the naming model: warn when a `per_tool_overrides` / `allowed_tools` / `allowed_skills` entry resolves to **nothing** registered (catches typos and entries stranded by a disabled plugin) — for `allowed_skills`, an entry that resolves to a *not-loaded* skill warns too, carrying its `load_error` — and warn when a bare permission key is **ambiguous** because two plugins provide that original name; the intended rule is then undefined and must be written in qualified `plugin.name` form. Every not-loaded skill entry is itself a warning.
 
 **Severity splits by provenance**: a failed **bundled** plugin is **Fatal** — losing `tools-fs` or `provider-openai` is a useless harness, not a degraded one — while a failed **user** plugin, or one bad `mcps.json` entry, is a **Warning** that disables just that piece.
 

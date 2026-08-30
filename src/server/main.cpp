@@ -10,14 +10,17 @@
 
 #include <cstdio>
 #include <fstream>
+#include <memory>
 #include <sstream>
 #include <string>
 
 #include "minimal/common/abi_tag.hpp"
 #include "minimal/common/config_paths.hpp"
+#include "minimal/config/skill_registry.hpp"
 #include "minimal/llm/provider_factory_registry.hpp"
 #include "minimal/plugins/plugin_discovery.hpp"
 #include "minimal/plugins/plugin_loader.hpp"
+#include "minimal/tools/skill_tool.hpp"
 #include "minimal/tools/tool_registry.hpp"
 
 namespace {
@@ -54,6 +57,9 @@ int main(int argc, char** argv) {
     const auto plugins_json = config_dir / "plugins.json";
     auto plugin_config = minimal::plugins::ParsePluginConfig(ReadFileOrEmpty(plugins_json));
 
+    // Frontmatter-only scan; bodies stay on disk until a skill is invoked.
+    const auto skills = minimal::config::SkillRegistry::Load(config_dir);
+
     // --- Stage 2: plugins ----------------------------------------------------
     const auto bundled_dir = minimal::plugins::BundledPluginDir();
     const auto user_dir = config_dir / "plugins";
@@ -81,6 +87,19 @@ int main(int argc, char** argv) {
         }
         for (const auto& kind : record.registered_provider_kinds) {
             std::printf("      provider %s\n", kind.c_str());
+        }
+    }
+
+    // Core tools are registered by the harness itself, not by a plugin: the
+    // empty attribution marks them as built-ins for collision reporting.
+    tools.Register(std::make_unique<minimal::tools::SkillTool>(skills));
+
+    std::printf("skills (%zu):\n", skills.All().size());
+    for (const auto& skill : skills.All()) {
+        if (skill.loaded) {
+            std::printf("  %-16s %s\n", skill.name.c_str(), skill.description.c_str());
+        } else {
+            std::printf("  %-16s NOT LOADED: %s\n", skill.name.c_str(), skill.load_error.c_str());
         }
     }
 

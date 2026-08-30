@@ -95,6 +95,16 @@ llm::ChatRequest AgentLoop::BuildChatRequest() const {
                                             }),
                              request.tools.end());
     }
+    if (preset_.allowed_skills.empty()) {
+        // No skills in this preset: the tool would only ever return errors. One
+        // post-erase suffices here (unlike the subagent case above) because it
+        // covers both an explicit allowed_tools list and "*".
+        request.tools.erase(std::remove_if(request.tools.begin(), request.tools.end(),
+                                            [](const llm::ToolDefinition& def) {
+                                                return def.name == kSkillToolName;
+                                            }),
+                             request.tools.end());
+    }
     return request;
 }
 
@@ -194,6 +204,7 @@ TurnResult AgentLoop::RunTurn(llm::Message seed_message) {
             tools::ToolContext ctx{session_.logger};
             ctx.session_id = session_.session_id;
             ctx.project_root = session_.project_root;
+            ctx.allowed_skills = preset_.allowed_skills;
             ctx.is_cancelled = is_cancelled_;
             if (session_.tool_output_sink) {
                 const std::string tool_use_id = use->id;

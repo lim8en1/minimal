@@ -21,6 +21,7 @@ add_library(minimal_server_core SHARED
     config/providers_config.cpp
     config/settings_config.cpp
     config/permissions_config.cpp
+    config/skill_registry.cpp
     agent/agent_preset_frontmatter.cpp
     agent/permission_resolution.cpp
     agent/agent_preset_registry.cpp
@@ -29,6 +30,7 @@ add_library(minimal_server_core SHARED
     agent/agent_loop.cpp
     tools/tool_registry.cpp
     tools/tool_executor.cpp
+    tools/skill_tool.cpp
     llm/provider_factory_registry.cpp
     plugins/plugin_loader.cpp
     plugins/plugin_discovery.cpp)
