@@ -17,14 +17,15 @@ v1::ServerEvent MakeEvent(const std::string& session_id) {
 }  // namespace
 
 Session::Session(SessionParams params, AgentPreset preset,
-                 std::unique_ptr<llm::LlmProvider> provider, tools::ToolRegistry& registry,
-                 LoopConfig loop_config, SessionObserverRegistry& observers,
-                 common::Logger& logger)
+                 std::unique_ptr<llm::LlmProvider> provider, std::unique_ptr<HistoryStore> store,
+                 tools::ToolRegistry& registry, LoopConfig loop_config,
+                 SessionObserverRegistry& observers, common::Logger& logger)
     : params_(std::move(params)),
       preset_(std::move(preset)),
       logger_(logger),
       observers_(observers),
       provider_(std::move(provider)),
+      store_(std::move(store)),
       checker_(params_.session_id, queue_, pending_),
       // The run mode the client asked for wins over the configured default: it
       // is a property of the CLIENT, not of the config. A headless run has no
@@ -86,7 +87,7 @@ Session::Session(SessionParams params, AgentPreset preset,
         return messages.empty() ? llm::Message{llm::Role::User, {}} : messages.front();
     };
 
-    loop_ = std::make_unique<AgentLoop>(*provider_, executor_, registry, store_, preset_,
+    loop_ = std::make_unique<AgentLoop>(*provider_, executor_, registry, *store_, preset_,
                                         loop_config, std::move(context),
                                         [this] { return IsCancelled(); }, std::move(event_sink),
                                         std::move(compactor));
@@ -168,7 +169,7 @@ void Session::WorkerMain() {
 
 void Session::RunOneTurn(std::string text) {
     const auto started = std::chrono::steady_clock::now();
-    const std::int64_t first_seq = static_cast<std::int64_t>(store_.size());
+    const std::int64_t first_seq = store_->last_appended_seq() + 1;
 
     TurnResult result;
     try {
@@ -201,7 +202,7 @@ void Session::RunOneTurn(std::string text) {
 
     TurnSummary summary;
     summary.first_seq = first_seq;
-    summary.last_seq = static_cast<std::int64_t>(store_.size()) - 1;
+    summary.last_seq = store_->last_appended_seq();
     summary.stop_reason = result.stop_reason;
     summary.usage = result.last_usage;
     summary.duration = std::chrono::duration_cast<std::chrono::milliseconds>(

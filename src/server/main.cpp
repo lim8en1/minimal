@@ -29,6 +29,7 @@
 #include "minimal/plugins/plugin_loader.hpp"
 #include "minimal/rpc/server.hpp"
 #include "minimal/rpc/session_service.hpp"
+#include "minimal/session/session_database.hpp"
 #include "minimal/tools/skill_tool.hpp"
 #include "minimal/tools/tool_registry.hpp"
 
@@ -154,10 +155,16 @@ int main(int argc, char** argv) {
     minimal::config::SettingsConfig settings;
     minimal::config::PermissionsConfig permissions;
     std::unique_ptr<minimal::agent::AgentPresetRegistry> presets;
+    std::unique_ptr<minimal::session::SessionDatabase> session_db;
     try {
         settings = minimal::config::LoadSettingsConfig(config_dir / "settings.json");
         permissions = minimal::config::LoadPermissionsConfig(config_dir / "permissions.json");
         presets = std::make_unique<minimal::agent::AgentPresetRegistry>(config_dir, skills);
+        // Opening migrates, and refuses a database this binary is too old to
+        // understand. That is a fatal startup condition, not a degraded mode:
+        // running on would silently drop every transcript on the floor.
+        session_db = std::make_unique<minimal::session::SessionDatabase>(
+            minimal::session::ResolveSessionDbPath(settings.session_db_path));
     } catch (const std::exception& e) {
         // Until the sanity check lands this is the only diagnostic for a broken
         // or absent config, so it names the directory as well as the error.
@@ -170,9 +177,9 @@ int main(int argc, char** argv) {
     loop_config.compaction_trigger_tokens = settings.memory.context_compaction_trigger_tokens;
     loop_config.compaction_keep_recent_tokens = settings.memory.compaction_keep_recent_tokens;
 
-    minimal::agent::SessionRegistry sessions(*presets, tools, providers, observers, loop_config,
-                                             minimal::common::DefaultLogger());
-    minimal::rpc::SessionServiceImpl service(sessions, settings, permissions,
+    minimal::agent::SessionRegistry sessions(*presets, tools, providers, observers, *session_db,
+                                             loop_config, minimal::common::DefaultLogger());
+    minimal::rpc::SessionServiceImpl service(sessions, *session_db, settings, permissions,
                                              minimal::common::DefaultLogger());
     minimal::rpc::Server server(service, socket_path);
 

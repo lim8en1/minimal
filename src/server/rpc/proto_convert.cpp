@@ -503,4 +503,28 @@ tools::PermissionResponse FromProto(const v1::PermissionResponse& response,
     return out;
 }
 
+v1::StoredMessage ToProto(const session::StoredMessage& stored) {
+    v1::StoredMessage out;
+    out.set_seq(stored.seq);
+    *out.mutable_message() = ToProto(stored.message);
+    out.set_token_count(stored.token_count);
+    out.set_created_at_unix_ms(stored.created_at_unix_ms);
+    return out;
+}
+
+v1::SessionSummary ToProto(const session::SessionSummary& summary) {
+    v1::SessionSummary out;
+    out.set_session_id(summary.session_id);
+    // Absent rather than empty in the domain type; the proto has no optional
+    // here because "" is already the unambiguous "top-level session".
+    out.set_parent_session_id(summary.parent_session_id.value_or(""));
+    out.set_name(summary.name);
+    out.set_project_root(summary.project_root);
+    out.set_agent_preset(summary.agent_preset);
+    out.set_created_at_unix_ms(summary.created_at_unix_ms);
+    out.set_updated_at_unix_ms(summary.updated_at_unix_ms);
+    out.set_message_count(summary.message_count);
+    return out;
+}
+
 }  // namespace minimal::rpc

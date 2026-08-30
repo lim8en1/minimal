@@ -39,7 +39,6 @@ add_library(minimal_server_core SHARED
     rpc/wire_permission_checker.cpp
     rpc/session_service.cpp
     rpc/server.cpp
-    agent/in_memory_history_store.cpp
     agent/session_observer_registry.cpp
     agent/session.cpp
     agent/session_registry.cpp

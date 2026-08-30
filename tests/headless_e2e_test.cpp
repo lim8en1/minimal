@@ -70,10 +70,12 @@ struct HeadlessFixture {
             return provider;
         });
         observers = std::make_unique<agent::SessionObserverRegistry>(common::DefaultLogger());
+        db = std::make_unique<session::SessionDatabase>(dir / "sessions.db");
         sessions = std::make_unique<agent::SessionRegistry>(*presets, tools, providers, *observers,
-                                                            agent::LoopConfig{},
+                                                            *db, agent::LoopConfig{},
                                                             common::DefaultLogger());
-        service = std::make_unique<rpc::SessionServiceImpl>(*sessions, config::SettingsConfig{},
+        service = std::make_unique<rpc::SessionServiceImpl>(*sessions, *db,
+                                                             config::SettingsConfig{},
                                                              config::PermissionsConfig{},
                                                              common::DefaultLogger());
         socket = dir / "headless.sock";
@@ -104,6 +106,7 @@ struct HeadlessFixture {
     std::vector<Step> steps;
     std::unique_ptr<agent::AgentPresetRegistry> presets;
     std::unique_ptr<agent::SessionObserverRegistry> observers;
+    std::unique_ptr<session::SessionDatabase> db;
     std::unique_ptr<agent::SessionRegistry> sessions;
     std::unique_ptr<rpc::SessionServiceImpl> service;
     std::unique_ptr<rpc::Server> server;

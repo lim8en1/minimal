@@ -9,27 +9,23 @@
 namespace minimal::rpc {
 namespace {
 
-std::int64_t NowUnixMs() {
-    return std::chrono::duration_cast<std::chrono::milliseconds>(
-               std::chrono::system_clock::now().time_since_epoch())
-        .count();
-}
-
-// The first line of a message, capped. A placeholder until a SessionObserver
-// replaces it with an LLM-generated title -- which is exactly the flow
-// SessionMetadataEvent exists to carry.
-std::string DefaultSessionName(const std::string& requested) {
-    if (!requested.empty()) return requested;
-    return "session";
-}
+// EMPTY, not a placeholder. SessionDatabase names an unnamed session from its
+// first user message, and that rule is guarded by `name = ''` so it can never
+// clobber a name someone chose. Stamping "session" here would satisfy the guard
+// and permanently suppress the default naming -- every row in the picker would
+// read "session" and no test below the RPC layer would notice.
+std::string DefaultSessionName(const std::string& requested) { return requested; }
 
 }  // namespace
 
 SessionServiceImpl::SessionServiceImpl(agent::SessionRegistry& sessions,
+                                       session::SessionDatabase& db,
                                        config::SettingsConfig settings,
                                        config::PermissionsConfig permissions,
                                        common::Logger& logger)
     : sessions_(sessions),
+      db_(db),
+      reader_(db),
       settings_(std::move(settings)),
       permissions_(std::move(permissions)),
       logger_(logger) {}
@@ -46,9 +42,6 @@ grpc::Status SessionServiceImpl::CreateSession(grpc::ServerContext*,
                                                const v1::CreateSessionRequest* request,
                                                v1::CreateSessionResponse* response) {
     agent::SessionParams params;
-    params.session_id =
-        "s-" + std::to_string(NowUnixMs()) + "-" +
-        std::to_string(next_session_id_.fetch_add(1, std::memory_order_relaxed));
     params.name = DefaultSessionName(request->name());
     params.agent_preset =
         request->agent_preset().empty() ? settings_.default_agent_preset : request->agent_preset();
@@ -72,6 +65,19 @@ grpc::Status SessionServiceImpl::CreateSession(grpc::ServerContext*,
         return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "project_root is required");
     }
 
+    // The DATABASE mints the id, so the row exists before the Session does. It
+    // is the only party that can guarantee uniqueness across restarts, and the
+    // transcript has to be attributable to a row from its very first append.
+    session::SessionSummary row;
+    try {
+        row = db_.CreateSession(params.name, std::nullopt, params.project_root.string(),
+                                params.agent_preset);
+    } catch (const std::exception& e) {
+        logger_.warn("CreateSession: could not record session: {}", e.what());
+        return grpc::Status(grpc::StatusCode::INTERNAL, e.what());
+    }
+    params.session_id = row.session_id;
+
     std::shared_ptr<agent::Session> session;
     try {
         session = sessions_.Create(params);
@@ -79,17 +85,16 @@ grpc::Status SessionServiceImpl::CreateSession(grpc::ServerContext*,
         // Preset and provider problems are configuration errors the operator has
         // to see and fix, so they come back with their reason attached rather
         // than as a generic INTERNAL.
+        //
+        // Roll the row back. Inserting first is what makes the id authoritative,
+        // but it also means a failure here would otherwise leave a message-less
+        // session sitting in the picker forever with no way to remove it.
+        db_.DeleteSession(row.session_id);
         logger_.warn("CreateSession failed: {}", e.what());
         return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, e.what());
     }
 
-    auto* summary = response->mutable_session();
-    summary->set_session_id(session->info().session_id);
-    summary->set_name(session->info().name);
-    summary->set_agent_preset(session->info().agent_preset);
-    summary->set_project_root(session->info().project_root.string());
-    summary->set_created_at_unix_ms(NowUnixMs());
-    summary->set_updated_at_unix_ms(NowUnixMs());
+    *response->mutable_session() = ToProto(row);
     return grpc::Status::OK;
 }
 
@@ -194,14 +199,66 @@ grpc::Status NotYet(const char* what) {
 }
 }  // namespace
 
-grpc::Status SessionServiceImpl::GetMessages(grpc::ServerContext*, const v1::GetMessagesRequest*,
-                                             v1::GetMessagesResponse*) {
-    return NotYet("GetMessages (needs SQLite session storage)");
+grpc::Status SessionServiceImpl::GetMessages(grpc::ServerContext*,
+                                             const v1::GetMessagesRequest* request,
+                                             v1::GetMessagesResponse* response) {
+    if (request->session_id().empty()) {
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "session_id is required");
+    }
+    // Existence is checked separately because an unknown session and a session
+    // with no messages both page as empty, and the client needs to tell them
+    // apart -- one is a bug, the other is a brand-new tab.
+    if (!db_.GetSession(request->session_id())) {
+        return grpc::Status(grpc::StatusCode::NOT_FOUND,
+                            "no such session: " + request->session_id());
+    }
+
+    int limit = request->limit();
+    if (limit <= 0) limit = static_cast<int>(settings_.memory.scrollback_page_size);
+    if (limit <= 0) limit = 100;  // settings.json may legitimately leave it unset
+
+    try {
+        const auto page = reader_.GetMessages(request->session_id(), request->before_seq(), limit);
+        for (const auto& stored : page.messages) {
+            *response->add_messages() = ToProto(stored);
+        }
+        response->set_has_more(page.has_more);
+    } catch (const std::exception& e) {
+        // The codec is strict on decode by design: an undecodable row means
+        // corruption or a database written by a newer binary. Surfacing it as
+        // INTERNAL keeps that visible instead of returning a short page that
+        // looks like the end of the transcript.
+        logger_.warn("GetMessages({}): {}", request->session_id(), e.what());
+        return grpc::Status(grpc::StatusCode::INTERNAL, e.what());
+    }
+    return grpc::Status::OK;
 }
 
-grpc::Status SessionServiceImpl::ListSessions(grpc::ServerContext*, const v1::ListSessionsRequest*,
-                                              v1::ListSessionsResponse*) {
-    return NotYet("ListSessions (needs SQLite session storage)");
+grpc::Status SessionServiceImpl::ListSessions(grpc::ServerContext*,
+                                              const v1::ListSessionsRequest* request,
+                                              v1::ListSessionsResponse* response) {
+    session::ListSessionsFilter filter;
+    if (!request->include_all_dirs()) {
+        if (request->project_root().empty()) {
+            // Without this the query would match sessions whose project_root is
+            // literally "" -- an empty result that reads like "no sessions here"
+            // rather than like the caller forgetting a field.
+            return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
+                                "project_root is required unless include_all_dirs is set");
+        }
+        filter.project_root = request->project_root();
+    }
+    filter.include_subagents = request->include_subagents();
+
+    try {
+        for (const auto& summary : db_.ListSessions(filter)) {
+            *response->add_sessions() = ToProto(summary);
+        }
+    } catch (const std::exception& e) {
+        logger_.warn("ListSessions: {}", e.what());
+        return grpc::Status(grpc::StatusCode::INTERNAL, e.what());
+    }
+    return grpc::Status::OK;
 }
 
 grpc::Status SessionServiceImpl::SuggestPaths(grpc::ServerContext*, const v1::SuggestPathsRequest*,

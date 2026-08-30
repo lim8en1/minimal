@@ -26,6 +26,8 @@
 #include "minimal/llm/message.hpp"
 #include "minimal/llm/provider.hpp"
 #include "minimal/llm/stream_event.hpp"
+#include "minimal/session/session_database.hpp"
+#include "minimal/session/stored_message.hpp"
 #include "minimal/tools/permission.hpp"
 #include "minimal/tools/permission_checker.hpp"
 #include "minimal/v1/common.pb.h"
@@ -111,5 +113,14 @@ v1::PermissionRequest ToProto(const tools::PermissionRequest& request);
 // since ToolExecutor sees only the resulting response.
 tools::PermissionResponse FromProto(const v1::PermissionResponse& response,
                                     const tools::PermissionDisclosure& offered);
+
+// --- Stored transcript (scrollback) ------------------------------------------
+//
+// One-way by design. These types come out of SQLite and go to the client; there
+// is no wire path that writes them, so a FromProto would be an unused inverse
+// that could drift without anything noticing.
+
+v1::StoredMessage ToProto(const session::StoredMessage& stored);
+v1::SessionSummary ToProto(const session::SessionSummary& summary);
 
 }  // namespace minimal::rpc

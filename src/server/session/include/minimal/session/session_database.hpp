@@ -76,10 +76,16 @@ public:
     SessionSummary CreateSession(std::string name, std::optional<std::string> parent_session_id,
                                  std::string project_root, std::string agent_preset);
 
-    // One durable transcript row. Assigns the next per-session seq; sets the
-    // default name (truncated first user text) when the session still has none;
-    // touches updated_at. token_count is the assistant output count, 0 otherwise.
-    void AppendMessage(const std::string& session_id, const llm::Message& message, int token_count = 0);
+    // One durable transcript row. Assigns the next per-session seq and returns
+    // it; sets the default name (truncated first user text) when the session
+    // still has none; touches updated_at. token_count is the assistant output
+    // count, 0 otherwise.
+    //
+    // The seq is read back inside the transaction rather than computed by the
+    // caller, because SQL is what assigns it -- anything else would be a second
+    // opinion that the UNIQUE(session_id, seq) constraint exists to reject.
+    std::int64_t AppendMessage(const std::string& session_id, const llm::Message& message,
+                               int token_count = 0);
 
     bool UpdateSessionName(const std::string& session_id, const std::string& name);
     bool DeleteSession(const std::string& session_id);  // cascades to messages and children

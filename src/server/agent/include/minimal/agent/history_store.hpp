@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <optional>
 
 #include "minimal/llm/message.hpp"
@@ -32,6 +33,12 @@ public:
     // override that disagree silently produce different values depending on
     // which reference you happen to be holding. Callers pass it explicitly.
     virtual void Append(const llm::Message& message, std::optional<int> output_tokens) = 0;
+
+    // The seq the last Append was assigned, or -1 if nothing has been appended.
+    // Read, not counted: seq is assigned by the store, so a caller that tracked
+    // its own count would be right only for a session that started empty. It is
+    // what TurnSummary's first_seq/last_seq bounds are computed from.
+    virtual std::int64_t last_appended_seq() const = 0;
 };
 
 }  // namespace minimal::agent

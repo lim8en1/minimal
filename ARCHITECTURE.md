@@ -1101,8 +1101,9 @@ Core. Server subprocesses are **shared across sessions** (one per `mcps.json` en
 
 ## Session storage — SQLite
 
-**Not yet built.** `HistoryStore` is currently backed by `agent::InMemoryHistoryStore`, so a transcript lives exactly as long as the server process. That store is already thread-safe and already exposes a `seq`-keyed read side, so the SQLite implementation swaps in behind an interface that has the right questions on it. Until it lands, `GetMessages` and `ListSessions` answer `UNIMPLEMENTED`.
+Built, in `src/server/session/`: `SessionDatabase` (connection, pragmas, migrations, lifecycle ops), `SqliteHistoryStore` (the `HistoryStore` the agent loop writes through), `SessionReader` (the read side `GetMessages` answers from), `message_codec` (strict `llm::Message` ↔ JSON) and `ulid`. The in-memory placeholder is **gone**, not retained as an option: keeping it would mean scrollback answered from memory for an open session and from SQLite for a closed one, so what a client saw would depend on whether a tab happened to be open.
 
+**One connection, one mutex, every method locking.** An append is a sub-millisecond transaction against second-scale LLM turns, so serialising concurrent session workers costs nothing measurable and removes every intra-process locking question SQLite would otherwise raise. WAL plus `busy_timeout` still cover out-of-process readers.
 
 - **`sessions`**: `id, parent_session_id (nullable, self-FK), name, project_root, agent_preset, created_at, updated_at`.
 - **`messages`**: `id, session_id, seq, role, content_json, token_count, created_at`, with `UNIQUE (session_id, seq)` — which is the `(session_id, seq)` index keyset pagination queries against.
@@ -1121,7 +1122,15 @@ A local summarization model (BART/ONNX) was considered and rejected: domain mism
 
 Names are therefore mutable after creation; `SessionMetadataEvent` notifies attached clients so tab labels and the picker refresh.
 
-**Schema versioning**: `PRAGMA user_version`, with an ordered migration list applied in a transaction at startup. A database *newer* than the binary understands is a fatal startup error, not a best-effort open.
+**Schema versioning**: `PRAGMA user_version`, with an ordered migration list applied in a transaction at startup. A database *newer* than the binary understands is a fatal startup error, not a best-effort open. All pending migrations share one transaction, so a failure part-way leaves the schema exactly as it was opened rather than half-applied.
+
+**Atomicity**: each `AppendMessage` is one transaction covering the insert, the default-name set, and the `updated_at` touch. A crash therefore leaves an exact prefix of the transcript, never a torn row. `synchronous=NORMAL` under WAL makes that guarantee against *process* death, not power loss — the right trade for a local single-user tool.
+
+**Who mints a session id.** The database, not the RPC layer: it is the only party that can guarantee uniqueness across restarts. So `CreateSession` inserts the row first and takes `session_id`, `created_at` and `updated_at` from it. That ordering has a consequence worth stating — if constructing the `Session` then fails (unknown preset, unregistered provider kind), the row is **deleted** before the error is returned, or every preset typo would leave a message-less session in the picker forever.
+
+**What is not built: resume.** `AgentLoop` has no seeded-history parameter — its in-memory history starts empty and everything it appends also goes to the store, so reopening a stored session would replay the whole transcript back as duplicate rows. Resume needs a load-without-appending path and a `session_id` on `CreateSessionRequest`, and neither exists. Until then the database holds conversations that can be read (`GetMessages`, `ListSessions`) but not resumed.
+
+**Ids are ULIDs** — 48-bit millisecond timestamp plus 80 bits of randomness, 26 Crockford base32 characters, so they sort by creation under plain string comparison and read chronologically in logs. The random half comes straight from `std::random_device`: seeding a PRNG from one draw would cap the real entropy of all 80 bits at the seed's width, and a same-millisecond collision is a `PRIMARY KEY` failure thrown out of `CreateSession`, not a cosmetic problem.
 
 ## Subagents
 

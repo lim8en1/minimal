@@ -266,8 +266,8 @@ SessionSummary SessionDatabase::CreateSession(std::string name,
                           std::move(project_root), std::move(agent_preset), now, now, 0};
 }
 
-void SessionDatabase::AppendMessage(const std::string& session_id, const llm::Message& message,
-                                    int token_count) {
+std::int64_t SessionDatabase::AppendMessage(const std::string& session_id,
+                                            const llm::Message& message, int token_count) {
     std::lock_guard lock(mu_);
     const std::int64_t now = NextTimestamp();
     const std::string content_json = MessageToJson(message).dump();
@@ -286,6 +286,7 @@ void SessionDatabase::AppendMessage(const std::string& session_id, const llm::Me
         }
     }
 
+    std::int64_t assigned_seq = 0;
     ExecChecked(db_, "BEGIN IMMEDIATE;", "failed to begin append");
     try {
         // Validate the session and touch last-activity first: appending to a
@@ -316,6 +317,15 @@ void SessionDatabase::AppendMessage(const std::string& session_id, const llm::Me
             ThrowSqliteError(db_, "failed to append message");
         }
 
+        // Still inside the transaction, so this reads the row just written and
+        // cannot see another writer's -- and there is only one writer anyway.
+        Stmt read_seq(db_, "SELECT seq FROM messages WHERE id = ?;", "failed to read back seq");
+        sqlite3_bind_int64(read_seq.stmt, 1, sqlite3_last_insert_rowid(db_));
+        if (sqlite3_step(read_seq.stmt) != SQLITE_ROW) {
+            ThrowSqliteError(db_, "failed to read back seq");
+        }
+        assigned_seq = sqlite3_column_int64(read_seq.stmt, 0);
+
         // Only when the session still has no name: an explicit creation name or
         // a name an observer plugin set later is never clobbered.
         if (!name_candidate.empty()) {
@@ -336,6 +346,7 @@ void SessionDatabase::AppendMessage(const std::string& session_id, const llm::Me
         }
         throw;
     }
+    return assigned_seq;
 }
 
 bool SessionDatabase::UpdateSessionName(const std::string& session_id, const std::string& name) {

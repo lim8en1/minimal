@@ -25,6 +25,7 @@
 #include "minimal/agent/session_observer_registry.hpp"
 #include "minimal/common/logger.hpp"
 #include "minimal/llm/provider_factory_registry.hpp"
+#include "minimal/session/session_database.hpp"
 #include "minimal/tools/tool_registry.hpp"
 
 namespace minimal::agent {
@@ -33,14 +34,18 @@ class SessionRegistry {
 public:
     SessionRegistry(const AgentPresetRegistry& presets, tools::ToolRegistry& tools,
                     const llm::ProviderFactoryRegistry& providers,
-                    SessionObserverRegistry& observers, LoopConfig loop_config,
-                    common::Logger& logger,
+                    SessionObserverRegistry& observers, session::SessionDatabase& db,
+                    LoopConfig loop_config, common::Logger& logger,
                     std::chrono::milliseconds initial_attach_guard = std::chrono::seconds(10));
     ~SessionRegistry();
 
     SessionRegistry(const SessionRegistry&) = delete;
     SessionRegistry& operator=(const SessionRegistry&) = delete;
 
+    // The session row must already exist in the database -- params.session_id
+    // names it -- because the database is what mints session ids. See
+    // SessionServiceImpl::CreateSession, which owns that ordering.
+    //
     // Throws std::runtime_error naming the problem: an unknown preset, or a
     // providers.json entry whose `provider` kind no loaded plugin registered.
     // Both are configuration errors the caller must be able to report back as
@@ -63,6 +68,7 @@ private:
     tools::ToolRegistry& tools_;
     const llm::ProviderFactoryRegistry& providers_;
     SessionObserverRegistry& observers_;
+    session::SessionDatabase& db_;
     LoopConfig loop_config_;
     common::Logger& logger_;
     std::chrono::milliseconds initial_attach_guard_;

@@ -136,6 +136,10 @@ public:
         (void)output_tokens;
         messages.push_back(message);
     }
+    // The fake starts empty and never compacts, so position is seq.
+    std::int64_t last_appended_seq() const override {
+        return static_cast<std::int64_t>(messages.size()) - 1;
+    }
     std::vector<llm::Message> messages;
 };
 

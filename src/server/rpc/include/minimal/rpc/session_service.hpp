@@ -1,10 +1,14 @@
 #pragma once
 
-// The gRPC surface. Implements CreateSession and OpenSession; every other RPC
-// answers UNIMPLEMENTED until the subsystem behind it exists (scrollback and
-// ListSessions need SQLite storage, SuggestPaths needs the TUI's resolver,
-// PluginCall needs client plugins). Answering explicitly matters: a client that
-// calls one gets a clear status instead of a hang.
+// The gRPC surface. Implements CreateSession, OpenSession, GetMessages and
+// ListSessions; the rest answer UNIMPLEMENTED until the subsystem behind them
+// exists (SuggestPaths needs the TUI's resolver, PluginCall needs client
+// plugins). Answering explicitly matters: a client that calls one gets a clear
+// status instead of a hang.
+//
+// The two read RPCs go to the DATABASE, not to a live Session, and that is the
+// point: the picker lists sessions the server has no Session object for, and
+// scrollback must read the same way whether or not a tab happens to be open.
 //
 // THREE THREADS PER SESSION, and this class owns two of the boundaries:
 //
@@ -30,14 +34,16 @@
 #include "minimal/common/logger.hpp"
 #include "minimal/config/permissions_config.hpp"
 #include "minimal/config/settings_config.hpp"
+#include "minimal/session/session_reader.hpp"
 #include "minimal/v1/session_service.grpc.pb.h"
 
 namespace minimal::rpc {
 
 class SessionServiceImpl final : public v1::SessionService::Service {
 public:
-    SessionServiceImpl(agent::SessionRegistry& sessions, config::SettingsConfig settings,
-                       config::PermissionsConfig permissions, common::Logger& logger);
+    SessionServiceImpl(agent::SessionRegistry& sessions, session::SessionDatabase& db,
+                       config::SettingsConfig settings, config::PermissionsConfig permissions,
+                       common::Logger& logger);
 
     grpc::Status CreateSession(grpc::ServerContext* context,
                                const v1::CreateSessionRequest* request,
@@ -71,13 +77,14 @@ private:
     bool Dispatch(const v1::ClientEvent& event, agent::Session& session);
 
     agent::SessionRegistry& sessions_;
+    session::SessionDatabase& db_;
+    session::SessionReader reader_;
     config::SettingsConfig settings_;
     config::PermissionsConfig permissions_;
     common::Logger& logger_;
 
     std::function<void()> on_last_client_detached_;
     std::atomic<std::size_t> attached_{0};
-    std::atomic<std::uint64_t> next_session_id_{0};
 };
 
 }  // namespace minimal::rpc

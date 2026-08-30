@@ -10,6 +10,7 @@
 #include "fakes.hpp"
 #include "minimal/agent/session_registry.hpp"
 #include "minimal/common/logger.hpp"
+#include "temp_dir.hpp"
 
 using namespace minimal;
 using namespace std::chrono_literals;
@@ -64,8 +65,12 @@ struct RegistryFixture {
             });
         }
         observers = std::make_unique<agent::SessionObserverRegistry>(common::DefaultLogger());
+        // A real database, but no rows: these tests never run a turn, and
+        // SqliteHistoryStore does not touch the connection until it appends.
+        // What is being tested is registry lifetime, not persistence.
+        db = std::make_unique<session::SessionDatabase>(db_dir.path() / "sessions.db");
         registry = std::make_unique<agent::SessionRegistry>(*presets, tools_registry, providers,
-                                                            *observers, agent::LoopConfig{},
+                                                            *observers, *db, agent::LoopConfig{},
                                                             common::DefaultLogger(), guard_);
     }
 
@@ -77,6 +82,8 @@ struct RegistryFixture {
     llm::ProviderFactoryRegistry providers;
     std::unique_ptr<agent::AgentPresetRegistry> presets;
     std::unique_ptr<agent::SessionObserverRegistry> observers;
+    testing::TempDir db_dir;
+    std::unique_ptr<session::SessionDatabase> db;
     std::unique_ptr<agent::SessionRegistry> registry;
     std::chrono::milliseconds guard_;
 };

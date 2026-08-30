@@ -2,9 +2,9 @@
 
 Companion to `ARCHITECTURE.md`, which remains the single source of truth for *design*. This document covers only *sequencing*: what is built, what blocks what, and what "done" means for each remaining piece. Every milestone cites the `ARCHITECTURE.md` section that specifies it; where this plan and that document disagree, that document wins and this one is stale.
 
-**Status: Milestone A is complete. 382 tests passing, clean build, zero warnings.**
+**Status: Milestones A and B are complete. 418 tests passing, clean build, zero warnings.**
 
-`minimal -p` holds real conversations against a local model using `read`, `bash`, and `skill`; a permission prompt round-trips over the wire in both directions; a session grant silences the second prompt; the server exits when the last client detaches.
+`minimal -p` holds real conversations against a local model using `read`, `bash`, and `skill`; a permission prompt round-trips over the wire in both directions; a session grant silences the second prompt; the server exits when the last client detaches. Transcripts persist to SQLite and survive the server process — `GetMessages` and `ListSessions` answer from the database, so a session the server has no live object for still reads back. **Sessions cannot yet be resumed**, only read (§4 B).
 
 ---
 
@@ -51,7 +51,7 @@ Companion to `ARCHITECTURE.md`, which remains the single source of truth for *de
 
 ### The risk this creates
 
-Test depth is inverted relative to integration risk: every well-tested layer is exercised through fakes, and **every layer that has never executed is a layer that connects two tested ones**. Accumulated interface mismatches will surface together, on the first real session. Milestone A exists to force that moment early and cheaply, before more code is written on top of untested assumptions.
+Test depth was inverted relative to integration risk: every well-tested layer was exercised through fakes, and **every layer that had never executed was one that connected two tested ones**. Milestone A forced that moment early and cheaply, and §3's closing section records what it found. The B merge is a second instance of the same effect at a different seam — two branches off one base, each internally green, whose mismatches only existed *between* them.
 
 ---
 
@@ -75,7 +75,7 @@ Test depth is inverted relative to integration risk: every well-tested layer is 
 
 **Independent — may start now, in any order, by anyone:**
 
-- **B. Session storage (SQLite)** — **Done.** `src/server/session/`: `SessionDatabase` (one connection, one mutex, WAL, transactional migrations), `SqliteHistoryStore` (the drop-in behind `HistoryStore`, which gained an optional per-message output-token count), `SessionReader` (keyset paging + session metadata for `ListSessions`). *Caveat: the `ListSessions`/`GetMessages` RPCs that expose it still need A.*
+- **B. Session storage (SQLite)** — **Done, and wired.** `src/server/session/`: `SessionDatabase` (one connection, one mutex, WAL, transactional migrations), `SqliteHistoryStore` (the `HistoryStore` the agent loop writes through), `SessionReader` (keyset paging + session metadata). `GetMessages` and `ListSessions` now answer for real; `agent::InMemoryHistoryStore` is deleted.
 - **F. Startup sanity check** — pure config-layer work over already-built loaders. `main.cpp` is already staged for it (`main.cpp:114`).
 - **H. Production compactor** — `Compactor` is an injected `std::function`; the real one calls the provider with `prompts/compression.md`. Both sides already exist.
 - ~~**I. `SessionObserver` registry**~~ — **done**, landed with A2. `minimal_plugin_register_session_observer` is live in the plugin ABI and `tools-bash` implements it.
@@ -215,7 +215,7 @@ Items 1, 6, 7, 8 and 9 were each discovered by a hang or a crash rather than by 
 
 ### B. Session storage — SQLite
 
-> § *Session storage — SQLite*. Depends on nothing; the RPCs that expose it depend on A3. **Done** — 31 test cases in `tests/session_store_test.cpp`, all green.
+> § *Session storage — SQLite*. Built on a branch off `cab3a91`, in parallel with and unaware of Milestone A, then merged. **Done** — 31 cases in `tests/session_store_test.cpp` plus 5 integration cases in `tests/session_service_test.cpp`.
 
 **What.** A `HistoryStore` implementation over SQLite3 (already a `find_package` dependency, currently unused), plus session metadata for `ListSessions`. Landed as `src/server/session/`: `message_codec` (strict `llm::Message` ↔ JSON), `ulid` (time-sortable session ids), `session_database` (connection, pragmas, transactional migrations, lifecycle ops), `sqlite_history_store` (the drop-in adapter), `session_reader` (keyset paging).
 
@@ -231,6 +231,17 @@ Items 1, 6, 7, 8 and 9 were each discovered by a hang or a crash rather than by 
 - [x] Paging: `GetMessages` by `seq` range over a large transcript stays bounded in memory.
 
 Plus, beyond the original list: migration rollback proven load-bearing (fault-injected failing migration via an `OpenOptions` test seam — delete the transaction, watch it fail), default session naming (set once, UTF-8-safe 60-code-point truncation, tool-result-only messages skipped), `ListSessions` filters/sort/`message_count`, cascade delete, and concurrent appends across sessions.
+
+#### What the merge with A found
+
+Two branches off the same base that had never met. Only three files conflicted textually — both `CMakeLists.txt` and this document — and none of the following showed up as a conflict:
+
+1. **`SessionServiceImpl::CreateSession` stamped every unnamed session with the literal `"session"`.** The database's default-naming rule is guarded by `WHERE ... AND name = ''` so it can never clobber a chosen name; a placeholder satisfies that guard and suppresses default naming permanently. Nothing below the RPC layer could catch it — the storage tests call `SessionDatabase::CreateSession("")` directly. Now `""`, with a regression test that drives a real turn over the wire and reads the name back through `ListSessions`.
+2. **Two `StoredMessage` types**, `agent::` and `session::`, describing the same row. Collapsed onto `session::`, which already mirrors the proto field for field.
+3. **Who mints a session id.** A minted `s-<ms>-<n>` from a counter; B's database mints a ULID. The database wins, which means the row now exists before the `Session` does — and a `Session` that fails to construct has to delete it, or every preset typo leaves a message-less row in the picker.
+4. **`HistoryStore::Append` had a default argument on a pure virtual.** Defaults resolve from the static type, so base and override can silently disagree.
+5. **`GenerateUlid` had 32 bits of real entropy, not 80** — a `mt19937_64` seeded from a single `random_device()` draw. A same-ms collision is a `PRIMARY KEY` failure out of `CreateSession`, so the birthday bound mattered.
+6. **`TurnSummary`'s seq bounds were computed from `InMemoryHistoryStore::size()`.** With the store behind an interface there is no size, and counting locally would be right only for a session that started empty. `HistoryStore` now reports `last_appended_seq()`, cached from what SQL actually assigned.
 
 ### F. Startup sanity check
 

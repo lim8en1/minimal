@@ -6,7 +6,8 @@ SqliteHistoryStore::SqliteHistoryStore(SessionDatabase& db, std::string session_
     : db_(db), session_id_(std::move(session_id)) {}
 
 void SqliteHistoryStore::Append(const llm::Message& message, std::optional<int> output_tokens) {
-    db_.AppendMessage(session_id_, message, output_tokens.value_or(0));
+    const std::int64_t seq = db_.AppendMessage(session_id_, message, output_tokens.value_or(0));
+    last_seq_.store(seq, std::memory_order_release);
 }
 
 }  // namespace minimal::session

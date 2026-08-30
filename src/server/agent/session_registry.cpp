@@ -3,17 +3,20 @@
 #include <stdexcept>
 #include <utility>
 
+#include "minimal/session/sqlite_history_store.hpp"
+
 namespace minimal::agent {
 
 SessionRegistry::SessionRegistry(const AgentPresetRegistry& presets, tools::ToolRegistry& tools,
                                  const llm::ProviderFactoryRegistry& providers,
-                                 SessionObserverRegistry& observers, LoopConfig loop_config,
-                                 common::Logger& logger,
+                                 SessionObserverRegistry& observers, session::SessionDatabase& db,
+                                 LoopConfig loop_config, common::Logger& logger,
                                  std::chrono::milliseconds initial_attach_guard)
     : presets_(presets),
       tools_(tools),
       providers_(providers),
       observers_(observers),
+      db_(db),
       loop_config_(loop_config),
       logger_(logger),
       initial_attach_guard_(initial_attach_guard) {
@@ -53,8 +56,10 @@ std::shared_ptr<Session> SessionRegistry::Create(SessionParams params) {
     }
 
     const std::string session_id = params.session_id;
+    auto store = std::make_unique<session::SqliteHistoryStore>(db_, session_id);
     auto session = std::make_shared<Session>(std::move(params), preset, std::move(provider),
-                                             tools_, loop_config_, observers_, logger_);
+                                             std::move(store), tools_, loop_config_, observers_,
+                                             logger_);
     {
         std::lock_guard<std::mutex> lock(mutex_);
         sessions_[session_id] = session;

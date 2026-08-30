@@ -41,16 +41,23 @@ struct SessionFixture {
             owned_provider->PushResponse(step.first, step.second);
         }
 
+        // The fake store, not SqliteHistoryStore: these tests are about the
+        // three-thread topology and the turn lifecycle, and a database would add
+        // a file, a schema and DB-minted ids to every one of them without
+        // testing anything they are about. Persistence through a live session is
+        // covered against the real store in session_service_test.cpp.
+        auto owned_store = std::make_unique<testing::InMemoryHistoryStore>();
+        store = owned_store.get();
+
         agent::SessionParams params;
         params.session_id = std::move(session_id);
         params.name = "test session";
         params.agent_preset = "test";
         params.project_root = project_root;
 
-        session = std::make_unique<agent::Session>(std::move(params), preset,
-                                                    std::move(owned_provider), tools_registry,
-                                                    loop_config, observers,
-                                                    common::DefaultLogger());
+        session = std::make_unique<agent::Session>(
+            std::move(params), preset, std::move(owned_provider), std::move(owned_store),
+            tools_registry, loop_config, observers, common::DefaultLogger());
     }
 
     void Script(llm::ChatResponse response, std::vector<llm::StreamEvent> events = {}) {
@@ -75,6 +82,7 @@ struct SessionFixture {
     agent::SessionObserverRegistry observers;
     std::vector<std::pair<llm::ChatResponse, std::vector<llm::StreamEvent>>> scripted;
     testing::FakeLlmProvider* provider = nullptr;
+    testing::InMemoryHistoryStore* store = nullptr;  // owned by the session
     std::unique_ptr<agent::Session> session;
 };
 
@@ -108,10 +116,10 @@ TEST_CASE("a session runs a full turn end to end", "[session]") {
     REQUIRE(fixture.session->WaitForIdleForTesting(5s));
 
     // Transcript: user -> assistant(tool_use) -> user(tool_result) -> assistant
-    const auto stored = fixture.session->history().Read(0, 0);
+    const auto& stored = fixture.store->messages;
     REQUIRE(stored.size() == 4);
-    CHECK(stored[3].seq == 0);  // descending by seq
-    CHECK(stored[0].seq == 3);
+    CHECK(stored[0].role == llm::Role::User);
+    CHECK(stored[1].role == llm::Role::Assistant);
     REQUIRE(tool_ptr->calls.size() == 1);
     CHECK(tool_ptr->calls[0]["path"] == "x.cpp");
 
@@ -283,7 +291,7 @@ TEST_CASE("a turn submitted after termination is ignored", "[session]") {
     fixture.Start();
     fixture.session->Terminate();
     fixture.session->SubmitTurn("too late");
-    CHECK(fixture.session->history().size() == 0);
+    CHECK(fixture.store->messages.empty());
 }
 
 TEST_CASE("a provider error surfaces as an ErrorEvent and the session survives",
@@ -365,15 +373,18 @@ TEST_CASE("a client-requested run mode overrides the preset's", "[session]") {
     params.project_root = fixture.project_root;
     params.run_mode_override = tools::PermissionRunMode::AllowOnly;
 
-    agent::Session session(params, fixture.preset, std::move(provider), fixture.tools_registry,
-                           fixture.loop_config, fixture.observers, common::DefaultLogger());
+    auto owned_store = std::make_unique<testing::InMemoryHistoryStore>();
+    auto* store = owned_store.get();
+    agent::Session session(params, fixture.preset, std::move(provider), std::move(owned_store),
+                           fixture.tools_registry, fixture.loop_config, fixture.observers,
+                           common::DefaultLogger());
     session.SubmitTurn("run something");
     REQUIRE(session.WaitForIdleForTesting(5s));  // did not block on a prompt
     session.Terminate();
 
     // The tool was refused, and the refusal is in the transcript as a result
     // block rather than as a missing turn.
-    CHECK(session.history().size() == 4);
+    CHECK(store->messages.size() == 4);
 }
 
 TEST_CASE("two sessions do not share bash state", "[session]") {

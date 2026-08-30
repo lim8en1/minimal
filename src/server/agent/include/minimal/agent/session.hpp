@@ -35,7 +35,7 @@
 
 #include "minimal/agent/agent_loop.hpp"
 #include "minimal/agent/agent_preset.hpp"
-#include "minimal/agent/in_memory_history_store.hpp"
+#include "minimal/agent/history_store.hpp"
 #include "minimal/agent/session_observer_registry.hpp"
 #include "minimal/common/logger.hpp"
 #include "minimal/llm/provider.hpp"
@@ -64,9 +64,13 @@ public:
     // `provider` is owned because a session outlives any one turn and the
     // provider is stateless by contract; `registry` and `observers` are
     // process-wide and outlive every session.
+    // `provider` and `store` are owned; `registry` and `observers` are
+    // process-wide. The store is injected rather than constructed here so a
+    // session does not have to know whether its transcript is durable -- and so
+    // tests can drive one without a database file.
     Session(SessionParams params, AgentPreset preset, std::unique_ptr<llm::LlmProvider> provider,
-            tools::ToolRegistry& registry, LoopConfig loop_config,
-            SessionObserverRegistry& observers, common::Logger& logger);
+            std::unique_ptr<HistoryStore> store, tools::ToolRegistry& registry,
+            LoopConfig loop_config, SessionObserverRegistry& observers, common::Logger& logger);
 
     // Terminates and joins. A Session is never destroyed with its worker running.
     ~Session();
@@ -92,7 +96,6 @@ public:
     rpc::PendingRequests& pending() { return pending_; }
 
     const SessionInfo& info() const { return info_; }
-    const InMemoryHistoryStore& history() const { return store_; }
 
     // The initial-attach guard reads these. A session that has never been
     // attached is reaped after a short grace period -- purely a safety net
@@ -128,7 +131,7 @@ private:
     SessionObserverRegistry& observers_;
 
     std::unique_ptr<llm::LlmProvider> provider_;
-    InMemoryHistoryStore store_;
+    std::unique_ptr<HistoryStore> store_;
 
     rpc::EventQueue<v1::ServerEvent> queue_;
     rpc::PendingRequests pending_;

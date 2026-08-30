@@ -89,11 +89,12 @@ struct ServiceFixture {
             return provider;
         });
         observers = std::make_unique<agent::SessionObserverRegistry>(common::DefaultLogger());
+        db = std::make_unique<session::SessionDatabase>(dir / "sessions.db");
         sessions = std::make_unique<agent::SessionRegistry>(
-            *presets, tools, providers, *observers, agent::LoopConfig{}, common::DefaultLogger(),
-            attach_guard);
+            *presets, tools, providers, *observers, *db, agent::LoopConfig{},
+            common::DefaultLogger(), attach_guard);
         service = std::make_unique<rpc::SessionServiceImpl>(
-            *sessions, config::SettingsConfig{}, config::PermissionsConfig{},
+            *sessions, *db, config::SettingsConfig{}, config::PermissionsConfig{},
             common::DefaultLogger());
         service->set_on_last_client_detached([this] { last_detach.store(true); });
 
@@ -133,6 +134,7 @@ struct ServiceFixture {
     std::shared_ptr<ProviderScript> script;
     std::unique_ptr<agent::AgentPresetRegistry> presets;
     std::unique_ptr<agent::SessionObserverRegistry> observers;
+    std::unique_ptr<session::SessionDatabase> db;
     std::unique_ptr<agent::SessionRegistry> sessions;
     std::unique_ptr<rpc::SessionServiceImpl> service;
     std::unique_ptr<rpc::Server> server;
@@ -163,6 +165,19 @@ grpc::Status DrainAndFinish(Stream& stream) {
     while (stream->Read(&discarded)) {
     }
     return stream->Finish();
+}
+
+// Reads until the turn terminator. A test that wants the transcript on disk has
+// to wait for the turn to finish, and TurnCompletedEvent is the only event that
+// says so -- stop_reason arrives once per tool round, not once per turn.
+template <typename Stream>
+bool WaitForTurnCompleted(Stream& stream) {
+    v1::ServerEvent event;
+    while (stream.Read(&event)) {
+        if (event.has_turn_completed()) return true;
+        if (event.has_error()) return false;
+    }
+    return false;
 }
 
 }  // namespace
@@ -500,25 +515,132 @@ TEST_CASE("a deferred RPC answers UNIMPLEMENTED rather than hanging", "[session_
 
     {
         grpc::ClientContext context;
-        v1::GetMessagesRequest request;
-        v1::GetMessagesResponse response;
-        CHECK(fixture.stub->GetMessages(&context, request, &response).error_code() ==
-              grpc::StatusCode::UNIMPLEMENTED);
-    }
-    {
-        grpc::ClientContext context;
-        v1::ListSessionsRequest request;
-        v1::ListSessionsResponse response;
-        CHECK(fixture.stub->ListSessions(&context, request, &response).error_code() ==
-              grpc::StatusCode::UNIMPLEMENTED);
-    }
-    {
-        grpc::ClientContext context;
         v1::SuggestPathsRequest request;
         v1::SuggestPathsResponse response;
         CHECK(fixture.stub->SuggestPaths(&context, request, &response).error_code() ==
               grpc::StatusCode::UNIMPLEMENTED);
     }
+    {
+        grpc::ClientContext context;
+        v1::PluginCallRequest request;
+        v1::PluginCallResponse response;
+        CHECK(fixture.stub->PluginCall(&context, request, &response).error_code() ==
+              grpc::StatusCode::UNIMPLEMENTED);
+    }
+}
+
+TEST_CASE("an unnamed session is named from its first user message",
+          "[session_service][naming]") {
+    // The interaction that would otherwise ship silently. SessionDatabase only
+    // sets the default name while the name is still empty -- deliberately, so an
+    // explicit one is never clobbered -- so a service that stamped a placeholder
+    // would suppress default naming forever and every row in the picker would
+    // read the same word. Nothing below the RPC layer can catch that: the
+    // storage tests call CreateSession("") directly.
+    ServiceFixture fixture;
+    fixture.Script(testing::TextResponse("hello there"));
+    fixture.Start();
+
+    const std::string session_id = fixture.CreateSession();  // sends no name
+    grpc::ClientContext open_context;
+    auto stream = fixture.stub->OpenSession(&open_context);
+    REQUIRE(stream->Write(ChatTurn(session_id, "summarize the build system")));
+    REQUIRE(WaitForTurnCompleted(*stream));
+    (void)DrainAndFinish(stream);
+
+    grpc::ClientContext context;
+    v1::ListSessionsRequest request;
+    request.set_include_all_dirs(true);
+    v1::ListSessionsResponse response;
+    REQUIRE(fixture.stub->ListSessions(&context, request, &response).ok());
+    REQUIRE(response.sessions_size() == 1);
+    CHECK(response.sessions(0).name() == "summarize the build system");
+    CHECK(response.sessions(0).session_id() == session_id);
+    CHECK(response.sessions(0).message_count() > 0);
+    CHECK(response.sessions(0).parent_session_id().empty());
+}
+
+TEST_CASE("a turn is durable and pages back through GetMessages",
+          "[session_service][scrollback]") {
+    ServiceFixture fixture;
+    fixture.Script(testing::TextResponse("the answer"));
+    fixture.Start();
+
+    const std::string session_id = fixture.CreateSession();
+    grpc::ClientContext open_context;
+    auto stream = fixture.stub->OpenSession(&open_context);
+    REQUIRE(stream->Write(ChatTurn(session_id, "ask something")));
+    REQUIRE(WaitForTurnCompleted(*stream));
+    (void)DrainAndFinish(stream);
+
+    grpc::ClientContext context;
+    v1::GetMessagesRequest request;
+    request.set_session_id(session_id);
+    v1::GetMessagesResponse response;
+    REQUIRE(fixture.stub->GetMessages(&context, request, &response).ok());
+
+    // Descending by seq: the newest message first, which is how scrollback pages.
+    REQUIRE(response.messages_size() == 2);
+    CHECK(response.messages(1).seq() == 0);
+    CHECK(response.messages(0).seq() == 1);
+    CHECK(response.messages(1).message().role() == v1::ROLE_USER);
+    CHECK(response.messages(0).message().role() == v1::ROLE_ASSISTANT);
+    CHECK_FALSE(response.has_more());
+}
+
+TEST_CASE("scrollback for an unknown session is NOT_FOUND, not an empty page",
+          "[session_service][scrollback]") {
+    // An empty page and a nonexistent session are different answers: one is a
+    // brand-new tab, the other is a bug the client needs to see.
+    ServiceFixture fixture;
+    fixture.Start();
+
+    grpc::ClientContext context;
+    v1::GetMessagesRequest request;
+    request.set_session_id("01ARZ3NDEKTSV4RRFFQ69G5FAV");
+    v1::GetMessagesResponse response;
+    CHECK(fixture.stub->GetMessages(&context, request, &response).error_code() ==
+          grpc::StatusCode::NOT_FOUND);
+}
+
+TEST_CASE("ListSessions without a project_root is refused rather than answered empty",
+          "[session_service][scrollback]") {
+    // Filtering on an empty project_root would match nothing and read like
+    // "no sessions here" instead of like a caller that forgot a field.
+    ServiceFixture fixture;
+    fixture.Start();
+
+    grpc::ClientContext context;
+    v1::ListSessionsRequest request;  // neither project_root nor include_all_dirs
+    v1::ListSessionsResponse response;
+    CHECK(fixture.stub->ListSessions(&context, request, &response).error_code() ==
+          grpc::StatusCode::INVALID_ARGUMENT);
+}
+
+TEST_CASE("a failed CreateSession leaves no session row behind",
+          "[session_service][naming]") {
+    // The database mints the id, so its row exists before the Session does. If
+    // constructing the Session then fails, that row has to go -- otherwise every
+    // preset typo leaves a message-less session in the picker permanently.
+    ServiceFixture fixture;
+    fixture.Start();
+
+    {
+        grpc::ClientContext context;
+        v1::CreateSessionRequest request;
+        request.set_agent_preset("nonexistent");
+        request.set_project_root("/tmp");
+        v1::CreateSessionResponse response;
+        CHECK(fixture.stub->CreateSession(&context, request, &response).error_code() ==
+              grpc::StatusCode::FAILED_PRECONDITION);
+    }
+
+    grpc::ClientContext context;
+    v1::ListSessionsRequest request;
+    request.set_include_all_dirs(true);
+    v1::ListSessionsResponse response;
+    REQUIRE(fixture.stub->ListSessions(&context, request, &response).ok());
+    CHECK(response.sessions_size() == 0);
 }
 
 TEST_CASE("a command invocation is answered while the subsystem is missing",
