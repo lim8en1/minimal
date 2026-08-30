@@ -40,13 +40,18 @@ ToolExecutor::ToolExecutor(ToolRegistry& registry, PermissionChecker& checker,
 
 PermissionMode ToolExecutor::ResolveMode(const Tool& tool, const nlohmann::json& input,
                                           const ToolContext& ctx) const {
-    const std::string& name = tool.spec().name;
+    const std::string& name = tool.spec().name;  // surface name: what the model calls it
     const ToolCategory category = tool.category_for(input).value_or(tool.spec().category);
 
     // 1. Is this tool allowed at all? MCP tools are server-scoped, not per-tool.
+    //    The policy lookup uses the PERMISSION key (the non-alias name), never
+    //    the surface: per_tool_overrides must keep governing a tool when an
+    //    alias changes what the model sees. For unaliased tools the two agree.
+    const std::string_view permission_key = registry_.PermissionKeyFor(name);
     const std::string mcp_server = mcp_server_of(name);
-    PermissionMode mode = mcp_server.empty() ? policy_.mode_for(name, category)
-                                              : mcp_policy_.mode_for(mcp_server);
+    PermissionMode mode =
+        mcp_server.empty() ? policy_.mode_for(permission_key, category)
+                           : mcp_policy_.mode_for(mcp_server);
 
     // 2. Only if permitted, and only for path-bearing tools, fold in
     //    out_of_workdir. This is a FOLD, never a substitution: substituting

@@ -1,6 +1,9 @@
 #include "minimal/rpc/session_service.hpp"
 
+#include <unistd.h>
+
 #include <chrono>
+#include <filesystem>
 #include <thread>
 #include <utility>
 
@@ -61,8 +64,24 @@ grpc::Status SessionServiceImpl::CreateSession(grpc::ServerContext*,
     if (params.project_root.empty()) {
         // project_root is per-session and client-supplied: it is the boundary for
         // path confinement and bash's initial cwd, so defaulting it server-side
-        // would silently point the agent at the server's cwd.
+        // would silently point the agent at the server's own cwd.
         return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "project_root is required");
+    }
+    // project_root must exist and be writable: it is the confinement boundary
+    // and bash's initial cwd, so a bad value should fail fast with a clear
+    // reason rather than surface later as confusing tool errors.
+    {
+        std::error_code ec;
+        if (!std::filesystem::is_directory(params.project_root, ec) || ec) {
+            return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION,
+                                "project_root is not an existing directory: " +
+                                    params.project_root.string());
+        }
+        if (::access(params.project_root.c_str(), W_OK) != 0) {
+            return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION,
+                                "project_root is not writable: " +
+                                    params.project_root.string());
+        }
     }
 
     // The DATABASE mints the id, so the row exists before the Session does. It

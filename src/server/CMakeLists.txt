@@ -21,15 +21,19 @@ add_library(minimal_server_core SHARED
     config/providers_config.cpp
     config/settings_config.cpp
     config/permissions_config.cpp
+    config/mcps_config.cpp
     config/skill_registry.cpp
+    config/sanity_check.cpp
     agent/agent_preset_frontmatter.cpp
     agent/permission_resolution.cpp
     agent/agent_preset_registry.cpp
     plugins/name_registry.cpp
+    plugins/name_resolution.cpp
     agent/compaction_boundary.cpp
     agent/context_compactor.cpp
     agent/agent_loop.cpp
     tools/tool_registry.cpp
+    tools/aliased_tool.cpp
     tools/tool_executor.cpp
     tools/skill_tool.cpp
     llm/provider_factory_registry.cpp

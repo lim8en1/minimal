@@ -6,15 +6,22 @@
 #include <filesystem>
 #include <fstream>
 
+#include "fakes.hpp"
+#include "minimal/common/logger.hpp"
 #include "minimal/llm/provider_factory_registry.hpp"
+#include "minimal/plugins/name_resolution.hpp"
 #include "minimal/plugins/plugin_discovery.hpp"
 #include "minimal/plugins/plugin_loader.hpp"
+#include "minimal/tools/tool_executor.hpp"
 #include "minimal/tools/tool_registry.hpp"
 
 using namespace minimal;
+using namespace minimal::testing;
 using plugins::LoadStatus;
 using plugins::PluginCandidate;
 using plugins::Provenance;
+using tools::PermissionMode;
+using tools::PermissionRunMode;
 
 namespace {
 
@@ -227,4 +234,161 @@ TEST_CASE("an existing plugins.json entry overrides the provenance default",
     CHECK(config.plugins.size() == 1);   // not duplicated
 
     std::filesystem::remove_all(tmp);
+}
+
+// --- Aliases ------------------------------------------------------------------
+//
+// fixture-good and fixture-collision both register a tool named "fixture_tool" --
+// the exact shape of two plugins claiming `bash`. The execute() result text
+// distinguishes which implementation is alive.
+
+namespace {
+
+struct AliasHarness {
+    tools::ToolRegistry tool_registry;
+    llm::ProviderFactoryRegistry provider_registry;
+    std::map<std::string, std::string> aliases;
+
+    // ApplyAliases runs after ALL registration (plugins + core built-ins), which
+    // is what makes a shadowed first registrant recoverable when the second one
+    // is the aliased side -- so it happens here, not per plugin.
+    std::vector<plugins::PluginRecord> LoadBoth() {
+        auto records = plugins::PluginLoader(tool_registry, provider_registry)
+                           .LoadAll({Enabled("fixture-good"), Enabled("fixture-collision")});
+        tool_registry.ApplyAliases(aliases);
+        return records;
+    }
+};
+
+}  // namespace
+
+TEST_CASE("an aliased tool is registered under its surface name", "[plugin_loader][alias]") {
+    tools::ToolRegistry tool_registry;
+    llm::ProviderFactoryRegistry provider_registry;
+    plugins::PluginLoader loader{tool_registry, provider_registry};
+
+    const auto records = loader.LoadAll({Enabled("fixture-good")});
+    tool_registry.ApplyAliases({{"fixture-good.fixture_tool", "ftool"}});
+    REQUIRE(records.size() == 1);
+    CHECK(records.front().status == LoadStatus::Loaded);
+    // The record still reports the ORIGINAL name: collision detection and
+    // permission keys are computed from "who provided what", which a rename
+    // does not change.
+    CHECK(records.front().registered_tools == std::vector<std::string>{"fixture_tool"});
+
+    CHECK(tool_registry.Find("ftool") != nullptr);
+    CHECK(tool_registry.Find("fixture_tool") == nullptr);
+    REQUIRE(tool_registry.Find("ftool"));
+    CHECK(tool_registry.Find("ftool")->spec().name == "ftool");
+    // The definition advertises the surface name too: the model calls what it sees.
+    CHECK(tool_registry.Find("ftool")->spec().definition.name == "ftool");
+
+    // Attribution is untouched by the rename -- one entry, still the original name.
+    const auto& attributions = tool_registry.attributions();
+    REQUIRE(attributions.size() == 1);
+    CHECK(attributions.front().plugin_name == "fixture-good");
+    CHECK(attributions.front().tool_name == "fixture_tool");
+}
+
+TEST_CASE("an alias resolves a collision: both implementations survive",
+          "[plugin_loader][alias][collision]") {
+    AliasHarness h;
+    h.aliases = {{"fixture-collision.fixture_tool", "ftool2"}};
+    const auto records = h.LoadBoth();
+    REQUIRE(records.size() == 2);
+    CHECK(records[0].status == LoadStatus::Loaded);
+    CHECK(records[1].status == LoadStatus::Loaded);
+
+    // Without application at registration, insert_or_assign would have silently
+    // dropped one of the two -- this is the soundness hole aliasing exists to close.
+    REQUIRE(h.tool_registry.Find("fixture_tool") != nullptr);
+    REQUIRE(h.tool_registry.Find("ftool2") != nullptr);
+
+    tools::ToolContext ctx(common::DefaultLogger());
+    const auto good = h.tool_registry.Find("fixture_tool")->execute({}, ctx);
+    const auto aliased = h.tool_registry.Find("ftool2")->execute({}, ctx);
+    CHECK(good.content_text == "fixture ok");
+    CHECK(aliased.content_text == "collision ok");
+
+    // Name resolution agrees with the registry: no fatal collision, and the
+    // shared original name makes BOTH permission keys qualified.
+    const auto resolution = plugins::ResolveToolNames(h.tool_registry, h.aliases);
+    CHECK(resolution.result.fatal_collisions.empty());
+    CHECK(resolution.result.dangling_aliases.empty());
+    h.tool_registry.SetPermissionKeys(resolution.permission_keys);
+    CHECK(std::string(h.tool_registry.PermissionKeyFor("fixture_tool")) ==
+          "fixture-good.fixture_tool");
+    CHECK(std::string(h.tool_registry.PermissionKeyFor("ftool2")) ==
+          "fixture-collision.fixture_tool");
+
+    // allowed_tools addresses the permission key, never the surface name.
+    const auto only_aliased = h.tool_registry.DefinitionsFor({"fixture-collision.fixture_tool"});
+    REQUIRE(only_aliased.size() == 1);
+    CHECK(only_aliased[0].name == "ftool2");
+    const auto only_good = h.tool_registry.DefinitionsFor({"fixture-good.fixture_tool"});
+    REQUIRE(only_good.size() == 1);
+    CHECK(only_good[0].name == "fixture_tool");
+}
+
+TEST_CASE("two plugins claiming one name without an alias collide", "[plugin_loader][collision]") {
+    AliasHarness h;
+    const auto records = h.LoadBoth();
+    REQUIRE(records.size() == 2);
+
+    const auto resolution = plugins::ResolveToolNames(h.tool_registry, h.aliases);
+    REQUIRE(resolution.result.fatal_collisions.size() == 1);
+    CHECK(resolution.result.fatal_collisions[0] == "fixture_tool");
+
+    // Both sides are nameable from the attributions: the fatal diagnostic must
+    // say WHICH two plugins collided, not merely that something did.
+    const auto& attributions = h.tool_registry.attributions();
+    REQUIRE(attributions.size() == 2);
+    CHECK(attributions[0].plugin_name == "fixture-good");
+    CHECK(attributions[1].plugin_name == "fixture-collision");
+}
+
+TEST_CASE("an alias naming nothing registered is dangling, not fatal", "[plugin_loader][alias]") {
+    tools::ToolRegistry tool_registry;
+    llm::ProviderFactoryRegistry provider_registry;
+    const std::map<std::string, std::string> aliases = {
+        {"fixture-good.no_such_tool", "x"}, {"some-other-plugin.tool", "y"}};
+
+    plugins::PluginLoader loader{tool_registry, provider_registry};
+    loader.LoadAll({Enabled("fixture-good")});
+    tool_registry.ApplyAliases(aliases);
+
+    const auto resolution = plugins::ResolveToolNames(tool_registry, aliases);
+    CHECK(resolution.result.fatal_collisions.empty());
+    REQUIRE(resolution.result.dangling_aliases.size() == 2);
+    // Sorted: startup diagnostics must be stable run to run.
+    CHECK(resolution.result.dangling_aliases[0] == "fixture-good.no_such_tool");
+    CHECK(resolution.result.dangling_aliases[1] == "some-other-plugin.tool");
+}
+
+TEST_CASE("per_tool_overrides govern an aliased tool through its permission key",
+          "[plugin_loader][alias][permission]") {
+    AliasHarness h;
+    h.aliases = {{"fixture-collision.fixture_tool", "ftool2"}};
+    h.LoadBoth();
+    const auto resolution = plugins::ResolveToolNames(h.tool_registry, h.aliases);
+    h.tool_registry.SetPermissionKeys(resolution.permission_keys);
+
+    // Deny ONLY the aliased tool's qualified key. A bare "fixture_tool" override
+    // would be ambiguous (two plugins provide that original name) and must not
+    // govern either one.
+    tools::PermissionPolicy policy = AllowAllPolicy();
+    policy.per_tool_overrides["fixture-collision.fixture_tool"] = PermissionMode::AlwaysDeny;
+
+    UnreachablePermissionChecker checker;  // a prompt would mean the key was missed
+    tools::ToolExecutor executor(h.tool_registry, checker, policy, {},
+                                 PermissionRunMode::Normal);
+    tools::ToolContext ctx(common::DefaultLogger());
+
+    const auto denied = executor.Run("t1", "ftool2", nlohmann::json::object(), ctx);
+    CHECK(denied.is_error);
+    CHECK(!checker.called);  // denied by policy, never reached the checker
+
+    const auto allowed = executor.Run("t2", "fixture_tool", nlohmann::json::object(), ctx);
+    CHECK_FALSE(allowed.is_error);
+    CHECK(!checker.called);
 }

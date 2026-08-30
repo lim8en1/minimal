@@ -10,6 +10,7 @@ function(minimal_add_fixture_plugin name source)
 endfunction()
 
 minimal_add_fixture_plugin(fixture-good        fixture_good.cpp)
+minimal_add_fixture_plugin(fixture-collision   fixture_collision.cpp)
 minimal_add_fixture_plugin(fixture-bad-abi     fixture_bad_abi.cpp)
 minimal_add_fixture_plugin(fixture-minimal     fixture_minimal.cpp)
 minimal_add_fixture_plugin(fixture-not-a-plugin fixture_not_a_plugin.cpp)

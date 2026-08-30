@@ -2,7 +2,7 @@
 
 Companion to `ARCHITECTURE.md`, which remains the single source of truth for *design*. This document covers only *sequencing*: what is built, what blocks what, and what "done" means for each remaining piece. Every milestone cites the `ARCHITECTURE.md` section that specifies it; where this plan and that document disagree, that document wins and this one is stale.
 
-**Status: Milestones A, B and H are complete. 433 tests passing, clean build, zero warnings.**
+**Status: Milestones A, B, F and H are complete. 482 tests passing, clean build, zero warnings.**
 
 `minimal -p` holds real conversations against a local model using `read`, `bash`, and `skill`; a permission prompt round-trips over the wire in both directions; a session grant silences the second prompt; the server exits when the last client detaches. Transcripts persist to SQLite and survive the server process — `GetMessages` and `ListSessions` answer from the database, so a session the server has no live object for still reads back. **Sessions cannot yet be resumed**, only read (§4 B).
 
@@ -16,10 +16,10 @@ Companion to `ARCHITECTURE.md`, which remains the single source of truth for *de
 
 | Subsystem | Location | Tests |
 |---|---|---|
-| Config: settings/providers/permissions/plugins, frontmatter, presets, skills, XDG paths | `src/server/config/` | 63 |
+| Config: settings/providers/permissions/plugins/mcps, frontmatter, presets, skills, sanity check, XDG paths | `src/server/config/` | 100 |
 | Permission model: lattice, run modes, precedence chains, out-of-workdir fold, MCP policy, consent scoping | `src/server/tools/` | 40 |
-| Tools: `Tool`/registry/executor, path confinement, `file_access`, `atomic_write`, `SkillTool` | `src/server/tools/` | 47 |
-| Plugins: discovery, `dlopen` loader + ABI guard, collision/alias registry | `src/server/plugins/` | 16 |
+| Tools: `Tool`/registry/executor, path confinement, `file_access`, `atomic_write`, `SkillTool`, `AliasedTool` | `src/server/tools/` | 51 |
+| Plugins: discovery, `dlopen` loader + ABI guard, collision/alias registry + name resolution | `src/server/plugins/` | 22 |
 | LLM: provider interface, chat/stream types, SSE parser, HTTP client, token accounting | `src/server/llm/` | 30 |
 | Agent loop: tool cycle, retries, cancellation, compaction trigger + boundary snapping, production compactor | `src/server/agent/` | 29 |
 | `tools-fs`, `tools-bash`, `provider-openai` | `plugins/server/` | 74 |
@@ -53,9 +53,18 @@ Companion to `ARCHITECTURE.md`, which remains the single source of truth for *de
 | `bundled/prompts/compression.md` | `bundled/` | The default compaction prompt, seeded into the config dir on first run. |
 | `bundled_assets` | `src/common/` | Executable-relative asset lookup + prompt seeding; absorbed plugin discovery's copy. |
 
+### Built in Milestone F
+
+| Piece | Location | Notes |
+|---|---|---|
+| `StartupSanityCheck` | `src/server/config/sanity_check.*` | Linter semantics; hands loaded config + opened DB to the serve stage. 26 cases. |
+| `mcps_config` | `src/server/config/mcps_config.*` | Parse-only loader (interpolation is G's); bad entries degrade individually. 11 cases. |
+| Alias application | `src/server/tools/`, `src/server/plugins/name_resolution.*` | `ApplyAliases` + `AliasedTool` wrapper; shadowed duplicates; surface→permission-key map consumed by `ToolExecutor`/`DefinitionsFor`. 5 loader cases + 4 wrapper cases + 1 `NameRegistry` regression. |
+| `project_root` validation | `src/server/rpc/session_service.cpp` | Per-session — validated in `CreateSession`, not at startup (exists, directory, writable). 2 wire cases. |
+
 ### Still not built
 
-`src/server/commands/`, `src/server/mcp/`, the TUI, subagents, the sanity check, **session resume** (see §4 B). `commands-core` is an empty plugin shell.
+`src/server/commands/`, `src/server/mcp/`, the TUI, subagents, **session resume** (see §4 B). `commands-core` is an empty plugin shell.
 
 ### The risk this creates
 
@@ -84,7 +93,7 @@ Test depth was inverted relative to integration risk: every well-tested layer wa
 **Independent — may start now, in any order, by anyone:**
 
 - **B. Session storage (SQLite)** — **Done, and wired.** `src/server/session/`: `SessionDatabase` (one connection, one mutex, WAL, transactional migrations), `SqliteHistoryStore` (the `HistoryStore` the agent loop writes through), `SessionReader` (keyset paging + session metadata). `GetMessages` and `ListSessions` now answer for real; `agent::InMemoryHistoryStore` is deleted.
-- **F. Startup sanity check** — pure config-layer work over already-built loaders. `main.cpp` is already staged for it (`main.cpp:114`).
+- ~~**F. Startup sanity check**~~ — **done.** Linter-style `RunAll()` in `src/server/config/sanity_check.{hpp,cpp}`, wired as stage 3 in `main.cpp`; `mcps_config` parse-only loader landed; `NameRegistry` wired through `ResolveToolNames` + `ToolRegistry::ApplyAliases`; `CreateSession` validates the per-session `project_root` (§4 F).
 - ~~**H. Production compactor**~~ — **done.** `compact_messages` replaces `Session`'s no-op stub, and the bundled prompt is delivered (§4 H).
 - ~~**I. `SessionObserver` registry**~~ — **done**, landed with A2. `minimal_plugin_register_session_observer` is live in the plugin ABI and `tools-bash` implements it.
 
@@ -251,22 +260,40 @@ Two branches off the same base that had never met. Only three files conflicted t
 5. **`GenerateUlid` had 32 bits of real entropy, not 80** — a `mt19937_64` seeded from a single `random_device()` draw. A same-ms collision is a `PRIMARY KEY` failure out of `CreateSession`, so the birthday bound mattered.
 6. **`TurnSummary`'s seq bounds were computed from `InMemoryHistoryStore::size()`.** With the store behind an interface there is no size, and counting locally would be right only for a session that started empty. `HistoryStore` now reports `last_appended_seq()`, cached from what SQL actually assigned.
 
-### F. Startup sanity check
+### F. Startup sanity check — done
 
-> § *Startup sanity check — `src/server/config/sanity_check.{hpp,cpp}`*. Independent; `main.cpp:114` is already staged for it.
+> § *Startup sanity check — `src/server/config/sanity_check.{hpp,cpp}`*. **Done** — 26 cases in `tests/sanity_check_test.cpp`, plus 11 `mcps_config` cases, 5 alias/collision cases in `plugin_loader_test.cpp`, 4 `AliasedTool` cases, 1 `NameRegistry` regression case, and 2 session-creation `project_root` cases.
 
 **How.** `StartupSanityCheck::RunAll()` returns `vector<CheckResult>` and **runs every check regardless of earlier failures** — it is a linter, not a fail-fast validator, so a misconfigured setup yields one complete diagnostic instead of a fix-one-rerun-find-the-next loop. A cold start with nothing configured is one more failing check with a clear reason, not a bespoke onboarding wizard.
 
-**Acceptance criteria.** The checks enumerated in that section: every config file parses; a usable `providers.json` entry exists with a resolvable key *and* a registered provider kind; each `mcps.json` entry's `command` resolves on `PATH` (stdio) or `url` is well-formed (http); `project_root` exists and is writable; the SQLite database is accessible and not newer than the binary; each discovered plugin's ABI tag matches; `max_concurrent_subagents` is sane; **no registration-name collisions (fatal)**; every `command_aliases` key resolves to something registered.
-
-Bundled-plugin failures are Fatal, user-plugin failures Warning.
+**Acceptance criteria** — all met:
+- [x] Every config file parses; core files (settings/permissions/providers) are Fatal when missing or malformed, `plugins.json`/`mcps.json` degrade with a Warning by design.
+- [x] A usable `providers.json` entry exists with a registered provider kind (Fatal when none); bad kinds, a dangling `default_provider`, and duplicate kinds across plugins each warn.
+- [x] Presets parse eagerly (`agents/*.md` frontmatter); zero presets is Fatal (the cold-start case); `default_agent_preset` must resolve end to end or it is Fatal; non-default breakage and missing compression prompts warn.
+- [x] Each `mcps.json` entry's `command` resolves on `PATH` (stdio) or `url` is well-formed (http); disabled entries are skipped. A parse-only `mcps_config` loader landed for this — G consumes it.
+- [x] `project_root` — implemented where it actually lives: it is per-session, so the startup check covers the server's own footprint (config dir + data dir exist and are writable), and `CreateSession` now validates the client-supplied root (exists, is a directory, is writable) with `FAILED_PRECONDITION`.
+- [x] The SQLite database opens (migrating) and is not newer than the binary; the opened database is handed to the serve stage rather than reopened.
+- [x] Each discovered plugin's load outcome is reported; bundled failures are Fatal, user failures Warning, deliberate disables silent.
+- [x] `max_concurrent_subagents` warns at ≤ 0 and > 8.
+- [x] **No registration-name collisions (fatal)** — wired through `NameRegistry` at last; the diagnostic names both plugins.
+- [x] Every `command_aliases` key resolves to something registered; dangling aliases warn.
 
 **Test cases** (`tests/sanity_check_test.cpp`)
-- [ ] Each check fires on its own broken fixture and passes on a good one.
-- [ ] **Two independent failures both appear in one `RunAll()` result** — the linter property is the whole point and is the easy one to regress into fail-fast.
-- [ ] Bundled-vs-user severity split is respected.
-- [ ] A name collision is fatal — this is the rule that makes tool replacement deliberate (§ *Name collisions and aliases*).
-- [ ] Unknown `allowed_skills` entries are reported (currently silently dropped by design — `agent_preset_registry.cpp` notes "a future sanity_check makes them loud").
+- [x] Each check fires on its own broken fixture and passes on a good one.
+- [x] **Two independent failures both appear in one `RunAll()` result** — the linter property is the whole point and is the easy one to regress into fail-fast; the test asserts results from checks that run *after* the first Fatal fires.
+- [x] Bundled-vs-user severity split is respected.
+- [x] A name collision is fatal — this is the rule that makes tool replacement deliberate (§ *Name collisions and aliases*).
+- [x] Unknown `allowed_skills` entries are reported (previously silently dropped by design).
+
+#### What first contact found
+
+1. **`ToolRegistry::Register` destroyed colliding tools before aliasing could save them.** `insert_or_assign` on the second registration deleted the first object, so the doc's flagship alias flow (two plugins providing `bash`, one aliased to `ssh_bash`) passed collision detection while serving only one tool — silent shadowing, the exact failure mode the fatal-collision rule exists to prevent. `Register` now keeps the first in the map and holds duplicates in a shadowed list; `ApplyAliases()` (once, after all registration) re-keys aliased tools under their surface names via a new `AliasedTool` wrapper, and `ResolveToolNames()` feeds `NameRegistry` for collisions, dangling aliases, and permission keys.
+2. **`NameRegistry` was built and tested but wired to nothing.** No production path fed it, so collisions were never detected and aliases were parsed but never applied. `main.cpp` now applies aliases, resolves names, and installs the surface→permission-key map before the sanity check runs.
+3. **Permission keys were never consulted.** `ToolExecutor::ResolveMode` and `ToolRegistry::DefinitionsFor` matched on the registered name, which is the surface name once aliasing exists — so `per_tool_overrides`/`allowed_tools` (which must never reference an alias) would have silently detached from aliased tools. Both now go through `PermissionKeyFor()`, which falls back to the name itself for unaliased and MCP tools: zero behavior change for every existing configuration.
+4. **`NameRegistry::Resolve` missed dangling aliases for kinds with no registrations.** The alias loop ran inside the per-kind entry loop, so an alias naming a disabled or absent plugin was silently kept — the exact typo the check exists to catch. Now kinds with zero entries are walked separately.
+5. **The spec's "`project_root` exists and is writable" check is unimplementable as written** — `project_root` is per-session (§ *Session storage*), supplied by the client in `CreateSessionRequest`. Split per the resolution above; `ARCHITECTURE.md` updated to match.
+6. **Presets loaded lazily, so broken ones stayed silent until the first session.** The sanity check parses `agents/*.md` eagerly — `agent_preset_registry.cpp`'s "a future sanity_check makes them loud" note is now discharged.
+7. **No `mcps.json` loader existed** — the check needed one; landed parse-only (interpolation deferred to G), with per-entry errors so one bad entry degrades alone.
 
 ### H. Production compactor — done
 
@@ -377,7 +404,7 @@ Not scheduled, recorded so they are decisions rather than oversights.
 
 - **Server-wide fd hygiene** — no `CLOEXEC` discipline on gRPC/SQLite/log fds; every bash command inherits them. The bash pipes are handled; the rest is not.
 - **`tree-sitter-bash` for command disclosure** — the hand-rolled scanner is conservative and its failure mode is safe (fewer grants offered). Upgrading raises the hit rate, not the safety floor. The grammar is already a planned client dependency.
-- **Unknown `allowed_skills` entries are silently dropped** — correct behaviour for resolution, but should be *reported* by F.
+- ~~**Unknown `allowed_skills` entries are silently dropped**~~ — still true of resolution (correct for lookup), but now *reported* at startup by F (`naming_model` check).
 - **`compaction_keep_recent_tokens` is parsed but unused** — the compaction cut is half the working history by message count (snapped to a tool-call cycle); selecting it by tokens needs per-message counts that are not tracked in memory (§ *Context compaction*).
 - **Backend `usage: 0`** from some OpenAI-compatible proxies — no fallback estimate designed (§ *Deferred*). Note the production compactor's `original_token_count` falls back to a bytes/4 estimate in exactly this case; it is an admission of roughness, not a precision claim.
 - Everything under § *Deferred / open items*: Anthropic provider, Windows, `llamacpp-kv`, parallel tool dispatch, session detach, tab-bar overflow.

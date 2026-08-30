@@ -70,6 +70,17 @@ NameRegistry::Result NameRegistry::Resolve() const {
         for (auto& r : kind_resolved) result.entries.push_back(std::move(r));
     }
 
+    // Kinds with no registrations at all never enter the loop above -- an alias
+    // naming a plugin that is disabled or absent would otherwise be silently
+    // kept, which is the exact typo the dangling check exists to catch.
+    for (const auto& [kind, kind_aliases] : aliases_) {
+        if (entries_.count(kind) != 0) continue;  // already covered above
+        for (const auto& [qualified_key, alias] : kind_aliases) {
+            (void)alias;
+            result.dangling_aliases.push_back(qualified_key);
+        }
+    }
+
     return result;
 }
 

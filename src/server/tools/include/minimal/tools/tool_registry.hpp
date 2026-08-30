@@ -1,9 +1,11 @@
 #pragma once
 
+#include <map>
 #include <memory>
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "minimal/llm/chat.hpp"
@@ -17,7 +19,24 @@ namespace minimal::tools {
 // which is also how ToolExecutor routes their permission decision.
 class ToolRegistry {
 public:
+    // A duplicate name does NOT overwrite: the first registration keeps the map
+    // slot, the later one is held in a shadowed list. Destroying it here -- as
+    // insert_or_assign did -- made a collision silent and unfixable by aliasing:
+    // by the time an alias could rename the second registrant, the first object
+    // was already gone. Shadowed tools are never served (the collision is fatal
+    // upstream) but they survive long enough to be renamed or diagnosed.
     void Register(std::unique_ptr<Tool> tool);
+
+    // The second half of startup registration, called ONCE after every plugin
+    // and core built-in has registered, before any session exists: resolves each
+    // aliased tool's surface name (its plugins.json alias, else its original)
+    // and re-keys it in the map, wrapping it so spec() advertises the surface.
+    // A tool whose surface is already taken stays shadowed -- ResolveToolNames()
+    // reports that as a fatal collision and the process exits before serving, so
+    // which object holds the slot is moot. Late registrations after this call
+    // (MCP tools) insert directly: their mcp__ namespacing cannot collide and no
+    // alias applies to them.
+    void ApplyAliases(const std::map<std::string, std::string>& aliases);
 
     Tool* Find(std::string_view name) const;
 
@@ -53,10 +72,36 @@ public:
     };
     const std::vector<Attribution>& attributions() const { return attributions_; }
 
+    // --- Permission keys ------------------------------------------------------
+    //
+    // surface_name -> the NON-alias key per_tool_overrides / allowed_tools may
+    // reference (bare original name when unambiguous, "plugin.original_name"
+    // when two plugins provide it -- see NameRegistry). Populated once at
+    // startup from ResolveToolNames(), before any session exists.
+    void SetPermissionKeys(std::unordered_map<std::string, std::string> keys);
+
+    // Falls back to the name itself when no resolution entry exists: that is the
+    // case for MCP tools (registered after startup) and, for every unaliased
+    // tool, the key IS the name -- so the fallback is correct, not accidental.
+    std::string_view PermissionKeyFor(std::string_view surface_name) const;
+
 private:
+    struct Pending {
+        Attribution attr;  // the attribution entry this object belongs to
+        std::unique_ptr<Tool> tool;
+    };
+
     std::unordered_map<std::string, std::unique_ptr<Tool>> tools_;
+    std::vector<Pending> shadowed_;  // duplicate names, held not destroyed
     std::string attribution_;
     std::vector<Attribution> attributions_;
+    // Parallel to attributions_: the object each entry refers to. Raw because
+    // the registry owns every registered tool for the process lifetime -- the
+    // pointer is valid while the object sits in tools_ or shadowed_, which is
+    // exactly when ApplyAliases needs it.
+    std::vector<Tool*> owners_;
+    std::unordered_map<std::string, std::string> permission_keys_;
+    bool aliases_applied_ = false;
 };
 
 }  // namespace minimal::tools
