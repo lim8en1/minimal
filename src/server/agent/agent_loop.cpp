@@ -102,6 +102,7 @@ llm::ChatRequest AgentLoop::BuildChatRequest() const {
     request.messages = history_;
     request.model = preset_.provider.model_name;
     request.parameters = preset_.parameters;
+    request.max_tokens = preset_.max_tokens;
     request.stream = true;
 
     std::vector<std::string> allowed = preset_.allowed_tools;
@@ -152,12 +153,31 @@ void AgentLoop::MaybeCompact() {
     // which is a hard 400 on both OpenAI and Anthropic rather than a soft
     // degradation.
     const std::size_t cut = snap_compaction_boundary(history_, candidate);
-    if (cut == 0 || cut >= history_.size()) return;
+    if (cut == 0 || cut >= history_.size()) {
+        // Not a no-op worth staying quiet about. A history whose every candidate
+        // boundary lands inside a tool-call cycle can never be compacted, so
+        // context grows until the provider rejects the request on length -- and
+        // a 400 from the backend is the only other symptom. Cooled down so this
+        // says it once per turn rather than once per tool cycle.
+        session_.logger.warn(
+            "session {}: cannot compact -- no safe boundary in {} messages; context will keep "
+            "growing",
+            session_.session_id, history_.size());
+        compaction_failed_this_turn_ = true;
+        return;
+    }
 
     const std::vector<llm::Message> to_compact(history_.begin(), history_.begin() + cut);
-    const auto result = compactor_(to_compact, provider_, preset_.provider.model_name,
-                                   preset_.compression_prompt, tokens_.last_input_tokens(),
-                                   is_cancelled_);
+    CompactionRequest params;
+    params.model_name = preset_.provider.model_name;
+    params.compression_prompt = preset_.compression_prompt;
+    params.parameters = preset_.parameters;
+    params.max_tokens = preset_.max_tokens;
+    params.last_reported_input_tokens = tokens_.last_input_tokens();
+    params.full_history = &history_;
+    params.is_cancelled = is_cancelled_;
+
+    const auto result = compactor_(to_compact, provider_, params);
     if (!result) {
         // No compaction this cycle; do not retry on every tool cycle of this turn.
         compaction_failed_this_turn_ = true;
@@ -170,12 +190,19 @@ void AgentLoop::MaybeCompact() {
     rebuilt.insert(rebuilt.end(), history_.begin() + cut, history_.end());
     history_.swap(rebuilt);
 
-    // The one number that makes a compaction legible after the fact: how much
-    // was replaced, and by how many messages. There is no wire event for this --
-    // nothing in the protocol specifies one and no client could render it yet --
-    // so the log is the only place it exists. That belongs with the TUI.
-    session_.logger.info("session {}: compacted {} messages (~{} tokens) into one summary",
-                         session_.session_id, cut, result->original_token_count);
+    // The numbers that make a compaction legible after the fact. There is no
+    // wire event for this -- nothing in the protocol specifies one and no client
+    // could render it yet -- so the log is the only place it exists. That
+    // belongs with the TUI.
+    //
+    // Says "context was" rather than "compacted N tokens", because that is what
+    // the number is: the size of the whole request that tripped the trigger, not
+    // the size of the prefix replaced. Claiming the latter overstated it by
+    // everything the cut kept.
+    session_.logger.info(
+        "session {}: context was ~{} tokens; compacted the oldest {} of {} messages into one "
+        "summary",
+        session_.session_id, result->context_tokens_before, cut, history_.size() + cut - 1);
 
     // NO COOLDOWN ON SUCCESS, deliberately. Repeated compaction inside one turn
     // looks unbounded but is not: each pass replaces the first `cut` ~= size/2

@@ -133,6 +133,7 @@ AgentPreset AgentPresetRegistry::ResolveUncached(const std::string& preset_name)
     preset.allowed_skills = resolved_skills;
     preset.allowed_mcp_servers = raw.allowed_mcp_servers;
     preset.parameters = entry->parameters;
+    preset.max_tokens = entry->max_tokens;
     preset.permission_mode = BuildPermissionPolicy(raw.permission_mode, permissions_.global_layer);
     preset.mcp_permissions = BuildMcpPermissionPolicy(raw.mcp_permissions, permissions_.mcp_default_mode);
     preset.run_mode = permissions_.default_run_mode;  // apply_run_mode() is applied once, downstream, by ToolExecutor

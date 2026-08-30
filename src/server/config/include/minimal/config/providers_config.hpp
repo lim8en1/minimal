@@ -18,6 +18,12 @@ struct ProviderEntry {
     std::string model_name;
     nlohmann::json parameters = nlohmann::json::object();
     std::optional<std::int64_t> context_window_tokens;
+    // Typed rather than left to `parameters`, because the serializer treats
+    // max_tokens as a structural field and erases whatever `parameters` put
+    // there -- so this was the only route to an output cap, and it did not
+    // exist. Unset means "send no cap and let the backend decide", which is the
+    // right default for a local llama.cpp and wrong for a metered API.
+    std::optional<int> max_tokens;
 };
 
 struct ProvidersConfig {

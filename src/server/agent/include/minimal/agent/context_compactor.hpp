@@ -3,22 +3,62 @@
 #include <cstdint>
 #include <functional>
 #include <optional>
+#include <string>
 #include <string_view>
 #include <vector>
+
+#include <nlohmann/json.hpp>
 
 #include "minimal/llm/message.hpp"
 #include "minimal/llm/provider.hpp"
 
 namespace minimal::agent {
 
-// The outcome of a successful compaction. original_token_count is the size of
-// what was replaced: the backend's own count from the last API call when it
-// reported one (ground truth), else a bytes/4 estimate -- there is no tokenizer
-// in this codebase, and an estimate that says so on its sleeve beats a precise
-// number computed from nothing.
+// The outcome of a successful compaction.
+//
+// context_tokens_before is the size of the WHOLE context going into the request
+// that triggered compaction -- system prompt, tool definitions, retained tail and
+// all -- not the size of the range that was replaced. That distinction was worth
+// a rename: the field used to be called original_token_count and its two branches
+// measured different things (the backend's whole-request count on one path, a
+// bytes/4 estimate of just the compacted range on the other), so the number the
+// log printed as "what compaction replaced" silently overstated by roughly the
+// size of everything it kept.
+//
+// Ground truth when the backend reported a count, else a bytes/4 estimate over
+// the same whole context -- there is no tokenizer in this codebase, and an
+// estimate that says so on its sleeve beats a precise number computed from
+// nothing.
 struct CompactionResult {
     llm::Message summary_message;
-    std::int64_t original_token_count = 0;
+    std::int64_t context_tokens_before = 0;
+};
+
+// Everything the summarization call needs that varies per call. A struct rather
+// than eight positional parameters, and per-call rather than bound at
+// construction because /agent can switch presets mid-session -- binding would
+// compact using the previous preset's prompt and sampling settings.
+struct CompactionRequest {
+    std::string_view model_name;
+    std::string_view compression_prompt;
+
+    // The preset's own sampling knobs and output cap. Both are load-bearing
+    // rather than tidiness: without `parameters` the summarization call runs
+    // with different generation settings than every other call in the session,
+    // and the OpenAI serializer ERASES max_tokens when the request does not set
+    // it -- so a cap the user put in `parameters` was being stripped on this
+    // path specifically, which is how a summary gets truncated.
+    nlohmann::json parameters = nlohmann::json::object();
+    std::optional<int> max_tokens;
+
+    // The backend's count for the last real request, or 0 if it reported none.
+    std::int64_t last_reported_input_tokens = 0;
+    // Everything currently in context, used only for the fallback estimate when
+    // the backend reported nothing. Measured over the same span as the ground
+    // truth so the two branches are comparable.
+    const std::vector<llm::Message>* full_history = nullptr;
+
+    std::function<bool()> is_cancelled;
 };
 
 // The production compactor: summarizes `messages_to_compact` into one synthetic
@@ -28,12 +68,12 @@ struct CompactionResult {
 // fidelity for more code than it saves.
 //
 // Returns nullopt when no compaction should happen: empty prompt, provider error,
-// cancellation, or a response with no usable text. Failure is a value, not an
-// exception -- the caller leaves history untouched, so a broken summarizer degrades
-// to "no compaction", never to a lost transcript.
+// cancellation, a response with no usable text, or a summary the model ran out of
+// output budget mid-way through. Failure is a value, not an exception -- the
+// caller leaves history untouched, so a broken summarizer degrades to "no
+// compaction", never to a lost transcript.
 std::optional<CompactionResult> compact_messages(
     const std::vector<llm::Message>& messages_to_compact, llm::LlmProvider& provider,
-    std::string_view model_name, std::string_view compression_prompt,
-    std::int64_t last_reported_input_tokens, std::function<bool()> is_cancelled);
+    const CompactionRequest& request);
 
 }  // namespace minimal::agent

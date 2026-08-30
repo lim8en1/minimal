@@ -372,8 +372,7 @@ TEST_CASE("compaction fires past the threshold and never touches the store",
 
     int compactions = 0;
     auto compactor = [&compactions](const std::vector<llm::Message>&, llm::LlmProvider&,
-                                    std::string_view, std::string_view, std::int64_t,
-                                    std::function<bool()>) {
+                                    const agent::CompactionRequest&) {
         ++compactions;
         return agent::CompactionResult{UserText("[summary]"), 0};
     };
@@ -399,8 +398,7 @@ TEST_CASE("auto_compact off means no compaction regardless of occupancy",
 
     int compactions = 0;
     auto compactor = [&compactions](const std::vector<llm::Message>&, llm::LlmProvider&,
-                                    std::string_view, std::string_view, std::int64_t,
-                                    std::function<bool()>) {
+                                    const agent::CompactionRequest&) {
         ++compactions;
         return agent::CompactionResult{UserText("[summary]"), 0};
     };

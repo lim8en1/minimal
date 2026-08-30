@@ -28,9 +28,17 @@ std::vector<llm::Message> MixedHistory() {
     return messages;
 }
 
+// The defaults every case shares; each test overrides only what it is about.
+agent::CompactionRequest Params(std::int64_t last_reported = 0) {
+    agent::CompactionRequest params;
+    params.model_name = "model-x";
+    params.compression_prompt = "THE PROMPT";
+    params.last_reported_input_tokens = last_reported;
+    return params;
+}
+
 agent::CompactionResult RunOk(FakeLlmProvider& provider, std::int64_t last_reported) {
-    const auto result = agent::compact_messages(MixedHistory(), provider, "model-x",
-                                                "THE PROMPT", last_reported, {});
+    const auto result = agent::compact_messages(MixedHistory(), provider, Params(last_reported));
     REQUIRE(result.has_value());
     return *result;
 }
@@ -44,7 +52,7 @@ TEST_CASE("compact_messages sends the prompt as system and passes messages throu
 
     const auto result = RunOk(provider, 1234);
 
-    CHECK(result.original_token_count == 1234);
+    CHECK(result.context_tokens_before == 1234);
     // The summary is a user message: it stands in for the compacted prefix of the
     // conversation, and that is the shape both wire formats accept at the head.
     REQUIRE(result.summary_message.role == llm::Role::User);
@@ -77,45 +85,102 @@ TEST_CASE("compact_messages sends the prompt as system and passes messages throu
     CHECK(request.stream);
 }
 
-TEST_CASE("original_token_count falls back to a bytes/4 estimate when no usage was reported",
+TEST_CASE("context_tokens_before falls back to a bytes/4 estimate when no usage was reported",
           "[compactor]") {
     FakeLlmProvider provider;
     provider.PushResponse(TextResponse("ok"));
 
     const std::vector<llm::Message> messages = {UserText(std::string(4000, 'x'))};
-    const auto result = agent::compact_messages(messages, provider, "model-x", "THE PROMPT", 0, {});
+    auto params = Params(0);
+    params.full_history = &messages;
+    const auto result = agent::compact_messages(messages, provider, params);
 
     REQUIRE(result.has_value());
-    CHECK(result->original_token_count == 1000);  // 4000 bytes / 4
+    CHECK(result->context_tokens_before == 1000);  // 4000 bytes / 4
+}
+
+TEST_CASE("both branches of context_tokens_before measure the same span", "[compactor][invariant]") {
+    // They did not. The ground-truth branch reported the backend's count for the
+    // WHOLE request; the fallback estimated only the range being compacted. So
+    // the same session produced numbers differing by roughly the size of
+    // everything compaction kept, depending on whether the backend happened to
+    // report usage -- and the log printed either as "what was replaced".
+    const std::vector<llm::Message> full = {UserText(std::string(4000, 'x')),
+                                            UserText(std::string(4000, 'y'))};
+    const std::vector<llm::Message> cut(full.begin(), full.begin() + 1);
+
+    FakeLlmProvider provider;
+    provider.PushResponse(TextResponse("ok"));
+    auto estimated = Params(0);
+    estimated.full_history = &full;
+    const auto without_usage = agent::compact_messages(cut, provider, estimated);
+
+    FakeLlmProvider reporting;
+    reporting.PushResponse(TextResponse("ok"));
+    auto ground_truth = Params(2000);  // what the backend says the whole request cost
+    ground_truth.full_history = &full;
+    const auto with_usage = agent::compact_messages(cut, reporting, ground_truth);
+
+    REQUIRE(without_usage.has_value());
+    REQUIRE(with_usage.has_value());
+    // 8000 bytes of history / 4 == 2000, the same span the backend counted.
+    CHECK(without_usage->context_tokens_before == 2000);
+    CHECK(with_usage->context_tokens_before == 2000);
+}
+
+TEST_CASE("a truncated summary is refused", "[compactor][invariant]") {
+    // A summary that hit max_tokens is cut off mid-sentence, and accepting it
+    // replaces half the conversation with a fragment whose only other copy is in
+    // SQLite where the loop cannot reach it. The agent loop already refuses to
+    // treat MaxTokens as normal completion; this is the same rule where the
+    // consequence is worse.
+    FakeLlmProvider provider;
+    provider.PushResponse(TextResponse("The user asked me to refac",
+                                       llm::StopReason::MaxTokens));
+
+    CHECK_FALSE(agent::compact_messages(MixedHistory(), provider, Params(10)).has_value());
+}
+
+TEST_CASE("the summarization call carries the preset's sampling settings", "[compactor]") {
+    // Without these the summarization call runs with different generation
+    // settings than the conversation it summarizes -- and because the OpenAI
+    // serializer treats max_tokens as structural and erases whatever
+    // `parameters` set, an unset cap here is how the truncation above happens.
+    FakeLlmProvider provider;
+    provider.PushResponse(TextResponse("ok"));
+
+    auto params = Params(10);
+    params.parameters = nlohmann::json{{"temperature", 0.1}};
+    params.max_tokens = 2048;
+    REQUIRE(agent::compact_messages(MixedHistory(), provider, params).has_value());
+
+    REQUIRE(provider.requests().size() == 1);
+    const auto& request = provider.requests().front();
+    CHECK(request.parameters == nlohmann::json{{"temperature", 0.1}});
+    REQUIRE(request.max_tokens.has_value());
+    CHECK(*request.max_tokens == 2048);
 }
 
 TEST_CASE("a retryable provider error degrades to no compaction", "[compactor]") {
     FakeLlmProvider provider;
     provider.PushError(llm::LlmError(llm::LlmErrorCategory::Transport, "connection reset"));
 
-    const auto result = agent::compact_messages(MixedHistory(), provider, "model-x", "THE PROMPT",
-                                                10, {});
-
-    CHECK_FALSE(result.has_value());
+    CHECK_FALSE(agent::compact_messages(MixedHistory(), provider, Params(10)).has_value());
 }
 
 TEST_CASE("a non-retryable provider error degrades to no compaction", "[compactor]") {
     FakeLlmProvider provider;
     provider.PushError(llm::LlmError(llm::LlmErrorCategory::RequestError, "context too long"));
 
-    const auto result = agent::compact_messages(MixedHistory(), provider, "model-x", "THE PROMPT",
-                                                10, {});
-
-    CHECK_FALSE(result.has_value());
+    CHECK_FALSE(agent::compact_messages(MixedHistory(), provider, Params(10)).has_value());
 }
 
 TEST_CASE("an empty prompt skips the provider entirely", "[compactor]") {
     FakeLlmProvider provider;
 
-    const auto result = agent::compact_messages(MixedHistory(), provider, "model-x", "   \n\t",
-                                                10, {});
-
-    CHECK_FALSE(result.has_value());
+    auto params = Params(10);
+    params.compression_prompt = "   \n\t";
+    CHECK_FALSE(agent::compact_messages(MixedHistory(), provider, params).has_value());
     CHECK(provider.call_count() == 0);
 }
 
@@ -126,10 +191,7 @@ TEST_CASE("a response without text blocks is unusable", "[compactor]") {
     weird.stop_reason = llm::StopReason::EndTurn;
     provider.PushResponse(std::move(weird));
 
-    const auto result = agent::compact_messages(MixedHistory(), provider, "model-x", "THE PROMPT",
-                                                10, {});
-
-    CHECK_FALSE(result.has_value());
+    CHECK_FALSE(agent::compact_messages(MixedHistory(), provider, Params(10)).has_value());
 }
 
 TEST_CASE("cancellation aborts the summarization call and yields no compaction", "[compactor]") {
@@ -139,8 +201,7 @@ TEST_CASE("cancellation aborts the summarization call and yields no compaction",
     provider.PushResponse(TextResponse("never assembled"),
                           {llm::TextDeltaEvent{0, "partial"}});
 
-    const auto result = agent::compact_messages(
-        MixedHistory(), provider, "model-x", "THE PROMPT", 10, [] { return true; });
-
-    CHECK_FALSE(result.has_value());
+    auto params = Params(10);
+    params.is_cancelled = [] { return true; };
+    CHECK_FALSE(agent::compact_messages(MixedHistory(), provider, params).has_value());
 }

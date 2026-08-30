@@ -42,6 +42,9 @@ ProviderEntry ParseEntry(const nlohmann::json& entry, std::size_t index) {
     }
 
     if (entry.contains("parameters")) result.parameters = entry.at("parameters");
+    if (entry.contains("max_tokens")) {
+        result.max_tokens = entry.at("max_tokens").get<int>();
+    }
     if (entry.contains("context_window_tokens")) {
         result.context_window_tokens = entry.at("context_window_tokens").get<std::int64_t>();
     }

@@ -96,13 +96,12 @@ struct TurnResult {
 // compaction path is testable without a live summarizer; production supplies
 // compact_messages, which calls the provider with the preset's compression prompt.
 // nullopt means "no compaction this cycle" -- failure degrades to no compaction,
-// never to a lost transcript. The prompt and model are per-call rather than bound
-// at construction because /agent can switch presets mid-session; binding them
-// would compact with the previous preset's prompt.
+// never to a lost transcript. Everything that varies is in CompactionRequest,
+// supplied per call rather than bound at construction, because /agent can switch
+// presets mid-session and binding would compact with the previous one's settings.
 using Compactor = std::function<std::optional<CompactionResult>(
     const std::vector<llm::Message>& messages_to_compact, llm::LlmProvider& provider,
-    std::string_view model_name, std::string_view compression_prompt,
-    std::int64_t last_reported_input_tokens, std::function<bool()> is_cancelled)>;
+    const CompactionRequest& request)>;
 
 // Runs on the session worker thread. Blocks freely -- permission waits, provider
 // calls, tool subprocesses -- which is safe only because the gRPC reader thread

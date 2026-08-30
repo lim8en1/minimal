@@ -61,23 +61,27 @@ bool IsBlank(std::string_view text) {
 
 std::optional<CompactionResult> compact_messages(
     const std::vector<llm::Message>& messages_to_compact, llm::LlmProvider& provider,
-    std::string_view model_name, std::string_view compression_prompt,
-    std::int64_t last_reported_input_tokens, std::function<bool()> is_cancelled) {
+    const CompactionRequest& params) {
     const auto& logger = common::DefaultLogger();
 
     // No prompt, no compaction: a summarization request with no instructions would
-    // burn tokens to produce garbage. An empty prompt means the bundled
-    // prompts/compression.md was never installed into the config dir.
-    if (IsBlank(compression_prompt)) {
+    // burn tokens to produce garbage. An empty prompt means prompts/compression.md
+    // is missing from the config dir.
+    if (IsBlank(params.compression_prompt)) {
         logger.error("compaction skipped: no compression prompt configured");
         return std::nullopt;
     }
 
     llm::ChatRequest request;
-    request.system = std::string(compression_prompt);
+    request.system = std::string(params.compression_prompt);
     request.messages = messages_to_compact;
-    request.model = std::string(model_name);
+    request.model = std::string(params.model_name);
     request.stream = true;
+    // The preset's, not defaults. A summarization call running with different
+    // sampling than the conversation it summarizes is a silent inconsistency,
+    // and an absent max_tokens is worse than inconsistent -- see the header.
+    request.parameters = params.parameters;
+    request.max_tokens = params.max_tokens;
 
     llm::ChatResponse response;
     try {
@@ -86,8 +90,8 @@ std::optional<CompactionResult> compact_messages(
         // must not stall a CancelTurn until request_timeout. The sink swallows
         // events -- the summary is internal and never reaches the client as
         // stream traffic -- and polls the cancel flag instead.
-        response = provider.StreamComplete(request, [&is_cancelled](const llm::StreamEvent&) {
-            return !is_cancelled || !is_cancelled();
+        response = provider.StreamComplete(request, [&params](const llm::StreamEvent&) {
+            return !params.is_cancelled || !params.is_cancelled();
         });
     } catch (const llm::LlmError& error) {
         // The trigger is still armed: occupancy did not drop, so the next turn
@@ -98,6 +102,17 @@ std::optional<CompactionResult> compact_messages(
     }
 
     if (response.stop_reason == llm::StopReason::Cancelled) {
+        return std::nullopt;
+    }
+
+    // A summary that hit the output cap is cut off mid-sentence, and accepting
+    // it would permanently replace half the conversation with a fragment whose
+    // only other copy is in SQLite where the loop cannot reach it. Same rule the
+    // agent loop applies to MaxTokens on a normal turn, for a worse consequence.
+    if (response.stop_reason == llm::StopReason::MaxTokens) {
+        logger.error(
+            "compaction produced a truncated summary (hit max_tokens); skipping -- raise "
+            "max_tokens for this provider or shorten the compaction prompt");
         return std::nullopt;
     }
 
@@ -113,9 +128,13 @@ std::optional<CompactionResult> compact_messages(
     // the head of a history.
     result.summary_message =
         llm::Message{llm::Role::User, {llm::TextBlock{std::string(kSummaryFraming) + text}}};
-    result.original_token_count = last_reported_input_tokens > 0
-                                      ? last_reported_input_tokens
-                                      : EstimateTokens(messages_to_compact);
+    // Both branches measure the WHOLE context, so the number means one thing.
+    // Estimating only `messages_to_compact` here -- as this used to -- made the
+    // fallback and the ground truth incomparable.
+    result.context_tokens_before =
+        params.last_reported_input_tokens > 0 ? params.last_reported_input_tokens
+        : params.full_history                 ? EstimateTokens(*params.full_history)
+                                              : EstimateTokens(messages_to_compact);
     return result;
 }
 

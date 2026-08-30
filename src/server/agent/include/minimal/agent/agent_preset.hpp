@@ -35,6 +35,10 @@ struct AgentPreset {
     std::vector<std::string> allowed_skills;
     std::vector<std::string> allowed_mcp_servers;
     nlohmann::json parameters = nlohmann::json::object();  // from the resolved providers.json entry, not preset frontmatter
+    // Also from the providers.json entry. Applies to every request the session
+    // makes, summarization included -- a cap the conversation honours and the
+    // compactor ignores is how a summary gets truncated.
+    std::optional<int> max_tokens;
 
     tools::PermissionPolicy permission_mode;
     tools::McpPermissionPolicy mcp_permissions;
