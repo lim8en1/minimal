@@ -672,3 +672,42 @@ TEST_CASE("a command invocation is answered while the subsystem is missing",
     (void)DrainAndFinish(stream);
     CHECK(answered);
 }
+
+TEST_CASE("a second client on the same session is refused, not silently served",
+          "[session_service][invariant]") {
+    // The outbound queue has ONE consumer by design (ARCHITECTURE.md,
+    // "Concurrency model"): events buffer on the SESSION so a producer never has
+    // to know whether anyone is listening. Two streams draining it would give
+    // each a random half of the events, and the first to close would terminate
+    // the session under the other -- which looks like flaky output, not a
+    // protocol error. MarkAttached was a latch that never said no.
+    ServiceFixture fixture;
+    fixture.Script(testing::TextResponse("hi"));
+    fixture.Start();
+
+    const std::string session_id = fixture.CreateSession();
+
+    grpc::ClientContext first_context;
+    auto first = fixture.stub->OpenSession(&first_context);
+    v1::ClientEvent naming;
+    naming.set_session_id(session_id);
+    naming.mutable_chat_turn()->set_text("hello");
+    REQUIRE(first->Write(naming));
+
+    // Wait for the first stream to actually be attached; OpenSession claims the
+    // session on its first inbound message, not at connect.
+    v1::ServerEvent event;
+    REQUIRE(first->Read(&event));
+
+    grpc::ClientContext second_context;
+    auto second = fixture.stub->OpenSession(&second_context);
+    REQUIRE(second->Write(naming));
+    v1::ServerEvent unused;
+    while (second->Read(&unused)) {
+    }
+    const auto status = second->Finish();
+    CHECK(status.error_code() == grpc::StatusCode::ALREADY_EXISTS);
+
+    // The first stream is unharmed: it still owns the session and its turn.
+    (void)DrainAndFinish(first);
+}

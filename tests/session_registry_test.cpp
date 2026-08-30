@@ -187,7 +187,7 @@ TEST_CASE("an attached session outlives the guard", "[session_registry]") {
     fixture.Build();
 
     auto session = fixture.registry->Create(Params("s1"));
-    session->MarkAttached();
+    session->TryAttach();
 
     std::this_thread::sleep_for(700ms);  // several guard periods
     CHECK(fixture.registry->size() == 1);
@@ -201,8 +201,8 @@ TEST_CASE("TerminateAll stops every live session", "[session_registry]") {
 
     auto first = fixture.registry->Create(Params("s1"));
     auto second = fixture.registry->Create(Params("s2"));
-    first->MarkAttached();
-    second->MarkAttached();
+    first->TryAttach();
+    second->TryAttach();
     CHECK(fixture.registry->size() == 2);
 
     fixture.registry->TerminateAll();
@@ -218,8 +218,8 @@ TEST_CASE("sessions are independent", "[session_registry]") {
 
     auto first = fixture.registry->Create(Params("s1"));
     auto second = fixture.registry->Create(Params("s2"));
-    first->MarkAttached();
-    second->MarkAttached();
+    first->TryAttach();
+    second->TryAttach();
 
     fixture.registry->Terminate("s1");
     CHECK(first->terminated());

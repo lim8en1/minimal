@@ -79,7 +79,9 @@ private:
     int ScrollbackPageSize() const;
 
     // Reader thread. Returns false if the stream should end.
-    bool Dispatch(const v1::ClientEvent& event, agent::Session& session);
+    // Reader thread. Every branch is non-blocking -- that is the property the
+    // three-thread topology depends on, not an implementation detail.
+    void Dispatch(const v1::ClientEvent& event, agent::Session& session);
 
     agent::SessionRegistry& sessions_;
     session::SessionDatabase& db_;

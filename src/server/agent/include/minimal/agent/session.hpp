@@ -102,7 +102,18 @@ public:
     // against a non-conforming client, since attaching is a client protocol
     // obligation (see ARCHITECTURE.md "Session lifetime"). Once attached, the
     // guard no longer applies: stream drop is what terminates from then on.
-    void MarkAttached() { ever_attached_.store(true, std::memory_order_release); }
+    // Claims the session for one stream. False means someone is already
+    // attached, and the caller must refuse rather than attach anyway: the
+    // outbound queue has ONE consumer by design, so a second writer draining it
+    // would give each stream a random half of the events -- and the first stream
+    // to close would terminate the session under the other. Exchange rather than
+    // a store so the check and the claim cannot race.
+    bool TryAttach() {
+        ever_attached_.store(true, std::memory_order_release);
+        return !attached_.exchange(true, std::memory_order_acq_rel);
+    }
+    void Detach() { attached_.store(false, std::memory_order_release); }
+
     bool ever_attached() const { return ever_attached_.load(std::memory_order_acquire); }
     std::chrono::steady_clock::time_point created_at() const { return created_at_; }
 
@@ -145,6 +156,9 @@ private:
     std::atomic<bool> cancel_{false};
     std::atomic<bool> terminated_{false};
     std::atomic<bool> ever_attached_{false};
+    // Currently attached, as distinct from ever attached: the guard above is a
+    // one-way latch for the reaper, this one goes back down on detach.
+    std::atomic<bool> attached_{false};
     std::chrono::steady_clock::time_point created_at_ = std::chrono::steady_clock::now();
 
     mutable std::mutex mutex_;

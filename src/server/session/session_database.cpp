@@ -71,36 +71,52 @@ void ExecChecked(sqlite3* db, const char* sql, const std::string& context) {
 // pending migration inside one transaction. A failure anywhere rolls back to the
 // version the database was opened at -- never a half-applied schema.
 void ApplyMigrations(sqlite3* db, int target_version, const std::vector<Migration>& migrations) {
-    int current = 0;
-    sqlite3_stmt* stmt = nullptr;
-    if (sqlite3_prepare_v2(db, "PRAGMA user_version;", -1, &stmt, nullptr) != SQLITE_OK) {
-        ThrowSqliteError(db, "failed to read schema version");
-    }
-    if (sqlite3_step(stmt) == SQLITE_ROW) current = sqlite3_column_int(stmt, 0);
-    sqlite3_finalize(stmt);
-
-    if (current > target_version) {
-        throw std::runtime_error("session database schema version " + std::to_string(current) +
-                                 " is newer than this binary understands (" +
-                                 std::to_string(target_version) +
-                                 "); refusing to open -- do not downgrade over a newer database");
-    }
-
-    std::vector<const Migration*> pending;
+    // The list is checked before any I/O: it is a compile-time-ish invariant of
+    // the caller, not a property of this database.
     int last_seen = 0;
     for (const auto& migration : migrations) {
         if (migration.version <= last_seen) {
             throw std::runtime_error("migration list is not strictly increasing in version");
         }
         last_seen = migration.version;
-        if (migration.version > current) pending.push_back(&migration);
     }
-    if (pending.empty()) return;
 
-    // IMMEDIATE takes the write lock up front so the busy timeout applies to the
-    // whole migration, not just its first statement.
+    // IMMEDIATE FIRST, then read the version INSIDE the transaction. Reading it
+    // outside was a time-of-check/time-of-use race: two processes starting
+    // together could both see 0, both try to apply v1, and the loser would fail
+    // to start with "table already exists". Narrow today, but the client
+    // auto-spawn that is deferred out of Milestone A is exactly what makes two
+    // concurrent starts routine.
+    //
+    // IMMEDIATE also takes the write lock up front, so the busy timeout applies
+    // to the whole migration rather than only its first statement -- which is
+    // what gives the loser of that race something to wait on instead of an error.
     ExecChecked(db, "BEGIN IMMEDIATE;", "failed to begin migration");
     try {
+        int current = 0;
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(db, "PRAGMA user_version;", -1, &stmt, nullptr) != SQLITE_OK) {
+            ThrowSqliteError(db, "failed to read schema version");
+        }
+        if (sqlite3_step(stmt) == SQLITE_ROW) current = sqlite3_column_int(stmt, 0);
+        sqlite3_finalize(stmt);
+
+        if (current > target_version) {
+            throw std::runtime_error(
+                "session database schema version " + std::to_string(current) +
+                " is newer than this binary understands (" + std::to_string(target_version) +
+                "); refusing to open -- do not downgrade over a newer database");
+        }
+
+        std::vector<const Migration*> pending;
+        for (const auto& migration : migrations) {
+            if (migration.version > current) pending.push_back(&migration);
+        }
+        if (pending.empty()) {
+            ExecChecked(db, "COMMIT;", "failed to close the migration check");
+            return;
+        }
+
         for (const auto* migration : pending) {
             for (const auto& statement : migration->statements) {
                 ExecChecked(db, statement.c_str(), "migration v" + std::to_string(migration->version));

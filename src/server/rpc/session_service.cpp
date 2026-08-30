@@ -9,17 +9,15 @@
 namespace minimal::rpc {
 namespace {
 
-// EMPTY, not a placeholder. SessionDatabase names an unnamed session from its
-// first user message, and that rule is guarded by `name = ''` so it can never
-// clobber a name someone chose. Stamping "session" here would satisfy the guard
-// and permanently suppress the default naming -- every row in the picker would
-// read "session" and no test below the RPC layer would notice.
-std::string DefaultSessionName(const std::string& requested) { return requested; }
-
 // The floor under both paged RPCs when settings.json leaves scrollback_page_size
 // unset, which is its default. Named rather than repeated as a literal: two
 // call sites drifting apart is how a "default" becomes two different defaults.
 constexpr int kFallbackPageSize = 100;
+
+grpc::Status NotYet(const char* what) {
+    return grpc::Status(grpc::StatusCode::UNIMPLEMENTED,
+                        std::string(what) + " is not implemented yet");
+}
 
 }  // namespace
 
@@ -52,7 +50,13 @@ grpc::Status SessionServiceImpl::CreateSession(grpc::ServerContext*,
                                                const v1::CreateSessionRequest* request,
                                                v1::CreateSessionResponse* response) {
     agent::SessionParams params;
-    params.name = DefaultSessionName(request->name());
+    // Passed through EMPTY when the client sent nothing, never defaulted to a
+    // placeholder. SessionDatabase names an unnamed session from its first user
+    // message, and that rule is guarded by `name = ''` so it can never clobber a
+    // name someone chose -- so a placeholder here would satisfy the guard and
+    // permanently suppress the default naming. Every row in the picker would
+    // read "session", and no test below the RPC layer would notice.
+    params.name = request->name();
     params.agent_preset =
         request->agent_preset().empty() ? settings_.default_agent_preset : request->agent_preset();
     params.project_root = request->project_root();
@@ -108,29 +112,29 @@ grpc::Status SessionServiceImpl::CreateSession(grpc::ServerContext*,
     return grpc::Status::OK;
 }
 
-bool SessionServiceImpl::Dispatch(const v1::ClientEvent& event, agent::Session& session) {
+void SessionServiceImpl::Dispatch(const v1::ClientEvent& event, agent::Session& session) {
     switch (event.payload_case()) {
         case v1::ClientEvent::kChatTurn:
             // Queues and returns. Running the turn here would block the reader,
             // which is the deadlock this whole topology exists to avoid.
             session.SubmitTurn(event.chat_turn().text());
-            return true;
+            return;
 
         case v1::ClientEvent::kPermissionResponse:
             // Carried across as bytes: parsing belongs on the worker, which can
             // afford to fail, not on the reader, which must not stall.
             session.pending().Resolve(event.permission_response().request_id(),
                                       event.permission_response().SerializeAsString());
-            return true;
+            return;
 
         case v1::ClientEvent::kConfirmationResponse:
             session.pending().Resolve(event.confirmation_response().request_id(),
                                       event.confirmation_response().chosen_option());
-            return true;
+            return;
 
         case v1::ClientEvent::kCancel:
             session.Cancel();
-            return true;
+            return;
 
         case v1::ClientEvent::kCommand: {
             // The command subsystem is not built. Answering explicitly beats
@@ -149,14 +153,13 @@ bool SessionServiceImpl::Dispatch(const v1::ClientEvent& event, agent::Session& 
                 logger_.warn("session {}: outbound queue full, dropped a command result",
                              session.info().session_id);
             }
-            return true;
+            return;
         }
 
         case v1::ClientEvent::PAYLOAD_NOT_SET:
             logger_.warn("session {}: client event with no payload", session.info().session_id);
-            return true;
+            return;
     }
-    return true;
 }
 
 grpc::Status SessionServiceImpl::OpenSession(
@@ -177,7 +180,14 @@ grpc::Status SessionServiceImpl::OpenSession(
                             "unknown session_id '" + first.session_id() + "'");
     }
 
-    session->MarkAttached();
+    if (!session->TryAttach()) {
+        // One stream per session. Attaching anyway would silently split the
+        // event stream between two writers draining one queue, and the first to
+        // close would terminate the session under the other -- both of which
+        // look like flaky output rather than a protocol error.
+        return grpc::Status(grpc::StatusCode::ALREADY_EXISTS,
+                            "session '" + first.session_id() + "' already has a client attached");
+    }
     attached_.fetch_add(1, std::memory_order_acq_rel);
 
     // The one and only Write() caller for this stream. It drains the SESSION's
@@ -193,7 +203,7 @@ grpc::Status SessionServiceImpl::OpenSession(
 
     v1::ClientEvent event;
     while (stream->Read(&event)) {
-        if (!Dispatch(event, *session)) break;
+        Dispatch(event, *session);
     }
 
     // Stream close TERMINATES the session -- there is no detached state in v1,
@@ -202,18 +212,13 @@ grpc::Status SessionServiceImpl::OpenSession(
     sessions_.Terminate(session->info().session_id);
     session->queue().Close();
     if (writer.joinable()) writer.join();
+    session->Detach();
 
     if (attached_.fetch_sub(1, std::memory_order_acq_rel) == 1 && on_last_client_detached_) {
         on_last_client_detached_();
     }
     return grpc::Status::OK;
 }
-
-namespace {
-grpc::Status NotYet(const char* what) {
-    return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, std::string(what) + " is not implemented yet");
-}
-}  // namespace
 
 grpc::Status SessionServiceImpl::GetMessages(grpc::ServerContext*,
                                              const v1::GetMessagesRequest* request,

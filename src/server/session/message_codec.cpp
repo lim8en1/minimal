@@ -27,11 +27,13 @@ nlohmann::json BlockToJson(const llm::ContentBlock& block) {
                 // input is arbitrary JSON and is preserved verbatim.
                 return {{"type", "tool_use"}, {"id", b.id}, {"name", b.name}, {"input", b.input}};
             } else {  // ToolResultBlock
+                // ToolResultContentBlock is variant<TextBlock> -- one
+                // alternative -- so this is a plain get, not a filter. The
+                // get_if that used to be here read like a guard while being
+                // vacuously true, which is worse than either.
                 nlohmann::json content = nlohmann::json::array();
                 for (const auto& inner : b.content) {
-                    if (const auto* text = std::get_if<llm::TextBlock>(&inner)) {
-                        content.push_back(TextBlockToJson(*text));
-                    }
+                    content.push_back(TextBlockToJson(std::get<llm::TextBlock>(inner)));
                 }
                 return {{"type", "tool_result"}, {"tool_use_id", b.tool_use_id},
                         {"content", std::move(content)}, {"is_error", b.is_error}};
