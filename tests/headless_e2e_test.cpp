@@ -21,6 +21,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "fakes.hpp"
+#include "temp_dir.hpp"
 #include "minimal/client/session_client.hpp"
 #include "minimal/rpc/server.hpp"
 #include "minimal/rpc/session_service.hpp"
@@ -32,9 +33,10 @@ namespace {
 
 struct HeadlessFixture {
     HeadlessFixture() {
-        dir = std::filesystem::temp_directory_path() / "minimal_headless_e2e_arena";
-        std::error_code ec;
-        std::filesystem::remove_all(dir, ec);
+        // A unique arena per process: catch_discover_tests runs every TEST_CASE
+        // as its own ctest entry, so a fixed path would be wiped out from under
+        // a concurrent run of this very file (ctest -j).
+        dir = tempdir.path();
         std::filesystem::create_directories(dir / "agents");
         std::filesystem::create_directories(dir / "work");
 
@@ -92,8 +94,6 @@ struct HeadlessFixture {
         if (server) server->Shutdown();
         server.reset();
         if (sessions) sessions->TerminateAll();
-        std::error_code ec;
-        std::filesystem::remove_all(dir, ec);
     }
 
     struct Step {
@@ -101,6 +101,7 @@ struct HeadlessFixture {
         std::vector<llm::StreamEvent> events;
     };
 
+    testing::TempDir tempdir;
     std::filesystem::path dir, socket;
     config::SkillRegistry skills;
     tools::ToolRegistry tools;

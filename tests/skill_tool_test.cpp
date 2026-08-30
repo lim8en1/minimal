@@ -7,6 +7,7 @@
 #include "minimal/common/logger.hpp"
 #include "minimal/config/skill_registry.hpp"
 #include "minimal/tools/skill_tool.hpp"
+#include "temp_dir.hpp"
 
 using namespace minimal;
 using namespace minimal::config;
@@ -14,19 +15,12 @@ using namespace minimal::tools;
 
 namespace {
 
+// Unique per process: catch_discover_tests runs every TEST_CASE as its own
+// ctest entry, so a fixed path would be wiped out from under a concurrent run
+// of this very file (ctest -j).
 struct TempConfigDir {
-    std::filesystem::path dir;
-
-    TempConfigDir() {
-        dir = std::filesystem::temp_directory_path() / "minimal_skill_tool_test_arena";
-        std::error_code ec;
-        std::filesystem::remove_all(dir, ec);
-        std::filesystem::create_directories(dir);
-    }
-    ~TempConfigDir() {
-        std::error_code ec;
-        std::filesystem::remove_all(dir, ec);
-    }
+    testing::TempDir tempdir;
+    std::filesystem::path dir = tempdir.path();
 
     void Write(const std::filesystem::path& relative, const std::string& contents) const {
         const auto path = dir / relative;

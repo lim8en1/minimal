@@ -3,27 +3,20 @@
 #include <fstream>
 
 #include "minimal/config/skill_registry.hpp"
+#include "temp_dir.hpp"
 
 using namespace minimal;
 using namespace minimal::config;
 
 namespace {
 
-// A throwaway config directory. Every test writes its skills/ tree fresh, so a
-// fixed arena path (removed up front) is fine and keeps failures inspectable.
+// A throwaway config directory. Every test writes its skills/ tree fresh. The
+// directory is unique per process: catch_discover_tests runs every TEST_CASE as
+// its own ctest entry, so a fixed path would be wiped out from under a
+// concurrent run of this very file (ctest -j).
 struct TempConfigDir {
-    std::filesystem::path dir;
-
-    TempConfigDir() {
-        dir = std::filesystem::temp_directory_path() / "minimal_skill_registry_test_arena";
-        std::error_code ec;
-        std::filesystem::remove_all(dir, ec);
-        std::filesystem::create_directories(dir);
-    }
-    ~TempConfigDir() {
-        std::error_code ec;
-        std::filesystem::remove_all(dir, ec);
-    }
+    testing::TempDir tempdir;
+    std::filesystem::path dir = tempdir.path();
 
     void Write(const std::filesystem::path& relative, const std::string& contents) const {
         const auto path = dir / relative;

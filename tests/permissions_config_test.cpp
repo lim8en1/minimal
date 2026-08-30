@@ -3,6 +3,7 @@
 #include <fstream>
 
 #include "minimal/config/permissions_config.hpp"
+#include "temp_dir.hpp"
 
 using namespace minimal::config;
 using minimal::tools::PermissionMode;
@@ -60,13 +61,12 @@ TEST_CASE("ParsePermissionsConfig: mcp_default_mode overridable", "[permissions_
 }
 
 TEST_CASE("LoadPermissionsConfig: reads and parses a real file", "[permissions_config]") {
-    const auto path = std::filesystem::temp_directory_path() / "minimal_permissions_config_test.json";
+    minimal::testing::TempDir tempdir;
+    const auto path = tempdir.path() / "permissions.json";
     { std::ofstream(path) << nlohmann::json{{"default_run_mode", "bypass"}}.dump(); }
 
     auto config = LoadPermissionsConfig(path);
     CHECK(config.default_run_mode == PermissionRunMode::Bypass);
-
-    std::filesystem::remove(path);
 }
 
 TEST_CASE("LoadPermissionsConfig: missing file throws", "[permissions_config]") {

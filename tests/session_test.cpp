@@ -11,6 +11,7 @@
 #include "fakes.hpp"
 #include "minimal/agent/session.hpp"
 #include "minimal/common/logger.hpp"
+#include "temp_dir.hpp"
 
 #include "bash_session_state.hpp"
 #include "bash_settings.hpp"
@@ -484,8 +485,8 @@ TEST_CASE("two sessions do not share bash state", "[session]") {
     // The real bash tool, forking real processes, keyed by session id. This is
     // the integration the per-session state map exists for -- and the one that
     // would silently regress into a single global shell.
-    const auto base = std::filesystem::temp_directory_path() / "minimal_session_bash_test";
-    std::filesystem::remove_all(base);
+    testing::TempDir tempdir;
+    const auto base = tempdir.path();
     std::filesystem::create_directories(base / "one");
     std::filesystem::create_directories(base / "two");
 
@@ -510,8 +511,6 @@ TEST_CASE("two sessions do not share bash state", "[session]") {
     CHECK(store.Has("sess-a"));
     CHECK(store.Has("sess-b"));
     CHECK(store.size() == 2);
-
-    std::filesystem::remove_all(base);
 }
 
 TEST_CASE("ending a session releases only that session's bash state", "[session]") {

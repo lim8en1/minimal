@@ -18,6 +18,7 @@
 
 #include "deadline.hpp"
 #include "fakes.hpp"
+#include "temp_dir.hpp"
 #include "minimal/rpc/server.hpp"
 #include "minimal/rpc/session_service.hpp"
 #include "minimal/v1/session_service.grpc.pb.h"
@@ -44,9 +45,10 @@ struct ProviderScript {
 
 struct ServiceFixture {
     ServiceFixture() {
-        dir = std::filesystem::temp_directory_path() / "minimal_session_service_test_arena";
-        std::error_code ec;
-        std::filesystem::remove_all(dir, ec);
+        // A unique arena per process: catch_discover_tests runs every TEST_CASE
+        // as its own ctest entry, so a fixed path would be wiped out from under
+        // a concurrent run of this very file (ctest -j).
+        dir = tempdir.path();
         std::filesystem::create_directories(dir / "agents");
         std::filesystem::create_directories(dir / "work");
 
@@ -117,8 +119,6 @@ struct ServiceFixture {
         if (server) server->Shutdown();
         server.reset();
         if (sessions) sessions->TerminateAll();
-        std::error_code ec;
-        std::filesystem::remove_all(dir, ec);
     }
 
     std::string CreateSession() {
@@ -134,6 +134,7 @@ struct ServiceFixture {
 
     commands::CommandRegistry commands;
     const commands::CommandRegistry* sessions_commands = nullptr;
+    testing::TempDir tempdir;
     std::filesystem::path dir, socket;
     config::SkillRegistry skills;
     tools::ToolRegistry tools;
