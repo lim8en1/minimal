@@ -2,7 +2,7 @@
 
 Companion to `ARCHITECTURE.md`, which remains the single source of truth for *design*. This document covers only *sequencing*: what is built, what blocks what, and what "done" means for each remaining piece. Every milestone cites the `ARCHITECTURE.md` section that specifies it; where this plan and that document disagree, that document wins and this one is stale.
 
-**Status: Milestones A, B and H are complete, and a post-merge review of all three has been actioned (§8). 444 tests passing, clean build, zero warnings.**
+**Status: Milestones A, B and H are complete, and a post-merge review of all three has been actioned (§8). The compaction trigger is now a strategy choice rather than a fixed token count (§10). 469 tests passing, clean build, zero warnings.**
 
 `minimal -p` holds real conversations against a local model using `read`, `bash`, and `skill`; a permission prompt round-trips over the wire in both directions; a session grant silences the second prompt; the server exits when the last client detaches. Transcripts persist to SQLite and survive the server process — `GetMessages` and `ListSessions` answer from the database, so a session the server has no live object for still reads back. `cmake --install` now produces a config dir the server actually starts against (§8). **Sessions cannot yet be resumed**, only read (§4 B).
 
@@ -429,8 +429,9 @@ the user does not edit.
 
 `providers.json` seeds empty on purpose — a `base_url` that is right on one machine is wrong on the
 next, and a plausible default pointing at nothing is worse than an obviously empty one.
-`context_compaction_trigger_tokens` defaults to `0`, which means *never*, so the seeded
-`settings.json` sets a real value: without it the prompt H delivered still never gets used.
+The compaction trigger seeds as `{"percent": 80}` (§10): it is live the moment the user's provider
+entry declares `context_window_tokens` (both `providers.example.json` entries do), and until then
+the loop warns once per session that auto-compaction is off rather than going silently inert.
 
 ### Efficiency
 
@@ -507,3 +508,31 @@ gRPC rather than of this code.
 the first draft scripted a response for turn 1 that turn 1 never consumed, because the cancel breaks
 the loop before it asks again. Turn 2 silently ate it and reported "no prompt". A scripted fake
 provider makes the number of provider calls per turn an assertion whether or not you meant it to be.
+
+---
+
+## 10. Compaction trigger: from token count to strategy choice
+
+Post-milestone change, landed against the A+B+H tree. The trigger was a single server-wide number
+(`memory.context_compaction_trigger_tokens`) that had to anticipate every model's window at config
+time — 120000 is right for one backend and wrong for the next three. It is now a one-of strategy
+under `memory.context_compaction_trigger`: `{"percent": 1..100}` of the provider's
+`context_window_tokens`, `{"tokens": N}` (the old behaviour), or `{"buffer_tokens": N}` (fire when
+the context comes within N of the window edge). Absent means never; the loader rejects anything but
+exactly one known key, because a silently-ignored typo here is compaction going inert — the exact
+failure the bundled-assets tests exist to catch.
+
+**What it needed.** The window was parsed from `providers.json` and consumed by nothing. It now
+rides on the resolved `AgentPreset`, not on `LoopConfig`, because `/agent` can switch provider
+entries and the trigger must track the window in use. `resolve_compaction_trigger` is a pure
+function of (strategy, window), returning 0 for "never" — and the agent loop warns **once per
+session** when a window-relative strategy meets an entry that declared no window, since that is a
+live state (the seeded `providers.json` is empty), not a corner case. This rewrites §8's cold-start
+rationale: the seed is now `{"percent": 80}`, live the moment an entry declares its window.
+
+**Compatibility.** The legacy flat key still parses as the fixed strategy, so an existing
+`settings.json` does not silently stop compacting; the new object wins when both are present.
+
+**Deliberately not touched.** The cut is still half the working history by message count —
+`compaction_keep_recent_tokens` remains the §7 gap. This changed *when* compaction fires, not what
+it keeps.

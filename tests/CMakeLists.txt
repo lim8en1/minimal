@@ -13,6 +13,7 @@ add_executable(minimal_tests
     frontmatter_test.cpp
     name_registry_test.cpp
     compaction_boundary_test.cpp
+    compaction_trigger_test.cpp
     context_compactor_test.cpp
     bundled_assets_test.cpp
     chat_request_bench.cpp

@@ -40,7 +40,7 @@ void WriteSeededConfig(const std::filesystem::path& dir) {
           R"("model_name":"m","max_tokens":4096}])");
     Write(dir / "settings.json",
           R"({"default_agent_preset":"build","default_provider":"local",)"
-          R"("memory":{"auto_compact":true,"context_compaction_trigger_tokens":120000}})");
+          R"("memory":{"auto_compact":true,"context_compaction_trigger":{"percent":80}}})");
     Write(dir / "permissions.json", R"({"default_run_mode":"normal"})");
     Write(dir / "agents" / "build.md",
           "---\nname: build\nprovider: default\n---\nYou are a coding agent.\n");

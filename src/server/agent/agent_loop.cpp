@@ -7,6 +7,7 @@
 #include <variant>
 
 #include "minimal/agent/compaction_boundary.hpp"
+#include "minimal/agent/compaction_trigger.hpp"
 
 namespace minimal::agent {
 namespace {
@@ -138,8 +139,39 @@ llm::ChatRequest AgentLoop::BuildChatRequest() const {
 
 void AgentLoop::MaybeCompact() {
     if (!config_.auto_compact) return;
-    if (config_.compaction_trigger_tokens <= 0) return;
-    if (tokens_.last_occupancy() < config_.compaction_trigger_tokens) return;
+
+    // The strategy is config, but the threshold is per-session: window-relative
+    // strategies resolve against the window of the provider entry THIS session
+    // is currently using (an /agent switch changes it).
+    const std::int64_t trigger =
+        resolve_compaction_trigger(config_.compaction_trigger, preset_.context_window_tokens);
+    if (trigger <= 0) {
+        using Kind = config::CompactionTriggerSettings::Kind;
+        const bool window_relative = config_.compaction_trigger.kind == Kind::PercentOfWindow ||
+                                     config_.compaction_trigger.kind == Kind::WindowBuffer;
+        if (window_relative && !compaction_trigger_warned_) {
+            compaction_trigger_warned_ = true;
+            if (!preset_.context_window_tokens) {
+                // Not an error state -- a local backend may genuinely not know its
+                // window -- but compaction is now off for this session, and silence
+                // is how that used to go unnoticed.
+                session_.logger.warn(
+                    "session {}: compaction trigger is window-relative but the provider entry "
+                    "declares no context_window_tokens; auto-compaction is disabled for this "
+                    "session",
+                    session_.session_id);
+            } else {
+                // Only WindowBuffer can reach this with a window present: a buffer
+                // at least as large as the window leaves nothing to trigger on.
+                session_.logger.warn(
+                    "session {}: compaction buffer_tokens is not smaller than the provider's "
+                    "context_window_tokens; auto-compaction is disabled for this session",
+                    session_.session_id);
+            }
+        }
+        return;
+    }
+    if (tokens_.last_occupancy() < trigger) return;
     if (!compactor_) return;
     if (history_.size() < 2) return;
     if (compaction_failed_this_turn_) return;

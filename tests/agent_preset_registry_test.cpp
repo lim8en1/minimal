@@ -70,8 +70,27 @@ TEST_CASE("AgentPresetRegistry: happy path resolves provider fields and system p
     CHECK(preset.provider.model_name == "gpt-4o-mini");
     CHECK(preset.provider.api_key.empty());
     CHECK(preset.parameters == nlohmann::json{{"temperature", 0.5}});
+    CHECK_FALSE(preset.context_window_tokens.has_value());
     CHECK(preset.system_prompt == "You are a build agent.\n");
     CHECK_FALSE(preset.is_subagent);
+}
+
+TEST_CASE("AgentPresetRegistry: the entry's context_window_tokens reaches the resolved preset",
+          "[agent_preset_registry]") {
+    // Load-bearing for the window-relative compaction triggers: they resolve
+    // against the preset's window, so a value dropped here would silently
+    // disable percent/buffer triggers on every session.
+    TempConfigDir config;
+    config.WriteDefaults();
+    auto entry = TempConfigDir::DefaultProviderEntry();
+    entry["context_window_tokens"] = 131072;
+    config.WriteJson("providers.json", nlohmann::json::array({entry}));
+    config::SkillRegistry skills = config::SkillRegistry::Load(config.dir);
+    AgentPresetRegistry registry(config.dir, skills);
+
+    const AgentPreset& preset = registry.Resolve("build");
+    REQUIRE(preset.context_window_tokens.has_value());
+    CHECK(*preset.context_window_tokens == 131072);
 }
 
 TEST_CASE("AgentPresetRegistry: preset model override wins over the provider entry's model_name",

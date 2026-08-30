@@ -5,7 +5,7 @@
 
   "memory": {
     "auto_compact": true,
-    "context_compaction_trigger_tokens": 120000,
+    "context_compaction_trigger": { "percent": 80 },
     "scrollback_page_size": 100
   },
 

@@ -26,6 +26,27 @@ using namespace std::chrono_literals;
 
 namespace {
 
+config::CompactionTriggerSettings FixedTrigger(std::int64_t tokens) {
+    config::CompactionTriggerSettings trigger;
+    trigger.kind = config::CompactionTriggerSettings::Kind::FixedTokens;
+    trigger.tokens = tokens;
+    return trigger;
+}
+
+config::CompactionTriggerSettings PercentTrigger(int percent) {
+    config::CompactionTriggerSettings trigger;
+    trigger.kind = config::CompactionTriggerSettings::Kind::PercentOfWindow;
+    trigger.percent = percent;
+    return trigger;
+}
+
+config::CompactionTriggerSettings BufferTrigger(std::int64_t buffer_tokens) {
+    config::CompactionTriggerSettings trigger;
+    trigger.kind = config::CompactionTriggerSettings::Kind::WindowBuffer;
+    trigger.buffer_tokens = buffer_tokens;
+    return trigger;
+}
+
 // Assembles the loop and everything it needs. Members are declared in
 // destruction-safe order: the loop refers to the others, so it is destroyed
 // first.
@@ -377,7 +398,7 @@ TEST_CASE("compaction fires past the threshold and never touches the store",
         return agent::CompactionResult{UserText("[summary]"), 0};
     };
     // TextResponse reports 10 in + 5 out = occupancy 15.
-    h.Build({}, agent::LoopConfig{.auto_compact = true, .compaction_trigger_tokens = 10},
+    h.Build({}, agent::LoopConfig{.auto_compact = true, .compaction_trigger = FixedTrigger(10)},
             compactor);
 
     h.loop->RunTurn(UserText("a"));
@@ -402,13 +423,101 @@ TEST_CASE("auto_compact off means no compaction regardless of occupancy",
         ++compactions;
         return agent::CompactionResult{UserText("[summary]"), 0};
     };
-    h.Build({}, agent::LoopConfig{.auto_compact = false, .compaction_trigger_tokens = 1},
+    h.Build({}, agent::LoopConfig{.auto_compact = false, .compaction_trigger = FixedTrigger(1)},
             compactor);
 
     h.loop->RunTurn(UserText("a"));
     h.loop->RunTurn(UserText("b"));
 
     CHECK(compactions == 0);
+}
+
+TEST_CASE("window-relative triggers resolve against the preset's context window",
+          "[agent_loop][compaction]") {
+    // The threshold is not config alone: the SAME strategy fires or not
+    // depending on the window of the provider entry this session resolved.
+    // TextResponse reports 10 in + 5 out = occupancy 15 throughout.
+    auto run_with = [](config::CompactionTriggerSettings trigger,
+                       std::optional<std::int64_t> window) {
+        Harness h;
+        h.provider.PushResponse(TextResponse("one"));
+        h.provider.PushResponse(TextResponse("two"));
+
+        int compactions = 0;
+        auto compactor = [&compactions](const std::vector<llm::Message>&, llm::LlmProvider&,
+                                        const agent::CompactionRequest&) {
+            ++compactions;
+            return agent::CompactionResult{UserText("[summary]"), 0};
+        };
+        agent::AgentPreset preset;
+        preset.context_window_tokens = window;
+        h.Build(std::move(preset),
+                agent::LoopConfig{.auto_compact = true, .compaction_trigger = trigger},
+                compactor);
+        h.loop->RunTurn(UserText("a"));
+        h.loop->RunTurn(UserText("b"));
+        return compactions;
+    };
+
+    SECTION("percent of window: 50% of 20 = 10, below the occupancy of 15") {
+        CHECK(run_with(PercentTrigger(50), 20) >= 1);
+    }
+    SECTION("percent of window: 80% of 20 = 16, above the occupancy of 15") {
+        CHECK(run_with(PercentTrigger(80), 20) == 0);
+    }
+    SECTION("buffer below window: 20 - 6 = 14, below the occupancy of 15") {
+        CHECK(run_with(BufferTrigger(6), 20) >= 1);
+    }
+    SECTION("buffer below window: 20 - 2 = 18, above the occupancy of 15") {
+        CHECK(run_with(BufferTrigger(2), 20) == 0);
+    }
+}
+
+TEST_CASE("a window-relative trigger with no window never compacts",
+          "[agent_loop][compaction][invariant]") {
+    // Providers.json entries need not declare context_window_tokens (the seeded
+    // file is empty on cold start), so "window-relative trigger, no window" is a
+    // real state, not a corner case. The loop must stay inert rather than guess
+    // a threshold. The percent is deliberately BELOW the occupancy of 15: a
+    // mutation that degrades to "use the percent as a token count" would then
+    // fire here and fail this test, instead of passing by arithmetic accident.
+    Harness h;
+    h.provider.PushResponse(TextResponse("one"));
+    h.provider.PushResponse(TextResponse("two"));
+
+    int compactions = 0;
+    auto compactor = [&compactions](const std::vector<llm::Message>&, llm::LlmProvider&,
+                                    const agent::CompactionRequest&) {
+        ++compactions;
+        return agent::CompactionResult{UserText("[summary]"), 0};
+    };
+    h.Build({}, agent::LoopConfig{.auto_compact = true, .compaction_trigger = PercentTrigger(10)},
+            compactor);
+
+    h.loop->RunTurn(UserText("a"));
+    h.loop->RunTurn(UserText("b"));
+
+    CHECK(compactions == 0);
+    // Same strategy, same occupancy -- only the window differs. 10% of 20 is 2,
+    // far below 15, so the window alone is what arms the trigger.
+    Harness armed;
+    armed.provider.PushResponse(TextResponse("one"));
+    armed.provider.PushResponse(TextResponse("two"));
+    int armed_compactions = 0;
+    auto armed_compactor = [&armed_compactions](const std::vector<llm::Message>&,
+                                                llm::LlmProvider&,
+                                                const agent::CompactionRequest&) {
+        ++armed_compactions;
+        return agent::CompactionResult{UserText("[summary]"), 0};
+    };
+    agent::AgentPreset preset;
+    preset.context_window_tokens = 20;
+    armed.Build(std::move(preset),
+                agent::LoopConfig{.auto_compact = true, .compaction_trigger = PercentTrigger(10)},
+                armed_compactor);
+    armed.loop->RunTurn(UserText("a"));
+    armed.loop->RunTurn(UserText("b"));
+    CHECK(armed_compactions >= 1);
 }
 
 namespace {
@@ -455,7 +564,7 @@ TEST_CASE("the production compactor runs end to end and never splits a tool pair
     preset.compression_prompt = "DEFAULT PROMPT";
     // TextResponse/ToolUseResponse report 10 in + 5 out = occupancy 15, past the
     // trigger of 12, so compaction is armed from the second loop iteration on.
-    h.Build(std::move(preset), agent::LoopConfig{.auto_compact = true, .compaction_trigger_tokens = 12},
+    h.Build(std::move(preset), agent::LoopConfig{.auto_compact = true, .compaction_trigger = FixedTrigger(12)},
             &agent::compact_messages);
 
     // Main calls: tu1, tu2, tu3, done. Compaction calls interleave wherever the
@@ -497,7 +606,7 @@ TEST_CASE("a provider error during compaction leaves history untouched and cools
     h.AddTool("read");
     agent::AgentPreset preset;
     preset.compression_prompt = "DEFAULT PROMPT";
-    h.Build(std::move(preset), agent::LoopConfig{.auto_compact = true, .compaction_trigger_tokens = 12},
+    h.Build(std::move(preset), agent::LoopConfig{.auto_compact = true, .compaction_trigger = FixedTrigger(12)},
             &agent::compact_messages);
 
     // Iter 2's compaction attempt hits the error; without the per-turn cooldown it
@@ -531,7 +640,7 @@ TEST_CASE("the preset's compression_prompt reaches the summarization request",
     h.AddTool("read");
     agent::AgentPreset preset;
     preset.compression_prompt = "OVERRIDE PROMPT";
-    h.Build(std::move(preset), agent::LoopConfig{.auto_compact = true, .compaction_trigger_tokens = 12},
+    h.Build(std::move(preset), agent::LoopConfig{.auto_compact = true, .compaction_trigger = FixedTrigger(12)},
             &agent::compact_messages);
 
     // Iteration 1's tool call pushes occupancy past the trigger, so iteration 2

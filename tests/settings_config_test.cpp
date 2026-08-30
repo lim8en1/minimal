@@ -14,7 +14,7 @@ TEST_CASE("ParseSettingsConfig: empty doc yields every documented default", "[se
     CHECK(config.default_theme.empty());
     CHECK(config.max_concurrent_subagents == 4);
     CHECK(config.memory.auto_compact == true);
-    CHECK(config.memory.context_compaction_trigger_tokens == 0);
+    CHECK(config.memory.context_compaction_trigger.kind == CompactionTriggerSettings::Kind::Never);
     CHECK(config.memory.compaction_keep_recent_tokens == 0);
     CHECK(config.memory.scrollback_page_size == 0);
     CHECK(config.tools_view.stdout_buffer_lines == 100);
@@ -41,16 +41,104 @@ TEST_CASE("ParseSettingsConfig: top-level fields overridable individually", "[se
 
 TEST_CASE("ParseSettingsConfig: memory settings overridable", "[settings_config]") {
     nlohmann::json doc = {{"memory",
-                            {{"auto_compact", false},
-                             {"context_compaction_trigger_tokens", 100000},
-                             {"compaction_keep_recent_tokens", 20000},
-                             {"scrollback_page_size", 50}}}};
+                             {{"auto_compact", false},
+                              {"context_compaction_trigger", {{"tokens", 100000}}},
+                              {"compaction_keep_recent_tokens", 20000},
+                              {"scrollback_page_size", 50}}}};
 
     auto config = ParseSettingsConfig(doc);
     CHECK(config.memory.auto_compact == false);
-    CHECK(config.memory.context_compaction_trigger_tokens == 100000);
+    CHECK(config.memory.context_compaction_trigger.kind ==
+          CompactionTriggerSettings::Kind::FixedTokens);
+    CHECK(config.memory.context_compaction_trigger.tokens == 100000);
     CHECK(config.memory.compaction_keep_recent_tokens == 20000);
     CHECK(config.memory.scrollback_page_size == 50);
+}
+
+TEST_CASE("ParseSettingsConfig: compaction trigger is a one-of strategy choice",
+          "[settings_config]") {
+    SECTION("percent of the provider's context window") {
+        const auto config = ParseSettingsConfig(
+            {{"memory", {{"context_compaction_trigger", {{"percent", 80}}}}}});
+        CHECK(config.memory.context_compaction_trigger.kind ==
+              CompactionTriggerSettings::Kind::PercentOfWindow);
+        CHECK(config.memory.context_compaction_trigger.percent == 80);
+    }
+    SECTION("fixed token budget") {
+        const auto config = ParseSettingsConfig(
+            {{"memory", {{"context_compaction_trigger", {{"tokens", 120000}}}}}});
+        CHECK(config.memory.context_compaction_trigger.kind ==
+              CompactionTriggerSettings::Kind::FixedTokens);
+        CHECK(config.memory.context_compaction_trigger.tokens == 120000);
+    }
+    SECTION("buffer below the context window") {
+        const auto config = ParseSettingsConfig(
+            {{"memory", {{"context_compaction_trigger", {{"buffer_tokens", 16000}}}}}});
+        CHECK(config.memory.context_compaction_trigger.kind ==
+              CompactionTriggerSettings::Kind::WindowBuffer);
+        CHECK(config.memory.context_compaction_trigger.buffer_tokens == 16000);
+    }
+    SECTION("more than one strategy key is an error") {
+        CHECK_THROWS_AS(ParseSettingsConfig(
+                            {{"memory", {{"context_compaction_trigger",
+                                           {{"percent", 80}, {"tokens", 120000}}}}}}),
+                        std::runtime_error);
+    }
+    SECTION("an unknown key is an error, not a silent no-op") {
+        CHECK_THROWS_AS(ParseSettingsConfig(
+                            {{"memory", {{"context_compaction_trigger", {{"percnet", 80}}}}}}),
+                        std::runtime_error);
+    }
+    SECTION("a non-object trigger is an error") {
+        CHECK_THROWS_AS(ParseSettingsConfig({{"memory", {{"context_compaction_trigger", 80}}}}),
+                        std::runtime_error);
+    }
+    SECTION("out-of-range values are errors") {
+        CHECK_THROWS_AS(ParseSettingsConfig(
+                            {{"memory", {{"context_compaction_trigger", {{"percent", 0}}}}}}),
+                        std::runtime_error);
+        CHECK_THROWS_AS(ParseSettingsConfig(
+                            {{"memory", {{"context_compaction_trigger", {{"percent", 101}}}}}}),
+                        std::runtime_error);
+        CHECK_THROWS_AS(ParseSettingsConfig(
+                            {{"memory", {{"context_compaction_trigger", {{"tokens", 0}}}}}}),
+                        std::runtime_error);
+        CHECK_THROWS_AS(ParseSettingsConfig(
+                            {{"memory", {{"context_compaction_trigger",
+                                           {{"buffer_tokens", -1}}}}}}),
+                        std::runtime_error);
+        CHECK_THROWS_AS(ParseSettingsConfig(
+                            {{"memory", {{"context_compaction_trigger",
+                                           {{"percent", "eighty"}}}}}}),
+                        std::runtime_error);
+    }
+}
+
+TEST_CASE("ParseSettingsConfig: legacy context_compaction_trigger_tokens still parses",
+          "[settings_config]") {
+    // Pre-strategy config dirs must not silently stop compacting. The new object
+    // wins when both are present.
+    SECTION("legacy key alone") {
+        const auto config = ParseSettingsConfig(
+            {{"memory", {{"context_compaction_trigger_tokens", 100000}}}});
+        CHECK(config.memory.context_compaction_trigger.kind ==
+              CompactionTriggerSettings::Kind::FixedTokens);
+        CHECK(config.memory.context_compaction_trigger.tokens == 100000);
+    }
+    SECTION("legacy zero keeps its old meaning of never") {
+        const auto config = ParseSettingsConfig(
+            {{"memory", {{"context_compaction_trigger_tokens", 0}}}});
+        CHECK(config.memory.context_compaction_trigger.kind ==
+              CompactionTriggerSettings::Kind::Never);
+    }
+    SECTION("new object wins over the legacy key") {
+        const auto config =
+            ParseSettingsConfig({{"memory", {{"context_compaction_trigger_tokens", 100000},
+                                               {"context_compaction_trigger", {{"percent", 80}}}}}});
+        CHECK(config.memory.context_compaction_trigger.kind ==
+              CompactionTriggerSettings::Kind::PercentOfWindow);
+        CHECK(config.memory.context_compaction_trigger.percent == 80);
+    }
 }
 
 TEST_CASE("ParseSettingsConfig: tools settings pass through as raw JSON", "[settings_config]") {

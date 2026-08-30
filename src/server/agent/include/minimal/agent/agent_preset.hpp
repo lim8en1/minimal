@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -39,6 +41,13 @@ struct AgentPreset {
     // makes, summarization included -- a cap the conversation honours and the
     // compactor ignores is how a summary gets truncated.
     std::optional<int> max_tokens;
+    // Also from the entry. The window the compaction trigger's window-relative
+    // strategies (percent / buffer) resolve against; it rides on the preset,
+    // not on LoopConfig, because /agent can switch provider entries mid-session
+    // and the trigger must track the window actually in use. nullopt means the
+    // entry declared none, and those strategies never fire (see
+    // compaction_trigger.hpp).
+    std::optional<std::int64_t> context_window_tokens;
 
     tools::PermissionPolicy permission_mode;
     tools::McpPermissionPolicy mcp_permissions;
