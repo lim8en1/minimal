@@ -275,6 +275,13 @@ message CreateSessionRequest {
   // @-mentions, SuggestPaths, and bash's initial cwd. The client supplies its cwd.
   string project_root = 3;
   PermissionRunMode run_mode = 4;
+  // Non-empty means RESUME: reopen this stored session rather than creating a
+  // new one. The stored row's name, agent_preset and project_root govern, so
+  // those fields must be empty here (the client already has them from
+  // ListSessions); run_mode still applies, being a property of the client.
+  // The server loads the stored transcript as the loop's working history
+  // WITHOUT re-appending it -- the next append continues at MAX(seq) + 1.
+  string session_id = 5;
 }
 
 message CreateSessionResponse {

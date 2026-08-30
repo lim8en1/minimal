@@ -35,3 +35,23 @@ TEST_CASE("a zero-usage turn contributes 0, not a crash", "[token_accounting]") 
 TEST_CASE("context_occupancy is a pure function of one Usage", "[token_accounting]") {
     CHECK(context_occupancy(Usage{10, 5, 0, 0}) == 15);
 }
+
+TEST_CASE("SeedOccupancy sets the trigger input without touching cumulative totals",
+          "[token_accounting]") {
+    // Resume seeds an ESTIMATE of the loaded context so the compaction trigger
+    // can fire before the first provider call. The cumulative totals are
+    // genuinely additive quantities -- a synthetic seed must not pollute them.
+    TokenAccumulator acc;
+    acc.SeedOccupancy(4000);
+
+    CHECK(acc.last_occupancy() == 4000);
+    CHECK(acc.last_input_tokens() == 4000);
+    CHECK(acc.cumulative().total_input_tokens == 0);
+    CHECK(acc.cumulative().total_output_tokens == 0);
+
+    // The first real turn replaces the estimate, and only real usage accumulates.
+    acc.RecordTurn(Usage{5000, 100, 0, 0});
+    CHECK(acc.last_occupancy() == 5100);
+    CHECK(acc.cumulative().total_input_tokens == 5000);
+    CHECK(acc.cumulative().total_output_tokens == 100);
+}

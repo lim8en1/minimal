@@ -82,11 +82,16 @@ struct ServiceFixture {
     void Start() {
         presets = std::make_unique<agent::AgentPresetRegistry>(dir, skills);
         auto script_copy = script;
-        providers.Register("fake", [script_copy](const llm::ProviderConfig&) {
+        providers.Register("fake", [script_copy, this](const llm::ProviderConfig&) {
             auto provider = std::make_unique<testing::FakeLlmProvider>();
             for (const auto& step : script_copy->steps) {
                 provider->PushResponse(step.response, step.events);
             }
+            // Recorded so tests can assert what a session's provider RECEIVED
+            // (e.g. that a resumed session replayed its stored history). Valid
+            // only while that session is alive -- the Session owns its provider,
+            // so assert before the session's stream closes.
+            created_providers.push_back(provider.get());
             return provider;
         });
         observers = std::make_unique<agent::SessionObserverRegistry>(common::DefaultLogger());
@@ -141,6 +146,7 @@ struct ServiceFixture {
     std::unique_ptr<rpc::Server> server;
     std::shared_ptr<grpc::Channel> channel;
     std::unique_ptr<v1::SessionService::Stub> stub;
+    std::vector<testing::FakeLlmProvider*> created_providers;
     std::chrono::milliseconds attach_guard = std::chrono::seconds(10);
     std::atomic<bool> last_detach{false};
 };
@@ -837,4 +843,248 @@ TEST_CASE("a turn's ServerEvent payloads arrive in order", "[session_service]") 
     REQUIRE(first_stop != order.end());
     CHECK(first_stop < start);
     CHECK(std::count(order.begin(), order.end(), "message_stop") == 2);
+}
+
+// --- Resume -------------------------------------------------------------------
+
+namespace {
+
+// Waits for a session to leave the registry, which happens when its stream
+// closes and the termination completes.
+void WaitForTerminated(agent::SessionRegistry& sessions, const std::string& session_id) {
+    const auto deadline = std::chrono::steady_clock::now() + 5s;
+    while (sessions.Find(session_id) != nullptr && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(10ms);
+    }
+    REQUIRE(sessions.Find(session_id) == nullptr);
+}
+
+grpc::Status ResumeOverWire(v1::SessionService::Stub& stub, const std::string& session_id,
+                            v1::CreateSessionResponse* response) {
+    grpc::ClientContext context;
+    v1::CreateSessionRequest request;
+    request.set_session_id(session_id);
+    return stub.CreateSession(&context, request, response);
+}
+
+}  // namespace
+
+TEST_CASE("a stored session resumes with its history intact", "[session_service][resume]") {
+    // The gap this closes: a transcript could be READ (GetMessages, ListSessions)
+    // but not resumed -- the loop had no seeded-history path, so a reopened
+    // session would either start blank or re-append the whole transcript as
+    // duplicate rows.
+    ServiceFixture fixture;
+    fixture.Script(testing::TextResponse("first answer"));
+    fixture.Start();
+
+    // Phase 1: an ordinary session, one turn, then the stream closes and it
+    // terminates -- the transcript survives in SQLite.
+    const std::string session_id = fixture.CreateSession();
+    {
+        grpc::ClientContext context;
+        auto stream = fixture.stub->OpenSession(&context);
+        REQUIRE(stream->Write(ChatTurn(session_id, "remember the number 7")));
+        REQUIRE(WaitForTurnCompleted(*stream));
+        (void)DrainAndFinish(stream);
+    }
+    WaitForTerminated(*fixture.sessions, session_id);
+
+    // Phase 2: resume. The resumed incarnation gets its own script.
+    fixture.script->steps.clear();
+    fixture.Script(testing::TextResponse("it was 7"));
+
+    v1::CreateSessionResponse resumed;
+    REQUIRE(ResumeOverWire(*fixture.stub, session_id, &resumed).ok());
+    CHECK(resumed.session().session_id() == session_id);  // the SAME session
+    CHECK(resumed.session().message_count() == 2);        // its stored transcript
+
+    grpc::ClientContext context;
+    auto stream = fixture.stub->OpenSession(&context);
+    REQUIRE(stream->Write(ChatTurn(session_id, "what number did I give you?")));
+    REQUIRE(WaitForTurnCompleted(*stream));
+
+    // The resumed session's provider received the stored history ahead of the
+    // new turn -- asserted while the session is still alive (the Session owns
+    // its provider). Removing the seeded-history load fails this: the provider
+    // would see only the new user message.
+    REQUIRE(fixture.created_providers.size() == 2);
+    const auto* provider = fixture.created_providers.back();
+    REQUIRE(provider->requests().size() == 1);
+    const auto& sent = provider->requests().front().messages;
+    REQUIRE(sent.size() == 3);
+    CHECK(std::get<llm::TextBlock>(sent[0].content.front()).text == "remember the number 7");
+    CHECK(std::get<llm::TextBlock>(sent[1].content.front()).text == "first answer");
+    CHECK(std::get<llm::TextBlock>(sent[2].content.front()).text == "what number did I give you?");
+
+    (void)DrainAndFinish(stream);
+    WaitForTerminated(*fixture.sessions, session_id);
+
+    // The transcript is one contiguous sequence: stored rows kept, new rows
+    // continuing at MAX(seq) + 1, and NOTHING duplicated. Re-appending the
+    // seed would show up here as repeated content.
+    grpc::ClientContext messages_context;
+    v1::GetMessagesRequest messages_request;
+    messages_request.set_session_id(session_id);
+    v1::GetMessagesResponse messages;
+    REQUIRE(fixture.stub->GetMessages(&messages_context, messages_request, &messages).ok());
+    REQUIRE(messages.messages_size() == 4);
+    for (int i = 0; i < 4; ++i) {
+        CHECK(messages.messages(i).seq() == 3 - i);  // descending on the wire
+    }
+    CHECK(messages.messages(3).message().content(0).text().text() == "remember the number 7");
+    CHECK(messages.messages(2).message().content(0).text().text() == "first answer");
+    CHECK(messages.messages(1).message().content(0).text().text() == "what number did I give you?");
+    CHECK(messages.messages(0).message().content(0).text().text() == "it was 7");
+
+    // Still exactly one session -- resume never mints a row.
+    grpc::ClientContext list_context;
+    v1::ListSessionsRequest list_request;
+    list_request.set_include_all_dirs(true);
+    v1::ListSessionsResponse list;
+    REQUIRE(fixture.stub->ListSessions(&list_context, list_request, &list).ok());
+    REQUIRE(list.sessions_size() == 1);
+    CHECK(list.sessions(0).session_id() == session_id);
+    CHECK(list.sessions(0).message_count() == 4);
+}
+
+TEST_CASE("resume validates its request", "[session_service][resume]") {
+    ServiceFixture fixture;
+    fixture.Script(testing::TextResponse("hi"));
+    fixture.Start();
+
+    SECTION("an unknown session is NOT_FOUND") {
+        v1::CreateSessionResponse response;
+        const auto status = ResumeOverWire(*fixture.stub, "01ARZ3NDEKTSV4RRFFQ69G5FAV", &response);
+        CHECK(status.error_code() == grpc::StatusCode::NOT_FOUND);
+    }
+
+    SECTION("creation fields are refused rather than silently ignored") {
+        const std::string session_id = fixture.CreateSession();
+        grpc::ClientContext context;
+        v1::CreateSessionRequest request;
+        request.set_session_id(session_id);
+        request.set_agent_preset("main");  // the stored preset governs
+        v1::CreateSessionResponse response;
+        const auto status = fixture.stub->CreateSession(&context, request, &response);
+        CHECK(status.error_code() == grpc::StatusCode::INVALID_ARGUMENT);
+        // The refused resume left the original session untouched.
+        CHECK(fixture.sessions->Find(session_id) != nullptr);
+    }
+
+    SECTION("an already-open session is refused") {
+        const std::string session_id = fixture.CreateSession();
+        grpc::ClientContext open_context;
+        auto stream = fixture.stub->OpenSession(&open_context);
+        REQUIRE(stream->Write(ChatTurn(session_id, "stay open")));
+        v1::ServerEvent event;
+        REQUIRE(stream->Read(&event));  // attached now
+
+        v1::CreateSessionResponse response;
+        const auto status = ResumeOverWire(*fixture.stub, session_id, &response);
+        CHECK(status.error_code() == grpc::StatusCode::ALREADY_EXISTS);
+
+        (void)DrainAndFinish(stream);
+    }
+
+    SECTION("a subagent session cannot be resumed") {
+        const auto parent = fixture.db->CreateSession("parent", std::nullopt, "/p", "main");
+        const auto child = fixture.db->CreateSession("child", parent.session_id, "/p", "main");
+        v1::CreateSessionResponse response;
+        const auto status = ResumeOverWire(*fixture.stub, child.session_id, &response);
+        CHECK(status.error_code() == grpc::StatusCode::FAILED_PRECONDITION);
+    }
+}
+
+TEST_CASE("resume repairs a transcript torn mid-tool-sequence", "[session_service][resume]") {
+    // The torn state is what a CRASH leaves: the assistant's tool_use persisted,
+    // its results never written. A live cancellation cannot produce it -- a
+    // cancelled turn still appends denial results before breaking -- so the rows
+    // are crafted directly, exactly as a killed server process would leave them.
+    // Replaying the tail as-is is a hard 400 on both wire formats, so resume
+    // must persist synthesized error results BEFORE the session runs.
+    ServiceFixture fixture;
+    fixture.tools.Register(
+        std::make_unique<testing::FakeTool>("bash", tools::ToolCategory::Execute, "ran it"));
+    fixture.Script(testing::TextResponse("recovered"));
+    fixture.Start();
+
+    const auto row = fixture.db->CreateSession("", std::nullopt,
+                                               (fixture.dir / "work").string(), "main");
+    fixture.db->AppendMessage(row.session_id,
+                              llm::Message{llm::Role::User, {llm::TextBlock{"build it"}}});
+    llm::Message tool_use{llm::Role::Assistant, {}};
+    tool_use.content.push_back(llm::ToolUseBlock{"call-1", "bash", {{"command", "make"}}});
+    fixture.db->AppendMessage(row.session_id, tool_use);
+    // ...and nothing after it: the process died before results were appended.
+
+    v1::CreateSessionResponse resumed;
+    REQUIRE(ResumeOverWire(*fixture.stub, row.session_id, &resumed).ok());
+
+    // The repair is a REAL persisted row: user-role, one error ToolResultBlock
+    // per unanswered tool_use, sitting between the torn tail and anything the
+    // resumed session appends.
+    grpc::ClientContext messages_context;
+    v1::GetMessagesRequest messages_request;
+    messages_request.set_session_id(row.session_id);
+    v1::GetMessagesResponse messages;
+    REQUIRE(fixture.stub->GetMessages(&messages_context, messages_request, &messages).ok());
+    REQUIRE(messages.messages_size() == 3);
+    CHECK(messages.messages(2).seq() == 0);  // user "build it"
+    CHECK(messages.messages(1).seq() == 1);  // assistant tool_use
+    REQUIRE(messages.messages(0).seq() == 2);
+    REQUIRE(messages.messages(0).message().role() == v1::ROLE_USER);
+    REQUIRE(messages.messages(0).message().content_size() == 1);
+    REQUIRE(messages.messages(0).message().content(0).has_tool_result());
+    CHECK(messages.messages(0).message().content(0).tool_result().tool_use_id() == "call-1");
+    CHECK(messages.messages(0).message().content(0).tool_result().is_error());
+
+    // And the resumed session actually runs on top of the repair.
+    grpc::ClientContext context;
+    auto stream = fixture.stub->OpenSession(&context);
+    REQUIRE(stream->Write(ChatTurn(row.session_id, "carry on")));
+    REQUIRE(WaitForTurnCompleted(*stream));
+
+    // Its first provider call saw the repaired history -- a dangling tool_use
+    // reaching the provider would mean the repair never happened.
+    const auto* provider = fixture.created_providers.back();
+    REQUIRE(provider->requests().size() == 1);
+    const auto& sent = provider->requests().front().messages;
+    REQUIRE(sent.size() == 4);
+    REQUIRE(sent[2].content.size() == 1);
+    const auto* repair = std::get_if<llm::ToolResultBlock>(&sent[2].content.front());
+    REQUIRE(repair != nullptr);
+    CHECK(repair->tool_use_id == "call-1");
+    CHECK(repair->is_error);
+
+    (void)DrainAndFinish(stream);
+    WaitForTerminated(*fixture.sessions, row.session_id);
+}
+
+TEST_CASE("a failed resume leaves the stored session intact", "[session_service][resume]") {
+    // Unlike fresh creation -- which rolls back its just-minted row when the
+    // Session fails to construct -- a failed resume must never touch the row:
+    // it is the user's existing session, not one this call made.
+    ServiceFixture fixture;
+    fixture.Script(testing::TextResponse("hi"));
+    fixture.Start();
+
+    const std::string session_id = fixture.CreateSession();
+
+    // A resume that fails validation never reaches the registry.
+    grpc::ClientContext context;
+    v1::CreateSessionRequest request;
+    request.set_session_id(session_id);
+    request.set_name("something else");
+    v1::CreateSessionResponse response;
+    CHECK(fixture.stub->CreateSession(&context, request, &response).error_code() ==
+          grpc::StatusCode::INVALID_ARGUMENT);
+
+    grpc::ClientContext list_context;
+    v1::ListSessionsRequest list_request;
+    list_request.set_include_all_dirs(true);
+    v1::ListSessionsResponse list;
+    REQUIRE(fixture.stub->ListSessions(&list_context, list_request, &list).ok());
+    REQUIRE(list.sessions_size() == 1);
+    CHECK(list.sessions(0).session_id() == session_id);
 }

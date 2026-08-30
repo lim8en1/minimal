@@ -25,10 +25,16 @@ std::string TextOf(const std::vector<llm::ContentBlock>& content) {
     return out;
 }
 
-// Rough size of a message range in tokens: serialized bytes / 4. Used only when
-// the backend reported no usage at all, where even a rough number is better than
-// nothing for "how much did compaction save".
-std::int64_t EstimateTokens(const std::vector<llm::Message>& messages) {
+bool IsBlank(std::string_view text) {
+    for (const char c : text) {
+        if (!std::isspace(static_cast<unsigned char>(c))) return false;
+    }
+    return true;
+}
+
+}  // namespace
+
+std::int64_t estimate_tokens(const std::vector<llm::Message>& messages) {
     std::int64_t bytes = 0;
     for (const auto& message : messages) {
         for (const auto& block : message.content) {
@@ -49,15 +55,6 @@ std::int64_t EstimateTokens(const std::vector<llm::Message>& messages) {
     }
     return bytes / 4;
 }
-
-bool IsBlank(std::string_view text) {
-    for (const char c : text) {
-        if (!std::isspace(static_cast<unsigned char>(c))) return false;
-    }
-    return true;
-}
-
-}  // namespace
 
 std::optional<CompactionResult> compact_messages(
     const std::vector<llm::Message>& messages_to_compact, llm::LlmProvider& provider,
@@ -133,8 +130,8 @@ std::optional<CompactionResult> compact_messages(
     // fallback and the ground truth incomparable.
     result.context_tokens_before =
         params.last_reported_input_tokens > 0 ? params.last_reported_input_tokens
-        : params.full_history                 ? EstimateTokens(*params.full_history)
-                                              : EstimateTokens(messages_to_compact);
+        : params.full_history                 ? estimate_tokens(*params.full_history)
+                                              : estimate_tokens(messages_to_compact);
     return result;
 }
 

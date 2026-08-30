@@ -69,9 +69,15 @@ int RunHeadless(const HeadlessOptions& options) {
     }
 
     minimal::client::SessionClient::CreateOptions create;
-    create.project_root = std::filesystem::current_path().string();
-    create.agent_preset = options.agent_preset;
-    create.name = options.prompt.substr(0, 60);
+    if (!options.resume_session_id.empty()) {
+        // Resume: the stored session keeps its preset and project_root; the
+        // server refuses them rather than silently ignoring a conflict.
+        create.resume_session_id = options.resume_session_id;
+    } else {
+        create.project_root = std::filesystem::current_path().string();
+        create.agent_preset = options.agent_preset;
+        create.name = options.prompt.substr(0, 60);
+    }
     // ALLOW_ONLY unless explicitly overridden. There is no human attached, so an
     // Ask-gated tool must auto-deny rather than block forever on a prompt nobody
     // can answer -- this mode exists for exactly this client.
@@ -80,7 +86,8 @@ int RunHeadless(const HeadlessOptions& options) {
 
     const auto created = client.CreateSession(create);
     if (!created.status.ok()) {
-        std::fprintf(stderr, "could not create a session: %s\n",
+        std::fprintf(stderr, "%s a session: %s\n",
+                     options.resume_session_id.empty() ? "could not create" : "could not resume",
                      created.status.error_message().c_str());
         return kUnavailable;
     }

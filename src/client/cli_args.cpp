@@ -57,6 +57,8 @@ std::string UsageText() {
     return "usage: minimal [-p PROMPT] [options]\n"
            "\n"
            "  -p, --print PROMPT        run one turn headlessly and exit\n"
+           "      --resume SESSION_ID   continue a stored session (see ListSessions);\n"
+           "                              it keeps its stored preset and project_root\n"
            "      --server TARGET       socket path or gRPC target\n"
            "                              (default: unix://<data dir>/server.sock;\n"
            "                               a bare path pairs with minimal-server --listen)\n"
@@ -134,6 +136,15 @@ ParsedArgs ParseArgs(int argc, const char* const* argv) {
             const auto value = take_value(name);
             if (!value) return parsed;
             parsed.headless.server = ResolveServerTarget(*value);
+        } else if (name == "--resume") {
+            const auto value = take_value(name);
+            if (!value) return parsed;
+            if (value->empty()) {
+                parsed.action = ParsedArgs::Action::Error;
+                parsed.error = "--resume needs a session id";
+                return parsed;
+            }
+            parsed.headless.resume_session_id = *value;
         } else if (name == "--agent") {
             const auto value = take_value(name);
             if (!value) return parsed;
@@ -168,6 +179,17 @@ ParsedArgs ParseArgs(int argc, const char* const* argv) {
     if (headless && prompt_set && parsed.headless.prompt.empty()) {
         parsed.action = ParsedArgs::Action::Error;
         parsed.error = "-p needs a non-empty prompt";
+        return parsed;
+    }
+    if (!headless && !parsed.headless.resume_session_id.empty()) {
+        parsed.action = ParsedArgs::Action::Error;
+        parsed.error = "--resume needs -p: resuming runs one headless turn";
+        return parsed;
+    }
+    if (!parsed.headless.resume_session_id.empty() && !parsed.headless.agent_preset.empty()) {
+        parsed.action = ParsedArgs::Action::Error;
+        parsed.error = "--resume and --agent cannot be combined: a resumed session keeps the "
+                       "preset it was stored with";
         return parsed;
     }
     parsed.action = headless ? ParsedArgs::Action::Headless : ParsedArgs::Action::Tui;

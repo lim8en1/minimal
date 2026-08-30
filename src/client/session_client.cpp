@@ -21,9 +21,15 @@ bool SessionClient::WaitForConnected(std::chrono::milliseconds timeout) {
 SessionClient::CreateResult SessionClient::CreateSession(const CreateOptions& options) {
     grpc::ClientContext context;
     v1::CreateSessionRequest request;
-    request.set_project_root(options.project_root);
-    request.set_agent_preset(options.agent_preset);
-    request.set_name(options.name);
+    if (!options.resume_session_id.empty()) {
+        // Resume: the stored session keeps its name, preset, and project_root.
+        // Sending them would be refused server-side, so they are not sent.
+        request.set_session_id(options.resume_session_id);
+    } else {
+        request.set_project_root(options.project_root);
+        request.set_agent_preset(options.agent_preset);
+        request.set_name(options.name);
+    }
     request.set_run_mode(options.run_mode);
 
     v1::CreateSessionResponse response;

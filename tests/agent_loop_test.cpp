@@ -70,7 +70,7 @@ struct Harness {
     }
 
     void Build(agent::AgentPreset preset = {}, agent::LoopConfig config = {},
-               agent::Compactor compactor = {}) {
+               agent::Compactor compactor = {}, std::vector<llm::Message> seeded_history = {}) {
         if (preset.allowed_tools.empty()) preset.allowed_tools = {"*"};
         if (preset.provider.model_name.empty()) preset.provider.model_name = "test-model";
         preset.permission_mode = AllowAllPolicy();
@@ -89,7 +89,7 @@ struct Harness {
                 seen_events.push_back(e);
                 return !cancel_flag.load();
             },
-            std::move(compactor));
+            std::move(compactor), std::move(seeded_history));
     }
 };
 
@@ -661,4 +661,74 @@ TEST_CASE("invoking a skill the preset does not allow yields an error result",
     CHECK(block->is_error);
     const std::string text = std::get<llm::TextBlock>(block->content.front()).text;
     CHECK(text.find("not available in this session") != std::string::npos);
+}
+
+// --- Resume: seeded history ----------------------------------------------------
+
+TEST_CASE("a seeded loop sends the stored history but never re-appends it",
+          "[agent_loop][resume]") {
+    // The resume invariant: the stored transcript becomes the working history,
+    // and the store receives ONLY what the resumed session produces. Re-appending
+    // the seed would duplicate every stored row.
+    Harness h;
+    std::vector<llm::Message> seeded = {
+        UserText("first user message"),
+        llm::Message{llm::Role::Assistant, {llm::TextBlock{"first answer"}}},
+        UserText("second user message"),
+        llm::Message{llm::Role::Assistant, {llm::TextBlock{"second answer"}}},
+    };
+    h.provider.PushResponse(TextResponse("third answer"));
+    h.Build({}, {}, {}, seeded);
+
+    const auto result = h.loop->RunTurn(UserText("third user message"));
+
+    CHECK(result.stop_reason == llm::StopReason::EndTurn);
+    // The provider saw the whole resumed context, seed first.
+    REQUIRE(h.provider.requests().size() == 1);
+    const auto& sent = h.provider.requests().front().messages;
+    REQUIRE(sent.size() == 5);
+    CHECK(std::get<llm::TextBlock>(sent[0].content.front()).text == "first user message");
+    CHECK(std::get<llm::TextBlock>(sent[3].content.front()).text == "second answer");
+    CHECK(std::get<llm::TextBlock>(sent[4].content.front()).text == "third user message");
+    // The store got exactly the new turn -- seed message, then the response.
+    // This is the assertion that fails if the seed is appended instead of loaded.
+    REQUIRE(h.store.messages.size() == 2);
+    CHECK(std::get<llm::TextBlock>(h.store.messages[0].content.front()).text == "third user message");
+    CHECK(std::get<llm::TextBlock>(h.store.messages[1].content.front()).text == "third answer");
+    // Working history is seed + new turn.
+    CHECK(h.loop->history().size() == 6);
+}
+
+TEST_CASE("a seeded history can trigger compaction before the first provider call",
+          "[agent_loop][resume]") {
+    // Without usage from a backend yet, the trigger works off an occupancy
+    // estimate of the loaded history. If that seed were missing, a resumed
+    // session over the window would fail its first provider call outright --
+    // removing SeedOccupancy from the loop makes this test fail.
+    Harness h;
+    std::vector<llm::Message> seeded = {
+        UserText(std::string(400, 'x')),
+        llm::Message{llm::Role::Assistant, {llm::TextBlock{std::string(400, 'y')}}},
+        UserText(std::string(400, 'z')),
+        llm::Message{llm::Role::Assistant, {llm::TextBlock{std::string(400, 'w')}}},
+    };  // estimate_tokens ~= 400 > trigger
+
+    int compactions = 0;
+    auto compactor = [&compactions](const std::vector<llm::Message>&, llm::LlmProvider&,
+                                    const agent::CompactionRequest&) {
+        ++compactions;
+        return agent::CompactionResult{UserText("[summary]"), 0};
+    };
+    h.provider.PushResponse(TextResponse("resumed"));
+    h.Build({}, agent::LoopConfig{.auto_compact = true, .compaction_trigger_tokens = 100},
+            compactor, std::move(seeded));
+
+    h.loop->RunTurn(UserText("continue"));
+
+    CHECK(compactions == 1);
+    // The summary replaced the older half BEFORE the call went out.
+    REQUIRE(h.provider.requests().size() == 1);
+    const auto& sent = h.provider.requests().front().messages;
+    REQUIRE(sent.size() >= 1);
+    CHECK(std::get<llm::TextBlock>(sent.front().content.front()).text == "[summary]");
 }

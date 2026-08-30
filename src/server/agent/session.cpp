@@ -19,7 +19,8 @@ v1::ServerEvent MakeEvent(const std::string& session_id) {
 Session::Session(SessionParams params, AgentPreset preset,
                  std::unique_ptr<llm::LlmProvider> provider, std::unique_ptr<HistoryStore> store,
                  tools::ToolRegistry& registry, LoopConfig loop_config,
-                 SessionObserverRegistry& observers, common::Logger& logger)
+                 SessionObserverRegistry& observers, common::Logger& logger,
+                 std::vector<llm::Message> seeded_history)
     : params_(std::move(params)),
       preset_(std::move(preset)),
       logger_(logger),
@@ -82,10 +83,14 @@ Session::Session(SessionParams params, AgentPreset preset,
     // because everything it needs -- provider, model, prompt, cancel flag -- is
     // an argument the loop supplies per call. That is what keeps a mid-session
     // /agent switch from compacting with the previous preset's prompt.
+    //
+    // seeded_history is non-empty only on resume: the stored transcript becomes
+    // the loop's working history WITHOUT being re-appended to the store it was
+    // loaded from.
     loop_ = std::make_unique<AgentLoop>(*provider_, executor_, registry, *store_, preset_,
-                                        loop_config, std::move(context),
-                                        [this] { return IsCancelled(); }, std::move(event_sink),
-                                        compact_messages);
+                                         loop_config, std::move(context),
+                                         [this] { return IsCancelled(); }, std::move(event_sink),
+                                         compact_messages, std::move(seeded_history));
 
     observers_.NotifySessionCreated(info_);
     worker_ = std::thread([this] { WorkerMain(); });

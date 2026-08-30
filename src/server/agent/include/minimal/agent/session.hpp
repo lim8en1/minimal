@@ -57,6 +57,11 @@ struct SessionParams {
     // Set when the client asked for a specific mode (the headless client asks
     // for AllowOnly); unset means the preset's configured mode stands.
     std::optional<tools::PermissionRunMode> run_mode_override;
+    // True when this Session reopens a STORED session: the registry loads the
+    // stored transcript as the loop's seeded history (without re-appending it)
+    // before construction. The session row must already exist either way --
+    // the database mints ids -- but a fresh session's transcript is empty.
+    bool resume = false;
 };
 
 class Session {
@@ -68,9 +73,13 @@ public:
     // process-wide. The store is injected rather than constructed here so a
     // session does not have to know whether its transcript is durable -- and so
     // tests can drive one without a database file.
+    // `seeded_history` is the RESUME path: the stored transcript, loaded
+    // without being re-appended (the store already holds it). Empty for a new
+    // session.
     Session(SessionParams params, AgentPreset preset, std::unique_ptr<llm::LlmProvider> provider,
             std::unique_ptr<HistoryStore> store, tools::ToolRegistry& registry,
-            LoopConfig loop_config, SessionObserverRegistry& observers, common::Logger& logger);
+            LoopConfig loop_config, SessionObserverRegistry& observers, common::Logger& logger,
+            std::vector<llm::Message> seeded_history = {});
 
     // Terminates and joins. A Session is never destroyed with its worker running.
     ~Session();

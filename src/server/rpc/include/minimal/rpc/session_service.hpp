@@ -78,6 +78,13 @@ private:
     // bound, and one default is easier to document than two.
     int ScrollbackPageSize() const;
 
+    // CreateSession with session_id set: reopen a stored session rather than
+    // creating a new one. The stored row's name/agent_preset/project_root
+    // govern -- the request may not carry its own -- and a failure NEVER
+    // deletes the row, unlike fresh creation's rollback of its just-minted one.
+    grpc::Status ResumeSession(const v1::CreateSessionRequest* request,
+                               v1::CreateSessionResponse* response);
+
     // Reader thread. Returns false if the stream should end.
     // Reader thread. Every branch is non-blocking -- that is the property the
     // three-thread topology depends on, not an implementation detail.

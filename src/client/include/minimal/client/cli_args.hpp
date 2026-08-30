@@ -26,6 +26,9 @@ struct HeadlessOptions {
     std::string prompt;
     std::string server;  // already a gRPC target; empty means the default socket
     std::string agent_preset;
+    // Non-empty means resume this stored session instead of creating a new one.
+    // Mutually exclusive with agent_preset: the stored session keeps its preset.
+    std::string resume_session_id;
     bool jsonl = false;
     bool bypass = false;
 };

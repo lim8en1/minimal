@@ -20,6 +20,12 @@ struct CumulativeTotals {
 class TokenAccumulator {
 public:
     void RecordTurn(const Usage& turn);
+    // Seeds ONLY the last-turn occupancy, never the cumulative totals: resume
+    // uses it to tell the compaction trigger how big the loaded working history
+    // roughly is, before any provider call has reported real usage. The
+    // cumulative totals are genuinely additive quantities, and a synthetic
+    // estimate must not pollute them.
+    void SeedOccupancy(std::int64_t estimated_input_tokens);
     CumulativeTotals cumulative() const { return cumulative_; }
     std::int64_t last_occupancy() const { return context_occupancy(last_turn_); }
     // The backend's own count of what the last request contained -- ground truth

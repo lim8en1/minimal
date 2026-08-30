@@ -39,7 +39,7 @@ AgentLoop::AgentLoop(llm::LlmProvider& provider, tools::ToolExecutor& executor,
                       tools::ToolRegistry& registry, HistoryStore& store, AgentPreset preset,
                       LoopConfig config, SessionContext session,
                       std::function<bool()> is_cancelled, llm::StreamEventSink event_sink,
-                      Compactor compactor)
+                      Compactor compactor, std::vector<llm::Message> seeded_history)
     : provider_(provider),
       executor_(executor),
       registry_(registry),
@@ -49,7 +49,17 @@ AgentLoop::AgentLoop(llm::LlmProvider& provider, tools::ToolExecutor& executor,
       session_(std::move(session)),
       is_cancelled_(std::move(is_cancelled)),
       event_sink_(std::move(event_sink)),
-      compactor_(std::move(compactor)) {}
+      compactor_(std::move(compactor)),
+      history_(std::move(seeded_history)) {
+    if (!history_.empty()) {
+        // A resumed context has no backend usage behind it yet, so give the
+        // compaction trigger an estimate to work with. Deliberately the same
+        // bytes/4 roughness the compactor's fallback uses -- there is no
+        // tokenizer in this codebase, and the first real response replaces the
+        // estimate with ground truth anyway.
+        tokens_.SeedOccupancy(estimate_tokens(history_));
+    }
+}
 
 bool AgentLoop::Cancelled() const { return is_cancelled_ && is_cancelled_(); }
 
