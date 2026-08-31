@@ -2,11 +2,11 @@
 
 // The built-in /-commands, as one plugin rather than nine.
 //
-// Deliberately does NOT include /restart-shell: that touches tools-bash's
-// per-session cwd/env, and one .so cannot reach into another's state. A plugin
-// owns the commands that touch its own state -- which is why
-// minimal_plugin_register_tools and ..._register_commands are independent
-// optional symbols rather than one "kind" of plugin.
+// Deliberately does NOT include /restart-shell: it resets tools-bash's
+// per-session shell state, and a command belongs to the plugin that owns the
+// state it touches. Other plugins can now ASK for that state through the
+// BashSessionStateService tools-bash provides (docs/EXTENSIBILITY.md §2.2);
+// that makes the state reachable, not the command relocatable.
 //
 // /new, /attach and /sessions are absent too, for a different reason: they drive
 // a tab model that arrives with the TUI (track E), and a command that creates a

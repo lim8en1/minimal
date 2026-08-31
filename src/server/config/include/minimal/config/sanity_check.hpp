@@ -50,6 +50,9 @@ struct SanityCheckInputs {
     // Optional: absent means no advisor can resolve, which only matters when
     // permissions.json names one.
     const tools::PermissionAdvisorRegistry* permission_advisors = nullptr;
+    // Optional: absent means no services were offered to plugins, so no service
+    // collision can exist. Borrowed -- it outlives the check.
+    const plugins::ServiceRegistry* service_registry = nullptr;
 };
 
 // Runs after config and plugin load, before serving. A linter, not a fail-fast

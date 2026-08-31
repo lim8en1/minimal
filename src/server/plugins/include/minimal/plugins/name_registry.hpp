@@ -8,7 +8,12 @@ namespace minimal::plugins {
 
 // The registration kinds subject to the collision/alias rules -- see
 // ARCHITECTURE.md's "Name collisions and aliases".
-enum class NameKind { Tool, Command, ViewId, ToolResultRenderer };
+//
+// Services are their own namespace: a service name may repeat a tool or
+// command name without colliding, and services are NOT user-aliasable (a
+// service name is addressed by code through ServiceRegistry::Find, never by
+// the model or the user, so command_aliases has nothing to rename).
+enum class NameKind { Tool, Command, ViewId, ToolResultRenderer, Service };
 
 // Models the three-naming-levels rule independent of the actual
 // ToolRegistry/CommandRegistry/plugin loader: stable identity never changes,

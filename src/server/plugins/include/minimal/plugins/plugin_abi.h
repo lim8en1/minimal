@@ -40,6 +40,7 @@
 #include "minimal/tools/permission_advisor.hpp"
 #include "minimal/tools/tool.hpp"
 #include "minimal/tools/tool_registry.hpp"
+#include "minimal/plugins/service_registry.hpp"
 
 // --- Half 1: extension points plugins implement -----------------------------
 
@@ -66,6 +67,15 @@ struct PluginRegistrationContext {
     // condition, not an error). Configure a plugin where you enable it:
     // plugins.json is the one file a user already edits for that purpose.
     nlohmann::json config = nlohmann::json::object();
+
+    // The cross-plugin service registry, for plugins that CONSUME another
+    // plugin's services as well as for the provider itself. Capture the pointer
+    // at registration and resolve with Find() lazily at use time -- never at
+    // registration: plugin load order is file order, so a consumer can load
+    // before its provider. Null when the host does not offer the seam (a test
+    // exercising only other registries), which a consumer treats as "no
+    // services", not as an error.
+    ServiceRegistry* services = nullptr;
 };
 
 }  // namespace minimal::plugins
@@ -104,10 +114,22 @@ void minimal_plugin_register_session_observer(minimal::agent::SessionObserverReg
 //
 // Separate from register_tools on purpose. A plugin owns the commands that touch
 // its own state -- tools-bash registers both a `bash` tool and `/restart-shell`,
-// because the per-session cwd/env they share lives inside that .so and no other
-// plugin can reach it. Two independent symbols is what expresses that, rather
-// than one "kind" of plugin that has to be either/or.
+// because the per-session cwd/env they share lives inside that .so. (Other
+// plugins may now ASK for that state through the service registry, which is the
+// sanctioned channel; a command registered by a plugin that does not own the
+// state it touches would still be the wrong shape.) Two independent symbols is
+// what expresses ownership, rather than one "kind" of plugin that has to be
+// either/or.
 void minimal_plugin_register_commands(minimal::commands::CommandRegistry&,
+                                      const minimal::plugins::PluginRegistrationContext&);
+
+// OPTIONAL, additive: contributes services other plugins may reach. Each
+// registration is an (name, abstract-interface pointer) pair; the interface
+// header the provider ships is the contract, and a consumer static_casts
+// ServiceRegistry::Find's result to it -- see service_registry.hpp for the
+// rules (abstract interfaces only, lazy lookup, no bus). Two plugins providing
+// the same service name is FATAL at startup, naming both.
+void minimal_plugin_register_services(minimal::plugins::ServiceRegistry&,
                                       const minimal::plugins::PluginRegistrationContext&);
 
 // Exclusive: one global choice. First registration wins; a second logs a

@@ -28,6 +28,8 @@ using RegisterAuthProviderFn =
     void (*)(rpc::AuthProviderRegistry&, const PluginRegistrationContext&);
 using RegisterPermissionAdvisorFn =
     void (*)(tools::PermissionAdvisorRegistry&, const PluginRegistrationContext&);
+using RegisterServicesFn =
+    void (*)(ServiceRegistry&, const PluginRegistrationContext&);
 
 template <typename Fn>
 Fn Lookup(void* handle, const char* symbol) {
@@ -59,14 +61,16 @@ PluginLoader::PluginLoader(tools::ToolRegistry& tools, llm::ProviderFactoryRegis
                             agent::SessionObserverRegistry* observers,
                            commands::CommandRegistry* commands,
                            rpc::AuthProviderRegistry* auth_providers,
-                           tools::PermissionAdvisorRegistry* permission_advisors)
+                           tools::PermissionAdvisorRegistry* permission_advisors,
+                           ServiceRegistry* services)
     : tools_(tools),
       providers_(providers),
       tools_settings_(std::move(tools_settings)),
       observers_(observers),
       commands_(commands),
       auth_providers_(auth_providers),
-      permission_advisors_(permission_advisors) {}
+      permission_advisors_(permission_advisors),
+      services_(services) {}
 
 // Handles are intentionally leaked -- see LIFETIME in the header.
 PluginLoader::~PluginLoader() = default;
@@ -122,6 +126,10 @@ PluginRecord PluginLoader::LoadOne(const PluginCandidate& candidate) {
     PluginRegistrationContext context;
     context.tools_settings = tools_settings_;
     context.config = candidate.config;
+    // The consumer side of the service channel: the same registry that
+    // register_services below dispatches into, so a plugin capturing this
+    // pointer at registration resolves services from this process's registry.
+    context.services = services_;
 
     // Attribution window: every tool registered inside it belongs to this
     // plugin, which is what lets a later collision name both culprits.
@@ -198,6 +206,25 @@ PluginRecord PluginLoader::LoadOne(const PluginCandidate& candidate) {
     }
 
     record.status = LoadStatus::Loaded;
+
+    if (services_ != nullptr) {
+        // Same attribution window as tools and commands: a duplicate service
+        // name must be diagnosable down to BOTH plugins, which is what the
+        // (plugin, name) pairs feed NameRegistry.
+        const std::size_t services_before = services_->attributions().size();
+        services_->SetAttribution(record.name);
+        if (auto register_services = Lookup<RegisterServicesFn>(
+                handle, "minimal_plugin_register_services")) {
+            register_services(*services_, context);
+        }
+        services_->ClearAttribution();
+
+        const auto& service_attributions = services_->attributions();
+        for (std::size_t i = services_before; i < service_attributions.size(); ++i) {
+            record.registered_services.push_back(service_attributions[i].service_name);
+        }
+    }
+
     return record;
 }
 

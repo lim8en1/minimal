@@ -10,9 +10,11 @@
 // WHAT IS DELIBERATELY ABSENT is as much of the design as what is present:
 //
 //   - No bash session state. Bash is a plugin and owns its own per-session
-//     cwd/env; one .so cannot reach into another's. That is exactly why
-//     /restart-shell lives in tools-bash rather than here, and why
-//     register_tools and register_commands are independent ABI symbols.
+//     cwd/env; the state is reachable only through the sanctioned channel --
+//     ServiceRegistry::Find against the provider's interface header -- which is
+//     why /restart-shell lives in tools-bash: a command belongs to the plugin
+//     that owns the state it touches. Services are the way TO ASK for state;
+//     this context still hands out no blanket reach into other plugins.
 //   - No SessionRegistry. /new and /attach would need it, and they are deferred
 //     to the TUI (track E) where a client can act on the result. Handing every
 //     command the power to create sessions before anything can attach to one

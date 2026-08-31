@@ -9,6 +9,7 @@
 #include "minimal/agent/session_observer_registry.hpp"
 #include "minimal/commands/command_registry.hpp"
 #include "minimal/llm/provider_factory_registry.hpp"
+#include "minimal/plugins/service_registry.hpp"
 #include "minimal/rpc/auth_provider.hpp"
 #include "minimal/tools/permission_advisor.hpp"
 #include "minimal/tools/tool_registry.hpp"
@@ -60,6 +61,9 @@ struct PluginRecord {
     // True when the plugin registered an advisor that actually landed (a
     // duplicate from the same plugin is refused and does not count twice).
     bool registered_permission_advisor = false;
+    // ORIGINAL service names, as the plugin declared them. Services live in
+    // their own namespace -- no aliasing, no permission keys.
+    std::vector<std::string> registered_services;
 
     bool ok() const { return status == LoadStatus::Loaded; }
 };
@@ -87,7 +91,8 @@ public:
                  agent::SessionObserverRegistry* observers = nullptr,
                  commands::CommandRegistry* commands = nullptr,
                  rpc::AuthProviderRegistry* auth_providers = nullptr,
-                 tools::PermissionAdvisorRegistry* permission_advisors = nullptr);
+                 tools::PermissionAdvisorRegistry* permission_advisors = nullptr,
+                 ServiceRegistry* services = nullptr);
     ~PluginLoader();
 
     PluginLoader(const PluginLoader&) = delete;
@@ -114,6 +119,11 @@ private:
     // Optional like the others; null means plugins cannot register a permission
     // advisor. Additive across plugins; permissions.json selects one by name.
     tools::PermissionAdvisorRegistry* permission_advisors_ = nullptr;
+    // Optional like the others; null means plugins cannot register services.
+    // Additive across plugins; duplicate names are fatal at startup via the
+    // NameRegistry (a new kind), not shadowed here. Also exposed to every
+    // plugin through PluginRegistrationContext::services as the CONSUMER side.
+    ServiceRegistry* services_ = nullptr;
     std::vector<void*> handles_;  // never closed; see LIFETIME above
 };
 

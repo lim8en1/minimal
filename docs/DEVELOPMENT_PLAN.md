@@ -2,7 +2,7 @@
 
 Companion to `ARCHITECTURE.md`, which remains the single source of truth for *design*. This document covers only *sequencing*: what is built, what blocks what, and what "done" means for each remaining piece. Every milestone cites the `ARCHITECTURE.md` section that specifies it; where this plan and that document disagree, that document wins and this one is stale.
 
-**Status: Milestones A, B, C, D, F and H are complete, and a post-merge review of A+B+H has been actioned (§8). Only E (the TUI) and G (MCP) remain. Clean build, zero warnings.** Track **J (permission advisor) is complete** — including the SessionChannels extraction, the E2E over a real socket through the real plugin loader, and the three §6 invariant proofs. The remaining extensibility tracks are **K** (per-plugin config), **L** (cross-plugin services), **M** (tool history access) and **N** (model auto-discovery) — all designed in `docs/EXTENSIBILITY.md` §2 and appended below as §4 K–N. K precedes L so the new `register_services` ABI symbol ships with the registration context and never needs a second signature sweep; M and N are independent of everything and each other.
+**Status: Milestones A, B, C, D, F and H are complete, and a post-merge review of A+B+H has been actioned (§8). Only E (the TUI) and G (MCP) remain. Clean build, zero warnings.** Track **J (permission advisor) is complete** — including the SessionChannels extraction, the E2E over a real socket through the real plugin loader, and the three §6 invariant proofs. Tracks **K (per-plugin config)** and **L (cross-plugin services)** are also complete. The remaining extensibility tracks are **M** (tool history access) and **N** (model auto-discovery) — both designed in `docs/EXTENSIBILITY.md` §2 and appended below as §4 M–N, and independent of everything and each other.
 
 `minimal -p` holds real conversations against a local model using `read`, `bash`, and `skill`; a permission prompt round-trips over the wire in both directions; a session grant silences the second prompt; the server exits when the last client detaches. Transcripts persist to SQLite, survive the server process, and are **resumable**: `CreateSession` with a `session_id` reopens a stored session, loads its transcript as the loop's working history without re-appending it, and the next turn continues the conversation (`minimal -p --resume <id> PROMPT`). **Subagents work** (§5 D): a model can spawn blocking and non-blocking children over the `spawn_subagent` tool, permission inheritance is enforced as ceilings, and the headless client honours its attach obligation over a real socket. `cmake --install` produces a config dir the server actually starts against (§8), and the startup sanity check reports every problem with it at once (§4 F).
 
@@ -97,8 +97,8 @@ Test depth was inverted relative to integration risk: every well-tested layer wa
 - ~~**H. Production compactor**~~ — **done.** `compact_messages` replaces `Session`'s no-op stub, and the bundled prompt is delivered (§4 H).
 - ~~**I. `SessionObserver` registry**~~ — **done**, landed with A2. `minimal_plugin_register_session_observer` is live in the plugin ABI and `tools-bash` implements it.
 - **J. Permission advisor** — independent of E and G; designed in `docs/EXTENSIBILITY.md` §3, specified below (§4 J).
-- **K. Per-plugin config** — designed in `docs/EXTENSIBILITY.md` §2.3, specified below (§4 K); sequenced before L.
-- **L. Cross-plugin services (ServiceRegistry)** — designed in `docs/EXTENSIBILITY.md` §2.2, specified below (§4 L).
+- ~~**K. Per-plugin config**~~ — **done** (§4 K). `PluginRegistrationContext` carries the per-plugin `config` on every registration seam.
+- ~~**L. Cross-plugin services (ServiceRegistry)**~~ — **done** (§4 L). `minimal_plugin_register_services` is live, `NameKind::Service` collisions are fatal, and `tools-bash` provides `BashSessionStateService` under `tools-bash.session_state`; `/restart-shell` resolves through the service. One deviation from the spec below: the command stayed in `tools-bash` (a command belongs to the plugin that owns the state it touches) — the service path and the absent-provider degrade are covered by tests against the extracted `RestartShellCommand`.
 - **M. Tool history access** — designed in `docs/EXTENSIBILITY.md` §2.1, specified below (§4 M).
 - **N. Model auto-discovery** — designed in `docs/EXTENSIBILITY.md` §2.6, specified below (§4 N).
 
@@ -432,7 +432,7 @@ Core imposes no schema — the same rule as `tools_settings` today. Every `regis
 
 ### L. Cross-plugin services (ServiceRegistry)
 
-> Specified by `docs/EXTENSIBILITY.md` §2.2. Sequenced after K. The missing half of plugin-owned state: `SessionObserver` covers ordered notification (push), this covers queries (pull). §2.5's server half dispatches `PluginCall` *through* this registry when E lands the client half.
+> Specified by `docs/EXTENSIBILITY.md` §2.2. Sequenced after K. **Done.** The missing half of plugin-owned state: `SessionObserver` covers ordered notification (push), this covers queries (pull). §2.5's server half dispatches `PluginCall` *through* this registry when E lands the client half.
 
 **What.** A sanctioned channel by which one `.so` can reach another's services:
 
@@ -451,24 +451,25 @@ public:
 
 **Typed at the edges, named in the middle.** The provider ships its interface header (e.g. `bash_state.hpp` with `tools-bash`); a consumer `static_cast`s `Find`'s result to it. The name is the only coupling; the header is the contract, under the same source-compatibility model as everything else. Collisions resolve through the existing `NameRegistry` as a new kind — **fatal, not shadowed**. No bus, no subscribe: push already exists, and an event bus would put ordering/concurrency burden back on plugin authors — exactly what serialized observer dispatch removed.
 
-**How.**
+**How.** As specified, plus three implementation details:
 
-- `NameKind::Service` in `name_registry.hpp:11`; `ResolveRegistrationNames` picks up service attributions, and `main.cpp:182-188` feeds them through the existing collision/sanity path (`sanity_check.cpp:421` turns them Fatal, naming both plugins).
-- `minimal_plugin_register_services(ServiceRegistry&, const PluginRegistrationContext&)` — loader dispatch with an attribution window, like tools (`plugin_loader.cpp:114-118`) and commands (`:141-146`).
-- **First consumer, proving the pattern with a real one:** `tools-bash` Provides its `BashSessionStateStore` under a name; `/restart-shell` resolves it through `Find` and degrades with a clear error when the provider is absent (tools-bash disabled is a runtime condition, not a startup failure). State ownership stays with tools-bash — a service is the sanctioned way *to ask*, not a state grab.
+- `NameKind::Service` in `name_registry.hpp:11`; `ResolveRegistrationNames` picks up service attributions, and `main.cpp` feeds them through the existing collision/sanity path (`sanity_check.cpp` turns them Fatal, naming both plugins).
+- `minimal_plugin_register_services(ServiceRegistry&, const PluginRegistrationContext&)` — loader dispatch with an attribution window, like tools and commands. `PluginRegistrationContext` gains `ServiceRegistry* services` — the CONSUMER side: a plugin captures the pointer at registration and resolves with `Find` lazily at use time, since plugin load order is file order and a consumer can load before its provider.
+- The provider's shipped interface must be **abstract** (header-only, pure virtual): the concrete store's symbols live inside the providing `.so` (`RTLD_LOCAL`), so a consumer calling them by symbol would fail at `dlopen(RTLD_NOW)`; virtual dispatch needs no symbols. `tools-bash` ships `bash_state_service.hpp` (`BashSessionStateService`: `Erase`/`Reset`) and `BashSessionStateStore` implements it.
+- **First consumer:** `/restart-shell` (extracted to `restart_shell.{hpp,cpp}` so tests drive it in-process) resolves the store through `Find` and answers a clear `kError` when the service is absent. One deviation: the command STAYED in `tools-bash` rather than moving to `commands-core` — the reasoning is that a command belongs to the plugin that owns the state it touches; the service path and the absent-provider degrade are exercised by tests against the extracted command.
 
 **Acceptance criteria**
-- [ ] A plugin Provides at registration; another consumer Finds, casts, and calls through the interface.
-- [ ] `Find` for a name no plugin provided returns null — no error, no warning.
-- [ ] Two plugins providing the same name are fatal at startup, naming both.
-- [ ] `/restart-shell` works through the service path and degrades cleanly when tools-bash is disabled.
+- [x] A plugin Provides at registration; another consumer Finds, casts, and calls through the interface.
+- [x] `Find` for a name no plugin provided returns null — no error, no warning.
+- [x] Two plugins providing the same name are fatal at startup, naming both.
+- [x] `/restart-shell` works through the service path and degrades cleanly when the service is absent.
 
 **Test cases**
-- [ ] Provide/Find round-trip; Find-before-Provide and Find-never-provided both null.
-- [ ] Collision: fatal, diagnostic names both claimants.
-- [ ] Loader attribution records the providing plugin; `NameRegistry::Resolve()` surfaces it.
-- [ ] `/restart-shell` through the registry (in-process); the absent-provider error path.
-- [ ] **Invariant test:** removing the collision check for `NameKind::Service` (last-wins) fails the collision test.
+- [x] Provide/Find round-trip; Find-before-Provide and Find-never-provided both null.
+- [x] Collision: fatal, diagnostic names both claimants.
+- [x] Loader attribution records the providing plugin; `NameRegistry::Resolve()` surfaces it.
+- [x] `/restart-shell` through the registry (in-process); the absent-provider error path.
+- [x] **Invariant test:** removing the collision check for `NameKind::Service` (last-wins) fails the collision test.
 
 ### M. Tool history access
 

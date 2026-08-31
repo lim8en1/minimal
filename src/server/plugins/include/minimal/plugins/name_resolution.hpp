@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "minimal/plugins/name_registry.hpp"
+#include "minimal/plugins/service_registry.hpp"
 #include "minimal/commands/command_registry.hpp"
 #include "minimal/tools/tool_registry.hpp"
 
@@ -49,9 +50,15 @@ struct RegistrationNames {
 //
 // Collision and dangling lists are sorted: NameRegistry iterates unordered
 // maps, and startup diagnostics must be stable run to run.
+//
+// `services` feeds NameKind::Service attributions when given. Aliases never
+// route to a service: a service name is addressed by code, not by user config,
+// so an alias key claimed only by a service lands in dangling_aliases -- which
+// is the honest report, since nothing user-visible answers to it.
 RegistrationNames ResolveRegistrationNames(const tools::ToolRegistry& registry,
                                            const std::map<std::string, std::string>& aliases,
                                            const commands::CommandRegistry* commands = nullptr,
-                                           const std::vector<std::string>& core_tool_names = {});
+                                           const std::vector<std::string>& core_tool_names = {},
+                                           const ServiceRegistry* services = nullptr);
 
 }  // namespace minimal::plugins

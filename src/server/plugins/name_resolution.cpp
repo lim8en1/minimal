@@ -15,7 +15,8 @@ std::string Qualify(const std::string& plugin_name, const std::string& original_
 RegistrationNames ResolveRegistrationNames(const tools::ToolRegistry& registry,
                                            const std::map<std::string, std::string>& aliases,
                                            const commands::CommandRegistry* commands,
-                                           const std::vector<std::string>& core_tool_names) {
+                                           const std::vector<std::string>& core_tool_names,
+                                           const ServiceRegistry* services) {
     NameRegistry name_registry;
 
     // Stable identities per kind, so an alias can be routed to whichever kind
@@ -42,6 +43,15 @@ RegistrationNames ResolveRegistrationNames(const tools::ToolRegistry& registry,
             command_identities.insert(Qualify(attribution.plugin_name, attribution.original_name));
         }
     }
+    // Services register into their own namespace: a service may share a surface
+    // name with a tool or command without colliding, and the permission-key
+    // pass below excludes them by the same identity-set mechanism commands use.
+    if (services != nullptr) {
+        for (const auto& attribution : services->attributions()) {
+            name_registry.Register(NameKind::Service, attribution.plugin_name,
+                                   attribution.service_name);
+        }
+    }
 
     for (const auto& [qualified_key, alias] : aliases) {
         if (command_identities.count(qualified_key) != 0) {
@@ -60,9 +70,9 @@ RegistrationNames ResolveRegistrationNames(const tools::ToolRegistry& registry,
     std::sort(resolution.result.fatal_collisions.begin(), resolution.result.fatal_collisions.end());
     std::sort(resolution.result.dangling_aliases.begin(), resolution.result.dangling_aliases.end());
 
-    // TOOLS ONLY. Resolve() merges both kinds into `entries` without a kind tag,
-    // and commands have no permission keys -- so a command surface name landing
-    // in this map would answer a permission question nobody asked.
+    // TOOLS ONLY. Resolve() merges all kinds into `entries` without a kind tag,
+    // and commands have no permission keys -- so a command or service surface
+    // name landing in this map would answer a permission question nobody asked.
     for (const auto& entry : resolution.result.entries) {
         if (tool_identities.count(entry.stable_identity) == 0) continue;
         resolution.permission_keys.emplace(entry.surface_name, entry.permission_key);

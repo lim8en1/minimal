@@ -4,7 +4,7 @@ Companion to `ARCHITECTURE.md`, which remains the single source of truth for *de
 
 ## 1. The surface as it exists
 
-**Server ABI** (`src/server/plugins/include/minimal/plugins/plugin_abi.h`) — eight `extern "C"` symbols on the merged tree (nine once the `tui` branch's mention-resolver registration lands), each `dlsym`'d by `plugin_loader.cpp`:
+**Server ABI** (`src/server/plugins/include/minimal/plugins/plugin_abi.h`) — nine `extern "C"` symbols on the merged tree (ten once the `tui` branch's mention-resolver registration lands), each `dlsym`'d by `plugin_loader.cpp`:
 
 | Symbol | Status | What it grants |
 |---|---|---|
@@ -13,11 +13,12 @@ Companion to `ARCHITECTURE.md`, which remains the single source of truth for *de
 | `minimal_plugin_register_provider_factories(ProviderFactoryRegistry&)` | live | provider kinds addressable from `providers.json` |
 | `minimal_plugin_register_session_observer(SessionObserverRegistry&)` | live | fire-and-forget lifecycle reactions; cannot veto anything |
 | `minimal_plugin_register_commands(CommandRegistry&)` | live | `/`-commands |
+| `minimal_plugin_register_services(ServiceRegistry&)` | **live (track L)** | pull-side access to another plugin's services; consumer side rides `PluginRegistrationContext::services` |
 | `minimal_plugin_register_mention_resolver(...)` | **wired on the `tui` branch (E3)** — `PrefixMentionResolver` is the core default, exclusive first-wins; pending merge | pluggable `@`-mention resolution |
 | `minimal_plugin_register_auth_provider(...)` | live | exclusive connection policy; pass-through default |
 | `minimal_plugin_register_permission_advisor(PermissionAdvisorRegistry&)` | **live (track J)** | answers `Ask` automatically; abstains/throws to the wire checker — the human |
 
-Interfaces a plugin implements today: `Tool` (with `Disclose` / `category_for` / `ExtractPath`), `Command` → `HarnessCommand`/`LLMCommand`, `LlmProvider` plus a factory, `SessionObserver`, `PermissionAdvisor` (composing above the wire checker — see §3).
+Interfaces a plugin implements today: `Tool` (with `Disclose` / `category_for` / `ExtractPath`), `Command` → `HarnessCommand`/`LLMCommand`, `LlmProvider` plus a factory, `SessionObserver`, `PermissionAdvisor` (composing above the wire checker — see §3), and the service interfaces a provider ships (abstract, header-only — see §2.2).
 
 **Utilities half** — included from `plugin_abi.h`: `path_confinement`, `file_access`, `atomic_write`, `HttpClient`, `SseParser`, `Logger`, plus the registry headers. Two utilities exist in core but are **not** in the frozen include set: `SessionReader` and the frontmatter parser. They are reachable through ordinary core linkage (plugins link `minimal_server_core`, a shared library), but they are not yet declared surface.
 
@@ -50,12 +51,18 @@ Constraints that keep it safe:
 
 ### 2.2 No sanctioned cross-plugin channel
 
+**Status: landed as track L.** Implemented as specified, with the interface shaped as below and three implementation findings:
+
+- **The consumer channel is `PluginRegistrationContext::services`** (a `ServiceRegistry*` alongside the config from 2.3). A consumer captures the pointer at registration and resolves with `Find` lazily at use time — plugin load order is file order, so a consumer can load before its provider. Null when the host offers no seam (a test), treated as "no services".
+- **The provider's interface must be abstract** (header-only, pure virtual). The concrete store's symbols live inside the providing `.so`, loaded `RTLD_LOCAL` — a consumer calling them by symbol fails at `dlopen(RTLD_NOW)`. Virtual dispatch needs no symbols. `tools-bash` ships `bash_state_service.hpp` (`BashSessionStateService`: `Erase`/`Reset`) and `BashSessionStateStore` implements it.
+- **The first consumer stayed where it was.** `/restart-shell` remains in `tools-bash` — a command belongs to the plugin that owns the state it touches — but it now resolves the store through `Find` (the extracted `RestartShellCommand` answers a clear `kError` when the service is absent), so the service path is what runs, not a plugin-internal static.
+
 **Hole.** One `.so` cannot reach another's state. For bash that is by design (a plugin owning its own state is the point), but the design stopped at ownership without providing the sanctioned way *to ask*. `SessionObserver` covers ordered notification, not queries; `CommandContext` deliberately hides other plugins' state (`command_context.hpp` says so explicitly).
 
 **Suggested architecture.** A service registry, in the same shape as every other registry:
 
 ```cpp
-// src/server/plugins/service_registry.hpp
+// src/server/plugins/include/minimal/plugins/service_registry.hpp
 class ServiceRegistry {
 public:
     // Register an abstract interface under a name. Ownership stays with the
@@ -419,7 +426,7 @@ Command (the abstract -- already named Command; no rename)
 | Item | Depends on | Status |
 |---|---|---|
 | 2.1 Tool history access | nothing | designed, **track M** (DEVELOPMENT_PLAN §4 M) |
-| 2.2 Cross-plugin services | nothing | designed, **track L** (DEVELOPMENT_PLAN §4 L), sequenced after K; first consumer: `/restart-shell` |
+| 2.2 Cross-plugin services | nothing | **done (track L)**; first consumer: `/restart-shell` |
 | 2.3 Per-plugin config | nothing | **done (track K)** |
 | 2.4 MCP lifecycle | track G | designed, waits on G |
 | 2.5 Plugin UI surface | track E + 2.2 | designed, lands with E; the server half dispatches through 2.2's registry (built by track L) |
@@ -429,4 +436,4 @@ Command (the abstract -- already named Command; no rename)
 | 4.3 `ListCommands` | nothing (server half trivial) | specified; lands with E |
 | 4.4 Command display modes | nothing | specified; server half lands with E |
 
-Track order: **J → K → L → M → N**. K precedes L so the new `register_services` ABI symbol ships with `PluginRegistrationContext` and never needs a second signature sweep; M and N are independent of everything and each other. 2.1–2.3 were independent of everything and small; 2.5's server half and 2.2 are the same mechanism — the registry is built once by L, and `PluginCall` wires to it when E lands the client half.
+Track order: **J → K → L → M → N**. K preceded L so the new `register_services` ABI symbol shipped with `PluginRegistrationContext` and never needed a second signature sweep; M and N are independent of everything and each other. 2.1–2.3 were independent of everything and small; 2.5's server half and 2.2 are the same mechanism — the registry was built once by L, and `PluginCall` wires to it when E lands the client half.

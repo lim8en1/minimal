@@ -88,3 +88,25 @@ TEST_CASE("permission key qualifies when the original name is ambiguous, even af
         CHECK(e.permission_key == e.stable_identity);
     }
 }
+
+TEST_CASE("two plugins providing the same service name collide", "[name_registry][service]") {
+    NameRegistry reg;
+    reg.Register(NameKind::Service, "tools-bash", "bash.session_state");
+    reg.Register(NameKind::Service, "bash_over_ssh", "bash.session_state");
+
+    auto result = reg.Resolve();
+    REQUIRE(result.fatal_collisions.size() == 1);
+    CHECK(result.fatal_collisions[0] == "bash.session_state");
+}
+
+TEST_CASE("a service name is a separate namespace from tools and commands",
+          "[name_registry][service]") {
+    NameRegistry reg;
+    reg.Register(NameKind::Tool, "tools-bash", "bash");
+    reg.Register(NameKind::Command, "commands-core", "bash");
+    reg.Register(NameKind::Service, "tools-bash", "bash");
+
+    auto result = reg.Resolve();
+    CHECK(result.fatal_collisions.empty());
+    REQUIRE(result.entries.size() == 3);
+}

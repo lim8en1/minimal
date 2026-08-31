@@ -1,10 +1,14 @@
-// tools-bash -- the bash tool, plus (when their core subsystems land) the
-// /restart-shell command and a SessionObserver.
+// tools-bash -- the bash tool, the /restart-shell command, the BashSessionState
+// service, and a SessionObserver.
 //
-// All three live together deliberately. The per-session cwd/env map lives INSIDE
+// All four live together deliberately. The per-session cwd/env map lives INSIDE
 // this plugin (core holds no bash state), so:
-//   - /restart-shell must be registered here, not in commands-core: one .so cannot
-//     reach into another's state.
+//   - /restart-shell must be registered here, not in commands-core: a command
+//     should belong to the plugin that owns the state it touches. Other plugins
+//     now reach that state through the BashSessionStateService provided below
+//     -- the sanctioned channel (docs/EXTENSIBILITY.md §2.2), which is what
+//     lets the command itself resolve the store through ServiceRegistry::Find
+//     instead of a plugin-internal static.
 //   - OnSessionEnded must be implemented here, or that map grows for the lifetime
 //     of the process.
 // This is the canonical example of plugin-owned per-session state needing a
@@ -32,6 +36,7 @@
 #include "bash_session_state.hpp"
 #include "bash_settings.hpp"
 #include "bash_tool.hpp"
+#include "restart_shell.hpp"
 
 namespace {
 
@@ -48,29 +53,6 @@ minimal::tools_bash::BashSessionStateStore& BashStore() {
 // this .so and nothing outside it can reach the store. Without this hook the
 // cwd/env of every session that ever ran would stay resident for the life of
 // the process.
-// THE PLUGIN-OWNS-ITS-COMMANDS RULE, made concrete. /restart-shell lives here
-// rather than in commands-core because the per-session cwd/env it resets lives
-// inside THIS .so -- another plugin has no way to reach it. That is why
-// minimal_plugin_register_tools and ..._register_commands are independent
-// optional symbols instead of one "kind" of plugin: this one exports both.
-class RestartShellCommand : public minimal::commands::HarnessCommand {
-public:
-    std::string_view Name() const override { return "restart-shell"; }
-    std::string_view Summary() const override {
-        return "Forget this session's shell cwd and environment";
-    }
-    std::string_view Usage() const override { return "/restart-shell"; }
-
-    minimal::commands::CommandResult Execute(minimal::commands::CommandContext& context,
-                                             const minimal::commands::CommandArgs&) override {
-        // Exactly what `restart: true` on a bash call does, and what
-        // OnSessionEnded does at teardown -- one map, one owner, three callers.
-        BashStore().Erase(context.session().session_id());
-        return minimal::commands::CommandResult::Ok(
-            "shell reset; the next command starts in the project root with a fresh environment");
-    }
-};
-
 class BashSessionObserver : public minimal::agent::SessionObserver {
 public:
     void OnSessionEnded(const minimal::agent::SessionInfo& info) override {
@@ -97,14 +79,27 @@ void minimal_plugin_register_tools(
 
 void minimal_plugin_register_commands(
     minimal::commands::CommandRegistry& registry,
-    const minimal::plugins::PluginRegistrationContext&) {
-    registry.Register(std::make_unique<RestartShellCommand>());
+    const minimal::plugins::PluginRegistrationContext& context) {
+    // The consumer side of the service channel: the command captures the
+    // registry pointer here and resolves the store lazily at execute time.
+    registry.Register(
+        std::make_unique<minimal::tools_bash::RestartShellCommand>(context.services));
 }
 
 void minimal_plugin_register_session_observer(
     minimal::agent::SessionObserverRegistry& registry,
     const minimal::plugins::PluginRegistrationContext&) {
     registry.Register(std::make_shared<BashSessionObserver>());
+}
+
+// Provides the per-session shell state under the shipped abstract contract
+// (bash_state_service.hpp). Non-owning pointer is safe for the process
+// lifetime: plugin handles are never dlclosed, and the store is a process-
+// lifetime static inside this .so.
+void minimal_plugin_register_services(
+    minimal::plugins::ServiceRegistry& registry,
+    const minimal::plugins::PluginRegistrationContext&) {
+    registry.Provide(minimal::tools_bash::kBashStateServiceName, &BashStore());
 }
 
 }  // extern "C"

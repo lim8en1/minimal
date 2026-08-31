@@ -423,12 +423,13 @@ std::vector<CheckResult> StartupSanityCheck::check_name_collisions() {
     std::vector<CheckResult> results;
     const auto& resolution = inputs_.name_resolution;
 
-    // Who claims a surface name, across BOTH registries. NameRegistry reports the
+    // Who claims a surface name, across ALL registries. NameRegistry reports the
     // colliding name; the attributions supply the claimants, which is what makes
     // the diagnostic actionable -- the name alone does not say which plugin to
-    // disable. Tools and commands are separate namespaces, so the kind is part of
-    // the answer rather than an aside.
-    const auto claimants = [this](const std::string& surface, bool& is_command) {
+    // disable. Tools, commands and services are separate namespaces, so the kind
+    // is part of the answer rather than an aside.
+    enum class ClaimKind { kTool, kCommand, kService };
+    const auto claimants = [this](const std::string& surface, ClaimKind& kind) {
         std::vector<std::string> owners;
         const auto add = [&owners](const std::string& plugin_name) {
             const auto label = plugin_name.empty() ? "core" : plugin_name;
@@ -446,7 +447,10 @@ std::vector<CheckResult> StartupSanityCheck::check_name_collisions() {
             }
             if (s == surface) add(attr.plugin_name);
         }
-        if (!owners.empty()) return owners;
+        if (!owners.empty()) {
+            kind = ClaimKind::kTool;
+            return owners;
+        }
 
         // A command collision, then. Its registry has already applied aliases, so
         // surface_name is what to compare -- no second alias lookup here.
@@ -454,17 +458,34 @@ std::vector<CheckResult> StartupSanityCheck::check_name_collisions() {
             for (const auto& attr : inputs_.command_registry->attributions()) {
                 if (attr.surface_name == surface) add(attr.plugin_name);
             }
-            if (!owners.empty()) is_command = true;
+            if (!owners.empty()) kind = ClaimKind::kCommand;
+        }
+        if (!owners.empty()) return owners;
+
+        // A service collision, then. Original names register unaliased, so the
+        // attribution's name is what to compare.
+        if (inputs_.service_registry != nullptr) {
+            for (const auto& attr : inputs_.service_registry->attributions()) {
+                if (attr.service_name == surface) add(attr.plugin_name);
+            }
+            if (!owners.empty()) kind = ClaimKind::kService;
         }
         return owners;
     };
 
     for (const auto& surface : resolution.result.fatal_collisions) {
-        bool is_command = false;
-        const auto owners = claimants(surface, is_command);
+        ClaimKind kind = ClaimKind::kTool;
+        const auto owners = claimants(surface, kind);
+        if (kind == ClaimKind::kService) {
+            results.push_back(Fatal("name_collisions",
+                                    "service name '" + surface + "' is provided by " +
+                                        JoinNames(owners) + " -- disable one of the plugins"));
+            continue;
+        }
         results.push_back(
             Fatal("name_collisions",
-                  std::string(is_command ? "command name '/" : "tool name '") + surface +
+                  std::string(kind == ClaimKind::kCommand ? "command name '/" : "tool name '") +
+                      surface +
                       "' is provided by " + JoinNames(owners) +
                       " -- disable one plugin, or give one of them a command_aliases entry"));
     }

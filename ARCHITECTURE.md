@@ -536,11 +536,11 @@ Both `PermissionChecker`'s implementation and `CommandDispatcher` compose the sa
 
 **The dispatch split, and why it is structural.** Turns and mutating commands share ONE queue on the session, and the worker pops from it only between `RunTurn` calls — so "a command never lands between a `tool_use` and its `tool_result`" is true by construction rather than by a check someone could forget. It also makes a preset or model switch safe to swap the session's `LlmProvider` under `AgentLoop`'s reference: the worker is provably not inside a provider call at that moment.
 
-**A plugin owns the commands that touch its own state.** `/restart-shell` lives in `tools-bash`, not `commands-core`, because bash's per-session cwd/env lives inside that plugin — one `.so` cannot reach into another's state. Registering a tool *and* its associated command from the same plugin is the general pattern, and the reason `minimal_plugin_register_tools` and `..._register_commands` are independent optional symbols rather than a single "kind" of plugin.
+**A plugin owns the commands that touch its own state.** `/restart-shell` lives in `tools-bash`, not `commands-core`, because bash's per-session cwd/env lives inside that plugin and a command belongs to the plugin that owns the state it touches. Registering a tool *and* its associated command from the same plugin is the general pattern, and the reason `minimal_plugin_register_tools` and `..._register_commands` are independent optional symbols rather than a single "kind" of plugin. What other plugins may now do is *ask*: the service registry (§ Cross-plugin services) is the sanctioned pull channel, and `/restart-shell` itself resolves the store through it.
 
 ### Name collisions and aliases
 
-**Collisions are fatal**, and they are now actually *detected*: `NameRegistry` existed and was unit-tested from the beginning but nothing outside its own tests ever constructed one, so a duplicate registration silently shadowed via `insert_or_assign` and which plugin won depended on directory iteration order. `plugins/name_resolution.{hpp,cpp}` (`ResolveRegistrationNames`) feeds it from both the tool and command attributions, applies `command_aliases` routed to whichever kind claims each key, and the startup sanity check reports the result. `ToolRegistry::Register` now *shadows* a duplicate rather than destroying it — destroying the first registrant made a collision unfixable by aliasing, since the object an alias would have renamed was already gone. Two plugins registering the same tool name, command name, `ViewSpec::id`, or `ToolResultRenderer::tool_name` halt startup with a diagnostic naming both. Silent shadowing is the wrong failure mode — it makes behavior depend on plugin load order.
+**Collisions are fatal**, and they are now actually *detected*: `NameRegistry` existed and was unit-tested from the beginning but nothing outside its own tests ever constructed one, so a duplicate registration silently shadowed via `insert_or_assign` and which plugin won depended on directory iteration order. `plugins/name_resolution.{hpp,cpp}` (`ResolveRegistrationNames`) feeds it from the tool, command, and service attributions, applies `command_aliases` routed to whichever kind claims each key, and the startup sanity check reports the result. `ToolRegistry::Register` now *shadows* a duplicate rather than destroying it — destroying the first registrant made a collision unfixable by aliasing, since the object an alias would have renamed was already gone. Two plugins registering the same tool name, command name, service name, `ViewSpec::id`, or `ToolResultRenderer::tool_name` halt startup with a diagnostic naming both. Silent shadowing is the wrong failure mode — it makes behavior depend on plugin load order.
 
 Resolution is disabling one plugin, rebuilding, or **aliasing** via an optional `plugins.json` field:
 
@@ -608,10 +608,15 @@ extern "C" {
   const char* minimal_plugin_version();
 
   // --- Additive: many plugins may each contribute ---
-  void minimal_plugin_register_tools(ToolRegistry&);
-  void minimal_plugin_register_commands(CommandRegistry&);
-  void minimal_plugin_register_provider_factories(ProviderFactoryRegistry&);
-  void minimal_plugin_register_session_observer(SessionObserverRegistry&);
+  void minimal_plugin_register_tools(ToolRegistry&, const PluginRegistrationContext&);
+  void minimal_plugin_register_commands(CommandRegistry&, const PluginRegistrationContext&);
+  void minimal_plugin_register_provider_factories(ProviderFactoryRegistry&,
+                                                  const PluginRegistrationContext&);
+  void minimal_plugin_register_session_observer(SessionObserverRegistry&,
+                                                const PluginRegistrationContext&);
+  void minimal_plugin_register_services(ServiceRegistry&, const PluginRegistrationContext&);
+  void minimal_plugin_register_permission_advisor(PermissionAdvisorRegistry&,
+                                                  const PluginRegistrationContext&);
 
   // --- Exclusive: one global choice. First plugin (by plugins.json order) wins;
   //     a second registration logs a warning and is ignored. ---
@@ -622,10 +627,10 @@ extern "C" {
 
 The ABI header has **two halves**, and both are frozen surface:
 
-- **Extension points** plugins *implement*: `Tool`, `Command`, provider factory, `SessionObserver`, `MentionResolver`, `AuthProvider`.
-- **Utilities** plugins *consume*: `path_confinement`, `file_access`, `atomic_write`, `HttpClient`, `Logger`, `SessionReader` (read-only history access), the frontmatter parser.
+- **Extension points** plugins *implement*: `Tool`, `Command`, provider factory, `SessionObserver`, service provider, `PermissionAdvisor`, `MentionResolver`, `AuthProvider`.
+- **Utilities** plugins *consume*: `path_confinement`, `file_access`, `atomic_write`, `HttpClient`, `Logger`, `SessionReader` (read-only history access), the frontmatter parser — and the `ServiceRegistry` pointer carried on `PluginRegistrationContext`, which is the consumer side of the service channel (§ Cross-plugin services).
 
-The surface above is verified against the tree, and the designed next points — cross-plugin services, per-plugin config, MCP lifecycle observers, the permission advisor, model auto-discovery — are catalogued with suggested architectures in `docs/EXTENSIBILITY.md`.
+The surface above is verified against the tree. The remaining designed points — MCP lifecycle observers, model auto-discovery — are catalogued with suggested architectures in `docs/EXTENSIBILITY.md`.
 
 ### `SessionObserver` — observe and react
 
@@ -670,6 +675,18 @@ public:
 The failure mode shifts accordingly. A hung observer stalls *further* notifications rather than leaking one pool thread — contained (sessions keep running; only notifications stop), and the right trade against silently racing plugin state.
 
 A throwing observer is expected rather than exceptional, since observers are plugin code: each call is wrapped, and one observer's failure never stops the others.
+
+### Cross-plugin services — ask, don't grab
+
+The sanctioned **pull** channel (`SessionObserver` is the push channel): one plugin can reach another's services without either exposing internals. The providing plugin exports `minimal_plugin_register_services(ServiceRegistry&, const PluginRegistrationContext&)` and hands the registry a non-owning pointer to an **abstract** interface under a name; the same registry pointer rides `PluginRegistrationContext::services` to every registration hook, so a consumer captures it at registration and resolves with `Find` lazily at use time — plugin load order is file order, so the consumer may load before its provider. `Find` returning null is a runtime condition (the provider is disabled), not an error: degrade with a clear message.
+
+Three rules keep it from becoming an event bus or a hidden dependency:
+
+- **Typed at the edges, named in the middle.** The provider ships a header-only, pure-virtual interface (its symbols live inside the providing `.so`, `RTLD_LOCAL`, so nothing else can call them by name — virtual dispatch needs no symbols); a consumer `static_cast`s `Find`'s result to it. The name is the only runtime coupling; the header is the contract, under the same source-compatibility model as everything else.
+- **Collisions are fatal, not shadowed.** Service names feed `NameRegistry` as their own `NameKind` — a separate namespace, so a service may share a name with a tool or command — and the startup check names both claimants. Services are not user-aliasable: the name is addressed by code, never by the model or the user.
+- **No bus, no subscribe.** Push already exists; this is pull, deliberately.
+
+First consumer: `tools-bash` provides its per-session shell state as `BashSessionStateService` (shipped header `bash_state_service.hpp`, name `tools-bash.session_state`), and `/restart-shell` resolves the store through `Find` — the same lookup a third-party consumer would use. The full §2.2 spec is `docs/EXTENSIBILITY.md`.
 
 ### `MentionResolver` and `AuthProvider`
 

@@ -111,6 +111,11 @@ int main(int argc, char** argv) {
     // name; permissions.json's "advisor" selects one. An empty registry is the
     // default -- every Ask reaches the human.
     minimal::tools::PermissionAdvisorRegistry permission_advisors;
+    // The sanctioned cross-plugin channel (pull; SessionObserver is push).
+    // Additive: many plugins may each provide services, and a duplicate name is
+    // fatal at startup via the name resolution below. Also handed to every
+    // plugin as the consumer side, through PluginRegistrationContext.
+    minimal::plugins::ServiceRegistry services;
 
     // The tools slice of settings.json is forwarded verbatim to every plugin;
     // core imposes no schema on it. Loaded defensively because a missing or
@@ -125,7 +130,7 @@ int main(int argc, char** argv) {
     }
 
     minimal::plugins::PluginLoader loader(tools, providers, tools_settings, &observers, &commands,
-                                          &auth_providers, &permission_advisors);
+                                          &auth_providers, &permission_advisors, &services);
     const auto records = loader.LoadAll(candidates);
 
     std::printf("plugins (%zu discovered):\n", records.size());
@@ -151,6 +156,9 @@ int main(int argc, char** argv) {
         }
         if (record.registered_permission_advisor) {
             std::printf("      advisor  permission prompts\n");
+        }
+        for (const auto& service : record.registered_services) {
+            std::printf("      service  %s\n", service.c_str());
         }
     }
 
@@ -188,7 +196,7 @@ int main(int argc, char** argv) {
     // surface. Same rule, different amount of machinery to enforce it.
     auto name_resolution = minimal::plugins::ResolveRegistrationNames(
         tools, plugin_config.command_aliases, &commands,
-        /*core_tool_names=*/{minimal::agent::kSpawnSubagentToolName});
+        /*core_tool_names=*/{minimal::agent::kSpawnSubagentToolName}, &services);
     // The name above is RESERVED here but the tool object itself registers at
     // serve stage (main registers SpawnSubagentTool only once subagents exist).
     // The reservation is what puts it inside the fatal-collision scan.
@@ -207,6 +215,7 @@ int main(int argc, char** argv) {
         std::move(name_resolution),
         &commands,
         &permission_advisors,
+        &services,
     });
     const auto check_results = sanity.RunAll();
 

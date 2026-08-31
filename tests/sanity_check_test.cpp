@@ -87,6 +87,7 @@ struct Fixture {
     tools::ToolRegistry tool_registry;
     llm::ProviderFactoryRegistry provider_factories;
     config::SkillRegistry skills;
+    plugins::ServiceRegistry service_registry;
 
     Fixture() {
         std::filesystem::create_directories(config_dir);
@@ -107,19 +108,31 @@ struct Fixture {
         tool_registry.ClearAttribution();
     }
 
+    // One service registration under a plugin attribution -- the shape the
+    // loader produces for minimal_plugin_register_services.
+    void ProvideService(const std::string& plugin, const std::string& name) {
+        static int dummy;  // identity only; nothing calls through it here
+        service_registry.SetAttribution(plugin);
+        service_registry.Provide(name, &dummy);
+        service_registry.ClearAttribution();
+    }
+
     config::SanityCheckInputs Inputs(const std::vector<plugins::PluginRecord>& records,
                                      const std::map<std::string, std::string>& aliases,
                                      const commands::CommandRegistry* command_registry,
-                                     const tools::PermissionAdvisorRegistry* advisors = nullptr) {
+                                     const tools::PermissionAdvisorRegistry* advisors = nullptr,
+                                     const plugins::ServiceRegistry* services = nullptr) {
         // ApplyAliases runs after ALL registration, as it does in main.
         tool_registry.ApplyAliases(aliases);
         auto resolution =
-            plugins::ResolveRegistrationNames(tool_registry, aliases, command_registry);
+            plugins::ResolveRegistrationNames(tool_registry, aliases, command_registry, {},
+                                              services);
         plugins::PluginConfig plugin_config;
         plugin_config.command_aliases = aliases;
         return config::SanityCheckInputs{config_dir,         records, tool_registry,
                                          provider_factories, skills,  plugin_config,
-                                         resolution,         command_registry, advisors};
+                                         resolution,         command_registry, advisors,
+                                         services};
     }
 };
 
@@ -128,7 +141,11 @@ std::vector<CheckResult> RunChecks(Fixture& f,
                                    const std::map<std::string, std::string>& aliases = {},
                                    const commands::CommandRegistry* commands = nullptr,
                                    const tools::PermissionAdvisorRegistry* advisors = nullptr) {
-    return StartupSanityCheck(f.Inputs(records, aliases, commands, advisors)).RunAll();
+    // The fixture's service registry is passed always: it is empty unless a
+    // test populates it, which is also the shape main() sees for every other
+    // registry.
+    return StartupSanityCheck(f.Inputs(records, aliases, commands, advisors,
+                                       &f.service_registry)).RunAll();
 }
 
 std::vector<const CheckResult*> ByCheck(const std::vector<CheckResult>& results, const std::string& name) {
@@ -496,6 +513,38 @@ TEST_CASE("an alias resolves the collision before the check runs", "[sanity_chec
     // Both implementations are alive under their surface names.
     CHECK(f.tool_registry.Find("bash") != nullptr);
     CHECK(f.tool_registry.Find("ssh_bash") != nullptr);
+}
+
+TEST_CASE("a service-name collision is fatal and names both plugins, with no alias escape",
+          "[sanity_check][name_collisions]") {
+    Fixture f;
+    WriteGoodConfig(f.config_dir);
+    ScopedEnv data("XDG_DATA_HOME", f.xdg_data.string().c_str());
+    f.ProvideService("tools-bash", "tools-bash.session_state");
+    f.ProvideService("bash_over_ssh", "tools-bash.session_state");
+
+    const auto results = RunChecks(f);
+    const auto hits = ByCheck(results, "name_collisions");
+    REQUIRE(hits.size() == 1);
+    CHECK(hits[0]->severity == CheckSeverity::Fatal);
+    CHECK(hits[0]->message.find("service name") != std::string::npos);
+    CHECK(hits[0]->message.find("tools-bash") != std::string::npos);
+    CHECK(hits[0]->message.find("bash_over_ssh") != std::string::npos);
+}
+
+TEST_CASE("a service name shared with a tool name is not a collision",
+          "[sanity_check][name_collisions]") {
+    // Separate namespaces: services are addressed by code through Find, never
+    // by the model or the user, so there is nothing to be ambiguous about.
+    Fixture f;
+    WriteGoodConfig(f.config_dir);
+    ScopedEnv data("XDG_DATA_HOME", f.xdg_data.string().c_str());
+    f.RegisterTool("tools-bash", "bash");
+    f.ProvideService("tools-bash", "bash");
+
+    const auto results = RunChecks(f);
+    CHECK(ByCheck(results, "name_collisions").empty());
+    CHECK_FALSE(HasFatal(results));
 }
 
 TEST_CASE("a dangling alias warns", "[sanity_check][aliases]") {
