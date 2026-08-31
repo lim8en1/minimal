@@ -188,10 +188,14 @@ LaunchedProcess LaunchProcess(const std::string& wrapped, const SessionShellStat
             return 127;
         };
 
-        if (chdir(cwd.c_str()) != 0) _exit(child_die("chdir to session cwd failed"));
-
         // dup2 clears FD_CLOEXEC on the copy, which is what we want for 0/1/2 and
-        // for the state fd -- the shell must be able to write to it.
+        // for the state fd -- the shell must be able to write to it. BEFORE the
+        // chdir, deliberately: the chdir-failure diagnostic below is the one
+        // message that reaches the parent only through fd 2, and its most
+        // likely cause -- a deleted session cwd, e.g. `cd build && rm -rf
+        // build` followed by any command -- is exactly where recovery guidance
+        // matters. Redirecting first is what makes "stderr is already the
+        // pipe" (the child_die comment) true for every call site.
         dup2(devnull.get(), STDIN_FILENO);
         dup2(out_write.get(), STDOUT_FILENO);
         dup2(out_write.get(), STDERR_FILENO);  // merged: one stream, in order
@@ -200,6 +204,8 @@ LaunchedProcess LaunchProcess(const std::string& wrapped, const SessionShellStat
         // from the pipe() setup above -- which would close the state channel on
         // exec and silently lose every cd/export.
         fcntl(kStateFd, F_SETFD, 0);
+
+        if (chdir(cwd.c_str()) != 0) _exit(child_die("chdir to session cwd failed"));
 
         execve(shell.c_str(), argv_ptrs, envp.data());
 

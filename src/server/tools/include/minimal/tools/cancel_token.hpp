@@ -30,9 +30,12 @@ class CancelToken {
 public:
     bool IsCancelled() const { return cancelled_.load(std::memory_order_acquire); }
 
-    // Fires the token and wakes every waiter parked on it.
+    // Fires the token and wakes every waiter parked on it. release, not
+    // acq_rel: acq_rel is invalid on a store (libc++ diagnose_if warns), and
+    // the acquire half is meaningless here -- waiters acquire through Mu()
+    // below.
     void Cancel() {
-        cancelled_.store(true, std::memory_order_acq_rel);
+        cancelled_.store(true, std::memory_order_release);
         Notify();
     }
 

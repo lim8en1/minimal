@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <csignal>
 #include <cstdio>
 #include <cstring>
 #include <exception>
@@ -26,6 +27,7 @@
 #include "minimal/common/config_paths.hpp"
 #include "minimal/common/logger.hpp"
 #include "minimal/common/logging_setup.hpp"
+#include "minimal/config/fd_hygiene.hpp"
 #include "minimal/config/permissions_config.hpp"
 #include "minimal/config/sanity_check.hpp"
 #include "minimal/config/settings_config.hpp"
@@ -83,6 +85,16 @@ void WriteConfigIfChanged(const std::filesystem::path& path, const std::string& 
 }  // namespace
 
 int main(int argc, char** argv) {
+    // Process-wide, deliberate, and UNCONDITIONAL: the hook executor and the
+    // MCP stdio shim both write payloads into pipes a child may close without
+    // reading. The shim used to install this lazily -- on first stdio-MCP
+    // initialization -- and the hook executor implicitly leaned on it, so
+    // server survival depended on whether an unrelated subsystem had happened
+    // to initialize. Children inherit SIG_IGN (the shim's comment already
+    // documents that as the hosted-runtime trade); a script that wants
+    // SIGPIPE semantics back can trap it.
+    std::signal(SIGPIPE, SIG_IGN);
+
     std::filesystem::path socket_path = minimal::rpc::DefaultSocketPath();
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--listen") == 0 && i + 1 < argc) {
@@ -491,6 +503,16 @@ int main(int argc, char** argv) {
     // registered their services into. Borrowed; `services` outlives the
     // service (declared at stage 2).
     service.set_services(&services);
+    // Every long-lived descriptor this process will ever own is open by now
+    // (logging, the session database, gRPC's sockets, plugin storage): mark
+    // them all close-on-exec so a bash command, MCP stdio server or hook
+    // action inherits only what its spawner explicitly dups. Retires the §7
+    // fd-hygiene gap structurally instead of chasing each spawner's fds.
+    const auto cloexec_marked = minimal::config::MarkInheritedFdsCloseOnExec();
+    if (cloexec_marked != 0) {
+        std::printf("  fd hygiene: %zu descriptor(s) marked close-on-exec\n", cloexec_marked);
+    }
+
     minimal::rpc::Server server(service, socket_path);
 
     if (!server.listening()) {

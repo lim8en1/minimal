@@ -55,9 +55,9 @@ AgentLoop::AgentLoop(llm::LlmProvider& provider, tools::ToolExecutor& executor,
       event_sink_(std::move(event_sink)),
       compactor_(std::move(compactor)),
       history_(std::move(seeded_history)),
-      pool_(config.max_parallel_tool_calls),
       first_persisted_seq_(seed_first_persisted_seq),
-      head_is_summary_(seed_head_is_summary) {
+      head_is_summary_(seed_head_is_summary),
+      pool_(config.max_parallel_tool_calls) {
     // The injection queue is shared with the session's channels block when
     // there is one (the producers are foreign threads and must see the same
     // queue the session's wake predicate and Terminate do). A plain test loop

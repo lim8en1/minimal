@@ -1005,13 +1005,15 @@ TEST_CASE("an injection on an idle session wakes the worker when the setting is 
                                            false}}}));
 
     // A REAL turn ran: provider called, turn completed, history grew. Wait on
-    // the PROVIDER CALL, not on idle -- an idle session is also the state
-    // before the worker has picked the wake turn up.
+    // the CALL COUNT, not on idle -- an idle session is also the state before
+    // the worker has picked the wake turn up, and call_count() is the
+    // mutex-guarded accessor: requests() itself may only be read once the
+    // worker is provably quiescent (the idle wait below).
     const auto deadline = std::chrono::steady_clock::now() + 5s;
-    while (fixture.provider->requests().empty() && std::chrono::steady_clock::now() < deadline) {
+    while (fixture.provider->call_count() == 0 && std::chrono::steady_clock::now() < deadline) {
         std::this_thread::sleep_for(5ms);
     }
-    REQUIRE(!fixture.provider->requests().empty());
+    REQUIRE(fixture.provider->call_count() >= 1);
     REQUIRE(fixture.session->WaitForIdleForTesting(5s));
     const auto& request = fixture.provider->requests().front();
     REQUIRE(request.messages.size() == 1);  // the injection IS the user content

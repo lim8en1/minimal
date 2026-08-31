@@ -21,13 +21,16 @@ namespace {
 
 // The MCP stdio client writes to the server child's stdin. When the child has
 // died, that write raises SIGPIPE, whose default disposition kills the ENTIRE
-// server process -- observed as exit 141 mid-test. Ignore it process-wide: the
-// write then fails with EPIPE and surfaces as a tool error, which is the whole
-// point of this layer. Children spawned afterwards (bash) inherit SIG_IGN, so
-// their pipelines report EPIPE errors instead of dying by signal -- the same
-// trade hosted runtimes (Python, Go) make, and an improvement in practice: a
-// `yes | head -1` exits with a write error it can report rather than a signal
-// it cannot.
+// server process -- observed as exit 141 mid-test. This ignore used to be the
+// process's ONLY guard, installed lazily here -- which meant the hook executor
+// and any other pipe-writing code implicitly leaned on whether an unrelated
+// stdio MCP server had happened to initialize. The disposition is now set
+// unconditionally at the top of server main(); this call stays as an idempotent
+// backstop for test binaries that exercise the shim without main(). Children
+// spawned afterwards (bash) inherit SIG_IGN, so their pipelines report EPIPE
+// errors instead of dying by signal -- the same trade hosted runtimes (Python,
+// Go) make, and an improvement in practice: a `yes | head -1` exits with a
+// write error it can report rather than a signal it cannot.
 void DisableSigpipe() {
     std::signal(SIGPIPE, SIG_IGN);
 }

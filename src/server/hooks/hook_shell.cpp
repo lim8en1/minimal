@@ -22,6 +22,10 @@ namespace {
 // deadline (or its own exit) reaps it.
 constexpr std::size_t kMaxCapturedBytes = 1 << 20;  // 1 MiB
 constexpr std::size_t kMaxBlockReasonBytes = 500;
+// Matches the bash tool's default filesize backstop (bash_settings.hpp): a
+// hook script redirecting to a file is bounded the same way its model-driven
+// cousin is.
+constexpr rlim_t kMaxHookFileSizeBytes = 1024LL * 1024 * 1024;  // 1 GiB
 
 class ScopedFd {
 public:
@@ -82,14 +86,17 @@ ShellActionResult RunShellAction(const std::string& command, std::string_view st
                                  const std::function<bool()>& is_cancelled) {
     ShellActionResult result;
 
-    // O_CLOEXEC so neither end leaks into grandchildren.
-    int in_fds[2];
-    int out_fds[2];
+    // O_CLOEXEC so neither end leaks into grandchildren. Both arrays start at
+    // -1: POSIX does not define the contents of an fd array when pipe()
+    // fails, so the cleanup below must read initialized values or it can
+    // close() a garbage number that happens to be another session's live fd.
+    int in_fds[2] = {-1, -1};
+    int out_fds[2] = {-1, -1};
     if (pipe(in_fds) != 0 || pipe(out_fds) != 0) {
         result.outcome = ShellActionOutcome::kFailOpen;
         result.fail_reason = std::string("pipe: ") + std::strerror(errno);
-        if (in_fds[0] >= 0) ::close(in_fds[0]);
-        if (in_fds[1] >= 0) ::close(in_fds[1]);
+        for (int fd : in_fds) ::close(fd);
+        for (int fd : out_fds) ::close(fd);
         return result;
     }
     for (int fd : {in_fds[0], in_fds[1], out_fds[0], out_fds[1]}) {
@@ -123,6 +130,12 @@ ShellActionResult RunShellAction(const std::string& command, std::string_view st
             rlimit cpu{};
             cpu.rlim_cur = cpu.rlim_max = static_cast<rlim_t>(timeout.count() / 1000) + 5;
             setrlimit(RLIMIT_CPU, &cpu);
+
+            // Filesize backstop, matching the bash tool: a runaway script
+            // redirecting to a file must not fill the disk unbounded.
+            rlimit fsize{};
+            fsize.rlim_cur = fsize.rlim_max = kMaxHookFileSizeBytes;
+            setrlimit(RLIMIT_FSIZE, &fsize);
         }
 
         dup2(in_read.get(), STDIN_FILENO);
@@ -188,18 +201,28 @@ ShellActionResult RunShellAction(const std::string& command, std::string_view st
         }
         if (rc == 0) continue;
 
-        if (in_slot >= 0 && (fds[in_slot].revents & (POLLOUT | POLLERR | POLLHUP))) {
-            const ssize_t n = write(in_write.get(), stdin_payload.data() + written,
-                                    stdin_payload.size() - written);
-            if (n > 0) {
-                written += static_cast<std::size_t>(n);
-                if (written >= stdin_payload.size()) {
-                    // EOF on stdin: the payload is data, not a stream.
-                    in_write.reset();
-                    in_open = false;
+        if (in_slot >= 0 && in_open) {
+            if ((fds[in_slot].revents & POLLOUT) != 0) {
+                const ssize_t n = write(in_write.get(), stdin_payload.data() + written,
+                                        stdin_payload.size() - written);
+                if (n > 0) {
+                    written += static_cast<std::size_t>(n);
+                    if (written >= stdin_payload.size()) {
+                        // EOF on stdin: the payload is data, not a stream.
+                        in_write.reset();
+                        in_open = false;
+                    }
+                } else if (n < 0 && errno != EINTR && errno != EAGAIN) {
+                    in_open = false;  // the child is gone or closed stdin; output tells the story
                 }
-            } else if (n < 0 && errno != EINTR && errno != EAGAIN) {
-                in_open = false;  // the child is gone or closed stdin; output tells the story
+            } else if ((fds[in_slot].revents & (POLLERR | POLLHUP)) != 0) {
+                // The read end is gone -- the child exited without reading the
+                // payload (the normal case for a notify-style hook) or closed
+                // its stdin. Writing anyway was a one-way trip: with the
+                // default SIGPIPE disposition it killed the whole server, and
+                // a poll report of POLLERR|POLLHUP arrives exactly then. Stop
+                // writing; the child's output tells the story.
+                in_open = false;
             }
         }
 

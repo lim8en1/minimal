@@ -72,6 +72,11 @@ struct Harness {
     std::vector<BackgroundTaskEvent> events;
     std::mutex events_mu;
     std::string streamed;
+    // Simulates a plugin handle callback that throws on the terminal event --
+    // the watcher's containment wrapper must turn that into a failed task,
+    // never a std::terminate that takes the whole test binary (and in
+    // production, every session) down.
+    std::atomic<bool> throw_on_terminal_event{false};
 
     struct Ack {
         tools::ToolResult result;
@@ -99,8 +104,14 @@ struct Harness {
         };
         ctx.session_lifetime = lifetime;
         ctx.emit_task_event = [this](const BackgroundTaskEvent& event) {
-            std::lock_guard<std::mutex> events_lock(events_mu);
-            events.push_back(event);
+            {
+                std::lock_guard<std::mutex> events_lock(events_mu);
+                events.push_back(event);
+            }
+            if (throw_on_terminal_event.load() &&
+                event.state != BackgroundTaskEvent::State::kStarted) {
+                throw std::runtime_error("simulated plugin failure");
+            }
         };
         ctx.emit_output = [this](std::string_view chunk) { streamed += chunk; };
 
@@ -323,11 +334,34 @@ TEST_CASE("a background command never adopts session cwd or environment",
     (void)ack;
 }
 
-TEST_CASE("background tasks are tracked per session and erased with it",
+TEST_CASE("a throwing handle callback fails the task instead of the process",
           "[tools_bash][background]") {
+    // The watcher is a detached thread -- an exception escaping a thread
+    // function calls std::terminate and takes the whole process with it. It is
+    // also the one plugin seam that must OUTLIVE its invocation, so the
+    // executor's guard does not cover it: the containment wrapper is the
+    // guard. A throwing callback must degrade to a failed task and a log
+    // line, never a dead server.
     Harness h;
+    h.throw_on_terminal_event.store(true);
+    const auto ack = h.Start("true");
+    REQUIRE(WaitFor([&] {
+        const auto state = h.TaskState(ack.task_id);
+        return state.has_value() && *state == BackgroundTaskEvent::State::kFailed;
+    }));
+}
+
+TEST_CASE("background tasks are tracked per session and erased with it",
+          "[tools_bash][background]") {    Harness h;
     const auto ack = h.Start("echo done-session-a", {}, "session-a");
-    REQUIRE(WaitFor([&] { return SingleCompletion(h).present; }));
+    // Terminal state, not the injection: the state is stored after the
+    // injection, so it is the quiescence point (all watcher writes done).
+    REQUIRE(WaitFor([&] {
+        for (const auto& task : h.background.List("session-a")) {
+            if (task.id == ack.task_id) return ReachedTerminal(task.state);
+        }
+        return false;
+    }));
 
     // Another session's listing is unaffected.
     CHECK(h.background.List("session-b").empty());

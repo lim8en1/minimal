@@ -1,5 +1,10 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <csignal>
+
+#include <dirent.h>
+#include <fcntl.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -21,6 +26,14 @@ using minimal::hooks::ShellActionResult;
 using minimal::hooks::RunShellAction;
 
 namespace {
+
+// Mirrors server main()'s process-wide disposition for the duration of a test.
+// The disposition is the load-bearing half of the unread-payload fix: the
+// poll→write window can never be closed by gating alone.
+struct ScopedSignalIgnore {
+    ScopedSignalIgnore() { std::signal(SIGPIPE, SIG_IGN); }
+    ~ScopedSignalIgnore() { std::signal(SIGPIPE, SIG_DFL); }
+};
 
 // A temp dir whose lifetime is the scope; hook scripts and their side-effect
 // files live here.
@@ -116,6 +129,92 @@ TEST_CASE("the payload passes through the child's stdin intact", "[hooks][shell]
     CHECK(dir.Slurp("payload.json") == "{\"tool_name\":\"bash\"}");
 }
 
+TEST_CASE("a hook that exits without reading the payload cannot kill the process",
+          "[hooks][shell]") {
+    // A notify-style hook (logger, notify-send) exits without reading stdin.
+    // The payload is deliberately larger than the 64 KiB pipe buffer, so the
+    // parent is guaranteed to still be writing when the read end closes -- the
+    // exact window where writing into a dead pipe raised SIGPIPE and, with the
+    // default disposition, killed the whole server.
+    //
+    // Two halves make the fix, and both are needed: the process-wide SIGPIPE
+    // ignore (installed in server main; mirrored here, because a poll→write
+    // race cannot be closed by gating alone) and the executor's POLLERR/POLLHUP
+    // gate, which stops feeding a dead pipe instead of relying on the EPIPE
+    // errno path. Before either, this test died with SIGPIPE; now it must
+    // complete the action ladder gracefully.
+    ScopedSignalIgnore ignore;
+    const std::string payload(128 * 1024, 'x');
+    const auto result =
+        RunShellAction("true", payload, std::chrono::milliseconds{3000}, nullptr);
+    CHECK(result.outcome == ShellActionOutcome::kPass);
+}
+
+TEST_CASE("a payload larger than the pipe buffer still reaches a reading hook",
+          "[hooks][shell]") {
+    // The other half of the write gate: stopping on POLLERR/POLLHUP must not
+    // stop the POLLOUT path from streaming a payload that takes many writes.
+    TempDir dir;
+    const auto script =
+        dir.Script("drain.sh", "cat > '" + dir.path.string() + "/big.json'\nexit 0\n");
+    const std::string payload(200 * 1024, 'p');
+    const auto result =
+        RunShellAction(script, payload, std::chrono::milliseconds{3000}, nullptr);
+    REQUIRE(result.outcome == ShellActionOutcome::kPass);
+    CHECK(dir.Slurp("big.json") == payload);
+}
+
+TEST_CASE("a hook writing past the filesize backstop fails open", "[hooks][shell]") {
+    // A sparse write at an offset beyond the RLIMIT_FSIZE backstop trips the
+    // limit immediately -- no gigabytes touch the disk -- while a hook without
+    // the backstop would complete and pass. The limit mirrors the bash tool's
+    // own; the wall-clock deadline cannot bound disk consumption. The shell
+    // reports the signal-killed dd as exit 128+SIGXFSZ; the load-bearing
+    // assertion is simply "not a pass", with the file size proving the write
+    // was bounded.
+    TempDir dir;
+    const auto target = (dir.path / "big.bin").string();
+    const auto script =
+        "dd if=/dev/zero of='" + target + "' bs=1M count=1 seek=1500 2>/dev/null";
+    const auto result =
+        RunShellAction(script, "{}", std::chrono::milliseconds{3000}, nullptr);
+    CHECK(result.outcome == ShellActionOutcome::kFailOpen);
+    std::error_code ec;
+    const auto written = std::filesystem::file_size(target, ec);
+    CHECK((ec || written < 1024LL * 1024 * 1024));
+}
+
+TEST_CASE("a pipe-open failure degrades to fail-open without touching unrelated fds",
+          "[hooks][shell]") {
+    // Cap the descriptor budget at exactly the number of fds this process has
+    // open, so the executor's first pipe() fails EMFILE. The cleanup path must
+    // read only initialized values: POSIX leaves the fd array undefined when
+    // pipe() fails, and a garbage close() could take out an unrelated live fd.
+    rlimit original{};
+    REQUIRE(::getrlimit(RLIMIT_NOFILE, &original) == 0);
+    struct Restore {
+        rlimit saved;
+        ~Restore() { ::setrlimit(RLIMIT_NOFILE, &saved); }
+    } restore{original};
+
+    std::size_t listed = 0;
+    DIR* dir = ::opendir("/proc/self/fd");
+    if (dir == nullptr) dir = ::opendir("/dev/fd");
+    REQUIRE(dir != nullptr);
+    while (::readdir(dir) != nullptr) ++listed;  // includes "." and ".."
+    ::closedir(dir);
+    REQUIRE(listed >= 4);  // ".", "..", and at least two open descriptors
+
+    rlimit capped = original;
+    capped.rlim_cur = listed - 2;  // exactly the open fds: the next pipe fails
+    REQUIRE(::setrlimit(RLIMIT_NOFILE, &capped) == 0);
+
+    const auto result =
+        RunShellAction("exit 0", "{}", std::chrono::milliseconds{3000}, nullptr);
+    CHECK(result.outcome == ShellActionOutcome::kFailOpen);
+    CHECK(result.fail_reason.find("pipe:") != std::string::npos);
+}
+
 TEST_CASE("a timed-out action fails open and does not outlive the call", "[hooks][shell]") {
     const auto started = std::chrono::steady_clock::now();
     const auto result = RunShellAction("sleep 30", "{}", std::chrono::milliseconds{200},
@@ -205,10 +304,12 @@ TEST_CASE("a veto-capable emission returns the first block and short-circuits th
                             dir.Script("a.sh", "echo first-reason\nexit 2\n"),
                             {{"tool_name", "x"}});
     // A second action whose side effect must NOT happen after the first block.
-    config.hooks.push_back({"core.pre_tool_use",
-                            {{"tool_name", "x"}},
-                            dir.Script("b.sh", "touch '" + dir.path.string() +
-                                                   "/should-not-run'\nexit 0\n")});
+    minimal::config::HookActionConfig second;
+    second.on = "core.pre_tool_use";
+    second.filter = {{"tool_name", "x"}};
+    second.command =
+        dir.Script("b.sh", "touch '" + dir.path.string() + "/should-not-run'\nexit 0\n");
+    config.hooks.push_back(std::move(second));
     const auto warnings = d.dispatcher->Configure(config);
     CHECK(warnings.empty());
 

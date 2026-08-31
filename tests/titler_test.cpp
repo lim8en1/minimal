@@ -9,6 +9,7 @@
 #include <chrono>
 #include <filesystem>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <utility>
@@ -41,6 +42,10 @@ public:
     std::shared_ptr<const session::SessionReader> reader;
     bool serve_llm = true;
     bool fail_rename = false;
+    // The titler's detached worker thread calls ResolveModelRef/RenameSession
+    // while the test's main thread reads the records, so both vectors are
+    // mutex-guarded and read only through the locked views below -- a data
+    // race here is a test bug, not a plugin finding.
     std::vector<std::pair<std::string, std::string>> renames;  // (session_id, name)
     std::vector<std::string> resolved_refs;
 
@@ -49,6 +54,7 @@ public:
         return agent::SessionLlm{provider, model};
     }
     std::optional<agent::SessionLlm> ResolveModelRef(const std::string& ref) override {
+        std::lock_guard<std::mutex> lock(records_mu);
         resolved_refs.push_back(ref);
         if (!serve_llm) return std::nullopt;
         return agent::SessionLlm{provider, model};
@@ -58,9 +64,23 @@ public:
     }
     bool RenameSession(const std::string& session_id, const std::string& name) override {
         if (fail_rename) return false;
+        std::lock_guard<std::mutex> lock(records_mu);
         renames.push_back({session_id, name});
         return true;
     }
+
+    // Locked read views: the main thread must not touch the raw vectors.
+    std::vector<std::pair<std::string, std::string>> Renames() const {
+        std::lock_guard<std::mutex> lock(records_mu);
+        return renames;
+    }
+    std::vector<std::string> ResolvedRefs() const {
+        std::lock_guard<std::mutex> lock(records_mu);
+        return resolved_refs;
+    }
+
+private:
+    mutable std::mutex records_mu;
 };
 
 agent::SessionInfo Info(std::string id, std::string parent = "") {
@@ -142,9 +162,10 @@ TEST_CASE("RunJobNow titles from the session's own model by default", "[titler]"
                                             common::DefaultLogger());
     observer.RunJobNow("s1", "please fix the login bug");
 
-    REQUIRE(support.renames.size() == 1);
-    CHECK(support.renames[0].first == "s1");
-    CHECK(support.renames[0].second == "Fix the login bug");
+    const auto renames = support.Renames();
+    REQUIRE(renames.size() == 1);
+    CHECK(renames[0].first == "s1");
+    CHECK(renames[0].second == "Fix the login bug");
 
     // The request went to the session's model, with the default prompt and cap.
     REQUIRE(support.provider->requests().size() == 1);
@@ -170,11 +191,13 @@ TEST_CASE("RunJobNow routes a configured model override through ResolveModelRef"
     session_titler::TitlerObserver observer(config, &services, common::DefaultLogger());
     observer.RunJobNow("s1", "text");
 
-    REQUIRE(support.resolved_refs.size() == 1);
-    CHECK(support.resolved_refs[0] == "cheap/main");
+    const auto refs = support.ResolvedRefs();
+    REQUIRE(refs.size() == 1);
+    CHECK(refs[0] == "cheap/main");
     // And the title still lands.
-    REQUIRE(support.renames.size() == 1);
-    CHECK(support.renames[0].second == "tiny title");
+    const auto renames = support.Renames();
+    REQUIRE(renames.size() == 1);
+    CHECK(renames[0].second == "tiny title");
 }
 
 TEST_CASE("RunJobNow degrades on every failure path", "[titler]") {
@@ -193,7 +216,7 @@ TEST_CASE("RunJobNow degrades on every failure path", "[titler]") {
         session_titler::TitlerObserver observer(DefaultConfig(), &services,
                                                 common::DefaultLogger());
         observer.RunJobNow("s1", "text");
-        CHECK(support.renames.empty());
+        CHECK(support.Renames().empty());
     }
     SECTION("provider error") {
         plugins::ServiceRegistry services;
@@ -204,7 +227,7 @@ TEST_CASE("RunJobNow degrades on every failure path", "[titler]") {
         session_titler::TitlerObserver observer(DefaultConfig(), &services,
                                                 common::DefaultLogger());
         observer.RunJobNow("s1", "text");
-        CHECK(support.renames.empty());
+        CHECK(support.Renames().empty());
     }
     SECTION("empty model output") {
         plugins::ServiceRegistry services;
@@ -214,7 +237,7 @@ TEST_CASE("RunJobNow degrades on every failure path", "[titler]") {
         session_titler::TitlerObserver observer(DefaultConfig(), &services,
                                                 common::DefaultLogger());
         observer.RunJobNow("s1", "text");
-        CHECK(support.renames.empty());
+        CHECK(support.Renames().empty());
     }
     SECTION("no service pointer at all (host offers no seam)") {
         session_titler::TitlerObserver observer(DefaultConfig(), nullptr,
@@ -233,11 +256,11 @@ TEST_CASE("OnTurnCompleted skips everything that is not a fresh session's first 
 
     // Subagents are named by their task.
     observer.OnTurnCompleted(Info("child", "parent"), Summary(0));
-    CHECK(support.renames.empty());
+    CHECK(support.Renames().empty());
 
     // A resumed session (or wake turn): the first new seq is above the seed.
     observer.OnTurnCompleted(Info("s1"), Summary(7));
-    CHECK(support.renames.empty());
+    CHECK(support.Renames().empty());
 }
 
 TEST_CASE("OnTurnCompleted reads the first user text and titles asynchronously",
@@ -261,17 +284,18 @@ TEST_CASE("OnTurnCompleted reads the first user text and titles asynchronously",
     // hang here is the bug, not a wrong assertion.
     observer.OnTurnCompleted(Info(id), Summary(0));
     const auto deadline = std::chrono::steady_clock::now() + 5s;
-    while (support.renames.empty() && std::chrono::steady_clock::now() < deadline) {
+    while (support.Renames().empty() && std::chrono::steady_clock::now() < deadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
-    REQUIRE(support.renames.size() == 1);
-    CHECK(support.renames[0].first == id);
-    CHECK(support.renames[0].second == "Fix the login bug");
+    const auto renames = support.Renames();
+    REQUIRE(renames.size() == 1);
+    CHECK(renames[0].first == id);
+    CHECK(renames[0].second == "Fix the login bug");
 
     // A second first-turn-shaped notification is still one title, ever.
     observer.OnTurnCompleted(Info(id), Summary(0));
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    CHECK(support.renames.size() == 1);
+    CHECK(support.Renames().size() == 1);
 
     observer.OnSessionEnded(Info(id));
 }
@@ -301,9 +325,10 @@ TEST_CASE("OnTurnCompleted resolves the provider before going async", "[titler][
     support.serve_llm = false;
 
     const auto deadline = std::chrono::steady_clock::now() + 5s;
-    while (support.renames.empty() && std::chrono::steady_clock::now() < deadline) {
+    while (support.Renames().empty() && std::chrono::steady_clock::now() < deadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
-    REQUIRE(support.renames.size() == 1);
-    CHECK(support.renames[0].second == "Fix the login bug");
+    const auto renames = support.Renames();
+    REQUIRE(renames.size() == 1);
+    CHECK(renames[0].second == "Fix the login bug");
 }

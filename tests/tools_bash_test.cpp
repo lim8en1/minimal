@@ -562,6 +562,25 @@ TEST_CASE("restart resets cwd and environment before running", "[tools_bash][res
     CHECK(f.Run({{"command", "printenv MINIMAL_TEST_VAR"}}).result.is_error);
 }
 
+TEST_CASE("a deleted session cwd reports the reason, not a bare exit 127",
+          "[tools_bash][restart]") {
+    // `cd build && rm -rf build` from outside the session: the cwd no longer
+    // exists and every later command fails at the child's chdir. The child's
+    // diagnostic must reach the captured output -- the model's only channel --
+    // which requires the stderr redirect to happen BEFORE the chdir in the
+    // child; written earlier, the message landed on the server's own stderr
+    // and the model saw a bare exit 127 in exactly the case where recovery
+    // guidance matters.
+    Fixture f;
+    std::filesystem::create_directories(f.dir.path() / "sub");
+    REQUIRE_FALSE(f.Run({{"command", "cd sub"}}).result.is_error);
+    std::filesystem::remove_all(f.dir.path() / "sub");
+
+    const auto out = f.Run({{"command", "echo hi"}});
+    REQUIRE(out.result.is_error);
+    CHECK(out.result.content_text.find("chdir to session cwd failed") != std::string::npos);
+}
+
 TEST_CASE("a rejected invocation does not reset state on its way out",
           "[tools_bash][restart]") {
     // restart used to be applied before the input was validated, so a malformed

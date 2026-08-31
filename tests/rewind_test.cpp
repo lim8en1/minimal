@@ -198,6 +198,11 @@ struct SqliteSessionFixture {
 
     ~SqliteSessionFixture() {
         if (session) session->Terminate();
+        // The observer dispatcher runs OnSessionRewound on its own thread;
+        // without this join the counting observer's fields can be written
+        // after (or during) this fixture's destruction -- the same teardown
+        // race the §12.39 note documents for the wedged-observer test.
+        observers.WaitForIdleForTesting();
     }
 };
 
@@ -489,7 +494,10 @@ TEST_CASE("a rewind truncates the transcript, the working set, and answers the w
     // The durable transcript ends before the cut...
     CHECK_FALSE(fx.db.LoadMessage(fx.row.session_id, 2).has_value());
     CHECK(fx.db.LastMessageSeq(fx.row.session_id) == 1);
-    // ...and the observer notification fired, as it must for shadow-git.
+    // ...and the observer notification fired, as it must for shadow-git. The
+    // counters are written on the observer dispatcher thread, so drain it
+    // before reading them.
+    fx.observers.WaitForIdleForTesting();
     CHECK(fx.rewind_notifications == 1);
     CHECK(fx.last_rewind_seq == 2);
 
@@ -591,6 +599,7 @@ TEST_CASE("rewind refuses invalid targets on the wire, never with silence",
 
     // Nothing above was accepted: the transcript is untouched.
     CHECK(fx.db.LastMessageSeq(fx.row.session_id) == 3);
+    fx.observers.WaitForIdleForTesting();
     CHECK(fx.rewind_notifications == 0);
 }
 

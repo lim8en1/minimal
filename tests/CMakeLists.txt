@@ -47,6 +47,7 @@ add_executable(minimal_tests
     session_mcp_test.cpp
     mcp_e2e_test.cpp
     sanity_check_test.cpp
+    fd_hygiene_test.cpp
     settings_config_test.cpp
     permissions_config_test.cpp
     agent_preset_frontmatter_test.cpp

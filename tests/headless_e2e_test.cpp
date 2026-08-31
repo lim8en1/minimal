@@ -184,6 +184,12 @@ struct HeadlessFixture {
         if (server) server->Shutdown();
         server.reset();
         if (sessions) sessions->TerminateAll();
+        // Drain the observer dispatcher BEFORE member destruction tears the
+        // databases down: a straggler observer task (cost-tracker writing
+        // plugins.db) running concurrently with ~SessionDatabase finalizing
+        // sessions.db races SQLite's own internals -- and is a lifetime bug
+        // regardless of what SQLite does about it.
+        if (observers) observers->WaitForIdleForTesting();
     }
 
     struct Step {

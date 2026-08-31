@@ -46,9 +46,9 @@ bool StateIsRunning(BackgroundTaskEvent::State state) {
 // channel must still be drained, or a child blocked writing a full pipe never
 // reaches its own exit), reap deadline-bounded, classify, emit the lifecycle
 // event, inject the result.
-void WatchTask(std::shared_ptr<BackgroundTaskRegistry::TaskState> task,
-               LaunchedProcess proc, BashSettings settings, std::int64_t timeout_ms,
-               BackgroundTaskRegistry::WatchHandles handles) {
+void WatchTaskImpl(std::shared_ptr<BackgroundTaskRegistry::TaskState> task,
+                   LaunchedProcess proc, BashSettings settings, std::int64_t timeout_ms,
+                   BackgroundTaskRegistry::WatchHandles handles) {
     ScopedFd out_read(proc.out_fd), state_read(proc.state_fd);
     common::Logger& logger =
         handles.logger ? *handles.logger : common::DefaultLogger();
@@ -153,8 +153,17 @@ void WatchTask(std::shared_ptr<BackgroundTaskRegistry::TaskState> task,
                              : BackgroundTaskEvent::State::kFailed;
         }
     }
-    task->state.store(static_cast<int>(exit), std::memory_order_release);
 
+    // THE terminal state is stored LAST -- after the lifecycle event and the
+    // injection, never before. That makes "state is terminal" a quiescence
+    // guarantee for every waiter on it (CountRunning, TaskState, the tests'
+    // joins): once it reads terminal, this thread will write nothing else. The
+    // state rides the event explicitly, so nothing reads the field to learn
+    // the outcome, and /tasks reporting a still-running task for the instants
+    // before the store is the harmless direction.
+    const auto StoreTerminalState = [&] {
+        task->state.store(static_cast<int>(exit), std::memory_order_release);
+    };
     const auto duration_ms =
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - task->started_at)
@@ -190,7 +199,10 @@ void WatchTask(std::shared_ptr<BackgroundTaskRegistry::TaskState> task,
     // kKilled means the session is gone; do not bother staging a message its
     // session will refuse (Push would return false -- skipping is equivalent,
     // just quieter).
-    if (exit == BackgroundTaskEvent::State::kKilled) return;
+    if (exit == BackgroundTaskEvent::State::kKilled) {
+        StoreTerminalState();
+        return;
+    }
 
     const std::string output = buffer.Render();
     const auto with_output = [&](const std::string& footer) {
@@ -235,6 +247,59 @@ void WatchTask(std::shared_ptr<BackgroundTaskRegistry::TaskState> task,
     if (!handles.schedule_injection(llm::Message{llm::Role::User, {std::move(block)}})) {
         logger.warn("bash[{}] background {}: result dropped; session already terminating",
                     task->session_id, task->id);
+    }
+
+    StoreTerminalState();
+}
+
+// Terminal state after a containment catch. Every step guarded: the handle
+// callbacks are the likeliest throwers, so a failure inside the failure path
+// must degrade to a log line, never escape the detached thread. The event is
+// emitted BEFORE the state is stored -- the same "lifecycle event first"
+// ordering the normal path uses -- so a waiter that observes the terminal
+// state knows every write the thread will ever make has completed.
+void MarkFailedQuietly(const std::shared_ptr<BackgroundTaskRegistry::TaskState>& task,
+                       const BackgroundTaskRegistry::WatchHandles& handles) {
+    if (handles.emit_task_event) {
+        try {
+            BackgroundTaskEvent event;
+            event.task_id = task->id;
+            event.tool_use_id = handles.tool_use_id;
+            event.command = task->command;
+            event.pid = task->pid;
+            event.state = BackgroundTaskEvent::State::kFailed;
+            handles.emit_task_event(event);
+        } catch (...) {
+        }
+    }
+    task->state.store(static_cast<int>(BackgroundTaskEvent::State::kFailed),
+                      std::memory_order_release);
+}
+
+// The containment wrapper. Every other plugin seam in the tree runs under a
+// guard because plugin code is arbitrary; this thread was the one exception,
+// and it is the one that must OUTLIVE its invocation -- an exception escaping
+// a thread function calls std::terminate and takes every session in the
+// process down. The body's own failure paths already degrade to task-failed
+// values; this catches what those paths cannot (a throw out of a handle
+// callback, out of buffer rendering, out of the allocator itself).
+void WatchTask(std::shared_ptr<BackgroundTaskRegistry::TaskState> task,
+               LaunchedProcess proc, BashSettings settings, std::int64_t timeout_ms,
+               BackgroundTaskRegistry::WatchHandles handles) {
+    try {
+        WatchTaskImpl(task, std::move(proc), settings, timeout_ms, handles);
+    } catch (const std::exception& e) {
+        common::Logger& logger =
+            handles.logger ? *handles.logger : common::DefaultLogger();
+        logger.error("bash[{}] background {}: watcher failed: {}", task->session_id, task->id,
+                     e.what());
+        MarkFailedQuietly(task, handles);
+    } catch (...) {
+        common::Logger& logger =
+            handles.logger ? *handles.logger : common::DefaultLogger();
+        logger.error("bash[{}] background {}: watcher failed (unknown exception)",
+                     task->session_id, task->id);
+        MarkFailedQuietly(task, handles);
     }
 }
 

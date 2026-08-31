@@ -396,6 +396,13 @@ int RunTui(int argc, char** argv) {
 }  // namespace
 
 int main(int argc, char** argv) {
+    // Matches the server's process-wide disposition: the client writes to
+    // gRPC sockets and to stdout -- which a piped script may close early --
+    // and neither should kill the process by default disposition. stdout
+    // writes after that simply fail; the run completes and the exit status
+    // goes where it can.
+    std::signal(SIGPIPE, SIG_IGN);
+
     const auto parsed = minimal::client::ParseArgs(argc, argv);
     switch (parsed.action) {
         case minimal::client::ParsedArgs::Action::Version:
