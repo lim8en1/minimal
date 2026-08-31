@@ -46,11 +46,19 @@ PluginConfig ParsePluginConfig(const std::string& json_text) {
             if (value.is_string()) config.command_aliases.emplace(key, value.get<std::string>());
         }
     }
+
+    // Anything this parser does not model is kept verbatim, so serializing back
+    // does not silently delete it. See PluginConfig::preserved.
+    for (const auto& [key, value] : parsed.items()) {
+        if (key == "plugins" || key == "command_aliases") continue;
+        config.preserved[key] = value;
+    }
     return config;
 }
 
 std::string SerializePluginConfig(const PluginConfig& config) {
-    nlohmann::json out;
+    // Starts from what was read, so unmodelled keys survive the round trip.
+    nlohmann::json out = config.preserved;
     out["plugins"] = nlohmann::json::array();
     for (const auto& entry : config.plugins) {
         out["plugins"].push_back({

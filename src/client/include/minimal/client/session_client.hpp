@@ -2,6 +2,7 @@
 
 #include <functional>
 #include <vector>
+#include <atomic>
 #include <memory>
 #include <optional>
 #include <cstdint>
@@ -95,7 +96,14 @@ private:
     std::shared_ptr<grpc::Channel> channel_;
     std::unique_ptr<v1::SessionService::Stub> stub_;
     // Monotonic command request ids; the server echoes them verbatim.
-    std::uint64_t command_counter_ = 0;
+    // ATOMIC, because its own comment describes the racy case as the reason it
+    // exists: "two commands on different streams of the same client would
+    // echo-collide". Two concurrent RunCommand calls on one SessionClient is
+    // exactly that scenario, and a plain ++ from two threads is a data race that
+    // can also produce the duplicate id this is meant to prevent. The class
+    // header already advertises concurrent streams, and app.cpp already runs
+    // Attach on other threads against the same object.
+    std::atomic<std::uint64_t> command_counter_{0};
 };
 
 }  // namespace minimal::client

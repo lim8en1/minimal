@@ -106,7 +106,8 @@ grpc::Status SessionClient::RunCommand(
     // A per-client counter, not a constant: two commands on different streams
     // of the same client would echo-collide on a shared "cmd-1" if a future
     // change ever multiplexed them.
-    command->set_request_id("cmd-" + std::to_string(++command_counter_));
+    command->set_request_id(
+        "cmd-" + std::to_string(command_counter_.fetch_add(1, std::memory_order_relaxed) + 1));
     command->set_name(options.name);
     for (const auto& value : options.positional) command->mutable_args()->add_positional(value);
     command->mutable_args()->set_raw(options.raw);

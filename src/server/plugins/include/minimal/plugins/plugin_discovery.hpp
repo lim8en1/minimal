@@ -1,6 +1,8 @@
 #pragma once
 
 #include <filesystem>
+#include <nlohmann/json.hpp>
+
 #include <map>
 #include <string>
 #include <vector>
@@ -31,6 +33,14 @@ struct PluginConfig {
     // registration, before collision checking, so aliasing is itself a valid way
     // to resolve a collision.
     std::map<std::string, std::string> command_aliases;
+
+    // EVERY OTHER TOP-LEVEL KEY, carried through untouched. This file is
+    // rewritten on every start (discovery persists what it found), and the
+    // serializer reconstructs the document from these fields -- so anything it
+    // did not know about was silently deleted on the next boot, in a file the
+    // user is explicitly invited to edit. Round-tripping is cheaper than a
+    // migration story for keys we have not invented yet.
+    nlohmann::json preserved = nlohmann::json::object();
 };
 
 PluginConfig ParsePluginConfig(const std::string& json_text);

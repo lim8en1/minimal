@@ -1028,3 +1028,47 @@ every one of them reads as done.
     finalized with empty fields, which used to reach the executor as `unknown tool: ` -- an error
     attributed to a call the model believes it made. Nothing is orphaned by dropping it: there is no
     tool_use in history to answer, and the loop already handles a ToolUse stop reason with no blocks.
+
+### Config the server promised and did not keep
+
+13. **`logging.*` was parsed, seeded, documented, and never applied.** `LoggingSettings` is fully
+    parsed, seeded into `bundled/settings.json`, and `ARCHITECTURE.md` describes it as backing a
+    spdlog rotating file sink under the data dir. Nothing read it: `DefaultLogger()` returned
+    spdlog's console default, so there was no file sink, `level` was ignored, and every
+    `logger_.debug()` in the tree was dead output.
+
+    That is worse than a missing feature, because a large share of this codebase's error handling IS
+    the log -- dropped `CommandResult`s, a dropped subagent result, the plugin-exists-twice warning,
+    compaction disabled for a session. They are visible today only because the server happens to run
+    in its own terminal; the moment a client auto-spawns it (which `main` already anticipates: "NO
+    DAEMON: refcounted by attached clients") they go nowhere. `common::ConfigureLogging` runs at the
+    top of `main`, before anything logs, because `DefaultLogger()` caches spdlog's default on first
+    use for the process lifetime. The console sink stays; a log file that cannot be opened degrades
+    to console-only rather than refusing to start.
+
+14. **`plugins.json` was rewritten every boot, non-atomically and lossily.** A plain truncating
+    `ofstream`, on every start, whether or not discovery changed anything -- while the tree already
+    had `tools::write_file` (same-directory temp, fsync, rename, mode preserved, §11.7) doing this
+    correctly for model-written files. The operator's own config deserved at least what a tool call
+    gets. And the serializer reconstructed the document from the two fields the parser models, so
+    any other top-level key a user added was silently deleted on the next boot. Unknown keys now
+    round-trip, and the write happens only when the content actually changed.
+
+15. **The headless client.** Four, all small, all in the same file:
+    - `PrintJsonLine` was `fputs(dump)` then `fputc('\n')` -- two stdio calls, each taking stdout's
+      lock separately -- called from the main thread AND every subagent-attach thread, so another
+      thread's line could land between a JSON body and its newline. That breaks the "one JSON value
+      per line" contract the file states outright. One locked `fwrite` now.
+    - The exit code derived from the last `message_delta`, not from `TurnCompletedEvent`.
+      `ARCHITECTURE.md` says the opposite, and §11.4 changed the server specifically so a cancel
+      inside retry backoff reports `Cancelled` rather than `Unknown` -- but that path emits no
+      `message_delta`, so the exit code stayed 0 and the §11.4 fix was unobservable from the client.
+      `hit_max_turns` was dropped entirely; it now maps to the truncation code, since stopping at the
+      turn ceiling is not success.
+    - `prompt.substr(0, 60)` could split a UTF-8 sequence, and `CreateSessionRequest.name` is a
+      proto3 `string`: the SERVER's parser rejects invalid UTF-8 while the client's serializer only
+      logs. Any non-ASCII prompt whose 60th byte fell mid-character failed session creation with an
+      opaque parse error.
+    - `command_counter_` was a plain `uint64_t` incremented from concurrent streams -- its own
+      comment describes that exact scenario as the reason it exists, and `++` from two threads is a
+      race that can produce the duplicate id it is meant to prevent.

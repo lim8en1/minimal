@@ -22,6 +22,7 @@
 #include "minimal/common/abi_tag.hpp"
 #include "minimal/common/config_paths.hpp"
 #include "minimal/common/logger.hpp"
+#include "minimal/common/logging_setup.hpp"
 #include "minimal/config/permissions_config.hpp"
 #include "minimal/config/sanity_check.hpp"
 #include "minimal/config/settings_config.hpp"
@@ -34,6 +35,7 @@
 #include "minimal/rpc/server.hpp"
 #include "minimal/rpc/session_service.hpp"
 #include "minimal/session/session_database.hpp"
+#include "minimal/tools/atomic_write.hpp"
 #include "minimal/tools/skill_tool.hpp"
 #include "minimal/tools/tool_registry.hpp"
 
@@ -47,11 +49,28 @@ std::string ReadFileOrEmpty(const std::filesystem::path& path) {
     return buffer.str();
 }
 
-void WriteFile(const std::filesystem::path& path, const std::string& contents) {
+// ATOMIC, and only when the content actually changed.
+//
+// This is the user's plugin-enablement file and it was rewritten on EVERY start
+// with a plain truncating ofstream -- so a crash, a full disk or a killed
+// process during that write left it truncated, and the tree already had
+// tools::write_file (same-directory temp, fsync, rename, mode preserved, added
+// in §11.7) doing this correctly for model-written files. The operator's own
+// config deserved at least what a tool call gets.
+//
+// Skipping the write when nothing changed is the other half: discovery usually
+// finds exactly what the file already says, so the common case now touches
+// nothing at all.
+void WriteConfigIfChanged(const std::filesystem::path& path, const std::string& contents,
+                          const std::string& previous) {
+    if (contents == previous) return;
     std::error_code ec;
     std::filesystem::create_directories(path.parent_path(), ec);
-    std::ofstream out(path);
-    if (out) out << contents;
+    const auto outcome = minimal::tools::write_file(path, contents);
+    if (!outcome.ok) {
+        std::fprintf(stderr, "warning: could not update %s: %s\n", path.c_str(),
+                     outcome.error.c_str());
+    }
 }
 
 }  // namespace
@@ -79,7 +98,37 @@ int main(int argc, char** argv) {
     // cmake/SeedConfig.cmake); by the time the server runs, those files are the
     // user's and this process only reads them.
     const auto plugins_json = config_dir / "plugins.json";
-    auto plugin_config = minimal::plugins::ParsePluginConfig(ReadFileOrEmpty(plugins_json));
+    const auto plugins_json_before = ReadFileOrEmpty(plugins_json);
+    auto plugin_config = minimal::plugins::ParsePluginConfig(plugins_json_before);
+
+    // LOGGING FIRST, before anything logs. DefaultLogger() caches spdlog's
+    // default on first use for the process lifetime, so this has to land ahead
+    // of it -- and ahead of plugin load, which is the first thing with anything
+    // to say. Read here with a tolerant parse rather than from the sanity
+    // check's SettingsConfig, because the sanity check runs two stages later and
+    // its own findings are among the things that need somewhere to go.
+    {
+        minimal::common::LoggingOptions logging;
+        try {
+            const auto settings = minimal::config::LoadSettingsConfig(config_dir / "settings.json");
+            logging.level = settings.logging.level;
+            logging.path = settings.logging.path;
+            logging.max_size_mb = settings.logging.max_size_mb;
+            logging.max_files = settings.logging.max_files;
+        } catch (const std::exception&) {
+            // Malformed settings.json is the sanity check's to report, at stage
+            // 3, with a proper message. Console defaults until then.
+        }
+        if (logging.path.empty()) {
+            // The documented home is the DATA dir, beside session_db_path --
+            // not the config dir, which is for things the user edits.
+            logging.path = (minimal::common::DataDir() / "minimal.log").string();
+        }
+        if (const auto problem = minimal::common::ConfigureLogging(logging); !problem.empty()) {
+            std::fprintf(stderr, "warning: %s\n", problem.c_str());
+        }
+        std::printf("  log file:   %s\n", logging.path.c_str());
+    }
 
     // Frontmatter-only scan; bodies stay on disk until a skill is invoked.
     const auto skills = minimal::config::SkillRegistry::Load(config_dir);
@@ -93,7 +142,8 @@ int main(int argc, char** argv) {
         minimal::plugins::DiscoverPlugins(bundled_dir, user_dir, plugin_config);
 
     // Persist anything newly discovered, so its enablement is user-editable.
-    WriteFile(plugins_json, minimal::plugins::SerializePluginConfig(plugin_config));
+    WriteConfigIfChanged(plugins_json, minimal::plugins::SerializePluginConfig(plugin_config),
+                         plugins_json_before);
 
     minimal::tools::ToolRegistry tools;
     minimal::llm::ProviderFactoryRegistry providers;

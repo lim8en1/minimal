@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -17,12 +18,14 @@
 
 #include "minimal/client/cli_args.hpp"
 #include "minimal/client/session_client.hpp"
+#include "minimal/client/utf8.hpp"
 #include "minimal/common/abi_tag.hpp"
 #include "minimal/common/config_paths.hpp"
 
 namespace {
 
 using minimal::client::HeadlessOptions;
+using minimal::client::TruncateUtf8;
 
 // Exit codes are part of the interface: a script piping `minimal -p` needs to
 // distinguish "the model finished" from "it was cut off" from "the call failed".
@@ -35,11 +38,21 @@ enum ExitCode {
     kUnavailable = 69,  // no server, or it refused the session
 };
 
+// ONE WRITE, UNDER ONE LOCK. This was fputs(dump) followed by fputc('\n') --
+// two separate stdio calls, each taking stdout's own lock independently -- and
+// it is called from the main thread AND from every subagent-attach thread. So
+// another thread's line could land between a JSON body and its newline, which
+// breaks the "one JSON value per line" contract this file states outright and
+// which is the entire point of the format. The mutex covers the flush too, so a
+// partially flushed line cannot interleave either.
 void PrintJsonLine(const nlohmann::json& value) {
-    std::fputs(value.dump().c_str(), stdout);
-    std::fputc('\n', stdout);
+    static std::mutex mu;
+    const std::string line = value.dump() + "\n";
+    std::lock_guard<std::mutex> lock(mu);
+    std::fwrite(line.data(), 1, line.size(), stdout);
     std::fflush(stdout);
 }
+
 
 int ExitCodeFor(minimal::v1::StopReason stop_reason) {
     switch (stop_reason) {
@@ -78,7 +91,7 @@ int RunHeadless(const HeadlessOptions& options) {
     } else {
         create.project_root = std::filesystem::current_path().string();
         create.agent_preset = options.agent_preset;
-        create.name = options.prompt.substr(0, 60);
+        create.name = TruncateUtf8(options.prompt, 60);
     }
     // OUTSIDE the branch, like run_mode: a model the user names is a property of
     // this invocation, not of the stored session -- and the override is in-memory
@@ -169,6 +182,12 @@ int RunHeadless(const HeadlessOptions& options) {
                 } else if (event.has_subagent_started()) {
                     line["type"] = "subagent_started";
                     line["child_session_id"] = event.subagent_started().child_session_id();
+                } else if (event.has_turn_completed()) {
+                    // The child branch had this and the parent's did not, so a
+                    // JSONL consumer could see a subagent's turn end but never
+                    // the top-level one -- it arrived as {"type":"event"}.
+                    line["type"] = "turn_completed";
+                    line["hit_max_turns"] = event.turn_completed().hit_max_turns();
                 } else {
                     line["type"] = "event";
                 }
@@ -181,6 +200,21 @@ int RunHeadless(const HeadlessOptions& options) {
 
             if (event.has_stream_event() && event.stream_event().has_message_delta()) {
                 exit_code = ExitCodeFor(event.stream_event().message_delta().stop_reason());
+            }
+            // TurnCompletedEvent WINS, and it is the only source that is always
+            // present. ARCHITECTURE.md says the headless exit code derives from
+            // the turn's stop reason, and §11.4 changed the server specifically
+            // so a cancel inside retry backoff reports Cancelled rather than
+            // Unknown -- but that path emits no message_delta at all, so reading
+            // only the delta left the exit code at 0 and made that fix
+            // unobservable from here. This file already asserts that
+            // TurnCompletedEvent is the only reliable end-of-turn signal; now it
+            // acts on it.
+            if (event.has_turn_completed()) {
+                exit_code = ExitCodeFor(event.turn_completed().stop_reason());
+                // Hitting the turn ceiling is not success: the work stopped
+                // short of an answer, which is the same shape as truncation.
+                if (event.turn_completed().hit_max_turns()) exit_code = kTruncated;
             }
             if (event.has_error()) saw_error = true;
 

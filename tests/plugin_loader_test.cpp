@@ -505,3 +505,25 @@ TEST_CASE("two plugins claiming one provider kind is a reported collision",
     CHECK(registry.collisions().front().first_plugin == "plugin-a");
     CHECK(registry.collisions().front().second_plugin == "plugin-b");
 }
+
+TEST_CASE("plugins.json keeps keys the parser does not model", "[plugin_loader][config]") {
+    // This file is rewritten on every start (discovery persists what it found),
+    // and the serializer reconstructed the document from two known fields -- so
+    // any other top-level key was silently deleted on the next boot, in a file
+    // the user is explicitly invited to edit.
+    const auto config = plugins::ParsePluginConfig(R"({
+        "plugins": [{"file": "a.so", "provenance": "user", "enabled": true}],
+        "command_aliases": {"p.cmd": "alias"},
+        "notes": "kept by hand",
+        "future_key": {"nested": 1}
+    })");
+
+    const auto round_tripped =
+        nlohmann::json::parse(plugins::SerializePluginConfig(config));
+    CHECK(round_tripped.at("notes") == "kept by hand");
+    CHECK(round_tripped.at("future_key").at("nested") == 1);
+    // ...and the modelled halves still serialize normally.
+    REQUIRE(round_tripped.at("plugins").size() == 1);
+    CHECK(round_tripped.at("plugins").at(0).at("file") == "a.so");
+    CHECK(round_tripped.at("command_aliases").at("p.cmd") == "alias");
+}

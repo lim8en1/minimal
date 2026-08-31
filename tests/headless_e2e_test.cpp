@@ -22,6 +22,8 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include "minimal/client/utf8.hpp"
+
 #include "fakes.hpp"
 #include "temp_dir.hpp"
 #include "minimal/client/session_client.hpp"
@@ -442,4 +444,32 @@ TEST_CASE("a stored session resumes headlessly", "[headless][resume]") {
     CHECK(std::get<llm::TextBlock>(loaded[2].message.content.front()).text == "and again?");
     CHECK(std::get<llm::TextBlock>(loaded[3].message.content.front()).text ==
           "the answer is 42");
+}
+
+TEST_CASE("truncating a name at a byte limit never splits a UTF-8 character",
+          "[client][utf8]") {
+    // CreateSessionRequest.name is a proto3 string: the SERVER's parser rejects
+    // invalid UTF-8 while the client's serializer only logs, so a plain
+    // substr(0, 60) turned any non-ASCII prompt whose 60th byte landed inside a
+    // multi-byte sequence into an opaque "could not create a session" error.
+    // Same helper, exercised here because it is pure.
+    const std::string emoji = "\xf0\x9f\x99\x82";  // 4 bytes
+    std::string prompt;
+    for (int i = 0; i < 20; ++i) prompt += emoji;  // 80 bytes, no ASCII
+
+    const auto truncated = minimal::client::TruncateUtf8(prompt, 60);
+    CHECK(truncated.size() == 60);  // 15 whole emoji
+    // Every byte accounted for as a complete sequence: re-scanning finds no
+    // truncated lead byte at the end.
+    std::size_t i = 0;
+    while (i < truncated.size()) {
+        const auto c = static_cast<unsigned char>(truncated[i]);
+        const std::size_t len = (c < 0x80) ? 1 : (c >> 5) == 0x6 ? 2 : (c >> 4) == 0xE ? 3 : 4;
+        REQUIRE(i + len <= truncated.size());
+        i += len;
+    }
+
+    // A limit that lands mid-character drops that character rather than half of it.
+    CHECK(minimal::client::TruncateUtf8(emoji + emoji, 6).size() == 4);
+    CHECK(minimal::client::TruncateUtf8("ascii", 60) == "ascii");
 }
