@@ -137,43 +137,45 @@ TEST_CASE("McpTool: disconnected invoker degrades to an error result", "[mcp_too
     CHECK(result.content_text.find("not connected") != std::string::npos);
 }
 
-TEST_CASE("ReplaceMcpTools swaps a server's set atomically and retires rather than frees", "[mcp_tool]") {
+TEST_CASE("ReplaceMcpTools swaps a server's set atomically; an in-flight tool survives", "[mcp_tool]") {
     ToolRegistry registry;
     auto first_invoker = std::make_shared<StubInvoker>(OkOutcome("v1"));
     auto second_invoker = std::make_shared<StubInvoker>(OkOutcome("v2"));
 
     std::vector<std::unique_ptr<Tool>> batch1;
-    // Raw pointer held across the replacement -- the ToolExecutor pattern.
-    McpTool* kept = nullptr;
-    {
-        auto tool = std::make_unique<McpTool>("ida", Listing("list_instances"), first_invoker);
-        kept = tool.get();
-        batch1.push_back(std::move(tool));
-    }
-    {
-        auto tool = std::make_unique<McpTool>("ida", Listing("stop_instance"), first_invoker);
-        batch1.push_back(std::move(tool));
-    }
+    batch1.push_back(std::make_unique<McpTool>("ida", Listing("list_instances"), first_invoker));
+    batch1.push_back(std::make_unique<McpTool>("ida", Listing("stop_instance"), first_invoker));
     registry.ReplaceMcpTools("ida", std::move(batch1));
 
-    CHECK(registry.Find("mcp__ida__list_instances") == kept);
+    CHECK(registry.Find("mcp__ida__list_instances") != nullptr);
     REQUIRE(registry.Find("mcp__ida__stop_instance") != nullptr);
 
-    // Re-discovery reports fewer tools: the stale one must disappear from the
-    // map without being destroyed.
+    // The ToolExecutor pattern: Find, then hold the shared_ptr across a
+    // replacement. The old object must stay alive and callable -- the
+    // shared_ptr IS the lifetime guarantee, so no use-after-free.
+    std::shared_ptr<Tool> in_flight = registry.Find("mcp__ida__list_instances");
+
+    // Re-discovery reports fewer tools: the stale one must leave the map.
     std::vector<std::unique_ptr<Tool>> batch2;
     batch2.push_back(std::make_unique<McpTool>("ida", Listing("list_instances"), second_invoker));
     registry.ReplaceMcpTools("ida", std::move(batch2));
 
     CHECK(registry.Find("mcp__ida__stop_instance") == nullptr);
     REQUIRE(registry.Find("mcp__ida__list_instances") != nullptr);
-    CHECK(registry.Find("mcp__ida__list_instances") != kept);  // new object
+    CHECK(registry.Find("mcp__ida__list_instances") != in_flight);  // new object
 
-    // The retired object is still alive and callable -- no use-after-free.
+    // The superseded object is still alive and callable -- no use-after-free,
+    // and it still answers with ITS invoker's result.
     ToolContext ctx{minimal::common::DefaultLogger()};
-    const ToolResult result = kept->execute(nlohmann::json::object(), ctx);
+    const ToolResult result = in_flight->execute(nlohmann::json::object(), ctx);
     CHECK_FALSE(result.is_error);
     CHECK(result.content_text == "v1");
+
+    // Dropping the executor's reference destroys the object: the registry no
+    // longer parks superseded tools for the process lifetime.
+    std::weak_ptr<Tool> weak = in_flight;
+    in_flight.reset();
+    CHECK(weak.expired());
 }
 
 TEST_CASE("ReplaceMcpTools: first registration wins within a batch, foreign names refused", "[mcp_tool]") {
@@ -188,7 +190,7 @@ TEST_CASE("ReplaceMcpTools: first registration wins within a batch, foreign name
     batch.push_back(std::make_unique<McpTool>("other", Listing("u"), invoker));  // wrong namespace
     registry.ReplaceMcpTools("s", std::move(batch));
 
-    REQUIRE(registry.Find("mcp__s__t") == winner_ptr);
+    REQUIRE(registry.Find("mcp__s__t").get() == winner_ptr);
     CHECK(registry.Find("mcp__other__u") == nullptr);
 }
 

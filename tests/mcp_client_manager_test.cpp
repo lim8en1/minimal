@@ -146,7 +146,7 @@ TEST_CASE("McpClientManager: ${ENV_VAR} interpolation reaches the child and unse
 
     // Prove the interpolated value reached the child: call the fake server's
     // getenv tool through the registered McpTool and read back the env value.
-    auto* marker_tool = fixture.registry.Find("mcp__fake__getenv");
+    auto marker_tool = fixture.registry.Find("mcp__fake__getenv");
     REQUIRE(marker_tool != nullptr);
     minimal::tools::ToolContext ctx{minimal::common::DefaultLogger()};
     const auto result = marker_tool->execute(nlohmann::json{{"name", "MCP_FAKE_MARKER"}}, ctx);

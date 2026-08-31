@@ -208,7 +208,7 @@ TEST_CASE("live gateway through the manager: tools registered and executed", "[m
     CHECK(saw_list);
 
     // Execute through the registry path, exactly as a session worker would.
-    auto* tool = registry.Find("mcp__ida__list_instances");
+    auto tool = registry.Find("mcp__ida__list_instances");
     REQUIRE(tool != nullptr);
     tools::ToolContext ctx{common::DefaultLogger()};
     ctx.session_id = "live";

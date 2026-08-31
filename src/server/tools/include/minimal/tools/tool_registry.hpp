@@ -48,7 +48,13 @@ public:
     // alias applies to them.
     void ApplyAliases(const std::map<std::string, std::string>& aliases);
 
-    Tool* Find(std::string_view name) const;
+    // Registry-wide ownership is std::shared_ptr: ToolExecutor::Run holds the
+    // Find() result across a blocking permission check and the execute() call
+    // itself -- a permission Ask can wait minutes on a human -- while a
+    // concurrent MCP replacement swaps the map. The shared reference is what
+    // keeps an in-flight tool object alive; there is no retired list to reason
+    // about.
+    std::shared_ptr<Tool> Find(std::string_view name) const;
 
     // Returns definitions for the allowed subset, SORTED BY NAME.
     //
@@ -110,17 +116,14 @@ public:
     // other sources, so this bypasses attribution, aliasing and the shadowed
     // list entirely.
     //
-    // NEVER DESTROYS a replaced tool: ToolExecutor::Run holds the raw Tool*
-    // from Find() across a blocking permission check and the execute() call
-    // itself, so freeing the old object would be a use-after-free under a
-    // concurrent replacement. Superseded objects are parked in a retired list
-    // and destroyed only at registry teardown -- the same process-lifetime
-    // ownership rule the plugin loader applies to its dlopen handles.
-    //
-    // A tool whose name is not `mcp__<server>__<something>` (checked by
-    // prefix, not by reparsing) is refused: this entry point owns exactly one
-    // server's namespace. Within the batch, the FIRST registration of a name
-    // wins, matching Register()'s rule.
+    // Replaced tools are NOT freed here: they leave the map, but an executor
+    // that already holds the shared_ptr from Find() keeps the object alive
+    // until its invocation finishes. A tool whose name is not
+    // `mcp__<server>__<something>` (checked by prefix, not by reparsing) is
+    // refused -- destroyed outright, since it was never Find-able and no
+    // executor can hold it: this entry point owns exactly one server's
+    // namespace. Within the batch, the FIRST registration of a name wins,
+    // matching Register()'s rule; same for batch-internal duplicates.
     void ReplaceMcpTools(const std::string& server_name,
                          std::vector<std::unique_ptr<Tool>> tools);
 
@@ -138,17 +141,18 @@ private:
 
     struct Pending {
         Attribution attr;  // the attribution entry this object belongs to
-        std::unique_ptr<Tool> tool;
+        std::shared_ptr<Tool> tool;
     };
 
-    std::unordered_map<std::string, std::unique_ptr<Tool>> tools_;
+    std::unordered_map<std::string, std::shared_ptr<Tool>> tools_;
     std::vector<Pending> shadowed_;  // duplicate names, held not destroyed
     std::string attribution_;
     std::vector<Attribution> attributions_;
-    // Parallel to attributions_: the object each entry refers to. Raw because
-    // the registry owns every registered tool for the process lifetime -- the
-    // pointer is valid while the object sits in tools_ or shadowed_, which is
-    // exactly when ApplyAliases needs it.
+    // Parallel to attributions_: the object each entry refers to. Raw and
+    // non-owning: ApplyAliases only matches against tools still in tools_ or
+    // shadowed_, which keep them alive. MCP tools never register through
+    // Register(), so these never dangle via ReplaceMcpTools (which erases
+    // only mcp__-prefixed names, none of which are attributed).
     std::vector<Tool*> owners_;
     std::unordered_map<std::string, std::string> permission_keys_;
     bool aliases_applied_ = false;
@@ -156,7 +160,6 @@ private:
     // mutable: readers are const and run on session workers; startup and MCP
     // replacement are the writers.
     mutable std::shared_mutex mutex_;
-    std::vector<std::unique_ptr<Tool>> retired_;  // superseded MCP tools, see ReplaceMcpTools
 };
 
 }  // namespace minimal::tools

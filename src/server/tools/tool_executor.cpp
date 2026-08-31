@@ -106,7 +106,10 @@ PermissionMode ToolExecutor::ResolveMode(const Tool& tool, const nlohmann::json&
 llm::ToolResultBlock ToolExecutor::Run(const std::string& tool_use_id,
                                         const std::string& tool_name,
                                         const nlohmann::json& input, ToolContext& ctx) {
-    Tool* tool = registry_.Find(tool_name);
+    // The shared_ptr copy is the lifetime guarantee: it outlives this call
+    // even if a concurrent MCP replacement removes the tool from the registry
+    // mid-invocation (the permission Ask below can block for minutes).
+    std::shared_ptr<Tool> tool = registry_.Find(tool_name);
     if (tool == nullptr) {
         return ErrorResult(tool_use_id, "unknown tool: " + tool_name);
     }

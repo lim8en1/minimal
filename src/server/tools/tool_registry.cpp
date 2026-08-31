@@ -19,11 +19,12 @@ void ToolRegistry::Register(std::unique_ptr<Tool> tool) {
     // a late-registered duplicate (spawn_subagent registered at serve stage)
     // silently shadowed or been shadowed; first-wins matches the pre-alias rule
     // and parks the loser where the collision diagnostics can still see it.
+    std::shared_ptr<Tool> shared = std::move(tool);
     const std::lock_guard<std::shared_mutex> lock(mutex_);
     if (tools_.count(name)) {
-        shadowed_.push_back(Pending{attributions_.back(), std::move(tool)});
+        shadowed_.push_back(Pending{attributions_.back(), std::move(shared)});
     } else {
-        tools_.emplace(name, std::move(tool));
+        tools_.emplace(name, std::move(shared));
     }
 }
 
@@ -37,7 +38,7 @@ void ToolRegistry::ApplyAliases(const std::map<std::string, std::string>& aliase
         if (alias == aliases.end()) continue;  // no alias: stays under its original name
 
         // Detach the object this attribution refers to, from wherever it lives.
-        std::unique_ptr<Tool> detached;
+        std::shared_ptr<Tool> detached;
         const Tool* owner = owners_[i];
         if (auto map_it = tools_.find(attr.tool_name);
             map_it != tools_.end() && map_it->second.get() == owner) {
@@ -65,14 +66,14 @@ void ToolRegistry::ApplyAliases(const std::map<std::string, std::string>& aliase
     aliases_applied_ = true;
 }
 
-Tool* ToolRegistry::Find(std::string_view name) const {
-    // The returned pointer is used by ToolExecutor::Run across the permission
-    // check and execute() itself, WITHOUT holding this lock. That is sound
-    // only because tool objects are never destroyed before teardown -- the
-    // retired_ list in ReplaceMcpTools is what guarantees it, not this lock.
+std::shared_ptr<Tool> ToolRegistry::Find(std::string_view name) const {
+    // The shared_ptr copy IS the lifetime guarantee: ToolExecutor::Run holds
+    // it across the permission check and execute() itself, without holding
+    // this lock, and remains safe even while a concurrent ReplaceMcpTools
+    // removes the entry from the map under it.
     std::shared_lock<std::shared_mutex> lock(mutex_);
     auto it = tools_.find(std::string(name));
-    return it == tools_.end() ? nullptr : it->second.get();
+    return it == tools_.end() ? nullptr : it->second;
 }
 
 std::vector<llm::ToolDefinition> ToolRegistry::DefinitionsFor(
@@ -156,13 +157,13 @@ void ToolRegistry::ReplaceMcpTools(const std::string& server_name,
     const std::string prefix = "mcp__" + server_name + "__";
     std::unique_lock<std::shared_mutex> lock(mutex_);
 
-    // Retire the server's previous set: out of the map, into retired_ -- NOT
-    // destroyed. A session worker may be inside execute() on one of them right
-    // now (ToolExecutor holds the raw pointer without the lock); freeing it
-    // here would be a use-after-free under a concurrent re-discovery.
+    // Retire the server's previous set: out of the map. An executor already
+    // holding the shared_ptr from Find() keeps the object alive for as long
+    // as its invocation runs (bounded by the permission Ask plus the call
+    // itself); when the last reference drops, the object destroys itself.
+    // No retired list, no process-lifetime accounting.
     for (auto it = tools_.begin(); it != tools_.end();) {
         if (it->first.rfind(prefix, 0) == 0) {
-            retired_.push_back(std::move(it->second));
             it = tools_.erase(it);
         } else {
             ++it;
@@ -170,21 +171,19 @@ void ToolRegistry::ReplaceMcpTools(const std::string& server_name,
     }
 
     // First registration of a name wins within the batch, matching Register().
+    // Refusals and duplicates were never Find-able, so no executor can hold
+    // them: they destroy right here rather than parking anywhere.
     for (auto& tool : tools) {
         if (!tool) continue;
         const std::string name = tool->spec().name;
         if (name.rfind(prefix, 0) != 0) {
-            // Refused, not renamed: this entry point owns exactly one server's
-            // namespace, and silently re-homing a foreign name would hide a
-            // caller bug. Park it so it is still diagnosable at teardown.
-            retired_.push_back(std::move(tool));
-            continue;
+            continue;  // foreign namespace: refused, destroyed with the batch
         }
+        std::shared_ptr<Tool> shared = std::move(tool);
         if (tools_.count(name)) {
-            retired_.push_back(std::move(tool));
-        } else {
-            tools_.emplace(name, std::move(tool));
+            continue;  // duplicate within the batch: first wins
         }
+        tools_.emplace(name, std::move(shared));
     }
 }
 
