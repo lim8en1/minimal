@@ -117,6 +117,17 @@ add_executable(minimal_tests
     "${CMAKE_SOURCE_DIR}/plugins/server/checklist/checklist_store.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/checklist/checklist_tool.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/checklist/rpc_service.cpp"
+    # Same pattern for cost-tracker. rates_fetch.cpp is the shared fetch path;
+    # its network test uses an unroutable port, never the live snapshot.
+    "${CMAKE_SOURCE_DIR}/plugins/server/cost-tracker/cost_model.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/cost-tracker/cost_store.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/cost-tracker/cost_settings.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/cost-tracker/cost_observer.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/cost-tracker/cost_command.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/cost-tracker/update_rates_command.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/cost-tracker/rates_fetch.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/cost-tracker/cost_tracking_service_impl.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/cost-tracker/rpc_service.cpp"
     # Same pattern for tools-search. The walker forks nothing and needs the
     # real filesystem only, so the whole plugin compiles in directly.
     "${CMAKE_SOURCE_DIR}/plugins/server/tools-search/search_settings.cpp"
@@ -125,6 +136,7 @@ add_executable(minimal_tests
     "${CMAKE_SOURCE_DIR}/plugins/server/tools-search/tree_walker.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/tools-search/glob_tool.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/tools-search/grep_tool.cpp"
+    cost_tracker_test.cpp
     hooks_config_test.cpp
     hook_dispatcher_test.cpp
     hooks_tool_executor_test.cpp
@@ -143,7 +155,8 @@ target_include_directories(minimal_tests PRIVATE
 target_include_directories(minimal_tests PRIVATE
     "${CMAKE_SOURCE_DIR}/plugins/server/checklist"
     "${CMAKE_SOURCE_DIR}/plugins/server/tools-search"
-    "${CMAKE_SOURCE_DIR}/plugins/server/session-titler")
+    "${CMAKE_SOURCE_DIR}/plugins/server/session-titler"
+    "${CMAKE_SOURCE_DIR}/plugins/server/cost-tracker")
 
 # minimal::test_support is the test-dependency bundle: it carries server_core,
 # which carries common publicly. Listing those again here is redundant and makes

@@ -11,18 +11,49 @@ void SessionSupport::Wire(SessionRegistry& sessions, session::SessionDatabase& d
     sessions_ = &sessions;
     db_ = &db;
     presets_ = &presets;
+    // Built once here: HistoryFor's gone-from-the-registry fallback hands this
+    // out, and it must outlive every caller's use of it -- which the service
+    // (process lifetime, like its targets) guarantees.
+    db_reader_ = std::make_shared<session::SessionReader>(db);
 }
 
 std::optional<SessionLlm> SessionSupport::LlmForSession(const std::string& session_id) {
     if (sessions_ == nullptr) return std::nullopt;
     const auto session = sessions_->Find(session_id);
-    if (session == nullptr) return std::nullopt;
-    auto provider = session->ProviderSnapshot();
-    if (provider == nullptr) return std::nullopt;
-    // preset_snapshot() takes the session lock; the model name rides the preset
-    // the same way it reaches BuildChatRequest, so a title goes to exactly the
-    // model the session is conversing with.
-    return SessionLlm{std::move(provider), session->preset_snapshot().provider.model_name};
+    if (session != nullptr) {
+        auto provider = session->ProviderSnapshot();
+        if (provider == nullptr) return std::nullopt;
+        // preset_snapshot() takes the session lock; the model name rides the preset
+        // the same way it reaches BuildChatRequest, so a title goes to exactly the
+        // model the session is conversing with.
+        return SessionLlm{std::move(provider), session->preset_snapshot().provider.model_name};
+    }
+
+    // GONE FROM THE REGISTRY, NOT GONE FROM THE WORLD. A one-shot headless
+    // turn closes its stream the instant TurnCompletedEvent lands, which can
+    // terminate and erase the session BEFORE the observer thread delivers
+    // OnTurnCompleted -- a queued notification must not race teardown and lose.
+    // The DB row is the authoritative record of which preset the session ran,
+    // and the provider cache is the same shared instance the session held.
+    // Degradation: a session created with a --model override is not
+    // distinguishable from its row, so it titles on the preset's model.
+    if (db_ == nullptr || presets_ == nullptr) return std::nullopt;
+    const auto row = db_->GetSession(session_id);
+    if (!row) return std::nullopt;
+    try {
+        const AgentPreset preset = presets_->Resolve(row->agent_preset);
+        auto provider =
+            sessions_->provider_cache().GetOrCreate(preset.model_ref.provider, preset.provider_kind,
+                                                    preset.provider);
+        if (provider == nullptr) return std::nullopt;
+        logger_.info("session {}: titling through the preset '{}' (session already ended)",
+                     session_id, row->agent_preset);
+        return SessionLlm{std::move(provider), preset.provider.model_name};
+    } catch (const std::exception& error) {
+        logger_.warn("session {}: titler could not re-resolve preset '{}': {}", session_id,
+                     row->agent_preset, error.what());
+        return std::nullopt;
+    }
 }
 
 std::optional<SessionLlm> SessionSupport::ResolveModelRef(const std::string& provider_model) {
@@ -56,8 +87,16 @@ std::shared_ptr<const session::SessionReader> SessionSupport::HistoryFor(
     const std::string& session_id) {
     if (sessions_ == nullptr) return nullptr;
     const auto session = sessions_->Find(session_id);
-    if (session == nullptr) return nullptr;
-    return session->history_reader();
+    if (session != nullptr) return session->history_reader();
+    // Same body as LlmForSession's fallback: the session can be erased from the
+    // registry before a queued OnTurnCompleted dispatches. SessionReader is a
+    // thin read-only view over the database -- the exact class and the exact
+    // data the session's own reader served -- so the transcript survives the
+    // session object. A session that never existed stays null (the unknown-id
+    // contract), which is what separates "gone" from "never was": db_ ==
+    // nullptr means unwired, not degraded.
+    if (db_ == nullptr || !db_->SessionExists(session_id)) return nullptr;
+    return db_reader_;
 }
 
 bool SessionSupport::RenameSession(const std::string& session_id, const std::string& name) {

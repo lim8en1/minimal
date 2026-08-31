@@ -29,13 +29,14 @@ minimal/
   plugins/                    # bundled plugin IMPLEMENTATIONS -- what the harness loads
     server/                       # tools-fs, tools-search, tools-bash, provider-openai,
                                   #   commands-core, checklist, session-titler
-                                  #   (shipped disabled -- see naming)
+                                  #   (shipped disabled -- see naming), cost-tracker
     client/                       # (none bundled yet)
   bundled/                    # non-code assets that ship WITH the binary
     prompts/compression.md        # all of it copied into the config dir by
     agents/{plan,build,subagent}.md   #   `cmake --install` -- never read from here
     settings.json  permissions.json   #   at runtime, never compiled into the binary
     providers.json  providers.example.json
+    cost-rates.json                   # cost-tracker's fallback price table
   cmake/SeedConfig.cmake      # the copy: never overwrites an existing file
   src/                        # the harness ITSELF
     common/                   # shared by server AND client
@@ -356,7 +357,7 @@ private:
 **Token accounting — two distinct quantities, never conflated:**
 
 - **Context occupancy** (status-bar `used/max`, compaction trigger) = `last_turn.input_tokens + last_turn.output_tokens`. Each turn's `input_tokens` already contains the whole history, so *summing* across turns double-counts quadratically and would fire compaction far too early.
-- **Cumulative totals** (genuinely additive) = running sum of `output_tokens`, plus summed `input_tokens` if cost display is added later.
+- **Cumulative totals** (genuinely additive) = running sum of `output_tokens`, plus summed `input_tokens` if cost display is added later. **The cost-tracker plugin is that later addition**: its `SessionObserver` accumulates per-session totals from `TurnSummary` (which carries `model` precisely so a per-model rate is resolvable), prices them from user config > a fetched LiteLLM snapshot > a seeded fallback table, and serves `/cost`, a § Cross-plugin services interface, and a `cost-tracker.rpc` PluginCall target the UI consumes. Models with no rate anywhere, and the zero-usage proxy gap below, render as *unknown*, never as `$0.00` — a missing price is not a price of zero.
 
 Counts come from the backend's own reported usage; there is no separate tokenizer. Some OpenAI-compatible proxies report `0` — no fallback estimate is designed for that, flagged as a known gap.
 
@@ -726,7 +727,7 @@ extern "C" {
 The ABI header has **two halves**, and both are frozen surface:
 
 - **Extension points** plugins *implement*: `Tool`, `Command`, provider factory, `SessionObserver`, service provider, `PermissionAdvisor`, hook points, `MentionResolver`, `AuthProvider`.
-- **Utilities** plugins *consume*: `path_confinement`, `file_access`, `atomic_write`, `HttpClient`, `Logger`, `SessionReader` (read-only history access), the frontmatter parser, `PluginStorage` (§ Plugin storage), the `PluginRpcHandler` calling convention — and the `ServiceRegistry` pointer carried on `PluginRegistrationContext`, which is the consumer side of the service channel (§ Cross-plugin services).
+- **Utilities** plugins *consume*: `path_confinement`, `file_access`, `atomic_write`, `HttpClient`, `Logger`, `ConfigDir()`, `SessionReader` (read-only history access), the frontmatter parser, `PluginStorage` (§ Plugin storage), the `PluginRpcHandler` calling convention — and the `ServiceRegistry` pointer carried on `PluginRegistrationContext`, which is the consumer side of the service channel (§ Cross-plugin services). `ConfigDir()` is the newest addition: a plugin whose data ships as a seeded config file (the `providers.json` treatment — user-editable text, never compiled in) needs the same directory resolution the server uses, which is exactly the cost-tracker plugin's `cost-rates.json`.
 
 The surface above is verified against the tree. The remaining designed points — MCP lifecycle observers, model auto-discovery — are catalogued with suggested architectures in `docs/EXTENSIBILITY.md`.
 
@@ -745,6 +746,9 @@ struct TurnSummary {
     Usage usage;
     std::chrono::milliseconds duration;
     std::vector<std::string> tool_names_invoked;
+    std::string model;                  // the request's model id -- /model can switch
+                                        //   mid-session, so the preset underdetermines
+                                        //   the per-model rate a cost tracker needs
 };
 struct ToolInvocation {
     std::string tool_use_id, tool_name, summary;
@@ -811,7 +815,7 @@ The sanctioned way a plugin persists state across restarts, and the reason it is
 - **One shared SQLite file** (`DataDir()/plugins.db`), namespaced by plugin: `plugin` is part of the primary key and the first argument of every method, so one plugin cannot read another's rows — structural, not conventional. A plugin that wants another's data uses the service channel, not storage.
 - **Values are opaque strings** (plugins serialize their own JSON, like everything else in this tree). Schema, semantics, and retention are the providing plugin's business.
 - **The escape hatch** for state that does not fit a KV shape: the loader provisions `<DataDir()>/plugins/<plugin_name>/` and carries it on `PluginRegistrationContext::data_dir` (created before the hooks that would use it run). A plugin may keep its own database there, inheriting the discipline as its own obligation.
-- **Not session-scoped by mechanism.** Scoping is a keying decision (the checklist plugin keys by session id); cleanup is a plugin decision. There is no session-deleted observer hook, so a plugin that keys rows by session either purges on `OnSessionEnded` — which breaks resume — or keeps the small rows and accepts the growth. Neither is hidden: choose deliberately per plugin.
+- **Not session-scoped by mechanism.** Scoping is a keying decision (the checklist plugin keys by session id); cleanup is a plugin decision. There is no session-deleted observer hook, so a plugin that keys rows by session either purges on `OnSessionEnded` — which breaks resume — or keeps the small rows and accepts the growth. Neither is hidden: choose deliberately per plugin (checklist keeps its rows; so does cost-tracker, whose history must survive a resume).
 - Open failure is **fatal at startup** (a newer-schema store is refused like a newer session DB), because the seam is handed to plugins at load time and bundled plugins may depend on it.
 
 The `PluginCall` server half (session_service.cpp) is the *transport* side of this: it resolves `plugin_name + ".rpc"` through the sealed `ServiceRegistry` and maps the outcome to statuses (`NOT_FOUND` = plugin disabled or absent, `INVALID_ARGUMENT` = bad request or handler refusal, `INTERNAL` = handler threw). Core defines the calling convention (`plugin_rpc.hpp`) but neither payload nor semantics — a web or mobile frontend consumes the same unary RPC the TUI would.
@@ -850,6 +854,7 @@ Default is no authentication, matching the local-only topology. `src/server/rpc/
 | `PluginStorage` (per-plugin KV) + per-plugin `data_dir` | **Core, exposed to plugins as utilities** | The same rule one level up: plugins must not each reinvent SQLite's concurrency discipline in the data dir. The namespace is the boundary; state that needs its own schema gets its own database under `data_dir`. |
 | `read`/`write`/`edit` (`tools-fs`), `grep`/`glob` (`tools-search`), `bash` (`tools-bash`) | **Bundled plugins** | Not structurally privileged. Bash is split out: distinct security profile, and the one with a plausible alternate implementation (container/remote executor) someone would actually swap. |
 | `checklist` tool + `checklist.rpc` service | **Bundled plugin** | The model's per-session task scratchpad. Exercises the PluginStorage seam and the PluginCall dispatch convention as a third-party plugin would; UI presentation lives in consumers, fetched over the generic channel. |
+| `cost-tracker` (observer + `/cost` + `/cost-update-rates` + tracking service + `.rpc`) | **Bundled plugin** | The cumulative-totals consumer of the token accounting above. Observer-only writing; `/cost` and both service surfaces read the same store, so a report cannot disagree with itself. The `.rpc` surface is the UI data path — the checklist shape, command-free, because cost is the operator's business and no model tool belongs here. |
 | OpenAI provider (`provider-openai`) | **Bundled plugin** | Two-method interface; the obvious thing to fork. |
 | Built-in `/`-commands (`commands-core`) | **Bundled plugin** | One plugin, not nine. |
 | llama.cpp KV-cache commands (`llamacpp-kv`) | **Deferred to v1.x+** | Retained below as the worked example that drove the plugin design, not shipped in v1. |
@@ -1548,5 +1553,5 @@ Two checks specifically for the naming model: warn when a `per_tool_overrides` /
 - Session detach (`EndSession{DETACH}`), deliberately deferred — see Session lifetime.
 - Status-bar segment and panel/picker column slots for client plugins (renderer slot ships in v1).
 - Tab-bar overflow behavior with many sessions × subagents.
-- Backend-reported `usage` of `0` from some OpenAI-compatible proxies — no fallback estimate designed.
+- Backend-reported `usage` of `0` from some OpenAI-compatible proxies — no fallback estimate is designed; the harness itself carries no estimate, and the cost-tracker plugin records such turns as *unpriced* ("unknown"), never as a zero-dollar turn.
 - **Sessions that last compacted before compaction checkpoints existed (schema v4) have no checkpoint row, so they still resume from the full uncompacted transcript** — correct, and cost-free for transcripts that fit the window, but a transcript well beyond the model window cannot converge its first compaction, checkpoint or no checkpoint: the halving strategy's summarization input must fit the window, and re-summarizing only ever writes a checkpoint once it succeeds (see *Context compaction*). For such a session the honest remedies are a larger-window model for one manual `/compact`, or starting fresh.

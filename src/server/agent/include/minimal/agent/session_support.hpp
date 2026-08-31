@@ -47,6 +47,9 @@ private:
     SessionRegistry* sessions_ = nullptr;
     session::SessionDatabase* db_ = nullptr;
     const AgentPresetRegistry* presets_ = nullptr;
+    // The DB-backed reader HistoryFor serves when the session is no longer in
+    // the registry (see the fallback comments in the .cpp).
+    std::shared_ptr<const session::SessionReader> db_reader_;
 };
 
 }  // namespace minimal::agent

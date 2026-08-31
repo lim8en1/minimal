@@ -959,6 +959,7 @@ void Session::RunOneTurn(std::optional<std::string> text) {
         // Specified by ARCHITECTURE.md since track I and shipped permanently
         // empty, because the loop collected it nowhere and this never set it.
         summary.tool_names_invoked = std::move(result.tool_names_invoked);
+        summary.model = std::move(result.model);
         summary.duration = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - started);
         observers_.NotifyTurnCompleted(InfoSnapshot(), std::move(summary));

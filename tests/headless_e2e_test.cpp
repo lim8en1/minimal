@@ -30,6 +30,9 @@
 #include "bash_settings.hpp"
 #include "bash_tool.hpp"
 
+#include "cost_observer.hpp"
+#include "cost_store.hpp"
+
 #include "fakes.hpp"
 #include "temp_dir.hpp"
 #include "minimal/agent/session_support.hpp"
@@ -146,6 +149,14 @@ struct HeadlessFixture {
             // titler resolves it lazily at titling time.
             services.Provide(agent::kSessionSupportServiceName, &support);
         }
+        // The cost-tracker plugin's observer, exactly as the plugin registers
+        // it: a real SessionObserver over real per-plugin storage. Harmless for
+        // the other tests (it only records), and it is what the cost E2E below
+        // asserts against.
+        plugin_storage = std::make_unique<plugins::PluginStorage>(tempdir.path() / "plugins.db");
+        cost_store = std::make_unique<cost_tracker::CostStore>(plugin_storage.get());
+        observers->Register(
+            std::make_shared<cost_tracker::CostSessionObserver>(*cost_store));
         db = std::make_unique<session::SessionDatabase>(dir / "sessions.db");
         sessions = std::make_unique<agent::SessionRegistry>(*presets, tools, providers, *observers,
                                                             *db, agent::LoopConfig{},
@@ -198,6 +209,8 @@ struct HeadlessFixture {
     std::vector<Step> steps;
     std::unique_ptr<agent::AgentPresetRegistry> presets;
     std::unique_ptr<agent::SessionObserverRegistry> observers;
+    std::unique_ptr<plugins::PluginStorage> plugin_storage;
+    std::unique_ptr<cost_tracker::CostStore> cost_store;
     std::unique_ptr<session::SessionDatabase> db;
     std::unique_ptr<agent::SessionRegistry> sessions;
     std::unique_ptr<rpc::SessionServiceImpl> service;
@@ -249,6 +262,41 @@ TEST_CASE("a headless turn returns the model's text", "[headless]") {
     CHECK(status.ok());
     CHECK(text == "the answer is 42");
     CHECK(stop == v1::STOP_REASON_END_TURN);
+}
+
+TEST_CASE("a completed turn lands in the cost tracker's history", "[headless][cost-tracker]") {
+    // The observer is the only writer, and this is the only tier that proves
+    // the whole push path: RunTurn -> TurnSummary (model included) -> observer
+    // dispatch -> PluginStorage. The dispatch is fire-and-forget, so the test
+    // polls for the record instead of asserting synchronously.
+    HeadlessFixture fixture;
+    fixture.Script(testing::TextResponse("the answer is 42"),
+                   TextStream("the answer is 42", llm::StopReason::EndTurn));
+    fixture.Start();
+
+    client::SessionClient::CreateOptions options;
+    options.project_root = (fixture.dir / "work").string();
+    options.agent_preset = "main";
+    options.run_mode = v1::PERMISSION_RUN_MODE_ALLOW_ONLY;
+    const auto created = fixture.client->CreateSession(options);
+    REQUIRE(created.status.ok());
+    const auto status = fixture.client->RunTurn(
+        created.session_id, "what is the answer?", [](const v1::ServerEvent&) { return true; });
+    CHECK(status.ok());
+
+    cost_tracker::SessionHistory history;
+    for (int waited_ms = 0; waited_ms < 5000; waited_ms += 10) {
+        history = fixture.cost_store->Load(created.session_id);
+        if (!history.turns.empty()) break;
+        std::this_thread::sleep_for(10ms);
+    }
+    REQUIRE(history.turns.size() == 1);
+    // The request's model id (the preset's), not the fake's -- that is the
+    // name a rate is keyed by.
+    CHECK(history.turns[0].model == "test-model");
+    CHECK(history.turns[0].usage.input_tokens == 10);
+    CHECK(history.turns[0].usage.output_tokens == 5);
+    CHECK(history.turns[0].usage.usage_reported);
 }
 
 TEST_CASE("AllowOnly auto-denies instead of blocking", "[headless]") {
@@ -357,8 +405,7 @@ TEST_CASE("the terminal stop reason reaches the client", "[headless]") {
     CHECK(stop == v1::STOP_REASON_MAX_TOKENS);
 }
 
-TEST_CASE("a provider failure reaches the client as an ErrorEvent", "[headless]") {
-    HeadlessFixture fixture;
+TEST_CASE("a provider failure reaches the client as an ErrorEvent", "[headless]") {    HeadlessFixture fixture;
     fixture.Start();  // nothing scripted: the fake provider throws
 
     client::SessionClient::CreateOptions options;

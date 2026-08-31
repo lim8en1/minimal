@@ -156,6 +156,12 @@ struct TurnResult {
     // which ARCHITECTURE.md has always specified and which was shipped
     // permanently empty because nothing populated it.
     std::vector<std::string> tool_names_invoked;
+    // The model id this turn's provider calls were made with -- the request's
+    // model, not the backend-reported one, so a per-model cost rate resolves
+    // against the same name the user's config keys it under. Set as soon as the
+    // first request is built, so a turn that failed or was cancelled before any
+    // response still reports what it would have billed.
+    std::string model;
 };
 
 // Summarizes a message range into one synthetic message. Injected so the

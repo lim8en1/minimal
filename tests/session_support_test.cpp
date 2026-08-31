@@ -125,6 +125,32 @@ TEST_CASE("LlmForSession degrades on an unknown session", "[session_support]") {
     CHECK_FALSE(fixture.support->RenameSession("no-such-session", "x"));
 }
 
+TEST_CASE("a DB-backed session gone from the registry still titles and reads",
+          "[session_support]") {
+    // The race the titler actually hits: a one-shot headless turn closes its
+    // stream the instant TurnCompletedEvent lands, and the session can be
+    // erased from the registry BEFORE the queued OnTurnCompleted dispatches.
+    // The service must fall back to the database -- the authoritative record
+    // -- rather than report "no session" for a session that ran a real turn.
+    SupportFixture fixture;
+    // A real row, no registry session: the exact state a raced teardown leaves.
+    const auto row = fixture.db->CreateSession("", std::nullopt, "/p", "build");
+
+    const auto reader = fixture.support->HistoryFor(row.session_id);
+    REQUIRE(reader != nullptr);
+    // The same class over the same database the live session's reader served.
+    const auto page = reader->GetMessages(row.session_id, std::nullopt, 10);
+    CHECK(page.messages.empty());
+
+    const auto llm = fixture.support->LlmForSession(row.session_id);
+    REQUIRE(llm.has_value());
+    CHECK(llm->model == "test-model");
+    CHECK(llm->provider != nullptr);
+
+    CHECK(fixture.support->RenameSession(row.session_id, "late title"));
+    CHECK(fixture.db->GetSession(row.session_id)->name == "late title");
+}
+
 TEST_CASE("ResolveModelRef shares the cached instance and rejects junk",
           "[session_support]") {
     SupportFixture fixture;

@@ -23,11 +23,15 @@
 //      SessionSupportService, provided by CORE itself under
 //      kSessionSupportServiceName -- the pull seam for plugins that react to
 //      session lifecycle and need the transcript, the session's own provider,
-//      or the rename-and-notify path.
+//      or the rename-and-notify path. ConfigDir() is here for the same reason:
+//      a plugin whose data ships as a seeded config file (the providers.json
+//      treatment -- user-editable text, never compiled in) needs the same
+//      directory resolution the server uses.
 
 #include <filesystem>
 
 #include "minimal/common/abi_tag.hpp"
+#include "minimal/common/config_paths.hpp"
 
 // --- Half 2: utilities plugins consume -------------------------------------
 #include "minimal/agent/session_observer.hpp"
