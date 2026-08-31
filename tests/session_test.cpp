@@ -299,7 +299,8 @@ TEST_CASE("a cancelled turn does not deny-lock the next one", "[session]") {
     v1::PermissionResponse answer;
     answer.set_request_id(*request_id);
     answer.set_decision(v1::PERMISSION_DECISION_ALLOW);
-    REQUIRE(fixture->session->pending().Resolve(*request_id, answer.SerializeAsString()));
+    REQUIRE(fixture->session->pending().Resolve(
+        *request_id, rpc::PermissionAnswer{answer.SerializeAsString()}));
 
     REQUIRE(fixture->session->WaitForIdleForTesting(5s));
     CHECK(tool_ptr->calls.size() == 1);

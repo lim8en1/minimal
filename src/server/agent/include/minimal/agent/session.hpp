@@ -118,11 +118,15 @@ public:
     // tests can drive one without a database file.
     // `seeded_history` is the RESUME path: the stored transcript, loaded
     // without being re-appended (the store already holds it). Empty for a new
-    // session.
+    // session. The seq/head companions tell the loop where the seed's persisted
+    // portion begins -- what compaction checkpoints are written against (see
+    // AgentLoop's constructor for the invariant).
     Session(SessionParams params, AgentPreset preset, std::shared_ptr<llm::LlmProvider> provider,
             std::unique_ptr<HistoryStore> store, tools::ToolRegistry& registry,
             LoopConfig loop_config, SessionObserverRegistry& observers, common::Logger& logger,
-            std::vector<llm::Message> seeded_history = {});
+            std::vector<llm::Message> seeded_history = {},
+            std::optional<std::int64_t> seed_first_persisted_seq = std::nullopt,
+            bool seed_head_is_summary = false);
 
     // Terminates and joins. A Session is never destroyed with its worker running.
     ~Session();

@@ -116,11 +116,40 @@ std::shared_ptr<Session> SessionRegistry::CreateResolved(SessionParams params,
     // not replayed -- everything below appends NEW messages at MAX(seq) + 1, so
     // the stored rows must not go through the store again or the transcript
     // would duplicate itself.
+    //
+    // Two load paths. A persisted compaction CHECKPOINT (the cached view the
+    // live session left behind) means the working set is [summary + tail]:
+    // reconstructing it costs no provider call and stays bounded by the KEPT
+    // context rather than the transcript, which is the difference between
+    // resuming a session that compacted four times over 3M tokens and trying
+    // to summarize half of a 3M-token history through one model window. No
+    // checkpoint (never compacted, or a pre-checkpoint session) falls back to
+    // the full-transcript load.
     std::vector<llm::Message> seeded_history;
+    std::optional<std::int64_t> seed_first_persisted_seq;
+    bool seed_head_is_summary = false;
     if (params.resume) {
         const session::SessionReader reader(db_);
-        for (auto& stored : reader.LoadAll(session_id)) {
-            seeded_history.push_back(std::move(stored.message));
+        const auto checkpoint = db_.LoadCompactionCheckpoint(session_id);
+        if (checkpoint) {
+            seeded_history.push_back(checkpoint->summary);
+            for (auto& stored : reader.LoadAfter(session_id, checkpoint->boundary_seq)) {
+                if (!seed_first_persisted_seq) seed_first_persisted_seq = stored.seq;
+                seeded_history.push_back(std::move(stored.message));
+            }
+            seed_head_is_summary = true;
+            if (!seed_first_persisted_seq) {
+                // Empty tail: the boundary is still exactly where the persisted
+                // portion will resume on the next append.
+                seed_first_persisted_seq = checkpoint->boundary_seq + 1;
+            }
+            logger_.info("session {}: resuming from compaction checkpoint (covers seq <= {})",
+                         session_id, checkpoint->boundary_seq);
+        } else {
+            for (auto& stored : reader.LoadAll(session_id)) {
+                if (!seed_first_persisted_seq) seed_first_persisted_seq = stored.seq;
+                seeded_history.push_back(std::move(stored.message));
+            }
         }
 
         // A session cancelled mid-tool-execution -- or a process killed between
@@ -128,7 +157,9 @@ std::shared_ptr<Session> SessionRegistry::CreateResolved(SessionParams params,
         // unanswered tool_use, which no provider accepts. Synthesize the
         // missing error results as one REAL message (persisted like any other
         // append) rather than refusing to resume: cancellation is ordinary,
-        // and the transcript stays an exact, valid prefix either way.
+        // and the transcript stays an exact, valid prefix either way. The
+        // repair appends at MAX(seq)+1, so a checkpoint boundary (which only
+        // covers earlier seqs) is unaffected by it.
         if (auto repair = synthesize_missing_tool_results(seeded_history)) {
             logger_.info(
                 "session {}: stored transcript ends mid tool call; appending synthesized "
@@ -145,7 +176,8 @@ std::shared_ptr<Session> SessionRegistry::CreateResolved(SessionParams params,
     auto session = std::make_shared<Session>(std::move(params), std::move(preset),
                                              std::move(provider), std::move(store), tools_,
                                              loop_config, observers_, logger_,
-                                             std::move(seeded_history));
+                                             std::move(seeded_history), seed_first_persisted_seq,
+                                             seed_head_is_summary);
     // Wired before the session is findable, so the first command a client sends
     // cannot arrive at a session that has no registry yet.
     session->set_presets(&presets_);

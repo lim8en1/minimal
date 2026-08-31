@@ -40,7 +40,9 @@ AgentLoop::AgentLoop(llm::LlmProvider& provider, tools::ToolExecutor& executor,
                       tools::ToolRegistry& registry, HistoryStore& store, AgentPreset preset,
                       LoopConfig config, SessionContext session,
                       std::function<bool()> is_cancelled, llm::StreamEventSink event_sink,
-                      Compactor compactor, std::vector<llm::Message> seeded_history)
+                      Compactor compactor, std::vector<llm::Message> seeded_history,
+                      std::optional<std::int64_t> seed_first_persisted_seq,
+                      bool seed_head_is_summary)
     : provider_(provider),
       executor_(executor),
       registry_(registry),
@@ -51,7 +53,9 @@ AgentLoop::AgentLoop(llm::LlmProvider& provider, tools::ToolExecutor& executor,
       is_cancelled_(std::move(is_cancelled)),
       event_sink_(std::move(event_sink)),
       compactor_(std::move(compactor)),
-      history_(std::move(seeded_history)) {
+      history_(std::move(seeded_history)),
+      first_persisted_seq_(seed_first_persisted_seq),
+      head_is_summary_(seed_head_is_summary) {
     if (!history_.empty()) {
         // A resumed context has no backend usage behind it yet, so give the
         // compaction trigger an estimate to work with. Deliberately the same
@@ -91,6 +95,12 @@ bool AgentLoop::SleepForBackoff(int attempt) {
 
 void AgentLoop::AppendAndPersist(llm::Message message, std::optional<int> output_tokens) {
     store_.Append(message, output_tokens);
+    // The persisted suffix gains its first member. Appends land at the END of
+    // both history_ and the store, so this is the only place the boundary can
+    // move forward.
+    if (!first_persisted_seq_.has_value()) {
+        first_persisted_seq_ = store_.last_appended_seq();
+    }
     history_.push_back(std::move(message));
 }
 
@@ -222,6 +232,20 @@ void AgentLoop::ClearHistory() {
     // -- but a token count that outlives its messages is the sort of thing a
     // later change trips over, and the compaction trigger reads it.
     tokens_ = llm::TokenAccumulator{};
+    // /clear drops the VIEW, and the checkpoint IS a view: leaving it would
+    // make a resume load [summary + tail] of a conversation the user wiped
+    // from context, when clear's contract is that only the transcript survives
+    // -- so resume goes back to the full-transcript load. Best-effort, like
+    // the save: a failed delete degrades to a resume that restores the last
+    // summary, not to a lost transcript.
+    try {
+        store_.ClearCompactionCheckpoint();
+    } catch (const std::exception& error) {
+        session_.logger.warn("session {}: failed to clear compaction checkpoint: {}",
+                             session_.session_id, error.what());
+    }
+    first_persisted_seq_.reset();
+    head_is_summary_ = false;
     // Not the store. Compaction established that the in-memory working set and
     // the durable transcript are different things; /clear drops the first and
     // leaves scrollback whole.
@@ -281,6 +305,35 @@ std::optional<std::size_t> AgentLoop::Compact() {
         return std::nullopt;
     }
 
+    // Persist the VIEW checkpoint so a resume reconstructs [summary + tail]
+    // instead of re-summarizing the full uncompacted transcript -- which for a
+    // transcript well beyond the model window could not even fit its own
+    // summarization request. The checkpoint is a cache of derived state, never
+    // part of the transcript: `messages` is untouched, and a failed write is an
+    // optimization miss (log and continue), because the fold below is correct
+    // with or without it.
+    //
+    // boundary_seq arithmetic rests on one invariant: the persisted messages
+    // in history_ are always a contiguous suffix of the stored transcript
+    // (appends continue at MAX(seq)+1; compaction only folds from the head).
+    // Persisted messages folded away = `cut` minus the synthetic head, so the
+    // new first persisted seq is the boundary, +1.
+    if (first_persisted_seq_.has_value()) {
+        const std::int64_t persisted_removed =
+            static_cast<std::int64_t>(cut) - (head_is_summary_ ? 1 : 0);
+        const std::int64_t boundary_seq = *first_persisted_seq_ + persisted_removed - 1;
+        try {
+            store_.SaveCompactionCheckpoint(boundary_seq, result->summary_message);
+        } catch (const std::exception& error) {
+            // Resume falls back to the full-transcript load: today's behavior,
+            // degraded only in cost, never in correctness.
+            session_.logger.warn("session {}: failed to save compaction checkpoint: {}",
+                                 session_.session_id, error.what());
+        }
+        first_persisted_seq_ = boundary_seq + 1;
+        head_is_summary_ = true;
+    }
+
     // Rebuilt with moves, not copies: the kept tail is shifted once (moving
     // strings, which is pointer swaps) rather than duplicated. The summary
     // message lands at the head, replacing everything the cut removed.
@@ -312,8 +365,8 @@ std::optional<std::size_t> AgentLoop::Compact() {
     // again once new messages have pushed occupancy back over the trigger is the
     // intended behaviour, not a runaway.
 
-    // Deliberately not persisted: compaction changes only what the NEXT request
-    // contains. The store keeps the full uncompacted record, so scrollback is
+    // The VIEW produced here is checkpointed above; the transcript is not
+    // touched. The store keeps the full uncompacted record, so scrollback is
     // unaffected no matter how many times this runs.
     return cut;
 }

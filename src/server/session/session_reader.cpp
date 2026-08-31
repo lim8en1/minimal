@@ -11,4 +11,9 @@ std::vector<StoredMessage> SessionReader::LoadAll(const std::string& session_id)
     return db_.LoadMessages(session_id);
 }
 
+std::vector<StoredMessage> SessionReader::LoadAfter(const std::string& session_id,
+                                                    std::int64_t after_seq) const {
+    return db_.LoadMessagesFrom(session_id, after_seq);
+}
+
 }  // namespace minimal::session

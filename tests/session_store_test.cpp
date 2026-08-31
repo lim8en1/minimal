@@ -590,6 +590,57 @@ TEST_CASE("LoadMessages on an empty or unknown session is empty, not an error",
     CHECK(SessionReader(db).LoadAll("no-such-session").empty());
 }
 
+TEST_CASE("compaction checkpoints round-trip, upsert, and clear", "[session][checkpoint]") {
+    TempDir dir;
+    SessionDatabase db(dir.path() / "ckpt.db");
+    const auto id = db.CreateSession("", std::nullopt, "/p", "build").session_id;
+    db.AppendMessage(id, UserMsg("one"));
+    db.AppendMessage(id, UserMsg("two"));
+
+    // No checkpoint until one is written -- and that is clean, not an error.
+    CHECK_FALSE(db.LoadCompactionCheckpoint(id).has_value());
+    CHECK_FALSE(db.LoadCompactionCheckpoint("no-such-session").has_value());
+
+    const llm::Message summary{llm::Role::User,
+                               {llm::TextBlock{"earlier context was compacted"}}};
+    db.SaveCompactionCheckpoint(id, 0, summary);
+
+    const auto loaded = db.LoadCompactionCheckpoint(id);
+    REQUIRE(loaded.has_value());
+    CHECK(loaded->session_id == id);
+    CHECK(loaded->boundary_seq == 0);
+    CHECK(loaded->created_at_unix_ms > 0);
+    REQUIRE(MessagesEqual(loaded->summary, summary));
+
+    // Upsert: the second compaction replaces, never stacks.
+    const llm::Message newer{llm::Role::User, {llm::TextBlock{"covers more"}}};
+    db.SaveCompactionCheckpoint(id, 1, newer);
+    const auto replaced = db.LoadCompactionCheckpoint(id);
+    REQUIRE(replaced.has_value());
+    CHECK(replaced->boundary_seq == 1);
+    CHECK(MessagesEqual(replaced->summary, newer));
+
+    // The resume tail is everything the summary does not cover.
+    db.AppendMessage(id, UserMsg("three"));
+    const auto tail = SessionReader(db).LoadAfter(id, replaced->boundary_seq);
+    REQUIRE(tail.size() == 1);
+    CHECK(tail[0].seq == 2);
+    CHECK(MessagesEqual(tail[0].message, UserMsg("three")));
+
+    db.ClearCompactionCheckpoint(id);
+    CHECK_FALSE(db.LoadCompactionCheckpoint(id).has_value());
+}
+
+TEST_CASE("deleting a session cascades to its compaction checkpoint", "[session][checkpoint]") {
+    TempDir dir;
+    SessionDatabase db(dir.path() / "ckpt-cascade.db");
+    const auto id = db.CreateSession("", std::nullopt, "/p", "build").session_id;
+    db.SaveCompactionCheckpoint(id, 3, llm::Message{llm::Role::User, {llm::TextBlock{"s"}}});
+
+    REQUIRE(db.DeleteSession(id));
+    CHECK_FALSE(db.LoadCompactionCheckpoint(id).has_value());
+}
+
 TEST_CASE("LastMessageSeq reports the highest seq, and -1 when there are none",
           "[session][resume]") {
     TempDir dir;

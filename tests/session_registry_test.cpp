@@ -337,6 +337,58 @@ TEST_CASE("resume of a clean transcript appends nothing", "[session_registry][re
     CHECK(fixture.db->LoadMessages(row.session_id).size() == 2);
 }
 
+TEST_CASE("resume with a compaction checkpoint reconstructs the compacted view",
+          "[session_registry][resume][checkpoint]") {
+    // The checkpoint is the cached view the live session left behind. Resume
+    // must seed the loop with [summary + tail] -- what the live session's
+    // working set actually was -- not the full uncompacted transcript, and it
+    // must not spend a provider call re-summarizing on the way in.
+    RegistryFixture fixture;
+    fixture.config.WriteDefaults();
+
+    // Capture the provider instance the resumed session constructs, so the
+    // first request can be inspected after the turn.
+    testing::FakeLlmProvider* provider = nullptr;
+    fixture.providers.Register("fake", [&provider](const llm::ProviderConfig&) {
+        auto owned = std::make_unique<testing::FakeLlmProvider>();
+        provider = owned.get();
+        return owned;
+    });
+    fixture.Build(/*register_provider_kind=*/false);
+
+    const auto row = fixture.db->CreateSession("ckpt", std::nullopt, "/proj", "build");
+    fixture.db->AppendMessage(row.session_id,
+                              llm::Message{llm::Role::User, {llm::TextBlock{"old-1"}}});
+    fixture.db->AppendMessage(row.session_id,
+                              llm::Message{llm::Role::Assistant, {llm::TextBlock{"old-2"}}});
+    fixture.db->AppendMessage(row.session_id,
+                              llm::Message{llm::Role::User, {llm::TextBlock{"tail"}}});
+    // The live session compacted everything through seq 1 into one summary.
+    fixture.db->SaveCompactionCheckpoint(
+        row.session_id, 1, llm::Message{llm::Role::User, {llm::TextBlock{"[compacted]"}}});
+
+    auto params = Params(row.session_id);
+    params.resume = true;
+    auto session = fixture.registry->Create(params);
+    REQUIRE(session != nullptr);
+
+    REQUIRE(provider != nullptr);
+    provider->PushResponse(testing::TextResponse("ok"));
+
+    session->SubmitTurn("new");
+    REQUIRE(session->WaitForIdleForTesting(5s));
+
+    // Exactly one provider call -- the turn itself, no summarization -- and
+    // its context is [summary, tail, turn], not the four stored messages.
+    CHECK(provider->call_count() == 1);
+    const auto& requests = provider->requests();
+    REQUIRE(requests.size() == 1);
+    REQUIRE(requests[0].messages.size() == 3);
+    CHECK(std::get<llm::TextBlock>(requests[0].messages[0].content.front()).text == "[compacted]");
+    CHECK(std::get<llm::TextBlock>(requests[0].messages[1].content.front()).text == "tail");
+    CHECK(std::get<llm::TextBlock>(requests[0].messages[2].content.front()).text == "new");
+}
+
 TEST_CASE("resume of an already-open session is refused", "[session_registry][resume]") {
     // Backstop: two live Sessions on one transcript would interleave appends.
     RegistryFixture fixture;

@@ -26,6 +26,9 @@ public:
         return last_seq_.load(std::memory_order_acquire);
     }
 
+    void SaveCompactionCheckpoint(std::int64_t boundary_seq, const llm::Message& summary) override;
+    void ClearCompactionCheckpoint() override;
+
 private:
     SessionDatabase& db_;
     std::string session_id_;

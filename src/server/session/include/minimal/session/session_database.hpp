@@ -37,6 +37,22 @@ struct SessionSummary {
     int message_count = 0;
 };
 
+// The persisted compaction checkpoint: the current derived VIEW of a session's
+// context, cached so a resume reconstructs the working set the live session had
+// -- summary + everything after boundary_seq -- instead of re-summarizing from
+// the full uncompacted transcript. NOT part of the conversation: `messages`
+// stays the exact record of what was said, and this row is a cache of a view
+// over it. One row per session, latest-wins; the prefix it covers is immutable
+// (appends only), so no invalidation exists beyond /clear and session deletion.
+struct CompactionCheckpoint {
+    std::string session_id;
+    // The summary covers every message with seq <= boundary_seq; the working
+    // set resumes with seq > boundary_seq.
+    std::int64_t boundary_seq = 0;
+    llm::Message summary;  // the synthetic User message at the head of the view
+    std::int64_t created_at_unix_ms = 0;
+};
+
 struct ListSessionsFilter {
     std::optional<std::string> project_root;  // nullopt = all dirs (include_all_dirs)
     bool include_subagents = false;           // subagent rows are hidden by default
@@ -72,7 +88,7 @@ struct OpenOptions {
 // therefore leaves an exact prefix of the transcript -- never a torn row.
 class SessionDatabase {
 public:
-    static constexpr int kSchemaVersion = 3;
+    static constexpr int kSchemaVersion = 4;
 
     // Opens (creating if needed) and migrates. Throws std::runtime_error on any
     // failure, including a database whose user_version is newer than this
@@ -121,10 +137,37 @@ public:
     // never calls this; it pages.
     std::vector<StoredMessage> LoadMessages(const std::string& session_id) const;
 
+    // The transcript tail after `after_seq` (exclusive), ascending. The
+    // checkpoint-resume path: loading [checkpoint summary + this tail] keeps a
+    // resumed long session's load proportional to the KEPT context, not to the
+    // full transcript it outgrew. Same strictness contract as LoadMessages --
+    // the most damaging place to return short is the working history.
+    std::vector<StoredMessage> LoadMessagesFrom(const std::string& session_id,
+                                                std::int64_t after_seq) const;
+
     // MAX(seq) of the session's messages, or -1 when it has none. What a
     // resumed session's HistoryStore initializes its seq tracking from, so the
     // next append continues the stored sequence instead of restarting it.
     std::int64_t LastMessageSeq(const std::string& session_id) const;
+
+    // --- Compaction checkpoints (see CompactionCheckpoint above) -------------
+
+    // Upsert: one checkpoint per session, the latest compaction's. Throws on
+    // I/O failure -- the CALLER (AgentLoop::Compact) treats that as an
+    // optimization miss and carries on, because the transcript itself is
+    // unaffected either way.
+    void SaveCompactionCheckpoint(const std::string& session_id, std::int64_t boundary_seq,
+                                  const llm::Message& summary);
+
+    // /clear drops the working set; a checkpoint surviving it would resurrect
+    // a summary of a conversation the user deliberately wiped from view.
+    void ClearCompactionCheckpoint(const std::string& session_id);
+
+    // nullopt = no checkpoint (a session that never compacted, or one from
+    // before checkpoints existed -- those resume the old way, from the full
+    // transcript).
+    std::optional<CompactionCheckpoint> LoadCompactionCheckpoint(
+        const std::string& session_id) const;
 
     // See SessionReader::GetMessages for both of these. A real cursor is taken
     // exactly; a bare `0` is rejected, because it used to mean "from the most

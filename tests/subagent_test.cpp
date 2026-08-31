@@ -202,7 +202,8 @@ struct SubagentFixture {
         answer.set_request_id(request_id);
         answer.set_decision(v1::PERMISSION_DECISION_ALLOW);
         for (auto& key : granted_keys) answer.add_granted_keys(std::move(key));
-        REQUIRE(session.pending().Resolve(request_id, answer.SerializeAsString()));
+        REQUIRE(session.pending().Resolve(request_id,
+                                          rpc::PermissionAnswer{answer.SerializeAsString()}));
     }
 
     void Write(const std::filesystem::path& relative, const std::string& contents) {

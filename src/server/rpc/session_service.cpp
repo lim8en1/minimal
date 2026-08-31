@@ -259,15 +259,18 @@ void SessionServiceImpl::Dispatch(const v1::ClientEvent& event, agent::Session& 
             return;
 
         case v1::ClientEvent::kPermissionResponse:
-            // Carried across as bytes: parsing belongs on the worker, which can
-            // afford to fail, not on the reader, which must not stall.
+            // Carried across as the typed variant, still unparsed: parsing
+            // belongs on the worker, which can afford to fail, not on the
+            // reader, which must not stall. The payload case IS the type --
+            // the variant makes a wrong-kind answer structurally unreadable
+            // at the waiter rather than merely failing to parse there.
             session.pending().Resolve(event.permission_response().request_id(),
-                                      event.permission_response().SerializeAsString());
+                                      PermissionAnswer{event.permission_response().SerializeAsString()});
             return;
 
         case v1::ClientEvent::kConfirmationResponse:
             session.pending().Resolve(event.confirmation_response().request_id(),
-                                      event.confirmation_response().chosen_option());
+                                      ConfirmationAnswer{event.confirmation_response().chosen_option()});
             return;
 
         case v1::ClientEvent::kCancel:

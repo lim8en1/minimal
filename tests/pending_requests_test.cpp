@@ -11,6 +11,8 @@
 #include "deadline.hpp"
 #include "minimal/rpc/pending_requests.hpp"
 
+using minimal::rpc::ConfirmationAnswer;
+using minimal::rpc::PendingAnswer;
 using minimal::rpc::PendingRequests;
 using minimal::testing::RunInBackground;
 using namespace std::chrono_literals;
@@ -41,12 +43,12 @@ TEST_CASE("an answer arriving after the wait begins unblocks it", "[pending_requ
     auto waiter = AwaitInBackground(pending, registration);
     CHECK_FALSE(waiter.WaitFor(50ms));  // established: it is actually blocked
 
-    CHECK(pending->Resolve("req-1", "allow"));
+    CHECK(pending->Resolve("req-1", ConfirmationAnswer{"allow"}));
 
     REQUIRE(waiter.Ready());
     const auto answer = waiter.Get();
     REQUIRE(answer.has_value());
-    CHECK(*answer == "allow");
+    CHECK(std::get<ConfirmationAnswer>(*answer).chosen_option == "allow");
 }
 
 TEST_CASE("an answer arriving before the wait begins is not lost", "[pending_requests]") {
@@ -58,13 +60,13 @@ TEST_CASE("an answer arriving before the wait begins is not lost", "[pending_req
     auto pending = std::make_shared<PendingRequests>();
     auto registration = Register(pending, "req-1");
 
-    CHECK(pending->Resolve("req-1", "deny"));
+    CHECK(pending->Resolve("req-1", ConfirmationAnswer{"deny"}));
 
     auto waiter = AwaitInBackground(pending, registration);
     REQUIRE(waiter.Ready());
     const auto answer = waiter.Get();
     REQUIRE(answer.has_value());
-    CHECK(*answer == "deny");
+    CHECK(std::get<ConfirmationAnswer>(*answer).chosen_option == "deny");
 }
 
 TEST_CASE("resolving an unregistered id is a harmless no-op", "[pending_requests]") {
@@ -72,7 +74,7 @@ TEST_CASE("resolving an unregistered id is a harmless no-op", "[pending_requests
     // it is correct; buffering it for a hypothetical future waiter would let a
     // client grow this map without bound by answering things nobody asked.
     PendingRequests pending;
-    CHECK_FALSE(pending.Resolve("never-registered", "allow"));
+    CHECK_FALSE(pending.Resolve("never-registered", ConfirmationAnswer{"allow"}));
     CHECK(pending.pending_count() == 0);
 }
 
@@ -85,13 +87,13 @@ TEST_CASE("concurrent waiters on different ids do not steal each other's answers
     auto waiter_one = AwaitInBackground(pending, first);
     auto waiter_two = AwaitInBackground(pending, second);
 
-    pending->Resolve("req-2", "second-answer");
-    pending->Resolve("req-1", "first-answer");
+    pending->Resolve("req-2", ConfirmationAnswer{"second-answer"});
+    pending->Resolve("req-1", ConfirmationAnswer{"first-answer"});
 
     REQUIRE(waiter_one.Ready());
     REQUIRE(waiter_two.Ready());
-    CHECK(waiter_one.Get().value() == "first-answer");
-    CHECK(waiter_two.Get().value() == "second-answer");
+    CHECK(std::get<ConfirmationAnswer>(waiter_one.Get().value()).chosen_option == "first-answer");
+    CHECK(std::get<ConfirmationAnswer>(waiter_two.Get().value()).chosen_option == "second-answer");
 }
 
 TEST_CASE("resolving one id leaves another waiter blocked", "[pending_requests]") {
@@ -102,13 +104,13 @@ TEST_CASE("resolving one id leaves another waiter blocked", "[pending_requests]"
     auto second = Register(pending, "req-2");
 
     auto waiter_two = AwaitInBackground(pending, second);
-    pending->Resolve("req-1", "not-for-you");
+    pending->Resolve("req-1", ConfirmationAnswer{"not-for-you"});
 
     CHECK_FALSE(waiter_two.WaitFor(200ms));
 
-    pending->Resolve("req-2", "mine");
+    pending->Resolve("req-2", ConfirmationAnswer{"mine"});
     REQUIRE(waiter_two.Ready());
-    CHECK(waiter_two.Get().value() == "mine");
+    CHECK(std::get<ConfirmationAnswer>(waiter_two.Get().value()).chosen_option == "mine");
 }
 
 TEST_CASE("cancellation wakes a blocked waiter", "[pending_requests]") {
@@ -161,9 +163,9 @@ TEST_CASE("cancellation is NOT permanent: the next waiter still blocks and is an
     auto waiter = AwaitInBackground(pending, next);
     CHECK_FALSE(waiter.WaitFor(50ms));
 
-    CHECK(pending->Resolve("req-2", "allow"));
+    CHECK(pending->Resolve("req-2", ConfirmationAnswer{"allow"}));
     REQUIRE(waiter.Ready());
-    CHECK(waiter.Get().value() == "allow");
+    CHECK(std::get<ConfirmationAnswer>(waiter.Get().value()).chosen_option == "allow");
 }
 
 TEST_CASE("an answer racing its own cancellation is not delivered", "[pending_requests]") {
@@ -173,7 +175,7 @@ TEST_CASE("an answer racing its own cancellation is not delivered", "[pending_re
     auto pending = std::make_shared<PendingRequests>();
     auto registration = Register(pending, "req-1");
 
-    CHECK(pending->Resolve("req-1", "allow"));
+    CHECK(pending->Resolve("req-1", ConfirmationAnswer{"allow"}));
     pending->CancelAll();
 
     auto waiter = AwaitInBackground(pending, registration);
@@ -205,7 +207,7 @@ TEST_CASE("a registration releases its slot when it goes out of scope", "[pendin
         CHECK(pending.pending_count() == 1);
     }
     CHECK(pending.pending_count() == 0);
-    CHECK_FALSE(pending.Resolve("req-1", "allow"));
+    CHECK_FALSE(pending.Resolve("req-1", ConfirmationAnswer{"allow"}));
 }
 
 TEST_CASE("a slot is released even when the waiter unwinds", "[pending_requests]") {
@@ -228,12 +230,12 @@ TEST_CASE("the first answer wins over a retransmission", "[pending_requests]") {
     auto pending = std::make_shared<PendingRequests>();
     auto registration = Register(pending, "req-1");
 
-    CHECK(pending->Resolve("req-1", "allow"));
-    CHECK(pending->Resolve("req-1", "deny"));
+    CHECK(pending->Resolve("req-1", ConfirmationAnswer{"allow"}));
+    CHECK(pending->Resolve("req-1", ConfirmationAnswer{"deny"}));
 
     auto waiter = AwaitInBackground(pending, registration);
     REQUIRE(waiter.Ready());
-    CHECK(waiter.Get().value() == "allow");
+    CHECK(std::get<ConfirmationAnswer>(waiter.Get().value()).chosen_option == "allow");
 }
 
 TEST_CASE("many concurrent registrations each get their own answer", "[pending_requests]") {
@@ -241,7 +243,7 @@ TEST_CASE("many concurrent registrations each get their own answer", "[pending_r
     auto pending = std::make_shared<PendingRequests>();
 
     std::vector<RegistrationPtr> registrations;
-    std::vector<minimal::testing::BackgroundResult<std::optional<std::string>>> waiters;
+    std::vector<minimal::testing::BackgroundResult<std::optional<PendingAnswer>>> waiters;
     registrations.reserve(kCount);
     waiters.reserve(kCount);
     for (int i = 0; i < kCount; ++i) {
@@ -251,12 +253,32 @@ TEST_CASE("many concurrent registrations each get their own answer", "[pending_r
 
     // Resolve in reverse, so answer order never matches wait order.
     for (int i = kCount - 1; i >= 0; --i) {
-        pending->Resolve("req-" + std::to_string(i), "answer-" + std::to_string(i));
+        pending->Resolve("req-" + std::to_string(i),
+                         ConfirmationAnswer{"answer-" + std::to_string(i)});
     }
 
     for (int i = 0; i < kCount; ++i) {
         INFO("waiter " << i);
         REQUIRE(waiters[i].Ready());
-        CHECK(waiters[i].Get().value() == "answer-" + std::to_string(i));
+        CHECK(std::get<ConfirmationAnswer>(waiters[i].Get().value()).chosen_option ==
+              "answer-" + std::to_string(i));
     }
+}
+
+TEST_CASE("a cross-delivered answer keeps its type", "[pending_requests]") {
+    // The typed payload: the variant travels with the answer, so a waiter that
+    // registered under a confirmation id can never misread a serialized
+    // PermissionResponse as a chosen option -- the mismatch is structural
+    // (std::get returns null / throws), not a parse failure the waiter had to
+    // remember to guard.
+    auto pending = std::make_shared<PendingRequests>();
+    auto registration = Register(pending, "req-1");
+
+    CHECK(pending->Resolve("req-1", minimal::rpc::PermissionAnswer{"<serialized proto>"}));
+
+    auto waiter = AwaitInBackground(pending, registration);
+    REQUIRE(waiter.Ready());
+    const auto answer = waiter.Get();
+    REQUIRE(answer.has_value());
+    CHECK(std::holds_alternative<minimal::rpc::PermissionAnswer>(*answer));
 }

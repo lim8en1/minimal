@@ -22,7 +22,8 @@ Session::Session(SessionParams params, AgentPreset preset,
                  std::shared_ptr<llm::LlmProvider> provider, std::unique_ptr<HistoryStore> store,
                  tools::ToolRegistry& registry, LoopConfig loop_config,
                  SessionObserverRegistry& observers, common::Logger& logger,
-                 std::vector<llm::Message> seeded_history)
+                 std::vector<llm::Message> seeded_history,
+                 std::optional<std::int64_t> seed_first_persisted_seq, bool seed_head_is_summary)
     : params_(std::move(params)),
       preset_(std::move(preset)),
       logger_(logger),
@@ -121,11 +122,13 @@ Session::Session(SessionParams params, AgentPreset preset,
     //
     // seeded_history is non-empty only on resume: the stored transcript becomes
     // the loop's working history WITHOUT being re-appended to the store it was
-    // loaded from.
+    // loaded from. The seq/head companions carry where that seed's persisted
+    // portion begins, which is what compaction checkpoints are written against.
     loop_ = std::make_unique<AgentLoop>(*provider_, executor_, registry, *store_, preset_,
                                          loop_config, std::move(context),
                                          [this] { return IsCancelled(); }, std::move(event_sink),
-                                         compact_messages, std::move(seeded_history));
+                                         compact_messages, std::move(seeded_history),
+                                         seed_first_persisted_seq, seed_head_is_summary);
 
     observers_.NotifySessionCreated(info_);
     worker_ = std::thread([this] { WorkerMain(); });

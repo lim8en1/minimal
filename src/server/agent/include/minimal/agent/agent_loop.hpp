@@ -138,7 +138,19 @@ public:
               // so auto-compaction can fire BEFORE the first post-resume
               // provider call -- without that, a resumed session whose stored
               // context exceeds the window would fail the call outright.
-              std::vector<llm::Message> seeded_history = {});
+              std::vector<llm::Message> seeded_history = {},
+              // Where the seed's PERSISTED portion begins in the store's seq
+              // space -- what the compaction checkpoint's boundary_seq derives
+              // from. nullopt for a fresh session (nothing persisted yet) or a
+              // seed with no persisted messages. With a checkpoint seed, this
+              // is boundary_seq + 1 and head_is_summary is true: the seed's
+              // first message is the synthetic summary, which is not in the
+              // store. The INVARIANT that makes this one number sufficient:
+              // the persisted messages in history_ are always a contiguous
+              // suffix of the stored transcript, because appends continue at
+              // MAX(seq)+1 and compaction only ever folds from the head.
+              std::optional<std::int64_t> seed_first_persisted_seq = std::nullopt,
+              bool seed_head_is_summary = false);
 
     // Appends `seed_message`, then runs to a natural stop. A subagent's entire
     // life is one call to this -- there is one loop implementation, not two.
@@ -206,6 +218,15 @@ private:
     Compactor compactor_;
 
     std::vector<llm::Message> history_;
+    // Compaction-checkpoint bookkeeping: where the persisted suffix of history_
+    // begins in the store's seq space, and whether the head message is the
+    // synthetic summary (which exists only in history_, never in the store).
+    // Together they yield the boundary_seq a checkpoint is written with:
+    // persisted messages covered by the next summary end just before
+    // first_persisted_seq_ after the fold. Both are worker-thread-only state,
+    // like everything else on the loop except injected_.
+    std::optional<std::int64_t> first_persisted_seq_;
+    bool head_is_summary_ = false;
     // Guarded because it crosses threads: a non-blocking subagent's worker
     // queues its completion here while THIS session's worker flushes at turn
     // boundaries. Everything else on the loop stays worker-thread-only.

@@ -125,17 +125,34 @@ gRPC permits one concurrent reader and one concurrent writer on a `ServerReaderW
 
 **Both session queues are bounded, by different rules.** The outbound `EventQueue` caps at 65,536 events and blocks the producer (`Push` is worker-only; the reader uses `TryPush` and answers refusals). The session's *work* queue (turns + mutating commands) caps at 32 items and REFUSES beyond that, answering each refusal on the wire — one turn can run for minutes, so an unbounded work queue let a client enqueue transcript-sized turns faster than the worker consumed them, growing memory without limit. Termination closes the outbound queue BEFORE joining the worker: `Push` blocks at the cap and is woken only by `Close` or `Pop`, so a worker parked on a full queue behind a stalled writer deadlocks a join that waits for a close scheduled after the join. Closing first wakes the producer; `Pop` still drains before honoring the close, so a live writer receives the backlog.
 
+**Termination runs in a fixed order, and the order is the invariant.** `Terminate` performs exactly three steps — `PendingRequests::Shutdown()` → `EventQueue::Close()` → join the worker — and each step exists to wake a worker parked at one specific spot before the next step can strand it there:
+
+- **`Shutdown()` before `Close()`** — a worker parked in `Registration::AwaitResponse()` (an unasked permission or confirmation question) is woken only by `Shutdown`; a worker parked in a blocking `Push` (full outbound queue) is woken only by `Close`. Both parks are reachable during teardown, and the two wake-ups come from different files: the blocking `Push` is `WirePermissionChecker::check` (`wire_permission_checker.cpp`), the ordering is `Session::Terminate` (`agent/session.cpp`). No comment inside either file alone can keep them correct, which is why the order is recorded here as well as at both code sites.
+- **`Close()` before the join** — as above: a full-queue `Push` parked behind a stalled writer would otherwise deadlock the join forever.
+- Swapping either pair deadlocks the worker on an unasked question or a full queue; both failure modes leave the join hanging with the test suite still green, since only an E2E termination with a mid-turn `Ask` exercises the window.
+
 **Inbound dispatch** (reader thread — every branch is non-blocking):
 
 | `ClientEvent` | Action |
 |---|---|
 | `UserChatTurn` | Push onto the session's turn queue; wake the worker. |
 | `CommandInvocation` | Read-only `HarnessCommand` → post to the bounded command pool (never a detached per-command thread: unbounded thread pileup under flood, and a shutdown window where a task outlives the registries it borrows); anything else → queue for the worker at a turn boundary. Refusals — pool saturated, work queue full — are ANSWERED on the wire, never dropped: silence on a `request_id` is a client hang. |
-| `PermissionResponse` / `ConfirmationResponse` | `PendingRequests::Resolve(request_id, choice)` — signals the blocked worker. |
+| `PermissionResponse` / `ConfirmationResponse` | `PendingRequests::Resolve(request_id, typed answer)` — signals the blocked worker. |
 | `CancelTurn` | Set the session's atomic cancel flag. |
 
 ```cpp
 // src/server/rpc/pending_requests.hpp
+
+// WHAT AN ANSWER IS, made a type. Two brokers share one PendingRequests (the
+// permission checker and the confirmation broker); a bare string payload kept
+// them apart only by convention. With the variant, a cross-delivered answer is
+// structurally unreadable at the waiter instead of merely failing to parse
+// there. The "perm-"/"confirm-" id prefixes remain as diagnostics; they are no
+// longer load-bearing.
+struct PermissionAnswer    { std::string serialized_response; };  // parsed on the worker
+struct ConfirmationAnswer  { std::string chosen_option; };
+using PendingAnswer = std::variant<PermissionAnswer, ConfirmationAnswer>;
+
 class PendingRequests {
 public:
     // Registration is SEPARATE from waiting, and returns the handle you need in
@@ -154,15 +171,17 @@ public:
         // nullopt means CANCELLED -- the session is terminating. Callers map that
         // onto a decision themselves; encoding "deny" here would put a policy
         // choice inside a synchronization primitive.
-        std::optional<std::string> AwaitResponse();
+        std::optional<PendingAnswer> AwaitResponse();
     };
     [[nodiscard]] Registration Register(std::string request_id);
 
     // Reader thread. False if no slot is registered, which is not an error: a
     // client may answer a request whose session already terminated. Unknown ids
     // are never buffered for a future waiter -- that would let a client grow this
-    // map without bound by answering things nobody asked.
-    bool Resolve(const std::string& request_id, std::string chosen_option);
+    // map without bound by answering things nobody asked. The reader constructs
+    // the variant from the ClientEvent's own payload case -- it knows the type,
+    // parses nothing, and the type travels with the value.
+    bool Resolve(const std::string& request_id, PendingAnswer answer);
 
     // Wakes every waiter with nullopt. Permanent, so a worker reaching a gate
     // DURING teardown returns instead of parking on a stopped reader.
@@ -1066,6 +1085,8 @@ The window-relative strategies resolve **per session, against the window of the 
 
 Setting `auto_compact: false` disables automatic compaction entirely, leaving `/compact` as the only trigger. Compaction only changes what goes into the *next* `ChatRequest.messages` — it never mutates persisted history, so scrollback always shows the full conversation.
 
+**The view, however, is checkpointed — `compactions` table, one row per session.** Each successful compaction upserts `{boundary_seq, summary_message}`: a cache of the *derived view*, never a message row, so `messages` stays the exact record of what was said and the sentence above stays literally true. The reason it exists is the resume path. Without a checkpoint, a resumed session loads the full uncompacted transcript and re-summarizes from scratch — real provider calls, real money, on *every* resume — and worse, the halving strategy silently assumes the half being summarized fits the model window. That assumption holds for a live session (occupancy trips the trigger near 0.8×window), and breaks for a transcript well beyond it: resuming a 3M-token transcript against a 200k window could not even fit its own summarization request, and the first turn failed with a 400 before any compaction could converge. With a checkpoint, resume reconstructs `[summary + tail]` — the working set the live session actually had, bounded by the kept context, zero summarization calls. Correctness relies on one invariant: the persisted messages in the loop's working history are always a **contiguous suffix** of the stored transcript (appends continue at `MAX(seq)+1`; compaction only folds from the head), which is what makes `boundary_seq` derivable from where the persisted portion starts. Failure semantics degrade to the old behavior, never to a lost transcript: a failed checkpoint write logs and continues; `/clear` deletes the checkpoint, because it drops the *view* and the checkpoint is a view; deleting the session cascades at the SQL layer. Sessions that never compacted — and ones that compacted before checkpoints existed — take the full-transcript load path.
+
 - Everything older than the cut is replaced by one synthetic summary message; the cut is currently half the working history by *message count* (snapped, below). Selecting it by `memory.compaction_keep_recent_tokens` needs per-message token counts, which are not tracked in memory — flagged in the development plan's known gaps.
 - **The boundary must snap backwards to the nearest complete tool-call cycle.** A count-based boundary is oblivious to tool pairing, and cutting between an assistant `ToolUseBlock` and its `ToolResultBlock` orphans the call — a hard 400 on both OpenAI and Anthropic, not a soft degradation. The snap lives in the agent loop (`snap_compaction_boundary`), so the compactor always receives a range that ends on a complete cycle.
 - Summarization goes through the active provider using `prompts/compression.md`, overridable per preset via the `compression_prompt` frontmatter field. **A missing prompt disables compaction outright** — `compact_messages` refuses to send a summarization request with no instructions, which would burn tokens to produce garbage — so delivering the default is what makes the feature exist at all rather than a packaging detail. The request passes the messages **verbatim, tool blocks included** — both wire formats accept them in history without a `tools` array — with the prompt as `system`. It runs through `StreamComplete` with a sink that polls the session's cancel flag, so `CancelTurn` aborts an in-flight summarization instead of stalling until `request_timeout`.
@@ -1292,7 +1313,7 @@ Names are therefore mutable after creation; `SessionMetadataEvent` notifies atta
 
 **Resume.** `CreateSessionRequest` carries an optional `session_id`; set, it means *resume that stored session* rather than create a new one. The contract: the stored row's `name`, `agent_preset`, and `project_root` govern and the request must not send its own (refused, not ignored — the client already has all three from `ListSessions`); `run_mode` still applies, being a property of the client. Subagent sessions are not resumable, and a session that is already open is refused. A failed resume never deletes the row — the asymmetry with fresh creation, whose just-minted row is rolled back.
 
-The load path is `SessionReader::LoadAll` — the one read allowed to materialize a whole transcript, ascending by seq, one-shot, because the loop's working history is what gets sent every turn and a resumed session must hold it exactly as a live one does. `AgentLoop` takes it as a constructor-seeded history, so "ran a turn before seeding" is inexpressible, and the store never sees it again: appends continue at `MAX(seq) + 1`, which is also what the store's `last_appended_seq()` initializes from — a store that assumed "started empty" would restart the seq accounting at -1 while SQL kept assigning the real continuation. Seeded history seeds the compaction trigger too (`TokenAccumulator::SeedOccupancy` with the same bytes/4 roughness the compactor's fallback uses, and like it, estimate-only: cumulative totals are never touched), so a resumed session over the trigger compacts *before* its first provider call instead of failing it.
+The load path depends on whether a compaction checkpoint exists. **With one** (the session compacted while alive), resume loads `[checkpoint summary] + SessionReader::LoadAfter(boundary_seq)` — the working set the live session had, with no summarization call and a load proportional to the kept context rather than the transcript (see *Context compaction* for why: re-summarizing a transcript beyond the model window was not merely costly, it could not converge). **Without one**, the load path is `SessionReader::LoadAll` — the one read allowed to materialize a whole transcript, ascending by seq, one-shot, because the loop's working history is what gets sent every turn and a resumed session must hold it exactly as a live one does. Either way `AgentLoop` takes it as a constructor-seeded history, so "ran a turn before seeding" is inexpressible, and the store never sees it again: appends continue at `MAX(seq) + 1`, which is also what the store's `last_appended_seq()` initializes from — a store that assumed "started empty" would restart the seq accounting at -1 while SQL kept assigning the real continuation. Seeded history seeds the compaction trigger too (`TokenAccumulator::SeedOccupancy` with the same bytes/4 roughness the compactor's fallback uses, and like it, estimate-only: cumulative totals are never touched), so a resumed session over the trigger compacts *before* its first provider call instead of failing it.
 
 One stored shape is not provider-valid: a transcript torn mid-tool-sequence — a cancel leaves denial results, but a process killed between the assistant append and the results append leaves an unanswered `tool_use`, a hard 400 on both wire formats. Resume persists one synthesized user message of error `ToolResultBlock`s for the unmatched calls (never a rewrite of the stored tail) before the session starts, so the transcript stays an exact, valid prefix.
 
@@ -1344,3 +1365,4 @@ Two checks specifically for the naming model: warn when a `per_tool_overrides` /
 - Status-bar segment and panel/picker column slots for client plugins (renderer slot ships in v1).
 - Tab-bar overflow behavior with many sessions × subagents.
 - Backend-reported `usage` of `0` from some OpenAI-compatible proxies — no fallback estimate designed.
+- **Sessions that last compacted before compaction checkpoints existed (schema v4) have no checkpoint row, so they still resume from the full uncompacted transcript** — correct, and cost-free for transcripts that fit the window, but a transcript well beyond the model window cannot converge its first compaction, checkpoint or no checkpoint: the halving strategy's summarization input must fit the window, and re-summarizing only ever writes a checkpoint once it succeeds (see *Context compaction*). For such a session the honest remedies are a larger-window model for one manual `/compact`, or starting fresh.

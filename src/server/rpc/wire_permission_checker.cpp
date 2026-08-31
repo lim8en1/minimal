@@ -41,8 +41,8 @@ tools::PermissionResponse WirePermissionChecker::check(const tools::PermissionRe
     // a question nobody will ever answer.
     queue_.Push(std::move(event));
 
-    const std::optional<std::string> answer = registration.AwaitResponse();
-    if (!answer) {
+    const std::optional<PendingAnswer> registration_answer = registration.AwaitResponse();
+    if (!registration_answer) {
         // Cancelled: the session is terminating. Deny is the correct outcome --
         // the work is being torn down, so the tool must not run -- but it is a
         // decision made HERE, not inside the synchronisation primitive, which
@@ -50,11 +50,18 @@ tools::PermissionResponse WirePermissionChecker::check(const tools::PermissionRe
         return tools::PermissionResponse{tools::PermissionDecision::Deny, {}};
     }
 
-    // The reader hands the serialized PermissionResponse across as the resolved
-    // value. Parsing it here rather than at the dispatch site keeps the reader
-    // thread free of anything that could fail or allocate meaningfully.
+    // The reader hands the serialized PermissionResponse across as the typed
+    // variant. A ConfirmationAnswer landing here -- a client answering the
+    // wrong kind of request -- is structurally unreadable (get_if returns
+    // null), which is the same fail-closed outcome a malformed payload had.
+    // Parsing it HERE rather than at the dispatch site keeps the reader thread
+    // free of anything that could fail or allocate meaningfully.
+    const auto* answer = std::get_if<PermissionAnswer>(&*registration_answer);
+    if (answer == nullptr) {
+        return tools::PermissionResponse{tools::PermissionDecision::Deny, {}};
+    }
     v1::PermissionResponse decoded;
-    if (!decoded.ParseFromString(*answer)) {
+    if (!decoded.ParseFromString(answer->serialized_response)) {
         return tools::PermissionResponse{tools::PermissionDecision::Deny, {}};
     }
     return FromProto(decoded, request.disclosure);

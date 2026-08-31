@@ -283,7 +283,22 @@ public:
     std::int64_t last_appended_seq() const override {
         return static_cast<std::int64_t>(messages.size()) - 1;
     }
+    // Checkpoint tracking mirrors the real store, so compaction tests can
+    // assert what a resume would consume.
+    void SaveCompactionCheckpoint(std::int64_t boundary_seq, const llm::Message& summary) override {
+        checkpoint_boundary = boundary_seq;
+        checkpoint_summary = summary;
+        checkpoint_cleared = false;
+    }
+    void ClearCompactionCheckpoint() override {
+        checkpoint_cleared = true;
+        checkpoint_boundary.reset();
+        checkpoint_summary = llm::Message{};
+    }
     std::vector<llm::Message> messages;
+    std::optional<std::int64_t> checkpoint_boundary;
+    llm::Message checkpoint_summary;
+    bool checkpoint_cleared = false;
 };
 
 class AlwaysAllowPermissionChecker : public tools::PermissionChecker {
