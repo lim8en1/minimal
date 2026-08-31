@@ -37,6 +37,7 @@
 #include "minimal/config/settings_config.hpp"
 #include "minimal/rpc/auth_interceptor.hpp"
 #include "minimal/rpc/command_executor.hpp"
+#include "minimal/tools/permission_advisor.hpp"
 #include "minimal/session/session_reader.hpp"
 #include "minimal/v1/session_service.grpc.pb.h"
 
@@ -46,7 +47,8 @@ class SessionServiceImpl final : public v1::SessionService::Service {
 public:
     SessionServiceImpl(agent::SessionRegistry& sessions, session::SessionDatabase& db,
                        config::SettingsConfig settings, config::PermissionsConfig permissions,
-                       common::Logger& logger);
+                       common::Logger& logger,
+                       const tools::PermissionAdvisorRegistry* permission_advisors = nullptr);
 
     grpc::Status CreateSession(grpc::ServerContext* context,
                                const v1::CreateSessionRequest* request,
@@ -121,6 +123,9 @@ private:
     const commands::CommandRegistry* commands_ = nullptr;
     // Borrowed and optional: absent = pass-through (see auth_provider.hpp).
     const AuthProviderRegistry* auth_providers_ = nullptr;
+    // Borrowed and optional: absent = no advisor can be selected, every Ask
+    // reaches the human. Selected per session in the params producers below.
+    const tools::PermissionAdvisorRegistry* permission_advisors_ = nullptr;
     session::SessionDatabase& db_;
     session::SessionReader reader_;
     config::SettingsConfig settings_;

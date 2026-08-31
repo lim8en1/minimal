@@ -28,13 +28,40 @@ SessionServiceImpl::SessionServiceImpl(agent::SessionRegistry& sessions,
                                        session::SessionDatabase& db,
                                        config::SettingsConfig settings,
                                        config::PermissionsConfig permissions,
-                                       common::Logger& logger)
+                                       common::Logger& logger,
+                                       const tools::PermissionAdvisorRegistry* permission_advisors)
     : sessions_(sessions),
       db_(db),
       reader_(db),
       settings_(std::move(settings)),
+      permission_advisors_(permission_advisors),
       permissions_(std::move(permissions)),
       logger_(logger) {}
+
+namespace {
+
+// The advisor composition for one session: the channels block comes first
+// (the wire checker is built against it), then the advised checker owns that
+// wire checker, and the shared cancel holder travels in params so the Session
+// can install its own predicate. No advisor configured, or the named plugin
+// not loaded (a runtime condition the sanity check warns about): params carry
+// no checker and Session builds the wire default -- the human, as always.
+void ApplyAdvisor(const config::PermissionsConfig& permissions,
+                  const tools::PermissionAdvisorRegistry* advisors, agent::SessionParams& params) {
+    if (!permissions.advisor || advisors == nullptr) return;
+    auto advisor = advisors->Find(*permissions.advisor);
+    if (advisor == nullptr) return;
+    params.channels = agent::MakeSessionChannels();
+    auto cancel_source = std::make_shared<tools::AdvisorCancelSource>();
+    params.permission_checker = std::make_unique<tools::AdvisedPermissionChecker>(
+        std::move(advisor),
+        std::make_unique<WirePermissionChecker>(params.session_id, params.channels->queue,
+                                                params.channels->pending),
+        cancel_source);
+    params.advisor_cancel_source = std::move(cancel_source);
+}
+
+}  // namespace
 
 void SessionServiceImpl::set_on_last_client_detached(std::function<void()> callback) {
     on_last_client_detached_ = std::move(callback);
@@ -123,6 +150,10 @@ grpc::Status SessionServiceImpl::CreateSession(grpc::ServerContext* context,
     }
     params.session_id = row.session_id;
 
+    // After the id is minted: the wire checker inside the composition captures
+    // the session_id, so the advisor cannot be applied earlier.
+    ApplyAdvisor(permissions_, permission_advisors_, params);
+
     std::shared_ptr<agent::Session> session;
     try {
         session = sessions_.Create(std::move(params));
@@ -199,6 +230,7 @@ grpc::Status SessionServiceImpl::ResumeSession(const v1::CreateSessionRequest* r
     params.project_root = stored->project_root;
     params.run_mode_override = FromProto(request->run_mode());
     params.resume = true;
+    ApplyAdvisor(permissions_, permission_advisors_, params);
     // APPLIES ON RESUME TOO, like run_mode and for the same reason: a model the
     // user names is a property of this invocation, not of the stored session --
     // and the override is in-memory only, so a resumed session has none of its

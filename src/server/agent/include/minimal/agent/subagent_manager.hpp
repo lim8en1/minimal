@@ -26,6 +26,7 @@
 #include "minimal/agent/subagent_spawn.hpp"
 #include "minimal/common/logger.hpp"
 #include "minimal/session/session_database.hpp"
+#include "minimal/tools/permission_advisor.hpp"
 #include "minimal/tools/tool.hpp"
 
 namespace minimal::agent {
@@ -34,7 +35,9 @@ class SubagentManager {
 public:
     SubagentManager(SessionRegistry& sessions, session::SessionDatabase& db,
                     const AgentPresetRegistry& presets, std::int64_t max_concurrent_subagents,
-                    common::Logger& logger);
+                    common::Logger& logger,
+                    std::shared_ptr<tools::PermissionAdvisor> advisor = nullptr,
+                    bool advisor_inherit = false);
 
     // Runs on the PARENT's worker thread -- it is a tool execution, and that is
     // the thread permitted to block. A blocking request returns only after the
@@ -48,6 +51,13 @@ private:
     const AgentPresetRegistry& presets_;
     std::int64_t max_concurrent_subagents_;
     common::Logger& logger_;
+    // The configured advisor, resolved once at startup; copied into a child's
+    // params ONLY when advisor_inherit_ is set -- a child defaults to no
+    // advisor (docs/EXTENSIBILITY.md §3.4). The parent's ceilings still bound
+    // the child: they are enforced by the child's ToolExecutor before its
+    // checker (advised or not) is ever consulted.
+    std::shared_ptr<tools::PermissionAdvisor> advisor_;
+    bool advisor_inherit_ = false;
 };
 
 }  // namespace minimal::agent

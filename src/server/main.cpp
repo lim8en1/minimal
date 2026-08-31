@@ -257,9 +257,14 @@ int main(int argc, char** argv) {
     // tool set before serving starts, so registering here is still before
     // first use. Core surface by design -- making it a plugin would expose
     // session CREATION across the ABI to relocate a thin wrapper.
+    // The advisor is resolved ONCE from the config against the loaded plugins;
+    // an unset advisor or a name that resolved to nothing (warned by the sanity
+    // check) both leave it null, which is the no-advisor default everywhere.
+    std::shared_ptr<minimal::tools::PermissionAdvisor> advisor =
+        permissions.advisor ? permission_advisors.Find(*permissions.advisor) : nullptr;
     auto subagents = std::make_unique<minimal::agent::SubagentManager>(
         sessions, *session_db, *presets, settings.max_concurrent_subagents,
-        minimal::common::DefaultLogger());
+        minimal::common::DefaultLogger(), advisor, permissions.advisor_inherit);
     minimal::agent::SubagentManager& subagent_manager = *subagents;
     tools.Register(std::make_unique<minimal::agent::SpawnSubagentTool>(
         [&subagent_manager](const minimal::agent::SubagentRequest& request,
@@ -268,7 +273,8 @@ int main(int argc, char** argv) {
         }));
 
     minimal::rpc::SessionServiceImpl service(sessions, *session_db, settings, permissions,
-                                             minimal::common::DefaultLogger());
+                                             minimal::common::DefaultLogger(),
+                                             &permission_advisors);
     service.set_commands(&commands);
     service.set_auth_providers(&auth_providers);
     minimal::rpc::Server server(service, socket_path);
