@@ -226,7 +226,7 @@ void AgentLoop::MaybeCompact() {
         return;
     }
     if (tokens_.last_occupancy() < trigger) return;
-    Compact();
+    Compact("auto");
 }
 
 std::optional<std::size_t> AgentLoop::CompactNow() {
@@ -234,7 +234,7 @@ std::optional<std::size_t> AgentLoop::CompactNow() {
     // the configured strategy are all beside the point. Everything Compact()
     // checks is not: an empty history, a missing compactor and a summarizer that
     // already failed this turn are just as true when the request is manual.
-    return Compact();
+    return Compact("manual");
 }
 
 void AgentLoop::ClearHistory() {
@@ -270,7 +270,7 @@ void AgentLoop::ClearHistory() {
     // leaves scrollback whole.
 }
 
-std::optional<std::size_t> AgentLoop::Compact() {
+std::optional<std::size_t> AgentLoop::Compact(std::string_view trigger) {
     if (!compactor_) return std::nullopt;
     if (history_.size() < 2) return std::nullopt;
     if (compaction_failed_this_turn_) return std::nullopt;
@@ -295,6 +295,13 @@ std::optional<std::size_t> AgentLoop::Compact() {
             "growing",
             session_.session_id, history_.size());
         compaction_failed_this_turn_ = true;
+        if (config_.hooks != nullptr) {
+            config_.hooks->EmitAsync(hooks::kPostCompact,
+                                     nlohmann::json{{"session_id", session_.session_id},
+                                                    {"project_root", session_.project_root.string()},
+                                                    {"trigger", trigger},
+                                                    {"error", "no safe compaction boundary"}});
+        }
         return std::nullopt;
     }
 
@@ -317,10 +324,30 @@ std::optional<std::size_t> AgentLoop::Compact() {
     params.session_label = session_.session_id;
     params.is_cancelled = is_cancelled_;
 
+    // core.pre_compact: observe-only, fired once per compaction attempt, after
+    // the boundary is known to be safe and before the summarizer call. Both the
+    // auto trigger and /compact land here; `trigger` is filterable, since the
+    // two are different events to an audit sink even when the mechanics match.
+    if (config_.hooks != nullptr) {
+        config_.hooks->EmitAsync(hooks::kPreCompact,
+                                 nlohmann::json{{"session_id", session_.session_id},
+                                                {"project_root", session_.project_root.string()},
+                                                {"trigger", trigger},
+                                                {"history_messages", history_.size()},
+                                                {"occupancy_tokens", tokens_.last_occupancy()}});
+    }
+
     const auto result = compactor_(to_compact, provider_.get(), params);
     if (!result) {
         // No compaction this cycle; do not retry on every tool cycle of this turn.
         compaction_failed_this_turn_ = true;
+        if (config_.hooks != nullptr) {
+            config_.hooks->EmitAsync(hooks::kPostCompact,
+                                     nlohmann::json{{"session_id", session_.session_id},
+                                                    {"project_root", session_.project_root.string()},
+                                                    {"trigger", trigger},
+                                                    {"error", "summarization produced no result"}});
+        }
         return std::nullopt;
     }
 
@@ -376,6 +403,16 @@ std::optional<std::size_t> AgentLoop::Compact() {
         "session {}: context was ~{} tokens; compacted the oldest {} of {} messages into one "
         "summary",
         session_.session_id, result->context_tokens_before, cut, history_.size() + cut - 1);
+
+    if (config_.hooks != nullptr) {
+        config_.hooks->EmitAsync(hooks::kPostCompact,
+                                 nlohmann::json{{"session_id", session_.session_id},
+                                                {"project_root", session_.project_root.string()},
+                                                {"trigger", trigger},
+                                                {"folded_messages", cut},
+                                                {"context_tokens_before",
+                                                 result->context_tokens_before}});
+    }
 
     // NO COOLDOWN ON SUCCESS, deliberately. Repeated compaction inside one turn
     // looks unbounded but is not: each pass replaces the first `cut` ~= size/2

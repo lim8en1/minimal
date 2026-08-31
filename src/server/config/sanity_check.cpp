@@ -10,6 +10,7 @@
 #include <unordered_set>
 
 #include "minimal/common/config_paths.hpp"
+#include "minimal/hooks/hook_dispatcher.hpp"
 
 namespace minimal::config {
 namespace {
@@ -98,6 +99,7 @@ std::vector<CheckResult> StartupSanityCheck::RunAll() {
     append(check_plugins());
     append(check_name_collisions());
     append(check_naming_model());
+    append(check_hooks());
     append(check_advisor());
     append(check_subagent_limit());
     return results;
@@ -127,6 +129,16 @@ std::vector<CheckResult> StartupSanityCheck::check_config_files() {
         providers_loaded_ = true;
     } catch (const std::exception& e) {
         results.push_back(Fatal("config_parse", std::string("providers.json: ") + e.what()));
+    }
+
+    try {
+        hooks_ = LoadHooksConfig(dir / "hooks.json");
+    } catch (const std::exception& e) {
+        // Same severity as permissions.json: a hook action is shell code the
+        // user opted into as a guardrail, and a parse error that silently
+        // disabled the file's guard hooks would be the dangerous outcome.
+        // Fatal names the problem; the user fixes or deletes the file.
+        results.push_back(Fatal("config_parse", std::string("hooks.json: ") + e.what()));
     }
 
     // plugins.json degrades to empty BY DESIGN -- but a silently degraded file
@@ -717,6 +729,54 @@ std::vector<CheckResult> StartupSanityCheck::check_subagent_limit() {
         // that is the operator's call (ARCHITECTURE.md, "Subagents").
         results.push_back(Warning("subagent_limit", "settings.json max_concurrent_subagents is " +
                                  std::to_string(limit) + "; past 8 the task has outgrown the harness"));
+    }
+    return results;
+}
+
+std::vector<CheckResult> StartupSanityCheck::check_hooks() {
+    std::vector<CheckResult> results;
+    if (hooks_.hooks.empty()) return results;  // no hooks.json, or none -- both normal
+
+    // Structural warnings that do not need the point registry.
+    for (const auto& action : hooks_.hooks) {
+        if (action.command.find_first_not_of(" \t\n") == std::string::npos) {
+            results.push_back(Warning("hooks", "action on '" + action.on +
+                                  "': command is whitespace only and will fail open"));
+        }
+    }
+
+    // Point-relative warnings. These need the dispatcher because the point is
+    // code -- core's or a plugin's -- and the check is deliberately structural:
+    // it reads which points REGISTERED, never fires one. Run before Configure,
+    // whose own warnings are the runtime backstop.
+    if (inputs_.hook_dispatcher == nullptr) return results;
+
+    for (const auto& action : hooks_.hooks) {
+        const auto* spec = inputs_.hook_dispatcher->Find(action.on);
+        if (spec == nullptr) {
+            results.push_back(Warning("hooks",
+                                      "action on unknown hook point '" + action.on +
+                                          "' -- is the plugin that provides it enabled?"));
+            continue;
+        }
+        for (const auto& [field, value] : action.filter) {
+            (void)value;
+            const bool filterable = std::find(spec->filterable.begin(), spec->filterable.end(),
+                                              field) != spec->filterable.end();
+            if (!filterable) {
+                results.push_back(Warning("hooks",
+                                          "action on '" + action.on + "' filters on field '" +
+                                              field +
+                                              "', which the point does not declare filterable -- "
+                                              "the action will never match"));
+            }
+        }
+        if (!spec->veto_capable) {
+            results.push_back(Warning("hooks",
+                                      "action on '" + action.on +
+                                          "' targets an observe-only point: an exit code of 2 "
+                                          "has no effect there"));
+        }
     }
     return results;
 }

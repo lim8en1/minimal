@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "minimal/agent/agent_preset_frontmatter.hpp"
+#include "minimal/config/hooks_config.hpp"
 #include "minimal/config/mcps_config.hpp"
 #include "minimal/config/permissions_config.hpp"
 #include "minimal/config/providers_config.hpp"
@@ -20,6 +21,10 @@
 #include "minimal/session/session_database.hpp"
 #include "minimal/tools/permission_advisor.hpp"
 #include "minimal/tools/tool_registry.hpp"
+
+namespace minimal::hooks {
+class HookDispatcher;  // borrowed via SanityCheckInputs::hook_dispatcher
+}  // namespace minimal::hooks
 
 namespace minimal::config {
 
@@ -59,6 +64,12 @@ struct SanityCheckInputs {
     // never a live List()): discovery is fetched lazily at first resolve,
     // never at startup.
     const llm::ModelCatalogRegistry* model_catalogs = nullptr;
+    // Optional: absent means hooks.json actions can only be validated
+    // structurally, not against the registered points. Borrowed -- it outlives
+    // the check. Points are registered at load (before this stage), so the
+    // point-name and filterable-field checks are structural too: no emission
+    // is ever fired from a sanity check.
+    const hooks::HookDispatcher* hook_dispatcher = nullptr;
 };
 
 // Runs after config and plugin load, before serving. A linter, not a fail-fast
@@ -78,6 +89,9 @@ public:
     const PermissionsConfig& permissions() const { return permissions_; }
     const ProvidersConfig& providers() const { return providers_; }
     const McpsConfig& mcps() const { return mcps_; }
+    // Valid after RunAll() even when the load failed -- the value is then the
+    // default (no hooks), and the config_parse Fatal is what names the problem.
+    const HooksConfig& hooks() const { return hooks_; }
     std::unique_ptr<session::SessionDatabase> take_session_db() { return std::move(session_db_); }
 
 private:
@@ -92,6 +106,7 @@ private:
     std::vector<CheckResult> check_naming_model();
     std::vector<CheckResult> check_advisor();
     std::vector<CheckResult> check_subagent_limit();
+    std::vector<CheckResult> check_hooks();
 
     SanityCheckInputs inputs_;
 
@@ -100,6 +115,7 @@ private:
     PermissionsConfig permissions_;
     ProvidersConfig providers_;
     McpsConfig mcps_;
+    HooksConfig hooks_;
     std::unique_ptr<session::SessionDatabase> session_db_;
     bool settings_loaded_ = false;
     bool providers_loaded_ = false;

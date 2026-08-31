@@ -8,6 +8,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "minimal/hooks/hook_dispatcher.hpp"
 #include "minimal/llm/message.hpp"
 #include "minimal/tools/permission.hpp"
 #include "minimal/tools/permission_checker.hpp"
@@ -63,7 +64,8 @@ public:
                  McpPermissionPolicy mcp_policy, PermissionRunMode run_mode,
                  std::optional<PermissionPolicy> policy_ceiling = std::nullopt,
                  std::optional<McpPermissionPolicy> mcp_ceiling = std::nullopt,
-                 std::vector<std::string> seed_grants = {});
+                 std::vector<std::string> seed_grants = {},
+                 const hooks::HookDispatcher* hooks = nullptr);
 
     // NEVER THROWS. A tool_use the loop has already persisted must be answered
     // on every path, or history keeps an orphaned call that both wire formats
@@ -144,6 +146,18 @@ private:
     // ToolExecutor already holds a per-session PermissionPolicy by value, so it
     // is the natural owner.
     std::unordered_set<std::string> session_grants_;
+
+    // The process-wide hook dispatcher (track O). Borrowed, null in tests that
+    // exercise only the permission chain: both emissions below are no-ops then.
+    // Two points are emitted from here:
+    //   core.pre_tool_use      -- SYNC and VETO-CAPABLE, placed after the
+    //                             AlwaysDeny short-circuit (a hook never sees a
+    //                             call policy already denied -- hooks only
+    //                             narrow) and before grants/Ask (a hook deny
+    //                             suppresses the prompt).
+    //   core.permission_prompted -- observe-only, fired when an Ask is about
+    //                             to round-trip to a human.
+    const hooks::HookDispatcher* hooks_ = nullptr;
 };
 
 // Extracts "<server>" from "mcp__<server>__<tool>". Returns empty for a name

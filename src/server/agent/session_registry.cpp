@@ -150,6 +150,11 @@ std::shared_ptr<Session> SessionRegistry::CreateResolved(SessionParams params,
     // fake stores) leave it null, and ctx.history is null with it.
     params.history_reader = std::make_shared<session::SessionReader>(db_);
 
+    // Track O: the same funnel property wires the hook dispatcher. A producer
+    // that set one explicitly (a test with its own) wins; everyone else gets
+    // the process-wide one without knowing it exists.
+    if (params.hooks == nullptr) params.hooks = hooks_;
+
     // RESUME: load the stored transcript as the loop's working history. Loaded,
     // not replayed -- everything below appends NEW messages at MAX(seq) + 1, so
     // the stored rows must not go through the store again or the transcript

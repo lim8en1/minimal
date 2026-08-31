@@ -13,10 +13,11 @@ std::string Qualify(const std::string& plugin_name, const std::string& original_
 }  // namespace
 
 RegistrationNames ResolveRegistrationNames(const tools::ToolRegistry& registry,
-                                           const std::map<std::string, std::string>& aliases,
-                                           const commands::CommandRegistry* commands,
-                                           const std::vector<std::string>& core_tool_names,
-                                           const ServiceRegistry* services) {
+                                            const std::map<std::string, std::string>& aliases,
+                                            const commands::CommandRegistry* commands,
+                                            const std::vector<std::string>& core_tool_names,
+                                            const ServiceRegistry* services,
+                                            const hooks::HookDispatcher* hook_points) {
     NameRegistry name_registry;
 
     // Stable identities per kind, so an alias can be routed to whichever kind
@@ -50,6 +51,18 @@ RegistrationNames ResolveRegistrationNames(const tools::ToolRegistry& registry,
         for (const auto& attribution : services->attributions()) {
             name_registry.Register(NameKind::Service, attribution.plugin_name,
                                    attribution.service_name);
+        }
+    }
+    // Hook points, like services, are their own namespace: addressed by
+    // hooks.json `on` and by code, never aliased, and a duplicate point name
+    // is fatal exactly like a duplicate service. The attribution's point name
+    // is already fully qualified ("plugin.point"), so the registry's
+    // qualification makes a redundant double prefix -- harmless, since no
+    // consumer reads the identity form of this kind, only its collision list.
+    if (hook_points != nullptr) {
+        for (const auto& attribution : hook_points->attributions()) {
+            name_registry.Register(NameKind::HookPoint, attribution.plugin_name,
+                                   attribution.point_name);
         }
     }
 

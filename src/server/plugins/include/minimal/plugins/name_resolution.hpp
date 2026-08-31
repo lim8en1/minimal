@@ -5,6 +5,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "minimal/hooks/hook_dispatcher.hpp"
 #include "minimal/plugins/name_registry.hpp"
 #include "minimal/plugins/service_registry.hpp"
 #include "minimal/commands/command_registry.hpp"
@@ -59,6 +60,7 @@ RegistrationNames ResolveRegistrationNames(const tools::ToolRegistry& registry,
                                            const std::map<std::string, std::string>& aliases,
                                            const commands::CommandRegistry* commands = nullptr,
                                            const std::vector<std::string>& core_tool_names = {},
-                                           const ServiceRegistry* services = nullptr);
+                                           const ServiceRegistry* services = nullptr,
+                                           const hooks::HookDispatcher* hook_points = nullptr);
 
 }  // namespace minimal::plugins

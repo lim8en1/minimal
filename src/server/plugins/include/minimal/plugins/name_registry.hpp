@@ -13,7 +13,9 @@ namespace minimal::plugins {
 // command name without colliding, and services are NOT user-aliasable (a
 // service name is addressed by code through ServiceRegistry::Find, never by
 // the model or the user, so command_aliases has nothing to rename).
-enum class NameKind { Tool, Command, ViewId, ToolResultRenderer, Service };
+// Hook points follow the same shape (addressed by hooks.json `on` and by code,
+// never aliased), and live in their own namespace for the same reason.
+enum class NameKind { Tool, Command, ViewId, ToolResultRenderer, Service, HookPoint };
 
 // Models the three-naming-levels rule independent of the actual
 // ToolRegistry/CommandRegistry/plugin loader: stable identity never changes,

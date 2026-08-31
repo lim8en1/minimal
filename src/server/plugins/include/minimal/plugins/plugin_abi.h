@@ -31,6 +31,7 @@
 #include "minimal/commands/command_context.hpp"
 #include "minimal/commands/command_registry.hpp"
 #include "minimal/common/logger.hpp"
+#include "minimal/hooks/hook_dispatcher.hpp"
 #include "minimal/rpc/auth_provider.hpp"
 #include "minimal/llm/http_client.hpp"
 #include "minimal/llm/model_catalog.hpp"
@@ -183,7 +184,19 @@ void minimal_plugin_register_permission_advisor(
 // providers.json, and a failed fetch is negative-cached and degrades to the
 // entry's static models.
 void minimal_plugin_register_model_catalogs(minimal::llm::ModelCatalogRegistry&,
-                                            const minimal::plugins::PluginRegistrationContext&);
+                                             const minimal::plugins::PluginRegistrationContext&);
+
+// OPTIONAL, additive: contributes HOOK POINTS -- named, typed events this
+// plugin emits from its own code, which hooks.json actions can answer. Core
+// owns the mechanism (dispatch, filters, the shell executor, fail-open
+// semantics); a plugin owns the points it declares and the meaning a Block
+// has for them. Registration is startup-only: keep the returned HookPoint
+// handle and Emit from your own code later. A duplicate point name is a
+// FATAL startup collision, named by the sanity check. See
+// hook_dispatcher.hpp for the full contract and docs/EXTENSIBILITY.md for
+// the worked example (tools-bash's before_command).
+void minimal_plugin_register_hook_points(minimal::hooks::HookDispatcher&,
+                                          const minimal::plugins::PluginRegistrationContext&);
 
 // Not yet wired -- declared nowhere until the subsystem it registers into
 // exists, so that this ABI is not frozen before it has consumers:

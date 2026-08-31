@@ -29,6 +29,7 @@
 #include "minimal/agent/session_registry.hpp"
 #include "minimal/agent/subagent_spawn.hpp"
 #include "minimal/common/logger.hpp"
+#include "minimal/hooks/hook_dispatcher.hpp"
 #include "minimal/session/session_database.hpp"
 #include "minimal/tools/permission_advisor.hpp"
 #include "minimal/tools/tool.hpp"
@@ -50,7 +51,8 @@ public:
                     common::Logger& logger, mcp::McpClientManager* mcp_manager = nullptr,
                     std::shared_ptr<tools::PermissionAdvisor> advisor = nullptr,
                     bool advisor_inherit = false,
-                    std::chrono::milliseconds advisor_timeout = tools::AdvisedPermissionChecker::kDefaultTimeout);
+                    std::chrono::milliseconds advisor_timeout = tools::AdvisedPermissionChecker::kDefaultTimeout,
+                    hooks::HookDispatcher* hooks = nullptr);
 
     // Runs where blocking is allowed -- the parent's worker, or a tool-pool
     // thread when the spawn was dispatched in a parallel round (still a tool
@@ -88,6 +90,13 @@ private:
     // when they hit zero.
     std::mutex limit_mu_;
     std::unordered_map<std::string, std::int64_t> starting_children_;
+    // The process-wide hook dispatcher (track O). Borrowed; null in tests.
+    // Emissions from here: core.subagent_started (before the child produces
+    // anything) and core.subagent_completed (from the child's completion hook,
+    // which fires on every exit path). The CHILD's own emissions -- its tools'
+    // pre_tool_use, its user_prompt_submit -- are wired through the registry
+    // funnel setting SessionParams::hooks, not here.
+    hooks::HookDispatcher* hooks_ = nullptr;
 };
 
 }  // namespace minimal::agent

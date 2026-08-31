@@ -15,6 +15,7 @@
 #include "fakes.hpp"
 #include "minimal/agent/agent_loop.hpp"
 #include "minimal/config/skill_registry.hpp"
+#include "minimal/hooks/hook_dispatcher.hpp"
 #include "minimal/tools/skill_tool.hpp"
 #include "temp_dir.hpp"
 
@@ -1340,4 +1341,66 @@ TEST_CASE("an unknown tool in a parallel round is answered, not fatal",
     CHECK(ResultOf(results_message, 0).tool_use_id == "t1");
     CHECK(ResultOf(results_message, 0).is_error);
     CHECK_FALSE(ResultOf(results_message, 1).is_error);
+}
+
+TEST_CASE("pre_compact and post_compact hook points fire on both the auto trigger and /compact",
+          "[agent_loop][compaction][hooks]") {
+    // Track O: the compaction pair is emitted from the shared Compact() body,
+    // so both the occupancy trigger and the manual /compact path reach it. The
+    // actions log to a file, which keeps the assertion on the DISPATCH ORDER
+    // (pre before post, both present) rather than on a mocked seam.
+    testing::TempDir arena;
+    const auto log = arena.path() / "compaction.log";
+    const auto make_action = [&](const std::string& point) {
+        minimal::config::HookActionConfig action;
+        action.on = point;
+        action.command = "echo " + point + " >> '" + log.string() + "'";
+        return action;
+    };
+    minimal::config::HooksConfig hooks_config;
+    hooks_config.hooks.push_back(make_action(minimal::hooks::kPreCompact));
+    hooks_config.hooks.push_back(make_action(minimal::hooks::kPostCompact));
+    hooks::HookDispatcher dispatcher{common::DefaultLogger()};
+    (void)dispatcher.Configure(hooks_config);
+
+    Harness h;
+    h.provider.PushResponse(TextResponse("one"));
+    h.provider.PushResponse(TextResponse("two"));
+
+    auto compactor = [](std::span<const llm::Message>, llm::LlmProvider&,
+                        const agent::CompactionRequest&) {
+        return agent::CompactionResult{UserText("[summary]"), 0};
+    };
+    // TextResponse reports 10 in + 5 out = occupancy 15, over a fixed trigger
+    // of 10: the second turn's trigger fires the AUTO path.
+    agent::LoopConfig config{.auto_compact = true, .compaction_trigger = FixedTrigger(10)};
+    config.hooks = &dispatcher;
+    h.Build({}, config, compactor);
+
+    h.loop->RunTurn(UserText("a"));  // occupancy 15 < trigger evaluated... first turn: no compaction
+    h.loop->RunTurn(UserText("b"));  // crosses the trigger: auto compaction
+
+    const auto read_lines = [&log] {
+        std::ifstream in(log);
+        std::vector<std::string> lines;
+        for (std::string line; std::getline(in, line);) lines.push_back(line);
+        return lines;
+    };
+
+    // The pair is observe-only, i.e. EmitAsync: drain the dispatch thread
+    // before asserting on its side effects.
+    dispatcher.WaitForIdleForTesting();
+    REQUIRE(std::filesystem::exists(log));
+    REQUIRE(read_lines().size() == 2);
+
+    // The manual path (/compact -> CompactNow) fires the same pair, with the
+    // same points; per-turn cooldown does not block a manual call.
+    h.loop->CompactNow();
+    dispatcher.WaitForIdleForTesting();
+    const auto lines = read_lines();
+    REQUIRE(lines.size() == 4);
+    CHECK(lines[0] == "core.pre_compact");
+    CHECK(lines[1] == "core.post_compact");
+    CHECK(lines[2] == "core.pre_compact");
+    CHECK(lines[3] == "core.post_compact");
 }

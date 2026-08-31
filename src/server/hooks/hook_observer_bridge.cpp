@@ -1,0 +1,47 @@
+#include "minimal/hooks/hook_observer_bridge.hpp"
+
+namespace minimal::hooks {
+
+void HookObserverBridge::OnSessionCreated(const agent::SessionInfo& info) {
+    dispatcher_.EmitAsync(kSessionCreated, nlohmann::json{
+                                               {"session_id", info.session_id},
+                                               {"parent_session_id", info.parent_session_id},
+                                               {"name", info.name},
+                                               {"agent_preset", info.agent_preset},
+                                               {"project_root", info.project_root.string()},
+                                           });
+}
+
+void HookObserverBridge::OnSessionEnded(const agent::SessionInfo& info) {
+    dispatcher_.EmitAsync(kSessionEnded, nlohmann::json{
+                                             {"session_id", info.session_id},
+                                             {"parent_session_id", info.parent_session_id},
+                                             {"name", info.name},
+                                             {"agent_preset", info.agent_preset},
+                                             {"project_root", info.project_root.string()},
+                                         });
+}
+
+void HookObserverBridge::OnTurnCompleted(const agent::SessionInfo& info,
+                                         const agent::TurnSummary& summary) {
+    dispatcher_.EmitAsync(kStop, nlohmann::json{
+                                     {"session_id", info.session_id},
+                                     {"stop_reason", StopReasonName(summary.stop_reason)},
+                                     {"duration_ms", summary.duration.count()},
+                                     {"tool_names_invoked", summary.tool_names_invoked},
+                                 });
+}
+
+void HookObserverBridge::OnToolExecuted(const agent::SessionInfo& info,
+                                        const agent::ToolInvocation& invocation) {
+    dispatcher_.EmitAsync(kPostToolUse, nlohmann::json{
+                                            {"session_id", info.session_id},
+                                            {"tool_use_id", invocation.tool_use_id},
+                                            {"tool_name", invocation.tool_name},
+                                            {"summary", invocation.summary},
+                                            {"is_error", invocation.is_error},
+                                            {"duration_ms", invocation.duration.count()},
+                                        });
+}
+
+}  // namespace minimal::hooks
