@@ -107,6 +107,48 @@ ToolsViewSettings ParseToolsView(const nlohmann::json& doc) {
     return result;
 }
 
+ProjectContextSettings ParseProjectContext(const nlohmann::json& doc) {
+    ProjectContextSettings result;
+    if (!doc.contains("project_context")) return result;
+    const auto& pc = doc.at("project_context");
+    if (!pc.is_object()) {
+        throw std::runtime_error("settings.json: project_context must be an object");
+    }
+    result.enabled = pc.value("enabled", result.enabled);
+    result.search_ancestors = pc.value("search_ancestors", result.search_ancestors);
+    result.max_bytes = pc.value("max_bytes", result.max_bytes);
+    if (result.max_bytes < 0) {
+        throw std::runtime_error("settings.json: project_context.max_bytes must not be negative");
+    }
+    if (pc.contains("files")) {
+        const auto& files = pc.at("files");
+        if (!files.is_array()) {
+            throw std::runtime_error(
+                "settings.json: project_context.files must be an array of file names");
+        }
+        result.files.clear();
+        for (const auto& entry : files) {
+            if (!entry.is_string() || entry.get<std::string>().empty()) {
+                throw std::runtime_error(
+                    "settings.json: project_context.files must contain non-empty strings");
+            }
+            // File NAMES, not paths: the loader composes them against
+            // project_root (and, with search_ancestors, its ancestors). A
+            // separator would silently redefine the search -- "settings in
+            // directories I chose" instead of "the convention file" -- and an
+            // absolute path would not follow the session at all.
+            const std::string name = entry.get<std::string>();
+            if (name.find('/') != std::string::npos || name.find('\\') != std::string::npos) {
+                throw std::runtime_error("settings.json: project_context.files entries must be "
+                                         "plain file names, not paths ('" +
+                                         name + "')");
+            }
+            result.files.push_back(name);
+        }
+    }
+    return result;
+}
+
 LoggingSettings ParseLogging(const nlohmann::json& doc) {
     LoggingSettings result;
     if (!doc.contains("logging")) return result;
@@ -130,6 +172,7 @@ SettingsConfig ParseSettingsConfig(const nlohmann::json& doc) {
         config.memory = ParseMemory(doc);
         config.tools = ParseTools(doc);
         config.tools_view = ParseToolsView(doc);
+        config.project_context = ParseProjectContext(doc);
         config.session_db_path = doc.value("session_db_path", config.session_db_path);
         config.logging = ParseLogging(doc);
     } catch (const nlohmann::json::exception& error) {

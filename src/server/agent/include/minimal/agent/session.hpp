@@ -110,6 +110,12 @@ struct SessionParams {
     // over whatever the preset resolves to, and is re-applied after a preset
     // switch -- the preset is where a default comes from, not a decision.
     std::optional<config::ModelRef> model_override;
+    // The rendered project-context section (AGENTS.md/CLAUDE.md), loaded by the
+    // registry from project_root -- a SESSION property, not a preset one, so a
+    // mid-session /agent switch cannot drop the project's instructions. The
+    // loop appends it after the preset's system prompt on every request. Empty
+    // when nothing was found (the normal state) or the feature is disabled.
+    std::string project_context;
     // True when this Session reopens a STORED session: the registry loads the
     // stored transcript as the loop's seeded history (without re-appending it)
     // before construction. The session row must already exist either way --

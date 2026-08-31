@@ -42,12 +42,13 @@ AgentLoop::AgentLoop(llm::LlmProvider& provider, tools::ToolExecutor& executor,
                       std::function<bool()> is_cancelled, llm::StreamEventSink event_sink,
                       Compactor compactor, std::vector<llm::Message> seeded_history,
                       std::optional<std::int64_t> seed_first_persisted_seq,
-                      bool seed_head_is_summary)
+                      bool seed_head_is_summary, std::string project_context)
     : provider_(provider),
       executor_(executor),
       registry_(registry),
       store_(store),
       preset_(std::move(preset)),
+      project_context_(std::move(project_context)),
       config_(config),
       session_(std::move(session)),
       is_cancelled_(std::move(is_cancelled)),
@@ -125,6 +126,15 @@ void AgentLoop::FlushInjectedMessages() {
 llm::ChatRequest AgentLoop::BuildChatRequest() const {
     llm::ChatRequest request;
     if (!preset_.system_prompt.empty()) request.system = preset_.system_prompt;
+    // Project context appends AFTER the preset body: both are constant within
+    // the session, so the request's prefix -- which the provider's prompt cache
+    // keys on -- is stable either way, but appending keeps the preset's own
+    // text at the very front across /agent switches.
+    if (!project_context_.empty()) {
+        if (request.system) *request.system += "\n\n";
+        else request.system = std::string();
+        *request.system += project_context_;
+    }
     request.messages = history_;
     request.model = preset_.provider.model_name;
     request.parameters = preset_.parameters;

@@ -165,7 +165,14 @@ public:
               // suffix of the stored transcript, because appends continue at
               // MAX(seq)+1 and compaction only ever folds from the head.
               std::optional<std::int64_t> seed_first_persisted_seq = std::nullopt,
-              bool seed_head_is_summary = false);
+              bool seed_head_is_summary = false,
+              // The rendered project-context section (AGENTS.md/CLAUDE.md),
+              // loaded from project_root by the registry and carried on
+              // SessionParams. Appended after the preset's system prompt on
+              // every BuildChatRequest -- a SESSION property held here rather
+              // than baked into the preset, so /agent re-resolving the preset
+              // cannot silently drop the project's instructions.
+              std::string project_context = {});
 
     // Appends `seed_message`, then runs to a natural stop. A subagent's entire
     // life is one call to this -- there is one loop implementation, not two.
@@ -239,6 +246,10 @@ private:
     tools::ToolRegistry& registry_;
     HistoryStore& store_;
     AgentPreset preset_;
+    // The project's instructions (AGENTS.md/CLAUDE.md), rendered. Constant for
+    // the session's life -- loaded once at creation/resume -- so it never
+    // disturbs the prompt-cache prefix mid-session.
+    std::string project_context_;
     std::vector<std::string> mcp_servers_;
     tools::CancelTokenPtr cancel_token_;
     LoopConfig config_;

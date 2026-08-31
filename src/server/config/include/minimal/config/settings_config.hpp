@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <string>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 
@@ -66,6 +67,25 @@ struct ToolsViewSettings {
     std::int64_t stdout_buffer_lines = 100;
 };
 
+// Project context files (AGENTS.md, CLAUDE.md): read once per session from the
+// session's project_root -- at creation, resume, and subagent spawn -- and
+// appended to the system prompt. This is a SESSION property, not a preset one:
+// a mid-session /agent re-resolves the preset and must not drop the project's
+// instructions (see AgentLoop::BuildChatRequest).
+//
+// `files` is tried in order WITHIN each directory. With search_ancestors the
+// search also walks upward from project_root, nearest directory first -- so a
+// CLAUDE.md sitting IN the project beats an AGENTS.md three levels up, because
+// closer instructions are more specific. Walking stops at the filesystem root,
+// which makes a ~/AGENTS.md a global fallback; that is a feature, not an
+// accident to fence off. max_bytes == 0 means unlimited.
+struct ProjectContextSettings {
+    bool enabled = true;
+    std::vector<std::string> files = {"AGENTS.md", "CLAUDE.md"};
+    std::int64_t max_bytes = 0;
+    bool search_ancestors = false;
+};
+
 struct LoggingSettings {
     std::string level = "info";
     std::string path;
@@ -83,6 +103,7 @@ struct SettingsConfig {
     MemorySettings memory;
     ToolsSettings tools;
     ToolsViewSettings tools_view;
+    ProjectContextSettings project_context;
     std::string session_db_path;
     LoggingSettings logging;
 };

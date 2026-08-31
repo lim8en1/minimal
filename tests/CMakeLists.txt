@@ -59,6 +59,7 @@ add_executable(minimal_tests
     tools_bash_test.cpp
     tool_pool_test.cpp
     skill_registry_test.cpp
+    project_context_test.cpp
     skill_tool_test.cpp
     proto_convert_test.cpp
     pending_requests_test.cpp

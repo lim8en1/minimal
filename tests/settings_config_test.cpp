@@ -22,6 +22,12 @@ TEST_CASE("ParseSettingsConfig: empty doc yields every documented default", "[se
     CHECK(config.tools.mcp.request_timeout_ms == 60000);
     CHECK(config.tools.mcp.max_list_pages == 100);
     CHECK(config.tools_view.stdout_buffer_lines == 100);
+    CHECK(config.project_context.enabled == true);
+    REQUIRE(config.project_context.files.size() == 2);
+    CHECK(config.project_context.files[0] == "AGENTS.md");
+    CHECK(config.project_context.files[1] == "CLAUDE.md");
+    CHECK(config.project_context.max_bytes == 0);
+    CHECK(config.project_context.search_ancestors == false);
     CHECK(config.session_db_path.empty());
     CHECK(config.logging.level == "info");
     CHECK(config.logging.max_size_mb == 10);
@@ -197,6 +203,51 @@ TEST_CASE("ParseSettingsConfig: tools_view and logging overridable", "[settings_
     CHECK(config.logging.path == "/var/log/minimal.log");
     CHECK(config.logging.max_size_mb == 50);
     CHECK(config.logging.max_files == 3);
+}
+
+TEST_CASE("ParseSettingsConfig: project_context overridable", "[settings_config]") {
+    nlohmann::json doc = {{"project_context",
+                            {{"enabled", false},
+                             {"files", {"AGENTS.md", "MINIMAL.md"}},
+                             {"max_bytes", 65536},
+                             {"search_ancestors", true}}}};
+
+    auto config = ParseSettingsConfig(doc);
+    CHECK(config.project_context.enabled == false);
+    REQUIRE(config.project_context.files.size() == 2);
+    CHECK(config.project_context.files[0] == "AGENTS.md");
+    CHECK(config.project_context.files[1] == "MINIMAL.md");
+    CHECK(config.project_context.max_bytes == 65536);
+    CHECK(config.project_context.search_ancestors == true);
+}
+
+TEST_CASE("ParseSettingsConfig: project_context rejects malformed shapes", "[settings_config]") {
+    SECTION("a non-object block") {
+        CHECK_THROWS_AS(ParseSettingsConfig({{"project_context", "on"}}), std::runtime_error);
+    }
+    SECTION("a non-array files") {
+        CHECK_THROWS_AS(
+            ParseSettingsConfig({{"project_context", {{"files", "AGENTS.md"}}}}),
+            std::runtime_error);
+    }
+    SECTION("an empty or non-string entry") {
+        CHECK_THROWS_AS(ParseSettingsConfig({{"project_context", {{"files", {""}}}}}),
+                        std::runtime_error);
+        CHECK_THROWS_AS(ParseSettingsConfig({{"project_context", {{"files", {7}}}}}),
+                        std::runtime_error);
+    }
+    SECTION("a path, not a plain file name") {
+        CHECK_THROWS_AS(
+            ParseSettingsConfig({{"project_context", {{"files", {"docs/AGENTS.md"}}}}}),
+            std::runtime_error);
+        CHECK_THROWS_AS(
+            ParseSettingsConfig({{"project_context", {{"files", {"../AGENTS.md"}}}}}),
+            std::runtime_error);
+    }
+    SECTION("a negative max_bytes") {
+        CHECK_THROWS_AS(ParseSettingsConfig({{"project_context", {{"max_bytes", -1}}}}),
+                        std::runtime_error);
+    }
 }
 
 TEST_CASE("LoadSettingsConfig: reads and parses a real file", "[settings_config]") {

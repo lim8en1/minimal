@@ -162,7 +162,8 @@ Session::Session(SessionParams params, AgentPreset preset,
                                          loop_config, std::move(context),
                                          [this] { return IsCancelled(); }, std::move(event_sink),
                                          compact_messages, std::move(seeded_history),
-                                         seed_first_persisted_seq, seed_head_is_summary);
+                                         seed_first_persisted_seq, seed_head_is_summary,
+                                         std::move(params_.project_context));
 
     // MCP liveness at session start, BEFORE the worker exists: this thread is
     // allowed to block (the RPC reader is a different one), and the loop must

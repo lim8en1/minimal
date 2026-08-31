@@ -26,6 +26,7 @@
 #include "minimal/agent/session.hpp"
 #include "minimal/agent/session_observer_registry.hpp"
 #include "minimal/common/logger.hpp"
+#include "minimal/config/settings_config.hpp"
 #include "minimal/llm/provider_factory_registry.hpp"
 #include "minimal/session/session_database.hpp"
 #include "minimal/tools/tool_registry.hpp"
@@ -55,6 +56,18 @@ public:
     // Optional: sessions created without one answer every command invocation
     // with "not available". Set before any session exists.
     void set_commands(const commands::CommandRegistry* commands) { commands_ = commands; }
+
+    // Project context (AGENTS.md/CLAUDE.md) settings, read once at startup.
+    // Optional but DEFAULTS TO DISABLED: until main wires the parsed settings
+    // in, no session reads anything from its project_root -- the same shape as
+    // set_commands, where a missing producer is a feature that is off rather
+    // than one running on guessed defaults. Loading happens per session in
+    // CreateResolved -- the one funnel top-level creation, resume, and
+    // SubagentManager spawns share -- because the file lives in the SESSION's
+    // project_root, not in any preset.
+    void set_project_context(config::ProjectContextSettings settings) {
+        project_context_ = settings;
+    }
 
     std::shared_ptr<Session> Create(SessionParams params);
 
@@ -99,6 +112,11 @@ private:
     SessionObserverRegistry& observers_;
     session::SessionDatabase& db_;
     LoopConfig loop_config_;
+    config::ProjectContextSettings project_context_ = [] {
+        config::ProjectContextSettings disabled;
+        disabled.enabled = false;
+        return disabled;
+    }();
     common::Logger& logger_;
     std::chrono::milliseconds initial_attach_guard_;
 
