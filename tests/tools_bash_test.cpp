@@ -12,6 +12,7 @@
 #include "minimal/tools/tool_executor.hpp"
 #include "minimal/tools/tool_registry.hpp"
 
+#include "background_registry.hpp"
 #include "bash_session_state.hpp"
 #include "bash_settings.hpp"
 #include "bash_tool.hpp"
@@ -20,6 +21,7 @@
 
 using namespace minimal;
 using minimal::testing::TempDir;
+using tools_bash::BackgroundTaskRegistry;
 using tools_bash::BashSessionStateStore;
 using tools_bash::BashSettings;
 using tools_bash::ScanCommand;
@@ -35,6 +37,7 @@ std::int64_t ElapsedMs(std::chrono::steady_clock::time_point from) {
 struct Fixture {
     TempDir dir;
     BashSessionStateStore store;
+    BackgroundTaskRegistry background;
     BashSettings settings;  // defaults: 120 s timeout, 1 MiB cap, /bin/sh
 
     struct Outcome {
@@ -45,7 +48,7 @@ struct Fixture {
 
     Outcome Run(const nlohmann::json& input, std::function<bool()> is_cancelled = {},
                 const std::string& session_id = "s1") {
-        auto tool = tools_bash::MakeBashTool(settings, store);
+        auto tool = tools_bash::MakeBashTool(settings, store, background);
         Outcome out;
         tools::ToolContext ctx{common::DefaultLogger()};
         ctx.session_id = session_id;
@@ -60,7 +63,7 @@ struct Fixture {
 
     tools::PermissionDisclosure Disclose(const nlohmann::json& input,
                                          const std::string& session_id = "s1") {
-        auto tool = tools_bash::MakeBashTool(settings, store);
+        auto tool = tools_bash::MakeBashTool(settings, store, background);
         tools::ToolContext ctx{common::DefaultLogger()};
         ctx.session_id = session_id;
         ctx.project_root = dir.path();
@@ -681,7 +684,7 @@ TEST_CASE("granting a real pipeline silences the prompt for the next one",
     // grants would silently never apply and every invocation would re-prompt.
     Fixture f;
     tools::ToolRegistry registry;
-    registry.Register(tools_bash::MakeBashTool(f.settings, f.store));
+    registry.Register(tools_bash::MakeBashTool(f.settings, f.store, f.background));
 
     testing::GrantingPermissionChecker checker;
     tools::PermissionPolicy policy;
@@ -724,7 +727,7 @@ TEST_CASE("a keyword-hidden program is not silenced by an unrelated grant",
     // apart, which is the point. Before the fix the disclosure named only `ls`,
     // reported itself complete, and this ran with checker.seen still at 1.
     tools::ToolRegistry registry;
-    registry.Register(tools_bash::MakeBashTool(f.settings, f.store));
+    registry.Register(tools_bash::MakeBashTool(f.settings, f.store, f.background));
 
     testing::GrantingPermissionChecker checker;
     tools::PermissionPolicy policy;

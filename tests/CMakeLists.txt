@@ -93,10 +93,14 @@ add_executable(minimal_tests
     # Same pattern for tools-bash. The execution tests fork real processes, so
     # they need the actual spawn code, not a seam around it.
     "${CMAKE_SOURCE_DIR}/plugins/server/tools-bash/bash_tool.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/tools-bash/bash_process.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/tools-bash/background_registry.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/tools-bash/bash_settings.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/tools-bash/bash_session_state.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/tools-bash/command_scanner.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/tools-bash/restart_shell.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/tools-bash/tasks_command.cpp"
+    bash_background_test.cpp
     service_registry_test.cpp)
 
 target_include_directories(minimal_tests PRIVATE

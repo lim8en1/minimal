@@ -18,6 +18,19 @@ struct BashSettings {
     // than the default (a build is not `ls`) but not without bound: the deadline
     // is the only hard limit on a session worker thread.
     std::int64_t max_timeout_ms = 600000;
+    // Background tasks have their OWN ceiling, and it exists for a different
+    // reason: a background task never holds the session worker, so the sync
+    // rationale ("the deadline is the only hard bound on a session worker
+    // thread") does not apply. What applies is that nothing may run forever on
+    // the operator's machine -- bounded, but separately, and generous. A model
+    // that supplies no timeout_ms gets the ceiling itself: a long-running build
+    // is the entire point of the mode. Still killable at any time (kill -- -PID
+    // from a later call) and killed when the session ends.
+    std::int64_t background_max_timeout_ms = 600000;
+    // Per-session cap on LIVE background tasks. Over the limit is an error
+    // result the model adapts to, not a queue -- the same ruling as
+    // max_concurrent_subagents.
+    int max_background_tasks = 4;
     // Bounds the PERSISTED result (the ToolResultBlock the model sees). Live
     // streaming through emit_output is uncapped -- that channel is lossy by
     // design, this one is the record.

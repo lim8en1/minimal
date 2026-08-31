@@ -1565,3 +1565,80 @@ fail). One item retires a §11 deliberate-deferral: **HTTP connection reuse** is
    reference destroys it.
 10. **`McpClientManager::config_` was dead weight** — a full copy of the parsed mcps.json kept for
      the process lifetime after the constructor consumed it. Now a local.
+
+## 14. Background bash
+
+The full spec is ARCHITECTURE.md § Background execution. Summary of what landed, the decisions
+behind it, and the invariant tests that make them load-bearing. Every piece landed as its own
+commit-sized change against the 841-test suite, all green.
+
+### What landed
+
+1. **Generalized the deferred-completion channel.** The non-blocking subagent's queue-and-flush
+   became a first-class core mechanism: `InjectionQueue` lives on `SessionChannels` (the
+   `shared_ptr` block a cross-thread handle must outlive to be safe), `AgentLoop` holds it from
+   `SessionContext`, and `ToolContext` gains `schedule_injection` / `session_lifetime` /
+   `emit_task_event` — three lifetime-safe handles a plugin can capture past its own invocation
+   without ever seeing an agent-layer type.
+2. **The turn-start flush.** Flushes used to run only at tool-cycle boundaries and turn end, so a
+   completion landing on an *idle* session missed the next turn entirely — the loop built its
+   request, called the provider, then appended the message. Injections now precede the seed
+   (chronological, and visible to the turn that should carry them). One existing session test
+   asserted the old (wrong) ordering; it was updated, deliberately.
+3. **The seedless wake turn.** `settings.json` `"background_wake"` (default **off** — a wake is a
+   provider call nobody asked for), resolved once per session at creation. The worker's wait
+   predicate (`ShouldWakeForInjections`) notices a pending injection on an idle session and runs
+   `AgentLoop::RunTurn()` with no seed — the injected messages ARE the user content. The
+   lost-wakeup window is closed the same way `CancelToken::Notify` closes it: an empty critical
+   section before `notify_all`, since a predicate change wakes nobody by itself.
+4. **The plugin side, entirely in `tools-bash`**: `bash` gains `run_in_background`; a
+   `BackgroundTaskRegistry` forks through the same `LaunchProcess` (extracted to
+   `bash_process.{hpp,cpp}` with `CappedBuffer`, the wrapper, and the pgid machinery) and a
+   DETACHED watcher drains output, discards the fd-9 state payload, reaps deadline-bounded,
+   classifies, emits `BackgroundTaskEvent`, and injects a tool-result user message keyed to the
+   original `tool_use_id` — the exact shape the subagent path uses and the session-naming rule
+   already skips. `/tasks` (ReadOnly `HarnessCommand`) lists the operator's view; the
+   `SessionObserver` erases the per-session records alongside the shell-state map.
+5. **Wire surface, additive only**: `BackgroundTaskEvent` (proto oneof case 12; nested state enum),
+   mapped from a core-neutral struct in `tool.hpp` — plugins never touch protobuf. Live output
+   deltas keep the original `tool_use_id`, so a client's panel row reopens after its ack's finish
+   event; that is the mode, and the running-tools section says so.
+
+### Decisions worth their reasoning
+
+- **No output tool, no kill tool.** Mid-run output is the model's redirect-to-file pattern (pipes
+  are why bash has no schema knobs); killing is `kill -- -PID` — the child setsids, so pid == pgid
+  and one signal reaches the tree, via an ordinary bash call. The ack text says both. The
+  alternative was two more tool names, two more permission keys, and two more surfaces to replace
+  when a better executor plugin arrives.
+- **Cancellation is asymmetric by design**: `CancelTurn` never kills a task (outliving the turn is
+  the point — the watcher holds no turn `CancelToken`); session terminate kills within one ~100 ms
+  poll slice (`session_lifetime` expiry IS the kill mechanism, since `OnSessionEnded` is
+  fire-and-forget and cannot order against teardown); process exit sweeps the process-global pgid
+  set via `atexit` (pids forgotten on reap, so only live groups are held — no pid-reuse exposure).
+- **Background state is never adopted.** A task's final cwd/env is stale by the time it reports;
+  adopting would stomp what foreground calls set up in between. The watcher still DRAINS fd 9 —
+  a child blocked writing a full pipe never exits.
+- **Two ceilings, two rationales.** The sync deadline bounds a BLOCKED WORKER; a background task
+  never holds one, so `background_max_timeout_ms` (default 600 s, the default budget when the
+  model supplies none) exists separately rather than silently inheriting the sync rationale.
+- **`-p` and background don't mix, honestly.** The stream closes when the headless turn ends,
+  which terminates the session, which kills the tasks. `run_in_background` under `-p` means
+  "don't wait within this turn," nothing more.
+
+### Invariant tests
+
+- [x] Ack returns in milliseconds, not the command's runtime; result injected at completion keyed
+      to the original `tool_use_id` (`bash_background_test.cpp`).
+- [x] Failure injects an ERROR result with output leading and `[exit status: N]` attached.
+- [x] Live channel uncapped, injected record capped with the omission marker — two artifacts, two
+      audiences, verified against a 100 KB `yes`.
+- [x] Session lifetime expiry kills the task within the poll deadline and injects nothing.
+- [x] The wall-clock ceiling kills the group; `killpg(pid, 0)` then fails `ESRCH` — the group is
+      actually gone, not just marked.
+- [x] Over-limit is a refusal naming the limit, never a wait; `CountRunning` drains to 0 after expiry.
+- [x] A `cd`/`export` in a background command leaves the session's shell state untouched.
+- [x] Turn-start flush: the injected message precedes the seed in the working history AND in the
+      first request the provider saw (`agent_loop_test.cpp`).
+- [x] The seedless wake turn runs to a natural stop carrying only the injections; `wake_on_injection`
+      off means no provider call and flush-before-seed on the next user turn (`session_test.cpp`).

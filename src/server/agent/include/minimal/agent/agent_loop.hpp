@@ -16,6 +16,7 @@
 #include "minimal/agent/agent_preset.hpp"
 #include "minimal/agent/context_compactor.hpp"
 #include "minimal/agent/history_store.hpp"
+#include "minimal/agent/injection_queue.hpp"
 #include "minimal/common/logger.hpp"
 #include "minimal/config/settings_config.hpp"
 #include "minimal/llm/chat.hpp"
@@ -104,6 +105,30 @@ struct SessionContext {
     // implementation detail of the wiring, not of the tools.
     common::Logger& logger;
 
+    // The session's cross-thread staging queue for out-of-band messages
+    // (non-blocking subagent completions, background task results). Shared
+    // because the producers are foreign threads whose handles must stay safe
+    // past this loop's death: the queue lives in the session's shared channels
+    // block, and Push refuses after Terminate closes it. Null in plain tests
+    // that never inject -- the loop then creates a private one, which is
+    // behaviorally identical for a loop nothing else talks to.
+    std::shared_ptr<InjectionQueue> injections;
+
+    // --- Deferred-completion wiring, copied into every ToolContext -----------
+    //
+    // All three are lifetime-safe (backed by the session's shared channels
+    // block), which is the whole point: a tool capturing them beyond its own
+    // invocation -- background bash's watcher thread -- degrades cleanly after
+    // the session dies instead of dangling. See tools/tool.hpp for the
+    // contract each one carries.
+
+    // Stages a message for injection at a turn boundary; false = terminating.
+    std::function<bool(llm::Message)> injection_sink;
+    // Expires with the session; a watcher polls it and self-terminates.
+    std::weak_ptr<const void> session_lifetime;
+    // BackgroundTaskEvent lifecycle, mapped onto a wire event by the session.
+    std::function<void(const tools::BackgroundTaskEvent&)> task_event_sink;
+
     // The session's tool-facing history window (see ToolContext::history). Owned
     // by the Session, which outlives this loop; null when the session's store is
     // not SQLite-backed (test fakes), which makes ctx.history null -- the
@@ -176,12 +201,21 @@ public:
 
     // Appends `seed_message`, then runs to a natural stop. A subagent's entire
     // life is one call to this -- there is one loop implementation, not two.
+    // Anything queued out-of-band while the session was idle is flushed BEFORE
+    // the seed, so it precedes both the seed and the first provider call.
     TurnResult RunTurn(llm::Message seed_message);
+
+    // The seedless turn: the wake path. When an injection lands on an IDLE
+    // session and settings enabled the wake, the worker runs a turn with no
+    // seed of its own -- the injected messages ARE the user turn. The loop
+    // body is shared with RunTurn(seed); only the seed differs.
+    TurnResult RunTurn();
 
     // Queued by a non-blocking subagent's completion, flushed at a turn boundary
     // rather than injected out-of-band: landing a user message between a
-    // tool_use and its tool_result is a hard 400 on both wire formats.
-    void QueueInjectedMessage(llm::Message message);
+    // tool_use and its tool_result is a hard 400 on both wire formats. False
+    // means the session is terminating and the message was not staged.
+    bool QueueInjectedMessage(llm::Message message);
 
     const std::vector<llm::Message>& history() const { return history_; }
     llm::ChatRequest BuildChatRequest() const;
@@ -234,6 +268,11 @@ private:
     // MaybeCompact adds and CompactNow deliberately skips.
     std::optional<std::size_t> Compact();
     void FlushInjectedMessages();
+    // The while(true) body both RunTurn overloads share. Takes `result` by
+    // reference so the two entry points can differ only in seeding. The wake
+    // path (no seed) does its initial injection flush here; the seeded path
+    // flushed BEFORE appending the seed, which is the chronological order.
+    void RunTurnLoop(TurnResult& result, bool flush_first);
     bool Cancelled() const;
     // Waits before retry `attempt`, polling cancellation. False means "give up"
     // -- cancelled during the wait -- so the caller stops retrying.
@@ -265,14 +304,13 @@ private:
     // Together they yield the boundary_seq a checkpoint is written with:
     // persisted messages covered by the next summary end just before
     // first_persisted_seq_ after the fold. Both are worker-thread-only state,
-    // like everything else on the loop except injected_.
+    // like everything else on the loop except the injection queue.
     std::optional<std::int64_t> first_persisted_seq_;
     bool head_is_summary_ = false;
-    // Guarded because it crosses threads: a non-blocking subagent's worker
-    // queues its completion here while THIS session's worker flushes at turn
-    // boundaries. Everything else on the loop stays worker-thread-only.
-    std::mutex injected_mu_;
-    std::vector<llm::Message> injected_;
+    // Shared with the session's channels block (see SessionContext::injections).
+    // The one loop member foreign threads touch, and only through the queue's
+    // own mutex.
+    std::shared_ptr<InjectionQueue> injections_;
     llm::TokenAccumulator tokens_;
     // Backoff jitter only. Loop-owned rather than shared, so two sessions
     // retrying the same failing backend do not draw the same delays.

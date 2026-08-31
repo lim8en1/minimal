@@ -169,6 +169,7 @@ SettingsConfig ParseSettingsConfig(const nlohmann::json& doc) {
         config.default_model = doc.value("default_model", config.default_model);
         config.default_theme = doc.value("default_theme", config.default_theme);
         config.max_concurrent_subagents = doc.value("max_concurrent_subagents", config.max_concurrent_subagents);
+        config.background_wake = doc.value("background_wake", config.background_wake);
         config.memory = ParseMemory(doc);
         config.tools = ParseTools(doc);
         config.tools_view = ParseToolsView(doc);
