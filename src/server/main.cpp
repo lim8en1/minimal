@@ -19,6 +19,7 @@
 #include "minimal/agent/agent_preset_registry.hpp"
 #include "minimal/agent/session_observer_registry.hpp"
 #include "minimal/agent/session_registry.hpp"
+#include "minimal/agent/session_support.hpp"
 #include "minimal/agent/spawn_subagent_tool.hpp"
 #include "minimal/agent/subagent_manager.hpp"
 #include "minimal/common/abi_tag.hpp"
@@ -206,6 +207,17 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "\nplugin storage error: %s\n", e.what());
         return 1;
     }
+
+    // The core-provided support service (the one pull seam a session-lifecycle
+    // plugin cannot do without: transcript reads, the session's own provider,
+    // and rename-and-notify). Constructed and Provided BEFORE Seal so the
+    // startup collision scan sees the name -- a plugin registering
+    // "core.session_support" is a diagnosed fatal duplicate, not a silent
+    // shadow. Its dependencies are serve-stage objects, so the actual wiring
+    // happens in stage 4 via Wire(); nothing can call through the unwired
+    // service because the RPC server is not listening yet.
+    minimal::agent::SessionSupport session_support(minimal::common::DefaultLogger());
+    services.Provide(minimal::agent::kSessionSupportServiceName, &session_support);
 
     // The tools slice of settings.json is forwarded verbatim to every plugin;
     // core imposes no schema on it. Loaded defensively because a missing or
@@ -421,6 +433,11 @@ int main(int argc, char** argv) {
     // the server serves many project roots and no file belongs to all of them.
     sessions.set_project_context(settings.project_context);
     sessions.set_hook_dispatcher(&hook_dispatcher);
+
+    // Stage-4 wiring for the core support service Provided above (see the
+    // comment there): the dependencies only exist now. Serving has not
+    // started, so this is still ahead of any Find().
+    session_support.Wire(sessions, *session_db, *presets);
 
     // The shared MCP server processes: one connection per enabled mcps.json
     // entry, shared across every session. Core, like the MCP client itself.

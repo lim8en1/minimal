@@ -93,6 +93,13 @@ public:
 
     std::shared_ptr<Session> Find(const std::string& session_id) const;
 
+    // The shared provider instance cache. Borrowed by SessionSupportService's
+    // model-override resolution (a titler resolving a configured
+    // "<provider>/<model>" lands in the same cache session construction uses,
+    // so the instance is shared, never duplicated). The registry outlives
+    // every session and every service call.
+    ProviderInstanceCache& provider_cache() { return provider_cache_; }
+
     // Live sessions whose parent_session_id is `parent_id`. The subagent
     // concurrency limit is a count of these.
     std::size_t ChildCount(const std::string& parent_id) const;

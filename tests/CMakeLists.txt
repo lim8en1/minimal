@@ -73,6 +73,7 @@ add_executable(minimal_tests
     session_test.cpp
     rewind_test.cpp
     session_registry_test.cpp
+    session_support_test.cpp
     subagent_spawn_test.cpp
     subagent_test.cpp
     tool_history_test.cpp
@@ -105,6 +106,10 @@ add_executable(minimal_tests
     "${CMAKE_SOURCE_DIR}/plugins/server/tools-bash/command_scanner.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/tools-bash/restart_shell.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/tools-bash/tasks_command.cpp"
+    # Same pattern for the titler: plugin logic over core headers, linked
+    # directly so the SessionSupportService seam is tested against a fake.
+    "${CMAKE_SOURCE_DIR}/plugins/server/session-titler/titler.cpp"
+    titler_test.cpp
     bash_background_test.cpp
     # Same pattern for checklist: store, tool and rpc service are pure plugin
     # logic over core headers; plugin.cpp (the extern "C" entry points) stays
@@ -137,7 +142,8 @@ target_include_directories(minimal_tests PRIVATE
 
 target_include_directories(minimal_tests PRIVATE
     "${CMAKE_SOURCE_DIR}/plugins/server/checklist"
-    "${CMAKE_SOURCE_DIR}/plugins/server/tools-search")
+    "${CMAKE_SOURCE_DIR}/plugins/server/tools-search"
+    "${CMAKE_SOURCE_DIR}/plugins/server/session-titler")
 
 # minimal::test_support is the test-dependency bundle: it carries server_core,
 # which carries common publicly. Listing those again here is redundant and makes

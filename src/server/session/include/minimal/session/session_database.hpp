@@ -30,6 +30,10 @@ struct SessionSummary {
     std::string session_id;
     std::optional<std::string> parent_session_id;  // set for subagents
     std::string name;
+    // Where the name came from: 'explicit' (the user named it at creation),
+    // 'default' (the free first-user-text rule), 'observer' (a plugin set it
+    // later), or '' (pre-v6 rows). See IsExplicitlyNamed.
+    std::string name_source;
     std::string project_root;
     std::string agent_preset;
     std::int64_t created_at_unix_ms = 0;
@@ -88,7 +92,7 @@ struct OpenOptions {
 // therefore leaves an exact prefix of the transcript -- never a torn row.
 class SessionDatabase {
 public:
-    static constexpr int kSchemaVersion = 5;
+    static constexpr int kSchemaVersion = 6;
 
     // Opens (creating if needed) and migrates. Throws std::runtime_error on any
     // failure, including a database whose user_version is newer than this
@@ -121,6 +125,15 @@ public:
                                int token_count = 0);
 
     bool UpdateSessionName(const std::string& session_id, const std::string& name);
+
+    // True when the session was created WITH an explicit name
+    // (CreateSessionRequest.name) rather than receiving the free default or a
+    // later observer title. The rename seam consults this so an LLM titler can
+    // never clobber a name the user chose. Pre-v6 rows backfill as '' -- "not
+    // known to be explicit" -- which is the safe reading: those sessions are
+    // old, and a titler only ever fires for a fresh session's first turn in
+    // the process that created it.
+    bool IsExplicitlyNamed(const std::string& session_id) const;
     bool DeleteSession(const std::string& session_id);  // cascades to messages and children
     std::optional<SessionSummary> GetSession(const std::string& session_id) const;
 

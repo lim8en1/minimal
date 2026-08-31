@@ -28,7 +28,8 @@ minimal/
   proto/minimal/v1/{common,session_service}.proto
   plugins/                    # bundled plugin IMPLEMENTATIONS -- what the harness loads
     server/                       # tools-fs, tools-search, tools-bash, provider-openai,
-                                  #   commands-core, checklist
+                                  #   commands-core, checklist, session-titler
+                                  #   (shipped disabled -- see naming)
     client/                       # (none bundled yet)
   bundled/                    # non-code assets that ship WITH the binary
     prompts/compression.md        # all of it copied into the config dir by
@@ -844,6 +845,7 @@ Default is no authentication, matching the local-only topology. `src/server/rpc/
 | Subsystem | Placement | Why |
 |---|---|---|
 | Permission model, config + frontmatter loader, agent/subagent loops, tool-calling machinery, MCP client, session storage, gRPC transport, concurrency | **Core** | Mechanisms everything else calls into — the stable foundation, not customization points. |
+| `SessionSupportService` (`core.session_support`) | **Core-provided service** | The one pull seam a session-lifecycle plugin needs: transcript reads, the session's own provider, rename-and-notify (`SessionMetadataEvent`). Provided before `Seal()` so the name is collision-scanned; late-wired at serve stage. |
 | `path_confinement` / `file_access` / `atomic_write` / `HttpClient` / `Logger` | **Core, exposed to plugins as utilities** | A plugin tool must call these, never reimplement path safety. Inbound ABI surface. |
 | `PluginStorage` (per-plugin KV) + per-plugin `data_dir` | **Core, exposed to plugins as utilities** | The same rule one level up: plugins must not each reinvent SQLite's concurrency discipline in the data dir. The namespace is the boundary; state that needs its own schema gets its own database under `data_dir`. |
 | `read`/`write`/`edit` (`tools-fs`), `grep`/`glob` (`tools-search`), `bash` (`tools-bash`) | **Bundled plugins** | Not structurally privileged. Bash is split out: distinct security profile, and the one with a plausible alternate implementation (container/remote executor) someone would actually swap. |
@@ -1352,7 +1354,7 @@ variable the install rule uses, so overriding one moves both.
   }
   ```
 
-  Newly discovered plugins are appended on startup with enablement defaulted by provenance, so the file is self-maintaining and the user only edits it to change a decision. Malformed content degrades to empty rather than throwing — a broken `plugins.json` should not prevent the server starting.
+  Newly discovered plugins are appended on startup with enablement defaulted by provenance, so the file is self-maintaining and the user only edits it to change a decision. One exception: bundled plugins named by the discovery layer's `DefaultsDisabled` list (currently `session-titler` — the only bundled plugin that spends the user's tokens on its own initiative) append as `enabled: false`. Malformed content degrades to empty rather than throwing — a broken `plugins.json` should not prevent the server starting.
 - **No `commands/` config dir** — a command's value is its code; a data-only manifest would be a drift-prone shadow copy.
 
 **Seeding**: `cmake --install` copies `bundled/` into the config dir and never overwrites — see *Bundled assets*. Nothing is compiled into the binary and nothing is read from the install prefix at runtime, so every file above is one the user can see and edit, and the copy they edit is the copy that runs.
@@ -1446,7 +1448,7 @@ Built, in `src/server/session/`: `SessionDatabase` (connection, pragmas, migrati
 
 **One connection, one mutex, every method locking.** An append is a sub-millisecond transaction against second-scale LLM turns, so serialising concurrent session workers costs nothing measurable and removes every intra-process locking question SQLite would otherwise raise. WAL plus `busy_timeout` still cover out-of-process readers.
 
-- **`sessions`**: `id, parent_session_id (nullable, self-FK), name, project_root, agent_preset, created_at, updated_at`.
+- **`sessions`**: `id, parent_session_id (nullable, self-FK), name, name_source (migration v6: 'explicit' | 'default' | 'observer' | '' for pre-v6 rows), project_root, agent_preset, created_at, updated_at`.
 - **`messages`**: `id, session_id, seq, role, content_json, token_count, discarded, created_at`, with `UNIQUE (session_id, seq)` — which is the `(session_id, seq)` index keyset pagination queries against. `discarded` is the rewind mark (schema v5): a discarded row is still stored but filtered out of every read — scrollback, resume loads, `MAX(seq)`, the picker's count — so all readers report exactly the ACTIVE transcript (§ *Session traversal*).
 - Keyset pagination for scrollback (`WHERE session_id=? AND seq < ? ORDER BY seq DESC LIMIT N`) — no `OFFSET` scans over a 1M-token history. WAL mode for concurrent read-while-write.
 - **`token_count` holds the backend-reported output tokens for assistant messages and 0 otherwise.** There is no per-message input count to store: each turn's `input_tokens` already covers the whole history, so attributing it to one row would be fiction (see Token accounting).
@@ -1457,7 +1459,7 @@ Built, in `src/server/session/`: `SessionDatabase` (connection, pragmas, migrati
 **Session naming, layered:**
 
 1. **Core default, free**: name = the first user message *with text*, whitespace-collapsed and truncated to 60 code points (UTF-8-safe). Set in the same transaction as that append, only while the name is still empty — so an explicit creation name or a later observer-set name is never clobbered. A tool-result-only user message (e.g. an injected subagent completion) is not a name; the search continues with later messages. No model, no latency, no failure mode.
-2. **Optional observer plugin**: async LLM titling after turn 1 through the already-configured provider (~100 tokens), overwriting the default.
+2. **Observer plugin (`session-titler`, bundled but shipped disabled)**: async LLM titling after turn 1 through the session's own provider (~100 tokens), overwriting the default. Disabled by default in `plugins.json` (the `DefaultsDisabled` list in plugin discovery) because it is the one bundled plugin that spends the user's tokens on its own initiative — enabling it is one edit. Its entire reach into core is ONE pull seam: the core-provided `SessionSupportService` (`agent/session_support_service.hpp`, provided under `core.session_support` before `Seal()` so a plugin claiming the name is a diagnosed collision), which hands out the session's own `LlmProvider` + model (from the shared `ProviderInstanceCache`, optionally overridden by a `<provider>/<model>` in the plugin's `config`), a `SessionReader`, and `RenameSession` — which persists the name, updates a live session's in-memory name, and emits `SessionMetadataEvent` to the attached client. `RenameSession` refuses sessions whose `name_source` is `'explicit'`: a name the user chose at creation is a decision, protected the same way the free default's `name = ''` guard protects it. The titler itself skips subagents (named by their task text) and any turn whose first seq is above 0 (a resumed or wake session is not this process's creation — retitling would spend tokens to overwrite an existing title). **The split between the observer thread and the detached worker is load-bearing**: the stream that closes at turn completion terminates the session and erases it from the registry, so the transcript read and the provider/model resolution happen synchronously on the observer thread while the session is still findable, and only the unbounded provider call goes to the detached thread — the rename afterwards works regardless, because the database write needs no live session. The detached worker holds the plugin's state shared_ptr and the resolved provider, never `this`, so a straggler call outliving a registry teardown degrades rather than dangles.
 
 A local summarization model (BART/ONNX) was considered and rejected: domain mismatch (`bart-large-cnn` is trained on news prose, emits multi-sentence extractive summaries rather than short titles, and has never seen a code-bearing chat transcript); dependency weight (~400M params — roughly 1.6 GB fp32, ~400 MB int8 — plus ONNX Runtime or libtorch, a *second* inference stack, in a project whose first goal is low footprint and which rejected far lighter dependencies); and redundancy (the configured provider does it better in-domain with zero new dependencies, and is already fully local when pointed at llama.cpp).
 

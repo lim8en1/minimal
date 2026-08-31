@@ -19,6 +19,16 @@ bool IsPluginFile(const std::filesystem::path& path) {
     return ext == ".so" || ext == ".dylib";
 }
 
+// Bundled plugins that default to DISABLED despite their provenance. Everything
+// else bundled is load-bearing for the default harness (tools, provider,
+// commands) and ships enabled. The list exists because session-titler is the
+// first bundled plugin whose entire job is to spend the user's tokens on its
+// own initiative (~100 per session) -- trusted code, but a cost the operator
+// should opt into. Match by basename, the same key plugins.json entries use.
+bool DefaultsDisabled(std::string_view file) {
+    return file == "session-titler.so" || file == "session-titler.dylib";
+}
+
 }  // namespace
 
 PluginConfig ParsePluginConfig(const std::string& json_text) {
@@ -139,7 +149,6 @@ std::vector<PluginCandidate> DiscoverPlugins(const std::filesystem::path& bundle
     // the same as the flat installed layout.
     scan(bundled_dir, Provenance::Bundled, /*recurse=*/true);
     scan(user_dir, Provenance::User, /*recurse=*/false);
-
     std::sort(found.begin(), found.end(), [](const Found& a, const Found& b) {
         if (a.provenance != b.provenance) return a.provenance == Provenance::Bundled;
         return a.file < b.file;
@@ -154,11 +163,16 @@ std::vector<PluginCandidate> DiscoverPlugins(const std::filesystem::path& bundle
 
         if (existing == config.plugins.end()) {
             // Provenance decides the default, mechanically: shipped-with-this-build
-            // is trusted, dropped-in-later is opt-in.
+            // is trusted, dropped-in-later is opt-in. One exception, listed below:
+            // a bundled plugin that spends the user's tokens on its own
+            // initiative is shipped present but disabled, so enabling it is a
+            // deliberate act. Once an entry exists in plugins.json, the user's
+            // `enabled` governs and this default is never consulted again.
             PluginConfig::Entry entry;
             entry.file = item.file;
             entry.provenance = item.provenance;
-            entry.enabled = (item.provenance == Provenance::Bundled);
+            entry.enabled = (item.provenance == Provenance::Bundled) &&
+                            !DefaultsDisabled(item.file);
             config.plugins.push_back(entry);
             existing = std::prev(config.plugins.end());
         } else if (existing->provenance != item.provenance) {
