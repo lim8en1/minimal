@@ -815,3 +815,74 @@ the tree and green.
   plugin, tree-sitter grammars** — all recorded in §7 with the reason each is a decision.
 - **A `catch(...)`-shaped seam test for the compactor** — the compactor already returns failure as
   a value; only the loop's bookkeeping needed the guard, and that is tested.
+
+---
+
+## 12. MCP client remediation
+
+The §11 exercise, aimed at the track-G MCP client after its first review. Each item landed as its
+own commit with the invariant test that proves it load-bearing (delete the fix, watch the test
+fail). One item retires a §11 deliberate-deferral: **HTTP connection reuse** is now built
+(item 7 below) — the deferral was written before the MCP http transport existed to want it.
+
+### Correctness
+
+1. **The http transport could wedge its worker forever.** `StreamPost` set no total timeout in
+   streaming mode, so a server that accepted the connection and went silent held the connection's
+   worker thread indefinitely (stdio was capped inside cpp-mcp at 60 s; http had nothing).
+   `request_timeout` now caps the WHOLE transfer in both modes — providers leave it 0 for streams
+   and are unchanged — which also aligns the transport's failure with the caller's deadline.
+2. **`tools/list` pagination had no cap.** Each page was individually within the request deadline,
+   so a server that never stops returning `nextCursor` occupied the worker forever. Capped by the
+   new `tools.mcp.max_list_pages` (default 100, loader rejects < 1); a cap hit is a named discovery
+   failure, and a truncated listing can no longer silently hide tools by wedging instead.
+3. **A wedged stdio call leaked the child process.** Teardown detached the worker and relied on
+   cpp-mcp's internal 60 s cap — or, if the server process exited inside that window, orphaned the
+   child forever (the detached worker's destructors never run at exit). Teardown now aborts the
+   transport first: the stdio child is SIGTERMed (waitpid(WNOHANG) proves liveness AND ownership at
+   signal time, so a reused pid is never signalled; a detached watcher escalates to SIGKILL after
+   5 s), the blocking read ends, and the worker unwinds. The vendored cpp-mcp — pinned, no releases
+   to track — carries a tiny header patch (atomic `process_id_` + `child_pid()`), applied
+   idempotently by `cmake/ApplyCppMcpPatches.cmake`, which fails loudly on a half-applied or
+   diverged tree rather than building silently.
+4. **One odd exception in a worker job killed the server.** `WorkerState::Loop` ran jobs bare; an
+   exception escaping the thread function reaches `std::terminate`. Contained: log, continue, the
+   caller's deadline is the backstop.
+5. **Wire hardening on the http path.** A stringified integer id echo (some SDKs stringify) now
+   matches; an SSE stream that ends without the matching frame is a NAMED error ("closed the stream
+   without a response to request N") instead of the misleading "unparseable response" the empty
+   buffer produced; the slot's `done`/`value` reads happen under the slot mutex instead of leaning
+   on same-thread callback timing documented three files away.
+
+### Efficiency
+
+6. **Cancellation stopped polling.** Callers waited in 25 ms condition-variable slices — 40
+   wakeups per second per in-flight MCP call — solely to notice a cancellation flag.
+   `tools::CancelToken` makes it event-driven end to end: one mutex+cv+flag per turn; BOTH events a
+   waiter cares about (its slot completing, cancellation firing) notify the same cv; `Session`
+   mints a token per turn pop, `Cancel`/`Terminate` fire every live one, the agent loop hands it to
+   every `ToolContext`, and `McpConnection::WaitSlot` is a zero-poll `wait_until` loop. The
+   polling `is_cancelled` stays for tools that merely check it occasionally (bash). Lock order is
+   one-directional (worker: slot.mu → token.mu; waiter releases token.mu before slot.mu) — holding
+   both would close a deadlock cycle, so the invariant is in the code shape, not just the comment.
+7. **HTTP connection reuse (retires the §11 deferral).** `llm::HttpSession` keeps one CURL handle
+   across transfers — reset after EVERY transfer by scope guard, so per-transfer options cannot
+   leak while the connection cache survives — and the MCP http transport holds one for its life.
+   Providers keep the stateless per-call-handle `HttpClient` untouched. Proven by a hand-framed
+   HTTP server that counts ACCEPTED CONNECTIONS: three requests, one connection.
+8. **`EnsureAlive` stopped serializing the world.** The manager-wide mutex was held across ping +
+   connect + discovery — up to ~2 minutes of I/O per dead server, across ALL sessions, with
+   `StatusOf`/`ServerNames` blocked behind it. The manager mutex now covers only the map lookup;
+   per-server start mutexes serialize each server's own I/O. A 2 s verified-TTL dedups
+   near-simultaneous checks (subagent spawn after the parent's check, concurrent session starts) —
+   deliberately short: the first draft's 10 s masked a scripted death in the existing respawn test,
+   which now guards exactly that trade.
+9. **`ToolRegistry` lost its retired list.** Superseded MCP tools were parked in an unbounded
+   `retired_` vector for the process lifetime (a flapping server retired its whole tool set per
+   re-discovery), and the entire safety argument for it lived in comments — `Find()` handed out a
+   raw pointer used across a permission Ask that can block minutes on a human. Registry-wide
+   `shared_ptr` makes the executor's reference the lifetime guarantee, structurally; the old
+   invariant test now proves the superseded object stays callable AND that dropping the executor's
+   reference destroys it.
+10. **`McpClientManager::config_` was dead weight** — a full copy of the parsed mcps.json kept for
+    the process lifetime after the constructor consumed it. Now a local.
