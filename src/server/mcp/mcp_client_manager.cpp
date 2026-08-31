@@ -62,8 +62,11 @@ private:
 
 McpClientManager::McpClientManager(config::McpsConfig config, tools::ToolRegistry& registry,
                                    const McpLimits& limits, common::Logger& logger)
-    : config_(std::move(config)), registry_(registry), limits_(limits), logger_(logger) {
-    for (const auto& entry : config_.entries) {
+    : registry_(registry), limits_(limits), logger_(logger) {
+    // The config is consumed here: handles carry their own entry copies, and
+    // a second copy of the whole mcps.json is dead weight for the process
+    // lifetime.
+    for (const auto& entry : config.entries) {
         if (!entry.enabled) continue;  // deliberate opt-out, silent
         auto handle = std::make_shared<ServerHandle>();
         handle->entry = entry;

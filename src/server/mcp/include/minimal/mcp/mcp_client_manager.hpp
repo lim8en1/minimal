@@ -68,7 +68,6 @@ private:
     bool StartHandle(const config::McpServerEntry& entry, ServerHandle& handle,
                      std::string& error);
 
-    config::McpsConfig config_;
     tools::ToolRegistry& registry_;
     McpLimits limits_;
     common::Logger& logger_;

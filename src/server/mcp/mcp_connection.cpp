@@ -483,7 +483,19 @@ struct McpConnection::WorkerState {
             std::function<void()> job = std::move(jobs.front());
             jobs.pop_front();
             lock.unlock();
-            job();
+            try {
+                job();
+            } catch (const std::exception& e) {
+                // A throwing job never completes its slot; the caller's
+                // deadline is the backstop. Swallow-and-continue: an
+                // exception escaping here would std::terminate the whole
+                // server from this thread.
+                minimal::common::DefaultLogger().error("MCP connection job threw: {}",
+                                                       e.what());
+            } catch (...) {
+                minimal::common::DefaultLogger().error(
+                    "MCP connection job threw a non-standard exception");
+            }
             lock.lock();
         }
     }
