@@ -29,6 +29,11 @@ public:
     void SaveCompactionCheckpoint(std::int64_t boundary_seq, const llm::Message& summary) override;
     void ClearCompactionCheckpoint() override;
 
+    // The row's current name. The default-naming rule inside AppendMessage may
+    // have set it after this Session was built; the read is only made while the
+    // session is still unnamed, so it costs one query per session lifetime.
+    std::optional<std::string> StoredName() const override;
+
 private:
     SessionDatabase& db_;
     std::string session_id_;

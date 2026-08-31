@@ -72,6 +72,13 @@ public:
     // preset: a preset supplies a default, a user selection is a decision.
     virtual const std::optional<common::ModelRef>& model_override() const = 0;
     virtual void set_model_override(std::optional<common::ModelRef> ref) = 0;
+
+    // Submits a user turn on this session -- the ONE sanctioned path by which a
+    // PromptShorthandCommand's content reaches the model (docs/EXTENSIBILITY.md
+    // 4.4): as the submitted turn itself, appended to history and answered like
+    // any other turn, never as a command result. Same queue and contract as a
+    // client-submitted turn.
+    virtual bool SubmitTurn(std::string text) = 0;
 };
 
 class CommandContext {

@@ -1,5 +1,7 @@
 #include "minimal/client/state.hpp"
 
+#include "minimal/client/plugins/registries.hpp"
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -40,6 +42,10 @@ SessionState::Snapshot SessionState::TakeSnapshot() {
     s.output_tokens = output_tokens_;
     s.transcript_version = transcript_version_;
     s.latest_notice = latest_notice_;
+    s.model = model_;
+    s.agent_preset = agent_preset_;
+    s.permission_mode = permission_mode_;
+    s.context_window_tokens = context_window_tokens_;
     return s;
 }
 
@@ -53,6 +59,15 @@ void SessionState::OnSessionMetadata(const v1::SessionMetadataEvent& metadata) {
     std::lock_guard lk(mtx_);
     if (!metadata.name().empty()) {
         display_name_ = metadata.name();
+    }
+    // The E5 metadata fields: the status bar's wire source. Empty/0 leaves the
+    // previous value alone -- a partial re-emit (a rename event) must not wipe
+    // fields it does not carry.
+    if (!metadata.model().empty()) model_ = metadata.model();
+    if (!metadata.agent_preset().empty()) agent_preset_ = metadata.agent_preset();
+    if (!metadata.permission_mode().empty()) permission_mode_ = metadata.permission_mode();
+    if (metadata.context_window_tokens() > 0) {
+        context_window_tokens_ = metadata.context_window_tokens();
     }
 }
 
@@ -334,6 +349,12 @@ bool AppState::HasTab(const std::string& session_id) const {
 // Reader-thread callback: route a ServerEvent to its owned tab. Defers subagent creation
 // until the app lock is released, so opening a child stream never happens while held.
 void AppState::DispatchToTab(const std::string& session_id, const v1::ServerEvent& event) {
+    // The exclusive chat surface sees EVERY event for the session, before
+    // core's handling (docs/EXTENSIBILITY.md 4.2: the host pushes, the surface
+    // owns its presentation; core's data plane runs regardless). Reader
+    // thread -- OnEvent must not block; that is the surface's contract.
+    if (chat_surface_ != nullptr) chat_surface_->OnEvent(event);
+
     SessionState* target = nullptr;
     {   // brief lock — grab only the pointer, release before touching per-tab state
         std::lock_guard lk(mtx_);
@@ -391,8 +412,8 @@ void AppState::DispatchToTab(const std::string& session_id, const v1::ServerEven
         std::lock_guard lk(mtx_);   // append only; deferred spawn happens after unlock below
         pending_subagents_.emplace_back(session_id, event.subagent_started());
     }
-    // command_result is stored as the tab's transient notice above; plugin
-    // calls are consumed later (E5).
+    // command_result is stored as the tab's transient notice above (routed by
+    // its display mode in RunTui); PluginCall data is a plugin's own path.
 
     // The app lock is released now. Spawn any deferred subagent tabs so child streams attach
     // on their own reader threads without ever holding mtx_ while opening (which could deadlock).
@@ -592,7 +613,15 @@ std::vector<AppState::TabSnapshot> AppState::GetAllTabs() const {
         snap.is_subagent = tab.info.parent_session_id.has_value();
         snap.root_ordinal = tab.info.root_ordinal;
         snap.spawn_seq = tab.info.spawn_seq;
-        snap.attention_glyph = (ss.state == SessionStateKind::Waiting) ? '!' : '\0';
+        // The glyph merge (docs/EXTENSIBILITY.md 4.2, "Attention sink"): core
+        // event derivation is the default source; a plugin raise wins until
+        // cleared. '!' stays the only color-independent signal whatever raised
+        // it, so both sources render the SAME glyph.
+        snap.attention_glyph =
+            (ss.state == SessionStateKind::Waiting ||
+             (plugin_attention_ != nullptr && plugin_attention_->TabRaised(tab.info.session_id)))
+                ? '!'
+                : '\0';
         snap.is_focused = (focused_id_ == tab.info.session_id);
         out.push_back(std::move(snap));
     }

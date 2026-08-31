@@ -26,15 +26,13 @@ namespace {
 // The per-language work, per ARCHITECTURE.md: one node-type -> category table.
 // tree-sitter node types are stable within a grammar's major version. A name
 // not listed is Plain, so a grammar update degrades coloring, never crashes.
-struct NodeRule {
-    const char* type;
-    HighlightCategory category;
-};
+// The rule type is the ABI-visible SyntaxRule (registries.hpp reuses it) so a
+// registered grammar's table needs no translation.
 
 struct Language {
     const char* name;
     const TSLanguage* (*language_fn)(void);
-    std::vector<NodeRule> rules;
+    std::vector<SyntaxRule> rules;
 };
 
 Language CppLanguage() {
@@ -371,22 +369,26 @@ Language GoLanguage() {
             }};
 }
 
-const Language& FindLanguage(std::string_view language) {
+const std::array<Language, 9>& VendoredTable() {
     static const std::array<Language, 9> kLanguages = {
         CppLanguage(),   PythonLanguage(), JavascriptLanguage(), TypescriptLanguage(),
         BashLanguage(),  JsonLanguage(),   YamlLanguage(),       RustLanguage(),
         GoLanguage(),
     };
+    return kLanguages;
+}
+
+const Language& FindLanguage(std::string_view language) {
     static const Language kUnsupported{"", nullptr, {}};
-    for (const Language& entry : kLanguages) {
+    for (const Language& entry : VendoredTable()) {
         if (language == entry.name) return entry;
     }
     return kUnsupported;
 }
 
 HighlightCategory Categorize(const Language& language, const char* node_type) {
-    for (const NodeRule& rule : language.rules) {
-        if (std::strcmp(rule.type, node_type) == 0) return rule.category;
+    for (const SyntaxRule& rule : language.rules) {
+        if (node_type == rule.node_type) return rule.category;
     }
     return HighlightCategory::Plain;
 }
@@ -427,7 +429,17 @@ void AppendSpan(std::vector<HighlightSpan>& spans, HighlightCategory category,
 
 }  // namespace
 
-std::string CanonicalLanguage(std::string_view language) {
+std::vector<LanguageDefinition> VendoredLanguages() {
+    std::vector<LanguageDefinition> out;
+    out.reserve(VendoredTable().size());
+    for (const Language& entry : VendoredTable()) {
+        out.push_back(LanguageDefinition{entry.name, entry.language_fn, entry.rules});
+    }
+    return out;
+}
+
+std::string CanonicalLanguage(std::string_view language,
+                              const std::vector<LanguageDefinition>* languages) {
     struct Alias {
         const char* alias;
         const char* canonical;
@@ -449,25 +461,67 @@ std::string CanonicalLanguage(std::string_view language) {
     for (const Alias& alias : kAliases) {
         if (lower == alias.alias) return alias.canonical;
     }
+    if (languages != nullptr) {
+        // A registered language resolves EXACTLY -- no aliases unless it
+        // supplies them; a plugin grammar's key is its own.
+        for (const LanguageDefinition& entry : *languages) {
+            if (lower == entry.name) return lower;
+        }
+        return "";
+    }
     if (FindLanguage(lower).language_fn != nullptr) return lower;
     return "";
 }
 
-bool SyntaxHighlighter::Supports(std::string_view language) {
-    return !CanonicalLanguage(language).empty();
+bool SyntaxHighlighter::Supports(std::string_view language) const {
+    return !CanonicalLanguage(language, languages_).empty();
 }
 
-SyntaxHighlighter::SyntaxHighlighter(const Theme& theme) : theme_(theme) {}
+SyntaxHighlighter::SyntaxHighlighter(const Theme& theme)
+    : theme_(theme), languages_(nullptr) {}
+
+SyntaxHighlighter::SyntaxHighlighter(const Theme& theme,
+                                     const std::vector<LanguageDefinition>& languages)
+    : theme_(theme), languages_(&languages) {}
 
 std::vector<HighlightSpan> SyntaxHighlighter::HighlightCode(std::string_view code,
                                                             std::string_view language) const {
-    const Language& lang = FindLanguage(CanonicalLanguage(language));
-    if (lang.language_fn == nullptr) {
-        return {{HighlightCategory::Plain, 0, static_cast<uint32_t>(code.size())}};
+    // Two lookup paths, one traversal: the vendored table (default) and the
+    // injected table the host assembles from the grammar registry. The
+    // categorizer differs; everything else is shared.
+    const Language* vendored = nullptr;
+    const LanguageDefinition* injected = nullptr;
+    if (languages_ != nullptr) {
+        const std::string canonical = CanonicalLanguage(language, languages_);
+        for (const LanguageDefinition& entry : *languages_) {
+            if (canonical == entry.name) {
+                injected = &entry;
+                break;
+            }
+        }
+        if (injected == nullptr) {
+            return {{HighlightCategory::Plain, 0, static_cast<uint32_t>(code.size())}};
+        }
+    } else {
+        vendored = &FindLanguage(CanonicalLanguage(language));
+        if (vendored->language_fn == nullptr) {
+            return {{HighlightCategory::Plain, 0, static_cast<uint32_t>(code.size())}};
+        }
     }
+    const TSLanguage* (*language_fn)(void) =
+        injected != nullptr ? injected->language_fn : vendored->language_fn;
+    const auto categorize = [&](const char* node_type) -> HighlightCategory {
+        if (injected != nullptr) {
+            for (const SyntaxRule& rule : injected->rules) {
+                if (node_type == rule.node_type) return rule.category;
+            }
+            return HighlightCategory::Plain;
+        }
+        return Categorize(*vendored, node_type);
+    };
 
     TSParser* parser = ts_parser_new();
-    if (!ts_parser_set_language(parser, lang.language_fn())) {
+    if (!ts_parser_set_language(parser, language_fn())) {
         ts_parser_delete(parser);
         return {{HighlightCategory::Plain, 0, static_cast<uint32_t>(code.size())}};
     }
@@ -484,7 +538,7 @@ std::vector<HighlightSpan> SyntaxHighlighter::HighlightCode(std::string_view cod
     while (true) {
         if (descend) {
             const TSNode node = ts_tree_cursor_current_node(&cursor);
-            const HighlightCategory category = Categorize(lang, ts_node_type(node));
+            const HighlightCategory category = categorize(ts_node_type(node));
             if (ts_node_is_named(node) || category != HighlightCategory::Plain) {
                 AppendSpan(spans, category, ts_node_start_byte(node), ts_node_end_byte(node));
             }

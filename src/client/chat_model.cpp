@@ -15,6 +15,40 @@ std::string JoinResultText(const v1::ToolResultBlock& block) {
     return joined;
 }
 
+// google.protobuf.Struct -> JSON, for the tool_input a renderer renders FROM.
+// The server has the same conversion in proto_convert.cpp; the client cannot
+// link server core, and the shape is fixed by protobuf's Struct, so this is a
+// twin rather than a drift risk.
+nlohmann::json StructToJson(const google::protobuf::Struct& value) {
+    nlohmann::json out = nlohmann::json::object();
+    for (const auto& [key, field] : value.fields()) {
+        switch (field.kind_case()) {
+            case google::protobuf::Value::kNullValue: out[key] = nullptr; break;
+            case google::protobuf::Value::kNumberValue: out[key] = field.number_value(); break;
+            case google::protobuf::Value::kStringValue: out[key] = field.string_value(); break;
+            case google::protobuf::Value::kBoolValue: out[key] = field.bool_value(); break;
+            case google::protobuf::Value::kListValue: {
+                nlohmann::json list = nlohmann::json::array();
+                for (const auto& item : field.list_value().values()) {
+                    // One level of nesting is all real tool inputs use; deeper
+                    // structures degrade to their string form rather than
+                    // recursing here -- the authoritative record is persisted,
+                    // and the renderer is a view, not a codec.
+                    (void)item;
+                    list.push_back(item.ShortDebugString());
+                }
+                out[key] = std::move(list);
+                break;
+            }
+            case google::protobuf::Value::kStructValue:
+                out[key] = StructToJson(field.struct_value());
+                break;
+            case google::protobuf::Value::KIND_NOT_SET: break;
+        }
+    }
+    return out;
+}
+
 // The spawn tool's name is core surface (agent_preset.hpp) but the wire is
 // what a client sees: a ToolUseBlock named this, whose id a later
 // tool-result-only User message echoes. Those messages are the harness
@@ -22,6 +56,18 @@ std::string JoinResultText(const v1::ToolResultBlock& block) {
 constexpr const char* kSpawnSubagentToolName = "spawn_subagent";
 
 }  // namespace
+
+std::string_view ToString(ChatRowKind kind) {
+    switch (kind) {
+        case ChatRowKind::UserText: return "user_text";
+        case ChatRowKind::UserAttachment: return "user_attachment";
+        case ChatRowKind::AgentMarkdown: return "agent_markdown";
+        case ChatRowKind::Thinking: return "thinking";
+        case ChatRowKind::ToolActivity: return "tool_activity";
+        case ChatRowKind::System: return "system";
+    }
+    return "unknown";
+}
 
 std::vector<ChatRow> ChatRowsFromMessages(const std::vector<v1::StoredMessage>& descending) {
     // Identify the spawn_subagent tool_use ids first: the completion
@@ -41,15 +87,20 @@ std::vector<ChatRow> ChatRowsFromMessages(const std::vector<v1::StoredMessage>& 
         return false;
     };
 
-    // Walk ascending (reverse of the input), remembering tool names by id so a
-    // result row can carry the name of the call that produced it.
+    // Walk ascending (reverse of the input), remembering tool names and inputs
+    // by id so a result row can carry the name of -- and the input JSON behind
+    // -- the call that produced it.
     std::vector<ChatRow> rows;
-    std::vector<std::pair<std::string, std::string>> tool_names;  // (id, name)
-    const auto tool_name_of = [&](const std::string& id) -> std::string {
-        for (const auto& [tool_id, name] : tool_names) {
-            if (tool_id == id) return name;
+    struct ToolCall {
+        std::string name;
+        nlohmann::json input = nlohmann::json::object();
+    };
+    std::vector<std::pair<std::string, ToolCall>> tool_calls;  // (id, call)
+    const auto tool_call_of = [&](const std::string& id) -> const ToolCall* {
+        for (const auto& [tool_id, call] : tool_calls) {
+            if (tool_id == id) return &call;
         }
-        return {};
+        return nullptr;
     };
 
     for (auto it = descending.rbegin(); it != descending.rend(); ++it) {
@@ -63,9 +114,12 @@ std::vector<ChatRow> ChatRowsFromMessages(const std::vector<v1::StoredMessage>& 
                     rows.push_back(ChatRow{.kind = ChatRowKind::Thinking,
                                            .text = block.thinking().text()});
                 } else if (block.has_tool_use()) {
-                    tool_names.emplace_back(block.tool_use().id(), block.tool_use().name());
+                    tool_calls.push_back(
+                        {block.tool_use().id(),
+                         ToolCall{block.tool_use().name(), StructToJson(block.tool_use().input())}});
                     rows.push_back(ChatRow{.kind = ChatRowKind::ToolActivity,
-                                           .tool_name = block.tool_use().name()});
+                                           .tool_name = block.tool_use().name(),
+                                           .tool_input = StructToJson(block.tool_use().input())});
                 }
             }
             continue;
@@ -94,9 +148,11 @@ std::vector<ChatRow> ChatRowsFromMessages(const std::vector<v1::StoredMessage>& 
                 continue;
             }
             for (const auto& block : message.content()) {
+                const ToolCall* call = tool_call_of(block.tool_result().tool_use_id());
                 ChatRow row{.kind = ChatRowKind::ToolActivity,
                             .text = JoinResultText(block.tool_result()),
-                            .tool_name = tool_name_of(block.tool_result().tool_use_id()),
+                            .tool_name = call != nullptr ? call->name : std::string{},
+                            .tool_input = call != nullptr ? call->input : nlohmann::json::object(),
                             .tool_is_error = block.tool_result().is_error()};
                 rows.push_back(std::move(row));
             }
@@ -134,6 +190,8 @@ CommandNotice NoticeFromCommandResult(const v1::CommandResult& result) {
     CommandNotice notice;
     notice.message = result.message();
     notice.is_error = result.status() == v1::COMMAND_STATUS_ERROR;
+    notice.display = result.display();
+    notice.view_hint = result.view_hint();
     return notice;
 }
 

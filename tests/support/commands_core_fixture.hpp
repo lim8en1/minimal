@@ -126,6 +126,14 @@ public:
     void set_model_override(std::optional<common::ModelRef> ref) override {
         override_ = std::move(ref);
     }
+    // Records rather than runs: a prompt-shorthand test asserts the text and
+    // shape of the submission, and running a real turn here would need a
+    // scripted provider response the command itself knows nothing about.
+    bool SubmitTurn(std::string text) override {
+        submitted_turns_.push_back(std::move(text));
+        return true;
+    }
+    const std::vector<std::string>& submitted_turns() const { return submitted_turns_; }
 
     // Replaces providers.json wholesale -- for tests that exercise discover
     // entries beside the static fixture. Call ReloadPresets() afterwards.
@@ -170,6 +178,7 @@ private:
     agent::AgentPreset preset_;
     std::unique_ptr<agent::AgentLoop> loop_;
     std::optional<common::ModelRef> override_;
+    std::vector<std::string> submitted_turns_;
 };
 
 }  // namespace minimal::testing

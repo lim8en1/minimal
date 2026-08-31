@@ -85,4 +85,12 @@ std::string Keybindings::KeyFor(std::string_view action, std::string_view fallba
     return std::string(fallback);
 }
 
+bool Keybindings::EnsureDefault(std::string_view action, std::string_view key) {
+    if (key.empty()) return false;
+    const std::string name(action);
+    if (bindings_.find(name) != bindings_.end()) return false;
+    bindings_.emplace(name, std::string(key));
+    return true;
+}
+
 }  // namespace minimal::client

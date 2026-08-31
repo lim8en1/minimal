@@ -82,6 +82,46 @@ struct PluginRegistrationContext {
     ServiceRegistry* services = nullptr;
 };
 
+// --- The generic client channel (track E5; docs/EXTENSIBILITY.md 2.5) -------
+//
+// A UI plugin is usually a PAIR: a server-side data source plus a client-side
+// view. The wire carries two generic RPCs (PluginCall / PluginSubscribe);
+// server-side, they dispatch by plugin_name through the ServiceRegistry to the
+// PluginEndpoint the plugin Provided under its own name. Core defines neither
+// payload nor semantics: the JSON both ways is the plugin's own.
+
+// The push side of a subscription. Implemented by the RPC layer; a plugin's
+// push source holds it by shared_ptr. Thread-safe. Push returns false once the
+// subscriber is gone (stream closed or cancelled) -- a push source must stop
+// and drop its reference at that point, which is what makes teardown safe.
+class PluginSubscriptionSink {
+public:
+    virtual ~PluginSubscriptionSink() = default;
+    virtual bool Push(std::string json_payload) = 0;
+};
+
+// What a plugin Provides under its own name to serve the generic channel.
+// Abstract, header-only, pure virtual: the RPC layer static_casts
+// ServiceRegistry::Find(plugin_name) to this and dispatches through the
+// vtable -- no symbol resolution, so RTLD_LOCAL costs nothing.
+class PluginEndpoint {
+public:
+    virtual ~PluginEndpoint() = default;
+
+    // One call, one JSON answer. A throw is contained by the RPC layer and
+    // answered as an error to the caller -- plugin code is not trusted to
+    // return normally, like every other entry point.
+    virtual std::string Call(const std::string& method, const std::string& json_payload) = 0;
+
+    // Starts a subscription: the endpoint pushes payloads to `sink` (from any
+    // thread it owns) until the subscriber is gone -- Push returning false.
+    // Returns false to refuse (unknown method, no such subscription): the RPC
+    // answers NOT_FOUND. The sink's lifetime is shared; holding it past the
+    // subscriber's disconnect is safe but pointless, since every Push fails.
+    virtual bool Subscribe(const std::string& method, const std::string& json_payload,
+                           std::shared_ptr<PluginSubscriptionSink> sink) = 0;
+};
+
 }  // namespace minimal::plugins
 
 extern "C" {
@@ -136,11 +176,9 @@ void minimal_plugin_register_commands(minimal::commands::CommandRegistry&,
 void minimal_plugin_register_services(minimal::plugins::ServiceRegistry&,
                                       const minimal::plugins::PluginRegistrationContext&);
 
-// OPTIONAL, exclusive: one @-mention suggestion strategy. First plugin wins; a
-// second registration logs a warning and is ignored. The core default
-// (PrefixMentionResolver) stays in force until a plugin registers.
 void minimal_plugin_register_mention_resolver(minimal::agent::MentionResolverRegistry&,
                                               const minimal::plugins::PluginRegistrationContext&);
+
 
 // Exclusive: one global choice. First registration wins; a second logs a
 // warning and is ignored (the registry enforces this). The default is NO

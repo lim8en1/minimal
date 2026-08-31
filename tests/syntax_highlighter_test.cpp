@@ -60,9 +60,9 @@ TEST_CASE("Aliases resolve to the vendored grammars") {
     const std::string code = "def f():\n    return 1\n";
     const auto pieces = Resolve(code, highlighter.HighlightCode(code, "py"));
     CHECK(HasPiece(pieces, HighlightCategory::Keyword, "def"));
-    CHECK(SyntaxHighlighter::Supports("c++"));
-    CHECK(SyntaxHighlighter::Supports("sh"));
-    CHECK(!SyntaxHighlighter::Supports("cobol"));
+    CHECK(highlighter.Supports("c++"));
+    CHECK(highlighter.Supports("sh"));
+    CHECK(!highlighter.Supports("cobol"));
 }
 
 TEST_CASE("An unsupported language is one Plain span over the whole input") {

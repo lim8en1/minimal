@@ -1,0 +1,424 @@
+#pragma once
+
+// The client slot registries (docs/EXTENSIBILITY.md 4.2) -- the TUI's pluggable
+// presentation surface, mirroring the server's registry pattern:
+//
+//   - ADDITIVE registries (views, tool-result renderers, message renderers,
+//     status segments, syntax grammars) take many plugins; a duplicate key is
+//     recorded through the shared NameRegistry and is FATAL at startup, naming
+//     both claimants.
+//
+//   - EXCLUSIVE registries (chat surface, markdown engine) take one; a second
+//     registration warns and is ignored -- the MentionResolver/AuthProvider
+//     pattern. The core default (registered only when no plugin claimed the
+//     slot) is what "exclusive" protects.
+//
+//   - Every registry carries the server's attribution window trio
+//     (SetAttribution / ClearAttribution / attributions) so a collision can
+//     name both culprits and a PluginRecord can say what one plugin registered.
+//
+// Render-time inputs travel with the call -- including `const Theme&`. Plugins
+// load BEFORE the theme does (theme `sections` need to know which plugins are
+// loaded), so nothing renderable can capture a theme at registration.
+
+#include <map>
+#include <memory>
+#include <optional>
+#include <span>
+#include <string>
+#include <string_view>
+#include <vector>
+
+#include <ftxui/component/component.hpp>
+#include <ftxui/dom/elements.hpp>
+#include <nlohmann/json.hpp>
+#include <tree_sitter/api.h>
+
+#include "minimal/client/chat_model.hpp"
+#include "minimal/client/render/theme.hpp"
+#include "minimal/client/render/syntax_highlighter.hpp"
+#include "minimal/v1/session_service.pb.h"
+
+namespace minimal::client::plugins {
+
+// The highlighter's rule type IS the ABI type -- no translation between a
+// registered grammar and core.
+using SyntaxRule = minimal::client::SyntaxRule;
+using LanguageFnPtr = minimal::client::LanguageFnPtr;
+
+// --- Attention (docs/EXTENSIBILITY.md 4.2, "Attention sink") ----------------
+
+// What a plugin may raise or clear. Core event derivation (the Waiting '!') is
+// the default source; a plugin raise WINS until cleared, and the glyph is the
+// same '!': the only color-independent signal, whatever raised it.
+//
+// Implemented by the host over a shared attention state block; handed to
+// plugins in the registration context.
+class AttentionSink {
+public:
+    virtual ~AttentionSink() = default;
+    virtual void RaiseTab(const std::string& session_id) = 0;
+    virtual void ClearTab(const std::string& session_id) = 0;
+    virtual void RaiseGlobal() = 0;
+    virtual void ClearGlobal() = 0;
+};
+
+// The host-side state behind AttentionSink, shared by the sink and AppState.
+// Created before plugin load; AppState reads it per frame. Thread-safe: Raise
+// arrives from plugin code (often a plugin's data thread), reads happen on the
+// render thread.
+class AttentionState {
+public:
+    void RaiseTab(const std::string& session_id);
+    void ClearTab(const std::string& session_id);
+    void RaiseGlobal();
+    void ClearGlobal();
+
+    // A plugin raise wins until cleared; core derivation ORs in underneath.
+    bool TabRaised(const std::string& session_id) const;
+    bool GlobalRaised() const;
+    std::vector<std::string> RaisedTabs() const;
+
+private:
+    mutable std::mutex mtx_;
+    std::map<std::string, bool> tab_;
+    bool global_ = false;
+};
+
+// --- Tool-result renderers (keyed by tool name) -----------------------------
+
+// A renderer for one tool's RESULT row -- "a diff view for `edit`", per
+// ARCHITECTURE.md. Rendering a CORE tool is as legitimate as a plugin tool:
+// keyed by name, source-agnostic. A renderer for a tool whose plugin is
+// disabled (or for a name nothing registers) simply never matches -- the
+// fallback is the default collapsible row, not an error.
+class ToolResultRenderer {
+public:
+    virtual ~ToolResultRenderer() = default;
+    virtual std::string_view tool_name() const = 0;
+    // Takes the tool INPUT as well as its result -- a diff renderer needs the
+    // file path, not just the hunk text (ARCHITECTURE.md). `tool_input` is the
+    // JSON the model sent with the call; empty object when unavailable.
+    virtual ftxui::Element Render(const nlohmann::json& tool_input, std::string_view result_text,
+                                  bool is_error, const Theme& theme) const = 0;
+};
+
+// --- Message-kind presentation (keyed by ChatRowKind) -----------------------
+
+// Renderers for one kind of chat row; core supplies the defaults the
+// message-kind table specifies. The DATA PLANE (event demux, virtualization,
+// streaming buffer) stays core regardless of who renders a row. A plugin
+// claiming a kind replaces the core default for that kind only; a second
+// plugin claiming the same kind is a fatal collision (a new NameRegistry kind
+// is overkill for an enum key -- the registry tracks (kind, plugin) pairs and
+// the loader surfaces duplicates through the same fatal path).
+class MessageRenderer {
+public:
+    virtual ~MessageRenderer() = default;
+    virtual ftxui::Element Render(const ChatRow& row, const Theme& theme) const = 0;
+};
+
+// --- Status-bar segments (keyed by segment id) ------------------------------
+
+// One provider per segment id; the format string (ui.json `status_format`)
+// orders and selects by id, so a plugin adds content while the user keeps
+// layout control. An unknown id renders nothing with a startup warning --
+// the keybindings.json rule for names unknown at compile time.
+//
+// Render() is called on the render thread each frame (~20 Hz): it must be
+// cheap and must never block. Color comes from theme roles, never hardcoded;
+// the v1 contract is text (the core segments are strings too).
+class StatusSegment {
+public:
+    virtual ~StatusSegment() = default;
+    virtual std::string_view id() const = 0;
+    virtual std::string Render() const = 0;
+};
+
+// --- Syntax grammars (additive, keyed by language) --------------------------
+
+// One language grammar: the vendored set registers as the defaults, and a
+// plugin may add a language (a grammar ships its own TSLanguage* -- the
+// vendored symbols are not exported). Two plugins claiming the same language
+// is a fatal collision (a NameRegistry kind). The rule type is the
+// highlighter's own `client::SyntaxRule`; no translation between ABI and core.
+class SyntaxGrammar {
+public:
+    virtual ~SyntaxGrammar() = default;
+    // Canonical language key ("python") -- the fenced-code info string is
+    // matched through the core alias table, which consults registered
+    // languages too.
+    virtual std::string_view Language() const = 0;
+    // The tree-sitter parse function itself (tree_sitter_python and friends) --
+    // the raw symbol, not a called result, so the highlighter's parser setup
+    // treats registered and vendored grammars identically.
+    virtual minimal::client::LanguageFnPtr LanguageFn() const = 0;
+    virtual std::span<const SyntaxRule> Rules() const = 0;
+};
+
+// --- Markdown engine (EXCLUSIVE) --------------------------------------------
+
+// The exclusive replacement slot for the whole markdown pipeline. The contract
+// carries the streaming semantics explicitly: complete-text render AND the
+// streaming lifecycle, whose debounce-and-finalize property ("partial input
+// cannot soundly parse"; Finalize() always reparses authoritatively) is the
+// IMPLEMENTER'S obligation, not the host's. Second registration warns and is
+// ignored; with none registered the core md4c adapter stands.
+class MarkdownEngine {
+public:
+    virtual ~MarkdownEngine() = default;
+
+    // A persisted (complete) block.
+    virtual ftxui::Element Render(std::string_view markdown_text, const Theme& theme) const = 0;
+
+    // The in-flight block. The implementer owns debounce and finalize: Render
+    // may reparse at the implementer's cadence, Finalize() must produce the
+    // authoritative render of everything appended so far.
+    class Stream {
+    public:
+        virtual ~Stream() = default;
+        virtual void AppendDelta(std::string_view text) = 0;
+        virtual void Finalize() = 0;
+        virtual ftxui::Element Render(const Theme& theme) const = 0;
+    };
+    virtual std::unique_ptr<Stream> MakeStream() const = 0;
+};
+
+// --- Chat surface (EXCLUSIVE -- the one wholesale-replacement slot) ---------
+
+// One plugin may replace the whole chat view. Exclusive deliberately: the
+// interface is big (streaming lifecycle, event push, scrollback, focus) and
+// this repo's rule is that an interface which grew that big needs a reason; a
+// wholesale chat replacement is that reason, taken once. Message-kind slots
+// cover the common case.
+class ChatSurface {
+public:
+    virtual ~ChatSurface() = default;
+
+    struct Spec {
+        std::string id;     // stable; how diagnostics and keybindings name it
+        std::string title;  // the tab body title, if shown
+    };
+    virtual const Spec& spec() const = 0;
+
+    // The tab body. Built per open tab by the host; one component instance per
+    // tab. The host owns layout: a surface renders INSIDE the tab, it does not
+    // restructure the frame.
+    virtual ftxui::Component component() = 0;
+
+    // The host pushes EVERY ServerEvent for the session -- the same events core
+    // dispatches to its own state plane. A surface owns its presentation and
+    // buffering from there; scrollback pages come through ClientApi. A surface
+    // NEVER opens its own connection.
+    virtual void OnEvent(const v1::ServerEvent& event) = 0;
+
+    // Called once after the theme is loaded (plugins register before it). The
+    // surface re-reads colors through it; Render paths receive the theme the
+    // same way core views do.
+    virtual void OnTheme(const Theme& theme) = 0;
+};
+
+// --- Views (additive: panel or modal) ---------------------------------------
+
+enum class ViewPlacement { Panel, Modal };
+
+struct ViewSpec {
+    std::string id;  // stable; how keybindings.json addresses it
+    std::string title;
+    ViewPlacement placement = ViewPlacement::Panel;
+    // Registered as the DEFAULT binding only if the user's keybindings.json
+    // does not already name this id (Keybindings::EnsureDefault).
+    std::string default_keybinding;
+};
+
+// A self-contained view. Panels render in the panel region; modals render in
+// the modal layer -- BELOW the quit confirmation and the permission modal,
+// always: a plugin modal cannot preempt or mask the security UI (the invariant
+// is structural in the host's modal nesting, and tested).
+class View {
+public:
+    virtual ~View() = default;
+    virtual const ViewSpec& spec() const = 0;
+    virtual ftxui::Component component() = 0;
+};
+
+// --- The sanctioned data path ------------------------------------------------
+
+// Implemented by the host over SessionClient. Declared here so the ABI names
+// the capability, not the transport. A view or chat surface NEVER opens its
+// own connection; the host owns the channel.
+class ClientApi {
+public:
+    virtual ~ClientApi() = default;
+
+    struct MessagePage {
+        std::vector<v1::StoredMessage> messages;  // descending by seq
+        bool has_more = false;
+    };
+
+    // Keyset page over the session transcript -- the same call, cursor
+    // semantics and bound core's scrollback uses (nullopt cursor = newest
+    // page). Bounded like core's own refresh (2 s deadline). nullopt return:
+    // the call failed or timed out -- a transient condition, not an error to
+    // surface.
+    virtual std::optional<MessagePage> GetMessages(const std::string& session_id,
+                                                   std::optional<std::int64_t> before_seq,
+                                                   int limit) = 0;
+
+    // The generic plugin channel (docs/EXTENSIBILITY.md 2.5, 4.3 ruling 3):
+    // a plugin's OWN data path, plugin-owned JSON both ways. `plugin_name`
+    // names the server-side pair; core transports and never interprets.
+
+    // One call, one JSON answer. nullopt: refused, unknown pair, or endpoint
+    // failure -- the transport-level conditions. Plugin-level errors are
+    // plugin-owned JSON, not this nullopt.
+    virtual std::optional<std::string> PluginCall(const std::string& plugin_name,
+                                                  const std::string& method,
+                                                  const std::string& json_payload) = 0;
+
+    // Streams the subscription to `on_payload` on the CALLING thread (blocking
+    // until the server closes the stream or the callback returns false).
+    // False return: the subscription was refused.
+    virtual bool PluginSubscribe(const std::string& plugin_name, const std::string& method,
+                                 const std::string& json_payload,
+                                 const std::function<bool(const std::string&)>& on_payload) = 0;
+};
+
+// --- Registries -------------------------------------------------------------
+
+// Common attribution mechanics, identical to the server's registries: the
+// loader opens a window around each plugin's registration callback and
+// everything arriving inside it is attributed to that plugin.
+struct Attribution {
+    std::string plugin_name;    // empty for what core registers itself
+    std::string original_name;  // the key as registered
+};
+
+class ViewRegistry {
+public:
+    // Registry owns the view. Returns the attribution recorded; a duplicate id
+    // is NOT silently replaced -- it is recorded for the fatal-collision scan
+    // and the first registration stays active.
+    void Register(std::unique_ptr<View> view);
+    const std::vector<std::unique_ptr<View>>& views() const { return views_; }
+    View* Find(std::string_view id) const;
+
+    void SetAttribution(std::string plugin_name) { attribution_ = std::move(plugin_name); }
+    void ClearAttribution() { attribution_.clear(); }
+    const std::vector<Attribution>& attributions() const { return attributions_; }
+
+private:
+    std::vector<std::unique_ptr<View>> views_;
+    std::string attribution_;
+    std::vector<Attribution> attributions_;
+};
+
+class ToolResultRendererRegistry {
+public:
+    void Register(std::unique_ptr<ToolResultRenderer> renderer);
+    const ToolResultRenderer* Find(std::string_view tool_name) const;
+    const std::vector<Attribution>& attributions() const { return attributions_; }
+
+    void SetAttribution(std::string plugin_name) { attribution_ = std::move(plugin_name); }
+    void ClearAttribution() { attribution_.clear(); }
+
+private:
+    std::vector<std::unique_ptr<ToolResultRenderer>> renderers_;
+    std::string attribution_;
+    std::vector<Attribution> attributions_;
+};
+
+class MessageRendererRegistry {
+public:
+    // Claims `kind`. The FIRST claimant for a kind stays; a second claim (from
+    // another plugin) is recorded -- the loader turns it into the same fatal
+    // outcome a name collision gets.
+    void Register(ChatRowKind kind, std::unique_ptr<MessageRenderer> renderer);
+    // The renderer for a kind, or null -- the caller falls back to the core
+    // default (which is itself registered here once core fills it).
+    const MessageRenderer* Find(ChatRowKind kind) const;
+    // (kind, plugin) pairs, for the collision scan.
+    const std::vector<std::pair<ChatRowKind, Attribution>>& claims() const { return claims_; }
+
+    void SetAttribution(std::string plugin_name) { attribution_ = std::move(plugin_name); }
+    void ClearAttribution() { attribution_.clear(); }
+
+private:
+    std::map<ChatRowKind, std::unique_ptr<MessageRenderer>> renderers_;
+    std::string attribution_;
+    std::vector<std::pair<ChatRowKind, Attribution>> claims_;
+};
+
+class StatusSegmentRegistry {
+public:
+    void Register(std::unique_ptr<StatusSegment> segment);
+    const std::vector<std::unique_ptr<StatusSegment>>& segments() const { return segments_; }
+    const StatusSegment* Find(std::string_view id) const;
+    const std::vector<Attribution>& attributions() const { return attributions_; }
+
+    void SetAttribution(std::string plugin_name) { attribution_ = std::move(plugin_name); }
+    void ClearAttribution() { attribution_.clear(); }
+
+private:
+    std::vector<std::unique_ptr<StatusSegment>> segments_;
+    std::string attribution_;
+    std::vector<Attribution> attributions_;
+};
+
+class SyntaxGrammarRegistry {
+public:
+    void Register(std::unique_ptr<SyntaxGrammar> grammar);
+    // The language table the highlighter consults, in registration order.
+    const std::vector<std::unique_ptr<SyntaxGrammar>>& grammars() const { return grammars_; }
+    const std::vector<Attribution>& attributions() const { return attributions_; }
+
+    void SetAttribution(std::string plugin_name) { attribution_ = std::move(plugin_name); }
+    void ClearAttribution() { attribution_.clear(); }
+
+private:
+    std::vector<std::unique_ptr<SyntaxGrammar>> grammars_;
+    std::string attribution_;
+    std::vector<Attribution> attributions_;
+};
+
+// Exclusive registries: first registration wins, the second warns and is
+// ignored. Kept as records rather than lookup tables -- there is exactly one
+// active registrant, or none.
+struct ExclusiveRecord {
+    bool registered = false;
+    std::string plugin_name;  // who holds the slot; empty for the core default
+
+    // False (and warns) when the slot was already taken. Never overwrites.
+    bool Claim(std::string_view claimant);
+};
+
+class ChatSurfaceRegistry {
+public:
+    std::unique_ptr<ChatSurface> surface;  // null when core's chat view stands
+    ExclusiveRecord record;
+    const std::vector<Attribution>& attributions() const { return attributions_; }
+    void SetAttribution(std::string plugin_name) { attribution_ = std::move(plugin_name); }
+    void ClearAttribution() { attribution_.clear(); }
+    // Takes ownership; warns and ignores when the slot is already claimed.
+    void Register(std::unique_ptr<ChatSurface> surface);
+
+private:
+    std::string attribution_;
+    std::vector<Attribution> attributions_;
+};
+
+class MarkdownEngineRegistry {
+public:
+    std::unique_ptr<MarkdownEngine> engine;  // null: host uses the core default
+    ExclusiveRecord record;
+    const std::vector<Attribution>& attributions() const { return attributions_; }
+    void SetAttribution(std::string plugin_name) { attribution_ = std::move(plugin_name); }
+    void ClearAttribution() { attribution_.clear(); }
+    void Register(std::unique_ptr<MarkdownEngine> engine);
+
+private:
+    std::string attribution_;
+    std::vector<Attribution> attributions_;
+};
+
+}  // namespace minimal::client::plugins

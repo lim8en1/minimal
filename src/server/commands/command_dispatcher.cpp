@@ -43,7 +43,18 @@ CommandResult Dispatch(const CommandRegistry& registry, const std::string& name,
     }
 
     try {
-        return command->Execute(context, args);
+        auto outcome = command->Execute(context, args);
+        // The command owns where its result surfaces; the dispatcher only
+        // carries it. Downgraded to the status line on error -- a View result
+        // that failed has nothing to show, and errors belong on the notice
+        // line (EXTENSIBILITY 4.4: "errors too, styled as errors").
+        outcome.display = outcome.status == CommandResult::Status::kOk
+                              ? command->Display()
+                              : CommandDisplay::kStatus;
+        if (outcome.display == CommandDisplay::kView) {
+            outcome.view_hint = std::string(command->ViewHint());
+        }
+        return outcome;
     } catch (const std::exception& error) {
         // A throwing command must not take the worker down with it: the session
         // survives a failed turn, and it survives a failed command for the same

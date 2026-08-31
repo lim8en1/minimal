@@ -16,9 +16,12 @@
 // is a click-to-open selector; type-ahead reads better inline. Tab completes
 // the highlighted suggestion.
 //
-// /-COMMANDS: a prompt starting with '/' goes out as a CommandInvocation (E4
-// sends and renders it as a notice; display-mode refinement and
-// /-autocomplete via ListCommands are E5).
+// /-COMMANDS: a prompt starting with '/' goes out as a CommandInvocation.
+// /-AUTOCOMPLETE (E5): while the first token still reads like a command name
+// ('/' plus non-space), the local ListCommands catalog filters inline -- no
+// debounce, the catalog is in memory, fetched once at connect. Prompt
+// shorthands are annotated as the one kind that will submit a turn
+// (docs/EXTENSIBILITY.md 4.4), so a macro never surprises anyone.
 
 #include <chrono>
 #include <functional>
@@ -35,7 +38,8 @@ namespace minimal::client {
 // Owned by RunTui (one per app; the editor targets the FOCUSED tab).
 struct PromptEditorState {
     std::string content;                    // the input's text (InputOption::content)
-    std::vector<std::string> suggestions;   // live @-mention list
+    std::vector<std::string> suggestions;   // live suggestion list (display text)
+    std::vector<std::string> completions;   // what Tab inserts (differs from display for commands)
     int suggestion_selected = 0;
     bool list_open = false;
     // Debounce bookkeeping for the SuggestPaths query.
@@ -44,10 +48,20 @@ struct PromptEditorState {
     bool query_pending = false;
 };
 
+// One /-command the editor may offer. From ListCommands, fetched once at
+// connect by the host.
+struct CommandCatalogEntry {
+    std::string name;
+    std::string summary;
+    bool read_only = false;
+    bool submits_prompt = false;  // PromptShorthand: the one kind that submits a turn
+};
+
 ftxui::Component MakePromptEditor(
     const Theme& theme, PromptEditorState& state,
     std::function<void(const std::string&)> on_text,
     std::function<void(const std::string&)> on_command,
-    std::function<std::vector<std::string>(const std::string& prefix)> suggest);
+    std::function<std::vector<std::string>(const std::string& prefix)> suggest,
+    std::function<std::vector<CommandCatalogEntry>()> command_catalog = nullptr);
 
 }  // namespace minimal::client

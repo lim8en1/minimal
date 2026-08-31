@@ -2,79 +2,43 @@
 
 namespace minimal::client {
 
-namespace {
-
-ftxui::Element DimLine(const std::string& content, const ftxui::Color& tint) {
-    using namespace ftxui;
-    return paragraph(content) | color(tint) | dim;
-}
-
-}  // namespace
-
-ChatView::ChatView(const Theme& theme, const MarkdownRenderer& renderer)
-    : theme_(theme), renderer_(renderer) {}
+ChatView::ChatView(const Theme& theme, const plugins::MarkdownEngine& engine,
+                   const plugins::MessageRendererRegistry& message_renderers,
+                   const plugins::ToolResultRendererRegistry& tool_renderers)
+    : theme_(theme),
+      engine_(engine),
+      message_renderers_(message_renderers),
+      tool_renderers_(tool_renderers) {}
 
 void ChatView::RebuildRows(const SessionState::Snapshot& snapshot) {
+    using namespace ftxui;
     rows_ = ChatRowsFromMessages(snapshot.scrollback_page);
     rendered_rows_.clear();
     rendered_rows_.reserve(rows_.size());
-    using namespace ftxui;
 
     for (const auto& row : rows_) {
         Elements parts;
-        switch (row.kind) {
-            case ChatRowKind::UserText:
-                // Verbatim: the user's text is echoed, never re-rendered as
-                // markdown (their underscores are not emphasis).
-                parts.push_back(paragraph(row.text) | color(theme_.ColorFor("user_message")) |
-                                bold);
-                break;
-            case ChatRowKind::UserAttachment: {
-                // Collapsed by default: the path header is the information; the
-                // body is one keystroke... (v1: a dimmed preview tail).
-                parts.push_back(
-                    hbox({text("@") | color(theme_.ColorFor("user_message")),
-                          text(row.attachment_path) | color(theme_.ColorFor("user_message")),
-                          text(" (attached)") | dim}));
-                parts.push_back(DimLine(row.text.substr(0, 400), theme_.ColorFor("system_message")));
-                break;
+
+        // The tool-result slot: a renderer keyed by the tool's NAME takes
+        // precedence on RESULT rows (it has something to render FROM). A bare
+        // tool_use row (nothing produced yet) and any unmatched name fall back
+        // to the message-kind default -- the "disabled tool's plugin" fallback
+        // is a fallback, not an error.
+        if (row.kind == ChatRowKind::ToolActivity && !row.text.empty()) {
+            if (const auto* renderer = tool_renderers_.Find(row.tool_name)) {
+                parts.push_back(renderer->Render(row.tool_input, row.text, row.tool_is_error,
+                                                 theme_));
+                rendered_rows_.push_back(std::move(parts));
+                continue;
             }
-            case ChatRowKind::AgentMarkdown:
-                parts.push_back(renderer_.Render(row.text));
-                break;
-            case ChatRowKind::Thinking:
-                parts.push_back(hbox({text("thinking ") | color(theme_.ColorFor("thinking")) | dim,
-                                      text("(" + std::to_string(static_cast<int>(row.text.size())) +
-                                           " chars, hidden)") |
-                                          color(theme_.ColorFor("thinking")) | dim}));
-                break;
-            case ChatRowKind::ToolActivity: {
-                const std::string name =
-                    row.tool_name.empty() ? std::string("tool") : row.tool_name;
-                Elements line;
-                line.push_back(text("tool " + name) | color(theme_.ColorFor("syntax_function")));
-                if (row.tool_is_error) {
-                    line.push_back(text(" FAILED") | color(theme_.ColorFor("error")));
-                }
-                parts.push_back(hbox(std::move(line)));
-                if (!row.text.empty()) {
-                    // Bounded body: the capped persisted ToolResultBlock is the
-                    // authoritative record; this is orientation, not an archive.
-                    std::string body = row.text;
-                    const auto last_newline =
-                        body.size() > 4000 ? body.rfind('\n', body.size() - 4000) : std::string::npos;
-                    if (last_newline != std::string::npos) body = "... " + body.substr(last_newline);
-                    parts.push_back(DimLine(body, theme_.ColorFor("system_message")));
-                }
-                break;
-            }
-            case ChatRowKind::System:
-                // Muted and prefixed: "the harness told you something" must
-                // never read as "the model said something".
-                parts.push_back(
-                    hbox({text("[minimal] ") | color(theme_.ColorFor("system_message")) | bold,
-                          paragraph(row.text) | color(theme_.ColorFor("system_message"))}));
-                break;
+        }
+
+        const auto* renderer = message_renderers_.Find(row.kind);
+        // Core fills every unclaimed kind, so null is unreachable in the
+        // wired host; kept as a guard so an unwired registry degrades to an
+        // empty row rather than a crash.
+        if (renderer != nullptr) {
+            parts.push_back(renderer->Render(row, theme_));
         }
         rendered_rows_.push_back(std::move(parts));
     }
@@ -82,7 +46,7 @@ void ChatView::RebuildRows(const SessionState::Snapshot& snapshot) {
 }
 
 ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
-                                StreamingMarkdownView& streaming) {
+                                plugins::MarkdownEngine::Stream& streaming) {
     using namespace ftxui;
 
     if (rendered_version_ != snapshot.transcript_version) {
@@ -96,12 +60,13 @@ ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
         column.push_back(text(" "));  // breathing room between rows
     }
 
-    // The in-flight block: streamed deltas via the debounced view. Rendered
-    // while the streaming text exists; a post-turn refresh swaps it for the
-    // persisted rows (SessionState::ClearStreaming after RefreshScrollback).
+    // The in-flight block: streamed deltas via the engine's debounced view.
+    // Rendered while the streaming text exists; a post-turn refresh swaps it
+    // for the persisted rows (SessionState::ClearStreaming after
+    // RefreshScrollback).
     if (!snapshot.streaming_text.empty()) {
         column.push_back(text("assistant") | color(theme_.ColorFor("assistant_message")) | bold);
-        column.push_back(streaming.Render());
+        column.push_back(streaming.Render(theme_));
     }
     return vbox(std::move(column));
 }

@@ -32,7 +32,11 @@ public:
 
     // Fires the token and wakes every waiter parked on it.
     void Cancel() {
-        cancelled_.store(true, std::memory_order_acq_rel);
+        // Release, not acq_rel: a store takes no acquire half, and libc++
+        // rejects acq_rel on a store outright (diagnose_if). IsCancelled pairs
+        // with acquire; the mutex critical section in Notify() provides the
+        // synchronization the cv path needs.
+        cancelled_.store(true, std::memory_order_release);
         Notify();
     }
 

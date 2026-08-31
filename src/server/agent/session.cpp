@@ -280,6 +280,10 @@ void Session::RejectCommand(const QueuedCommand& command, const std::string& rea
     result->set_request_id(command.request_id);
     result->set_status(v1::COMMAND_STATUS_ERROR);
     result->set_message(reason);
+    // Refusals surface on the notice line like any other error; UNSPECIFIED is
+    // never sent deliberately -- the client treats it as STATUS anyway, but an
+    // explicit value keeps the wire self-describing.
+    result->set_display(v1::COMMAND_DISPLAY_STATUS);
     if (!channels_->queue.TryPush(std::move(event))) {
         logger_.warn("session {}: command '{}' refused and the queue is full; client will not "
                      "see it",
@@ -386,6 +390,14 @@ void Session::ExecuteCommand(const QueuedCommand& command, bool busy) {
                            ? v1::COMMAND_STATUS_OK
                            : v1::COMMAND_STATUS_ERROR);
     result->set_message(outcome.message);
+    // Where the result surfaces (EXTENSIBILITY 4.4). The dispatcher already
+    // downgraded an error to the status line; this copies the surviving value.
+    result->set_display(outcome.display == commands::CommandDisplay::kView
+                            ? v1::COMMAND_DISPLAY_VIEW
+                            : outcome.display == commands::CommandDisplay::kSilent
+                                  ? v1::COMMAND_DISPLAY_SILENT
+                                  : v1::COMMAND_DISPLAY_STATUS);
+    result->set_view_hint(outcome.view_hint);
     EmitCommandResult(std::move(event), command);
 }
 
@@ -593,6 +605,19 @@ void Session::RunOneTurn(std::string text) {
     // plugin code), and one stage throwing must not skip the later ones -- a
     // blocking subagent waiting on on_turn_finished must unblock even if the
     // observer notify above it just failed.
+    // The name refresh runs BEFORE EmitTurnCompleted, deliberately:
+    // TurnCompletedEvent is the END-OF-TURN signal -- "the only thing that
+    // tells a client the server is done talking for now" (proto comment) -- and
+    // a client may half-close the moment it sees it. Anything pushed after it
+    // is then an undrained message on a stream the client has stopped reading,
+    // which wedges the client's Finish() (the drain-before-Finish deadlock § A
+    // records, from the server side). Bookkeeping events ride BEFORE the
+    // terminator, never after.
+    try {
+        MaybeEmitNameFromStore();
+    } catch (...) {
+        logger_.warn("session {}: checking the store for a default name failed", params_.session_id);
+    }
     try {
         EmitTurnCompleted(result.stop_reason, result.last_usage, result.hit_max_turns);
     } catch (...) {
@@ -644,6 +669,31 @@ void Session::EmitTurnCompleted(llm::StopReason stop_reason, const llm::Usage& u
     completed->set_stop_reason(rpc::ToProto(stop_reason));
     *completed->mutable_usage() = rpc::ToProto(usage);
     completed->set_hit_max_turns(hit_max_turns);
+    channels_->queue.Push(std::move(event));
+}
+
+void Session::MaybeEmitNameFromStore() {
+    // Two exit conditions before the query: already named (the ordinary case --
+    // a chosen name, a resumed session, or this method having run once), or
+    // nothing appended yet (a turn that failed before its first message; there
+    // is no name to find and the next turn will ask again).
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!info_.name.empty()) return;
+    }
+    if (store_->last_appended_seq() < 0) return;
+
+    const auto stored = store_->StoredName();
+    if (!stored || stored->empty()) return;
+
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        info_.name = *stored;
+    }
+    v1::ServerEvent event = MakeEvent(params_.session_id);
+    auto* metadata = event.mutable_session_metadata();
+    metadata->set_session_id(params_.session_id);
+    metadata->set_name(*stored);
     channels_->queue.Push(std::move(event));
 }
 

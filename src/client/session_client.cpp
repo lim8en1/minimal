@@ -92,6 +92,60 @@ SessionClient::ListSessionsResult SessionClient::ListSessions(const std::string&
     return result;
 }
 
+SessionClient::ListCommandsResult SessionClient::ListCommands() {
+    grpc::ClientContext context;
+    context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(2));
+    ListCommandsResult result;
+    result.status = stub_->ListCommands(&context, v1::ListCommandsRequest{}, &result.response);
+    return result;
+}
+
+grpc::Status SessionClient::DeleteSession(const std::string& session_id) {
+    grpc::ClientContext context;
+    context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(2));
+    v1::DeleteSessionRequest request;
+    request.set_session_id(session_id);
+    v1::DeleteSessionResponse response;
+    return stub_->DeleteSession(&context, request, &response);
+}
+
+SessionClient::PluginCallResult SessionClient::PluginCall(const std::string& plugin_name,
+                                                          const std::string& method,
+                                                          const std::string& json_payload) {
+    grpc::ClientContext context;
+    context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(5));
+    v1::PluginCallRequest request;
+    request.set_plugin_name(plugin_name);
+    request.set_method(method);
+    request.set_json_payload(json_payload);
+    PluginCallResult result;
+    v1::PluginCallResponse response;
+    result.status = stub_->PluginCall(&context, request, &response);
+    if (result.status.ok()) result.json_payload = response.json_payload();
+    return result;
+}
+
+bool SessionClient::PluginSubscribe(
+    const std::string& plugin_name, const std::string& method, const std::string& json_payload,
+    const std::function<bool(const std::string& json_payload)>& on_payload) {
+    grpc::ClientContext context;
+    // No deadline: a subscription lives as long as the subscriber does. The
+    // escape hatch is on_payload returning false, which cancels the call.
+    v1::PluginCallRequest request;
+    request.set_plugin_name(plugin_name);
+    request.set_method(method);
+    request.set_json_payload(json_payload);
+    auto reader = stub_->PluginSubscribe(&context, request);
+    v1::PluginCallResponse response;
+    while (reader->Read(&response)) {
+        if (on_payload && !on_payload(response.json_payload())) {
+            context.TryCancel();
+            return true;
+        }
+    }
+    return reader->Finish().ok();
+}
+
 SessionClient::SuggestPathsResult SessionClient::SuggestPaths(const std::string& session_id,
                                                               const std::string& prefix,
                                                               int32_t limit) {

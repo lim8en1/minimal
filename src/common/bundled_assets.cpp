@@ -61,4 +61,23 @@ std::filesystem::path BundledPluginDir() {
     return installed;
 }
 
+std::filesystem::path BundledClientPluginDir() {
+    // The client twin of the probe above; MINIMAL_CLIENT_PLUGIN_DIR is baked
+    // into the client core by CMake (src/client/CMakeLists.txt) with the same
+    // value the install uses, so overriding MINIMAL_CLIENT_PLUGIN_INSTALL_DIR
+    // moves both halves together.
+    const auto exe = ExecutablePath();
+    if (exe.empty()) return {};
+    const auto bin_dir = exe.parent_path();
+
+    std::error_code ec;
+    const auto installed = bin_dir.parent_path() / MINIMAL_CLIENT_PLUGIN_DIR;
+    if (std::filesystem::is_directory(installed, ec)) return installed;
+
+    const auto staged = bin_dir.parent_path().parent_path().parent_path() / "plugins/client";
+    if (std::filesystem::is_directory(staged, ec)) return staged;
+
+    return installed;
+}
+
 }  // namespace minimal::common

@@ -27,4 +27,10 @@ void SqliteHistoryStore::ClearCompactionCheckpoint() {
     db_.ClearCompactionCheckpoint(session_id_);
 }
 
+std::optional<std::string> SqliteHistoryStore::StoredName() const {
+    const auto row = db_.GetSession(session_id_);
+    if (!row || row->name.empty()) return std::nullopt;
+    return row->name;
+}
+
 }  // namespace minimal::session

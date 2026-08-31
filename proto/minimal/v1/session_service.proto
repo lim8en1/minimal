@@ -121,10 +121,54 @@ enum CommandStatus {
   COMMAND_STATUS_ERROR = 2;
 }
 
+// The /-command taxonomy (docs/EXTENSIBILITY.md 4.4). The server derives it
+// from the command's C++ type -- HarnessCommand, LLMCommand,
+// PromptShorthandCommand -- not from a flag, because the distinction is about
+// what the command IS.
+enum CommandKind {
+  COMMAND_KIND_UNSPECIFIED = 0;
+  COMMAND_KIND_HARNESS = 1;            // never touches the conversation path
+  COMMAND_KIND_LLM = 2;                // issues its own provider request (/compact)
+  COMMAND_KIND_PROMPT_SHORTHAND = 3;   // submits an interpolated prompt as the
+                                       // user turn -- the ONLY kind whose content
+                                       // reaches the model, and it reaches it as
+                                       // the turn itself, never as a result.
+}
+
+// Where a CommandResult surfaces -- never the chat (EXTENSIBILITY.md 4.4:
+// results are appended to no history and reach no provider; the one client-side
+// violation was routing them into the chat).
+enum CommandDisplay {
+  COMMAND_DISPLAY_UNSPECIFIED = 0;
+  COMMAND_DISPLAY_STATUS = 1;  // ephemeral notice line (errors too, styled as errors)
+  COMMAND_DISPLAY_VIEW = 2;    // open/refresh the client view named by view_hint
+  COMMAND_DISPLAY_SILENT = 3;  // status-bar segment only; no transient line
+}
+
 message CommandResult {
   string request_id = 1; // echoes CommandInvocation.request_id
   CommandStatus status = 2;
   string message = 3;
+  CommandDisplay display = 4;
+  // Non-empty only when display == VIEW: the client view id to open/refresh.
+  string view_hint = 5;
+}
+
+// One row of ListCommands: everything the prompt editor needs to render
+// /-autocomplete without executing anything.
+message CommandInfo {
+  string name = 1;
+  string summary = 2;
+  string usage = 3;
+  CommandKind kind = 4;
+  CommandDisplay display = 5;
+  bool read_only = 6;
+}
+
+message ListCommandsRequest {}
+
+message ListCommandsResponse {
+  repeated CommandInfo commands = 1;
 }
 
 // Emitted on the PARENT session's stream when a subagent is spawned.
@@ -143,9 +187,26 @@ message SubagentStartedEvent {
 // Session metadata changed server-side (e.g. a SessionObserver plugin replaced
 // the default truncated-first-message name with an LLM-generated title), so
 // tab labels and the session picker must refresh.
+//
+// Emitted once when a stream opens (create/attach/resume) so a freshly attached
+// tab has everything the status bar renders, and re-emitted whenever a field
+// changes. Fields beyond `name` are the E additions that give {model}, {agent}
+// and {permission_mode} their wire source; context_window_tokens is the
+// resolved session maximum (compaction's window), the `max` half of {tokens}.
 message SessionMetadataEvent {
   string session_id = 1;
   string name = 2;
+  string agent_preset = 3;
+  // "<provider>/<model>" as resolved for this session.
+  string model = 4;
+  // Mirrors tools::PermissionRunMode as a string (e.g. "normal") -- the status
+  // bar renders text, and a new enum value would need a wire release to be
+  // renderable.
+  string permission_mode = 5;
+  // The session's context window in tokens, resolved from providers.json or
+  // discovery. 0 = unknown; the status bar renders nothing for it, matching
+  // the unknown-segment rule.
+  int64 context_window_tokens = 6;
 }
 
 // One turn reached a natural stop. The stream stays OPEN -- the client may send
@@ -266,6 +327,15 @@ message ListSessionsResponse {
   repeated SessionSummary sessions = 1;
 }
 
+// Deletes a stored session that no stream has open. The database delete
+// cascades to messages and subagent children (session_database.hpp). Refused
+// for a session whose stream is open -- the client closes the tab first.
+message DeleteSessionRequest {
+  string session_id = 1;
+}
+
+message DeleteSessionResponse {}
+
 // Mirrors tools::PermissionRunMode. Client-supplied because it is a property of
 // the CLIENT, not of the config: the headless client has no human attached, so
 // it must ask for ALLOW_ONLY (Ask -> Deny) rather than block forever on a prompt
@@ -328,6 +398,11 @@ service SessionService {
   rpc ListSessions(ListSessionsRequest) returns (ListSessionsResponse);
   rpc CreateSession(CreateSessionRequest) returns (CreateSessionResponse);
   rpc SuggestPaths(SuggestPathsRequest) returns (SuggestPathsResponse);
+  // Unary, fetched once at connect: plugins load at startup and config is read
+  // once, so the command list cannot change mid-connection -- no invalidation
+  // machinery. Without it, plugin commands are invisible to /-autocomplete.
+  rpc ListCommands(ListCommandsRequest) returns (ListCommandsResponse);
+  rpc DeleteSession(DeleteSessionRequest) returns (DeleteSessionResponse);
 
   rpc PluginCall(PluginCallRequest) returns (PluginCallResponse);
   rpc PluginSubscribe(PluginCallRequest) returns (stream PluginCallResponse);

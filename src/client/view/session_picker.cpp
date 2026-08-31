@@ -40,6 +40,12 @@ ftxui::Component MakeSessionPicker(const std::vector<v1::SessionSummary>& sessio
             if (!ids->empty()) callbacks.on_resume((*ids)[selected]);
             return true;   // consumed either way: no double-submit on empty list
         }
+        if (event == ftxui::Event::Delete || event == ftxui::Event::Character("d")) {
+            // Delete asks for its own confirmation (RunTui stages the modal);
+            // the picker only nominates the row.
+            if (!ids->empty()) callbacks.on_delete((*ids)[selected]);
+            return true;
+        }
         if (event == ftxui::Event::Escape) {
             callbacks.on_close();
             return true;
@@ -51,7 +57,7 @@ ftxui::Component MakeSessionPicker(const std::vector<v1::SessionSummary>& sessio
         using namespace ftxui;
         Elements rows;
         rows.push_back(text(" sessions ") | bold);
-        rows.push_back(text(" enter: resume  ·  esc: close") | dim);
+        rows.push_back(text(" enter: resume  ·  d: delete  ·  esc: close") | dim);
         rows.push_back(separator());
         if (ids->empty()) {
             rows.push_back(text(" (no stored sessions here)") | dim);

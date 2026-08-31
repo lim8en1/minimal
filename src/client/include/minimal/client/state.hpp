@@ -15,6 +15,11 @@
 #include "minimal/client/chat_model.hpp"
 #include "minimal/client/session_client.hpp"
 
+namespace minimal::client::plugins {
+class AttentionState;
+class ChatSurface;
+}  // namespace minimal::client::plugins
+
 namespace minimal::client {
 
 // ============================================================================
@@ -118,8 +123,18 @@ public:
 
         // The latest /-command outcome, for the transient notice line. NEVER a
         // chat row (EXTENSIBILITY §4.4) — that is a type-level property of
-        // CommandNotice, not a rendering choice made here.
+        // CommandNotice, not a rendering choice made here. The display/view_hint
+        // fields carry the E5 CommandDisplay refinement.
         std::optional<CommandNotice> latest_notice;
+
+        // --- Session metadata (the E5 emission, one per attach + on change) ---
+        // The wire source for the status bar's {model} {agent}
+        // {permission_mode} segments and the `max` half of {tokens}. Empty/0 =
+        // unknown; the segment renders nothing, per the unknown-segment rule.
+        std::string model;
+        std::string agent_preset;
+        std::string permission_mode;
+        int64_t context_window_tokens = 0;
     };
 
     Snapshot TakeSnapshot();
@@ -181,6 +196,12 @@ private:
     // Latest /-command outcome (transient notice line; never a chat row).
     std::optional<CommandNotice> latest_notice_;
 
+    // Session metadata (see Snapshot).
+    std::string model_;
+    std::string agent_preset_;
+    std::string permission_mode_;
+    int64_t context_window_tokens_ = 0;
+
     // Streaming assistant text
     std::string streaming_accumulated_;
     bool is_streaming_ = false;
@@ -222,7 +243,7 @@ public:
         uint32_t spawn_seq = 0;
 
         // UI-derived
-        char attention_glyph = '\0';     // '!' when Waiting, else nothing
+        char attention_glyph = '\0';     // '!' when Waiting or plugin-raised, else nothing
         bool is_focused = false;
     };
 
@@ -291,6 +312,22 @@ public:
     // lifetime rule -- nothing outlives its client.
     void CloseAllTabs();
 
+    // --- E5 extension seams (host-owned; both optional) ----------------------
+
+    // The shared plugin-attention block (docs/EXTENSIBILITY.md 4.2): a plugin
+    // raise WINS over core derivation until cleared; the glyph stays '!'.
+    // Called once before any reader thread exists; not thread-of-use safe, the
+    // block itself is.
+    void SetPluginAttention(plugins::AttentionState* attention) {
+        plugin_attention_ = attention;
+    }
+
+    // The exclusive chat surface, when a plugin claimed the slot. DispatchToTab
+    // pushes EVERY ServerEvent to it (reader thread; OnEvent must not block)
+    // before core's own handling -- a surface owns its presentation, core keeps
+    // its data plane regardless.
+    void SetChatSurface(plugins::ChatSurface* surface) { chat_surface_ = surface; }
+
 private:
     struct TabEntry {
         TabInfo info;
@@ -311,6 +348,10 @@ private:
     std::vector<std::pair<std::string, v1::SubagentStartedEvent>> pending_subagents_;   // deferred
 
     std::shared_ptr<SessionClient> client_;
+
+    // E5 seams (see the setters above).
+    plugins::AttentionState* plugin_attention_ = nullptr;
+    plugins::ChatSurface* chat_surface_ = nullptr;
 
     void FocusWithWrap(bool forward);       // shared logic for the two cycle methods
     TabEntry* FindTab(const std::string& session_id);  // unlocked, mutex held by caller

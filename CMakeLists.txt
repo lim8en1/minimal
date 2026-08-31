@@ -44,6 +44,12 @@ include(FetchContent)
 set(MINIMAL_PLUGIN_INSTALL_DIR "${CMAKE_INSTALL_LIBDIR}/minimal/plugins"
     CACHE STRING "Install location for bundled plugins")
 
+# The client plugin tree, separate from the server's for the same reason the
+# loaders are separate: different ABI symbols, different discovery file. The
+# client resolves it relative to its own executable (bundled_assets).
+set(MINIMAL_CLIENT_PLUGIN_INSTALL_DIR "${CMAKE_INSTALL_LIBDIR}/minimal/plugins/client"
+    CACHE STRING "Install location for bundled client plugins")
+
 # bundled/ is copied into the USER'S CONFIG DIR at install time, not installed
 # under the prefix and read from there. Everything in it -- prompts, presets,
 # settings -- is a file the user owns and edits; a copy sitting in the install

@@ -23,7 +23,7 @@ Interfaces a plugin implements today: `Tool` (with `Disclose` / `category_for` /
 
 **Utilities half** — included from `plugin_abi.h`: `path_confinement`, `file_access`, `atomic_write`, `HttpClient`, `SseParser`, `Logger`, `SessionReader` + `HistoryWindow` (landed with track M), plus the registry headers. The frontmatter parser remains reachable through ordinary core linkage (plugins link `minimal_server_core`, a shared library) but is not declared surface.
 
-**Client ABI**: does not exist. `src/client/plugins/` is unbuilt and `PluginCall`/`PluginSubscribe` are not in the proto. Client extensibility is track E in the development plan.
+**Client ABI** (`src/client/plugins/include/minimal/client/plugins/client_plugin_abi.h`) — **live (track E5)**: `minimal_client_plugin_abi_tag` / `_name` / `_version` plus seven optional `minimal_client_plugin_register_*` hooks (views, tool-result renderers, message-kind renderers, status segments, syntax grammars, and the exclusive chat-surface and markdown-engine slots), each taking `(Registry&, const ClientPluginRegistrationContext&)` — the context carries the per-plugin `config` slice, an `AttentionSink`, and the `ClientApi` data path (GetMessages paging + the PluginCall/PluginSubscribe channel). Loaded by `client_plugin_loader.cpp` (the server loader's twin: `RTLD_NOW|RTLD_LOCAL`, tag gate, guarded registration, attribution, never dlclosed) against `client-plugins.json` — a separate file from the server's `plugins.json`, so neither writer can stomp the other's entries. Client plugins link `minimal::client_core` (SHARED, like the server core) and install to `plugins/client/`. The generic channel dispatches server-side through the ServiceRegistry to a `PluginEndpoint` the pair plugin Provides under its own name.
 
 `tests/support/` is an installed target (`minimal::test_support`), so a plugin author links the same `FakeLlmProvider`/`ScriptedProvider`/permission fakes the suite uses.
 
@@ -440,11 +440,11 @@ Command (the abstract -- already named Command; no rename)
 | 2.2 Cross-plugin services | nothing | **done (track L)**; first consumer: `/restart-shell` |
 | 2.3 Per-plugin config | nothing | **done (track K)** |
 | 2.4 MCP lifecycle | track G | designed, waits on G |
-| 2.5 Plugin UI surface | track E + 2.2 | designed, lands with E; the server half dispatches through 2.2's registry (built by track L) |
+| 2.5 Plugin UI surface | track E + 2.2 | **done (track E5)**; `PluginCall`/`PluginSubscribe` dispatch through L's registry to a `PluginEndpoint` the pair plugin Provides under its own name; the client half is the `ClientApi` in the registration context |
 | 2.6 Model auto-discovery | nothing | **done (track N)**; lazy discovery via `ModelCatalogRegistry`, `/providers refresh`, network-free sanity checks |
 | 3 Permission advisor | nothing | **done (track J)** |
-| 4.2 TUI slots | E's frame first | specified; E additions (DEVELOPMENT_PLAN §5 E) |
-| 4.3 `ListCommands` | nothing (server half trivial) | specified; lands with E |
-| 4.4 Command display modes | nothing | specified; server half lands with E |
+| 4.2 TUI slots | E's frame first | **done (track E5)**; the full §4.2 slot table ships — additive views/tool-renderers/message-kinds/status-segments/grammars plus the exclusive chat-surface and markdown-engine slots, host `src/client/plugins/`, fixtures proving the loader through a real dlopen |
+| 4.3 `ListCommands` | nothing (server half trivial) | **done (track E5a)**; unary, fetched once at connect, feeds `/`-autocomplete |
+| 4.4 Command display modes | nothing | **done (track E5a/E5b)**; `CommandDisplay` on the wire, dispatcher downgrades errors to Status, results never enter the chat (`CommandNotice` is type-disjoint from `ChatRow`) |
 
 Track order: **J → K → L → M → N**. K preceded L so the new `register_services` ABI symbol shipped with `PluginRegistrationContext` and never needed a second signature sweep; M and N are independent of everything and each other. 2.1–2.3 were independent of everything and small; 2.5's server half and 2.2 are the same mechanism — the registry was built once by L, and `PluginCall` wires to it when E lands the client half. N added the eleventh `extern "C"` symbol (`minimal_plugin_register_model_catalogs`); discovery reaches the config layer as an injected hook precisely so the config layer never links plugins.

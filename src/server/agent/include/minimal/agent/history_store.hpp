@@ -53,6 +53,15 @@ public:
     virtual void SaveCompactionCheckpoint(std::int64_t boundary_seq,
                                           const llm::Message& summary) = 0;
     virtual void ClearCompactionCheckpoint() = 0;
+
+    // The name the durable store currently has for this session, if the store
+    // knows one. The SQLite store answers from the sessions row, which the free
+    // default-naming rule inside its append transaction may have set AFTER the
+    // Session was built from an empty name -- this is how the session learns the
+    // name its transcript was given, and emits the SessionMetadataEvent the
+    // client's tab label refreshes from. nullopt is "no news" (in-memory test
+    // fakes), never an error.
+    virtual std::optional<std::string> StoredName() const { return std::nullopt; }
 };
 
 }  // namespace minimal::agent

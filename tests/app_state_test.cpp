@@ -16,6 +16,8 @@
 #include <string>
 #include <thread>
 
+#include <unistd.h>
+
 #include <catch2/catch_test_macros.hpp>
 
 #include "deadline.hpp"
@@ -37,7 +39,14 @@ namespace {
 
 struct ClientFixture {
     ClientFixture() {
-        dir = std::filesystem::temp_directory_path() / "minimal_app_state_test_arena";
+        // Unique per PROCESS: ctest runs every test case as its own invocation
+        // of this binary, in parallel. A fixed shared arena turned the
+        // destructor's remove_all into a race -- one fixture deleting
+        // settings.json out from under a concurrently starting one, surfacing
+        // as a flaky "settings.json not found" from OpenTab. The same session_id
+        // collision would be worse, so the directory name is unique instead.
+        dir = std::filesystem::temp_directory_path() /
+              ("minimal_app_state_test_arena_" + std::to_string(::getpid()));
         std::error_code ec;
         std::filesystem::remove_all(dir, ec);
         std::filesystem::create_directories(dir / "agents");

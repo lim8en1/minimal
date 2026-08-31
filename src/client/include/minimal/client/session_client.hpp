@@ -186,6 +186,42 @@ public:
     SuggestPathsResult SuggestPaths(const std::string& session_id, const std::string& prefix,
                                     int32_t limit);
 
+    // The /-command catalog, fetched ONCE at connect (plugins load at startup
+    // and config is read once, so the list cannot change mid-connection).
+    // Feeds the prompt editor's /-autocomplete.
+    struct ListCommandsResult {
+        v1::ListCommandsResponse response;
+        grpc::Status status;
+    };
+    ListCommandsResult ListCommands();
+
+    // Deletes a stored session that has no stream open. The picker's delete
+    // action closes the tab first; the server refuses an open session.
+    grpc::Status DeleteSession(const std::string& session_id);
+
+    // --- The generic plugin channel (E5; docs/EXTENSIBILITY.md 2.5) ----------
+    //
+    // A client plugin's OWN data path: the payloads are plugin-owned JSON that
+    // core neither defines nor interprets. The plugin names its server-side
+    // pair; the server dispatches through the ServiceRegistry.
+
+    // One call, one JSON answer. status not-ok covers unknown plugin / refused
+    // method / endpoint throw -- the message names which.
+    struct PluginCallResult {
+        std::string json_payload;
+        grpc::Status status;
+    };
+    PluginCallResult PluginCall(const std::string& plugin_name, const std::string& method,
+                                const std::string& json_payload);
+
+    // Streams the subscription's payloads to `on_payload` on the CALLING
+    // thread (blocking until the server closes the stream or `on_payload`
+    // returns false -- which cancels the call). False return: the
+    // subscription was refused (unknown plugin or method).
+    bool PluginSubscribe(const std::string& plugin_name, const std::string& method,
+                         const std::string& json_payload,
+                         const std::function<bool(const std::string& json_payload)>& on_payload);
+
     // Opens the bidi stream, sends one user turn, and pumps ServerEvents to
     // `on_event` until the stream ends or `on_event` returns false.
     //

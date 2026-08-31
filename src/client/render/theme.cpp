@@ -1,11 +1,14 @@
 #include "minimal/client/render/theme.hpp"
 
+#include <algorithm>
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
 #include <tuple>
 
 #include <nlohmann/json.hpp>
+
+#include "minimal/common/logger.hpp"
 
 namespace minimal::client {
 
@@ -44,7 +47,8 @@ std::tuple<uint8_t, uint8_t, uint8_t> ParseHexColor(std::string_view value,
 
 }  // namespace
 
-Theme Theme::Parse(std::string_view json, ColorDepth depth) {
+Theme Theme::Parse(std::string_view json, ColorDepth depth,
+                   const std::vector<std::string>* known_plugins) {
     nlohmann::json doc;
     try {
         doc = nlohmann::json::parse(json);
@@ -64,11 +68,42 @@ Theme Theme::Parse(std::string_view json, ColorDepth depth) {
         const auto [r, g, b] = ParseHexColor(value.get_ref<const std::string&>(), role);
         theme.colors_.emplace(role, Downsample(r, g, b, depth));
     }
+
+    // Plugin sections (docs/EXTENSIBILITY.md 4.2): optional namespaced roles,
+    // addressable only as `section.role` and merged AFTER the core roles, so a
+    // plugin can never shadow one -- emplace keeps the first (core) entry, and
+    // a dotted key colliding with an earlier section's is likewise first-wins.
+    // Duplicate section NAMES cannot be detected here: a JSON object keeps one
+    // entry per key, so a repeated name in one file collapses before we see it.
+    if (auto sections = doc.find("sections");
+        sections != doc.end() && sections->is_object()) {
+        for (const auto& [section, roles] : sections->items()) {
+            if (known_plugins != nullptr &&
+                std::find(known_plugins->begin(), known_plugins->end(), section) ==
+                    known_plugins->end()) {
+                // The naming_model rule: a section naming no loaded plugin is
+                // reported, not fatal -- it may be this theme predates the
+                // plugin's removal, and colors are decoration.
+                common::DefaultLogger().warn(
+                    "theme '{}': section '{}' names no loaded client plugin; its roles are "
+                    "unreachable",
+                    theme.name_, section);
+            }
+            if (!roles.is_object()) continue;
+            for (const auto& [role, value] : roles.items()) {
+                if (!value.is_string()) continue;  // tolerate: plugin sections are not core config
+                const std::string full = section + "." + role;
+                if (theme.colors_.contains(role) || theme.colors_.contains(full)) continue;
+                const auto [r, g, b] = ParseHexColor(value.get_ref<const std::string&>(), full);
+                theme.colors_.emplace(full, Downsample(r, g, b, depth));
+            }
+        }
+    }
     return theme;
 }
 
 Theme Theme::Load(const std::filesystem::path& themes_dir, const std::string& name,
-                  ColorDepth depth) {
+                  ColorDepth depth, const std::vector<std::string>* known_plugins) {
     const std::filesystem::path file = themes_dir / (name + ".json");
     std::ifstream in(file);
     if (!in) {
@@ -77,7 +112,7 @@ Theme Theme::Load(const std::filesystem::path& themes_dir, const std::string& na
     std::ostringstream contents;
     contents << in.rdbuf();
     try {
-        return Parse(contents.str(), depth);
+        return Parse(contents.str(), depth, known_plugins);
     } catch (const std::runtime_error& e) {
         throw std::runtime_error(file.string() + ": " + e.what());
     }

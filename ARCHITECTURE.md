@@ -823,20 +823,30 @@ public:
                                    std::string_view result_text, bool is_error) const = 0;
 };
 
-// src/client/plugins/client_plugin_abi.h
+// src/client/plugins/include/minimal/client/plugins/client_plugin_abi.h -- SHIPPED (track E5).
+// Every hook takes (Registry&, const ClientPluginRegistrationContext&) from the
+// first symbol: the context carries the per-plugin `config` slice, an
+// `AttentionSink*`, and the `ClientApi*` data path (GetMessages paging plus the
+// PluginCall/PluginSubscribe channel) -- the struct-argument rule the server's
+// `PluginRegistrationContext` taught, applied from day one so no hook ever
+// needs a second signature sweep.
 extern "C" {
   const char* minimal_client_plugin_abi_tag();
-  void minimal_client_plugin_register_views(ViewRegistry&);
-  void minimal_client_plugin_register_renderers(ToolResultRendererRegistry&);
-  void minimal_client_plugin_register_message_renderers(MessageRendererRegistry&);
-  void minimal_client_plugin_register_status_segments(StatusSegmentRegistry&);
-  void minimal_client_plugin_register_chat_surface(ChatSurfaceRegistry&);        // exclusive
-  void minimal_client_plugin_register_markdown_engine(MarkdownEngineRegistry&);  // exclusive
-  void minimal_client_plugin_register_syntax_grammars(SyntaxGrammarRegistry&);
+  const char* minimal_client_plugin_name();
+  const char* minimal_client_plugin_version();
+  void minimal_client_plugin_register_views(ViewRegistry&, const ClientPluginRegistrationContext&);
+  void minimal_client_plugin_register_renderers(ToolResultRendererRegistry&, const ClientPluginRegistrationContext&);
+  void minimal_client_plugin_register_message_renderers(MessageRendererRegistry&, const ClientPluginRegistrationContext&);
+  void minimal_client_plugin_register_status_segments(StatusSegmentRegistry&, const ClientPluginRegistrationContext&);
+  void minimal_client_plugin_register_chat_surface(ChatSurfaceRegistry&, const ClientPluginRegistrationContext&);        // exclusive
+  void minimal_client_plugin_register_markdown_engine(MarkdownEngineRegistry&, const ClientPluginRegistrationContext&);  // exclusive
+  void minimal_client_plugin_register_syntax_grammars(SyntaxGrammarRegistry&, const ClientPluginRegistrationContext&);
 }
 ```
 
 Both registries follow the server's collision rules: duplicate `ViewSpec::id` or `tool_name()` is fatal and alias-resolvable, and `keybindings.json` addresses views by their canonical id, never an alias. A renderer registered for a tool whose plugin is disabled falls back to default rendering rather than erroring.
+
+**Shipped shape (track E5).** The host lives in `src/client/plugins/` (loader = the server loader's twin; `NameRegistry` moved to `src/common` so both loaders run one collision rule). Client plugins link the SHARED `minimal::client_core` -- the same one-copy-in-memory argument as the server core -- and are discovered from `client-plugins.json` (client-owned and rewritten, bundled dir `plugins/client/`, user dir `config_dir/client-plugins/`; a separate file from the server's `plugins.json` precisely so neither writer can stomp the other's entries). Two user-facing config files become plugin infrastructure here: `keybindings.json` (view ids) and the new seeded `ui.json`, whose `status_format` string is how status-bar segments are addressed. Render-time inputs travel with the call, `const Theme&` included: plugins load before the theme does (theme `sections` reference loaded plugin names), so nothing renderable can capture a theme at registration.
 
 Three policies complete the surface:
 

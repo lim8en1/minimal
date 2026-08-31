@@ -19,6 +19,8 @@
 #include <string>
 #include <vector>
 
+#include <nlohmann/json.hpp>
+
 #include "minimal/v1/session_service.pb.h"
 
 namespace minimal::client {
@@ -33,6 +35,10 @@ enum class ChatRowKind {
                      // because the model must see them at the turn boundary)
 };
 
+// Stable diagnostic name -- registry collision reports and startup warnings
+// name kinds by it.
+std::string_view ToString(ChatRowKind kind);
+
 struct ChatRow {
     ChatRowKind kind;
     // UserText/AgentMarkdown/Thinking: the text itself. UserAttachment: the
@@ -40,9 +46,13 @@ struct ChatRow {
     // the expandable body, empty for a bare tool_use. System: the injected
     // result text.
     std::string text;
-    std::string tool_name;       // ToolActivity only
-    std::string attachment_path; // UserAttachment: the path="..." from the frame
-    bool tool_is_error = false;  // ToolActivity only
+    std::string tool_name;        // ToolActivity only
+    // ToolActivity only: the input JSON the model sent with the call, so a
+    // tool-result renderer can show what was rendered FROM (a diff renderer
+    // needs the file path, not just the hunk text). Empty object when unknown.
+    nlohmann::json tool_input = nlohmann::json::object();
+    std::string attachment_path;  // UserAttachment: the path="..." from the frame
+    bool tool_is_error = false;   // ToolActivity only
 };
 
 // Rows in DISPLAY order (oldest first) from a DESCENDING-seq scrollback page --
@@ -54,10 +64,15 @@ std::vector<ChatRow> ChatRowsFromMessages(const std::vector<v1::StoredMessage>& 
 // CommandResult -> transient notice line. The return type is deliberately not
 // a ChatRow and not convertible to one: a command result has no path into the
 // chat model at compile time, which is the invariant (§4.4) expressed where it
-// cannot regress.
+// cannot regress. Display carries the CommandDisplay refinement (E5): Status
+// renders on the notice line, View opens the view named by view_hint, Silent
+// is status-bar-only -- and an ERROR always degrades to the status line, the
+// dispatcher having already downgraded it server-side.
 struct CommandNotice {
     std::string message;
     bool is_error = false;
+    v1::CommandDisplay display = v1::COMMAND_DISPLAY_STATUS;
+    std::string view_hint;
 };
 CommandNotice NoticeFromCommandResult(const v1::CommandResult& result);
 

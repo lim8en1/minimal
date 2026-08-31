@@ -4,7 +4,12 @@ add_library(minimal_common STATIC
     config_paths.cpp
     model_ref.cpp
     logger.cpp
-    logging_setup.cpp)
+    logging_setup.cpp
+    # The NameRegistry moved here from src/server/plugins when the client host
+    # (track E5) needed the same collision/alias rule: one rule, two loaders,
+    # so the machinery cannot live on either side. name_resolution.cpp stayed
+    # behind -- it feeds the registry from SERVER registry attributions.
+    plugins/name_registry.cpp)
 add_library(minimal::common ALIAS minimal_common)
 
 target_include_directories(minimal_common PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
@@ -25,6 +30,7 @@ target_compile_definitions(minimal_common
     # a runtime lookup at all: they are code the user does not edit, so they stay
     # in the install tree. Everything else is seeded into the config dir.
     PRIVATE
-        MINIMAL_PLUGIN_DIR="${MINIMAL_PLUGIN_INSTALL_DIR}")
+        MINIMAL_PLUGIN_DIR="${MINIMAL_PLUGIN_INSTALL_DIR}"
+        MINIMAL_CLIENT_PLUGIN_DIR="${MINIMAL_CLIENT_PLUGIN_INSTALL_DIR}")
 
 target_compile_options(minimal_common PRIVATE ${MINIMAL_WARNING_FLAGS})

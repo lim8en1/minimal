@@ -5,6 +5,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <vector>
 
 #include <ftxui/screen/color.hpp>
 
@@ -21,10 +22,15 @@ public:
     // Loads <themes_dir>/<name>.json. Throws std::runtime_error naming the file
     // and the offending key on unreadable or malformed content.
     static Theme Load(const std::filesystem::path& themes_dir, const std::string& name,
-                      ColorDepth depth);
+                      ColorDepth depth, const std::vector<std::string>* known_plugins = nullptr);
 
     // Parses a theme document directly. The test seam; Load() is this over a file.
-    static Theme Parse(std::string_view json, ColorDepth depth);
+    // `known_plugins`, when given, feeds the naming_model rule for plugin
+    // sections: a `sections` entry naming no loaded plugin is WARNED about
+    // (its roles are unreachable), while section roles themselves merge AFTER
+    // the core roles -- a plugin section can never shadow a core role.
+    static Theme Parse(std::string_view json, ColorDepth depth,
+                       const std::vector<std::string>* known_plugins = nullptr);
 
     // The color for a role, or Color::Default when the theme does not set it.
     // Missing roles fall back rather than failing: a partially-written theme is

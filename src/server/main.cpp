@@ -406,6 +406,7 @@ int main(int argc, char** argv) {
     service.set_commands(&commands);
     service.set_auth_providers(&auth_providers);
     service.set_mention_resolvers(&mention_resolvers);
+    service.set_services(&services);
     service.set_mcp_manager(&mcp);
     minimal::rpc::Server server(service, socket_path);
 

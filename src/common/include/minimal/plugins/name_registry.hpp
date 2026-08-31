@@ -13,7 +13,18 @@ namespace minimal::plugins {
 // command name without colliding, and services are NOT user-aliasable (a
 // service name is addressed by code through ServiceRegistry::Find, never by
 // the model or the user, so command_aliases has nothing to rename).
-enum class NameKind { Tool, Command, ViewId, ToolResultRenderer, Service };
+//
+// ViewId/ToolResultRenderer/StatusSegment/SyntaxGrammar are the CLIENT host's
+// kinds (track E5): shared machinery, one collision rule, two loaders.
+enum class NameKind {
+    Tool,
+    Command,
+    ViewId,
+    ToolResultRenderer,
+    Service,
+    StatusSegment,
+    SyntaxGrammar
+};
 
 // Models the three-naming-levels rule independent of the actual
 // ToolRegistry/CommandRegistry/plugin loader: stable identity never changes,

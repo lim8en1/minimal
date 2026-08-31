@@ -4,11 +4,20 @@ set(MINIMAL_PROTO_FILES
     minimal/v1/common.proto
     minimal/v1/session_service.proto)
 
-add_library(minimal_proto STATIC ${MINIMAL_PROTO_FILES})
+# SHARED, not STATIC, and that matters now that the client core is shared too
+# (E5b): a static archive linked into two shared libraries bakes TWO copies of
+# protobuf/gRPC/abseil into any process that loads both cores -- which is every
+# test binary, and the deadlock there was real (grpc_init blocking on another
+# copy's absl mutex). One shared library, one copy in memory, one init.
+add_library(minimal_proto SHARED ${MINIMAL_PROTO_FILES})
 add_library(minimal::proto ALIAS minimal_proto)
 
 target_link_libraries(minimal_proto
     PUBLIC protobuf::libprotobuf gRPC::grpc++)
+
+set_target_properties(minimal_proto PROPERTIES
+    VERSION "${PROJECT_VERSION}"
+    SOVERSION "${PROJECT_VERSION_MAJOR}")
 
 # Generated headers are included as "minimal/v1/....pb.h", so the generation root
 # must be on the include path for anything that links this target.
