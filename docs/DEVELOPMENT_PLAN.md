@@ -474,6 +474,27 @@ The permission modal is where consent scoping becomes real UI — and where the 
 - [ ] Tab bar: colour + single `!` attention glyph only (no metadata clutter).
 - [ ] Scrollback pages via `GetMessages` without competing with live turn traffic.
 
+#### E additions — extension seams (added post-hoc; sequenced after the original E definition-of-done)
+
+> Specified by `docs/EXTENSIBILITY.md` §4 (TUI core vs. pluggable) and §4.4 (command results never enter the chat). Appended without rewriting E's original scope, which is in flight: the frame lands first, then these.
+
+- [ ] Client plugin host — loader, ABI tag, and the registries, mirroring the server-side pattern (`src/client/plugins/`; nothing exists there today).
+- [ ] `ListCommands` RPC — unary; name, summary, usage, kind, display, read-only. Fetched once at connect (plugins load at startup and config is read once, so the list cannot change mid-connection — no invalidation machinery). Prompt-editor `/`-autocomplete consumes it and annotates prompt shorthands.
+- [ ] `CommandResult` display modes — one additive proto field + dispatcher pass-through (the server half is small); results surface as status line, view, or transient error, never as chat rows. Headless `-p` prints regardless.
+- [ ] **Invariant tests:** no command path appends a message to the store except a prompt shorthand's interpolated turn; no `CommandResult` is rendered or persisted as a chat message; subagent completion injections stay messages.
+- [ ] Prompt-shorthand commands land as a plugin example (`review`-style) — the only command kind whose content reaches the model, and only as the submitted turn.
+- [ ] Tool-result renderer slot — `ToolResultRendererRegistry`; a renderer for a disabled tool's name falls back to default rendering.
+- [ ] Status-bar segment registry — the format string orders and selects by id; an unknown id renders nothing with a startup warning.
+- [ ] Message-kind presentation slots — agent/thinking/tool-activity/system keyed renderers; core supplies the defaults.
+- [ ] Theme sections — `plugin.role` namespacing, merged after core roles (no shadowing), sanity-checked.
+- [ ] Attention sink — plugins may raise/clear tab or global attention; the `!` glyph stays the only color-independent signal.
+- [ ] Modal-stack invariant — permission/confirmation modals are always topmost; plugin modals cannot preempt or mask them.
+
+**E2 follow-on** (nothing else blocks on these; the big-interface items):
+
+- [ ] `ChatSurface` exclusive slot — one plugin may replace the whole chat view; second registration warns and is ignored.
+- [ ] Markdown engine exclusive slot + language-keyed grammar registration.
+
 ### G. MCP client
 
 > § *MCP client — `src/server/mcp/`*. cpp-mcp is pinned and fetched but never referenced; only permission plumbing exists.

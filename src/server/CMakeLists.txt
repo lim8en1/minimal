@@ -49,6 +49,8 @@ add_library(minimal_server_core SHARED
     rpc/proto_convert.cpp
     rpc/pending_requests.cpp
     rpc/command_executor.cpp
+    rpc/auth_provider.cpp
+    rpc/auth_interceptor.cpp
     rpc/wire_permission_checker.cpp
     rpc/wire_confirmation_broker.cpp
     rpc/session_service.cpp

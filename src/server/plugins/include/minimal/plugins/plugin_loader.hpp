@@ -9,6 +9,7 @@
 #include "minimal/agent/session_observer_registry.hpp"
 #include "minimal/commands/command_registry.hpp"
 #include "minimal/llm/provider_factory_registry.hpp"
+#include "minimal/rpc/auth_provider.hpp"
 #include "minimal/tools/tool_registry.hpp"
 
 namespace minimal::plugins {
@@ -50,6 +51,7 @@ struct PluginRecord {
     std::vector<std::string> registered_provider_kinds;
     std::vector<std::string> registered_commands;  // surface names, after aliasing
     bool registered_session_observer = false;
+    bool registered_auth_provider = false;
 
     bool ok() const { return status == LoadStatus::Loaded; }
 };
@@ -75,7 +77,8 @@ public:
     PluginLoader(tools::ToolRegistry& tools, llm::ProviderFactoryRegistry& providers,
                  nlohmann::json tools_settings = nlohmann::json::object(),
                  agent::SessionObserverRegistry* observers = nullptr,
-                 commands::CommandRegistry* commands = nullptr);
+                 commands::CommandRegistry* commands = nullptr,
+                 rpc::AuthProviderRegistry* auth_providers = nullptr);
     ~PluginLoader();
 
     PluginLoader(const PluginLoader&) = delete;
@@ -96,6 +99,9 @@ private:
     // registration has no command surface to offer, and building one would be
     // scaffolding for nothing.
     commands::CommandRegistry* commands_ = nullptr;
+    // Optional like the others; null means plugins cannot register an auth
+    // provider. Exclusive registry: the first plugin to register wins.
+    rpc::AuthProviderRegistry* auth_providers_ = nullptr;
     std::vector<void*> handles_;  // never closed; see LIFETIME above
 };
 

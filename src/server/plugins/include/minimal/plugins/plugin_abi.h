@@ -29,6 +29,7 @@
 #include "minimal/commands/command_context.hpp"
 #include "minimal/commands/command_registry.hpp"
 #include "minimal/common/logger.hpp"
+#include "minimal/rpc/auth_provider.hpp"
 #include "minimal/llm/http_client.hpp"
 #include "minimal/llm/provider.hpp"
 #include "minimal/llm/provider_factory_registry.hpp"
@@ -91,9 +92,14 @@ void minimal_plugin_register_session_observer(minimal::agent::SessionObserverReg
 // than one "kind" of plugin that has to be either/or.
 void minimal_plugin_register_commands(minimal::commands::CommandRegistry&);
 
-// Not yet wired -- declared nowhere until the subsystems they register into
-// exist, so that this ABI is not frozen before it has consumers:
+// Exclusive: one global choice. First registration wins; a second logs a
+// warning and is ignored (the registry enforces this). The default is NO
+// authentication -- an empty registry passes everything through, matching the
+// local-only single-user topology (ARCHITECTURE.md).
+void minimal_plugin_register_auth_provider(minimal::rpc::AuthProviderRegistry&);
+
+// Not yet wired -- declared nowhere until the subsystem it registers into
+// exists, so that this ABI is not frozen before it has consumers:
 //   minimal_plugin_register_mention_resolver(MentionResolverRegistry&)
-//   minimal_plugin_register_auth_provider(AuthProviderRegistry&)
 
 }  // extern "C"

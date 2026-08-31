@@ -35,6 +35,7 @@
 #include "minimal/common/logger.hpp"
 #include "minimal/config/permissions_config.hpp"
 #include "minimal/config/settings_config.hpp"
+#include "minimal/rpc/auth_interceptor.hpp"
 #include "minimal/rpc/command_executor.hpp"
 #include "minimal/session/session_reader.hpp"
 #include "minimal/v1/session_service.grpc.pb.h"
@@ -76,6 +77,12 @@ public:
     // available" rather than dropping it. Set before serving.
     void set_commands(const commands::CommandRegistry* commands) { commands_ = commands; }
 
+    // Optional; absent means the pass-through default (no authentication), which
+    // matches the local-only topology. Set before serving.
+    void set_auth_providers(const AuthProviderRegistry* registry) {
+        auth_providers_ = registry;
+    }
+
     std::size_t attached_clients() const;
 
 private:
@@ -112,6 +119,8 @@ private:
     // Borrowed and optional: a service built without commands answers every
     // invocation with "not available" rather than dropping it.
     const commands::CommandRegistry* commands_ = nullptr;
+    // Borrowed and optional: absent = pass-through (see auth_provider.hpp).
+    const AuthProviderRegistry* auth_providers_ = nullptr;
     session::SessionDatabase& db_;
     session::SessionReader reader_;
     config::SettingsConfig settings_;

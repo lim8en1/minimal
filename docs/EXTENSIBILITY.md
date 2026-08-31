@@ -137,7 +137,7 @@ Payloads are owned values (copies) for the same reason `SessionObserver`'s are �
 
 ### 2.5 No UI surface for server-plugin data
 
-**Hole.** A plugin command renders only through the system-message path (`CommandResult` → inline chat text), and a plugin tool renders only as a generic collapsible row. A plugin cannot contribute a richer view of its own data.
+**Hole.** A plugin command's result has exactly one sanctioned presentation (since §4.4: a status line or a named view — never a chat row), and a plugin tool renders only as a generic collapsible row unless the plugin ships a client-side renderer. What does not exist at all is the **data channel**: a server plugin cannot push richer, live data to a client view of its own, because the generic `PluginCall`/`PluginSubscribe` RPCs are not in the proto yet.
 
 **Suggested architecture.** Two halves, split because they land in different tracks:
 
@@ -275,7 +275,140 @@ Zero changes to `clamp_run_mode`, `most_restrictive`, the precedence chains, or 
 
 Sequenced as **track J** in `DEVELOPMENT_PLAN.md`; depends on nothing unbuilt.
 
-## 4. Sequencing
+## 4. TUI: core vs. pluggable
+
+Track E is building the client now; this section is the spec it leaves the seams against. It revises the `ARCHITECTURE.md` § *Client plugins* table in one direction: **more of the TUI is pluggable than that table allowed.** The principle is unchanged — the frame, the state machine, and the transport are the client's equivalent of core tools, and presentation is plugin surface — but presentation is most of the TUI, and most of it is now slotted.
+
+### 4.1 What stays core
+
+- **Frame + shell**: `app.cpp` assembly, `ResizableSplit` proportions, the modal stack, the tab model, tab states/attention *derivation from wire events*, ordering key, group lifecycle, navigation.
+- **Transport + state**: `SessionClient` (demux by `session_id`, drain-before-`Finish`, attach obligations), `SessionState`/`AppState`, scrollback virtualization against `GetMessages`, the streaming buffer lifecycle.
+- **Input**: the prompt-editor shell (multiline input, keyboard-protocol handling). Completion *content* is pluggable (see below); the editor itself is not.
+- **Security UI**: the permission/confirmation modal — never pluggable, under any circumstance. The consent-scoping wording obligations are core-owned.
+- **The plugin host**: registries, slot routing, fallback rendering when a slot's plugin is disabled.
+
+The "write a different frontend" tier shrinks to exactly this list.
+
+### 4.2 The slot surface
+
+| Slot | Kind | Default |
+|---|---|---|
+| Tool-result renderer (keyed by tool name) | additive | generic collapsible row |
+| Message-kind presentation (agent/thinking/tool-activity/system) | additive | core defaults (§ *Message-kind rendering*) |
+| Chat surface (the whole chat view) | **exclusive**, first registration wins | core chat view |
+| Status-bar segments (keyed by segment id) | additive; **format string orders/selects** | core segments |
+| Markdown engine | **exclusive** | md4c adapter |
+| Syntax-highlight languages (keyed by language) | additive, collisions fatal | vendored grammars |
+| Views (Panel/Modal) | additive | — |
+| MentionResolver (server-side) | exclusive | `PrefixMentionResolver` — designed, unwired (`plugin_abi.h` names the symbol) |
+| Attention source | additive | core event derivation |
+| Theme sections (config) | namespaced roles | core roles |
+
+Details for the new slots:
+
+**Message-kind presentation.** Renderers keyed by message kind, same shape as `ToolResultRenderer`; core supplies the defaults the message-kind table already specifies. The data plane — event demux, virtualization, streaming buffering — stays core regardless of who renders a row.
+
+**Chat surface — the one exclusive client slot.**
+
+```cpp
+// src/client/plugins/chat_surface.hpp
+class ChatSurface {
+public:
+    virtual const ChatSurfaceSpec& spec() const = 0;  // id (keybindings address it), title
+    virtual ftxui::Component component() = 0;         // the tab body
+    // The host pushes every ServerEvent for the session; the surface owns its
+    // own presentation and buffering. Scrollback pages are fetched through the
+    // same client API core uses -- exposed to client plugins as a utility. A
+    // surface never opens its own connection.
+    virtual void OnEvent(const v1::ServerEvent& event) = 0;
+};
+```
+
+Exclusive because the interface is deliberately big — streaming lifecycle, scrollback, focus and attention integration — and this repo's rule is that an interface which grew that big needs a reason; a wholesale chat replacement is the reason, taken once. Message-kind slots cover the common case; this covers "a whole different chat UI". Second registration warns and is ignored (the `MentionResolver`/`AuthProvider` pattern); with none registered, the core chat view stands.
+
+**Status-bar segments.**
+
+```cpp
+class StatusSegment {
+public:
+    virtual std::string_view id() const = 0;  // what {id} addresses in the format string
+    virtual std::string Render() const = 0;   // text; color via theme roles, never hardcoded
+};
+```
+
+The format string (`"{version} | {tokens} | {git_branch}"`) is the ordering/selection config; a plugin adds content, the user keeps layout control. An unknown id renders nothing with a startup warning — the `keybindings.json` pattern for names unknown at compile time.
+
+**Markdown engine.** The md4c adapter becomes the default registrant of an exclusive slot. The contract carries the streaming semantics explicitly — complete-text render *and* the `AppendDelta`/`Finalize` lifecycle, whose debounce-and-finalize property ("partial input cannot soundly parse"; `Finalize()` always reparses authoritatively) is the **implementer's** obligation, not the host's.
+
+**Syntax grammars.** The highlighter takes additive, language-keyed registrations; the vendored set registers as the defaults; two plugins claiming `python` is fatal (a `NameRegistry` kind).
+
+**Attention sink.** Plugins receive an `AttentionSink` at registration and may raise/clear tab or global attention; core event derivation remains the default source and a plugin raise wins until cleared. The `!` glyph stays the only color-independent signal, whatever raised it.
+
+**Theme sections.** `themes/*.json` gains optional namespaced sections:
+
+```json
+{ "name": "dark",
+  "colors": { "...core roles..." },
+  "sections": { "git_plugin": { "branch": "#7dd3fc" } } }
+```
+
+A section's roles are addressable only as `git_plugin.branch`, merged **after** core roles so a plugin can never shadow one; two sections with the same name, or roles naming no known plugin, are reported by the sanity check (the `naming_model` pattern).
+
+### 4.3 Rulings from the architecture review
+
+1. **Command enumeration is a wire gap.** `ListCommands` — unary, returning name/summary/usage/kind/display/read-only per live command. Fetched once at connect: plugins load at startup and config is read once, so the list cannot change mid-connection — no invalidation machinery. Without it, plugin commands are invisible to `/`-autocomplete.
+2. **Redefining bundled tools is allowed, and rendering core tools is allowed.** Bundled tools are themselves plugins — disabling and replacing via `plugins.json` is the designed path — and a third-party renderer for a *core* tool (a diff view for `edit`) is as legitimate as one for a plugin tool. Duplicate registrations are fatal and alias-resolvable like every other name.
+3. **Client plugins own their data path.** A plugin view wanting live data subscribes itself through the generic `PluginCall`/`PluginSubscribe` channel; core transports and never interprets plugin payloads.
+4. **Plugin modals never preempt the permission modal.** Permission/confirmation prompts are always topmost; a plugin modal cannot mask one or steal its input. Invariant, tested.
+
+### 4.4 Command results never enter the chat
+
+**The ruling:** the results of `/` commands must not be rendered as chat messages and must not reach the model. `git tree` or a session list fed to an LLM makes no sense. One clarification of current state: command results are *already* wire-events only — appended to no history and sent to no provider, because commands bypass the agent loop by construction. The violation was client-side: output routed to "inline system message in chat". The fix is a display mode, plus a taxonomy refinement:
+
+```cpp
+enum class CommandDisplay { Status, View, Silent };
+struct CommandResult {
+    enum class Status { kOk, kError } status = Status::kOk;
+    std::string message;
+    CommandDisplay display = CommandDisplay::Status;  // Status: ephemeral line (errors too,
+                                                      //   styled as errors — never persisted).
+                                                      // View: open/refresh the view named by
+                                                      //   view_hint. Silent: status bar only.
+    std::string view_hint;  // a client view id; a pair plugin registers both sides
+};
+```
+
+Taxonomy:
+
+```
+Command (the abstract -- already named Command; no rename)
+├── HarnessCommand      -- never touches the conversation path; never enters the chat.
+│                         Outcome: a view, a config change (status line), or an error
+│                         (transient, never a chat row).
+│                         The Harness/LLM boundary is the CONVERSATION PATH -- the turn
+│                         queue and chat-completions requests -- not "network vs. no
+│                         network": /model-info is a read-only HarnessCommand that does
+│                         provider-adjacent HTTP and renders a view, safely beside a
+│                         live turn.
+└── LLMCommand          -- may issue provider requests or submit turns
+    ├── direct          -- its own provider request (/compact); displays like a HarnessCommand
+    └── PromptShorthand -- submits an interpolated prompt as a user turn (review, roast).
+                          The ONLY command kind whose content reaches the model, and it
+                          reaches it as the turn itself -- entering the chat exactly as a
+                          normal user turn would, never as a result message.
+```
+
+`PromptShorthand` is its own subcategory precisely so a prompt macro is an honest thing to register, not a `HarnessCommand` that smuggles a turn. Finer inheritance under `Command` stays open.
+
+**Invariants (each tested):**
+
+- No command path ever appends a message to the store — except a prompt shorthand, which appends exactly the interpolated user turn.
+- No `CommandResult` is ever rendered as a chat row or persisted to the session store.
+- Subagent completion injections are **not** command results — they stay real messages, because the model must see them at the turn boundary.
+
+`ListCommands` carries `kind`, `display`, and `read_only`, so the prompt editor can annotate autocomplete — including flagging prompt shorthands, the one kind that will submit a prompt.
+
+## 5. Sequencing
 
 | Item | Depends on | Status |
 |---|---|---|
@@ -286,5 +419,8 @@ Sequenced as **track J** in `DEVELOPMENT_PLAN.md`; depends on nothing unbuilt.
 | 2.5 Plugin UI surface | track E + 2.2 | designed, lands with E |
 | 2.6 Model auto-discovery | nothing | designed, unscheduled |
 | 3 Permission advisor | nothing | designed, **track J (scheduled)** |
+| 4.2 TUI slots | E's frame first | specified; E additions (DEVELOPMENT_PLAN §5 E) |
+| 4.3 `ListCommands` | nothing (server half trivial) | specified; lands with E |
+| 4.4 Command display modes | nothing | specified; server half lands with E |
 
 2.1–2.3 are independent of everything and small; they can ride along any track that touches their files. 2.5's server half and 2.2 are the same mechanism — build the registry once, wire `PluginCall` to it when E lands the client half.

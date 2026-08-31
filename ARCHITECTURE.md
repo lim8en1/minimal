@@ -477,7 +477,16 @@ Harness-level control operations dispatched from the client over the bidi stream
 
 ```cpp
 struct CommandArgs { std::vector<std::string> positional; std::unordered_map<std::string,std::string> flags; std::string raw; };
-struct CommandResult { enum class Status { kOk, kError } status = Status::kOk; std::string message; };
+enum class CommandDisplay { Status, View, Silent };  // where a result surfaces -- never the chat
+struct CommandResult {
+    enum class Status { kOk, kError } status = Status::kOk;
+    std::string message;
+    CommandDisplay display = CommandDisplay::Status;  // Status: ephemeral line (errors too, styled
+                                                      //   as errors -- never persisted).
+                                                      // View: open/refresh the view named by
+                                                      //   view_hint. Silent: status bar only.
+    std::string view_hint;  // a client view id; a pair plugin registers both sides
+};
 
 class Command {
 public:
@@ -491,10 +500,14 @@ public:
     virtual CommandResult Execute(CommandContext&, const CommandArgs&) = 0;
 };
 
-class HarnessCommand : public Command {};  // never touches LlmProvider; read-only ones may
-                                            // run concurrently with an in-flight turn
-class LLMCommand : public Command {};       // issues a real provider request; requires session idle
+class HarnessCommand : public Command {};  // never touches the conversation path; read-only ones
+                                            // may run concurrently with an in-flight turn
+class LLMCommand : public Command {};       // may issue provider requests or submit turns
+class PromptShorthandCommand : public LLMCommand {};  // submits an interpolated prompt as a
+                                                      // user turn; the only kind that enters the chat
 ```
+
+**Command results never enter the chat, and never reach the model.** A result is a wire event only — by construction it appends to no history and is sent to no provider; the ruling is about display. `CommandDisplay` decides where it surfaces: an ephemeral **status line** (errors included, styled as errors — never persisted), a **view** (`view_hint` names the client view a pair plugin registered), or **silent**. The one exception is `PromptShorthandCommand`: it submits an interpolated prompt as a user turn, so its content reaches the model *as the turn itself* and enters the chat exactly as a normal user turn would — never as a result message. The Harness/LLM boundary is the **conversation path** — the turn queue and chat-completions requests — not "network vs. no network": `/model-info` is a read-only `HarnessCommand` that fetches model metadata over HTTP and renders a view, safely beside a live turn. Subagent completion injections are *not* command results; they stay real messages the model must see. Finer inheritance under `Command` stays open; `docs/EXTENSIBILITY.md` §4.4 is the spec.
 
 `CommandRegistry` holds both uniformly. `/help` lists live from `Name()`/`Summary()`/`Usage()` — no config-directory manifest, since a command's value is the code it runs and a data-only manifest would be a drift-prone shadow copy. `CommandDispatcher`: parse → busy-check → confirm if required → execute → emit result.
 
@@ -510,7 +523,7 @@ Both `PermissionChecker`'s implementation and `CommandDispatcher` compose the sa
 
 **`CommandContext`** borrows references the session already owns: active `LlmProvider` and its resolved `ProviderConfig`, `SessionStore`, `AgentPresetRegistry` (+ active preset, mutable for `/agent`), `Settings`, plus `EmitStatus`/`EmitError`. It deliberately does **not** expose bash session state: bash is a plugin and owns that itself (see below).
 
-**Bundled commands** (`commands-core` plugin): `/help [command]`, `/providers`, `/compact` (`LLMCommand`), `/clear` (confirm), `/agent <preset>`, `/model <provider>/<model>`, `/permission-mode <normal|bypass|allow-only>` (confirm). `/help` and `/providers` are `ReadOnly()`.
+**Bundled commands** (`commands-core` plugin): `/help [command]`, `/providers`, `/compact` (`LLMCommand`), `/clear` (confirm), `/agent <preset>`, `/model <provider>/<model>`, `/permission-mode <normal|bypass|allow-only>` (confirm). `/help` and `/providers` are `ReadOnly()` and render as views; the config-changing commands surface as status lines. None enters the chat.
 
 `/new`, `/attach` and `/sessions` are **deferred to the TUI** (track E): they drive a tab model, and a command creating a session no client can attach to would be wire surface built ahead of its consumer.
 
@@ -717,19 +730,22 @@ rpc PluginSubscribe(PluginCallRequest) returns (stream PluginCallResponse);
 
 Core defines neither payload nor semantics; plugin authors define their own JSON on both ends.
 
-**Additive views: yes. Compositional: only through named slots.**
+**Additive views: yes. Compositional: only through named slots.** The frame, the tab model, and the transport stay core; presentation is plugin surface — and most of the TUI is presentation. `docs/EXTENSIBILITY.md` §4 is the full core-vs-pluggable split and wins where the two disagree.
 
 | Kind | Mechanism | Support |
 |---|---|---|
 | New self-contained view (panel or modal) | register a `View` — placement + default keybinding, remappable | **v1** |
-| Fill a named slot | slot registry, small enumerated set | **v1 for renderers**, rest later |
-| Wrap/replace core views, restructure the frame | — | **No** — write a different client |
+| Fill a named slot | slot registry | **v1**: tool-result renderers, message-kind presentation, status-bar segments; follow-on: markdown engine, syntax grammars, chat surface |
+| Wrap/replace core views, restructure the frame | — | **No** — write a different client. One exception: the chat surface below is replaceable wholesale, exclusively. |
 
-Slots, in demand order:
+Slots:
 
-1. **Tool-result renderers keyed by tool name — v1.** The strongest case in a plugin-first harness: a plugin shipping a `sql_query` tool wants a table, a `diff` tool wants colored hunks, not raw text. The plugin owns both the tool and its rendering. A renderer registered for a tool whose plugin is disabled falls back to default rendering rather than erroring.
-2. **Status-bar segments — later.** The format string is already a slot mechanism; `{git_branch}` resolving to a plugin-registered provider is nearly free.
-3. **Tools-panel / session-picker columns — later.**
+1. **Tool-result renderers keyed by tool name — v1.** The strongest case in a plugin-first harness: a plugin shipping a `sql_query` tool wants a table, a `diff` tool wants colored hunks, not raw text. The plugin owns both the tool and its rendering. A renderer registered for a tool whose plugin is disabled falls back to default rendering rather than erroring. A renderer for a *core* tool (a diff view for `edit`) is equally legitimate — bundled tools are themselves plugins, replaceable via `plugins.json`, and rendering follows the same rule.
+2. **Message-kind presentation — v1.** Additive renderers keyed by message kind (agent text, thinking, tool activity, system); core supplies the defaults § *Message-kind rendering* specifies. The data plane — event demux, scrollback virtualization, streaming buffer — stays core regardless of who renders a row.
+3. **Chat surface — exclusive.** One plugin may replace the whole chat view. The host pushes the session's events; scrollback pages come through the shared client API; second registration warns and is ignored (the `MentionResolver`/`AuthProvider` pattern). The interface is deliberately big and deliberately the only one of its kind — message-kind slots cover the common case, a whole new chat UI is a whole different component.
+4. **Status-bar segments — v1.** Plugins register segment providers (`{git_branch}`); the format string orders and selects them by id; an unknown id renders nothing with a startup warning. Config keeps layout control; plugins add content.
+5. **Markdown engine and syntax grammars — follow-on.** The md4c adapter becomes an exclusive-slot default; a replacement engine must carry the streaming contract itself (§ *TUI rendering*). Grammar registration is additive and language-keyed, the vendored set registering as the defaults.
+6. **Tools-panel / session-picker columns — later.**
 
 ```cpp
 // src/client/plugins/view.hpp
@@ -763,10 +779,21 @@ extern "C" {
   const char* minimal_client_plugin_abi_tag();
   void minimal_client_plugin_register_views(ViewRegistry&);
   void minimal_client_plugin_register_renderers(ToolResultRendererRegistry&);
+  void minimal_client_plugin_register_message_renderers(MessageRendererRegistry&);
+  void minimal_client_plugin_register_status_segments(StatusSegmentRegistry&);
+  void minimal_client_plugin_register_chat_surface(ChatSurfaceRegistry&);        // exclusive
+  void minimal_client_plugin_register_markdown_engine(MarkdownEngineRegistry&);  // exclusive
+  void minimal_client_plugin_register_syntax_grammars(SyntaxGrammarRegistry&);
 }
 ```
 
 Both registries follow the server's collision rules: duplicate `ViewSpec::id` or `tool_name()` is fatal and alias-resolvable, and `keybindings.json` addresses views by their canonical id, never an alias. A renderer registered for a tool whose plugin is disabled falls back to default rendering rather than erroring.
+
+Three policies complete the surface:
+
+- **Plugin modals never preempt the permission modal.** Permission/confirmation prompts are always topmost in the modal stack; a plugin modal cannot mask one or steal its input. Invariant, tested.
+- **Client plugins own their data path.** A plugin view wanting live data subscribes itself through the generic `PluginCall`/`PluginSubscribe` channel; core transports and never interprets plugin payloads. A plugin *pair* binding a server command to a client view works the same way: the client side observes its own `CommandResult` — whose `view_hint` names the view — and opens or refreshes it.
+- **Attention is raiseable.** Plugins receive an `AttentionSink` at registration and may raise or clear tab/global attention; core event derivation (§ *Tab states and attention*) remains the default source, and the `!` glyph stays the only color-independent signal.
 
 **Consequence:** `keybindings.json` and the status-bar format string become **load-bearing plugin infrastructure**, not just user conveniences — they are how plugin-registered views and segments are addressed, so their schemas must accommodate names that don't exist at compile time.
 
@@ -822,6 +849,8 @@ public:
 
 The highlighter never hardcodes a color; the theme supplies one per `HighlightCategory`, keeping highlighting and theming separate.
 
+**Both engines are slots, not privileged code paths.** The md4c adapter is the default registrant of an exclusive markdown-engine slot — a replacement engine must carry the streaming contract itself (partial input cannot soundly parse; the debounce and the authoritative `Finalize()` reparse are the implementer's obligations, not the host's). The syntax highlighter takes additive, language-keyed grammar registrations with the vendored set as the defaults. `docs/EXTENSIBILITY.md` §4.2 specifies both.
+
 **Themes**: `themes/*.json`, bundled `dark.json`/`light.json`, seeded like other config. Flat role/category → truecolor RGB:
 
 ```json
@@ -852,7 +881,7 @@ The highlighter never hardcodes a color; the theme supplies one per `HighlightCa
 | Session picker | **Modal** | Transient — open, choose, dismiss |
 | Permission / confirmation prompt | **Modal** | Transient, demands an answer |
 | Running-tools view | **Panel** (`ResizableSplit`) | A *monitor* — wanted visible *while* working |
-| `/help`, `/providers` output | inline system message in chat | already how `CommandResult` renders |
+| Command results (`/help`, `/providers`, config changes) | view, status line, or transient error — **never a chat row** (§ `/-command system`) | `CommandResult.display` decides |
 
 Frame: `tab bar / active session view / optional panel / status bar`, plus a modal layer. There is no separate "agent view" — that *is* the tab.
 
@@ -926,15 +955,15 @@ A client-side presentational categorization, broader than the wire `Role` enum (
 | Agent | `Message{role: Assistant}` text | `MarkdownRenderer` / `StreamingMarkdownView` |
 | Thinking | `ThinkingBlock` | `Collapsible`, dimmed, collapsed by default |
 | Tool activity | `ToolExecutionEvent`, `ToolUseBlock`/`ToolResultBlock` | `Collapsible` one-line status; a plugin-registered renderer for that tool name takes precedence |
-| System/harness | `CommandResult`, `ErrorEvent`, subagent-completion injections | Muted, distinctly prefixed — separates "the harness told you something" from "the model said something" |
+| System/harness | `ErrorEvent`, subagent-completion injections | Muted, distinctly prefixed — separates "the harness told you something" from "the model said something". Command results are **not** in this row: they surface as views/status lines and never as chat messages (§ `/-command system`) |
 
 ### Customization surface
 
 Three tiers:
 
-1. **Config** — no code: `themes/*.json`; **`keybindings.json`** (not optional: terminals disagree on what they can even *encode* — `Shift+Enter` is indistinguishable from `Enter` without the kitty keyboard protocol / CSI-u — so remapping must be user config; default newline-in-prompt is the more portable `Alt+Enter`); status bar as a format string (`"{version} | {model} | {tokens} | {agent} | {permission_mode} | {session}"`); layout ratios and collapse/timestamp toggles.
-2. **Server plugins extend UI *content* without touching UI code** — a plugin command appears in `/help` via the existing system-message path; a plugin tool appears in chat and the tools panel automatically.
-3. **Client plugins** for additive views and named slots; and for anything structural, **write a different frontend** against `SessionService` — language-agnostic, process-isolated. This is also why @-mention resolution lives server-side: every frontend inherits it.
+1. **Config** — no code: `themes/*.json` (now with namespaced plugin sections — `git_plugin.branch` — merged after core roles so a plugin can never shadow one); **`keybindings.json`** (not optional: terminals disagree on what they can even *encode* — `Shift+Enter` is indistinguishable from `Enter` without the kitty keyboard protocol / CSI-u — so remapping must be user config; default newline-in-prompt is the more portable `Alt+Enter`); status bar as a format string (`"{version} | {model} | {tokens} | {agent} | {permission_mode} | {session}"`) that orders and selects registered segments — core's and plugins' alike; layout ratios and collapse/timestamp toggles.
+2. **Server plugins extend UI *content* without touching UI code** — a plugin command appears in `/`-autocomplete via `ListCommands`, and its results surface as a view or status line, never as a chat message (§ `/-command system`); a plugin tool appears in chat and the tools panel automatically.
+3. **Client plugins** for additive views, message-kind and tool-result renderers, status segments, and — exclusively — the chat surface and markdown engine; for anything beyond (frame, tab model, transport), **write a different frontend** against `SessionService` — language-agnostic, process-isolated. This is also why @-mention resolution lives server-side: every frontend inherits it.
 
 ## @-mention file references
 

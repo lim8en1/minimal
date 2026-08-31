@@ -103,6 +103,10 @@ int main(int argc, char** argv) {
     commands.SetAliases({plugin_config.command_aliases.begin(),
                          plugin_config.command_aliases.end()});
     minimal::agent::SessionObserverRegistry observers(minimal::common::DefaultLogger());
+    // Exclusive: at most one plugin provides the connection policy. An empty
+    // registry is the pass-through default -- no authentication, matching the
+    // local-only single-user topology.
+    minimal::rpc::AuthProviderRegistry auth_providers;
 
     // The tools slice of settings.json is forwarded verbatim to every plugin;
     // core imposes no schema on it. Loaded defensively because a missing or
@@ -116,7 +120,8 @@ int main(int argc, char** argv) {
     } catch (const std::exception&) {
     }
 
-    minimal::plugins::PluginLoader loader(tools, providers, tools_settings, &observers, &commands);
+    minimal::plugins::PluginLoader loader(tools, providers, tools_settings, &observers, &commands,
+                                          &auth_providers);
     const auto records = loader.LoadAll(candidates);
 
     std::printf("plugins (%zu discovered):\n", records.size());
@@ -136,6 +141,9 @@ int main(int argc, char** argv) {
         }
         if (record.registered_session_observer) {
             std::printf("      observer session lifecycle\n");
+        }
+        if (record.registered_auth_provider) {
+            std::printf("      auth provider registered\n");
         }
     }
 
@@ -255,6 +263,7 @@ int main(int argc, char** argv) {
     minimal::rpc::SessionServiceImpl service(sessions, *session_db, settings, permissions,
                                              minimal::common::DefaultLogger());
     service.set_commands(&commands);
+    service.set_auth_providers(&auth_providers);
     minimal::rpc::Server server(service, socket_path);
 
     if (!server.listening()) {

@@ -49,9 +49,11 @@ int SessionServiceImpl::ScrollbackPageSize() const {
     return configured > 0 ? configured : kFallbackPageSize;
 }
 
-grpc::Status SessionServiceImpl::CreateSession(grpc::ServerContext*,
+grpc::Status SessionServiceImpl::CreateSession(grpc::ServerContext* context,
                                                const v1::CreateSessionRequest* request,
                                                v1::CreateSessionResponse* response) {
+    if (const auto auth = EnsureAuthenticated(auth_providers_, context); !auth.ok()) return auth;
+
     // session_id set means RESUME: reopen the stored session, loading its
     // transcript as the loop's working history. Distinct enough from creation
     // -- different validation, no row minting, no rollback-on-failure -- to be
@@ -305,7 +307,10 @@ void SessionServiceImpl::DispatchCommand(const v1::CommandInvocation& invocation
 }
 
 grpc::Status SessionServiceImpl::OpenSession(
-    grpc::ServerContext*, grpc::ServerReaderWriter<v1::ServerEvent, v1::ClientEvent>* stream) {
+    grpc::ServerContext* context,
+    grpc::ServerReaderWriter<v1::ServerEvent, v1::ClientEvent>* stream) {
+    if (const auto auth = EnsureAuthenticated(auth_providers_, context); !auth.ok()) return auth;
+
     // OpenSession carries no request message: the stream is named by the
     // session_id on its first ClientEvent (deliberately redundant on every
     // message rather than bound once via metadata). So attach happens on the
@@ -386,9 +391,11 @@ grpc::Status SessionServiceImpl::OpenSession(
     return grpc::Status::OK;
 }
 
-grpc::Status SessionServiceImpl::GetMessages(grpc::ServerContext*,
+grpc::Status SessionServiceImpl::GetMessages(grpc::ServerContext* context,
                                              const v1::GetMessagesRequest* request,
                                              v1::GetMessagesResponse* response) {
+    if (const auto auth = EnsureAuthenticated(auth_providers_, context); !auth.ok()) return auth;
+
     if (request->session_id().empty()) {
         return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "session_id is required");
     }
@@ -425,9 +432,11 @@ grpc::Status SessionServiceImpl::GetMessages(grpc::ServerContext*,
     return grpc::Status::OK;
 }
 
-grpc::Status SessionServiceImpl::ListSessions(grpc::ServerContext*,
+grpc::Status SessionServiceImpl::ListSessions(grpc::ServerContext* context,
                                               const v1::ListSessionsRequest* request,
                                               v1::ListSessionsResponse* response) {
+    if (const auto auth = EnsureAuthenticated(auth_providers_, context); !auth.ok()) return auth;
+
     session::ListSessionsFilter filter;
     if (!request->include_all_dirs()) {
         if (request->project_root().empty()) {

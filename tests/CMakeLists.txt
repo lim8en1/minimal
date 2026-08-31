@@ -52,6 +52,7 @@ add_executable(minimal_tests
     pending_requests_test.cpp
     event_queue_test.cpp
     command_executor_test.cpp
+    auth_test.cpp
     wire_permission_checker_test.cpp
     session_observer_test.cpp
     session_store_test.cpp
