@@ -11,6 +11,7 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -1408,4 +1409,45 @@ TEST_CASE("the model flag applies on resume, and a malformed one is refused ther
         CHECK(status.error_code() == grpc::StatusCode::INVALID_ARGUMENT);
         CHECK(fixture.sessions->Find(session_id) == nullptr);  // not opened
     }
+}
+
+TEST_CASE("a client-supplied page limit is clamped, not trusted",
+          "[session_service][scrollback]") {
+    // `limit` is a wire int32 with a floor and, until this, no ceiling.
+    // SessionDatabase binds `limit + 1` for the has-more probe, so INT32_MAX is
+    // signed overflow -- and in practice binds a NEGATIVE limit, which SQLite
+    // reads as no limit at all. One request then loads the whole transcript:
+    // every row decoded, every message copied into one proto response. That is
+    // the O(n) blowup the keyset paging exists to prevent, and it is reachable
+    // from any client, since authentication is pass-through by default.
+    ServiceFixture fixture;
+    fixture.Start();
+
+    const std::string session_id = fixture.CreateSession();
+    // More rows than the ceiling, or the assertion below passes on a short
+    // transcript whether or not anything clamps.
+    for (int i = 0; i < 1010; ++i) {
+        fixture.db->AppendMessage(
+            session_id, llm::Message{llm::Role::User, {llm::TextBlock{"m" + std::to_string(i)}}}, 0);
+    }
+
+    grpc::ClientContext context;
+    v1::GetMessagesRequest request;
+    request.set_session_id(session_id);
+    request.set_limit(std::numeric_limits<std::int32_t>::max());
+    v1::GetMessagesResponse response;
+
+    // Answered normally rather than refused: asking for more than we serve is
+    // not an error, and has_more already tells the client to page.
+    REQUIRE(fixture.stub->GetMessages(&context, request, &response).ok());
+    CHECK(response.messages_size() == 1000);
+    CHECK(response.has_more());
+
+    grpc::ClientContext list_context;
+    v1::ListSessionsRequest list;
+    list.set_include_all_dirs(true);
+    list.set_limit(std::numeric_limits<std::int32_t>::max());
+    v1::ListSessionsResponse listed;
+    REQUIRE(fixture.stub->ListSessions(&list_context, list, &listed).ok());
+    CHECK(listed.sessions_size() <= 1000);  // one session here; the clamp is the same call
 }

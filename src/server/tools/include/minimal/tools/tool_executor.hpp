@@ -35,6 +35,11 @@ public:
                  std::optional<McpPermissionPolicy> mcp_ceiling = std::nullopt,
                  std::vector<std::string> seed_grants = {});
 
+    // NEVER THROWS. A tool_use the loop has already persisted must be answered
+    // on every path, or history keeps an orphaned call that both wire formats
+    // reject on the next request -- one throwing tool would poison the session
+    // for good. Plugin code (category_for, Disclose, execute) reading input the
+    // MODEL wrote is where the throws come from; see the comment on Run().
     llm::ToolResultBlock Run(const std::string& tool_use_id, const std::string& tool_name,
                               const nlohmann::json& input, ToolContext& ctx);
 
@@ -70,6 +75,12 @@ public:
 
 
 private:
+    // The real body. Split out only so Run() can be the one place the catch
+    // lives -- an inline try around a function this long invites a later edit to
+    // slip a return past it.
+    llm::ToolResultBlock RunGuarded(const std::string& tool_use_id, const std::string& tool_name,
+                                     const nlohmann::json& input, ToolContext& ctx);
+
     ToolRegistry& registry_;
     PermissionChecker& checker_;
     PermissionPolicy policy_;

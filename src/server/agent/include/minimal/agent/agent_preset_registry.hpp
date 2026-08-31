@@ -1,6 +1,7 @@
 #pragma once
 
 #include <filesystem>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 
@@ -38,7 +39,12 @@ public:
     // is_subagent == false and an unprefixed system_prompt -- subagent.md
     // prefixing and is_subagent=true are session-level facts layered on by a
     // future session/spawn-time caller, using SubagentPrefix() below.
-    const AgentPreset& Resolve(const std::string& preset_name) const;
+    // BY VALUE, and the cache below is why. Returning a reference into a
+    // container that a concurrent Resolve() may rehash hands the caller a
+    // pointer that can die under it -- and every production caller copied the
+    // result anyway, because a preset is per-session state a session then
+    // mutates (--model, /agent).
+    AgentPreset Resolve(const std::string& preset_name) const;
 
     const std::string& SubagentPrefix() const { return subagent_prefix_; }
 
@@ -58,6 +64,15 @@ private:
     const config::SkillRegistry& skills_;
     std::string subagent_prefix_;
     std::string default_compression_prompt_;
+    // GUARDED, because Resolve() populates it lazily and its callers are on
+    // different threads with nothing between them: SessionRegistry::Create runs
+    // on a gRPC handler thread (before it takes its own lock), and
+    // SubagentManager::Spawn runs on a session worker during a tool call. Two
+    // concurrent CreateSessions, or a CreateSession racing a spawn_subagent, is
+    // a concurrent emplace into one unordered_map. The class comment's "config
+    // is read once at startup, there is no hot-reload" is true of the FILES; the
+    // cache is built at runtime, on demand, from whichever thread asks first.
+    mutable std::mutex cache_mu_;
     mutable std::unordered_map<std::string, AgentPreset> cache_;
 };
 

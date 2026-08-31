@@ -865,3 +865,55 @@ every one of them reads as done.
    which is what this disproves. Still deferred now that the hole is closed, but the argument for it
    is no longer only hit rate — a hand-rolled walker cannot tell "I parsed this" from "I mis-parsed
    this", which is exactly how this produced `complete = true`, and a grammar can.
+
+### Correctness
+
+2. **A throwing tool poisoned the session for good.** `ToolExecutor::Run` called plugin code --
+   `category_for`, `Disclose`, `execute`, all arbitrary native code by design -- with no guard, and
+   the agent loop did not wrap it either. The loop persists the assistant message carrying the
+   `tool_use` BEFORE running any tool and appends results AFTER all of them, so a throw left an
+   orphaned `tool_use` in history: the exact state `snap_compaction_boundary` exists to prevent, and
+   a hard 400 on both wire formats. `Session::RunOneTurn` caught the exception, the session
+   survived, and then failed every subsequent turn forever.
+
+   Three live routes, none exotic, all reading input the MODEL wrote: `fs_tools` used `value()` and
+   `get<int>()` on `offset`/`limit`/`view_range`/`command` without checking type, so
+   `{"offset": "1"}` was a `type_error` out of the tool; and `SessionDatabase::AppendMessage` called
+   `dump()` with the default strict UTF-8 handler, which throws on invalid UTF-8 -- nothing between
+   a child process's raw stdout and that line validates encoding, so one `cat` of a binary file did
+   it. All three fixed: the executor answers every call on every path (`Run` is now a `try` around
+   `RunGuarded`, so a later edit cannot slip a return past the catch), `fs_tools` type-checks the way
+   its own `Insert` already did, and persisted content substitutes U+FFFD. `Run` never throwing is
+   stated on the declaration, since it is a contract the loop depends on rather than an
+   implementation detail.
+
+3. **The server never exited after an `OpenSession` exception.** The catch path restored the attach
+   count and stopped; the success path fires `on_last_client_detached_` on the zero transition, which
+   `main()` wires to `RequestShutdown()`. So a client whose stream unwound decremented to zero
+   without ever firing it, and the no-daemon design -- "refcounted by attached clients, gone when the
+   last one leaves" -- silently did not hold: the process kept the socket forever and the next
+   auto-spawning client would find a zombie it could not replace. The catch block existed precisely
+   so the refcount could not leak, and its comment says so; it just did not carry the consequence of
+   reaching zero. Both exits call one `ReleaseAttachment` now, because splitting that decision across
+   two sites is what let them drift.
+
+4. **`AgentPresetRegistry::Resolve` raced on its own cache.** A `mutable unordered_map` populated
+   lazily, with no mutex in the class, called from `SessionRegistry::Create` on a gRPC handler thread
+   (before it takes its own lock) and from `SubagentManager::Spawn` on a session worker. Two
+   concurrent `CreateSession`s, or a `CreateSession` racing a `spawn_subagent`, is a concurrent
+   `emplace` into one map -- and it returned a `const AgentPreset&` into a container a rehash could
+   move. The class comment's "config is read once at startup, there is no hot-reload" is true of the
+   FILES; the cache is built at runtime from whichever thread asks first. Now mutex-guarded and
+   returning by value, with `ResolveUncached` run OUTSIDE the lock so disk I/O does not serialize
+   every concurrent session creation -- two threads racing an unseen preset may both parse it, which
+   is harmless because the result is a pure function of files that do not change at runtime.
+
+5. **A client-supplied page limit was trusted.** `limit` is a wire `int32` with a floor and no
+   ceiling; `SessionDatabase` binds `limit + 1` for the has-more probe, so `INT32_MAX` is signed
+   overflow -- and in practice binds a NEGATIVE limit, which SQLite reads as no limit at all. One
+   `GetMessages{limit: 2147483647}` then loaded an entire transcript, every row decoded and copied
+   into one proto response: the O(n) blowup the keyset paging (§11.8) exists to prevent, reachable
+   from any client since authentication is pass-through by default. `ListSessions` had the same gap,
+   and its proto comment already documented a bound it did not have. Both clamp to 1000 now --
+   clamped rather than refused, because asking for more than we serve is not an error and `has_more`
+   already tells the client to page.

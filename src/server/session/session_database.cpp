@@ -334,7 +334,18 @@ std::int64_t SessionDatabase::AppendMessage(const std::string& session_id,
                                             const llm::Message& message, int token_count) {
     std::lock_guard lock(mu_);
     const std::int64_t now = NextTimestamp();
-    const std::string content_json = MessageToJson(message).dump();
+    // REPLACE, not the default strict handler. dump() throws type_error.316 on
+    // invalid UTF-8, and nothing between a child process's raw stdout and this
+    // line validates encoding -- one `cat` of a binary file, or a tool printing
+    // Latin-1, threw here. That throw arrived BEFORE the transaction, so the
+    // message was persisted nowhere and AgentLoop::AppendAndPersist never
+    // reached its history_.push_back either: the assistant's tool_use was
+    // already in history, its results were not, and every later turn 400'd on
+    // the orphaned call. Substituting U+FFFD keeps a byte of noise from
+    // destroying a conversation; the transcript is a record of what was said,
+    // not a binary-faithful channel.
+    const std::string content_json =
+        MessageToJson(message).dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
     const char* role = message.role == llm::Role::User ? "user" : "assistant";
 
     // Name candidate for the free default: the first user message carrying text.

@@ -102,11 +102,23 @@ AgentPresetRegistry::AgentPresetRegistry(std::filesystem::path config_dir,
         config::parse_frontmatter_markdown(ReadFileOrEmpty(config_dir_ / "prompts" / "compression.md")).body;
 }
 
-const AgentPreset& AgentPresetRegistry::Resolve(const std::string& preset_name) const {
-    if (auto it = cache_.find(preset_name); it != cache_.end()) return it->second;
-    auto [it, inserted] = cache_.emplace(preset_name, ResolveUncached(preset_name));
-    (void)inserted;
-    return it->second;
+AgentPreset AgentPresetRegistry::Resolve(const std::string& preset_name) const {
+    {
+        std::lock_guard<std::mutex> lock(cache_mu_);
+        if (auto it = cache_.find(preset_name); it != cache_.end()) return it->second;
+    }
+
+    // Resolved OUTSIDE the lock: ResolveUncached reads files and can throw, and
+    // holding the cache mutex across disk I/O would serialize every concurrent
+    // session creation behind one preset parse. The cost is that two threads
+    // racing the same unseen preset may both parse it -- harmless, since the
+    // result is a pure function of files that do not change at runtime, and the
+    // insert below keeps whichever landed first so every later caller still sees
+    // one consistent value.
+    AgentPreset resolved = ResolveUncached(preset_name);
+
+    std::lock_guard<std::mutex> lock(cache_mu_);
+    return cache_.emplace(preset_name, std::move(resolved)).first->second;
 }
 
 void ApplyModel(AgentPreset& preset, const config::ResolvedModel& model) {

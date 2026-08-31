@@ -98,17 +98,24 @@ private:
     grpc::Status ResumeSession(const v1::CreateSessionRequest* request,
                                v1::CreateSessionResponse* response);
 
-    // Reader thread. Returns false if the stream should end.
     // Reader thread. Every branch is non-blocking -- that is the property the
     // three-thread topology depends on, not an implementation detail.
     void Dispatch(const v1::ClientEvent& event, agent::Session& session);
+
     // Read-only commands go to the bounded command pool, everything else to the
     // session's work queue. Reader thread; must not block on either path.
+    void DispatchCommand(const v1::CommandInvocation& invocation, agent::Session& session);
+
     // Parses CreateSessionRequest.model onto params. Shared by fresh creation
     // and resume, so the two cannot disagree about whether --model applies.
     grpc::Status ApplyModelOverride(const v1::CreateSessionRequest& request,
                                     agent::SessionParams& params) const;
-    void DispatchCommand(const v1::CommandInvocation& invocation, agent::Session& session);
+
+    // Detach and drop this stream's reference, firing on_last_client_detached_
+    // if it was the last. BOTH exits of OpenSession go through here: the catch
+    // path used to decrement without firing, which left the refcounted server
+    // unable to ever notice it had zero clients.
+    void ReleaseAttachment(agent::Session& session);
 
     // Runs read-only commands off the reader thread. Its destructor joins the
     // pool, and a task may borrow `sessions_`/`commands_` -- both outlive this

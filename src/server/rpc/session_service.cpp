@@ -1,5 +1,7 @@
 #include "minimal/rpc/session_service.hpp"
 
+#include <algorithm>
+
 #include <unistd.h>
 
 #include <chrono>
@@ -16,6 +18,24 @@ namespace {
 // unset, which is its default. Named rather than repeated as a literal: two
 // call sites drifting apart is how a "default" becomes two different defaults.
 constexpr int kFallbackPageSize = 100;
+
+// CEILING on a client-supplied page size, and it is load-bearing rather than
+// tidy. `limit` arrives as a wire int32 with a floor and nothing above it, and
+// SessionDatabase binds `limit + 1` to reserve the has-more probe: INT32_MAX is
+// signed-overflow UB, and in practice binds a NEGATIVE limit, which SQLite reads
+// as no limit at all. One GetMessages{limit: 2147483647} then loads an entire
+// transcript -- every row, every JSON decode, every proto copy, in one response
+// -- which is precisely the O(n) blowup the keyset paging exists to prevent.
+// ListSessions' proto comment already documented a bound it did not have.
+constexpr int kMaxPageSize = 1000;
+
+// Clamped, never rejected: a client asking for more than we will serve is not
+// making an error, and paging is the caller's answer either way. `has_more`
+// already tells it there is another page.
+int ClampPageSize(int requested, int fallback) {
+    if (requested <= 0) requested = fallback;
+    return std::min(requested, kMaxPageSize);
+}
 
 grpc::Status NotYet(const char* what) {
     return grpc::Status(grpc::StatusCode::UNIMPLEMENTED,
@@ -371,8 +391,7 @@ grpc::Status SessionServiceImpl::OpenSession(
         sessions_.Terminate(session->info().session_id);
         session->queue().Close();
         if (writer.joinable()) writer.join();
-        session->Detach();
-        attached_.fetch_sub(1, std::memory_order_acq_rel);
+        ReleaseAttachment(*session);
         return grpc::Status(grpc::StatusCode::INTERNAL, e.what());
     }
 
@@ -383,12 +402,27 @@ grpc::Status SessionServiceImpl::OpenSession(
     // blocking forever on Pop().
     sessions_.Terminate(session->info().session_id);
     if (writer.joinable()) writer.join();
-    session->Detach();
+    ReleaseAttachment(*session);
+    return grpc::Status::OK;
+}
 
+void SessionServiceImpl::ReleaseAttachment(agent::Session& session) {
+    // ONE function, called by both exits, because the two used to differ in the
+    // half that matters. The catch path restored the count and stopped there --
+    // so a client whose stream unwound decremented to zero without ever firing
+    // the callback, and main() wires that callback to RequestShutdown(). The
+    // whole no-daemon design ("refcounted by attached clients, gone when the
+    // last one leaves") then never fired: the process held the socket forever
+    // and the next auto-spawning client found a zombie it could not replace.
+    //
+    // The catch block existed precisely for a stream that unwinds, and its own
+    // comment says it is there so the refcount cannot leak -- it just did not
+    // carry the consequence of reaching zero. Splitting that decision across two
+    // call sites is what let them drift, so there is now only one.
+    session.Detach();
     if (attached_.fetch_sub(1, std::memory_order_acq_rel) == 1 && on_last_client_detached_) {
         on_last_client_detached_();
     }
-    return grpc::Status::OK;
 }
 
 grpc::Status SessionServiceImpl::GetMessages(grpc::ServerContext* context,
@@ -407,7 +441,7 @@ grpc::Status SessionServiceImpl::GetMessages(grpc::ServerContext* context,
                             "no such session: " + request->session_id());
     }
 
-    const int limit = request->limit() > 0 ? request->limit() : ScrollbackPageSize();
+    const int limit = ClampPageSize(request->limit(), ScrollbackPageSize());
 
     try {
         // has_before_seq(), not a value test: the wire field is optional
@@ -449,7 +483,7 @@ grpc::Status SessionServiceImpl::ListSessions(grpc::ServerContext* context,
         filter.project_root = request->project_root();
     }
     filter.include_subagents = request->include_subagents();
-    filter.limit = request->limit() > 0 ? request->limit() : ScrollbackPageSize();
+    filter.limit = ClampPageSize(request->limit(), ScrollbackPageSize());
     // Both halves or neither: the cursor is a (updated_at, id) pair because the
     // sort key is, and half a cursor would silently page from the wrong place.
     if (request->has_before_updated_at() && request->has_before_id()) {
