@@ -20,6 +20,8 @@
 //      path_confinement::confine rather than reimplementing path safety, which
 //      is precisely why these are ABI surface too, just inbound.
 
+#include <filesystem>
+
 #include "minimal/common/abi_tag.hpp"
 
 // --- Half 2: utilities plugins consume -------------------------------------
@@ -35,6 +37,8 @@
 #include "minimal/llm/provider.hpp"
 #include "minimal/llm/provider_factory_registry.hpp"
 #include "minimal/llm/sse_parser.hpp"
+#include "minimal/plugins/plugin_rpc.hpp"
+#include "minimal/plugins/plugin_storage.hpp"
 #include "minimal/session/history_window.hpp"
 #include "minimal/session/session_reader.hpp"
 #include "minimal/tools/atomic_write.hpp"
@@ -79,6 +83,23 @@ struct PluginRegistrationContext {
     // exercising only other registries), which a consumer treats as "no
     // services", not as an error.
     ServiceRegistry* services = nullptr;
+
+    // Per-plugin persistent KV storage, namespaced by this plugin's name --
+    // pass the namespace as the first argument of every call; no plugin can
+    // reach another's rows. Null when the host does not offer the seam, which a
+    // plugin treats as "storage unavailable" and DEGRADES with a clear message,
+    // not as a fatal condition. Values are opaque strings (serialize your own
+    // JSON). For state that does not fit a KV shape, data_dir below is the
+    // escape hatch.
+    PluginStorage* storage = nullptr;
+
+    // This plugin's own directory under the host's data dir, created by the
+    // host before registration: <DataDir()>/plugins/<plugin_name>/. Empty when
+    // the host does not provision one. The documented escape hatch for state
+    // that does not fit the KV store -- a plugin may create its own database or
+    // files here, inheriting the concurrency discipline as its own obligation
+    // (WAL, a single-writer mutex).
+    std::filesystem::path data_dir;
 };
 
 }  // namespace minimal::plugins

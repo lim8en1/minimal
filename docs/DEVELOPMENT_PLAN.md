@@ -1527,3 +1527,49 @@ fail). One item retires a §11 deliberate-deferral: **HTTP connection reuse** is
    reference destroys it.
 10. **`McpClientManager::config_` was dead weight** — a full copy of the parsed mcps.json kept for
      the process lifetime after the constructor consumed it. Now a local.
+
+## 14. Plugin storage + the `checklist` plugin + the `PluginCall` server half
+
+Three pieces landing together, because each is the other's first consumer:
+
+1. **`PluginStorage`** (`src/server/plugins/plugin_storage.{hpp,cpp}`) — the sanctioned way a plugin
+   persists state across restarts. One shared SQLite file (`DataDir()/plugins.db`), the session
+   store's discipline (one connection, one mutex every method locks, WAL, `BEGIN IMMEDIATE`
+   + `user_version` migrations in one transaction, newer-schema refusal) extracted and namespaced.
+   `plugin` is part of the primary key and the first argument of every method, so one plugin cannot
+   read another's rows — structural, not conventional; cross-plugin goes through the service
+   channel. Values are opaque strings. The escape hatch for state that does not fit a KV shape is
+   `PluginRegistrationContext::data_dir` — the loader provisions
+   `<DataDir()>/plugins/<plugin_name>/` before registration and a plugin may keep its own database
+   there. Open failure is fatal at startup: the seam is handed to plugins at load, bundled plugins
+   may depend on it, and a store a newer binary wrote must not be silently rebuilt over.
+   Exposed via `PluginRegistrationContext::storage` (additive members, not new symbols). No
+   session-scoped mechanism: scoping is a keying decision, cleanup a plugin decision — recorded in
+   ARCHITECTURE § *Plugin storage* because "purge on OnSessionEnded breaks resume" is the
+   non-obvious half.
+2. **`PluginCall` server half** — §EXTENSIBILITY 2.5 landed early, deliberately. The proto was
+   already declared; the stub answered `UNIMPLEMENTED`. The calling convention lives in
+   `plugin_rpc.hpp`: a plugin serves UI consumers through a `PluginRpcHandler` provided under
+   `<plugin_name>.rpc` (the suffix keeps the dispatch target clear of plain §2.2 service names —
+   a collision there is fatal, so it is made unexpressible). `DispatchPluginCall` is grpc-free so
+   the dispatch is unit-testable without a channel; `session_service.cpp` only maps outcomes to
+   statuses (`NOT_FOUND` = plugin disabled/absent, `INVALID_ARGUMENT` = bad request or handler
+   refusal, `INTERNAL` = handler threw) behind the usual `EnsureAuthenticated` guard.
+   `PluginSubscribe` stays `UNIMPLEMENTED` — no consumer needs live push yet, and "poll first"
+   is the honest shape for model-driven, low-frequency data. Why land before track E: the
+   mechanism is the plugin-first philosophy's data path, and any frontend (web/mobile over plain
+   gRPC included) can now consume plugin state with no client-plugin machinery.
+3. **`checklist`** (`plugins/server/checklist/`) — bundled plugin, the model's per-session task
+   scratchpad. One tool (`checklist`, category `ReadOnly` — reaches no filesystem or process, so
+   the default chain allows it; gating a todo list trains click-through), ops `set` (full replace,
+   TodoWrite ergonomics) / `update` (mutate by id) / `view`; the result text is a GFM tasklist —
+   that text is the MODEL's medium, NOT the UI's. UI presentation is deliberately not
+   server-rendered: the plugin provides `checklist.rpc` (`get`/`list`, plugin-defined JSON) and any
+   consumer — TUI client-plugin view, web, mobile, script — fetches the same structured items over
+   the generic channel. State is one list per session keyed by session id in the plugin's storage
+   namespace; it survives resume and is not purged on session end (tiny rows, no session-deleted
+   hook). `context.storage == nullptr` degrades to clear error results, never a crash.
+
+`bundled/agents/plan.md` gained `checklist` in `allowed_tools`; `build.md` already allows all
+tools. `plugins.json` self-appends the new bundled entry on first start (provenance bundled,
+enabled), needing no migration.

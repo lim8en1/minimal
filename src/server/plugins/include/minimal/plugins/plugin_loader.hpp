@@ -17,6 +17,8 @@
 
 namespace minimal::plugins {
 
+class PluginStorage;  // forwarded; the full type reaches plugins via plugin_abi.h
+
 // "Came out of this build" vs. "someone dropped this in" is a real trust
 // distinction, and it drives both the default enablement and the severity of a
 // load failure -- bundled failures are fatal (a harness without tools-fs is
@@ -103,7 +105,9 @@ public:
                  rpc::AuthProviderRegistry* auth_providers = nullptr,
                  tools::PermissionAdvisorRegistry* permission_advisors = nullptr,
                  llm::ModelCatalogRegistry* model_catalogs = nullptr,
-                 ServiceRegistry* services = nullptr);
+                 ServiceRegistry* services = nullptr,
+                 PluginStorage* storage = nullptr,
+                 std::filesystem::path plugin_data_root = {});
     ~PluginLoader();
 
     PluginLoader(const PluginLoader&) = delete;
@@ -139,6 +143,15 @@ private:
     // NameRegistry (a new kind), not shadowed here. Also exposed to every
     // plugin through PluginRegistrationContext::services as the CONSUMER side.
     ServiceRegistry* services_ = nullptr;
+    // Optional like the others; null means no per-plugin KV storage is offered
+    // and PluginRegistrationContext::storage is null -- the plugin degrades.
+    // Owned by main (process lifetime, like the registries); the loader only
+    // forwards the pointer.
+    PluginStorage* storage_ = nullptr;
+    // Root under which each plugin's own data_dir is provisioned
+    // (<root>/<plugin_name>/, created before its registration hooks run).
+    // Empty disables provisioning.
+    std::filesystem::path plugin_data_root_;
     std::vector<void*> handles_;  // never closed; see LIFETIME above
 };
 

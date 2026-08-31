@@ -11,6 +11,8 @@
 
 #include "minimal/rpc/proto_convert.hpp"
 
+#include "minimal/plugins/plugin_rpc.hpp"
+
 namespace minimal::rpc {
 namespace {
 
@@ -588,9 +590,33 @@ grpc::Status SessionServiceImpl::SuggestPaths(grpc::ServerContext*, const v1::Su
     return NotYet("SuggestPaths");
 }
 
-grpc::Status SessionServiceImpl::PluginCall(grpc::ServerContext*, const v1::PluginCallRequest*,
-                                            v1::PluginCallResponse*) {
-    return NotYet("PluginCall");
+grpc::Status SessionServiceImpl::PluginCall(grpc::ServerContext* context,
+                                            const v1::PluginCallRequest* request,
+                                            v1::PluginCallResponse* response) {
+    if (const auto auth = EnsureAuthenticated(auth_providers_, context); !auth.ok()) return auth;
+
+    if (services_ == nullptr) {
+        return NotYet("PluginCall");
+    }
+
+    // The dispatch itself (validation, resolution, handler invocation,
+    // exception containment) is plugins::DispatchPluginCall, grpc-free so it is
+    // unit-testable without a channel. Only the outcome -> status mapping
+    // lives here.
+    const auto result = plugins::DispatchPluginCall(services_, request->plugin_name(),
+                                                    request->method(), request->json_payload());
+    switch (result.outcome) {
+        case plugins::RpcOutcome::kOk:
+            response->set_json_payload(result.payload);
+            return grpc::Status::OK;
+        case plugins::RpcOutcome::kNotFound:
+            return grpc::Status(grpc::StatusCode::NOT_FOUND, result.error);
+        case plugins::RpcOutcome::kInvalid:
+            return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, result.error);
+        case plugins::RpcOutcome::kInternal:
+            return grpc::Status(grpc::StatusCode::INTERNAL, result.error);
+    }
+    return grpc::Status(grpc::StatusCode::INTERNAL, "unreachable outcome");
 }
 
 grpc::Status SessionServiceImpl::PluginSubscribe(grpc::ServerContext*,

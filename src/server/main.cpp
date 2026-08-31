@@ -34,6 +34,7 @@
 #include "minimal/plugins/name_resolution.hpp"
 #include "minimal/plugins/plugin_discovery.hpp"
 #include "minimal/plugins/plugin_loader.hpp"
+#include "minimal/plugins/plugin_storage.hpp"
 #include "minimal/rpc/server.hpp"
 #include "minimal/rpc/session_service.hpp"
 #include "minimal/session/session_database.hpp"
@@ -172,6 +173,23 @@ int main(int argc, char** argv) {
     // plugin as the consumer side, through PluginRegistrationContext.
     minimal::plugins::ServiceRegistry services;
 
+    // Per-plugin persistent KV storage, constructed BEFORE plugin load: the
+    // pointer rides PluginRegistrationContext into every registration hook.
+    // Owned here for the process lifetime, like the registries. Open failure
+    // is fatal -- a plugin store a newer binary wrote must not be silently
+    // rebuilt over -- and there is no degraded harness to serve anyway, since
+    // bundled plugins may depend on the seam.
+    const auto plugin_data_root = minimal::common::DataDir() / "plugins";
+    std::unique_ptr<minimal::plugins::PluginStorage> plugin_storage;
+    try {
+        plugin_storage =
+            std::make_unique<minimal::plugins::PluginStorage>(minimal::common::DataDir() /
+                                                              "plugins.db");
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "\nplugin storage error: %s\n", e.what());
+        return 1;
+    }
+
     // The tools slice of settings.json is forwarded verbatim to every plugin;
     // core imposes no schema on it. Loaded defensively because a missing or
     // malformed settings.json must not stop plugins from loading -- the startup
@@ -186,7 +204,7 @@ int main(int argc, char** argv) {
 
     minimal::plugins::PluginLoader loader(tools, providers, tools_settings, &observers, &commands,
                                           &auth_providers, &permission_advisors, &model_catalogs,
-                                          &services);
+                                          &services, plugin_storage.get(), plugin_data_root);
     const auto records = loader.LoadAll(candidates);
     // The load thread is the only writer; from here the map is read-only, which
     // is what makes unguarded Find from session workers and the command pool
@@ -402,6 +420,10 @@ int main(int argc, char** argv) {
     service.set_commands(&commands);
     service.set_auth_providers(&auth_providers);
     service.set_mcp_manager(&mcp);
+    // The PluginCall dispatch target: the same sealed registry plugins
+    // registered their services into. Borrowed; `services` outlives the
+    // service (declared at stage 2).
+    service.set_services(&services);
     minimal::rpc::Server server(service, socket_path);
 
     if (!server.listening()) {
