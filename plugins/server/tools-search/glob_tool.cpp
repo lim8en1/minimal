@@ -1,0 +1,186 @@
+#include "glob_tool.hpp"
+
+#include <algorithm>
+#include <optional>
+#include <system_error>
+#include <vector>
+
+#include <re2/re2.h>
+
+#include "glob_matcher.hpp"
+#include "minimal/tools/path_confinement.hpp"
+#include "tree_walker.hpp"
+
+namespace minimal::tools_search {
+namespace {
+
+using tools::ToolCategory;
+using tools::ToolContext;
+using tools::ToolResult;
+using tools::ToolSpec;
+
+ToolResult Error(std::string message) { return ToolResult{true, std::move(message)}; }
+
+// Deterministic secondary sort: mtime descending (newest first -- "what did I
+// just change" is the dominant glob intent), ties broken by rel path.
+struct MatchedPath {
+    std::string rel_path;
+    bool is_dir = false;
+    std::int64_t mtime_ns = 0;  // 0 when the mtime cannot be read
+};
+
+class GlobTool : public tools::Tool {
+public:
+    explicit GlobTool(SearchSettings settings) : settings_(settings) {
+        spec_.name = "glob";
+        spec_.category = ToolCategory::ReadOnly;
+        spec_.definition.name = spec_.name;
+        spec_.definition.description =
+            "Find files by glob pattern (supports *, ?, [...], {a,b} and **). Returns paths "
+            "sorted by modification time, newest first, capped at head_limit with a footer "
+            "stating the total when more exist.";
+        spec_.definition.input_schema = {
+            {"type", "object"},
+            {"properties",
+             {{"pattern",
+               {{"type", "string"},
+                {"description",
+                 "Glob relative to `path`: `src/**/*.cpp`, `*.md`, `**/*.{hpp,cpp}`"}}},
+              {"path",
+               {{"type", "string"},
+                {"description", "Directory to search, relative to the project root "
+                                "or absolute within it (default: project root)"}}},
+              {"head_limit",
+               {{"type", "integer"},
+                {"description", "Maximum paths to return (default 200)"}}}}},
+            {"required", nlohmann::json::array({"pattern"})}};
+    }
+
+    const ToolSpec& spec() const override { return spec_; }
+    bool path_confinement_supported() const override { return true; }
+    std::optional<std::string> ExtractPath(const nlohmann::json& input) const override {
+        if (!input.contains("path") || !input.at("path").is_string()) return std::nullopt;
+        return input.at("path").get<std::string>();
+    }
+
+    ToolResult execute(const nlohmann::json& input, ToolContext& ctx) override {
+        if (!input.contains("pattern") || !input.at("pattern").is_string()) {
+            return Error("missing required string field: pattern");
+        }
+        const auto pattern = input.at("pattern").get<std::string>();
+        if (pattern.empty()) return Error("pattern must not be empty");
+
+        // Default search root is the project root itself; the executor has
+        // already classified an explicit `path` for out-of-workdir purposes.
+        // The MODEL writes this input: a non-string path is an ordinary
+        // mistake, reported -- never silently reinterpreted as ".".
+        std::string search_root(".");
+        if (input.contains("path")) {
+            if (!input.at("path").is_string()) return Error("path must be a string");
+            search_root = input.at("path").get<std::string>();
+        }
+        const auto resolved =
+            tools::confine(ctx.project_root, search_root, /*must_exist=*/true);
+        if (!resolved.ok) return Error(resolved.error);
+
+        if (input.contains("head_limit") && !input.at("head_limit").is_number_integer()) {
+            return Error("head_limit must be an integer");
+        }
+        const int head_limit = input.value("head_limit", settings_.glob_default_limit) > 0
+                                   ? input.value("head_limit", settings_.glob_default_limit)
+                                   : settings_.glob_default_limit;
+
+        // Literal fast path: no metacharacters means at most one concrete
+        // path; walking the tree to find it would be theatre.
+        if (IsLiteralGlob(pattern)) {
+            std::error_code ec;
+            const auto target = resolved.absolute_path / pattern;
+            const auto status = std::filesystem::symlink_status(target, ec);
+            if (ec || status.type() == std::filesystem::file_type::not_found) {
+                return ToolResult{false, "No files found"};
+            }
+            std::filesystem::path rel = pattern;
+            return ToolResult{false, rel.generic_string() + "\n"};
+        }
+
+        // Glob patterns are always anchored to the search root (VS Code
+        // semantics): `*.cpp` is top level only, `**/*.cpp` is everywhere.
+        // A pattern that cannot be translated is a tool error, unlike in
+        // gitignore where one bad line must not void a whole file.
+        const auto regex_source =
+            GlobToRegex(pattern, GlobFlags::kForceAnchored | GlobFlags::kBraceAlternation);
+        if (!regex_source) return Error("invalid glob pattern: " + pattern);
+        const re2::RE2 matcher("^" + *regex_source + "$");
+        if (!matcher.ok()) return Error("invalid glob pattern: " + pattern);
+
+        WalkOptions options;
+        options.timeout = std::chrono::steady_clock::duration{
+            std::chrono::milliseconds(settings_.glob_timeout_ms)};
+        options.is_cancelled = ctx.is_cancelled;
+        // No max_file_bytes: the walker only stats files; content is never
+        // read, so size cannot bound memory here.
+
+        std::vector<MatchedPath> matches;
+        const auto stats = WalkTree(
+            resolved.absolute_path, options, [&](const WalkEntry& entry) {
+                if (!re2::RE2::FullMatch(re2::StringPiece(entry.rel_path.data(), entry.rel_path.size()), matcher)) return true;
+                MatchedPath m;
+                m.rel_path = entry.rel_path;
+                m.is_dir = entry.is_dir;
+                if (!entry.is_dir) {
+                    std::error_code ec;
+                    const auto t = std::filesystem::last_write_time(entry.absolute_path, ec);
+                    if (!ec) {
+                        // Clock epochs differ across platforms; only the ORDER
+                        // matters, and any consistent nanosecond-scale tick
+                        // provides it.
+                        m.mtime_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                         t.time_since_epoch())
+                                         .count();
+                    }
+                }
+                matches.push_back(std::move(m));
+                // The walker's hard ceiling; head_limit is applied after the
+                // sort, on the NEWEST matches, so collecting to max and
+                // stopping there is what makes the cap meaningful.
+                return static_cast<int>(matches.size()) < settings_.glob_max_results;
+            });
+
+        if (matches.empty()) return ToolResult{false, "No files found"};
+
+        std::sort(matches.begin(), matches.end(), [](const MatchedPath& a, const MatchedPath& b) {
+            if (a.mtime_ns != b.mtime_ns) return a.mtime_ns > b.mtime_ns;
+            return a.rel_path < b.rel_path;
+        });
+
+        std::string out;
+        const int shown = std::min<int>(head_limit, static_cast<int>(matches.size()));
+        for (int i = 0; i < shown; ++i) {
+            out += matches[i].rel_path;
+            if (matches[i].is_dir) out += '/';
+            out += '\n';
+        }
+
+        const bool more = matches.size() > static_cast<std::size_t>(shown);
+        if (more) {
+            out += "(" + std::to_string(matches.size()) + " total; showing newest " +
+                   std::to_string(shown) + ")\n";
+        }
+        // A walk that stopped early is said so -- a partial result presented
+        // as complete is the one failure mode worse than a truncation.
+        if (stats.timed_out) out += "(stopped early: timeout)\n";
+        if (stats.cancelled) out += "(stopped early: cancelled)\n";
+        return ToolResult{false, out};
+    }
+
+private:
+    ToolSpec spec_;
+    SearchSettings settings_;
+};
+
+}  // namespace
+
+std::unique_ptr<tools::Tool> MakeGlobTool(SearchSettings settings) {
+    return std::make_unique<GlobTool>(std::move(settings));
+}
+}  // namespace minimal::tools_search

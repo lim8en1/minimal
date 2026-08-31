@@ -86,6 +86,14 @@ else()
     target_link_libraries(minimal_tree_sitter INTERFACE tree-sitter::tree-sitter)
 endif()
 
+# RE2 backs the tools-search plugin's regex matching. The point of the
+# dependency is the LINEAR-TIME guarantee: grep patterns are model-authored,
+# and a backtracking engine would let `(a+)+b` wedge the session worker thread
+# -- the exact hang bash's timeout_ms exists to bound, now unreachable.
+find_package(re2 CONFIG REQUIRED)
+add_library(minimal_re2 INTERFACE)
+target_link_libraries(minimal_re2 INTERFACE re2::re2)
+
 if(MINIMAL_BUILD_CLIENT)
     find_package(ftxui CONFIG REQUIRED)
     find_package(md4c CONFIG REQUIRED)   # exports md4c::md4c (verified: vcpkg + brew agree)
