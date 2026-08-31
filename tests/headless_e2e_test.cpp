@@ -19,15 +19,21 @@
 #include <string>
 #include <vector>
 
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <catch2/catch_test_macros.hpp>
 
 #include "minimal/client/utf8.hpp"
 
+#include "bash_session_state.hpp"
+#include "bash_settings.hpp"
+#include "bash_tool.hpp"
+
 #include "fakes.hpp"
 #include "temp_dir.hpp"
 #include "minimal/client/session_client.hpp"
+#include "minimal/hooks/hook_dispatcher.hpp"
 #include "minimal/rpc/server.hpp"
 #include "minimal/rpc/session_service.hpp"
 
@@ -129,6 +135,7 @@ struct HeadlessFixture {
         sessions = std::make_unique<agent::SessionRegistry>(*presets, tools, providers, *observers,
                                                             *db, agent::LoopConfig{},
                                                             common::DefaultLogger());
+        sessions->set_hook_dispatcher(hook_dispatcher.get());
         service = std::make_unique<rpc::SessionServiceImpl>(*sessions, *db,
                                                              config::SettingsConfig{},
                                                              config::PermissionsConfig{},
@@ -158,6 +165,12 @@ struct HeadlessFixture {
     config::SkillRegistry skills;
     tools::ToolRegistry tools;
     llm::ProviderFactoryRegistry providers;
+    // Plugin-owned state for the real bash tool (tools-bash's store type, the
+    // way the plugin itself owns one).
+    tools_bash::BashSessionStateStore bash_store;
+    // Optional hook dispatcher (track O). Set BEFORE Start(); wired through the
+    // same SessionRegistry funnel main uses.
+    std::unique_ptr<minimal::hooks::HookDispatcher> hook_dispatcher;
     std::vector<Step> steps;
     std::unique_ptr<agent::AgentPresetRegistry> presets;
     std::unique_ptr<agent::SessionObserverRegistry> observers;
@@ -581,4 +594,71 @@ TEST_CASE("a client-side cancel ends the turn with STOP_REASON_CANCELLED",
     CHECK(stop == v1::STOP_REASON_CANCELLED);
     CHECK_FALSE(fixture.provider_attempts->load() >= 2);  // no second attempt ran
     CHECK(text.empty());                                  // its answer never arrived
+}
+
+TEST_CASE("a pre_tool_use hook denies a tool call over the wire and the model adapts",
+          "[headless][hooks]") {
+    // Track O end to end: hooks.json maps a guard script onto core.pre_tool_use;
+    // the server runs it in /bin/sh with the payload on stdin; exit 2 becomes an
+    // error ToolResultBlock whose reason the model sees and adapts to -- all
+    // over a real gRPC channel with a real client, and WITHOUT a permission
+    // prompt (the hook fires before the Ask).
+    HeadlessFixture fixture;
+
+    // The real bash tool, registered exactly like the plugin registers it: the
+    // hook must gate a plugin-registered tool, not a test double.
+    fixture.tools.Register(
+        tools_bash::MakeBashTool(tools_bash::BashSettings{}, fixture.bash_store));
+
+    const auto script = fixture.dir / "guard.sh";
+    {
+        std::ofstream out(script);
+        out << "echo 'no bash in this sandbox'\nexit 2\n";
+    }
+    ::chmod(script.string().c_str(), 0755);
+
+    minimal::config::HookActionConfig action;
+    action.on = minimal::hooks::kPreToolUse;
+    action.filter = {{"tool_name", "bash"}};
+    action.command = script.string();
+    minimal::config::HooksConfig hooks_config;
+    hooks_config.hooks.push_back(std::move(action));
+    fixture.hook_dispatcher =
+        std::make_unique<minimal::hooks::HookDispatcher>(common::DefaultLogger());
+    (void)fixture.hook_dispatcher->Configure(hooks_config);
+
+    fixture.Script(testing::ToolUseResponse("call-1", "bash", {{"command", "echo hi"}}),
+                   {llm::StreamEvent{llm::MessageStartEvent{"m-1", "test-model"}},
+                    llm::StreamEvent{llm::MessageDeltaEvent{llm::StopReason::ToolUse}}});
+    fixture.Script(testing::TextResponse("understood, no shell then"),
+                   TextStream("understood, no shell then", llm::StopReason::EndTurn));
+    fixture.Start();
+
+    client::SessionClient::CreateOptions options;
+    options.project_root = (fixture.dir / "work").string();
+    options.agent_preset = "main";
+    options.run_mode = v1::PERMISSION_RUN_MODE_NORMAL;  // the hook must be the gate, not AllowOnly
+    const auto created = fixture.client->CreateSession(options);
+    REQUIRE(created.status.ok());
+
+    bool prompted = false;
+    bool tool_errored = false;
+    std::string text;
+    const auto status = fixture.client->RunTurn(
+        created.session_id, "run echo hi", [&](const v1::ServerEvent& event) {
+            if (event.has_permission_request()) prompted = true;
+            if (event.has_tool_execution() && !event.tool_execution().started()) {
+                tool_errored = event.tool_execution().is_error();
+            }
+            if (event.has_stream_event() && event.stream_event().has_text_delta()) {
+                text += event.stream_event().text_delta().text();
+            }
+            return true;
+        });
+
+    CHECK(status.ok());
+    CHECK(tool_errored);
+    CHECK_FALSE(prompted);  // the hook deny suppressed the prompt entirely
+    CHECK(text == "understood, no shell then");
+    CHECK(fixture.provider_attempts->load() == 2);  // the loop continued after the denial
 }

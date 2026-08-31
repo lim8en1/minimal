@@ -8,6 +8,7 @@
 
 #include "fakes.hpp"
 #include "minimal/common/logger.hpp"
+#include "minimal/hooks/hook_dispatcher.hpp"
 #include "minimal/llm/provider_factory_registry.hpp"
 #include "minimal/plugins/name_resolution.hpp"
 #include "minimal/plugins/plugin_discovery.hpp"
@@ -49,9 +50,10 @@ struct Harness {
     llm::ProviderFactoryRegistry provider_registry;
     llm::ModelCatalogRegistry model_catalog_registry;
     plugins::ServiceRegistry service_registry;
+    hooks::HookDispatcher hook_dispatcher{common::DefaultLogger()};
     plugins::PluginLoader loader{tool_registry, provider_registry, nlohmann::json::object(),
                                  nullptr, nullptr, nullptr, nullptr, &model_catalog_registry,
-                                 &service_registry};
+                                 &service_registry, &hook_dispatcher};
 };
 
 }  // namespace
@@ -316,6 +318,26 @@ TEST_CASE("a plugin entry with no config still loads with an empty context confi
     tools::ToolContext ctx(common::DefaultLogger());
     CHECK(h.tool_registry.Find("fixture_tool")->execute({}, ctx).content_text ==
           "fixture ok");
+}
+
+TEST_CASE("a plugin's hook points register before its tools, and land on the record",
+          "[plugin_loader][track_o]") {
+    Harness h;
+    const auto records = h.loader.LoadAll({Enabled("fixture-hook")});
+
+    REQUIRE(records.size() == 1);
+    const auto& record = records.front();
+    CHECK(record.status == LoadStatus::Loaded);
+    CHECK(record.registered_hook_points == std::vector<std::string>{"fixture-hook.before_thing"});
+
+    // The ordering guarantee the worked example (tools-bash) rests on: when the
+    // plugin's tools registered, its HookPoint handle was already minted and
+    // enabled. Exposed through the service channel because a dlopen'd plugin's
+    // symbols are private.
+    const auto* flag = static_cast<const bool*>(
+        h.service_registry.Find("fixture.hook_captured_before_tools"));
+    REQUIRE(flag != nullptr);
+    CHECK(*flag);
 }
 
 TEST_CASE("config reaches the tool seam while tools_settings stays verbatim",

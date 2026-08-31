@@ -64,7 +64,7 @@ Session::Session(SessionParams params, AgentPreset preset,
       // grants as seed -- the whole inheritance lands in this one call.
       executor_(registry, *checker_, preset_.permission_mode, preset_.mcp_permissions,
                 params_.run_mode_override.value_or(preset_.run_mode), params_.policy_ceiling,
-                params_.mcp_policy_ceiling, params_.seed_grants) {
+                params_.mcp_policy_ceiling, params_.seed_grants, params_.hooks) {
     // An advised checker was composed before this Session existed, so only its
     // shared cancel holder could not yet be bound to a session: install the
     // predicate now. The worker starts at the end of this constructor, so there
@@ -528,8 +528,41 @@ void Session::WorkerMain() {
     }
 }
 
-void Session::RunOneTurn(std::string text) {
-    const auto started = std::chrono::steady_clock::now();
+void Session::RunOneTurn(std::string text) {    const auto started = std::chrono::steady_clock::now();
+
+    // --- core.user_prompt_submit: the prompt veto seam -------------------------
+    //
+    // On the WORKER, deliberately, not in SubmitTurn: SubmitTurn runs on the
+    // gRPC reader, which must never block, and a hook action is a subprocess
+    // with a budget. The observable semantics are unchanged -- nothing is
+    // persisted, and the client gets an ErrorEvent -- but the wedge risk lands
+    // on the thread that is allowed to block.
+    //
+    // TOP-LEVEL ONLY: a subagent's seeded task is the parent model's own
+    // formulation, not a user prompt, and the parent already decided to send
+    // it. Blocking it here would strand a spawner waiting on a completion the
+    // child is forbidden to produce.
+    if (params_.hooks != nullptr && params_.parent_session_id.empty()) {
+        nlohmann::json payload{{"session_id", params_.session_id},
+                               {"project_root", params_.project_root.string()},
+                               {"prompt", text}};
+        if (auto blocked = params_.hooks->Emit(hooks::kUserPromptSubmit, std::move(payload),
+                                               [this] { return IsCancelled(); })) {
+            logger_.warn("session {}: user_prompt_submit hook blocked the prompt: {}",
+                         params_.session_id, *blocked);
+            v1::ServerEvent event = MakeEvent(params_.session_id);
+            auto* error = event.mutable_error();
+            error->set_category(v1::LLM_ERROR_CATEGORY_UNSPECIFIED);
+            error->set_message("prompt rejected by hook: " + *blocked);
+            error->set_is_retryable(false);
+            channels_->queue.Push(std::move(event));
+            // The end-of-turn signal anyway: a headless client reads until
+            // TurnCompletedEvent, and a refusal is an exit path like any
+            // other. saw_error is what maps it onto the model-error exit code.
+            EmitTurnCompleted(llm::StopReason::Unknown, llm::Usage{}, false);
+            return;
+        }
+    }
 
     TurnResult result;
     std::int64_t first_seq = 0;

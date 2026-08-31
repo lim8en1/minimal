@@ -8,6 +8,7 @@
 
 #include "minimal/agent/session_observer_registry.hpp"
 #include "minimal/commands/command_registry.hpp"
+#include "minimal/hooks/hook_dispatcher.hpp"
 #include "minimal/llm/model_catalog.hpp"
 #include "minimal/llm/provider_factory_registry.hpp"
 #include "minimal/plugins/service_registry.hpp"
@@ -74,6 +75,10 @@ struct PluginRecord {
     // a providers.json `backend` names). Feeds the sanity check's discover-entry
     // warnings and its duplicate-catalog report.
     std::vector<std::string> registered_model_catalog_kinds;
+    // FULL hook point names, as the plugin declared them. Points live in their
+    // own namespace -- no aliasing, no permission keys -- and a duplicate is
+    // fatal at startup via the NameRegistry (NameKind::HookPoint).
+    std::vector<std::string> registered_hook_points;
 
     bool ok() const { return status == LoadStatus::Loaded; }
 };
@@ -103,7 +108,8 @@ public:
                  rpc::AuthProviderRegistry* auth_providers = nullptr,
                  tools::PermissionAdvisorRegistry* permission_advisors = nullptr,
                  llm::ModelCatalogRegistry* model_catalogs = nullptr,
-                 ServiceRegistry* services = nullptr);
+                 ServiceRegistry* services = nullptr,
+                 hooks::HookDispatcher* hook_points = nullptr);
     ~PluginLoader();
 
     PluginLoader(const PluginLoader&) = delete;
@@ -139,6 +145,12 @@ private:
     // NameRegistry (a new kind), not shadowed here. Also exposed to every
     // plugin through PluginRegistrationContext::services as the CONSUMER side.
     ServiceRegistry* services_ = nullptr;
+    // Optional like the others; null means plugins cannot register hook points.
+    // Additive across plugins; duplicate point names are fatal at startup via
+    // the NameRegistry (NameKind::HookPoint). The same object is the dispatch
+    // surface the plugin's HookPoint handles emit through, which is why it is
+    // one registry-and-dispatcher rather than two.
+    hooks::HookDispatcher* hook_points_ = nullptr;
     std::vector<void*> handles_;  // never closed; see LIFETIME above
 };
 

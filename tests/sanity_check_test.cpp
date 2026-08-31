@@ -15,6 +15,7 @@
 #include "minimal/common/config_paths.hpp"
 #include "commands_core_fixture.hpp"
 #include "minimal/config/sanity_check.hpp"
+#include "minimal/hooks/hook_dispatcher.hpp"
 #include "minimal/plugins/name_resolution.hpp"
 #include "temp_dir.hpp"
 
@@ -89,6 +90,7 @@ struct Fixture {
     llm::ModelCatalogRegistry model_catalogs;
     config::SkillRegistry skills;
     plugins::ServiceRegistry service_registry;
+    hooks::HookDispatcher hook_dispatcher{common::DefaultLogger()};
 
     Fixture() {
         std::filesystem::create_directories(config_dir);
@@ -133,7 +135,8 @@ struct Fixture {
         return config::SanityCheckInputs{config_dir,         records, tool_registry,
                                          provider_factories, skills,  plugin_config,
                                          resolution,         command_registry, advisors,
-                                         services,           &model_catalogs};
+                                         services,           &model_catalogs,
+                                         &hook_dispatcher};
     }
 };
 
@@ -909,4 +912,55 @@ TEST_CASE("advisor_inherit without an advisor is inert and warned", "[sanity_che
     REQUIRE(advisor.size() == 1);
     CHECK(advisor.front()->severity == CheckSeverity::Warning);
     CHECK(advisor.front()->message.find("advisor_inherit") != std::string::npos);
+}
+
+// --- Hooks (track O) -------------------------------------------------------------
+
+TEST_CASE("a malformed hooks.json is fatal, like permissions.json", "[sanity_check][hooks]") {
+    Fixture f;
+    WriteGoodConfig(f.config_dir);
+    ScopedEnv data("XDG_DATA_HOME", f.xdg_data.string().c_str());
+    f.Write("hooks.json", "{ not json ");
+
+    const auto results = RunChecks(f);
+    REQUIRE(HasFatal(results));
+    const auto config_parse = ByCheck(results, "config_parse");
+    REQUIRE(config_parse.size() == 1);
+    CHECK(config_parse.front()->message.find("hooks.json") != std::string::npos);
+}
+
+TEST_CASE("hooks actions validate against registered points", "[sanity_check][hooks]") {
+    Fixture f;
+    WriteGoodConfig(f.config_dir);
+    ScopedEnv data("XDG_DATA_HOME", f.xdg_data.string().c_str());
+    f.RegisterTool("tools-bash", "bash");
+
+    f.Write("hooks.json", R"({
+      "hooks": [
+        {"on": "core.pre_tool_use", "filter": {"tool_name": "bash"}, "command": "exit 0"},
+        {"on": "someplugin.gone", "command": "exit 0"},
+        {"on": "core.pre_tool_use", "filter": {"input": "x"}, "command": "exit 0"},
+        {"on": "core.post_tool_use", "command": "exit 0"}
+      ]})");
+
+    const auto results = RunChecks(f);
+    const auto hooks = ByCheck(results, "hooks");
+    REQUIRE(hooks.size() == 3);
+    CHECK(hooks[0]->message.find("unknown hook point 'someplugin.gone'") != std::string::npos);
+    CHECK(hooks[1]->message.find("does not declare filterable") != std::string::npos);
+    CHECK(hooks[2]->message.find("observe-only point") != std::string::npos);
+}
+
+TEST_CASE("a well-formed hooks.json produces no hook warnings", "[sanity_check][hooks]") {
+    Fixture f;
+    WriteGoodConfig(f.config_dir);
+    ScopedEnv data("XDG_DATA_HOME", f.xdg_data.string().c_str());
+    f.RegisterTool("tools-bash", "bash");
+
+    f.Write("hooks.json", R"({
+      "hooks": [ {"on": "core.pre_tool_use", "filter": {"tool_name": "bash"},
+                  "command": "~/bin/guard.sh", "timeout_ms": 10000} ]})");
+
+    const auto results = RunChecks(f);
+    CHECK(ByCheck(results, "hooks").empty());
 }

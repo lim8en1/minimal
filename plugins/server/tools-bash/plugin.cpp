@@ -49,6 +49,15 @@ minimal::tools_bash::BashSessionStateStore& BashStore() {
     return store;
 }
 
+// This plugin's hook point handle, minted at registration and captured here
+// (the same process-lifetime rule as BashStore). register_hook_points runs
+// BEFORE register_tools in the loader precisely so the handle exists when the
+// tool is constructed.
+minimal::hooks::HookPoint& BeforeCommandPoint() {
+    static minimal::hooks::HookPoint point;
+    return point;
+}
+
 // Releases this plugin's per-session state. Core cannot do it: the map lives in
 // this .so and nothing outside it can reach the store. Without this hook the
 // cwd/env of every session that ever ran would stay resident for the life of
@@ -74,7 +83,22 @@ void minimal_plugin_register_tools(
     // The plugin's own `config` object from its plugins.json entry, verbatim;
     // core imposes no schema, this plugin owns the shape of its own slice.
     const auto settings = minimal::tools_bash::ParseBashSettings(context.config);
-    registry.Register(minimal::tools_bash::MakeBashTool(settings, BashStore()));
+    registry.Register(
+        minimal::tools_bash::MakeBashTool(settings, BashStore(), BeforeCommandPoint()));
+}
+
+// The worked example for plugin-declared hook points (docs/EXTENSIBILITY.md):
+// a veto-capable event fired right before this plugin spawns a shell command.
+// The point is declared here; what a Block MEANS is also declared here -- this
+// plugin refuses the invocation -- which is exactly the division of labor the
+// hook mechanism specifies: core owns dispatch and fail-open semantics, the
+// plugin owns its events and their consequences.
+void minimal_plugin_register_hook_points(
+    minimal::hooks::HookDispatcher& registry,
+    const minimal::plugins::PluginRegistrationContext&) {
+    BeforeCommandPoint() = registry.RegisterPoint(
+        {minimal::tools_bash::kBeforeCommandPoint, /*veto_capable=*/true,
+         /*filterable=*/{"program"}});
 }
 
 void minimal_plugin_register_commands(

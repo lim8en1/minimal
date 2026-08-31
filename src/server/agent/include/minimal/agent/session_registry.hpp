@@ -26,6 +26,7 @@
 #include "minimal/agent/session.hpp"
 #include "minimal/agent/session_observer_registry.hpp"
 #include "minimal/common/logger.hpp"
+#include "minimal/hooks/hook_dispatcher.hpp"
 #include "minimal/llm/provider_factory_registry.hpp"
 #include "minimal/session/session_database.hpp"
 #include "minimal/tools/tool_registry.hpp"
@@ -55,6 +56,11 @@ public:
     // Optional: sessions created without one answer every command invocation
     // with "not available". Set before any session exists.
     void set_commands(const commands::CommandRegistry* commands) { commands_ = commands; }
+
+    // The process-wide hook dispatcher (track O). Optional and borrowed; set
+    // before any session exists. Attached to every params.hooks that arrives
+    // null -- the funnel property, like the history reader below.
+    void set_hook_dispatcher(const hooks::HookDispatcher* hooks) { hooks_ = hooks; }
 
     std::shared_ptr<Session> Create(SessionParams params);
 
@@ -97,6 +103,9 @@ private:
     // Declared after providers_ so the factory registry outlives the cache.
     ProviderInstanceCache provider_cache_;
     SessionObserverRegistry& observers_;
+    // Optional and borrowed; every session gets the same one via the
+    // CreateResolved funnel.
+    const hooks::HookDispatcher* hooks_ = nullptr;
     session::SessionDatabase& db_;
     LoopConfig loop_config_;
     common::Logger& logger_;

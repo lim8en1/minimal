@@ -32,6 +32,8 @@ using RegisterModelCatalogsFn =
     void (*)(llm::ModelCatalogRegistry&, const PluginRegistrationContext&);
 using RegisterServicesFn =
     void (*)(ServiceRegistry&, const PluginRegistrationContext&);
+using RegisterHookPointsFn =
+    void (*)(hooks::HookDispatcher&, const PluginRegistrationContext&);
 
 template <typename Fn>
 Fn Lookup(void* handle, const char* symbol) {
@@ -96,8 +98,8 @@ PluginLoader::PluginLoader(tools::ToolRegistry& tools, llm::ProviderFactoryRegis
                            commands::CommandRegistry* commands,
                            rpc::AuthProviderRegistry* auth_providers,
                            tools::PermissionAdvisorRegistry* permission_advisors,
-                           llm::ModelCatalogRegistry* model_catalogs,
-                           ServiceRegistry* services)
+                            llm::ModelCatalogRegistry* model_catalogs,
+                            ServiceRegistry* services, hooks::HookDispatcher* hook_points)
     : tools_(tools),
       providers_(providers),
       tools_settings_(std::move(tools_settings)),
@@ -106,7 +108,8 @@ PluginLoader::PluginLoader(tools::ToolRegistry& tools, llm::ProviderFactoryRegis
       commands_(commands),
       auth_providers_(auth_providers),
       permission_advisors_(permission_advisors),
-      services_(services) {}
+      services_(services),
+      hook_points_(hook_points) {}
 
 // Handles are intentionally leaked -- see LIFETIME in the header.
 PluginLoader::~PluginLoader() = default;
@@ -170,6 +173,27 @@ PluginRecord PluginLoader::LoadOne(const PluginCandidate& candidate) {
     // Attribution window: every tool registered inside it belongs to this
     // plugin, which is what lets a later collision name both culprits.
     const std::size_t tools_before = tools_.attributions().size();
+    if (hook_points_ != nullptr) {
+        // FIRST, deliberately, before tools/commands/services: a plugin's tool
+        // registration may want to capture the HookPoint handle its own
+        // register_hook_points just minted (tools-bash's before_command is the
+        // worked example), and capture-before-use requires the point to exist
+        // by the time the tool is constructed.
+        const std::size_t points_before = hook_points_->attributions().size();
+        if (auto register_points = Lookup<RegisterHookPointsFn>(
+                handle, "minimal_plugin_register_hook_points")) {
+            if (!GuardedRegistration(record, "minimal_plugin_register_hook_points",
+                                     [&] { hook_points_->SetAttribution(record.name); },
+                                     [&] { register_points(*hook_points_, context); },
+                                     [&] { hook_points_->ClearAttribution(); })) {
+                return record;
+            }
+        }
+        const auto& point_attributions = hook_points_->attributions();
+        for (std::size_t i = points_before; i < point_attributions.size(); ++i) {
+            record.registered_hook_points.push_back(point_attributions[i].point_name);
+        }
+    }
     if (auto register_tools = Lookup<RegisterToolsFn>(handle, "minimal_plugin_register_tools")) {
         const bool ok = GuardedRegistration(
             record, "minimal_plugin_register_tools",

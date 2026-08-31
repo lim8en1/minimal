@@ -18,6 +18,7 @@ Companion to `ARCHITECTURE.md`, which remains the single source of truth for *de
 | `minimal_plugin_register_auth_provider(...)` | live | exclusive connection policy; pass-through default |
 | `minimal_plugin_register_permission_advisor(PermissionAdvisorRegistry&)` | **live (track J)** | answers `Ask` automatically; abstains/throws to the wire checker — the human |
 | `minimal_plugin_register_model_catalogs(ModelCatalogRegistry&)` | **live (track N)** | `"discover": true` providers list their models from the backend, lazily at first resolve; keyed by the same kind string as the provider factory |
+| `minimal_plugin_register_hook_points(HookDispatcher&)` | **live (track O)** | named, veto-capable or observe-only events the plugin emits; hooks.json actions answer them — see §5 |
 
 Interfaces a plugin implements today: `Tool` (with `Disclose` / `category_for` / `ExtractPath`), `Command` → `HarnessCommand`/`LLMCommand`, `LlmProvider` plus a factory, `SessionObserver`, `PermissionAdvisor` (composing above the wire checker — see §3), and the service interfaces a provider ships (abstract, header-only — see §2.2).
 
@@ -432,7 +433,27 @@ Command (the abstract -- already named Command; no rename)
 
 `ListCommands` carries `kind`, `display`, and `read_only`, so the prompt editor can annotate autocomplete — including flagging prompt shorthands, the one kind that will submit a prompt.
 
-## 5. Sequencing
+## 5. Hooks — config-mapped actions on named points
+
+**Status: landed as track O.** ARCHITECTURE.md § *Hooks* is the design source of truth; this section records the surface and the worked example.
+
+**The shape.** Core owns the mechanism (`src/server/hooks/`): a `HookDispatcher` that is both the point registry (registration-time, sealed at `Configure`) and the dispatch surface. `RegisterPoint({name, veto_capable, filterable})` returns a `HookPoint` handle the emitter keeps; `Emit(payload, is_cancelled)` is synchronous and returns the first block reason (nullopt = passed), `EmitAsync` posts to one ordered thread modeled on `SessionObserverRegistry`. Config-declared actions (`hooks.json`) map `/bin/sh -c` commands onto points: JSON payload on stdin, exit 0 pass / 2 block / anything else **fails open, enforced by the dispatcher**. Plugins register ADDITIONAL points — they never see user hook config, and the shell executor never sees plugin code.
+
+**The eleven core points** (registered in the dispatcher constructor, reserved before plugin load): `pre_tool_use` (veto, from `ToolExecutor::RunGuarded` after the `AlwaysDeny` short-circuit and before grants/Ask), `user_prompt_submit` (veto, from the **worker at turn-pop** — never `SubmitTurn`, the reader must not block; top-level sessions only), `post_tool_use` and `stop` (via a core bridge over `SessionObserver`), `session_created`/`session_ended` (same bridge), `pre_compact`/`post_compact` (both the auto trigger and `/compact`, with a filterable `trigger` field), `subagent_started`/`subagent_completed` (the latter from the child's every-exit-path completion hook), and `permission_prompted` (fired the moment an Ask reaches the checker — the desktop-notification feed).
+
+**The worked example: `tools-bash.before_command`.** Veto-capable, filterable on `program` — the disclosure-time RESOLVED program path (session `PATH` included), which is a finer grain than `pre_tool_use`'s tool name. The loader calls `register_hook_points` **before** `register_tools` precisely so the plugin can mint its handle and capture it into the tool at construction; what a Block MEANS is declared by the plugin (bash refuses the invocation) — core owns dispatch and fail-open, the plugin owns its events and their consequences.
+
+**What the surface guarantees (each tested):**
+
+1. Hooks only narrow: `AllowOnly` short-circuits before the hook seam; no hook can raise what the substrate denied.
+2. Fail-open on every action failure mode; the permission substrate is untouched and remains the boundary.
+3. Filters are exact equality on declared string fields; model-controlled input is never filterable; a pinning test freezes each point's field list.
+4. Duplicate point names are fatal via `NameKind::HookPoint` — the attribution feed is `ResolveRegistrationNames`'s `hook_points` parameter.
+5. A disabled plugin's points degrade to startup warnings on their actions; core points are unaffected.
+
+**Deliberately deferred:** `pre_compact` veto (bricks the session as occupancy climbs), pre/post LLM-call points (payload = the whole request, prompt-cache-hostile), prompt rewriting and stdout-context injection, per-preset hook scoping.
+
+## 6. Sequencing
 
 | Item | Depends on | Status |
 |---|---|---|
@@ -443,8 +464,9 @@ Command (the abstract -- already named Command; no rename)
 | 2.5 Plugin UI surface | track E + 2.2 | designed, lands with E; the server half dispatches through 2.2's registry (built by track L) |
 | 2.6 Model auto-discovery | nothing | **done (track N)**; lazy discovery via `ModelCatalogRegistry`, `/providers refresh`, network-free sanity checks |
 | 3 Permission advisor | nothing | **done (track J)** |
+| 5 Hooks (track O) | nothing | **done (track O)**; core mechanism + 11 core points + `tools-bash.before_command` worked example |
 | 4.2 TUI slots | E's frame first | specified; E additions (DEVELOPMENT_PLAN §5 E) |
 | 4.3 `ListCommands` | nothing (server half trivial) | specified; lands with E |
 | 4.4 Command display modes | nothing | specified; server half lands with E |
 
-Track order: **J → K → L → M → N**. K preceded L so the new `register_services` ABI symbol shipped with `PluginRegistrationContext` and never needed a second signature sweep; M and N are independent of everything and each other. 2.1–2.3 were independent of everything and small; 2.5's server half and 2.2 are the same mechanism — the registry was built once by L, and `PluginCall` wires to it when E lands the client half. N added the eleventh `extern "C"` symbol (`minimal_plugin_register_model_catalogs`); discovery reaches the config layer as an injected hook precisely so the config layer never links plugins.
+Track order: **J → K → L → M → N**. K preceded L so the new `register_services` ABI symbol shipped with `PluginRegistrationContext` and never needed a second signature sweep; M and N are independent of everything and each other. 2.1–2.3 were independent of everything and small; 2.5's server half and 2.2 are the same mechanism — the registry was built once by L, and `PluginCall` wires to it when E lands the client half. N added the eleventh `extern "C"` symbol (`minimal_plugin_register_model_catalogs`); discovery reaches the config layer as an injected hook precisely so the config layer never links plugins. O (§5) added the twelfth (`minimal_plugin_register_hook_points`), additive with no signature sweep, and its `hooks.json` reaches the dispatcher the same way `permissions.json` reaches the permission model: config loads before plugins, the dispatcher is core, and the sanity check validates the file against the points both have registered.

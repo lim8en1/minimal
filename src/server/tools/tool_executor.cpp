@@ -34,7 +34,8 @@ ToolExecutor::ToolExecutor(ToolRegistry& registry, PermissionChecker& checker,
                             PermissionRunMode run_mode,
                             std::optional<PermissionPolicy> policy_ceiling,
                             std::optional<McpPermissionPolicy> mcp_ceiling,
-                            std::vector<std::string> seed_grants)
+                            std::vector<std::string> seed_grants,
+                            const hooks::HookDispatcher* hooks)
     : registry_(registry),
       checker_(checker),
       policy_(std::move(policy)),
@@ -42,7 +43,21 @@ ToolExecutor::ToolExecutor(ToolRegistry& registry, PermissionChecker& checker,
       run_mode_(run_mode),
       policy_ceiling_(std::move(policy_ceiling)),
       mcp_ceiling_(std::move(mcp_ceiling)),
-      session_grants_(seed_grants.begin(), seed_grants.end()) {}
+      session_grants_(seed_grants.begin(), seed_grants.end()),
+      hooks_(hooks) {}
+
+namespace {
+
+const char* CategoryName(ToolCategory category) {
+    switch (category) {
+        case ToolCategory::ReadOnly: return "read_only";
+        case ToolCategory::FileWrite: return "file_write";
+        case ToolCategory::Execute: return "execute";
+    }
+    return "read_only";
+}
+
+}  // namespace
 
 PermissionMode ToolExecutor::ResolveMode(const Tool& tool, const nlohmann::json& input,
                                           const ToolContext& ctx) const {
@@ -151,9 +166,53 @@ llm::ToolResultBlock ToolExecutor::RunGuarded(const std::string& tool_use_id,
         return ErrorResult(tool_use_id, "permission denied for tool: " + tool_name);
     }
 
+    // --- core.pre_tool_use: the hook veto seam --------------------------------
+    //
+    // Placed AFTER the AlwaysDeny short-circuit -- a hook never sees a call the
+    // policy already denied; hooks only narrow -- and BEFORE grants/Ask: a hook
+    // deny suppresses the prompt entirely, which is the point (a guard that
+    // denies must not still put a modal in front of the operator).
+    //
+    // HOOKS ONLY NARROW: everything above this line (mode lattice, precedence
+    // chains, out-of-workdir fold, subagent ceilings, run mode) is final. A
+    // hook can deny what policy allowed; it can never allow what policy
+    // denied, because no path from here can raise `mode`.
+    if (hooks_ != nullptr) {
+        const std::string permission_key(registry_.PermissionKeyFor(tool_name));
+        const ToolCategory category =
+            tool->category_for(input).value_or(tool->spec().category);
+        nlohmann::json payload{{"session_id", ctx.session_id},
+                               {"tool_use_id", tool_use_id},
+                               {"tool_name", tool_name},
+                               {"permission_key", permission_key},
+                               {"category", CategoryName(category)},
+                               {"tool_input", input}};
+        if (auto blocked = hooks_->Emit(hooks::kPreToolUse, std::move(payload),
+                                        ctx.is_cancelled)) {
+            ctx.logger.warn("session {}: pre_tool_use hook blocked '{}': {}", ctx.session_id,
+                            tool_name, *blocked);
+            return ErrorResult(tool_use_id, "blocked by hook: " + *blocked);
+        }
+    }
+
     if (mode == PermissionMode::Ask) {
         const PermissionDisclosure disclosure = tool->Disclose(input, ctx);
         if (!SatisfiedByGrants(disclosure)) {
+            // core.permission_prompted: observe-only, fired the moment a human
+            // is about to be asked. The natural feed for a desktop
+            // notification -- "the agent is waiting on you" -- which is the
+            // consumer story for it.
+            if (hooks_ != nullptr) {
+                const std::string permission_key(registry_.PermissionKeyFor(tool_name));
+                nlohmann::json payload{{"session_id", ctx.session_id},
+                                       {"tool_name", tool_name},
+                                       {"permission_key", permission_key},
+                                       {"category",
+                                        CategoryName(tool->category_for(input)
+                                                         .value_or(tool->spec().category))},
+                                       {"summary", disclosure.summary}};
+                hooks_->EmitAsync(hooks::kPermissionPrompted, std::move(payload));
+            }
             PermissionRequest request;
             request.session_id = ctx.session_id;
             request.tool_name = tool_name;

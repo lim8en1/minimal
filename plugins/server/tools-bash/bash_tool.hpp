@@ -2,6 +2,7 @@
 
 #include <memory>
 
+#include "minimal/hooks/hook_dispatcher.hpp"
 #include "minimal/tools/tool.hpp"
 
 #include "bash_session_state.hpp"
@@ -12,6 +13,19 @@ namespace minimal::tools_bash {
 // The bash tool. `store` is plugin-owned (see BashSessionStateStore); the tool
 // holds a reference because it and the future /restart-shell command and
 // SessionObserver all operate on the same map -- one .so, one state owner.
-std::unique_ptr<tools::Tool> MakeBashTool(BashSettings settings, BashSessionStateStore& store);
+//
+// `before_command` is this plugin's OWN hook point (veto-capable): a hook
+// action may refuse an individual invocation before it spawns, at a finer
+// grain than core's pre_tool_use because the payload carries the RESOLVED
+// program path (disclosure-time resolution, session PATH included). Default
+// (disabled) for tests that build the tool directly.
+std::unique_ptr<tools::Tool> MakeBashTool(
+    BashSettings settings, BashSessionStateStore& store,
+    hooks::HookPoint before_command = hooks::HookPoint{});
+
+// The point this plugin registers, under the plugin-qualified convention
+// shared with services. Declared here so a consumer (or a test) can address
+// the name without hardcoding it.
+inline constexpr char kBeforeCommandPoint[] = "tools-bash.before_command";
 
 }  // namespace minimal::tools_bash

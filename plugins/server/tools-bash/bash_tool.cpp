@@ -495,8 +495,9 @@ std::optional<std::filesystem::path> ResolveOnPath(const SessionShellState& stat
 
 class BashTool : public tools::Tool {
 public:
-    BashTool(BashSettings settings, BashSessionStateStore& store)
-        : settings_(std::move(settings)), store_(store) {
+    BashTool(BashSettings settings, BashSessionStateStore& store,
+             hooks::HookPoint before_command)
+        : settings_(std::move(settings)), store_(store), before_command_(std::move(before_command)) {
         spec_.name = "bash";
         spec_.category = ToolCategory::Execute;
         spec_.definition.name = spec_.name;
@@ -591,6 +592,37 @@ public:
             timeout_ms = std::min(timeout_ms, settings_.max_timeout_ms);
         }
 
+        // --- tools-bash.before_command: this plugin's own hook point ----------
+        //
+        // Veto-capable and synchronous, on the session worker: the natural
+        // seam is right before spawn, so a guard script can refuse one
+        // invocation at a finer grain than core's pre_tool_use -- the payload
+        // carries the RESOLVED program path (the same disclosure-time
+        // resolution the Ask prompt shows, session PATH included), not just
+        // the tool name. A block becomes an error ToolResult; a broken script
+        // fails open at the dispatcher, never here.
+        //
+        // Resolved against a pre-reset snapshot, and placed BEFORE the
+        // restart below: a blocked invocation must not have wiped the
+        // session's cwd and environment on its way out -- the same rule the
+        // restart line's own comment states.
+        if (before_command_.enabled()) {
+            nlohmann::json payload{{"session_id", ctx.session_id}, {"command", command}};
+            const auto hook_state = store_.Snapshot(ctx.session_id, ctx.project_root);
+            const auto scan = ScanCommand(command);
+            for (const auto& word : scan.command_words) {
+                if (auto program = ResolveOnPath(hook_state, word)) {
+                    payload["program"] = program->string();
+                    break;
+                }
+            }
+            if (auto blocked = before_command_.Emit(std::move(payload), ctx.is_cancelled)) {
+                ctx.logger.warn("bash[{}] before_command hook blocked '{}': {}", ctx.session_id,
+                                command, *blocked);
+                return Error("blocked by hook: " + *blocked);
+            }
+        }
+
         // After validation, never before: a rejected invocation must not have
         // wiped the session's cwd and environment on its way out.
         if (restart) store_.Reset(ctx.session_id, ctx.project_root);
@@ -677,12 +709,16 @@ private:
     ToolSpec spec_;
     BashSettings settings_;
     BashSessionStateStore& store_;
+    // This plugin's veto-capable hook point. See plugin.cpp for registration
+    // and kBeforeCommandPoint for the name.
+    hooks::HookPoint before_command_;
 };
 
 }  // namespace
 
-std::unique_ptr<tools::Tool> MakeBashTool(BashSettings settings, BashSessionStateStore& store) {
-    return std::make_unique<BashTool>(std::move(settings), store);
+std::unique_ptr<tools::Tool> MakeBashTool(BashSettings settings, BashSessionStateStore& store,
+                                          hooks::HookPoint before_command) {
+    return std::make_unique<BashTool>(std::move(settings), store, std::move(before_command));
 }
 
 }  // namespace minimal::tools_bash

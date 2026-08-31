@@ -18,6 +18,7 @@
 #include "minimal/agent/history_store.hpp"
 #include "minimal/common/logger.hpp"
 #include "minimal/config/settings_config.hpp"
+#include "minimal/hooks/hook_dispatcher.hpp"
 #include "minimal/llm/chat.hpp"
 #include "minimal/llm/message.hpp"
 #include "minimal/llm/provider.hpp"
@@ -48,6 +49,12 @@ struct LoopConfig {
     // for nothing.
     std::chrono::milliseconds retry_base_delay{500};
     std::chrono::milliseconds retry_max_delay{8000};
+
+    // The process-wide hook dispatcher (track O). Borrowed; null in tests that
+    // do not exercise hooks -- both compaction emissions are observe-only
+    // EmitAsync calls and become no-ops. Owned by main, shared by every
+    // session, read-only after Configure.
+    const hooks::HookDispatcher* hooks = nullptr;
 };
 
 // Brackets one tool invocation, surfaced to the client as ToolExecutionEvent.
@@ -216,8 +223,11 @@ private:
     void AppendAndPersist(llm::Message message, std::optional<int> output_tokens = std::nullopt);
     void MaybeCompact();
     // The shared body: every guard except the occupancy trigger, which is what
-    // MaybeCompact adds and CompactNow deliberately skips.
-    std::optional<std::size_t> Compact();
+    // MaybeCompact adds and CompactNow deliberately skips. `trigger` names who
+    // asked -- the pre/post_compact hook payloads carry it filterable, since
+    // "auto compacted" and "the user ran /compact" are different events even
+    // when the mechanics are identical.
+    std::optional<std::size_t> Compact(std::string_view trigger);
     void FlushInjectedMessages();
     bool Cancelled() const;
     // Waits before retry `attempt`, polling cancellation. False means "give up"

@@ -44,6 +44,7 @@
 #include "minimal/commands/command_registry.hpp"
 #include "minimal/common/logger.hpp"
 #include "minimal/config/providers_config.hpp"
+#include "minimal/hooks/hook_dispatcher.hpp"
 #include "minimal/llm/provider.hpp"
 #include "minimal/llm/provider_factory_registry.hpp"
 #include "minimal/rpc/event_queue.hpp"
@@ -145,6 +146,14 @@ struct SessionParams {
     // (no mcps.json entries, or tests without MCP) simply means no live MCP
     // servers and no liveness checks.
     mcp::McpClientManager* mcp_manager = nullptr;
+
+    // The process-wide hook dispatcher (track O). Borrowed; null in tests that
+    // do not exercise hooks, which makes every emission a no-op. Set by the
+    // registry -- the one funnel every session (top-level and subagent alike)
+    // passes through -- so producers need not know it exists; a producer MAY
+    // set it explicitly (a test with its own dispatcher wins over the funnel
+    // default, mirroring how params.permission_checker behaves).
+    const hooks::HookDispatcher* hooks = nullptr;
 };
 
 // One item of work for the session worker. A variant rather than two queues,

@@ -44,7 +44,8 @@ SubagentManager::SubagentManager(SessionRegistry& sessions, session::SessionData
                                   mcp::McpClientManager* mcp_manager,
                                   std::shared_ptr<tools::PermissionAdvisor> advisor,
                                   bool advisor_inherit,
-                                  std::chrono::milliseconds advisor_timeout)
+                                  std::chrono::milliseconds advisor_timeout,
+                                  hooks::HookDispatcher* hooks)
     : sessions_(sessions),
       db_(db),
       presets_(presets),
@@ -53,7 +54,8 @@ SubagentManager::SubagentManager(SessionRegistry& sessions, session::SessionData
       mcp_manager_(mcp_manager),
       advisor_(std::move(advisor)),
       advisor_inherit_(advisor_inherit),
-      advisor_timeout_(advisor_timeout) {}
+      advisor_timeout_(advisor_timeout),
+      hooks_(hooks) {}
 
 SubagentOutcome SubagentManager::Spawn(const SubagentRequest& request,
                                         const tools::ToolContext& ctx) {
@@ -168,8 +170,22 @@ SubagentOutcome SubagentManager::Spawn(const SubagentRequest& request,
     std::shared_ptr<Session> parent_ref = parent;
     common::Logger& logger = logger_;
     params.on_turn_finished = [completion, blocking, parent_ref, child_id, tool_use_id,
-                               &logger](const TurnResult& result) {
+                               &logger, hooks = hooks_](const TurnResult& result) {
         completion->set_value(result);
+        // core.subagent_completed: observe-only, fired from the child's
+        // completion hook, which lands on EVERY exit path -- success, failure,
+        // cancellation, teardown -- exactly the guarantee the blocking wait
+        // already rests on. A hook watching subagent completions therefore
+        // sees the same record a parent does.
+        if (hooks != nullptr) {
+            hooks->EmitAsync(hooks::kSubagentCompleted,
+                             nlohmann::json{{"child_session_id", child_id},
+                                            {"stop_reason", hooks::StopReasonName(result.stop_reason)},
+                                            {"hit_max_turns", result.hit_max_turns},
+                                            {"is_error", result.stop_reason !=
+                                                                     llm::StopReason::EndTurn ||
+                                                         result.final_text.empty()}});
+        }
         if (blocking) return;  // the waiter translates the result itself
 
         // Non-blocking: the result arrives at the parent's next turn boundary,
@@ -216,6 +232,18 @@ SubagentOutcome SubagentManager::Spawn(const SubagentRequest& request,
     started->set_task(request.task);
     started->set_blocking(blocking);
     parent->queue().Push(std::move(started_event));
+
+    // core.subagent_started: observe-only, fired at the same moment as the
+    // wire event above. The task text is the parent model's own formulation --
+    // carried as payload data, deliberately not filterable.
+    if (hooks_ != nullptr) {
+        hooks_->EmitAsync(hooks::kSubagentStarted,
+                          nlohmann::json{{"parent_session_id", parent_id},
+                                         {"child_session_id", child_id},
+                                         {"blocking", blocking},
+                                         {"agent_preset", preset_name},
+                                         {"task", request.task}});
+    }
 
     child->SubmitTurn(request.task);
     logger_.info("session {}: spawned {} subagent {} (preset '{}')", parent_id,

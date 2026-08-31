@@ -95,6 +95,10 @@ add_executable(minimal_tests
     "${CMAKE_SOURCE_DIR}/plugins/server/tools-bash/bash_session_state.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/tools-bash/command_scanner.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/tools-bash/restart_shell.cpp"
+    hooks_config_test.cpp
+    hook_dispatcher_test.cpp
+    hooks_tool_executor_test.cpp
+    hooks_session_test.cpp
     service_registry_test.cpp)
 
 target_include_directories(minimal_tests PRIVATE
@@ -113,7 +117,7 @@ target_include_directories(minimal_tests PRIVATE
 add_subdirectory(fixtures)
 add_dependencies(minimal_tests
     fixture-good fixture-collision fixture-bad-abi fixture-minimal fixture-not-a-plugin
-    fixture-throws fixture-advisor fixture-service fixture-service-b)
+    fixture-throws fixture-advisor fixture-service fixture-service-b fixture-hook)
 target_compile_definitions(minimal_tests PRIVATE
     MINIMAL_FIXTURE_DIR="${CMAKE_CURRENT_BINARY_DIR}/fixtures")
 

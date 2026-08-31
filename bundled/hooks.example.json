@@ -1,0 +1,17 @@
+{
+  "default_timeout_ms": 10000,
+  "_comment": "Copy to hooks.json and edit. One entry per action: 'on' names the hook point (core points: core.pre_tool_use, core.post_tool_use, core.user_prompt_submit, core.stop, core.session_created, core.session_ended, core.pre_compact, core.post_compact, core.subagent_started, core.subagent_completed, core.permission_prompted -- plugins may add their own, e.g. tools-bash.before_command). 'filter' is exact-match on string payload fields the point declares filterable (see docs/EXTENSIBILITY.md). 'command' runs through /bin/sh -c with the JSON payload on stdin.",
+  "_exit_codes": "0 = pass. 2 = block the emission (reason: first non-empty output line) -- veto-capable points only. Anything else fails OPEN and logs: a broken hook never widens what the permission substrate allowed, and never wedges the session.",
+  "hooks": [
+    {
+      "on": "core.pre_tool_use",
+      "filter": { "tool_name": "bash" },
+      "command": "~/bin/minimal-guards/check-bash.sh",
+      "timeout_ms": 10000
+    },
+    {
+      "on": "core.permission_prompted",
+      "command": "notify-send 'minimal is waiting for you' >/dev/null 2>&1 || true"
+    }
+  ]
+}

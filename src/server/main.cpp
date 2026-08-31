@@ -14,6 +14,7 @@
 #include <memory>
 #include <sstream>
 #include <string>
+#include <unordered_set>
 
 #include "minimal/agent/agent_preset_registry.hpp"
 #include "minimal/agent/session_observer_registry.hpp"
@@ -28,6 +29,8 @@
 #include "minimal/config/sanity_check.hpp"
 #include "minimal/config/settings_config.hpp"
 #include "minimal/config/skill_registry.hpp"
+#include "minimal/hooks/hook_dispatcher.hpp"
+#include "minimal/hooks/hook_observer_bridge.hpp"
 #include "minimal/llm/provider_factory_registry.hpp"
 #include "minimal/commands/command_registry.hpp"
 #include "minimal/mcp/mcp_client_manager.hpp"
@@ -154,6 +157,20 @@ int main(int argc, char** argv) {
     // itself a way to resolve a collision rather than only a way to avoid one.
     commands.SetAliases({plugin_config.aliases.begin(), plugin_config.aliases.end()});
     minimal::agent::SessionObserverRegistry observers(minimal::common::DefaultLogger());
+    // The hook mechanism (track O). Owns the point registry -- the harness's
+    // eleven conversation-path points are registered in its constructor,
+    // reserved before any plugin loads -- and, after Configure below, the
+    // hooks.json action map. One object, deliberately: registration and
+    // dispatch are the two halves of the same seam, and a HookPoint handle a
+    // plugin captured at load must reach the dispatch surface without a second
+    // indirection.
+    minimal::hooks::HookDispatcher hook_dispatcher(minimal::common::DefaultLogger());
+    // The observer-to-hook bridge, registered FIRST so a user's hook action on
+    // a lifecycle point runs before plugin observers reacting to the same
+    // event. It converts session_created/session_ended/post_tool_use/stop onto
+    // their EmitAsync points -- the observe-only hook points need no dispatch
+    // machinery of their own, by design.
+    observers.Register(std::make_shared<minimal::hooks::HookObserverBridge>(hook_dispatcher));
     // Exclusive: at most one plugin provides the connection policy. An empty
     // registry is the pass-through default -- no authentication, matching the
     // local-only single-user topology.
@@ -186,7 +203,7 @@ int main(int argc, char** argv) {
 
     minimal::plugins::PluginLoader loader(tools, providers, tools_settings, &observers, &commands,
                                           &auth_providers, &permission_advisors, &model_catalogs,
-                                          &services);
+                                          &services, &hook_dispatcher);
     const auto records = loader.LoadAll(candidates);
     // The load thread is the only writer; from here the map is read-only, which
     // is what makes unguarded Find from session workers and the command pool
@@ -207,6 +224,9 @@ int main(int argc, char** argv) {
         }
         for (const auto& kind : record.registered_model_catalog_kinds) {
             std::printf("      catalog  %s\n", kind.c_str());
+        }
+        for (const auto& point : record.registered_hook_points) {
+            std::printf("      hook     %s\n", point.c_str());
         }
         for (const auto& command : record.registered_commands) {
             std::printf("      command  /%s\n", command.c_str());
@@ -259,7 +279,8 @@ int main(int argc, char** argv) {
     // surface. Same rule, different amount of machinery to enforce it.
     auto name_resolution = minimal::plugins::ResolveRegistrationNames(
         tools, plugin_config.aliases, &commands,
-        /*core_tool_names=*/{minimal::agent::kSpawnSubagentToolName}, &services);
+        /*core_tool_names=*/{minimal::agent::kSpawnSubagentToolName}, &services,
+        &hook_dispatcher);
     // The name above is RESERVED here but the tool object itself registers at
     // serve stage (main registers SpawnSubagentTool only once subagents exist).
     // The reservation is what puts it inside the fatal-collision scan.
@@ -280,6 +301,7 @@ int main(int argc, char** argv) {
         &permission_advisors,
         &services,
         &model_catalogs,
+        &hook_dispatcher,
     });
     const auto check_results = sanity.RunAll();
 
@@ -349,10 +371,32 @@ int main(int argc, char** argv) {
     loop_config.auto_compact = settings.memory.auto_compact;
     loop_config.compaction_trigger = settings.memory.context_compaction_trigger;
     loop_config.compaction_keep_recent_tokens = settings.memory.compaction_keep_recent_tokens;
+    loop_config.hooks = &hook_dispatcher;
+
+    // Configure hooks (track O) now that every point -- core's and plugins' --
+    // is registered: hooks.json actions resolve onto points, filter fields are
+    // validated, and the point map seals (making unguarded Emit from session
+    // workers safe). The sanity check validated the same file structurally and
+    // reports the same registry-relative findings; its list is what the
+    // deduplication below subtracts, so a user sees each warning once. What
+    // Configure adds beyond the check is nothing today -- but it OWNS the
+    // resolution (the check reads registered points only), so its return value
+    // stays the backstop rather than being assumed empty.
+    {
+        std::unordered_set<std::string> already_reported;
+        for (const auto& result : check_results) {
+            if (result.check_name == "hooks") already_reported.insert(result.message);
+        }
+        for (const auto& warning : hook_dispatcher.Configure(sanity.hooks())) {
+            if (already_reported.count(warning) != 0) continue;
+            std::printf("  warning [hooks] %s\n", warning.c_str());
+        }
+    }
 
     minimal::agent::SessionRegistry sessions(*presets, tools, providers, observers, *session_db,
                                              loop_config, minimal::common::DefaultLogger());
     sessions.set_commands(&commands);
+    sessions.set_hook_dispatcher(&hook_dispatcher);
 
     // The shared MCP server processes: one connection per enabled mcps.json
     // entry, shared across every session. Core, like the MCP client itself.
@@ -389,7 +433,7 @@ int main(int argc, char** argv) {
     auto subagents = std::make_shared<minimal::agent::SubagentManager>(
         sessions, *session_db, *presets, settings.max_concurrent_subagents,
         minimal::common::DefaultLogger(), &mcp, advisor, permissions.advisor_inherit,
-        std::chrono::milliseconds(permissions.advisor_timeout_ms));
+        std::chrono::milliseconds(permissions.advisor_timeout_ms), &hook_dispatcher);
     tools.Register(std::make_unique<minimal::agent::SpawnSubagentTool>(
         [subagents](const minimal::agent::SubagentRequest& request,
                     const minimal::tools::ToolContext& ctx) {
