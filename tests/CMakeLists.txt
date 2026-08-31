@@ -7,6 +7,7 @@ target_link_libraries(minimal_test_support INTERFACE minimal::server_core)
 
 add_executable(minimal_tests
     permission_test.cpp
+    permission_advisor_test.cpp
     permission_chain_test.cpp
     path_confinement_test.cpp
     sse_parser_test.cpp

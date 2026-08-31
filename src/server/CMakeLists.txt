@@ -10,6 +10,7 @@
 # lets plugins link core directly instead of relying on export tricks.
 add_library(minimal_server_core SHARED
     tools/permission.cpp
+    tools/permission_advisor.cpp
     tools/path_confinement.cpp
     tools/file_access.cpp
     tools/atomic_write.cpp
