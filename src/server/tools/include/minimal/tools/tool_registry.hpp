@@ -2,6 +2,8 @@
 
 #include <map>
 #include <memory>
+#include <mutex>
+#include <shared_mutex>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -17,6 +19,14 @@ namespace minimal::tools {
 // MCP-discovered tools all arrive through Register() and are indistinguishable
 // afterwards. MCP tools are namespaced `mcp__<server>__<tool>` at registration,
 // which is also how ToolExecutor routes their permission decision.
+//
+// Concurrency: startup registration (Register/ApplyAliases/SetPermissionKeys)
+// is single-threaded and completes before any session exists. Once MCP tools
+// can be REPLACED at runtime (a shared MCP server process restarting and
+// re-discovering), reads from session workers overlap writes for the first
+// time -- so all map access goes through the mutex below. Startup mutators
+// take the exclusive lock too, serially and before serving, which costs
+// nothing and keeps the rules uniform.
 class ToolRegistry {
 public:
     // A duplicate name does NOT overwrite: the first registration keeps the map
@@ -50,6 +60,14 @@ public:
     //
     // `allowed` containing a single "*" means every registered tool.
     std::vector<llm::ToolDefinition> DefinitionsFor(const std::vector<std::string>& allowed) const;
+
+    // Definitions for the mcp__<server>__* tools of exactly these servers,
+    // sorted like DefinitionsFor (one request prefix, one cache). The caller --
+    // the agent loop -- passes the allowed-AND-alive set it resolved with the
+    // McpClientManager; servers not in the list contribute nothing, which is
+    // how a dead or de-scoped server's tools vanish from the model's view.
+    std::vector<llm::ToolDefinition> DefinitionsForMcpServers(
+        const std::vector<std::string>& servers) const;
 
     std::size_t size() const { return tools_.size(); }
 
@@ -85,7 +103,39 @@ public:
     // tool, the key IS the name -- so the fallback is correct, not accidental.
     std::string_view PermissionKeyFor(std::string_view surface_name) const;
 
+    // Registers or replaces the tool set of one MCP server, atomically from the
+    // readers' point of view: after this returns, Find/DefinitionsFor see
+    // exactly the new set. Called at discovery time and again on re-discovery
+    // (a server process restarted) -- the mcp__ namespacing cannot collide with
+    // other sources, so this bypasses attribution, aliasing and the shadowed
+    // list entirely.
+    //
+    // NEVER DESTROYS a replaced tool: ToolExecutor::Run holds the raw Tool*
+    // from Find() across a blocking permission check and the execute() call
+    // itself, so freeing the old object would be a use-after-free under a
+    // concurrent replacement. Superseded objects are parked in a retired list
+    // and destroyed only at registry teardown -- the same process-lifetime
+    // ownership rule the plugin loader applies to its dlopen handles.
+    //
+    // A tool whose name is not `mcp__<server>__<something>` (checked by
+    // prefix, not by reparsing) is refused: this entry point owns exactly one
+    // server's namespace. Within the batch, the FIRST registration of a name
+    // wins, matching Register()'s rule.
+    void ReplaceMcpTools(const std::string& server_name,
+                         std::vector<std::unique_ptr<Tool>> tools);
+
 private:
+    // Locking discipline: every tools_/permission_keys_ access holds mutex_.
+    // This helper is the lock-free inner half of PermissionKeyFor, so
+    // DefinitionsFor can scan under ONE shared acquisition instead of nesting
+    // a second one (undefined for shared_mutex).
+    std::string_view PermissionKeyForUnlocked(std::string_view surface_name) const {
+        if (auto it = permission_keys_.find(std::string(surface_name)); it != permission_keys_.end()) {
+            return it->second;
+        }
+        return surface_name;
+    }
+
     struct Pending {
         Attribution attr;  // the attribution entry this object belongs to
         std::unique_ptr<Tool> tool;
@@ -102,6 +152,11 @@ private:
     std::vector<Tool*> owners_;
     std::unordered_map<std::string, std::string> permission_keys_;
     bool aliases_applied_ = false;
+
+    // mutable: readers are const and run on session workers; startup and MCP
+    // replacement are the writers.
+    mutable std::shared_mutex mutex_;
+    std::vector<std::unique_ptr<Tool>> retired_;  // superseded MCP tools, see ReplaceMcpTools
 };
 
 }  // namespace minimal::tools

@@ -36,10 +36,20 @@ struct MemorySettings {
 // Kept as raw pass-through JSON: each plugin owns the schema of its own slice
 // (tools-fs parses `read`/`edit`, tools-bash parses `bash`), so core never has
 // to match or break their shapes.
+struct McpSettings {
+    // Spawn/handshake deadline and per-call deadline. The MCP client wrapper
+    // enforces these itself: cpp-mcp's client blocks internally (up to a fixed
+    // 60 s) with no deadline parameter, and a dead or hanging MCP server must
+    // degrade to a tool error, never a hung session worker.
+    std::int64_t connect_timeout_ms = 10000;
+    std::int64_t request_timeout_ms = 60000;
+};
+
 struct ToolsSettings {
     nlohmann::json read = nlohmann::json::object();
     nlohmann::json edit = nlohmann::json::object();
     nlohmann::json bash = nlohmann::json::object();
+    McpSettings mcp;
 };
 
 struct ToolsViewSettings {

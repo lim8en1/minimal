@@ -40,6 +40,10 @@
 #include "minimal/session/session_reader.hpp"
 #include "minimal/v1/session_service.grpc.pb.h"
 
+namespace minimal::mcp {
+class McpClientManager;
+}  // namespace minimal::mcp
+
 namespace minimal::rpc {
 
 class SessionServiceImpl final : public v1::SessionService::Service {
@@ -76,6 +80,7 @@ public:
     // Optional: a service without one answers every invocation with "not
     // available" rather than dropping it. Set before serving.
     void set_commands(const commands::CommandRegistry* commands) { commands_ = commands; }
+    void set_mcp_manager(mcp::McpClientManager* manager) { mcp_manager_ = manager; }
 
     // Optional; absent means the pass-through default (no authentication), which
     // matches the local-only topology. Set before serving.
@@ -119,6 +124,7 @@ private:
     // Borrowed and optional: a service built without commands answers every
     // invocation with "not available" rather than dropping it.
     const commands::CommandRegistry* commands_ = nullptr;
+    mcp::McpClientManager* mcp_manager_ = nullptr;
     // Borrowed and optional: absent = pass-through (see auth_provider.hpp).
     const AuthProviderRegistry* auth_providers_ = nullptr;
     session::SessionDatabase& db_;

@@ -2,7 +2,7 @@
 
 Companion to `ARCHITECTURE.md`, which remains the single source of truth for *design*. This document covers only *sequencing*: what is built, what blocks what, and what "done" means for each remaining piece. Every milestone cites the `ARCHITECTURE.md` section that specifies it; where this plan and that document disagree, that document wins and this one is stale.
 
-**Status: Milestones A, B, C, D, F and H are complete, and a post-merge review of A+B+H has been actioned (§8). Only E (the TUI) and G (MCP) remain. Clean build, zero warnings.** J (permission advisor) is designed (`docs/EXTENSIBILITY.md` §3) and scheduled (§4 J) but not started.
+**Status: Milestones A, B, C, D, F, G and H are complete, and a post-merge review of A+B+H has been actioned (§8). Only E (the TUI) remains. Clean build, zero warnings.** J (permission advisor) is designed (`docs/EXTENSIBILITY.md` §3) and scheduled (§4 J) but not started.
 
 `minimal -p` holds real conversations against a local model using `read`, `bash`, and `skill`; a permission prompt round-trips over the wire in both directions; a session grant silences the second prompt; the server exits when the last client detaches. Transcripts persist to SQLite, survive the server process, and are **resumable**: `CreateSession` with a `session_id` reopens a stored session, loads its transcript as the loop's working history without re-appending it, and the next turn continues the conversation (`minimal -p --resume <id> PROMPT`). **Subagents work** (§5 D): a model can spawn blocking and non-blocking children over the `spawn_subagent` tool, permission inheritance is enforced as ceilings, and the headless client honours its attach obligation over a real socket. `cmake --install` produces a config dir the server actually starts against (§8), and the startup sanity check reports every problem with it at once (§4 F).
 
@@ -64,7 +64,7 @@ Companion to `ARCHITECTURE.md`, which remains the single source of truth for *de
 
 ### Still not built
 
-`src/server/mcp/` (track G) and the TUI (track E).
+The TUI (track E).
 
 ### The risk this creates
 
@@ -495,16 +495,31 @@ The permission modal is where consent scoping becomes real UI — and where the 
 - [ ] `ChatSurface` exclusive slot — one plugin may replace the whole chat view; second registration warns and is ignored.
 - [ ] Markdown engine exclusive slot + language-keyed grammar registration.
 
-### G. MCP client
+### G. MCP client — done
 
-> § *MCP client — `src/server/mcp/`*. cpp-mcp is pinned and fetched but never referenced; only permission plumbing exists.
+> § *MCP client — `src/server/mcp/`*. **Built, wired, and exercised end to end over a real socket plus a live real-server smoke test.**
 
-Lazy connection on first MCP tool call. Tools register as `mcp__<server>__<tool>` — `mcp_server_of` and the per-server permission chain are already built and tested.
+`src/server/mcp/`: `naming` (mangling + validation), `env_interpolation` (connection-time `${ENV_VAR}`, fail-closed), `mcp_tool` (the `Tool` adapter + result conversion), `mcp_connection` (per-connection worker thread, deadlines, cancellation; stdio via a cpp-mcp **shim island**, http via a hand-rolled Streamable-HTTP client over `HttpClient`+`SseParser`), and `mcp_client_manager` (shared processes, discovery cache, liveness, respawn). Wired into `SessionRegistry`/`Session` (liveness at session start and `/agent`), `BuildChatRequest` (`DefinitionsForMcpServers`), `SpawnSubagentTool` (dead-server gating), and `main.cpp` (serve-stage construction).
 
-- [ ] Tools from a stdio MCP server appear as `mcp__<server>__<tool>` and execute.
-- [ ] Per-server permission policy governs them (already tested in isolation — assert it end to end).
-- [ ] A dead/hanging MCP server degrades to a tool error, never a hung worker.
-- [ ] Connection is lazy: no MCP process spawns until a tool is actually called.
+The plan-vs-architecture "lazy connection" discrepancy was resolved in the architecture's favour: liveness and discovery fire at session start (and `/agent` switches) for allowed servers, never at boot; the `mcps.json` env/header `${ENV_VAR}` interpolation promised by `mcps_config.hpp` is resolved at connect time.
+
+- [x] Tools from a stdio MCP server appear as `mcp__<server>__<tool>` and execute. *(E2E over a real socket: discovery at session start, `ToolExecutionEvent` round-trip, `TurnCompletedEvent` last.)*
+- [x] Per-server permission policy governs them. *(E2E: `mcp_default_mode: ask` prompts over the wire; allow runs the tool, deny produces an error `ToolResultBlock`.)*
+- [x] A dead/hanging MCP server degrades to a tool error, never a hung worker. *(Deadlines at every layer — open, discovery, call — against scripted hang/garbage/die-after-init fakes, all under the deadline harness; `SIGPIPE` from a dead child is disabled, exit 141 verified before the fix.)*
+- [x] No MCP process spawns at boot. *(Manager construction spawns nothing; liveness checks at session start spawn per allowed server — the original "lazy until first tool call" wording was stale, see § *MCP client*.)*
+
+#### What first contact found
+
+1. **cpp-mcp and the harness cannot share a translation unit.** cpp-mcp vendors its own older nlohmann/json (ABI `v3_11_310`) while the tree links vcpkg's (`v3_12_0`); the static library's symbols simply do not bind. The `mcp_stdio_shim` island (one TU, cpp-mcp headers only, string/bool facade) is the resolution — recorded in ARCHITECTURE.md, since any future consumer of cpp-mcp must go through it.
+2. **cpp-mcp's `sse_client` cannot speak to a modern http MCP server.** The gateway (official python SDK) answers Streamable HTTP; the probe caught this before any wrapper was built on the wrong transport. Hand-rolled client over `HttpClient`/`SseParser` instead — both already exposed as utilities.
+3. **cpp-mcp's `initialize` blocks indefinitely if the child dies during startup**, and a request blocks up to a fixed internal 60 s. All deadlines are therefore ours: one worker thread per connection, callers wait in slices on their own slots, wedged workers are detached rather than joined.
+4. **A dead child's stdin write killed the whole test process with SIGPIPE (exit 141).** The shim ignores SIGPIPE process-wide before spawning; children inherit SIG_IGN — the hosted-runtime trade, and a real server-hosting hazard that no unit test of the happy path would have found.
+5. **`allowed_tools: ["*"]` swept MCP tools into every request.** `DefinitionsFor` now excludes `mcp__*` names; the model sees `DefinitionsForMcpServers(live_servers)` only. A de-scope test (assert the tools vanish after `/agent`) failed against the original code — the invariant test earning its keep.
+6. **ToolRegistry went from read-only-after-startup to concurrently mutated.** Re-discovery replaces a server's tool set while session workers call `DefinitionsFor`/`Find`; a `shared_mutex` plus the never-destroy retired list (the executor holds the raw pointer across `execute()`) make replacement safe. Verified with a concurrent read-during-replace test.
+7. **First registration of the invoker was moved-from**, leaving every McpTool after the first with a null invoker and a "not connected" error — caught by the env-marker round-trip test, not by review.
+8. **Header names arrive verbatim from the wire.** Comparing `"Content-Type"` case-sensitively silently disabled SSE parsing (the body then failed to parse as JSON); the same class of bug `FindHeaderCI` already existed for.
+
+**Test infrastructure.** A scripted stdio MCP server (built on cpp-mcp's own `mcp::server`) provides deterministic hang/slow/die-after-init/garbage modes; it carries an orphan watchdog because a fake server outliving its parent holds the parent's stdio pipes open and ctests waits for EOF — a run that has passed but will not end. The live smoke test (`mcp_live_test.cpp`, `MINIMAL_ENABLE_LIVE_MCP_TESTS=ON`) is a hard requirement where enabled — a missing `gateway` FAILS — and CI never sets the option.
 
 ---
 
@@ -525,7 +540,8 @@ Applies to every milestone. These are existing project practice, recorded so the
 
 Not scheduled, recorded so they are decisions rather than oversights.
 
-- **Server-wide fd hygiene** — no `CLOEXEC` discipline on gRPC/SQLite/log fds; every bash command inherits them. The bash pipes are handled; the rest is not.
+- **Server-wide fd hygiene** — no `CLOEXEC` discipline on gRPC/SQLite/log fds; every bash command inherits them. The bash pipes are handled; the rest is not. MCP stdio children are spawned through cpp-mcp and have the same gap.
+- **`mcps.json` `args[]` entries containing spaces cannot reach the child** — cpp-mcp splits the stdio command line on whitespace; the shim inherits the limitation. Recorded in ARCHITECTURE.md.
 - **`tree-sitter-bash` for command disclosure** — the hand-rolled scanner is conservative and its failure mode is safe (fewer grants offered). Upgrading raises the hit rate, not the safety floor. The grammar is already a planned client dependency.
 - ~~**Unknown `allowed_skills` entries are silently dropped**~~ — still true of resolution (correct for lookup), but now *reported* at startup by F (`naming_model` check).
 - **`themes/*.json` and `keybindings.json` are specified but unread** — nothing outside a comment in `config_paths.hpp` refers to them, so they are deliberately not seeded either. They arrive with the TUI (track E), which is the first thing that would read one.

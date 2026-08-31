@@ -1,5 +1,9 @@
 #include "minimal/agent/session.hpp"
 
+#include <algorithm>
+
+#include "minimal/mcp/mcp_client_manager.hpp"
+
 #include "minimal/agent/provider_instance_cache.hpp"
 
 #include <exception>
@@ -105,8 +109,46 @@ Session::Session(SessionParams params, AgentPreset preset,
                                          [this] { return IsCancelled(); }, std::move(event_sink),
                                          compact_messages, std::move(seeded_history));
 
+    // MCP liveness at session start, BEFORE the worker exists: this thread is
+    // allowed to block (the RPC reader is a different one), and the loop must
+    // already carry its final server set when the first turn can run.
+    mcp_manager_ = params_.mcp_manager;
+    if (mcp_manager_ != nullptr) RefreshMcpServers();
+
     observers_.NotifySessionCreated(info_);
     worker_ = std::thread([this] { WorkerMain(); });
+}
+
+void Session::RefreshMcpServers() {
+    std::vector<std::string> live;
+    live.reserve(preset_.allowed_mcp_servers.size());
+    for (const auto& server : preset_.allowed_mcp_servers) {
+        // Once failed, disabled for this session's life: re-testing on every
+        // /agent switch would make an operator's typo a per-switch stall, and
+        // the surfaced error already told the client what happened.
+        if (std::find(disabled_mcp_servers_.begin(), disabled_mcp_servers_.end(), server) !=
+            disabled_mcp_servers_.end()) {
+            continue;
+        }
+        std::string error;
+        if (mcp_manager_->EnsureAlive(server, error)) {
+            live.push_back(server);
+            continue;
+        }
+        disabled_mcp_servers_.push_back(server);
+        // Surfaced, not swallowed: an ErrorEvent on the outbound queue is the
+        // same channel a failed turn uses, so the client sees WHY the
+        // server's tools never appeared.
+        v1::ServerEvent event = MakeEvent(params_.session_id);
+        auto* err = event.mutable_error();
+        err->set_category(v1::LLM_ERROR_CATEGORY_UNSPECIFIED);
+        err->set_message(error);
+        err->set_is_retryable(false);
+        queue_.Push(std::move(event));
+        logger_.warn("session {}: MCP server '{}' disabled: {}", params_.session_id, server,
+                     error);
+    }
+    loop_->SetMcpServers(std::move(live));
 }
 
 Session::~Session() { Terminate(); }
@@ -224,6 +266,10 @@ void Session::ApplyPreset(AgentPreset preset) {
     }
     executor_.SetRunMode(params_.run_mode_override.value_or(preset_.run_mode));
     loop_->SetPreset(preset_);
+    // The new preset may allow different MCP servers. Runs on the worker at a
+    // turn boundary (the same blocking contract as a preset swap): a dead
+    // server in the new list is surfaced here, never discovered mid-turn.
+    if (mcp_manager_ != nullptr) RefreshMcpServers();
 
     if (!provider_changed) return;
     if (provider_factories_ == nullptr) {

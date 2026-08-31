@@ -1,0 +1,512 @@
+#include "minimal/mcp/mcp_connection.hpp"
+
+#include <algorithm>
+#include <cctype>
+#include <atomic>
+#include <chrono>
+#include <thread>
+#include <utility>
+
+#include "minimal/llm/http_client.hpp"
+#include "minimal/llm/sse_parser.hpp"
+#include "minimal/mcp/mcp_stdio_shim.hpp"
+
+namespace minimal::mcp {
+
+namespace {
+
+constexpr auto kWaitSlice = std::chrono::milliseconds(25);
+constexpr const char* kProtocolVersion = "2025-03-26";
+constexpr const char* kClientName = "minimal";
+constexpr const char* kClientVersion = "0.1.0";
+
+// Completion slot for one call. Shared between caller and worker: the caller
+// may give up on deadline or cancellation while the job still runs, so the
+// slot must outlive the caller's interest.
+template <typename T>
+struct Slot {
+    std::mutex mu;
+    std::condition_variable cv;
+    std::optional<T> value;
+    std::string error;
+    bool done = false;
+
+    void Complete(std::optional<T> v, std::string e) {
+        {
+            std::lock_guard<std::mutex> lock(mu);
+            value = std::move(v);
+            error = std::move(e);
+            done = true;
+        }
+        cv.notify_all();
+    }
+};
+
+// Waits until the slot completes, the deadline passes, or cancellation fires.
+// True when the slot completed; false after setting `error` -- the underlying
+// job keeps running in the background either way. `is_cancelled` may be null.
+template <typename T>
+bool WaitSlot(Slot<T>& slot, std::chrono::steady_clock::time_point deadline,
+              const std::function<bool()>& is_cancelled, std::string& error) {
+    std::unique_lock<std::mutex> lock(slot.mu);
+    while (!slot.done) {
+        if (is_cancelled && is_cancelled()) {
+            error = "cancelled";
+            return false;
+        }
+        if (std::chrono::steady_clock::now() >= deadline) {
+            error = "request timed out";
+            return false;
+        }
+        slot.cv.wait_for(lock, kWaitSlice);
+    }
+    if (slot.error.empty()) return true;
+    error = slot.error;
+    return false;
+}
+
+}  // namespace
+
+// --- transport -------------------------------------------------------------
+
+struct McpConnection::Transport {
+    virtual ~Transport() = default;
+    // All methods BLOCK the worker thread until they complete their slot.
+    virtual void Initialize(Slot<bool>& slot) = 0;
+    virtual void Ping(Slot<bool>& slot) = 0;
+    virtual void ListTools(Slot<std::vector<ToolListing>>& slot) = 0;
+    virtual void CallTool(const std::string& tool_name, const nlohmann::json& arguments,
+                          Slot<nlohmann::json>& slot) = 0;
+};
+
+namespace {
+
+// --- stdio transport: cpp-mcp's client over a spawned subprocess ----------
+
+class StdioTransport final : public McpConnection::Transport {
+public:
+    StdioTransport(const McpEndpoint& endpoint, const std::string& client_name,
+                   const std::string& client_version)
+        : client_name_(client_name), client_version_(client_version) {
+        // Env arrives pre-interpolated (secrets included) and is never logged.
+        for (const auto& [key, value] : endpoint.env) env_[key] = value;
+        shim_ = std::make_unique<McpStdioShim>(endpoint.command_line, env_);
+    }
+
+    void Initialize(Slot<bool>& slot) override {
+        if (shim_->Initialize(client_name_, client_version_)) {
+            slot.Complete(true, {});
+        } else {
+            slot.Complete(std::nullopt,
+                          "MCP initialize failed: server rejected the handshake or died "
+                          "during startup");
+        }
+    }
+
+    void Ping(Slot<bool>& slot) override { slot.Complete(std::optional<bool>(shim_->Ping()), {}); }
+
+    void ListTools(Slot<std::vector<McpConnection::ToolListing>>& slot) override {
+        std::vector<McpConnection::ToolListing> listings;
+        for (const auto& tool : shim_->ListTools()) {
+            McpConnection::ToolListing listing;
+            listing.name = tool.name;
+            listing.description = tool.description;
+            listing.input_schema = nlohmann::json::parse(tool.schema_json, nullptr, false);
+            if (!listing.input_schema.is_object()) listing.input_schema = nlohmann::json::object();
+            listings.push_back(std::move(listing));
+        }
+        slot.Complete(std::move(listings), {});
+    }
+
+    void CallTool(const std::string& tool_name, const nlohmann::json& arguments,
+                  Slot<nlohmann::json>& slot) override {
+        std::string result_json, error;
+        if (!shim_->CallTool(tool_name, arguments.dump(), result_json, error)) {
+            slot.Complete(std::nullopt, error);
+            return;
+        }
+        nlohmann::json parsed = nlohmann::json::parse(result_json, nullptr, false);
+        if (!parsed.is_object()) {
+            slot.Complete(std::nullopt, "MCP server returned an unparseable tool result");
+            return;
+        }
+        slot.Complete(std::move(parsed), {});
+    }
+
+private:
+    std::string client_name_;
+    std::string client_version_;
+    std::map<std::string, std::string> env_;
+    std::unique_ptr<McpStdioShim> shim_;
+};
+
+// --- http transport: minimal Streamable HTTP over HttpClient ---------------
+
+class HttpTransport final : public McpConnection::Transport {
+public:
+    HttpTransport(const McpEndpoint& endpoint, std::chrono::milliseconds request_timeout)
+        : endpoint_(endpoint), request_timeout_(request_timeout) {}
+
+    void Initialize(Slot<bool>& slot) override {
+        nlohmann::json params = {
+            {"protocolVersion", kProtocolVersion},
+            {"capabilities", nlohmann::json::object()},
+            {"clientInfo", {{"name", kClientName}, {"version", kClientVersion}}}};
+        nlohmann::json result;
+        std::string error;
+        if (!Rpc("initialize", params, NextId(), &result, &error)) {
+            slot.Complete(std::nullopt, error);
+            return;
+        }
+        // The session id rides the initialize response headers and must be
+        // echoed on every later request.
+        session_id_ = response_session_id_;
+        if (!Notify("notifications/initialized", error)) {
+            slot.Complete(std::nullopt, error);
+            return;
+        }
+        slot.Complete(true, {});
+    }
+
+    void Ping(Slot<bool>& slot) override {
+        nlohmann::json result;
+        std::string error;
+        slot.Complete(std::optional<bool>(Rpc("ping", nlohmann::json::object(), NextId(),
+                                              &result, &error)),
+                      error);
+    }
+
+    void ListTools(Slot<std::vector<McpConnection::ToolListing>>& slot) override {
+        std::vector<McpConnection::ToolListing> listings;
+        std::string cursor;
+        std::string error;
+        // tools/list pages with a cursor; most servers never paginate, but a
+        // truncated listing would silently hide tools from the model, so the
+        // loop is real.
+        do {
+            nlohmann::json params = nlohmann::json::object();
+            if (!cursor.empty()) params["cursor"] = cursor;
+            nlohmann::json result;
+            if (!Rpc("tools/list", params, NextId(), &result, &error)) {
+                slot.Complete(std::nullopt, error);
+                return;
+            }
+            if (!result.contains("tools") || !result.at("tools").is_array()) {
+                slot.Complete(std::nullopt, "MCP tools/list response has no tools array");
+                return;
+            }
+            for (const auto& tool : result.at("tools")) {
+                McpConnection::ToolListing listing;
+                listing.name = tool.value("name", "");
+                listing.description = tool.value("description", "");
+                listing.input_schema =
+                    tool.contains("inputSchema") ? tool.at("inputSchema") : nlohmann::json::object();
+                listings.push_back(std::move(listing));
+            }
+            cursor = result.value("nextCursor", std::string());
+        } while (!cursor.empty());
+        slot.Complete(std::move(listings), {});
+    }
+
+    void CallTool(const std::string& tool_name, const nlohmann::json& arguments,
+                  Slot<nlohmann::json>& slot) override {
+        nlohmann::json result;
+        std::string error;
+        if (!Rpc("tools/call", {{"name", tool_name}, {"arguments", arguments}}, NextId(),
+                 &result, &error)) {
+            slot.Complete(std::nullopt, error);
+            return;
+        }
+        slot.Complete(std::move(result), {});
+    }
+
+private:
+    int64_t NextId() { return next_id_++; }
+
+    llm::HttpRequest BuildRequest(const std::string& body) const {
+        llm::HttpRequest request;
+        request.url = endpoint_.url;
+        request.body = body;
+        request.request_timeout = request_timeout_;
+        for (const auto& [key, value] : endpoint_.headers) {
+            request.headers.push_back({key, value});
+        }
+        request.headers.push_back({"Content-Type", "application/json"});
+        // Both content types must be accepted: a server may answer a POST
+        // with a plain JSON body or with an SSE stream (the python SDK
+        // answers SSE).
+        request.headers.push_back({"Accept", "application/json, text/event-stream"});
+        request.headers.push_back({"MCP-Protocol-Version", kProtocolVersion});
+        if (!session_id_.empty()) {
+            request.headers.push_back({"mcp-session-id", session_id_});
+        }
+        return request;
+    }
+
+    // Sends one request and, for requests, extracts the JSON-RPC response
+    // with the matching id -- from a JSON body, or from an SSE stream that is
+    // aborted the moment the response frame arrives (a server may otherwise
+    // keep the stream open long after the answer).
+    bool Rpc(const std::string& method, const nlohmann::json& params, int64_t id,
+             nlohmann::json* result, std::string* error) {
+        const std::string body = nlohmann::json{{"jsonrpc", "2.0"},
+                                                {"id", id},
+                                                {"method", method},
+                                                {"params", params}}
+                                    .dump();
+
+        auto slot = std::make_shared<Slot<nlohmann::json>>();
+        auto status = std::make_shared<int>(0);
+        auto is_sse = std::make_shared<bool>(false);
+        auto session_id = std::make_shared<std::string>();
+        auto buffer = std::make_shared<std::string>();
+        auto parser = std::make_shared<llm::SseParser>();
+
+        try {
+            llm::HttpClient http;
+            http.StreamPost(
+                BuildRequest(body),
+                [status, is_sse, session_id](int code,
+                                             const std::vector<llm::HttpHeader>& headers) {
+                    *status = code;
+                    // Names arrive verbatim from the wire (libcurl does not
+                    // normalize case): compare case-insensitively, the same
+                    // rule llm::FindHeaderCI exists for.
+                    auto equals_ci = [](std::string_view a, std::string_view b) {
+                        return a.size() == b.size() &&
+                               std::equal(a.begin(), a.end(), b.begin(), [](char x, char y) {
+                                   return std::tolower(static_cast<unsigned char>(x)) ==
+                                          std::tolower(static_cast<unsigned char>(y));
+                               });
+                    };
+                    for (const auto& header : headers) {
+                        if (equals_ci(header.name, "Content-Type")) {
+                            *is_sse = header.value.find("text/event-stream") != std::string::npos;
+                        }
+                        if (equals_ci(header.name, "mcp-session-id")) *session_id = header.value;
+                    }
+                },
+                [slot, status, is_sse, session_id, buffer, parser,
+                 id](std::string_view chunk) -> bool {
+                    if (*is_sse) {
+                        // SSE: incremental parse, stop at the response frame.
+                        for (const auto& frame : parser->Feed(chunk)) {
+                            if (frame.data.empty()) continue;
+                            nlohmann::json parsed =
+                                nlohmann::json::parse(frame.data, nullptr, false);
+                            if (parsed.is_object() && parsed.value("id", int64_t{-1}) == id) {
+                                slot->Complete(std::move(parsed), {});
+                                return false;  // abort the transfer: we have our answer
+                            }
+                        }
+                        return true;
+                    }
+                    // Plain JSON: read to completion.
+                    buffer->append(chunk);
+                    return true;
+                });
+        } catch (const llm::HttpError& e) {
+            // The abort path lands here too; a completed slot means the
+            // response was found, not that anything failed.
+            if (!slot->done) {
+                *error = std::string("MCP transport error: ") + e.what();
+                return false;
+            }
+        }
+
+        if (!session_id->empty()) response_session_id_ = *session_id;
+
+        nlohmann::json message;
+        if (slot->done) {
+            message = *slot->value;
+        } else if (*status < 200 || *status >= 300) {
+            *error = "MCP server returned HTTP " + std::to_string(*status) +
+                     (buffer->empty() ? std::string() : ": " + buffer->substr(0, 200));
+            return false;
+        } else {
+            message = nlohmann::json::parse(*buffer, nullptr, false);
+            if (!message.is_object()) {
+                *error = "MCP server returned an unparseable response";
+                return false;
+            }
+        }
+
+        if (message.contains("error")) {
+            *error = "MCP server error: " + message.at("error").value("message", "unknown");
+            return false;
+        }
+        *result = message.contains("result") ? message.at("result") : nlohmann::json::object();
+        return true;
+    }
+
+    bool Notify(const std::string& method, std::string& error) {
+        const std::string body = nlohmann::json{{"jsonrpc", "2.0"},
+                                                {"method", method},
+                                                {"params", nlohmann::json::object()}}
+                                    .dump();
+        try {
+            llm::HttpClient http;
+            const llm::HttpResponse response = http.Post(BuildRequest(body));
+            if (response.status < 200 || response.status >= 300) {
+                error = "MCP server returned HTTP " + std::to_string(response.status) +
+                        " for " + method;
+                return false;
+            }
+            return true;
+        } catch (const llm::HttpError& e) {
+            error = std::string("MCP transport error: ") + e.what();
+            return false;
+        }
+    }
+
+    McpEndpoint endpoint_;
+    std::chrono::milliseconds request_timeout_;
+    std::string session_id_;           // worker-thread only
+    std::string response_session_id_;  // out-of-band: Rpc records what headers carried
+    int64_t next_id_ = 1;
+};
+
+}  // namespace
+
+// --- worker ----------------------------------------------------------------
+
+struct McpConnection::WorkerState {
+    std::mutex mu;
+    std::condition_variable cv;
+    std::deque<std::function<void()>> jobs;
+    bool stopped = false;
+
+    void Push(std::function<void()> job) {
+        {
+            std::lock_guard<std::mutex> lock(mu);
+            if (stopped) return;  // teardown: the job's slot times out instead
+            jobs.push_back(std::move(job));
+        }
+        cv.notify_all();
+    }
+
+    // The thread lambda holds the shared_ptrs to this state and to the
+    // transport, so even a detached exit after a wedged blocking call leaves
+    // everything alive. Loop touches nothing else.
+    void Loop() {
+        std::unique_lock<std::mutex> lock(mu);
+        for (;;) {
+            cv.wait(lock, [this] { return stopped || !jobs.empty(); });
+            if (jobs.empty()) {
+                if (stopped) return;
+                continue;
+            }
+            std::function<void()> job = std::move(jobs.front());
+            jobs.pop_front();
+            lock.unlock();
+            job();
+            lock.lock();
+        }
+    }
+};
+
+// --- McpConnection ----------------------------------------------------------
+
+McpConnection::McpConnection(std::shared_ptr<WorkerState> worker,
+                             std::shared_ptr<Transport> transport, std::thread loop)
+    : worker_(std::move(worker)), transport_(std::move(transport)), loop_(std::move(loop)) {}
+
+McpConnection::~McpConnection() { Teardown(); }
+
+void McpConnection::Teardown() {
+    if (!worker_) return;
+    {
+        std::lock_guard<std::mutex> lock(worker_->mu);
+        worker_->stopped = true;
+    }
+    worker_->cv.notify_all();
+    if (loop_.joinable()) {
+        // Detach, never join: the thread may be parked inside cpp-mcp's
+        // blocking call with no deadline. It references only shared_ptr-held
+        // state, so it exits safely whenever that call returns.
+        loop_.detach();
+    }
+    worker_.reset();
+}
+
+std::unique_ptr<McpConnection> McpConnection::Open(const McpEndpoint& endpoint,
+                                                   const McpTimeouts& timeouts,
+                                                   const std::string& client_name,
+                                                   const std::string& client_version,
+                                                   Failure& error) {
+    std::shared_ptr<Transport> transport;
+    if (endpoint.transport == McpTransport::Stdio) {
+        if (endpoint.command_line.empty()) {
+            error.message = "MCP stdio endpoint has no command";
+            return nullptr;
+        }
+        transport = std::make_shared<StdioTransport>(endpoint, client_name, client_version);
+    } else {
+        if (endpoint.url.empty()) {
+            error.message = "MCP http endpoint has no url";
+            return nullptr;
+        }
+        transport = std::make_shared<HttpTransport>(endpoint, timeouts.request);
+    }
+
+    auto worker = std::make_shared<WorkerState>();
+    std::thread loop([worker, transport] { worker->Loop(); });
+
+    auto connection = std::unique_ptr<McpConnection>(new McpConnection(
+        std::move(worker), transport, std::move(loop)));
+    connection->request_timeout_ = timeouts.request;
+
+    // The initialize handshake runs on the worker under the connect deadline.
+    // Bounded even when the subprocess dies during startup, which wedges
+    // cpp-mcp's own initialize indefinitely (verified by probe).
+    auto slot = std::make_shared<Slot<bool>>();
+    connection->worker_->Push([transport, slot] { transport->Initialize(*slot); });
+    if (!WaitSlot(*slot, std::chrono::steady_clock::now() + timeouts.connect, nullptr,
+                  error.message)) {
+        if (error.message.empty()) error.message = "MCP initialize timed out";
+        connection->Teardown();
+        return nullptr;
+    }
+    return connection;
+}
+
+bool McpConnection::Ping(const std::function<bool()>& is_cancelled, Failure& error) {
+    auto slot = std::make_shared<Slot<bool>>();
+    worker_->Push([transport = transport_, slot] { transport->Ping(*slot); });
+    const bool completed = WaitSlot(*slot, std::chrono::steady_clock::now() + request_timeout_,
+                                    is_cancelled, error.message);
+    return completed && slot->value.value_or(false);
+}
+
+std::optional<std::vector<McpConnection::ToolListing>> McpConnection::ListTools(
+        const std::function<bool()>& is_cancelled, Failure& error) {
+    auto slot = std::make_shared<Slot<std::vector<ToolListing>>>();
+    worker_->Push([transport = transport_, slot] { transport->ListTools(*slot); });
+    if (!WaitSlot(*slot, std::chrono::steady_clock::now() + request_timeout_, is_cancelled,
+                  error.message)) {
+        return std::nullopt;
+    }
+    return std::move(*slot->value);
+}
+
+McpCallOutcome McpConnection::CallTool(std::string_view tool_name, const nlohmann::json& arguments,
+                                       const std::function<bool()>& is_cancelled) {
+    McpCallOutcome outcome;
+    auto slot = std::make_shared<Slot<nlohmann::json>>();
+    worker_->Push([transport = transport_, slot, name = std::string(tool_name), arguments] {
+        transport->CallTool(name, arguments, *slot);
+    });
+    std::string error;
+    if (!WaitSlot(*slot, std::chrono::steady_clock::now() + request_timeout_, is_cancelled,
+                  error)) {
+        outcome.error = std::move(error);
+        if (outcome.error.empty()) outcome.error = "MCP call failed";
+        return outcome;
+    }
+    outcome.ok = true;
+    outcome.result = std::move(*slot->value);
+    return outcome;
+}
+
+}  // namespace minimal::mcp
+

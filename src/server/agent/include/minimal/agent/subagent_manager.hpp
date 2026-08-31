@@ -28,13 +28,21 @@
 #include "minimal/session/session_database.hpp"
 #include "minimal/tools/tool.hpp"
 
+namespace minimal::mcp {
+class McpClientManager;
+}  // namespace minimal::mcp
+
 namespace minimal::agent {
 
 class SubagentManager {
 public:
+    // `mcp_manager` may be null (no mcps.json, MCP-free tests): the child then
+    // simply has no live MCP servers. When present it gates the spawn: a child
+    // preset naming a dead server FAILS THE SPAWN -- an error ToolResultBlock
+    // the parent model adapts to, never a child that starts crippled.
     SubagentManager(SessionRegistry& sessions, session::SessionDatabase& db,
                     const AgentPresetRegistry& presets, std::int64_t max_concurrent_subagents,
-                    common::Logger& logger);
+                    common::Logger& logger, mcp::McpClientManager* mcp_manager = nullptr);
 
     // Runs on the PARENT's worker thread -- it is a tool execution, and that is
     // the thread permitted to block. A blocking request returns only after the
@@ -48,6 +56,7 @@ private:
     const AgentPresetRegistry& presets_;
     std::int64_t max_concurrent_subagents_;
     common::Logger& logger_;
+    mcp::McpClientManager* mcp_manager_ = nullptr;
 };
 
 }  // namespace minimal::agent

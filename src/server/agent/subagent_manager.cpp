@@ -1,5 +1,7 @@
 #include "minimal/agent/subagent_manager.hpp"
 
+#include "minimal/mcp/mcp_client_manager.hpp"
+
 #include <chrono>
 #include <future>
 #include <utility>
@@ -37,12 +39,14 @@ ChildResult ResultOf(const TurnResult& result) {
 
 SubagentManager::SubagentManager(SessionRegistry& sessions, session::SessionDatabase& db,
                                   const AgentPresetRegistry& presets,
-                                  std::int64_t max_concurrent_subagents, common::Logger& logger)
+                                  std::int64_t max_concurrent_subagents, common::Logger& logger,
+                                  mcp::McpClientManager* mcp_manager)
     : sessions_(sessions),
       db_(db),
       presets_(presets),
       max_concurrent_subagents_(max_concurrent_subagents),
-      logger_(logger) {}
+      logger_(logger),
+      mcp_manager_(mcp_manager) {}
 
 SubagentOutcome SubagentManager::Spawn(const SubagentRequest& request,
                                         const tools::ToolContext& ctx) {
@@ -92,6 +96,21 @@ SubagentOutcome SubagentManager::Spawn(const SubagentRequest& request,
     child_preset.allowed_mcp_servers =
         intersect_allowed(parent->preset().allowed_mcp_servers, child_preset.allowed_mcp_servers);
 
+    // A subagent whose preset requires a dead server DOES NOT START: an error
+    // ToolResultBlock the parent model adapts to, before any child row exists.
+    // Checked here, not in the child's construction, so the failure names the
+    // SERVER and lands as the spawn tool's result.
+    if (mcp_manager_ != nullptr) {
+        for (const auto& server : child_preset.allowed_mcp_servers) {
+            std::string error;
+            if (!mcp_manager_->EnsureAlive(server, error)) {
+                return SubagentOutcome::Error("subagent preset '" + preset_name +
+                                              "' requires MCP server '" + server +
+                                              "' which is unavailable: " + error);
+            }
+        }
+    }
+
     // The DATABASE mints the id, so the row exists before the Session does --
     // the same ordering SessionServiceImpl::CreateSession owns, with the same
     // rollback obligation below. The parent's row exists by construction, so
@@ -114,6 +133,7 @@ SubagentOutcome SubagentManager::Spawn(const SubagentRequest& request,
     params.seed_grants = parent->granted_keys();
     params.policy_ceiling = parent->policy();
     params.mcp_policy_ceiling = parent->mcp_policy();
+    params.mcp_manager = mcp_manager_;
 
     // The completion signal. Blocking waits on it here; non-blocking uses it on
     // the child's worker to queue the parent's injection. Fired on every exit

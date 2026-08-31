@@ -6,6 +6,7 @@
 // provider?" cannot be answered before plugins are in. See ARCHITECTURE.md.
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <exception>
@@ -28,6 +29,7 @@
 #include "minimal/config/skill_registry.hpp"
 #include "minimal/llm/provider_factory_registry.hpp"
 #include "minimal/commands/command_registry.hpp"
+#include "minimal/mcp/mcp_client_manager.hpp"
 #include "minimal/plugins/name_resolution.hpp"
 #include "minimal/plugins/plugin_discovery.hpp"
 #include "minimal/plugins/plugin_loader.hpp"
@@ -245,6 +247,19 @@ int main(int argc, char** argv) {
                                              loop_config, minimal::common::DefaultLogger());
     sessions.set_commands(&commands);
 
+    // The shared MCP server processes: one connection per enabled mcps.json
+    // entry, shared across every session. Core, like the MCP client itself.
+    // Nothing spawns here -- liveness checks fire when a session whose preset
+    // allows a server actually starts (ARCHITECTURE.md, MCP client). A missing
+    // mcps.json is the normal no-MCP state, not an error.
+    minimal::mcp::McpTimeouts mcp_timeouts;
+    mcp_timeouts.connect = std::chrono::milliseconds(settings.tools.mcp.connect_timeout_ms);
+    mcp_timeouts.request = std::chrono::milliseconds(settings.tools.mcp.request_timeout_ms);
+    auto mcp_manager = std::make_unique<minimal::mcp::McpClientManager>(
+        minimal::config::LoadMcpsConfig(config_dir / "mcps.json"), tools, mcp_timeouts,
+        minimal::common::DefaultLogger());
+    minimal::mcp::McpClientManager& mcp = *mcp_manager;
+
     // Registered by the harness itself, like SkillTool, but only NOW: the
     // manager needs the SessionRegistry to exist, and no session can build a
     // tool set before serving starts, so registering here is still before
@@ -252,7 +267,7 @@ int main(int argc, char** argv) {
     // session CREATION across the ABI to relocate a thin wrapper.
     auto subagents = std::make_unique<minimal::agent::SubagentManager>(
         sessions, *session_db, *presets, settings.max_concurrent_subagents,
-        minimal::common::DefaultLogger());
+        minimal::common::DefaultLogger(), &mcp);
     minimal::agent::SubagentManager& subagent_manager = *subagents;
     tools.Register(std::make_unique<minimal::agent::SpawnSubagentTool>(
         [&subagent_manager](const minimal::agent::SubagentRequest& request,
@@ -264,6 +279,7 @@ int main(int argc, char** argv) {
                                              minimal::common::DefaultLogger());
     service.set_commands(&commands);
     service.set_auth_providers(&auth_providers);
+    service.set_mcp_manager(&mcp);
     minimal::rpc::Server server(service, socket_path);
 
     if (!server.listening()) {

@@ -79,6 +79,7 @@ grpc::Status SessionServiceImpl::CreateSession(grpc::ServerContext* context,
     // resolve it, and collapsing the two earlier would silently override a
     // deliberate client choice with permissions.json.
     params.run_mode_override = FromProto(request->run_mode());
+    params.mcp_manager = mcp_manager_;
 
     if (const auto status = ApplyModelOverride(*request, params); !status.ok()) return status;
 
@@ -198,6 +199,7 @@ grpc::Status SessionServiceImpl::ResumeSession(const v1::CreateSessionRequest* r
     params.agent_preset = stored->agent_preset;
     params.project_root = stored->project_root;
     params.run_mode_override = FromProto(request->run_mode());
+    params.mcp_manager = mcp_manager_;
     params.resume = true;
     // APPLIES ON RESUME TOO, like run_mode and for the same reason: a model the
     // user names is a property of this invocation, not of the stored session --

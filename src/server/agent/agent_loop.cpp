@@ -130,6 +130,18 @@ llm::ChatRequest AgentLoop::BuildChatRequest() const {
     }
 
     request.tools = registry_.DefinitionsFor(allowed);
+    // Live MCP tools for the allowed-and-alive servers, merged into the same
+    // sorted order -- this request is rebuilt every turn, so the merge must
+    // preserve the deterministic prefix the prompt cache keys on.
+    {
+        std::vector<llm::ToolDefinition> mcp_defs =
+            registry_.DefinitionsForMcpServers(mcp_servers_);
+        request.tools.insert(request.tools.end(), mcp_defs.begin(), mcp_defs.end());
+        std::sort(request.tools.begin(), request.tools.end(),
+                  [](const llm::ToolDefinition& a, const llm::ToolDefinition& b) {
+                      return a.name < b.name;
+                  });
+    }
     if (preset_.is_subagent) {
         // DefinitionsFor("*") would have re-admitted it.
         request.tools.erase(std::remove_if(request.tools.begin(), request.tools.end(),

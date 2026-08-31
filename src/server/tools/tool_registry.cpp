@@ -17,8 +17,9 @@ void ToolRegistry::Register(std::unique_ptr<Tool> tool) {
     // First registration owns the map slot, always -- before AND after alias
     // application. The post-alias branch once used insert_or_assign, which made
     // a late-registered duplicate (spawn_subagent registered at serve stage)
-    // silently shadow or be shadowed; first-wins matches the pre-alias rule and
-    // parks the loser where the collision diagnostics can still see it.
+    // silently shadowed or been shadowed; first-wins matches the pre-alias rule
+    // and parks the loser where the collision diagnostics can still see it.
+    const std::lock_guard<std::shared_mutex> lock(mutex_);
     if (tools_.count(name)) {
         shadowed_.push_back(Pending{attributions_.back(), std::move(tool)});
     } else {
@@ -27,6 +28,9 @@ void ToolRegistry::Register(std::unique_ptr<Tool> tool) {
 }
 
 void ToolRegistry::ApplyAliases(const std::map<std::string, std::string>& aliases) {
+    // Startup-only: exclusive for the whole body. It manipulates tools_ and
+    // shadowed_ directly and must not overlap a runtime MCP replacement.
+    std::unique_lock<std::shared_mutex> lock(mutex_);
     for (std::size_t i = 0; i < attributions_.size(); ++i) {
         const auto& attr = attributions_[i];
         const auto alias = aliases.find(attr.plugin_name + "." + attr.tool_name);
@@ -62,6 +66,11 @@ void ToolRegistry::ApplyAliases(const std::map<std::string, std::string>& aliase
 }
 
 Tool* ToolRegistry::Find(std::string_view name) const {
+    // The returned pointer is used by ToolExecutor::Run across the permission
+    // check and execute() itself, WITHOUT holding this lock. That is sound
+    // only because tool objects are never destroyed before teardown -- the
+    // retired_ list in ReplaceMcpTools is what guarantees it, not this lock.
+    std::shared_lock<std::shared_mutex> lock(mutex_);
     auto it = tools_.find(std::string(name));
     return it == tools_.end() ? nullptr : it->second.get();
 }
@@ -71,15 +80,26 @@ std::vector<llm::ToolDefinition> ToolRegistry::DefinitionsFor(
     const bool allow_all =
         std::find(allowed.begin(), allowed.end(), "*") != allowed.end();
 
+    // One shared acquisition for the whole scan. The permission-key lookup
+    // inside the loop goes through the unlocked helper: nesting a second
+    // shared_lock on this mutex is undefined (a queued writer between the two
+    // acquisitions deadlocks the reader).
+    std::shared_lock<std::shared_mutex> lock(mutex_);
     std::vector<llm::ToolDefinition> out;
     out.reserve(allow_all ? tools_.size() : allowed.size());
 
     for (const auto& [name, tool] : tools_) {
+        // MCP tools are NEVER governed by allowed_tools -- they belong to the
+        // separate server-scoped chain (allowed_mcp_servers + the manager's
+        // live set) and are added by DefinitionsForMcpServers(). Letting "*"
+        // sweep them in here would advertise a dead or de-scoped server's
+        // tools to the model.
+        if (name.rfind("mcp__", 0) == 0) continue;
         // Filter on the PERMISSION key, not the map key: allowed_tools never
         // references an alias (ARCHITECTURE.md, "Name collisions and aliases"),
         // so an aliased tool is addressed by its original/qualified name while
         // the model sees the surface name.
-        const std::string_view key = PermissionKeyFor(name);
+        const std::string_view key = PermissionKeyForUnlocked(name);
         if (!allow_all && std::find(allowed.begin(), allowed.end(), key) == allowed.end()) {
             continue;
         }
@@ -95,15 +115,77 @@ std::vector<llm::ToolDefinition> ToolRegistry::DefinitionsFor(
     return out;
 }
 
+std::vector<llm::ToolDefinition> ToolRegistry::DefinitionsForMcpServers(
+        const std::vector<std::string>& servers) const {
+    if (servers.empty()) return {};
+    std::vector<std::string> prefixes;
+    prefixes.reserve(servers.size());
+    for (const auto& server : servers) {
+        prefixes.push_back("mcp__" + server + "__");
+    }
+
+    std::shared_lock<std::shared_mutex> lock(mutex_);
+    std::vector<llm::ToolDefinition> out;
+    for (const auto& [name, tool] : tools_) {
+        for (const auto& prefix : prefixes) {
+            if (name.rfind(prefix, 0) == 0) {
+                out.push_back(tool->spec().definition);
+                break;
+            }
+        }
+    }
+    std::sort(out.begin(), out.end(),
+              [](const llm::ToolDefinition& a, const llm::ToolDefinition& b) {
+                  return a.name < b.name;
+              });
+    return out;
+}
+
 void ToolRegistry::SetPermissionKeys(std::unordered_map<std::string, std::string> keys) {
+    const std::lock_guard<std::shared_mutex> lock(mutex_);
     permission_keys_ = std::move(keys);
 }
 
 std::string_view ToolRegistry::PermissionKeyFor(std::string_view surface_name) const {
-    if (auto it = permission_keys_.find(std::string(surface_name)); it != permission_keys_.end()) {
-        return it->second;
+    std::shared_lock<std::shared_mutex> lock(mutex_);
+    return PermissionKeyForUnlocked(surface_name);
+}
+
+void ToolRegistry::ReplaceMcpTools(const std::string& server_name,
+                                   std::vector<std::unique_ptr<Tool>> tools) {
+    const std::string prefix = "mcp__" + server_name + "__";
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+
+    // Retire the server's previous set: out of the map, into retired_ -- NOT
+    // destroyed. A session worker may be inside execute() on one of them right
+    // now (ToolExecutor holds the raw pointer without the lock); freeing it
+    // here would be a use-after-free under a concurrent re-discovery.
+    for (auto it = tools_.begin(); it != tools_.end();) {
+        if (it->first.rfind(prefix, 0) == 0) {
+            retired_.push_back(std::move(it->second));
+            it = tools_.erase(it);
+        } else {
+            ++it;
+        }
     }
-    return surface_name;
+
+    // First registration of a name wins within the batch, matching Register().
+    for (auto& tool : tools) {
+        if (!tool) continue;
+        const std::string name = tool->spec().name;
+        if (name.rfind(prefix, 0) != 0) {
+            // Refused, not renamed: this entry point owns exactly one server's
+            // namespace, and silently re-homing a foreign name would hide a
+            // caller bug. Park it so it is still diagnosable at teardown.
+            retired_.push_back(std::move(tool));
+            continue;
+        }
+        if (tools_.count(name)) {
+            retired_.push_back(std::move(tool));
+        } else {
+            tools_.emplace(name, std::move(tool));
+        }
+    }
 }
 
 }  // namespace minimal::tools
