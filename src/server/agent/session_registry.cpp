@@ -263,13 +263,18 @@ std::shared_ptr<Session> SessionRegistry::Find(const std::string& session_id) co
 
 std::size_t SessionRegistry::ChildCount(const std::string& parent_id) const {
     std::lock_guard<std::mutex> lock(mutex_);
-    // LIVE children only. A finished child stays in the map until its client's
-    // stream closes it, and counting it made max_concurrent_subagents mean
-    // "children not yet reaped" rather than "concurrent" -- a client that kept
-    // finished child tabs open would refuse every new spawn.
+    // CONCURRENT children only -- the definition the subagent limit needs. Two
+    // states free a slot: the session terminated (reaped or stream-closed), or
+    // its single seeded turn finished (a finished child stays in the map until
+    // its client's stream closes it, and counting it made
+    // max_concurrent_subagents mean "children not yet reaped" rather than
+    // "concurrent" -- a client that kept finished child tabs open would refuse
+    // every new spawn).
     std::size_t count = 0;
     for (const auto& [id, session] : sessions_) {
-        if (session->info().parent_session_id == parent_id && !session->terminated()) ++count;
+        if (session->info().parent_session_id != parent_id) continue;
+        if (session->terminated() || session->subagent_finished()) continue;
+        ++count;
     }
     return count;
 }

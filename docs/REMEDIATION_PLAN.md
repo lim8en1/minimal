@@ -403,6 +403,15 @@ shows only intended fds.
 
 ### W2 — Subagent admission trio (ship-blocker 1)
 
+**Status: landed.** Full suite, `asan` and `tsan` presets green (1037 tests each; three
+new). All three items landed as specified; the work re-exposed a fourth, adjacent
+defect: the existing over-limit test's determinism rested on the leak (the
+never-released ticket was what made the sibling spawn's refusal guaranteed). Its
+admitted child now parks on a permission prompt so "concurrent" is pinned by the test,
+not by the bug, and the blocking-spawn test's `ChildCount == 1` assertion — written
+when finished children counted — was updated to the corrected semantics (a blocking
+child's turn has ended; it holds no slot).
+
 1. Give `TicketGuard` an explicit `Release()` (decrement under `limit_mu_`, then set
    `released`); the success path calls it at `subagent_manager.cpp:251` instead of
    `ticket.released = true` — the "microscopically conservative" window the comment

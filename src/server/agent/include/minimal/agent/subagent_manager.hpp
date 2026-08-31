@@ -84,10 +84,15 @@ private:
     // ChildCount, but a child only becomes countable when CreateResolved
     // inserts it -- two simultaneous spawns at limit 1 would both pass the
     // check before either child existed. An admission ticket closes the gap:
-    // check-and-increment under limit_mu_, held from the check until the
-    // registry's count picks the child up (or the spawn fails, where the guard
-    // below decrements instead). The count is per parent; entries are erased
-    // when they hit zero.
+    // check-and-increment under limit_mu_ (with the ChildCount read inside the
+    // same critical section -- a read beside it leaves a TOCTOU window), held
+    // until the registry's count picks the child up, then explicitly released;
+    // a failed spawn releases via the guard. The count is per parent; entries
+    // are erased when they hit zero.
+    //
+    // Lock order: limit_mu_ -> SessionRegistry::mutex_, one-directional. Nothing
+    // holds the registry lock and then enters this class, so no reverse path
+    // can close a cycle. Both ends state it; keep them agreeing.
     std::mutex limit_mu_;
     std::unordered_map<std::string, std::int64_t> starting_children_;
     // The process-wide hook dispatcher (track O). Borrowed; null in tests.

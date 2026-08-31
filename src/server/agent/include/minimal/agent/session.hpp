@@ -396,6 +396,15 @@ public:
     std::chrono::steady_clock::time_point created_at() const { return created_at_; }
 
     bool terminated() const { return terminated_.load(std::memory_order_acquire); }
+    // A subagent whose single seeded turn has ended. Distinct from terminated:
+    // a finished child stays in the registry until its client's stream closes,
+    // and the two states mean different things to different readers -- the
+    // concurrency limit counts the finished child as FREE (its turn no longer
+    // runs), while SubmitTurn reads it as CLOSED (the completion hook must
+    // fire exactly once).
+    bool subagent_finished() const {
+        return subagent_finished_.load(std::memory_order_acquire);
+    }
     bool idle() const;
 
     // Testing seam: blocks until the turn queue is empty and the worker is idle.

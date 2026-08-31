@@ -100,8 +100,11 @@ public:
     // every session and every service call.
     ProviderInstanceCache& provider_cache() { return provider_cache_; }
 
-    // Live sessions whose parent_session_id is `parent_id`. The subagent
-    // concurrency limit is a count of these.
+    // Sessions of `parent_id` that are still RUNNING: neither terminated nor
+    // finished-with-their-seeded-turn. This is the count the subagent
+    // concurrency limit admits against -- a finished child whose tab is still
+    // open holds no slot. Called under SubagentManager::limit_mu_ (lock order
+    // limit_mu_ -> mutex_, one-directional; see subagent_manager.hpp).
     std::size_t ChildCount(const std::string& parent_id) const;
 
     // Terminates and forgets. Safe for an id that is already gone.

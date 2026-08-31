@@ -73,9 +73,18 @@ SubagentOutcome SubagentManager::Spawn(const SubagentRequest& request,
     // Spawn is still constructing it. The admission ticket below holds a place
     // from this check until CreateResolved has inserted the row, so every
     // concurrent checker sees either the ticket or the child, never neither.
-    const std::size_t live_children = sessions_.ChildCount(parent_id);
+    //
+    // The ChildCount read is INSIDE limit_mu_, deliberately: read-then-check
+    // splits admission into two unsynchronized halves, and a sibling whose read
+    // landed before another's registry insert can then acquire the lock, find
+    // the ticket already released, and admit a second child at the exact
+    // boundary the ticket exists to protect. Lock order is limit_mu_ ->
+    // registry mutex, one-directional: nothing holds the registry lock and then
+    // calls into SubagentManager (the registry does not know this class
+    // exists), so no reverse path can close a cycle.
     {
         std::lock_guard<std::mutex> lock(limit_mu_);
+        const std::size_t live_children = sessions_.ChildCount(parent_id);
         const std::int64_t starting = starting_children_[parent_id];
         if (static_cast<std::int64_t>(live_children) + starting >= max_concurrent_subagents_) {
             return SubagentOutcome::Error("subagent limit reached (" +
@@ -88,13 +97,26 @@ SubagentOutcome SubagentManager::Spawn(const SubagentRequest& request,
         SubagentManager& self;
         const std::string& parent_id;
         bool released = false;
-        ~TicketGuard() {
+        // Explicit release once the child is countable in ChildCount: the
+        // ticket's job is done, so its place is given back. The conservative
+        // window the comment at the release site describes -- a concurrent
+        // checker seeing both the child and the still-held ticket, and
+        // refusing at the exact limit boundary -- exists only between the
+        // registry insert and this call. Idempotent, so the destructor can
+        // simply call it: an error path that never reached the release site
+        // gives the place back here.
+        void Release() {
             if (released) return;
-            std::lock_guard<std::mutex> lock(self.limit_mu_);
-            if (--self.starting_children_[parent_id] <= 0) {
-                self.starting_children_.erase(parent_id);
+            {
+                std::lock_guard<std::mutex> lock(self.limit_mu_);
+                auto it = self.starting_children_.find(parent_id);
+                if (it != self.starting_children_.end() && --it->second <= 0) {
+                    self.starting_children_.erase(it);
+                }
             }
+            released = true;
         }
+        ~TicketGuard() { Release(); }
     } ticket{*this, parent_id};
 
     // The parent's own preset is the default, addressed by the name it was
@@ -244,11 +266,15 @@ SubagentOutcome SubagentManager::Spawn(const SubagentRequest& request,
         db_.DeleteSession(row.session_id);
         return SubagentOutcome::Error(e.what());
     }
-    // The child is countable in ChildCount from here; the ticket's job is done.
-    // (Microscopically conservative: a concurrent checker between these two
-    // lines may see both the child and the ticket, and refuse at the exact
-    // limit boundary -- the safe direction to err.)
-    ticket.released = true;
+    // The child is countable in ChildCount from here; give the ticket's place
+    // back. (Microscopically conservative: a concurrent checker between the
+    // insert and this Release may see both the child and the ticket, and
+    // refuse at the exact limit boundary -- the safe direction to err. Skipping
+    // the decrement instead, as an earlier draft did, leaked the ticket on
+    // every successful spawn: after max_concurrent_subagents successes -- even
+    // sequential ones, all long finished -- every future spawn refused, the
+    // count inflated permanently and the map growing monotonically.)
+    ticket.Release();
 
     // Announce BEFORE the child produces anything: attaching to the child is a
     // client protocol obligation, and this event is what starts it. The child's

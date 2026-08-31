@@ -10,10 +10,12 @@
 //     inherits its grants;
 //   - termination and cancellation unblock a waiting parent instead of hanging.
 
+#include <atomic>
 #include <chrono>
 #include <deque>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -360,7 +362,13 @@ TEST_CASE("a blocking subagent returns its final text as the parent's tool resul
     REQUIRE(child_row.has_value());
     CHECK(child_row->parent_session_id == parent->info().session_id);
     CHECK(child_row->name == "do the thing");
-    CHECK(fixture.sessions->ChildCount(parent->info().session_id) == 1);
+    // The blocking child's turn has ENDED: it is finished (its result was the
+    // tool result above) and holds no concurrency slot, but stays in the
+    // registry until its client's stream closes it.
+    const auto child_session = fixture.sessions->Find(*child_id);
+    REQUIRE(child_session != nullptr);
+    CHECK(child_session->subagent_finished());
+    CHECK(fixture.sessions->ChildCount(parent->info().session_id) == 0);
 
     // The child's one provider call: prefixed system prompt, the task as its
     // seed, and NO spawn_subagent among its tools even though allowed_tools is
@@ -498,9 +506,30 @@ TEST_CASE("a non-blocking subagent's completion is injected at a turn boundary",
 
 // --- limits ---------------------------------------------------------------------
 
+// Polls until `done` or the deadline. Spawn results land on other threads'
+// workers, so every wait here names what it waited on and cannot wedge.
+bool WaitForSpawned(const std::function<bool()>& done,
+                    std::chrono::milliseconds timeout = std::chrono::seconds(5)) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (done()) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    return false;
+}
+
 TEST_CASE("an over-limit spawn is an error result, not a queue", "[subagent][limit]") {
     SubagentFixture fixture;
     fixture.BuildWithLimit(1);
+    // The admitted child parks on a permission prompt for the whole turn, so
+    // its slot is held for the duration of the assertion. (The child's script
+    // used to be a plain text response -- which made the child's turn finish
+    // in microseconds, and the test's determinism then rested on the admission
+    // ticket never being released: with the ticket working, the sibling spawn
+    // can legitimately arrive after the first child has finished and free its
+    // slot. Holding the child live is what pins "concurrent".)
+    fixture.tools.Register(
+        std::make_unique<testing::FakeTool>("slow", tools::ToolCategory::Execute));
     auto parent = fixture.CreateParent();
     auto* parent_script = fixture.scripts["parent-script"].get();
     auto* child_script = fixture.scripts["child-script"].get();
@@ -516,9 +545,13 @@ TEST_CASE("an over-limit spawn is an error result, not a queue", "[subagent][lim
     two_spawns.usage.input_tokens = 10;
     two_spawns.usage.output_tokens = 5;
 
+    llm::ChatResponse child_parks;
+    child_parks.content.push_back(llm::ToolUseBlock{"t1", "slow", nlohmann::json::object()});
+    child_parks.stop_reason = llm::StopReason::ToolUse;
+
     parent_script->Push(std::move(two_spawns));
     parent_script->Push(testing::TextResponse("adapted"));
-    child_script->Push(testing::TextResponse("first result"));
+    child_script->Push(std::move(child_parks));
 
     parent->SubmitTurn("go");
     REQUIRE(parent->WaitForIdleForTesting(10s));
@@ -553,6 +586,143 @@ TEST_CASE("an over-limit spawn is an error result, not a queue", "[subagent][lim
         CHECK_FALSE(admitted.is_error);
     }
     CHECK(saw_results);
+    // The parked child holds its slot until teardown; TerminateAll unblocks
+    // its worker from the permission wait and reaps everything.
+    fixture.sessions->TerminateAll();
+}
+
+TEST_CASE("sequential spawns past the limit keep succeeding", "[subagent][limit]") {
+    // The admission ticket once leaked on every SUCCESSFUL spawn: its guard
+    // skipped the decrement when the success path marked it released, so the
+    // count inflated permanently and after max_concurrent_subagents spawns --
+    // even sequential ones, each long finished before the next -- every future
+    // spawn refused with "limit reached". The limit means CONCURRENT; this is
+    // that regression.
+    SubagentFixture fixture;
+    fixture.BuildWithLimit(4);
+    auto parent = fixture.CreateParent();
+    auto* child_script = fixture.scripts["child-script"].get();
+
+    tools::ToolContext ctx{common::DefaultLogger()};
+    ctx.session_id = parent->info().session_id;
+
+    for (int i = 0; i < 10; ++i) {
+        child_script->Push(testing::TextResponse("result " + std::to_string(i)));
+        agent::SubagentRequest request;
+        request.task = "task " + std::to_string(i);
+        request.agent_preset = "child";
+        request.blocking = false;
+        ctx.tool_use_id = "tu-" + std::to_string(i);
+        const auto outcome = fixture.manager->Spawn(request, ctx);
+        if (outcome.kind == agent::SubagentOutcome::Kind::kError) {
+            FAIL("spawn " << i << " refused: " << outcome.error);
+        }
+        // Drain each child before the next spawn so at most one is ever live:
+        // far below the limit of 4, which is what isolates the ticket leak
+        // from genuine concurrency.
+        REQUIRE(WaitForSpawned([&] {
+            const auto child = fixture.sessions->Find(outcome.child_session_id);
+            return child != nullptr && child->subagent_finished();
+        }));
+    }
+    fixture.sessions->TerminateAll();
+}
+
+TEST_CASE("a finished child's open tab does not consume a concurrency slot",
+          "[subagent][limit]") {
+    // A finished child stays in the registry until its client's stream closes
+    // it -- the natural thing for a TUI that wants to keep reading the output.
+    // Counting it made the limit mean "children not yet reaped"; the slot must
+    // free when the child's single turn ends.
+    SubagentFixture fixture;
+    fixture.BuildWithLimit(1);
+    auto parent = fixture.CreateParent();
+    auto* child_script = fixture.scripts["child-script"].get();
+
+    tools::ToolContext ctx{common::DefaultLogger()};
+    ctx.session_id = parent->info().session_id;
+    const auto spawn = [&](int i) {
+        child_script->Push(testing::TextResponse("result"));
+        agent::SubagentRequest request;
+        request.task = "task";
+        request.agent_preset = "child";
+        request.blocking = false;
+        ctx.tool_use_id = "tu-" + std::to_string(i);
+        return fixture.manager->Spawn(request, ctx);
+    };
+
+    const auto first = spawn(1);
+    REQUIRE(first.kind == agent::SubagentOutcome::Kind::kStarted);
+    REQUIRE(WaitForSpawned([&] {
+        const auto child = fixture.sessions->Find(first.child_session_id);
+        return child != nullptr && child->subagent_finished();
+    }));
+    // Still in the registry -- nothing reaped it -- and still holding no slot.
+    REQUIRE(fixture.sessions->Find(first.child_session_id) != nullptr);
+
+    const auto second = spawn(2);
+    INFO("second spawn: " << second.error);
+    CHECK(second.kind == agent::SubagentOutcome::Kind::kStarted);
+    fixture.sessions->TerminateAll();
+}
+
+TEST_CASE("five concurrent sibling spawns against one live child admit exactly one",
+          "[subagent][limit]") {
+    // The ticket exists for the window where a spawn is in flight but its
+    // child is not yet countable in ChildCount; the ChildCount read sharing
+    // the admission lock is what keeps the two halves from interleaving. A
+    // child parked on a permission prompt holds its slot deterministically, so
+    // every concurrent sibling must see either the child or the ticket and
+    // refuse -- never neither.
+    SubagentFixture fixture;
+    fixture.BuildWithLimit(1);
+    fixture.tools.Register(
+        std::make_unique<testing::FakeTool>("slow", tools::ToolCategory::Execute));
+    auto parent = fixture.CreateParent();
+    auto* child_script = fixture.scripts["child-script"].get();
+
+    llm::ChatResponse use_slow;
+    use_slow.content.push_back(llm::ToolUseBlock{"t1", "slow", nlohmann::json::object()});
+    use_slow.stop_reason = llm::StopReason::ToolUse;
+    child_script->Push(std::move(use_slow));
+
+    const std::string parent_id = parent->info().session_id;
+    std::atomic<int> ready{0};
+    std::vector<agent::SubagentOutcome> outcomes(5);
+    std::vector<std::thread> threads;
+    for (int i = 0; i < 5; ++i) {
+        threads.emplace_back([&, i] {
+            agent::SubagentRequest request;
+            request.task = "sibling";
+            request.agent_preset = "child";
+            request.blocking = false;
+            tools::ToolContext ctx{common::DefaultLogger()};
+            ctx.session_id = parent_id;
+            ctx.tool_use_id = "tu-" + std::to_string(i);
+            ready.fetch_add(1);
+            while (ready.load() < 5) {
+            }  // release all five into the admission check together
+            outcomes[i] = fixture.manager->Spawn(request, ctx);
+        });
+    }
+    for (auto& thread : threads) thread.join();
+
+    int admitted = 0;
+    int refused = 0;
+    for (const auto& outcome : outcomes) {
+        if (outcome.kind == agent::SubagentOutcome::Kind::kError) {
+            ++refused;
+            INFO(outcome.error);
+            CHECK(outcome.error.find("limit") != std::string::npos);
+        } else {
+            ++admitted;
+        }
+    }
+    CHECK(admitted == 1);
+    CHECK(refused == 4);
+    // The one admitted child is parked on its prompt: live, counted.
+    CHECK(fixture.sessions->ChildCount(parent_id) == 1);
+    fixture.sessions->TerminateAll();
 }
 
 // --- permission inheritance -------------------------------------------------------
