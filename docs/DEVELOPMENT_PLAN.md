@@ -524,6 +524,18 @@ Applies to every milestone. These are existing project practice, recorded so the
   (ARCHITECTURE.md, "Server plugins"), and uninstrumented third-party allocators made LSan noise
   exceed signal. Sanitizer findings are test bugs until proven otherwise — the preset's first run
   caught a use-after-scope in a test that destroyed its release flag before the worker polling it.
+- **TSan is a preset, not an accident.** `cmake --preset tsan && cmake --build --preset tsan && ctest
+  --preset tsan` is the same overlay-triplet shape (`cmake/triplets/arm64-osx-tsan.cmake`), for the
+  same reason with the opposite sign: an uninstrumented dependency hides races in happens-before
+  terms, so the false-negative risk argues for instrumenting everything, not just first-party code.
+  Unlike ASan there is no option to turn off — a race report fails ctest by default. The suite is
+  otherwise the same 678 tests, no TSAN_OPTIONS tuning. The first run caught exactly one finding: the
+  cancel-during-backoff rendezvous spun on `FakeLlmProvider::call_count()` while the session worker
+  recorded the request — a data race whose practical harm was zero and whose existence contradicted
+  the test's own "deterministic rendezvous" comment. The fix is the mutex `ScriptedProviderScript`
+  already wore; `requests()` deliberately stays a bare reference read after join. The races the
+  review pass found (#4, #7, #9, the client's command counter) were fixed without TSan available to
+  verify them, so this run was their verification, and it is what keeps them caught.
 - **The presets pin the generator** (`Ninja`); ad-hoc `-G Ninja` configurations were how every
   build here has actually been made, and a preset that cannot configure from a clean checkout is a
   gap, not a default.

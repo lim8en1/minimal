@@ -41,9 +41,11 @@ public:
     };
 
     void PushResponse(llm::ChatResponse response, std::vector<llm::StreamEvent> events = {}) {
+        std::lock_guard<std::mutex> lock(mu_);
         steps_.push_back(Step{std::move(response), std::nullopt, std::move(events)});
     }
     void PushError(llm::LlmError error) {
+        std::lock_guard<std::mutex> lock(mu_);
         steps_.push_back(Step{std::nullopt, std::move(error), {}});
     }
 
@@ -61,17 +63,26 @@ public:
         //
         // A deque, not a vector: recorded spans point INTO the elements, so the
         // container must not move them when it grows.
-        auto& owned = recorded_messages_.emplace_back(request.messages.begin(),
-                                                      request.messages.end());
-        llm::ChatRequest copy = request;
-        copy.messages = owned;
-        requests_.push_back(std::move(copy));
-        if (steps_.empty()) {
-            throw llm::LlmError(llm::LlmErrorCategory::RequestError,
-                                "FakeLlmProvider: no scripted step remaining");
+        //
+        // The mutex, not merely paranoia: a Session's worker thread runs the
+        // call while the test's main thread spins on call_count() -- the
+        // cancel-during-backoff rendezvous -- so the recorded state is written
+        // and read from two threads with no other happens-before edge.
+        Step step;
+        {
+            std::lock_guard<std::mutex> lock(mu_);
+            auto& owned = recorded_messages_.emplace_back(request.messages.begin(),
+                                                          request.messages.end());
+            llm::ChatRequest copy = request;
+            copy.messages = owned;
+            requests_.push_back(std::move(copy));
+            if (steps_.empty()) {
+                throw llm::LlmError(llm::LlmErrorCategory::RequestError,
+                                    "FakeLlmProvider: no scripted step remaining");
+            }
+            step = std::move(steps_.front());
+            steps_.pop_front();
         }
-        Step step = std::move(steps_.front());
-        steps_.pop_front();
 
         for (const auto& event : step.events) {
             if (sink && !sink(event)) {
@@ -86,10 +97,19 @@ public:
         return *step.response;
     }
 
+    std::size_t call_count() const {
+        std::lock_guard<std::mutex> lock(mu_);
+        return requests_.size();
+    }
+
+    // Synchronised access ends here. The reference return is read-only, and
+    // every caller reads it after the loop (or the session worker, via
+    // Terminate) has joined -- thread join is a happens-before edge, so no
+    // lock is taken and none may be: the references point into the container.
     const std::vector<llm::ChatRequest>& requests() const { return requests_; }
-    std::size_t call_count() const { return requests_.size(); }
 
 private:
+    mutable std::mutex mu_;
     std::deque<Step> steps_;
     std::deque<std::vector<llm::Message>> recorded_messages_;
     std::vector<llm::ChatRequest> requests_;
