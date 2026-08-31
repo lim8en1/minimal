@@ -2,7 +2,7 @@
 
 Companion to `ARCHITECTURE.md`, which remains the single source of truth for *design*. This document covers only *sequencing*: what is built, what blocks what, and what "done" means for each remaining piece. Every milestone cites the `ARCHITECTURE.md` section that specifies it; where this plan and that document disagree, that document wins and this one is stale.
 
-**Status: Milestones A, B, C, D, F and H are complete, and a post-merge review of A+B+H has been actioned (§8). Only E (the TUI) and G (MCP) remain. Clean build, zero warnings.** Track **J (permission advisor) is complete** — including the SessionChannels extraction, the E2E over a real socket through the real plugin loader, and the three §6 invariant proofs. Tracks **K (per-plugin config)**, **L (cross-plugin services)** and **M (tool history access)** are also complete. The remaining extensibility track is **N** (model auto-discovery), designed in `docs/EXTENSIBILITY.md` §2.6 and specified below as §4 N, independent of everything.
+**Status: Milestones A, B, C, D, F and H are complete, and a post-merge review of A+B+H has been actioned (§8). Only E (the TUI) and G (MCP) remain. Clean build, zero warnings.** Track **J (permission advisor) is complete** — including the SessionChannels extraction, the E2E over a real socket through the real plugin loader, and the three §6 invariant proofs. Tracks **K (per-plugin config)**, **L (cross-plugin services)** and **M (tool history access)** are also complete. Track **N (model auto-discovery) is complete** — lazy discovery through a `ModelCatalogRegistry` keyed by the provider kind string, `/providers refresh`, network-free structural sanity checks. A post-N review hardened the transport (the loopback + live-backend tests), the concurrency (per-provider fetch gates — no config lock is ever held across the network call), and the resolve contract (`Resolve` returns a snapshot; refresh replaces entries without pulling them out from under a holder). The remaining tracks are **E** (the TUI) and **G** (MCP).
 
 `minimal -p` holds real conversations against a local model using `read`, `bash`, and `skill`; a permission prompt round-trips over the wire in both directions; a session grant silences the second prompt; the server exits when the last client detaches. Transcripts persist to SQLite, survive the server process, and are **resumable**: `CreateSession` with a `session_id` reopens a stored session, loads its transcript as the loop's working history without re-appending it, and the next turn continues the conversation (`minimal -p --resume <id> PROMPT`). **Subagents work** (§5 D): a model can spawn blocking and non-blocking children over the `spawn_subagent` tool, permission inheritance is enforced as ceilings, and the headless client honours its attach obligation over a real socket. `cmake --install` produces a config dir the server actually starts against (§8), and the startup sanity check reports every problem with it at once (§4 F).
 
@@ -100,7 +100,7 @@ Test depth was inverted relative to integration risk: every well-tested layer wa
 - ~~**K. Per-plugin config**~~ — **done** (§4 K). `PluginRegistrationContext` carries the per-plugin `config` on every registration seam.
 - ~~**L. Cross-plugin services (ServiceRegistry)**~~ — **done** (§4 L). `minimal_plugin_register_services` is live, `NameKind::Service` collisions are fatal, and `tools-bash` provides `BashSessionStateService` under `tools-bash.session_state`; `/restart-shell` resolves through the service. One deviation from the spec below: the command stayed in `tools-bash` (a command belongs to the plugin that owns the state it touches) — the service path and the absent-provider degrade are covered by tests against the extracted `RestartShellCommand`.
 - ~~**M. Tool history access**~~ — **done** (§4 M). `ToolContext::history` is a `session::HistoryWindow` — a bound, windowed slice of `SessionReader` exposing only keyset-paged reads, so the windowed-only rule is a property of the type. `SessionReader` and `history_window.hpp` joined the frozen include set in `plugin_abi.h`.
-- **N. Model auto-discovery** — designed in `docs/EXTENSIBILITY.md` §2.6, specified below (§4 N).
+- ~~**N. Model auto-discovery**~~ — **done** (§4 N). `minimal_plugin_register_model_catalogs` is live, `providers.json` accepts `"discover": true` (with or without a static `models` object), discovery fetches lazily at first resolve with negative caching, `/providers refresh` evicts and refetches, and the discovered `context_window_tokens` reaches the compaction trigger. Two spec deviations, both decisions recorded in §4 N below: the sanity check stays **network-free** (structural warnings only), and persistence/TTL caching was **rejected** — the server is short-lived, so a runtime cache needs no TTL, and a month-old cached window is the exact staleness the track exists to eliminate.
 
 **Strictly dependent on A:** C, D, E, G, and every RPC beyond `CreateSession`/`OpenSession`. **A is now done, so all of them were unblocked; D is now done too.**
 
@@ -362,7 +362,7 @@ All four invariant proofs were run per §6: suppressing the seeded load, the rep
 
 > Specified by `docs/EXTENSIBILITY.md` §3. Independent of E and G — the permission substrate it composes with is built and tested (A3's wire checker, the executor's mode resolution, D's ceilings).
 
-A plugin answers `Ask`-gated tool calls automatically and abstains to the wire checker — the human — when it has no answer. The substrate (mode lattice, precedence chains, out-of-workdir fold, subagent ceilings, run modes, grant ownership) is untouched; the **decision source for `Ask`** becomes pluggable. Composition is an advisor *above* the wire checker, never a replacement of it: abstain and throw both fall through to the human.
+A plugin answers `Ask`-gated tool calls automatically and abstains to the wire checker — the human — when it has no answer. The substrate (mode lattice, precedence chains, out-of-workdir fold, subagent ceilings, run modes, grant ownership) is untouched; the **decision source for `Ask`** becomes pluggable. Composition is an advisor *above* the wire checker, never a replacement of it: abstain and throw both fall through to the human. **A post-J review added a budget:** `permissions.json` `advisor_timeout_ms` (default 30 s, 0 = off) bounds one `Advise` — the call runs on its own thread, the wait polls the cancel source, and a wedged advisor (one that ignores its cancellation contract) is abandoned at the budget's edge and the human prompted, instead of wedging the worker join, the reaper and process shutdown.
 
 **What.** Checker injection in `Session` (`SessionParams` carries `std::unique_ptr<tools::PermissionChecker>`; `WirePermissionChecker` is the default and stops being a by-value member — `session.hpp:276` is the only structural change), `PermissionAdvisorRegistry` + `minimal_plugin_register_permission_advisor` in the plugin ABI, an `AdvisedPermissionChecker` decorator (advise → abstain/throw → wire), `permissions.json` `"advisor": "<plugin>"` with `"advisor_inherit"` for subagents (default **off**), and a sanity-check warning for an advisor name that resolves to nothing.
 
@@ -387,7 +387,8 @@ A plugin answers `Ask`-gated tool calls automatically and abstains to the wire c
 - [x] An advisor never sees — let alone approves — a tool the substrate resolved to `AlwaysDeny`, including via the `AllowOnly` run mode (`Ask` short-circuits before the advisor is consulted). *(executor-level: `permission_advisor_test.cpp` AllowOnly + ceiling cases, both assert `advisor->seen` stays empty.)*
 - [x] Subagent ceilings hold with an advisor active in the parent; a child defaults to **no** advisor, and `advisor_inherit: true` still cannot exceed the parent ceilings. *(subagent-level inherit-gate tests + the executor-level ceiling-ordering test.)*
 - [x] Grants returned by an advisor are filtered against the disclosure exactly as a human's are — the existing double filter (`tool_executor.cpp` + `proto_convert.cpp`) holds unchanged, proven by the undisclosed-key case.
-- [x] A wedged advisor does not outlive cancellation (deadline-harnessed, `tests/support/deadline.hpp`).
+- [x] A throwing advisor degrades to the wire prompt, never a lost turn. *(std and non-standard exceptions.)*
+- [x] A wedged advisor that ignores its cancellation contract costs only its budget (`advisor_timeout_ms`), then the human decides; cancellation abandons the wait before the budget is spent. *(deadline-harnessed, `tests/support/deadline.hpp`.)*
 - [x] A throwing advisor degrades to the wire prompt, never a lost turn. *(std and non-standard exceptions.)*
 
 **Test cases**
@@ -453,7 +454,7 @@ public:
 
 **How.** As specified, plus three implementation details:
 
-- `NameKind::Service` in `name_registry.hpp:11`; `ResolveRegistrationNames` picks up service attributions, and `main.cpp` feeds them through the existing collision/sanity path (`sanity_check.cpp` turns them Fatal, naming both plugins).
+- `NameKind::Service` in `name_registry.hpp:11`; `ResolveRegistrationNames` picks up service attributions, and `main.cpp` feeds them through the existing collision/sanity path (`sanity_check.cpp` turns them Fatal, naming both plugins). **Post-L review:** `main.cpp` also `Seal()`s the registry right after `LoadAll` — after that a `Provide` is logged and ignored, so the unguarded map's safety is a property of the registry, not a comment about load order (a runtime registration would race concurrent `Find`s and slip past collision detection besides).
 - `minimal_plugin_register_services(ServiceRegistry&, const PluginRegistrationContext&)` — loader dispatch with an attribution window, like tools and commands. `PluginRegistrationContext` gains `ServiceRegistry* services` — the CONSUMER side: a plugin captures the pointer at registration and resolves with `Find` lazily at use time, since plugin load order is file order and a consumer can load before its provider.
 - The provider's shipped interface must be **abstract** (header-only, pure virtual): the concrete store's symbols live inside the providing `.so` (`RTLD_LOCAL`), so a consumer calling them by symbol would fail at `dlopen(RTLD_NOW)`; virtual dispatch needs no symbols. `tools-bash` ships `bash_state_service.hpp` (`BashSessionStateService`: `Erase`/`Reset`) and `BashSessionStateStore` implements it.
 - **First consumer:** `/restart-shell` (extracted to `restart_shell.{hpp,cpp}` so tests drive it in-process) resolves the store through `Find` and answers a clear `kError` when the service is absent. One deviation: the command STAYED in `tools-bash` rather than moving to `commands-core` — the reasoning is that a command belongs to the plugin that owns the state it touches; the service path and the absent-provider degrade are exercised by tests against the extracted command.
@@ -504,50 +505,43 @@ Anything context-aware — a "summarize the thread so far" tool, retrieval keyed
 - [x] `HistoryWindow` direct: newest-first paging, keyset cursor, `has_more`, and binding (another session's row never appears).
 - [x] **Invariant test:** the end-to-end read asserts `history != nullptr`, so the agent loop building the context without the reader fails it.
 
-### N. Model auto-discovery
+### N. Model auto-discovery — done
 
 > Specified by `docs/EXTENSIBILITY.md` §2.6. Independent of E and G. The payoff is concrete: `context_window_tokens` — the field window-relative compaction resolves against (§10) — stops being the one most likely to be stale or absent, and a provider serving fifty models stops being unconfigurable by hand.
 
-**What.** A catalog registry keyed by the same kind string the provider factory uses — a second registry, not a capability query on `LlmProvider` (that two-method interface stays two methods; `ARCHITECTURE.md` deleted a capability-query layer for having no users, and this is its user, arriving as a registry instead):
+**Status: implemented as specified, with the decisions below.** `src/server/llm/model_catalog.hpp` (`DiscoveredModel`, `ModelCatalog::List` — const, per the same no-mutable-state contract as `LlmProvider` — and `ModelCatalogRegistry` mirroring `ProviderFactoryRegistry`); `minimal_plugin_register_model_catalogs` in the ABI (additive, no signature sweep); `providers.json` `"discover": true` accepted with or without a static `models` object (the legacy array still refused by name); `ProvidersConfig` retains per-provider entries, injects a discovery hook from `main.cpp` after plugin load (config layer never links plugins), caches per provider (generation-keyed, always 0), negative-caches failures, and returns discovered/enriched models from an overlay map. The one OpenAI-shape catalog ships beside `provider-openai` (`openai_model_catalog.{hpp,cpp}`: pure `ParseModelList` + an `HttpClient::Get` on `<url>/models`, reading `context_length` / `meta.n_ctx_train` / `max_model_len`, missing fields degrading to `nullopt`); its listing request timeout is 10 s, not the chat-length one, because a hung catalog must not wedge a resolver.
 
-```cpp
-// src/server/llm/model_catalog.hpp
-struct DiscoveredModel {
-    std::string id;   // the <model> half of <provider>/<model>
-    std::optional<std::int64_t> context_window_tokens;  // feeds compaction + status
-    nlohmann::json metadata;  // pricing, quantization, ... -- opaque to core
-};
-class ModelCatalog {
-public:
-    virtual std::vector<DiscoveredModel> List(const ProviderConfig&) = 0;
-};
-```
+**Concurrency — the post-N review's restructure (recorded because the first draft got it wrong).** The first draft called the hook under the single global config mutex: one hung catalog stalled *every* `Resolve` — all session creation — for the full 10 s, and `/providers refresh` held the lock across serial fetches of every discover-provider (N×10 s process-wide). It also erased overlay entries on refresh while `Resolve` handed out raw pointers into them — a use-after-free window between the RPC pool and a concurrent refresh. The shipped shape:
 
-`minimal_plugin_register_model_catalogs(ModelCatalogRegistry&)` — optional, keyed by kind.
+- **`Resolve` returns `std::shared_ptr<const ResolvedModel>`** — a snapshot. Overlay entries are written once and never mutated in place; refresh *replaces* entries, and outstanding holders keep their snapshot alive. A vanished model leaves the listing immediately without dangling anyone.
+- **Per-provider fetch gates.** The network call (`FetchOutcome`, the hook) runs holding ONLY the provider's gate — never the global mutex — with a double-check under the gate after waiting (another resolver may have fetched first). The gate preserves the "N threads, one fetch" property per provider; unrelated providers, and all plain config reads, proceed regardless of how slow one catalog is. Lock order is gate → mutex, never the reverse.
+- **`/providers refresh` fetches per provider outside the global mutex** too — providers refresh in parallel, a hung catalog costs its own 10 s, not the process's.
+- **The transport is loopback-tested.** `Mode::Get` originally fell into the streaming branch of the curl write callback and silently dropped every GET body — every real catalog fetch was misread as a malformed response and negative-cached, invisible to the canned-body tests. `tests/http_client_test.cpp` now runs a loopback HTTP server (Get round-trip, Post round-trip, body-cap abort), and `tests/model_catalog_live_test.cpp` exercises the real catalog against a running backend when `MINIMAL_LLM_BASE_URL` is set (skip otherwise). Buffered responses are capped at 8 MiB in bytes, not just seconds.
 
-**How.**
+**Decisions taken during implementation (recorded here because the spec text left them open):**
 
-- **Parse.** `providers.json` gains `"discover": true`; the parse stops rejecting a provider with no `models` object when it is set (`providers_config.cpp:117-124` throws on exactly that shape today). The legacy array is still refused by name.
-- **Lazy resolution.** `ProvidersConfig` gains an injected discovery hook, set from `main.cpp` after plugin load (the config layer never links plugins). `Resolve` for a model absent from the static map under a discover-entry consults a per-entry runtime cache on first miss; the cache keys on the config-generation counter, like `ProviderInstanceCache` (generation is 0 until a reload ever exists). Discovered models are **never written back** to `providers.json` — config-read-once stands.
-- **Miss reporting.** A miss reports both the static alternatives and whether discovery itself failed, so a typo and a dead catalog are distinguishable errors (extends the `DescribeModels` text, `session_registry.cpp:15`).
-- **Consumers.** `ModelRefs()` unions static ∪ cached-discovered; `context_window_tokens` resolves from discovery when the static entry omits it, flowing to the compaction trigger and the status surface; `/providers` lists the union.
-- **The implementation** ships beside `provider-openai`: `GET <url>/models`, reading `context_length` (OpenRouter) / `meta.n_ctx_train` (llama.cpp) when present — one catalog covering llama.cpp, vLLM, and OpenRouter alike. Config knobs (model filters, refresh) ride K's per-plugin config when convenient; none are required for v1.
-- **Failure posture.** Discovery is a live network call: fetched lazily at first resolve, never at startup. The sanity check *warns* when a discover-entry's catalog is unreachable (the entry may still have static models); the existing "at least one usable provider" fatal stays the only fatal — a discover entry with zero static and zero discovered models fails it as today.
+1. **The sanity check is network-free.** "Never at startup" and "warns when a catalog is unreachable" conflict unless *unreachable* is structural. The check warns when a discover-entry's backend kind registers no `ModelCatalog` and warns once per provider when its backend is unregistered; a discover-entry with a registered backend counts as usable with zero static models (the "zero discovered" fatal materializes at first resolve instead, with the miss reporting naming the failure); preset/`default_model` refs under a discover-entry that resolve to no static model are not flagged — unverifiable without a network call.
+2. **No persisted cache, no TTL.** Evaluated and rejected: the server is short-lived (auto-spawned, exits with the last client), so a TTL on a runtime cache is meaningless and a persisted cache would add a state file plus invalidation keys while reintroducing month-stale windows — the exact problem the track fixes. The hook + generation-keyed cache shape leaves the door open if a deployment ever shows the pain.
+3. **`/providers refresh` shipped in v1.** Mid-process backend changes (llama.cpp restarted serving a different model set) are real; the refresh command evicts the cache and refetches immediately, reporting per provider, so the operator gets the fresh list rather than a promise. It is `ReadOnly()` — meaning it never touches the conversation path, which is what qualifies it for the RPC pool beside live turns; the per-provider fetch gates (above) are what make the network I/O and cache mutation safe there, not the label. The `/providers` listing also resolves each ref's context window, which warms cold discover-entries' caches — a listing fetches, by operator decision, because the listing is where the operator looks for the fresh list; the gated fetch means it costs one catalog call per cold provider, never a stall.
+4. **Resume after the backend's list changed** needs no mechanism: it degrades to today's fail-loud shape (session creation throws "unknown model"), now with the honest reason — "discovery succeeded, model not served" vs "discovery failed: <reason>". No silent substitution of another discovered model behind an existing transcript.
 
 **Acceptance criteria**
-- [ ] A provider with `"discover": true` and no `models` parses and serves discovered refs at first resolve.
-- [ ] Discovery failure degrades: static models still resolve, and the miss error distinguishes typo from dead catalog.
-- [ ] A discovered model's `context_window_tokens` reaches the compaction trigger.
-- [ ] Nothing ever writes discovery results back to `providers.json`.
-- [ ] Sanity check: unreachable catalog warns; zero static ∪ zero discovered still fails usable-provider.
+- [x] A provider with `"discover": true` and no `models` parses and serves discovered refs at first resolve.
+- [x] Discovery failure degrades: static models still resolve, and the miss error distinguishes typo from dead catalog.
+- [x] A discovered model's `context_window_tokens` reaches the compaction trigger (via `ApplyModel` into the preset; proven through the command fixture and the preset registry tests).
+- [x] Nothing ever writes discovery results back to `providers.json`.
+- [x] Sanity check: unreachable catalog warns (structurally); zero static ∪ zero discovered still fails usable-provider.
 
-**Test cases** (`tests/providers_config_test.cpp`, `tests/model_catalog_test.cpp`)
-- [ ] Parse: `discover` + no-`models` accepted; the legacy array still refused by name.
-- [ ] Lazy fetch: `List` called once on first miss; a second resolve of the same ref hits the cache (assert the call count).
-- [ ] Negative cache: a failed discovery is not re-attempted per resolve.
-- [ ] Union: `ModelRefs()` includes cached discovered entries, sorted; a cold cache contributes none.
-- [ ] Catalog impl: canned JSON bodies — llama.cpp shape, OpenRouter shape, missing metadata fields degrade to `nullopt`.
-- [ ] **Invariant tests:** removing the miss→discovery fallback fails the lazy-fetch test; resolving `context_window_tokens` from static-only fails the compaction-window test.
+**Test cases** (`tests/providers_config_test.cpp`, `tests/model_catalog_test.cpp`, `tests/commands_test.cpp`, `tests/sanity_check_test.cpp`, `tests/agent_preset_registry_test.cpp`, `tests/plugin_loader_test.cpp` + `fixture-good`)
+- [x] Parse: `discover` + no-`models` accepted; the legacy array still refused by name; non-boolean `discover` refused.
+- [x] Lazy fetch: `List` called once on first miss; a second resolve of the same ref hits the cache (assert the call count).
+- [x] Negative cache: a failed discovery is not re-attempted per resolve.
+- [x] Union: `ModelRefs()` includes cached discovered entries, sorted; a cold cache contributes none.
+- [x] Catalog impl: canned JSON bodies — llama.cpp shape, OpenRouter shape, vLLM shape (`max_model_len`), missing metadata fields degrade to `nullopt`.
+- [x] Enrichment: a static model with an omitted window gains the discovered window (overlay copy; the parsed entry is never mutated); a static model with its own window is untouched.
+- [x] Refresh: evict-then-refetch visible to a subsequent `Resolve` and to the listing; per-provider outcomes; a dead catalog reports instead of throwing; no discover-entries is an honest error.
+- [x] Concurrency: parallel `Resolve` from eight threads fetches once and resolves for all.
+- [x] **Invariant tests:** removing the miss→discovery fallback fails the lazy-fetch test; resolving `context_window_tokens` from static-only fails the compaction-window test.
 
 ---
 
