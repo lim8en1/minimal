@@ -21,6 +21,7 @@
 #include "minimal/commands/command_dispatcher.hpp"
 #include "minimal/commands/command_registry.hpp"
 #include "minimal/config/providers_config.hpp"
+#include "minimal/config/settings_config.hpp"
 #include "temp_dir.hpp"
 
 namespace minimal::testing {
@@ -68,7 +69,9 @@ public:
         Write("agents/other.md", "---\nname: other\nmodel: main/fast\n---\nother body\n");
 
         skills_ = std::make_unique<config::SkillRegistry>(config::SkillRegistry::Load(dir_.path()));
-        presets_ = std::make_unique<agent::AgentPresetRegistry>(dir_.path(), *skills_);
+        presets_ = std::make_unique<agent::AgentPresetRegistry>(
+            dir_.path(), *skills_,
+            config::LoadSettingsConfig(dir_.path() / "settings.json"));
         preset_ = presets_->Resolve("build");
 
         executor_ = std::make_unique<tools::ToolExecutor>(tools_, checker_, AllowAllPolicy(),

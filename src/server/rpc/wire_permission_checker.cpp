@@ -32,6 +32,13 @@ tools::PermissionResponse WirePermissionChecker::check(const tools::PermissionRe
     auto* permission = event.mutable_permission_request();
     *permission = ToProto(request);
     permission->set_request_id(request_id);
+    // BLOCKING Push, and its safety is a two-file dependency: a worker parked
+    // here on a full queue is woken only by EventQueue::Close() -- which
+    // Session::Terminate deliberately calls BEFORE joining the worker, and
+    // only after PendingRequests::Shutdown() has already unblocked the
+    // AwaitResponse below (see Session::Terminate in agent/session.cpp).
+    // Swap those two lines in Terminate and this call deadlocks the worker on
+    // a question nobody will ever answer.
     queue_.Push(std::move(event));
 
     const std::optional<std::string> answer = registration.AwaitResponse();

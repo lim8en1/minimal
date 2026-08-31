@@ -326,6 +326,39 @@ TEST_CASE("a command that exits early leaves state unchanged", "[tools_bash][sta
     CHECK(f.Cwd() == before);
 }
 
+TEST_CASE("a trailing backslash does not swallow the state trailer", "[tools_bash][state]") {
+    // `echo hi \` + trailer is one logical line to the shell -- backslash-
+    // newline is a continuation -- so the marker became an ARGUMENT and the
+    // model saw "hi __minimal_rc=0" instead of "hi". Fails with the fix
+    // reverted.
+    Fixture f;
+    const auto out = f.Run({{"command", "echo hi \\"}});
+    CHECK_FALSE(out.result.is_error);
+    CHECK(out.result.content_text == "hi\n");
+
+    // State still round-trips across the continuation.
+    std::filesystem::create_directories(f.dir.path() / "sub");
+    REQUIRE_FALSE(f.Run({{"command", "cd sub && echo ok \\"}}).result.is_error);
+    CHECK(f.Cwd() == std::filesystem::canonical(f.dir.path()) / "sub");
+}
+
+TEST_CASE("a directory named with a slash offers no grant", "[tools_bash][disclosure]") {
+    // The slash branch of ResolveOnPath omitted is_regular_file, so
+    // access(dir, X_OK) -- which succeeds for directories on POSIX -- offered
+    // a grant for a path that cannot be a program. Over-disclosure only, but
+    // disclosure is what consent is given against. Fails with the fix
+    // reverted: the grants included the directory itself.
+    Fixture f;
+    std::filesystem::create_directories(f.dir.path() / "sub");
+    const auto disclosure = f.Disclose({{"command",
+                                         (f.dir.path() / "sub").string() + " && ls"}});
+    CHECK(disclosure.complete);
+    CHECK(Offers(disclosure, "/ls"));
+    for (const auto& offer : disclosure.grants) {
+        CHECK(offer.key.find("/sub") == std::string::npos);
+    }
+}
+
 TEST_CASE("a corrupted state payload leaves state unchanged", "[tools_bash][state]") {
     // A command can write to fd 9 itself, by accident or otherwise. Session state
     // must not be corruptible that way, so the payload is validated rather than

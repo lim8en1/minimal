@@ -156,13 +156,13 @@ TEST_CASE("tool registrations are attributed to the registering plugin",
 
 TEST_CASE("plugins.json round-trips as an object", "[plugin_config]") {
     // An earlier draft described this as a bare array while also placing
-    // command_aliases at the top level; both cannot hold.
+    // aliases at the top level; both cannot hold.
     const std::string text = R"({
       "plugins": [
         {"file": "tools-fs.so", "provenance": "bundled", "enabled": true},
         {"file": "custom.so", "provenance": "user", "enabled": false}
       ],
-      "command_aliases": {"bash_over_ssh.bash": "ssh_bash"}
+      "aliases": {"bash_over_ssh.bash": "ssh_bash"}
     })";
 
     const auto config = plugins::ParsePluginConfig(text);
@@ -172,13 +172,13 @@ TEST_CASE("plugins.json round-trips as an object", "[plugin_config]") {
     CHECK(config.plugins[0].enabled);
     CHECK(config.plugins[1].provenance == Provenance::User);
     CHECK_FALSE(config.plugins[1].enabled);
-    REQUIRE(config.command_aliases.count("bash_over_ssh.bash") == 1);
-    CHECK(config.command_aliases.at("bash_over_ssh.bash") == "ssh_bash");
+    REQUIRE(config.aliases.count("bash_over_ssh.bash") == 1);
+    CHECK(config.aliases.at("bash_over_ssh.bash") == "ssh_bash");
 
     const auto reparsed = plugins::ParsePluginConfig(plugins::SerializePluginConfig(config));
     REQUIRE(reparsed.plugins.size() == 2);
     CHECK(reparsed.plugins[0].file == config.plugins[0].file);
-    CHECK(reparsed.command_aliases == config.command_aliases);
+    CHECK(reparsed.aliases == config.aliases);
 }
 
 TEST_CASE("malformed plugins.json degrades to empty rather than throwing",
@@ -186,6 +186,25 @@ TEST_CASE("malformed plugins.json degrades to empty rather than throwing",
     CHECK(plugins::ParsePluginConfig("{ not json").plugins.empty());
     CHECK(plugins::ParsePluginConfig("[]").plugins.empty());   // wrong shape
     CHECK(plugins::ParsePluginConfig("").plugins.empty());
+}
+
+TEST_CASE("the legacy command_aliases key is ignored, not applied", "[plugin_config]") {
+    // Renamed to "aliases" with NO fallback: a file from before the rename
+    // must not have its aliases silently apply under a key the docs no longer
+    // name -- and must not have them silently NOT apply either. The key is
+    // preserved verbatim (it round-trips through `preserved`), parsed into
+    // nothing, and the rename is warned about by the parser. This test pins
+    // the first two properties; the warning is a log line, not observable
+    // here.
+    const std::string text = R"({"plugins":[],"command_aliases":{"p.cmd":"alias"}})";
+    const auto config = plugins::ParsePluginConfig(text);
+    CHECK(config.aliases.empty());
+
+    const auto round_tripped = nlohmann::json::parse(plugins::SerializePluginConfig(config));
+    // Preserved, so the operator's file is not edited behind their back --
+    // and the warning has something to point at on the next boot too.
+    CHECK(round_tripped.at("command_aliases").at("p.cmd") == "alias");
+    CHECK_FALSE(round_tripped.contains("aliases"));
 }
 
 TEST_CASE("discovery applies the provenance enablement rule", "[plugin_discovery]") {
@@ -513,7 +532,7 @@ TEST_CASE("plugins.json keeps keys the parser does not model", "[plugin_loader][
     // the user is explicitly invited to edit.
     const auto config = plugins::ParsePluginConfig(R"({
         "plugins": [{"file": "a.so", "provenance": "user", "enabled": true}],
-        "command_aliases": {"p.cmd": "alias"},
+        "aliases": {"p.cmd": "alias"},
         "notes": "kept by hand",
         "future_key": {"nested": 1}
     })");
@@ -525,5 +544,5 @@ TEST_CASE("plugins.json keeps keys the parser does not model", "[plugin_loader][
     // ...and the modelled halves still serialize normally.
     REQUIRE(round_tripped.at("plugins").size() == 1);
     CHECK(round_tripped.at("plugins").at(0).at("file") == "a.so");
-    CHECK(round_tripped.at("command_aliases").at("p.cmd") == "alias");
+    CHECK(round_tripped.at("aliases").at("p.cmd") == "alias");
 }

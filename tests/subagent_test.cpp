@@ -106,7 +106,8 @@ struct SubagentFixture {
     }
 
     void Build() {
-        presets = std::make_unique<agent::AgentPresetRegistry>(dir.path(), skills);
+        presets = std::make_unique<agent::AgentPresetRegistry>(
+            dir.path(), skills, config::LoadSettingsConfig(dir.path() / "settings.json"));
         observers = std::make_unique<agent::SessionObserverRegistry>(common::DefaultLogger());
         db = std::make_unique<session::SessionDatabase>(dir.path() / "sessions.db");
         // A long guard: unattached children are normal here (no client in this
@@ -126,7 +127,8 @@ struct SubagentFixture {
     }
 
     void BuildWithLimit(std::int64_t max_concurrent) {
-        presets = std::make_unique<agent::AgentPresetRegistry>(dir.path(), skills);
+        presets = std::make_unique<agent::AgentPresetRegistry>(
+            dir.path(), skills, config::LoadSettingsConfig(dir.path() / "settings.json"));
         observers = std::make_unique<agent::SessionObserverRegistry>(common::DefaultLogger());
         db = std::make_unique<session::SessionDatabase>(dir.path() / "sessions.db");
         sessions = std::make_unique<agent::SessionRegistry>(*presets, tools, providers,

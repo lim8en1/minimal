@@ -253,6 +253,20 @@ TEST_CASE("insert places text at the requested line", "[tools_fs][edit]") {
         CHECK(result.is_error);
         CHECK(f.Read("a.txt") == "one\n");
     }
+
+    SECTION("a file with no trailing newline keeps having none") {
+        // str_replace never touches the terminator; Insert used to append '\n'
+        // to every line unconditionally, so this file GAINED one -- editing
+        // bytes the caller never named. Fails with the fix reverted.
+        f.Write("a.txt", "one\ntwo");
+        CHECK_FALSE(tool->execute({{"command", "insert"},
+                                    {"path", "a.txt"},
+                                    {"insert_line", 1},
+                                    {"insert_text", "mid"}},
+                                   ctx)
+                        .is_error);
+        CHECK(f.Read("a.txt") == "one\nmid\ntwo");
+    }
 }
 
 TEST_CASE("edit refuses a file over the byte cap", "[tools_fs][edit]") {

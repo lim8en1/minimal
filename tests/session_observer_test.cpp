@@ -185,12 +185,19 @@ TEST_CASE("a wedged observer drops notifications instead of blocking its dispatc
     // blocked outright, including the one thread the three-thread topology
     // forbids from blocking. Which is the opposite of contained.
     constexpr std::size_t kQueue = 8;
+
+    // The atomics are declared BEFORE the registry on purpose: destruction runs
+    // in reverse, so the registry (whose destructor JOINS the wedged dispatcher
+    // thread) goes away first and the thread is provably no longer touching
+    // them when they go. The other order is a stack-use-after-scope at teardown
+    // -- real, and ASan's whole point -- when the dispatcher drains its queued
+    // tasks after `release` is set but before the join.
+    std::atomic<bool> release{false};
+    std::atomic<int> entered{0};
     agent::SessionObserverRegistry registry(common::DefaultLogger(), kQueue);
 
     // Wedged: the dispatcher thread parks in the first task and never returns,
     // so nothing is ever drained and the queue fills and stays full.
-    std::atomic<bool> release{false};
-    std::atomic<int> entered{0};
     struct Wedged : agent::SessionObserver {
         std::atomic<bool>* release;
         std::atomic<int>* entered;

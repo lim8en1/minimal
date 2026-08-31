@@ -207,6 +207,41 @@ TEST_CASE("a slash inside a name is refused", "[providers]") {
                     std::runtime_error);
 }
 
+TEST_CASE("a fractional numeric field is refused by name, not truncated", "[providers][invariant]") {
+    // is_number() is true for 4096.7 and get<int> truncates, so a typo silently
+    // became a different, valid-looking limit. Fails with the fix reverted --
+    // the revert makes this parse cleanly with max_tokens == 2048.
+    const auto doc = nlohmann::json::parse(R"({
+      "providers": {"p": {"backend":"openai","url":"http://x",
+        "models":{"m":{"max_tokens": 2048.5}}}}
+    })");
+    try {
+        ParseProvidersConfig(doc);
+        FAIL("expected the fractional max_tokens to be refused");
+    } catch (const std::runtime_error& error) {
+        const std::string message = error.what();
+        CHECK(message.find("max_tokens") != std::string::npos);
+        CHECK(message.find("integer") != std::string::npos);
+        CHECK(message.find("p/m") != std::string::npos);
+    }
+}
+
+TEST_CASE("a typo'd top-level key is refused where the mistake is", "[providers][invariant]") {
+    // "provider" instead of "providers" used to parse as a valid EMPTY config,
+    // and the failure surfaced much later as "providers.json is empty" pointing
+    // at the preset. The message must name the key actually found. Fails with
+    // the fix reverted: this used to return an empty config without throwing.
+    const auto doc = nlohmann::json::parse(R"({"provider": {"p": {"backend":"openai","url":"http://x"}}})");
+    try {
+        ParseProvidersConfig(doc);
+        FAIL("expected the typo'd key to be refused");
+    } catch (const std::runtime_error& error) {
+        const std::string message = error.what();
+        CHECK(message.find("\"providers\"") != std::string::npos);
+        CHECK(message.find("provider") != std::string::npos);
+    }
+}
+
 TEST_CASE("an empty config is valid and resolves nothing", "[providers]") {
     // What bundled/providers.json seeds. The server must start so the startup
     // sanity check can report every problem at once, rather than dying here.

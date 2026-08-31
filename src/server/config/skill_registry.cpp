@@ -54,14 +54,20 @@ SkillMeta LoadCandidate(const std::filesystem::path& candidate) {
     SkillMeta meta;
     meta.name = candidate.filename().string();
 
-    if (!std::filesystem::is_directory(candidate)) {
+    // The error_code overloads, not the throwing ones: this function is
+    // documented never to throw, and the throwing overloads turn an unreadable
+    // parent directory into a filesystem_error straight out of the loader.
+    // The Load() below already had the right shape.
+    std::error_code ec;
+    if (!std::filesystem::is_directory(candidate, ec) || ec) {
         meta.load_error = "expected a skill directory containing SKILL.md, found a file";
         return meta;
     }
 
     const std::filesystem::path skill_md = candidate / "SKILL.md";
     meta.body_path = skill_md;
-    if (!std::filesystem::is_regular_file(skill_md)) {
+    ec.clear();
+    if (!std::filesystem::is_regular_file(skill_md, ec) || ec) {
         meta.load_error = "no SKILL.md in directory";
         return meta;
     }

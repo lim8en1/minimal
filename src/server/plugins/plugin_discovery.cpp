@@ -41,16 +41,25 @@ PluginConfig ParsePluginConfig(const std::string& json_text) {
         }
     }
 
-    if (auto it = parsed.find("command_aliases"); it != parsed.end() && it->is_object()) {
+    if (auto it = parsed.find("aliases"); it != parsed.end() && it->is_object()) {
         for (const auto& [key, value] : it->items()) {
-            if (value.is_string()) config.command_aliases.emplace(key, value.get<std::string>());
+            if (value.is_string()) config.aliases.emplace(key, value.get<std::string>());
         }
+    }
+    // No legacy fallback: the old key is IGNORED (it round-trips via
+    // `preserved`, so it is not deleted either). Silence would mean aliases
+    // quietly not applying after an upgrade, so say so on every boot -- the
+    // noise is the feature.
+    if (parsed.contains("command_aliases")) {
+        common::DefaultLogger().warn(
+            "plugins.json: \"command_aliases\" was renamed to \"aliases\" and no longer "
+            "applies; rename the key");
     }
 
     // Anything this parser does not model is kept verbatim, so serializing back
     // does not silently delete it. See PluginConfig::preserved.
     for (const auto& [key, value] : parsed.items()) {
-        if (key == "plugins" || key == "command_aliases") continue;
+        if (key == "plugins" || key == "aliases") continue;
         config.preserved[key] = value;
     }
     return config;
@@ -67,7 +76,10 @@ std::string SerializePluginConfig(const PluginConfig& config) {
             {"enabled", entry.enabled},
         });
     }
-    out["command_aliases"] = nlohmann::json(config.command_aliases);
+    // Only when non-empty: an always-present empty key is noise in a file the
+    // user is invited to edit, and would resurrect "aliases": {} on the very
+    // boot after an operator removed their last one.
+    if (!config.aliases.empty()) out["aliases"] = nlohmann::json(config.aliases);
     return out.dump(2) + "\n";
 }
 

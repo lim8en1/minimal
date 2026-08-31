@@ -23,7 +23,6 @@
 #include "minimal/common/config_paths.hpp"
 #include "minimal/common/logger.hpp"
 #include "minimal/common/logging_setup.hpp"
-#include "minimal/config/permissions_config.hpp"
 #include "minimal/config/sanity_check.hpp"
 #include "minimal/config/settings_config.hpp"
 #include "minimal/config/skill_registry.hpp"
@@ -150,8 +149,7 @@ int main(int argc, char** argv) {
     minimal::commands::CommandRegistry commands;
     // Applied at registration, BEFORE the collision check below, so aliasing is
     // itself a way to resolve a collision rather than only a way to avoid one.
-    commands.SetAliases({plugin_config.command_aliases.begin(),
-                         plugin_config.command_aliases.end()});
+    commands.SetAliases({plugin_config.aliases.begin(), plugin_config.aliases.end()});
     minimal::agent::SessionObserverRegistry observers(minimal::common::DefaultLogger());
     // Exclusive: at most one plugin provides the connection policy. An empty
     // registry is the pass-through default -- no authentication, matching the
@@ -220,17 +218,17 @@ int main(int argc, char** argv) {
 
     // --- Stage 3: sanity check -------------------------------------------------
     // Aliases apply at registration, before collision checking: a tool whose
-    // "plugin.original_name" has an entry in plugins.json command_aliases is
+    // "plugin.original_name" has an entry in plugins.json aliases is
     // served under its surface name, and permission keys / allowed_tools keep
     // referencing the non-alias name (ARCHITECTURE.md, "Name collisions and
     // aliases").
-    tools.ApplyAliases(plugin_config.command_aliases);
+    tools.ApplyAliases(plugin_config.aliases);
     // Commands alias at REGISTRATION rather than in a second pass: a tool has to
     // be re-keyed and wrapped so spec() advertises its surface name, which cannot
     // happen until every registration is in, whereas a command's Name() IS its
     // surface. Same rule, different amount of machinery to enforce it.
     auto name_resolution = minimal::plugins::ResolveRegistrationNames(
-        tools, plugin_config.command_aliases, &commands,
+        tools, plugin_config.aliases, &commands,
         /*core_tool_names=*/{minimal::agent::kSpawnSubagentToolName});
     // The name above is RESERVED here but the tool object itself registers at
     // serve stage (main registers SpawnSubagentTool only once subagents exist).
@@ -270,17 +268,20 @@ int main(int argc, char** argv) {
     }
 
     // --- Stage 4: serve ------------------------------------------------------
-    // Settings, permissions and the session database were already loaded and
-    // validated by the sanity check; take them from there rather than re-reading
-    // the same files. The preset registry still loads its own copies -- it is
-    // constructed from the config dir -- which cannot fail now that parsing is
-    // proven; the catch remains defense-in-depth.
+    // Settings and the session database were already loaded and validated by
+    // the sanity check; take them from there rather than re-reading the same
+    // files. The preset registry used to load settings.json a THIRD time --
+    // main ran the loop on the sanity check's parse while the registry resolved
+    // default_model from its own, so the sanity check could validate content
+    // the server was not running. It receives the sanity check's parse now;
+    // providers.json/permissions.json remain its own to load, and cannot fail
+    // now that their parsing is proven -- the catch is defense-in-depth.
     minimal::config::SettingsConfig settings = sanity.settings();
-    minimal::config::PermissionsConfig permissions = sanity.permissions();
     std::unique_ptr<minimal::agent::AgentPresetRegistry> presets;
     auto session_db = sanity.take_session_db();
     try {
-        presets = std::make_unique<minimal::agent::AgentPresetRegistry>(config_dir, skills);
+        presets = std::make_unique<minimal::agent::AgentPresetRegistry>(config_dir, skills,
+                                                                        settings);
     } catch (const std::exception& e) {
         std::fprintf(stderr, "\nconfiguration error (%s): %s\n", config_dir.c_str(), e.what());
         return 1;
@@ -300,17 +301,23 @@ int main(int argc, char** argv) {
     // tool set before serving starts, so registering here is still before
     // first use. Core surface by design -- making it a plugin would expose
     // session CREATION across the ABI to relocate a thin wrapper.
-    auto subagents = std::make_unique<minimal::agent::SubagentManager>(
+    //
+    // The tool captures a SHARED_PTR, not the bare reference this used to hold:
+    // `tools` is declared before `subagents`, so it is DESTROYED after it, and
+    // the registered tool briefly held a reference into a destroyed manager
+    // during teardown -- safe only because sessions.TerminateAll() runs first
+    // on the normal path, which is exactly the kind of "safe" a reordered
+    // return path forgets. Ownership in the capture makes the order not matter.
+    auto subagents = std::make_shared<minimal::agent::SubagentManager>(
         sessions, *session_db, *presets, settings.max_concurrent_subagents,
         minimal::common::DefaultLogger());
-    minimal::agent::SubagentManager& subagent_manager = *subagents;
     tools.Register(std::make_unique<minimal::agent::SpawnSubagentTool>(
-        [&subagent_manager](const minimal::agent::SubagentRequest& request,
-                            const minimal::tools::ToolContext& ctx) {
-            return subagent_manager.Spawn(request, ctx);
+        [subagents](const minimal::agent::SubagentRequest& request,
+                    const minimal::tools::ToolContext& ctx) {
+            return subagents->Spawn(request, ctx);
         }));
 
-    minimal::rpc::SessionServiceImpl service(sessions, *session_db, settings, permissions,
+    minimal::rpc::SessionServiceImpl service(sessions, *session_db, settings,
                                              minimal::common::DefaultLogger());
     service.set_commands(&commands);
     service.set_auth_providers(&auth_providers);

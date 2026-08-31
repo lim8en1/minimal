@@ -89,10 +89,11 @@ std::string DescribeAvailableModels(const config::ProvidersConfig& providers) {
 }  // namespace
 
 AgentPresetRegistry::AgentPresetRegistry(std::filesystem::path config_dir,
-                                         const config::SkillRegistry& skills)
+                                         const config::SkillRegistry& skills,
+                                         const config::SettingsConfig& settings)
     : config_dir_(std::move(config_dir)),
       providers_(config::LoadProvidersConfig(config_dir_ / "providers.json")),
-      settings_(config::LoadSettingsConfig(config_dir_ / "settings.json")),
+      settings_(settings),
       permissions_(config::LoadPermissionsConfig(config_dir_ / "permissions.json")),
       skills_(skills) {
     // Both optional at this phase -- a real deployment's absence is the

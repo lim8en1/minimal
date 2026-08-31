@@ -191,7 +191,7 @@ TEST_CASE("a throwing command does not take the worker down", "[commands]") {
 
 TEST_CASE("an alias renames a command's surface, keeping its identity",
           "[commands][invariant]") {
-    // plugins.json's command_aliases was parsed and re-serialized for the whole
+    // plugins.json's aliases were parsed and re-serialized for the whole
     // life of the plugin system without ever being APPLIED to anything. Keys are
     // "plugin.original_name", so they are unambiguous even before collisions are
     // resolved -- which is what lets aliasing resolve one.

@@ -268,6 +268,10 @@ std::optional<std::size_t> AgentLoop::Compact() {
     params.max_tokens = preset_.max_tokens;
     params.last_reported_input_tokens = tokens_.last_input_tokens();
     params.full_history = &history_;
+    // The session's logger, not DefaultLogger: compaction lines belong beside
+    // this loop's own compaction diagnostics, session id and all.
+    params.logger = &session_.logger;
+    params.session_label = session_.session_id;
     params.is_cancelled = is_cancelled_;
 
     const auto result = compactor_(to_compact, provider_.get(), params);

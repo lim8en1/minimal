@@ -115,7 +115,7 @@ struct Fixture {
         auto resolution =
             plugins::ResolveRegistrationNames(tool_registry, aliases, command_registry);
         plugins::PluginConfig plugin_config;
-        plugin_config.command_aliases = aliases;
+        plugin_config.aliases = aliases;
         return config::SanityCheckInputs{config_dir,         records, tool_registry,
                                          provider_factories, skills,  plugin_config,
                                          resolution,         command_registry};
@@ -664,7 +664,7 @@ TEST_CASE("a colliding COMMAND name is fatal and names both plugins",
     CHECK(hits[0]->message.find("plugin-b") != std::string::npos);
 }
 
-TEST_CASE("a command_aliases key naming a COMMAND is not reported dangling",
+TEST_CASE("an aliases key naming a COMMAND is not reported dangling",
           "[sanity_check][aliases][invariant]") {
     // The routing in ResolveRegistrationNames. Applying every alias as a Tool
     // alias -- as it did when commands did not exist -- makes a perfectly good
@@ -673,7 +673,7 @@ TEST_CASE("a command_aliases key naming a COMMAND is not reported dangling",
     WriteGoodConfig(f.config_dir);
     ScopedEnv data("XDG_DATA_HOME", f.xdg_data.string().c_str());
     f.Write("plugins.json",
-            R"({"plugins":[],"command_aliases":{"plugin-a.boom":"kaboom"}})");
+            R"({"plugins":[],"aliases":{"plugin-a.boom":"kaboom"}})");
 
     commands::CommandRegistry registry;
     registry.SetAliases({{"plugin-a.boom", "kaboom"}});

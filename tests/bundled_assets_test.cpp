@@ -56,7 +56,8 @@ TEST_CASE("a seeded config dir resolves the default preset", "[bundled_assets]")
     WriteSeededConfig(config.path());
 
     const auto skills = config::SkillRegistry::Load(config.path());
-    agent::AgentPresetRegistry registry(config.path(), skills);
+    agent::AgentPresetRegistry registry(config.path(), skills,
+                                         config::LoadSettingsConfig(config.path() / "settings.json"));
     const auto& preset = registry.Resolve("build");
 
     CHECK(preset.name == "build");
@@ -76,14 +77,16 @@ TEST_CASE("a seeded compression prompt reaches AgentPreset::compression_prompt",
 
     SECTION("absent, compaction has no prompt and is silently inert") {
         const auto skills = config::SkillRegistry::Load(config.path());
-        agent::AgentPresetRegistry registry(config.path(), skills);
+        agent::AgentPresetRegistry registry(config.path(), skills,
+                                         config::LoadSettingsConfig(config.path() / "settings.json"));
         CHECK(registry.Resolve("build").compression_prompt.empty());
     }
 
     SECTION("present, the default prompt is live") {
         Write(config.path() / "prompts" / "compression.md", "THE DEFAULT COMPACTION PROMPT.\n");
         const auto skills = config::SkillRegistry::Load(config.path());
-        agent::AgentPresetRegistry registry(config.path(), skills);
+        agent::AgentPresetRegistry registry(config.path(), skills,
+                                         config::LoadSettingsConfig(config.path() / "settings.json"));
         CHECK(registry.Resolve("build").compression_prompt == "THE DEFAULT COMPACTION PROMPT.\n");
     }
 }
@@ -101,7 +104,8 @@ TEST_CASE("a preset's compression_prompt override wins over the seeded default",
           "---\nname: brief\ncompression_prompt: terse\n---\nHi.\n");
 
     const auto skills = config::SkillRegistry::Load(config.path());
-    agent::AgentPresetRegistry registry(config.path(), skills);
+    agent::AgentPresetRegistry registry(config.path(), skills,
+                                         config::LoadSettingsConfig(config.path() / "settings.json"));
 
     CHECK(registry.Resolve("brief").compression_prompt == "BE BRIEF.\n");
     CHECK(registry.Resolve("build").compression_prompt == "THE DEFAULT.\n");

@@ -57,7 +57,8 @@ struct RegistryFixture {
         : skills(config::SkillRegistry::Load(config.dir)), guard_(guard) {}
 
     void Build(bool register_provider_kind = true) {
-        presets = std::make_unique<agent::AgentPresetRegistry>(config.dir, skills);
+        presets = std::make_unique<agent::AgentPresetRegistry>(
+            config.dir, skills, config::LoadSettingsConfig(config.dir / "settings.json"));
         if (register_provider_kind) {
             providers.Register("fake", [](const llm::ProviderConfig&) {
                 return std::make_unique<testing::FakeLlmProvider>();

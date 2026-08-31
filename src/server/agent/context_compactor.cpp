@@ -94,13 +94,18 @@ std::int64_t estimate_tokens(std::span<const llm::Message> messages) {
 std::optional<CompactionResult> compact_messages(
     std::span<const llm::Message> messages_to_compact, llm::LlmProvider& provider,
     const CompactionRequest& params) {
-    const auto& logger = common::DefaultLogger();
+    const common::Logger& logger = params.logger ? *params.logger : common::DefaultLogger();
+    // Same "session <id>: " shape the agent loop's adjacent compaction lines
+    // use, so the two interleaved in one log file read as one stream.
+    const std::string where = params.session_label.empty()
+                                  ? std::string{}
+                                  : "session " + std::string(params.session_label) + ": ";
 
     // No prompt, no compaction: a summarization request with no instructions would
     // burn tokens to produce garbage. An empty prompt means prompts/compression.md
     // is missing from the config dir.
     if (IsBlank(params.compression_prompt)) {
-        logger.error("compaction skipped: no compression prompt configured");
+        logger.error("{}compaction skipped: no compression prompt configured", where);
         return std::nullopt;
     }
 
@@ -129,7 +134,7 @@ std::optional<CompactionResult> compact_messages(
         // The trigger is still armed: occupancy did not drop, so the next turn
         // retries. Logging and moving on is the whole policy -- a broken
         // summarizer must never take the transcript down with it.
-        logger.warn("compaction failed (will retry next turn): {}", error.what());
+        logger.warn("{}compaction failed (will retry next turn): {}", where, error.what());
         return std::nullopt;
     }
 
@@ -143,14 +148,15 @@ std::optional<CompactionResult> compact_messages(
     // agent loop applies to MaxTokens on a normal turn, for a worse consequence.
     if (response.stop_reason == llm::StopReason::MaxTokens) {
         logger.error(
-            "compaction produced a truncated summary (hit max_tokens); skipping -- raise "
-            "max_tokens for this provider or shorten the compaction prompt");
+            "{}compaction produced a truncated summary (hit max_tokens); skipping -- raise "
+            "max_tokens for this provider or shorten the compaction prompt",
+            where);
         return std::nullopt;
     }
 
     const std::string text = TextOf(response.content);
     if (IsBlank(text)) {
-        logger.error("compaction produced no usable text; skipping");
+        logger.error("{}compaction produced no usable text; skipping", where);
         return std::nullopt;
     }
 

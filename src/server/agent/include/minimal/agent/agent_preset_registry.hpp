@@ -13,13 +13,14 @@
 
 namespace minimal::agent {
 
-// Loads providers.json/settings.json/permissions.json/agents/*.md into fully
-// resolved AgentPresets. Config is read once at startup -- there is no
-// hot-reload (see ARCHITECTURE.md's Config section).
+// Loads providers.json/permissions.json/agents/*.md into fully resolved
+// AgentPresets, plus the settings.json handed to it. Config is read once at
+// startup -- there is no hot-reload (see ARCHITECTURE.md's Config section).
 class AgentPresetRegistry {
 public:
-    // Loads providers.json, settings.json, permissions.json from config_dir
-    // immediately (throws if any is missing/malformed). agents/*.md files are
+    // Loads providers.json and permissions.json from config_dir immediately
+    // (throws if either is missing/malformed); settings.json arrives pre-parsed
+    // via the constructor. agents/*.md files are
     // NOT scanned eagerly: each is loaded lazily on first Resolve() for that
     // name and cached, matching "computed once at load/switch time, never
     // re-resolved per tool call". agents/subagent.md and prompts/compression.md
@@ -31,7 +32,14 @@ public:
     // skills/, one set of load-status entries, and both consumers agree on what
     // exists. The listing rendered into each preset's system prompt comes from
     // it (allowed_skills ∩ loaded, see ResolveUncached).
-    AgentPresetRegistry(std::filesystem::path config_dir, const config::SkillRegistry& skills);
+    //
+    // `settings` is passed in rather than parsed here: settings.json used to be
+    // read three times at startup (main, the sanity check, and this class), and
+    // main ran the loop on the sanity check's parse while this one resolved
+    // default_model from its own -- the sanity check could validate content the
+    // server was not running. One parse, in the sanity check, handed to both.
+    AgentPresetRegistry(std::filesystem::path config_dir, const config::SkillRegistry& skills,
+                        const config::SettingsConfig& settings);
 
     // Throws if agents/<preset_name>.md doesn't exist, or its `provider`
     // doesn't resolve (a providers.json entry, or "default" with no

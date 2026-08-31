@@ -59,6 +59,15 @@ bool ParseHeaderLine(std::string_view line, HttpHeader& out) {
 
 enum class Mode { Blocking, Streaming };
 
+// The blocking path accumulates the whole response body in memory before
+// returning it, so an endpoint (typically a proxy) that streams an endless or
+// mislabelled body would grow that string without bound. 64 MiB is orders of
+// magnitude above any legitimate completion and orders below anything that
+// could OOM the process. Enforced in WriteCallback rather than only via
+// CURLOPT_MAXFILESIZE_LARGE, because the libcurl option is advisory unless the
+// server states a Content-Length -- a chunked response would sail past it.
+constexpr std::size_t kMaxBodyBytes = 64ull << 20;
+
 struct TransferState {
     Mode mode = Mode::Blocking;
     CURL* handle = nullptr;
@@ -67,6 +76,7 @@ struct TransferState {
     const HttpBodyChunkSink* on_chunk = nullptr;
     bool headers_ready_fired = false;
     bool cancelled_by_sink = false;
+    bool body_exceeded_cap = false;
 
     // Idle-timeout bookkeeping -- StreamPost() only.
     std::chrono::milliseconds idle_timeout{0};
@@ -101,6 +111,10 @@ std::size_t WriteCallback(char* ptr, std::size_t size, std::size_t nmemb, void* 
     auto& state = *static_cast<TransferState*>(userdata);
     std::size_t total = size * nmemb;
     if (state.mode == Mode::Blocking) {
+        if (state.response.body.size() + total > kMaxBodyBytes) {
+            state.body_exceeded_cap = true;
+            return 0;  // short count -> CURLE_WRITE_ERROR, classified below
+        }
         state.response.body.append(ptr, total);
         return total;
     }
@@ -126,6 +140,12 @@ int XferInfoCallback(void* clientp, curl_off_t /*dltotal*/, curl_off_t dlnow, cu
 }
 
 [[noreturn]] void ThrowForCurlCode(CURLcode code, const TransferState& state) {
+    if (code == CURLE_WRITE_ERROR && state.body_exceeded_cap) {
+        // Name the cap: "failed sending data" would send the reader debugging
+        // their own request body instead of a server that never stopped.
+        throw HttpError(HttpErrorKind::Other,
+                        "response body exceeded 64 MiB; refusing to buffer it");
+    }
     if (code == CURLE_WRITE_ERROR && state.cancelled_by_sink) {
         throw HttpError(HttpErrorKind::Cancelled, "aborted by sink");
     }
@@ -171,6 +191,9 @@ HttpResponse PerformRequest(const HttpRequest& request, Mode mode, const HttpHea
     curl_easy_setopt(handle, CURLOPT_POSTFIELDSIZE_LARGE, static_cast<curl_off_t>(request.body.size()));
     curl_easy_setopt(handle, CURLOPT_NOSIGNAL, 1L);
     curl_easy_setopt(handle, CURLOPT_CONNECTTIMEOUT_MS, static_cast<long>(request.connect_timeout.count()));
+    // Early abort when the server states a Content-Length above the cap; the
+    // WriteCallback check remains the authority for chunked responses.
+    curl_easy_setopt(handle, CURLOPT_MAXFILESIZE_LARGE, static_cast<curl_off_t>(kMaxBodyBytes));
 
     if (mode == Mode::Blocking && request.request_timeout.count() > 0) {
         curl_easy_setopt(handle, CURLOPT_TIMEOUT_MS, static_cast<long>(request.request_timeout.count()));

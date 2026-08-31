@@ -542,12 +542,12 @@ Both `PermissionChecker`'s implementation and `CommandDispatcher` compose the sa
 
 ### Name collisions and aliases
 
-**Collisions are fatal**, and they are now actually *detected*: `NameRegistry` existed and was unit-tested from the beginning but nothing outside its own tests ever constructed one, so a duplicate registration silently shadowed via `insert_or_assign` and which plugin won depended on directory iteration order. `plugins/name_resolution.{hpp,cpp}` (`ResolveRegistrationNames`) feeds it from both the tool and command attributions, applies `command_aliases` routed to whichever kind claims each key, and the startup sanity check reports the result. `ToolRegistry::Register` now *shadows* a duplicate rather than destroying it — destroying the first registrant made a collision unfixable by aliasing, since the object an alias would have renamed was already gone. Two plugins registering the same tool name, command name, `ViewSpec::id`, or `ToolResultRenderer::tool_name` halt startup with a diagnostic naming both. Silent shadowing is the wrong failure mode — it makes behavior depend on plugin load order.
+**Collisions are fatal**, and they are now actually *detected*: `NameRegistry` existed and was unit-tested from the beginning but nothing outside its own tests ever constructed one, so a duplicate registration silently shadowed via `insert_or_assign` and which plugin won depended on directory iteration order. `plugins/name_resolution.{hpp,cpp}` (`ResolveRegistrationNames`) feeds it from both the tool and command attributions, applies `aliases` routed to whichever kind claims each key, and the startup sanity check reports the result. `ToolRegistry::Register` now *shadows* a duplicate rather than destroying it — destroying the first registrant made a collision unfixable by aliasing, since the object an alias would have renamed was already gone. Two plugins registering the same tool name, command name, `ViewSpec::id`, or `ToolResultRenderer::tool_name` halt startup with a diagnostic naming both. Silent shadowing is the wrong failure mode — it makes behavior depend on plugin load order.
 
-Resolution is disabling one plugin, rebuilding, or **aliasing** via an optional `plugins.json` field:
+Resolution is disabling one plugin, rebuilding, or **aliasing** via an optional `plugins.json` field. The key is `aliases` — it applies to TOOLS as well as commands (one flat `plugin.name`-keyed namespace; a plugin shipping both a tool and a command under one original name aliases them together or not at all). It was renamed from `command_aliases`, which claimed a scope it did not have; the old key is ignored with a startup warning rather than silently applying:
 
 ```json
-"command_aliases": { "bash_over_ssh.bash": "ssh_bash", "commands-core.compact": "c" }
+"aliases": { "bash_over_ssh.bash": "ssh_bash", "commands-core.compact": "c" }
 ```
 
 Alias keys are always fully qualified, so they are unambiguous even *before* collision resolution; aliases are applied at registration, **before** the collision check, so aliasing is itself a valid way to resolve one. In practice that means `ToolRegistry::ApplyAliases()` — run once after every plugin and core built-in has registered — re-keys each aliased tool under its surface name, wrapping it in `AliasedTool` so `spec()` advertises the surface name the model must call it by. This is not the command manifest rejected above: that would have *declared* commands as data (a shadow of code, free to drift). This *overrides metadata of code-registered entries*, and a key resolving to nothing is detectable at load.
@@ -1086,11 +1086,13 @@ struct CompactionRequest {
     std::optional<int> max_tokens;
     int64_t last_reported_input_tokens;
     const std::vector<Message>* full_history;   // fallback estimate only
+    const common::Logger* logger;               // null = DefaultLogger
+    std::string_view session_label;             // "session <id>: " on log lines
     std::function<bool()> is_cancelled;
 };
 
 using Compactor = std::function<std::optional<CompactionResult>(
-    const std::vector<Message>& messages_to_compact, LlmProvider& provider,
+    std::span<const Message> messages_to_compact, LlmProvider& provider,
     const CompactionRequest& request)>;
 
 std::optional<CompactionResult> compact_messages(/* same signature */);
@@ -1172,12 +1174,12 @@ variable the install rule uses, so overriding one moves both.
 - **`mcps.json`** — `[{name, transport: "stdio"|"http", command, args[], env{} | url, headers{}, enabled}]`. `env`/`headers` support `${ENV_VAR}` interpolation, resolved once at load and never logged. No per-server risk category — MCP permission is server-scoped, resolved separately.
 - **`permissions.json`** — security config, split from `settings.json` so it can be reviewed and locked down independently: `{default_run_mode: "normal"|"bypass"|"allow-only" (default "normal"), fallback: {read_only, file_write, execute, out_of_workdir}, per_tool_overrides: {}, mcp_default_mode: "allow"|"ask"|"deny" (default "ask")}`. A global floor a preset can still override — no clamping; guardrails presets cannot loosen are future scope.
 - **`settings.json`** — `default_agent_preset, default_model (a `<provider>/<model>` reference), default_theme, max_concurrent_subagents (default 4), memory.{auto_compact (default true), context_compaction_trigger (a one-of object: `{"percent": 1..100}` | `{"tokens": >0}` | `{"buffer_tokens": >0}`; absent = never; exactly one key or the loader rejects the file; the window-relative strategies resolve against the active MODEL's context_window_tokens and never fire without one — see Context compaction; the pre-strategy flat key context_compaction_trigger_tokens still parses as the fixed strategy, and the new object wins when both are present; the seeded settings.json sets `{"percent": 80}`), compaction_keep_recent_tokens (NOT YET HONORED — see Context compaction), scrollback_page_size (default 100 when unset, applied by the RPC layer to both GetMessages and ListSessions)}, tools.{read,edit,bash}.*, tools_view.stdout_buffer_lines (default 100), session_db_path, logging.{level, path, max_size_mb, max_files}`. `logging` backs a **spdlog** rotating file sink (no custom rotation code), with `path` alongside `session_db_path` under the platform *data* dir, not the config dir. Applied by `common::ConfigureLogging` at the very top of `main`, before anything logs -- `DefaultLogger()` caches spdlog's default on first use for the process lifetime, so the ordering is load-bearing. The console sink stays alongside the file one; a log file that cannot be opened degrades to console-only rather than refusing to start.
-- **`plugins.json`** — an object, not a bare array (an earlier draft said array while also placing `command_aliases` at the top level; both cannot hold):
+- **`plugins.json`** — an object, not a bare array (an earlier draft said array while also placing the aliases at the top level; both cannot hold):
 
   ```json
   {
     "plugins": [ {"file": "tools-fs.so", "provenance": "bundled", "enabled": true} ],
-    "command_aliases": { "bash_over_ssh.bash": "ssh_bash" }
+    "aliases": { "bash_over_ssh.bash": "ssh_bash" }
   }
   ```
 
@@ -1210,7 +1212,7 @@ struct AgentPreset {
 
 class AgentPresetRegistry {
 public:
-    const AgentPreset& Resolve(const std::string& preset_name) const;
+    AgentPreset Resolve(const std::string& preset_name) const;  // by value; internally cached+locked
 };
 ```
 
@@ -1322,7 +1324,7 @@ public:
 };
 ```
 
-Checks: every config file parses; at least one usable `providers.json` entry exists with a resolvable key *and* a registered provider kind; at least one agent preset parses and `settings.json`'s `default_agent_preset` resolves end to end; referenced compression prompts exist; each `mcps.json` entry's `command` resolves on `PATH` (stdio) or `url` is well-formed (http); the config and data directories exist and are writable; the SQLite database is accessible and not newer than the binary; each discovered plugin's load status is reported with severity split by provenance; `max_concurrent_subagents` is sane; **no registration-name collisions** (fatal — see Name collisions and aliases); every `command_aliases` key resolves to something registered.
+Checks: every config file parses; at least one usable `providers.json` entry exists with a resolvable key *and* a registered provider kind; at least one agent preset parses and `settings.json`'s `default_agent_preset` resolves end to end; referenced compression prompts exist; each `mcps.json` entry's `command` resolves on `PATH` (stdio) or `url` is well-formed (http); the config and data directories exist and are writable; the SQLite database is accessible and not newer than the binary; each discovered plugin's load status is reported with severity split by provenance; `max_concurrent_subagents` is sane; **no registration-name collisions** (fatal — see Name collisions and aliases); every `aliases` key resolves to something registered.
 
 `project_root` is per-session, supplied by the client in `CreateSessionRequest`, so it is **not** a startup check. It is validated in `CreateSession` — it must exist, be a directory, and be writable — with a `FAILED_PRECONDITION` reason rather than failing later inside tool execution.
 

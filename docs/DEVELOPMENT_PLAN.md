@@ -301,7 +301,7 @@ All four invariant proofs were run per §6: suppressing the seeded load, the rep
 - [x] Each discovered plugin's load outcome is reported; bundled failures are Fatal, user failures Warning, deliberate disables silent.
 - [x] `max_concurrent_subagents` warns at ≤ 0 and > 8.
 - [x] **No registration-name collisions (fatal)** — wired through `NameRegistry` at last; the diagnostic names both plugins.
-- [x] Every `command_aliases` key resolves to something registered; dangling aliases warn.
+- [x] Every `aliases` key resolves to something registered; dangling aliases warn.
 
 **Test cases** (`tests/sanity_check_test.cpp`)
 - [x] Each check fires on its own broken fixture and passes on a good one.
@@ -422,7 +422,7 @@ without a worker thread, a provider and a transcript store.
 **Two things this track fixed that were not on the list.** `NameRegistry` had existed and been
 unit-tested since the plugin work landed while nothing outside its own tests ever *constructed* one,
 so duplicate registrations shadowed silently via `insert_or_assign` and which plugin won depended on
-directory iteration order; `command_aliases` was likewise parsed from `plugins.json` and
+directory iteration order; the aliases map was likewise parsed from `plugins.json` and
 re-serialized without ever being applied. C is the first track with a second registry, which is what
 made connecting them worth more than reimplementing per registry. Collisions are now fatal at
 startup, naming both claimants.
@@ -536,6 +536,17 @@ Applies to every milestone. These are existing project practice, recorded so the
 
 Not scheduled, recorded so they are decisions rather than oversights.
 
+- **Compaction is never persisted, so every resume re-summarizes from scratch.** `CreateResolved`
+  loads the full uncompacted transcript and the seeded occupancy immediately re-trips the trigger —
+  real provider calls, real money, on every resume of a long session. The architecture says
+  compaction never mutates persisted history and says nothing about what resume does with that;
+  persisting a summary marker per session (or keying the trigger off persisted state) is the fix
+  whenever resume latency or cost actually bites. Recorded as a decision, not an oversight.
+- **`PendingRequests` is an untyped `string` channel** shared by the permission and confirmation
+  brokers, kept apart only by an id-prefix convention, with the answer serialized on the reader and
+  parsed on the worker. Cross-delivery fails closed (a permission answer parsed as a confirmation
+  fails and denies), so this is complexity rather than a bug — a `variant` payload would protect the
+  same invariant with less machinery, and is not worth the churn now.
 - **Server-wide fd hygiene** — no `CLOEXEC` discipline on gRPC/SQLite/log fds; every bash command inherits them. The bash pipes are handled; the rest is not.
 - **`tree-sitter-bash` for command disclosure** — still deferred, but **the reason recorded here was wrong and is corrected**. This said the hand-rolled scanner's "failure mode is safe (fewer grants offered)", so upgrading would raise the hit rate and not the safety floor. It was not safe: shell reserved words were recorded as programs, which consumed the command slot and demoted the real program to an argument, so `ls; if true; then rm -rf /; fi` disclosed only `{ls}` and reported itself *complete* — more authorised than the operator saw, not less (§12.1). A hand-rolled walker cannot distinguish "I parsed this" from "I mis-parsed this", which is exactly how that produced `complete = true`; a grammar can, because ERROR/MISSING nodes map onto `complete = false`. The keyword hole is closed, so this is no longer urgent — but it is now a hit-rate *and* soundness argument. Note when it lands: `tree-sitter-bash` has no vcpkg port (only `tree-sitter`, `-c`, `-cli`), so it needs the `FetchContent` grammar-vendoring path that track E has to build anyway; and being error-recovering, it must be walked for ERROR/MISSING explicitly or it trades a known-shape bug for an unknown-shape one.
 - ~~**Unknown `allowed_skills` entries are silently dropped**~~ — still true of resolution (correct for lookup), but now *reported* at startup by F (`naming_model` check).
@@ -1116,6 +1127,124 @@ every one of them reads as done.
     The test covers the behaviour (an enormous line still yields a truncated one), not the bound
     itself: a peak-RSS assertion inside a shared test binary is not dependable, so the memory
     property rests on the structure -- one fixed-size buffer, nothing else retaining the line.
+
+### Tier 4 — correctness nits and stale contracts
+
+The third pass's bottom tier, folded in two commits. Each is small; each is a case of the code
+disagreeing with what a nearby comment or doc claims, which is the theme of the whole pass.
+
+21. **`proto_convert`'s int64 guard admitted the one value it existed to stop.**
+    `static_cast<double>(INT64_MAX)` rounds *up* to 2^63, so a `<=` against it accepted
+    `9223372036854775808.0` — whose cast to `int64_t` is the UB the guard was written to prevent,
+    wire-reachable through any tool_use input. Strict `<` at the top; INT64_MIN is exactly -2^63 and
+    needs no such care, so the bounds are deliberately asymmetric. Same file: the header's totality
+    guarantee ("a missing mapping is a compile error") held for the enum switches via `-Wswitch` and
+    for neither `std::visit` + `if constexpr` chain — a future `ContentBlock` alternative would have
+    compiled silently, serialized as `BLOCK_NOT_SET`, and been *dropped* on the way back. Both chains
+    now end in `static_assert` on a dependent false.
+
+22. **`Session::RunOneTurn` used `store` where its own exactly-once claim names `exchange`.** The
+    claim was true, but only because `Terminate` joins the worker before reading the flag — correct
+    by a mechanism other than the one documented, which is how the next edit breaks it. Firing twice
+    would set a `std::promise` twice. Both sides exchange now; the property holds whatever the
+    ordering.
+
+23. **`sanity_check`'s error checks were half inert.** `!ec && is_regular_file(path, ec)` tested a
+    default-constructed `error_code` before the call wrote it, so the code `is_regular_file` reported
+    was never read — three copies of the pattern in the tree, one inert. And the presets scan's
+    range-for over `directory_iterator(dir, ec)` made only *construction* non-throwing: `operator++`
+    is the throwing overload, so one unreadable entry escaped `RunAll` and skipped every later check
+    — breaking the linter property the class documents. `it.increment(ec)` throughout.
+
+24. **`ProviderInstanceCache::GetOrCreate` read `generation_` outside `mu_`.** Harmless while the
+    field is always zero; the field exists *solely* for the day a config reload bumps it, which is
+    precisely the day the unsynchronised read becomes a race between the key and the bump. Lock
+    first, then build the key.
+
+25. **`SessionServiceImpl` stored a `PermissionsConfig` it never read**, and its run-mode comment
+    pointed a future reader at this service for a security-relevant default that is actually applied
+    in `AgentPresetRegistry`. The member, the constructor parameter, and the wrong pointer are all
+    gone.
+
+26. **`skill_registry`'s `LoadCandidate` used the throwing `is_directory`/`is_regular_file`** in a
+    function documented never to throw — an unreadable parent directory escaped the loader as a
+    `filesystem_error` instead of becoming a load-error entry. The `error_code` overloads, which the
+    same file already used elsewhere.
+
+27. **`InheritNumber` accepted floats.** `is_number()` is true for `4096.7` and `get<int>` truncates,
+    so a typo'd `max_tokens` silently became a different, valid-looking limit. Present-but-fractional
+    is now a named parse error carrying the model reference — same integer-only rule
+    `settings_config` already applied.
+
+28. **A typo'd top-level key in providers.json parsed as a valid empty config.** `"provider"`
+    instead of `"providers"` surfaced much later as "providers.json is empty", pointing at the
+    preset. A non-empty object with no `"providers"` key is refused at parse time, naming the first
+    key actually found; `{}` stays a valid empty config.
+
+29. **`mcps.json` leaked nlohmann's exceptions to users.** `entry.at("name")` threw
+    `json.exception.out_of_range` into a blanket catch, so a missing key read like a library bug
+    while every neighbouring field had a hand-written message. `name` and `transport` get the
+    hand-written treatment.
+
+30. **`insert` rewrote line endings `str_replace` left alone.** Rejoining lines unconditionally
+    appended `\n` to the last line, so a file not ending in a newline gained one — editing bytes
+    the caller never named. The original terminator state is preserved; the two mutating paths of
+    one tool agree.
+
+31. **`ResolveOnPath`'s two branches had drifted.** The slash branch omitted `is_regular_file`, so
+    `access(dir, X_OK)` — which succeeds for directories on POSIX — offered a *grant* for a path
+    that cannot be a program. Over-disclosure only, but disclosure is what consent is given against.
+
+32. **`WrapCommand` spliced the state trailer onto a trailing `\`.** Backslash-newline is a line
+    continuation, so the plain separator made `ls \` run `ls __minimal_rc=$?` — the marker became
+    an argument and the state the trailer exists to report was lost. An extra newline first is
+    correct for both backslash parities.
+
+33. **The unbounded-response gaps §11.13 missed.** The blocking HTTP path accumulated the response
+    body with no cap (a misbehaving proxy grows a string until the process dies); now a 64 MiB cap
+    enforced in the write callback — deterministic, unlike `CURLOPT_MAXFILESIZE_LARGE`, which is
+    advisory without a Content-Length — with the failure named after the cap. The SSE parser grew
+    `line_buffer_`/`pending_data_` without bound on a stream with no newline; past 1 MiB it throws,
+    and the streaming path's existing catch-and-classify turns that into an `LlmError` — the
+    fail-closed posture of §12.11. The provider's `error_body` accumulator (classification only,
+    never parsed) is capped at 64 KiB.
+
+34. **settings.json was parsed three times at startup, from two sources of truth.** main ran the
+    loop on the sanity check's parse while `AgentPresetRegistry` resolved `default_model` from its
+    own — the sanity check could validate content the server was not running. The registry takes
+    the caller's `SettingsConfig` now; one parse, in the sanity check, handed to both. (The early
+    logging-only read in main stays: it must run before the sanity check so its findings have
+    somewhere to go.)
+
+35. **`compact_messages` logged to `DefaultLogger()`**, so its diagnostics carried no session id
+    while the agent loop's adjacent compaction log did. `CompactionRequest` carries a `Logger*`
+    and a session label; the compactor's lines read as one stream with the loop's.
+
+36. **`SpawnSubagentTool` held a bare reference to the `SubagentManager`**, which declaration order
+    in `main()` destroys *before* the registry holding the tool — safe only because
+    `sessions.TerminateAll()` runs first on the normal path. The capture owns a `shared_ptr`; the
+    order no longer matters.
+
+37. **`command_aliases` was renamed to `aliases`, with no fallback.** The old name claimed a scope
+    it did not have: the one flat `plugin.name`-keyed namespace aliases TOOLS as well as commands.
+    A leftover `command_aliases` key is ignored and warned about on every boot (it round-trips
+    verbatim rather than being deleted), because with no fallback the alternative to the warning is
+    aliases silently not applying after an upgrade. The serializer also no longer writes an empty
+    `aliases: {}` into everyone's plugins.json.
+
+38. **The permission path's blocking `Push` was safe only by a two-file dependency nothing
+    documented.** `WirePermissionChecker::check` parks the worker on a full queue; it is woken by
+    `EventQueue::Close()`, which `Session::Terminate` calls only *after* `PendingRequests::Shutdown`
+    has unblocked the `AwaitResponse`. Swapping those two lines deadlocks the worker on an unasked
+    question. Both ends now say so, each pointing at the other.
+
+39. **The wedged-observer test itself was a stack-use-after-scope at teardown.** Found by the
+    ASan preset, which had not been run since the test landed in item 7's commit: the test's
+    `release`/`entered` atomics were declared AFTER the registry, so destruction (reverse order)
+    destroyed them BEFORE the registry's destructor joined the wedged dispatcher — which drains its
+    queued tasks, each touching `entered`, in exactly that window. The atomics are declared first
+    now, with the ordering rule written down where the next test of this shape will read it. This is
+    also why the verification bar is "the ASan preset runs", not "it ran once".
 
 ### Deliberately not done
 

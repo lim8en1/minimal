@@ -360,7 +360,9 @@ void Session::Terminate() {
 
     // NOT a cancel-generation bump: Terminate ends the SESSION, and IsCancelled
     // already folds terminated_ in. Shutting pending requests is what wakes a
-    // worker parked on a gate mid-teardown.
+    // worker parked on a gate mid-teardown -- including one parked in
+    // WirePermissionChecker::check on a question the client will never answer
+    // (the other half of the two-file dependency documented at that Push).
     pending_.Shutdown();
     turn_cv_.notify_all();
 

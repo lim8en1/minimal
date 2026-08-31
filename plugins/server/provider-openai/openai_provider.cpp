@@ -85,7 +85,13 @@ llm::ChatResponse OpenAiProvider::StreamComplete(const llm::ChatRequest& request
     // behavior) -- caught here, stashed, and rethrown once StreamPost unwinds.
     auto on_chunk = [&](std::string_view chunk) -> bool {
         if (is_error_status) {
-            error_body.append(chunk);
+            // For classification and the error message only -- never parsed as
+            // a completion. A proxy streaming an endless "error" body would
+            // otherwise grow this string for as long as the connection held.
+            constexpr std::size_t kMaxErrorBody = 64 * 1024;
+            if (error_body.size() < kMaxErrorBody) {
+                error_body.append(chunk.substr(0, kMaxErrorBody - error_body.size()));
+            }
             return true;
         }
         try {

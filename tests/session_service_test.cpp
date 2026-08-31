@@ -93,7 +93,8 @@ struct ServiceFixture {
 
     // Built after the script and any tools, so a session sees the finished setup.
     void Start() {
-        presets = std::make_unique<agent::AgentPresetRegistry>(dir, skills);
+        presets = std::make_unique<agent::AgentPresetRegistry>(
+            dir, skills, config::LoadSettingsConfig(dir / "settings.json"));
         auto script_copy = script;
         providers.Register("fake", [script_copy](const llm::ProviderConfig&) {
             return std::make_unique<testing::ScriptedProvider>(script_copy);
@@ -105,8 +106,7 @@ struct ServiceFixture {
             *presets, tools, providers, *observers, *db, agent::LoopConfig{},
             common::DefaultLogger(), attach_guard);
         service = std::make_unique<rpc::SessionServiceImpl>(
-            *sessions, *db, config::SettingsConfig{}, config::PermissionsConfig{},
-            common::DefaultLogger());
+            *sessions, *db, config::SettingsConfig{}, common::DefaultLogger());
         sessions->set_commands(&commands);
         service->set_commands(&commands);
         service->set_on_last_client_detached([this] { last_detach.store(true); });

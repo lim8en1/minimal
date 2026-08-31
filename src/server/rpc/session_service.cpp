@@ -45,15 +45,13 @@ grpc::Status NotYet(const char* what) {
 }  // namespace
 
 SessionServiceImpl::SessionServiceImpl(agent::SessionRegistry& sessions,
-                                       session::SessionDatabase& db,
-                                       config::SettingsConfig settings,
-                                       config::PermissionsConfig permissions,
-                                       common::Logger& logger)
+                                        session::SessionDatabase& db,
+                                        config::SettingsConfig settings,
+                                        common::Logger& logger)
     : sessions_(sessions),
       db_(db),
       reader_(db),
       settings_(std::move(settings)),
-      permissions_(std::move(permissions)),
       logger_(logger) {}
 
 void SessionServiceImpl::set_on_last_client_detached(std::function<void()> callback) {
@@ -95,9 +93,14 @@ grpc::Status SessionServiceImpl::CreateSession(grpc::ServerContext* context,
     params.project_root = request->project_root();
 
     // UNSPECIFIED means "the client did not ask", which is why FromProto reports
-    // nullopt rather than a default: only here is the config available to
-    // resolve it, and collapsing the two earlier would silently override a
-    // deliberate client choice with permissions.json.
+    // nullopt rather than a default: this service deliberately holds no
+    // permissions.json -- the run-mode default is applied where the rest of it
+    // is, in AgentPresetRegistry (agent_preset_registry.cpp,
+    // LoadPermissionsConfig). An earlier revision stored a PermissionsConfig
+    // here and never read it, which made this comment read as if the default
+    // were resolved on this path. Collapsing the wire value into a default
+    // anywhere before the registry would silently override a deliberate client
+    // choice with the file's.
     params.run_mode_override = FromProto(request->run_mode());
 
     if (const auto status = ApplyModelOverride(*request, params); !status.ok()) return status;

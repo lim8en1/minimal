@@ -459,8 +459,8 @@ std::vector<CheckResult> StartupSanityCheck::check_name_collisions() {
         for (const auto& attr : inputs_.tool_registry.attributions()) {
             std::string s = attr.tool_name;
             const auto qualified = attr.plugin_name + "." + attr.tool_name;
-            if (auto it = inputs_.plugin_config.command_aliases.find(qualified);
-                it != inputs_.plugin_config.command_aliases.end()) {
+            if (auto it = inputs_.plugin_config.aliases.find(qualified);
+                it != inputs_.plugin_config.aliases.end()) {
                 s = it->second;
             }
             if (s == surface) add(attr.plugin_name);
@@ -485,11 +485,11 @@ std::vector<CheckResult> StartupSanityCheck::check_name_collisions() {
             Fatal("name_collisions",
                   std::string(is_command ? "command name '/" : "tool name '") + surface +
                       "' is provided by " + JoinNames(owners) +
-                      " -- disable one plugin, or give one of them a command_aliases entry"));
+                      " -- disable one plugin, or give one of them an aliases entry"));
     }
 
     for (const auto& key : resolution.result.dangling_aliases) {
-        results.push_back(Warning("aliases", "command_aliases key '" + key +
+        results.push_back(Warning("aliases", "aliases key '" + key +
                                   "' resolves to nothing registered (typo, or the providing plugin is disabled)"));
     }
 

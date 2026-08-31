@@ -115,7 +115,17 @@ private:
 // which is also self-limiting, since the PATH change that broke it is discarded
 // along with everything else rather than persisting.
 std::string WrapCommand(const std::string& command) {
-    return command + "\n__minimal_rc=$?\n{ pwd -P; printf '\\0'; env -0; } >&" +
+    // A command ending in a backslash is a line continuation: backslash-newline
+    // glues the next physical line onto it, so the plain separator below made
+    // `ls \` run `ls __minimal_rc=$?` -- the marker became an argument of the
+    // user's command, and the state the trailer exists to report was lost. An
+    // EXTRA newline first is correct for both parities: an odd trailing
+    // backslash count consumes the first newline as continuation and the second
+    // ends the (now empty) logical line; an even count is a literal backslash,
+    // the first newline ends the command, and the second is a no-op empty line.
+    const bool trailing_backslash = !command.empty() && command.back() == '\\';
+    return command + (trailing_backslash ? "\n\n" : "\n") +
+           "__minimal_rc=$?\n{ pwd -P; printf '\\0'; env -0; } >&" +
            std::to_string(kStateFd) + "\nexit $__minimal_rc\n";
 }
 
@@ -448,7 +458,13 @@ std::optional<std::filesystem::path> ResolveOnPath(const SessionShellState& stat
         std::filesystem::path p = state.cwd;
         p /= word;  // absolute `word` replaces, relative appends
         const auto canonical = std::filesystem::canonical(p, ec);
-        if (ec || access(canonical.c_str(), X_OK) != 0) return std::nullopt;
+        // is_regular_file, same as the PATH branch below -- the two branches
+        // had drifted, and without it `access(dir, X_OK)` succeeds for a
+        // DIRECTORY, offering a grant for a path that cannot be a program.
+        // Over-discloses only, but disclosure is what consent is given against.
+        if (ec) return std::nullopt;
+        const bool regular = std::filesystem::is_regular_file(canonical, ec);
+        if (!regular || ec || access(canonical.c_str(), X_OK) != 0) return std::nullopt;
         return canonical;
     }
 

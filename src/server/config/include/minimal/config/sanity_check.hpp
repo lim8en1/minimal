@@ -39,7 +39,7 @@ struct SanityCheckInputs {
     const tools::ToolRegistry& tool_registry;  // attributions: both sides of a collision
     const llm::ProviderFactoryRegistry& provider_factories;
     const SkillRegistry& skills;
-    plugins::PluginConfig plugin_config;  // command_aliases, enablement state
+    plugins::PluginConfig plugin_config;  // aliases, enablement state
     // A VALUE, not a reference: it is computed once (by ResolveRegistrationNames) and
     // its owner must not have to outlive the inputs struct.
     plugins::RegistrationNames name_resolution;

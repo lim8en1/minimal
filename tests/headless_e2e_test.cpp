@@ -70,7 +70,8 @@ struct HeadlessFixture {
     }
 
     void Start() {
-        presets = std::make_unique<agent::AgentPresetRegistry>(dir, skills);
+        presets = std::make_unique<agent::AgentPresetRegistry>(
+            dir, skills, config::LoadSettingsConfig(dir / "settings.json"));
         auto scripted = std::make_shared<decltype(steps)>(steps);
         providers.Register("fake", [scripted](const llm::ProviderConfig&) {
             auto provider = std::make_unique<testing::FakeLlmProvider>();
@@ -84,7 +85,6 @@ struct HeadlessFixture {
                                                             common::DefaultLogger());
         service = std::make_unique<rpc::SessionServiceImpl>(*sessions, *db,
                                                              config::SettingsConfig{},
-                                                             config::PermissionsConfig{},
                                                              common::DefaultLogger());
         socket = dir / "headless.sock";
         server = std::make_unique<rpc::Server>(*service, socket);

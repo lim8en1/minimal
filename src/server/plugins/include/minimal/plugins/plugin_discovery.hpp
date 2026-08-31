@@ -14,12 +14,12 @@ namespace minimal::plugins {
 // Parsed plugins.json.
 //
 // Note this is an OBJECT, not the bare array an earlier draft of the design
-// described: that draft also placed `command_aliases` at the top level, and both
+// described: that draft also placed the aliases at the top level, and both
 // cannot be true at once.
 //
 //   {
 //     "plugins": [ {"file": "tools-fs.so", "provenance": "bundled", "enabled": true} ],
-//     "command_aliases": { "bash_over_ssh.bash": "ssh_bash" }
+//     "aliases": { "bash_over_ssh.bash": "ssh_bash" }
 //   }
 struct PluginConfig {
     struct Entry {
@@ -31,8 +31,12 @@ struct PluginConfig {
 
     // Fully-qualified "plugin.original_name" -> surface name. Applied at
     // registration, before collision checking, so aliasing is itself a valid way
-    // to resolve a collision.
-    std::map<std::string, std::string> command_aliases;
+    // to resolve a collision. Key is `aliases` in plugins.json -- the old
+    // `command_aliases` name was a lie, since the one namespace aliases TOOLS
+    // as well as commands (one flat plugin.name-keyed space; a plugin shipping
+    // both a tool and a command under one original name aliases them together
+    // or not at all).
+    std::map<std::string, std::string> aliases;
 
     // EVERY OTHER TOP-LEVEL KEY, carried through untouched. This file is
     // rewritten on every start (discovery persists what it found), and the

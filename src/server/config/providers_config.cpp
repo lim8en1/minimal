@@ -55,11 +55,23 @@ nlohmann::json InheritParameters(const nlohmann::json& provider, const nlohmann:
     return nlohmann::json::object();
 }
 
+// The model's value if it has one, else the provider's. A key that is present
+// but not an integer is a NAMED error, not a silent truncation: is_number()
+// was true for 4096.7, and get<int> happily truncated it -- a typo'd max_tokens
+// became a different, valid-looking limit with no message anywhere.
+// settings_config.cpp applies the same integer-only rule.
 template <typename T>
 std::optional<T> InheritNumber(const nlohmann::json& provider, const nlohmann::json& model,
-                               const char* key) {
-    if (model.contains(key) && model.at(key).is_number()) return model.at(key).get<T>();
-    if (provider.contains(key) && provider.at(key).is_number()) return provider.at(key).get<T>();
+                               const char* key, const std::string& where) {
+    for (const auto* node : {&model, &provider}) {
+        if (!node->contains(key)) continue;
+        const auto& value = node->at(key);
+        if (!value.is_number_integer()) {
+            throw std::runtime_error("providers.json: " + where + " field \"" + key +
+                                     "\" must be an integer, got " + value.dump());
+        }
+        return value.get<T>();
+    }
     return std::nullopt;
 }
 
@@ -98,7 +110,22 @@ ProvidersConfig ParseProvidersConfig(const nlohmann::json& doc) {
     }
 
     ProvidersConfig config;
-    if (!doc.contains("providers")) return config;  // {} is a valid empty config
+    if (!doc.contains("providers")) {
+        // {} is a valid empty config. Anything else with no "providers" key is
+        // almost certainly a typo ("provider", "Providers", ...) -- and the
+        // failure used to surface much later, as "preset names unknown model
+        // ... providers.json is empty", pointing the reader at the preset
+        // instead of their own key. Refuse here, where the mistake is.
+        if (!doc.empty()) {
+            const std::string found = doc.begin().key();
+            throw std::runtime_error(
+                "providers.json: expected a \"providers\" object, found no such key (first key "
+                "present: \"" +
+                found +
+                "\"). An empty object {} is a valid empty config; a typo'd key is not.");
+        }
+        return config;
+    }
     const auto& providers = doc.at("providers");
     if (!providers.is_object()) {
         throw std::runtime_error("providers.json: \"providers\" must be an object keyed by name");
@@ -124,9 +151,9 @@ ProvidersConfig ParseProvidersConfig(const nlohmann::json& doc) {
         }
 
         for (const auto& [model_name, model] : provider.at("models").items()) {
+            const std::string model_where = "model '" + provider_name + "/" + model_name + "'";
             if (!model.is_object()) {
-                throw std::runtime_error("providers.json: model '" + provider_name + "/" +
-                                         model_name + "' must be an object");
+                throw std::runtime_error("providers.json: " + model_where + " must be an object");
             }
             if (model_name.find('/') != std::string::npos ||
                 provider_name.find('/') != std::string::npos) {
@@ -143,9 +170,10 @@ ProvidersConfig ParseProvidersConfig(const nlohmann::json& doc) {
             resolved.provider.api_key = api_key;
             resolved.provider.model_name = model_name;
             resolved.parameters = InheritParameters(provider, model);
-            resolved.max_tokens = InheritNumber<int>(provider, model, "max_tokens");
+            resolved.max_tokens = InheritNumber<int>(provider, model, "max_tokens", model_where);
             resolved.context_window_tokens =
-                InheritNumber<std::int64_t>(provider, model, "context_window_tokens");
+                InheritNumber<std::int64_t>(provider, model, "context_window_tokens",
+                                            model_where);
             // The key is copied out FIRST. Passing `resolved.ref` alongside
             // `std::move(resolved)` in one call is unsequenced -- the move may
             // run first, and the key is then read from a moved-from string.
