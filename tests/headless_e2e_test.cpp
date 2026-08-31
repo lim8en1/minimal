@@ -27,9 +27,13 @@
 
 #include "fakes.hpp"
 #include "temp_dir.hpp"
+#include "minimal/agent/session_support.hpp"
 #include "minimal/client/session_client.hpp"
+#include "minimal/plugins/service_registry.hpp"
 #include "minimal/rpc/server.hpp"
 #include "minimal/rpc/session_service.hpp"
+
+#include "titler.hpp"
 
 using namespace minimal;
 using namespace std::chrono_literals;
@@ -96,6 +100,12 @@ struct HeadlessFixture {
         steps.push_back({std::move(response), std::move(events), std::nullopt});
     }
 
+    // Set BEFORE Start() to load the session titler (a real observer, the real
+    // plugin source, over a real core-provided SessionSupportService).
+    bool title = false;
+    plugins::ServiceRegistry services;
+    agent::SessionSupport support{common::DefaultLogger()};
+
     // A retryable provider failure: the agent loop parks in retry backoff
     // before reaching for the next scripted step.
     void ScriptError(llm::LlmError error) {
@@ -125,10 +135,21 @@ struct HeadlessFixture {
             return provider;
         });
         observers = std::make_unique<agent::SessionObserverRegistry>(common::DefaultLogger());
+        if (title) {
+            // Provided before serving starts, exactly like main.cpp; the
+            // titler resolves it lazily at titling time.
+            services.Provide(agent::kSessionSupportServiceName, &support);
+        }
         db = std::make_unique<session::SessionDatabase>(dir / "sessions.db");
         sessions = std::make_unique<agent::SessionRegistry>(*presets, tools, providers, *observers,
                                                             *db, agent::LoopConfig{},
                                                             common::DefaultLogger());
+        if (title) {
+            support.Wire(*sessions, *db, *presets);
+            session_titler::TitlerConfig titler_config;
+            observers->Register(std::make_shared<session_titler::TitlerObserver>(
+                titler_config, &services, common::DefaultLogger()));
+        }
         service = std::make_unique<rpc::SessionServiceImpl>(*sessions, *db,
                                                              config::SettingsConfig{},
                                                              config::PermissionsConfig{},
@@ -581,4 +602,53 @@ TEST_CASE("a client-side cancel ends the turn with STOP_REASON_CANCELLED",
     CHECK(stop == v1::STOP_REASON_CANCELLED);
     CHECK_FALSE(fixture.provider_attempts->load() >= 2);  // no second attempt ran
     CHECK(text.empty());                                  // its answer never arrived
+}
+
+TEST_CASE("the session titler renames a fresh session after its first turn",
+          "[headless][titler]") {
+    // The full path over a real socket: turn completes, the observer fires, the
+    // titler reads the first user text through SessionSupportService, calls the
+    // LLM (consuming the second scripted step from the SAME shared provider
+    // instance), and the rename lands in SQLite -- where ListSessions would
+    // serve it to the picker.
+    HeadlessFixture fixture;
+    fixture.title = true;
+    fixture.Script(testing::TextResponse("the answer is 42"),
+                   TextStream("the answer is 42", llm::StopReason::EndTurn));
+    // The title request: same provider, next scripted step.
+    fixture.Script(testing::TextResponse("  \"The Answer Question\"  "),
+                   TextStream("The Answer Question", llm::StopReason::EndTurn));
+    fixture.Start();
+
+    client::SessionClient::CreateOptions options;
+    options.project_root = (fixture.dir / "work").string();
+    options.agent_preset = "main";
+    options.run_mode = v1::PERMISSION_RUN_MODE_ALLOW_ONLY;
+    const auto created = fixture.client->CreateSession(options);
+    REQUIRE(created.status.ok());
+    // Created unnamed, so the free default names it from the first message.
+    REQUIRE(fixture.db->GetSession(created.session_id)->name.empty());
+
+    const auto status = fixture.client->RunTurn(created.session_id, "what is the answer?",
+                                                [](const v1::ServerEvent&) { return true; });
+    CHECK(status.ok());
+
+    // The rename runs on the titler's detached thread, after the turn
+    // completed; poll with a deadline. A timeout means the feature is broken,
+    // and the residual name says which layer failed.
+    const auto deadline = std::chrono::steady_clock::now() + 5s;
+    std::string name;
+    while (std::chrono::steady_clock::now() < deadline) {
+        name = fixture.db->GetSession(created.session_id)->name;
+        if (name == "The Answer Question") break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    CHECK(name == "The Answer Question");
+
+    // Two provider calls total -- the turn and the title, nothing more (the
+    // title happens once per session). The count is 3, not 2, because the
+    // counting fake double-counts a Complete(): it delegates to its own
+    // virtual StreamComplete, and the override increments again.
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    CHECK(fixture.provider_attempts->load() == 3);
 }

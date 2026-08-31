@@ -187,7 +187,7 @@ Session::Session(SessionParams params, AgentPreset preset,
         // tool's own disclosure, which is built for a permission prompt and is
         // not reached when the call is pre-approved. An observer that wants
         // detail has SessionReader and the tool_use_id.
-        observers_.NotifyToolExecuted(info_, std::move(invocation));
+        observers_.NotifyToolExecuted(InfoSnapshot(), std::move(invocation));
     };
 
     // Returning false aborts the provider request. This is the cancellation path
@@ -222,7 +222,7 @@ Session::Session(SessionParams params, AgentPreset preset,
     mcp_manager_ = params_.mcp_manager;
     if (mcp_manager_ != nullptr) RefreshMcpServers();
 
-    observers_.NotifySessionCreated(info_);
+    observers_.NotifySessionCreated(InfoSnapshot());
     worker_ = std::thread([this] { WorkerMain(); });
 }
 
@@ -411,8 +411,15 @@ void Session::ApplyPreset(AgentPreset preset) {
     // Worker thread, between turns: the loop is provably not inside a provider
     // call, so rebinding and then releasing the old reference is safe. Rebind
     // FIRST -- the loop must never hold a reference to the object being freed.
-    auto previous = std::move(provider_);
-    provider_ = std::move(rebuilt);
+    // The rebind takes mutex_ because ProviderSnapshot() hands the shared_ptr to
+    // the titler thread, and a concurrent reassign would be a data race; the
+    // titler tolerates the momentary null a snapshot between the two moves can
+    // see (it degrades to no title).
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto previous = std::move(provider_);
+        provider_ = std::move(rebuilt);
+    }
     loop_->SetProvider(*provider_);
 }
 
@@ -550,7 +557,27 @@ void Session::Terminate() {
         }
     }
 
-    observers_.NotifySessionEnded(info_);
+    observers_.NotifySessionEnded(InfoSnapshot());
+}
+
+SessionInfo Session::InfoSnapshot() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return info_;
+}
+
+void Session::SetName(std::string name) {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        info_.name = name;
+    }
+    v1::ServerEvent event = MakeEvent(params_.session_id);
+    auto* metadata = event.mutable_session_metadata();
+    metadata->set_session_id(params_.session_id);
+    metadata->set_name(name);
+    // TryPush, not Push: the titler thread must never block, and after
+    // Terminate closes the queue the event is simply lost -- the session is
+    // gone, so there is nobody to refresh.
+    channels_->queue.TryPush(std::move(event));
 }
 
 void Session::WorkerMain() {
@@ -700,7 +727,7 @@ void Session::RunOneTurn(std::optional<std::string> text) {
         summary.tool_names_invoked = std::move(result.tool_names_invoked);
         summary.duration = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - started);
-        observers_.NotifyTurnCompleted(info_, std::move(summary));
+        observers_.NotifyTurnCompleted(InfoSnapshot(), std::move(summary));
     } catch (...) {
         logger_.warn("session {}: notifying turn observers failed", params_.session_id);
     }

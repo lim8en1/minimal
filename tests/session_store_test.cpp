@@ -432,6 +432,76 @@ TEST_CASE("message_count stays exact across appends and restarts", "[session][mi
     CHECK(sessions[0].message_count == 7);
 }
 
+TEST_CASE("migration to name_source upgrades a v4 database in place", "[session][migrations]") {
+    // A v4 database predates name_source. The ALTER adds the column with ''
+    // -- "not known to be explicit", the safe reading for pre-v5 rows -- and
+    // the store keeps working over it.
+    TempDir dir;
+    const auto path = dir.path() / "v4.db";
+
+    {
+        sqlite3* raw = RawOpen(path);
+        REQUIRE(sqlite3_exec(raw,
+                             "CREATE TABLE sessions ("
+                             "  id TEXT PRIMARY KEY,"
+                             "  parent_session_id TEXT REFERENCES sessions(id) ON DELETE CASCADE,"
+                             "  name TEXT NOT NULL DEFAULT '',"
+                             "  project_root TEXT NOT NULL,"
+                             "  agent_preset TEXT NOT NULL,"
+                             "  created_at INTEGER NOT NULL,"
+                             "  updated_at INTEGER NOT NULL,"
+                             "  message_count INTEGER NOT NULL DEFAULT 0"
+                             ");",
+                             nullptr, nullptr, nullptr) == SQLITE_OK);
+        REQUIRE(sqlite3_exec(raw,
+                             "CREATE TABLE messages ("
+                             "  id INTEGER PRIMARY KEY,"
+                             "  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,"
+                             "  seq INTEGER NOT NULL,"
+                             "  role TEXT NOT NULL,"
+                             "  content_json TEXT NOT NULL,"
+                             "  token_count INTEGER NOT NULL DEFAULT 0,"
+                             "  created_at INTEGER NOT NULL,"
+                             "  UNIQUE (session_id, seq)"
+                             ");",
+                             nullptr, nullptr, nullptr) == SQLITE_OK);
+        REQUIRE(sqlite3_exec(raw,
+                             "CREATE TABLE compactions ("
+                             "  session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE"
+                             " CASCADE,"
+                             "  boundary_seq INTEGER NOT NULL,"
+                             "  summary_content_json TEXT NOT NULL,"
+                             "  created_at INTEGER NOT NULL"
+                             ");",
+                             nullptr, nullptr, nullptr) == SQLITE_OK);
+        REQUIRE(sqlite3_exec(raw, "PRAGMA user_version = 4;", nullptr, nullptr, nullptr) ==
+                SQLITE_OK);
+        const std::string session_id = GenerateUlid();
+        char sql[512];
+        std::snprintf(sql, sizeof(sql),
+                      "INSERT INTO sessions (id, name, project_root, agent_preset, created_at,"
+                      " updated_at) VALUES ('%s', 'old name', '/p', 'build', 1, 1);",
+                      session_id.c_str());
+        REQUIRE(sqlite3_exec(raw, sql, nullptr, nullptr, nullptr) == SQLITE_OK);
+        sqlite3_close(raw);
+    }
+    REQUIRE(RawScalar(path, "PRAGMA user_version;") == "4");
+
+    SessionDatabase db(path);
+    REQUIRE(RawScalar(path, "PRAGMA user_version;") ==
+            std::to_string(SessionDatabase::kSchemaVersion));
+    const auto sessions = db.ListSessions({});
+    REQUIRE(sessions.size() == 1);
+    // Backfilled rows read as "not known to be explicit" -- the safe reading,
+    // since a pre-v5 session is old and the titler only ever fires for a fresh
+    // session's first turn in its creating process.
+    CHECK(sessions[0].name_source.empty());
+    CHECK_FALSE(db.IsExplicitlyNamed(sessions[0].session_id));
+    // The store keeps working over the upgraded schema.
+    CHECK(db.UpdateSessionName(sessions[0].session_id, "renamed post-upgrade"));
+    CHECK(db.GetSession(sessions[0].session_id)->name_source == "observer");
+}
+
 TEST_CASE("paging constrains on seq -- the planner seeks, it does not walk",
           "[session][paging][invariant]") {
     // THE INVARIANT behind "a page costs the same on a long transcript": the
@@ -763,6 +833,36 @@ TEST_CASE("UpdateSessionName renames and reports unknown ids", "[session][naming
     CHECK(db.UpdateSessionName(id, "new"));
     CHECK(db.GetSession(id)->name == "new");
     CHECK_FALSE(db.UpdateSessionName("no-such-session", "x"));
+}
+TEST_CASE("name_source records where a name came from", "[session][naming]") {
+    // NOTE: the name_source column is asserted through the SessionDatabase's
+    // own GetSession, never through a second in-process connection. The test
+    // binary links its own SQLite copy for the raw fixtures (see CMakeLists)
+    // while server_core embeds another -- and two SQLite libraries in one
+    // process do not share their connection registry, so a reader's close
+    // would treat itself as the last connection and delete a live writer's
+    // WAL. Same-process second connections against a live SessionDatabase are
+    // therefore off-limits in these tests.
+    TempDir dir;
+    SessionDatabase db(dir.path() / "source.db");
+
+    // Explicit at creation.
+    const auto explicit_id = db.CreateSession("chosen", std::nullopt, "/p", "build").session_id;
+    CHECK(db.IsExplicitlyNamed(explicit_id));
+    CHECK(db.GetSession(explicit_id)->name_source == "explicit");
+
+    // Default rule (first user text) -- not explicit, and the column says so.
+    const auto default_id = db.CreateSession("", std::nullopt, "/p", "build").session_id;
+    db.AppendMessage(default_id, UserMsg("fix the login bug"));
+    CHECK_FALSE(db.IsExplicitlyNamed(default_id));
+    CHECK(db.GetSession(default_id)->name_source == "default");
+
+    // A rename marks it as observer-set. The rename does NOT clear the
+    // explicit flag on a session the user named -- but the rename seam refuses
+    // those before reaching here, so the observable path is default/observer.
+    CHECK(db.UpdateSessionName(default_id, "a better title"));
+    CHECK(db.GetSession(default_id)->name_source == "observer");
+    CHECK_FALSE(db.IsExplicitlyNamed(default_id));
 }
 
 // --- Crash safety ---------------------------------------------------------------------

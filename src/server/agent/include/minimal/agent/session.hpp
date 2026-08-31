@@ -249,6 +249,39 @@ public:
 
     const SessionInfo& info() const { return info_; }
 
+    // The titler path (a SessionObserver plugin, reached through
+    // SessionSupportService::RenameSession): updates the in-memory name and
+    // TryPushes a SessionMetadataEvent so an attached client refreshes its tab
+    // label. The DATABASE write belongs to the caller -- the service does
+    // rename-then-notify, keeping Session free of store concerns it does not
+    // otherwise have. TryPush, never Push: this runs on the titler's detached
+    // thread, which must never block (and only the worker may block on this
+    // queue); a dropped event on a full queue is display-only, the persisted
+    // name is the authoritative record.
+    //
+    // Safe from any thread. This is the ONLY mutation info_ ever takes after
+    // construction, and it synchronizes on mutex_; the internal Notify* sites
+    // snapshot info_ under that same mutex, and info() itself stays a plain
+    // const-ref for the immutable fields (session_id, parent_session_id,
+    // agent_preset, project_root) that are everything external callers read.
+    void SetName(std::string name);
+
+    // The provider this session is currently running, shared (instances are
+    // stateless by contract). The ONLY writer is ApplyPreset on the worker
+    // between turns, and that swap now takes mutex_ too, so a titler thread can
+    // snapshot it safely. Null only in plain test sessions that never had one.
+    std::shared_ptr<llm::LlmProvider> ProviderSnapshot() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return provider_;
+    }
+
+    // The session's transcript read side. Bound at construction and never
+    // mutated, so the shared_ptr copy is safe from any thread. Null when the
+    // session is not SQLite-backed (plain tests).
+    std::shared_ptr<const session::SessionReader> history_reader() const {
+        return history_reader_;
+    }
+
     // --- commands::SessionControl ------------------------------------------
     // Worker-thread only, which is what makes the mutating half lock-free: a
     // command that touches this is not ReadOnly(), so it runs on the worker
@@ -337,6 +370,9 @@ public:
 
 private:
     void WorkerMain();
+    // info_ copied under mutex_ -- the snapshot the Notify* call sites take, so
+    // a concurrent SetName can never race a payload copy.
+    SessionInfo InfoSnapshot() const;
     // nullopt = the wake path: a turn whose user content is the injected
     // messages themselves (see SessionParams::wake_on_injection).
     void RunOneTurn(std::optional<std::string> text);

@@ -100,6 +100,18 @@ const std::vector<Migration>& DefaultMigrationsImpl() {
              "  created_at INTEGER NOT NULL"
              ");",
          }},
+        // Where a session's name came from: 'explicit' (the user named it at
+        // creation), 'default' (the free first-user-text rule), 'observer' (a
+        // plugin -- the LLM titler -- set it later). The rename seam checks
+        // this so a generated title can never clobber a name the user chose;
+        // the in-memory alternative was considered and rejected because the
+        // column also records the fact permanently, at the cost of one ALTER.
+        // Pre-v5 rows backfill '' -- not known to be explicit, which is the
+        // safe reading (see IsExplicitlyNamed).
+        {5,
+         {
+             "ALTER TABLE sessions ADD COLUMN name_source TEXT NOT NULL DEFAULT '';",
+         }},
     }};
     return migrations;
 }
@@ -364,10 +376,13 @@ SessionSummary SessionDatabase::CreateSession(std::string name,
     }
 
     const std::string id = GenerateUlid();
+    // An explicitly named session is recorded as such (see IsExplicitlyNamed);
+    // the auto-naming rule and the rename seam both honor it later.
+    const char* name_source = name.empty() ? "" : "explicit";
     Stmt insert(
         db_,
-        "INSERT INTO sessions (id, parent_session_id, name, project_root, agent_preset,"
-        " created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?);",
+        "INSERT INTO sessions (id, parent_session_id, name, name_source, project_root,"
+        " agent_preset, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?);",
         "failed to create session");
     sqlite3_bind_text(insert.stmt, 1, id.c_str(), -1, SQLITE_TRANSIENT);
     if (parent_session_id) {
@@ -376,16 +391,20 @@ SessionSummary SessionDatabase::CreateSession(std::string name,
         sqlite3_bind_null(insert.stmt, 2);
     }
     sqlite3_bind_text(insert.stmt, 3, name.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(insert.stmt, 4, project_root.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(insert.stmt, 5, agent_preset.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_int64(insert.stmt, 6, now);
+    sqlite3_bind_text(insert.stmt, 4, name_source, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(insert.stmt, 5, project_root.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(insert.stmt, 6, agent_preset.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_int64(insert.stmt, 7, now);
+    sqlite3_bind_int64(insert.stmt, 8, now);
     if (sqlite3_step(insert.stmt) != SQLITE_DONE) {
         ThrowSqliteError(db_, "failed to create session");
     }
 
-    return SessionSummary{std::move(id), std::move(parent_session_id), std::move(name),
-                          std::move(project_root), std::move(agent_preset), now, now, 0};
+    return SessionSummary{std::move(id),          std::move(parent_session_id),
+                          std::move(name),        name_source,
+                          std::move(project_root), std::move(agent_preset),
+                          now,                    now,
+                          0};
 }
 
 std::int64_t SessionDatabase::AppendMessage(const std::string& session_id,
@@ -480,10 +499,13 @@ std::int64_t SessionDatabase::AppendMessage(const std::string& session_id,
         assigned_seq = sqlite3_column_int64(read_seq.stmt, 0);
 
         // Only when the session still has no name: an explicit creation name or
-        // a name an observer plugin set later is never clobbered.
+        // a name an observer plugin set later is never clobbered. The source
+        // is recorded with it (migration v5), so the rename seam can tell a
+        // generated title from a default apart from a user's choice.
         if (!name_candidate.empty()) {
             CachedStmt rename(db_, prepared_,
-                              "UPDATE sessions SET name = ? WHERE id = ? AND name = '';",
+                              "UPDATE sessions SET name = ?, name_source = 'default'"
+                              " WHERE id = ? AND name = '';",
                               "failed to set default session name");
             sqlite3_bind_text(rename.stmt, 1, name_candidate.c_str(), -1, SQLITE_TRANSIENT);
             sqlite3_bind_text(rename.stmt, 2, session_id.c_str(), -1, SQLITE_TRANSIENT);
@@ -505,7 +527,8 @@ std::int64_t SessionDatabase::AppendMessage(const std::string& session_id,
 
 bool SessionDatabase::UpdateSessionName(const std::string& session_id, const std::string& name) {
     std::lock_guard lock(mu_);
-    Stmt update(db_, "UPDATE sessions SET name = ?, updated_at = ? WHERE id = ?;",
+    Stmt update(db_, "UPDATE sessions SET name = ?, name_source = 'observer', updated_at = ?"
+                     " WHERE id = ?;",
                 "failed to rename session");
     sqlite3_bind_text(update.stmt, 1, name.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_int64(update.stmt, 2, NextTimestamp());
@@ -514,6 +537,20 @@ bool SessionDatabase::UpdateSessionName(const std::string& session_id, const std
         ThrowSqliteError(db_, "failed to rename session");
     }
     return sqlite3_changes(db_) == 1;
+}
+
+bool SessionDatabase::IsExplicitlyNamed(const std::string& session_id) const {
+    std::lock_guard lock(mu_);
+    CachedStmt query(db_, prepared_,
+                     "SELECT 1 FROM sessions WHERE id = ? AND name_source = 'explicit';",
+                     "failed to check session name source");
+    sqlite3_bind_text(query.stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
+    const int rc = sqlite3_step(query.stmt);
+    if (rc == SQLITE_ROW) return true;
+    // A lock or I/O failure is not "not explicitly named" -- same ruling as
+    // SessionExists.
+    CheckRowLoopEnd(db_, rc, "failed to check session name source");
+    return false;
 }
 
 bool SessionDatabase::DeleteSession(const std::string& session_id) {
@@ -532,8 +569,8 @@ std::optional<SessionSummary> SessionDatabase::GetSession(const std::string& ses
     // backfilled by migration v2), not a correlated COUNT(*) -- the subquery
     // made every call pay O(messages-of-session) to fill a display field.
     CachedStmt query(db_, prepared_,
-                     "SELECT s.id, s.parent_session_id, s.name, s.project_root, s.agent_preset,"
-                     " s.created_at, s.updated_at, s.message_count"
+                     "SELECT s.id, s.parent_session_id, s.name, s.name_source, s.project_root,"
+                     " s.agent_preset, s.created_at, s.updated_at, s.message_count"
                      " FROM sessions s WHERE s.id = ?;",
                      "failed to load session");
     sqlite3_bind_text(query.stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
@@ -546,11 +583,12 @@ std::optional<SessionSummary> SessionDatabase::GetSession(const std::string& ses
             reinterpret_cast<const char*>(sqlite3_column_text(query.stmt, 1));
     }
     summary.name = reinterpret_cast<const char*>(sqlite3_column_text(query.stmt, 2));
-    summary.project_root = reinterpret_cast<const char*>(sqlite3_column_text(query.stmt, 3));
-    summary.agent_preset = reinterpret_cast<const char*>(sqlite3_column_text(query.stmt, 4));
-    summary.created_at_unix_ms = sqlite3_column_int64(query.stmt, 5);
-    summary.updated_at_unix_ms = sqlite3_column_int64(query.stmt, 6);
-    summary.message_count = sqlite3_column_int(query.stmt, 7);
+    summary.name_source = reinterpret_cast<const char*>(sqlite3_column_text(query.stmt, 3));
+    summary.project_root = reinterpret_cast<const char*>(sqlite3_column_text(query.stmt, 4));
+    summary.agent_preset = reinterpret_cast<const char*>(sqlite3_column_text(query.stmt, 5));
+    summary.created_at_unix_ms = sqlite3_column_int64(query.stmt, 6);
+    summary.updated_at_unix_ms = sqlite3_column_int64(query.stmt, 7);
+    summary.message_count = sqlite3_column_int(query.stmt, 8);
     return summary;
 }
 
@@ -582,8 +620,8 @@ std::vector<SessionSummary> SessionDatabase::ListSessions(const ListSessionsFilt
     // message_count is the maintained column (see GetSession), not a correlated
     // COUNT(*) that would make the page cost O(total messages).
     CachedStmt query(db_, prepared_,
-                     "SELECT s.id, s.parent_session_id, s.name, s.project_root, s.agent_preset,"
-                     " s.created_at, s.updated_at, s.message_count"
+                     "SELECT s.id, s.parent_session_id, s.name, s.name_source, s.project_root,"
+                     " s.agent_preset, s.created_at, s.updated_at, s.message_count"
                      " FROM sessions s"
                      " WHERE (?1 IS NULL OR s.project_root = ?1) AND (?2 OR s.parent_session_id IS NULL)"
                      " AND (?3 IS NULL OR s.updated_at < ?3 OR (s.updated_at = ?3 AND s.id > ?4))"
@@ -620,11 +658,12 @@ std::vector<SessionSummary> SessionDatabase::ListSessions(const ListSessionsFilt
                 reinterpret_cast<const char*>(sqlite3_column_text(query.stmt, 1));
         }
         summary.name = reinterpret_cast<const char*>(sqlite3_column_text(query.stmt, 2));
-        summary.project_root = reinterpret_cast<const char*>(sqlite3_column_text(query.stmt, 3));
-        summary.agent_preset = reinterpret_cast<const char*>(sqlite3_column_text(query.stmt, 4));
-        summary.created_at_unix_ms = sqlite3_column_int64(query.stmt, 5);
-        summary.updated_at_unix_ms = sqlite3_column_int64(query.stmt, 6);
-        summary.message_count = sqlite3_column_int(query.stmt, 7);
+        summary.name_source = reinterpret_cast<const char*>(sqlite3_column_text(query.stmt, 3));
+        summary.project_root = reinterpret_cast<const char*>(sqlite3_column_text(query.stmt, 4));
+        summary.agent_preset = reinterpret_cast<const char*>(sqlite3_column_text(query.stmt, 5));
+        summary.created_at_unix_ms = sqlite3_column_int64(query.stmt, 6);
+        summary.updated_at_unix_ms = sqlite3_column_int64(query.stmt, 7);
+        summary.message_count = sqlite3_column_int(query.stmt, 8);
         out.push_back(std::move(summary));
     }
     CheckRowLoopEnd(db_, rc, "failed to list sessions");

@@ -65,6 +65,7 @@ add_library(minimal_server_core SHARED
     agent/session_observer_registry.cpp
     agent/session.cpp
     agent/session_registry.cpp
+    agent/session_support.cpp
     session/ulid.cpp
     session/message_codec.cpp
     session/session_database.cpp

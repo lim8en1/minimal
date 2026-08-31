@@ -18,13 +18,19 @@
 //
 //   2. UTILITIES a plugin consumes -- included below. A plugin tool must call
 //      path_confinement::confine rather than reimplementing path safety, which
-//      is precisely why these are ABI surface too, just inbound.
+//      is precisely why these are ABI surface too, just inbound. One utility is
+//      reached through ServiceRegistry::Find rather than a link-time symbol:
+//      SessionSupportService, provided by CORE itself under
+//      kSessionSupportServiceName -- the pull seam for plugins that react to
+//      session lifecycle and need the transcript, the session's own provider,
+//      or the rename-and-notify path.
 
 #include "minimal/common/abi_tag.hpp"
 
 // --- Half 2: utilities plugins consume -------------------------------------
 #include "minimal/agent/session_observer.hpp"
 #include "minimal/agent/session_observer_registry.hpp"
+#include "minimal/agent/session_support_service.hpp"
 #include "minimal/commands/command.hpp"
 #include "minimal/commands/command_context.hpp"
 #include "minimal/commands/command_registry.hpp"
