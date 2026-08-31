@@ -1,11 +1,16 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <memory>
 #include <nlohmann/json.hpp>
@@ -50,6 +55,154 @@ std::unique_ptr<McpConnection> OpenStdio(const std::string& mode,
 }
 
 }  // namespace
+
+// A hand-framed HTTP server whose reason to exist is counting ACCEPTED
+// CONNECTIONS -- the witness for connection reuse, which httplib cannot
+// expose. Speaks the same plain-JSON MCP script (initialize, notification,
+// tools/list) with keep-alive semantics: HTTP/1.1, no Connection: close, one
+// response per request, several requests per connection.
+class CountingRawHttpServer {
+public:
+    CountingRawHttpServer() {
+        listener_ = ::socket(AF_INET, SOCK_STREAM, 0);
+        REQUIRE(listener_ >= 0);
+        sockaddr_in address{};
+        address.sin_family = AF_INET;
+        address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        address.sin_port = 0;
+        REQUIRE(::bind(listener_, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0);
+        REQUIRE(::listen(listener_, 4) == 0);
+        socklen_t length = sizeof(address);
+        REQUIRE(::getsockname(listener_, reinterpret_cast<sockaddr*>(&address), &length) == 0);
+        port_ = ntohs(address.sin_port);
+
+        thread_ = std::thread([this] { AcceptLoop(); });
+    }
+
+    ~CountingRawHttpServer() {
+        ::close(listener_);
+        if (thread_.joinable()) thread_.join();
+    }
+
+    std::string url() const { return "http://127.0.0.1:" + std::to_string(port_) + "/mcp"; }
+    int connections() const { return connections_; }
+
+private:
+    static void ReadFull(int fd, std::string& data, std::size_t want) {
+        char buffer[4096];
+        while (data.size() < want) {
+            const ssize_t n = ::read(fd, buffer, sizeof(buffer));
+            if (n <= 0) return;
+            data.append(buffer, static_cast<std::size_t>(n));
+        }
+    }
+
+    // Reads one request (headers + Content-Length body) off the connection.
+    static bool ReadRequest(int fd, std::string& body) {
+        std::string data;
+        char buffer[4096];
+        while (data.find("\r\n\r\n") == std::string::npos) {
+            const ssize_t n = ::read(fd, buffer, sizeof(buffer));
+            if (n <= 0) return false;
+            data.append(buffer, static_cast<std::size_t>(n));
+        }
+        const std::size_t body_start = data.find("\r\n\r\n") + 4;
+        std::size_t content_length = 0;
+        for (std::size_t i = 0; i < body_start;) {
+            const std::size_t eol = data.find("\r\n", i);
+            if (eol == std::string::npos || eol > body_start) break;
+            const std::string line = data.substr(i, eol - i);
+            const std::size_t colon = line.find(':');
+            if (colon != std::string::npos) {
+                std::string name = line.substr(0, colon);
+                for (auto& c : name) c = static_cast<char>(::tolower(c));
+                if (name == "content-length") content_length = std::stoul(line.substr(colon + 1));
+            }
+            i = eol + 2;
+        }
+        ReadFull(fd, data, body_start + content_length);
+        if (data.size() < body_start + content_length) return false;
+        body = data.substr(body_start, content_length);
+        return true;
+    }
+
+    static void WriteAll(int fd, const std::string& text) {
+        std::size_t sent = 0;
+        while (sent < text.size()) {
+            const ssize_t n = ::write(fd, text.data() + sent, text.size() - sent);
+            if (n <= 0) return;
+            sent += static_cast<std::size_t>(n);
+        }
+    }
+
+    std::string ResponseFor(const std::string& body) const {
+        const nlohmann::json request = nlohmann::json::parse(body, nullptr, false);
+        const std::string method = request.value("method", "");
+        // The initialized notification carries no id and expects no body --
+        // a bare 202 satisfies Notify().
+        if (!request.contains("id")) {
+            return "HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\n\r\n";
+        }
+        nlohmann::json result = nlohmann::json::object();
+        if (method == "initialize") {
+            result = {{"protocolVersion", "2025-03-26"},
+                      {"capabilities", nlohmann::json::object()},
+                      {"serverInfo", {{"name", "raw"}, {"version", "0.0.1"}}}};
+        } else if (method == "tools/list") {
+            result = {{"tools", nlohmann::json::array({nlohmann::json{
+                                    {"name", "echo"}, {"description", "Echo"},
+                                    {"inputSchema", nlohmann::json{{"type", "object"}}}}})}};
+        }
+        nlohmann::json message = {{"jsonrpc", "2.0"}, {"id", request.at("id")},
+                                  {"result", result}};
+        const std::string payload = message.dump();
+        return "HTTP/1.1 200 OK\r\n"
+               "Content-Type: application/json\r\n"
+               "mcp-session-id: raw-session-1\r\n"
+               "Content-Length: " +
+               std::to_string(payload.size()) + "\r\n\r\n" + payload;
+    }
+
+    void AcceptLoop() {
+        for (;;) {
+            const int fd = ::accept(listener_, nullptr, nullptr);
+            if (fd < 0) return;
+            ++connections_;
+            // Serve several requests over this one connection: keep-alive.
+            for (int served = 0; served < 8; ++served) {
+                std::string body;
+                if (!ReadRequest(fd, body)) break;
+                WriteAll(fd, ResponseFor(body));
+            }
+            ::close(fd);
+        }
+    }
+
+    int listener_ = -1;
+    int port_ = 0;
+    std::thread thread_;
+    std::atomic<int> connections_{0};
+};
+
+TEST_CASE("McpConnection http: one persistent connection rides the whole protocol", "[mcp_connection]") {
+    // Open (initialize + notification) and tools/list are three separate
+    // requests. The connection's HttpSession reuses its CURL handle, so they
+    // must share ONE TCP connection -- the keep-alive win that per-call
+    // handles (HttpClient) never had.
+    CountingRawHttpServer server;
+    McpEndpoint endpoint;
+    endpoint.transport = McpTransport::Http;
+    endpoint.url = server.url();
+
+    McpConnection::Failure error;
+    auto connection = McpConnection::Open(endpoint, {std::chrono::seconds(5), std::chrono::seconds(5)},
+                                          "test", "0.0.1", error);
+    REQUIRE(connection != nullptr);
+    const auto tools = connection->ListTools(nullptr, error);
+    REQUIRE(tools.has_value());
+    CHECK((*tools)[0].name == "echo");
+    CHECK(server.connections() == 1);
+}
 
 TEST_CASE("McpConnection stdio: initialize, discovery, ping, tool call", "[mcp_connection]") {
     auto connection = OpenStdio("normal");

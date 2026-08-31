@@ -332,8 +332,7 @@ private:
         auto parser = std::make_shared<llm::SseParser>();
 
         try {
-            llm::HttpClient http;
-            http.StreamPost(
+            session_.StreamPost(
                 BuildRequest(body),
                 [status, is_sse, session_id](int code,
                                              const std::vector<llm::HttpHeader>& headers) {
@@ -428,8 +427,7 @@ private:
                                                 {"params", nlohmann::json::object()}}
                                     .dump();
         try {
-            llm::HttpClient http;
-            const llm::HttpResponse response = http.Post(BuildRequest(body));
+            const llm::HttpResponse response = session_.Post(BuildRequest(body));
             if (response.status < 200 || response.status >= 300) {
                 error = "MCP server returned HTTP " + std::to_string(response.status) +
                         " for " + method;
@@ -442,6 +440,11 @@ private:
         }
     }
 
+    // One persistent CURL handle for the connection's whole life. All calls
+    // run on the single worker thread -- the session's not-thread-safe
+    // contract holds by construction, and requests to one host reuse the
+    // TCP+TLS connection instead of re-handshaking per call.
+    llm::HttpSession session_;
     McpEndpoint endpoint_;
     std::chrono::milliseconds request_timeout_;
     std::int64_t max_list_pages_;
