@@ -94,6 +94,25 @@ bool OpenAiStreamReassembler::FeedFrame(std::string_view data, const llm::Stream
     return true;
 }
 
+void OpenAiStreamReassembler::CloseOpenBlocks(const llm::StreamEventSink& sink) {
+    // A stream that ended without a finish_reason -- an idle timeout, a dropped
+    // connection, a sink that cancelled -- left every block it had announced
+    // permanently open: the client saw MessageStart and TextDelta/ToolUseStart
+    // and never the matching ContentBlockStop. That is the same failure the
+    // tool-lifecycle rule already names ("a client that showed a tool as started
+    // must always see it finish"), applied to content blocks.
+    //
+    // Idempotent against the finish_reason path via finished_, so a normal
+    // stream closes its blocks exactly once.
+    if (finished_) return;
+    finished_ = true;
+    for (std::size_t i = 0; i < blocks_.size(); ++i) {
+        if (blocks_[i].kind == Block::Kind::Text || blocks_[i].started) {
+            if (sink && !sink(llm::ContentBlockStopEvent{static_cast<int>(i)})) return;
+        }
+    }
+}
+
 llm::ChatResponse OpenAiStreamReassembler::Finalize() const {
     llm::ChatResponse response;
     response.id = id_;
@@ -105,6 +124,14 @@ llm::ChatResponse OpenAiStreamReassembler::Finalize() const {
         if (block.kind == Block::Kind::Text) {
             response.content.push_back(llm::TextBlock{block.text});
         } else {
+            // A tool call whose id or name never arrived cannot be run: it
+            // reached ToolExecutor as `unknown tool: ` -- an error attributed to
+            // a call the model believes it made, which is more confusing than
+            // the call simply not being there. Dropping it leaves no tool_use in
+            // history, so nothing is orphaned either; the loop already handles a
+            // ToolUse stop reason with no blocks. Reachable whenever a stream is
+            // cut mid-tool-call, which is exactly when Finalize runs.
+            if (block.id.empty() || block.name.empty()) continue;
             llm::ToolUseBlock tool_use;
             tool_use.id = block.id;
             tool_use.name = block.name;

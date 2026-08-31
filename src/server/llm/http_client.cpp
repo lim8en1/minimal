@@ -196,6 +196,16 @@ HttpResponse PerformRequest(const HttpRequest& request, Mode mode, const HttpHea
     CURLcode code = curl_easy_perform(handle);
     if (code != CURLE_OK) ThrowForCurlCode(code, state);
 
+    // A RESPONSE WITH NO BODY STILL HAS HEADERS. MaybeFireHeadersReady is
+    // reachable only from WriteCallback -- the first body byte -- so a 4xx/5xx
+    // with an empty body (or Content-Length: 0) never fired it at all: the
+    // provider's is_error_status stayed false, its response_status stayed 0, and
+    // StreamComplete fell through to Finalize() and returned an EMPTY ASSISTANT
+    // MESSAGE instead of throwing a classified LlmError. A turn that silently
+    // produced nothing, for an error the server had already been told about.
+    // Idempotent via headers_ready_fired, so the normal path is unaffected.
+    MaybeFireHeadersReady(state);
+
     long status = 0;
     curl_easy_getinfo(handle, CURLINFO_RESPONSE_CODE, &status);
     state.response.status = static_cast<int>(status);

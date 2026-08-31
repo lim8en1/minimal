@@ -1004,3 +1004,27 @@ every one of them reads as done.
     point in the tree was already wrapped -- observers, commands, and (after §12.2) tool execution.
     A throw is now the `RegistrationThrew` load outcome, reported like any other. Tested against a
     real `.so` that really throws, because a mock cannot demonstrate a process dying.
+
+12. **The streaming provider had three ways to turn an error into a silent empty turn.**
+
+    *A non-2xx with an empty body read as success.* `MaybeFireHeadersReady` is reachable only from
+    `WriteCallback` -- the first body byte -- so a 4xx/5xx with no body never fired it at all:
+    `is_error_status` stayed false, `response_status` stayed 0, and `StreamComplete` fell through to
+    `Finalize()` and returned an EMPTY ASSISTANT MESSAGE for an error the server had already
+    reported. Fired after `curl_easy_perform` too, idempotently.
+
+    *Non-`OpenAiParseError` exceptions were caught and dropped.* `FeedFrame` reaches raw nlohmann
+    accessors in several places -- the content delta, the tool-call fields, `ParseUsage` -- and only
+    `json::parse` was wrapped. A proxy sending `usage: null` threw a `type_error` that the
+    stash-and-rethrow lambda caught and then discarded, because its only handler was for
+    `OpenAiParseError`. The NON-streaming path has caught `json::exception` all along; the streaming
+    path had drifted. Now classified, with `LlmError` rethrown unchanged so it keeps its category.
+
+    *Blocks that opened never closed on a truncated stream.* `ContentBlockStop` was emitted only
+    inside the `finish_reason` branch, so an idle timeout, a dropped connection or a cancelled sink
+    left the client holding a block it had been told about and would never be told ended -- the same
+    rule the tool lifecycle already states for the running-tools panel. `CloseOpenBlocks` runs on
+    both exits, idempotently. And a tool call whose id/name never arrived is DROPPED rather than
+    finalized with empty fields, which used to reach the executor as `unknown tool: ` -- an error
+    attributed to a call the model believes it made. Nothing is orphaned by dropping it: there is no
+    tool_use in history to answer, and the loop already handles a ToolUse stop reason with no blocks.
