@@ -363,6 +363,10 @@ void Session::Cancel() {
     // generation as its base and runs uncancelled. One mechanism, no
     // clear-timing race in either direction.
     cancel_gen_.fetch_add(1, std::memory_order_acq_rel);
+    // Fire the turn's token: a tool parked on its cv (MCP call) wakes now,
+    // not on its next poll slice. Everything a live token's waiters do from
+    // here is the same path a deadline takes -- a cancelled tool call.
+    cancel_source_.CancelAll();
     // Wakes a worker parked on a permission prompt. Without this, cancelling
     // during an Ask would set a flag nobody is in a position to read.
     //
@@ -383,8 +387,10 @@ void Session::Terminate() {
     }
 
     // NOT a cancel-generation bump: Terminate ends the SESSION, and IsCancelled
-    // already folds terminated_ in. Shutting pending requests is what wakes a
-    // worker parked on a gate mid-teardown.
+    // already folds terminated_ in. It DOES fire the cancel tokens, though --
+    // a tool blocked on a token cv must wake to unwind (the same reason
+    // Shutting pending requests wakes a worker parked on a gate mid-teardown).
+    cancel_source_.CancelAll();
     pending_.Shutdown();
     turn_cv_.notify_all();
 
@@ -434,6 +440,13 @@ void Session::WorkerMain() {
             // member comment for why the generation exists at all.
             turn_cancel_base_.store(cancel_gen_.load(std::memory_order_acquire),
                                     std::memory_order_relaxed);
+            // The turn's cancellation token: the loop hands it to every
+            // ToolContext, so a tool blocked on a condition variable (MCP)
+            // wakes the moment Cancel or Terminate fires. Minted AFTER the
+            // generation snapshot, exactly like the base above: a token from
+            // the previous turn stays fired for its own stragglers, and this
+            // turn starts clean.
+            loop_->SetCancelToken(cancel_source_.Mint());
             item = std::move(work_.front());
             work_.pop_front();
             running_turn_ = true;

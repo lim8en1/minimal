@@ -17,51 +17,70 @@ namespace minimal::mcp {
 
 namespace {
 
-constexpr auto kWaitSlice = std::chrono::milliseconds(25);
 constexpr const char* kProtocolVersion = "2025-03-26";
 constexpr const char* kClientName = "minimal";
 constexpr const char* kClientVersion = "0.1.0";
 
 // Completion slot for one call. Shared between caller and worker: the caller
 // may give up on deadline or cancellation while the job still runs, so the
-// slot must outlive the caller's interest.
+// slot must outlive the caller's interest. Waiters do NOT wait on the slot --
+// they wait on the call's cancellation token (see WaitSlot), whose cv the
+// completion path notifies too.
 template <typename T>
 struct Slot {
-    std::mutex mu;
-    std::condition_variable cv;
+    std::mutex mu;  // guards value/error
     std::optional<T> value;
     std::string error;
-    bool done = false;
+    std::atomic<bool> done{false};  // set LAST, release: publish after value/error
 
     void Complete(std::optional<T> v, std::string e) {
         {
             std::lock_guard<std::mutex> lock(mu);
             value = std::move(v);
             error = std::move(e);
-            done = true;
         }
-        cv.notify_all();
+        done.store(true, std::memory_order_release);
     }
 };
 
-// Waits until the slot completes, the deadline passes, or cancellation fires.
-// True when the slot completed; false after setting `error` -- the underlying
-// job keeps running in the background either way. `is_cancelled` may be null.
+// A null token means "no cancellation path": the wait still needs a cv to be
+// woken by the completion notify, so it shares this process-wide dummy. It is
+// never cancelled, and a stray wake from another null-token completion is
+// harmless -- waiters re-check their own slot.
+tools::CancelToken& TokenFor(const tools::CancelTokenPtr& cancel) {
+    static tools::CancelToken never_cancelled;
+    return cancel != nullptr ? *cancel : never_cancelled;
+}
+
+// Waits until the slot completes, the token is cancelled, or the deadline
+// passes. Zero polling: the completion path notifies the token's cv, so the
+// waiter wakes on exactly the events that can change its outcome. True when
+// the slot completed; false after setting `error` -- the underlying job keeps
+// running in the background either way.
+//
+// Lock order: the token mutex is held across the predicate loop and the wait,
+// then RELEASED before slot.mu is taken -- the worker's completion path takes
+// them in the opposite order (slot.mu, then token.mu in Notify), and a
+// waiter that held both would close a cycle.
 template <typename T>
-bool WaitSlot(Slot<T>& slot, std::chrono::steady_clock::time_point deadline,
-              const std::function<bool()>& is_cancelled, std::string& error) {
-    std::unique_lock<std::mutex> lock(slot.mu);
-    while (!slot.done) {
-        if (is_cancelled && is_cancelled()) {
-            error = "cancelled";
-            return false;
+bool WaitSlot(Slot<T>& slot, const tools::CancelTokenPtr& cancel,
+              std::chrono::steady_clock::time_point deadline, std::string& error) {
+    tools::CancelToken& token = TokenFor(cancel);
+    {
+        std::unique_lock<std::mutex> lock(token.Mu());
+        while (!slot.done.load(std::memory_order_acquire)) {
+            if (token.IsCancelled()) {
+                error = "cancelled";
+                return false;
+            }
+            if (std::chrono::steady_clock::now() >= deadline) {
+                error = "request timed out";
+                return false;
+            }
+            token.Cv().wait_until(lock, deadline);
         }
-        if (std::chrono::steady_clock::now() >= deadline) {
-            error = "request timed out";
-            return false;
-        }
-        slot.cv.wait_for(lock, kWaitSlice);
     }
+    std::lock_guard<std::mutex> slot_lock(slot.mu);
     if (slot.error.empty()) return true;
     error = slot.error;
     return false;
@@ -527,10 +546,15 @@ std::unique_ptr<McpConnection> McpConnection::Open(const McpEndpoint& endpoint,
 
     // The initialize handshake runs on the worker under the connect deadline.
     // Bounded even when the subprocess dies during startup, which wedges
-    // cpp-mcp's own initialize indefinitely (verified by probe).
+    // cpp-mcp's own initialize indefinitely (verified by probe). No token:
+    // the handshake has no cancellation path, only the deadline.
     auto slot = std::make_shared<Slot<bool>>();
-    connection->worker_->Push([transport, slot] { transport->Initialize(*slot); });
-    if (!WaitSlot(*slot, std::chrono::steady_clock::now() + limits.connect, nullptr,
+    auto token = std::make_shared<tools::CancelToken>();
+    connection->worker_->Push([transport, slot, token] {
+        transport->Initialize(*slot);
+        TokenFor(token).Notify();
+    });
+    if (!WaitSlot(*slot, token, std::chrono::steady_clock::now() + limits.connect,
                   error.message)) {
         if (error.message.empty()) error.message = "MCP initialize timed out";
         connection->Teardown();
@@ -539,41 +563,54 @@ std::unique_ptr<McpConnection> McpConnection::Open(const McpEndpoint& endpoint,
     return connection;
 }
 
-bool McpConnection::Ping(const std::function<bool()>& is_cancelled, Failure& error) {
+bool McpConnection::Ping(const tools::CancelTokenPtr& cancel, Failure& error) {
     auto slot = std::make_shared<Slot<bool>>();
-    worker_->Push([transport = transport_, slot] { transport->Ping(*slot); });
-    const bool completed = WaitSlot(*slot, std::chrono::steady_clock::now() + request_timeout_,
-                                    is_cancelled, error.message);
-    return completed && slot->value.value_or(false);
+    worker_->Push([transport = transport_, slot, cancel] {
+        transport->Ping(*slot);
+        TokenFor(cancel).Notify();
+    });
+    const bool completed =
+        WaitSlot(*slot, cancel, std::chrono::steady_clock::now() + request_timeout_, error.message);
+    if (!completed) return false;
+    std::lock_guard<std::mutex> lock(slot->mu);
+    return slot->value.value_or(false);
 }
 
 std::optional<std::vector<McpConnection::ToolListing>> McpConnection::ListTools(
-        const std::function<bool()>& is_cancelled, Failure& error) {
+        const tools::CancelTokenPtr& cancel, Failure& error) {
     auto slot = std::make_shared<Slot<std::vector<ToolListing>>>();
-    worker_->Push([transport = transport_, slot] { transport->ListTools(*slot); });
-    if (!WaitSlot(*slot, std::chrono::steady_clock::now() + request_timeout_, is_cancelled,
+    worker_->Push([transport = transport_, slot, cancel] {
+        transport->ListTools(*slot);
+        TokenFor(cancel).Notify();
+    });
+    if (!WaitSlot(*slot, cancel, std::chrono::steady_clock::now() + request_timeout_,
                   error.message)) {
         return std::nullopt;
     }
+    std::lock_guard<std::mutex> lock(slot->mu);
     return std::move(*slot->value);
 }
 
 McpCallOutcome McpConnection::CallTool(std::string_view tool_name, const nlohmann::json& arguments,
-                                       const std::function<bool()>& is_cancelled) {
+                                       const tools::CancelTokenPtr& cancel) {
     McpCallOutcome outcome;
     auto slot = std::make_shared<Slot<nlohmann::json>>();
-    worker_->Push([transport = transport_, slot, name = std::string(tool_name), arguments] {
+    worker_->Push([transport = transport_, slot, cancel, name = std::string(tool_name),
+                   arguments] {
         transport->CallTool(name, arguments, *slot);
+        TokenFor(cancel).Notify();
     });
     std::string error;
-    if (!WaitSlot(*slot, std::chrono::steady_clock::now() + request_timeout_, is_cancelled,
-                  error)) {
+    if (!WaitSlot(*slot, cancel, std::chrono::steady_clock::now() + request_timeout_, error)) {
         outcome.error = std::move(error);
         if (outcome.error.empty()) outcome.error = "MCP call failed";
         return outcome;
     }
+    {
+        std::lock_guard<std::mutex> lock(slot->mu);
+        outcome.result = std::move(*slot->value);
+    }
     outcome.ok = true;
-    outcome.result = std::move(*slot->value);
     return outcome;
 }
 

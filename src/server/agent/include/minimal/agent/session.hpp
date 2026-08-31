@@ -339,6 +339,11 @@ private:
     // Written by the worker when it pops a turn; read by IsCancelled on the
     // worker's own call stack (loop, sink, tools, compactor).
     std::atomic<std::uint64_t> turn_cancel_base_{0};
+    // The event-driven face of the same mechanism: the worker mints a token
+    // per turn (recorded in the agent loop, handed to every ToolContext), and
+    // Cancel/Terminate fire every live one, so a tool blocked on a condition
+    // variable wakes immediately instead of polling. See tools/cancel_token.hpp.
+    tools::CancelSource cancel_source_;
     std::atomic<bool> terminated_{false};
     // A subagent's life is one seeded turn; once its completion hook has fired,
     // a stray client-submitted turn would fire it a second time, so SubmitTurn

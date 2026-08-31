@@ -246,8 +246,10 @@ TEST_CASE("McpConnection stdio: slow tool succeeds under a generous timeout", "[
 
 TEST_CASE("McpConnection stdio: cancellation returns promptly with an error", "[mcp_connection]") {
     auto connection = OpenStdio("normal", {std::chrono::seconds(10), std::chrono::seconds(10)});
+    auto cancelled = std::make_shared<minimal::tools::CancelToken>();
+    cancelled->Cancel();
     const auto run = RunInBackground([&] {
-        return connection->CallTool("slow", nlohmann::json{{"ms", 10000}}, [] { return true; });
+        return connection->CallTool("slow", nlohmann::json{{"ms", 10000}}, cancelled);
     });
     CHECK(run.WaitFor(std::chrono::seconds(2)));  // promptly: not after the 10 s tool
     if (run.Ready()) {
@@ -255,6 +257,26 @@ TEST_CASE("McpConnection stdio: cancellation returns promptly with an error", "[
         CHECK_FALSE(outcome.ok);
         CHECK(outcome.error == "cancelled");
     }
+}
+
+TEST_CASE("McpConnection stdio: cancelling mid-call wakes the blocked waiter", "[mcp_connection]") {
+    // The event-driven contract: a tool blocked on the token's cv wakes the
+    // moment the token fires -- not on a poll slice, not after the deadline.
+    auto connection = OpenStdio("hang", {std::chrono::seconds(10), std::chrono::seconds(30)});
+    auto token = std::make_shared<minimal::tools::CancelToken>();
+    const auto run = RunInBackground([&] {
+        return connection->CallTool("hang", nlohmann::json::object(), token);
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));  // let the call park
+    token->Cancel();
+    CHECK(run.WaitFor(std::chrono::seconds(2)));  // promptly: not after 30 s
+    if (run.Ready()) {
+        const McpCallOutcome outcome = run.Get();
+        CHECK_FALSE(outcome.ok);
+        CHECK(outcome.error == "cancelled");
+    }
+    // The wedged stdio child would outlive everything without teardown's
+    // kill; the destructor handles it.
 }
 
 TEST_CASE("McpConnection stdio: hanging tool degrades to a bounded error", "[mcp_connection]") {

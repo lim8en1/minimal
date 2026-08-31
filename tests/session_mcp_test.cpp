@@ -63,8 +63,7 @@ struct Fixture {
         store = owned_store.get();
 
         manager = std::make_unique<mcp::McpClientManager>(
-            minimal::config::LoadMcpsConfig(mcp_config_path), registry,
-            mcp::McpLimits{std::chrono::seconds(3), std::chrono::seconds(5)},
+            minimal::config::LoadMcpsConfig(mcp_config_path), registry, limits,
             minimal::common::DefaultLogger());
 
         agent::SessionParams params;
@@ -93,6 +92,9 @@ struct Fixture {
 
     std::string mcp_config_path;
     agent::AgentPreset preset;
+    // Overridable per test: the cancel-wake test raises the request deadline
+    // so the deadline cannot masquerade as the cancellation wake.
+    mcp::McpLimits limits{std::chrono::seconds(3), std::chrono::seconds(5)};
     agent::SessionObserverRegistry observers{minimal::common::DefaultLogger()};
     tools::ToolRegistry registry;
     std::unique_ptr<mcp::McpClientManager> manager;
@@ -199,6 +201,25 @@ TEST_CASE("de-scoping a server on /agent removes its tools without killing the p
         INFO("tool: " << def.name);
         CHECK(def.name.rfind("mcp__fake__", 0) != 0);
     }
+}
+
+TEST_CASE("CancelTurn wakes a blocked MCP tool call", "[session_mcp]") {
+    // The full event-driven cancellation chain: Session::Cancel fires the
+    // turn's token, the token's cv wakes the parked McpConnection waiter, the
+    // tool call degrades to a cancelled result, and the turn ends -- all well
+    // inside the 30 s request deadline, which cannot be the wake-up source.
+    Fixture fixture(nlohmann::json::array({StdioEntry("fake", "hang")}), {"fake"});
+    fixture.limits = mcp::McpLimits{std::chrono::seconds(3), std::chrono::seconds(30)};
+    fixture.Script(minimal::testing::ToolUseResponse("tu1", "mcp__fake__hang"));
+    fixture.Start();
+    REQUIRE(fixture.session->SubmitTurn("go"));
+
+    // Reach the parked call: spawn (~0.5 s) + initialize + tools/list.
+    std::this_thread::sleep_for(std::chrono::seconds(2));
+    fixture.session->Cancel();
+    // Without the token wake this waits out the 30 s deadline; the idle
+    // arrival here is the proof the wake worked.
+    REQUIRE(fixture.session->WaitForIdleForTesting(std::chrono::seconds(6)));
 }
 
 TEST_CASE("a subagent whose preset requires a dead server does not start", "[session_mcp]") {

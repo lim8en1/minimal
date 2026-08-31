@@ -51,12 +51,15 @@ struct McpLimits {
 // deadline parameter, so a caller-visible timeout or a CancelTurn could not be
 // honoured without keeping the blocking call off the caller's thread; and one
 // thread serialises calls to the shared server, which sidesteps cpp-mcp's
-// unverified concurrency. Callers wait in 25 ms slices on their own state
-// object, so a deadline or cancellation returns promptly even though the
-// underlying request may still complete in the background (accepted
-// asymmetry -- the same class as bash's killpg window). A worker wedged in a
-// blocking call is never joined: it holds its state by shared_ptr and exits
-// when the call finally returns, so destruction cannot hang on a dead server.
+// unverified concurrency. Callers wait on their cancellation token's
+// condition variable (tools::CancelToken): completion and cancellation both
+// notify it, so a waiter wakes on exactly the events that can change its
+// outcome -- no polling. The underlying request may still complete in the
+// background (accepted asymmetry -- the same class as bash's killpg window). A
+// worker wedged in a blocking call is never joined: it holds its state by
+// shared_ptr and exits when the call finally returns (the stdio child is
+// killed on teardown, which unblocks it), so destruction cannot hang on a
+// dead server.
 class McpConnection : public McpInvoker {
 public:
     struct ToolListing {
@@ -90,18 +93,19 @@ public:
 
     // Liveness probe for session start and /agent switches. Value, not
     // exception: a dead server is an expected state, not a crash.
-    bool Ping(const std::function<bool()>& is_cancelled, Failure& error);
+    bool Ping(const tools::CancelTokenPtr& cancel, Failure& error);
 
     // tools/list. nullopt with `error` set on failure.
-    std::optional<std::vector<ToolListing>> ListTools(const std::function<bool()>& is_cancelled,
+    std::optional<std::vector<ToolListing>> ListTools(const tools::CancelTokenPtr& cancel,
                                                       Failure& error);
 
     // McpInvoker -- the path McpTool::execute takes. Always returns a value;
     // timeouts, dead servers, protocol errors and cancellation all become
     // outcome.error. Never throws, never outlives its deadline by design (the
-    // background request itself may).
+    // background request itself may). A null token means no cancellation
+    // path: deadline-only, which is also what tests that never cancel want.
     McpCallOutcome CallTool(std::string_view tool_name, const nlohmann::json& arguments,
-                            const std::function<bool()>& is_cancelled) override;
+                            const tools::CancelTokenPtr& cancel) override;
 
 private:
     struct WorkerState;

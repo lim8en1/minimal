@@ -26,7 +26,7 @@ public:
     explicit StubInvoker(McpCallOutcome outcome) : outcome_(std::move(outcome)) {}
 
     McpCallOutcome CallTool(std::string_view, const nlohmann::json&,
-                            const std::function<bool()>&) override {
+                            const minimal::tools::CancelTokenPtr&) override {
         ++calls;
         return outcome_;
     }

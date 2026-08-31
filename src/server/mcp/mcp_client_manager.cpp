@@ -33,7 +33,7 @@ public:
     explicit HandleInvoker(std::weak_ptr<ServerHandle> handle) : handle_(std::move(handle)) {}
 
     McpCallOutcome CallTool(std::string_view tool_name, const nlohmann::json& arguments,
-                            const std::function<bool()>& is_cancelled) override {
+                            const tools::CancelTokenPtr& cancel) override {
         std::shared_ptr<ServerHandle> handle = handle_.lock();
         if (handle == nullptr) {
             return {false, "MCP server is no longer configured", nlohmann::json()};
@@ -47,7 +47,7 @@ public:
                         nlohmann::json()};
             }
         }
-        return connection->CallTool(tool_name, arguments, is_cancelled);
+        return connection->CallTool(tool_name, arguments, cancel);
     }
 
 private:
@@ -203,7 +203,9 @@ bool McpClientManager::EnsureAlive(const std::string& server_name, std::string& 
     ServerHandle& handle = *it->second;
 
     if (handle.alive && handle.connection) {
-        // The liveness check the architecture asks for at session start.
+        // The liveness check the architecture asks for at session start. A
+        // null token: the ping has no cancellation path -- it is bounded by
+        // the request deadline.
         McpConnection::Failure ping_error;
         if (handle.connection->Ping(nullptr, ping_error)) return true;
         logger_.warn("MCP server '{}' liveness check failed ({}); restarting", server_name,

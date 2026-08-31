@@ -82,7 +82,7 @@ tools::ToolResult McpTool::execute(const nlohmann::json& input, tools::ToolConte
     }
 
     const auto started = std::chrono::steady_clock::now();
-    const McpCallOutcome outcome = invoker->CallTool(definition_.name, input, ctx.is_cancelled);
+    const McpCallOutcome outcome = invoker->CallTool(definition_.name, input, ctx.cancel_token);
     const auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - started);
 

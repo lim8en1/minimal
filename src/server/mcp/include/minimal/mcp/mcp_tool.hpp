@@ -20,11 +20,12 @@ class McpInvoker {
 public:
     virtual ~McpInvoker() = default;
 
-    // Blocks until the call finishes, fails, times out, or `is_cancelled`
-    // fires. The connection layer owns deadlines; this interface carries none.
+    // Blocks until the call finishes, fails, times out, or `cancel` fires.
+    // The connection layer owns deadlines; this interface carries none. A
+    // null token is legal: deadline-only, no cancellation path.
     virtual struct McpCallOutcome CallTool(std::string_view tool_name,
                                             const nlohmann::json& arguments,
-                                            const std::function<bool()>& is_cancelled) = 0;
+                                            const tools::CancelTokenPtr& cancel) = 0;
 };
 
 // Value-level outcome: a failed MCP call is a tool error, never an exception

@@ -401,6 +401,7 @@ TurnResult AgentLoop::RunTurn(llm::Message seed_message) {
             ctx.project_root = session_.project_root;
             ctx.allowed_skills = preset_.allowed_skills;
             ctx.is_cancelled = is_cancelled_;
+            ctx.cancel_token = cancel_token_;
             if (session_.tool_output_sink) {
                 const std::string tool_use_id = use->id;
                 ctx.emit_output = [this, tool_use_id](std::string_view chunk) {
