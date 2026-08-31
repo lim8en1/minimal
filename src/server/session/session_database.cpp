@@ -7,6 +7,7 @@
 #include <stdexcept>
 #include <string>
 #include <system_error>
+#include <unordered_map>
 #include <utility>
 #include <variant>
 
@@ -48,7 +49,18 @@ const std::vector<Migration>& DefaultMigrationsImpl() {
              "  token_count INTEGER NOT NULL DEFAULT 0,"
              "  created_at INTEGER NOT NULL,"
              "  UNIQUE (session_id, seq)"
-             ");",
+              ");",
+          }},
+        // message_count as a maintained column. ListSessions/GetSession used to
+        // pay a correlated COUNT(*) per session row, which is O(total messages)
+        // for the page -- exactly the growth pattern the picker's keyset cursor
+        // exists to avoid. The count is bumped in the append transaction, so it
+        // is exact, and the migration backfills from the rows that exist.
+        {2,
+         {
+             "ALTER TABLE sessions ADD COLUMN message_count INTEGER NOT NULL DEFAULT 0;",
+             "UPDATE sessions SET message_count ="
+             " (SELECT COUNT(*) FROM messages WHERE messages.session_id = sessions.id);",
          }},
     }};
     return migrations;
@@ -195,6 +207,37 @@ struct Stmt {
     Stmt& operator=(const Stmt&) = delete;
 };
 
+// Reuses a prepared statement across calls. sqlite3_prepare is cheap next to
+// the work most statements do, but AppendMessage runs four of them per message
+// on the path every turn pays, so the hot ones live in SessionDatabase's cache.
+// Every public method holds mu_, so the cache needs no lock of its own. Reset
+// (never finalize) on scope exit: the statement object stays owned by the
+// cache, which finalizes it when the database closes.
+class CachedStmt {
+public:
+    CachedStmt(sqlite3* db, std::unordered_map<std::string, sqlite3_stmt*>& cache,
+               const char* sql, const std::string& context) {
+        const std::string key(sql);
+        auto it = cache.find(key);
+        if (it == cache.end()) {
+            sqlite3_stmt* fresh = nullptr;
+            if (sqlite3_prepare_v2(db, sql, -1, &fresh, nullptr) != SQLITE_OK) {
+                ThrowSqliteError(db, context);
+            }
+            it = cache.emplace(key, fresh).first;
+        } else {
+            sqlite3_reset(it->second);
+            sqlite3_clear_bindings(it->second);
+        }
+        stmt = it->second;
+    }
+    ~CachedStmt() { sqlite3_reset(stmt); }
+    CachedStmt(const CachedStmt&) = delete;
+    CachedStmt& operator=(const CachedStmt&) = delete;
+
+    sqlite3_stmt* stmt = nullptr;
+};
+
 }  // namespace
 
 const std::vector<Migration>& DefaultMigrations() { return DefaultMigrationsImpl(); }
@@ -229,6 +272,11 @@ SessionDatabase::SessionDatabase(const std::filesystem::path& db_path, const Ope
 
 SessionDatabase::~SessionDatabase() {
     if (db_) {
+        // Cached statements must die before their connection.
+        for (auto& [sql, stmt] : prepared_) {
+            sqlite3_finalize(stmt);
+        }
+        prepared_.clear();
         // A clean close of the last connection checkpoints the WAL and removes
         // the -wal/-shm side files, leaving one self-contained database file.
         sqlite3_close(db_);
@@ -307,8 +355,13 @@ std::int64_t SessionDatabase::AppendMessage(const std::string& session_id,
     try {
         // Validate the session and touch last-activity first: appending to a
         // session that does not exist is a wiring bug and must be loud, not a
-        // silently dropped row.
-        Stmt touch(db_, "UPDATE sessions SET updated_at = ? WHERE id = ?;", "failed to touch session");
+        // silently dropped row. The message_count bump rides the same
+        // statement -- and the same transaction, so the maintained count the
+        // picker reads is exact even across a crash mid-append.
+        CachedStmt touch(db_, prepared_,
+                         "UPDATE sessions SET updated_at = ?, message_count = message_count + 1"
+                         " WHERE id = ?;",
+                         "failed to touch session");
         sqlite3_bind_int64(touch.stmt, 1, now);
         sqlite3_bind_text(touch.stmt, 2, session_id.c_str(), -1, SQLITE_TRANSIENT);
         if (sqlite3_step(touch.stmt) != SQLITE_DONE || sqlite3_changes(db_) == 0) {
@@ -317,8 +370,8 @@ std::int64_t SessionDatabase::AppendMessage(const std::string& session_id,
 
         // seq is the next per-session value; the UNIQUE(session_id, seq)
         // constraint is the backstop if this arithmetic is ever wrong.
-        Stmt insert(
-            db_,
+        CachedStmt insert(
+            db_, prepared_,
             "INSERT INTO messages (session_id, seq, role, content_json, token_count, created_at)"
             " VALUES (?, COALESCE((SELECT MAX(seq) FROM messages WHERE session_id = ?), -1) + 1,"
             " ?, ?, ?, ?);",
@@ -335,7 +388,8 @@ std::int64_t SessionDatabase::AppendMessage(const std::string& session_id,
 
         // Still inside the transaction, so this reads the row just written and
         // cannot see another writer's -- and there is only one writer anyway.
-        Stmt read_seq(db_, "SELECT seq FROM messages WHERE id = ?;", "failed to read back seq");
+        CachedStmt read_seq(db_, prepared_, "SELECT seq FROM messages WHERE id = ?;",
+                            "failed to read back seq");
         sqlite3_bind_int64(read_seq.stmt, 1, sqlite3_last_insert_rowid(db_));
         if (sqlite3_step(read_seq.stmt) != SQLITE_ROW) {
             ThrowSqliteError(db_, "failed to read back seq");
@@ -345,8 +399,9 @@ std::int64_t SessionDatabase::AppendMessage(const std::string& session_id,
         // Only when the session still has no name: an explicit creation name or
         // a name an observer plugin set later is never clobbered.
         if (!name_candidate.empty()) {
-            Stmt rename(db_, "UPDATE sessions SET name = ? WHERE id = ? AND name = '';",
-                        "failed to set default session name");
+            CachedStmt rename(db_, prepared_,
+                              "UPDATE sessions SET name = ? WHERE id = ? AND name = '';",
+                              "failed to set default session name");
             sqlite3_bind_text(rename.stmt, 1, name_candidate.c_str(), -1, SQLITE_TRANSIENT);
             sqlite3_bind_text(rename.stmt, 2, session_id.c_str(), -1, SQLITE_TRANSIENT);
             if (sqlite3_step(rename.stmt) != SQLITE_DONE) {
@@ -390,13 +445,14 @@ bool SessionDatabase::DeleteSession(const std::string& session_id) {
 
 std::optional<SessionSummary> SessionDatabase::GetSession(const std::string& session_id) const {
     std::lock_guard lock(mu_);
-    Stmt query(
-        db_,
-        "SELECT s.id, s.parent_session_id, s.name, s.project_root, s.agent_preset,"
-        " s.created_at, s.updated_at,"
-        " (SELECT COUNT(*) FROM messages m WHERE m.session_id = s.id)"
-        " FROM sessions s WHERE s.id = ?;",
-        "failed to load session");
+    // message_count is a maintained column (bumped in the append transaction,
+    // backfilled by migration v2), not a correlated COUNT(*) -- the subquery
+    // made every call pay O(messages-of-session) to fill a display field.
+    CachedStmt query(db_, prepared_,
+                     "SELECT s.id, s.parent_session_id, s.name, s.project_root, s.agent_preset,"
+                     " s.created_at, s.updated_at, s.message_count"
+                     " FROM sessions s WHERE s.id = ?;",
+                     "failed to load session");
     sqlite3_bind_text(query.stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
     if (sqlite3_step(query.stmt) != SQLITE_ROW) return std::nullopt;
 
@@ -417,10 +473,11 @@ std::optional<SessionSummary> SessionDatabase::GetSession(const std::string& ses
 
 bool SessionDatabase::SessionExists(const std::string& session_id) const {
     std::lock_guard lock(mu_);
-    // Deliberately NOT GetSession(): that carries a COUNT(*) over every message
-    // in the session purely to fill message_count, which a presence check throws
-    // away. Paging a long transcript called this once per page.
-    Stmt query(db_, "SELECT 1 FROM sessions WHERE id = ?;", "failed to check session");
+    // Deliberately NOT GetSession(): that carries the session's message_count,
+    // which a presence check throws away. Paging a long transcript called this
+    // once per page.
+    CachedStmt query(db_, prepared_, "SELECT 1 FROM sessions WHERE id = ?;",
+                     "failed to check session");
     sqlite3_bind_text(query.stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
     return sqlite3_step(query.stmt) == SQLITE_ROW;
 }
@@ -432,17 +489,17 @@ std::vector<SessionSummary> SessionDatabase::ListSessions(const ListSessionsFilt
     // either skip or repeat rows at a page boundary. The row comparison
     // (updated_at, id) < (?, ?) in lexicographic form is what makes the page
     // boundary exact, and it matches ORDER BY updated_at DESC, id ASC.
-    Stmt query(
-        db_,
-        "SELECT s.id, s.parent_session_id, s.name, s.project_root, s.agent_preset,"
-        " s.created_at, s.updated_at,"
-        " (SELECT COUNT(*) FROM messages m WHERE m.session_id = s.id)"
-        " FROM sessions s"
-        " WHERE (?1 IS NULL OR s.project_root = ?1) AND (?2 OR s.parent_session_id IS NULL)"
-        " AND (?3 IS NULL OR s.updated_at < ?3 OR (s.updated_at = ?3 AND s.id > ?4))"
-        " ORDER BY s.updated_at DESC, s.id ASC"
-        " LIMIT ?5;",
-        "failed to list sessions");
+    // message_count is the maintained column (see GetSession), not a correlated
+    // COUNT(*) that would make the page cost O(total messages).
+    CachedStmt query(db_, prepared_,
+                     "SELECT s.id, s.parent_session_id, s.name, s.project_root, s.agent_preset,"
+                     " s.created_at, s.updated_at, s.message_count"
+                     " FROM sessions s"
+                     " WHERE (?1 IS NULL OR s.project_root = ?1) AND (?2 OR s.parent_session_id IS NULL)"
+                     " AND (?3 IS NULL OR s.updated_at < ?3 OR (s.updated_at = ?3 AND s.id > ?4))"
+                     " ORDER BY s.updated_at DESC, s.id ASC"
+                     " LIMIT ?5;",
+                     "failed to list sessions");
     if (filter.project_root) {
         sqlite3_bind_text(query.stmt, 1, filter.project_root->c_str(), -1, SQLITE_TRANSIENT);
     } else {
@@ -492,13 +549,19 @@ MessagePage SessionDatabase::GetMessagesPage(const std::string& session_id,
     // Keyset pagination: the predicate is an index seek, so a page of a 1M-token
     // history costs the same as a page of a short one. Fetch one probe row past
     // the page to compute has_more without a second COUNT query.
-    // `?2 IS NULL` is the cursor test, not a magic value: seq starts at 0, so
-    // any in-range sentinel would collide with a real row. NULL is outside the
-    // value space by construction.
-    Stmt query(
-        db_,
+    //
+    // The cursor sentinel is INT64_MAX, not a `?2 IS NULL` branch. The branch
+    // looks cleaner but defeats the planner: with `OR` binding a NULL, SQLite
+    // plans this as equality on session_id and a plain index walk from
+    // MAX(seq) -- every page request re-walked the whole range above the
+    // cursor, so paging an n-message transcript was O(n) per page and O(n^2)
+    // total. COALESCE folds the "no cursor" case into the same comparison, the
+    // planner constrains on seq, and any real cursor is an exact seek. The
+    // sentinel cannot collide with a row: seq values here are row indices.
+    CachedStmt query(
+        db_, prepared_,
         "SELECT seq, content_json, token_count, created_at FROM messages"
-        " WHERE session_id = ?1 AND (?2 IS NULL OR seq < ?2)"
+        " WHERE session_id = ?1 AND seq < COALESCE(?2, 9223372036854775807)"
         " ORDER BY seq DESC LIMIT ?3;",
         "failed to page messages");
     sqlite3_bind_text(query.stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
@@ -531,26 +594,45 @@ MessagePage SessionDatabase::GetMessagesPage(const std::string& session_id,
 }
 
 std::vector<StoredMessage> SessionDatabase::LoadMessages(const std::string& session_id) const {
-    std::lock_guard lock(mu_);
     // Ascending, no limit: the caller (resume) needs the whole working history
     // in order. Same strict decode as the paging path -- an undecodable row is
     // corruption or a newer binary's work, and must surface as an error rather
     // than as a silently truncated history that would then be re-persisted.
-    Stmt query(
-        db_,
-        "SELECT seq, content_json, token_count, created_at FROM messages"
-        " WHERE session_id = ?1 ORDER BY seq ASC;",
-        "failed to load messages");
-    sqlite3_bind_text(query.stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
+    struct RawRow {
+        std::int64_t seq;
+        std::string json;
+        int token_count;
+        std::int64_t created_at;
+    };
+    std::vector<RawRow> rows;
+    {
+        std::lock_guard lock(mu_);
+        CachedStmt query(db_, prepared_,
+                         "SELECT seq, content_json, token_count, created_at FROM messages"
+                         " WHERE session_id = ?1 ORDER BY seq ASC;",
+                         "failed to load messages");
+        sqlite3_bind_text(query.stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
+        while (sqlite3_step(query.stmt) == SQLITE_ROW) {
+            RawRow row;
+            row.seq = sqlite3_column_int64(query.stmt, 0);
+            row.json = reinterpret_cast<const char*>(sqlite3_column_text(query.stmt, 1));
+            row.token_count = sqlite3_column_int(query.stmt, 2);
+            row.created_at = sqlite3_column_int64(query.stmt, 3);
+            rows.push_back(std::move(row));
+        }
+    }
 
+    // Decode OUTSIDE the lock. The JSON parse is the expensive part of a large
+    // resume, and holding the one database mutex through it would stall every
+    // other session's appends and reads for the whole load.
     std::vector<StoredMessage> out;
-    while (sqlite3_step(query.stmt) == SQLITE_ROW) {
+    out.reserve(rows.size());
+    for (auto& row : rows) {
         StoredMessage stored;
-        stored.seq = sqlite3_column_int64(query.stmt, 0);
-        const char* json_text = reinterpret_cast<const char*>(sqlite3_column_text(query.stmt, 1));
-        stored.message = JsonToMessage(nlohmann::json::parse(json_text));
-        stored.token_count = sqlite3_column_int(query.stmt, 2);
-        stored.created_at_unix_ms = sqlite3_column_int64(query.stmt, 3);
+        stored.seq = row.seq;
+        stored.message = JsonToMessage(nlohmann::json::parse(row.json));
+        stored.token_count = row.token_count;
+        stored.created_at_unix_ms = row.created_at;
         out.push_back(std::move(stored));
     }
     return out;
@@ -558,8 +640,8 @@ std::vector<StoredMessage> SessionDatabase::LoadMessages(const std::string& sess
 
 std::int64_t SessionDatabase::LastMessageSeq(const std::string& session_id) const {
     std::lock_guard lock(mu_);
-    Stmt query(db_, "SELECT MAX(seq) FROM messages WHERE session_id = ?;",
-               "failed to read last message seq");
+    CachedStmt query(db_, prepared_, "SELECT MAX(seq) FROM messages WHERE session_id = ?;",
+                     "failed to read last message seq");
     sqlite3_bind_text(query.stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
     if (sqlite3_step(query.stmt) != SQLITE_ROW || sqlite3_column_type(query.stmt, 0) == SQLITE_NULL) {
         // MAX() over an empty set is NULL, not 0 -- and 0 is a real seq.

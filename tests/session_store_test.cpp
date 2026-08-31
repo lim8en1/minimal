@@ -277,7 +277,8 @@ TEST_CASE("absolute session_db_path is used as-is", "[session][path]") {
 
 // --- Migrations ------------------------------------------------------------------
 
-TEST_CASE("a fresh database opens at schema version 1 in WAL mode", "[session][migrations]") {
+TEST_CASE("a fresh database opens at the current schema version in WAL mode",
+          "[session][migrations]") {
     TempDir dir;
     const auto path = dir.path() / "fresh.db";
 
@@ -286,7 +287,8 @@ TEST_CASE("a fresh database opens at schema version 1 in WAL mode", "[session][m
         REQUIRE(db.ListSessions({}).empty());
     }
 
-    CHECK(RawScalar(path, "PRAGMA user_version;") == "1");
+    CHECK(RawScalar(path, "PRAGMA user_version;") ==
+          std::to_string(SessionDatabase::kSchemaVersion));
     CHECK(RawScalar(path, "PRAGMA journal_mode;") == "wal");
     const auto tables = RawTableNames(path);
     CHECK(tables.count("sessions") == 1);
@@ -331,7 +333,141 @@ TEST_CASE("a failing migration rolls back completely", "[session][migrations]") 
     // schema from scratch.
     SessionDatabase db(path);
     REQUIRE(db.ListSessions({}).empty());
-    CHECK(RawScalar(path, "PRAGMA user_version;") == "1");
+    CHECK(RawScalar(path, "PRAGMA user_version;") ==
+          std::to_string(SessionDatabase::kSchemaVersion));
+}
+
+TEST_CASE("migration to the message_count column backfills from existing rows",
+          "[session][migrations]") {
+    // A v1 database holds rows the counter column knows nothing about. The
+    // backfill runs inside the migration transaction; without it the picker
+    // would show 0 messages for every pre-v2 session. The rows are inserted
+    // raw: the binary's append SQL writes the v2 column, so it cannot run
+    // against a v1 schema -- that is what the migration is for.
+    TempDir dir;
+    const auto path = dir.path() / "upgrade.db";
+
+    // Schema at v1 ONLY, hand-crafted. (OpenOptions' migration list is a
+    // fault-injection seam, not a version simulator: ApplyMigrations stamps the
+    // target version, so an injected v1 list still yields user_version = 2.)
+    {
+        sqlite3* raw = RawOpen(path);
+        REQUIRE(sqlite3_exec(raw,
+                             "CREATE TABLE sessions ("
+                             "  id TEXT PRIMARY KEY,"
+                             "  parent_session_id TEXT REFERENCES sessions(id) ON DELETE CASCADE,"
+                             "  name TEXT NOT NULL DEFAULT '',"
+                             "  project_root TEXT NOT NULL,"
+                             "  agent_preset TEXT NOT NULL,"
+                             "  created_at INTEGER NOT NULL,"
+                             "  updated_at INTEGER NOT NULL"
+                             ");",
+                             nullptr, nullptr, nullptr) == SQLITE_OK);
+        REQUIRE(sqlite3_exec(raw,
+                             "CREATE TABLE messages ("
+                             "  id INTEGER PRIMARY KEY,"
+                             "  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,"
+                             "  seq INTEGER NOT NULL,"
+                             "  role TEXT NOT NULL,"
+                             "  content_json TEXT NOT NULL,"
+                             "  token_count INTEGER NOT NULL DEFAULT 0,"
+                             "  created_at INTEGER NOT NULL,"
+                             "  UNIQUE (session_id, seq)"
+                             ");",
+                             nullptr, nullptr, nullptr) == SQLITE_OK);
+        REQUIRE(sqlite3_exec(raw, "PRAGMA user_version = 1;", nullptr, nullptr, nullptr) ==
+                SQLITE_OK);
+        sqlite3_close(raw);
+    }
+
+    const std::string session_id = GenerateUlid();
+    {
+        sqlite3* raw = RawOpen(path);
+        const std::int64_t now = 1700000000000;
+        char sql[512];
+        std::snprintf(sql, sizeof(sql),
+                      "INSERT INTO sessions (id, name, project_root, agent_preset, created_at,"
+                      " updated_at) VALUES ('%s', 's', '/p', 'build', %lld, %lld);",
+                      session_id.c_str(), static_cast<long long>(now),
+                      static_cast<long long>(now));
+        REQUIRE(sqlite3_exec(raw, sql, nullptr, nullptr, nullptr) == SQLITE_OK);
+        for (int i = 0; i < 3; ++i) {
+            const std::string json = MessageToJson(UserMsg("m" + std::to_string(i))).dump();
+            std::snprintf(sql, sizeof(sql),
+                          "INSERT INTO messages (session_id, seq, role, content_json, token_count,"
+                          " created_at) VALUES ('%s', %d, 'user', '%s', 0, %lld);",
+                          session_id.c_str(), i, json.c_str(), static_cast<long long>(now));
+            REQUIRE(sqlite3_exec(raw, sql, nullptr, nullptr, nullptr) == SQLITE_OK);
+        }
+        sqlite3_close(raw);
+    }
+    REQUIRE(RawScalar(path, "PRAGMA user_version;") == "1");
+
+    // Reopen at the current version: the migration applies and backfills.
+    SessionDatabase db(path);
+    REQUIRE(RawScalar(path, "PRAGMA user_version;") ==
+            std::to_string(SessionDatabase::kSchemaVersion));
+    const auto sessions = db.ListSessions({});
+    REQUIRE(sessions.size() == 1);
+    CHECK(sessions[0].message_count == 3);
+}
+
+TEST_CASE("message_count stays exact across appends and restarts", "[session][migrations]") {
+    TempDir dir;
+    const auto path = dir.path() / "s.db";
+    {
+        SessionDatabase db(path);
+        const auto id = db.CreateSession("s", std::nullopt, "/p", "build").session_id;
+        for (int i = 0; i < 7; ++i) db.AppendMessage(id, UserMsg("m"), 0);
+        REQUIRE(db.GetSession(id).has_value());
+        CHECK(db.GetSession(id)->message_count == 7);
+    }
+    // Reopened, the count is read back from the column, not recomputed -- so a
+    // drifted column would show up as a wrong number here rather than silently
+    // healing. It must not drift: the bump lives in the append transaction.
+    SessionDatabase db(path);
+    const auto sessions = db.ListSessions({});
+    REQUIRE(sessions.size() == 1);
+    CHECK(sessions[0].message_count == 7);
+}
+
+TEST_CASE("paging constrains on seq -- the planner seeks, it does not walk",
+          "[session][paging][invariant]") {
+    // THE INVARIANT behind "a page costs the same on a long transcript": the
+    // production predicate binds COALESCE(?, INT64_MAX) so the planner applies
+    // the seq range constraint. The previous `?2 IS NULL OR seq < ?2` shape
+    // planned as equality on session_id plus a plain index walk from MAX(seq)
+    // -- O(n) per page, O(n^2) to page a whole transcript. This is EXPLAIN'd
+    // against the real schema with a bound cursor; the reverted shape drops the
+    // constraint under the same EXPLAIN, which is what made the fix necessary.
+    TempDir dir;
+    SessionDatabase db(dir.path() / "s.db");
+    const auto id = db.CreateSession("s", std::nullopt, "/p", "build").session_id;
+    for (int i = 0; i < 10; ++i) db.AppendMessage(id, UserMsg("m"), 0);
+    (void)id;
+
+    sqlite3* raw = RawOpen(dir.path() / "s.db");
+    sqlite3_stmt* stmt = nullptr;
+    REQUIRE(sqlite3_prepare_v2(
+                raw,
+                "EXPLAIN QUERY PLAN SELECT seq, content_json FROM messages"
+                " WHERE session_id = ?1 AND seq < COALESCE(?2, 9223372036854775807)"
+                " ORDER BY seq DESC LIMIT 10;",
+                -1, &stmt, nullptr) == SQLITE_OK);
+    sqlite3_bind_text(stmt, 1, "s", -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(stmt, 2, 5);
+
+    std::string plan;
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        plan += reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
+        plan += "; ";
+    }
+    sqlite3_finalize(stmt);
+    sqlite3_close(raw);
+
+    // The plan must constrain on seq -- a cursor page must be a seek, not a
+    // walk from MAX(seq) past every newer row.
+    CHECK(plan.find("seq<?") != std::string::npos);
 }
 
 // --- Write path -------------------------------------------------------------------

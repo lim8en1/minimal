@@ -5,12 +5,14 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "minimal/llm/message.hpp"
 #include "minimal/session/stored_message.hpp"
 
-struct sqlite3;  // opaque handle; <sqlite3.h> stays private to the .cpp
+struct sqlite3;      // opaque handle; <sqlite3.h> stays private to the .cpp
+struct sqlite3_stmt;
 
 namespace minimal::session {
 
@@ -70,7 +72,7 @@ struct OpenOptions {
 // therefore leaves an exact prefix of the transcript -- never a torn row.
 class SessionDatabase {
 public:
-    static constexpr int kSchemaVersion = 1;
+    static constexpr int kSchemaVersion = 2;
 
     // Opens (creating if needed) and migrates. Throws std::runtime_error on any
     // failure, including a database whose user_version is newer than this
@@ -149,6 +151,11 @@ private:
     mutable std::mutex mu_;
     std::filesystem::path path_;
     std::int64_t last_ts_ = 0;  // guarded by mu_
+    // Cached prepared statements for the hot paths (appends, paging). Every
+    // public method holds mu_, so the cache needs no lock of its own, and it is
+    // mutable because the read paths (GetMessagesPage, GetSession) prepare on
+    // first use too. Finalized in the destructor, before the connection closes.
+    mutable std::unordered_map<std::string, sqlite3_stmt*> prepared_;  // guarded by mu_
 };
 
 // settings.json session_db_path -> concrete file. Empty means the default,

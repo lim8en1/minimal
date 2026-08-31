@@ -1,5 +1,9 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
 #include <fstream>
 #include <sstream>
 
@@ -113,4 +117,33 @@ TEST_CASE("writes content containing NUL bytes verbatim", "[atomic_write]") {
     REQUIRE(outcome.ok);
     CHECK(outcome.bytes_written == 3);
     CHECK(ReadBack(path) == content);
+}
+
+TEST_CASE("editing an existing file preserves its mode", "[atomic_write][invariant]") {
+    // The rename installs a NEW inode, so the target's permissions survive only
+    // if the temp file carries them. The previous unconditional 0644 silently
+    // stripped executable bits and widened 0600 private files on their next
+    // edit -- a file the user could no longer run, now readable by the group.
+    TempDir dir;
+    const auto path = dir.path() / "script.sh";
+    { std::ofstream(path) << "#!/bin/sh\necho hi\n"; }
+    REQUIRE(::chmod(path.c_str(), 0700) == 0);
+
+    REQUIRE(tools::write_file(path, "#!/bin/sh\necho bye\n").ok);
+
+    struct stat st {};
+    REQUIRE(::stat(path.c_str(), &st) == 0);
+    CHECK((st.st_mode & 07777) == 0700);
+}
+
+TEST_CASE("a new file lands with ordinary 0644 permissions, not mkstemp's 0600",
+          "[atomic_write]") {
+    TempDir dir;
+    const auto path = dir.path() / "new.txt";
+
+    REQUIRE(tools::write_file(path, "content").ok);
+
+    struct stat st {};
+    REQUIRE(::stat(path.c_str(), &st) == 0);
+    CHECK((st.st_mode & 07777) == 0644);
 }

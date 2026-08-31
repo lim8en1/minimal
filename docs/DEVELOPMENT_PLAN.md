@@ -2,7 +2,7 @@
 
 Companion to `ARCHITECTURE.md`, which remains the single source of truth for *design*. This document covers only *sequencing*: what is built, what blocks what, and what "done" means for each remaining piece. Every milestone cites the `ARCHITECTURE.md` section that specifies it; where this plan and that document disagree, that document wins and this one is stale.
 
-**Status: Milestones A, B, C, D, F and H are complete, and a post-merge review of A+B+H has been actioned (§8). Only E (the TUI) and G (MCP) remain. Clean build, zero warnings.**
+**Status: Milestones A, B, C, D, F and H are complete, and a post-merge review of A+B+H has been actioned (§8). Only E (the TUI) and G (MCP) remain. Clean build, zero warnings.** J (permission advisor) is designed (`docs/EXTENSIBILITY.md` §3) and scheduled (§4 J) but not started.
 
 `minimal -p` holds real conversations against a local model using `read`, `bash`, and `skill`; a permission prompt round-trips over the wire in both directions; a session grant silences the second prompt; the server exits when the last client detaches. Transcripts persist to SQLite, survive the server process, and are **resumable**: `CreateSession` with a `session_id` reopens a stored session, loads its transcript as the loop's working history without re-appending it, and the next turn continues the conversation (`minimal -p --resume <id> PROMPT`). **Subagents work** (§5 D): a model can spawn blocking and non-blocking children over the `spawn_subagent` tool, permission inheritance is enforced as ceilings, and the headless client honours its attach obligation over a real socket. `cmake --install` produces a config dir the server actually starts against (§8), and the startup sanity check reports every problem with it at once (§4 F).
 
@@ -96,6 +96,7 @@ Test depth was inverted relative to integration risk: every well-tested layer wa
 - ~~**F. Startup sanity check**~~ — **done.** Linter-style `RunAll()` in `src/server/config/sanity_check.{hpp,cpp}`, wired as stage 3 in `main.cpp`; `mcps_config` parse-only loader landed; `NameRegistry` wired through `ResolveToolNames` + `ToolRegistry::ApplyAliases`; `CreateSession` validates the per-session `project_root` (§4 F).
 - ~~**H. Production compactor**~~ — **done.** `compact_messages` replaces `Session`'s no-op stub, and the bundled prompt is delivered (§4 H).
 - ~~**I. `SessionObserver` registry**~~ — **done**, landed with A2. `minimal_plugin_register_session_observer` is live in the plugin ABI and `tools-bash` implements it.
+- **J. Permission advisor** — independent of E and G; designed in `docs/EXTENSIBILITY.md` §3, specified below (§4 J).
 
 **Strictly dependent on A:** C, D, E, G, and every RPC beyond `CreateSession`/`OpenSession`. **A is now done, so all of them were unblocked; D is now done too.**
 
@@ -352,6 +353,31 @@ All four invariant proofs were run per §6: suppressing the seeded load, the rep
 **Test cases**
 - [x] Ending a session erases exactly that session's bash state and no other's.
 - [x] A throwing observer does not take down session teardown.
+
+### J. Permission advisor
+
+> Specified by `docs/EXTENSIBILITY.md` §3. Independent of E and G — the permission substrate it composes with is built and tested (A3's wire checker, the executor's mode resolution, D's ceilings).
+
+A plugin answers `Ask`-gated tool calls automatically and abstains to the wire checker — the human — when it has no answer. The substrate (mode lattice, precedence chains, out-of-workdir fold, subagent ceilings, run modes, grant ownership) is untouched; the **decision source for `Ask`** becomes pluggable. Composition is an advisor *above* the wire checker, never a replacement of it: abstain and throw both fall through to the human.
+
+**What.** Checker injection in `Session` (`SessionParams` carries `std::unique_ptr<tools::PermissionChecker>`; `WirePermissionChecker` is the default and stops being a by-value member — `session.hpp:276` is the only structural change), `PermissionAdvisorRegistry` + `minimal_plugin_register_permission_advisor` in the plugin ABI, an `AdvisedPermissionChecker` decorator (advise → abstain/throw → wire), `permissions.json` `"advisor": "<plugin>"` with `"advisor_inherit"` for subagents (default **off**), and a sanity-check warning for an advisor name that resolves to nothing.
+
+**Acceptance criteria**
+- [ ] An advisor's Allow runs the tool; its Deny produces the same error `ToolResultBlock` a human deny does; its abstain round-trips a real permission prompt over the wire.
+- [ ] An advisor never sees — let alone approves — a tool the substrate resolved to `AlwaysDeny`, including via the `AllowOnly` run mode (`Ask` short-circuits before the advisor is consulted).
+- [ ] Subagent ceilings hold with an advisor active in the parent; a child defaults to **no** advisor, and `advisor_inherit: true` still cannot exceed the parent ceilings.
+- [ ] Grants returned by an advisor are filtered against the disclosure exactly as a human's are — the existing double filter (`tool_executor.cpp` + `proto_convert.cpp`) must hold unchanged.
+- [ ] A wedged advisor does not outlive cancellation (deadline-harnessed, `tests/support/deadline.hpp`).
+- [ ] A throwing advisor degrades to the wire prompt, never a lost turn.
+
+**Test cases**
+- [ ] Unit: advisor allow / deny / abstain / throw — abstain and throw both fall through to the wire checker.
+- [ ] Unit: `AllowOnly` + advisor → the tool is denied before the advisor runs (assert it is never consulted).
+- [ ] Unit: grant filter — an advisor returning an undisclosed key leaves `session_grants_` untouched.
+- [ ] Unit: cancellation mid-`Advise` → the call returns (detached-thread deadline harness; a joined future would hang the suite).
+- [ ] Integration: subagent spawned from an advisor-governed parent — child has no advisor by default; with `advisor_inherit` the child's advisor sees only requests that passed the parent ceilings.
+- [ ] E2E over a real socket: a scripted advisor plugin allows one tool and abstains on another; the prompt reaches the client, the answer returns, the turn completes with `TurnCompletedEvent`.
+- [ ] **Invariant tests:** removing the abstain fall-through (advisor abstain → Deny) fails the abstain test; removing the grant filter fails the undisclosed-key test; making `checker_` concrete again fails any test that injects a fake.
 
 ---
 

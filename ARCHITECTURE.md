@@ -388,7 +388,7 @@ That cwd/env map lives **inside the `tools-bash` plugin**, keyed by session id �
 
 ## Permission model — `src/server/tools/`
 
-Core, and never plugin-replaceable: it is the substrate everything calls into, not a strategy with alternatives.
+Core, and never plugin-replaceable in its **substrate**: the mode lattice, precedence chains, run modes, subagent ceilings, and grant ownership are what everything calls into, not a strategy with alternatives. The one pluggable seam is the **decision source for `Ask`** — who answers when the substrate has resolved a mode to `Ask` and no grant satisfies it. A plugin may register a `PermissionAdvisor` that answers automatically and abstains to the human; the substrate itself is not exposed. The line and the design are specified in `docs/EXTENSIBILITY.md` §3.
 
 ```cpp
 enum class PermissionDecision { Allow, Deny };
@@ -604,6 +604,8 @@ The ABI header has **two halves**, and both are frozen surface:
 
 - **Extension points** plugins *implement*: `Tool`, `Command`, provider factory, `SessionObserver`, `MentionResolver`, `AuthProvider`.
 - **Utilities** plugins *consume*: `path_confinement`, `file_access`, `atomic_write`, `HttpClient`, `Logger`, `SessionReader` (read-only history access), the frontmatter parser.
+
+The surface above is verified against the tree, and the designed next points — cross-plugin services, per-plugin config, MCP lifecycle observers, the permission advisor — are catalogued with suggested architectures in `docs/EXTENSIBILITY.md`.
 
 ### `SessionObserver` — observe and react
 

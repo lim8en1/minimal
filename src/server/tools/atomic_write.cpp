@@ -1,6 +1,7 @@
 #include "minimal/tools/atomic_write.hpp"
 
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <cerrno>
@@ -72,6 +73,10 @@ WriteOutcome write_file(const std::filesystem::path& confined_abs_path, std::str
         outcome.error = "cannot create temp file next to target: " + Errno();
         return outcome;
     }
+    // Close-on-exec: the fd carries the file's new content, and a bash command
+    // forked from a concurrent session's worker would otherwise inherit it.
+    // Part of the fd-hygiene discipline; the bash pipes set theirs too.
+    ::fcntl(fd, F_SETFD, FD_CLOEXEC);
     ScopedTempFile temp(std::filesystem::path(temp_path.data()), fd);
 
     std::size_t written = 0;
@@ -85,20 +90,40 @@ WriteOutcome write_file(const std::filesystem::path& confined_abs_path, std::str
         written += static_cast<std::size_t>(n);
     }
 
-    // Durability before visibility: fsync the contents, then rename. Renaming a
-    // file whose data is still only in the page cache would make it visible
-    // before it is persistent.
+    // Mode for the inode the rename installs. The rename swaps the temp inode
+    // in wholesale, so an existing file's permissions live or die with what the
+    // temp file carries: the previous unconditional 0644 stripped executable
+    // bits and widened 0600 private files on their next edit. An existing
+    // target keeps its own mode; a new file gets the usual 0644.
+    if (!outcome.created) {
+        struct stat st {};
+        if (::stat(confined_abs_path.c_str(), &st) != 0) {
+            outcome.error = "cannot stat target to preserve its mode: " + Errno();
+            return outcome;
+        }
+        if (::fchmod(fd, st.st_mode & 07777) != 0) {
+            outcome.error = "cannot preserve file mode: " + Errno();
+            return outcome;
+        }
+    } else {
+        // mkstemp creates 0600; match what a normal file would get instead.
+        std::filesystem::permissions(temp.path(),
+                                     std::filesystem::perms::owner_read |
+                                         std::filesystem::perms::owner_write |
+                                         std::filesystem::perms::group_read |
+                                         std::filesystem::perms::others_read,
+                                     std::filesystem::perm_options::replace, ec);
+    }
+
+    // Durability before visibility: fsync the contents (with the mode already
+    // set, so both persist together), then rename. Renaming a file whose data
+    // is still only in the page cache would make it visible before it is
+    // persistent.
     if (::fsync(fd) != 0) {
         outcome.error = "fsync failed: " + Errno();
         return outcome;
     }
     temp.close_fd();
-
-    // mkstemp creates 0600; match what a normal file would get instead.
-    std::filesystem::permissions(temp.path(),
-                                 std::filesystem::perms::owner_read | std::filesystem::perms::owner_write |
-                                     std::filesystem::perms::group_read | std::filesystem::perms::others_read,
-                                 std::filesystem::perm_options::replace, ec);
 
     std::filesystem::rename(temp.path(), confined_abs_path, ec);
     if (ec) {
@@ -106,6 +131,15 @@ WriteOutcome write_file(const std::filesystem::path& confined_abs_path, std::str
         return outcome;
     }
     temp.set_committed();
+
+    // The rename is only durable once the DIRECTORY entry naming the new file
+    // is. Best-effort: some filesystems do not support directory fsync, and the
+    // write itself is already safe at that point.
+    const int dir_fd = ::open(parent.empty() ? "." : parent.c_str(), O_RDONLY | O_DIRECTORY);
+    if (dir_fd >= 0) {
+        (void)::fsync(dir_fd);
+        (void)::close(dir_fd);
+    }
 
     outcome.ok = true;
     outcome.bytes_written = written;
