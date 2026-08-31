@@ -34,7 +34,7 @@ bool IsBlank(std::string_view text) {
 
 }  // namespace
 
-std::int64_t estimate_tokens(const std::vector<llm::Message>& messages) {
+std::int64_t estimate_tokens(std::span<const llm::Message> messages) {
     std::int64_t bytes = 0;
     for (const auto& message : messages) {
         for (const auto& block : message.content) {
@@ -57,7 +57,7 @@ std::int64_t estimate_tokens(const std::vector<llm::Message>& messages) {
 }
 
 std::optional<CompactionResult> compact_messages(
-    const std::vector<llm::Message>& messages_to_compact, llm::LlmProvider& provider,
+    std::span<const llm::Message> messages_to_compact, llm::LlmProvider& provider,
     const CompactionRequest& params) {
     const auto& logger = common::DefaultLogger();
 

@@ -19,7 +19,7 @@ public:
     llm::ChatResponse StreamComplete(const llm::ChatRequest& request, const llm::StreamEventSink& sink) override;
 
 private:
-    llm::HttpRequest BuildHttpRequest(const nlohmann::json& body, bool streaming) const;
+    llm::HttpRequest BuildHttpRequest(std::string body, bool streaming) const;
 
     llm::ProviderConfig config_;
     llm::HttpClient http_;  // stateless -- see HttpClient's own contract

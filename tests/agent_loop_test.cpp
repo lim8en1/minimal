@@ -392,7 +392,7 @@ TEST_CASE("compaction fires past the threshold and never touches the store",
     h.provider.PushResponse(TextResponse("three"));
 
     int compactions = 0;
-    auto compactor = [&compactions](const std::vector<llm::Message>&, llm::LlmProvider&,
+    auto compactor = [&compactions](std::span<const llm::Message>, llm::LlmProvider&,
                                     const agent::CompactionRequest&) {
         ++compactions;
         return agent::CompactionResult{UserText("[summary]"), 0};
@@ -418,7 +418,7 @@ TEST_CASE("auto_compact off means no compaction regardless of occupancy",
     h.provider.PushResponse(TextResponse("two"));
 
     int compactions = 0;
-    auto compactor = [&compactions](const std::vector<llm::Message>&, llm::LlmProvider&,
+    auto compactor = [&compactions](std::span<const llm::Message>, llm::LlmProvider&,
                                     const agent::CompactionRequest&) {
         ++compactions;
         return agent::CompactionResult{UserText("[summary]"), 0};
@@ -444,7 +444,7 @@ TEST_CASE("window-relative triggers resolve against the preset's context window"
         h.provider.PushResponse(TextResponse("two"));
 
         int compactions = 0;
-        auto compactor = [&compactions](const std::vector<llm::Message>&, llm::LlmProvider&,
+        auto compactor = [&compactions](std::span<const llm::Message>, llm::LlmProvider&,
                                         const agent::CompactionRequest&) {
             ++compactions;
             return agent::CompactionResult{UserText("[summary]"), 0};
@@ -486,7 +486,7 @@ TEST_CASE("a window-relative trigger with no window never compacts",
     h.provider.PushResponse(TextResponse("two"));
 
     int compactions = 0;
-    auto compactor = [&compactions](const std::vector<llm::Message>&, llm::LlmProvider&,
+    auto compactor = [&compactions](std::span<const llm::Message>, llm::LlmProvider&,
                                     const agent::CompactionRequest&) {
         ++compactions;
         return agent::CompactionResult{UserText("[summary]"), 0};
@@ -504,7 +504,7 @@ TEST_CASE("a window-relative trigger with no window never compacts",
     armed.provider.PushResponse(TextResponse("one"));
     armed.provider.PushResponse(TextResponse("two"));
     int armed_compactions = 0;
-    auto armed_compactor = [&armed_compactions](const std::vector<llm::Message>&,
+    auto armed_compactor = [&armed_compactions](std::span<const llm::Message>,
                                                 llm::LlmProvider&,
                                                 const agent::CompactionRequest&) {
         ++armed_compactions;
@@ -823,7 +823,7 @@ TEST_CASE("a seeded history can trigger compaction before the first provider cal
     };  // estimate_tokens ~= 400 > trigger
 
     int compactions = 0;
-    auto compactor = [&compactions](const std::vector<llm::Message>&, llm::LlmProvider&,
+    auto compactor = [&compactions](std::span<const llm::Message>, llm::LlmProvider&,
                                     const agent::CompactionRequest&) {
         ++compactions;
         return agent::CompactionResult{UserText("[summary]"), 0};

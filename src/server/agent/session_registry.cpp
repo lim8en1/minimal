@@ -33,6 +33,7 @@ SessionRegistry::SessionRegistry(const AgentPresetRegistry& presets, tools::Tool
     : presets_(presets),
       tools_(tools),
       providers_(providers),
+      provider_cache_(providers, logger),
       observers_(observers),
       db_(db),
       loop_config_(loop_config),
@@ -97,7 +98,13 @@ std::shared_ptr<Session> SessionRegistry::CreateResolved(SessionParams params,
                                  "' needs provider kind '" + preset.provider_kind +
                                  "', which no loaded plugin registered");
     }
-    auto provider = providers_.Create(preset.provider_kind, preset.provider);
+    // SHARED, not per-session: providers are stateless by contract, so two
+    // sessions on one providers.json entry share one instance instead of each
+    // paying construction. The entry NAME is the key (immutable at runtime);
+    // the model override already applied above does not change it -- two
+    // models on one entry share the connection by design.
+    auto provider = provider_cache_.GetOrCreate(preset.model_ref.provider, preset.provider_kind,
+                                                preset.provider);
     if (provider == nullptr) {
         throw std::runtime_error("provider kind '" + preset.provider_kind +
                                  "' failed to construct");
@@ -154,6 +161,7 @@ std::shared_ptr<Session> SessionRegistry::CreateResolved(SessionParams params,
     // one command that happens to reach it today.
     session->set_commands(params_parent.empty() ? commands_ : nullptr);
     session->set_provider_factories(&providers_);
+    session->set_provider_instance_cache(&provider_cache_);
 
     {
         std::lock_guard<std::mutex> lock(mutex_);

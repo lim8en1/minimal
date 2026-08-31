@@ -22,6 +22,7 @@
 #include <vector>
 
 #include "minimal/agent/agent_preset_registry.hpp"
+#include "minimal/agent/provider_instance_cache.hpp"
 #include "minimal/agent/session.hpp"
 #include "minimal/agent/session_observer_registry.hpp"
 #include "minimal/common/logger.hpp"
@@ -92,6 +93,9 @@ private:
     const commands::CommandRegistry* commands_ = nullptr;
     tools::ToolRegistry& tools_;
     const llm::ProviderFactoryRegistry& providers_;
+    // Shared provider instances across every session this registry creates.
+    // Declared after providers_ so the factory registry outlives the cache.
+    ProviderInstanceCache provider_cache_;
     SessionObserverRegistry& observers_;
     session::SessionDatabase& db_;
     LoopConfig loop_config_;

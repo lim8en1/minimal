@@ -33,6 +33,7 @@ add_library(minimal_server_core SHARED
     agent/compaction_trigger.cpp
     agent/context_compactor.cpp
     agent/agent_loop.cpp
+    agent/provider_instance_cache.cpp
     commands/command_registry.cpp
     commands/command_dispatcher.cpp
     agent/subagent_spawn.cpp

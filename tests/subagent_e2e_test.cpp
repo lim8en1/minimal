@@ -52,8 +52,11 @@ struct SubagentE2EFixture {
                               {{"main",
                                 {{"backend", "fake"},
                                  {"url", "http://localhost/v1"},
-                                 {"models", {{"parent-script", nlohmann::json::object()},
-                                            {"child-script", nlohmann::json::object()}}}}}}}}
+                                 {"models", {{"parent-script", nlohmann::json::object()}}}}},
+                               {"childmain",
+                                {{"backend", "fake"},
+                                 {"url", "http://localhost/v1"},
+                                 {"models", {{"child-script", nlohmann::json::object()}}}}}}}}
                   .dump());
         Write("settings.json", nlohmann::json{{"default_agent_preset", "main"}}.dump());
         // spawn_subagent is Execute, Ask by default; AllowOnly would auto-deny
@@ -65,7 +68,7 @@ struct SubagentE2EFixture {
               "---\nname: main\nmodel: main/parent-script\nallowed_tools: "
               "[\"*\"]\n---\nYou are the main agent.\n");
         Write("agents/child.md",
-              "---\nname: child\nmodel: main/child-script\nallowed_tools: "
+              "---\nname: child\nmodel: childmain/child-script\nallowed_tools: "
               "[\"*\"]\n---\nYou are the child agent.\n");
         Write("agents/subagent.md", "You are running as a subagent.\n");
 

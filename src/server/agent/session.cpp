@@ -1,5 +1,7 @@
 #include "minimal/agent/session.hpp"
 
+#include "minimal/agent/provider_instance_cache.hpp"
+
 #include <exception>
 #include <utility>
 
@@ -17,7 +19,7 @@ v1::ServerEvent MakeEvent(const std::string& session_id) {
 }  // namespace
 
 Session::Session(SessionParams params, AgentPreset preset,
-                 std::unique_ptr<llm::LlmProvider> provider, std::unique_ptr<HistoryStore> store,
+                 std::shared_ptr<llm::LlmProvider> provider, std::unique_ptr<HistoryStore> store,
                  tools::ToolRegistry& registry, LoopConfig loop_config,
                  SessionObserverRegistry& observers, common::Logger& logger,
                  std::vector<llm::Message> seeded_history)
@@ -229,7 +231,20 @@ void Session::ApplyPreset(AgentPreset preset) {
                      params_.session_id);
         return;
     }
-    auto rebuilt = provider_factories_->Create(preset_.provider_kind, preset_.provider);
+
+    // Through the instance cache, not a fresh construct: entries are immutable
+    // at runtime, so a switch back to an entry this process already built is a
+    // cache hit -- the same instance, shared with any session using it. The
+    // PREVIOUS provider needs no teardown either: this session only drops its
+    // reference, and the cache holds the instance for whoever else uses it.
+    std::shared_ptr<llm::LlmProvider> rebuilt;
+    if (provider_instance_cache_ != nullptr) {
+        rebuilt = provider_instance_cache_->GetOrCreate(preset_.model_ref.provider,
+                                                        preset_.provider_kind, preset_.provider);
+    } else {
+        rebuilt = std::shared_ptr<llm::LlmProvider>(
+            provider_factories_->Create(preset_.provider_kind, preset_.provider));
+    }
     if (rebuilt == nullptr) {
         // The preset resolved, so the kind was known at that point; failing to
         // construct is still possible and must not leave the loop holding a
@@ -241,7 +256,7 @@ void Session::ApplyPreset(AgentPreset preset) {
     }
 
     // Worker thread, between turns: the loop is provably not inside a provider
-    // call, so rebinding and then destroying the old object is safe. Rebind
+    // call, so rebinding and then releasing the old reference is safe. Rebind
     // FIRST -- the loop must never hold a reference to the object being freed.
     auto previous = std::move(provider_);
     provider_ = std::move(rebuilt);

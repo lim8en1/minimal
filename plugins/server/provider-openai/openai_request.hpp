@@ -8,16 +8,27 @@ namespace minimal::provider_openai {
 
 // ChatRequest -> OpenAI /chat/completions request body. Pure, no I/O.
 //
-// Merge order: request.parameters is copied in first, then every structural
-// field below is unconditionally (re)written from `request`'s own members --
-// ARCHITECTURE.md's guarantee that a misconfigured `parameters` can tweak
-// generation but never corrupt conversation/tool-calling mechanics.
-// `max_tokens` is treated as structural for the same reason even though it's
-// a typed ChatRequest member rather than a `parameters` knob.
-nlohmann::json BuildRequestBody(const llm::ChatRequest& request);
+// Returns the serialized body directly. The previous implementation built a
+// nlohmann DOM of the whole history and dumped it -- two copies of every
+// message per provider call -- which is the wrong shape for the 512k-1M token
+// goal. Message text is now escaped straight into the output string; only
+// small O(1)-sized pieces (tool definitions, tool_choice, `parameters` values)
+// go through nlohmann.
+//
+// Merge order: request.parameters members are spliced in first, minus any key
+// that names a structural field; every structural field below is then always
+// written from `request`'s own members -- ARCHITECTURE.md's guarantee that a
+// misconfigured `parameters` can tweak generation but never corrupt
+// conversation/tool-calling mechanics. Dropping colliding parameter keys (not
+// emitting them after the structural ones) preserves that guarantee without
+// relying on how any given parser resolves duplicate JSON keys.
+// `max_tokens` is structural for the same reason even though it is a typed
+// ChatRequest member rather than a `parameters` knob.
+std::string BuildRequestBody(const llm::ChatRequest& request);
 
-// Exposed individually so each translation rule gets its own focused test.
-nlohmann::json ToOpenAiMessages(const llm::ChatRequest& request);
+// Tool definitions and tool_choice are small and structured; nlohmann is the
+// right tool for them, and they are exposed individually so each translation
+// rule gets its own focused test.
 nlohmann::json ToOpenAiTools(const std::vector<llm::ToolDefinition>& tools);
 nlohmann::json ToOpenAiToolChoice(const llm::ToolChoiceSpec& choice);
 

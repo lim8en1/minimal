@@ -8,6 +8,7 @@
 #include <optional>
 #include <functional>
 #include <random>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -109,7 +110,7 @@ struct TurnResult {
 // supplied per call rather than bound at construction, because /agent can switch
 // presets mid-session and binding would compact with the previous one's settings.
 using Compactor = std::function<std::optional<CompactionResult>(
-    const std::vector<llm::Message>& messages_to_compact, llm::LlmProvider& provider,
+    std::span<const llm::Message> messages_to_compact, llm::LlmProvider& provider,
     const CompactionRequest& request)>;
 
 // Runs on the session worker thread. Blocks freely -- permission waits, provider

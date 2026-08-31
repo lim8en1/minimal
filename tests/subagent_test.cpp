@@ -67,8 +67,11 @@ struct SubagentFixture {
                               {{"main",
                                 {{"backend", "fake"},
                                  {"url", "http://localhost/v1"},
-                                 {"models", {{"parent-script", nlohmann::json::object()},
-                                            {"child-script", nlohmann::json::object()}}}}}}}}
+                                 {"models", {{"parent-script", nlohmann::json::object()}}}}},
+                               {"childmain",
+                                {{"backend", "fake"},
+                                 {"url", "http://localhost/v1"},
+                                 {"models", {{"child-script", nlohmann::json::object()}}}}}}}}
                   .dump());
         Write("settings.json", nlohmann::json{{"default_agent_preset", "main"},
                                               {"max_concurrent_subagents", max_concurrent}}
@@ -80,12 +83,12 @@ struct SubagentFixture {
               "---\nname: main\nmodel: main/parent-script\nallowed_tools: "
               "[\"*\"]\n---\nYou are the main agent.\n");
         Write("agents/child.md",
-              "---\nname: child\nmodel: main/child-script\nallowed_tools: "
+              "---\nname: child\nmodel: childmain/child-script\nallowed_tools: "
               "[\"*\"]\n---\nYou are the child agent.\n");
         // execute: allow at the preset level -- only the PARENT's policy can
         // still hold it back (the ceiling tests).
         Write("agents/child-allow.md",
-              "---\nname: child-allow\nmodel: main/child-script\nallowed_tools: "
+              "---\nname: child-allow\nmodel: childmain/child-script\nallowed_tools: "
               "[\"*\"]\npermission_mode:\n  execute: allow\n---\nYou are the child agent.\n");
         Write("agents/subagent.md", std::string(kSubagentPrefix) + "\n");
 

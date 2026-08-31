@@ -56,6 +56,8 @@
 
 namespace minimal::agent {
 
+class ProviderInstanceCache;  // borrowed via set_provider_instance_cache
+
 struct SessionParams {
     std::string session_id;
     std::string parent_session_id;  // empty for a top-level session
@@ -117,7 +119,7 @@ public:
     // `seeded_history` is the RESUME path: the stored transcript, loaded
     // without being re-appended (the store already holds it). Empty for a new
     // session.
-    Session(SessionParams params, AgentPreset preset, std::unique_ptr<llm::LlmProvider> provider,
+    Session(SessionParams params, AgentPreset preset, std::shared_ptr<llm::LlmProvider> provider,
             std::unique_ptr<HistoryStore> store, tools::ToolRegistry& registry,
             LoopConfig loop_config, SessionObserverRegistry& observers, common::Logger& logger,
             std::vector<llm::Message> seeded_history = {});
@@ -207,6 +209,11 @@ public:
     void set_provider_factories(const llm::ProviderFactoryRegistry* factories) {
         provider_factories_ = factories;
     }
+    // The shared instance cache the rebuild above routes through. Optional:
+    // without it the rebuild constructs a private instance (test sessions).
+    void set_provider_instance_cache(ProviderInstanceCache* cache) {
+        provider_instance_cache_ = cache;
+    }
     // What a spawner reads off a PARENT at spawn time to derive the child's
     // inheritance: permission ceilings, the run mode to clamp against, the
     // grants to copy, and the preset whose allowed lists the child intersects.
@@ -268,7 +275,10 @@ private:
     common::Logger& logger_;
     SessionObserverRegistry& observers_;
 
-    std::unique_ptr<llm::LlmProvider> provider_;
+    // shared_ptr, not unique_ptr: with ProviderInstanceCache the instance is
+    // SHARED across sessions, so the session holds a reference rather than
+    // ownership. Stateless-by-contract providers are freely shareable.
+    std::shared_ptr<llm::LlmProvider> provider_;
     std::unique_ptr<HistoryStore> store_;
 
     rpc::EventQueue<v1::ServerEvent> queue_;
@@ -283,6 +293,7 @@ private:
     const commands::CommandRegistry* commands_ = nullptr;
     const AgentPresetRegistry* presets_ = nullptr;
     const llm::ProviderFactoryRegistry* provider_factories_ = nullptr;
+    ProviderInstanceCache* provider_instance_cache_ = nullptr;
     // The user's explicit model choice. Outranks the preset's, and survives
     // /agent re-resolving it.
     std::optional<common::ModelRef> model_override_;

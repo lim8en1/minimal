@@ -42,14 +42,6 @@ namespace {
 // silent response the server writes nothing, the client blocks in Read(), and
 // the server blocks in Read() waiting for the client -- a test that hangs rather
 // than fails. A real provider always streams.
-struct ProviderScript {
-    struct Step {
-        llm::ChatResponse response;
-        std::vector<llm::StreamEvent> events;
-    };
-    std::vector<Step> steps;
-};
-
 struct ServiceFixture {
     ServiceFixture() {
         // A unique arena per process: catch_discover_tests runs every TEST_CASE
@@ -73,7 +65,14 @@ struct ServiceFixture {
         Write("permissions.json", "{}");
         Write("agents/main.md", "---\nname: main\nmodel: main/test-model\nallowed_tools: [\"*\"]\n---\nYou help.\n");
 
-        script = std::make_shared<ProviderScript>();
+        // ONE SHARED SCRIPT, consumed in real time -- the same multi-session
+        // determinism ScriptedProviderScript was built for. Provider instances
+        // are SHARED across sessions by ProviderInstanceCache (they are
+        // stateless by contract), so a fixture that handed each session its own
+        // seeded copy would fight the design: resume and multi-session tests
+        // would get a provider whose queue was already consumed. Pushing onto
+        // the live script works for every session, whenever it is pushed.
+        script = std::make_shared<testing::ScriptedProviderScript>();
         skills = config::SkillRegistry::Load(dir);
     }
 
@@ -88,24 +87,15 @@ struct ServiceFixture {
             events = {llm::StreamEvent{llm::MessageStartEvent{"m-1", "test-model"}},
                       llm::StreamEvent{llm::MessageStopEvent{}}};
         }
-        script->steps.push_back({std::move(response), std::move(events)});
+        script->Push(std::move(response), std::move(events));
     }
 
     // Built after the script and any tools, so a session sees the finished setup.
     void Start() {
         presets = std::make_unique<agent::AgentPresetRegistry>(dir, skills);
         auto script_copy = script;
-        providers.Register("fake", [script_copy, this](const llm::ProviderConfig&) {
-            auto provider = std::make_unique<testing::FakeLlmProvider>();
-            for (const auto& step : script_copy->steps) {
-                provider->PushResponse(step.response, step.events);
-            }
-            // Recorded so tests can assert what a session's provider RECEIVED
-            // (e.g. that a resumed session replayed its stored history). Valid
-            // only while that session is alive -- the Session owns its provider,
-            // so assert before the session's stream closes.
-            created_providers.push_back(provider.get());
-            return provider;
+        providers.Register("fake", [script_copy](const llm::ProviderConfig&) {
+            return std::make_unique<testing::ScriptedProvider>(script_copy);
         });
         observers = std::make_unique<agent::SessionObserverRegistry>(common::DefaultLogger());
         db = std::make_unique<session::SessionDatabase>(dir / "sessions.db");
@@ -154,7 +144,7 @@ struct ServiceFixture {
     config::SkillRegistry skills;
     tools::ToolRegistry tools;
     llm::ProviderFactoryRegistry providers;
-    std::shared_ptr<ProviderScript> script;
+    std::shared_ptr<testing::ScriptedProviderScript> script;
     std::unique_ptr<agent::AgentPresetRegistry> presets;
     std::unique_ptr<agent::SessionObserverRegistry> observers;
     std::unique_ptr<session::SessionDatabase> db;
@@ -163,7 +153,6 @@ struct ServiceFixture {
     std::unique_ptr<rpc::Server> server;
     std::shared_ptr<grpc::Channel> channel;
     std::unique_ptr<v1::SessionService::Stub> stub;
-    std::vector<testing::FakeLlmProvider*> created_providers;
     std::chrono::milliseconds attach_guard = std::chrono::seconds(10);
     std::atomic<bool> last_detach{false};
 };
@@ -1184,13 +1173,12 @@ TEST_CASE("a stored session resumes with its history intact", "[session_service]
     REQUIRE(WaitForTurnCompleted(*stream));
 
     // The resumed session's provider received the stored history ahead of the
-    // new turn -- asserted while the session is still alive (the Session owns
+    // new turn -- asserted while the session is still alive (the Session holds
     // its provider). Removing the seeded-history load fails this: the provider
-    // would see only the new user message.
-    REQUIRE(fixture.created_providers.size() == 2);
-    const auto* provider = fixture.created_providers.back();
-    REQUIRE(provider->requests().size() == 1);
-    const auto& sent = provider->requests().front().messages;
+    // would see only the new user message. Requests are recorded in the SHARED
+    // script: request 1 is phase 1's turn, request 2 is the resumed one.
+    REQUIRE(fixture.script->requests.size() == 2);
+    const auto& sent = fixture.script->requests.back().messages;
     REQUIRE(sent.size() == 3);
     CHECK(std::get<llm::TextBlock>(sent[0].content.front()).text == "remember the number 7");
     CHECK(std::get<llm::TextBlock>(sent[1].content.front()).text == "first answer");
@@ -1326,9 +1314,8 @@ TEST_CASE("resume repairs a transcript torn mid-tool-sequence", "[session_servic
 
     // Its first provider call saw the repaired history -- a dangling tool_use
     // reaching the provider would mean the repair never happened.
-    const auto* provider = fixture.created_providers.back();
-    REQUIRE(provider->requests().size() == 1);
-    const auto& sent = provider->requests().front().messages;
+    REQUIRE(fixture.script->requests.size() == 1);
+    const auto& sent = fixture.script->requests.front().messages;
     REQUIRE(sent.size() == 4);
     REQUIRE(sent[2].content.size() == 1);
     const auto* repair = std::get_if<llm::ToolResultBlock>(&sent[2].content.front());

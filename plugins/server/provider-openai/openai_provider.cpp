@@ -18,7 +18,7 @@ namespace {
 
 }  // namespace
 
-llm::HttpRequest OpenAiProvider::BuildHttpRequest(const nlohmann::json& body, bool streaming) const {
+llm::HttpRequest OpenAiProvider::BuildHttpRequest(std::string body, bool streaming) const {
     llm::HttpRequest request;
     std::string base = config_.base_url;
     while (!base.empty() && base.back() == '/') base.pop_back();
@@ -27,7 +27,7 @@ llm::HttpRequest OpenAiProvider::BuildHttpRequest(const nlohmann::json& body, bo
     if (!config_.api_key.empty()) {
         request.headers.push_back({"Authorization", "Bearer " + config_.api_key});
     }
-    request.body = body.dump();
+    request.body = std::move(body);
     request.connect_timeout = config_.connect_timeout;
     // Never cap total duration of a stream; the idle timeout covers stalls.
     request.request_timeout = streaming ? std::chrono::milliseconds(0) : config_.request_timeout;

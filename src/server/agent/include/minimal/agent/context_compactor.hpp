@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <functional>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -73,7 +74,7 @@ struct CompactionRequest {
 // caller leaves history untouched, so a broken summarizer degrades to "no
 // compaction", never to a lost transcript.
 std::optional<CompactionResult> compact_messages(
-    const std::vector<llm::Message>& messages_to_compact, llm::LlmProvider& provider,
+    std::span<const llm::Message> messages_to_compact, llm::LlmProvider& provider,
     const CompactionRequest& request);
 
 // Rough size of a message range in tokens: serialized bytes / 4. The fallback
@@ -81,6 +82,6 @@ std::optional<CompactionResult> compact_messages(
 // that says so on its sleeve beats a precise number computed from nothing.
 // Exposed beyond the compactor because resume has the same problem: it seeds
 // the compaction trigger with a loaded transcript and no backend count either.
-std::int64_t estimate_tokens(const std::vector<llm::Message>& messages);
+std::int64_t estimate_tokens(std::span<const llm::Message> messages);
 
 }  // namespace minimal::agent

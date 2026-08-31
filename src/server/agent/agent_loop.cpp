@@ -241,7 +241,12 @@ std::optional<std::size_t> AgentLoop::Compact() {
         return std::nullopt;
     }
 
-    const std::vector<llm::Message> to_compact(history_.begin(), history_.begin() + cut);
+    // A SPAN, not a copy: the range being compacted is the oldest half of the
+    // working history, and copying it duplicated the session's whole working
+    // set of strings for the duration of the summarization call. The compactor
+    // only reads, and nothing mutates history_ while it runs -- compaction is
+    // sequential with the turn that triggered it, on this same worker thread.
+    const std::span to_compact(history_.begin(), history_.begin() + static_cast<long>(cut));
     CompactionRequest params;
     params.model_name = preset_.provider.model_name;
     params.compression_prompt = preset_.compression_prompt;
@@ -258,10 +263,14 @@ std::optional<std::size_t> AgentLoop::Compact() {
         return std::nullopt;
     }
 
+    // Rebuilt with moves, not copies: the kept tail is shifted once (moving
+    // strings, which is pointer swaps) rather than duplicated. The summary
+    // message lands at the head, replacing everything the cut removed.
     std::vector<llm::Message> rebuilt;
     rebuilt.reserve(history_.size() - cut + 1);
     rebuilt.push_back(std::move(result->summary_message));
-    rebuilt.insert(rebuilt.end(), history_.begin() + cut, history_.end());
+    std::move(history_.begin() + static_cast<long>(cut), history_.end(),
+              std::back_inserter(rebuilt));
     history_.swap(rebuilt);
 
     // The numbers that make a compaction legible after the fact. There is no
@@ -311,12 +320,16 @@ TurnResult AgentLoop::RunTurn(llm::Message seed_message) {
 
         MaybeCompact();
 
+        // Built ONCE per tool round, not per attempt: the request is identical
+        // across retries (nothing this loop does mutates preset or registry),
+        // and rebuilding it re-serialized the whole history on every retry.
+        const llm::ChatRequest chat_request = BuildChatRequest();
         llm::ChatResponse response;
         bool got_response = false;
         bool cancelled_in_backoff = false;
         for (int attempt = 0; attempt <= config_.max_retries; ++attempt) {
             try {
-                response = provider_.get().StreamComplete(BuildChatRequest(), event_sink_);
+                response = provider_.get().StreamComplete(chat_request, event_sink_);
                 got_response = true;
                 break;
             } catch (const llm::LlmError& error) {

@@ -81,7 +81,7 @@ public:
             [] { return false; }, [](const llm::StreamEvent&) { return true; },
             // A real-shaped compactor: /compact must actually fold history, not
             // just be dispatched. Returns a summary without a provider call.
-            [](const std::vector<llm::Message>&, llm::LlmProvider&,
+            [](std::span<const llm::Message>, llm::LlmProvider&,
                const agent::CompactionRequest&) {
                 return agent::CompactionResult{UserText("[summary]"), 42};
             });

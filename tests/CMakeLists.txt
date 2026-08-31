@@ -41,6 +41,7 @@ add_executable(minimal_tests
     agent_preset_frontmatter_test.cpp
     permission_resolution_test.cpp
     agent_preset_registry_test.cpp
+    provider_instance_cache_test.cpp
     file_access_test.cpp
     atomic_write_test.cpp
     tools_fs_test.cpp
