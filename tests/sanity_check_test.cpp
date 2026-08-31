@@ -109,7 +109,8 @@ struct Fixture {
 
     config::SanityCheckInputs Inputs(const std::vector<plugins::PluginRecord>& records,
                                      const std::map<std::string, std::string>& aliases,
-                                     const commands::CommandRegistry* command_registry) {
+                                     const commands::CommandRegistry* command_registry,
+                                     const tools::PermissionAdvisorRegistry* advisors = nullptr) {
         // ApplyAliases runs after ALL registration, as it does in main.
         tool_registry.ApplyAliases(aliases);
         auto resolution =
@@ -118,15 +119,16 @@ struct Fixture {
         plugin_config.command_aliases = aliases;
         return config::SanityCheckInputs{config_dir,         records, tool_registry,
                                          provider_factories, skills,  plugin_config,
-                                         resolution,         command_registry};
+                                         resolution,         command_registry, advisors};
     }
 };
 
 std::vector<CheckResult> RunChecks(Fixture& f,
                                    const std::vector<plugins::PluginRecord>& records = {},
                                    const std::map<std::string, std::string>& aliases = {},
-                                   const commands::CommandRegistry* commands = nullptr) {
-    return StartupSanityCheck(f.Inputs(records, aliases, commands)).RunAll();
+                                   const commands::CommandRegistry* commands = nullptr,
+                                   const tools::PermissionAdvisorRegistry* advisors = nullptr) {
+    return StartupSanityCheck(f.Inputs(records, aliases, commands, advisors)).RunAll();
 }
 
 std::vector<const CheckResult*> ByCheck(const std::vector<CheckResult>& results, const std::string& name) {
@@ -685,4 +687,65 @@ TEST_CASE("a command_aliases key naming a COMMAND is not reported dangling",
     CHECK(ByCheck(results, "aliases").empty());
     CHECK(ByCheck(results, "name_collisions").empty());
     CHECK(registry.Find("kaboom") != nullptr);
+}
+
+// --- advisor ---------------------------------------------------------------------
+
+namespace {
+
+// Minimal answering advisor for the registry-resolution cases.
+class StubAdvisor : public tools::PermissionAdvisor {
+public:
+    std::optional<tools::PermissionResponse> Advise(const tools::PermissionRequest&,
+                                                    const tools::AdvisorContext&) override {
+        return std::nullopt;  // abstain: these tests never run a tool
+    }
+};
+
+}  // namespace
+
+TEST_CASE("an advisor naming no loaded plugin warns", "[sanity_check][advisor]") {
+    Fixture f;
+    WriteGoodConfig(f.config_dir);
+    ScopedEnv data("XDG_DATA_HOME", f.xdg_data.string().c_str());
+    f.RegisterTool("tools-bash", "bash");
+    f.Write("permissions.json", R"({"advisor": "auto-approve"})");
+
+    const auto results = RunChecks(f);
+
+    const auto advisor = ByCheck(results, "advisor");
+    REQUIRE(advisor.size() == 1);
+    CHECK(advisor.front()->severity == CheckSeverity::Warning);
+    CHECK(advisor.front()->message.find("auto-approve") != std::string::npos);
+}
+
+TEST_CASE("a configured advisor that resolves produces no finding", "[sanity_check][advisor]") {
+    Fixture f;
+    WriteGoodConfig(f.config_dir);
+    ScopedEnv data("XDG_DATA_HOME", f.xdg_data.string().c_str());
+    f.RegisterTool("tools-bash", "bash");
+    f.Write("permissions.json", R"({"advisor": "auto-approve"})");
+
+    tools::PermissionAdvisorRegistry advisors;
+    advisors.SetAttribution("auto-approve");
+    advisors.Register(std::make_shared<StubAdvisor>());
+    advisors.ClearAttribution();
+
+    const auto results = RunChecks(f, {}, {}, nullptr, &advisors);
+    CHECK(ByCheck(results, "advisor").empty());
+}
+
+TEST_CASE("advisor_inherit without an advisor is inert and warned", "[sanity_check][advisor]") {
+    Fixture f;
+    WriteGoodConfig(f.config_dir);
+    ScopedEnv data("XDG_DATA_HOME", f.xdg_data.string().c_str());
+    f.RegisterTool("tools-bash", "bash");
+    f.Write("permissions.json", R"({"advisor_inherit": true})");
+
+    const auto results = RunChecks(f);
+
+    const auto advisor = ByCheck(results, "advisor");
+    REQUIRE(advisor.size() == 1);
+    CHECK(advisor.front()->severity == CheckSeverity::Warning);
+    CHECK(advisor.front()->message.find("advisor_inherit") != std::string::npos);
 }

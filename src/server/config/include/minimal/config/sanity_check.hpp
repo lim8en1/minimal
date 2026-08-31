@@ -18,6 +18,7 @@
 #include "minimal/plugins/plugin_discovery.hpp"
 #include "minimal/plugins/plugin_loader.hpp"
 #include "minimal/session/session_database.hpp"
+#include "minimal/tools/permission_advisor.hpp"
 #include "minimal/tools/tool_registry.hpp"
 
 namespace minimal::config {
@@ -46,6 +47,9 @@ struct SanityCheckInputs {
     // Optional: a service built without commands has none to check. Borrowed --
     // it outlives the check, which runs before serving.
     const commands::CommandRegistry* command_registry = nullptr;
+    // Optional: absent means no advisor can resolve, which only matters when
+    // permissions.json names one.
+    const tools::PermissionAdvisorRegistry* permission_advisors = nullptr;
 };
 
 // Runs after config and plugin load, before serving. A linter, not a fail-fast
@@ -77,6 +81,7 @@ private:
     std::vector<CheckResult> check_plugins();
     std::vector<CheckResult> check_name_collisions();
     std::vector<CheckResult> check_naming_model();
+    std::vector<CheckResult> check_advisor();
     std::vector<CheckResult> check_subagent_limit();
 
     SanityCheckInputs inputs_;

@@ -93,6 +93,7 @@ std::vector<CheckResult> StartupSanityCheck::RunAll() {
     append(check_plugins());
     append(check_name_collisions());
     append(check_naming_model());
+    append(check_advisor());
     append(check_subagent_limit());
     return results;
 }
@@ -555,6 +556,25 @@ std::vector<CheckResult> StartupSanityCheck::check_naming_model() {
         }
     }
 
+    return results;
+}
+
+std::vector<CheckResult> StartupSanityCheck::check_advisor() {
+    std::vector<CheckResult> results;
+    if (permissions_.advisor) {
+        const bool resolved = inputs_.permission_advisors != nullptr &&
+                              inputs_.permission_advisors->Has(*permissions_.advisor);
+        if (!resolved) {
+            results.push_back(Warning(
+                "advisor", "permissions.json names advisor '" + *permissions_.advisor +
+                               "' but no loaded plugin registered one (typo, or the providing "
+                               "plugin is disabled); prompts fall through to the human"));
+        }
+    } else if (permissions_.advisor_inherit) {
+        results.push_back(Warning(
+            "advisor", "permissions.json sets advisor_inherit but names no advisor; "
+                       "the flag is inert"));
+    }
     return results;
 }
 

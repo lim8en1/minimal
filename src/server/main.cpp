@@ -206,6 +206,7 @@ int main(int argc, char** argv) {
         plugin_config,
         std::move(name_resolution),
         &commands,
+        &permission_advisors,
     });
     const auto check_results = sanity.RunAll();
 
