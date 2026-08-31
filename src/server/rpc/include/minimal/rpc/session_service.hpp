@@ -123,12 +123,12 @@ private:
     const commands::CommandRegistry* commands_ = nullptr;
     // Borrowed and optional: absent = pass-through (see auth_provider.hpp).
     const AuthProviderRegistry* auth_providers_ = nullptr;
-    // Borrowed and optional: absent = no advisor can be selected, every Ask
-    // reaches the human. Selected per session in the params producers below.
-    const tools::PermissionAdvisorRegistry* permission_advisors_ = nullptr;
     session::SessionDatabase& db_;
     session::SessionReader reader_;
     config::SettingsConfig settings_;
+    // Borrowed and optional: absent = no advisor can be selected, every Ask
+    // reaches the human. Selected per session in the params producers below.
+    const tools::PermissionAdvisorRegistry* permission_advisors_ = nullptr;
     config::PermissionsConfig permissions_;
     common::Logger& logger_;
 
