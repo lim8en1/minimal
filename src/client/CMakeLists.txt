@@ -1,6 +1,7 @@
 add_library(minimal_client_core STATIC
     cli_args.cpp
     session_client.cpp
+    state.cpp
     render/color_downsample.cpp
     render/theme.cpp
     render/syntax_highlighter.cpp

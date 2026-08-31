@@ -67,6 +67,8 @@ add_executable(minimal_tests
     theme_test.cpp
     streaming_markdown_view_test.cpp
     syntax_highlighter_test.cpp
+    session_state_test.cpp
+    app_state_test.cpp
     # provider-openai's pure translation logic, compiled directly into the test
     # binary rather than via the plugin .so -- these files have no ABI/plugin
     # dependency, only core headers, so this is real linkage, not dlopen.

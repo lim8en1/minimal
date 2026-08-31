@@ -1,0 +1,536 @@
+#include "minimal/client/state.hpp"
+
+#include <algorithm>
+#include <utility>
+
+namespace minimal::client {
+
+// ===========================================================================
+// SessionState — one per tab, thread-safe snapshot surface.
+// All mutators lock an internal mutex (never held across RPC/IO), so they are
+// safe to call from the reader thread while AppState owns its own ordering.
+// ===========================================================================
+
+SessionState::SessionState(std::string session_id, std::string name)
+    : session_id_(std::move(session_id)), display_name_(std::move(name)) {}
+
+SessionState::Snapshot SessionState::TakeSnapshot() {
+    std::lock_guard lk(mtx_);
+    Snapshot s;
+    s.session_id = session_id_;
+    s.display_name = display_name_;
+    s.state = state_;
+    s.scrollback_page = scrollback_page_;
+    s.has_earlier_messages = has_earlier_;
+    s.last_loaded_seq = last_loaded_seq_;
+    s.streaming_text = streaming_accumulated_;
+    s.is_streaming_finalized = !is_streaming_;   // not streaming => finalized this turn
+    if (pending_permission_) {
+        s.pending_permission = *pending_permission_;
+    }
+    if (pending_confirmation_) {
+        s.pending_confirmation = *pending_confirmation_;
+    }
+    s.tools = tools_;
+    s.input_tokens = input_tokens_;
+    s.output_tokens = output_tokens_;
+    return s;
+}
+
+void SessionState::OnSessionCreated(std::string name) {
+    std::lock_guard lk(mtx_);
+    if (!name.empty()) display_name_ = std::move(name);
+    state_ = SessionStateKind::Idle;
+}
+
+void SessionState::OnSessionMetadata(const v1::SessionMetadataEvent& metadata) {
+    std::lock_guard lk(mtx_);
+    if (!metadata.name().empty()) {
+        display_name_ = metadata.name();
+    }
+}
+
+void SessionState::AppendStreamingText(std::string_view text) {
+    std::lock_guard lk(mtx_);
+    streaming_accumulated_.append(text);
+    is_streaming_ = true;
+    // A fresh assistant turn supersedes any unanswered prompt (including Waiting
+    // -- the prompt below is cleared by this same call, so the state must move
+    // with it rather than being stranded in Waiting with nothing pending).
+    if (state_ != SessionStateKind::Error) {
+        state_ = SessionStateKind::Thinking;
+    }
+    pending_permission_.reset();
+    pending_confirmation_.reset();
+}
+
+void SessionState::FinalizeStreamingText() {
+    std::lock_guard lk(mtx_);
+    is_streaming_ = false;
+    MaybeGoIdleLocked();
+}
+
+// "Idle | MessageStopEvent, nothing pending" (ARCHITECTURE.md, Tab states and
+// attention). A tool-using turn emits several message_stops before the turn is
+// actually done -- this fires between tool cycles too, which is correct: the
+// tab really is briefly idle there.
+void SessionState::MaybeGoIdleLocked() {
+    if (state_ == SessionStateKind::Error || state_ == SessionStateKind::Done) return;
+    const bool tool_active = !tools_.empty() && tools_.back().started;
+    if (!tool_active && !pending_permission_ && !pending_confirmation_) {
+        state_ = SessionStateKind::Idle;
+    }
+}
+
+void SessionState::OnTurnCompleted(const v1::TurnCompletedEvent& evt) {
+    std::lock_guard lk(mtx_);
+    is_streaming_ = false;
+    input_tokens_ = evt.usage().input_tokens();
+    output_tokens_ = evt.usage().output_tokens();
+    // Turn completion is bookkeeping, not a state transition: `Done` means the
+    // SESSION ended (see OnSessionEnded), not that a turn finished -- the
+    // preceding message_stop already resolved state_ (normally to Idle). An
+    // in-flight Error is left alone rather than silently cleared here.
+    tools_.clear();   // the panel resets when a new turn begins
+}
+
+void SessionState::OnError(const std::string&) {
+    std::lock_guard lk(mtx_);
+    is_streaming_ = false;
+    pending_permission_.reset();
+    pending_confirmation_.reset();
+    state_ = SessionStateKind::Error;
+}
+
+// The real "subagent session stopped" signal (ARCHITECTURE.md): the session's
+// stream ended, not merely a turn. Terminal -- nothing can answer a pending
+// modal once the session is gone.
+void SessionState::OnSessionEnded() {
+    std::lock_guard lk(mtx_);
+    is_streaming_ = false;
+    pending_permission_.reset();
+    pending_confirmation_.reset();
+    state_ = SessionStateKind::Done;
+}
+
+// Pending modals -------------------------------------------------------------
+
+void SessionState::SetPermissionRequest(std::unique_ptr<PendingPermission> req) {
+    std::lock_guard lk(mtx_);
+    pending_permission_ = std::move(*req);
+    pending_confirmation_.reset();
+    if (state_ == SessionStateKind::Done || state_ == SessionStateKind::Idle) {
+        state_ = SessionStateKind::Waiting;
+    }
+}
+
+void SessionState::SetConfirmationRequest(std::unique_ptr<PendingConfirmation> req) {
+    std::lock_guard lk(mtx_);
+    pending_confirmation_ = std::move(*req);
+    pending_permission_.reset();
+    if (state_ == SessionStateKind::Done || state_ == SessionStateKind::Idle) {
+        state_ = SessionStateKind::Waiting;
+    }
+}
+
+void SessionState::ClearPendingFor(std::string_view request_id) {
+    std::lock_guard lk(mtx_);
+    if (pending_permission_ && pending_permission_->request_id == request_id) {
+        pending_permission_.reset();
+    }
+    if (pending_confirmation_ && pending_confirmation_->request_id == request_id) {
+        pending_confirmation_.reset();
+    }
+}
+
+// Tools ---------------------------------------------------------------------
+// v1 runs tools sequentially and streams them start -> output deltas -> finish, keyed by
+// the tool_use_id that echoes on every delta. We match on that id rather than a positional.
+
+void SessionState::OnToolStarted(const v1::ToolExecutionEvent& evt) {
+    std::lock_guard lk(mtx_);
+    ToolExecutionState tool;
+    tool.tool_use_id = evt.tool_use_id();
+    tool.tool_name = evt.tool_name();
+    tool.summary = evt.summary();
+    tool.started_at_unix_ms = std::chrono::milliseconds(evt.started_at_unix_ms());
+    tools_.push_back(std::move(tool));
+
+    auto& live = tools_.back();   // v1 sequential => the just-started tool is last
+    live.started = true;
+    if (state_ == SessionStateKind::Idle || state_ == SessionStateKind::Done) {
+        state_ = SessionStateKind::Working;
+    }
+}
+
+void SessionState::OnToolOutputDelta(const std::string& tool_use_id, const std::string& chunk) {
+    if (chunk.empty()) return;   // ignore empty writes to avoid a spurious space
+    std::lock_guard lk(mtx_);
+    for (auto it = tools_.rbegin(); it != tools_.rend(); ++it) {
+        if (it->tool_use_id == tool_use_id && it->started) {   // the active execution, if any
+            it->buffered_output.append(chunk);
+            return;
+        }
+    }
+}
+
+void SessionState::OnToolFinished(const std::string& tool_use_id, const v1::ToolExecutionEvent& final_evt) {
+    std::lock_guard lk(mtx_);
+    for (auto it = tools_.rbegin(); it != tools_.rend(); ++it) {
+        if (it->tool_use_id == tool_use_id && it->started) {   // finish the matching active tool
+            it->is_error = final_evt.has_is_error() ? final_evt.is_error() : false;
+            it->started = false;   // no longer current — deltas after this won't match
+            return;
+        }
+    }
+}
+
+// Scrollback -----------------------------------------------------------------
+
+void SessionState::ApplyScrollbackPage(const v1::GetMessagesResponse& resp) {
+    std::lock_guard lk(mtx_);
+    if (resp.messages().empty()) {
+        has_earlier_ = resp.has_more();   // no rows, but the server may still have older pages
+        return;
+    }
+
+    if (scrollback_page_.empty() || resp.messages(0).seq() < last_loaded_seq_) {
+        // Older than what we hold: append. The window stays DESCENDING by seq
+        // (newest at index 0, matching what GetMessages returns), so an older
+        // page's newest slot must land just after the existing back of the
+        // window, not at its front.
+        scrollback_page_.insert(scrollback_page_.end(), resp.messages().begin(),
+                                resp.messages().end());
+    } else {
+        // Newer than what we hold — keep only the contiguous newest slice (bounded memory).
+        scrollback_page_.assign(resp.messages().begin(), resp.messages().end());
+    }
+
+    last_loaded_seq_ = scrollback_page_.empty() ? -1 : scrollback_page_.back().seq();
+    has_earlier_ = resp.has_more();
+}
+
+bool SessionState::CanLoadMore() const {
+    std::lock_guard lk(mtx_);
+    return has_earlier_;
+}
+
+// ===========================================================================
+// AppState — manages all tabs (roots + subagent children), focus, derived UI.
+// Each public method locks mtx_ for its container mutation so a single app-level view
+// is consistent; per-tab SessionState owns its own mutex.
+// ===========================================================================
+
+AppState::AppState(std::shared_ptr<SessionClient> client) : client_(std::move(client)) {}
+
+// Open a brand-new session as a tab. Two-phase: create the stream + session id under no
+// app lock (session creation is blocking), register the entry, THEN Resume() the reader so
+// the first dispatched event can never race an unregistered tab.
+std::string AppState::OpenTab(const SessionClient::CreateOptions& opts) {
+    auto stream = client_->MakeStream(
+        [this](const v1::ServerEvent& e) { DispatchToTab(e.session_id(), e); });
+
+    const auto sid = stream->Open(opts);   // creates session, names bidi (threads off)
+    if (!sid) {
+        return "";   // server rejected the create (or no server reachable) — drop empty stream
+    }
+
+    {   // register under a lock, then drop it before starting the reader thread
+        std::lock_guard lk(mtx_);
+        TabEntry entry;
+        entry.stream = stream;
+        entry.info.state = std::make_shared<SessionState>(*sid);
+        entry.info.session_id = *sid;
+        entry.info.parent_session_id = std::nullopt;   // root tab (a child gets its parent set)
+        entry.info.root_ordinal = ++next_root_ordinal_;   // a fresh group id
+        entry.info.spawn_seq = next_spawn_seq_++;
+
+        if (focused_id_.empty()) focused_id_ = *sid;   // focus an empty app on its first tab
+        tabs_.push_back(std::move(entry));
+    }   // lock released here, before the reader thread can dispatch back into us
+
+    stream->SetOnClosed([this, sid = *sid] {
+        if (auto* state = GetState(sid)) state->OnSessionEnded();
+    });
+    stream->Resume();   // start threads AFTER unlock — a dispatched event must find this entry
+    return *sid;
+}
+
+// Attach an existing server-side session as a tab. Same two-phase pattern: name+register,
+// then Resume() so its child's events find this entry rather than racing it.
+std::string AppState::AttachTab(const std::string& session_id, int64_t parent_ordinal) {
+    auto stream = client_->MakeStream(
+        [this](const v1::ServerEvent& e) { DispatchToTab(e.session_id(), e); });
+
+    const auto attached = stream->Attach(session_id);   // names the stream (threads off)
+    if (!attached) return "";
+
+    {   // register under a lock, then drop it before starting the reader thread
+        std::lock_guard lk(mtx_);
+        TabEntry entry;
+        entry.stream = stream;
+        entry.info.state = std::make_shared<SessionState>(session_id);
+        entry.info.session_id = session_id;
+
+        // Parent-of-group: locate the leader (root) of this group so subagents inherit its ordinal.
+        if (parent_ordinal >= 0) {
+            for (const auto& tab : tabs_) {
+                if (tab.info.root_ordinal == parent_ordinal && !tab.info.parent_session_id.has_value()) {
+                    entry.info.parent_session_id = tab.info.session_id;   // immediate parent
+                    entry.info.root_ordinal = parent_ordinal;             // inherit group id
+                    break;
+                }
+            }
+        }
+        if (!entry.info.parent_session_id.has_value()) {
+            entry.info.parent_session_id = std::nullopt;          // standalone root when no leader found
+            entry.info.root_ordinal = ++next_root_ordinal_;
+        }
+
+        entry.info.spawn_seq = next_spawn_seq_++;
+        tabs_.push_back(std::move(entry));
+    }   // lock released here, before the reader thread can dispatch back into us
+
+    stream->SetOnClosed([this, session_id] {
+        if (auto* state = GetState(session_id)) state->OnSessionEnded();
+    });
+    stream->Resume();   // start threads AFTER unlock — same guard as OpenTab
+    return session_id;
+}
+
+bool AppState::HasTab(const std::string& session_id) const {
+    std::lock_guard lk(mtx_);
+    for (const auto& tab : tabs_) {
+        if (tab.info.session_id == session_id) return true;
+    }
+    return false;
+}
+
+// Reader-thread callback: route a ServerEvent to its owned tab. Defers subagent creation
+// until the app lock is released, so opening a child stream never happens while held.
+void AppState::DispatchToTab(const std::string& session_id, const v1::ServerEvent& event) {
+    SessionState* target = nullptr;
+    {   // brief lock — grab only the pointer, release before touching per-tab state
+        std::lock_guard lk(mtx_);
+        if (TabEntry* e = FindTab(session_id)) target = e->info.state.get();
+    }
+    if (!target) return;   // orphaned / unknown id (e.g. pre-attach race) — ignore
+
+    // Use has_* predicates (not the oneof case enum) so this stays correct across protobuf
+    // codegen versions; each ServerEvent carries exactly one of these fields.
+    if (event.has_turn_completed()) {
+        target->OnTurnCompleted(event.turn_completed());   // Done + occupancy metrics
+    } else if (event.has_error()) {
+        target->OnError(event.error().message());
+    } else if (event.has_session_metadata()) {
+        target->OnSessionMetadata(event.session_metadata());   // refreshes tab label later
+    } else if (event.has_stream_event()) {
+        const auto& se = event.stream_event();
+        if (se.has_text_delta()) {
+            target->AppendStreamingText(se.text_delta().text());
+        } else if (se.has_content_block_stop() || se.has_message_stop()) {
+            target->FinalizeStreamingText();
+        }
+    } else if (event.has_permission_request()) {
+        const auto& pr = event.permission_request();
+        auto pp = std::make_unique<PendingPermission>();
+        pp->request_id = pr.request_id();
+        pp->tool_name = pr.tool_name();
+        pp->category = pr.category();
+        pp->summary = pr.summary();
+        pp->complete = pr.complete();
+        pp->grants.assign(pr.grants().begin(), pr.grants().end());
+        target->SetPermissionRequest(std::move(pp));
+    } else if (event.has_confirmation_request()) {
+        const auto& cr = event.confirmation_request();
+        auto cp = std::make_unique<PendingConfirmation>();
+        cp->request_id = cr.request_id();
+        cp->kind = cr.kind();
+        cp->title = cr.title();
+        cp->detail = cr.detail();
+        cp->options.assign(cr.options().begin(), cr.options().end());
+        target->SetConfirmationRequest(std::move(cp));
+    } else if (event.has_tool_execution()) {
+        const auto& te = event.tool_execution();
+            if (te.started()) {
+                target->OnToolStarted(te);
+            } else {
+                target->OnToolFinished(te.tool_use_id(), te);   // finished tool
+            }
+    } else if (event.has_tool_output_delta()) {
+        target->OnToolOutputDelta(event.tool_output_delta().tool_use_id(),
+                                   event.tool_output_delta().chunk());
+    } else if (event.has_subagent_started()) {
+        std::lock_guard lk(mtx_);   // append only; deferred spawn happens after unlock below
+        pending_subagents_.emplace_back(session_id, event.subagent_started());
+    }
+    // command_result / plugin calls are consumed later by the E4 render layer.
+
+    // The app lock is released now. Spawn any deferred subagent tabs so child streams attach
+    // on their own reader threads without ever holding mtx_ while opening (which could deadlock).
+    std::vector<std::pair<std::string, v1::SubagentStartedEvent>> spawned;
+    {
+        std::lock_guard lk(mtx_);
+        std::swap(pending_subagents_, spawned);   // drain under a fresh lock
+    }
+    for (auto& [parent_id, subevt] : spawned) {
+        OnSubagentSpawned(parent_id, subevt);
+    }
+}
+
+void AppState::OnSubagentSpawned(std::string_view parent_id, const v1::SubagentStartedEvent& evt) {
+    int64_t parent_root = 0;
+    {   // find the group id of the parent BEFORE attaching so the child inherits it stably
+        std::lock_guard lk(mtx_);
+        for (const auto& tab : tabs_) {
+            if (tab.info.session_id == parent_id) {
+                parent_root = tab.info.root_ordinal;
+                break;
+            }
+        }
+    }
+    AttachTab(evt.child_session_id(), parent_root);   // child inherits the group ordinal
+
+    // A blocking subagent pins its parent's turn, so focus follows it (parent is stuck waiting).
+    if (evt.blocking()) SetFocusedTab(evt.child_session_id());
+}
+
+void AppState::CloseTab(const std::string& session_id) {
+    std::shared_ptr<SessionClient::Stream> to_close;
+    bool was_focused = false;
+    {
+        std::lock_guard lk(mtx_);
+        for (auto it = tabs_.begin(); it != tabs_.end(); ++it) {
+            if (it->info.session_id == session_id) {
+                to_close = it->stream;
+                was_focused = (focused_id_ == session_id);
+                tabs_.erase(it);
+                break;
+            }
+        }
+        if (was_focused && !tabs_.empty()) focused_id_ = tabs_.back().info.session_id;
+    }
+    if (to_close) to_close->Close();   // drains + joins; terminates the session when last open
+}
+
+void AppState::SetFocusedTab(const std::string& session_id) {
+    std::lock_guard lk(mtx_);
+    // FindTab, not HasTab: HasTab locks mtx_ itself, and this mutex is not
+    // recursive -- calling it here would deadlock every caller, including
+    // FocusWithWrap and the blocking-subagent auto-focus path.
+    if (FindTab(session_id) != nullptr) focused_id_ = session_id;
+}
+
+void AppState::CycleFocusForward() { FocusWithWrap(true); }
+void AppState::CycleFocusBackward() { FocusWithWrap(false); }
+
+void AppState::FocusWithWrap(bool forward) {
+    std::vector<std::string> order;
+    {
+        std::lock_guard lk(mtx_);
+        for (const auto& tab : tabs_) order.push_back(tab.info.session_id);
+    }
+    if (order.empty()) return;
+
+    const auto current = std::find(order.begin(), order.end(), focused_id_);
+    if (current == order.end()) {     // nothing focused yet — focus first in render order
+        SetFocusedTab(order.front());
+        return;
+    }
+
+    const ssize_t idx = static_cast<ssize_t>(current - order.begin());
+    const ssize_t total = static_cast<ssize_t>(order.size());
+    const ssize_t next = forward ? (idx + 1) % total
+                                 : ((idx - 1 + total) % total);
+    SetFocusedTab(order[next]);
+}
+
+void AppState::SendChatTurn(const std::string& session_id, const std::string& text) {
+    auto stream = GetStream(session_id);
+    if (!stream) return;
+
+    v1::ClientEvent ev;
+    ev.set_session_id(session_id);
+    ev.mutable_chat_turn()->set_text(text);
+    stream->Send(ev);
+}
+
+void AppState::AnswerPermission(const std::string& session_id, const std::string& request_id,
+                                v1::PermissionDecision decision,
+                                std::vector<std::string> granted_keys) {
+    // Mirror the wire guarantee (see ARCHITECTURE.md consent scoping): only keys actually
+    // offered by the PermissionRequest may be answered. The server filters extras too, but
+    // answering is a local no-op here so the round-trip stays cheap.
+    auto stream = GetStream(session_id);
+    if (!stream) return;
+
+    v1::ClientEvent ev;
+    ev.set_session_id(session_id);
+    auto* pr = ev.mutable_permission_response();
+    pr->set_request_id(request_id);
+    pr->set_decision(decision);
+    for (auto& k : granted_keys) pr->add_granted_keys(k);
+    stream->Send(ev);
+
+    if (auto state = GetState(session_id)) state->ClearPendingFor(request_id);
+}
+
+void AppState::AnswerConfirmation(const std::string& session_id, const std::string& request_id,
+                                  const std::string& chosen_option) {
+    auto stream = GetStream(session_id);
+    if (!stream) return;
+
+    v1::ClientEvent ev;
+    ev.set_session_id(session_id);
+    auto* cr = ev.mutable_confirmation_response();
+    cr->set_request_id(request_id);
+    cr->set_chosen_option(chosen_option);
+    stream->Send(ev);
+
+    if (auto state = GetState(session_id)) state->ClearPendingFor(request_id);
+}
+
+std::vector<AppState::TabSnapshot> AppState::GetAllTabs() const {
+    std::lock_guard lk(mtx_);
+    std::vector<TabSnapshot> out;
+    out.reserve(tabs_.size());
+    for (const auto& tab : tabs_) {
+        TabSnapshot snap;
+        const SessionState::Snapshot ss = tab.info.state->TakeSnapshot();   // each State locks internally
+        snap.session_id = tab.info.session_id;
+        snap.display_name = ss.display_name.empty() ? tab.info.session_id : ss.display_name;
+        snap.state = ss.state;
+        snap.is_subagent = tab.info.parent_session_id.has_value();
+        snap.root_ordinal = tab.info.root_ordinal;
+        snap.spawn_seq = tab.info.spawn_seq;
+        snap.attention_glyph = (ss.state == SessionStateKind::Waiting) ? '!' : '\0';
+        snap.is_focused = (focused_id_ == tab.info.session_id);
+        out.push_back(std::move(snap));
+    }
+    return out;
+}
+
+AppState::TabEntry* AppState::FindTab(const std::string& session_id) {
+    for (auto& tab : tabs_) {
+        if (tab.info.session_id == session_id) return &tab;
+    }
+    return nullptr;
+}
+
+std::shared_ptr<SessionClient::Stream> AppState::GetStream(const std::string& session_id) {
+    std::lock_guard lk(mtx_);
+    for (const auto& tab : tabs_) {
+        if (tab.info.session_id == session_id) return tab.stream;   // copy the shared_ptr, hold no state lock
+    }
+    return nullptr;
+}
+
+SessionState* AppState::GetState(const std::string& session_id) {
+    std::lock_guard lk(mtx_);
+    for (const auto& tab : tabs_) {
+        if (tab.info.session_id == session_id) return tab.info.state.get();
+    }
+    return nullptr;
+}
+
+}  // namespace minimal::client
