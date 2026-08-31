@@ -349,6 +349,7 @@ int main(int argc, char** argv) {
     loop_config.auto_compact = settings.memory.auto_compact;
     loop_config.compaction_trigger = settings.memory.context_compaction_trigger;
     loop_config.compaction_keep_recent_tokens = settings.memory.compaction_keep_recent_tokens;
+    loop_config.max_parallel_tool_calls = settings.tools.max_parallel_tool_calls;
 
     minimal::agent::SessionRegistry sessions(*presets, tools, providers, observers, *session_db,
                                              loop_config, minimal::common::DefaultLogger());

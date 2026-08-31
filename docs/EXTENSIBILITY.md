@@ -219,7 +219,7 @@ The one OpenAI-shape catalog implementation (`GET <url>/models`, read `context_l
 
 ### 3.1 Why the interface is ready and the wiring is not
 
-`PermissionChecker` is already a one-method virtual interface (`permission_checker.hpp`), consumed polymorphically by `ToolExecutor` (`tool_executor.cpp:124`) — the same shape as the fakes in `tests/support/`. The design explicitly anticipated alternative implementations.
+`PermissionChecker` is already a one-method virtual interface (`permission_checker.hpp`), consumed polymorphically by `ToolExecutor` (`tool_executor.cpp:47`) — the same shape as the fakes in `tests/support/`. The design explicitly anticipated alternative implementations.
 
 The blocker is one member declaration: `Session` holds `rpc::WirePermissionChecker checker_;` as a **concrete by-value member** (`session.hpp:276`), constructed in its member-init list (`session.cpp`). There is no seam.
 
@@ -261,11 +261,11 @@ An advisor sits **below** `ResolveMode` and **above** the wire checker. Everythi
 
 | Invariant | Where enforced | Effect on an advisor |
 |---|---|---|
-| `AlwaysDeny` short-circuit | `tool_executor.cpp:109-111` | Never sees a denied tool at all |
-| Policy + out-of-workdir fold | `tool_executor.cpp:47-76` | Cannot overturn `file_write: deny` |
-| Subagent ceilings | `tool_executor.cpp:82-88` | A child's advisor cannot exceed its parent |
-| Run mode (`AllowOnly`/`Bypass`) | `tool_executor.cpp:91` | Under `AllowOnly`, `Ask` → `AlwaysDeny` short-circuits *before* the advisor — an auto-approver cannot smuggle approvals into headless runs |
-| Grant minting | Double filter: `tool_executor.cpp:131-136` + `proto_convert.cpp:493-498` | May grant only keys the disclosure offered — already guaranteed, no new code |
+| `AlwaysDeny` short-circuit | `tool_executor.cpp:175-178` | Never sees a denied tool at all |
+| Policy + out-of-workdir fold | `tool_executor.cpp:47-100` | Cannot overturn `file_write: deny` |
+| Subagent ceilings | `tool_executor.cpp:86-96` | A child's advisor cannot exceed its parent |
+| Run mode (`AllowOnly`/`Bypass`) | `tool_executor.cpp:99` | Under `AllowOnly`, `Ask` → `AlwaysDeny` short-circuits *before* the advisor — an auto-approver cannot smuggle approvals into headless runs |
+| Grant minting | Double filter: `tool_executor.cpp:199-205` + `proto_convert.cpp:493-498` | May grant only keys the disclosure offered — already guaranteed, no new code |
 | Cancel semantics | Template exists: `wire_permission_checker.cpp` maps cancel/no-answer → Deny | Must map cancellation → abstain or Deny; never block through a cancel |
 
 Zero changes to `clamp_run_mode`, `most_restrictive`, the precedence chains, or subagent spawn. The advisor inherits all of it by position.

@@ -524,6 +524,12 @@ public:
 
     const ToolSpec& spec() const override { return spec_; }
 
+    // Not parallel-safe: the per-session cwd/env map below is adopted wholesale
+    // after each command, so two concurrent invocations in one session would
+    // race the adopt step (`cd A` in one call landing under another call's
+    // result). Serialized per session by the agent loop; see Tool::parallel_safe.
+    bool parallel_safe() const override { return false; }
+
     // Bash keeps the interface default for path confinement: there is no sound
     // way to know which paths an arbitrary command touches.
     PermissionDisclosure Disclose(const nlohmann::json& input,

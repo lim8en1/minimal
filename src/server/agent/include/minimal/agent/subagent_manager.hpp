@@ -1,6 +1,8 @@
 #pragma once
 
 #include <chrono>
+#include <mutex>
+#include <unordered_map>
 
 // Everything a spawn_subagent call does besides parsing its input. A subagent
 // is the SAME Session entity as a top-level conversation -- one field
@@ -50,10 +52,12 @@ public:
                     bool advisor_inherit = false,
                     std::chrono::milliseconds advisor_timeout = tools::AdvisedPermissionChecker::kDefaultTimeout);
 
-    // Runs on the PARENT's worker thread -- it is a tool execution, and that is
-    // the thread permitted to block. A blocking request returns only after the
-    // child's single turn has finished (or the parent was cancelled, which
-    // terminates the child and returns an error instead of hanging).
+    // Runs where blocking is allowed -- the parent's worker, or a tool-pool
+    // thread when the spawn was dispatched in a parallel round (still a tool
+    // execution context, still only ever blocked on bounded things: the child's
+    // turn, which cancellation terminates). A blocking request returns only
+    // after the child's single turn has finished (or the parent was cancelled,
+    // which terminates the child and returns an error instead of hanging).
     SubagentOutcome Spawn(const SubagentRequest& request, const tools::ToolContext& ctx);
 
 private:
@@ -71,6 +75,19 @@ private:
     std::shared_ptr<tools::PermissionAdvisor> advisor_;
     bool advisor_inherit_ = false;
     std::chrono::milliseconds advisor_timeout_;
+
+    // Parallel-dispatch accounting (ARCHITECTURE.md "Tool dispatch"). Spawn can
+    // now run concurrently with sibling spawns of the same round, which breaks
+    // the old check-then-register story: the limit reads SessionRegistry::
+    // ChildCount, but a child only becomes countable when CreateResolved
+    // inserts it -- two simultaneous spawns at limit 1 would both pass the
+    // check before either child existed. An admission ticket closes the gap:
+    // check-and-increment under limit_mu_, held from the check until the
+    // registry's count picks the child up (or the spawn fails, where the guard
+    // below decrements instead). The count is per parent; entries are erased
+    // when they hit zero.
+    std::mutex limit_mu_;
+    std::unordered_map<std::string, std::int64_t> starting_children_;
 };
 
 }  // namespace minimal::agent

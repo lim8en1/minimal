@@ -102,6 +102,13 @@ PermissionMode ToolExecutor::ResolveMode(const Tool& tool, const nlohmann::json&
 llm::ToolResultBlock ToolExecutor::Run(const std::string& tool_use_id,
                                         const std::string& tool_name,
                                         const nlohmann::json& input, ToolContext& ctx) {
+    PreparedInvocation prepared = Prepare(tool_use_id, tool_name, input, ctx);
+    return Execute(prepared, ctx);
+}
+
+PreparedInvocation ToolExecutor::Prepare(const std::string& tool_use_id,
+                                         const std::string& tool_name,
+                                         const nlohmann::json& input, ToolContext& ctx) {
     // EVERY EXIT PATH ANSWERS THE CALL, including a throw, and that is a
     // history-integrity requirement rather than politeness. The agent loop
     // persists the assistant message carrying the tool_use BEFORE running any
@@ -118,27 +125,45 @@ llm::ToolResultBlock ToolExecutor::Run(const std::string& tool_use_id,
     // can be held to. Every other plugin entry point in the tree is already
     // wrapped this way (observers, commands); this was the one that wasn't.
     try {
-        return RunGuarded(tool_use_id, tool_name, input, ctx);
+        return PrepareGuarded(tool_use_id, tool_name, input, ctx);
     } catch (const std::exception& error) {
-        ctx.logger.warn("tool '{}' threw: {}", tool_name, error.what());
-        return ErrorResult(tool_use_id, "tool '" + tool_name + "' failed: " + error.what());
+        ctx.logger.warn("tool '{}' threw while gating: {}", tool_name, error.what());
+        PreparedInvocation failed;
+        failed.tool_use_id = tool_use_id;
+        failed.tool_name = tool_name;
+        failed.input = input;
+        failed.denial = ErrorResult(tool_use_id,
+                                    "tool '" + tool_name + "' failed: " + error.what());
+        return failed;
     } catch (...) {
-        ctx.logger.warn("tool '{}' threw a non-standard exception", tool_name);
-        return ErrorResult(tool_use_id,
-                           "tool '" + tool_name + "' failed with an unrecognized exception");
+        ctx.logger.warn("tool '{}' threw a non-standard exception while gating", tool_name);
+        PreparedInvocation failed;
+        failed.tool_use_id = tool_use_id;
+        failed.tool_name = tool_name;
+        failed.input = input;
+        failed.denial = ErrorResult(
+            tool_use_id, "tool '" + tool_name + "' failed with an unrecognized exception");
+        return failed;
     }
 }
 
-llm::ToolResultBlock ToolExecutor::RunGuarded(const std::string& tool_use_id,
-                                               const std::string& tool_name,
-                                               const nlohmann::json& input, ToolContext& ctx) {
+PreparedInvocation ToolExecutor::PrepareGuarded(const std::string& tool_use_id,
+                                                const std::string& tool_name,
+                                                const nlohmann::json& input, ToolContext& ctx) {
+    PreparedInvocation prepared;
+    prepared.tool_use_id = tool_use_id;
+    prepared.tool_name = tool_name;
+    prepared.input = input;
+
     // The shared_ptr copy is the lifetime guarantee: it outlives this call
     // even if a concurrent MCP replacement removes the tool from the registry
     // mid-invocation (the permission Ask below can block for minutes).
     std::shared_ptr<Tool> tool = registry_.Find(tool_name);
     if (tool == nullptr) {
-        return ErrorResult(tool_use_id, "unknown tool: " + tool_name);
+        prepared.denial = ErrorResult(tool_use_id, "unknown tool: " + tool_name);
+        return prepared;
     }
+    prepared.tool = tool;
 
     // The invocation id belongs to the context before anything runs: a tool
     // that ties follow-up work to its own call (subagent completion injection)
@@ -148,7 +173,8 @@ llm::ToolResultBlock ToolExecutor::RunGuarded(const std::string& tool_use_id,
     const PermissionMode mode = ResolveMode(*tool, input, ctx);
 
     if (mode == PermissionMode::AlwaysDeny) {
-        return ErrorResult(tool_use_id, "permission denied for tool: " + tool_name);
+        prepared.denial = ErrorResult(tool_use_id, "permission denied for tool: " + tool_name);
+        return prepared;
     }
 
     if (mode == PermissionMode::Ask) {
@@ -164,7 +190,9 @@ llm::ToolResultBlock ToolExecutor::RunGuarded(const std::string& tool_use_id,
 
             const PermissionResponse response = checker_.check(request);
             if (response.decision == PermissionDecision::Deny) {
-                return ErrorResult(tool_use_id, "permission denied by user for tool: " + tool_name);
+                prepared.denial =
+                    ErrorResult(tool_use_id, "permission denied by user for tool: " + tool_name);
+                return prepared;
             }
             // Only keys this invocation actually disclosed may be remembered: a
             // checker must not be able to grant something the operator was never
@@ -178,21 +206,49 @@ llm::ToolResultBlock ToolExecutor::RunGuarded(const std::string& tool_use_id,
         }
     }
 
-    if (ctx.is_cancelled && ctx.is_cancelled()) {
-        return ErrorResult(tool_use_id, "cancelled before execution: " + tool_name);
+    return prepared;
+}
+
+llm::ToolResultBlock ToolExecutor::Execute(const PreparedInvocation& prepared,
+                                           ToolContext& ctx) {
+    if (prepared.denial) {
+        return *prepared.denial;
     }
 
-    ToolResult result = tool->execute(input, ctx);
+    // Checked here rather than in Prepare: a cancellation that lands between
+    // the gating phase and this call still denies the call, which matters now
+    // that the two phases can be separated by the rest of the round's gating.
+    if (ctx.is_cancelled && ctx.is_cancelled()) {
+        return ErrorResult(prepared.tool_use_id,
+                           "cancelled before execution: " + prepared.tool_name);
+    }
 
-    llm::ToolResultBlock block;
-    block.tool_use_id = tool_use_id;
-    block.is_error = result.is_error;
-    // Never emit an empty text block: `touch x` succeeds silently, and an empty
-    // block is a hard 400 on the Anthropic wire format. Systemic here rather than
-    // per-tool, since any tool can produce no output.
-    if (result.content_text.empty()) result.content_text = "(no output)";
-    block.content.push_back(llm::TextBlock{std::move(result.content_text)});
-    return block;
+    // Same never-throws contract as Prepare, same reasoning: execute() is
+    // plugin code reading model-written input, and the call is already
+    // persisted. The catch moved here from the old Run() so a parallel caller
+    // gets the guarantee without composing through Run().
+    try {
+        ToolResult result = prepared.tool->execute(prepared.input, ctx);
+
+        llm::ToolResultBlock block;
+        block.tool_use_id = prepared.tool_use_id;
+        block.is_error = result.is_error;
+        // Never emit an empty text block: `touch x` succeeds silently, and an empty
+        // block is a hard 400 on the Anthropic wire format. Systemic here rather than
+        // per-tool, since any tool can produce no output.
+        if (result.content_text.empty()) result.content_text = "(no output)";
+        block.content.push_back(llm::TextBlock{std::move(result.content_text)});
+        return block;
+    } catch (const std::exception& error) {
+        ctx.logger.warn("tool '{}' threw: {}", prepared.tool_name, error.what());
+        return ErrorResult(prepared.tool_use_id,
+                           "tool '" + prepared.tool_name + "' failed: " + error.what());
+    } catch (...) {
+        ctx.logger.warn("tool '{}' threw a non-standard exception", prepared.tool_name);
+        return ErrorResult(prepared.tool_use_id,
+                           "tool '" + prepared.tool_name +
+                               "' failed with an unrecognized exception");
+    }
 }
 
 bool ToolExecutor::SatisfiedByGrants(const PermissionDisclosure& disclosure) const {

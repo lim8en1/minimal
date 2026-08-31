@@ -1,5 +1,6 @@
 #pragma once
 
+#include <memory>
 #include <optional>
 #include <string>
 #include <unordered_set>
@@ -15,9 +16,38 @@
 
 namespace minimal::tools {
 
+// The output of the gating phase, and everything Execute needs. Owns the
+// resolved tool's shared_ptr (the registry hands out copies precisely so an
+// in-flight invocation survives a concurrent MCP replacement) and, when the
+// gate refused the call, the error result that answers it. A denial is a VALUE
+// rather than an error state so Execute stays total: it returns the block it
+// was given and touches nothing else.
+struct PreparedInvocation {
+    std::string tool_use_id;
+    std::string tool_name;
+    nlohmann::json input;
+    std::shared_ptr<Tool> tool;  // null iff denial is set
+    std::optional<llm::ToolResultBlock> denial;
+};
+
 // The single call site the agent loop uses for tool invocation. Permission
 // gating lives entirely here: Tool::execute() implementations never reference
 // PermissionChecker, so the safety model cannot vary per tool.
+//
+// THREAD CONTRACT (parallel dispatch -- see ARCHITECTURE.md "Tool dispatch"):
+//
+//   Prepare   -- SESSION WORKER ONLY. Mutates session_grants_ (lock-free by
+//                construction) and BLOCKS on the permission checker, which must
+//                never happen on a pool thread: teardown wakes permission
+//                waiters via PendingRequests::Shutdown, a mechanism keyed to
+//                the worker, and a grant an earlier call acquires must be
+//                visible to later calls in the same round, which is exactly
+//                the sequential ordering this phase runs in.
+//   Execute   -- any thread. Touches no executor state; the tool's shared_ptr
+//                rides in the PreparedInvocation.
+//
+// Run() composes the two on the calling thread and is the whole contract for
+// callers that dispatch sequentially (width 1, serial-only tools, tests).
 class ToolExecutor {
 public:
     // The optional ceilings exist for subagents: a child session may never be
@@ -40,6 +70,23 @@ public:
     // reject on the next request -- one throwing tool would poison the session
     // for good. Plugin code (category_for, Disclose, execute) reading input the
     // MODEL wrote is where the throws come from; see the comment on Run().
+    //
+    // GATE-THEN-RUN. Prepare resolves the permission decision for one call --
+    // resolve every call of a round first, THEN execute them: prompts still
+    // arrive one at a time (better UX than five simultaneous modals), a grant
+    // granted mid-round satisfies later calls, and no pool thread can park in
+    // the checker. Run() is Prepare+Execute and is all a sequential caller needs.
+    [[nodiscard]] PreparedInvocation Prepare(const std::string& tool_use_id,
+                                             const std::string& tool_name,
+                                             const nlohmann::json& input, ToolContext& ctx);
+
+    // Runs a prepared call. Thread-safe: reads nothing mutable on *this. The
+    // ctx passed here belongs to THIS invocation (parallel callers each hold
+    // their own). NEVER THROWS, for the same history-integrity reason as Run.
+    [[nodiscard]] llm::ToolResultBlock Execute(const PreparedInvocation& prepared,
+                                               ToolContext& ctx);
+
+    // Sequential convenience: gate and run on the calling thread.
     llm::ToolResultBlock Run(const std::string& tool_use_id, const std::string& tool_name,
                               const nlohmann::json& input, ToolContext& ctx);
 
@@ -75,11 +122,12 @@ public:
 
 
 private:
-    // The real body. Split out only so Run() can be the one place the catch
-    // lives -- an inline try around a function this long invites a later edit to
-    // slip a return past it.
-    llm::ToolResultBlock RunGuarded(const std::string& tool_use_id, const std::string& tool_name,
-                                     const nlohmann::json& input, ToolContext& ctx);
+    // The real body of the gating phase, split out only so Prepare() can be the
+    // one place the catch lives -- an inline try around a function this long
+    // invites a later edit to slip a return past it.
+    PreparedInvocation PrepareGuarded(const std::string& tool_use_id,
+                                      const std::string& tool_name, const nlohmann::json& input,
+                                      ToolContext& ctx);
 
     ToolRegistry& registry_;
     PermissionChecker& checker_;

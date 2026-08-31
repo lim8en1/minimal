@@ -108,8 +108,10 @@ Foundational, and the thing every "blocks until answered" interface elsewhere in
 | Thread | Owns | Blocking behavior |
 |---|---|---|
 | **Reader** — the gRPC handler thread itself | the `stream->Read()` loop | Never blocks on anything but `Read()`. Dispatches each `ClientEvent` and immediately returns to reading. |
-| **Worker** — one per session | the agent loop, tool execution, compaction | Blocks freely: permission waits, LLM calls, bash subprocesses. |
+| **Worker** — one per session | the agent loop, permission gating, compaction; plus the per-session tool pool it drives | Blocks freely: permission waits, LLM calls, bash subprocesses, pool backpressure. |
 | **Writer** — one per attached stream | `stream->Write()`, and is its **only** caller | Blocks on the outbound queue. |
+
+Parallel tool execution adds pool threads UNDER the worker (one pool per session, width-capped by `tools.max_parallel_tool_calls`): they run only `ToolExecutor::Execute` — no gating, no provider calls, no history mutation — and the worker joins them before appending the round's results. See "Tool dispatch is parallel" below.
 
 gRPC permits one concurrent reader and one concurrent writer on a `ServerReaderWriter`, but **not** concurrent `Write()` calls. Three independent sources produce outbound events (agent loop, subagent completion, read-only commands running alongside a turn), so a single writer draining one queue is required — a mutex at each call site would be slower *and* easier to get wrong.
 
@@ -129,6 +131,8 @@ gRPC permits one concurrent reader and one concurrent writer on a `ServerReaderW
 
 - **`Shutdown()` before `Close()`** — a worker parked in `Registration::AwaitResponse()` (an unasked permission or confirmation question) is woken only by `Shutdown`; a worker parked in a blocking `Push` (full outbound queue) is woken only by `Close`. Both parks are reachable during teardown, and the two wake-ups come from different files: the blocking `Push` is `WirePermissionChecker::check` (`wire_permission_checker.cpp`), the ordering is `Session::Terminate` (`agent/session.cpp`). No comment inside either file alone can keep them correct, which is why the order is recorded here as well as at both code sites.
 - **`Close()` before the join** — as above: a full-queue `Push` parked behind a stalled writer would otherwise deadlock the join forever.
+- **The join now has the tool pool in its chain** (worker → pool). Two facts keep that safe: pool tasks never park in `PendingRequests` (gate-then-run — the checker is only ever met on the worker, which `Shutdown()` covers), and they only ever block on deadline-bounded tool execution, which the cancel token wakes. Swapping gate-then-run for concurrent permission checks would put an un-wakeable park inside this join chain.
+
 - Swapping either pair deadlocks the worker on an unasked question or a full queue; both failure modes leave the join hanging with the test suite still green, since only an E2E termination with a mid-turn `Ask` exercises the window.
 
 **Inbound dispatch** (reader thread — every branch is non-blocking):
@@ -198,7 +202,13 @@ auto-denying their work is worse than waiting.
 - `ToolContext::is_cancelled` — checked before each tool runs, and polled by long-running tools (bash);
 - the stream sink, which is why **`StreamEventSink` returns `bool`** (`false` = abort) rather than `void`. `HttpClient`'s libcurl write callback returns a short byte count on `false`, aborting the transfer with `CURLE_WRITE_ERROR`. Deliberately *not* an exception — throwing through libcurl's C stack frames is undefined behavior.
 
-**Tool dispatch is sequential in v1.** An assistant turn requesting five tool calls executes them one at a time. This costs wall-clock latency on parallel-friendly batches, but avoids a per-session thread pool, keeps permission prompts arriving one at a time (better UX than five simultaneous modals), and needs no ordering rules for interleaved `ToolExecutionEvent`s. `request_id` correlation is already in place, so parallel dispatch is a later change rather than a rewrite.
+**Tool dispatch is parallel, gate-then-run.** An assistant turn requesting several tool calls gates them all first, then executes them concurrently on a per-session pool. The `request_id` correlation that made this a later change rather than a rewrite is, as predicted, all the wire needed — the interesting rules are all server-side:
+
+- **Gate-then-run.** Every call's permission decision resolves sequentially on the session worker, in assistant-block order, BEFORE any execution (`ToolExecutor::Prepare`); executions (`ToolExecutor::Execute`) then run concurrently. Prompts still arrive one at a time (better UX than five simultaneous modals), a session grant an earlier call of the round acquires satisfies later ones (the sequential gating is what makes that true by construction), and — the load-bearing part — no pool thread can park in the permission checker, whose wake-up machinery (`PendingRequests::Shutdown`) is keyed to the worker and the teardown order.
+- **Width and topology.** One bounded pool per session (`ToolPool`), width from `settings.json`'s `tools.max_parallel_tool_calls` (default 4; 1 degenerates to inline execution on the worker and starts no threads). `Submit` blocks the worker at the width cap — backpressure is the limit, not a queue that would silently defeat it. Tasks never block on anything unbounded: gate-then-run keeps them out of the checker, and tool execution is deadline-bounded (bash's timeout, the MCP request deadline, the shared cancel token), which is what keeps the Terminate order below deadlock-free with a pool in the join chain.
+- **Deterministic transcript.** Results are collected per `tool_use_id` and appended as ONE results message in assistant-block order, regardless of completion order — a stable prompt-cache prefix and a deterministic transcript, not a race lottery. `tool_names_invoked` is recorded at gate time in the model's order for the same reason.
+- **Per-tool opt-out.** `Tool::parallel_safe()` (default true, the same declarative pattern as `path_confinement_supported()`): a tool whose `execute()` cannot safely overlap another execution of the same tool sets it false, and the loop runs its invocations one at a time on the worker, in block order, while parallel-safe calls of the round run on the pool. `bash` opts out — its per-session cwd/env map is adopted wholesale after each command, and two concurrent invocations would race the adopt step. MCP tools need no opt-out: all protocol I/O funnels through the connection's single I/O thread, so concurrent callers serialize there by construction and the one-CURL-handle contract holds.
+- **Client contract unchanged.** `ToolExecutionEvent`/`ToolOutputDeltaEvent` already carry `tool_use_id`, so interleaved events from concurrent executions correlate per call; the running-tools panel keys rows on it. With sequential dispatch at most one tool ran per session — the panel's multi-row case is now the common one, not the subagent-only one.
 
 ## Session lifetime — `src/server/agent/`
 
@@ -383,7 +393,7 @@ public:
 };
 ```
 
-`ToolExecutor::run()` is the only call site the agent loop uses: resolve category → resolve permission (below) → execute → wrap into `llm::ToolResultBlock`. Permission gating lives entirely outside each tool's code — `Tool::execute()` implementations never reference `PermissionChecker`.
+`ToolExecutor` is the only call site the agent loop uses for tool invocation, in two phases: `Prepare()` (worker-only: resolve category → resolve permission → session grants) and `Execute()` (thread-safe: run the tool, wrap into `llm::ToolResultBlock`); `Run()` composes the two for sequential callers. Permission gating lives entirely outside each tool's code — `Tool::execute()` implementations never reference `PermissionChecker`.
 
 **Shared utilities** (core, and exposed to plugins — a plugin tool must *call* these, never reimplement path safety):
 
@@ -988,7 +998,7 @@ Cross-session (that is what distinguishes it from chat): command summary, agent/
 - **Bounded at both ends**: the client keeps a ring buffer of `tools_view.stdout_buffer_lines` (default 100); the server coalesces on a ~100 ms timer and sends **only the tail that fits**, so a 50 MB `make` neither floods gRPC nor competes with turn traffic.
 - The live view is **lossy by design** — a tail, answering "is this progressing?". The authoritative record is the capped, persisted `ToolResultBlock`. Two artifacts, two jobs.
 
-With sequential tool dispatch there is at most one running tool *per session*, so this panel earns its keep with subagents and long bash commands, not parallel fan-out.
+With parallel tool dispatch (width 4 by default) the multi-row case is the common one, not just subagents and long bash commands; rows correlate on `tool_use_id`, so interleaved events from concurrent executions of one session render correctly.
 
 ### Session picker
 
@@ -1065,8 +1075,12 @@ RunTurn(session, seed_message):
         emit ErrorEvent; break
     append + persist assistant message
     if stop_reason != tool_use: break
-    for each ToolUseBlock, sequentially:
-      append + persist ToolExecutor::run(...) as ToolResultBlock
+    gate each ToolUseBlock, in block order, on this thread   # permission decisions
+                                                              #   resolve one at a time;
+                                                              #   grants propagate in order
+    execute: parallel-safe calls on the session pool (width-capped),
+             parallel_safe()==false calls one at a time here; join
+    append + persist all ToolResultBlocks in BLOCK order       # not completion order
     flush queued subagent completions                    # the turn boundary
   observers.OnTurnCompleted(...)
 ```
@@ -1217,7 +1231,7 @@ variable the install rule uses, so overriding one moves both.
   `max_tokens` is typed rather than left to `parameters` because the serializer treats it as a structural field and erases whatever `parameters` put there — so it was the only route to an output cap, and it did not exist. It applies to every request the session makes, summarization included: a cap the conversation honours and the compactor ignores is how a summary gets truncated.
 - **`mcps.json`** — `[{name, transport: "stdio"|"http", command, args[], env{} | url, headers{}, enabled}]`. `env`/`headers` support `${ENV_VAR}` interpolation, resolved once at load and never logged. No per-server risk category — MCP permission is server-scoped, resolved separately.
 - **`permissions.json`** — security config, split from `settings.json` so it can be reviewed and locked down independently: `{default_run_mode: "normal"|"bypass"|"allow-only" (default "normal"), fallback: {read_only, file_write, execute, out_of_workdir}, per_tool_overrides: {}, mcp_default_mode: "allow"|"ask"|"deny" (default "ask")}`. A global floor a preset can still override — no clamping; guardrails presets cannot loosen are future scope.
-- **`settings.json`** — `default_agent_preset, default_model (a `<provider>/<model>` reference), default_theme, max_concurrent_subagents (default 4), memory.{auto_compact (default true), context_compaction_trigger (a one-of object: `{"percent": 1..100}` | `{"tokens": >0}` | `{"buffer_tokens": >0}`; absent = never; exactly one key or the loader rejects the file; the window-relative strategies resolve against the active MODEL's context_window_tokens and never fire without one — see Context compaction; the pre-strategy flat key context_compaction_trigger_tokens still parses as the fixed strategy, and the new object wins when both are present; the seeded settings.json sets `{"percent": 80}`), compaction_keep_recent_tokens (NOT YET HONORED — see Context compaction), scrollback_page_size (default 100 when unset, applied by the RPC layer to both GetMessages and ListSessions)}, tools.{read,edit,bash}.*, tools_view.stdout_buffer_lines (default 100), session_db_path, logging.{level, path, max_size_mb, max_files}`. `logging` backs a **spdlog** rotating file sink (no custom rotation code), with `path` alongside `session_db_path` under the platform *data* dir, not the config dir. Applied by `common::ConfigureLogging` at the very top of `main`, before anything logs -- `DefaultLogger()` caches spdlog's default on first use for the process lifetime, so the ordering is load-bearing. The console sink stays alongside the file one; a log file that cannot be opened degrades to console-only rather than refusing to start.
+- **`settings.json`** — `default_agent_preset, default_model (a `<provider>/<model>` reference), default_theme, max_concurrent_subagents (default 4), memory.{auto_compact (default true), context_compaction_trigger (a one-of object: `{"percent": 1..100}` | `{"tokens": >0}` | `{"buffer_tokens": >0}`; absent = never; exactly one key or the loader rejects the file; the window-relative strategies resolve against the active MODEL's context_window_tokens and never fire without one — see Context compaction; the pre-strategy flat key context_compaction_trigger_tokens still parses as the fixed strategy, and the new object wins when both are present; the seeded settings.json sets `{"percent": 80}`), compaction_keep_recent_tokens (NOT YET HONORED — see Context compaction), scrollback_page_size (default 100 when unset, applied by the RPC layer to both GetMessages and ListSessions)}, tools.{read,edit,bash}.*, tools.max_parallel_tool_calls (default 4 — how many tool calls of one assistant turn may execute concurrently; 1 is exactly the sequential behavior; see the Concurrency model's "Tool dispatch"), tools_view.stdout_buffer_lines (default 100), session_db_path, logging.{level, path, max_size_mb, max_files}`. `logging` backs a **spdlog** rotating file sink (no custom rotation code), with `path` alongside `session_db_path` under the platform *data* dir, not the config dir. Applied by `common::ConfigureLogging` at the very top of `main`, before anything logs -- `DefaultLogger()` caches spdlog's default on first use for the process lifetime, so the ordering is load-bearing. The console sink stays alongside the file one; a log file that cannot be opened degrades to console-only rather than refusing to start.
 - **`plugins.json`** — an object, not a bare array (an earlier draft said array while also placing the aliases at the top level; both cannot hold):
 
   ```json
@@ -1362,7 +1376,7 @@ A subagent is **the same `Session` entity as a top-level conversation** — same
 - **System prompt stacking**: for any session with a parent, the system prompt is `agents/subagent.md` (the harness convention: "you are in subagent mode; you'll be given a task; when done or the task is impossible, summarize for the parent") followed by the resolved preset's body. Concatenation, not a new mechanism.
 - **No recursion is a hard rule, not preset config**: if `parent_session_id` is non-null, `SpawnSubagentTool` is unconditionally excluded from that session's tool set regardless of `allowed_tools`. A misconfigured preset cannot reopen recursion. Flat, one level.
 - **Permission inheritance — a child can never be more permissive than its parent**: effective `PermissionPolicy` is `most_restrictive(parent, child_preset)` per category; `allowed_tools`/`allowed_skills`/`allowed_mcp_servers` are **intersected** with the parent's; `PermissionRunMode` is clamped (`AllowOnly < Normal < Bypass`). Without this, a parent at `file_write: ask` could spawn a child preset at `file_write: allow`.
-- **Concurrency limit**: `max_concurrent_subagents` per parent session, default 4. Over-limit spawns return an **error `ToolResultBlock`** ("subagent limit reached") rather than blocking, so the model adapts instead of hanging. The sanity check *warns* above 8 — past that the task has outgrown the harness — but does not block, matching the build-it-yourself philosophy.
+- **Concurrency limit**: `max_concurrent_subagents` per parent session, default 4. Over-limit spawns return an **error `ToolResultBlock`** ("subagent limit reached") rather than blocking, so the model adapts instead of hanging. The check is an admission ticket under a mutex — parallel dispatch means sibling spawns of one round execute concurrently, and a child is not yet countable in the registry when its spawn is still constructing it, so each concurrent checker must see either the ticket or the child, never neither. Which sibling wins the ticket (and which is refused) is genuinely nondeterministic; only the COUNT is guaranteed. The sanity check *warns* above 8 — past that the task has outgrown the harness — but does not block, matching the build-it-yourself philosophy.
 - **Blocking mode**: the child's own worker runs its single turn — one drive path for both modes — while `execute()` blocks the parent's worker on the completion signal, which fires on every exit path of the child's turn, so a failure unblocks the parent exactly like a success. The child's tab auto-focuses, since the parent is stuck waiting anyway.
 - **Non-blocking mode**: `execute()` returns an acknowledgment immediately and the parent's turn continues; the child runs on its own worker. On completion the result is **queued** for the parent and flushed by the parent's worker **at a turn boundary** — after all tool results for the current assistant turn are appended, before the next provider call. Injecting it truly out-of-band could land a `User` message between a `tool_use` and its `tool_result`, which is a hard 400.
 
@@ -1393,7 +1407,6 @@ Two checks specifically for the naming model: warn when a `per_tool_overrides` /
 - Anthropic Messages-shape provider (the unified model needs only additive changes: `cache_control` fields and a widened `system`).
 - **Windows support generally — out of scope until 2.x**; WSL is the interim answer. This is broader than plugin loading (`LoadLibrary` vs `dlopen`): the bash tool is fork + `execve` + `setrlimit` + `killpg`, POSIX by construction rather than by porting accident, so a Windows target needs a genuinely different execution backend, not a shim.
 - `llamacpp-kv` plugin (`/save-session`, `/restore-session`, `/erase-session`) — designed, deliberately not shipped in v1.
-- Parallel tool dispatch (sequential in v1; `request_id` correlation already supports it).
 - Session detach (`EndSession{DETACH}`), deliberately deferred — see Session lifetime.
 - Status-bar segment and panel/picker column slots for client plugins (renderer slot ships in v1).
 - Tab-bar overflow behavior with many sessions × subagents.

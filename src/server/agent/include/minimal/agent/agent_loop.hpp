@@ -26,6 +26,7 @@
 #include "minimal/session/history_window.hpp"
 #include "minimal/tools/tool.hpp"
 #include "minimal/tools/tool_executor.hpp"
+#include "minimal/tools/tool_pool.hpp"
 #include "minimal/tools/tool_registry.hpp"
 
 namespace minimal::agent {
@@ -39,6 +40,13 @@ struct LoopConfig {
     std::int64_t compaction_keep_recent_tokens = 0;
     int max_retries = 3;
     int max_turns = 0;  // 0 = unbounded; subagents bound their own life
+
+    // Parallel tool dispatch width (ARCHITECTURE.md "Tool dispatch"): how many
+    // tool calls of one round may execute concurrently. 1 is exactly the
+    // sequential behavior -- the ToolPool degenerates to inline execution and
+    // starts no threads. Sourced from settings.json's
+    // tools.max_parallel_tool_calls.
+    int max_parallel_tool_calls = 4;
 
     // Exponential-with-EQUAL-jitter backoff between retries: half the ceiling
     // is a fixed floor, the other half random. Full jitter can legally draw
@@ -258,6 +266,13 @@ private:
     // Backoff jitter only. Loop-owned rather than shared, so two sessions
     // retrying the same failing backend do not draw the same delays.
     std::mt19937 jitter_{std::random_device{}()};
+
+    // Parallel tool dispatch (ARCHITECTURE.md "Tool dispatch"). Width from
+    // LoopConfig; width 1 never starts threads. Lives on the loop rather than
+    // the Session so a loop-only test exercises the real dispatch path, and so
+    // the pool cannot outlive the executor/registry it borrows -- the loop is
+    // destroyed first (Session declares it before its borrowed state).
+    tools::ToolPool pool_;
 
     // Set when a compaction attempt fails, cleared at each RunTurn: without it a
     // failing summarizer would be re-invoked on every tool cycle of the same turn,

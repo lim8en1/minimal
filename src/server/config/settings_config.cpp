@@ -91,6 +91,12 @@ ToolsSettings ParseTools(const nlohmann::json& doc) {
                 "settings.json: tools.mcp.max_list_pages must be at least 1");
         }
     }
+    result.max_parallel_tool_calls =
+        tools.value("max_parallel_tool_calls", result.max_parallel_tool_calls);
+    if (result.max_parallel_tool_calls < 1) {
+        throw std::runtime_error(
+            "settings.json: tools.max_parallel_tool_calls must be at least 1");
+    }
     return result;
 }
 

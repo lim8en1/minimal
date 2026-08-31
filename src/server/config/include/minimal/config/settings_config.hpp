@@ -55,6 +55,11 @@ struct ToolsSettings {
     nlohmann::json edit = nlohmann::json::object();
     nlohmann::json bash = nlohmann::json::object();
     McpSettings mcp;
+    // How many tool calls from one assistant turn may execute concurrently
+    // (parallel dispatch -- see ARCHITECTURE.md "Tool dispatch"). 1 reproduces
+    // the sequential behavior exactly. This is a WIDTH, not a thread-pool size:
+    // the per-session pool is built from it, so 1 allocates no extra threads.
+    int max_parallel_tool_calls = 4;
 };
 
 struct ToolsViewSettings {

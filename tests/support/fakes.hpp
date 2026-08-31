@@ -224,6 +224,12 @@ private:
 
 // Configurable tool. Records every invocation; can claim a path so the
 // out-of-workdir composition can be exercised.
+//
+// Thread-safe by construction: parallel dispatch may invoke a parallel-safe
+// tool CONCURRENTLY within one round, and a fake that models a parallel-safe
+// tool must tolerate that -- the same obligation a real plugin tool takes on
+// with parallel_safe() == true (ToolContext is per-invocation; this fake's own
+// recording needs the mutex).
 class FakeTool : public tools::Tool {
 public:
     FakeTool(std::string name, tools::ToolCategory category, std::string result_text = "ok")
@@ -238,7 +244,10 @@ public:
     const tools::ToolSpec& spec() const override { return spec_; }
 
     tools::ToolResult execute(const nlohmann::json& input, tools::ToolContext& ctx) override {
-        calls.push_back(input);
+        {
+            std::lock_guard<std::mutex> lock(mu_);
+            calls.push_back(input);
+        }
         if (ctx.emit_output) ctx.emit_output(result_text_);
         return tools::ToolResult{is_error_, result_text_};
     }
@@ -270,6 +279,8 @@ private:
     std::optional<std::string> path_key_;
     std::optional<tools::PermissionDisclosure> disclosure_;
     bool is_error_ = false;
+    // Guards `calls` against concurrent executes (parallel dispatch).
+    std::mutex mu_;
 };
 
 class InMemoryHistoryStore : public agent::HistoryStore {

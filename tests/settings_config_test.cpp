@@ -169,6 +169,23 @@ TEST_CASE("ParseSettingsConfig: tools.mcp knobs overridable, max_list_pages must
                         {"tools", {{"mcp", {{"max_list_pages", -3}}}}}}), std::runtime_error);
 }
 
+TEST_CASE("ParseSettingsConfig: max_parallel_tool_calls defaults to 4, must be positive",
+          "[settings_config]") {
+    auto config = ParseSettingsConfig(nlohmann::json::object());
+    CHECK(config.tools.max_parallel_tool_calls == 4);
+
+    auto overridden = ParseSettingsConfig(
+        nlohmann::json{{"tools", {{"max_parallel_tool_calls", 1}}}});
+    CHECK(overridden.tools.max_parallel_tool_calls == 1);
+
+    CHECK_THROWS_AS(ParseSettingsConfig(
+                        nlohmann::json{{"tools", {{"max_parallel_tool_calls", 0}}}}),
+                    std::runtime_error);
+    CHECK_THROWS_AS(ParseSettingsConfig(
+                        nlohmann::json{{"tools", {{"max_parallel_tool_calls", -2}}}}),
+                    std::runtime_error);
+}
+
 TEST_CASE("ParseSettingsConfig: tools_view and logging overridable", "[settings_config]") {
     nlohmann::json doc = {{"tools_view", {{"stdout_buffer_lines", 250}}},
                            {"logging", {{"level", "debug"}, {"path", "/var/log/minimal.log"},
