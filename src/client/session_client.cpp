@@ -41,7 +41,8 @@ SessionClient::CreateResult SessionClient::CreateSession(const CreateOptions& op
 
 grpc::Status SessionClient::RunTurn(
     const std::string& session_id, const std::string& text,
-    const std::function<bool(const v1::ServerEvent&)>& on_event) {
+    const std::function<bool(const v1::ServerEvent&)>& on_event,
+    std::shared_ptr<TurnHandle>* handle) {
     grpc::ClientContext context;
     auto stream = stub_->OpenSession(&context);
 
@@ -53,6 +54,20 @@ grpc::Status SessionClient::RunTurn(
     if (!stream->Write(turn)) {
         stream->WritesDone();
         return stream->Finish();
+    }
+
+    // Published before the first read so a cancel can land at any point of the
+    // turn. Cleared before returning, which turns every later Cancel into a
+    // no-op rather than a write on a finished stream.
+    auto control = std::make_shared<TurnControl>();
+    control->cancel_event.set_session_id(session_id);
+    control->cancel_event.mutable_cancel();
+    if (handle != nullptr) {
+        *handle = std::make_shared<TurnHandle>(control, TurnHandle::Token{});
+    }
+    {
+        std::lock_guard<std::mutex> lock(control->mu);
+        control->stream = stream.get();
     }
 
     v1::ServerEvent event;
@@ -70,6 +85,7 @@ grpc::Status SessionClient::RunTurn(
             auto* response = answer.mutable_permission_response();
             response->set_request_id(event.permission_request().request_id());
             response->set_decision(v1::PERMISSION_DECISION_DENY);
+            std::lock_guard<std::mutex> lock(control->mu);
             stream->Write(answer);
         }
         bool done = false;
@@ -86,6 +102,10 @@ grpc::Status SessionClient::RunTurn(
             // entitle us to stop receiving, and abandoning the read side would
             // wedge the server's writer mid-Write().
         }
+    }
+    {
+        std::lock_guard<std::mutex> lock(control->mu);
+        control->stream = nullptr;
     }
     if (!half_closed) stream->WritesDone();
     return stream->Finish();

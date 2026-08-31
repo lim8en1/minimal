@@ -1,6 +1,7 @@
 #pragma once
 
 #include <functional>
+#include <mutex>
 #include <vector>
 #include <atomic>
 #include <memory>
@@ -62,8 +63,15 @@ public:
     // The stream is READ TO END before finishing. gRPC's sync API blocks in
     // Write() when the peer is not reading, so finishing early with events still
     // in flight deadlocks both sides.
+    //
+    // When `handle` is non-null it is populated BEFORE the first event is read,
+    // with a handle whose Cancel() interrupts the in-flight turn (a CancelTurn
+    // ClientEvent on this stream). Cancel is safe to call from another thread
+    // while RunTurn's thread reads, and a no-op once the stream has closed.
+    class TurnHandle;
     grpc::Status RunTurn(const std::string& session_id, const std::string& text,
-                         const std::function<bool(const v1::ServerEvent&)>& on_event);
+                         const std::function<bool(const v1::ServerEvent&)>& on_event,
+                         std::shared_ptr<TurnHandle>* handle = nullptr);
 
     struct CommandOptions {
         std::string name;  // without the leading '/'
@@ -90,6 +98,45 @@ public:
     // terminates the session when the stream closes.
     grpc::Status Attach(const std::string& session_id,
                         const std::function<bool(const v1::ServerEvent&)>& on_event);
+
+private:
+    // Shared between RunTurn's thread (which reads) and a Cancel() caller
+    // (which writes). One writer at a time is the gRPC sync-stream rule, so
+    // every write on the stream -- RunTurn's permission answers included --
+    // takes mu. stream is null before the turn is sent and after RunTurn
+    // returns, which is what makes a late Cancel a harmless no-op.
+    struct TurnControl {
+        std::mutex mu;
+        v1::ClientEvent cancel_event;
+        grpc::ClientReaderWriter<v1::ClientEvent, v1::ServerEvent>* stream = nullptr;
+    };
+
+public:
+    // Cancels the turn of the RunTurn call that produced this handle. The
+    // server ends the turn with a TurnCompletedEvent carrying
+    // STOP_REASON_CANCELLED; RunTurn keeps reading until it arrives.
+    class TurnHandle {
+    private:
+        // Pass-key: Token is private, so only SessionClient (a friend) can
+        // name it -- the public constructor is uncallable from outside, which
+        // is what std::make_shared's allocator context needs to see.
+        struct Token {};
+
+    public:
+        void Cancel() {
+            const auto control = control_;
+            if (!control) return;
+            std::lock_guard<std::mutex> lock(control->mu);
+            if (control->stream != nullptr) control->stream->Write(control->cancel_event);
+        }
+
+        explicit TurnHandle(std::shared_ptr<TurnControl> control, Token)
+            : control_(std::move(control)) {}
+
+    private:
+        friend class SessionClient;
+        std::shared_ptr<TurnControl> control_;
+    };
 
 private:
     std::string server_address_;

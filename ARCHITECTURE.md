@@ -1023,6 +1023,8 @@ minimal -p PROMPT [--server TARGET] [--agent PRESET] [--model PROVIDER/MODEL]
 
 Exit codes are interface, because a script piping `-p` has to tell "the model finished" from "it was cut off" from "the call failed": `0` ok, `2` truncated (`max_tokens`/`stop_sequence`), `3` model error or `ErrorEvent`, `4` cancelled, `64` usage, `69` no reachable server.
 
+**SIGINT/SIGTERM during a turn cancel through the protocol, not by dying.** The handler does only async-signal-safe work (set a flag, write one byte to a self-pipe); a watcher thread turns that into a `CancelTurn` ClientEvent on the live stream — the same path § *Cancellation* describes — and the process exits `4` once the server reports `turn_completed` with `StopReason::Cancelled`. The signal handlers are installed only while a turn is in flight: before the turn exists there is nothing to abandon, and after it ends a late signal should kill, not defer. A second signal after the cancel was issued restores the default disposition rather than waiting out a wedged server.
+
 **Attaching to child sessions is a client protocol obligation, not a TUI behavior.** Any conforming client must attach on `SubagentStartedEvent` — otherwise the initial-attach guard would kill a subagent spawned during a headless run. Attaching is expressible without submitting work through a dedicated no-op `Attach` `ClientEvent` payload (the stream is named by its first event, and before `Attach` existed every payload did something). The headless client merges child output into its stream, or discards it under `--output-format text`.
 
 ## Agent loop — `src/server/agent/agent_loop.{hpp,cpp}`

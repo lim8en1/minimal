@@ -5,7 +5,10 @@
 // Building it first is what proves the proto is a real boundary rather than a
 // TUI-shaped hole, and it is the natural end-to-end test harness.
 
+#include <atomic>
+#include <cerrno>
 #include <chrono>
+#include <csignal>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -13,6 +16,8 @@
 #include <string>
 #include <thread>
 #include <vector>
+
+#include <unistd.h>
 
 #include <nlohmann/json.hpp>
 
@@ -67,6 +72,47 @@ int ExitCodeFor(minimal::v1::StopReason stop_reason) {
         default:
             return kOk;
     }
+}
+
+// SIGINT/SIGTERM during a turn cancel it through the protocol -- a CancelTurn
+// ClientEvent -- instead of killing the process, so the exit code reflects the
+// server's own StopReason::Cancelled (exit 4) rather than dying with 130.
+//
+// The handler itself may only do async-signal-safe work: set a flag, write one
+// byte to a self-pipe. The gRPC write happens on the watcher thread, which
+// blocks on the pipe and acts on what it reads: 'c' means a signal arrived,
+// 'q' is the main thread's wake so the watcher can be joined once the turn has
+// ended on its own.
+std::atomic<bool> g_cancel_requested{false};
+int g_cancel_pipe[2] = {-1, -1};
+
+void CancelSignalHandler(int) {
+    g_cancel_requested.store(true, std::memory_order_relaxed);
+    const char byte = 'c';
+    const ssize_t ignored = write(g_cancel_pipe[1], &byte, 1);
+    (void)ignored;
+}
+
+void InstallCancelHandlers() {
+    struct sigaction action;
+    std::memset(&action, 0, sizeof(action));
+    action.sa_handler = CancelSignalHandler;
+    sigaction(SIGINT, &action, nullptr);
+    sigaction(SIGTERM, &action, nullptr);
+}
+
+void RestoreDefaultHandlers() {
+    struct sigaction action;
+    std::memset(&action, 0, sizeof(action));
+    action.sa_handler = SIG_DFL;
+    sigaction(SIGINT, &action, nullptr);
+    sigaction(SIGTERM, &action, nullptr);
+}
+
+void CloseCancelPipe() {
+    if (g_cancel_pipe[0] != -1) close(g_cancel_pipe[0]);
+    if (g_cancel_pipe[1] != -1) close(g_cancel_pipe[1]);
+    g_cancel_pipe[0] = g_cancel_pipe[1] = -1;
 }
 
 int RunHeadless(const HeadlessOptions& options) {
@@ -153,8 +199,38 @@ int RunHeadless(const HeadlessOptions& options) {
         return saw_error ? kModelError : kOk;
     }
 
+    // Wire SIGINT/SIGTERM to a protocol-level cancel before the turn starts.
+    // Before this point (connection, CreateSession) the default disposition
+    // applies: dying mid-setup is fine, there is no turn to abandon.
+    const bool cancel_wired = pipe(g_cancel_pipe) == 0;
+    if (!cancel_wired) g_cancel_pipe[0] = g_cancel_pipe[1] = -1;
+    std::shared_ptr<minimal::client::SessionClient::TurnHandle> turn_handle;
+    std::thread cancel_watcher;
+    if (cancel_wired) {
+        InstallCancelHandlers();
+        cancel_watcher = std::thread([&turn_handle] {
+            char byte = 0;
+            ssize_t n;
+            do {
+                n = read(g_cancel_pipe[0], &byte, 1);
+            } while (n == -1 && errno == EINTR);
+            if (n != 1 || byte != 'c') return;
+            // RunTurn populates the handle before its first event; allow a
+            // short window for that rather than dropping a cancel that raced
+            // the turn's start.
+            for (int waited_ms = 0; !turn_handle && waited_ms < 5000; waited_ms += 5) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            }
+            if (turn_handle) turn_handle->Cancel();
+            // Cancelled, or no handle ever arrived (nothing to cancel). Either
+            // way a second signal kills instead of deferring.
+            RestoreDefaultHandlers();
+        });
+    }
+
     const auto status = client.RunTurn(
-        created.session_id, options.prompt, [&](const minimal::v1::ServerEvent& event) {
+        created.session_id, options.prompt,
+        [&](const minimal::v1::ServerEvent& event) {
             if (options.jsonl) {
                 // One JSON value per line, so the stream stays parseable
                 // incrementally rather than only once complete.
@@ -259,7 +335,20 @@ int RunHeadless(const HeadlessOptions& options) {
                 });
             }
             return true;
-        });
+        },
+        cancel_wired ? &turn_handle : nullptr);
+
+    if (cancel_wired) {
+        // Wake the watcher (it exits without cancelling on 'q') and take the
+        // signal disposition back down: past this point there is no turn to
+        // abandon, and a late signal should kill, not defer.
+        const char wake = 'q';
+        const ssize_t ignored = write(g_cancel_pipe[1], &wake, 1);
+        (void)ignored;
+        cancel_watcher.join();
+        RestoreDefaultHandlers();
+        CloseCancelPipe();
+    }
 
     // Wait out every child before reporting: their streams hold the server's
     // refcount, and jsonl consumers expect the children's events too.
