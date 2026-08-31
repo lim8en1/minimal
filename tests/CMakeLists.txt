@@ -22,6 +22,7 @@ add_executable(minimal_tests
     "${CMAKE_SOURCE_DIR}/plugins/server/commands-core/core_commands.cpp"
     token_accounting_test.cpp
     config_paths_test.cpp
+    logger_test.cpp
     tool_executor_test.cpp
     agent_loop_test.cpp
     http_client_test.cpp

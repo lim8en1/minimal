@@ -3,11 +3,11 @@
 namespace minimal::common {
 
 Logger& DefaultLogger() {
-    // spdlog::default_logger() creates a multi-threaded color console logger on
-    // first use. Future logging-settings wiring can call spdlog::set_default_logger()
-    // with the rotating-file sink BEFORE this runs; after first use the instance
-    // is fixed for the process lifetime (config is read once at startup anyway).
-    static Logger instance(spdlog::default_logger());
+    // Stateless: the returned handle resolves spdlog's CURRENT default logger
+    // on every call (see Logger in the header). ConfigureLogging swaps that
+    // default for the console+file logger early in startup, and every later
+    // log line -- including those logged before the swap -- simply follows.
+    static Logger instance;
     return instance;
 }
 
