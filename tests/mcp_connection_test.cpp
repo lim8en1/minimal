@@ -17,7 +17,7 @@
 using minimal::mcp::McpCallOutcome;
 using minimal::mcp::McpConnection;
 using minimal::mcp::McpEndpoint;
-using minimal::mcp::McpTimeouts;
+using minimal::mcp::McpLimits;
 using minimal::mcp::McpTransport;
 using minimal::testing::RunInBackground;
 
@@ -34,7 +34,7 @@ McpEndpoint StdioEndpoint(const std::string& mode) {
 
 // A connection whose background jobs must finish; used for the happy paths.
 std::unique_ptr<McpConnection> OpenStdio(const std::string& mode,
-                                         McpTimeouts timeouts = {std::chrono::seconds(10),
+                                         McpLimits timeouts = {std::chrono::seconds(10),
                                                                  std::chrono::seconds(10)}) {
     McpConnection::Failure error;
     auto connection = McpConnection::Open(StdioEndpoint(mode), timeouts, "test", "0.0.1", error);
@@ -46,7 +46,16 @@ std::unique_ptr<McpConnection> OpenStdio(const std::string& mode,
 // binds an ephemeral localhost port.
 class FakeHttpMcpServer {
 public:
-    explicit FakeHttpMcpServer(bool reply_sse = true) : reply_sse_(reply_sse) {
+    struct Options {
+        bool reply_sse = true;
+        int list_pages = 1;             // >1: tools/list answers with nextCursor pages
+        bool id_as_string = false;      // echoes JSON-RPC ids as strings
+        bool no_response_frame = false; // SSE reply carrying only unrelated frames
+        int call_delay_ms = 0;          // tools/call sleeps before answering
+    };
+
+    FakeHttpMcpServer() : FakeHttpMcpServer(Options{}) {}
+    explicit FakeHttpMcpServer(Options options) : options_(options) {
         server_.Post("/mcp", [this](const httplib::Request& req, httplib::Response& res) {
             ++requests_;
             const nlohmann::json body = nlohmann::json::parse(req.body, nullptr, false);
@@ -80,16 +89,25 @@ public:
                 return;
             }
             if (method == "tools/list") {
+                const int page = static_cast<int>(list_pages_served_++);
+                const bool more = page + 1 < options_.list_pages;
+                const std::string tool_name =
+                    page == 0 ? "echo" : "echo-" + std::to_string(page);
                 nlohmann::json result = {
                     {"tools",
                      nlohmann::json::array({nlohmann::json{
-                         {"name", "echo"},
+                         {"name", tool_name},
                          {"description", "Echo"},
                          {"inputSchema", nlohmann::json{{"type", "object"}}}}})}};
+                if (more) result["nextCursor"] = "page-" + std::to_string(page + 1);
                 Reply(res, body, result);
                 return;
             }
             if (method == "tools/call") {
+                if (options_.call_delay_ms > 0) {
+                    std::this_thread::sleep_for(
+                        std::chrono::milliseconds(options_.call_delay_ms));
+                }
                 if (body.at("params").value("name", "") == "boom") {
                     ReplyError(res, body, nlohmann::json{{"code", -32000},
                                                           {"message", "scripted rpc error"}});
@@ -124,7 +142,20 @@ private:
     void Reply(httplib::Response& res, const nlohmann::json& body,
                const nlohmann::json& result) const {
         nlohmann::json message = {{"jsonrpc", "2.0"}, {"id", body.at("id")}, {"result", result}};
-        if (reply_sse_) {
+        if (options_.id_as_string) {
+            message["id"] = std::to_string(body.at("id").get<long long>());
+        }
+        if (options_.no_response_frame && body.value("method", "") != "initialize") {
+            // SSE frames that are protocol traffic but never OUR response:
+            // a server notification, no id at all. Initialize still answers
+            // normally -- the handshake cannot opt out, or Open would fail.
+            res.set_content(
+                "event: message\n"
+                "data: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\"}\n\n",
+                "text/event-stream");
+            return;
+        }
+        if (options_.reply_sse) {
             res.set_content("event: message\ndata: " + message.dump() + "\n\n",
                             "text/event-stream");
         } else {
@@ -135,7 +166,7 @@ private:
     void ReplyError(httplib::Response& res, const nlohmann::json& body,
                     const nlohmann::json& error) const {
         nlohmann::json message = {{"jsonrpc", "2.0"}, {"id", body.at("id")}, {"error", error}};
-        if (reply_sse_) {
+        if (options_.reply_sse) {
             res.set_content("event: message\ndata: " + message.dump() + "\n\n",
                             "text/event-stream");
         } else {
@@ -147,9 +178,10 @@ private:
     std::thread thread_;
     int port_ = 0;
     int requests_ = 0;
+    int list_pages_served_ = 0;
     std::string session_id_;
     int session_counter_ = 0;
-    bool reply_sse_ = true;
+    Options options_;
 };
 
 }  // namespace
@@ -264,7 +296,7 @@ TEST_CASE("McpConnection stdio: garbage protocol output fails Open within the de
 }
 
 TEST_CASE("McpConnection http: SSE-framed responses drive the full protocol", "[mcp_connection]") {
-    FakeHttpMcpServer server(/*reply_sse=*/true);
+    FakeHttpMcpServer server(FakeHttpMcpServer::Options{.reply_sse = true});
     McpEndpoint endpoint;
     endpoint.transport = McpTransport::Http;
     endpoint.url = server.url();
@@ -285,7 +317,7 @@ TEST_CASE("McpConnection http: SSE-framed responses drive the full protocol", "[
 }
 
 TEST_CASE("McpConnection http: plain JSON responses work too", "[mcp_connection]") {
-    FakeHttpMcpServer server(/*reply_sse=*/false);
+    FakeHttpMcpServer server(FakeHttpMcpServer::Options{.reply_sse = false});
     McpEndpoint endpoint;
     endpoint.transport = McpTransport::Http;
     endpoint.url = server.url();
@@ -311,4 +343,101 @@ TEST_CASE("McpConnection http: a JSON-RPC error response is a failed call, not a
     const McpCallOutcome outcome = connection->CallTool("boom", nlohmann::json::object(), nullptr);
     CHECK_FALSE(outcome.ok);
     CHECK(outcome.error.find("scripted rpc error") != std::string::npos);
+}
+
+TEST_CASE("McpConnection http: tools/list pagination is followed", "[mcp_connection]") {
+    FakeHttpMcpServer server(FakeHttpMcpServer::Options{.reply_sse = false, .list_pages = 3});
+    McpEndpoint endpoint;
+    endpoint.transport = McpTransport::Http;
+    endpoint.url = server.url();
+
+    McpConnection::Failure error;
+    auto connection = McpConnection::Open(endpoint, {std::chrono::seconds(5), std::chrono::seconds(5)},
+                                          "test", "0.0.1", error);
+    REQUIRE(connection != nullptr);
+    const auto tools = connection->ListTools(nullptr, error);
+    REQUIRE(tools.has_value());
+    REQUIRE(tools->size() == 3);
+    CHECK((*tools)[0].name == "echo");
+    CHECK((*tools)[2].name == "echo-2");
+    CHECK(server.requests() == 5);  // initialize + initialized + 3 pages
+}
+
+TEST_CASE("McpConnection http: a server that never stops paginating hits the cap", "[mcp_connection]") {
+    FakeHttpMcpServer server(FakeHttpMcpServer::Options{.reply_sse = false, .list_pages = 1000000});
+    McpEndpoint endpoint;
+    endpoint.transport = McpTransport::Http;
+    endpoint.url = server.url();
+
+    McpConnection::Failure error;
+    auto connection = McpConnection::Open(endpoint, {std::chrono::seconds(5), std::chrono::seconds(5), 2},
+                                          "test", "0.0.1", error);
+    REQUIRE(connection != nullptr);
+    const auto tools = connection->ListTools(nullptr, error);
+    CHECK_FALSE(tools.has_value());
+    CHECK(error.message.find("exceeded 2 pages") != std::string::npos);
+    CHECK(error.message.find("max_list_pages") != std::string::npos);
+    CHECK(server.requests() == 4);  // initialize + initialized + exactly 2 pages
+}
+
+TEST_CASE("McpConnection http: a stringified id echo still matches", "[mcp_connection]") {
+    FakeHttpMcpServer server(FakeHttpMcpServer::Options{.reply_sse = true, .id_as_string = true});
+    McpEndpoint endpoint;
+    endpoint.transport = McpTransport::Http;
+    endpoint.url = server.url();
+
+    McpConnection::Failure error;
+    // initialize itself rides the lenient match: the handshake must succeed.
+    auto connection = McpConnection::Open(endpoint, {std::chrono::seconds(5), std::chrono::seconds(5)},
+                                          "test", "0.0.1", error);
+    REQUIRE(connection != nullptr);
+    const auto tools = connection->ListTools(nullptr, error);
+    REQUIRE(tools.has_value());
+    const McpCallOutcome outcome = connection->CallTool("echo", nlohmann::json::object(), nullptr);
+    REQUIRE(outcome.ok);
+}
+
+TEST_CASE("McpConnection http: a stream with no matching frame is a named error", "[mcp_connection]") {
+    FakeHttpMcpServer server(
+        FakeHttpMcpServer::Options{.reply_sse = true, .no_response_frame = true});
+    McpEndpoint endpoint;
+    endpoint.transport = McpTransport::Http;
+    endpoint.url = server.url();
+
+    McpConnection::Failure error;
+    auto connection = McpConnection::Open(endpoint, {std::chrono::seconds(5), std::chrono::seconds(5)},
+                                          "test", "0.0.1", error);
+    REQUIRE(connection != nullptr);
+    const auto tools = connection->ListTools(nullptr, error);
+    CHECK_FALSE(tools.has_value());
+    CHECK(error.message.find("closed the stream without a response") != std::string::npos);
+}
+
+TEST_CASE("McpConnection http: a silent server is bounded by the request timeout", "[mcp_connection]") {
+    // The handler sleeps 2 s before answering; a 500 ms request timeout must
+    // cap the transfer (the total cap applies in streaming mode too).
+    FakeHttpMcpServer server(FakeHttpMcpServer::Options{.reply_sse = true, .call_delay_ms = 2000});
+    McpEndpoint endpoint;
+    endpoint.transport = McpTransport::Http;
+    endpoint.url = server.url();
+
+    McpConnection::Failure error;
+    // 1 s request timeout against a 2 s handler: the total cap applies in
+    // streaming mode too, so the transfer aborts at the deadline.
+    auto connection = McpConnection::Open(endpoint, {std::chrono::seconds(5), std::chrono::seconds(1)},
+                                          "test", "0.0.1", error);
+    REQUIRE(connection != nullptr);
+    const auto run = RunInBackground([&] {
+        return connection->CallTool("echo", nlohmann::json::object(), nullptr);
+    });
+    CHECK(run.WaitFor(std::chrono::seconds(3)));  // promptly: not after the 2 s handler
+    if (run.Ready()) {
+        const McpCallOutcome outcome = run.Get();
+        CHECK_FALSE(outcome.ok);
+        // Either the caller deadline ("request timed out") or the transport's
+        // total cap ("MCP transport error: Timeout was reached") — both
+        // bounded, both a timeout.
+        CHECK((outcome.error.find("timed") != std::string::npos ||
+               outcome.error.find("Timeout") != std::string::npos));
+    }
 }

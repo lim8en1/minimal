@@ -43,6 +43,11 @@ struct McpSettings {
     // degrade to a tool error, never a hung session worker.
     std::int64_t connect_timeout_ms = 10000;
     std::int64_t request_timeout_ms = 60000;
+    // tools/list pagination cap for the http transport. A server that never
+    // stops returning nextCursor pages would otherwise wedge the connection's
+    // worker thread (each page is individually within request_timeout). The
+    // stdio transport answers from a single request and needs no cap.
+    std::int64_t max_list_pages = 100;
 };
 
 struct ToolsSettings {

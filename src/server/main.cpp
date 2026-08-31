@@ -252,11 +252,12 @@ int main(int argc, char** argv) {
     // Nothing spawns here -- liveness checks fire when a session whose preset
     // allows a server actually starts (ARCHITECTURE.md, MCP client). A missing
     // mcps.json is the normal no-MCP state, not an error.
-    minimal::mcp::McpTimeouts mcp_timeouts;
-    mcp_timeouts.connect = std::chrono::milliseconds(settings.tools.mcp.connect_timeout_ms);
-    mcp_timeouts.request = std::chrono::milliseconds(settings.tools.mcp.request_timeout_ms);
+    minimal::mcp::McpLimits mcp_limits;
+    mcp_limits.connect = std::chrono::milliseconds(settings.tools.mcp.connect_timeout_ms);
+    mcp_limits.request = std::chrono::milliseconds(settings.tools.mcp.request_timeout_ms);
+    mcp_limits.max_list_pages = settings.tools.mcp.max_list_pages;
     auto mcp_manager = std::make_unique<minimal::mcp::McpClientManager>(
-        minimal::config::LoadMcpsConfig(config_dir / "mcps.json"), tools, mcp_timeouts,
+        minimal::config::LoadMcpsConfig(config_dir / "mcps.json"), tools, mcp_limits,
         minimal::common::DefaultLogger());
     minimal::mcp::McpClientManager& mcp = *mcp_manager;
 

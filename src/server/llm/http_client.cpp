@@ -172,7 +172,11 @@ HttpResponse PerformRequest(const HttpRequest& request, Mode mode, const HttpHea
     curl_easy_setopt(handle, CURLOPT_NOSIGNAL, 1L);
     curl_easy_setopt(handle, CURLOPT_CONNECTTIMEOUT_MS, static_cast<long>(request.connect_timeout.count()));
 
-    if (mode == Mode::Blocking && request.request_timeout.count() > 0) {
+    // The cap is total, not per-phase, in BOTH modes: a streaming server that
+    // accepts the connection and then goes silent must degrade to a bounded
+    // error, never wedge the calling thread. Streaming callers that need an
+    // unbounded transfer (LLM providers) leave this 0.
+    if (request.request_timeout.count() > 0) {
         curl_easy_setopt(handle, CURLOPT_TIMEOUT_MS, static_cast<long>(request.request_timeout.count()));
     }
 

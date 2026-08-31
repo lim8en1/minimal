@@ -64,7 +64,7 @@ struct Fixture {
 
         manager = std::make_unique<mcp::McpClientManager>(
             minimal::config::LoadMcpsConfig(mcp_config_path), registry,
-            mcp::McpTimeouts{std::chrono::seconds(3), std::chrono::seconds(5)},
+            mcp::McpLimits{std::chrono::seconds(3), std::chrono::seconds(5)},
             minimal::common::DefaultLogger());
 
         agent::SessionParams params;
@@ -241,7 +241,7 @@ TEST_CASE("a subagent whose preset requires a dead server does not start", "[ses
     const std::string broken_config = WriteMcpsConfig(nlohmann::json::array({StdioEntry("broken", "garbage")}));
     mcp::McpClientManager manager(
         minimal::config::LoadMcpsConfig(broken_config), tools,
-        mcp::McpTimeouts{std::chrono::seconds(2), std::chrono::seconds(2)},
+        mcp::McpLimits{std::chrono::seconds(2), std::chrono::seconds(2)},
         minimal::common::DefaultLogger());
 
     agent::SubagentManager subagents(sessions, db, presets, /*max_concurrent_subagents=*/4,

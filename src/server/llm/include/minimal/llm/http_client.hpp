@@ -23,7 +23,7 @@ struct HttpRequest {
     std::vector<HttpHeader> headers;
     std::string body;
     std::chrono::milliseconds connect_timeout{5000};
-    std::chrono::milliseconds request_timeout{0};  // 0 = uncapped; Post() only
+    std::chrono::milliseconds request_timeout{0};  // 0 = uncapped; caps the WHOLE transfer in both modes
     std::chrono::milliseconds idle_timeout{0};     // 0 = disabled; StreamPost() only
 };
 

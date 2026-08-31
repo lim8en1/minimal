@@ -133,7 +133,7 @@ struct McpE2eFixture {
     std::unique_ptr<session::SessionDatabase> db;
     std::unique_ptr<agent::SessionRegistry> sessions;
     std::unique_ptr<mcp::McpClientManager> manager;
-    mcp::McpTimeouts timeouts{5s, 5s};
+    mcp::McpLimits timeouts{5s, 5s};
     std::unique_ptr<rpc::SessionServiceImpl> service;
     std::unique_ptr<rpc::Server> server;
     std::shared_ptr<grpc::Channel> channel;

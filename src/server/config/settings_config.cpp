@@ -85,6 +85,11 @@ ToolsSettings ParseTools(const nlohmann::json& doc) {
         const auto& mcp = tools.at("mcp");
         result.mcp.connect_timeout_ms = mcp.value("connect_timeout_ms", result.mcp.connect_timeout_ms);
         result.mcp.request_timeout_ms = mcp.value("request_timeout_ms", result.mcp.request_timeout_ms);
+        result.mcp.max_list_pages = mcp.value("max_list_pages", result.mcp.max_list_pages);
+        if (result.mcp.max_list_pages < 1) {
+            throw std::runtime_error(
+                "settings.json: tools.mcp.max_list_pages must be at least 1");
+        }
     }
     return result;
 }

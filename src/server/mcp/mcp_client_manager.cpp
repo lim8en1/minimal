@@ -55,8 +55,8 @@ private:
 };
 
 McpClientManager::McpClientManager(config::McpsConfig config, tools::ToolRegistry& registry,
-                                   const McpTimeouts& timeouts, common::Logger& logger)
-    : config_(std::move(config)), registry_(registry), timeouts_(timeouts), logger_(logger) {
+                                   const McpLimits& limits, common::Logger& logger)
+    : config_(std::move(config)), registry_(registry), limits_(limits), logger_(logger) {
     for (const auto& entry : config_.entries) {
         if (!entry.enabled) continue;  // deliberate opt-out, silent
         auto handle = std::make_shared<ServerHandle>();
@@ -137,7 +137,7 @@ bool McpClientManager::StartHandleLocked(const config::McpServerEntry& entry,
 
     McpConnection::Failure failure;
     auto connection =
-        McpConnection::Open(ToEndpoint(*resolved), timeouts_, "minimal-server", "0.1.0", failure);
+        McpConnection::Open(ToEndpoint(*resolved), limits_, "minimal-server", "0.1.0", failure);
     if (!connection) {
         error = "MCP server '" + entry.name + "' failed to connect: " + failure.message;
         return false;

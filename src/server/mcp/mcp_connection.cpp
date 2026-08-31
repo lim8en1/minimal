@@ -4,6 +4,8 @@
 #include <cctype>
 #include <atomic>
 #include <chrono>
+#include <cstdint>
+#include <string>
 #include <thread>
 #include <utility>
 
@@ -62,6 +64,29 @@ bool WaitSlot(Slot<T>& slot, std::chrono::steady_clock::time_point deadline,
     }
     if (slot.error.empty()) return true;
     error = slot.error;
+    return false;
+}
+
+// We send integer ids; a conforming server echoes the id verbatim. Lenient
+// anyway: an integer, or a string that parses to the same integer (some
+// server SDKs stringify ids). Server-originated requests (notifications and
+// their own request ids) must not match, and non-numeric strings cannot.
+bool FrameIdMatches(const nlohmann::json& message, int64_t id) {
+    if (!message.is_object() || !message.contains("id")) return false;
+    const auto& wire = message.at("id");
+    if (wire.is_number_integer()) return wire.get<int64_t>() == id;
+    if (wire.is_string()) {
+        const std::string& text = wire.get_ref<const std::string&>();
+        if (text.empty()) return false;
+        std::size_t consumed = 0;
+        long long parsed = 0;
+        try {
+            parsed = std::stoll(text, &consumed);
+        } catch (const std::exception&) {
+            return false;  // non-numeric string: never our echo
+        }
+        return consumed == text.size() && static_cast<int64_t>(parsed) == id;
+    }
     return false;
 }
 
@@ -144,8 +169,9 @@ private:
 
 class HttpTransport final : public McpConnection::Transport {
 public:
-    HttpTransport(const McpEndpoint& endpoint, std::chrono::milliseconds request_timeout)
-        : endpoint_(endpoint), request_timeout_(request_timeout) {}
+    HttpTransport(const McpEndpoint& endpoint, std::chrono::milliseconds request_timeout,
+                  std::int64_t max_list_pages)
+        : endpoint_(endpoint), request_timeout_(request_timeout), max_list_pages_(max_list_pages) {}
 
     void Initialize(Slot<bool>& slot) override {
         nlohmann::json params = {
@@ -182,8 +208,17 @@ public:
         std::string error;
         // tools/list pages with a cursor; most servers never paginate, but a
         // truncated listing would silently hide tools from the model, so the
-        // loop is real.
-        do {
+        // loop is real. Capped: a server that never stops returning
+        // nextCursor would otherwise occupy this worker thread forever (each
+        // page is individually within request_timeout, so no deadline fires).
+        for (std::int64_t page = 0;; ++page) {
+            if (page >= max_list_pages_) {
+                slot.Complete(std::nullopt,
+                              "MCP tools/list exceeded " + std::to_string(max_list_pages_) +
+                                  " pages (tools.mcp.max_list_pages); refusing further "
+                                  "cursors from a possibly broken or malicious server");
+                return;
+            }
             nlohmann::json params = nlohmann::json::object();
             if (!cursor.empty()) params["cursor"] = cursor;
             nlohmann::json result;
@@ -204,7 +239,8 @@ public:
                 listings.push_back(std::move(listing));
             }
             cursor = result.value("nextCursor", std::string());
-        } while (!cursor.empty());
+            if (cursor.empty()) break;
+        }
         slot.Complete(std::move(listings), {});
     }
 
@@ -294,7 +330,7 @@ private:
                             if (frame.data.empty()) continue;
                             nlohmann::json parsed =
                                 nlohmann::json::parse(frame.data, nullptr, false);
-                            if (parsed.is_object() && parsed.value("id", int64_t{-1}) == id) {
+                            if (FrameIdMatches(parsed, id)) {
                                 slot->Complete(std::move(parsed), {});
                                 return false;  // abort the transfer: we have our answer
                             }
@@ -307,7 +343,10 @@ private:
                 });
         } catch (const llm::HttpError& e) {
             // The abort path lands here too; a completed slot means the
-            // response was found, not that anything failed.
+            // response was found, not that anything failed. Read under the
+            // slot mutex: Complete() may have run on this thread, but the
+            // protocol must not depend on that timing.
+            std::lock_guard<std::mutex> lock(slot->mu);
             if (!slot->done) {
                 *error = std::string("MCP transport error: ") + e.what();
                 return false;
@@ -317,17 +356,28 @@ private:
         if (!session_id->empty()) response_session_id_ = *session_id;
 
         nlohmann::json message;
-        if (slot->done) {
-            message = *slot->value;
-        } else if (*status < 200 || *status >= 300) {
-            *error = "MCP server returned HTTP " + std::to_string(*status) +
-                     (buffer->empty() ? std::string() : ": " + buffer->substr(0, 200));
-            return false;
-        } else {
-            message = nlohmann::json::parse(*buffer, nullptr, false);
-            if (!message.is_object()) {
-                *error = "MCP server returned an unparseable response";
+        {
+            std::lock_guard<std::mutex> lock(slot->mu);
+            if (slot->done) {
+                message = *slot->value;
+            } else if (*status < 200 || *status >= 300) {
+                *error = "MCP server returned HTTP " + std::to_string(*status) +
+                         (buffer->empty() ? std::string() : ": " + buffer->substr(0, 200));
                 return false;
+            } else if (*is_sse) {
+                // The stream ended within the deadline but the matching frame
+                // never came: a dedicated message, not the generic
+                // "unparseable response" the empty-buffer fallthrough would
+                // produce.
+                *error = "MCP server closed the stream without a response to request " +
+                         std::to_string(id);
+                return false;
+            } else {
+                message = nlohmann::json::parse(*buffer, nullptr, false);
+                if (!message.is_object()) {
+                    *error = "MCP server returned an unparseable response";
+                    return false;
+                }
             }
         }
 
@@ -361,6 +411,7 @@ private:
 
     McpEndpoint endpoint_;
     std::chrono::milliseconds request_timeout_;
+    std::int64_t max_list_pages_;
     std::string session_id_;           // worker-thread only
     std::string response_session_id_;  // out-of-band: Rpc records what headers carried
     int64_t next_id_ = 1;
@@ -430,7 +481,7 @@ void McpConnection::Teardown() {
 }
 
 std::unique_ptr<McpConnection> McpConnection::Open(const McpEndpoint& endpoint,
-                                                   const McpTimeouts& timeouts,
+                                                   const McpLimits& limits,
                                                    const std::string& client_name,
                                                    const std::string& client_version,
                                                    Failure& error) {
@@ -446,7 +497,7 @@ std::unique_ptr<McpConnection> McpConnection::Open(const McpEndpoint& endpoint,
             error.message = "MCP http endpoint has no url";
             return nullptr;
         }
-        transport = std::make_shared<HttpTransport>(endpoint, timeouts.request);
+        transport = std::make_shared<HttpTransport>(endpoint, limits.request, limits.max_list_pages);
     }
 
     auto worker = std::make_shared<WorkerState>();
@@ -454,14 +505,14 @@ std::unique_ptr<McpConnection> McpConnection::Open(const McpEndpoint& endpoint,
 
     auto connection = std::unique_ptr<McpConnection>(new McpConnection(
         std::move(worker), transport, std::move(loop)));
-    connection->request_timeout_ = timeouts.request;
+    connection->request_timeout_ = limits.request;
 
     // The initialize handshake runs on the worker under the connect deadline.
     // Bounded even when the subprocess dies during startup, which wedges
     // cpp-mcp's own initialize indefinitely (verified by probe).
     auto slot = std::make_shared<Slot<bool>>();
     connection->worker_->Push([transport, slot] { transport->Initialize(*slot); });
-    if (!WaitSlot(*slot, std::chrono::steady_clock::now() + timeouts.connect, nullptr,
+    if (!WaitSlot(*slot, std::chrono::steady_clock::now() + limits.connect, nullptr,
                   error.message)) {
         if (error.message.empty()) error.message = "MCP initialize timed out";
         connection->Teardown();

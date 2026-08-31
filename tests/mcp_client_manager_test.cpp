@@ -16,7 +16,7 @@
 
 using minimal::config::LoadMcpsConfig;
 using minimal::mcp::McpClientManager;
-using minimal::mcp::McpTimeouts;
+using minimal::mcp::McpLimits;
 using minimal::tools::ToolRegistry;
 
 namespace {
@@ -47,7 +47,7 @@ struct Fixture {
     std::unique_ptr<McpClientManager> manager;
 
     explicit Fixture(const nlohmann::json& entries,
-                     McpTimeouts timeouts = {std::chrono::seconds(10), std::chrono::seconds(10)}) {
+                     McpLimits timeouts = {std::chrono::seconds(10), std::chrono::seconds(10)}) {
         const std::string path = WriteMcpsConfig(entries.dump());
         manager = std::make_unique<McpClientManager>(LoadMcpsConfig(path), registry, timeouts,
                                                      minimal::common::DefaultLogger());

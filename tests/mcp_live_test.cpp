@@ -119,7 +119,7 @@ TEST_CASE("live gateway over stdio: initialize, discovery, tool call", "[mcp_liv
 
     mcp::McpConnection::Failure error;
     auto connection = mcp::McpConnection::Open(
-        StdioEndpoint(gateway), mcp::McpTimeouts{kConnectTimeout, kRequestTimeout},
+        StdioEndpoint(gateway), mcp::McpLimits{kConnectTimeout, kRequestTimeout},
         "minimal-live", "0.1.0", error);
     REQUIRE(connection != nullptr);
 
@@ -156,7 +156,7 @@ TEST_CASE("live gateway over http: initialize, discovery, tool call", "[mcp_live
         mcp::McpConnection::Failure error;
         auto connection =
             mcp::McpConnection::Open(HttpEndpoint(server.port()),
-                                     mcp::McpTimeouts{1s, kRequestTimeout}, "minimal-live",
+                                     mcp::McpLimits{1s, kRequestTimeout}, "minimal-live",
                                      "0.1.0", error);
         if (!connection) continue;
         up = true;
@@ -193,7 +193,7 @@ TEST_CASE("live gateway through the manager: tools registered and executed", "[m
     { std::ofstream(config_path) << config_json; }
 
     mcp::McpClientManager manager(config::LoadMcpsConfig(config_path), registry,
-                                  mcp::McpTimeouts{kConnectTimeout, kRequestTimeout},
+                                  mcp::McpLimits{kConnectTimeout, kRequestTimeout},
                                   common::DefaultLogger());
     std::string error;
     REQUIRE(manager.EnsureAlive("ida", error));

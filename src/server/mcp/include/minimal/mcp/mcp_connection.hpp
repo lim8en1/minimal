@@ -33,9 +33,12 @@ struct McpEndpoint {
     std::unordered_map<std::string, std::string> headers;
 };
 
-struct McpTimeouts {
+struct McpLimits {
     std::chrono::milliseconds connect{10000};
     std::chrono::milliseconds request{60000};
+    // tools/list pagination cap (http transport). 0 is never legal: the
+    // settings loader rejects it; the default matches settings_config.hpp.
+    std::int64_t max_list_pages{100};
 };
 
 // One live MCP server connection -- either a spawned stdio subprocess (cpp-mcp)
@@ -76,7 +79,7 @@ public:
     // the subprocess dies during startup (cpp-mcp's initialize can block
     // indefinitely there; the deadline lives here).
     static std::unique_ptr<McpConnection> Open(const McpEndpoint& endpoint,
-                                               const McpTimeouts& timeouts,
+                                               const McpLimits& limits,
                                                const std::string& client_name,
                                                const std::string& client_version,
                                                Failure& error);

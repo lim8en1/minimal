@@ -32,7 +32,7 @@ public:
     // under mcp__<server>__<tool>. Must outlive every session that was handed
     // tools from it (sessions borrow the manager via the registry's tools).
     McpClientManager(config::McpsConfig config, tools::ToolRegistry& registry,
-                     const McpTimeouts& timeouts, common::Logger& logger);
+                     const McpLimits& limits, common::Logger& logger);
 
     struct Status {
         bool configured = false;  // present and enabled in mcps.json
@@ -64,7 +64,7 @@ private:
 
     config::McpsConfig config_;
     tools::ToolRegistry& registry_;
-    McpTimeouts timeouts_;
+    McpLimits limits_;
     common::Logger& logger_;
 
     mutable std::mutex mu_;  // session workers call EnsureAlive concurrently
