@@ -16,12 +16,18 @@ namespace {
 using AbiTagFn = const char* (*)();
 using NameFn = const char* (*)();
 using VersionFn = const char* (*)();
-using RegisterToolsFn = void (*)(tools::ToolRegistry&, const ToolRegistrationContext&);
-using RegisterProviderFactoriesFn = void (*)(llm::ProviderFactoryRegistry&);
-using RegisterSessionObserverFn = void (*)(agent::SessionObserverRegistry&);
-using RegisterCommandsFn = void (*)(commands::CommandRegistry&);
-using RegisterAuthProviderFn = void (*)(rpc::AuthProviderRegistry&);
-using RegisterPermissionAdvisorFn = void (*)(tools::PermissionAdvisorRegistry&);
+using RegisterToolsFn =
+    void (*)(tools::ToolRegistry&, const PluginRegistrationContext&);
+using RegisterProviderFactoriesFn =
+    void (*)(llm::ProviderFactoryRegistry&, const PluginRegistrationContext&);
+using RegisterSessionObserverFn =
+    void (*)(agent::SessionObserverRegistry&, const PluginRegistrationContext&);
+using RegisterCommandsFn =
+    void (*)(commands::CommandRegistry&, const PluginRegistrationContext&);
+using RegisterAuthProviderFn =
+    void (*)(rpc::AuthProviderRegistry&, const PluginRegistrationContext&);
+using RegisterPermissionAdvisorFn =
+    void (*)(tools::PermissionAdvisorRegistry&, const PluginRegistrationContext&);
 
 template <typename Fn>
 Fn Lookup(void* handle, const char* symbol) {
@@ -110,14 +116,19 @@ PluginRecord PluginLoader::LoadOne(const PluginCandidate& candidate) {
         return record;
     }
 
+    // Everything the registration hooks see: the shared settings.json `tools`
+    // object plus THIS plugin's own plugins.json `config` slice. Built once per
+    // plugin, before any hook runs.
+    PluginRegistrationContext context;
+    context.tools_settings = tools_settings_;
+    context.config = candidate.config;
+
     // Attribution window: every tool registered inside it belongs to this
     // plugin, which is what lets a later collision name both culprits.
     const std::size_t tools_before = tools_.attributions().size();
     tools_.SetAttribution(record.name);
 
     if (auto register_tools = Lookup<RegisterToolsFn>(handle, "minimal_plugin_register_tools")) {
-        ToolRegistrationContext context;
-        context.tools_settings = tools_settings_;
         register_tools(tools_, context);
     }
 
@@ -131,7 +142,7 @@ PluginRecord PluginLoader::LoadOne(const PluginCandidate& candidate) {
     if (auto register_providers = Lookup<RegisterProviderFactoriesFn>(
             handle, "minimal_plugin_register_provider_factories")) {
         const auto before = providers_.kinds();
-        register_providers(providers_);
+        register_providers(providers_, context);
         const auto after = providers_.kinds();
         std::set_difference(after.begin(), after.end(), before.begin(), before.end(),
                             std::back_inserter(record.registered_provider_kinds));
@@ -145,7 +156,7 @@ PluginRecord PluginLoader::LoadOne(const PluginCandidate& candidate) {
         commands_->SetAttribution(record.name);
         if (auto register_commands =
                 Lookup<RegisterCommandsFn>(handle, "minimal_plugin_register_commands")) {
-            register_commands(*commands_);
+            register_commands(*commands_, context);
         }
         commands_->ClearAttribution();
 
@@ -158,7 +169,7 @@ PluginRecord PluginLoader::LoadOne(const PluginCandidate& candidate) {
     if (observers_ != nullptr) {
         if (auto register_observer = Lookup<RegisterSessionObserverFn>(
                 handle, "minimal_plugin_register_session_observer")) {
-            register_observer(*observers_);
+            register_observer(*observers_, context);
             record.registered_session_observer = true;
         }
     }
@@ -166,7 +177,7 @@ PluginRecord PluginLoader::LoadOne(const PluginCandidate& candidate) {
     if (auth_providers_ != nullptr) {
         if (auto register_auth = Lookup<RegisterAuthProviderFn>(
                 handle, "minimal_plugin_register_auth_provider")) {
-            register_auth(*auth_providers_);
+            register_auth(*auth_providers_, context);
             record.registered_auth_provider = true;
         }
     }
@@ -179,7 +190,7 @@ PluginRecord PluginLoader::LoadOne(const PluginCandidate& candidate) {
         permission_advisors_->SetAttribution(record.name);
         if (auto register_advisor = Lookup<RegisterPermissionAdvisorFn>(
                 handle, "minimal_plugin_register_permission_advisor")) {
-            register_advisor(*permission_advisors_);
+            register_advisor(*permission_advisors_, context);
         }
         permission_advisors_->ClearAttribution();
         record.registered_permission_advisor =

@@ -19,11 +19,12 @@ const char* minimal_plugin_abi_tag() { return minimal::common::AbiTag(); }
 const char* minimal_plugin_name() { return "tools-fs"; }
 const char* minimal_plugin_version() { return minimal::common::Version(); }
 
-void minimal_plugin_register_tools(minimal::tools::ToolRegistry& registry,
-                                   const minimal::plugins::ToolRegistrationContext& context) {
-    // Core hands over the whole `tools` object without imposing a schema; this
-    // plugin owns the shape of its own slice.
-    const auto settings = minimal::tools_fs::ParseFsSettings(context.tools_settings);
+void minimal_plugin_register_tools(
+    minimal::tools::ToolRegistry& registry,
+    const minimal::plugins::PluginRegistrationContext& context) {
+    // The plugin's own `config` object from its plugins.json entry, verbatim;
+    // core imposes no schema, this plugin owns the shape of its own slice.
+    const auto settings = minimal::tools_fs::ParseFsSettings(context.config);
 
     registry.Register(minimal::tools_fs::MakeReadTool(settings));
     registry.Register(minimal::tools_fs::MakeWriteTool(settings));

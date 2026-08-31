@@ -27,7 +27,8 @@ const char* minimal_plugin_name() { return "fixture-advisor"; }
 const char* minimal_plugin_version() { return "1.0.0"; }
 
 void minimal_plugin_register_permission_advisor(
-    minimal::tools::PermissionAdvisorRegistry& registry) {
+    minimal::tools::PermissionAdvisorRegistry& registry,
+    const minimal::plugins::PluginRegistrationContext&) {
     registry.Register(std::make_shared<FixtureAdvisor>());
 }
 }

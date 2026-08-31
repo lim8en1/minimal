@@ -9,11 +9,7 @@
     "scrollback_page_size": 100
   },
 
-  "tools": {
-    "read": {},
-    "edit": {},
-    "bash": {}
-  },
+  "tools": {},
 
   "tools_view": {
     "stdout_buffer_lines": 100

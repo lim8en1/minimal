@@ -45,15 +45,27 @@
 
 namespace minimal::plugins {
 
-// Everything a tool needs at REGISTRATION time. A struct rather than loose
-// parameters so a later addition stays source-compatible instead of forcing
-// another signature change on every plugin author. (Per-invocation needs like
-// the Logger travel in ToolContext, not here.)
-struct ToolRegistrationContext {
+// Everything a plugin needs at REGISTRATION time, for every registration seam.
+// A struct rather than loose parameters so a later addition stays
+// source-compatible instead of forcing another signature change on every
+// plugin author. (Per-invocation needs like the Logger travel in ToolContext,
+// not here.)
+struct PluginRegistrationContext {
     // The `tools` object from settings.json, verbatim. Core deliberately does
     // not impose a schema on it: each plugin owns the shape of its own slice,
-    // which is why config::ToolsSettings keeps it as raw JSON.
+    // which is why config::ToolsSettings keeps it as raw JSON. Carried on the
+    // shared context rather than only at tool registration so a plugin that
+    // registers several seam kinds sees the same world at each.
     nlohmann::json tools_settings = nlohmann::json::object();
+
+    // This plugin's own configuration, verbatim: the optional "config" object
+    // on the plugin's plugins.json entry --
+    //   {"plugins": [{"file": "tools-bash.so", "config": {"timeout_ms": 30000}}]}
+    // -- and only this plugin's. Core imposes no schema here either; the same
+    // rule as tools_settings. Empty when the entry carries none (a runtime
+    // condition, not an error). Configure a plugin where you enable it:
+    // plugins.json is the one file a user already edits for that purpose.
+    nlohmann::json config = nlohmann::json::object();
 };
 
 }  // namespace minimal::plugins
@@ -69,12 +81,15 @@ const char* minimal_plugin_abi_tag();
 const char* minimal_plugin_name();
 const char* minimal_plugin_version();
 
-// OPTIONAL, additive: many plugins may each contribute tools.
+// OPTIONAL, additive: many plugins may each contribute tools. The context
+// carries the verbatim `tools` object from settings.json AND this plugin's own
+// `config` object from its plugins.json entry.
 void minimal_plugin_register_tools(minimal::tools::ToolRegistry&,
-                                   const minimal::plugins::ToolRegistrationContext&);
+                                   const minimal::plugins::PluginRegistrationContext&);
 
 // OPTIONAL, additive: contributes provider kinds addressable from providers.json.
-void minimal_plugin_register_provider_factories(minimal::llm::ProviderFactoryRegistry&);
+void minimal_plugin_register_provider_factories(
+    minimal::llm::ProviderFactoryRegistry&, const minimal::plugins::PluginRegistrationContext&);
 
 // OPTIONAL, additive: reacts to session lifecycle events.
 //
@@ -82,7 +97,8 @@ void minimal_plugin_register_provider_factories(minimal::llm::ProviderFactoryReg
 // state grows for the process lifetime -- tools-bash's cwd/env map is the
 // concrete case. Observers are dispatched fire-and-forget and cannot veto
 // anything; see SessionObserver for the constraints they run under.
-void minimal_plugin_register_session_observer(minimal::agent::SessionObserverRegistry&);
+void minimal_plugin_register_session_observer(minimal::agent::SessionObserverRegistry&,
+                                              const minimal::plugins::PluginRegistrationContext&);
 
 // OPTIONAL, additive: contributes /-commands.
 //
@@ -91,13 +107,15 @@ void minimal_plugin_register_session_observer(minimal::agent::SessionObserverReg
 // because the per-session cwd/env they share lives inside that .so and no other
 // plugin can reach it. Two independent symbols is what expresses that, rather
 // than one "kind" of plugin that has to be either/or.
-void minimal_plugin_register_commands(minimal::commands::CommandRegistry&);
+void minimal_plugin_register_commands(minimal::commands::CommandRegistry&,
+                                      const minimal::plugins::PluginRegistrationContext&);
 
 // Exclusive: one global choice. First registration wins; a second logs a
 // warning and is ignored (the registry enforces this). The default is NO
 // authentication -- an empty registry passes everything through, matching the
 // local-only single-user topology (ARCHITECTURE.md).
-void minimal_plugin_register_auth_provider(minimal::rpc::AuthProviderRegistry&);
+void minimal_plugin_register_auth_provider(minimal::rpc::AuthProviderRegistry&,
+                                           const minimal::plugins::PluginRegistrationContext&);
 
 // OPTIONAL, additive: contributes a permission advisor, keyed by the plugin's
 // name. permissions.json's "advisor" field selects one by that name; an
@@ -107,7 +125,9 @@ void minimal_plugin_register_auth_provider(minimal::rpc::AuthProviderRegistry&);
 // the mode lattice, precedence chains, subagent ceilings, and run modes before
 // the checker runs, and the grant filter at the call site holds for an
 // advisor's answer exactly as for a human's.
-void minimal_plugin_register_permission_advisor(minimal::tools::PermissionAdvisorRegistry&);
+void minimal_plugin_register_permission_advisor(
+    minimal::tools::PermissionAdvisorRegistry&,
+    const minimal::plugins::PluginRegistrationContext&);
 
 // Not yet wired -- declared nowhere until the subsystem it registers into
 // exists, so that this ABI is not frozen before it has consumers:

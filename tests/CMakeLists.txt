@@ -31,6 +31,7 @@ add_executable(minimal_tests
     openai_stream_test.cpp
     openai_error_mapping_test.cpp
     plugin_loader_test.cpp
+    plugin_discovery_test.cpp
     aliased_tool_test.cpp
     provider_factory_registry_test.cpp
     permission_codec_test.cpp

@@ -33,6 +33,10 @@ struct PluginCandidate {
     std::filesystem::path file;
     Provenance provenance = Provenance::User;
     bool enabled = false;
+    // The candidate's own config from its plugins.json entry, verbatim
+    // (PluginConfig::Entry::config, propagated by DiscoverPlugins). Forwarded
+    // to the plugin's registration hooks; core imposes no schema on it.
+    nlohmann::json config = nlohmann::json::object();
 };
 
 struct PluginRecord {

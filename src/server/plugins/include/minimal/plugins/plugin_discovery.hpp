@@ -5,6 +5,8 @@
 #include <string>
 #include <vector>
 
+#include <nlohmann/json.hpp>
+
 #include "minimal/plugins/plugin_loader.hpp"
 
 namespace minimal::plugins {
@@ -19,11 +21,22 @@ namespace minimal::plugins {
 //     "plugins": [ {"file": "tools-fs.so", "provenance": "bundled", "enabled": true} ],
 //     "command_aliases": { "bash_over_ssh.bash": "ssh_bash" }
 //   }
+//
+// Each entry may also carry a "config" object -- the plugin's own settings,
+// forwarded to it at registration.
 struct PluginConfig {
     struct Entry {
         std::string file;  // basename, resolved against its provenance directory
         Provenance provenance = Provenance::User;
         bool enabled = false;
+        // This plugin's own configuration, verbatim. Source: the optional
+        // "config" object on the entry:
+        //   {"plugins": [{"file": "tools-bash.so", "enabled": true,
+        //                 "config": {"timeout_ms": 30000}}]}
+        // Core imposes no schema -- each plugin owns the shape of its own
+        // slice, the same rule as tools_settings. A non-object value degrades
+        // to an empty object with a startup warning.
+        nlohmann::json config = nlohmann::json::object();
     };
     std::vector<Entry> plugins;
 

@@ -86,20 +86,24 @@ const char* minimal_plugin_abi_tag() { return minimal::common::AbiTag(); }
 const char* minimal_plugin_name() { return "tools-bash"; }
 const char* minimal_plugin_version() { return minimal::common::Version(); }
 
-void minimal_plugin_register_tools(minimal::tools::ToolRegistry& registry,
-                                   const minimal::plugins::ToolRegistrationContext& context) {
-    // Core hands over the whole `tools` object without imposing a schema; this
-    // plugin owns the shape of its own slice.
-    const auto settings = minimal::tools_bash::ParseBashSettings(context.tools_settings);
+void minimal_plugin_register_tools(
+    minimal::tools::ToolRegistry& registry,
+    const minimal::plugins::PluginRegistrationContext& context) {
+    // The plugin's own `config` object from its plugins.json entry, verbatim;
+    // core imposes no schema, this plugin owns the shape of its own slice.
+    const auto settings = minimal::tools_bash::ParseBashSettings(context.config);
     registry.Register(minimal::tools_bash::MakeBashTool(settings, BashStore()));
 }
 
-void minimal_plugin_register_commands(minimal::commands::CommandRegistry& registry) {
+void minimal_plugin_register_commands(
+    minimal::commands::CommandRegistry& registry,
+    const minimal::plugins::PluginRegistrationContext&) {
     registry.Register(std::make_unique<RestartShellCommand>());
 }
 
 void minimal_plugin_register_session_observer(
-    minimal::agent::SessionObserverRegistry& registry) {
+    minimal::agent::SessionObserverRegistry& registry,
+    const minimal::plugins::PluginRegistrationContext&) {
     registry.Register(std::make_shared<BashSessionObserver>());
 }
 

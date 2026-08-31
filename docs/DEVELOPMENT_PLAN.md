@@ -416,19 +416,19 @@ Core imposes no schema — the same rule as `tools_settings` today. Every `regis
 - `PluginConfig::Entry` (`plugin_discovery.hpp:22-34`) gains `nlohmann::json config`. Parse degrades to `{}` with a warning on a non-object value — the file's existing degrade-don't-throw rule. **The serializer must round-trip `config`:** `main.cpp:96` rewrites `plugins.json` after discovery, and a config that vanishes on the next save is user config silently dropped.
 - `plugin_abi.h`: the signature sweep. Source compatibility makes it a rebuild for plugin authors, not a break.
 - `plugin_loader.cpp` copies the entry's config into the context before each register call, inside the attribution window it already opens (pattern: tools at `:114-118`, commands at `:141-146`).
-- Bundled plugins update mechanically; none change behavior. Each may keep parsing its slice from `tools_settings` — the context carries both, and moving a plugin's knobs to its own `config` is optional per plugin.
+- Bundled plugins update mechanically. **Implemented deviation:** the knob migration was taken immediately and strict — `tools-bash` and `tools-fs` parse their settings from `context.config` with **no** `tools.*` fallback (`tools.bash.*` / `tools.read.*` / `tools.edit.*` in settings.json are no longer honored); `bundled/settings.json`'s `tools` object is now empty and remains only as the verbatim channel for third-party tool plugins.
 
 **Acceptance criteria**
-- [ ] A plugin's `config` object reaches every register symbol verbatim, and only that plugin's.
-- [ ] A malformed `config` (non-object) degrades to `{}` with a startup warning; the plugin still loads.
-- [ ] The `main.cpp:96` rewrite preserves `config` — no user-config loss on save.
-- [ ] `tools_settings` still carries the whole verbatim `tools` object to tool plugins.
+- [x] A plugin's `config` object reaches every register symbol verbatim, and only that plugin's.
+- [x] A malformed `config` (non-object) degrades to `{}` with a startup warning; the plugin still loads.
+- [x] The `main.cpp:96` rewrite preserves `config` — no user-config loss on save.
+- [x] `tools_settings` still carries the whole verbatim `tools` object to tool plugins.
 
-**Test cases** (`tests/plugin_discovery_test.cpp`, `tests/plugin_loader_test.cpp`)
-- [ ] Parse: `config` present / absent / non-object; serialize round-trips it through a load→save→load cycle.
-- [ ] Two plugins with different configs — each context sees only its own slice (isolation).
-- [ ] **Invariant test:** removing the per-plugin copy (every context gets one shared entry's config) fails the isolation test.
-- [ ] One bundled plugin compiles through the new signature and still parses its settings unchanged.
+**Test cases** (`tests/plugin_discovery_test.cpp` — new, parse/serialize/discovery — and `tests/plugin_loader_test.cpp`)
+- [x] Parse: `config` present / absent / non-object; serialize round-trips it through a load→save→load cycle (plus discovery propagation: entry config → candidate → context).
+- [x] Two plugins with different configs — each context sees only its own slice (isolation; observed through the real dlopen via the fixtures' config-echo tools).
+- [x] **Invariant test:** removing the per-plugin copy (every context gets one shared entry's config) fails the isolation test.
+- [x] One bundled plugin compiles through the new signature and still parses its settings unchanged.
 
 ### L. Cross-plugin services (ServiceRegistry)
 

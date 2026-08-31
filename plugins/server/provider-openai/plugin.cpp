@@ -21,7 +21,9 @@ const char* minimal_plugin_abi_tag() { return minimal::common::AbiTag(); }
 const char* minimal_plugin_name() { return "provider-openai"; }
 const char* minimal_plugin_version() { return minimal::common::Version(); }
 
-void minimal_plugin_register_provider_factories(minimal::llm::ProviderFactoryRegistry& registry) {
+void minimal_plugin_register_provider_factories(
+    minimal::llm::ProviderFactoryRegistry& registry,
+    const minimal::plugins::PluginRegistrationContext&) {
     registry.Register("openai", [](const minimal::llm::ProviderConfig& config) {
         return std::make_unique<minimal::provider_openai::OpenAiProvider>(config);
     });

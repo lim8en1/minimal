@@ -6,6 +6,7 @@
 #include <nlohmann/json.hpp>
 
 #include "minimal/common/bundled_assets.hpp"
+#include "minimal/common/logger.hpp"
 
 namespace minimal::plugins {
 namespace {
@@ -37,6 +38,19 @@ PluginConfig ParsePluginConfig(const std::string& json_text) {
                 item.value("provenance", std::string{kUser}) == kBundled ? Provenance::Bundled
                                                                          : Provenance::User;
             entry.enabled = item.value("enabled", false);
+            if (auto config_it = item.find("config"); config_it != item.end()) {
+                if (config_it->is_object()) {
+                    entry.config = *config_it;
+                } else {
+                    // Degrade-don't-throw, like the rest of this file: a
+                    // malformed config must not stop the plugin from loading.
+                    // The plugin sees {} and the warning says what was dropped.
+                    common::DefaultLogger().warn(
+                        "plugins.json: entry '{}' has a non-object 'config' ({}); "
+                        "ignoring it -- the plugin will receive an empty config",
+                        entry.file, config_it->type_name());
+                }
+            }
             config.plugins.push_back(std::move(entry));
         }
     }
@@ -53,11 +67,17 @@ std::string SerializePluginConfig(const PluginConfig& config) {
     nlohmann::json out;
     out["plugins"] = nlohmann::json::array();
     for (const auto& entry : config.plugins) {
-        out["plugins"].push_back({
+        nlohmann::json item = {
             {"file", entry.file},
             {"provenance", entry.provenance == Provenance::Bundled ? kBundled : kUser},
             {"enabled", entry.enabled},
-        });
+        };
+        // User config must survive the load->save cycle: main rewrites this file
+        // on every startup, so dropping config here would silently erase it.
+        // Emitted unconditionally (object or not) so what round-trips is what
+        // was parsed -- a malformed value was already flattened to {} at parse.
+        item["config"] = entry.config;
+        out["plugins"].push_back(std::move(item));
     }
     out["command_aliases"] = nlohmann::json(config.command_aliases);
     return out.dump(2) + "\n";
@@ -134,7 +154,8 @@ std::vector<PluginCandidate> DiscoverPlugins(const std::filesystem::path& bundle
                 item.file);
         }
 
-        candidates.push_back(PluginCandidate{item.path, item.provenance, existing->enabled});
+        candidates.push_back(
+            PluginCandidate{item.path, item.provenance, existing->enabled, existing->config});
     }
 
     return candidates;

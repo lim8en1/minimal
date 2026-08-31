@@ -9,7 +9,7 @@ Companion to `ARCHITECTURE.md`, which remains the single source of truth for *de
 | Symbol | Status | What it grants |
 |---|---|---|
 | `minimal_plugin_abi_tag` / `_name` / `_version` | required | load gate |
-| `minimal_plugin_register_tools(ToolRegistry&, const ToolRegistrationContext&)` | live | concrete tools; the context carries the verbatim `tools.*` JSON from `settings.json` |
+| `minimal_plugin_register_tools(ToolRegistry&, const PluginRegistrationContext&)` | live | concrete tools; the context carries the verbatim `tools.*` JSON from `settings.json` plus the plugin's own `config` from `plugins.json` |
 | `minimal_plugin_register_provider_factories(ProviderFactoryRegistry&)` | live | provider kinds addressable from `providers.json` |
 | `minimal_plugin_register_session_observer(SessionObserverRegistry&)` | live | fire-and-forget lifecycle reactions; cannot veto anything |
 | `minimal_plugin_register_commands(CommandRegistry&)` | live | `/`-commands |
@@ -82,6 +82,8 @@ The first consumer justifies the pattern: `/restart-shell` lives in `tools-bash`
 **Cost.** Moderate — small code, one new design rule (`NameRegistry` kind, sanity-check wiring).
 
 ### 2.3 No per-plugin config beyond one verbatim blob
+
+**Status: landed as track K.** Implemented as specified below, with one deviation: the bundled plugins' knobs did **not** stay in `tools_settings` — `tools-bash` and `tools-fs` moved their knobs to their own `plugins.json` `config` objects with no `tools.*` fallback (the "optional per plugin" migration exercised immediately, strict rather than backward-compatible). The `tools_settings` channel itself is unchanged and still carries the whole verbatim `tools` object.
 
 **Hole.** Only tool-registering plugins receive configuration: `ToolRegistrationContext::tools_settings` is the verbatim `tools` object from `settings.json`, and it reaches only `minimal_plugin_register_tools`. A provider, observer, or command plugin has no sanctioned way to read its own settings, and a tool plugin cannot get anything but the `tools.*` slice.
 
@@ -418,7 +420,7 @@ Command (the abstract -- already named Command; no rename)
 |---|---|---|
 | 2.1 Tool history access | nothing | designed, **track M** (DEVELOPMENT_PLAN §4 M) |
 | 2.2 Cross-plugin services | nothing | designed, **track L** (DEVELOPMENT_PLAN §4 L), sequenced after K; first consumer: `/restart-shell` |
-| 2.3 Per-plugin config | nothing | designed, **track K** (DEVELOPMENT_PLAN §4 K), sequenced before L |
+| 2.3 Per-plugin config | nothing | **done (track K)** |
 | 2.4 MCP lifecycle | track G | designed, waits on G |
 | 2.5 Plugin UI surface | track E + 2.2 | designed, lands with E; the server half dispatches through 2.2's registry (built by track L) |
 | 2.6 Model auto-discovery | nothing | designed, **track N** (DEVELOPMENT_PLAN §4 N) |
