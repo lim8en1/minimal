@@ -4,6 +4,7 @@
 #include <utility>
 
 #include "minimal/agent/compaction_boundary.hpp"
+#include "minimal/config/project_context.hpp"
 #include "minimal/session/session_reader.hpp"
 #include "minimal/session/sqlite_history_store.hpp"
 
@@ -80,6 +81,23 @@ std::shared_ptr<Session> SessionRegistry::CreateResolved(SessionParams params,
                                                           std::optional<int> max_turns_override) {
     // Read before params is moved from.
     const std::string params_parent = params.parent_session_id;
+    const std::filesystem::path project_root = params.project_root;
+
+    // PROJECT CONTEXT (AGENTS.md/CLAUDE.md), loaded HERE -- in the funnel every
+    // session passes through: top-level creation, resume, and SubagentManager
+    // spawns alike. The file is a property of the session's project_root, which
+    // no preset knows; the rendered section rides SessionParams into the loop,
+    // which appends it after the preset body on every request. Absence is the
+    // normal state and silent; a file that exists but cannot be read is worth
+    // one warning, since the operator wrote instructions and got silence.
+    std::string error;
+    if (auto context = config::LoadProjectContext(project_root, project_context_, &error)) {
+        params.project_context = config::RenderProjectContextSection(*context);
+        logger_.info("session {}: loaded project context from {}", params.session_id,
+                     context->source_path.string());
+    } else if (!error.empty()) {
+        logger_.warn("session {}: {}", params.session_id, error);
+    }
     // The user's model outranks the preset's. Applied here rather than inside
     // the preset registry because it is a property of this SESSION, not of the
     // preset -- two sessions on one preset can be running different models. In

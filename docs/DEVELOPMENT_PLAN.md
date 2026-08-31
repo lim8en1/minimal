@@ -543,6 +543,44 @@ Anything context-aware — a "summarize the thread so far" tool, retrieval keyed
 - [x] Concurrency: parallel `Resolve` from eight threads fetches once and resolves for all.
 - [x] **Invariant tests:** removing the miss→discovery fallback fails the lazy-fetch test; resolving `context_window_tokens` from static-only fails the compaction-window test.
 
+### O. Project context files (AGENTS.md / CLAUDE.md) — done
+
+> Independent of the other tracks. The de-facto project-instruction convention: a repo documents its build/test conventions in `AGENTS.md` (the emerging cross-tool standard) or `CLAUDE.md` (Claude Code's name), and the harness should put that in front of the model without anyone pasting it into a prompt.
+
+**What.** Each session's system prompt gains the instructions from the first context file found in the session's `project_root`. Discovery and content are config (`settings.json`):
+
+```json
+"project_context": { "enabled": true, "files": ["AGENTS.md", "CLAUDE.md"],
+                     "max_bytes": 0, "search_ancestors": false }
+```
+
+`files` is tried in order within each directory (first existing wins; `CLAUDE.md` is the fallback, not an additional file); `max_bytes: 0` means unlimited, and a set cap truncates with a visible marker line; `search_ancestors` walks upward from `project_root` to the filesystem root — nearest directory first, THEN the configured file order within it, so a `CLAUDE.md` in the project beats an `AGENTS.md` three levels up (closer instructions are more specific), and a `~/AGENTS.md` becomes a global fallback, which is documented as a feature rather than fenced off.
+
+**How, and the decisions the spec left open:**
+
+- **The loader never throws and treats absence as the normal state** (`src/server/config/project_context.{hpp,cpp}`, the `SkillRegistry` pattern). A found-but-unreadable file is distinguished from "not found" through an error out-param, so the registry can log one honest warning instead of silently ignoring instructions the operator wrote. An empty or whitespace-only file is skipped and the search CONTINUES — it carries no instructions and must not stop `CLAUDE.md` from being found.
+- **Injection is a SESSION property, not a preset one.** The file lives in the session's `project_root`, which no preset knows; the rendered section rides `SessionParams::project_context` into the `AgentLoop`, which appends it after the preset body in `BuildChatRequest`. Baking it into `AgentPreset::system_prompt` would have been simpler but wrong twice: the preset registry's cache is keyed by preset name (project-specific prompts would pollute it), and a mid-session `/agent` re-resolves the preset from disk — the project's instructions would silently vanish at exactly the moment the operator switched agents mid-task.
+- **Loaded once in `SessionRegistry::CreateResolved`** — the one funnel top-level creation, resume, and `SubagentManager` spawns share — so a child inherits its parent's context through the parent's `project_root` with no extra code, and a resumed session re-reads it deterministically. The section is constant for the session's life; the prompt-cache prefix is never disturbed mid-session. If the file changed between sessions, a resumed session picks up the new text — accepted, the same spirit as config having no hot reload.
+- **The registry defaults to DISABLED** until `main.cpp` wires the parsed settings in (`set_project_context`), the same shape as `set_commands`: an unwired producer is a feature that is off, not one running on guessed defaults — and no registry-constructing test scans the filesystem by accident.
+- **A symlinked `project_root` is canonicalized first** (`weakly_canonical`), so the ancestor walk starts where the root actually sits — the same canonicalize-first stance as `path_confinement`.
+- **File names are validated as file NAMES**: `files` entries containing `/` or `\` are rejected at parse time — the setting means "the convention file", not "an arbitrary path I resolved once".
+- **Occupancy note, deliberately not "fixed"**: the compaction trigger's fallback estimate (bytes/4 over history) still does not count the system prompt, so a very large context file under-states occupancy until the backend's usage reports arrive (which capture it). This is the same estimate-only stance the compactor already records; capping is the operator's lever (`max_bytes`), not a new accounting mechanism.
+
+**Acceptance criteria**
+- [x] `AGENTS.md` wins over `CLAUDE.md` in one directory; `CLAUDE.md` is the fallback when `AGENTS.md` is absent; absence is silent.
+- [x] The section is appended after the preset body, names the winning file, and survives `/agent`.
+- [x] A subagent inherits the context from the parent's `project_root` through the `CreateResolved` funnel, with no spawner changes.
+- [x] `search_ancestors` defaults OFF; when ON, proximity beats file order across directories.
+- [x] `max_bytes` truncates with a visible marker recording shown/total bytes; a file exactly at the cap is not truncated.
+- [x] The feature is inert until wired: a registry without `set_project_context` loads nothing.
+
+**Test cases** (`tests/project_context_test.cpp` — new; `tests/settings_config_test.cpp`; `tests/session_registry_test.cpp`; `tests/agent_loop_test.cpp`)
+- [x] Loader: found/verbatim/fallback/order; disabled; empty and whitespace-only skipped with the search continuing; no-candidate yields nullopt with no error; `max_bytes` truncation and exact-boundary; a directory named `AGENTS.md` is not a candidate; ancestor walk on/off and the proximity invariant; canonicalized `source_path` (macOS `/var` → `/private/var`).
+- [x] Renderer: header + body; the truncation marker; empty body renders nothing.
+- [x] Settings: defaults (`enabled`, both standard names, no cap, no ancestors); overrides; rejection of non-object, non-array `files`, empty/non-string entries, path-shaped names, negative `max_bytes`.
+- [x] Registry: context reaches `BuildChatRequest().system` with the preset body still at the front; `CLAUDE.md` fallback through a real session; absent when disabled or no file.
+- [x] Loop: exact concatenation; survives `SetPreset`; stable across rebuilds (the cached-prefix invariant).
+
 ---
 
 ## 5. Dependent tracks (after A)

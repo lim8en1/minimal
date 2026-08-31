@@ -24,6 +24,7 @@ add_library(minimal_server_core SHARED
     config/permissions_config.cpp
     config/mcps_config.cpp
     config/skill_registry.cpp
+    config/project_context.cpp
     config/sanity_check.cpp
     agent/agent_preset_frontmatter.cpp
     agent/permission_resolution.cpp

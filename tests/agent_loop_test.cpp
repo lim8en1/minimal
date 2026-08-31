@@ -93,7 +93,7 @@ struct Harness {
     void Build(agent::AgentPreset preset = {}, agent::LoopConfig config = {},
                agent::Compactor compactor = {}, std::vector<llm::Message> seeded_history = {},
                std::optional<std::int64_t> seed_first_persisted_seq = std::nullopt,
-               bool seed_head_is_summary = false) {
+               bool seed_head_is_summary = false, std::string project_context = {}) {
         if (preset.allowed_tools.empty()) preset.allowed_tools = {"*"};
         if (preset.provider.model_name.empty()) preset.provider.model_name = "test-model";
         preset.permission_mode = AllowAllPolicy();
@@ -113,7 +113,7 @@ struct Harness {
                 return !cancel_flag.load();
             },
             std::move(compactor), std::move(seeded_history), seed_first_persisted_seq,
-            seed_head_is_summary);
+            seed_head_is_summary, std::move(project_context));
     }
 };
 
@@ -326,6 +326,50 @@ TEST_CASE("tools reach the request sorted and stable", "[agent_loop][invariant]"
     REQUIRE(second.tools.size() == first.tools.size());
     for (std::size_t i = 0; i < first.tools.size(); ++i) {
         CHECK(first.tools[i].name == second.tools[i].name);
+    }
+}
+
+TEST_CASE("project context rides the session, not the preset", "[agent_loop][invariant]") {
+    // AGENTS.md/CLAUDE.md is a SESSION property held by the loop, appended after
+    // whatever preset body is active. /agent re-resolves the preset from disk;
+    // if the context were baked into the preset it would silently vanish at
+    // exactly the moment the operator switched agents mid-task.
+    Harness h;
+    h.provider.PushResponse(TextResponse("ok"));
+
+    SECTION("appended after the preset body; empty preset still carries it") {
+        agent::AgentPreset preset;
+        preset.system_prompt = "You are a build agent.";
+        h.Build(preset, agent::LoopConfig{}, {}, {}, std::nullopt, false,
+                "## Project context\n\nAlways run the tests.");
+
+        const auto request = h.loop->BuildChatRequest();
+        REQUIRE(request.system.has_value());
+        CHECK(*request.system ==
+              "You are a build agent.\n\n## Project context\n\nAlways run the tests.");
+    }
+    SECTION("survives SetPreset") {
+        agent::AgentPreset preset;
+        preset.system_prompt = "first";
+        h.Build(preset, agent::LoopConfig{}, {}, {}, std::nullopt, false,
+                "## Project context\n\nAlways run the tests.");
+
+        agent::AgentPreset replacement;
+        replacement.system_prompt = "second";
+        h.loop->SetPreset(std::move(replacement));
+
+        const auto request = h.loop->BuildChatRequest();
+        REQUIRE(request.system.has_value());
+        CHECK(request.system->rfind("second", 0) == 0);
+        CHECK(request.system->find("## Project context\n\nAlways run the tests.") !=
+              std::string::npos);
+    }
+    SECTION("stable across rebuilds of the same session") {
+        h.Build(agent::AgentPreset{}, agent::LoopConfig{}, {}, {}, std::nullopt, false,
+                "## Project context\n\nAlways run the tests.");
+        const auto first = h.loop->BuildChatRequest();
+        const auto second = h.loop->BuildChatRequest();
+        CHECK(first.system == second.system);
     }
 }
 

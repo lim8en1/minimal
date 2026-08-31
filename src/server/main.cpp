@@ -353,6 +353,10 @@ int main(int argc, char** argv) {
     minimal::agent::SessionRegistry sessions(*presets, tools, providers, observers, *session_db,
                                              loop_config, minimal::common::DefaultLogger());
     sessions.set_commands(&commands);
+    // Project context (AGENTS.md/CLAUDE.md): each session loads its own, from
+    // its own project_root, at creation/resume/spawn -- never at startup, since
+    // the server serves many project roots and no file belongs to all of them.
+    sessions.set_project_context(settings.project_context);
 
     // The shared MCP server processes: one connection per enabled mcps.json
     // entry, shared across every session. Core, like the MCP client itself.

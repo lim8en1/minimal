@@ -15,6 +15,13 @@
     "stdout_buffer_lines": 100
   },
 
+  "project_context": {
+    "enabled": true,
+    "files": ["AGENTS.md", "CLAUDE.md"],
+    "max_bytes": 0,
+    "search_ancestors": false
+  },
+
   "logging": {
     "level": "info",
     "max_size_mb": 10,

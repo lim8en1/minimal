@@ -449,3 +449,74 @@ TEST_CASE("ChildCount counts only live sessions of that parent", "[session_regis
     fixture.registry->Terminate("ca");
     CHECK(fixture.registry->ChildCount("p") == 1);
 }
+
+// --- Project context (AGENTS.md / CLAUDE.md) ---------------------------------
+
+TEST_CASE("project context is loaded from the session's project_root into the system prompt",
+          "[session_registry][project_context]") {
+    RegistryFixture fixture;
+    fixture.config.WriteDefaults();
+    fixture.Build();
+    // Explicit wiring turns the feature on; the registry defaults to disabled
+    // so unwired tests never scan the filesystem.
+    fixture.registry->set_project_context(config::ProjectContextSettings{});
+
+    testing::TempDir project;
+    { std::ofstream(project.path() / "AGENTS.md") << "Always run the tests.\n"; }
+
+    auto params = Params("s1");
+    params.project_root = project.path();
+    auto session = fixture.registry->Create(std::move(params));
+    REQUIRE(session != nullptr);
+
+    const auto request = session->loop().BuildChatRequest();
+    REQUIRE(request.system.has_value());
+    CHECK(request.system->find("Instructions from AGENTS.md in the project root:") !=
+          std::string::npos);
+    CHECK(request.system->find("Always run the tests.") != std::string::npos);
+    // Appended after the preset body, which stays at the front.
+    CHECK(request.system->rfind("You are a build agent.", 0) == 0);
+}
+
+TEST_CASE("project context falls back to CLAUDE.md and skips empty files",
+          "[session_registry][project_context]") {
+    RegistryFixture fixture;
+    fixture.config.WriteDefaults();
+    fixture.Build();
+    fixture.registry->set_project_context(config::ProjectContextSettings{});
+
+    testing::TempDir project;
+    { std::ofstream(project.path() / "AGENTS.md") << ""; }
+    { std::ofstream(project.path() / "CLAUDE.md") << "Claude-side instructions.\n"; }
+
+    auto params = Params("s1");
+    params.project_root = project.path();
+    auto session = fixture.registry->Create(std::move(params));
+
+    const auto request = session->loop().BuildChatRequest();
+    REQUIRE(request.system.has_value());
+    CHECK(request.system->find("Instructions from CLAUDE.md in the project root:") !=
+          std::string::npos);
+    CHECK(request.system->find("Claude-side instructions.") != std::string::npos);
+}
+
+TEST_CASE("project context is absent when disabled or when no candidate file exists",
+          "[session_registry][project_context]") {
+    RegistryFixture fixture;
+    fixture.config.WriteDefaults();
+    fixture.Build();
+
+    SECTION("registry defaults: the feature is off until wired") {
+        auto session = fixture.registry->Create(Params("s1"));
+        const auto request = session->loop().BuildChatRequest();
+        REQUIRE(request.system.has_value());
+        CHECK(request.system->find("## Project context") == std::string::npos);
+    }
+    SECTION("enabled, but the project has neither file") {
+        fixture.registry->set_project_context(config::ProjectContextSettings{});
+        auto session = fixture.registry->Create(Params("s1"));
+        const auto request = session->loop().BuildChatRequest();
+        REQUIRE(request.system.has_value());
+        CHECK(request.system->find("## Project context") == std::string::npos);
+    }
+}
