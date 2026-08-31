@@ -2,7 +2,7 @@
 
 Companion to `ARCHITECTURE.md`, which remains the single source of truth for *design*. This document covers only *sequencing*: what is built, what blocks what, and what "done" means for each remaining piece. Every milestone cites the `ARCHITECTURE.md` section that specifies it; where this plan and that document disagree, that document wins and this one is stale.
 
-**Status: Milestones A, B, C, D, F, G and H are complete, and a post-merge review of A+B+H has been actioned (§8). Only E (the TUI) remains. Clean build, zero warnings.** Track **J (permission advisor) is complete** — including the SessionChannels extraction, the E2E over a real socket through the real plugin loader, and the three §6 invariant proofs. Tracks **K (per-plugin config)**, **L (cross-plugin services)** and **M (tool history access)** are also complete. Track **N (model auto-discovery) is complete** — lazy discovery through a `ModelCatalogRegistry` keyed by the provider kind string, `/providers refresh`, network-free structural sanity checks. A post-N review hardened the transport (the loopback + live-backend tests), the concurrency (per-provider fetch gates — no config lock is ever held across the network call), and the resolve contract (`Resolve` returns a snapshot; refresh replaces entries without pulling them out from under a holder).
+**Status: Milestones A, B, C, D, F, G and H are complete, and a post-merge review of A+B+H has been actioned (§8). Only E (the TUI) remains. Clean build, zero warnings.** Track **J (permission advisor) is complete** — including the SessionChannels extraction, the E2E over a real socket through the real plugin loader, and the three §6 invariant proofs. Tracks **K (per-plugin config)**, **L (cross-plugin services)** and **M (tool history access)** are also complete. Track **N (model auto-discovery) is complete** — lazy discovery through a `ModelCatalogRegistry` keyed by the provider kind string, `/providers refresh`, network-free structural sanity checks. A post-N review hardened the transport (the loopback + live-backend tests), the concurrency (per-provider fetch gates — no config lock is ever held across the network call), and the resolve contract (`Resolve` returns a snapshot; refresh replaces entries without pulling them out from under a holder). Track **O (search tools) is complete** — the bundled `tools-search` plugin registers `grep` and `glob`: RE2-backed, `.gitignore`-aware, bounded on every axis the session worker cares about (§4 O).
 
 `minimal -p` holds real conversations against a local model using `read`, `bash`, and `skill`; a permission prompt round-trips over the wire in both directions; a session grant silences the second prompt; the server exits when the last client detaches. Transcripts persist to SQLite, survive the server process, and are **resumable**: `CreateSession` with a `session_id` reopens a stored session, loads its transcript as the loop's working history without re-appending it, and the next turn continues the conversation (`minimal -p --resume <id> PROMPT`). **Subagents work** (§5 D): a model can spawn blocking and non-blocking children over the `spawn_subagent` tool, permission inheritance is enforced as ceilings, and the headless client honours its attach obligation over a real socket. `cmake --install` produces a config dir the server actually starts against (§8), and the startup sanity check reports every problem with it at once (§4 F).
 
@@ -22,7 +22,7 @@ Companion to `ARCHITECTURE.md`, which remains the single source of truth for *de
 | Plugins: discovery, `dlopen` loader + ABI guard, collision/alias registry + name resolution | `src/server/plugins/` | 22 |
 | LLM: provider interface, chat/stream types, SSE parser, HTTP client, token accounting | `src/server/llm/` | 30 |
 | Agent loop: tool cycle, retries, cancellation, compaction trigger + boundary snapping, production compactor | `src/server/agent/` | 29 |
-| `tools-fs`, `tools-bash`, `provider-openai` | `plugins/server/` | 74 |
+| `tools-fs`, `tools-search`, `tools-bash`, `provider-openai` | `plugins/server/` | 105 |
 
 ### Built in Milestone A
 
@@ -101,6 +101,7 @@ Test depth was inverted relative to integration risk: every well-tested layer wa
 - ~~**L. Cross-plugin services (ServiceRegistry)**~~ — **done** (§4 L). `minimal_plugin_register_services` is live, `NameKind::Service` collisions are fatal, and `tools-bash` provides `BashSessionStateService` under `tools-bash.session_state`; `/restart-shell` resolves through the service. One deviation from the spec below: the command stayed in `tools-bash` (a command belongs to the plugin that owns the state it touches) — the service path and the absent-provider degrade are covered by tests against the extracted `RestartShellCommand`.
 - ~~**M. Tool history access**~~ — **done** (§4 M). `ToolContext::history` is a `session::HistoryWindow` — a bound, windowed slice of `SessionReader` exposing only keyset-paged reads, so the windowed-only rule is a property of the type. `SessionReader` and `history_window.hpp` joined the frozen include set in `plugin_abi.h`.
 - ~~**N. Model auto-discovery**~~ — **done** (§4 N). `minimal_plugin_register_model_catalogs` is live, `providers.json` accepts `"discover": true` (with or without a static `models` object), discovery fetches lazily at first resolve with negative caching, `/providers refresh` evicts and refetches, and the discovered `context_window_tokens` reaches the compaction trigger. Two spec deviations, both decisions recorded in §4 N below: the sanity check stays **network-free** (structural warnings only), and persistence/TTL caching was **rejected** — the server is short-lived, so a runtime cache needs no TTL, and a month-old cached window is the exact staleness the track exists to eliminate.
+- ~~**O. Search tools (grep/glob)**~~ — **done** (§4 O). A new bundled plugin `tools-search` registers `grep` and `glob` — read-only, `.gitignore`-aware, RE2-backed, bounded on every axis the session worker cares about. Independent of E and G.
 
 **Strictly dependent on A:** C, D, E, G, and every RPC beyond `CreateSession`/`OpenSession`. **A is now done, so all of them were unblocked; D is now done too.**
 
@@ -580,6 +581,40 @@ Anything context-aware — a "summarize the thread so far" tool, retrieval keyed
 - [x] Settings: defaults (`enabled`, both standard names, no cap, no ancestors); overrides; rejection of non-object, non-array `files`, empty/non-string entries, path-shaped names, negative `max_bytes`.
 - [x] Registry: context reaches `BuildChatRequest().system` with the preset body still at the front; `CLAUDE.md` fallback through a real session; absent when disabled or no file.
 - [x] Loop: exact concatenation; survives `SetPreset`; stable across rebuilds (the cached-prefix invariant).
+
+---
+
+### O. Search tools (grep/glob) — done
+
+> Independent of E and G. The payoff is context efficiency: a structured, `.gitignore`-aware search result (line numbers, counts, bounded) instead of the model round-tripping a raw `rg` dump through bash, and a file-finding primitive that does not require the model to remember `find`'s argument order.
+
+**Status: implemented.** New bundled plugin `plugins/server/tools-search/` — categorically identical to `tools-fs` (separate `.so`, links `minimal::server_core`, bundled ⇒ enabled, fatal sanity-check on load failure), registering `grep` and `glob` through the ordinary `minimal_plugin_register_tools` seam. Shared internals: `glob_matcher` (glob→RE2 translation, one flag set away between the two callers' brace semantics), `ignore_rules` (gitignore sets + the per-depth stack), `tree_walker` (the bounded traversal both tools run on). Settings come from the plugin's own `config` object per the track-K mechanism; both tools are `ReadOnly` with `path_confinement_supported()`/`ExtractPath()`, so permission classification stays where it already was. `re2` joined the vcpkg manifest (registry-verified) behind a `minimal_re2` interface target, same normalization pattern as tree-sitter.
+
+**Decisions taken during implementation (recorded because the spec text left them open):**
+
+1. **RE2, not std::regex/PCRE2 — the linear-time guarantee is the requirement.** Patterns are model-authored; a backtracking engine lets `(a+)+b` wedge the session worker thread for unbounded time, the exact hang bash's `timeout_ms` exists to bound. Linear time makes it unreachable rather than bounded. Cost: no backreferences/lookarounds, stated in the tool description so the model stops reaching for them.
+2. **Real `.gitignore` support, git-index deliberately not consulted.** Same call `SuggestPaths` made: no git dependency. Untracked-but-unignored files are searched — ripgrep's default behaviour, not a gap. Precedence is git-faithful (deeper file wins; last matching rule in a file wins, which is what makes `!` re-inclusion work), and ignored-directory pruning is git-faithful too (nothing under an ignored directory is considered — re-inclusion under one is impossible here as in git). One untranslatable line (unterminated `[`) becomes a rule that never matches rather than voiding the file: a malformed line must never *widen* what a search returns.
+3. **Symlinks are never followed — files as well as directories.** A symlinked directory is the classic traversal wedge; a symlinked *file* silently aims the search outside the root the model pointed at. Both cost more than they buy in a local single-user harness.
+4. **Truncation totals are honest lower bounds.** A budget-stopped walk reports "showing X of **at least** Y" — the unscanned remainder is by definition unknown, and an exact-looking number over a partial walk trains the model to trust truncated results. The re-run hint (`offset=`) rides the same footer; `read`'s footer is the precedent for the whole affordance, the model having no structured channel.
+5. **Disclosures survive a zero-match result.** Skipped-oversize, timeout, and cancellation notes are emitted even when nothing matched — a bare "No matches found" over a partial walk is a *false negative*, the worst shape a search tool can produce.
+6. **The walker is plugin code, not a core utility.** Only `path_confinement`/`file_access`/`atomic_write` are core-exposed; a second consumer (a third-party search-adjacent plugin) promotes it later, per the philosophy. Both tools' traversal needs are identical, so it lives inside the one plugin rather than being duplicated.
+7. **Content-mode blocks are atomic against the budget.** A match and its context are emitted or withheld together; emitting a fraction would present context with no match. `offset`/`head_limit` budget MATCHES, and context rides free — the pagination affordance stays predictable.
+8. **Brace alternation is a flag, not a behaviour.** `{a,b}` in the glob tool and glob filter; literal braces in gitignore patterns, as git treats them. One translator, two callers, the difference explicit — the alternative was two translators drifting apart.
+
+**Acceptance criteria**
+- [x] Both tools load as one bundled plugin and register through the ordinary seam; a `plugins.json` `config` slice tunes every limit (track-K mechanism, no new config surface).
+- [x] Both are `ReadOnly` and declare their paths; the out-of-workdir `Ask` fold applies to an escaping search root without tool-side permission code.
+- [x] Every invocation is bounded: per-entry cancellation poll, wall-clock timeout, per-file size cap, result cap with footer.
+- [x] gitignore semantics match git for anchor/dir-only/negation/`**`/classes, including nested-file precedence; `.git`/`.hg` always skipped; symlinks never followed.
+- [x] Deterministic output: per-directory name sort; glob mtime-sorted with a rel-path tiebreak.
+
+**Test cases** (`tests/tools_search_test.cpp` — tier 1 + tier 3 against `temp_dir.hpp`, 31 cases)
+- [x] Translation: `*`/`?`/`[...]`/`{a,b}`/`**` in its three placements; escapes; regex metachars taken literally; untranslatable patterns fail per-caller policy.
+- [x] gitignore: basename-at-depth, anchoring, dir-only, comments/escapes, last-rule-wins negation, nested-stack precedence, `gen/**` not matching `gen` itself.
+- [x] Walker: deterministic order, VCS dirs skipped, per-level gitignore (including nested re-inclusion), ignored-directory pruning, symlink refusal, oversize skip+count, cancellation, callback limit, timeout reported.
+- [x] grep: all three output modes, context blocks with `--` separators and zero-gap merging, case insensitivity, binary skip, glob filter, head_limit/offset pagination with honest footers, invalid regex as error result, wrong-typed input as error result, file-path search root, `emit_output` streaming, cancellation partial + "at least".
+- [x] glob: `**` patterns, mtime ordering, literal fast path, head_limit footer, invalid pattern as error.
+- [x] **Invariant tests:** removing the counter propagation in the walker's finish step fails every count assertion (demonstrated); removing the offset/budget merge guard fails the content-mode pagination test.
 
 ---
 

@@ -56,6 +56,7 @@ add_executable(minimal_tests
     file_access_test.cpp
     atomic_write_test.cpp
     tools_fs_test.cpp
+    tools_search_test.cpp
     tools_bash_test.cpp
     tool_pool_test.cpp
     skill_registry_test.cpp
@@ -110,6 +111,14 @@ add_executable(minimal_tests
     "${CMAKE_SOURCE_DIR}/plugins/server/checklist/checklist_store.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/checklist/checklist_tool.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/checklist/rpc_service.cpp"
+    # Same pattern for tools-search. The walker forks nothing and needs the
+    # real filesystem only, so the whole plugin compiles in directly.
+    "${CMAKE_SOURCE_DIR}/plugins/server/tools-search/search_settings.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/tools-search/glob_matcher.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/tools-search/ignore_rules.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/tools-search/tree_walker.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/tools-search/glob_tool.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/tools-search/grep_tool.cpp"
     service_registry_test.cpp)
 
 target_include_directories(minimal_tests PRIVATE
@@ -122,7 +131,8 @@ target_include_directories(minimal_tests PRIVATE
     "${CMAKE_SOURCE_DIR}/plugins/server/tools-bash")
 
 target_include_directories(minimal_tests PRIVATE
-    "${CMAKE_SOURCE_DIR}/plugins/server/checklist")
+    "${CMAKE_SOURCE_DIR}/plugins/server/checklist"
+    "${CMAKE_SOURCE_DIR}/plugins/server/tools-search")
 
 # minimal::test_support is the test-dependency bundle: it carries server_core,
 # which carries common publicly. Listing those again here is redundant and makes
@@ -148,6 +158,9 @@ target_link_libraries(minimal_tests PRIVATE
     minimal::client_core
     Catch2::Catch2WithMain
     SQLite3::SQLite3
+    # tools-search sources are compiled directly into the test binary (see the
+    # sources list above), so RE2 comes with them -- same linkage as the plugin.
+    minimal_re2
     # command_scanner.cpp is compiled directly into the test binary (see the
     # sources list above), so the scanner's tree-sitter dependencies come with
     # it -- same linkage as the plugin.

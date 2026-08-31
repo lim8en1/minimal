@@ -12,7 +12,8 @@
     "nlohmann-json",
     "yaml-cpp",
     "spdlog",
-    "tree-sitter"
+    "tree-sitter",
+    "re2"
   ],
   "features": {
     "client": {
