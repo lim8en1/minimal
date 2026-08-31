@@ -781,6 +781,62 @@ TEST_CASE("a queued subagent result lands at a turn boundary", "[agent_loop][sub
     }
 }
 
+namespace {
+
+std::string TextOf(const llm::Message& message) {
+    std::string out;
+    for (const auto& block : message.content) {
+        if (const auto* text = std::get_if<llm::TextBlock>(&block)) out += text->text;
+    }
+    return out;
+}
+
+}  // namespace
+
+TEST_CASE("an injection queued while idle precedes the first provider call of the next turn",
+          "[agent_loop][subagent][background]") {
+    // The flush used to happen only at tool-cycle boundaries and turn end, so
+    // a completion landing on an IDLE session missed the very turn that should
+    // have carried it: the loop built its request, called the provider, and
+    // only then appended the message. Turn start is the third flush point.
+    Harness h;
+    h.AddTool("read");
+    h.provider.PushResponse(SmallTextResponse("ack"));
+    h.Build();
+
+    h.loop->QueueInjectedMessage(UserText("[Background task bg-1 completed] build passed"));
+    h.loop->RunTurn(UserText("go"));
+
+    // Working history: injection before seed.
+    const auto& history = h.loop->history();
+    REQUIRE(history.size() == 3);
+    CHECK(TextOf(history[0]).find("build passed") != std::string::npos);
+    CHECK(TextOf(history[1]) == "go");
+    // First provider request saw them in the same order.
+    REQUIRE(h.provider.requests().size() == 1);
+    REQUIRE(h.provider.requests().front().messages.size() == 2);
+    CHECK(TextOf(h.provider.requests().front().messages[0]).find("build passed") !=
+          std::string::npos);
+    CHECK(TextOf(h.provider.requests().front().messages[1]) == "go");
+}
+
+TEST_CASE("the seedless wake turn carries only the injected messages", "[agent_loop][subagent]") {
+    // SessionParams::wake_on_injection drives the SESSION to call this; the
+    // loop-side contract is that a turn with no seed still flushes first and
+    // runs to a natural stop.
+    Harness h;
+    h.AddTool("read");
+    h.provider.PushResponse(SmallTextResponse("noticed"));
+    h.Build();
+
+    h.loop->QueueInjectedMessage(UserText("[Background task bg-2 failed] exit 1"));
+    const auto result = h.loop->RunTurn();
+
+    CHECK(result.stop_reason == llm::StopReason::EndTurn);
+    REQUIRE(h.loop->history().size() == 2);  // injection + assistant reply
+    CHECK(TextOf(h.loop->history()[0]).find("bg-2 failed") != std::string::npos);
+}
+
 TEST_CASE("the skill tool round-trips a lazy-loaded body through the loop", "[agent_loop][skills]") {
     Harness h;
     h.EnableSkills({{"deploy", "Always run the smoke tests first.\n"}});

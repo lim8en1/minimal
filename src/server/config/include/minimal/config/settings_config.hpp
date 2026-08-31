@@ -75,6 +75,12 @@ struct SettingsConfig {
     std::string default_model;
     std::string default_theme;
     std::int64_t max_concurrent_subagents = 4;
+    // When an out-of-band message (a background task's result, a non-blocking
+    // subagent's completion) lands on an IDLE session, run a turn for it
+    // immediately instead of waiting for the next user turn. Off by default:
+    // a wake is a real provider call the user did not ask for. Per-session,
+    // resolved at creation; a session never changes its answer mid-life.
+    bool background_wake = false;
     MemorySettings memory;
     ToolsSettings tools;
     ToolsViewSettings tools_view;

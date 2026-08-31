@@ -132,6 +132,10 @@ grpc::Status SessionServiceImpl::CreateSession(grpc::ServerContext* context,
     // choice with the file's.
     params.run_mode_override = FromProto(request->run_mode());
     params.mcp_manager = mcp_manager_;
+    // A startup-config decision, resolved once: the session never changes its
+    // answer mid-life, so a hot edit would not take effect anyway (config is
+    // read once at startup).
+    params.wake_on_injection = settings_.background_wake;
 
     if (const auto status = ApplyModelOverride(*request, params); !status.ok()) return status;
 
@@ -257,6 +261,9 @@ grpc::Status SessionServiceImpl::ResumeSession(const v1::CreateSessionRequest* r
     params.run_mode_override = FromProto(request->run_mode());
     params.mcp_manager = mcp_manager_;
     params.resume = true;
+    // Same startup-config decision as fresh creation: the setting is a
+    // property of the deployment, not of the stored row.
+    params.wake_on_injection = settings_.background_wake;
     ApplyAdvisor(permissions_, permission_advisors_, params);
     // APPLIES ON RESUME TOO, like run_mode and for the same reason: a model the
     // user names is a property of this invocation, not of the stored session --

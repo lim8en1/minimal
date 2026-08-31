@@ -1,9 +1,6 @@
 #include "bash_tool.hpp"
 
-#include <fcntl.h>
 #include <poll.h>
-#include <signal.h>
-#include <sys/resource.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -18,6 +15,8 @@
 #include <utility>
 #include <vector>
 
+#include "background_registry.hpp"
+#include "bash_process.hpp"
 #include "command_scanner.hpp"
 
 namespace minimal::tools_bash {
@@ -32,302 +31,34 @@ using tools::ToolSpec;
 
 ToolResult Error(std::string message) { return ToolResult{true, std::move(message)}; }
 
-// The fd the wrapper writes session state to. Any fd can collide with something
-// the command does itself, so correctness rests on validating the payload rather
-// than on picking a lucky number -- see ParseStatePayload.
-constexpr int kStateFd = 9;
-
-// The state payload is `pwd -P` plus `env -0` -- kilobytes at most. Bounded so a
-// command pumping fd 9 (`yes >&9`) cannot grow one string without limit for the
-// whole timeout; on overflow the payload is discarded WHOLESALE, preserving the
-// all-or-nothing rule: adopting a truncated prefix would silently apply partial
-// environment state.
-constexpr std::size_t kMaxStatePayloadBytes = 1 << 20;  // 1 MiB
-
-// --- Capped output buffer ------------------------------------------------------
-//
-// Head (1/4 of the cap) + tail (3/4): in a long build log both the first error
-// and the final status matter. This bounds only what is PERSISTED into the
-// ToolResultBlock; live streaming through emit_output is uncapped because that
-// channel is lossy by design -- the session's outbound queue is the backpressure
-// boundary, and the authoritative record is the capped result block here (the
-// running-tools panel's tail behavior is a track-E client concern; see
-// ARCHITECTURE.md "Running-tools panel").
-class CappedBuffer {
-public:
-    explicit CappedBuffer(std::int64_t cap)
-        : head_cap_(static_cast<std::size_t>(cap / 4)),
-          tail_cap_(static_cast<std::size_t>(cap - cap / 4)) {}
-
-    void Append(std::string_view chunk) {
-        if (head_.size() < head_cap_) {
-            const auto take = std::min(head_cap_ - head_.size(), chunk.size());
-            head_.append(chunk.data(), take);
-            chunk.remove_prefix(take);
-        }
-        tail_.append(chunk.data(), chunk.size());
-
-        // AMORTIZED, not per-chunk. This used to erase down to exactly tail_cap_
-        // on every append, and reads arrive in 8 KiB chunks: once the tail was
-        // full, every single chunk memmoved ~tail_cap_ bytes to discard 8 KiB.
-        // A 200 MB build log -- an entirely ordinary `make` -- meant ~25,000
-        // erases of ~768 KB each, about 19 GB of memmove on the session worker,
-        // spent purely on throwing bytes away.
-        //
-        // Letting the tail grow to 2x before compacting makes the work
-        // proportional to the data instead: each compaction discards at least
-        // tail_cap_ bytes, so the total moved is O(total output) rather than
-        // O(total output x tail_cap_ / chunk). The peak cost is one extra
-        // tail_cap_ of memory, which is the same order the buffer already holds.
-        if (tail_.size() > 2 * tail_cap_) Compact();
-    }
-
-    std::string Render() const {
-        // Render is the only reader, and it needs the tail at its true size --
-        // Append deliberately leaves it over-long between compactions.
-        const_cast<CappedBuffer*>(this)->Compact();
-        if (dropped_ == 0) return head_ + tail_;
-        return head_ + "\n[" + std::to_string(dropped_) + " bytes omitted]\n" + tail_;
-    }
-
-private:
-    void Compact() {
-        if (tail_.size() <= tail_cap_) return;
-        dropped_ += tail_.size() - tail_cap_;
-        tail_.erase(0, tail_.size() - tail_cap_);
-    }
-
-    std::size_t head_cap_, tail_cap_;
-    std::string head_, tail_;
-    std::size_t dropped_ = 0;
-};
-
-// --- The state trailer ----------------------------------------------------------
-//
-// `cd` and `export` inside `sh -c` die with the subshell, so the shell reports
-// its final cwd and environment on a side channel and we adopt them. This is what
-// lets the process stay per-call (no long-lived interpreter to corrupt, hang, or
-// leak) while `cd`/`export` still chain across calls.
-//
-// `pwd` and `printf` are shell builtins; `env` is not, so a command that removes
-// it from PATH makes the trailer produce no environment. Adoption is then
-// refused wholesale (see ParseStatePayload) and the previous state survives --
-// which is also self-limiting, since the PATH change that broke it is discarded
-// along with everything else rather than persisting.
-std::string WrapCommand(const std::string& command) {
-    // A command ending in a backslash is a line continuation: backslash-newline
-    // glues the next physical line onto it, so the plain separator below made
-    // `ls \` run `ls __minimal_rc=$?` -- the marker became an argument of the
-    // user's command, and the state the trailer exists to report was lost. An
-    // EXTRA newline first is correct for both parities: an odd trailing
-    // backslash count consumes the first newline as continuation and the second
-    // ends the (now empty) logical line; an even count is a literal backslash,
-    // the first newline ends the command, and the second is a no-op empty line.
-    const bool trailing_backslash = !command.empty() && command.back() == '\\';
-    return command + (trailing_backslash ? "\n\n" : "\n") +
-           "__minimal_rc=$?\n{ pwd -P; printf '\\0'; env -0; } >&" +
-           std::to_string(kStateFd) + "\nexit $__minimal_rc\n";
+std::int64_t ElapsedMs(std::chrono::steady_clock::time_point started) {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::steady_clock::now() - started)
+        .count();
 }
 
-struct ShellState {
-    std::filesystem::path cwd;
-    std::map<std::string, std::string> env;
-    bool ok = false;
-};
-
-// Payload: <absolute cwd> NUL (KEY=VALUE NUL)*
+// --- Synchronous execution ---------------------------------------------------------
 //
-// Validated rather than trusted. A command may write to fd 9 itself -- by
-// accident or otherwise -- and session state must not be corruptible that way.
-// Anything unexpected leaves the previous state untouched, which is also what a
-// command that exits before the trailer runs produces (an empty payload).
-ShellState ParseStatePayload(const std::string& payload) {
-    ShellState state;
-    const auto nul = payload.find('\0');
-    if (nul == std::string::npos || nul == 0) return state;
-
-    // `pwd` terminates its line, so the cwd arrives with a trailing newline that
-    // would make every subsequent chdir() fail.
-    std::string cwd = payload.substr(0, nul);
-    while (!cwd.empty() && (cwd.back() == '\n' || cwd.back() == '\r')) cwd.pop_back();
-    if (cwd.empty() || cwd.front() != '/') return state;  // must be an absolute path
-    state.cwd = cwd;
-
-    std::size_t pos = nul + 1;
-    while (pos < payload.size()) {
-        const auto end = payload.find('\0', pos);
-        const auto entry = payload.substr(pos, end == std::string::npos ? std::string::npos
-                                                                         : end - pos);
-        const auto eq = entry.find('=');
-        if (eq != std::string::npos && eq != 0) {
-            state.env.emplace(entry.substr(0, eq), entry.substr(eq + 1));
-        }
-        if (end == std::string::npos) break;
-        pos = end + 1;
-    }
-    if (state.env.empty()) return state;  // a shell always reports something
-    state.ok = true;
-    return state;
-}
-
-// --- Execution -------------------------------------------------------------------
-//
-// fork + execve rather than posix_spawn: the rlimits must be set in the child
-// before exec, and setrlimit is not on POSIX's async-signal-safe list, which is
-// all a posix_spawn pre-exec function may call.
+// The whole process lifecycle on the CALLING thread -- the session worker,
+// which is the one thread permitted to block. The background runner shares
+// LaunchProcess/KillProcessGroup/CappedBuffer via bash_process.hpp but runs
+// its drain loop on its own watcher thread.
 
 struct RunOutcome {
-    bool spawn_failed = false;
-    std::string spawn_error;
     bool io_error = false;
     std::string io_error_message;
     bool timed_out = false;
     bool cancelled = false;
-    int wait_status = 0;   // valid unless spawn_failed
+    int wait_status = 0;   // valid unless the spawn itself failed
     std::string output;    // the capped, rendered stdout+stderr captured so far
     std::string state_payload;
     bool state_overflow = false;  // fd-9 payload exceeded the cap; state untouched
 };
 
-class ScopedFd {
-public:
-    ScopedFd() = default;
-    explicit ScopedFd(int fd) : fd_(fd) {}
-    ~ScopedFd() { reset(); }
-    ScopedFd(ScopedFd&& other) noexcept : fd_(std::exchange(other.fd_, -1)) {}
-    ScopedFd& operator=(ScopedFd&& other) noexcept {
-        reset();
-        fd_ = std::exchange(other.fd_, -1);
-        return *this;
-    }
-    ScopedFd(const ScopedFd&) = delete;
-    ScopedFd& operator=(const ScopedFd&) = delete;
-
-    int get() const { return fd_; }
-    void reset() {
-        if (fd_ >= 0) ::close(fd_);
-        fd_ = -1;
-    }
-
-private:
-    int fd_ = -1;
-};
-
-RunOutcome RunProcess(const std::string& wrapped, const SessionShellState& state,
-                      const BashSettings& settings, std::int64_t timeout_ms, ToolContext& ctx) {
+RunOutcome RunProcess(const LaunchedProcess& proc, const BashSettings& settings,
+                      std::int64_t timeout_ms, ToolContext& ctx) {
     RunOutcome outcome;
-
-    // O_CLOEXEC so these do not leak into grandchildren: a daemonising process
-    // holding the read end open would otherwise keep the parent reading until the
-    // deadline even after the direct child exited.
-    int out_fds[2];
-    int state_fds[2];
-    if (pipe(out_fds) != 0) {
-        outcome.spawn_failed = true;
-        outcome.spawn_error = std::strerror(errno);
-        return outcome;
-    }
-    if (pipe(state_fds) != 0) {
-        outcome.spawn_failed = true;
-        outcome.spawn_error = std::strerror(errno);
-        ::close(out_fds[0]);
-        ::close(out_fds[1]);
-        return outcome;
-    }
-    for (int fd : {out_fds[0], out_fds[1], state_fds[0], state_fds[1]}) {
-        fcntl(fd, F_SETFD, fcntl(fd, F_GETFD) | FD_CLOEXEC);
-    }
-    ScopedFd out_read(out_fds[0]), out_write(out_fds[1]);
-    ScopedFd state_read(state_fds[0]), state_write(state_fds[1]);
-
-    // Opened in the parent so a failure is reportable rather than a silent
-    // mystery in the child. Without this the child inherits the server's stdin
-    // and any command that reads fd 0 blocks until the deadline.
-    ScopedFd devnull(::open("/dev/null", O_RDONLY | O_CLOEXEC));
-    if (devnull.get() < 0) {
-        outcome.spawn_failed = true;
-        outcome.spawn_error = std::string("open /dev/null: ") + std::strerror(errno);
-        return outcome;
-    }
-
-    // Built in the parent BEFORE fork so the child only dereferences, never
-    // allocates, after it. The sorted env map gives deterministic envp order.
-    std::vector<std::string> env_strings;
-    env_strings.reserve(state.env.size());
-    for (const auto& [key, value] : state.env) env_strings.push_back(key + "=" + value);
-    std::vector<char*> envp;
-    envp.reserve(env_strings.size() + 1);
-    for (auto& s : env_strings) envp.push_back(s.data());
-    envp.push_back(nullptr);
-
-    std::string shell = settings.shell;
-    std::string dash_c = "-c";
-    std::string script = wrapped;
-    char* argv_ptrs[] = {shell.data(), dash_c.data(), script.data(), nullptr};
-
-    const std::string cwd = state.cwd.string();
-    const rlim_t cpu_seconds = static_cast<rlim_t>(timeout_ms / 1000) + 5;
-    const rlim_t file_bytes = static_cast<rlim_t>(settings.max_file_size_bytes);
-
-    const pid_t pid = fork();
-    if (pid < 0) {
-        outcome.spawn_failed = true;
-        outcome.spawn_error = std::strerror(errno);
-        return outcome;
-    }
-
-    if (pid == 0) {
-        // Child. Plain C only from here: no C++ runtime, no exceptions, every
-        // failure is _exit.
-        setsid();  // Own session + process group (pgid == pid): killpg reaches
-                   // the whole tree, since group membership is inherited by fork.
-
-        // RLIMIT_CPU is a backstop for CPU-bound runaways; the wall-clock
-        // deadline normally fires first. The grace keeps the two from racing on
-        // a command that legitimately spends its budget.
-        rlimit cpu{};
-        cpu.rlim_cur = cpu.rlim_max = cpu_seconds;
-        setrlimit(RLIMIT_CPU, &cpu);
-
-        rlimit fsize{};
-        fsize.rlim_cur = fsize.rlim_max = file_bytes;
-        setrlimit(RLIMIT_FSIZE, &fsize);
-
-        // Length comes from the literal's type: strlen is avoided along with
-        // strerror, since this is a post-fork child of a multithreaded process
-        // and only async-signal-safe calls are sound here. stderr is already the
-        // pipe, so the parent sees this in the command's output.
-        auto child_die = []<std::size_t N>(const char (&message)[N]) -> int {
-            (void)!write(STDERR_FILENO, message, N - 1);
-            (void)!write(STDERR_FILENO, "\n", 1);
-            return 127;
-        };
-
-        if (chdir(cwd.c_str()) != 0) _exit(child_die("chdir to session cwd failed"));
-
-        // dup2 clears FD_CLOEXEC on the copy, which is what we want for 0/1/2 and
-        // for the state fd -- the shell must be able to write to it.
-        dup2(devnull.get(), STDIN_FILENO);
-        dup2(out_write.get(), STDOUT_FILENO);
-        dup2(out_write.get(), STDERR_FILENO);  // merged: one stream, in order
-        dup2(state_write.get(), kStateFd);
-        // dup2 is a no-op when the fd is already in place, leaving FD_CLOEXEC set
-        // from the pipe() setup above -- which would close the state channel on
-        // exec and silently lose every cd/export.
-        fcntl(kStateFd, F_SETFD, 0);
-
-        execve(shell.c_str(), argv_ptrs, envp.data());
-
-        // execve returns only on failure.
-        if (errno == ENOENT) _exit(child_die("shell not found"));
-        if (errno == EACCES) _exit(child_die("shell not executable"));
-        _exit(child_die("failed to exec shell"));
-    }
-
-    // Parent.
-    out_write.reset();
-    state_write.reset();
-    devnull.reset();
+    ScopedFd out_read(proc.out_fd), state_read(proc.state_fd);
 
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
     CappedBuffer buffer(settings.max_output_bytes);
@@ -384,11 +115,11 @@ RunOutcome RunProcess(const std::string& wrapped, const SessionShellState& state
                 } else if (!outcome.state_overflow) {
                     outcome.state_overflow = true;
                     // Cleared AND latched: without the flag check on the next append the
-        // payload simply started re-accumulating, so `yes >&9` refilled and
-        // cleared 1 MiB over and over for the whole timeout. The payload is
-        // discarded wholesale once overflow is set, so there is nothing to keep.
-        state_payload.clear();
-        state_payload.shrink_to_fit();  // discard wholesale: never adopt a prefix
+                    // payload simply started re-accumulating, so `yes >&9` refilled and
+                    // cleared 1 MiB over and over for the whole timeout. The payload is
+                    // discarded wholesale once overflow is set, so there is nothing to keep.
+                    state_payload.clear();
+                    state_payload.shrink_to_fit();  // discard wholesale: never adopt a prefix
                 }
             } else if (n == 0 || errno != EINTR) {
                 state_open = false;
@@ -403,8 +134,8 @@ RunOutcome RunProcess(const std::string& wrapped, const SessionShellState& state
     int status = 0;
     bool reaped = false;
     while (!outcome.timed_out && !outcome.cancelled) {
-        const pid_t rc = waitpid(pid, &status, WNOHANG);
-        if (rc == pid) {
+        const pid_t rc = waitpid(proc.pid, &status, WNOHANG);
+        if (rc == proc.pid) {
             reaped = true;
             break;
         }
@@ -421,29 +152,19 @@ RunOutcome RunProcess(const std::string& wrapped, const SessionShellState& state
         poll(nullptr, 0, 10);  // brief sleep; no fd to wait on
     }
 
-    if (!reaped) {
-        // killpg reaches the whole tree once setsid() has run. kill() covers the
-        // window before it: between fork() and setsid() the child's pgid is still
-        // ours, so killpg(pid, ...) finds no such group, fails ESRCH, and would
-        // leave the blocking waitpid below waiting for a process nothing killed.
-        killpg(pid, SIGKILL);
-        kill(pid, SIGKILL);
-        while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {
-        }
+    if (!reaped) KillProcessGroup(proc.pid);
+    // Blocking waitpid after SIGKILL is bounded: the target is dead or dying.
+    // A cancelled run that never reaped still needs the child gone before the
+    // worker moves on -- a leaked zombie holds a slot in the process table
+    // forever.
+    while (waitpid(proc.pid, &status, 0) < 0 && errno == EINTR) {
     }
+    ForgetPgid(proc.pid);
 
     outcome.wait_status = status;
     outcome.output = buffer.Render();
     outcome.state_payload = std::move(state_payload);
     return outcome;
-}
-
-// --- Audit log ---------------------------------------------------------------------
-
-std::int64_t ElapsedMs(std::chrono::steady_clock::time_point started) {
-    return std::chrono::duration_cast<std::chrono::milliseconds>(
-               std::chrono::steady_clock::now() - started)
-        .count();
 }
 
 // Resolves a command word against the SESSION's PATH, so `export PATH=...` in an
@@ -495,8 +216,9 @@ std::optional<std::filesystem::path> ResolveOnPath(const SessionShellState& stat
 
 class BashTool : public tools::Tool {
 public:
-    BashTool(BashSettings settings, BashSessionStateStore& store)
-        : settings_(std::move(settings)), store_(store) {
+    BashTool(BashSettings settings, BashSessionStateStore& store,
+             BackgroundTaskRegistry& background)
+        : settings_(std::move(settings)), store_(store), background_(background) {
         spec_.name = "bash";
         spec_.category = ToolCategory::Execute;
         spec_.definition.name = spec_.name;
@@ -506,7 +228,10 @@ public:
             "log, since everything returned enters the context. The working directory and "
             "environment PERSIST across calls: use `cd` and `export` normally, and pass "
             "restart=true to reset both. stdout and stderr are returned together; very long "
-            "output is truncated in the middle; a non-zero exit status is an error.";
+            "output is truncated in the middle; a non-zero exit status is an error. Set "
+            "run_in_background=true for long-running commands: the call returns immediately "
+            "with a task id, the result is reported automatically at a later turn boundary, "
+            "and the process is killed when the session ends.";
         spec_.definition.input_schema = {
             {"type", "object"},
             {"properties",
@@ -518,14 +243,24 @@ public:
                                     std::to_string(settings_.max_timeout_ms)}}},
               {"restart",
                {{"type", "boolean"},
-                {"description", "Reset cwd and environment to their defaults before running"}}}}},
+                {"description", "Reset cwd and environment to their defaults before running"}}},
+              {"run_in_background",
+               {{"type", "boolean"},
+                {"description",
+                 "Run without waiting. Returns a task id and pid immediately; the output "
+                 "arrives at a turn boundary when the command finishes. To read output "
+                 "mid-run, redirect it to a file in the command itself. Kill the whole "
+                 "process group with: kill -- -PID"}}}}},
             {"required", nlohmann::json::array({"command"})}};
     }
 
     const ToolSpec& spec() const override { return spec_; }
 
     // Bash keeps the interface default for path confinement: there is no sound
-    // way to know which paths an arbitrary command touches.
+    // way to know which paths an arbitrary command touches. A background
+    // command is the same command string through the same shell, so disclosure
+    // and the grant conjunction are identical either way -- run_in_background
+    // changes WHEN the operator waits, never WHAT is being approved.
     PermissionDisclosure Disclose(const nlohmann::json& input,
                                   const ToolContext& ctx) const override {
         PermissionDisclosure disclosure;
@@ -579,7 +314,16 @@ public:
             restart = input.at("restart").get<bool>();
         }
 
+        bool run_in_background = false;
+        if (input.contains("run_in_background")) {
+            if (!input.at("run_in_background").is_boolean()) {
+                return Reject(ctx, started, "run_in_background must be a boolean", command);
+            }
+            run_in_background = input.at("run_in_background").get<bool>();
+        }
+
         std::int64_t timeout_ms = settings_.timeout_ms;
+        bool timeout_supplied = false;
         if (input.contains("timeout_ms")) {
             if (!input.at("timeout_ms").is_number_integer()) {
                 return Reject(ctx, started, "timeout_ms must be an integer", command);
@@ -588,23 +332,29 @@ public:
             if (timeout_ms <= 0) {
                 return Reject(ctx, started, "timeout_ms must be positive", command);
             }
-            timeout_ms = std::min(timeout_ms, settings_.max_timeout_ms);
+            timeout_supplied = true;
         }
 
         // After validation, never before: a rejected invocation must not have
         // wiped the session's cwd and environment on its way out.
         if (restart) store_.Reset(ctx.session_id, ctx.project_root);
+
+        if (run_in_background) return ExecuteBackground(ctx, command, timeout_ms, timeout_supplied);
+
+        timeout_ms = std::min(timeout_ms, settings_.max_timeout_ms);
         const auto state = store_.Snapshot(ctx.session_id, ctx.project_root);
 
-        const auto outcome =
-            RunProcess(WrapCommand(command), state, settings_, timeout_ms, ctx);
-        const auto duration_ms = ElapsedMs(started);
-
-        if (outcome.spawn_failed) {
-            ctx.logger.warn("bash[{}] spawn failed: {} ({} ms)", ctx.session_id,
-                            outcome.spawn_error, duration_ms);
-            return Error("failed to start shell: " + outcome.spawn_error);
+        const auto proc =
+            LaunchProcess(WrapCommand(command), state, settings_, timeout_ms);
+        if (!proc.ok) {
+            const auto duration_ms = ElapsedMs(started);
+            ctx.logger.warn("bash[{}] spawn failed: {} ({} ms)", ctx.session_id, proc.spawn_error,
+                            duration_ms);
+            return Error("failed to start shell: " + proc.spawn_error);
         }
+
+        const auto outcome = RunProcess(proc, settings_, timeout_ms, ctx);
+        const auto duration_ms = ElapsedMs(started);
 
         if (outcome.state_overflow) {
             ctx.logger.warn("bash[{}] fd-9 state payload exceeded {} bytes; cwd and environment "
@@ -655,6 +405,67 @@ public:
     }
 
 private:
+    // The background path. The tool call returns an acknowledgment immediately;
+    // the watcher thread drains output, reaps, and reports the result through
+    // the deferred-completion handles on the context. Session state is NOT
+    // adopted from a background command: its final cwd/env is stale by the time
+    // it reports, and adopting it would stomp whatever foreground calls set up
+    // in between.
+    ToolResult ExecuteBackground(ToolContext& ctx, const std::string& command,
+                                 std::int64_t timeout_ms, bool timeout_supplied) {
+        if (!ctx.schedule_injection) {
+            // Without the injection channel the result would be silently lost
+            // at completion. The synchronous path always works; refuse this
+            // one with the reason rather than start work nobody can collect.
+            return Error("background execution is unavailable in this session "
+                         "(no deferred-completion channel)");
+        }
+        // A background task's budget is its own ceiling: the sync default (2
+        // minutes) exists to bound a BLOCKED WORKER, which a background task
+        // never holds. When the model supplies no timeout, the ceiling IS the
+        // budget -- a long-running build is the entire point of the mode.
+        const std::int64_t bg_timeout =
+            std::min(timeout_supplied ? timeout_ms : settings_.background_max_timeout_ms,
+                     settings_.background_max_timeout_ms);
+
+        const auto state = store_.Snapshot(ctx.session_id, ctx.project_root);
+
+        BackgroundTaskRegistry::WatchHandles handles;
+        handles.emit_output = ctx.emit_output;
+        handles.schedule_injection = ctx.schedule_injection;
+        handles.emit_task_event = ctx.emit_task_event;
+        handles.session_lifetime = ctx.session_lifetime;
+        handles.tool_use_id = ctx.tool_use_id;
+        handles.logger = &ctx.logger;
+
+        std::string error;
+        auto started_task =
+            background_.Start(ctx.session_id, command, state, settings_, bg_timeout,
+                              std::move(handles), &error);
+        if (!started_task) {
+            ctx.logger.warn("bash[{}] background start rejected: {} ({})", ctx.session_id, error,
+                            command);
+            return Error(error);
+        }
+        ctx.logger.info("bash[{}] background {}: '{}' (pid {}, timeout {} ms)", ctx.session_id,
+                        started_task->id, command, started_task->pid, bg_timeout);
+
+        // The acknowledgment. pid == pgid (the child setsid()s), so `kill -- -pid`
+        // reaches the whole tree -- the model can clean up its own task with an
+        // ordinary bash call. The polling hint steers toward the redirect-to-file
+        // pattern instead of a bespoke output tool: pipes and redirection are the
+        // reason this tool has no schema knobs, and background changes nothing.
+        return ToolResult{
+            false,
+            "running in background as task " + started_task->id + " (pid " +
+                std::to_string(started_task->pid) + ", timeout " +
+                std::to_string(bg_timeout / 1000) + " s). The result will be reported "
+                "automatically at a turn boundary once it finishes; this session ends, so does "
+                "the task. To follow progress mid-run, redirect output to a file and read it "
+                "with later calls; to stop the task: kill -- -" +
+                std::to_string(started_task->pid)};
+    }
+
     void AdoptShellState(ToolContext& ctx, const std::string& payload) {
         if (payload.empty()) return;  // the command exited before the trailer ran
         const ShellState reported = ParseStatePayload(payload);
@@ -677,12 +488,14 @@ private:
     ToolSpec spec_;
     BashSettings settings_;
     BashSessionStateStore& store_;
+    BackgroundTaskRegistry& background_;
 };
 
 }  // namespace
 
-std::unique_ptr<tools::Tool> MakeBashTool(BashSettings settings, BashSessionStateStore& store) {
-    return std::make_unique<BashTool>(std::move(settings), store);
+std::unique_ptr<tools::Tool> MakeBashTool(BashSettings settings, BashSessionStateStore& store,
+                                          BackgroundTaskRegistry& background) {
+    return std::make_unique<BashTool>(std::move(settings), store, background);
 }
 
 }  // namespace minimal::tools_bash

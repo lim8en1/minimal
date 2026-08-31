@@ -93,15 +93,67 @@ Session::Session(SessionParams params, AgentPreset preset,
     context.history = history_window_.get();
 
     const std::string session_id = params_.session_id;
+    // Sinks that OUTLIVE their invocation (background bash's watcher captures
+    // them past the tool call, the turn, and this worker's lifetime) must be
+    // backed by the channels shared_ptr, never by `this` or a raw queue
+    // pointer: after Terminate, Push/TryPush into the closed queue refuse
+    // harmlessly instead of dangling. The worker-only sinks below capture raw
+    // pointers deliberately -- they cannot be invoked after the worker joins.
+    const auto channels = channels_;
     auto* queue = &channels_->queue;
 
-    context.tool_output_sink = [queue, session_id](std::string_view tool_use_id,
-                                                   std::string_view chunk) {
+    context.injections = std::shared_ptr<InjectionQueue>(channels, &channels_->injections);
+    context.session_lifetime = channels_;
+
+    context.tool_output_sink = [channels, session_id](std::string_view tool_use_id,
+                                                      std::string_view chunk) {
         v1::ServerEvent event = MakeEvent(session_id);
         auto* delta = event.mutable_tool_output_delta();
         delta->set_tool_use_id(std::string(tool_use_id));
         delta->set_chunk(std::string(chunk));
-        queue->Push(std::move(event));
+        // Push, not TryPush: the common caller is the worker (sync bash), which
+        // is allowed to block. The background watcher may block here too when
+        // the queue is full -- a stalled client backpressures it the same way,
+        // and Terminate's Close wakes it. See the background-task watcher.
+        channels->queue.Push(std::move(event));
+    };
+
+    context.task_event_sink = [channels, session_id](const tools::BackgroundTaskEvent& task) {
+        v1::ServerEvent event = MakeEvent(session_id);
+        auto* message = event.mutable_background_task();
+        message->set_task_id(task.task_id);
+        message->set_tool_use_id(task.tool_use_id);
+        message->set_command(task.command);
+        message->set_pid(task.pid);
+        switch (task.state) {
+            case tools::BackgroundTaskEvent::State::kStarted:
+                message->set_state(v1::BackgroundTaskEvent::STARTED);
+                break;
+            case tools::BackgroundTaskEvent::State::kCompleted:
+                message->set_state(v1::BackgroundTaskEvent::COMPLETED);
+                break;
+            case tools::BackgroundTaskEvent::State::kFailed:
+                message->set_state(v1::BackgroundTaskEvent::FAILED);
+                break;
+            case tools::BackgroundTaskEvent::State::kTimedOut:
+                message->set_state(v1::BackgroundTaskEvent::TIMED_OUT);
+                break;
+            case tools::BackgroundTaskEvent::State::kKilled:
+                message->set_state(v1::BackgroundTaskEvent::KILLED);
+                break;
+        }
+        // The caller may be the watcher thread, never the worker: TryPush. A
+        // full queue means the client is stalled; losing one lifecycle event
+        // is the correct degradation (the authoritative record is the injected
+        // message and the persisted transcript, not this status channel).
+        if (!channels->queue.TryPush(std::move(event))) {
+            // DefaultLogger is process-lifetime; the session logger is the
+            // same object. This lambda can outlive `logger_`'s session, but
+            // not the logger itself.
+            common::DefaultLogger().warn("session {}: background task event for '{}' dropped "
+                                         "(queue full)",
+                                         session_id, task.task_id);
+        }
     };
 
     context.tool_lifecycle_sink = [this, queue, session_id](const ToolLifecycleEvent& lifecycle) {
@@ -408,8 +460,20 @@ void Session::RunOneCommand(const QueuedCommand& command) {
 
 bool Session::QueueInjectedMessage(llm::Message message) {
     if (terminated_.load(std::memory_order_acquire)) return false;
-    loop_->QueueInjectedMessage(std::move(message));
-    return true;
+    // The wake decision is the worker's, not ours: its wait predicate sees the
+    // pending message (ShouldWakeForInjections) and runs a seedless turn when
+    // params_.wake_on_injection says so. But a predicate change WAKES NOBODY
+    // by itself -- the parked worker must be notified, or it sleeps with its
+    // predicate already true until some unrelated event lands. The empty
+    // critical section closes the lost-wakeup window: a worker either saw
+    // (work empty, injections pending) before parking, or was not yet parked
+    // and cannot miss the notify because it must acquire mutex_ to park.
+    const bool staged = channels_->injections.Push(std::move(message));
+    if (staged) {
+        { std::lock_guard<std::mutex> lock(mutex_); }
+        turn_cv_.notify_all();
+    }
+    return staged;
 }
 
 void Session::Cancel() {
@@ -450,6 +514,13 @@ void Session::Terminate() {
     // (the other half of the two-file dependency documented at that Push).
     cancel_source_.CancelAll();
     channels_->pending.Shutdown();
+    // Refuses future out-of-band pushes: a background task finishing mid-
+    // teardown learns "session gone" from its schedule_injection returning
+    // false, exactly like a subagent's completion hook. Already-staged
+    // messages stay drainable but nobody will drain them -- the worker is
+    // exiting, and a session nobody is attached to loses its in-flight
+    // injections by design.
+    channels_->injections.Close();
     turn_cv_.notify_all();
 
     // Close BEFORE the join, and the order is the whole point. Push() blocks at
@@ -485,10 +556,12 @@ void Session::Terminate() {
 void Session::WorkerMain() {
     while (true) {
         WorkItem item;
+        bool wake_turn = false;
         {
             std::unique_lock<std::mutex> lock(mutex_);
             turn_cv_.wait(lock, [this] {
-                return !work_.empty() || terminated_.load(std::memory_order_acquire);
+                return !work_.empty() || terminated_.load(std::memory_order_acquire) ||
+                       ShouldWakeForInjections();
             });
             if (terminated_.load(std::memory_order_acquire)) return;
             // Record the cancel generation THIS turn must be measured against,
@@ -505,8 +578,16 @@ void Session::WorkerMain() {
             // the previous turn stays fired for its own stragglers, and this
             // turn starts clean.
             loop_->SetCancelToken(cancel_source_.Mint());
-            item = std::move(work_.front());
-            work_.pop_front();
+            if (!work_.empty()) {
+                item = std::move(work_.front());
+                work_.pop_front();
+            } else {
+                // Only reachable when ShouldWakeForInjections() fired: an
+                // out-of-band message landed on an idle session and the wake
+                // setting is on. A seedless turn whose user content is the
+                // injected messages themselves.
+                wake_turn = true;
+            }
             running_turn_ = true;
         }
 
@@ -514,7 +595,9 @@ void Session::WorkerMain() {
         // this pops one item at a time and RunOneTurn is atomic from here, so a
         // command can only ever land BETWEEN turns -- never between a tool_use
         // and its tool_result.
-        if (auto* text = std::get_if<std::string>(&item)) {
+        if (wake_turn) {
+            RunOneTurn(std::nullopt);
+        } else if (auto* text = std::get_if<std::string>(&item)) {
             RunOneTurn(std::move(*text));
         } else {
             RunOneCommand(std::get<QueuedCommand>(item));
@@ -528,14 +611,32 @@ void Session::WorkerMain() {
     }
 }
 
-void Session::RunOneTurn(std::string text) {
+bool Session::ShouldWakeForInjections() const {
+    // Called from the wait predicate, under mutex_. Lock order is one-way:
+    // mutex_ -> the queue's own mutex; producers (subagent completion hooks,
+    // background watchers) hold only the queue's mutex, so no cycle exists.
+    if (!params_.wake_on_injection) return false;
+    if (running_turn_ || !work_.empty()) return false;
+    // A finished subagent's life is over regardless of what is staged.
+    if (subagent_finished_.load(std::memory_order_acquire)) return false;
+    return !channels_->injections.empty();
+}
+
+void Session::RunOneTurn(std::optional<std::string> text) {
     const auto started = std::chrono::steady_clock::now();
 
     TurnResult result;
     std::int64_t first_seq = 0;
     try {
         first_seq = store_->last_appended_seq() + 1;
-        result = loop_->RunTurn(llm::Message{llm::Role::User, {llm::TextBlock{std::move(text)}}});
+        if (text) {
+            result =
+                loop_->RunTurn(llm::Message{llm::Role::User, {llm::TextBlock{std::move(*text)}}});
+        } else {
+            // The wake path: no seed. The turn's user content is whatever the
+            // loop flushes at turn start -- the injected messages themselves.
+            result = loop_->RunTurn();
+        }
     } catch (const llm::LlmError& error) {
         // The loop rethrows once retries are exhausted. The session survives:
         // one failed turn is not a reason to tear down a conversation the user

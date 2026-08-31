@@ -38,6 +38,7 @@
 #include "minimal/agent/agent_preset.hpp"
 #include "minimal/agent/history_store.hpp"
 #include "minimal/agent/agent_preset_registry.hpp"
+#include "minimal/agent/injection_queue.hpp"
 #include "minimal/agent/session_observer_registry.hpp"
 #include "minimal/commands/command_context.hpp"
 #include "minimal/commands/command_dispatcher.hpp"
@@ -75,6 +76,14 @@ class ProviderInstanceCache;  // borrowed via set_provider_instance_cache
 struct SessionChannels {
     rpc::EventQueue<v1::ServerEvent> queue;
     rpc::PendingRequests pending;
+    // Cross-thread staging for out-of-band messages (non-blocking subagent
+    // completions, background task results), drained at turn boundaries. Lives
+    // HERE -- on the shared_ptr block -- because that is exactly the object a
+    // cross-thread handle must outlive in order to be safe: a tool's captured
+    // schedule_injection holds the channels shared_ptr, so the queue (and the
+    // callables' state) survive past the session and Push refuses after
+    // Terminate closes it. See injection_queue.hpp.
+    InjectionQueue injections;
 };
 
 inline std::shared_ptr<SessionChannels> MakeSessionChannels() {
@@ -115,6 +124,15 @@ struct SessionParams {
     // before construction. The session row must already exist either way --
     // the database mints ids -- but a fresh session's transcript is empty.
     bool resume = false;
+
+    // When an out-of-band message (a non-blocking subagent completion, a
+    // background task's result) lands on an IDLE session, run a turn for it
+    // immediately instead of waiting for the next user turn to flush it --
+    // the injected messages ARE that turn's user content. Off by default: a
+    // wake is a real provider call the user did not ask for, so it is a
+    // settings.json decision (`background_wake`), never a default. Subagents
+    // never wake (their life is one seeded turn, and they take the default).
+    bool wake_on_injection = false;
 
     // The read side of the session's durable transcript, injected by the
     // registry (which owns the database). Session owns it and builds the
@@ -319,7 +337,9 @@ public:
 
 private:
     void WorkerMain();
-    void RunOneTurn(std::string text);
+    // nullopt = the wake path: a turn whose user content is the injected
+    // messages themselves (see SessionParams::wake_on_injection).
+    void RunOneTurn(std::optional<std::string> text);
     void RunOneCommand(const QueuedCommand& command);
     // Builds the context and dispatches. Shared by the worker path and the
     // read-only pool path so the two cannot diverge on what a command may reach.
@@ -333,6 +353,9 @@ private:
     void EmitTurnCompleted(llm::StopReason stop_reason, const llm::Usage& usage,
                            bool hit_max_turns);
     bool IsCancelled() const;
+    // The worker's wait predicate extension: should an out-of-band message
+    // wake this parked worker and drive a seedless turn? Called under mutex_.
+    bool ShouldWakeForInjections() const;
 
     SessionParams params_;
     SessionInfo info_;

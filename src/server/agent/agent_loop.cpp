@@ -56,6 +56,12 @@ AgentLoop::AgentLoop(llm::LlmProvider& provider, tools::ToolExecutor& executor,
       history_(std::move(seeded_history)),
       first_persisted_seq_(seed_first_persisted_seq),
       head_is_summary_(seed_head_is_summary) {
+    // The injection queue is shared with the session's channels block when
+    // there is one (the producers are foreign threads and must see the same
+    // queue the session's wake predicate and Terminate do). A plain test loop
+    // gets a private one, which nothing else can observe anyway.
+    injections_ =
+        session_.injections ? session_.injections : std::make_shared<InjectionQueue>();
     if (!history_.empty()) {
         // A resumed context has no backend usage behind it yet, so give the
         // compaction trigger an estimate to work with. Deliberately the same
@@ -104,21 +110,14 @@ void AgentLoop::AppendAndPersist(llm::Message message, std::optional<int> output
     history_.push_back(std::move(message));
 }
 
-void AgentLoop::QueueInjectedMessage(llm::Message message) {
-    std::lock_guard<std::mutex> lock(injected_mu_);
-    injected_.push_back(std::move(message));
+bool AgentLoop::QueueInjectedMessage(llm::Message message) {
+    return injections_->Push(std::move(message));
 }
 
 void AgentLoop::FlushInjectedMessages() {
-    std::vector<llm::Message> pending;
-    {
-        std::lock_guard<std::mutex> lock(injected_mu_);
-        if (injected_.empty()) return;
-        pending.swap(injected_);
-    }
-    for (auto& message : pending) {
-        AppendAndPersist(std::move(message));
-    }
+    // DrainAll runs the sink outside the queue's mutex; AppendAndPersist
+    // touches the store and must not hold it.
+    injections_->DrainAll([this](llm::Message message) { AppendAndPersist(std::move(message)); });
 }
 
 llm::ChatRequest AgentLoop::BuildChatRequest() const {
@@ -229,16 +228,13 @@ std::optional<std::size_t> AgentLoop::CompactNow() {
 
 void AgentLoop::ClearHistory() {
     history_.clear();
-    {
-        // UNDER THE LOCK, like every other touch of injected_. This one was not,
-        // and the two sides are genuinely concurrent: /clear runs on THIS
-        // session's worker, while QueueInjectedMessage runs on a NON-BLOCKING
-        // SUBAGENT's worker from its completion hook. A background child
-        // finishing while the user types /clear is a data race on a
-        // vector<Message> -- the kind that corrupts rather than crashes.
-        std::lock_guard<std::mutex> lock(injected_mu_);
-        injected_.clear();
-    }
+    // The queue is concurrency-safe by construction (its own mutex), and the
+    // two sides are genuinely concurrent: /clear runs on THIS session's worker,
+    // while QueueInjectedMessage runs on a NON-BLOCKING SUBAGENT's worker from
+    // its completion hook -- or on a background task's watcher. A background
+    // child finishing while the user types /clear is a data race on a
+    // vector<Message> -- the kind that corrupts rather than crashes.
+    injections_->Clear();
     // The occupancy estimate goes with the history it described. It self-heals
     // on the next RecordTurn, so leaving it stale only cost one no-op Compact()
     // -- but a token count that outlives its messages is the sort of thing a
@@ -386,8 +382,31 @@ std::optional<std::size_t> AgentLoop::Compact() {
 TurnResult AgentLoop::RunTurn(llm::Message seed_message) {
     TurnResult result;
     compaction_failed_this_turn_ = false;
+    // TURN START, before the seed and the first BuildChatRequest: anything
+    // queued out-of-band while the session was idle -- a non-blocking
+    // subagent's completion, a background task's result -- enters the history
+    // here. Without this flush an injection that landed on an idle session
+    // would MISS the very turn that should have carried it: the loop would
+    // build its request, call the provider, and only then append the message.
+    // The ordering is also chronological -- the injection happened before the
+    // user typed the seed.
+    FlushInjectedMessages();
     AppendAndPersist(std::move(seed_message));
+    RunTurnLoop(result, /*flush_first=*/false);
+    return result;
+}
 
+TurnResult AgentLoop::RunTurn() {
+    TurnResult result;
+    compaction_failed_this_turn_ = false;
+    // The wake path: no seed of its own -- the injected messages ARE the user
+    // turn, flushed at the top of the loop body.
+    RunTurnLoop(result, /*flush_first=*/true);
+    return result;
+}
+
+void AgentLoop::RunTurnLoop(TurnResult& result, bool flush_first) {
+    if (flush_first) FlushInjectedMessages();
     int turns = 0;
     while (true) {
         if (Cancelled()) {
@@ -489,6 +508,13 @@ TurnResult AgentLoop::RunTurn(llm::Message seed_message) {
                     session_.tool_output_sink(tool_use_id, chunk);
                 };
             }
+            // Deferred-completion surface, copied verbatim from the session's
+            // wiring (see SessionContext): a tool that schedules work beyond
+            // its own invocation captures these, and their lifetime is the
+            // session's shared channels block -- not this call, not this loop.
+            ctx.schedule_injection = session_.injection_sink;
+            ctx.session_lifetime = session_.session_lifetime;
+            ctx.emit_task_event = session_.task_event_sink;
 
             ToolLifecycleEvent lifecycle;
             lifecycle.tool_use_id = use->id;
@@ -528,7 +554,6 @@ TurnResult AgentLoop::RunTurn(llm::Message seed_message) {
     }
 
     FlushInjectedMessages();
-    return result;
 }
 
 }  // namespace minimal::agent

@@ -60,6 +60,7 @@ struct SessionFixture {
         params.seed_grants = seed_grants;
         params.policy_ceiling = policy_ceiling;
         params.on_turn_finished = on_turn_finished;
+        params.wake_on_injection = wake_on_injection;
 
         session = std::make_unique<agent::Session>(
             std::move(params), preset, std::move(owned_provider), std::move(owned_store),
@@ -98,6 +99,9 @@ struct SessionFixture {
     std::vector<std::string> seed_grants;
     std::optional<tools::PermissionPolicy> policy_ceiling;
     std::function<void(const agent::TurnResult&)> on_turn_finished;
+    // The idle-wake setting: an out-of-band injection on an IDLE session runs a
+    // seedless turn (the injected messages are the user content).
+    bool wake_on_injection = false;
     testing::FakeLlmProvider* provider = nullptr;
     testing::InMemoryHistoryStore* store = nullptr;  // owned by the session
     std::unique_ptr<agent::Session> session;
@@ -729,12 +733,13 @@ TEST_CASE("two sessions do not share bash state", "[session]") {
     std::filesystem::create_directories(base / "two");
 
     tools_bash::BashSessionStateStore store;
+    tools_bash::BackgroundTaskRegistry background;
 
     auto run = [&](const std::string& session_id, const std::filesystem::path& root,
                    const std::string& command) {
         SessionFixture fixture(root);
         fixture.tools_registry.Register(
-            tools_bash::MakeBashTool(tools_bash::ParseBashSettings({}), store));
+            tools_bash::MakeBashTool(tools_bash::ParseBashSettings({}), store, background));
         fixture.Script(testing::ToolUseResponse("c1", "bash", {{"command", command}}));
         fixture.Script(testing::TextResponse("done"));
         fixture.Start(session_id);
@@ -930,15 +935,18 @@ TEST_CASE("a queued injected message is appended at a turn boundary", "[session]
     fixture.session->SubmitTurn("next turn");
     REQUIRE(fixture.session->WaitForIdleForTesting(5s));
 
-    // Order: injected seed of turn 1 never existed; this turn appended its seed
-    // and response FIRST, then the boundary flush appended the injection.
+    // Order: the injection is flushed at TURN START, so it precedes the seed
+    // both in the transcript and in the request the provider saw. (Before the
+    // turn-start flush existed, an injection queued while idle landed after
+    // the seed and response -- the model never saw it in the turn that should
+    // have carried it.)
     const auto& stored = fixture.store->messages;
     REQUIRE(stored.size() == 3);
-    CHECK(stored[0].role == llm::Role::User);      // "next turn"
-    CHECK(stored[1].role == llm::Role::Assistant);  // "next answer"
-    REQUIRE(stored[2].role == llm::Role::User);
-    REQUIRE(stored[2].content.size() == 1);
-    CHECK(std::get<llm::ToolResultBlock>(stored[2].content.front()).tool_use_id == "spawn-1");
+    REQUIRE(stored[0].role == llm::Role::User);
+    REQUIRE(stored[0].content.size() == 1);
+    CHECK(std::get<llm::ToolResultBlock>(stored[0].content.front()).tool_use_id == "spawn-1");
+    CHECK(stored[1].role == llm::Role::User);       // "next turn"
+    CHECK(stored[2].role == llm::Role::Assistant);  // "next answer"
 }
 
 TEST_CASE("session cancellation reaches an advisor through the shared cancel source",
@@ -978,4 +986,81 @@ TEST_CASE("session cancellation reaches an advisor through the shared cancel sou
     // The advisor abstained on cancellation; the inner checker denied; the turn
     // ENDED rather than wedging on a blocked advisor.
     REQUIRE(fixture.session->WaitForIdleForTesting(5s));
+}
+
+TEST_CASE("an injection on an idle session wakes the worker when the setting is on",
+          "[session][background]") {
+    // background_wake=true: a background task (or subagent) completing while
+    // nobody is waiting must still reach the model -- the worker runs a
+    // seedless turn whose user content is the injected messages themselves.
+    SessionFixture fixture;
+    fixture.wake_on_injection = true;
+    fixture.Script(testing::TextResponse("build passed, noted"));
+    fixture.Start();
+
+    REQUIRE(fixture.session->QueueInjectedMessage(
+        llm::Message{llm::Role::User,
+                     {llm::ToolResultBlock{"tu-bg", {llm::TextBlock{"[background task bg-1 "
+                                                                "completed] build ok"}},
+                                           false}}}));
+
+    // A REAL turn ran: provider called, turn completed, history grew. Wait on
+    // the PROVIDER CALL, not on idle -- an idle session is also the state
+    // before the worker has picked the wake turn up.
+    const auto deadline = std::chrono::steady_clock::now() + 5s;
+    while (fixture.provider->requests().empty() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(5ms);
+    }
+    REQUIRE(!fixture.provider->requests().empty());
+    REQUIRE(fixture.session->WaitForIdleForTesting(5s));
+    const auto& request = fixture.provider->requests().front();
+    REQUIRE(request.messages.size() == 1);  // the injection IS the user content
+    CHECK(std::get<llm::ToolResultBlock>(request.messages[0].content.front()).tool_use_id ==
+          "tu-bg");
+
+    // The transcript records it as the appended message it is.
+    const auto& stored = fixture.store->messages;
+    REQUIRE(stored.size() == 2);
+    CHECK(stored[0].role == llm::Role::User);
+    CHECK(stored[1].role == llm::Role::Assistant);
+
+    // And the client saw a turn_completed for the wake turn -- a headless
+    // client that had closed its side would otherwise hang.
+    bool saw_completed = false;
+    while (auto event = fixture.session->queue().TryPop()) {
+        if (event->has_turn_completed()) saw_completed = true;
+    }
+    CHECK(saw_completed);
+}
+
+TEST_CASE("an injection on an idle session does NOT wake the worker by default",
+          "[session][background]") {
+    // Default off: a wake is a provider call nobody asked for. The message
+    // stages; the session stays idle; the next user turn flushes it first.
+    SessionFixture fixture;
+    fixture.Script(testing::TextResponse("later answer"));
+    fixture.Start();
+
+    REQUIRE(fixture.session->QueueInjectedMessage(
+        llm::Message{llm::Role::User,
+                     {llm::ToolResultBlock{"tu-bg", {llm::TextBlock{"[background task bg-1 "
+                                                                "completed] build ok"}},
+                                           false}}}));
+
+    // No turn ran for it.
+    std::this_thread::sleep_for(100ms);
+    CHECK(fixture.provider->requests().empty());
+    CHECK(fixture.session->WaitForIdleForTesting(100ms));
+
+    // The next turn flushes it BEFORE the seed -- the ordering the loop-level
+    // turn-start flush guarantees.
+    fixture.Script(testing::TextResponse("with the background result"));
+    fixture.session->SubmitTurn("what happened?");
+    REQUIRE(fixture.session->WaitForIdleForTesting(5s));
+
+    const auto& request = fixture.provider->requests().front();
+    REQUIRE(request.messages.size() == 2);
+    CHECK(std::get<llm::ToolResultBlock>(request.messages[0].content.front()).tool_use_id ==
+          "tu-bg");
+    CHECK(std::get<llm::TextBlock>(request.messages[1].content.front()).text == "what happened?");
 }

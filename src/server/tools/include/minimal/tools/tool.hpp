@@ -2,6 +2,7 @@
 
 #include <filesystem>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -26,6 +27,24 @@ struct ToolSpec {
 struct ToolResult {
     bool is_error = false;
     std::string content_text;
+};
+
+// Lifecycle of a BACKGROUND task -- work a tool starts (background bash) whose
+// process outlives the tool call that spawned it. The tool call itself returns
+// an acknowledgment; the task reports here as it changes state, and its result
+// reaches the model later via ToolContext::schedule_injection.
+//
+// Core-neutral on purpose: the plugin that runs the task knows nothing about
+// gRPC, and the session maps this onto a wire event the same way it maps
+// ToolLifecycleEvent. `tool_use_id` is the ORIGINAL invocation -- output deltas
+// keep streaming under it, and a client correlates the two.
+struct BackgroundTaskEvent {
+    enum class State { kStarted, kCompleted, kFailed, kTimedOut, kKilled };
+    std::string task_id;
+    std::string tool_use_id;
+    std::string command;
+    int pid = 0;
+    State state = State::kStarted;
 };
 
 struct ToolContext {
@@ -74,6 +93,34 @@ struct ToolContext {
     // client's ring buffer, while the authoritative record stays the capped
     // ToolResultBlock. Two artifacts, two jobs.
     std::function<void(std::string_view)> emit_output;
+
+    // --- Deferred-completion surface (background bash; see ARCHITECTURE.md) --
+    //
+    // Three handles a tool captures when it schedules work that OUTLIVES its
+    // own invocation. All three are lifetime-safe by construction: the
+    // callable's state is the session's shared channels block, and the weak_ptr
+    // expires exactly when that block does -- so a detached watcher holding
+    // them past the session's death degrades (refusal, expired) instead of
+    // dangling. No agent-layer type crosses here.
+
+    // Stages a message for injection at the session's next turn boundary.
+    // False means the session is terminating and the message was NOT staged --
+    // log the loss, never retry. The message must be wire-valid where it lands
+    // (a user message, or a tool-result keyed to a tool_use the history
+    // already carries).
+    std::function<bool(llm::Message)> schedule_injection;
+
+    // Expires with the session. A long-lived helper polls this (cheaply --
+    // expiry is one atomic load on a null-or-live control block) and
+    // self-terminates -- for background bash, killpg + reap -- when it does.
+    // This is the ONLY session-death signal such a helper gets, and it is
+    // deliberately NOT the turn's CancelToken: CancelTurn must not kill
+    // background work, termination must.
+    std::weak_ptr<const void> session_lifetime;
+
+    // Task lifecycle events (started/completed/failed/timed out/killed).
+    // Optional -- a session may wire none -- and safe to call from any thread.
+    std::function<void(const BackgroundTaskEvent&)> emit_task_event;
 
     // Per-invocation audit logging (bash logs command, resolved argv or
     // rejection reason, exit code, duration). One process-wide instance for now.

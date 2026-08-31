@@ -1,18 +1,28 @@
-// tools-bash -- the bash tool, the /restart-shell command, the BashSessionState
-// service, and a SessionObserver.
+// tools-bash -- the bash tool (synchronous and background), the /restart-shell
+// and /tasks commands, the BashSessionState service, and a SessionObserver.
 //
-// All four live together deliberately. The per-session cwd/env map lives INSIDE
-// this plugin (core holds no bash state), so:
-//   - /restart-shell must be registered here, not in commands-core: a command
-//     should belong to the plugin that owns the state it touches. Other plugins
-//     now reach that state through the BashSessionStateService provided below
-//     -- the sanctioned channel (docs/EXTENSIBILITY.md §2.2), which is what
-//     lets the command itself resolve the store through ServiceRegistry::Find
-//     instead of a plugin-internal static.
-//   - OnSessionEnded must be implemented here, or that map grows for the lifetime
-//     of the process.
+// All of these live together deliberately. The per-session cwd/env map AND the
+// background task registry live INSIDE this plugin (core holds no bash state),
+// so:
+//   - /restart-shell and /tasks must be registered here, not in commands-core:
+//     a command should belong to the plugin that owns the state it touches.
+//     Other plugins reach the shell state through the BashSessionStateService
+//     provided below -- the sanctioned channel (docs/EXTENSIBILITY.md §2.2),
+//     which is what lets /restart-shell resolve the store through
+//     ServiceRegistry::Find instead of a plugin-internal static.
+//   - OnSessionEnded must be implemented here, or those maps grow for the
+//     lifetime of the process.
 // This is the canonical example of plugin-owned per-session state needing a
 // lifecycle signal.
+//
+// BACKGROUND BASH: the task registry is the second process-lifetime static.
+// Its watchers are detached threads whose lifetimes are bounded by the
+// sessions that spawned them (they poll ToolContext::session_lifetime and
+// killpg on expiry). Detached watchers cannot survive this process -- but
+// their setsid'd children can, so bash_process.cpp keeps the process-global
+// pgid set and an atexit SIGKILL sweep as the last-resort backstop for server
+// shutdown: the sweep runs synchronously at exit, when there is nothing left
+// to race.
 //
 // Split from tools-fs because it has a distinct security profile and is the one
 // tool with a plausible alternate implementation (container / remote executor)
@@ -30,13 +40,17 @@
 // Consent scoping (see ARCHITECTURE.md) makes Ask livable: an invocation discloses
 // the binaries it names, by resolved path, and the operator may grant them for the
 // session. That reduces prompts; it does not constrain what a command can do.
+// A background task is the SAME command string through the SAME gate -- only the
+// waiting differs -- so disclosure needs no background-specific path.
 
 #include "minimal/plugins/plugin_abi.h"
 
+#include "background_registry.hpp"
 #include "bash_session_state.hpp"
 #include "bash_settings.hpp"
 #include "bash_tool.hpp"
 #include "restart_shell.hpp"
+#include "tasks_command.hpp"
 
 namespace {
 
@@ -49,14 +63,25 @@ minimal::tools_bash::BashSessionStateStore& BashStore() {
     return store;
 }
 
-// Releases this plugin's per-session state. Core cannot do it: the map lives in
-// this .so and nothing outside it can reach the store. Without this hook the
-// cwd/env of every session that ever ran would stay resident for the life of
-// the process.
+minimal::tools_bash::BackgroundTaskRegistry& BackgroundTasks() {
+    static minimal::tools_bash::BackgroundTaskRegistry registry;
+    return registry;
+}
+
+// Releases this plugin's per-session state. Core cannot do it: the maps live in
+// this .so and nothing outside it can reach the stores. Without this hook the
+// cwd/env of every session that ever ran -- and every background task record --
+// would stay resident for the life of the process.
+//
+// The background PROCESSES are not killed here: observers are dispatched
+// fire-and-forget, so ordering against session teardown is not guaranteed, and
+// the kill belongs to the watchers' own expiry poll (prompt, ordered, and
+// reached even when this observer never runs). This is bookkeeping only.
 class BashSessionObserver : public minimal::agent::SessionObserver {
 public:
     void OnSessionEnded(const minimal::agent::SessionInfo& info) override {
         BashStore().Erase(info.session_id);
+        BackgroundTasks().EraseSession(info.session_id);
     }
 };
 
@@ -74,16 +99,20 @@ void minimal_plugin_register_tools(
     // The plugin's own `config` object from its plugins.json entry, verbatim;
     // core imposes no schema, this plugin owns the shape of its own slice.
     const auto settings = minimal::tools_bash::ParseBashSettings(context.config);
-    registry.Register(minimal::tools_bash::MakeBashTool(settings, BashStore()));
+    registry.Register(
+        minimal::tools_bash::MakeBashTool(settings, BashStore(), BackgroundTasks()));
 }
 
 void minimal_plugin_register_commands(
     minimal::commands::CommandRegistry& registry,
     const minimal::plugins::PluginRegistrationContext& context) {
-    // The consumer side of the service channel: the command captures the
-    // registry pointer here and resolves the store lazily at execute time.
+    // /restart-shell is the consumer side of the service channel: it captures
+    // the registry pointer here and resolves the store lazily at execute time.
     registry.Register(
         std::make_unique<minimal::tools_bash::RestartShellCommand>(context.services));
+    // /tasks touches this plugin's own registry directly -- it is state this
+    // .so owns outright, not a service another plugin provides.
+    registry.Register(std::make_unique<minimal::tools_bash::TasksCommand>(&BackgroundTasks()));
 }
 
 void minimal_plugin_register_session_observer(

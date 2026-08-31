@@ -111,7 +111,7 @@ Foundational, and the thing every "blocks until answered" interface elsewhere in
 | **Worker** — one per session | the agent loop, tool execution, compaction | Blocks freely: permission waits, LLM calls, bash subprocesses. |
 | **Writer** — one per attached stream | `stream->Write()`, and is its **only** caller | Blocks on the outbound queue. |
 
-gRPC permits one concurrent reader and one concurrent writer on a `ServerReaderWriter`, but **not** concurrent `Write()` calls. Three independent sources produce outbound events (agent loop, subagent completion, read-only commands running alongside a turn), so a single writer draining one queue is required — a mutex at each call site would be slower *and* easier to get wrong.
+gRPC permits one concurrent reader and one concurrent writer on a `ServerReaderWriter`, but **not** concurrent `Write()` calls. Four independent sources produce outbound events (agent loop, subagent completion, background task events, read-only commands running alongside a turn), so a single writer draining one queue is required — a mutex at each call site would be slower *and* easier to get wrong. Background task events are the one source that is *never* the worker: their sink uses `TryPush`, losing one lifecycle event on a stalled client rather than blocking a thread that cannot be blocked (the injected result is the authoritative record, so the loss is display-only).
 
 **The outbound queue belongs to the `Session`, not to the stream.** Events produced before a client attaches buffer instead of being dropped — this is what lets a subagent's loop start producing events before its tab attaches (see Subagents), and means the worker never has to know whether anyone is currently listening.
 
@@ -363,6 +363,13 @@ struct ToolContext {
     Logger& logger;
     std::function<bool()> is_cancelled;
     std::function<void(std::string_view)> emit_output;  // incremental output -> ToolOutputDeltaEvent
+    // Deferred-completion surface (background bash; § Background execution):
+    // schedule_injection stages a message for a turn boundary; session_lifetime
+    // expires with the session; emit_task_event carries BackgroundTaskEvent.
+    // All lifetime-safe past the session's death.
+    std::function<bool(llm::Message)> schedule_injection;
+    std::weak_ptr<const void> session_lifetime;
+    std::function<void(const BackgroundTaskEvent&)> emit_task_event;
 };
 
 class Tool {
@@ -411,6 +418,40 @@ public:
 **Limits.** `timeout_ms` is per-invocation, model-supplied and clamped to a configured ceiling; "until it finishes" is deliberately not offered, since the deadline is the only hard bound on a session worker thread. Resource limits via `setrlimit` (child-side, before exec — hence fork + execve rather than posix_spawn, whose pre-exec functions may only call async-signal-safe functions). On timeout or cancellation the child's process group is killed *and* the child itself: the child sets its own pgid via `setsid()`, so between fork and that call `killpg` would find no such group and fail. Reaping is deadline-bounded rather than a blocking `waitpid`, because EOF on the pipes does not mean the process is gone — it can close its stdio and keep running. stdin is `/dev/null`: inherited, a command reading fd 0 blocks until the deadline and competes for the operator's terminal. **Streams stdout incrementally through `ToolContext::emit_output`** rather than buffering to `max_output_bytes` — the cap (head ¼ + tail ¾, marker in the middle) still bounds the persisted result, and with pipes available the model can filter at the source (`| tail -50`) rather than being handed schema knobs to do it. Every invocation logged (command, exit code, duration).
 
 That cwd/env map lives **inside the `tools-bash` plugin**, keyed by session id — core holds no bash state. The plugin therefore also registers a `SessionObserver` purely to implement `OnSessionEnded` and free the entry; without it the map would grow for the process lifetime. This is the canonical example of why plugin-owned per-session state needs a lifecycle signal.
+
+### Background execution
+
+The bash tool's `run_in_background: true` is the same command through the same gate with a different WAITING arrangement, not a second tool: same `Execute` category, same `Disclose` (the string is identical, so the grant conjunction is identical), no new permission keys. The acknowledgment returns immediately — `bg-N (pid P)` — and the result reaches the model later, through the same mechanism a non-blocking subagent's completion uses, generalized.
+
+**The shape mirrors non-blocking subagents one level down.** The tool call acks; the task runs on its own thread; the result is **injected at a turn boundary** keyed to the *original* `tool_use_id` (a second tool-result user message carrying that id — the shape the session-naming rule already knows not to title, and which the OpenAI provider already tolerates for subagent completions). Nothing lands out-of-band, because a message between a `tool_use` and its `tool_result` is a hard 400.
+
+**There is deliberately no output tool and no kill tool.** Mid-run output is the model's own redirect-to-file pattern — pipes and redirection are why bash has no schema knobs, and background changes nothing about that. Killing is `kill -- -PID`: the child `setsid()`s, so pid == pgid and one signal reaches the whole tree, via an ordinary bash call. The acknowledgment says both. (`/tasks`, registered by the same plugin, lists the operator's view.)
+
+**Three lifetime-safe handles on `ToolContext` make this possible without exposing session internals to the plugin:**
+
+```cpp
+std::function<bool(llm::Message)> schedule_injection;   // false = session terminating
+std::weak_ptr<const void> session_lifetime;             // expires with the session
+std::function<void(const BackgroundTaskEvent&)> emit_task_event;
+```
+
+The injection queue itself lives in `SessionChannels` — the `shared_ptr` block that already travels wherever a cross-thread handle needs one — so a watcher holding these past the session's death degrades (refusal, expiry, closed queue) instead of dangling. `Push` refuses after `Terminate` closes the queue, the same contract `Session::QueueInjectedMessage` has always had for subagent completions.
+
+**Cancellation is deliberately asymmetric:**
+
+| Event | Background task | Rationale |
+|---|---|---|
+| `CancelTurn` | **keeps running** | Outliving the turn that started it is the mode's entire purpose; the watcher holds no turn `CancelToken` for exactly this reason. |
+| Session terminate | **killed** | The watcher polls `session_lifetime` and killpg + reaps on expiry — at most one poll slice (~100 ms) of lag. There is no synchronous plugin kill hook at teardown (`SessionObserver::OnSessionEnded` is fire-and-forget), so the expiry poll IS the mechanism. |
+| Server process exit | **killed** | Detached watchers die with the process, but their `setsid`'d children would be orphaned — a process-global pgid set (pids forgotten on reap, so only live groups are held) plus an `atexit` SIGKILL sweep is the backstop, synchronous at exit where nothing can race it. |
+
+**Limits, both in the plugin's `plugins.json` config:** `max_background_tasks` (default 4) — over the limit is an **error result the model adapts to**, never a queue, matching `max_concurrent_subagents`; and `background_max_timeout_ms` (default 600,000) — a background task never holds the session worker, so the sync deadline's rationale ("the only hard bound on a worker thread") does not apply, but nothing may run forever on the operator's machine either, so the ceiling is its own knob and the default when the model supplies no timeout. `RLIMIT_CPU`/`RLIMIT_FSIZE` backstops are identical to the sync path.
+
+**Session state is never adopted from a background completion.** The wrapper still reports final cwd/env on fd 9 — and the watcher still *drains* it, because a child blocked writing a full pipe never reaches its own exit — but the payload is discarded: a task's final state is stale by the time it reports, and adopting it would stomp whatever foreground calls set up in between. `restart` semantics are unchanged.
+
+**Two artifacts, two audiences** (the same ruling as the running-tools panel): live output streams through `emit_output` keyed to the original `tool_use_id` — lossy, the operator's; the capped head+tail render is what gets injected — the model's, and the only copy that outlives the session. A `BackgroundTaskEvent` (started/completed/failed/timed_out/killed, additive proto oneof case) carries lifecycle to the client so a panel row can go terminal; the authoritative result is the injected message and the persisted transcript, never the status channel.
+
+**The wake, and why it is off by default.** A completion landing while a turn runs is flushed at a tool-cycle boundary or turn end; one landing while the session is *idle* waits for the next turn — unless `settings.json` sets `"background_wake": true`, in which case the worker's wait predicate (`ShouldWakeForInjections`) notices the pending injection and runs a **seedless turn** whose user content is the injected messages themselves. A wake is a real provider call nobody asked for, so it is a config decision, resolved once per session at creation. When it fires, `TurnCompletedEvent` is emitted like any turn — a headless client that closed its side must still learn the turn happened.
 
 ## Permission model — `src/server/tools/`
 
@@ -990,6 +1031,8 @@ Cross-session (that is what distinguishes it from chat): command summary, agent/
 
 With sequential tool dispatch there is at most one running tool *per session*, so this panel earns its keep with subagents and long bash commands, not parallel fan-out.
 
+**Background bash rows** ride the same stream: a `BackgroundTaskEvent{started}` opens a row (labeled by `command`, keyed by the `tool_use_id` the event carries), output deltas arrive under that same id, and the terminal event closes it — possibly many turns after the `ToolExecutionEvent{finished}` that acked the original call. A client that keys rows by tool_use_id alone must therefore tolerate a row REOPENING after its finish event; that is the background mode, not a bug.
+
 ### Session picker
 
 Since attached sessions are all visible as tabs, the picker is primarily a browser of **past (terminated)** sessions: filtered to the current `project_root` by default (`include_all_dirs` to widen), excluding `parent_session_id IS NOT NULL`, sorted by last activity, showing name / message count / last-activity. Deletion happens here, confirmed. Opened at startup when prior sessions exist for the cwd — otherwise a session is created directly — and via `/sessions`.
@@ -1046,12 +1089,17 @@ Exit codes are interface, because a script piping `-p` has to tell "the model fi
 
 **Attaching to child sessions is a client protocol obligation, not a TUI behavior.** Any conforming client must attach on `SubagentStartedEvent` — otherwise the initial-attach guard would kill a subagent spawned during a headless run. Attaching is expressible without submitting work through a dedicated no-op `Attach` `ClientEvent` payload (the stream is named by its first event, and before `Attach` existed every payload did something). The headless client merges child output into its stream, or discards it under `--output-format text`.
 
+**Background bash under `-p` is bounded by the run itself.** The stream closes when the turn ends, which terminates the session, which kills the session's background tasks (§ Background execution) — so `run_in_background` inside a headless run only ever means "don't wait for it within this turn," never "keep it running after the script moves on." A turn that ends with live tasks still reports `EndTurn`; the tasks' results die with the session, which is the correct reading of "no detached state in v1" and the reason no `-p` flag pretends otherwise.
+
 ## Agent loop — `src/server/agent/agent_loop.{hpp,cpp}`
 
 Core, and the thing every other component in this document plugs into. Runs on the session worker thread (see Concurrency model), one turn at a time.
 
 ```
 RunTurn(session, seed_message):
+  flush queued completions              # TURN START: injections precede the seed and
+                                        #   the first provider call -- a completion that
+                                        #   landed while idle must not miss this turn
   append + persist seed_message
   loop:
     if cancelled: break
@@ -1067,9 +1115,13 @@ RunTurn(session, seed_message):
     if stop_reason != tool_use: break
     for each ToolUseBlock, sequentially:
       append + persist ToolExecutor::run(...) as ToolResultBlock
-    flush queued subagent completions                    # the turn boundary
+    flush queued completions             # the turn boundary: subagent + background-task
+                                        #   results; never between a tool_use and its result
+  flush queued completions              # turn end
   observers.OnTurnCompleted(...)
 ```
+
+There are three flush points and one loop: turn start (before the seed), after each tool cycle, and turn end. The turn-start flush is what makes an injection land when it should — before the flush existed there, a completion arriving while the session was *idle* missed the very next turn: the loop built its request, called the provider, and only then appended the message. When `background_wake` is on (§ Background execution), an idle session also runs the seedless `RunTurn()` whose user content is the injected messages themselves — the loop body is shared, only the seed differs, so there is still one loop implementation, not two.
 
 `BuildChatRequest` is rebuilt **every turn**, because MCP server liveness and `/agent` can both change the set mid-session:
 
@@ -1217,7 +1269,7 @@ variable the install rule uses, so overriding one moves both.
   `max_tokens` is typed rather than left to `parameters` because the serializer treats it as a structural field and erases whatever `parameters` put there — so it was the only route to an output cap, and it did not exist. It applies to every request the session makes, summarization included: a cap the conversation honours and the compactor ignores is how a summary gets truncated.
 - **`mcps.json`** — `[{name, transport: "stdio"|"http", command, args[], env{} | url, headers{}, enabled}]`. `env`/`headers` support `${ENV_VAR}` interpolation, resolved once at load and never logged. No per-server risk category — MCP permission is server-scoped, resolved separately.
 - **`permissions.json`** — security config, split from `settings.json` so it can be reviewed and locked down independently: `{default_run_mode: "normal"|"bypass"|"allow-only" (default "normal"), fallback: {read_only, file_write, execute, out_of_workdir}, per_tool_overrides: {}, mcp_default_mode: "allow"|"ask"|"deny" (default "ask")}`. A global floor a preset can still override — no clamping; guardrails presets cannot loosen are future scope.
-- **`settings.json`** — `default_agent_preset, default_model (a `<provider>/<model>` reference), default_theme, max_concurrent_subagents (default 4), memory.{auto_compact (default true), context_compaction_trigger (a one-of object: `{"percent": 1..100}` | `{"tokens": >0}` | `{"buffer_tokens": >0}`; absent = never; exactly one key or the loader rejects the file; the window-relative strategies resolve against the active MODEL's context_window_tokens and never fire without one — see Context compaction; the pre-strategy flat key context_compaction_trigger_tokens still parses as the fixed strategy, and the new object wins when both are present; the seeded settings.json sets `{"percent": 80}`), compaction_keep_recent_tokens (NOT YET HONORED — see Context compaction), scrollback_page_size (default 100 when unset, applied by the RPC layer to both GetMessages and ListSessions)}, tools.{read,edit,bash}.*, tools_view.stdout_buffer_lines (default 100), session_db_path, logging.{level, path, max_size_mb, max_files}`. `logging` backs a **spdlog** rotating file sink (no custom rotation code), with `path` alongside `session_db_path` under the platform *data* dir, not the config dir. Applied by `common::ConfigureLogging` at the very top of `main`, before anything logs -- `DefaultLogger()` caches spdlog's default on first use for the process lifetime, so the ordering is load-bearing. The console sink stays alongside the file one; a log file that cannot be opened degrades to console-only rather than refusing to start.
+- **`settings.json`** — `default_agent_preset, default_model (a `<provider>/<model>` reference), default_theme, max_concurrent_subagents (default 4), background_wake (default false — run a seedless turn when an injected completion lands on an idle session; see Background execution; resolved once per session at creation), memory.{auto_compact (default true), context_compaction_trigger (a one-of object: `{"percent": 1..100}` | `{"tokens": >0}` | `{"buffer_tokens": >0}`; absent = never; exactly one key or the loader rejects the file; the window-relative strategies resolve against the active MODEL's context_window_tokens and never fire without one — see Context compaction; the pre-strategy flat key context_compaction_trigger_tokens still parses as the fixed strategy, and the new object wins when both are present; the seeded settings.json sets `{"percent": 80}`), compaction_keep_recent_tokens (NOT YET HONORED — see Context compaction), scrollback_page_size (default 100 when unset, applied by the RPC layer to both GetMessages and ListSessions)}, tools.{read,edit,bash}.*, tools_view.stdout_buffer_lines (default 100), session_db_path, logging.{level, path, max_size_mb, max_files}`. `logging` backs a **spdlog** rotating file sink (no custom rotation code), with `path` alongside `session_db_path` under the platform *data* dir, not the config dir. Applied by `common::ConfigureLogging` at the very top of `main`, before anything logs -- `DefaultLogger()` caches spdlog's default on first use for the process lifetime, so the ordering is load-bearing. The console sink stays alongside the file one; a log file that cannot be opened degrades to console-only rather than refusing to start.
 - **`plugins.json`** — an object, not a bare array (an earlier draft said array while also placing the aliases at the top level; both cannot hold):
 
   ```json
@@ -1364,7 +1416,7 @@ A subagent is **the same `Session` entity as a top-level conversation** — same
 - **Permission inheritance — a child can never be more permissive than its parent**: effective `PermissionPolicy` is `most_restrictive(parent, child_preset)` per category; `allowed_tools`/`allowed_skills`/`allowed_mcp_servers` are **intersected** with the parent's; `PermissionRunMode` is clamped (`AllowOnly < Normal < Bypass`). Without this, a parent at `file_write: ask` could spawn a child preset at `file_write: allow`.
 - **Concurrency limit**: `max_concurrent_subagents` per parent session, default 4. Over-limit spawns return an **error `ToolResultBlock`** ("subagent limit reached") rather than blocking, so the model adapts instead of hanging. The sanity check *warns* above 8 — past that the task has outgrown the harness — but does not block, matching the build-it-yourself philosophy.
 - **Blocking mode**: the child's own worker runs its single turn — one drive path for both modes — while `execute()` blocks the parent's worker on the completion signal, which fires on every exit path of the child's turn, so a failure unblocks the parent exactly like a success. The child's tab auto-focuses, since the parent is stuck waiting anyway.
-- **Non-blocking mode**: `execute()` returns an acknowledgment immediately and the parent's turn continues; the child runs on its own worker. On completion the result is **queued** for the parent and flushed by the parent's worker **at a turn boundary** — after all tool results for the current assistant turn are appended, before the next provider call. Injecting it truly out-of-band could land a `User` message between a `tool_use` and its `tool_result`, which is a hard 400.
+- **Non-blocking mode**: `execute()` returns an acknowledgment immediately and the parent's turn continues; the child runs on its own worker. On completion the result is **queued** for the parent and flushed by the parent's worker **at a turn boundary** — after all tool results for the current assistant turn are appended, before the next provider call. Injecting it truly out-of-band could land a `User` message between a `tool_use` and its `tool_result`, which is a hard 400. This queue-and-flush mechanism is *the* deferred-completion mechanism — background bash (§ Background execution) rides the same generalized channel, `InjectionQueue` on `SessionChannels`, flushed at the same three turn boundaries — and if `background_wake` is set, an injection landing on an **idle** parent runs a seedless turn immediately rather than waiting for the next user message.
 
 ## Startup sanity check — `src/server/config/sanity_check.{hpp,cpp}`
 

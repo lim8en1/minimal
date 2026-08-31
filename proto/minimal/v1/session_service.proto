@@ -166,6 +166,31 @@ message TurnCompletedEvent {
   bool hit_max_turns = 3;
 }
 
+// Lifecycle of a BACKGROUND task -- work (background bash) whose process
+// outlives the tool call that spawned it. STARTED arrives on the spawning
+// session's stream before the ack ToolResult does; the terminal states arrive
+// whenever the task finishes, possibly several turns later.
+//
+// `tool_use_id` is the ORIGINAL invocation: the task's live output streams as
+// ToolOutputDeltaEvents under that same id, so a client keys its running-tools
+// row by tool_use_id and labels it from this event. The authoritative result
+// reaches the MODEL as an injected message at a turn boundary, not through
+// this event -- this channel is the operator's status display.
+message BackgroundTaskEvent {
+  enum State {
+    STARTED = 0;
+    COMPLETED = 1;   // exit status 0
+    FAILED = 2;      // non-zero exit or killed by a signal
+    TIMED_OUT = 3;   // the task's wall-clock deadline; process group killed
+    KILLED = 4;      // the session terminated; the watcher killed the group
+  }
+  string task_id = 1;
+  string tool_use_id = 2;
+  string command = 3;
+  int32 pid = 4;
+  State state = 5;
+}
+
 message ServerEvent {
   // Which session this event belongs to. Required because one client multiplexes
   // several sessions (tabs), including subagent children of the focused session.
@@ -181,6 +206,7 @@ message ServerEvent {
     SessionMetadataEvent session_metadata = 9;
     ErrorEvent error = 10;
     TurnCompletedEvent turn_completed = 11;
+    BackgroundTaskEvent background_task = 12;
   }
 }
 

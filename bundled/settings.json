@@ -3,6 +3,8 @@
   "default_model": "local/your-model-name",
   "max_concurrent_subagents": 4,
 
+  "background_wake": false,
+
   "memory": {
     "auto_compact": true,
     "context_compaction_trigger": { "percent": 80 },

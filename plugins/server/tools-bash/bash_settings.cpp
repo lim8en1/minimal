@@ -20,9 +20,13 @@ BashSettings ParseBashSettings(const nlohmann::json& config) {
     // because every knob in this schema belongs to this one tool.
     settings.timeout_ms = ValueOr(config, "timeout_ms", settings.timeout_ms);
     settings.max_timeout_ms = ValueOr(config, "max_timeout_ms", settings.max_timeout_ms);
+    settings.background_max_timeout_ms =
+        ValueOr(config, "background_max_timeout_ms", settings.background_max_timeout_ms);
     settings.max_output_bytes = ValueOr(config, "max_output_bytes", settings.max_output_bytes);
     settings.max_file_size_bytes =
         ValueOr(config, "max_file_size_bytes", settings.max_file_size_bytes);
+    settings.max_background_tasks = ValueOr(config, "max_background_tasks",
+                                            settings.max_background_tasks);
 
     auto shell_it = config.find("shell");
     if (shell_it != config.end() && shell_it->is_string()) {
@@ -34,10 +38,16 @@ BashSettings ParseBashSettings(const nlohmann::json& config) {
     if (settings.timeout_ms <= 0) settings.timeout_ms = 120000;
     if (settings.max_output_bytes <= 0) settings.max_output_bytes = 1024 * 1024;
     if (settings.max_file_size_bytes <= 0) settings.max_file_size_bytes = 1024LL * 1024 * 1024;
+    if (settings.background_max_timeout_ms <= 0) settings.background_max_timeout_ms = 600000;
+    if (settings.max_background_tasks <= 0) settings.max_background_tasks = 4;
     if (settings.shell.empty()) settings.shell = "/bin/sh";
     // A ceiling below the default would silently shorten every command that did
     // not ask for a timeout, which is not what configuring a *maximum* means.
     if (settings.max_timeout_ms < settings.timeout_ms) settings.max_timeout_ms = settings.timeout_ms;
+    // Same rule for the background ceiling, against its own default.
+    if (settings.background_max_timeout_ms < settings.timeout_ms) {
+        settings.background_max_timeout_ms = settings.timeout_ms;
+    }
     return settings;
 }
 
