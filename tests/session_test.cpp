@@ -55,6 +55,7 @@ struct SessionFixture {
         params.name = "test session";
         params.agent_preset = "test";
         params.project_root = project_root;
+        params.permission_checker = std::move(injected_checker);
         params.seed_grants = seed_grants;
         params.policy_ceiling = policy_ceiling;
         params.on_turn_finished = on_turn_finished;
@@ -67,6 +68,10 @@ struct SessionFixture {
     void Script(llm::ChatResponse response, std::vector<llm::StreamEvent> events = {}) {
         scripted.emplace_back(std::move(response), std::move(events));
     }
+
+    // Injected through SessionParams::permission_checker -- the seam an advised
+    // (or test) checker crosses. Null keeps the wire default.
+    std::unique_ptr<tools::PermissionChecker> injected_checker;
 
     // Drains everything currently queued. The writer thread's job, done inline.
     std::vector<v1::ServerEvent> DrainQueue() {
@@ -118,6 +123,35 @@ int CountStreamEvents(const std::vector<v1::ServerEvent>& events) {
 }
 
 }  // namespace
+
+
+TEST_CASE("a checker injected through SessionParams is honored end to end",
+          "[session][advisor]") {
+    // The seam the permission advisor composes through: the params producer can
+    // hand the session any PermissionChecker, and the session uses it INSTEAD of
+    // the wire default. Making the session's checker concrete again fails this
+    // test -- the fake would have nowhere to arrive.
+    SessionFixture fixture;
+    auto tool = std::make_unique<testing::FakeTool>("bash", tools::ToolCategory::Execute, "ran");
+    auto* tool_ptr = tool.get();
+    fixture.tools_registry.Register(std::move(tool));
+    fixture.preset.permission_mode.execute = tools::PermissionMode::Ask;
+
+    auto checker = std::make_unique<testing::AlwaysDenyPermissionChecker>();
+    auto* checker_ptr = checker.get();
+    fixture.injected_checker = std::move(checker);
+
+    fixture.Script(testing::ToolUseResponse("call-1", "bash", {{"command", "ls"}}));
+    fixture.Script(testing::TextResponse("I could not run that"));
+    fixture.Start();
+
+    fixture.session->SubmitTurn("run it");
+    REQUIRE(fixture.session->WaitForIdleForTesting(5s));
+
+    REQUIRE(checker_ptr->seen.size() == 1);  // the injected checker decided, not the wire
+    CHECK(checker_ptr->seen.front().tool_name == "bash");
+    CHECK(tool_ptr->calls.empty());          // deny gates before execution
+}
 
 TEST_CASE("a session runs a full turn end to end", "[session]") {
     // The first time the agent loop, the tool executor, a real tool, the event

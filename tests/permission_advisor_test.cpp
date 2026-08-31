@@ -284,3 +284,28 @@ TEST_CASE("registry attributes registrations and refuses duplicates", "[permissi
     // A disabled plugin is a runtime condition: Find returns null, not an error.
     CHECK(registry.Find("no-such-plugin") == nullptr);
 }
+
+TEST_CASE("a child's advisor cannot exceed its parent's ceiling", "[permission_advisor][ceiling]") {
+    // The advisor sits BELOW the ceilings in ToolExecutor::ResolveMode: a
+    // policy resolved to AlwaysDeny (the child's inherited ceiling) never
+    // reaches the checker, so the advisor is never even consulted. An
+    // auto-approver therefore cannot buy back what the parent denied.
+    Fixture f;
+    f.AddTool("bash", ToolCategory::Execute);
+    auto advisor = std::make_shared<ScriptedAdvisor>();
+    advisor->next = PermissionResponse{PermissionDecision::Allow, {}};
+    UnreachablePermissionChecker inner;
+
+    tools::AdvisedPermissionChecker checker(advisor,
+                                            std::make_unique<UnreachablePermissionChecker>(inner),
+                                            [] { return false; });
+    tools::PermissionPolicy ceiling;
+    ceiling.execute = PermissionMode::AlwaysDeny;
+    tools::ToolExecutor executor(f.registry, checker, AllowAllPolicy(), {},
+                                 PermissionRunMode::Normal, ceiling);
+    auto ctx = f.Context();
+
+    CHECK(executor.Run("tu1", "bash", nlohmann::json::object(), ctx).is_error);
+    CHECK(f.tool->calls.empty());
+    CHECK(advisor->seen.empty());  // denied before the advisor ever saw it
+}

@@ -27,6 +27,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "deadline.hpp"
+#include "minimal/tools/permission_advisor.hpp"
 #include "../plugins/server/commands-core/core_commands.hpp"
 #include "fakes.hpp"
 #include "minimal/commands/command_registry.hpp"
@@ -105,7 +106,8 @@ struct SubagentFixture {
         });
     }
 
-    void Build() {
+    void Build(std::shared_ptr<tools::PermissionAdvisor> advisor = nullptr,
+               bool advisor_inherit = false) {
         presets = std::make_unique<agent::AgentPresetRegistry>(dir.path(), skills);
         observers = std::make_unique<agent::SessionObserverRegistry>(common::DefaultLogger());
         db = std::make_unique<session::SessionDatabase>(dir.path() / "sessions.db");
@@ -117,7 +119,8 @@ struct SubagentFixture {
                                                             common::DefaultLogger(), 60s);
         manager = std::make_unique<agent::SubagentManager>(*sessions, *db, *presets,
                                                            /*max_concurrent_subagents=*/4,
-                                                           common::DefaultLogger());
+                                                           common::DefaultLogger(),
+                                                           std::move(advisor), advisor_inherit);
         agent::SubagentManager* mgr = manager.get();
         tools.Register(std::make_unique<agent::SpawnSubagentTool>(
             [mgr](const agent::SubagentRequest& request, const tools::ToolContext& ctx) {
@@ -887,4 +890,91 @@ TEST_CASE("a subagent gets no /-command surface", "[subagent][commands][invarian
     // hang a client either way -- but only one of them can act.
     CHECK(answer(*parent).find("/agent") != std::string::npos);
     CHECK(answer(*child).find("not available") != std::string::npos);
+}
+
+// --- advisor inheritance ----------------------------------------------------------
+
+namespace {
+
+// Auto-approves everything -- the shape of a configured advisor in these tests.
+class AllowAllAdvisor : public tools::PermissionAdvisor {
+public:
+    std::optional<tools::PermissionResponse> Advise(const tools::PermissionRequest&,
+                                                    const tools::AdvisorContext&) override {
+        return tools::PermissionResponse{tools::PermissionDecision::Allow, {}};
+    }
+};
+
+}  // namespace
+
+TEST_CASE("a child defaults to no advisor even when one is configured",
+          "[subagent][advisor]") {
+    // An auto-approver silently governing children violates the spirit of "a
+    // child is never more permissive than its parent". The manager holds the
+    // advisor, but without advisor_inherit the child's Ask reaches the WIRE --
+    // the prompt arriving at all is the proof the advisor never ran.
+    SubagentFixture fixture(4, nlohmann::json{{"per_tool_overrides", {{"spawn_subagent", "allow"}}}});
+    fixture.Build(std::make_shared<AllowAllAdvisor>(), /*advisor_inherit=*/false);
+    auto parent = fixture.CreateParent();
+
+    auto bash = std::make_unique<testing::FakeTool>("bash", tools::ToolCategory::Execute, "ran");
+    auto* bash_ptr = bash.get();
+    fixture.tools.Register(std::move(bash));
+
+    auto* parent_script = fixture.scripts["parent-script"].get();
+    auto* child_script = fixture.scripts["child-script"].get();
+    parent_script->Push(testing::ToolUseResponse(
+        "call-spawn", "spawn_subagent", {{"task", "run it"}, {"agent_preset", "child"}}));
+    parent_script->Push(testing::TextResponse("parent done"));
+    child_script->Push(testing::ToolUseResponse("call-bash", "bash"));
+    child_script->Push(testing::TextResponse("child result"));
+
+    parent->SubmitTurn("go");
+    const auto child_id = fixture.WaitForSubagentStarted(*parent);
+    REQUIRE(child_id.has_value());
+    auto child = fixture.sessions->Find(*child_id);
+    REQUIRE(child != nullptr);
+
+    // The child parks on the wire prompt: the child preset's execute is Ask and
+    // no advisor answered it, even though the manager holds an auto-approver.
+    const auto request_id = fixture.WaitForPermissionRequest(*child);
+    REQUIRE(request_id.has_value());
+    CHECK(bash_ptr->calls.empty());
+
+    fixture.AnswerPermission(*child, *request_id);
+    REQUIRE(parent->WaitForIdleForTesting(10s));
+    CHECK(bash_ptr->calls.size() == 1);
+}
+
+TEST_CASE("advisor_inherit opts the child into the configured advisor",
+          "[subagent][advisor]") {
+    SubagentFixture fixture(4, nlohmann::json{{"per_tool_overrides", {{"spawn_subagent", "allow"}}}});
+    fixture.Build(std::make_shared<AllowAllAdvisor>(), /*advisor_inherit=*/true);
+    auto parent = fixture.CreateParent();
+
+    auto bash = std::make_unique<testing::FakeTool>("bash", tools::ToolCategory::Execute, "ran");
+    auto* bash_ptr = bash.get();
+    fixture.tools.Register(std::move(bash));
+
+    auto* parent_script = fixture.scripts["parent-script"].get();
+    auto* child_script = fixture.scripts["child-script"].get();
+    parent_script->Push(testing::ToolUseResponse(
+        "call-spawn", "spawn_subagent", {{"task", "run it"}, {"agent_preset", "child"}}));
+    parent_script->Push(testing::TextResponse("parent done"));
+    child_script->Push(testing::ToolUseResponse("call-bash", "bash"));
+    child_script->Push(testing::TextResponse("child result"));
+
+    parent->SubmitTurn("go");
+    const auto child_id = fixture.WaitForSubagentStarted(*parent);
+    REQUIRE(child_id.has_value());
+
+    // The inherited advisor answered the child's Ask: the tool runs without any
+    // prompt on the child's queue.
+    REQUIRE(parent->WaitForIdleForTesting(10s));
+    CHECK(bash_ptr->calls.size() == 1);
+    auto child = fixture.sessions->Find(*child_id);
+    REQUIRE(child != nullptr);
+    for (const auto& event : fixture.DrainQueue(*child)) {
+        CHECK_FALSE(event.has_permission_request());
+    }
 }
