@@ -8,7 +8,7 @@ namespace {
 
 class FixtureTool : public minimal::tools::Tool {
 public:
-    FixtureTool() {
+    explicit FixtureTool(std::string echo) : echo_(std::move(echo)) {
         spec_.name = "fixture_tool";
         spec_.category = minimal::tools::ToolCategory::ReadOnly;
         spec_.definition.name = spec_.name;
@@ -18,10 +18,11 @@ public:
     const minimal::tools::ToolSpec& spec() const override { return spec_; }
     minimal::tools::ToolResult execute(const nlohmann::json&,
                                        minimal::tools::ToolContext&) override {
-        return {false, "collision ok"};
+        return {false, echo_};
     }
 private:
     minimal::tools::ToolSpec spec_;
+    std::string echo_;
 };
 
 }  // namespace
@@ -31,8 +32,18 @@ const char* minimal_plugin_abi_tag() { return minimal::common::AbiTag(); }
 const char* minimal_plugin_name() { return "fixture-collision"; }
 const char* minimal_plugin_version() { return "1.0.0"; }
 
-void minimal_plugin_register_tools(minimal::tools::ToolRegistry& registry,
-                                   const minimal::plugins::ToolRegistrationContext&) {
-    registry.Register(std::make_unique<FixtureTool>());
+void minimal_plugin_register_tools(
+    minimal::tools::ToolRegistry& registry,
+    const minimal::plugins::PluginRegistrationContext& context) {
+    // Same config-echo contract as fixture-good; the default distinguishes
+    // which implementation is alive in the collision/alias tests.
+    std::string echo = "collision ok";
+    if (context.config.is_object()) {
+        if (auto it = context.config.find("echo_value");
+            it != context.config.end() && it->is_string()) {
+            echo = it->get<std::string>();
+        }
+    }
+    registry.Register(std::make_unique<FixtureTool>(echo));
 }
 }

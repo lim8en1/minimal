@@ -34,8 +34,27 @@ Session::Session(SessionParams params, AgentPreset preset,
       observers_(observers),
       provider_(std::move(provider)),
       store_(std::move(store)),
-      checker_(params_.session_id, queue_, pending_),
-      confirmations_(params_.session_id, queue_, pending_),
+      // Track M: the registry injects the reader when the transcript is
+      // SQLite-backed; plain tests on fake stores leave it null and tools see
+      // ctx.history == nullptr. The window is built here, bound to THIS
+      // session's id -- a subagent's window is bound to the child's id the
+      // same way, which is what isolates the child's transcript from the
+      // parent's (docs/EXTENSIBILITY.md §2.1).
+      history_reader_(std::move(params_.history_reader)),
+      history_window_(history_reader_
+                          ? std::make_unique<session::HistoryWindow>(*history_reader_,
+                                                                     params_.session_id)
+                          : nullptr),
+      // The channels block comes from the producer when it composed a checker
+      // that had to be built against the queue and pending maps (an advised
+      // permission checker, docs/EXTENSIBILITY.md §3); otherwise Session makes
+      // its own, which is what every plain session and test does.
+      channels_(params_.channels ? std::move(params_.channels) : MakeSessionChannels()),
+      checker_(params_.permission_checker ? std::move(params_.permission_checker)
+                                          : std::make_unique<rpc::WirePermissionChecker>(
+                                                params_.session_id, channels_->queue,
+                                                channels_->pending)),
+      confirmations_(params_.session_id, channels_->queue, channels_->pending),
       // The run mode the client asked for wins over the configured default: it
       // is a property of the CLIENT, not of the config. A headless run has no
       // human to answer a prompt, so it must be able to say so. apply_run_mode()
@@ -43,9 +62,17 @@ Session::Session(SessionParams params, AgentPreset preset,
       // spawner has already clamped the override against the parent's run mode,
       // and hands down the parent's policies as ceilings and the parent's
       // grants as seed -- the whole inheritance lands in this one call.
-      executor_(registry, checker_, preset_.permission_mode, preset_.mcp_permissions,
+      executor_(registry, *checker_, preset_.permission_mode, preset_.mcp_permissions,
                 params_.run_mode_override.value_or(preset_.run_mode), params_.policy_ceiling,
                 params_.mcp_policy_ceiling, params_.seed_grants) {
+    // An advised checker was composed before this Session existed, so only its
+    // shared cancel holder could not yet be bound to a session: install the
+    // predicate now. The worker starts at the end of this constructor, so there
+    // is no window in which an advisor sees the default "never cancelled".
+    if (params_.advisor_cancel_source) {
+        params_.advisor_cancel_source->is_cancelled = [this] { return IsCancelled(); };
+    }
+
     // Seeded from what the client asked for. THE REGISTRY already applied it to
     // the preset before construction, but applying is not the same as
     // remembering: /agent re-resolves the preset from disk, and without the
@@ -61,9 +88,12 @@ Session::Session(SessionParams params, AgentPreset preset,
     SessionContext context{logger_};
     context.session_id = params_.session_id;
     context.project_root = params_.project_root;
+    // ToolContext::history for every tool this session runs; null when there
+    // is no SQLite-backed reader behind it.
+    context.history = history_window_.get();
 
     const std::string session_id = params_.session_id;
-    auto* queue = &queue_;
+    auto* queue = &channels_->queue;
 
     context.tool_output_sink = [queue, session_id](std::string_view tool_use_id,
                                                    std::string_view chunk) {
@@ -169,7 +199,7 @@ void Session::RefreshMcpServers() {
         err->set_category(v1::LLM_ERROR_CATEGORY_UNSPECIFIED);
         err->set_message(error);
         err->set_is_retryable(false);
-        queue_.Push(std::move(event));
+        channels_->queue.Push(std::move(event));
         logger_.warn("session {}: MCP server '{}' disabled: {}", params_.session_id, server,
                      error);
     }
@@ -210,7 +240,7 @@ bool Session::SubmitTurn(std::string text) {
         error->set_category(v1::LLM_ERROR_CATEGORY_UNSPECIFIED);
         error->set_message("session backlog is full; turn refused");
         error->set_is_retryable(false);
-        if (!queue_.TryPush(std::move(event))) {
+        if (!channels_->queue.TryPush(std::move(event))) {
             logger_.warn("session {}: turn refused and the queue is full; client will not see it",
                          params_.session_id);
         }
@@ -249,7 +279,7 @@ void Session::RejectCommand(const QueuedCommand& command, const std::string& rea
     result->set_request_id(command.request_id);
     result->set_status(v1::COMMAND_STATUS_ERROR);
     result->set_message(reason);
-    if (!queue_.TryPush(std::move(event))) {
+    if (!channels_->queue.TryPush(std::move(event))) {
         logger_.warn("session {}: command '{}' refused and the queue is full; client will not "
                      "see it",
                      params_.session_id, command.name);
@@ -363,7 +393,7 @@ void Session::EmitCommandResult(v1::ServerEvent event, const QueuedCommand& comm
     // layer's command pool, and only the worker is allowed to block. A full
     // queue means the client is stalled or gone; losing one command answer is
     // the correct degradation there, logged so it is not silent.
-    if (!queue_.TryPush(std::move(event))) {
+    if (!channels_->queue.TryPush(std::move(event))) {
         logger_.warn("session {}: queue is full; CommandResult for '{}' dropped",
                      params_.session_id, command.name);
     }
@@ -400,7 +430,7 @@ void Session::Cancel() {
     // prompt in the session answering "no answer" instantly, which
     // WirePermissionChecker turns into Deny, so one CancelTurn would silently
     // deny-lock a session that reports itself alive and keeps accepting turns.
-    pending_.CancelAll();
+    channels_->pending.CancelAll();
 }
 
 void Session::Terminate() {
@@ -419,7 +449,7 @@ void Session::Terminate() {
     // WirePermissionChecker::check on a question the client will never answer
     // (the other half of the two-file dependency documented at that Push).
     cancel_source_.CancelAll();
-    pending_.Shutdown();
+    channels_->pending.Shutdown();
     turn_cv_.notify_all();
 
     // Close BEFORE the join, and the order is the whole point. Push() blocks at
@@ -430,7 +460,7 @@ void Session::Terminate() {
     // already-queued event to a writer that is still attached. The only events
     // lost are ones the dying turn pushes after this point, for a session whose
     // consumer is going away regardless.
-    queue_.Close();
+    channels_->queue.Close();
 
     if (worker_.joinable() && worker_.get_id() != std::this_thread::get_id()) worker_.join();
 
@@ -512,7 +542,7 @@ void Session::RunOneTurn(std::string text) {
         // can retry.
         v1::ServerEvent event = MakeEvent(params_.session_id);
         *event.mutable_error() = rpc::ToProto(error);
-        queue_.Push(std::move(event));
+        channels_->queue.Push(std::move(event));
         logger_.warn("session {}: turn failed: {}", params_.session_id, error.what());
     } catch (const std::exception& e) {
         v1::ServerEvent event = MakeEvent(params_.session_id);
@@ -520,7 +550,7 @@ void Session::RunOneTurn(std::string text) {
         error->set_category(v1::LLM_ERROR_CATEGORY_UNSPECIFIED);
         error->set_message(e.what());
         error->set_is_retryable(false);
-        queue_.Push(std::move(event));
+        channels_->queue.Push(std::move(event));
         logger_.warn("session {}: turn threw: {}", params_.session_id, e.what());
     } catch (...) {
         // Neither an LlmError nor a std::exception. The catches above existed to
@@ -533,7 +563,7 @@ void Session::RunOneTurn(std::string text) {
         error->set_category(v1::LLM_ERROR_CATEGORY_UNSPECIFIED);
         error->set_message("the turn threw an unrecognized exception");
         error->set_is_retryable(false);
-        queue_.Push(std::move(event));
+        channels_->queue.Push(std::move(event));
         logger_.warn("session {}: turn threw a non-standard exception", params_.session_id);
     }
 
@@ -604,7 +634,7 @@ void Session::EmitTurnCompleted(llm::StopReason stop_reason, const llm::Usage& u
     completed->set_stop_reason(rpc::ToProto(stop_reason));
     *completed->mutable_usage() = rpc::ToProto(usage);
     completed->set_hit_max_turns(hit_max_turns);
-    queue_.Push(std::move(event));
+    channels_->queue.Push(std::move(event));
 }
 
 bool Session::idle() const {

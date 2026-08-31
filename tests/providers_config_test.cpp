@@ -1,13 +1,17 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <atomic>
 #include <cstdlib>
 #include <fstream>
 #include <string>
+#include <thread>
+#include <vector>
 
 #include "minimal/config/providers_config.hpp"
 #include "temp_dir.hpp"
 
 using namespace minimal::config;
+namespace llm = minimal::llm;
 
 namespace {
 
@@ -63,7 +67,7 @@ nlohmann::json TwoModelsOnOneProvider() {
 const ResolvedModel& Require(const ProvidersConfig& config, const std::string& text) {
     const auto ref = ParseModelRef(text);
     REQUIRE(ref.has_value());
-    const ResolvedModel* model = config.Resolve(*ref);
+    const auto model = config.Resolve(*ref);
     REQUIRE(model != nullptr);
     return *model;
 }
@@ -316,4 +320,274 @@ TEST_CASE("LoadProvidersConfig reads a real file", "[providers]") {
 TEST_CASE("LoadProvidersConfig names the missing file", "[providers]") {
     minimal::testing::TempDir dir;
     CHECK_THROWS_AS(LoadProvidersConfig(dir.path() / "nope.json"), std::runtime_error);
+}
+
+// --- Discovery (track N, docs/EXTENSIBILITY.md §2.6) -------------------------
+
+namespace {
+
+// A hook with a call counter: the lazy/negative-cache properties are about HOW
+// OFTEN the backend is asked, so the tests assert on the count, not just the
+// result. Captured by reference everywhere; the hook also records the
+// connection it was called with, so a test can assert it reached the catalog.
+struct CountingHook {
+    int calls = 0;
+    bool ok = true;
+    std::string error;
+    std::vector<llm::DiscoveredModel> models;
+    std::string last_kind;
+    std::string last_url;
+
+    DiscoveryOutcome AsHook(const std::string& kind, const llm::ProviderConfig& connection) {
+        ++calls;
+        last_kind = kind;
+        last_url = connection.base_url;
+        DiscoveryOutcome outcome;
+        outcome.catalog_present = true;
+        outcome.ok = ok;
+        outcome.error = error;
+        outcome.models = models;
+        return outcome;
+    }
+};
+
+ProvidersConfig DiscoverConfig() {
+    // One discover-only entry (no static models) and one discover entry with a
+    // static model whose context window is omitted -- the enrichment case. No
+    // provider-level context_window_tokens here: an inherited default would
+    // make "omitted" false and the enrichment path unreachable. The fallback
+    // test below builds its own config for exactly that case.
+    return ParseProvidersConfig(nlohmann::json::parse(R"({
+      "providers": {
+        "local": {"backend": "openai", "url": "http://localhost:8000/v1", "discover": true,
+                  "max_tokens": 4096},
+        "mixed": {"backend": "openai", "url": "http://mixed:8000/v1", "discover": true,
+                  "models": {"static1": {}, "windowed": {"context_window_tokens": 16384}}}
+      }
+    })"));
+}
+
+}  // namespace
+
+TEST_CASE("a discover-entry with no models parses", "[providers][discover]") {
+    // The whole point: the backend names the models, not the file.
+    const auto config = ParseProvidersConfig(nlohmann::json::parse(R"({
+      "providers": {"p": {"backend": "openai", "url": "http://x/v1", "discover": true}}
+    })"));
+    CHECK(config.Resolve(ModelRef{"p", "anything"}) == nullptr);  // cold, no hook: miss
+    REQUIRE(config.provider_entries().count("p") == 1);
+    CHECK(config.provider_entries().at("p").discover);
+    CHECK(config.provider_entries().at("p").connection.base_url == "http://x/v1");
+}
+
+TEST_CASE("a non-discover provider with no models is still refused", "[providers][discover]") {
+    CHECK_THROWS_AS(ParseProvidersConfig(nlohmann::json::parse(R"({
+      "providers": {"p": {"backend": "openai", "url": "http://x/v1", "discover": false}}
+    })")), std::runtime_error);
+    CHECK_THROWS_AS(ParseProvidersConfig(nlohmann::json::parse(R"({
+      "providers": {"p": {"backend": "openai", "url": "http://x/v1", "discover": "yes"}}
+    })")), std::runtime_error);
+}
+
+TEST_CASE("a discover-only model resolves lazily, once", "[providers][discover]") {
+    CountingHook hook;
+    hook.models = {{"big", 131072, nlohmann::json::object()},
+                   {"small", std::nullopt, nlohmann::json::object()}};
+    auto config = DiscoverConfig();
+    config.SetDiscoveryHook([&hook](const std::string& kind, const llm::ProviderConfig& c) {
+        return hook.AsHook(kind, c);
+    });
+
+    // Cold: the miss triggers the fetch, the model resolves with the provider's
+    // defaults and the discovered window.
+    const auto big = config.Resolve(ModelRef{"local", "big"});
+    REQUIRE(big != nullptr);
+    CHECK(hook.calls == 1);
+    CHECK(hook.last_kind == "openai");
+    CHECK(hook.last_url == "http://localhost:8000/v1");
+    CHECK(big->ref.str() == "local/big");
+    CHECK(big->backend == "openai");
+    CHECK(big->provider.model_name == "big");
+    REQUIRE(big->max_tokens.has_value());
+    CHECK(*big->max_tokens == 4096);  // provider-level default, inherited
+    REQUIRE(big->context_window_tokens.has_value());
+    CHECK(*big->context_window_tokens == 131072);
+
+    // Warm: a second resolve of the same ref -- and a miss on a model the
+    // catalog does not serve -- hit the cache, never the network.
+    CHECK(config.Resolve(ModelRef{"local", "big"}) == big);
+    CHECK(config.Resolve(ModelRef{"local", "absent"}) == nullptr);
+    CHECK(hook.calls == 1);
+}
+
+TEST_CASE("a failed discovery is negative-cached and reported", "[providers][discover]") {
+    CountingHook hook;
+    hook.ok = false;
+    hook.error = "connection refused";
+    auto config = DiscoverConfig();
+    config.SetDiscoveryHook([&hook](const std::string& kind, const llm::ProviderConfig& c) {
+        return hook.AsHook(kind, c);
+    });
+
+    CHECK(config.Resolve(ModelRef{"local", "big"}) == nullptr);
+    CHECK(config.Resolve(ModelRef{"local", "big"}) == nullptr);
+    CHECK(hook.calls == 1);  // not re-attempted per resolve
+
+    const auto status = config.discovery_status("local");
+    CHECK(status.attempted);
+    CHECK_FALSE(status.ok);
+    CHECK(status.error.find("connection refused") != std::string::npos);
+
+    // A non-discover provider reports untouched, and a discover-entry never
+    // resolved against is untouched too.
+    CHECK_FALSE(config.discovery_status("mixed").attempted);
+}
+
+TEST_CASE("ModelRefs unions static and cached-discovered entries", "[providers][discover]") {
+    CountingHook hook;
+    hook.models = {{"zdisc", 4096, nlohmann::json::object()}};
+    auto config = DiscoverConfig();
+    config.SetDiscoveryHook([&hook](const std::string& kind, const llm::ProviderConfig& c) {
+        return hook.AsHook(kind, c);
+    });
+
+    // Cold cache contributes none -- a listing is not a trigger to fetch.
+    const auto cold = config.ModelRefs();
+    REQUIRE(cold.size() == 2);
+    CHECK(cold[0] == "mixed/static1");
+    CHECK(cold[1] == "mixed/windowed");
+
+    (void)config.Resolve(ModelRef{"local", "zdisc"});
+    const auto warm = config.ModelRefs();
+    REQUIRE(warm.size() == 3);
+    CHECK(warm[0] == "local/zdisc");  // sorted, not appended
+    CHECK(warm[1] == "mixed/static1");
+    CHECK(warm[2] == "mixed/windowed");
+}
+
+TEST_CASE("a static model with an omitted window is enriched from discovery",
+          "[providers][discover][invariant]") {
+    // THE PAYOFF: compaction tracks the model actually served instead of a
+    // number someone typed (or omitted, silently disabling compaction).
+    // Resolving this window from the static entry alone fails this test.
+    CountingHook hook;
+    hook.models = {{"static1", 999999, nlohmann::json::object()}};
+    auto config = DiscoverConfig();
+    config.SetDiscoveryHook([&hook](const std::string& kind, const llm::ProviderConfig& c) {
+        return hook.AsHook(kind, c);
+    });
+
+    const auto enriched = config.Resolve(ModelRef{"mixed", "static1"});
+    REQUIRE(enriched != nullptr);
+    REQUIRE(enriched->context_window_tokens.has_value());
+    CHECK(*enriched->context_window_tokens == 999999);  // from discovery, not the 8192 default
+
+    // A static model with its OWN window is untouched by discovery.
+    const auto windowed = config.Resolve(ModelRef{"mixed", "windowed"});
+    REQUIRE(windowed != nullptr);
+    CHECK(*windowed->context_window_tokens == 16384);
+    // ... and the enrichment did not overwrite the parsed entry for it.
+    CHECK(config.Resolve(ModelRef{"mixed", "static1"}) == enriched);
+    CHECK(hook.calls == 1);
+}
+
+TEST_CASE("a discovered window falls back to the provider-level default",
+          "[providers][discover]") {
+    // A backend that reports no window for a model: the provider-level
+    // context_window_tokens is the inheritance base, exactly as it is for a
+    // static model.
+    CountingHook hook;
+    hook.models = {{"small", std::nullopt, nlohmann::json::object()}};
+    auto config = ParseProvidersConfig(nlohmann::json::parse(R"({
+      "providers": {"p": {"backend": "openai", "url": "http://x/v1", "discover": true,
+                          "context_window_tokens": 8192}}
+    })"));
+    config.SetDiscoveryHook([&hook](const std::string& kind, const llm::ProviderConfig& c) {
+        return hook.AsHook(kind, c);
+    });
+
+    const auto model = config.Resolve(ModelRef{"p", "small"});
+    REQUIRE(model != nullptr);
+    REQUIRE(model->context_window_tokens.has_value());
+    CHECK(*model->context_window_tokens == 8192);
+}
+
+TEST_CASE("RefreshDiscovery evicts and refetches, reporting per provider",
+          "[providers][discover]") {
+    // The mid-process drift case: the backend restarts serving a different
+    // model set while the server stays up. Refresh makes the new set visible
+    // without a server restart.
+    CountingHook hook;
+    hook.models = {{"old", 4096, nlohmann::json::object()}};
+    auto config = DiscoverConfig();
+    config.SetDiscoveryHook([&hook](const std::string& kind, const llm::ProviderConfig& c) {
+        return hook.AsHook(kind, c);
+    });
+    REQUIRE(config.Resolve(ModelRef{"local", "old"}) != nullptr);
+
+    hook.models = {{"new", 8192, nlohmann::json::object()}};
+    const auto outcomes = config.RefreshDiscovery();
+    REQUIRE(outcomes.size() == 2);  // both discover-entries
+    CHECK(outcomes[0].provider == "local");
+    CHECK(outcomes[0].ok);
+    CHECK(outcomes[0].model_count == 1);
+
+    // The stale model is gone from both listing and resolution; the new one is
+    // served.
+    CHECK(config.Resolve(ModelRef{"local", "old"}) == nullptr);
+    const auto fresh = config.Resolve(ModelRef{"local", "new"});
+    REQUIRE(fresh != nullptr);
+    CHECK(*fresh->context_window_tokens == 8192);
+}
+
+TEST_CASE("RefreshDiscovery reports a dead catalog instead of throwing",
+          "[providers][discover]") {
+    CountingHook hook;
+    hook.ok = false;
+    hook.error = "timed out";
+    auto config = DiscoverConfig();
+    config.SetDiscoveryHook([&hook](const std::string& kind, const llm::ProviderConfig& c) {
+        return hook.AsHook(kind, c);
+    });
+
+    const auto outcomes = config.RefreshDiscovery();
+    REQUIRE(outcomes.size() == 2);
+    CHECK_FALSE(outcomes[0].ok);
+    CHECK(outcomes[0].error.find("timed out") != std::string::npos);
+}
+
+TEST_CASE("without a hook, discovery reports 'no discovery hook set'",
+          "[providers][discover]") {
+    // Tests and unhosted configs: a distinguishable state, not a silent
+    // success-with-zero-models.
+    auto config = DiscoverConfig();
+    const auto model = config.Resolve(ModelRef{"local", "big"});
+    CHECK(model == nullptr);
+    const auto status = config.discovery_status("local");
+    CHECK(status.attempted);
+    CHECK_FALSE(status.ok);
+    CHECK(status.error.find("no discovery hook") != std::string::npos);
+}
+
+TEST_CASE("concurrent Resolve is safe and fetches once", "[providers][discover]") {
+    // The command pool runs beside session workers, so Resolve races Resolve.
+    // The mutex is the mechanism; the assertions are timing-independent: every
+    // thread must resolve, and the fetch must have happened exactly once.
+    CountingHook hook;
+    hook.models = {{"big", 131072, nlohmann::json::object()}};
+    auto config = DiscoverConfig();
+    config.SetDiscoveryHook([&hook](const std::string& kind, const llm::ProviderConfig& c) {
+        return hook.AsHook(kind, c);
+    });
+
+    std::vector<std::thread> threads;
+    std::atomic<int> resolved{0};
+    for (int i = 0; i < 8; ++i) {
+        threads.emplace_back([&] {
+            if (config.Resolve(ModelRef{"local", "big"}) != nullptr) ++resolved;
+        });
+    }
+    for (auto& t : threads) t.join();
+    CHECK(resolved.load() == 8);
+    CHECK(hook.calls == 1);  // one fetch, not eight
 }

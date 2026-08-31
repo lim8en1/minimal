@@ -62,6 +62,18 @@ public:
     // second could disagree after an edit.
     const config::ProvidersConfig& providers() const { return providers_; }
 
+    // Discovery injection (track N): the hook built over the ModelCatalogRegistry
+    // after plugin load. Must be called before the first Resolve()/model lookup
+    // that could trigger a fetch -- main.cpp injects right after construction.
+    void SetDiscoveryHook(config::DiscoveryHook hook) { providers_.SetDiscoveryHook(std::move(hook)); }
+
+    // Evicts and refetches every discover-entry's catalog (see
+    // ProvidersConfig::RefreshDiscovery). Const for the same reason: it touches
+    // only mutex-guarded cache state, never the parsed config.
+    std::vector<config::DiscoveryRefreshOutcome> RefreshDiscovery() const {
+        return providers_.RefreshDiscovery();
+    }
+
 private:
     AgentPreset ResolveUncached(const std::string& preset_name) const;
 

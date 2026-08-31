@@ -7,6 +7,7 @@ target_link_libraries(minimal_test_support INTERFACE minimal::server_core)
 
 add_executable(minimal_tests
     permission_test.cpp
+    permission_advisor_test.cpp
     permission_chain_test.cpp
     path_confinement_test.cpp
     sse_parser_test.cpp
@@ -31,8 +32,11 @@ add_executable(minimal_tests
     openai_stream_test.cpp
     openai_error_mapping_test.cpp
     plugin_loader_test.cpp
+    plugin_discovery_test.cpp
     aliased_tool_test.cpp
     provider_factory_registry_test.cpp
+    model_catalog_test.cpp
+    model_catalog_live_test.cpp
     permission_codec_test.cpp
     providers_config_test.cpp
     mcps_config_test.cpp
@@ -67,6 +71,7 @@ add_executable(minimal_tests
     session_registry_test.cpp
     subagent_spawn_test.cpp
     subagent_test.cpp
+    tool_history_test.cpp
     session_service_test.cpp
     subagent_e2e_test.cpp
     headless_e2e_test.cpp
@@ -77,6 +82,7 @@ add_executable(minimal_tests
     "${CMAKE_SOURCE_DIR}/plugins/server/provider-openai/openai_response.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/provider-openai/openai_stream_reassembler.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/provider-openai/openai_error_mapping.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/provider-openai/openai_model_catalog.cpp"
     # Same pattern for tools-fs: pure logic depending only on core headers, so
     # linked directly rather than exercised through dlopen.
     "${CMAKE_SOURCE_DIR}/plugins/server/tools-fs/fs_tools.cpp"
@@ -87,7 +93,9 @@ add_executable(minimal_tests
     "${CMAKE_SOURCE_DIR}/plugins/server/tools-bash/bash_tool.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/tools-bash/bash_settings.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/tools-bash/bash_session_state.cpp"
-    "${CMAKE_SOURCE_DIR}/plugins/server/tools-bash/command_scanner.cpp")
+    "${CMAKE_SOURCE_DIR}/plugins/server/tools-bash/command_scanner.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/tools-bash/restart_shell.cpp"
+    service_registry_test.cpp)
 
 target_include_directories(minimal_tests PRIVATE
     "${CMAKE_SOURCE_DIR}/plugins/server/tools-fs")
@@ -105,7 +113,7 @@ target_include_directories(minimal_tests PRIVATE
 add_subdirectory(fixtures)
 add_dependencies(minimal_tests
     fixture-good fixture-collision fixture-bad-abi fixture-minimal fixture-not-a-plugin
-    fixture-throws)
+    fixture-throws fixture-advisor fixture-service fixture-service-b)
 target_compile_definitions(minimal_tests PRIVATE
     MINIMAL_FIXTURE_DIR="${CMAKE_CURRENT_BINARY_DIR}/fixtures")
 

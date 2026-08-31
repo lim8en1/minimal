@@ -41,7 +41,7 @@ const char* minimal_plugin_name() { return "fixture-throws"; }
 const char* minimal_plugin_version() { return "1.0.0"; }
 
 void minimal_plugin_register_tools(minimal::tools::ToolRegistry& registry,
-                                   const minimal::plugins::ToolRegistrationContext&) {
+                                    const minimal::plugins::PluginRegistrationContext&) {
     registry.Register(std::make_unique<BeforeTheThrow>());
     throw std::runtime_error("this plugin's registration is broken");
 }

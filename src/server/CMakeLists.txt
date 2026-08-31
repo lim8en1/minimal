@@ -10,6 +10,7 @@
 # lets plugins link core directly instead of relying on export tricks.
 add_library(minimal_server_core SHARED
     tools/permission.cpp
+    tools/permission_advisor.cpp
     tools/path_confinement.cpp
     tools/file_access.cpp
     tools/atomic_write.cpp
@@ -49,6 +50,7 @@ add_library(minimal_server_core SHARED
     mcp/mcp_connection.cpp
     mcp/mcp_client_manager.cpp
     llm/provider_factory_registry.cpp
+    llm/model_catalog.cpp
     plugins/plugin_loader.cpp
     plugins/plugin_discovery.cpp
     rpc/proto_convert.cpp

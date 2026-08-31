@@ -108,6 +108,7 @@ struct SubagentE2EFixture {
 
         service = std::make_unique<rpc::SessionServiceImpl>(*sessions, *db,
                                                             config::SettingsConfig{},
+                                                            config::PermissionsConfig{},
                                                             common::DefaultLogger());
         socket = dir / "subagent.sock";
         server = std::make_unique<rpc::Server>(*service, socket);

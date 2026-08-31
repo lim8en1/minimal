@@ -1,5 +1,7 @@
 #pragma once
 
+#include <chrono>
+
 // Everything a spawn_subagent call does besides parsing its input. A subagent
 // is the SAME Session entity as a top-level conversation -- one field
 // (parent_session_id) plus restrictions derived from it -- so this class is
@@ -26,6 +28,7 @@
 #include "minimal/agent/subagent_spawn.hpp"
 #include "minimal/common/logger.hpp"
 #include "minimal/session/session_database.hpp"
+#include "minimal/tools/permission_advisor.hpp"
 #include "minimal/tools/tool.hpp"
 
 namespace minimal::mcp {
@@ -42,7 +45,10 @@ public:
     // the parent model adapts to, never a child that starts crippled.
     SubagentManager(SessionRegistry& sessions, session::SessionDatabase& db,
                     const AgentPresetRegistry& presets, std::int64_t max_concurrent_subagents,
-                    common::Logger& logger, mcp::McpClientManager* mcp_manager = nullptr);
+                    common::Logger& logger, mcp::McpClientManager* mcp_manager = nullptr,
+                    std::shared_ptr<tools::PermissionAdvisor> advisor = nullptr,
+                    bool advisor_inherit = false,
+                    std::chrono::milliseconds advisor_timeout = tools::AdvisedPermissionChecker::kDefaultTimeout);
 
     // Runs on the PARENT's worker thread -- it is a tool execution, and that is
     // the thread permitted to block. A blocking request returns only after the
@@ -57,6 +63,14 @@ private:
     std::int64_t max_concurrent_subagents_;
     common::Logger& logger_;
     mcp::McpClientManager* mcp_manager_ = nullptr;
+    // The configured advisor, resolved once at startup; copied into a child's
+    // params ONLY when advisor_inherit_ is set -- a child defaults to no
+    // advisor (docs/EXTENSIBILITY.md §3.4). The parent's ceilings still bound
+    // the child: they are enforced by the child's ToolExecutor before its
+    // checker (advised or not) is ever consulted.
+    std::shared_ptr<tools::PermissionAdvisor> advisor_;
+    bool advisor_inherit_ = false;
+    std::chrono::milliseconds advisor_timeout_;
 };
 
 }  // namespace minimal::agent

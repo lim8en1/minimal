@@ -92,6 +92,7 @@ struct McpE2eFixture {
 
         service = std::make_unique<rpc::SessionServiceImpl>(*sessions, *db,
                                                             config::SettingsConfig{},
+                                                            config::PermissionsConfig{},
                                                             common::DefaultLogger());
         service->set_mcp_manager(manager.get());
 

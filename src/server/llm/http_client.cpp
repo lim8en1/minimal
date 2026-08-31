@@ -57,7 +57,7 @@ bool ParseHeaderLine(std::string_view line, HttpHeader& out) {
     return true;
 }
 
-enum class Mode { Blocking, Streaming };
+enum class Mode { Blocking, Streaming, Get };
 
 // The blocking path accumulates the whole response body in memory before
 // returning it, so an endpoint (typically a proxy) that streams an endless or
@@ -110,8 +110,14 @@ std::size_t HeaderCallback(char* buffer, std::size_t size, std::size_t nitems, v
 std::size_t WriteCallback(char* ptr, std::size_t size, std::size_t nmemb, void* userdata) {
     auto& state = *static_cast<TransferState*>(userdata);
     std::size_t total = size * nmemb;
-    if (state.mode == Mode::Blocking) {
-        if (state.response.body.size() + total > kMaxBodyBytes) {
+    if (state.mode != Mode::Streaming) {
+        // Blocking and Get both buffer the full body; only Streaming hands it
+        // to a sink. (Mode::Get originally fell into the streaming branch here,
+        // silently dropping every GET response body -- the bug the loopback
+        // transport test exists to catch.) The cap is per mode: completions
+        // (Post) may legitimately be large, catalogs (Get) are small JSON.
+        const std::size_t cap = state.mode == Mode::Get ? kMaxResponseBodyBytes : kMaxBodyBytes;
+        if (state.response.body.size() + total > cap) {
             state.body_exceeded_cap = true;
             return 0;  // short count -> CURLE_WRITE_ERROR, classified below
         }
@@ -143,6 +149,9 @@ int XferInfoCallback(void* clientp, curl_off_t /*dltotal*/, curl_off_t dlnow, cu
     if (code == CURLE_WRITE_ERROR && state.body_exceeded_cap) {
         // Name the cap: "failed sending data" would send the reader debugging
         // their own request body instead of a server that never stopped.
+        if (state.mode == Mode::Get) {
+            throw HttpError(HttpErrorKind::Other, "response body exceeds limit");
+        }
         throw HttpError(HttpErrorKind::Other,
                         "response body exceeded 64 MiB; refusing to buffer it");
     }
@@ -186,16 +195,24 @@ HttpResponse ConfigureAndPerform(CURL* handle, const HttpRequest& request, Mode 
     state.last_progress = std::chrono::steady_clock::now();
 
     curl_easy_setopt(handle, CURLOPT_URL, request.url.c_str());
-    curl_easy_setopt(handle, CURLOPT_POST, 1L);
-    curl_easy_setopt(handle, CURLOPT_POSTFIELDS, request.body.data());
-    curl_easy_setopt(handle, CURLOPT_POSTFIELDSIZE_LARGE, static_cast<curl_off_t>(request.body.size()));
+    if (mode == Mode::Get) {
+        // A GET carries no body; everything else (headers, timeouts, callbacks)
+        // is shared with the POST path below.
+        curl_easy_setopt(handle, CURLOPT_HTTPGET, 1L);
+    } else {
+        curl_easy_setopt(handle, CURLOPT_POST, 1L);
+        curl_easy_setopt(handle, CURLOPT_POSTFIELDS, request.body.data());
+        curl_easy_setopt(handle, CURLOPT_POSTFIELDSIZE_LARGE,
+                         static_cast<curl_off_t>(request.body.size()));
+    }
     curl_easy_setopt(handle, CURLOPT_NOSIGNAL, 1L);
     curl_easy_setopt(handle, CURLOPT_CONNECTTIMEOUT_MS, static_cast<long>(request.connect_timeout.count()));
     // Early abort when the server states a Content-Length above the cap; the
-    // WriteCallback check remains the authority for chunked responses.
+    // WriteCallback check remains the authority for chunked responses -- and
+    // for Get's tighter 8 MiB cap, which must produce its own named error.
     curl_easy_setopt(handle, CURLOPT_MAXFILESIZE_LARGE, static_cast<curl_off_t>(kMaxBodyBytes));
 
-    // The cap is total, not per-phase, in BOTH modes: a streaming server that
+    // The cap is total, not per-phase, in EVERY mode: a streaming server that
     // accepts the connection and then goes silent must degrade to a bounded
     // error, never wedge the calling thread. Streaming callers that need an
     // unbounded transfer (LLM providers) leave this 0.
@@ -258,6 +275,14 @@ std::optional<std::string> FindHeaderCI(const std::vector<HttpHeader>& headers, 
 
 HttpResponse HttpClient::Post(const HttpRequest& request) const {
     return PerformRequest(request, Mode::Blocking, nullptr, nullptr);
+}
+
+// Model catalogs (track N) list via GET <url>/models; the request body is
+// ignored. request_timeout is honored exactly as for Post() -- the catalog
+// implementation sets a bounded one, since a hung backend must not wedge the
+// caller (a session worker or the command pool) for the chat-length timeout.
+HttpResponse HttpClient::Get(const HttpRequest& request) const {
+    return PerformRequest(request, Mode::Get, nullptr, nullptr);
 }
 
 HttpResponse HttpClient::StreamPost(const HttpRequest& request, const HttpHeadersReadySink& on_headers,

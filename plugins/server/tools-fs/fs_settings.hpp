@@ -6,7 +6,8 @@
 
 namespace minimal::tools_fs {
 
-// This plugin's slice of settings.json's `tools` object. Core keeps that object
+// This plugin's own config, the "config" object on its plugins.json entry,
+// with one sub-object per tool: {"read": {...}, "edit": {...}}. Core keeps it
 // as raw JSON precisely so each plugin owns its own schema -- this is that
 // schema, and nothing outside tools-fs needs to know it.
 struct FsSettings {
@@ -20,7 +21,7 @@ struct FsSettings {
 };
 
 // Every field optional; missing values keep the struct's defaults, so an absent
-// or partial `tools` object is normal rather than an error.
-FsSettings ParseFsSettings(const nlohmann::json& tools_settings);
+// or partial config object is normal rather than an error.
+FsSettings ParseFsSettings(const nlohmann::json& config);
 
 }  // namespace minimal::tools_fs

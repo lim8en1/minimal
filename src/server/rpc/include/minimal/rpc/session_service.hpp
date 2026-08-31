@@ -33,9 +33,11 @@
 #include "minimal/agent/session_registry.hpp"
 #include "minimal/commands/command_registry.hpp"
 #include "minimal/common/logger.hpp"
+#include "minimal/config/permissions_config.hpp"
 #include "minimal/config/settings_config.hpp"
 #include "minimal/rpc/auth_interceptor.hpp"
 #include "minimal/rpc/command_executor.hpp"
+#include "minimal/tools/permission_advisor.hpp"
 #include "minimal/session/session_reader.hpp"
 #include "minimal/v1/session_service.grpc.pb.h"
 
@@ -48,7 +50,9 @@ namespace minimal::rpc {
 class SessionServiceImpl final : public v1::SessionService::Service {
 public:
     SessionServiceImpl(agent::SessionRegistry& sessions, session::SessionDatabase& db,
-                       config::SettingsConfig settings, common::Logger& logger);
+                       config::SettingsConfig settings, config::PermissionsConfig permissions,
+                       common::Logger& logger,
+                       const tools::PermissionAdvisorRegistry* permission_advisors = nullptr);
 
     grpc::Status CreateSession(grpc::ServerContext* context,
                                const v1::CreateSessionRequest* request,
@@ -135,6 +139,10 @@ private:
     session::SessionDatabase& db_;
     session::SessionReader reader_;
     config::SettingsConfig settings_;
+    // Borrowed and optional: absent = no advisor can be selected, every Ask
+    // reaches the human. Selected per session in the params producers below.
+    const tools::PermissionAdvisorRegistry* permission_advisors_ = nullptr;
+    config::PermissionsConfig permissions_;
     common::Logger& logger_;
 
     std::function<void()> on_last_client_detached_;

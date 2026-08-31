@@ -11,6 +11,7 @@
 
 #include "minimal/common/logger.hpp"
 #include "minimal/llm/chat.hpp"
+#include "minimal/session/history_window.hpp"
 #include "minimal/tools/cancel_token.hpp"
 #include "minimal/tools/permission.hpp"
 
@@ -55,6 +56,18 @@ struct ToolContext {
     // slice. Null is legal and means "no cancellation path": call sites and
     // tests that never cancel need not mint one. See cancel_token.hpp.
     CancelTokenPtr cancel_token;
+
+    // Read-only access to the transcript this tool runs inside (session::HistoryWindow,
+    // a bound, windowed slice of SessionReader). Set by the agent loop per
+    // invocation; null when unavailable -- sessions on stores that are not
+    // SQLite-backed (test fakes) have no reader behind the window.
+    //
+    // WINDOWED ACCESS ONLY, and the type enforces it: a tool reads bounded
+    // pages through GetMessages, exactly like the GetMessages RPC, and there
+    // is no full-materialization path on the window -- LoadAll exists solely
+    // for resume and lives on SessionReader, which no tool holds. Nothing is
+    // retained here across calls, so the 512k-1M goal is untouched.
+    const session::HistoryWindow* history = nullptr;
 
     // Incremental output, surfaced as ToolOutputDeltaEvent. Deliberately lossy
     // downstream: the server coalesces and sends only the tail that fits the

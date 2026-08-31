@@ -479,6 +479,10 @@ TurnResult AgentLoop::RunTurn(llm::Message seed_message) {
             ctx.allowed_skills = preset_.allowed_skills;
             ctx.is_cancelled = is_cancelled_;
             ctx.cancel_token = cancel_token_;
+            // Per invocation, from the Session-owned window: a subagent sees
+            // only its own transcript, because the window is bound to THIS
+            // session's id (docs/EXTENSIBILITY.md §2.1).
+            ctx.history = session_.history;
             if (session_.tool_output_sink) {
                 const std::string tool_use_id = use->id;
                 ctx.emit_output = [this, tool_use_id](std::string_view chunk) {

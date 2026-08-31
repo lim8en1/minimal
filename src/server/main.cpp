@@ -24,6 +24,7 @@
 #include "minimal/common/config_paths.hpp"
 #include "minimal/common/logger.hpp"
 #include "minimal/common/logging_setup.hpp"
+#include "minimal/config/permissions_config.hpp"
 #include "minimal/config/sanity_check.hpp"
 #include "minimal/config/settings_config.hpp"
 #include "minimal/config/skill_registry.hpp"
@@ -157,6 +158,19 @@ int main(int argc, char** argv) {
     // registry is the pass-through default -- no authentication, matching the
     // local-only single-user topology.
     minimal::rpc::AuthProviderRegistry auth_providers;
+    // Additive across plugins: each may contribute one advisor keyed by its
+    // name; permissions.json's "advisor" selects one. An empty registry is the
+    // default -- every Ask reaches the human.
+    minimal::tools::PermissionAdvisorRegistry permission_advisors;
+    // Additive across plugins, keyed by the provider kind string: a backend can
+    // be asked to LIST its models ("discover": true in providers.json), fetched
+    // lazily at first resolve and never written back to the file.
+    minimal::llm::ModelCatalogRegistry model_catalogs;
+    // The sanctioned cross-plugin channel (pull; SessionObserver is push).
+    // Additive: many plugins may each provide services, and a duplicate name is
+    // fatal at startup via the name resolution below. Also handed to every
+    // plugin as the consumer side, through PluginRegistrationContext.
+    minimal::plugins::ServiceRegistry services;
 
     // The tools slice of settings.json is forwarded verbatim to every plugin;
     // core imposes no schema on it. Loaded defensively because a missing or
@@ -171,8 +185,13 @@ int main(int argc, char** argv) {
     }
 
     minimal::plugins::PluginLoader loader(tools, providers, tools_settings, &observers, &commands,
-                                          &auth_providers);
+                                          &auth_providers, &permission_advisors, &model_catalogs,
+                                          &services);
     const auto records = loader.LoadAll(candidates);
+    // The load thread is the only writer; from here the map is read-only, which
+    // is what makes unguarded Find from session workers and the command pool
+    // safe. A runtime Provide is logged and ignored (the registry's own rule).
+    services.Seal();
 
     std::printf("plugins (%zu discovered):\n", records.size());
     for (const auto& record : records) {
@@ -186,6 +205,9 @@ int main(int argc, char** argv) {
         for (const auto& kind : record.registered_provider_kinds) {
             std::printf("      provider %s\n", kind.c_str());
         }
+        for (const auto& kind : record.registered_model_catalog_kinds) {
+            std::printf("      catalog  %s\n", kind.c_str());
+        }
         for (const auto& command : record.registered_commands) {
             std::printf("      command  /%s\n", command.c_str());
         }
@@ -194,6 +216,12 @@ int main(int argc, char** argv) {
         }
         if (record.registered_auth_provider) {
             std::printf("      auth provider registered\n");
+        }
+        if (record.registered_permission_advisor) {
+            std::printf("      advisor  permission prompts\n");
+        }
+        for (const auto& service : record.registered_services) {
+            std::printf("      service  %s\n", service.c_str());
         }
     }
 
@@ -231,7 +259,7 @@ int main(int argc, char** argv) {
     // surface. Same rule, different amount of machinery to enforce it.
     auto name_resolution = minimal::plugins::ResolveRegistrationNames(
         tools, plugin_config.aliases, &commands,
-        /*core_tool_names=*/{minimal::agent::kSpawnSubagentToolName});
+        /*core_tool_names=*/{minimal::agent::kSpawnSubagentToolName}, &services);
     // The name above is RESERVED here but the tool object itself registers at
     // serve stage (main registers SpawnSubagentTool only once subagents exist).
     // The reservation is what puts it inside the fatal-collision scan.
@@ -249,6 +277,9 @@ int main(int argc, char** argv) {
         plugin_config,
         std::move(name_resolution),
         &commands,
+        &permission_advisors,
+        &services,
+        &model_catalogs,
     });
     const auto check_results = sanity.RunAll();
 
@@ -270,15 +301,16 @@ int main(int argc, char** argv) {
     }
 
     // --- Stage 4: serve ------------------------------------------------------
-    // Settings and the session database were already loaded and validated by
-    // the sanity check; take them from there rather than re-reading the same
-    // files. The preset registry used to load settings.json a THIRD time --
+    // Settings, permissions and the session database were already loaded and
+    // validated by the sanity check; take them from there rather than re-reading
+    // the same files. The preset registry used to load settings.json a THIRD time --
     // main ran the loop on the sanity check's parse while the registry resolved
     // default_model from its own, so the sanity check could validate content
     // the server was not running. It receives the sanity check's parse now;
-    // providers.json/permissions.json remain its own to load, and cannot fail
-    // now that their parsing is proven -- the catch is defense-in-depth.
+    // providers.json remains its own to load, and cannot fail
+    // now that its parsing is proven -- the catch is defense-in-depth.
     minimal::config::SettingsConfig settings = sanity.settings();
+    minimal::config::PermissionsConfig permissions = sanity.permissions();
     std::unique_ptr<minimal::agent::AgentPresetRegistry> presets;
     auto session_db = sanity.take_session_db();
     try {
@@ -288,6 +320,30 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "\nconfiguration error (%s): %s\n", config_dir.c_str(), e.what());
         return 1;
     }
+
+    // Inject discovery (track N): providers.json "discover": true entries list
+    // their models through the catalog the backend kind names. AFTER plugin
+    // load and BEFORE any Resolve() -- presets resolve lazily, so this is the
+    // last point at which the hook can be set before first use. The hook never
+    // throws: a failed List is cached as a failed discovery and reported
+    // through the miss reporting and /providers refresh, not here.
+    presets->SetDiscoveryHook(
+        [&model_catalogs, &logger = minimal::common::DefaultLogger()](
+            const std::string& kind,
+            const minimal::llm::ProviderConfig& connection) -> minimal::config::DiscoveryOutcome {
+            minimal::config::DiscoveryOutcome outcome;
+            auto* catalog = model_catalogs.Find(kind);
+            if (catalog == nullptr) return outcome;  // catalog_present stays false
+            outcome.catalog_present = true;
+            try {
+                outcome.models = catalog->List(connection);
+                outcome.ok = true;
+            } catch (const std::exception& error) {
+                outcome.error = error.what();
+                logger.warn("model discovery for backend kind '{}' failed: {}", kind, outcome.error);
+            }
+            return outcome;
+        });
 
     minimal::agent::LoopConfig loop_config;
     loop_config.auto_compact = settings.memory.auto_compact;
@@ -324,17 +380,25 @@ int main(int argc, char** argv) {
     // during teardown -- safe only because sessions.TerminateAll() runs first
     // on the normal path, which is exactly the kind of "safe" a reordered
     // return path forgets. Ownership in the capture makes the order not matter.
+    //
+    // The advisor is resolved ONCE from the config against the loaded plugins;
+    // an unset advisor or a name that resolved to nothing (warned by the sanity
+    // check) both leave it null, which is the no-advisor default everywhere.
+    std::shared_ptr<minimal::tools::PermissionAdvisor> advisor =
+        permissions.advisor ? permission_advisors.Find(*permissions.advisor) : nullptr;
     auto subagents = std::make_shared<minimal::agent::SubagentManager>(
         sessions, *session_db, *presets, settings.max_concurrent_subagents,
-        minimal::common::DefaultLogger(), &mcp);
+        minimal::common::DefaultLogger(), &mcp, advisor, permissions.advisor_inherit,
+        std::chrono::milliseconds(permissions.advisor_timeout_ms));
     tools.Register(std::make_unique<minimal::agent::SpawnSubagentTool>(
         [subagents](const minimal::agent::SubagentRequest& request,
                     const minimal::tools::ToolContext& ctx) {
             return subagents->Spawn(request, ctx);
         }));
 
-    minimal::rpc::SessionServiceImpl service(sessions, *session_db, settings,
-                                             minimal::common::DefaultLogger());
+    minimal::rpc::SessionServiceImpl service(sessions, *session_db, settings, permissions,
+                                             minimal::common::DefaultLogger(),
+                                             &permission_advisors);
     service.set_commands(&commands);
     service.set_auth_providers(&auth_providers);
     service.set_mcp_manager(&mcp);

@@ -7,6 +7,8 @@
 #include <string>
 #include <unordered_map>
 
+#include "bash_state_service.hpp"
+
 namespace minimal::tools_bash {
 
 // One session's persistent shell state: cwd and environment ONLY. The process
@@ -23,7 +25,11 @@ struct SessionShellState {
 // plugin's header comment). Without OnSessionEnded this map would grow for the
 // process lifetime; Erase() is that hook, called from BashSessionObserver in
 // this plugin's plugin.cpp.
-class BashSessionStateStore {
+//
+// Implements the shipped BashSessionStateService contract so the store can be
+// Provided under kBashStateServiceName; the virtual surface is exactly that
+// interface's, which is what keeps the service narrow.
+class BashSessionStateStore : public BashSessionStateService {
 public:
     // Existing state, or a fresh one seeded from `project_root` (bash's initial
     // cwd) and the server process's environment (the model expects $HOME & co).
@@ -37,9 +43,10 @@ public:
                   std::map<std::string, std::string> env);
 
     // Back to the seed: project_root + a fresh copy of the process environment.
-    void Reset(const std::string& session_id, const std::filesystem::path& project_root);
+    void Reset(const std::string& session_id,
+               const std::filesystem::path& project_root) override;
 
-    void Erase(const std::string& session_id);
+    void Erase(const std::string& session_id) override;
 
     // Observable so a test can assert that OnSessionEnded actually shrank the
     // map -- "no longer leaks" is not a claim inspection can settle.

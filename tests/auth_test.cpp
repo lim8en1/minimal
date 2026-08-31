@@ -103,7 +103,7 @@ TEST_CASE("the guard runs on the wire: a denying provider rejects OpenSession",
     agent::SessionRegistry sessions(*presets, tools, providers, observers, db,
                                     agent::LoopConfig{}, common::DefaultLogger());
     rpc::SessionServiceImpl service(sessions, db, config::SettingsConfig{},
-                                    common::DefaultLogger());
+                                    config::PermissionsConfig{}, common::DefaultLogger());
 
     rpc::AuthProviderRegistry auth;
     auth.Register(std::make_shared<DenyingProvider>());

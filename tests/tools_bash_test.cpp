@@ -302,21 +302,23 @@ TEST_CASE("bash settings take defaults when absent or nonsensical", "[tools_bash
     CHECK(defaults.max_output_bytes == 1024 * 1024);
     CHECK(defaults.shell == "/bin/sh");
 
+    // The plugin's own plugins.json "config" object, verbatim -- flat keys,
+    // every one of them belonging to this tool.
     const nlohmann::json configured = {
-        {"bash", {{"timeout_ms", 5000}, {"max_output_bytes", 64}, {"shell", "/bin/dash"}}}};
+        {"timeout_ms", 5000}, {"max_output_bytes", 64}, {"shell", "/bin/dash"}};
     const auto settings = tools_bash::ParseBashSettings(configured);
     CHECK(settings.timeout_ms == 5000);
     CHECK(settings.max_output_bytes == 64);
     CHECK(settings.shell == "/bin/dash");
 
-    const nlohmann::json nonsense = {{"bash", {{"timeout_ms", 0}, {"max_output_bytes", -1}}}};
+    const nlohmann::json nonsense = {{"timeout_ms", 0}, {"max_output_bytes", -1}};
     const auto fallback = tools_bash::ParseBashSettings(nonsense);
     CHECK(fallback.timeout_ms == 120000);
     CHECK(fallback.max_output_bytes == 1024 * 1024);
 
     // A ceiling below the default would silently shorten every command that did
     // not ask for a timeout, which is not what configuring a maximum means.
-    const nlohmann::json inverted = {{"bash", {{"timeout_ms", 90000}, {"max_timeout_ms", 1000}}}};
+    const nlohmann::json inverted = {{"timeout_ms", 90000}, {"max_timeout_ms", 1000}};
     CHECK(tools_bash::ParseBashSettings(inverted).max_timeout_ms == 90000);
 }
 

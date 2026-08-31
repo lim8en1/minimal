@@ -276,7 +276,7 @@ TEST_CASE("a subagent whose preset requires a dead server does not start", "[ses
     parent_params.agent_preset = "main";
     parent_params.project_root = dir.path();
     parent_params.mcp_manager = &manager;
-    auto parent = sessions.Create(parent_params);
+    auto parent = sessions.Create(std::move(parent_params));
     parent->TryAttach();
 
     agent::SubagentRequest request;

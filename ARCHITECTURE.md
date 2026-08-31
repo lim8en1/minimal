@@ -331,6 +331,8 @@ private:
 
 `ProviderCacheKey` is the `providers.json` entry **name** plus a config-generation counter — entries are immutable at runtime, so this is sufficient, and it avoids hashing an API key into a map key. `parameters` is not part of the key: it lives on `ChatRequest`, populated fresh per call. This cache is real, not aspirational: `SessionRegistry::CreateResolved` and the `/agent`//`model` rebuild path both route through it, sessions hold a `shared_ptr` rather than ownership, and switching away from and back to an entry reuses the instance.
 
+**Model discovery — a third registry, keyed by the same kind string.** A providers.json entry may set `"discover": true`, in which case the models it serves come from the backend's own listing (`GET <url>/models`) instead of a hand-written `models` object — the point being `context_window_tokens`, the one field whose staleness silently disables compaction, and the practical unconfigurability of a provider serving fifty models. `ModelCatalogRegistry` maps the same `backend` kind string a factory registers to a `ModelCatalog` whose `List()` reports `{id, context_window_tokens, metadata}`; one OpenAI-shape implementation beside `provider-openai` covers llama.cpp (`meta.n_ctx_train`), vLLM (`max_model_len`), and OpenRouter (`context_length`) alike. Discovery is fetched **lazily at first resolve, never at startup** (the sanity check inspects it structurally — which kinds registered — and never probes), the runtime cache negative-caches failures and is never written back to `providers.json`, a failed discovery degrades to the entry's static models, and `/providers refresh` evicts and refetches on demand. The config layer never links plugins: the fetch reaches it as a hook injected from `main.cpp` after plugin load. Details and decisions in `docs/EXTENSIBILITY.md` §2.6.
+
 **The request body is serialized, not materialized.** The OpenAI serializer builds the wire body incrementally into a string — message text is escaped straight into the buffer; only O(1) pieces (tool definitions, tool_choice, `parameters` values) pass through nlohmann — and the retry loop builds the `ChatRequest` once per tool round rather than once per attempt. Against the 512k–1M token goal, a DOM of the whole history per call (let alone per retry) was the remaining RAM spike. The merge-order guarantee survives exactly: parameter keys that name structural fields are DROPPED rather than emitted after them, which preserves "structural always wins" without relying on any parser's duplicate-key resolution.
 
 `StopReason` carries a **`Cancelled`** value alongside `EndTurn`/`ToolUse`/`MaxTokens`/`StopSequence`/`ContentFilter`/`Refusal`/`Unknown`. Cancellation is expected, not exceptional, so it must not surface as an `LlmError`: the provider catches its own aborted transfer and returns a partial `ChatResponse` carrying this stop reason, and the loop treats it as a clean exit rather than a failure.
@@ -342,7 +344,7 @@ private:
 
 Counts come from the backend's own reported usage; there is no separate tokenizer. Some OpenAI-compatible proxies report `0` — no fallback estimate is designed for that, flagged as a known gap.
 
-**Transport**: no `openai-cpp` dependency (researched and rejected — blocking-only, no streaming, no typed message/tool modeling beyond raw JSON passthrough, unmaintained since April 2024, TLS verification appears off by default). Hand-rolled instead: `HttpClient` (blocking POST + streaming POST over libcurl) and `SseParser` (generic incremental SSE frame parser handling frames split across libcurl write-callback invocations). Both are exposed to plugins as consumable utilities. TLS verification left at libcurl defaults (on).
+**Transport**: no `openai-cpp` dependency (researched and rejected — blocking-only, no streaming, no typed message/tool modeling beyond raw JSON passthrough, unmaintained since April 2024, TLS verification appears off by default). Hand-rolled instead: `HttpClient` (blocking POST, streaming POST, and GET over libcurl — the GET is the model-catalog listing path, its response body buffered under an 8 MiB cap) and `SseParser` (generic incremental SSE frame parser handling frames split across libcurl write-callback invocations). Both are exposed to plugins as consumable utilities. TLS verification left at libcurl defaults (on).
 
 Retries are **not** performed inside the provider; it throws a classified `LlmError` and the agent loop owns backoff/max-attempts policy. A single error type with a category enum (not a hierarchy) crosses two boundaries cleanly: the retry decision, and translation into a gRPC error payload.
 
@@ -559,11 +561,11 @@ Both `PermissionChecker`'s implementation and `CommandDispatcher` compose the sa
 
 **The dispatch split, and why it is structural.** Turns and mutating commands share ONE queue on the session, and the worker pops from it only between `RunTurn` calls — so "a command never lands between a `tool_use` and its `tool_result`" is true by construction rather than by a check someone could forget. It also makes a preset or model switch safe to swap the session's `LlmProvider` under `AgentLoop`'s reference: the worker is provably not inside a provider call at that moment.
 
-**A plugin owns the commands that touch its own state.** `/restart-shell` lives in `tools-bash`, not `commands-core`, because bash's per-session cwd/env lives inside that plugin — one `.so` cannot reach into another's state. Registering a tool *and* its associated command from the same plugin is the general pattern, and the reason `minimal_plugin_register_tools` and `..._register_commands` are independent optional symbols rather than a single "kind" of plugin.
+**A plugin owns the commands that touch its own state.** `/restart-shell` lives in `tools-bash`, not `commands-core`, because bash's per-session cwd/env lives inside that plugin and a command belongs to the plugin that owns the state it touches. Registering a tool *and* its associated command from the same plugin is the general pattern, and the reason `minimal_plugin_register_tools` and `..._register_commands` are independent optional symbols rather than a single "kind" of plugin. What other plugins may now do is *ask*: the service registry (§ Cross-plugin services) is the sanctioned pull channel, and `/restart-shell` itself resolves the store through it.
 
 ### Name collisions and aliases
 
-**Collisions are fatal**, and they are now actually *detected*: `NameRegistry` existed and was unit-tested from the beginning but nothing outside its own tests ever constructed one, so a duplicate registration silently shadowed via `insert_or_assign` and which plugin won depended on directory iteration order. `plugins/name_resolution.{hpp,cpp}` (`ResolveRegistrationNames`) feeds it from both the tool and command attributions, applies `aliases` routed to whichever kind claims each key, and the startup sanity check reports the result. `ToolRegistry::Register` now *shadows* a duplicate rather than destroying it — destroying the first registrant made a collision unfixable by aliasing, since the object an alias would have renamed was already gone. Two plugins registering the same tool name, command name, `ViewSpec::id`, or `ToolResultRenderer::tool_name` halt startup with a diagnostic naming both. Silent shadowing is the wrong failure mode — it makes behavior depend on plugin load order.
+**Collisions are fatal**, and they are now actually *detected*: `NameRegistry` existed and was unit-tested from the beginning but nothing outside its own tests ever constructed one, so a duplicate registration silently shadowed via `insert_or_assign` and which plugin won depended on directory iteration order. `plugins/name_resolution.{hpp,cpp}` (`ResolveRegistrationNames`) feeds it from the tool, command, and service attributions, applies `aliases` routed to whichever kind claims each key, and the startup sanity check reports the result. `ToolRegistry::Register` now *shadows* a duplicate rather than destroying it — destroying the first registrant made a collision unfixable by aliasing, since the object an alias would have renamed was already gone. Two plugins registering the same tool name, command name, service name, `ViewSpec::id`, or `ToolResultRenderer::tool_name` halt startup with a diagnostic naming both. Silent shadowing is the wrong failure mode — it makes behavior depend on plugin load order.
 
 Resolution is disabling one plugin, rebuilding, or **aliasing** via an optional `plugins.json` field. The key is `aliases` — it applies to TOOLS as well as commands (one flat `plugin.name`-keyed namespace; a plugin shipping both a tool and a command under one original name aliases them together or not at all). It was renamed from `command_aliases`, which claimed a scope it did not have; the old key is ignored with a startup warning rather than silently applying:
 
@@ -631,10 +633,15 @@ extern "C" {
   const char* minimal_plugin_version();
 
   // --- Additive: many plugins may each contribute ---
-  void minimal_plugin_register_tools(ToolRegistry&);
-  void minimal_plugin_register_commands(CommandRegistry&);
-  void minimal_plugin_register_provider_factories(ProviderFactoryRegistry&);
-  void minimal_plugin_register_session_observer(SessionObserverRegistry&);
+  void minimal_plugin_register_tools(ToolRegistry&, const PluginRegistrationContext&);
+  void minimal_plugin_register_commands(CommandRegistry&, const PluginRegistrationContext&);
+  void minimal_plugin_register_provider_factories(ProviderFactoryRegistry&,
+                                                  const PluginRegistrationContext&);
+  void minimal_plugin_register_session_observer(SessionObserverRegistry&,
+                                                const PluginRegistrationContext&);
+  void minimal_plugin_register_services(ServiceRegistry&, const PluginRegistrationContext&);
+  void minimal_plugin_register_permission_advisor(PermissionAdvisorRegistry&,
+                                                  const PluginRegistrationContext&);
 
   // --- Exclusive: one global choice. First plugin (by plugins.json order) wins;
   //     a second registration logs a warning and is ignored. ---
@@ -645,10 +652,10 @@ extern "C" {
 
 The ABI header has **two halves**, and both are frozen surface:
 
-- **Extension points** plugins *implement*: `Tool`, `Command`, provider factory, `SessionObserver`, `MentionResolver`, `AuthProvider`.
-- **Utilities** plugins *consume*: `path_confinement`, `file_access`, `atomic_write`, `HttpClient`, `Logger`, `SessionReader` (read-only history access), the frontmatter parser.
+- **Extension points** plugins *implement*: `Tool`, `Command`, provider factory, `SessionObserver`, service provider, `PermissionAdvisor`, `MentionResolver`, `AuthProvider`.
+- **Utilities** plugins *consume*: `path_confinement`, `file_access`, `atomic_write`, `HttpClient`, `Logger`, `SessionReader` (read-only history access), the frontmatter parser — and the `ServiceRegistry` pointer carried on `PluginRegistrationContext`, which is the consumer side of the service channel (§ Cross-plugin services).
 
-The surface above is verified against the tree, and the designed next points — cross-plugin services, per-plugin config, MCP lifecycle observers, the permission advisor, model auto-discovery — are catalogued with suggested architectures in `docs/EXTENSIBILITY.md`.
+The surface above is verified against the tree. The remaining designed points — MCP lifecycle observers, model auto-discovery — are catalogued with suggested architectures in `docs/EXTENSIBILITY.md`.
 
 ### `SessionObserver` — observe and react
 
@@ -693,6 +700,18 @@ public:
 The failure mode shifts accordingly. A hung observer stalls *further* notifications rather than leaking one pool thread — contained (sessions keep running; only notifications stop), and the right trade against silently racing plugin state.
 
 A throwing observer is expected rather than exceptional, since observers are plugin code: each call is wrapped, and one observer's failure never stops the others.
+
+### Cross-plugin services — ask, don't grab
+
+The sanctioned **pull** channel (`SessionObserver` is the push channel): one plugin can reach another's services without either exposing internals. The providing plugin exports `minimal_plugin_register_services(ServiceRegistry&, const PluginRegistrationContext&)` and hands the registry a non-owning pointer to an **abstract** interface under a name; the same registry pointer rides `PluginRegistrationContext::services` to every registration hook, so a consumer captures it at registration and resolves with `Find` lazily at use time — plugin load order is file order, so the consumer may load before its provider. `Find` returning null is a runtime condition (the provider is disabled), not an error: degrade with a clear message.
+
+Three rules keep it from becoming an event bus or a hidden dependency:
+
+- **Typed at the edges, named in the middle.** The provider ships a header-only, pure-virtual interface (its symbols live inside the providing `.so`, `RTLD_LOCAL`, so nothing else can call them by name — virtual dispatch needs no symbols); a consumer `static_cast`s `Find`'s result to it. The name is the only runtime coupling; the header is the contract, under the same source-compatibility model as everything else.
+- **Collisions are fatal, not shadowed.** Service names feed `NameRegistry` as their own `NameKind` — a separate namespace, so a service may share a name with a tool or command — and the startup check names both claimants. Services are not user-aliasable: the name is addressed by code, never by the model or the user.
+- **No bus, no subscribe.** Push already exists; this is pull, deliberately.
+
+First consumer: `tools-bash` provides its per-session shell state as `BashSessionStateService` (shipped header `bash_state_service.hpp`, name `tools-bash.session_state`), and `/restart-shell` resolves the store through `Find` — the same lookup a third-party consumer would use. The full §2.2 spec is `docs/EXTENSIBILITY.md`.
 
 ### `MentionResolver` and `AuthProvider`
 
@@ -1083,7 +1102,7 @@ Triggered from the agent loop when `memory.auto_compact` is on and a session's *
 
 Absent means never trigger (only `/compact` then). The loader rejects anything but exactly one key — a typo like `percnet` must not silently disable compaction, which is precisely the failure mode a bare unknown-key policy creates.
 
-The window-relative strategies resolve **per session, against the window of the provider entry that session actually uses** — the window rides on the resolved `AgentPreset`, not on the loop config, because `/agent` can switch provider entries mid-session and the trigger must track the window in use. A provider entry declaring no `context_window_tokens` leaves a window-relative strategy with nothing to be relative to: the trigger then never fires, and the loop says so once per session rather than silently. That is a live state, not a corner case — the seeded `providers.json` is empty and the field is optional; a buffer at least as large as the window degenerates the same way.
+The window-relative strategies resolve **per session, against the window of the provider entry that session actually uses** — the window rides on the resolved `AgentPreset`, not on the loop config, because `/agent` can switch provider entries mid-session and the trigger must track the window in use. A model with no `context_window_tokens` anywhere — its own, its provider's default, or model discovery (track N fills the gap from the backend's own listing when it can) — leaves a window-relative strategy with nothing to be relative to: the trigger then never fires, and the loop says so once per session rather than silently. That is a live state, not a corner case — the seeded `providers.json` is empty and the field is optional; a buffer at least as large as the window degenerates the same way.
 
 Setting `auto_compact: false` disables automatic compaction entirely, leaving `/compact` as the only trigger. Compaction only changes what goes into the *next* `ChatRequest.messages` — it never mutates persisted history, so scrollback always shows the full conversation.
 
@@ -1183,7 +1202,7 @@ variable the install rule uses, so overriding one moves both.
 - **`skills/<name>/SKILL.md`** (+ supporting files) — lazy-loaded: frontmatter (`name`, `description`) resident in the registry; body loads only on invocation.
 - **`themes/*.json`** — role/category → truecolor RGB.
 - **`keybindings.json`** — action → key. Must accommodate plugin-registered action names unknown at compile time.
-- **`providers.json`** — **a provider is a CONNECTION, not a model.** An object keyed by provider name; each carries `backend` (a `ProviderFactoryRegistry` kind, so any plugin-registered kind is valid — no closed enum), `url`, `api_key | api_key_env`, and a nested `models` object keyed by model id. `parameters` and `max_tokens` may sit on the provider as defaults and be overridden per model; `context_window_tokens` is per model, and is both informational (the status bar's `used/max`) **and the basis the window-relative compaction triggers resolve against — a model that declares none never fires them** (see *Context compaction*).
+- **`providers.json`** — **a provider is a CONNECTION, not a model.** An object keyed by provider name; each carries `backend` (a `ProviderFactoryRegistry` kind, so any plugin-registered kind is valid — no closed enum), `url`, `api_key | api_key_env`, and a nested `models` object keyed by model id — optional when the entry sets `"discover": true` (track N: the backend lists its own models at runtime, fetched lazily at first resolve and never written back; static entries beside it still resolve, and a discovered model's `context_window_tokens` overrides the provider-level default the same way a static model's own value would). `parameters` and `max_tokens` may sit on the provider as defaults and be overridden per model; `context_window_tokens` is per model, and is both informational (the status bar's `used/max`) **and the basis the window-relative compaction triggers resolve against — a model that declares none never fires them** (see *Context compaction*).
 
   ```json
   { "providers": { "local": {

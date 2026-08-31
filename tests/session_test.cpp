@@ -55,6 +55,8 @@ struct SessionFixture {
         params.name = "test session";
         params.agent_preset = "test";
         params.project_root = project_root;
+        params.permission_checker = std::move(injected_checker);
+        params.advisor_cancel_source = injected_cancel_source;
         params.seed_grants = seed_grants;
         params.policy_ceiling = policy_ceiling;
         params.on_turn_finished = on_turn_finished;
@@ -67,6 +69,13 @@ struct SessionFixture {
     void Script(llm::ChatResponse response, std::vector<llm::StreamEvent> events = {}) {
         scripted.emplace_back(std::move(response), std::move(events));
     }
+
+    // Injected through SessionParams::permission_checker -- the seam an advised
+    // (or test) checker crosses. Null keeps the wire default.
+    std::unique_ptr<tools::PermissionChecker> injected_checker;
+    // Set alongside an injected AdvisedPermissionChecker: the Session installs
+    // its cancel predicate into this shared holder in its constructor body.
+    std::shared_ptr<tools::AdvisorCancelSource> injected_cancel_source;
 
     // Drains everything currently queued. The writer thread's job, done inline.
     std::vector<v1::ServerEvent> DrainQueue() {
@@ -118,6 +127,35 @@ int CountStreamEvents(const std::vector<v1::ServerEvent>& events) {
 }
 
 }  // namespace
+
+
+TEST_CASE("a checker injected through SessionParams is honored end to end",
+          "[session][advisor]") {
+    // The seam the permission advisor composes through: the params producer can
+    // hand the session any PermissionChecker, and the session uses it INSTEAD of
+    // the wire default. Making the session's checker concrete again fails this
+    // test -- the fake would have nowhere to arrive.
+    SessionFixture fixture;
+    auto tool = std::make_unique<testing::FakeTool>("bash", tools::ToolCategory::Execute, "ran");
+    auto* tool_ptr = tool.get();
+    fixture.tools_registry.Register(std::move(tool));
+    fixture.preset.permission_mode.execute = tools::PermissionMode::Ask;
+
+    auto checker = std::make_unique<testing::AlwaysDenyPermissionChecker>();
+    auto* checker_ptr = checker.get();
+    fixture.injected_checker = std::move(checker);
+
+    fixture.Script(testing::ToolUseResponse("call-1", "bash", {{"command", "ls"}}));
+    fixture.Script(testing::TextResponse("I could not run that"));
+    fixture.Start();
+
+    fixture.session->SubmitTurn("run it");
+    REQUIRE(fixture.session->WaitForIdleForTesting(5s));
+
+    REQUIRE(checker_ptr->seen.size() == 1);  // the injected checker decided, not the wire
+    CHECK(checker_ptr->seen.front().tool_name == "bash");
+    CHECK(tool_ptr->calls.empty());          // deny gates before execution
+}
 
 TEST_CASE("a session runs a full turn end to end", "[session]") {
     // The first time the agent loop, the tool executor, a real tool, the event
@@ -669,7 +707,7 @@ TEST_CASE("a client-requested run mode overrides the preset's", "[session]") {
 
     auto owned_store = std::make_unique<testing::InMemoryHistoryStore>();
     auto* store = owned_store.get();
-    agent::Session session(params, fixture.preset, std::move(provider), std::move(owned_store),
+    agent::Session session(std::move(params), fixture.preset, std::move(provider), std::move(owned_store),
                            fixture.tools_registry, fixture.loop_config, fixture.observers,
                            common::DefaultLogger());
     session.SubmitTurn("run something");
@@ -867,7 +905,7 @@ TEST_CASE("a policy ceiling reaches the session's executor", "[session][subagent
 
     auto owned_store = std::make_unique<testing::InMemoryHistoryStore>();
     auto* store = owned_store.get();
-    agent::Session session(params, fixture.preset, std::move(provider), std::move(owned_store),
+    agent::Session session(std::move(params), fixture.preset, std::move(provider), std::move(owned_store),
                            fixture.tools_registry, fixture.loop_config, fixture.observers,
                            common::DefaultLogger());
     session.SubmitTurn("run something");
@@ -901,4 +939,43 @@ TEST_CASE("a queued injected message is appended at a turn boundary", "[session]
     REQUIRE(stored[2].role == llm::Role::User);
     REQUIRE(stored[2].content.size() == 1);
     CHECK(std::get<llm::ToolResultBlock>(stored[2].content.front()).tool_use_id == "spawn-1");
+}
+
+TEST_CASE("session cancellation reaches an advisor through the shared cancel source",
+          "[session][advisor]") {
+    // The producer composes the advised checker before the Session exists, so
+    // only the shared AdvisorCancelSource can carry cancellation to the
+    // advisor; the Session installs its predicate in its constructor body. If
+    // that wiring breaks, the advisor below never observes the cancel and the
+    // turn never completes -- WaitForIdleForTesting fails rather than hanging
+    // the suite, and teardown still joins cleanly (terminate also cancels).
+    SessionFixture fixture;
+    fixture.tools_registry.Register(
+        std::make_unique<testing::FakeTool>("bash", tools::ToolCategory::Execute, "ran"));
+    fixture.preset.permission_mode.execute = tools::PermissionMode::Ask;
+
+    auto cancel_source = std::make_shared<tools::AdvisorCancelSource>();
+    struct Polling : tools::PermissionAdvisor {
+        std::optional<tools::PermissionResponse> Advise(const tools::PermissionRequest&,
+                                                        const tools::AdvisorContext& ctx) override {
+            while (!ctx.is_cancelled()) std::this_thread::sleep_for(1ms);
+            return std::nullopt;  // abstain on cancellation, per the contract
+        }
+    };
+    fixture.injected_checker = std::make_unique<tools::AdvisedPermissionChecker>(
+        std::make_shared<Polling>(), std::make_unique<testing::AlwaysDenyPermissionChecker>(),
+        cancel_source);
+    fixture.injected_cancel_source = cancel_source;
+
+    fixture.Script(testing::ToolUseResponse("call-1", "bash", {{"command", "ls"}}));
+    fixture.Script(testing::TextResponse("after"));
+    fixture.Start();
+
+    fixture.session->SubmitTurn("run it");
+    std::this_thread::sleep_for(50ms);  // let the worker reach Advise (or not -- both safe)
+    fixture.session->Cancel();
+
+    // The advisor abstained on cancellation; the inner checker denied; the turn
+    // ENDED rather than wedging on a blocked advisor.
+    REQUIRE(fixture.session->WaitForIdleForTesting(5s));
 }

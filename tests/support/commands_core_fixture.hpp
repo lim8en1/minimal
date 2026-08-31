@@ -127,6 +127,26 @@ public:
         override_ = std::move(ref);
     }
 
+    // Replaces providers.json wholesale -- for tests that exercise discover
+    // entries beside the static fixture. Call ReloadPresets() afterwards.
+    void WriteProviders(const std::string& contents) {
+        Write("providers.json", contents);
+    }
+
+    // Rebuilds the preset registry from the config dir and re-resolves the
+    // session's preset -- for tests that edit providers.json after
+    // construction (the refresh tests edit it to add a discover-entry).
+    void ReloadPresets() {
+        presets_ = std::make_unique<agent::AgentPresetRegistry>(
+            dir_.path(), *skills_, config::LoadSettingsConfig(dir_.path() / "settings.json"));
+        preset_ = presets_->Resolve("build");
+    }
+
+    // Discovery injection, exactly as main.cpp does after plugin load.
+    void SetDiscoveryHook(config::DiscoveryHook hook) {
+        presets_->SetDiscoveryHook(std::move(hook));
+    }
+
     commands::CommandRegistry registry;
     FakeConfirmationBroker confirmations;
 

@@ -47,7 +47,11 @@ PluginCandidate Enabled(const std::string& stem, Provenance provenance = Provena
 struct Harness {
     tools::ToolRegistry tool_registry;
     llm::ProviderFactoryRegistry provider_registry;
-    plugins::PluginLoader loader{tool_registry, provider_registry};
+    llm::ModelCatalogRegistry model_catalog_registry;
+    plugins::ServiceRegistry service_registry;
+    plugins::PluginLoader loader{tool_registry, provider_registry, nlohmann::json::object(),
+                                 nullptr, nullptr, nullptr, nullptr, &model_catalog_registry,
+                                 &service_registry};
 };
 
 }  // namespace
@@ -65,11 +69,18 @@ TEST_CASE("a well-formed plugin loads and contributes its registrations", "[plug
 
     CHECK(record.registered_tools == std::vector<std::string>{"fixture_tool"});
     CHECK(record.registered_provider_kinds == std::vector<std::string>{"fixture"});
+    CHECK(record.registered_model_catalog_kinds == std::vector<std::string>{"fixture"});
 
     // The registrations reached the real registries, not just the record.
     CHECK(h.tool_registry.Find("fixture_tool") != nullptr);
     CHECK(h.provider_registry.Has("fixture"));
     CHECK(h.provider_registry.Create("fixture", {}) != nullptr);
+    // ... including the catalog (track N): it answers under the same kind.
+    const auto* catalog = h.model_catalog_registry.Find("fixture");
+    REQUIRE(catalog != nullptr);
+    const auto listed = catalog->List({});
+    REQUIRE(listed.size() == 1);
+    CHECK(listed[0].id == "fixture-model");
 }
 
 TEST_CASE("an ABI-mismatched plugin is skipped without running its code",
@@ -253,6 +264,77 @@ TEST_CASE("an existing plugins.json entry overrides the provenance default",
     CHECK(config.plugins.size() == 1);   // not duplicated
 
     std::filesystem::remove_all(tmp);
+}
+
+// --- Per-plugin config (track K) ----------------------------------------------
+//
+// fixture-good and fixture-collision echo their config's "echo_value" through
+// their tools, so config delivery is observable through a real dlopen rather
+// than asserted on a struct the test compiled itself.
+
+TEST_CASE("each plugin's registration context sees only its own config",
+          "[plugin_loader][track_k]") {
+    // The isolation property. Both plugins load in one process; if the loader
+    // handed every context one shared config (or the wrong plugin's), the tool
+    // outputs would cross.
+    tools::ToolRegistry tool_registry;
+    llm::ProviderFactoryRegistry provider_registry;
+    plugins::PluginLoader loader{tool_registry, provider_registry};
+
+    PluginCandidate good = Enabled("fixture-good");
+    good.config = nlohmann::json{{"echo_value", "good config"}};
+    PluginCandidate collision = Enabled("fixture-collision");
+    collision.config = nlohmann::json{{"echo_value", "collision config"}};
+
+    const auto records = loader.LoadAll({good, collision});
+    REQUIRE(records.size() == 2);
+    CHECK(records[0].status == LoadStatus::Loaded);
+    CHECK(records[1].status == LoadStatus::Loaded);
+
+    // Both register "fixture_tool"; first-wins parks the second. Alias it so
+    // both implementations are reachable and their configs observable.
+    tool_registry.ApplyAliases({{"fixture-collision.fixture_tool", "ftool2"}});
+
+    tools::ToolContext ctx(common::DefaultLogger());
+    CHECK(tool_registry.Find("fixture_tool")->execute({}, ctx).content_text ==
+          "good config");
+    REQUIRE(tool_registry.Find("ftool2") != nullptr);
+    CHECK(tool_registry.Find("ftool2")->execute({}, ctx).content_text ==
+          "collision config");
+}
+
+TEST_CASE("a plugin entry with no config still loads with an empty context config",
+          "[plugin_loader][track_k]") {
+    // An absent config is a runtime condition, not an error: the tool falls
+    // back to its default echo.
+    Harness h;
+    const auto records = h.loader.LoadAll({Enabled("fixture-good")});
+
+    REQUIRE(records.size() == 1);
+    CHECK(records.front().status == LoadStatus::Loaded);
+
+    tools::ToolContext ctx(common::DefaultLogger());
+    CHECK(h.tool_registry.Find("fixture_tool")->execute({}, ctx).content_text ==
+          "fixture ok");
+}
+
+TEST_CASE("config reaches the tool seam while tools_settings stays verbatim",
+          "[plugin_loader][track_k]") {
+    // The two channels are independent: config is per-plugin, tools_settings is
+    // the whole verbatim `tools` object every tool plugin still receives.
+    tools::ToolRegistry tool_registry;
+    llm::ProviderFactoryRegistry provider_registry;
+    const nlohmann::json tools_settings = {
+        {"some_third_party_tool", nlohmann::json::object()}};
+    plugins::PluginLoader loader{tool_registry, provider_registry, tools_settings};
+
+    PluginCandidate good = Enabled("fixture-good");
+    good.config = nlohmann::json{{"echo_value", "from config"}};
+    REQUIRE(loader.LoadAll({good}).front().status == LoadStatus::Loaded);
+
+    tools::ToolContext ctx(common::DefaultLogger());
+    CHECK(tool_registry.Find("fixture_tool")->execute({}, ctx).content_text ==
+          "from config");
 }
 
 // --- Aliases ------------------------------------------------------------------
@@ -545,4 +627,96 @@ TEST_CASE("plugins.json keeps keys the parser does not model", "[plugin_loader][
     REQUIRE(round_tripped.at("plugins").size() == 1);
     CHECK(round_tripped.at("plugins").at(0).at("file") == "a.so");
     CHECK(round_tripped.at("aliases").at("p.cmd") == "alias");
+}
+
+TEST_CASE("a plugin provides a service through the real loader", "[plugin_loader][service]") {
+    Harness h;
+    const auto records = h.loader.LoadAll({Enabled("fixture-service")});
+    REQUIRE(records.size() == 1);
+    CHECK(records.front().status == LoadStatus::Loaded);
+
+    // The record names the services under the plugin's attribution. The
+    // context_ok marker is provided only when PluginRegistrationContext::services
+    // was the very registry dispatched into, which is the consumer channel a
+    // plugin captures for later Find calls.
+    CHECK(records.front().registered_services ==
+          std::vector<std::string>{"fixture.service", "fixture.context_services_ok"});
+
+    // ...and the registry holds both.
+    CHECK(h.service_registry.Find("fixture.service") != nullptr);
+    CHECK(h.service_registry.Find("fixture.context_services_ok") != nullptr);
+
+    const auto& attributions = h.service_registry.attributions();
+    REQUIRE(attributions.size() == 2);
+    CHECK(attributions[0].plugin_name == "fixture-service");
+    CHECK(attributions[0].service_name == "fixture.service");
+}
+
+TEST_CASE("a plugin offering no service seam loads cleanly", "[plugin_loader][service]") {
+    // Symbol presence is the capability declaration -- register_services is
+    // optional like every other hook.
+    Harness h;
+    const auto records = h.loader.LoadAll({Enabled("fixture-good")});
+    REQUIRE(records.size() == 1);
+    CHECK(records.front().registered_services.empty());
+    CHECK(h.service_registry.attributions().empty());
+}
+
+TEST_CASE("two plugins providing one service name collide",
+          "[plugin_loader][service][collision]") {
+    Harness h;
+    const auto records = h.loader.LoadAll({Enabled("fixture-service"), Enabled("fixture-service-b")});
+    REQUIRE(records.size() == 2);
+    CHECK(records[0].status == LoadStatus::Loaded);
+    CHECK(records[1].status == LoadStatus::Loaded);
+
+    const auto resolution = plugins::ResolveRegistrationNames(
+        h.tool_registry, {}, nullptr, {}, &h.service_registry);
+    REQUIRE(resolution.result.fatal_collisions.size() == 1);
+    CHECK(resolution.result.fatal_collisions[0] == "fixture.service");
+
+    // The diagnostic names both claimants -- that is WHY attributions are taken.
+    // (fixture-service provides twice: the service itself plus the context_ok
+    // marker; fixture-service-b provides once.)
+    const auto& attributions = h.service_registry.attributions();
+    REQUIRE(attributions.size() == 3);
+    CHECK(attributions[0].plugin_name == "fixture-service");
+    CHECK(attributions[0].service_name == "fixture.service");
+    CHECK(attributions[2].plugin_name == "fixture-service-b");
+    CHECK(attributions[2].service_name == "fixture.service");
+}
+
+TEST_CASE("a service name does not collide with an equal tool name",
+          "[plugin_loader][service][collision]") {
+    // Separate namespaces: a tool and a service may share a surface name, the
+    // same independence commands already have from tools.
+    Harness h;
+    h.tool_registry.SetAttribution("fixture-service");
+    h.tool_registry.Register(
+        std::make_unique<testing::FakeTool>("fixture.service", tools::ToolCategory::ReadOnly));
+    h.tool_registry.ClearAttribution();
+    REQUIRE(h.loader.LoadAll({Enabled("fixture-service")}).front().status == LoadStatus::Loaded);
+
+    const auto resolution = plugins::ResolveRegistrationNames(
+        h.tool_registry, {}, nullptr, {}, &h.service_registry);
+    CHECK(resolution.result.fatal_collisions.empty());
+}
+
+TEST_CASE("the service collision check is load-bearing",
+          "[plugin_loader][service][collision][invariant]") {
+    // Removing the NameKind::Service feed from ResolveRegistrationNames (the
+    // "last-wins" world) must fail the collision test above. This test holds
+    // the observable half: WITHOUT the feed, the same two plugins produce no
+    // collision -- which is exactly the hole.
+    Harness h;
+    REQUIRE(h.loader.LoadAll({Enabled("fixture-service"), Enabled("fixture-service-b")}).size() ==
+            2);
+
+    const auto without_service_feed =
+        plugins::ResolveRegistrationNames(h.tool_registry, {}, nullptr, {});
+    CHECK(without_service_feed.result.fatal_collisions.empty());
+
+    const auto with_service_feed =
+        plugins::ResolveRegistrationNames(h.tool_registry, {}, nullptr, {}, &h.service_registry);
+    CHECK_FALSE(with_service_feed.result.fatal_collisions.empty());
 }

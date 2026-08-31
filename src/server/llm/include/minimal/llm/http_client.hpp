@@ -23,17 +23,23 @@ struct HttpRequest {
     std::vector<HttpHeader> headers;
     std::string body;
     std::chrono::milliseconds connect_timeout{5000};
-    std::chrono::milliseconds request_timeout{0};  // 0 = uncapped; caps the WHOLE transfer in both modes
+    std::chrono::milliseconds request_timeout{0};  // 0 = uncapped; caps the WHOLE transfer in every mode
     std::chrono::milliseconds idle_timeout{0};     // 0 = disabled; StreamPost() only
 };
 
 struct HttpResponse {
     int status = 0;
-    std::string body;  // full body for Post(); unused by StreamPost()
+    std::string body;  // full body for Post() and Get(); unused by StreamPost()
     std::vector<HttpHeader> headers;
 };
 
 enum class HttpErrorKind { ConnectFailed, TlsError, Timeout, Cancelled, Other };
+
+// Bounds a buffered GET response (model catalogs) in bytes -- a transfer past
+// it aborts with HttpError{Other} rather than buffering unboundedly. Post()
+// carries a larger internal cap (see http_client.cpp) because legitimate
+// completions can be large.
+inline constexpr std::size_t kMaxResponseBodyBytes = 8u << 20;  // 8 MiB
 
 // Transport-level failure only -- a non-2xx status is NOT an error here. It
 // comes back via HttpResponse::status so the caller can classify it against
@@ -67,8 +73,14 @@ class HttpClient {
 public:
     HttpResponse Post(const HttpRequest& request) const;
 
+    // GET with a buffered response body. Same timeout semantics as Post():
+    // request_timeout > 0 caps the whole transfer, 0 is uncapped. The body is
+    // buffered (bounded by an internal 8 MiB cap -- larger responses throw
+    // HttpError{Other}). Used by model catalogs (track N).
+    HttpResponse Get(const HttpRequest& request) const;
+
     HttpResponse StreamPost(const HttpRequest& request, const HttpHeadersReadySink& on_headers,
-                             const HttpBodyChunkSink& on_chunk) const;
+                            const HttpBodyChunkSink& on_chunk) const;
 };
 
 // One CURL handle, reused across transfers: the connection cache lives in the

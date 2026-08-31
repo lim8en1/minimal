@@ -131,6 +131,7 @@ struct HeadlessFixture {
                                                             common::DefaultLogger());
         service = std::make_unique<rpc::SessionServiceImpl>(*sessions, *db,
                                                              config::SettingsConfig{},
+                                                             config::PermissionsConfig{},
                                                              common::DefaultLogger());
         socket = dir / "headless.sock";
         server = std::make_unique<rpc::Server>(*service, socket);

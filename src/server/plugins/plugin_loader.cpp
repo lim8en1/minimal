@@ -16,11 +16,22 @@ namespace {
 using AbiTagFn = const char* (*)();
 using NameFn = const char* (*)();
 using VersionFn = const char* (*)();
-using RegisterToolsFn = void (*)(tools::ToolRegistry&, const ToolRegistrationContext&);
-using RegisterProviderFactoriesFn = void (*)(llm::ProviderFactoryRegistry&);
-using RegisterSessionObserverFn = void (*)(agent::SessionObserverRegistry&);
-using RegisterCommandsFn = void (*)(commands::CommandRegistry&);
-using RegisterAuthProviderFn = void (*)(rpc::AuthProviderRegistry&);
+using RegisterToolsFn =
+    void (*)(tools::ToolRegistry&, const PluginRegistrationContext&);
+using RegisterProviderFactoriesFn =
+    void (*)(llm::ProviderFactoryRegistry&, const PluginRegistrationContext&);
+using RegisterSessionObserverFn =
+    void (*)(agent::SessionObserverRegistry&, const PluginRegistrationContext&);
+using RegisterCommandsFn =
+    void (*)(commands::CommandRegistry&, const PluginRegistrationContext&);
+using RegisterAuthProviderFn =
+    void (*)(rpc::AuthProviderRegistry&, const PluginRegistrationContext&);
+using RegisterPermissionAdvisorFn =
+    void (*)(tools::PermissionAdvisorRegistry&, const PluginRegistrationContext&);
+using RegisterModelCatalogsFn =
+    void (*)(llm::ModelCatalogRegistry&, const PluginRegistrationContext&);
+using RegisterServicesFn =
+    void (*)(ServiceRegistry&, const PluginRegistrationContext&);
 
 template <typename Fn>
 Fn Lookup(void* handle, const char* symbol) {
@@ -82,13 +93,20 @@ std::string_view ToString(LoadStatus status) {
 PluginLoader::PluginLoader(tools::ToolRegistry& tools, llm::ProviderFactoryRegistry& providers,
                             nlohmann::json tools_settings,
                             agent::SessionObserverRegistry* observers,
-                           commands::CommandRegistry* commands, rpc::AuthProviderRegistry* auth_providers)
+                           commands::CommandRegistry* commands,
+                           rpc::AuthProviderRegistry* auth_providers,
+                           tools::PermissionAdvisorRegistry* permission_advisors,
+                           llm::ModelCatalogRegistry* model_catalogs,
+                           ServiceRegistry* services)
     : tools_(tools),
       providers_(providers),
       tools_settings_(std::move(tools_settings)),
       observers_(observers),
+      model_catalogs_(model_catalogs),
       commands_(commands),
-      auth_providers_(auth_providers) {}
+      auth_providers_(auth_providers),
+      permission_advisors_(permission_advisors),
+      services_(services) {}
 
 // Handles are intentionally leaked -- see LIFETIME in the header.
 PluginLoader::~PluginLoader() = default;
@@ -138,6 +156,17 @@ PluginRecord PluginLoader::LoadOne(const PluginCandidate& candidate) {
         return record;
     }
 
+    // Everything the registration hooks see: the shared settings.json `tools`
+    // object plus THIS plugin's own plugins.json `config` slice. Built once per
+    // plugin, before any hook runs.
+    PluginRegistrationContext context;
+    context.tools_settings = tools_settings_;
+    context.config = candidate.config;
+    // The consumer side of the service channel: the same registry that
+    // register_services below dispatches into, so a plugin capturing this
+    // pointer at registration resolves services from this process's registry.
+    context.services = services_;
+
     // Attribution window: every tool registered inside it belongs to this
     // plugin, which is what lets a later collision name both culprits.
     const std::size_t tools_before = tools_.attributions().size();
@@ -145,11 +174,7 @@ PluginRecord PluginLoader::LoadOne(const PluginCandidate& candidate) {
         const bool ok = GuardedRegistration(
             record, "minimal_plugin_register_tools",
             [&] { tools_.SetAttribution(record.name); },
-            [&] {
-                ToolRegistrationContext context;
-                context.tools_settings = tools_settings_;
-                register_tools(tools_, context);
-            },
+            [&] { register_tools(tools_, context); },
             [&] { tools_.ClearAttribution(); });
         if (!ok) return record;
     }
@@ -165,7 +190,7 @@ PluginRecord PluginLoader::LoadOne(const PluginCandidate& candidate) {
         const bool ok = GuardedRegistration(
             record, "minimal_plugin_register_provider_factories",
             [&] { providers_.SetAttribution(record.name); },
-            [&] { register_providers(providers_); },
+            [&] { register_providers(providers_, context); },
             [&] { providers_.ClearAttribution(); });
         if (!ok) return record;
         const auto after = providers_.kinds();
@@ -183,7 +208,7 @@ PluginRecord PluginLoader::LoadOne(const PluginCandidate& candidate) {
             const bool ok = GuardedRegistration(
                 record, "minimal_plugin_register_commands",
                 [&] { commands_->SetAttribution(record.name); },
-                [&] { register_commands(*commands_); },
+                [&] { register_commands(*commands_, context); },
                 [&] { commands_->ClearAttribution(); });
             if (!ok) return record;
         }
@@ -198,7 +223,8 @@ PluginRecord PluginLoader::LoadOne(const PluginCandidate& candidate) {
         if (auto register_observer = Lookup<RegisterSessionObserverFn>(
                 handle, "minimal_plugin_register_session_observer")) {
             if (!GuardedRegistration(record, "minimal_plugin_register_session_observer",
-                                      [] {}, [&] { register_observer(*observers_); }, [] {})) {
+                                      [] {}, [&] { register_observer(*observers_, context); },
+                                      [] {})) {
                 return record;
             }
             record.registered_session_observer = true;
@@ -209,14 +235,71 @@ PluginRecord PluginLoader::LoadOne(const PluginCandidate& candidate) {
         if (auto register_auth = Lookup<RegisterAuthProviderFn>(
                 handle, "minimal_plugin_register_auth_provider")) {
             if (!GuardedRegistration(record, "minimal_plugin_register_auth_provider", [] {},
-                                      [&] { register_auth(*auth_providers_); }, [] {})) {
+                                      [&] { register_auth(*auth_providers_, context); }, [] {})) {
                 return record;
             }
             record.registered_auth_provider = true;
         }
     }
 
+    if (permission_advisors_ != nullptr) {
+        // Same attribution window as tools and commands: registrations arriving
+        // inside it are keyed by this plugin's name, which is what
+        // permissions.json's "advisor" field selects on.
+        const std::size_t advisors_before = permission_advisors_->attributions().size();
+        if (auto register_advisor = Lookup<RegisterPermissionAdvisorFn>(
+                handle, "minimal_plugin_register_permission_advisor")) {
+            if (!GuardedRegistration(record, "minimal_plugin_register_permission_advisor",
+                                      [&] { permission_advisors_->SetAttribution(record.name); },
+                                      [&] { register_advisor(*permission_advisors_, context); },
+                                      [&] { permission_advisors_->ClearAttribution(); })) {
+                return record;
+            }
+        }
+        record.registered_permission_advisor =
+            permission_advisors_->attributions().size() > advisors_before;
+    }
+
+    if (model_catalogs_ != nullptr) {
+        // Same attribution window as tools and commands: a kind two plugins
+        // both register must be diagnosable down to both, which the
+        // attributions feed the sanity check for.
+        const auto kinds_before = model_catalogs_->kinds();
+        if (auto register_catalogs = Lookup<RegisterModelCatalogsFn>(
+                handle, "minimal_plugin_register_model_catalogs")) {
+            if (!GuardedRegistration(record, "minimal_plugin_register_model_catalogs", [] {},
+                                      [&] { register_catalogs(*model_catalogs_, context); }, [] {})) {
+                return record;
+            }
+        }
+        const auto kinds_after = model_catalogs_->kinds();
+        std::set_difference(kinds_after.begin(), kinds_after.end(), kinds_before.begin(),
+                            kinds_before.end(), std::back_inserter(record.registered_model_catalog_kinds));
+    }
+
     record.status = LoadStatus::Loaded;
+
+    if (services_ != nullptr) {
+        // Same attribution window as tools and commands: a duplicate service
+        // name must be diagnosable down to BOTH plugins, which is what the
+        // (plugin, name) pairs feed NameRegistry.
+        const std::size_t services_before = services_->attributions().size();
+        if (auto register_services = Lookup<RegisterServicesFn>(
+                handle, "minimal_plugin_register_services")) {
+            if (!GuardedRegistration(record, "minimal_plugin_register_services",
+                                      [&] { services_->SetAttribution(record.name); },
+                                      [&] { register_services(*services_, context); },
+                                      [&] { services_->ClearAttribution(); })) {
+                return record;
+            }
+        }
+
+        const auto& service_attributions = services_->attributions();
+        for (std::size_t i = services_before; i < service_attributions.size(); ++i) {
+            record.registered_services.push_back(service_attributions[i].service_name);
+        }
+    }
+
     return record;
 }
 

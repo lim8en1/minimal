@@ -1,13 +1,15 @@
 // commands-core -- the built-in /-commands, as one plugin rather than nine.
 //
-// Deliberately does NOT include /restart-shell: that touches tools-bash's
-// per-session state and therefore belongs to tools-bash. A plugin owns the
-// commands that touch its own state.
+// Deliberately does NOT include /restart-shell: it resets tools-bash's
+// per-session state, so it belongs to tools-bash. (The state is reachable from
+// outside now via the BashSessionStateService, but reachability is about
+// services; command placement is about ownership.)
 
 #include "core_commands.hpp"
 
 #include "minimal/commands/command_registry.hpp"
 #include "minimal/common/abi_tag.hpp"
+#include "minimal/plugins/plugin_abi.h"
 
 extern "C" {
 
@@ -15,7 +17,9 @@ const char* minimal_plugin_abi_tag() { return minimal::common::AbiTag(); }
 const char* minimal_plugin_name() { return "commands-core"; }
 const char* minimal_plugin_version() { return minimal::common::Version(); }
 
-void minimal_plugin_register_commands(minimal::commands::CommandRegistry& registry) {
+void minimal_plugin_register_commands(
+    minimal::commands::CommandRegistry& registry,
+    const minimal::plugins::PluginRegistrationContext&) {
     for (auto& command : minimal::commands_core::MakeCoreCommands()) {
         registry.Register(std::move(command));
     }
