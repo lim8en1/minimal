@@ -13,6 +13,8 @@
 #include "minimal/common/logger.hpp"
 #include "minimal/mcp/mcp_client_manager.hpp"
 #include "minimal/tools/tool_registry.hpp"
+#include "support/deadline.hpp"
+#include "support/fake_http_mcp_server.hpp"
 
 using minimal::config::LoadMcpsConfig;
 using minimal::mcp::McpClientManager;
@@ -176,4 +178,56 @@ TEST_CASE("McpClientManager: server names that cannot be namespaced are refused"
     CHECK_FALSE(fixture.manager->EnsureAlive("bad__name", error));
     CHECK(error.find("cannot be namespaced") != std::string::npos);
     CHECK(fixture.registry.DefinitionsForMcpServers({"broken"}).empty());
+}
+
+TEST_CASE("McpClientManager: a fresh verdict skips the wire ping", "[mcp_manager]") {
+    // The request count is the witness: connect+discover cost 3 requests
+    // (initialize, initialized, tools/list); a follow-up EnsureAlive inside
+    // the verified-TTL window must NOT add a ping request.
+    FakeHttpMcpServer server;
+    nlohmann::json entry = {{"name", "counted"},
+                            {"transport", "http"},
+                            {"url", server.url()},
+                            {"enabled", true}};
+    Fixture fixture(nlohmann::json::array({entry}));
+
+    std::string error;
+    REQUIRE(fixture.manager->EnsureAlive("counted", error));
+    REQUIRE(server.requests() == 3);
+    // Back-to-back: the second check rides the fresh verdict -- no ping
+    // request reaches the server.
+    REQUIRE(fixture.manager->EnsureAlive("counted", error));
+    CHECK(server.requests() == 3);
+    // After the TTL the check goes back to the wire: one more request (the
+    // ping) and still no respawn.
+    std::this_thread::sleep_for(std::chrono::seconds(3));
+    REQUIRE(fixture.manager->EnsureAlive("counted", error));
+    CHECK(server.requests() == 4);
+    CHECK(fixture.manager->StatusOf("counted").generation == 1);
+}
+
+TEST_CASE("McpClientManager: one slow server does not block another's check", "[mcp_manager]") {
+    // The gated http server parks its initialize until released; while it
+    // holds, EnsureAlive for a DIFFERENT server must complete -- the
+    // manager-wide lock covers only the map lookup, never network I/O.
+    FakeHttpMcpServer gated(FakeHttpMcpServer::Options{.gate_initialize = true});
+    nlohmann::json gated_entry = {{"name", "gated"},
+                                  {"transport", "http"},
+                                  {"url", gated.url()},
+                                  {"enabled", true}};
+    Fixture fixture(nlohmann::json::array({gated_entry, StdioEntry("fast", "normal")}),
+                    {std::chrono::seconds(5), std::chrono::seconds(5)});
+
+    const auto gated_run = minimal::testing::RunInBackground([&] {
+        std::string error;
+        return fixture.manager->EnsureAlive("gated", error);
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));  // let it park on the gate
+
+    std::string error;
+    CHECK(fixture.manager->EnsureAlive("fast", error));  // must not wait behind 'gated'
+
+    gated.ReleaseGate();
+    CHECK(gated_run.WaitFor(std::chrono::seconds(5)));
+    if (gated_run.Ready()) CHECK(gated_run.Get());
 }

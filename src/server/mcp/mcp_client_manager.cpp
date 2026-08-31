@@ -18,11 +18,17 @@ namespace minimal::mcp {
 struct McpClientManager::ServerHandle {
     config::McpServerEntry entry;
     std::shared_ptr<HandleInvoker> invoker;
-    mutable std::mutex mu;  // guards connection/alive/generation swaps (StatusOf is const)
+    mutable std::mutex mu;  // guards connection/alive/generation/verified swaps
+    // Serializes ping + (re)start for THIS server. All network I/O for the
+    // handle happens under it -- never under mu_, so other servers' checks
+    // and the cheap Status/ServerNames lookups never wait behind a wedged or
+    // slow server.
+    std::mutex start_mu;
     std::shared_ptr<McpConnection> connection;
     bool alive = false;
     uint64_t generation = 0;
     std::string error;
+    std::chrono::steady_clock::time_point verified{};  // epoch = never
 };
 
 // The McpInvoker implementation McpTool carries. Weak to the handle: if the
@@ -67,6 +73,17 @@ McpClientManager::McpClientManager(config::McpsConfig config, tools::ToolRegistr
 }
 
 namespace {
+
+// How long a successful liveness check counts as proof of life. A subagent
+// spawn right after the parent verified the same server, a child session
+// starting while another caller's restart is still in flight, and other
+// back-to-back checks reuse the verdict instead of paying another ping round
+// trip (a full TCP+TLS handshake on the http transport). Deliberately SHORT:
+// a server that died 3 s ago must still be caught by the next session's
+// check -- the TTL is a dedup for near-simultaneous callers, not a general
+// liveness cache. (A server that dies inside the window is still surfaced
+// immediately by the next tool call, which respawns the handle.)
+constexpr auto kVerifiedTtl = std::chrono::seconds(2);
 
 std::optional<config::McpServerEntry> ResolveEndpoint(const config::McpServerEntry& entry,
                                                       std::string& error) {
@@ -121,11 +138,12 @@ McpEndpoint ToEndpoint(const config::McpServerEntry& entry) {
 
 }  // namespace
 
-bool McpClientManager::StartHandleLocked(const config::McpServerEntry& entry,
-                                         ServerHandle& handle, std::string& error) {
-    // Close any previous connection first: a dead child must not linger, and
-    // the swap must be atomic from the invoker's point of view (a concurrent
-    // CallTool holds the old connection alive through its shared_ptr copy).
+bool McpClientManager::StartHandle(const config::McpServerEntry& entry, ServerHandle& handle,
+                                   std::string& error) {
+    // Caller holds handle.start_mu. Close any previous connection first: a
+    // dead child must not linger, and the swap must be atomic from the
+    // invoker's point of view (a concurrent CallTool holds the old
+    // connection alive through its shared_ptr copy).
     if (handle.connection) {
         std::lock_guard<std::mutex> lock(handle.mu);
         handle.connection.reset();
@@ -188,35 +206,59 @@ bool McpClientManager::StartHandleLocked(const config::McpServerEntry& entry,
         handle.alive = true;
         ++handle.generation;
         handle.error.clear();
+        handle.verified = std::chrono::steady_clock::now();
     }
     logger_.info("MCP server '{}': connected, {} tools registered", entry.name, registered);
     return true;
 }
 
 bool McpClientManager::EnsureAlive(const std::string& server_name, std::string& error) {
-    std::lock_guard<std::mutex> lock(mu_);
-    const auto it = handles_.find(server_name);
-    if (it == handles_.end()) {
-        error = "MCP server '" + server_name + "' is not configured (mcps.json) or is disabled";
-        return false;
+    // mu_ is held ONLY for the map lookup -- never across network I/O. All
+    // blocking work (ping, connect, discovery) happens under the handle's
+    // own start_mu, so a slow or wedged server delays only its own callers;
+    // other sessions' checks and Status/ServerNames proceed.
+    std::shared_ptr<ServerHandle> handle;
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        const auto it = handles_.find(server_name);
+        if (it == handles_.end()) {
+            error = "MCP server '" + server_name + "' is not configured (mcps.json) or is disabled";
+            return false;
+        }
+        handle = it->second;
     }
-    ServerHandle& handle = *it->second;
 
-    if (handle.alive && handle.connection) {
-        // The liveness check the architecture asks for at session start. A
-        // null token: the ping has no cancellation path -- it is bounded by
-        // the request deadline.
+    // One ping/restarter at a time per server. A caller that waited behind a
+    // successful one falls into the fresh-verdict path below and skips its
+    // own ping entirely.
+    std::lock_guard<std::mutex> start_lock(handle->start_mu);
+
+    const auto now = std::chrono::steady_clock::now();
+    {
+        std::lock_guard<std::mutex> lock(handle->mu);
+        if (handle->alive && handle->connection && now - handle->verified < kVerifiedTtl) {
+            // The liveness check the architecture asks for at session start,
+            // answered from the recent verdict rather than the wire.
+            return true;
+        }
+    }
+
+    if (handle->alive && handle->connection) {
         McpConnection::Failure ping_error;
-        if (handle.connection->Ping(nullptr, ping_error)) return true;
+        if (handle->connection->Ping(nullptr, ping_error)) {
+            std::lock_guard<std::mutex> lock(handle->mu);
+            handle->verified = std::chrono::steady_clock::now();
+            return true;
+        }
         logger_.warn("MCP server '{}' liveness check failed ({}); restarting", server_name,
                      ping_error.message);
     }
 
-    if (StartHandleLocked(handle.entry, handle, error)) return true;
+    if (StartHandle(handle->entry, *handle, error)) return true;
     {
-        std::lock_guard<std::mutex> lock(handle.mu);
-        handle.alive = false;
-        handle.error = error;
+        std::lock_guard<std::mutex> lock(handle->mu);
+        handle->alive = false;
+        handle->error = error;
     }
     logger_.error("MCP server '{}' unavailable: {}", server_name, error);
     return false;

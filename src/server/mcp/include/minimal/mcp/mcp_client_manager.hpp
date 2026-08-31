@@ -46,6 +46,11 @@ public:
     // the error is surfaced (value, not exception) so the session can proceed
     // without it. A dead server is RESPAWNED here -- re-discovery is exactly
     // what a server process restart means.
+    //
+    // Blocking shape: the manager-wide lock covers only the handle lookup;
+    // the ping/restart I/O runs under a per-server mutex, so slow servers
+    // stall only their own callers. A verdict younger than ~10 s is reused
+    // without a wire round trip.
     bool EnsureAlive(const std::string& server_name, std::string& error);
 
     Status StatusOf(const std::string& server_name) const;
@@ -58,9 +63,10 @@ private:
     class HandleInvoker;
 
     // Spawns/connects, initializes, discovers, and (re)registers the server's
-    // tools into the registry. Returns false with `error` set. Caller holds mu_.
-    bool StartHandleLocked(const config::McpServerEntry& entry, ServerHandle& handle,
-                           std::string& error);
+    // tools into the registry. Returns false with `error` set. Caller holds
+    // the handle's start_mu.
+    bool StartHandle(const config::McpServerEntry& entry, ServerHandle& handle,
+                     std::string& error);
 
     config::McpsConfig config_;
     tools::ToolRegistry& registry_;
