@@ -123,12 +123,14 @@ gRPC permits one concurrent reader and one concurrent writer on a `ServerReaderW
 
 **Session lifetime**: stream close **terminates** the session — see "Session lifetime" below. There is no detached state in v1, which is why `PendingRequests` has no grace-timer machinery.
 
+**Both session queues are bounded, by different rules.** The outbound `EventQueue` caps at 65,536 events and blocks the producer (`Push` is worker-only; the reader uses `TryPush` and answers refusals). The session's *work* queue (turns + mutating commands) caps at 32 items and REFUSES beyond that, answering each refusal on the wire — one turn can run for minutes, so an unbounded work queue let a client enqueue transcript-sized turns faster than the worker consumed them, growing memory without limit. Termination closes the outbound queue BEFORE joining the worker: `Push` blocks at the cap and is woken only by `Close` or `Pop`, so a worker parked on a full queue behind a stalled writer deadlocks a join that waits for a close scheduled after the join. Closing first wakes the producer; `Pop` still drains before honoring the close, so a live writer receives the backlog.
+
 **Inbound dispatch** (reader thread — every branch is non-blocking):
 
 | `ClientEvent` | Action |
 |---|---|
 | `UserChatTurn` | Push onto the session's turn queue; wake the worker. |
-| `CommandInvocation` | Read-only `HarnessCommand` → execute inline on a short-lived task; anything else → queue for the worker at a turn boundary. |
+| `CommandInvocation` | Read-only `HarnessCommand` → post to the bounded command pool (never a detached per-command thread: unbounded thread pileup under flood, and a shutdown window where a task outlives the registries it borrows); anything else → queue for the worker at a turn boundary. Refusals — pool saturated, work queue full — are ANSWERED on the wire, never dropped: silence on a `request_id` is a client hang. |
 | `PermissionResponse` / `ConfirmationResponse` | `PendingRequests::Resolve(request_id, choice)` — signals the blocked worker. |
 | `CancelTurn` | Set the session's atomic cancel flag. |
 
@@ -194,12 +196,12 @@ What this gives up: "close the terminal, the agent keeps working, come back late
 
 **One carve-out.** The rule is *not* "unattached ⇒ terminate," because a subagent session emits events before its tab attaches. Terminate fires on stream drop **after having been attached**; a never-yet-attached session gets a short initial-attach timeout (~10 s) purely as a guard against a non-conforming client. Attaching to child sessions is a **client protocol obligation** (see Non-interactive client), so this is a safety net, not a designed flow.
 
-**Termination reuses the cancellation path** (atomic cancel flag → `bool` stream sink aborts the provider request → tools observe `is_cancelled`), then joins and reaps the worker. No new mechanism.
+**Termination reuses the cancellation path** (atomic cancel flag → `bool` stream sink aborts the provider request → tools observe `is_cancelled`), then joins and reaps the worker. No new mechanism. Cancel is a GENERATION, not a flag: the worker records the generation when it pops a turn, and a turn is cancelled iff the generation has moved since — a flag cleared before the pop loses a cancel that landed while the worker was between turns, one cleared after the pop loses one that landed in the pop-to-clear window. A cancel landing inside a retry backoff reports `StopReason::Cancelled`, not `Unknown` — the headless exit code derives from this value.
 
 **Server shutdown must be *requested*, not performed, from an RPC handler.** The last-client-detached callback fires at the tail of `OpenSession`, on the handler thread, and `grpc::Server::Shutdown()` blocks until every in-flight RPC completes — including the one calling it. So `Server::RequestShutdown()` only sets a flag, and a thread inside `Server::Wait()` does the blocking part. Getting this wrong hangs the binary on every run while every unit test still passes, because a test that merely records the callback never exercises it.
 
 - **Confirm when work is in flight.** Closing a tab mid-turn destroys running work, so it routes through the existing `ConfirmationBroker`; closing an idle tab needs no prompt.
-- **Terminating a blocking subagent must unblock its parent** — the parent's `SpawnSubagentTool` is synchronously waiting and receives an error `ToolResultBlock` (the child's completion signal fires on every exit path, teardown included) rather than hanging. Cancelling the parent's turn propagates the same way: the wait observes the parent's cancellation and terminates the child.
+- **Terminating a blocking subagent must unblock its parent** — the parent's `SpawnSubagentTool` is synchronously waiting and receives an error `ToolResultBlock` (the child's completion signal fires on every exit path, teardown included) rather than hanging. Cancelling the parent's turn propagates the same way: the wait observes the parent's cancellation and terminates the child. "Every exit path" includes a terminate that lands BEFORE the seeded turn ever ran (the initial-attach reaper, or a terminate racing `SubmitTurn`): the completion hook fires from `Terminate` with a synthesized `Cancelled` result, because the only alternative is a blocking parent waiting on a promise nothing will ever set.
 - **Client quit** = closing every tab: terminates all attached sessions, with one confirmation if any have work in flight.
 
 ## LLM provider adapter — `src/server/llm/`
@@ -308,7 +310,9 @@ private:
 };
 ```
 
-`ProviderCacheKey` is the `providers.json` entry **name** plus a config-generation counter — entries are immutable at runtime, so this is sufficient, and it avoids hashing an API key into a map key. `parameters` is not part of the key: it lives on `ChatRequest`, populated fresh per call.
+`ProviderCacheKey` is the `providers.json` entry **name** plus a config-generation counter — entries are immutable at runtime, so this is sufficient, and it avoids hashing an API key into a map key. `parameters` is not part of the key: it lives on `ChatRequest`, populated fresh per call. This cache is real, not aspirational: `SessionRegistry::CreateResolved` and the `/agent`//`model` rebuild path both route through it, sessions hold a `shared_ptr` rather than ownership, and switching away from and back to an entry reuses the instance.
+
+**The request body is serialized, not materialized.** The OpenAI serializer builds the wire body incrementally into a string — message text is escaped straight into the buffer; only O(1) pieces (tool definitions, tool_choice, `parameters` values) pass through nlohmann — and the retry loop builds the `ChatRequest` once per tool round rather than once per attempt. Against the 512k–1M token goal, a DOM of the whole history per call (let alone per retry) was the remaining RAM spike. The merge-order guarantee survives exactly: parameter keys that name structural fields are DROPPED rather than emitted after them, which preserves "structural always wins" without relying on any parser's duplicate-key resolution.
 
 `StopReason` carries a **`Cancelled`** value alongside `EndTurn`/`ToolUse`/`MaxTokens`/`StopSequence`/`ContentFilter`/`Refusal`/`Unknown`. Cancellation is expected, not exceptional, so it must not surface as an `LlmError`: the provider catches its own aborted transfer and returns a partial `ChatResponse` carrying this stop reason, and the loop treats it as a clean exit rather than a failure.
 
@@ -363,6 +367,7 @@ public:
 **Shared utilities** (core, and exposed to plugins — a plugin tool must *call* these, never reimplement path safety):
 
 - `path_confinement::confine(project_root, user_supplied, must_exist)` → `{absolute_path, ok, outside_project_root, error}`. Canonicalizes symlinks/`..` and *reports* whether the result escapes `project_root` rather than hard-rejecting; still rejects paths that cannot be safely resolved at all (symlink loops, embedded NUL, encoded traversal resisting canonicalization).
+- **The classification is not a lock.** `confine` canonicalizes a path and returns it; the file at that path can be swapped between classification and the tool's later `open()`. Accepted asymmetry, same as bash's: the threat is model error, not a hostile local process, and against the latter only a container is a boundary. Hardening (`O_NOFOLLOW` reopen) is revisited only if the topology leaves the local single-user assumption.
 - `file_access::read_window(path, offset, limit, max_line_length)` — streams line-by-line, memory proportional to `limit` not file size. Shared by Read and Edit's `view`.
 - `atomic_write::write_file(path, content)` — temp file + fsync + rename. Shared by Write and Edit's mutating commands.
 
@@ -559,7 +564,9 @@ Alias keys are always fully qualified, so they are unambiguous even *before* col
                         "tools-bash.bash": "deny" }
 ```
 
-`per_tool_overrides`, `allowed_tools`, and `allowed_skills` **never reference an alias**, so renaming for typing convenience cannot detach a rule from what it was meant to govern.
+`per_tool_overrides`, `allowed_tools`, and `allowed_skills` **never reference an alias**, so renaming for typing convenience cannot detach a rule from what it was meant to govern. This is enforced at EVERY policy lookup, not just the first: the subagent ceiling — the parent's policy handed down as the child's upper bound — also resolves through the permission key, because an aliased tool missing its parent's per-tool `deny` would let the child run exactly the tool the parent's operator had denied, under its alias. Two lookups, one rule, and a test fails if either regresses to the surface name.
+
+Two more startup guarantees close holes that registration ORDER had reopened. Core tools that register at serve stage — `spawn_subagent` is the one — are RESERVED by name before the fatal-collision check runs, so a plugin claiming the name is a diagnosed collision rather than a silent `insert_or_assign` shadow. And both registries keep the FIRST registration of a duplicate name, identically, before and after alias application: the loser is parked where diagnostics can see it, never swapped in silently.
 
 **Replacing a bundled tool needs no new mechanism**: set `tools-bash` to `enabled: false` and ship a plugin registering `bash`. Permission config keyed `bash` continues to apply to the replacement. The fatal-collision rule is precisely what makes this an explicit act rather than an accident.
 

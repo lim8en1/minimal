@@ -534,6 +534,10 @@ Not scheduled, recorded so they are decisions rather than oversights.
   no declared `context_window_tokens` logs once and disables itself rather than staying silent.
 - **`compaction_keep_recent_tokens` is parsed but unused** — the compaction cut is half the working history by message count (snapped to a tool-call cycle); selecting it by tokens needs per-message counts that are not tracked in memory (§ *Context compaction*).
 - **Backend `usage: 0`** from some OpenAI-compatible proxies — no fallback estimate designed (§ *Deferred*). Note the production compactor's `context_tokens_before` falls back to a bytes/4 estimate in exactly this case; it is an admission of roughness, not a precision claim.
+- **No HTTP connection reuse** — a fresh CURL handle per provider call is the deliberate shape of the statelessness contract ("no mutable state across calls"), but a remote backend pays a TCP/TLS handshake per tool cycle. A per-call handle *pool* would recover most of it without shared state; deferred until a remote-backend deployment actually feels it.
+- **Terminate latency can hit `stream_idle_timeout`** — a backend that stalls silently is observed as cancelled only at event boundaries and the 25 ms backoff poll, so `Terminate`'s join can block for up to the 60 s idle timeout before the sink abort propagates. Bounded, and local llama.cpp does not stall this way; recorded rather than tuned.
+- **The shared-token auth plugin is deferred** — the `AuthProvider` registry, the pass-through default, and the wire guard are built (§11); the example plugin that registers one is not.
+- **`tree-sitter` grammars** — claimed by the architecture's vendoring note and absent from the tree (dead vcpkg entry included). They arrive with track E, the only consumer.
 - Everything under § *Deferred / open items*: Anthropic provider, Windows, `llamacpp-kv`, parallel tool dispatch, session detach, tab-bar overflow.
 
 ---
@@ -685,3 +689,113 @@ rationale: the seed is now `{"percent": 80}`, live the moment an entry declares 
 **Deliberately not touched.** The cut is still half the working history by message count —
 `compaction_keep_recent_tokens` remains the §7 gap. This changed *when* compaction fires, not what
 it keeps.
+
+---
+
+## 11. Post-review remediation
+
+A deliberate read of the whole tree against `ARCHITECTURE.md` after the E-track began — the same
+exercise as §8, but aimed at correctness and efficiency rather than at merge seams. Each item below
+landed with the invariant test that proves it load-bearing (delete the fix, watch the test fail),
+except where the note says otherwise. Status lines are records, not claims: everything here is in
+the tree and green.
+
+### The one that would have shipped broken
+
+1. **`Session::Terminate` deadlocked against its own queue.** It joined the worker before closing
+   the outbound `EventQueue`, but `Push` blocks at the 65,536 cap and is woken only by `Close` or
+   `Pop` — reachable whenever a client stalls or dies mid-stream and the queue fills: the writer
+   stops draining, the worker parks in `Push`, the join waits for a close scheduled after the join,
+   and `grpc::Server::Shutdown` (which waits for in-flight RPCs) bricks the server. The headless
+   client never lived long enough to reach this; the TUI is exactly the client that produces slow
+   writers. Close-before-join; the drain-before-close rule in `Pop` keeps the backlog semantics.
+   Deadline-bounded test deadlocks against the old order.
+
+### Correctness
+
+2. **A blocking subagent could wait forever.** The completion hook fired only from `RunOneTurn`, so
+   a terminate landing before the seeded turn ran (initial-attach reaper, terminate racing
+   `SubmitTurn`) left the parent's `future` permanently unset. `Terminate` now fires the hook with a
+   synthesized `Cancelled` result — the same every-exit-path rule the tool-finish event follows.
+3. **One odd exception killed the server.** `RunOneTurn` caught `LlmError` and `std::exception`; the
+   seq read, the observer notify, and the completion hook ran OUTSIDE the try, and anything
+   non-standard escaped to `std::terminate` through `WorkerMain`. Each tail stage is guarded
+   separately, so a failing stage cannot skip the later ones.
+4. **CancelTurn lost races in both clearing directions.** A flag cleared before the pop swallowed a
+   cancel that landed between turns; cleared after the pop, it swallowed one landing in the
+   pop-to-clear window. Cancel is a generation now: a turn is cancelled iff the generation moved
+   since its pop. A cancel landing inside retry backoff also reported `Unknown` instead of
+   `Cancelled` — the headless exit code derives from this value, and exit 3 ("model error") for a
+   user cancel was simply the wrong answer.
+5. **The subagent ceiling looked up the wrong key.** The base policy resolves per-tool overrides
+   through the permission key (the rule §F installed); the ceiling — the parent's policy — matched
+   on the surface name, so an ALIASED tool missed its parent's per-tool `deny` and the child could
+   run exactly what the operator had denied, under its alias. Second enforcement point of the same
+   rule; the invariant test fails against the surface-name lookup.
+6. **`spawn_subagent` was invisible to the collision check.** Core registers it at serve stage,
+   after `ResolveRegistrationNames` ran, so a plugin claiming the name silently shadowed (or was
+   shadowed by) it via `insert_or_assign`. Reserved core names feed the check; both registries now
+   keep the FIRST registration of a duplicate, before and after alias application, identically.
+7. **`atomic_write` clobbered file modes.** The rename installs a new inode, and the unconditional
+   0644 stripped executable bits and widened 0600 private files on their next edit. Existing targets
+   keep their mode; new files get 0644; the rename is followed by a best-effort parent-directory
+   fsync; the temp fd is `CLOEXEC` (a concurrently forked bash command must not inherit the file's
+   new content).
+8. **Keyset paging did not seek.** `?2 IS NULL OR seq < ?2` made SQLite's planner drop the range
+   constraint: equality on `session_id` plus a plain index walk from `MAX(seq)` — O(n) per page,
+   O(n²) to page a transcript, against the doc's "costs the same for a long transcript" claim.
+   `COALESCE(?2, INT64_MAX)` folds the no-cursor case into one comparison; `EXPLAIN QUERY PLAN` is
+   asserted against the real schema.
+9. **The command pool replaced detached threads.** One detached, never-joined thread per read-only
+   command meant unbounded threads under a flood, a shutdown window where a task held shared_ptrs
+   into registries being destroyed, and a blocking `queue_.Push` from a non-worker thread. A
+   bounded, joined pool answers saturated posts with an error — a `request_id` a client waits on is
+   never answered with silence. `/providers` reads a preset snapshot taken under the session lock;
+   the reference read raced `/agent`'s rewrite of the same strings (a TSan-class data race, UB).
+
+### Efficiency (against the 512k–1M token goal)
+
+10. **`ProviderInstanceCache` now exists.** The architecture specified it; the tree constructed a
+    fresh provider per session. Instances are shared per `providers.json` entry (the API key is
+    deliberately not in the key; the generation counter is always zero until a reload ever exists),
+    sessions hold a `shared_ptr`, and `/agent` away-and-back reuses the instance. The fixtures that
+    handed each session a fresh stateful fake were fighting the statelessness contract sharing rests
+    on, and were moved to the shared-script pattern that was already built for multi-session tests.
+11. **Compaction stopped copying the history.** The `Compactor` takes a `std::span` (the compactor
+    reads; nothing mutates history during the call); the kept tail is moved, not copied; the
+    boundary snap maintains use/result counts incrementally instead of rescanning per shrink
+    (O(cut²) worst case gone); and the retry loop builds the `ChatRequest` once per tool round
+    instead of once per attempt.
+12. **The request body is streamed into a string.** `BuildRequestBody` used to materialize a
+    nlohmann DOM of the whole history and dump it — two copies of every message per provider call.
+    Message text is escaped straight into the buffer; `parameters` keys naming structural fields are
+    DROPPED rather than emitted after them (emit-then-overwrite would have left precedence to the
+    receiving parser's duplicate-key handling — the guarantee now rests on nothing but the output);
+    tool arguments remain a JSON-encoded string per the OpenAI contract, enforced by test.
+13. **The last unbounded buffers got bounds.** The session work queue (32 items, refusals answered
+    on the wire — an unbounded deque of transcript-sized turns behind a minutes-long worker) and the
+    bash fd-9 state payload (1 MiB, overflow discarded WHOLESALE — adopting a truncated prefix would
+    silently apply partial environment). `ChildCount` counts only non-terminated children, so
+    `max_concurrent_subagents` means concurrent.
+
+### Wired as specified, verified on the wire
+
+14. **Auth.** `AuthProvider` + exclusive registry + `EnsureAuthenticated` at the head of every
+    service method. The pass-through default is the local-only topology, stated as policy rather
+    than omission. Placement note recorded in the code: the sync gRPC API does not invoke
+    experimental interceptors for synchronous handlers, so the guard is explicit at each method head
+    — and the E2E case exists precisely because an in-process-only guard proves nothing. The
+    shared-token example plugin is a §7 gap.
+15. **Client hardening.** `RunTurn` auto-denies a mid-turn permission request instead of parking the
+    server worker on an answer nobody can send (headless forces `AllowOnly`, so reaching there means
+    a non-conforming run mode — degrade loudly, never hang); command request ids count instead of
+    colliding on `"cmd-1"`; a non-blocking subagent finishing during parent teardown logs the drop
+    instead of claiming the result was queued; plugin discovery warns when one basename exists
+    bundled AND user-installed (shared enablement entry, guaranteed collision, previously silent).
+
+### Not done, deliberately
+
+- **HTTP connection reuse, `stream_idle_timeout`-bounded terminate latency, the shared-token
+  plugin, tree-sitter grammars** — all recorded in §7 with the reason each is a decision.
+- **A `catch(...)`-shaped seam test for the compactor** — the compactor already returns failure as
+  a value; only the loop's bookkeeping needed the guard, and that is tested.
