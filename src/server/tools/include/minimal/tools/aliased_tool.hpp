@@ -19,7 +19,7 @@ namespace minimal::tools {
 // original name, and a model calling the advertised name would find nothing.
 class AliasedTool : public Tool {
 public:
-    AliasedTool(std::unique_ptr<Tool> inner, std::string surface_name);
+    AliasedTool(std::shared_ptr<Tool> inner, std::string surface_name);
 
     const ToolSpec& spec() const override;
     ToolResult execute(const nlohmann::json& input, ToolContext& ctx) override;
@@ -29,7 +29,7 @@ public:
     PermissionDisclosure Disclose(const nlohmann::json& input, const ToolContext& ctx) const override;
 
 private:
-    std::unique_ptr<Tool> inner_;
+    std::shared_ptr<Tool> inner_;
     ToolSpec spec_;  // a copy of inner_->spec() with name/definition.name rewritten
 };
 

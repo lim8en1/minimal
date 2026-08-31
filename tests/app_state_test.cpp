@@ -22,6 +22,7 @@
 #include "fakes.hpp"
 #include "minimal/client/session_client.hpp"
 #include "minimal/client/state.hpp"
+#include "minimal/config/settings_config.hpp"
 #include "minimal/rpc/server.hpp"
 #include "minimal/rpc/session_service.hpp"
 
@@ -75,7 +76,8 @@ struct ClientFixture {
     }
 
     void Start() {
-        presets = std::make_unique<agent::AgentPresetRegistry>(dir, skills);
+        presets = std::make_unique<agent::AgentPresetRegistry>(
+            dir, skills, config::LoadSettingsConfig(dir / "settings.json"));
         observers = std::make_unique<agent::SessionObserverRegistry>(common::DefaultLogger());
         db = std::make_unique<session::SessionDatabase>(dir / "sessions.db");
         sessions = std::make_unique<agent::SessionRegistry>(

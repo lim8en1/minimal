@@ -91,7 +91,9 @@ struct Harness {
     }
 
     void Build(agent::AgentPreset preset = {}, agent::LoopConfig config = {},
-               agent::Compactor compactor = {}, std::vector<llm::Message> seeded_history = {}) {
+               agent::Compactor compactor = {}, std::vector<llm::Message> seeded_history = {},
+               std::optional<std::int64_t> seed_first_persisted_seq = std::nullopt,
+               bool seed_head_is_summary = false) {
         if (preset.allowed_tools.empty()) preset.allowed_tools = {"*"};
         if (preset.provider.model_name.empty()) preset.provider.model_name = "test-model";
         preset.permission_mode = AllowAllPolicy();
@@ -110,7 +112,8 @@ struct Harness {
                 seen_events.push_back(e);
                 return !cancel_flag.load();
             },
-            std::move(compactor), std::move(seeded_history));
+            std::move(compactor), std::move(seeded_history), seed_first_persisted_seq,
+            seed_head_is_summary);
     }
 };
 
@@ -409,6 +412,96 @@ TEST_CASE("compaction fires past the threshold and never touches the store",
     // Compaction rewrites only the in-memory working set. The durable record
     // keeps every message, so scrollback is unaffected however often it runs.
     CHECK(h.store.messages.size() > store_after_first);
+}
+
+TEST_CASE("a successful compaction persists a checkpoint with a correct boundary",
+          "[agent_loop][compaction][checkpoint]") {
+    Harness h;
+    h.provider.PushResponse(TextResponse("one"));
+    h.provider.PushResponse(TextResponse("two"));
+    h.provider.PushResponse(TextResponse("three"));
+
+    int summaries = 0;
+    auto compactor = [&summaries](std::span<const llm::Message>, llm::LlmProvider&,
+                                  const agent::CompactionRequest&) {
+        return agent::CompactionResult{UserText("[summary-" + std::to_string(++summaries) + "]"),
+                                       0};
+    };
+    // TextResponse reports 10 in + 5 out = occupancy 15.
+    h.Build({}, agent::LoopConfig{.auto_compact = true, .compaction_trigger = FixedTrigger(10)},
+            compactor);
+
+    h.loop->RunTurn(UserText("a"));
+    REQUIRE_FALSE(h.store.checkpoint_boundary.has_value());
+    CHECK_FALSE(h.store.checkpoint_cleared);
+
+    h.loop->RunTurn(UserText("b"));
+    h.loop->RunTurn(UserText("c"));
+
+    // The fake store assigns seq = row index, so the transcript is
+    // {a=0, one=1, b=2, two=3, c=4, three=5}. Turn two compacted [a] into
+    // summary-1 (checkpoint covers seq <= 0). Turn three folded
+    // [summary-1, one] -- one synthetic head, one persisted message -- into
+    // summary-2, extending coverage to seq <= 1.
+    REQUIRE(h.store.checkpoint_boundary.has_value());
+    CHECK(*h.store.checkpoint_boundary == 1);
+    CHECK(h.store.checkpoint_summary.content.size() == 1);
+    CHECK(std::get<llm::TextBlock>(h.store.checkpoint_summary.content[0]).text == "[summary-2]");
+    // The transcript itself was never touched: six real messages.
+    CHECK(h.store.messages.size() == 6);
+}
+
+TEST_CASE("a checkpoint-seeded resume replaces the checkpoint with correct arithmetic",
+          "[agent_loop][compaction][checkpoint]") {
+    Harness h;
+    h.provider.PushResponse(TextResponse("one"));
+
+    // Simulates the resume path: [old summary] is synthetic (not in the
+    // store); tail1/tail2 are persisted at seq 5 and 6. The seed text is long
+    // enough that the bytes/4 occupancy estimate crosses the trigger before
+    // the first provider call -- which is the point of the seed.
+    const std::string long_text(80, 'x');
+    auto compactor = [](std::span<const llm::Message>, llm::LlmProvider&,
+                        const agent::CompactionRequest&) {
+        return agent::CompactionResult{UserText("[new summary]"), 0};
+    };
+    h.Build({}, agent::LoopConfig{.auto_compact = true, .compaction_trigger = FixedTrigger(10)},
+            compactor, {UserText("[old summary]"), UserText(long_text), UserText(long_text)}, 5,
+            /*seed_head_is_summary=*/true);
+
+    h.loop->RunTurn(UserText("x"));
+
+    // The fold removed 2 messages, one of them the synthetic head, so
+    // persisted coverage advances by exactly one: from "starts at 5" to
+    // "covers seq <= 5" (tail1). The new summary must be the one persisted --
+    // the old summary is superseded, never stacked.
+    REQUIRE(h.store.checkpoint_boundary.has_value());
+    CHECK(*h.store.checkpoint_boundary == 5);
+    CHECK(std::get<llm::TextBlock>(h.store.checkpoint_summary.content[0]).text == "[new summary]");
+}
+
+TEST_CASE("clearing the working set clears the checkpoint", "[agent_loop][compaction][checkpoint]") {
+    // /clear drops the view, and the checkpoint IS a view: leaving it would
+    // make a resume restore a summary of a conversation the user wiped from
+    // context instead of reloading the full record the store kept.
+    Harness h;
+    h.provider.PushResponse(TextResponse("one"));
+
+    const std::string long_text(80, 'x');
+    auto compactor = [](std::span<const llm::Message>, llm::LlmProvider&,
+                        const agent::CompactionRequest&) {
+        return agent::CompactionResult{UserText("[summary]"), 0};
+    };
+    h.Build({}, agent::LoopConfig{.auto_compact = true, .compaction_trigger = FixedTrigger(10)},
+            compactor, {UserText("[old summary]"), UserText(long_text)}, 5,
+            /*seed_head_is_summary=*/true);
+
+    h.loop->RunTurn(UserText("x"));
+    REQUIRE(h.store.checkpoint_boundary.has_value());
+
+    h.loop->ClearHistory();
+    CHECK(h.store.checkpoint_cleared);
+    CHECK_FALSE(h.store.checkpoint_boundary.has_value());
 }
 
 TEST_CASE("auto_compact off means no compaction regardless of occupancy",

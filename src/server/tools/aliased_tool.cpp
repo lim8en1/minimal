@@ -4,7 +4,7 @@
 
 namespace minimal::tools {
 
-AliasedTool::AliasedTool(std::unique_ptr<Tool> inner, std::string surface_name)
+AliasedTool::AliasedTool(std::shared_ptr<Tool> inner, std::string surface_name)
     : inner_(std::move(inner)), spec_(inner_->spec()) {
     spec_.name = std::move(surface_name);
     spec_.definition.name = spec_.name;

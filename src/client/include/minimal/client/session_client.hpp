@@ -5,7 +5,9 @@
 #include <cstdint>
 #include <deque>
 #include <functional>
+#include <mutex>
 #include <vector>
+#include <atomic>
 #include <memory>
 #include <optional>
 #include <cstdint>
@@ -184,12 +186,27 @@ public:
     SuggestPathsResult SuggestPaths(const std::string& session_id, const std::string& prefix,
                                     int32_t limit);
 
-    // Opens a bidi stream for one turn: sends UserChatTurn, pumps ServerEvents to
-    // `on_event` until TurnCompletedEvent or stream end. Reads TO END before Finish()
-    // (the read loop only returns once the server stops sending), so no events are lost
-    // and Finish() cannot deadlock a still-writing peer.
+    // Opens the bidi stream, sends one user turn, and pumps ServerEvents to
+    // `on_event` until the stream ends or `on_event` returns false.
+    //
+    // The stream is READ TO END before finishing. gRPC's sync API blocks in
+    // Write() when the peer is not reading, so finishing early with events still
+    // in flight deadlocks both sides.
+    //
+    // `on_handle` is invoked ON RUNTURN'S THREAD, once, as soon as the handle
+    // exists and BEFORE the first event is read. The handle's Cancel()
+    // interrupts the in-flight turn (a CancelTurn ClientEvent on this stream);
+    // Cancel is safe to call from another thread while RunTurn's thread reads,
+    // and a no-op once the stream has closed. Publication is a callback rather
+    // than an out-param because the reader is BY DESIGN another thread (SIGINT
+    // watcher): a plain cross-thread read of a shared_ptr this thread wrote is
+    // a data race, while a callback lets the caller store the handle behind a
+    // release-store flag the cancel thread acquires.
+    class TurnHandle;
     grpc::Status RunTurn(const std::string& session_id, const std::string& text,
-                         const std::function<bool(const ServerEvent&)>& on_event);
+                         const std::function<bool(const ServerEvent&)>& on_event,
+                         const std::function<void(const std::shared_ptr<TurnHandle>&)>&
+                             on_handle = nullptr);
 
     struct CommandOptions {
         std::string name;  // without the leading '/'
@@ -218,10 +235,57 @@ public:
                         const std::function<bool(const v1::ServerEvent&)>& on_event);
 
 private:
+    // Shared between RunTurn's thread (which reads) and a Cancel() caller
+    // (which writes). One writer at a time is the gRPC sync-stream rule, so
+    // every write on the stream -- RunTurn's permission answers included --
+    // takes mu. stream is null before the turn is sent and after RunTurn
+    // returns, which is what makes a late Cancel a harmless no-op.
+    struct TurnControl {
+        std::mutex mu;
+        v1::ClientEvent cancel_event;
+        grpc::ClientReaderWriter<v1::ClientEvent, v1::ServerEvent>* stream = nullptr;
+    };
+
+public:
+    // Cancels the turn of the RunTurn call that produced this handle. The
+    // server ends the turn with a TurnCompletedEvent carrying
+    // STOP_REASON_CANCELLED; RunTurn keeps reading until it arrives.
+    class TurnHandle {
+    private:
+        // Pass-key: Token is private, so only SessionClient (a friend) can
+        // name it -- the public constructor is uncallable from outside, which
+        // is what std::make_shared's allocator context needs to see.
+        struct Token {};
+
+    public:
+        void Cancel() {
+            const auto control = control_;
+            if (!control) return;
+            std::lock_guard<std::mutex> lock(control->mu);
+            if (control->stream != nullptr) control->stream->Write(control->cancel_event);
+        }
+
+        explicit TurnHandle(std::shared_ptr<TurnControl> control, Token)
+            : control_(std::move(control)) {}
+
+    private:
+        friend class SessionClient;
+        std::shared_ptr<TurnControl> control_;
+    };
+
+private:
+    std::string server_address_;
     std::shared_ptr<grpc::Channel> channel_;
     std::unique_ptr<v1::SessionService::Stub> stub_;
     // Monotonic command request ids; the server echoes them verbatim.
-    std::uint64_t command_counter_ = 0;
+    // ATOMIC, because its own comment describes the racy case as the reason it
+    // exists: "two commands on different streams of the same client would
+    // echo-collide". Two concurrent RunCommand calls on one SessionClient is
+    // exactly that scenario, and a plain ++ from two threads is a data race that
+    // can also produce the duplicate id this is meant to prevent. The class
+    // header already advertises concurrent streams, and app.cpp already runs
+    // Attach on other threads against the same object.
+    std::atomic<std::uint64_t> command_counter_{0};
 };
 
 }  // namespace minimal::client

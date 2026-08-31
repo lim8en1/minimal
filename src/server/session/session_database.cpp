@@ -62,12 +62,62 @@ const std::vector<Migration>& DefaultMigrationsImpl() {
              "UPDATE sessions SET message_count ="
              " (SELECT COUNT(*) FROM messages WHERE messages.session_id = sessions.id);",
          }},
+        // The indexes the session picker's keyset cursor has always assumed.
+        //
+        // §11.8 made the MESSAGE cursor a real seek; the SESSION cursor was
+        // still a full scan plus a temp b-tree sort on every page, because
+        // nothing indexed (updated_at, id) -- so the predicate filtered rather
+        // than sought and paging the picker stayed O(total sessions) per page,
+        // which is the exact growth the cursor exists to remove. DESC/ASC in the
+        // index matches the ORDER BY so the sort disappears too.
+        //
+        // The second is the canonical unindexed-foreign-key case: with
+        // foreign_keys=ON and ON DELETE CASCADE on the self-reference, every
+        // DELETE FROM sessions full-scanned the table looking for children.
+        {3,
+         {
+             "CREATE INDEX IF NOT EXISTS idx_sessions_activity"
+             " ON sessions(updated_at DESC, id ASC);",
+             "CREATE INDEX IF NOT EXISTS idx_sessions_parent"
+             " ON sessions(parent_session_id);",
+         }},
+        // The persisted compaction checkpoint (see CompactionCheckpoint): the
+        // derived VIEW of a session's context, cached so a resume reconstructs
+        // [summary + tail] instead of re-summarizing the whole uncompacted
+        // transcript -- which for a transcript well beyond the model window
+        // could not even fit its own summarization request. A cache of view
+        // state, deliberately NOT a message row: `messages` stays the exact
+        // record of what was said, scrollback is untouched, and the
+        // "compaction never mutates persisted history" rule survives verbatim.
+        // ON DELETE CASCADE does the session-deletion cleanup; /clear is the
+        // one explicit invalidation (ClearCompactionCheckpoint).
+        {4,
+         {
+             "CREATE TABLE compactions ("
+             "  session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,"
+             "  boundary_seq INTEGER NOT NULL,"
+             "  summary_content_json TEXT NOT NULL,"
+             "  created_at INTEGER NOT NULL"
+             ");",
+         }},
     }};
     return migrations;
 }
 
 [[noreturn]] void ThrowSqliteError(sqlite3* db, const std::string& context) {
     throw std::runtime_error(context + ": " + sqlite3_errmsg(db));
+}
+
+// The terminating code of a row loop, checked. `while (step() == SQLITE_ROW)`
+// exits on SQLITE_DONE and equally on SQLITE_BUSY, SQLITE_IOERR and
+// SQLITE_CORRUPT -- so a mid-scan failure returned a SHORT result that every
+// caller read as a complete one. On the resume path that is a transcript with a
+// hole in it, which the loop then continues appending to at MAX(seq)+1; on the
+// scrollback path it is a truncated page rendered as the top of the
+// conversation. The JSON decode below these loops is strict about a row it
+// cannot parse, which made the strict half a guard over the lax half's output.
+void CheckRowLoopEnd(sqlite3* db, int rc, const std::string& context) {
+    if (rc != SQLITE_DONE) ThrowSqliteError(db, context);
 }
 
 void ExecChecked(sqlite3* db, const char* sql, const std::string& context) {
@@ -231,7 +281,15 @@ public:
         }
         stmt = it->second;
     }
-    ~CachedStmt() { sqlite3_reset(stmt); }
+    // Reset AND clear. Reset alone left the last call's bound pointers in the
+    // cached statement until its next use -- harmless while every binding was
+    // SQLITE_TRANSIENT (SQLite owned copies), but AppendMessage now binds
+    // content_json as SQLITE_STATIC, and a dangling borrowed pointer parked in a
+    // long-lived statement is not something to leave to "nothing steps it".
+    ~CachedStmt() {
+        sqlite3_reset(stmt);
+        sqlite3_clear_bindings(stmt);
+    }
     CachedStmt(const CachedStmt&) = delete;
     CachedStmt& operator=(const CachedStmt&) = delete;
 
@@ -334,7 +392,18 @@ std::int64_t SessionDatabase::AppendMessage(const std::string& session_id,
                                             const llm::Message& message, int token_count) {
     std::lock_guard lock(mu_);
     const std::int64_t now = NextTimestamp();
-    const std::string content_json = MessageToJson(message).dump();
+    // REPLACE, not the default strict handler. dump() throws type_error.316 on
+    // invalid UTF-8, and nothing between a child process's raw stdout and this
+    // line validates encoding -- one `cat` of a binary file, or a tool printing
+    // Latin-1, threw here. That throw arrived BEFORE the transaction, so the
+    // message was persisted nowhere and AgentLoop::AppendAndPersist never
+    // reached its history_.push_back either: the assistant's tool_use was
+    // already in history, its results were not, and every later turn 400'd on
+    // the orphaned call. Substituting U+FFFD keeps a byte of noise from
+    // destroying a conversation; the transcript is a record of what was said,
+    // not a binary-faithful channel.
+    const std::string content_json =
+        MessageToJson(message).dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
     const char* role = message.role == llm::Role::User ? "user" : "assistant";
 
     // Name candidate for the free default: the first user message carrying text.
@@ -364,7 +433,15 @@ std::int64_t SessionDatabase::AppendMessage(const std::string& session_id,
                          "failed to touch session");
         sqlite3_bind_int64(touch.stmt, 1, now);
         sqlite3_bind_text(touch.stmt, 2, session_id.c_str(), -1, SQLITE_TRANSIENT);
-        if (sqlite3_step(touch.stmt) != SQLITE_DONE || sqlite3_changes(db_) == 0) {
+        // The two conditions are SEPARATE because they are different problems.
+        // Folding them reported a full disk, a locked database or an I/O error
+        // as "unknown session" -- and the comment above says this message is
+        // meant to be loud about a WIRING BUG, so it sent the next reader
+        // hunting one that was not there.
+        if (const int rc = sqlite3_step(touch.stmt); rc != SQLITE_DONE) {
+            ThrowSqliteError(db_, "failed to touch session " + session_id);
+        }
+        if (sqlite3_changes(db_) == 0) {
             throw std::runtime_error("cannot append to unknown session: " + session_id);
         }
 
@@ -379,7 +456,13 @@ std::int64_t SessionDatabase::AppendMessage(const std::string& session_id,
         sqlite3_bind_text(insert.stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_text(insert.stmt, 2, session_id.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_text(insert.stmt, 3, role, -1, SQLITE_STATIC);
-        sqlite3_bind_text(insert.stmt, 4, content_json.c_str(), -1, SQLITE_TRANSIENT);
+        // STATIC with an explicit length, not TRANSIENT with a strlen. content_json
+    // is the largest thing on this path -- a tool result can be hundreds of KB --
+    // and TRANSIENT tells SQLite to malloc and memcpy the whole thing, a third
+    // full copy after the JSON DOM and the dump(). It outlives the step() below,
+    // and ~CachedStmt clears bindings, so nothing retains the pointer.
+    sqlite3_bind_text(insert.stmt, 4, content_json.data(),
+                      static_cast<int>(content_json.size()), SQLITE_STATIC);
         sqlite3_bind_int(insert.stmt, 5, token_count);
         sqlite3_bind_int64(insert.stmt, 6, now);
         if (sqlite3_step(insert.stmt) != SQLITE_DONE) {
@@ -479,7 +562,14 @@ bool SessionDatabase::SessionExists(const std::string& session_id) const {
     CachedStmt query(db_, prepared_, "SELECT 1 FROM sessions WHERE id = ?;",
                      "failed to check session");
     sqlite3_bind_text(query.stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
-    return sqlite3_step(query.stmt) == SQLITE_ROW;
+    const int rc = sqlite3_step(query.stmt);
+    if (rc == SQLITE_ROW) return true;
+    // A LOCKED DATABASE IS NOT A MISSING SESSION. Returning false for
+    // SQLITE_BUSY/SQLITE_IOERR exactly as for an absent row made the RPC layer
+    // answer "no such session" -- so a transient lock told the client its
+    // session had been deleted, which is the one answer it cannot recover from.
+    CheckRowLoopEnd(db_, rc, "failed to check session");
+    return false;
 }
 
 std::vector<SessionSummary> SessionDatabase::ListSessions(const ListSessionsFilter& filter) const {
@@ -521,7 +611,8 @@ std::vector<SessionSummary> SessionDatabase::ListSessions(const ListSessionsFilt
     sqlite3_bind_int(query.stmt, 5, filter.limit > 0 ? filter.limit : -1);
 
     std::vector<SessionSummary> out;
-    while (sqlite3_step(query.stmt) == SQLITE_ROW) {
+    int rc = SQLITE_OK;
+    while ((rc = sqlite3_step(query.stmt)) == SQLITE_ROW) {
         SessionSummary summary;
         summary.session_id = reinterpret_cast<const char*>(sqlite3_column_text(query.stmt, 0));
         if (sqlite3_column_type(query.stmt, 1) == SQLITE_TEXT) {
@@ -536,6 +627,7 @@ std::vector<SessionSummary> SessionDatabase::ListSessions(const ListSessionsFilt
         summary.message_count = sqlite3_column_int(query.stmt, 7);
         out.push_back(std::move(summary));
     }
+    CheckRowLoopEnd(db_, rc, "failed to list sessions");
     return out;
 }
 
@@ -570,13 +662,20 @@ MessagePage SessionDatabase::GetMessagesPage(const std::string& session_id,
     } else {
         sqlite3_bind_null(query.stmt, 2);
     }
-    sqlite3_bind_int(query.stmt, 3, limit + 1);
+    // int64, not `limit + 1` as int: a limit at INT_MAX would overflow the
+    // increment and bind a negative LIMIT, which SQLite reads as "no limit" --
+    // a full-transcript materialization instead of a page.
+    sqlite3_bind_int64(query.stmt, 3, static_cast<std::int64_t>(limit) + 1);
 
     MessagePage page;
-    while (sqlite3_step(query.stmt) == SQLITE_ROW) {
+    int rc = SQLITE_OK;
+    while ((rc = sqlite3_step(query.stmt)) == SQLITE_ROW) {
         if (static_cast<int>(page.messages.size()) == limit) {
             page.has_more = true;
-            break;
+            // Deliberately leaves rc == SQLITE_ROW: this loop ends early ON
+            // PURPOSE when the probe row appears, which is not an error and must
+            // not be checked as one.
+            return page;
         }
         StoredMessage stored;
         stored.seq = sqlite3_column_int64(query.stmt, 0);
@@ -590,6 +689,10 @@ MessagePage SessionDatabase::GetMessagesPage(const std::string& session_id,
         stored.created_at_unix_ms = sqlite3_column_int64(query.stmt, 3);
         page.messages.push_back(std::move(stored));
     }
+    // Reached only when the scan ran out of rows, so anything but DONE is a real
+    // failure. Returning short here reported has_more = false, which renders a
+    // truncated page as the top of the transcript.
+    CheckRowLoopEnd(db_, rc, "failed to read message page");
     return page;
 }
 
@@ -612,7 +715,8 @@ std::vector<StoredMessage> SessionDatabase::LoadMessages(const std::string& sess
                          " WHERE session_id = ?1 ORDER BY seq ASC;",
                          "failed to load messages");
         sqlite3_bind_text(query.stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
-        while (sqlite3_step(query.stmt) == SQLITE_ROW) {
+        int rc = SQLITE_OK;
+        while ((rc = sqlite3_step(query.stmt)) == SQLITE_ROW) {
             RawRow row;
             row.seq = sqlite3_column_int64(query.stmt, 0);
             row.json = reinterpret_cast<const char*>(sqlite3_column_text(query.stmt, 1));
@@ -620,6 +724,11 @@ std::vector<StoredMessage> SessionDatabase::LoadMessages(const std::string& sess
             row.created_at = sqlite3_column_int64(query.stmt, 3);
             rows.push_back(std::move(row));
         }
+        // THE RESUME PATH, and the most damaging place to return short: a
+        // partial read becomes the loop's working history while
+        // SqliteHistoryStore keeps appending at MAX(seq) + 1, so the session
+        // runs on a transcript with a hole in it and nothing ever says so.
+        CheckRowLoopEnd(db_, rc, "failed to load messages");
     }
 
     // Decode OUTSIDE the lock. The JSON parse is the expensive part of a large
@@ -648,6 +757,122 @@ std::int64_t SessionDatabase::LastMessageSeq(const std::string& session_id) cons
         return -1;
     }
     return sqlite3_column_int64(query.stmt, 0);
+}
+
+void SessionDatabase::SaveCompactionCheckpoint(const std::string& session_id,
+                                               std::int64_t boundary_seq,
+                                               const llm::Message& summary) {
+    std::lock_guard lock(mu_);
+    // REPLACE, exactly like the append path's error handler: the summary is
+    // model output and dump() throws type_error.316 on invalid UTF-8.
+    const std::string content_json =
+        MessageToJson(summary).dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
+
+    // Upsert, not INSERT: each successful compaction REPLACES the previous
+    // checkpoint -- its covered range is a strict superset (the new summary
+    // range always contains the old one, since compaction folds from the head)
+    // and only the latest is ever read.
+    CachedStmt upsert(db_, prepared_,
+                      "INSERT INTO compactions (session_id, boundary_seq, summary_content_json,"
+                      " created_at) VALUES (?, ?, ?, ?)"
+                      " ON CONFLICT(session_id) DO UPDATE SET boundary_seq = excluded.boundary_seq,"
+                      " summary_content_json = excluded.summary_content_json,"
+                      " created_at = excluded.created_at;",
+                      "failed to save compaction checkpoint");
+    sqlite3_bind_text(upsert.stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(upsert.stmt, 2, boundary_seq);
+    // STATIC + explicit length, same reasoning as the append path: content can
+    // be large, ~CachedStmt clears bindings, nothing retains the pointer.
+    sqlite3_bind_text(upsert.stmt, 3, content_json.data(), static_cast<int>(content_json.size()),
+                      SQLITE_STATIC);
+    sqlite3_bind_int64(upsert.stmt, 4, NextTimestamp());
+    if (sqlite3_step(upsert.stmt) != SQLITE_DONE) {
+        ThrowSqliteError(db_, "failed to save compaction checkpoint");
+    }
+}
+
+void SessionDatabase::ClearCompactionCheckpoint(const std::string& session_id) {
+    std::lock_guard lock(mu_);
+    CachedStmt del(db_, prepared_, "DELETE FROM compactions WHERE session_id = ?;",
+                   "failed to clear compaction checkpoint");
+    sqlite3_bind_text(del.stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
+    if (sqlite3_step(del.stmt) != SQLITE_DONE) {
+        ThrowSqliteError(db_, "failed to clear compaction checkpoint");
+    }
+}
+
+std::optional<CompactionCheckpoint> SessionDatabase::LoadCompactionCheckpoint(
+    const std::string& session_id) const {
+    std::string json;
+    CompactionCheckpoint out;
+    {
+        std::lock_guard lock(mu_);
+        CachedStmt query(db_, prepared_,
+                         "SELECT boundary_seq, summary_content_json, created_at"
+                         " FROM compactions WHERE session_id = ?;",
+                         "failed to load compaction checkpoint");
+        sqlite3_bind_text(query.stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
+        const int rc = sqlite3_step(query.stmt);
+        if (rc == SQLITE_DONE) return std::nullopt;  // no checkpoint: clean, not an error
+        if (rc != SQLITE_ROW) ThrowSqliteError(db_, "failed to load compaction checkpoint");
+        out.boundary_seq = sqlite3_column_int64(query.stmt, 0);
+        json = reinterpret_cast<const char*>(sqlite3_column_text(query.stmt, 1));
+        out.created_at_unix_ms = sqlite3_column_int64(query.stmt, 2);
+        // session_id is a PRIMARY KEY, so exactly one row; confirm the scan is
+        // over rather than trusting that (BUSY/IOERR must not read as "done").
+        CheckRowLoopEnd(db_, sqlite3_step(query.stmt), "failed to load compaction checkpoint");
+    }
+    // Strict decode outside the lock, same as the message read paths: an
+    // undecodable summary is corruption and must surface, not silently
+    // truncate the resumed view.
+    out.summary = JsonToMessage(nlohmann::json::parse(json));
+    out.session_id = session_id;
+    return out;
+}
+
+std::vector<StoredMessage> SessionDatabase::LoadMessagesFrom(const std::string& session_id,
+                                                             std::int64_t after_seq) const {
+    // Same shape and strictness as LoadMessages -- the checkpoint-resume path
+    // is exactly as damaged by a short read -- with the seq floor that keeps a
+    // resumed long session's load proportional to the kept context.
+    struct RawRow {
+        std::int64_t seq;
+        std::string json;
+        int token_count;
+        std::int64_t created_at;
+    };
+    std::vector<RawRow> rows;
+    {
+        std::lock_guard lock(mu_);
+        CachedStmt query(db_, prepared_,
+                         "SELECT seq, content_json, token_count, created_at FROM messages"
+                         " WHERE session_id = ?1 AND seq > ?2 ORDER BY seq ASC;",
+                         "failed to load messages after seq");
+        sqlite3_bind_text(query.stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int64(query.stmt, 2, after_seq);
+        int rc = SQLITE_OK;
+        while ((rc = sqlite3_step(query.stmt)) == SQLITE_ROW) {
+            RawRow row;
+            row.seq = sqlite3_column_int64(query.stmt, 0);
+            row.json = reinterpret_cast<const char*>(sqlite3_column_text(query.stmt, 1));
+            row.token_count = sqlite3_column_int(query.stmt, 2);
+            row.created_at = sqlite3_column_int64(query.stmt, 3);
+            rows.push_back(std::move(row));
+        }
+        CheckRowLoopEnd(db_, rc, "failed to load messages after seq");
+    }
+
+    std::vector<StoredMessage> out;
+    out.reserve(rows.size());
+    for (auto& row : rows) {
+        StoredMessage stored;
+        stored.seq = row.seq;
+        stored.message = JsonToMessage(nlohmann::json::parse(row.json));
+        stored.token_count = row.token_count;
+        stored.created_at_unix_ms = row.created_at;
+        out.push_back(std::move(stored));
+    }
+    return out;
 }
 
 std::filesystem::path ResolveSessionDbPath(const std::string& configured) {

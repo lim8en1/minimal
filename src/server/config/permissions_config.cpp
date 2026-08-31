@@ -45,6 +45,20 @@ PermissionsConfig ParsePermissionsConfig(const nlohmann::json& doc) {
         if (doc.contains("mcp_default_mode")) {
             config.mcp_default_mode = ParsePermissionMode(doc.at("mcp_default_mode").get<std::string>());
         }
+        if (doc.contains("advisor")) {
+            config.advisor = doc.at("advisor").get<std::string>();
+        }
+        if (doc.contains("advisor_inherit")) {
+            config.advisor_inherit = doc.at("advisor_inherit").get<bool>();
+        }
+        if (doc.contains("advisor_timeout_ms")) {
+            const auto value = doc.at("advisor_timeout_ms").get<int>();
+            if (value < 0) {
+                throw std::runtime_error(
+                    "permissions.json: advisor_timeout_ms must be >= 0 (0 disables the budget)");
+            }
+            config.advisor_timeout_ms = value;
+        }
     } catch (const nlohmann::json::exception& error) {
         throw std::runtime_error(std::string("permissions.json: ") + error.what());
     }

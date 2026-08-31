@@ -1,5 +1,9 @@
 #include "minimal/agent/session.hpp"
 
+#include <algorithm>
+
+#include "minimal/mcp/mcp_client_manager.hpp"
+
 #include "minimal/agent/provider_instance_cache.hpp"
 
 #include <exception>
@@ -23,15 +27,35 @@ Session::Session(SessionParams params, AgentPreset preset,
                  std::shared_ptr<llm::LlmProvider> provider, std::unique_ptr<HistoryStore> store,
                  tools::ToolRegistry& registry, LoopConfig loop_config,
                  SessionObserverRegistry& observers, common::Logger& logger,
-                 std::vector<llm::Message> seeded_history)
+                 std::vector<llm::Message> seeded_history,
+                 std::optional<std::int64_t> seed_first_persisted_seq, bool seed_head_is_summary)
     : params_(std::move(params)),
       preset_(std::move(preset)),
       logger_(logger),
       observers_(observers),
       provider_(std::move(provider)),
       store_(std::move(store)),
-      checker_(params_.session_id, queue_, pending_),
-      confirmations_(params_.session_id, queue_, pending_),
+      // Track M: the registry injects the reader when the transcript is
+      // SQLite-backed; plain tests on fake stores leave it null and tools see
+      // ctx.history == nullptr. The window is built here, bound to THIS
+      // session's id -- a subagent's window is bound to the child's id the
+      // same way, which is what isolates the child's transcript from the
+      // parent's (docs/EXTENSIBILITY.md §2.1).
+      history_reader_(std::move(params_.history_reader)),
+      history_window_(history_reader_
+                          ? std::make_unique<session::HistoryWindow>(*history_reader_,
+                                                                     params_.session_id)
+                          : nullptr),
+      // The channels block comes from the producer when it composed a checker
+      // that had to be built against the queue and pending maps (an advised
+      // permission checker, docs/EXTENSIBILITY.md §3); otherwise Session makes
+      // its own, which is what every plain session and test does.
+      channels_(params_.channels ? std::move(params_.channels) : MakeSessionChannels()),
+      checker_(params_.permission_checker ? std::move(params_.permission_checker)
+                                          : std::make_unique<rpc::WirePermissionChecker>(
+                                                params_.session_id, channels_->queue,
+                                                channels_->pending)),
+      confirmations_(params_.session_id, channels_->queue, channels_->pending),
       // The run mode the client asked for wins over the configured default: it
       // is a property of the CLIENT, not of the config. A headless run has no
       // human to answer a prompt, so it must be able to say so. apply_run_mode()
@@ -39,9 +63,17 @@ Session::Session(SessionParams params, AgentPreset preset,
       // spawner has already clamped the override against the parent's run mode,
       // and hands down the parent's policies as ceilings and the parent's
       // grants as seed -- the whole inheritance lands in this one call.
-      executor_(registry, checker_, preset_.permission_mode, preset_.mcp_permissions,
+      executor_(registry, *checker_, preset_.permission_mode, preset_.mcp_permissions,
                 params_.run_mode_override.value_or(preset_.run_mode), params_.policy_ceiling,
                 params_.mcp_policy_ceiling, params_.seed_grants) {
+    // An advised checker was composed before this Session existed, so only its
+    // shared cancel holder could not yet be bound to a session: install the
+    // predicate now. The worker starts at the end of this constructor, so there
+    // is no window in which an advisor sees the default "never cancelled".
+    if (params_.advisor_cancel_source) {
+        params_.advisor_cancel_source->is_cancelled = [this] { return IsCancelled(); };
+    }
+
     // Seeded from what the client asked for. THE REGISTRY already applied it to
     // the preset before construction, but applying is not the same as
     // remembering: /agent re-resolves the preset from disk, and without the
@@ -57,9 +89,12 @@ Session::Session(SessionParams params, AgentPreset preset,
     SessionContext context{logger_};
     context.session_id = params_.session_id;
     context.project_root = params_.project_root;
+    // ToolContext::history for every tool this session runs; null when there
+    // is no SQLite-backed reader behind it.
+    context.history = history_window_.get();
 
     const std::string session_id = params_.session_id;
-    auto* queue = &queue_;
+    auto* queue = &channels_->queue;
 
     context.tool_output_sink = [queue, session_id](std::string_view tool_use_id,
                                                    std::string_view chunk) {
@@ -70,7 +105,7 @@ Session::Session(SessionParams params, AgentPreset preset,
         queue->Push(std::move(event));
     };
 
-    context.tool_lifecycle_sink = [queue, session_id](const ToolLifecycleEvent& lifecycle) {
+    context.tool_lifecycle_sink = [this, queue, session_id](const ToolLifecycleEvent& lifecycle) {
         v1::ServerEvent event = MakeEvent(session_id);
         auto* execution = event.mutable_tool_execution();
         execution->set_tool_use_id(lifecycle.tool_use_id);
@@ -80,6 +115,28 @@ Session::Session(SessionParams params, AgentPreset preset,
         if (!lifecycle.started) execution->set_is_error(lifecycle.is_error);
         execution->set_started_at_unix_ms(lifecycle.started_at_unix_ms);
         queue->Push(std::move(event));
+
+        // AND THE OBSERVER SIDE, which had no producer at all. ARCHITECTURE.md
+        // documents OnToolExecuted as one of the four SessionObserver hooks, and
+        // NotifyToolExecuted's only caller in the whole tree was its own unit
+        // test -- so a plugin implementing the documented hook got silence,
+        // which is worse than the hook not existing.
+        //
+        // On the FINISH event only: a started/finished pair is the wire's
+        // concern (a client has a panel to clear), whereas an observer wants one
+        // record of a completed call. Fired for a FAILED tool too, for the same
+        // reason the wire event is.
+        if (lifecycle.started) return;
+        ToolInvocation invocation;
+        invocation.tool_use_id = lifecycle.tool_use_id;
+        invocation.tool_name = lifecycle.tool_name;
+        invocation.is_error = lifecycle.is_error;
+        invocation.duration = lifecycle.duration;
+        // `summary` stays empty deliberately: the only honest summary is the
+        // tool's own disclosure, which is built for a permission prompt and is
+        // not reached when the call is pre-approved. An observer that wants
+        // detail has SessionReader and the tool_use_id.
+        observers_.NotifyToolExecuted(info_, std::move(invocation));
     };
 
     // Returning false aborts the provider request. This is the cancellation path
@@ -100,14 +157,54 @@ Session::Session(SessionParams params, AgentPreset preset,
     //
     // seeded_history is non-empty only on resume: the stored transcript becomes
     // the loop's working history WITHOUT being re-appended to the store it was
-    // loaded from.
+    // loaded from. The seq/head companions carry where that seed's persisted
+    // portion begins, which is what compaction checkpoints are written against.
     loop_ = std::make_unique<AgentLoop>(*provider_, executor_, registry, *store_, preset_,
                                          loop_config, std::move(context),
                                          [this] { return IsCancelled(); }, std::move(event_sink),
-                                         compact_messages, std::move(seeded_history));
+                                         compact_messages, std::move(seeded_history),
+                                         seed_first_persisted_seq, seed_head_is_summary);
+
+    // MCP liveness at session start, BEFORE the worker exists: this thread is
+    // allowed to block (the RPC reader is a different one), and the loop must
+    // already carry its final server set when the first turn can run.
+    mcp_manager_ = params_.mcp_manager;
+    if (mcp_manager_ != nullptr) RefreshMcpServers();
 
     observers_.NotifySessionCreated(info_);
     worker_ = std::thread([this] { WorkerMain(); });
+}
+
+void Session::RefreshMcpServers() {
+    std::vector<std::string> live;
+    live.reserve(preset_.allowed_mcp_servers.size());
+    for (const auto& server : preset_.allowed_mcp_servers) {
+        // Once failed, disabled for this session's life: re-testing on every
+        // /agent switch would make an operator's typo a per-switch stall, and
+        // the surfaced error already told the client what happened.
+        if (std::find(disabled_mcp_servers_.begin(), disabled_mcp_servers_.end(), server) !=
+            disabled_mcp_servers_.end()) {
+            continue;
+        }
+        std::string error;
+        if (mcp_manager_->EnsureAlive(server, error)) {
+            live.push_back(server);
+            continue;
+        }
+        disabled_mcp_servers_.push_back(server);
+        // Surfaced, not swallowed: an ErrorEvent on the outbound queue is the
+        // same channel a failed turn uses, so the client sees WHY the
+        // server's tools never appeared.
+        v1::ServerEvent event = MakeEvent(params_.session_id);
+        auto* err = event.mutable_error();
+        err->set_category(v1::LLM_ERROR_CATEGORY_UNSPECIFIED);
+        err->set_message(error);
+        err->set_is_retryable(false);
+        channels_->queue.Push(std::move(event));
+        logger_.warn("session {}: MCP server '{}' disabled: {}", params_.session_id, server,
+                     error);
+    }
+    loop_->SetMcpServers(std::move(live));
 }
 
 Session::~Session() { Terminate(); }
@@ -144,7 +241,7 @@ bool Session::SubmitTurn(std::string text) {
         error->set_category(v1::LLM_ERROR_CATEGORY_UNSPECIFIED);
         error->set_message("session backlog is full; turn refused");
         error->set_is_retryable(false);
-        if (!queue_.TryPush(std::move(event))) {
+        if (!channels_->queue.TryPush(std::move(event))) {
             logger_.warn("session {}: turn refused and the queue is full; client will not see it",
                          params_.session_id);
         }
@@ -183,7 +280,7 @@ void Session::RejectCommand(const QueuedCommand& command, const std::string& rea
     result->set_request_id(command.request_id);
     result->set_status(v1::COMMAND_STATUS_ERROR);
     result->set_message(reason);
-    if (!queue_.TryPush(std::move(event))) {
+    if (!channels_->queue.TryPush(std::move(event))) {
         logger_.warn("session {}: command '{}' refused and the queue is full; client will not "
                      "see it",
                      params_.session_id, command.name);
@@ -225,6 +322,10 @@ void Session::ApplyPreset(AgentPreset preset) {
     }
     executor_.SetRunMode(params_.run_mode_override.value_or(preset_.run_mode));
     loop_->SetPreset(preset_);
+    // The new preset may allow different MCP servers. Runs on the worker at a
+    // turn boundary (the same blocking contract as a preset swap): a dead
+    // server in the new list is surfaced here, never discovered mid-turn.
+    if (mcp_manager_ != nullptr) RefreshMcpServers();
 
     if (!provider_changed) return;
     if (provider_factories_ == nullptr) {
@@ -293,7 +394,7 @@ void Session::EmitCommandResult(v1::ServerEvent event, const QueuedCommand& comm
     // layer's command pool, and only the worker is allowed to block. A full
     // queue means the client is stalled or gone; losing one command answer is
     // the correct degradation there, logged so it is not silent.
-    if (!queue_.TryPush(std::move(event))) {
+    if (!channels_->queue.TryPush(std::move(event))) {
         logger_.warn("session {}: queue is full; CommandResult for '{}' dropped",
                      params_.session_id, command.name);
     }
@@ -318,6 +419,10 @@ void Session::Cancel() {
     // generation as its base and runs uncancelled. One mechanism, no
     // clear-timing race in either direction.
     cancel_gen_.fetch_add(1, std::memory_order_acq_rel);
+    // Fire the turn's token: a tool parked on its cv (MCP call) wakes now,
+    // not on its next poll slice. Everything a live token's waiters do from
+    // here is the same path a deadline takes -- a cancelled tool call.
+    cancel_source_.CancelAll();
     // Wakes a worker parked on a permission prompt. Without this, cancelling
     // during an Ask would set a flag nobody is in a position to read.
     //
@@ -326,7 +431,7 @@ void Session::Cancel() {
     // prompt in the session answering "no answer" instantly, which
     // WirePermissionChecker turns into Deny, so one CancelTurn would silently
     // deny-lock a session that reports itself alive and keeps accepting turns.
-    pending_.CancelAll();
+    channels_->pending.CancelAll();
 }
 
 void Session::Terminate() {
@@ -338,9 +443,14 @@ void Session::Terminate() {
     }
 
     // NOT a cancel-generation bump: Terminate ends the SESSION, and IsCancelled
-    // already folds terminated_ in. Shutting pending requests is what wakes a
-    // worker parked on a gate mid-teardown.
-    pending_.Shutdown();
+    // already folds terminated_ in. It DOES fire the cancel tokens, though --
+    // a tool blocked on a token cv must wake to unwind. Shutting pending
+    // requests is the other half of the same wakeup: it releases a worker
+    // parked on a gate mid-teardown -- including one parked in
+    // WirePermissionChecker::check on a question the client will never answer
+    // (the other half of the two-file dependency documented at that Push).
+    cancel_source_.CancelAll();
+    channels_->pending.Shutdown();
     turn_cv_.notify_all();
 
     // Close BEFORE the join, and the order is the whole point. Push() blocks at
@@ -351,7 +461,7 @@ void Session::Terminate() {
     // already-queued event to a writer that is still attached. The only events
     // lost are ones the dying turn pushes after this point, for a session whose
     // consumer is going away regardless.
-    queue_.Close();
+    channels_->queue.Close();
 
     if (worker_.joinable() && worker_.get_id() != std::this_thread::get_id()) worker_.join();
 
@@ -389,6 +499,13 @@ void Session::WorkerMain() {
             // member comment for why the generation exists at all.
             turn_cancel_base_.store(cancel_gen_.load(std::memory_order_acquire),
                                     std::memory_order_relaxed);
+            // The turn's cancellation token: the loop hands it to every
+            // ToolContext, so a tool blocked on a condition variable (MCP)
+            // wakes the moment Cancel or Terminate fires. Minted AFTER the
+            // generation snapshot, exactly like the base above: a token from
+            // the previous turn stays fired for its own stragglers, and this
+            // turn starts clean.
+            loop_->SetCancelToken(cancel_source_.Mint());
             item = std::move(work_.front());
             work_.pop_front();
             running_turn_ = true;
@@ -435,7 +552,7 @@ void Session::RunOneTurn(std::string text) {
         // can retry.
         v1::ServerEvent event = MakeEvent(params_.session_id);
         *event.mutable_error() = rpc::ToProto(error);
-        queue_.Push(std::move(event));
+        channels_->queue.Push(std::move(event));
         logger_.warn("session {}: turn failed: {}", params_.session_id, error.what());
     } catch (const std::exception& e) {
         v1::ServerEvent event = MakeEvent(params_.session_id);
@@ -443,7 +560,7 @@ void Session::RunOneTurn(std::string text) {
         error->set_category(v1::LLM_ERROR_CATEGORY_UNSPECIFIED);
         error->set_message(e.what());
         error->set_is_retryable(false);
-        queue_.Push(std::move(event));
+        channels_->queue.Push(std::move(event));
         logger_.warn("session {}: turn threw: {}", params_.session_id, e.what());
     } catch (...) {
         // Neither an LlmError nor a std::exception. The catches above existed to
@@ -456,7 +573,7 @@ void Session::RunOneTurn(std::string text) {
         error->set_category(v1::LLM_ERROR_CATEGORY_UNSPECIFIED);
         error->set_message("the turn threw an unrecognized exception");
         error->set_is_retryable(false);
-        queue_.Push(std::move(event));
+        channels_->queue.Push(std::move(event));
         logger_.warn("session {}: turn threw a non-standard exception", params_.session_id);
     }
 
@@ -487,6 +604,9 @@ void Session::RunOneTurn(std::string text) {
         summary.last_seq = store_->last_appended_seq();
         summary.stop_reason = result.stop_reason;
         summary.usage = result.last_usage;
+        // Specified by ARCHITECTURE.md since track I and shipped permanently
+        // empty, because the loop collected it nowhere and this never set it.
+        summary.tool_names_invoked = std::move(result.tool_names_invoked);
         summary.duration = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - started);
         observers_.NotifyTurnCompleted(info_, std::move(summary));
@@ -500,8 +620,16 @@ void Session::RunOneTurn(std::string text) {
         // flight. Fired on EVERY exit path -- `result` is default-constructed
         // after a failed turn, which is exactly what a waiter needs to unblock
         // with an error.
-        if (params_.on_turn_finished) {
-            subagent_finished_.store(true, std::memory_order_release);
+        // EXCHANGE, not store. Terminate() guards the same hook with an
+        // exchange and its comment claims that makes the pair exactly-once --
+        // which was true only because Terminate joins this worker before reading
+        // the flag, i.e. because of the JOIN, not because of the exchange. A
+        // claim resting on a mechanism other than the one it names is how the
+        // next edit breaks it; with both sides exchanging, exactly-once holds
+        // whatever the ordering. Firing twice would set a std::promise twice,
+        // which throws.
+        if (params_.on_turn_finished &&
+            !subagent_finished_.exchange(true, std::memory_order_acq_rel)) {
             params_.on_turn_finished(result);
         }
     } catch (...) {
@@ -516,7 +644,7 @@ void Session::EmitTurnCompleted(llm::StopReason stop_reason, const llm::Usage& u
     completed->set_stop_reason(rpc::ToProto(stop_reason));
     *completed->mutable_usage() = rpc::ToProto(usage);
     completed->set_hit_max_turns(hit_max_turns);
-    queue_.Push(std::move(event));
+    channels_->queue.Push(std::move(event));
 }
 
 bool Session::idle() const {

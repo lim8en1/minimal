@@ -5,7 +5,9 @@
 
 namespace minimal::agent {
 
-SessionObserverRegistry::SessionObserverRegistry(common::Logger& logger) : logger_(logger) {
+SessionObserverRegistry::SessionObserverRegistry(common::Logger& logger,
+                                                 std::size_t task_queue_size)
+    : logger_(logger), tasks_(task_queue_size) {
     dispatcher_ = std::thread([this] {
         // One thread, so tasks run in the order they were queued. That ordering
         // IS the contract: OnSessionCreated must be delivered before the
@@ -45,7 +47,21 @@ void SessionObserverRegistry::Dispatch(std::function<void(SessionObserver&)> cal
     }
 
     outstanding_.fetch_add(1, std::memory_order_acq_rel);
-    tasks_.Push([this, snapshot = std::move(snapshot), call = std::move(call)] {
+    // TryPush, NEVER Push, and the containment property this class advertises is
+    // the reason. Push blocks at the queue's cap, and the threads that dispatch
+    // are not allowed to block: NotifySessionCreated runs inside Session's
+    // constructor, which SessionRegistry::CreateResolved calls from the gRPC
+    // HANDLER thread, and NotifySessionEnded runs from Session::Terminate on the
+    // reaper and in ~SessionRegistry. So a wedged observer -- the documented
+    // failure mode, "sessions keep running; only notifications stop" -- would
+    // fill the queue and then block session creation and teardown outright,
+    // including the one thread the three-thread topology forbids from blocking.
+    //
+    // Dropping a notification to a consumer that has stopped consuming is the
+    // correct degradation; stalling the transport is not. Counted rather than
+    // silent, because a plugin that misses an OnSessionEnded leaks its
+    // per-session state and the only evidence would otherwise be the leak.
+    if (!tasks_.TryPush([this, snapshot = std::move(snapshot), call = std::move(call)] {
         for (const auto& observer : snapshot) {
             // Observers are plugin code, so a throw is expected rather than
             // exceptional. One misbehaving observer must not stop the others --
@@ -59,7 +75,17 @@ void SessionObserverRegistry::Dispatch(std::function<void(SessionObserver&)> cal
                 logger_.warn("session observer threw a non-std exception");
             }
         }
-    });
+    })) {
+        // Refused: the queue is full (a wedged observer) or already closed
+        // (shutdown). Undo the outstanding count the task will never decrement,
+        // or WaitForIdleForTesting spins forever on a task that does not exist.
+        outstanding_.fetch_sub(1, std::memory_order_acq_rel);
+        const auto n = dropped_.fetch_add(1, std::memory_order_acq_rel) + 1;
+        if (!tasks_.closed()) {
+            logger_.warn("session observer notification dropped (queue full); {} dropped so far",
+                         n);
+        }
+    }
 }
 
 void SessionObserverRegistry::NotifySessionCreated(SessionInfo info) {

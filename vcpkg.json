@@ -11,15 +11,15 @@
     "sqlite3",
     "nlohmann-json",
     "yaml-cpp",
-    "spdlog"
+    "spdlog",
+    "tree-sitter"
   ],
   "features": {
     "client": {
       "description": "Build the FTXUI TUI client",
       "dependencies": [
         "ftxui",
-        "md4c",
-        "tree-sitter"
+        "md4c"
       ]
     },
     "tests": {

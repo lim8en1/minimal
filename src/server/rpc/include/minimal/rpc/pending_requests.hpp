@@ -19,8 +19,28 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <variant>
 
 namespace minimal::rpc {
+
+// WHAT AN ANSWER IS, made a type rather than left as a string. Two brokers
+// share one PendingRequests (the permission checker and the confirmation
+// broker), and a bare std::string payload kept them apart only by convention:
+// the wire reader knew which kind it was dispatching, the waiter guessed by
+// parsing or comparing. With the variant, a cross-delivered answer -- a client
+// responding to a confirmation id with a permission payload, or vice versa --
+// is structurally unreadable at the waiter instead of merely failing to parse.
+// The "perm-"/"confirm-" id prefixes remain, as diagnostics, but they are no
+// longer load-bearing.
+struct PermissionAnswer {
+    // Still serialized at this layer: parsing the proto stays on the worker,
+    // which can afford to fail, not on the reader, which must not stall.
+    std::string serialized_response;
+};
+struct ConfirmationAnswer {
+    std::string chosen_option;
+};
+using PendingAnswer = std::variant<PermissionAnswer, ConfirmationAnswer>;
 
 class PendingRequests {
 public:
@@ -52,7 +72,7 @@ public:
         // session is terminating. Callers must treat it as exactly that, never
         // as a decision: mapping it onto Deny here would put a policy choice
         // inside a synchronisation primitive.
-        std::optional<std::string> AwaitResponse();
+        std::optional<PendingAnswer> AwaitResponse();
 
         const std::string& request_id() const { return request_id_; }
 
@@ -74,8 +94,10 @@ public:
     // is not an error: a client may answer a request whose session has already
     // terminated, and the honest response to that is to drop it. Unknown ids are
     // never buffered for a future waiter -- that would let a client grow this map
-    // without bound by answering requests that were never asked.
-    bool Resolve(const std::string& request_id, std::string chosen_option);
+    // without bound by answering requests that were never asked. The reader
+    // constructs the answer variant from the ClientEvent's own payload case, so
+    // it never parses anything and the type travels with the value.
+    bool Resolve(const std::string& request_id, PendingAnswer answer);
 
     // TWO CANCELLATIONS, because the session has two of them and they mean
     // different things (Session::Cancel ends the TURN, Session::Terminate ends
@@ -105,7 +127,7 @@ private:
     bool AnswerIsUnreachable(std::uint64_t epoch) const { return shutdown_ || epoch != epoch_; }
 
     struct Slot {
-        std::optional<std::string> answer;
+        std::optional<PendingAnswer> answer;
     };
 
     mutable std::mutex mutex_;

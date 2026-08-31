@@ -50,13 +50,36 @@
 #include "minimal/rpc/pending_requests.hpp"
 #include "minimal/rpc/wire_confirmation_broker.hpp"
 #include "minimal/rpc/wire_permission_checker.hpp"
+#include "minimal/session/history_window.hpp"
+#include "minimal/session/session_reader.hpp"
+#include "minimal/tools/permission_advisor.hpp"
+#include "minimal/tools/permission_checker.hpp"
 #include "minimal/tools/tool_executor.hpp"
 #include "minimal/tools/tool_registry.hpp"
 #include "minimal/v1/session_service.pb.h"
 
+namespace minimal::mcp {
+class McpClientManager;       // borrowed via SessionParams::mcp_manager
+}  // namespace minimal::mcp
+
 namespace minimal::agent {
 
 class ProviderInstanceCache;  // borrowed via set_provider_instance_cache
+
+// The session's two transport-side primitives, extracted from Session into a
+// shareable block: the params PRODUCER creates them so it can also build a
+// WirePermissionChecker (or a decoration over one) before the Session exists --
+// the seam the permission advisor composes through (docs/EXTENSIBILITY.md §3).
+// Session owns the block through a shared_ptr; the queue and pending maps are
+// exactly the members Session used to hold, unchanged in behavior.
+struct SessionChannels {
+    rpc::EventQueue<v1::ServerEvent> queue;
+    rpc::PendingRequests pending;
+};
+
+inline std::shared_ptr<SessionChannels> MakeSessionChannels() {
+    return std::make_shared<SessionChannels>();
+}
 
 struct SessionParams {
     std::string session_id;
@@ -64,6 +87,20 @@ struct SessionParams {
     std::string name;
     std::string agent_preset;
     std::filesystem::path project_root;
+    // The transport-side primitives this session uses. Producers create one via
+    // MakeSessionChannels() whenever they also build a checker (below); null
+    // means Session creates its own -- the path every plain test takes.
+    std::shared_ptr<SessionChannels> channels;
+    // The permission decision source for this session. Null means the wire
+    // checker (the default -- prompts round-trip to the client). A producer
+    // that configured an advisor composes AdvisedPermissionChecker(wire) and
+    // injects it; a test injects any fake. ToolExecutor sees one checker
+    // either way.
+    std::unique_ptr<tools::PermissionChecker> permission_checker;
+    // Set only when permission_checker is an AdvisedPermissionChecker composed
+    // around this shared holder: Session installs its own cancel predicate into
+    // it in the constructor body, before the worker starts. Null otherwise.
+    std::shared_ptr<tools::AdvisorCancelSource> advisor_cancel_source;
     // Set when the client asked for a specific mode (the headless client asks
     // for AllowOnly); unset means the preset's configured mode stands. For a
     // subagent the spawner has ALREADY clamped it against the parent's via
@@ -78,6 +115,14 @@ struct SessionParams {
     // before construction. The session row must already exist either way --
     // the database mints ids -- but a fresh session's transcript is empty.
     bool resume = false;
+
+    // The read side of the session's durable transcript, injected by the
+    // registry (which owns the database). Session owns it and builds the
+    // HistoryWindow that reaches tools as ToolContext::history
+    // (docs/EXTENSIBILITY.md §2.1, track M). Null when a session's store is
+    // not SQLite-backed -- plain test Sessions on fake stores -- which makes
+    // ctx.history null: the natural "unavailable" case, not an error path.
+    std::shared_ptr<const session::SessionReader> history_reader;
 
     // --- Subagent inheritance (empty/unset for a top-level session) ----------
     // Grants the parent already held at spawn time. Re-prompting for every
@@ -95,6 +140,11 @@ struct SessionParams {
     // the final text, release a blocking parent, and queue a non-blocking
     // parent's completion injection.
     std::function<void(const TurnResult&)> on_turn_finished;
+
+    // Borrowed, like the registry: the manager outlives every session. Null
+    // (no mcps.json entries, or tests without MCP) simply means no live MCP
+    // servers and no liveness checks.
+    mcp::McpClientManager* mcp_manager = nullptr;
 };
 
 // One item of work for the session worker. A variant rather than two queues,
@@ -118,11 +168,15 @@ public:
     // tests can drive one without a database file.
     // `seeded_history` is the RESUME path: the stored transcript, loaded
     // without being re-appended (the store already holds it). Empty for a new
-    // session.
+    // session. The seq/head companions tell the loop where the seed's persisted
+    // portion begins -- what compaction checkpoints are written against (see
+    // AgentLoop's constructor for the invariant).
     Session(SessionParams params, AgentPreset preset, std::shared_ptr<llm::LlmProvider> provider,
             std::unique_ptr<HistoryStore> store, tools::ToolRegistry& registry,
             LoopConfig loop_config, SessionObserverRegistry& observers, common::Logger& logger,
-            std::vector<llm::Message> seeded_history = {});
+            std::vector<llm::Message> seeded_history = {},
+            std::optional<std::int64_t> seed_first_persisted_seq = std::nullopt,
+            bool seed_head_is_summary = false);
 
     // Terminates and joins. A Session is never destroyed with its worker running.
     ~Session();
@@ -170,10 +224,10 @@ public:
     void Terminate();
 
     // Drained by the writer thread; the sole Write() source.
-    rpc::EventQueue<v1::ServerEvent>& queue() { return queue_; }
+    rpc::EventQueue<v1::ServerEvent>& queue() { return channels_->queue; }
     // Resolved from the reader thread when a Permission/Confirmation response
     // arrives.
-    rpc::PendingRequests& pending() { return pending_; }
+    rpc::PendingRequests& pending() { return channels_->pending; }
 
     const SessionInfo& info() const { return info_; }
 
@@ -192,6 +246,14 @@ public:
     // read-only commands (running off the worker) read.
     AgentPreset preset_snapshot() const override;
     void ApplyPreset(AgentPreset preset) override;
+
+    // Session-start and /agent liveness resolution against the McpClientManager:
+    // for every server in the preset's allowed_mcp_servers, EnsureAlive; a
+    // failure disables the server FOR THIS SESSION (recorded, surfaced as an
+    // ErrorEvent) and the session proceeds without it. Sets the loop's live
+    // server list. Runs where blocking is allowed -- session construction and
+    // the worker at a preset-switch boundary -- never the RPC reader.
+    void RefreshMcpServers();
     const std::optional<common::ModelRef>& model_override() const override {
         return model_override_;
     }
@@ -213,6 +275,7 @@ public:
     }
     // The shared instance cache the rebuild above routes through. Optional:
     // without it the rebuild constructs a private instance (test sessions).
+    void set_mcp_manager(mcp::McpClientManager* manager) { mcp_manager_ = manager; }
     void set_provider_instance_cache(ProviderInstanceCache* cache) {
         provider_instance_cache_ = cache;
     }
@@ -283,9 +346,20 @@ private:
     std::shared_ptr<llm::LlmProvider> provider_;
     std::unique_ptr<HistoryStore> store_;
 
-    rpc::EventQueue<v1::ServerEvent> queue_;
-    rpc::PendingRequests pending_;
-    rpc::WirePermissionChecker checker_;
+    // Track M: the read side of the durable transcript and the tool-facing
+    // window over it (docs/EXTENSIBILITY.md §2.1). Declared BEFORE loop_ so
+    // destruction order is safe: loop_ is destroyed first, and it is what
+    // borrows history_window_ -- the borrowed pointer never outlives the
+    // window. Null pair when the store is not SQLite-backed (plain tests).
+    std::shared_ptr<const session::SessionReader> history_reader_;
+    std::unique_ptr<session::HistoryWindow> history_window_;
+
+    // The transport-side primitives, created here or shared in via params (see
+    // SessionParams::channels).
+    std::shared_ptr<SessionChannels> channels_;
+    // The permission decision source: the wire default built here, or the
+    // producer's composition (an advised checker, a test fake) moved in.
+    std::unique_ptr<tools::PermissionChecker> checker_;
     rpc::WireConfirmationBroker confirmations_;
 
     tools::ToolExecutor executor_;
@@ -296,6 +370,11 @@ private:
     const AgentPresetRegistry* presets_ = nullptr;
     const llm::ProviderFactoryRegistry* provider_factories_ = nullptr;
     ProviderInstanceCache* provider_instance_cache_ = nullptr;
+    mcp::McpClientManager* mcp_manager_ = nullptr;
+    // Servers that failed a liveness check in THIS session. Disabled for the
+    // session's life: the session proceeds without them (ARCHITECTURE.md, MCP
+    // client), and later /agent switches do not re-test them.
+    std::vector<std::string> disabled_mcp_servers_;
     // The user's explicit model choice. Outranks the preset's, and survives
     // /agent re-resolving it.
     std::optional<common::ModelRef> model_override_;
@@ -316,6 +395,11 @@ private:
     // Written by the worker when it pops a turn; read by IsCancelled on the
     // worker's own call stack (loop, sink, tools, compactor).
     std::atomic<std::uint64_t> turn_cancel_base_{0};
+    // The event-driven face of the same mechanism: the worker mints a token
+    // per turn (recorded in the agent loop, handed to every ToolContext), and
+    // Cancel/Terminate fire every live one, so a tool blocked on a condition
+    // variable wakes immediately instead of polling. See tools/cancel_token.hpp.
+    tools::CancelSource cancel_source_;
     std::atomic<bool> terminated_{false};
     // A subagent's life is one seeded turn; once its completion hook has fired,
     // a stray client-submitted turn would fire it a second time, so SubmitTurn

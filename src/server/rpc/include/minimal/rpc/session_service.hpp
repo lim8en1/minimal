@@ -38,8 +38,13 @@
 #include "minimal/config/settings_config.hpp"
 #include "minimal/rpc/auth_interceptor.hpp"
 #include "minimal/rpc/command_executor.hpp"
+#include "minimal/tools/permission_advisor.hpp"
 #include "minimal/session/session_reader.hpp"
 #include "minimal/v1/session_service.grpc.pb.h"
+
+namespace minimal::mcp {
+class McpClientManager;
+}  // namespace minimal::mcp
 
 namespace minimal::rpc {
 
@@ -47,7 +52,8 @@ class SessionServiceImpl final : public v1::SessionService::Service {
 public:
     SessionServiceImpl(agent::SessionRegistry& sessions, session::SessionDatabase& db,
                        config::SettingsConfig settings, config::PermissionsConfig permissions,
-                       common::Logger& logger);
+                       common::Logger& logger,
+                       const tools::PermissionAdvisorRegistry* permission_advisors = nullptr);
 
     grpc::Status CreateSession(grpc::ServerContext* context,
                                const v1::CreateSessionRequest* request,
@@ -77,6 +83,7 @@ public:
     // Optional: a service without one answers every invocation with "not
     // available" rather than dropping it. Set before serving.
     void set_commands(const commands::CommandRegistry* commands) { commands_ = commands; }
+    void set_mcp_manager(mcp::McpClientManager* manager) { mcp_manager_ = manager; }
 
     // Optional; absent means the pass-through default (no authentication), which
     // matches the local-only topology. Set before serving.
@@ -105,17 +112,24 @@ private:
     grpc::Status ResumeSession(const v1::CreateSessionRequest* request,
                                v1::CreateSessionResponse* response);
 
-    // Reader thread. Returns false if the stream should end.
     // Reader thread. Every branch is non-blocking -- that is the property the
     // three-thread topology depends on, not an implementation detail.
     void Dispatch(const v1::ClientEvent& event, agent::Session& session);
+
     // Read-only commands go to the bounded command pool, everything else to the
     // session's work queue. Reader thread; must not block on either path.
+    void DispatchCommand(const v1::CommandInvocation& invocation, agent::Session& session);
+
     // Parses CreateSessionRequest.model onto params. Shared by fresh creation
     // and resume, so the two cannot disagree about whether --model applies.
     grpc::Status ApplyModelOverride(const v1::CreateSessionRequest& request,
                                     agent::SessionParams& params) const;
-    void DispatchCommand(const v1::CommandInvocation& invocation, agent::Session& session);
+
+    // Detach and drop this stream's reference, firing on_last_client_detached_
+    // if it was the last. BOTH exits of OpenSession go through here: the catch
+    // path used to decrement without firing, which left the refcounted server
+    // unable to ever notice it had zero clients.
+    void ReleaseAttachment(agent::Session& session);
 
     // Runs read-only commands off the reader thread. Its destructor joins the
     // pool, and a task may borrow `sessions_`/`commands_` -- both outlive this
@@ -126,6 +140,7 @@ private:
     // Borrowed and optional: a service built without commands answers every
     // invocation with "not available" rather than dropping it.
     const commands::CommandRegistry* commands_ = nullptr;
+    mcp::McpClientManager* mcp_manager_ = nullptr;
     // Borrowed and optional: absent = pass-through (see auth_provider.hpp).
     const AuthProviderRegistry* auth_providers_ = nullptr;
     // Borrowed and optional: null falls back to the core default resolver.
@@ -133,6 +148,9 @@ private:
     session::SessionDatabase& db_;
     session::SessionReader reader_;
     config::SettingsConfig settings_;
+    // Borrowed and optional: absent = no advisor can be selected, every Ask
+    // reaches the human. Selected per session in the params producers below.
+    const tools::PermissionAdvisorRegistry* permission_advisors_ = nullptr;
     config::PermissionsConfig permissions_;
     common::Logger& logger_;
 

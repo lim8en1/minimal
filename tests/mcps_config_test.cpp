@@ -100,6 +100,30 @@ TEST_CASE("ParseMcpsConfig: missing name falls back to the entry position in the
     CHECK(config.errors[0].find("#1") != std::string::npos);
 }
 
+TEST_CASE("ParseMcpsConfig: a missing name is a named error, never a json exception",
+          "[mcps_config][invariant]") {
+    // entry.at("name") threw json.exception.out_of_range into the blanket
+    // catch, so a missing key read like a library bug while every neighbouring
+    // field had a hand-written message. Fails with the fix reverted: the error
+    // text used to contain "json.exception".
+    auto entry = StdioEntry();
+    entry.erase("name");
+    auto config = ParseMcpsConfig(nlohmann::json::array({entry}));
+    REQUIRE(config.errors.size() == 1);
+    CHECK(config.errors[0].find("name") != std::string::npos);
+    CHECK(config.errors[0].find("json.exception") == std::string::npos);
+}
+
+TEST_CASE("ParseMcpsConfig: a missing transport is a named error, never a json exception",
+          "[mcps_config][invariant]") {
+    auto entry = HttpEntry();
+    entry.erase("transport");
+    auto config = ParseMcpsConfig(nlohmann::json::array({entry}));
+    REQUIRE(config.errors.size() == 1);
+    CHECK(config.errors[0].find("transport") != std::string::npos);
+    CHECK(config.errors[0].find("json.exception") == std::string::npos);
+}
+
 TEST_CASE("ParseMcpsConfig: duplicate name is a per-entry error", "[mcps_config]") {
     auto config = ParseMcpsConfig(nlohmann::json::array({StdioEntry(), StdioEntry()}));
     REQUIRE(config.entries.size() == 1);

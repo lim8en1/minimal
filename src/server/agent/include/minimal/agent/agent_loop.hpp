@@ -23,6 +23,7 @@
 #include "minimal/llm/provider.hpp"
 #include "minimal/llm/stream_event.hpp"
 #include "minimal/llm/token_accounting.hpp"
+#include "minimal/session/history_window.hpp"
 #include "minimal/tools/tool.hpp"
 #include "minimal/tools/tool_executor.hpp"
 #include "minimal/tools/tool_registry.hpp"
@@ -65,6 +66,10 @@ struct ToolLifecycleEvent {
     bool started = false;
     bool is_error = false;  // meaningful only when started == false
     std::int64_t started_at_unix_ms = 0;
+    // Wall time the call took, set on the FINISH event only. SessionObserver's
+    // ToolInvocation carries a duration and this is the only place that knows
+    // it; the wire event derives its own from the start timestamp.
+    std::chrono::milliseconds duration{0};
 };
 
 // Session-scoped, as distinct from the preset (which is switchable via /agent)
@@ -90,6 +95,12 @@ struct SessionContext {
     // a free function so a later per-session sink (session-id prefix) is an
     // implementation detail of the wiring, not of the tools.
     common::Logger& logger;
+
+    // The session's tool-facing history window (see ToolContext::history). Owned
+    // by the Session, which outlives this loop; null when the session's store is
+    // not SQLite-backed (test fakes), which makes ctx.history null -- the
+    // natural "unavailable" case, not an error path.
+    const session::HistoryWindow* history = nullptr;
 };
 
 struct TurnResult {
@@ -100,6 +111,11 @@ struct TurnResult {
     llm::Usage last_usage;
     int provider_calls = 0;
     bool hit_max_turns = false;
+    // Every tool this turn invoked, in call order, duplicates included -- it is
+    // a record of what happened, not a set. Feeds TurnSummary::tool_names_invoked,
+    // which ARCHITECTURE.md has always specified and which was shipped
+    // permanently empty because nothing populated it.
+    std::vector<std::string> tool_names_invoked;
 };
 
 // Summarizes a message range into one synthetic message. Injected so the
@@ -129,7 +145,19 @@ public:
               // so auto-compaction can fire BEFORE the first post-resume
               // provider call -- without that, a resumed session whose stored
               // context exceeds the window would fail the call outright.
-              std::vector<llm::Message> seeded_history = {});
+              std::vector<llm::Message> seeded_history = {},
+              // Where the seed's PERSISTED portion begins in the store's seq
+              // space -- what the compaction checkpoint's boundary_seq derives
+              // from. nullopt for a fresh session (nothing persisted yet) or a
+              // seed with no persisted messages. With a checkpoint seed, this
+              // is boundary_seq + 1 and head_is_summary is true: the seed's
+              // first message is the synthetic summary, which is not in the
+              // store. The INVARIANT that makes this one number sufficient:
+              // the persisted messages in history_ are always a contiguous
+              // suffix of the stored transcript, because appends continue at
+              // MAX(seq)+1 and compaction only ever folds from the head.
+              std::optional<std::int64_t> seed_first_persisted_seq = std::nullopt,
+              bool seed_head_is_summary = false);
 
     // Appends `seed_message`, then runs to a natural stop. A subagent's entire
     // life is one call to this -- there is one loop implementation, not two.
@@ -167,6 +195,19 @@ public:
     void SetPreset(AgentPreset preset) { preset_ = std::move(preset); }
     const AgentPreset& preset() const { return preset_; }
 
+    // The allowed-AND-alive MCP server set, resolved by the session against the
+    // McpClientManager at construction and at every /agent switch (a preset
+    // change can re-scope the servers). A dead server's exclusion is exactly
+    // this list: the model never sees tools for a server that is not in it.
+    // WORKER THREAD ONLY, like SetPreset.
+    void SetMcpServers(std::vector<std::string> servers) { mcp_servers_ = std::move(servers); }
+
+    // The current turn's cancellation token, minted by the session when it
+    // pops the turn. Handed to every ToolContext so blocking tools can wait
+    // on its cv instead of polling. May be null between turns (tools cannot
+    // observe that: they only run inside a turn). WORKER THREAD ONLY.
+    void SetCancelToken(tools::CancelTokenPtr token) { cancel_token_ = std::move(token); }
+
     // /model across providers: the session builds the new provider and rebinds
     // it. A reference, not an owner -- the session owns the object.
     void SetProvider(llm::LlmProvider& provider) { provider_ = provider; }
@@ -190,6 +231,8 @@ private:
     tools::ToolRegistry& registry_;
     HistoryStore& store_;
     AgentPreset preset_;
+    std::vector<std::string> mcp_servers_;
+    tools::CancelTokenPtr cancel_token_;
     LoopConfig config_;
     SessionContext session_;
     std::function<bool()> is_cancelled_;
@@ -197,6 +240,15 @@ private:
     Compactor compactor_;
 
     std::vector<llm::Message> history_;
+    // Compaction-checkpoint bookkeeping: where the persisted suffix of history_
+    // begins in the store's seq space, and whether the head message is the
+    // synthetic summary (which exists only in history_, never in the store).
+    // Together they yield the boundary_seq a checkpoint is written with:
+    // persisted messages covered by the next summary end just before
+    // first_persisted_seq_ after the fold. Both are worker-thread-only state,
+    // like everything else on the loop except injected_.
+    std::optional<std::int64_t> first_persisted_seq_;
+    bool head_is_summary_ = false;
     // Guarded because it crosses threads: a non-blocking subagent's worker
     // queues its completion here while THIS session's worker flushes at turn
     // boundaries. Everything else on the loop stays worker-thread-only.

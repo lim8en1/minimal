@@ -40,10 +40,17 @@ public:
     MessagePage GetMessages(const std::string& session_id, int before_seq, int limit) const = delete;
 
     // The full transcript, ascending by seq -- the one-shot load resume seeds
-    // the loop's working history with. Not a scrollback path: GetMessages pages
-    // precisely so reading a 1M-token history stays bounded, and this is the
-    // only read allowed to materialize the whole thing.
+    // the loop's working history with when no compaction checkpoint exists.
+    // Not a scrollback path: GetMessages pages precisely so reading a 1M-token
+    // history stays bounded, and this is the only read allowed to materialize
+    // the whole thing.
     std::vector<StoredMessage> LoadAll(const std::string& session_id) const;
+
+    // The tail after `after_seq` (exclusive), ascending -- the checkpoint
+    // resume path pairs this with the checkpoint's summary, so resuming a long
+    // session loads the kept context, not the transcript it outgrew.
+    std::vector<StoredMessage> LoadAfter(const std::string& session_id,
+                                         std::int64_t after_seq) const;
 
 private:
     SessionDatabase& db_;

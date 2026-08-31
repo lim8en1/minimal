@@ -18,4 +18,13 @@ void SqliteHistoryStore::Append(const llm::Message& message, std::optional<int> 
     last_seq_.store(seq, std::memory_order_release);
 }
 
+void SqliteHistoryStore::SaveCompactionCheckpoint(std::int64_t boundary_seq,
+                                                  const llm::Message& summary) {
+    db_.SaveCompactionCheckpoint(session_id_, boundary_seq, summary);
+}
+
+void SqliteHistoryStore::ClearCompactionCheckpoint() {
+    db_.ClearCompactionCheckpoint(session_id_);
+}
+
 }  // namespace minimal::session

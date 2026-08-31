@@ -163,6 +163,48 @@ TEST_CASE("scanner names an interpreter without special-casing it", "[tools_bash
     CHECK((result.command_words == std::vector<std::string>{"bash"}));
 }
 
+TEST_CASE("shell keywords do not consume the command slot", "[tools_bash][scanner]") {
+    // THE REGRESSION, and it was a live authorisation hole rather than a missed
+    // grant. `then` was recorded as the program of its list, which demoted `rm`
+    // to an argument -- so `rm` was never disclosed, `complete` stayed true
+    // because nothing had failed, and a session already holding a grant on the
+    // harmless `ls` satisfied the whole conjunction and ran `rm -rf /` with no
+    // prompt at all. See the invariant in command_scanner.hpp.
+    const auto branch = ScanCommand("ls; if true; then rm -rf /; fi");
+    CHECK(Names(branch, "rm"));
+    CHECK_FALSE(Names(branch, "then"));
+    CHECK_FALSE(Names(branch, "if"));
+    CHECK_FALSE(Names(branch, "fi"));
+
+    // The same slot-stealing shape in every other compound form.
+    CHECK(Names(ScanCommand("for f in *.o; do rm $f; done"), "rm"));
+    CHECK(Names(ScanCommand("while read -r l; do rm $l; done"), "rm"));
+    CHECK(Names(ScanCommand("time rm -rf /"), "rm"));
+    CHECK(Names(ScanCommand("! rm -rf /"), "rm"));
+    CHECK(Names(ScanCommand("if [ -f x ]; then rm x; else mv y x; fi"), "mv"));
+
+    // A keyword alone names nothing, and nothing nameable means incomplete --
+    // it must not resolve to a complete, empty disclosure that grants itself.
+    CHECK_FALSE(ScanCommand("fi").complete);
+}
+
+TEST_CASE("scanner treats $'...' as the literal word it is", "[tools_bash][scanner]") {
+    // `$'` used to be consumed as a two-character `$x` token, leaving the
+    // closing quote to open a fresh quote region that swallowed the rest of the
+    // line -- so the pipeline stage after it vanished from the disclosure.
+    const auto ansi = ScanCommand("grep $'\\t' file | wc -l");
+    CHECK(ansi.complete);
+    CHECK(Names(ansi, "grep"));
+    CHECK(Names(ansi, "wc"));
+
+    // A program spelled with ANSI-C quoting is still a literal program.
+    const auto quoted = ScanCommand("$'rm' -rf /");
+    CHECK(quoted.complete);
+    CHECK((quoted.command_words == std::vector<std::string>{"rm"}));
+
+    CHECK_FALSE(ScanCommand("grep $'unterminated").complete);
+}
+
 TEST_CASE("scanner disclosure is a lower bound", "[tools_bash][scanner]") {
     // Documenting the accepted limit rather than pretending it away: semantic
     // indirection is invisible to any parser, so the prompt wording must not
@@ -173,6 +215,85 @@ TEST_CASE("scanner disclosure is a lower bound", "[tools_bash][scanner]") {
     CHECK_FALSE(Names(result, "rm"));  // rm is xargs' argument, not a command word
 }
 
+// --- scanner: the grammar ----------------------------------------------------------
+//
+// The tree-sitter-bash rewrite adds two guarantees the hand-rolled walker
+// could not make: input the parser does not understand fails closed, and
+// constructs that are data rather than commands are no longer scanned as
+// commands. The tests above are the contract this half must keep unchanged.
+
+TEST_CASE("scanner fails closed on input the grammar does not understand",
+          "[tools_bash][scanner]") {
+    // tree-sitter is error-recovering: it produces a tree for garbage rather
+    // than refusing. ERROR and MISSING nodes are the only signal that it
+    // guessed, and a guessed parse must not report itself complete -- that is
+    // exactly how the reserved-word hole once authorized more than the
+    // operator saw.
+    CHECK_FALSE(ScanCommand("echo \"unclosed").complete);   // ERROR node
+    CHECK_FALSE(ScanCommand("foo $( bar").complete);        // MISSING ')'
+    CHECK_FALSE(ScanCommand("rm -rf /; if true; then").complete);  // MISSING fi
+
+    // Failing closed does not mean failing usefully-blind: what DID parse is
+    // still named, so a grant on the literal prefix can do its job once the
+    // operator has seen the rest.
+    CHECK(Names(ScanCommand("foo $( bar"), "foo"));
+    CHECK(Names(ScanCommand("rm -rf /; if true; then"), "rm"));
+}
+
+TEST_CASE("heredoc bodies are data, not commands", "[tools_bash][scanner]") {
+    // The hand-rolled walker scanned heredoc bodies as commands, so this
+    // offered a grant for rm -- a program that only ever existed as an
+    // echoed line of text.
+    const auto result = ScanCommand("cat <<'EOF'\nrm -rf /\nEOF");
+    CHECK(result.complete);
+    CHECK((result.command_words == std::vector<std::string>{"cat"}));
+    CHECK_FALSE(Names(result, "rm"));
+}
+
+TEST_CASE("scanner names command positions the grammar structures",
+          "[tools_bash][scanner]") {
+    // Function bodies, subshells, case arms: the grammar yields command_name
+    // nodes at each, where the walker approximated or over-recorded.
+    CHECK(Names(ScanCommand("f() { rm -rf /; }"), "rm"));
+    CHECK(Names(ScanCommand("(cd /tmp && ls)"), "cd"));
+    CHECK(Names(ScanCommand("(cd /tmp && ls)"), "ls"));
+    CHECK(Names(ScanCommand("case $x in a) rm -rf /;; esac"), "rm"));
+
+    // `coproc` is one of the two keywords the grammar leaves UNstructured --
+    // it parses as a plain command with `{ rm -rf /; }` smeared into its
+    // arguments -- so the reserved-word rule must recover the real program
+    // from among them.
+    CHECK(Names(ScanCommand("coproc thing { rm -rf /; }"), "rm"));
+
+    // Conversely, positions that are NOT commands are no longer recorded as
+    // programs. The old walker named the loop variable `f` (and `[`), each of
+    // which could only ever contribute a junk grant offer.
+    CHECK_FALSE(Names(ScanCommand("for f in *.o; do rm $f; done"), "f"));
+    CHECK_FALSE(Names(ScanCommand("if [ -f x ]; then rm x; fi"), "["));
+}
+
+TEST_CASE("a computed program is incomplete even mid-word", "[tools_bash][scanner]") {
+    // `foo$(nproc) bar`: the program is built by substitution, so there is no
+    // literal to name. The old walker saw a word that merely BEGAN with a
+    // literal and confidently recorded `foo` -- over-confident in exactly the
+    // way `complete` exists to prevent. The substitution's own command is
+    // still a literal and still named.
+    const auto computed = ScanCommand("foo$(nproc) bar");
+    CHECK_FALSE(computed.complete);
+    CHECK(Names(computed, "nproc"));
+    CHECK_FALSE(Names(computed, "foo"));
+
+    CHECK_FALSE(ScanCommand("v$i").complete);
+}
+
+TEST_CASE("quoted programs are named unquoted", "[tools_bash][scanner]") {
+    // The disclosure feeds PATH resolution, so the program a quoted spelling
+    // invokes -- not its quote characters -- is what must be named.
+    CHECK((ScanCommand("'ls' -la").command_words == std::vector<std::string>{"ls"}));
+    CHECK((ScanCommand("\"echo\" hi").command_words == std::vector<std::string>{"echo"}));
+    CHECK((ScanCommand("$'rm' -rf /").command_words == std::vector<std::string>{"rm"}));
+}
+
 // --- settings ----------------------------------------------------------------------
 
 TEST_CASE("bash settings take defaults when absent or nonsensical", "[tools_bash][settings]") {
@@ -181,21 +302,23 @@ TEST_CASE("bash settings take defaults when absent or nonsensical", "[tools_bash
     CHECK(defaults.max_output_bytes == 1024 * 1024);
     CHECK(defaults.shell == "/bin/sh");
 
+    // The plugin's own plugins.json "config" object, verbatim -- flat keys,
+    // every one of them belonging to this tool.
     const nlohmann::json configured = {
-        {"bash", {{"timeout_ms", 5000}, {"max_output_bytes", 64}, {"shell", "/bin/dash"}}}};
+        {"timeout_ms", 5000}, {"max_output_bytes", 64}, {"shell", "/bin/dash"}};
     const auto settings = tools_bash::ParseBashSettings(configured);
     CHECK(settings.timeout_ms == 5000);
     CHECK(settings.max_output_bytes == 64);
     CHECK(settings.shell == "/bin/dash");
 
-    const nlohmann::json nonsense = {{"bash", {{"timeout_ms", 0}, {"max_output_bytes", -1}}}};
+    const nlohmann::json nonsense = {{"timeout_ms", 0}, {"max_output_bytes", -1}};
     const auto fallback = tools_bash::ParseBashSettings(nonsense);
     CHECK(fallback.timeout_ms == 120000);
     CHECK(fallback.max_output_bytes == 1024 * 1024);
 
     // A ceiling below the default would silently shorten every command that did
     // not ask for a timeout, which is not what configuring a maximum means.
-    const nlohmann::json inverted = {{"bash", {{"timeout_ms", 90000}, {"max_timeout_ms", 1000}}}};
+    const nlohmann::json inverted = {{"timeout_ms", 90000}, {"max_timeout_ms", 1000}};
     CHECK(tools_bash::ParseBashSettings(inverted).max_timeout_ms == 90000);
 }
 
@@ -282,6 +405,39 @@ TEST_CASE("a command that exits early leaves state unchanged", "[tools_bash][sta
     CHECK(out.result.is_error);
     CHECK(out.result.content_text.find("exit status: 3") != std::string::npos);
     CHECK(f.Cwd() == before);
+}
+
+TEST_CASE("a trailing backslash does not swallow the state trailer", "[tools_bash][state]") {
+    // `echo hi \` + trailer is one logical line to the shell -- backslash-
+    // newline is a continuation -- so the marker became an ARGUMENT and the
+    // model saw "hi __minimal_rc=0" instead of "hi". Fails with the fix
+    // reverted.
+    Fixture f;
+    const auto out = f.Run({{"command", "echo hi \\"}});
+    CHECK_FALSE(out.result.is_error);
+    CHECK(out.result.content_text == "hi\n");
+
+    // State still round-trips across the continuation.
+    std::filesystem::create_directories(f.dir.path() / "sub");
+    REQUIRE_FALSE(f.Run({{"command", "cd sub && echo ok \\"}}).result.is_error);
+    CHECK(f.Cwd() == std::filesystem::canonical(f.dir.path()) / "sub");
+}
+
+TEST_CASE("a directory named with a slash offers no grant", "[tools_bash][disclosure]") {
+    // The slash branch of ResolveOnPath omitted is_regular_file, so
+    // access(dir, X_OK) -- which succeeds for directories on POSIX -- offered
+    // a grant for a path that cannot be a program. Over-disclosure only, but
+    // disclosure is what consent is given against. Fails with the fix
+    // reverted: the grants included the directory itself.
+    Fixture f;
+    std::filesystem::create_directories(f.dir.path() / "sub");
+    const auto disclosure = f.Disclose({{"command",
+                                         (f.dir.path() / "sub").string() + " && ls"}});
+    CHECK(disclosure.complete);
+    CHECK(Offers(disclosure, "/ls"));
+    for (const auto& offer : disclosure.grants) {
+        CHECK(offer.key.find("/sub") == std::string::npos);
+    }
 }
 
 TEST_CASE("a corrupted state payload leaves state unchanged", "[tools_bash][state]") {
@@ -549,6 +705,42 @@ TEST_CASE("granting a real pipeline silences the prompt for the next one",
     // A third binary was never disclosed before, so it must ask again.
     const auto third = executor.Run("tu3", "bash", {{"command", "ls | sort | wc -l"}}, ctx);
     CHECK_FALSE(third.is_error);
+    CHECK(checker.seen.size() == 2);
+}
+
+TEST_CASE("a keyword-hidden program is not silenced by an unrelated grant",
+          "[tools_bash][disclosure][integration]") {
+    // The whole hole, end to end. Disclose() executes nothing, so this half can
+    // carry the real string: `rm` must reach the operator's prompt.
+    Fixture f;
+    const auto disclosure = f.Disclose({{"command", "ls; if true; then rm -rf /; fi"}});
+    CHECK(disclosure.complete);
+    CHECK(Offers(disclosure, "/rm"));
+    CHECK(Offers(disclosure, "/ls"));
+
+    // And the half that runs: a grant on `ls` must NOT satisfy the conjunction
+    // for a second command hiding another program behind `then`. `sort` stands
+    // in for `rm` here for the obvious reason; the scanner cannot tell them
+    // apart, which is the point. Before the fix the disclosure named only `ls`,
+    // reported itself complete, and this ran with checker.seen still at 1.
+    tools::ToolRegistry registry;
+    registry.Register(tools_bash::MakeBashTool(f.settings, f.store));
+
+    testing::GrantingPermissionChecker checker;
+    tools::PermissionPolicy policy;
+    policy.execute = tools::PermissionMode::Ask;
+    tools::ToolExecutor executor(registry, checker, policy, {}, tools::PermissionRunMode::Normal);
+
+    tools::ToolContext ctx{common::DefaultLogger()};
+    ctx.session_id = "s1";
+    ctx.project_root = f.dir.path();
+
+    CHECK_FALSE(executor.Run("tu1", "bash", {{"command", "ls"}}, ctx).is_error);
+    REQUIRE(checker.seen.size() == 1);
+
+    CHECK_FALSE(
+        executor.Run("tu2", "bash", {{"command", "ls; if true; then sort /dev/null; fi"}}, ctx)
+            .is_error);
     CHECK(checker.seen.size() == 2);
 }
 

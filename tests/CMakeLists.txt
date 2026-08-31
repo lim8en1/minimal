@@ -7,6 +7,7 @@ target_link_libraries(minimal_test_support INTERFACE minimal::server_core)
 
 add_executable(minimal_tests
     permission_test.cpp
+    permission_advisor_test.cpp
     permission_chain_test.cpp
     path_confinement_test.cpp
     sse_parser_test.cpp
@@ -22,6 +23,7 @@ add_executable(minimal_tests
     "${CMAKE_SOURCE_DIR}/plugins/server/commands-core/core_commands.cpp"
     token_accounting_test.cpp
     config_paths_test.cpp
+    logger_test.cpp
     tool_executor_test.cpp
     agent_loop_test.cpp
     http_client_test.cpp
@@ -30,11 +32,20 @@ add_executable(minimal_tests
     openai_stream_test.cpp
     openai_error_mapping_test.cpp
     plugin_loader_test.cpp
+    plugin_discovery_test.cpp
     aliased_tool_test.cpp
     provider_factory_registry_test.cpp
+    model_catalog_test.cpp
+    model_catalog_live_test.cpp
     permission_codec_test.cpp
     providers_config_test.cpp
     mcps_config_test.cpp
+    mcp_naming_test.cpp
+    mcp_tool_test.cpp
+    mcp_connection_test.cpp
+    mcp_client_manager_test.cpp
+    session_mcp_test.cpp
+    mcp_e2e_test.cpp
     sanity_check_test.cpp
     settings_config_test.cpp
     permissions_config_test.cpp
@@ -60,6 +71,7 @@ add_executable(minimal_tests
     session_registry_test.cpp
     subagent_spawn_test.cpp
     subagent_test.cpp
+    tool_history_test.cpp
     session_service_test.cpp
     subagent_e2e_test.cpp
     headless_e2e_test.cpp
@@ -80,6 +92,7 @@ add_executable(minimal_tests
     "${CMAKE_SOURCE_DIR}/plugins/server/provider-openai/openai_response.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/provider-openai/openai_stream_reassembler.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/provider-openai/openai_error_mapping.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/provider-openai/openai_model_catalog.cpp"
     # Same pattern for tools-fs: pure logic depending only on core headers, so
     # linked directly rather than exercised through dlopen.
     "${CMAKE_SOURCE_DIR}/plugins/server/tools-fs/fs_tools.cpp"
@@ -90,7 +103,9 @@ add_executable(minimal_tests
     "${CMAKE_SOURCE_DIR}/plugins/server/tools-bash/bash_tool.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/tools-bash/bash_settings.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/tools-bash/bash_session_state.cpp"
-    "${CMAKE_SOURCE_DIR}/plugins/server/tools-bash/command_scanner.cpp")
+    "${CMAKE_SOURCE_DIR}/plugins/server/tools-bash/command_scanner.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/tools-bash/restart_shell.cpp"
+    service_registry_test.cpp)
 
 target_include_directories(minimal_tests PRIVATE
     "${CMAKE_SOURCE_DIR}/plugins/server/tools-fs")
@@ -107,7 +122,8 @@ target_include_directories(minimal_tests PRIVATE
 # warns about it). Depend on the bundle.
 add_subdirectory(fixtures)
 add_dependencies(minimal_tests
-    fixture-good fixture-collision fixture-bad-abi fixture-minimal fixture-not-a-plugin)
+    fixture-good fixture-collision fixture-bad-abi fixture-minimal fixture-not-a-plugin
+    fixture-throws fixture-advisor fixture-service fixture-service-b)
 target_compile_definitions(minimal_tests PRIVATE
     MINIMAL_FIXTURE_DIR="${CMAKE_CURRENT_BINARY_DIR}/fixtures"
     MINIMAL_BUNDLED_DIR="${CMAKE_SOURCE_DIR}/bundled")
@@ -124,11 +140,47 @@ target_link_libraries(minimal_tests PRIVATE
     minimal::test_support
     minimal::client_core
     Catch2::Catch2WithMain
-    SQLite3::SQLite3)
+    SQLite3::SQLite3
+    # command_scanner.cpp is compiled directly into the test binary (see the
+    # sources list above), so the scanner's tree-sitter dependencies come with
+    # it -- same linkage as the plugin.
+    minimal_tree_sitter
+    minimal_tree_sitter_bash)
+
+# Scripted stdio MCP server spawned by the MCP tests as a real child process.
+# Island build like mcp_stdio_shim.cpp: cpp-mcp's bundled json only.
+add_executable(minimal_mcp_fake_server support/mcp_fake_server.cpp)
+target_include_directories(minimal_mcp_fake_server SYSTEM PRIVATE
+    "${cpp_mcp_SOURCE_DIR}/include"
+    "${cpp_mcp_SOURCE_DIR}/common")
+target_link_libraries(minimal_mcp_fake_server PRIVATE mcp)
+target_compile_options(minimal_mcp_fake_server PRIVATE ${MINIMAL_WARNING_FLAGS})
+add_dependencies(minimal_tests minimal_mcp_fake_server)
+target_compile_definitions(minimal_tests PRIVATE
+    MINIMAL_MCP_FAKE_SERVER="$<TARGET_FILE:minimal_mcp_fake_server>")
+
+# The http-side tests use cpp-mcp's bundled (header-only) httplib as an
+# in-process streamable-http server fixture. SYSTEM: third-party header.
+target_include_directories(minimal_tests SYSTEM PRIVATE
+    "${cpp_mcp_SOURCE_DIR}/common")
 
 catch_discover_tests(minimal_tests)
 
 target_compile_options(minimal_tests PRIVATE ${MINIMAL_WARNING_FLAGS})
+
+# Live MCP smoke test against a real MCP server (stdio + streamable-http).
+# Opt-in: OFF by default so CI never builds or runs it; when ON, a missing
+# server is a FAIL, not a skip -- it is a hard requirement where enabled.
+option(MINIMAL_ENABLE_LIVE_MCP_TESTS
+       "Build the live MCP smoke test (needs 'gateway' on PATH or MINIMAL_MCP_LIVE_SERVER)" OFF)
+if(MINIMAL_ENABLE_LIVE_MCP_TESTS)
+    add_executable(minimal_mcp_live_test mcp_live_test.cpp)
+    target_link_libraries(minimal_mcp_live_test PRIVATE
+        minimal::test_support
+        Catch2::Catch2WithMain)
+    target_compile_options(minimal_mcp_live_test PRIVATE ${MINIMAL_WARNING_FLAGS})
+    catch_discover_tests(minimal_mcp_live_test)
+endif()
 
 # Config seeding is CMake, so its test is CMake. Reimplementing the copy in C++
 # to test it would assert that two copies of the logic agree -- which is the

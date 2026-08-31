@@ -40,9 +40,19 @@ McpServerEntry ParseEntry(const nlohmann::json& entry) {
     if (!entry.is_object()) throw std::runtime_error("must be an object");
 
     McpServerEntry result;
+    // contains + type checks, not entry.at(): .at() throws a raw
+    // json.exception.out_of_range ("key 'name' not found") which the blanket
+    // catch below would hand to the user verbatim, while every neighbouring
+    // field has a hand-written message. Same for "transport".
+    if (!entry.contains("name") || !entry.at("name").is_string()) {
+        throw std::runtime_error("name is required and must be a string");
+    }
     result.name = entry.at("name").get<std::string>();
     if (result.name.empty()) throw std::runtime_error("name must be a non-empty string");
 
+    if (!entry.contains("transport") || !entry.at("transport").is_string()) {
+        throw std::runtime_error("transport is required and must be \"stdio\" or \"http\"");
+    }
     const std::string transport = entry.at("transport").get<std::string>();
     if (transport == "stdio") {
         result.transport = McpTransport::Stdio;

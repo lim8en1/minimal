@@ -79,10 +79,6 @@ PermissionMode ToolExecutor::ResolveMode(const Tool& tool, const nlohmann::json&
     //     permissive than its parent. Folds like out_of_workdir -- it can only
     //     tighten -- and sits before run mode so the clamped run mode still
     //     wraps the whole decision.
-    // 2b. Subagent ceiling, when one was handed down: a child is never more
-    //     permissive than its parent. Folds like out_of_workdir -- it can only
-    //     tighten -- and sits before run mode so the clamped run mode still
-    //     wraps the whole decision.
     //
     //     Same key rule as the lookup above: the ceiling's per_tool_overrides
     //     are keyed by PERMISSION key (they come from the parent's resolved
@@ -106,7 +102,40 @@ PermissionMode ToolExecutor::ResolveMode(const Tool& tool, const nlohmann::json&
 llm::ToolResultBlock ToolExecutor::Run(const std::string& tool_use_id,
                                         const std::string& tool_name,
                                         const nlohmann::json& input, ToolContext& ctx) {
-    Tool* tool = registry_.Find(tool_name);
+    // EVERY EXIT PATH ANSWERS THE CALL, including a throw, and that is a
+    // history-integrity requirement rather than politeness. The agent loop
+    // persists the assistant message carrying the tool_use BEFORE running any
+    // tool and appends the results AFTER all of them, so an exception escaping
+    // here leaves an orphaned tool_use in history -- the exact state
+    // snap_compaction_boundary exists to prevent, and a hard 400 on both wire
+    // formats. The session survives the throw (Session::RunOneTurn catches it)
+    // and then fails every subsequent turn forever.
+    //
+    // A throw is expected here, not exceptional: everything below Find() is
+    // plugin code -- category_for, Disclose and execute are all arbitrary native
+    // code by design -- reading a JSON input the MODEL wrote. `{"offset": "1"}`
+    // is a type_error out of nlohmann, and the model has no schema obligation it
+    // can be held to. Every other plugin entry point in the tree is already
+    // wrapped this way (observers, commands); this was the one that wasn't.
+    try {
+        return RunGuarded(tool_use_id, tool_name, input, ctx);
+    } catch (const std::exception& error) {
+        ctx.logger.warn("tool '{}' threw: {}", tool_name, error.what());
+        return ErrorResult(tool_use_id, "tool '" + tool_name + "' failed: " + error.what());
+    } catch (...) {
+        ctx.logger.warn("tool '{}' threw a non-standard exception", tool_name);
+        return ErrorResult(tool_use_id,
+                           "tool '" + tool_name + "' failed with an unrecognized exception");
+    }
+}
+
+llm::ToolResultBlock ToolExecutor::RunGuarded(const std::string& tool_use_id,
+                                               const std::string& tool_name,
+                                               const nlohmann::json& input, ToolContext& ctx) {
+    // The shared_ptr copy is the lifetime guarantee: it outlives this call
+    // even if a concurrent MCP replacement removes the tool from the registry
+    // mid-invocation (the permission Ask below can block for minutes).
+    std::shared_ptr<Tool> tool = registry_.Find(tool_name);
     if (tool == nullptr) {
         return ErrorResult(tool_use_id, "unknown tool: " + tool_name);
     }

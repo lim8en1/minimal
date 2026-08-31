@@ -12,6 +12,7 @@
 #include <atomic>
 #include <chrono>
 #include <filesystem>
+#include <optional>
 #include <thread>
 #include <fstream>
 #include <memory>
@@ -21,6 +22,8 @@
 #include <unistd.h>
 
 #include <catch2/catch_test_macros.hpp>
+
+#include "minimal/client/utf8.hpp"
 
 #include "fakes.hpp"
 #include "temp_dir.hpp"
@@ -32,6 +35,32 @@ using namespace minimal;
 using namespace std::chrono_literals;
 
 namespace {
+
+// A FakeLlmProvider that counts CALLS, release-stored before the scripted step
+// is consumed. The store-then-consume order is what lets a test observe "the
+// first attempt has failed" and know the server is inside its retry backoff.
+// It proves WHEN the turn reached the provider -- not visibility of anything
+// the client's turn thread published; that needs its own edge (the handle
+// tests below use RunTurn's on_handle publication).
+class CountingFakeProvider : public testing::FakeLlmProvider {
+public:
+    explicit CountingFakeProvider(std::shared_ptr<std::atomic<int>> calls)
+        : calls_(std::move(calls)) {}
+
+    llm::ChatResponse Complete(const llm::ChatRequest& request) override {
+        calls_->fetch_add(1, std::memory_order_release);
+        return FakeLlmProvider::Complete(request);
+    }
+
+    llm::ChatResponse StreamComplete(const llm::ChatRequest& request,
+                                     const llm::StreamEventSink& sink) override {
+        calls_->fetch_add(1, std::memory_order_release);
+        return FakeLlmProvider::StreamComplete(request, sink);
+    }
+
+private:
+    std::shared_ptr<std::atomic<int>> calls_;
+};
 
 struct HeadlessFixture {
     HeadlessFixture() {
@@ -64,15 +93,35 @@ struct HeadlessFixture {
     }
 
     void Script(llm::ChatResponse response, std::vector<llm::StreamEvent> events) {
-        steps.push_back({std::move(response), std::move(events)});
+        steps.push_back({std::move(response), std::move(events), std::nullopt});
     }
 
+    // A retryable provider failure: the agent loop parks in retry backoff
+    // before reaching for the next scripted step.
+    void ScriptError(llm::LlmError error) {
+        steps.push_back({llm::ChatResponse{}, {}, std::move(error)});
+    }
+
+    // Incremented once per provider CALL (not per provider instance), so a
+    // test can rendezvous with a specific attempt -- e.g. "the first attempt
+    // has failed, the server is now parked in backoff".
+    std::shared_ptr<std::atomic<int>> provider_attempts =
+        std::make_shared<std::atomic<int>>(0);
+
     void Start() {
-        presets = std::make_unique<agent::AgentPresetRegistry>(dir, skills);
+        presets = std::make_unique<agent::AgentPresetRegistry>(
+            dir, skills, config::LoadSettingsConfig(dir / "settings.json"));
         auto scripted = std::make_shared<decltype(steps)>(steps);
-        providers.Register("fake", [scripted](const llm::ProviderConfig&) {
-            auto provider = std::make_unique<testing::FakeLlmProvider>();
-            for (const auto& step : *scripted) provider->PushResponse(step.response, step.events);
+        auto attempts = provider_attempts;
+        providers.Register("fake", [scripted, attempts](const llm::ProviderConfig&) {
+            auto provider = std::make_unique<CountingFakeProvider>(attempts);
+            for (const auto& step : *scripted) {
+                if (step.error) {
+                    provider->PushError(*step.error);
+                } else {
+                    provider->PushResponse(step.response, step.events);
+                }
+            }
             return provider;
         });
         observers = std::make_unique<agent::SessionObserverRegistry>(common::DefaultLogger());
@@ -101,6 +150,7 @@ struct HeadlessFixture {
     struct Step {
         llm::ChatResponse response;
         std::vector<llm::StreamEvent> events;
+        std::optional<llm::LlmError> error;
     };
 
     testing::TempDir tempdir;
@@ -442,4 +492,93 @@ TEST_CASE("a stored session resumes headlessly", "[headless][resume]") {
     CHECK(std::get<llm::TextBlock>(loaded[2].message.content.front()).text == "and again?");
     CHECK(std::get<llm::TextBlock>(loaded[3].message.content.front()).text ==
           "the answer is 42");
+}
+
+TEST_CASE("truncating a name at a byte limit never splits a UTF-8 character",
+          "[client][utf8]") {
+    // CreateSessionRequest.name is a proto3 string: the SERVER's parser rejects
+    // invalid UTF-8 while the client's serializer only logs, so a plain
+    // substr(0, 60) turned any non-ASCII prompt whose 60th byte landed inside a
+    // multi-byte sequence into an opaque "could not create a session" error.
+    // Same helper, exercised here because it is pure.
+    const std::string emoji = "\xf0\x9f\x99\x82";  // 4 bytes
+    std::string prompt;
+    for (int i = 0; i < 20; ++i) prompt += emoji;  // 80 bytes, no ASCII
+
+    const auto truncated = minimal::client::TruncateUtf8(prompt, 60);
+    CHECK(truncated.size() == 60);  // 15 whole emoji
+    // Every byte accounted for as a complete sequence: re-scanning finds no
+    // truncated lead byte at the end.
+    std::size_t i = 0;
+    while (i < truncated.size()) {
+        const auto c = static_cast<unsigned char>(truncated[i]);
+        const std::size_t len = (c < 0x80) ? 1 : (c >> 5) == 0x6 ? 2 : (c >> 4) == 0xE ? 3 : 4;
+        REQUIRE(i + len <= truncated.size());
+        i += len;
+    }
+
+    // A limit that lands mid-character drops that character rather than half of it.
+    CHECK(minimal::client::TruncateUtf8(emoji + emoji, 6).size() == 4);
+    CHECK(minimal::client::TruncateUtf8("ascii", 60) == "ascii");
+}
+
+TEST_CASE("a client-side cancel ends the turn with STOP_REASON_CANCELLED",
+          "[headless][cancel]") {
+    // The wire path the headless client's SIGINT handling depends on: RunTurn's
+    // handle writes a CancelTurn ClientEvent on the live stream, and the server
+    // ends the turn with its own stop reason instead of dropping the stream.
+    // The scripted first step fails retryably, so the cancel lands while the
+    // server is parked in retry backoff (500 ms base) -- the same window the
+    // manual exit-4 scenario drives against a real backend.
+    HeadlessFixture fixture;
+    fixture.ScriptError(llm::LlmError(llm::LlmErrorCategory::Transport, "connection refused"));
+    fixture.Script(testing::TextResponse("never delivered"),
+                   TextStream("never delivered", llm::StopReason::EndTurn));
+    fixture.Start();
+
+    client::SessionClient::CreateOptions options;
+    options.project_root = (fixture.dir / "work").string();
+    options.agent_preset = "main";
+    const auto created = fixture.client->CreateSession(options);
+    REQUIRE(created.status.ok());
+
+    // RunTurn blocks, so it runs on a worker. It publishes its cancel handle
+    // through the on_handle callback, on ITS OWN thread, and this test stores
+    // it behind a release-store flag: the rendezvous the provider-attempt
+    // counter provides (when to cancel -- during the retry backoff) is a
+    // server-side edge only, so the handle read needs its own.
+    std::shared_ptr<client::SessionClient::TurnHandle> handle;
+    std::atomic<bool> handle_ready{false};
+    v1::StopReason stop = v1::STOP_REASON_UNSPECIFIED;
+    std::string text;
+    grpc::Status status;
+    std::thread turn_thread([&] {
+        status = fixture.client->RunTurn(
+            created.session_id, "hello",
+            [&](const v1::ServerEvent& event) {
+                if (event.has_stream_event() && event.stream_event().has_text_delta()) {
+                    text += event.stream_event().text_delta().text();
+                }
+                if (event.has_turn_completed()) {
+                    stop = event.turn_completed().stop_reason();
+                }
+                return true;
+            },
+            [&](const std::shared_ptr<client::SessionClient::TurnHandle>& published) {
+                handle = published;
+                handle_ready.store(true, std::memory_order_release);
+            });
+    });
+
+    while (fixture.provider_attempts->load(std::memory_order_acquire) < 1) {
+        std::this_thread::sleep_for(2ms);
+    }
+    REQUIRE(handle_ready.load(std::memory_order_acquire));
+    handle->Cancel();
+
+    turn_thread.join();
+    CHECK(status.ok());
+    CHECK(stop == v1::STOP_REASON_CANCELLED);
+    CHECK_FALSE(fixture.provider_attempts->load() >= 2);  // no second attempt ran
+    CHECK(text.empty());                                  // its answer never arrived
 }

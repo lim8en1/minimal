@@ -40,6 +40,13 @@
           "context_window_tokens": 200000
         }
       }
+    },
+
+    "auto": {
+      "//": "With \"discover\": true the backend lists its own models -- no \"models\" object needed (static entries beside it still work, and a model's own window always wins over the provider default). The list is fetched lazily, never written back to this file, and /providers refresh re-fetches it on demand. Works with any OpenAI-shaped backend provider-openai covers: llama.cpp, vLLM, OpenRouter.",
+      "backend": "openai",
+      "url": "http://localhost:8000/v1",
+      "discover": true
     }
   },
 

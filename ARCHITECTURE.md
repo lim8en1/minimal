@@ -13,7 +13,7 @@ Local-first, memory/CPU-efficient coding-agent harness. C++ server/TUI-client sp
 
 - **License: MIT.**
 - **Server topology: local-only, one server per user.** Each team member installs and runs the binary on their own machine — no shared/remote server in v1. This is a *security* assumption, not just a deployment default: the bash tool, path confinement, and permission checker all assume the server acts on behalf of one trusted local user on their own filesystem. A shared/remote server (multiple people connecting to one instance) would need per-connection auth and a much stricter tool-sandboxing model, and is explicitly out of scope until revisited. A single local server does serve multiple concurrent clients.
-- **Dependency management**: vcpkg manifest mode (`vcpkg.json`) so `cmake --build .` works for any contributor without bespoke local setup. All of grpc, protobuf, curl, sqlite3, nlohmann-json, ftxui, yaml-cpp, md4c, tree-sitter (core), spdlog, and catch2 are present in the registry — verified, not assumed. Only `hkr04/cpp-mcp` is genuinely absent (niche library) and is vendored via `FetchContent`. The curated `tree-sitter-<lang>` **grammars** are also vendored that way, since vcpkg packages the core library but not the per-language parsers.
+- **Dependency management**: vcpkg manifest mode (`vcpkg.json`) so `cmake --build .` works for any contributor without bespoke local setup. All of grpc, protobuf, curl, sqlite3, nlohmann-json, ftxui, yaml-cpp, md4c, tree-sitter (core), spdlog, and catch2 are present in the registry — verified, not assumed. Only `hkr04/cpp-mcp` is genuinely absent (niche library) and is vendored via `FetchContent`. The curated `tree-sitter-<lang>` **grammars** are vendored the same way, since vcpkg packages the core library but not the per-language parsers — `tree-sitter-bash` is the first in the tree (the bash tool's command scanner), and the rest arrive with client-side highlighting.
 - **Config paths must be platform-aware** — see Config section below.
 
 ## Repository layout
@@ -125,17 +125,34 @@ gRPC permits one concurrent reader and one concurrent writer on a `ServerReaderW
 
 **Both session queues are bounded, by different rules.** The outbound `EventQueue` caps at 65,536 events and blocks the producer (`Push` is worker-only; the reader uses `TryPush` and answers refusals). The session's *work* queue (turns + mutating commands) caps at 32 items and REFUSES beyond that, answering each refusal on the wire — one turn can run for minutes, so an unbounded work queue let a client enqueue transcript-sized turns faster than the worker consumed them, growing memory without limit. Termination closes the outbound queue BEFORE joining the worker: `Push` blocks at the cap and is woken only by `Close` or `Pop`, so a worker parked on a full queue behind a stalled writer deadlocks a join that waits for a close scheduled after the join. Closing first wakes the producer; `Pop` still drains before honoring the close, so a live writer receives the backlog.
 
+**Termination runs in a fixed order, and the order is the invariant.** `Terminate` performs exactly three steps — `PendingRequests::Shutdown()` → `EventQueue::Close()` → join the worker — and each step exists to wake a worker parked at one specific spot before the next step can strand it there:
+
+- **`Shutdown()` before `Close()`** — a worker parked in `Registration::AwaitResponse()` (an unasked permission or confirmation question) is woken only by `Shutdown`; a worker parked in a blocking `Push` (full outbound queue) is woken only by `Close`. Both parks are reachable during teardown, and the two wake-ups come from different files: the blocking `Push` is `WirePermissionChecker::check` (`wire_permission_checker.cpp`), the ordering is `Session::Terminate` (`agent/session.cpp`). No comment inside either file alone can keep them correct, which is why the order is recorded here as well as at both code sites.
+- **`Close()` before the join** — as above: a full-queue `Push` parked behind a stalled writer would otherwise deadlock the join forever.
+- Swapping either pair deadlocks the worker on an unasked question or a full queue; both failure modes leave the join hanging with the test suite still green, since only an E2E termination with a mid-turn `Ask` exercises the window.
+
 **Inbound dispatch** (reader thread — every branch is non-blocking):
 
 | `ClientEvent` | Action |
 |---|---|
 | `UserChatTurn` | Push onto the session's turn queue; wake the worker. |
 | `CommandInvocation` | Read-only `HarnessCommand` → post to the bounded command pool (never a detached per-command thread: unbounded thread pileup under flood, and a shutdown window where a task outlives the registries it borrows); anything else → queue for the worker at a turn boundary. Refusals — pool saturated, work queue full — are ANSWERED on the wire, never dropped: silence on a `request_id` is a client hang. |
-| `PermissionResponse` / `ConfirmationResponse` | `PendingRequests::Resolve(request_id, choice)` — signals the blocked worker. |
+| `PermissionResponse` / `ConfirmationResponse` | `PendingRequests::Resolve(request_id, typed answer)` — signals the blocked worker. |
 | `CancelTurn` | Set the session's atomic cancel flag. |
 
 ```cpp
 // src/server/rpc/pending_requests.hpp
+
+// WHAT AN ANSWER IS, made a type. Two brokers share one PendingRequests (the
+// permission checker and the confirmation broker); a bare string payload kept
+// them apart only by convention. With the variant, a cross-delivered answer is
+// structurally unreadable at the waiter instead of merely failing to parse
+// there. The "perm-"/"confirm-" id prefixes remain as diagnostics; they are no
+// longer load-bearing.
+struct PermissionAnswer    { std::string serialized_response; };  // parsed on the worker
+struct ConfirmationAnswer  { std::string chosen_option; };
+using PendingAnswer = std::variant<PermissionAnswer, ConfirmationAnswer>;
+
 class PendingRequests {
 public:
     // Registration is SEPARATE from waiting, and returns the handle you need in
@@ -154,15 +171,17 @@ public:
         // nullopt means CANCELLED -- the session is terminating. Callers map that
         // onto a decision themselves; encoding "deny" here would put a policy
         // choice inside a synchronization primitive.
-        std::optional<std::string> AwaitResponse();
+        std::optional<PendingAnswer> AwaitResponse();
     };
     [[nodiscard]] Registration Register(std::string request_id);
 
     // Reader thread. False if no slot is registered, which is not an error: a
     // client may answer a request whose session already terminated. Unknown ids
     // are never buffered for a future waiter -- that would let a client grow this
-    // map without bound by answering things nobody asked.
-    bool Resolve(const std::string& request_id, std::string chosen_option);
+    // map without bound by answering things nobody asked. The reader constructs
+    // the variant from the ClientEvent's own payload case -- it knows the type,
+    // parses nothing, and the type travels with the value.
+    bool Resolve(const std::string& request_id, PendingAnswer answer);
 
     // Wakes every waiter with nullopt. Permanent, so a worker reaching a gate
     // DURING teardown returns instead of parking on a stopped reader.
@@ -312,6 +331,8 @@ private:
 
 `ProviderCacheKey` is the `providers.json` entry **name** plus a config-generation counter — entries are immutable at runtime, so this is sufficient, and it avoids hashing an API key into a map key. `parameters` is not part of the key: it lives on `ChatRequest`, populated fresh per call. This cache is real, not aspirational: `SessionRegistry::CreateResolved` and the `/agent`//`model` rebuild path both route through it, sessions hold a `shared_ptr` rather than ownership, and switching away from and back to an entry reuses the instance.
 
+**Model discovery — a third registry, keyed by the same kind string.** A providers.json entry may set `"discover": true`, in which case the models it serves come from the backend's own listing (`GET <url>/models`) instead of a hand-written `models` object — the point being `context_window_tokens`, the one field whose staleness silently disables compaction, and the practical unconfigurability of a provider serving fifty models. `ModelCatalogRegistry` maps the same `backend` kind string a factory registers to a `ModelCatalog` whose `List()` reports `{id, context_window_tokens, metadata}`; one OpenAI-shape implementation beside `provider-openai` covers llama.cpp (`meta.n_ctx_train`), vLLM (`max_model_len`), and OpenRouter (`context_length`) alike. Discovery is fetched **lazily at first resolve, never at startup** (the sanity check inspects it structurally — which kinds registered — and never probes), the runtime cache negative-caches failures and is never written back to `providers.json`, a failed discovery degrades to the entry's static models, and `/providers refresh` evicts and refetches on demand. The config layer never links plugins: the fetch reaches it as a hook injected from `main.cpp` after plugin load. Details and decisions in `docs/EXTENSIBILITY.md` §2.6.
+
 **The request body is serialized, not materialized.** The OpenAI serializer builds the wire body incrementally into a string — message text is escaped straight into the buffer; only O(1) pieces (tool definitions, tool_choice, `parameters` values) pass through nlohmann — and the retry loop builds the `ChatRequest` once per tool round rather than once per attempt. Against the 512k–1M token goal, a DOM of the whole history per call (let alone per retry) was the remaining RAM spike. The merge-order guarantee survives exactly: parameter keys that name structural fields are DROPPED rather than emitted after them, which preserves "structural always wins" without relying on any parser's duplicate-key resolution.
 
 `StopReason` carries a **`Cancelled`** value alongside `EndTurn`/`ToolUse`/`MaxTokens`/`StopSequence`/`ContentFilter`/`Refusal`/`Unknown`. Cancellation is expected, not exceptional, so it must not surface as an `LlmError`: the provider catches its own aborted transfer and returns a partial `ChatResponse` carrying this stop reason, and the loop treats it as a clean exit rather than a failure.
@@ -323,7 +344,7 @@ private:
 
 Counts come from the backend's own reported usage; there is no separate tokenizer. Some OpenAI-compatible proxies report `0` — no fallback estimate is designed for that, flagged as a known gap.
 
-**Transport**: no `openai-cpp` dependency (researched and rejected — blocking-only, no streaming, no typed message/tool modeling beyond raw JSON passthrough, unmaintained since April 2024, TLS verification appears off by default). Hand-rolled instead: `HttpClient` (blocking POST + streaming POST over libcurl) and `SseParser` (generic incremental SSE frame parser handling frames split across libcurl write-callback invocations). Both are exposed to plugins as consumable utilities. TLS verification left at libcurl defaults (on).
+**Transport**: no `openai-cpp` dependency (researched and rejected — blocking-only, no streaming, no typed message/tool modeling beyond raw JSON passthrough, unmaintained since April 2024, TLS verification appears off by default). Hand-rolled instead: `HttpClient` (blocking POST, streaming POST, and GET over libcurl — the GET is the model-catalog listing path, its response body buffered under an 8 MiB cap) and `SseParser` (generic incremental SSE frame parser handling frames split across libcurl write-callback invocations). Both are exposed to plugins as consumable utilities. TLS verification left at libcurl defaults (on).
 
 Retries are **not** performed inside the provider; it throws a classified `LlmError` and the agent loop owns backoff/max-attempts policy. A single error type with a category enum (not a hierarchy) crosses two boundaries cleanly: the retry decision, and translation into a gRPC error payload.
 
@@ -466,6 +487,10 @@ virtual PermissionDisclosure Tool::Disclose(const nlohmann::json&, const ToolCon
 
 **Disclosure is a lower bound**, and the prompt must say so. `complete = false` covers only *syntactic* blindness, where the program is not a literal in the string (`$X args`, `eval "$CMD"`). It cannot cover semantic indirection: `find . | xargs rm` names `find` and `xargs`, never `rm`. No parser fixes that.
 
+That lower bound has a floor the scanner owes rule 1, and it is the line between the two cases: **a program that appears as a literal in a command position is either named or `complete` is false — never both missing.** The difference from `xargs rm` is what the operator was shown. Granting xargs is a decision about xargs, taken knowingly with the lower bound stated; nobody decides anything about a program that was never disclosed. Shell reserved words broke this floor — `then` and `if` were recorded *as* the program of their list, which demoted the real one to an argument, so `ls; if true; then rm -rf /; fi` disclosed `{ls}`, called itself complete, and a held grant on `ls` satisfied the conjunction (§12.1).
+
+**The scanner is `tree-sitter-bash`** (vendored via `FetchContent`; see *Dependency management*). The grammar yields a `command_name` node at every command position — inside `if`/`while`/`for`, function bodies, subshells, command substitutions — which is the whole class of compound forms, and heredoc bodies come back as data rather than commands. But the structural win is the error signal, not the coverage: a hand-rolled walker cannot tell "I parsed this" from "I mis-parsed this", which is exactly how the reserved-word hole produced `complete = true` on a string it had misread. tree-sitter is error-recovering — it produces a tree for input it does not understand rather than refusing — so the walker checks the root for ERROR/MISSING nodes and maps their presence onto `complete = false`. A parse the grammar did not confidently understand never claims to be complete. The two keywords the grammar leaves unstructured (`time`, `coproc`) are handled by name so their real program is still disclosed.
+
 **Non-interactive mode is unaffected.** `AllowOnly` still means Ask → auto-deny; grants start empty in a headless session and stay empty, because nothing can prompt to create one. Running bash headless is `per_tool_overrides: {"bash": "allow"}` — containerisation is then the operator's responsibility, which is the contract either way.
 
 
@@ -536,16 +561,16 @@ Both `PermissionChecker`'s implementation and `CommandDispatcher` compose the sa
 
 **The dispatch split, and why it is structural.** Turns and mutating commands share ONE queue on the session, and the worker pops from it only between `RunTurn` calls — so "a command never lands between a `tool_use` and its `tool_result`" is true by construction rather than by a check someone could forget. It also makes a preset or model switch safe to swap the session's `LlmProvider` under `AgentLoop`'s reference: the worker is provably not inside a provider call at that moment.
 
-**A plugin owns the commands that touch its own state.** `/restart-shell` lives in `tools-bash`, not `commands-core`, because bash's per-session cwd/env lives inside that plugin — one `.so` cannot reach into another's state. Registering a tool *and* its associated command from the same plugin is the general pattern, and the reason `minimal_plugin_register_tools` and `..._register_commands` are independent optional symbols rather than a single "kind" of plugin.
+**A plugin owns the commands that touch its own state.** `/restart-shell` lives in `tools-bash`, not `commands-core`, because bash's per-session cwd/env lives inside that plugin and a command belongs to the plugin that owns the state it touches. Registering a tool *and* its associated command from the same plugin is the general pattern, and the reason `minimal_plugin_register_tools` and `..._register_commands` are independent optional symbols rather than a single "kind" of plugin. What other plugins may now do is *ask*: the service registry (§ Cross-plugin services) is the sanctioned pull channel, and `/restart-shell` itself resolves the store through it.
 
 ### Name collisions and aliases
 
-**Collisions are fatal**, and they are now actually *detected*: `NameRegistry` existed and was unit-tested from the beginning but nothing outside its own tests ever constructed one, so a duplicate registration silently shadowed via `insert_or_assign` and which plugin won depended on directory iteration order. `plugins/name_resolution.{hpp,cpp}` (`ResolveRegistrationNames`) feeds it from both the tool and command attributions, applies `command_aliases` routed to whichever kind claims each key, and the startup sanity check reports the result. `ToolRegistry::Register` now *shadows* a duplicate rather than destroying it — destroying the first registrant made a collision unfixable by aliasing, since the object an alias would have renamed was already gone. Two plugins registering the same tool name, command name, `ViewSpec::id`, or `ToolResultRenderer::tool_name` halt startup with a diagnostic naming both. Silent shadowing is the wrong failure mode — it makes behavior depend on plugin load order.
+**Collisions are fatal**, and they are now actually *detected*: `NameRegistry` existed and was unit-tested from the beginning but nothing outside its own tests ever constructed one, so a duplicate registration silently shadowed via `insert_or_assign` and which plugin won depended on directory iteration order. `plugins/name_resolution.{hpp,cpp}` (`ResolveRegistrationNames`) feeds it from the tool, command, and service attributions, applies `aliases` routed to whichever kind claims each key, and the startup sanity check reports the result. `ToolRegistry::Register` now *shadows* a duplicate rather than destroying it — destroying the first registrant made a collision unfixable by aliasing, since the object an alias would have renamed was already gone. Two plugins registering the same tool name, command name, service name, `ViewSpec::id`, or `ToolResultRenderer::tool_name` halt startup with a diagnostic naming both. Silent shadowing is the wrong failure mode — it makes behavior depend on plugin load order.
 
-Resolution is disabling one plugin, rebuilding, or **aliasing** via an optional `plugins.json` field:
+Resolution is disabling one plugin, rebuilding, or **aliasing** via an optional `plugins.json` field. The key is `aliases` — it applies to TOOLS as well as commands (one flat `plugin.name`-keyed namespace; a plugin shipping both a tool and a command under one original name aliases them together or not at all). It was renamed from `command_aliases`, which claimed a scope it did not have; the old key is ignored with a startup warning rather than silently applying:
 
 ```json
-"command_aliases": { "bash_over_ssh.bash": "ssh_bash", "commands-core.compact": "c" }
+"aliases": { "bash_over_ssh.bash": "ssh_bash", "commands-core.compact": "c" }
 ```
 
 Alias keys are always fully qualified, so they are unambiguous even *before* collision resolution; aliases are applied at registration, **before** the collision check, so aliasing is itself a valid way to resolve one. In practice that means `ToolRegistry::ApplyAliases()` — run once after every plugin and core built-in has registered — re-keys each aliased tool under its surface name, wrapping it in `AliasedTool` so `spec()` advertises the surface name the model must call it by. This is not the command manifest rejected above: that would have *declared* commands as data (a shadow of code, free to drift). This *overrides metadata of code-registered entries*, and a key resolving to nothing is detectable at load.
@@ -608,10 +633,15 @@ extern "C" {
   const char* minimal_plugin_version();
 
   // --- Additive: many plugins may each contribute ---
-  void minimal_plugin_register_tools(ToolRegistry&);
-  void minimal_plugin_register_commands(CommandRegistry&);
-  void minimal_plugin_register_provider_factories(ProviderFactoryRegistry&);
-  void minimal_plugin_register_session_observer(SessionObserverRegistry&);
+  void minimal_plugin_register_tools(ToolRegistry&, const PluginRegistrationContext&);
+  void minimal_plugin_register_commands(CommandRegistry&, const PluginRegistrationContext&);
+  void minimal_plugin_register_provider_factories(ProviderFactoryRegistry&,
+                                                  const PluginRegistrationContext&);
+  void minimal_plugin_register_session_observer(SessionObserverRegistry&,
+                                                const PluginRegistrationContext&);
+  void minimal_plugin_register_services(ServiceRegistry&, const PluginRegistrationContext&);
+  void minimal_plugin_register_permission_advisor(PermissionAdvisorRegistry&,
+                                                  const PluginRegistrationContext&);
 
   // --- Exclusive: one global choice. First plugin (by plugins.json order) wins;
   //     a second registration logs a warning and is ignored. ---
@@ -622,10 +652,10 @@ extern "C" {
 
 The ABI header has **two halves**, and both are frozen surface:
 
-- **Extension points** plugins *implement*: `Tool`, `Command`, provider factory, `SessionObserver`, `MentionResolver`, `AuthProvider`.
-- **Utilities** plugins *consume*: `path_confinement`, `file_access`, `atomic_write`, `HttpClient`, `Logger`, `SessionReader` (read-only history access), the frontmatter parser.
+- **Extension points** plugins *implement*: `Tool`, `Command`, provider factory, `SessionObserver`, service provider, `PermissionAdvisor`, `MentionResolver`, `AuthProvider`.
+- **Utilities** plugins *consume*: `path_confinement`, `file_access`, `atomic_write`, `HttpClient`, `Logger`, `SessionReader` (read-only history access), the frontmatter parser — and the `ServiceRegistry` pointer carried on `PluginRegistrationContext`, which is the consumer side of the service channel (§ Cross-plugin services).
 
-The surface above is verified against the tree, and the designed next points — cross-plugin services, per-plugin config, MCP lifecycle observers, the permission advisor, model auto-discovery — are catalogued with suggested architectures in `docs/EXTENSIBILITY.md`.
+The surface above is verified against the tree. The remaining designed points — MCP lifecycle observers, model auto-discovery — are catalogued with suggested architectures in `docs/EXTENSIBILITY.md`.
 
 ### `SessionObserver` — observe and react
 
@@ -670,6 +700,18 @@ public:
 The failure mode shifts accordingly. A hung observer stalls *further* notifications rather than leaking one pool thread — contained (sessions keep running; only notifications stop), and the right trade against silently racing plugin state.
 
 A throwing observer is expected rather than exceptional, since observers are plugin code: each call is wrapped, and one observer's failure never stops the others.
+
+### Cross-plugin services — ask, don't grab
+
+The sanctioned **pull** channel (`SessionObserver` is the push channel): one plugin can reach another's services without either exposing internals. The providing plugin exports `minimal_plugin_register_services(ServiceRegistry&, const PluginRegistrationContext&)` and hands the registry a non-owning pointer to an **abstract** interface under a name; the same registry pointer rides `PluginRegistrationContext::services` to every registration hook, so a consumer captures it at registration and resolves with `Find` lazily at use time — plugin load order is file order, so the consumer may load before its provider. `Find` returning null is a runtime condition (the provider is disabled), not an error: degrade with a clear message.
+
+Three rules keep it from becoming an event bus or a hidden dependency:
+
+- **Typed at the edges, named in the middle.** The provider ships a header-only, pure-virtual interface (its symbols live inside the providing `.so`, `RTLD_LOCAL`, so nothing else can call them by name — virtual dispatch needs no symbols); a consumer `static_cast`s `Find`'s result to it. The name is the only runtime coupling; the header is the contract, under the same source-compatibility model as everything else.
+- **Collisions are fatal, not shadowed.** Service names feed `NameRegistry` as their own `NameKind` — a separate namespace, so a service may share a name with a tool or command — and the startup check names both claimants. Services are not user-aliasable: the name is addressed by code, never by the model or the user.
+- **No bus, no subscribe.** Push already exists; this is pull, deliberately.
+
+First consumer: `tools-bash` provides its per-session shell state as `BashSessionStateService` (shipped header `bash_state_service.hpp`, name `tools-bash.session_state`), and `/restart-shell` resolves the store through `Find` — the same lookup a third-party consumer would use. The full §2.2 spec is `docs/EXTENSIBILITY.md`.
 
 ### `MentionResolver` and `AuthProvider`
 
@@ -845,7 +887,7 @@ private:
 
 Scrollback (`GetMessages` results) never touches `StreamingMarkdownView` — those messages are complete, so each gets one `MarkdownRenderer::Render()`.
 
-**Syntax highlighting**: **tree-sitter** core plus a curated grammar set (`cpp`, `python`, `javascript`/`typescript`, `bash`, `json`, `yaml`, `rust`, `go`). A hand-rolled regex tokenizer was considered and rejected: regex cannot soundly handle nested/context-free constructs (Rust nested block comments, C++ raw strings, JS template-literal interpolation), so it fails exactly where correctness matters, and every language becomes a bespoke ruleset to keep debugging — with visibly ugly failures, since this is user-facing output. tree-sitter's cost is front-loaded and mechanical: each grammar repo ships a generated `parser.c`, so vendoring means compiling a small C file, not running the tree-sitter CLI/Node toolchain. Per-language work is one node-type → category table.
+**Syntax highlighting**: **tree-sitter** core plus a curated grammar set (`cpp`, `python`, `javascript`/`typescript`, `bash`, `json`, `yaml`, `rust`, `go`). A hand-rolled regex tokenizer was considered and rejected: regex cannot soundly handle nested/context-free constructs (Rust nested block comments, C++ raw strings, JS template-literal interpolation), so it fails exactly where correctness matters, and every language becomes a bespoke ruleset to keep debugging — with visibly ugly failures, since this is user-facing output. tree-sitter's cost is front-loaded and mechanical: each grammar repo ships a generated `parser.c`, so vendoring means compiling a small C file, not running the tree-sitter CLI/Node toolchain. Per-language work is one node-type → category table. The `FetchContent` vendoring path this needs already exists — built for the bash tool's command scanner, one track earlier — so a grammar here is a target declaration, not new plumbing.
 
 ```cpp
 enum class HighlightCategory { Keyword, String, Comment, Number, Function, Type, Operator, Plain };
@@ -1014,6 +1056,8 @@ minimal -p PROMPT [--server TARGET] [--agent PRESET] [--model PROVIDER/MODEL]
 
 Exit codes are interface, because a script piping `-p` has to tell "the model finished" from "it was cut off" from "the call failed": `0` ok, `2` truncated (`max_tokens`/`stop_sequence`), `3` model error or `ErrorEvent`, `4` cancelled, `64` usage, `69` no reachable server.
 
+**SIGINT/SIGTERM during a turn cancel through the protocol, not by dying.** The handler does only async-signal-safe work (set a flag, write one byte to a self-pipe); a watcher thread turns that into a `CancelTurn` ClientEvent on the live stream — the same path § *Cancellation* describes — and the process exits `4` once the server reports `turn_completed` with `StopReason::Cancelled`. The signal handlers are installed only while a turn is in flight: before the turn exists there is nothing to abandon, and after it ends a late signal should kill, not defer. A second signal after the cancel was issued restores the default disposition rather than waiting out a wedged server.
+
 **Attaching to child sessions is a client protocol obligation, not a TUI behavior.** Any conforming client must attach on `SubagentStartedEvent` — otherwise the initial-attach guard would kill a subagent spawned during a headless run. Attaching is expressible without submitting work through a dedicated no-op `Attach` `ClientEvent` payload (the stream is named by its first event, and before `Attach` existed every payload did something). The headless client merges child output into its stream, or discards it under `--output-format text`.
 
 ## Agent loop — `src/server/agent/agent_loop.{hpp,cpp}`
@@ -1072,9 +1116,11 @@ Triggered from the agent loop when `memory.auto_compact` is on and a session's *
 
 Absent means never trigger (only `/compact` then). The loader rejects anything but exactly one key — a typo like `percnet` must not silently disable compaction, which is precisely the failure mode a bare unknown-key policy creates.
 
-The window-relative strategies resolve **per session, against the window of the provider entry that session actually uses** — the window rides on the resolved `AgentPreset`, not on the loop config, because `/agent` can switch provider entries mid-session and the trigger must track the window in use. A provider entry declaring no `context_window_tokens` leaves a window-relative strategy with nothing to be relative to: the trigger then never fires, and the loop says so once per session rather than silently. That is a live state, not a corner case — the seeded `providers.json` is empty and the field is optional; a buffer at least as large as the window degenerates the same way.
+The window-relative strategies resolve **per session, against the window of the provider entry that session actually uses** — the window rides on the resolved `AgentPreset`, not on the loop config, because `/agent` can switch provider entries mid-session and the trigger must track the window in use. A model with no `context_window_tokens` anywhere — its own, its provider's default, or model discovery (track N fills the gap from the backend's own listing when it can) — leaves a window-relative strategy with nothing to be relative to: the trigger then never fires, and the loop says so once per session rather than silently. That is a live state, not a corner case — the seeded `providers.json` is empty and the field is optional; a buffer at least as large as the window degenerates the same way.
 
 Setting `auto_compact: false` disables automatic compaction entirely, leaving `/compact` as the only trigger. Compaction only changes what goes into the *next* `ChatRequest.messages` — it never mutates persisted history, so scrollback always shows the full conversation.
+
+**The view, however, is checkpointed — `compactions` table, one row per session.** Each successful compaction upserts `{boundary_seq, summary_message}`: a cache of the *derived view*, never a message row, so `messages` stays the exact record of what was said and the sentence above stays literally true. The reason it exists is the resume path. Without a checkpoint, a resumed session loads the full uncompacted transcript and re-summarizes from scratch — real provider calls, real money, on *every* resume — and worse, the halving strategy silently assumes the half being summarized fits the model window. That assumption holds for a live session (occupancy trips the trigger near 0.8×window), and breaks for a transcript well beyond it: resuming a 3M-token transcript against a 200k window could not even fit its own summarization request, and the first turn failed with a 400 before any compaction could converge. With a checkpoint, resume reconstructs `[summary + tail]` — the working set the live session actually had, bounded by the kept context, zero summarization calls. Correctness relies on one invariant: the persisted messages in the loop's working history are always a **contiguous suffix** of the stored transcript (appends continue at `MAX(seq)+1`; compaction only folds from the head), which is what makes `boundary_seq` derivable from where the persisted portion starts. Failure semantics degrade to the old behavior, never to a lost transcript: a failed checkpoint write logs and continues; `/clear` deletes the checkpoint, because it drops the *view* and the checkpoint is a view; deleting the session cascades at the SQL layer. Sessions that never compacted — and ones that compacted before checkpoints existed — take the full-transcript load path.
 
 - Everything older than the cut is replaced by one synthetic summary message; the cut is currently half the working history by *message count* (snapped, below). Selecting it by `memory.compaction_keep_recent_tokens` needs per-message token counts, which are not tracked in memory — flagged in the development plan's known gaps.
 - **The boundary must snap backwards to the nearest complete tool-call cycle.** A count-based boundary is oblivious to tool pairing, and cutting between an assistant `ToolUseBlock` and its `ToolResultBlock` orphans the call — a hard 400 on both OpenAI and Anthropic, not a soft degradation. The snap lives in the agent loop (`snap_compaction_boundary`), so the compactor always receives a range that ends on a complete cycle.
@@ -1098,11 +1144,13 @@ struct CompactionRequest {
     std::optional<int> max_tokens;
     int64_t last_reported_input_tokens;
     const std::vector<Message>* full_history;   // fallback estimate only
+    const common::Logger* logger;               // null = DefaultLogger
+    std::string_view session_label;             // "session <id>: " on log lines
     std::function<bool()> is_cancelled;
 };
 
 using Compactor = std::function<std::optional<CompactionResult>(
-    const std::vector<Message>& messages_to_compact, LlmProvider& provider,
+    std::span<const Message> messages_to_compact, LlmProvider& provider,
     const CompactionRequest& request)>;
 
 std::optional<CompactionResult> compact_messages(/* same signature */);
@@ -1168,7 +1216,7 @@ variable the install rule uses, so overriding one moves both.
 - **`skills/<name>/SKILL.md`** (+ supporting files) — lazy-loaded: frontmatter (`name`, `description`) resident in the registry; body loads only on invocation.
 - **`themes/*.json`** — role/category → truecolor RGB.
 - **`keybindings.json`** — action → key. Must accommodate plugin-registered action names unknown at compile time.
-- **`providers.json`** — **a provider is a CONNECTION, not a model.** An object keyed by provider name; each carries `backend` (a `ProviderFactoryRegistry` kind, so any plugin-registered kind is valid — no closed enum), `url`, `api_key | api_key_env`, and a nested `models` object keyed by model id. `parameters` and `max_tokens` may sit on the provider as defaults and be overridden per model; `context_window_tokens` is per model, and is both informational (the status bar's `used/max`) **and the basis the window-relative compaction triggers resolve against — a model that declares none never fires them** (see *Context compaction*).
+- **`providers.json`** — **a provider is a CONNECTION, not a model.** An object keyed by provider name; each carries `backend` (a `ProviderFactoryRegistry` kind, so any plugin-registered kind is valid — no closed enum), `url`, `api_key | api_key_env`, and a nested `models` object keyed by model id — optional when the entry sets `"discover": true` (track N: the backend lists its own models at runtime, fetched lazily at first resolve and never written back; static entries beside it still resolve, and a discovered model's `context_window_tokens` overrides the provider-level default the same way a static model's own value would). `parameters` and `max_tokens` may sit on the provider as defaults and be overridden per model; `context_window_tokens` is per model, and is both informational (the status bar's `used/max`) **and the basis the window-relative compaction triggers resolve against — a model that declares none never fires them** (see *Context compaction*).
 
   ```json
   { "providers": { "local": {
@@ -1183,13 +1231,13 @@ variable the install rule uses, so overriding one moves both.
   `max_tokens` is typed rather than left to `parameters` because the serializer treats it as a structural field and erases whatever `parameters` put there — so it was the only route to an output cap, and it did not exist. It applies to every request the session makes, summarization included: a cap the conversation honours and the compactor ignores is how a summary gets truncated.
 - **`mcps.json`** — `[{name, transport: "stdio"|"http", command, args[], env{} | url, headers{}, enabled}]`. `env`/`headers` support `${ENV_VAR}` interpolation, resolved once at load and never logged. No per-server risk category — MCP permission is server-scoped, resolved separately.
 - **`permissions.json`** — security config, split from `settings.json` so it can be reviewed and locked down independently: `{default_run_mode: "normal"|"bypass"|"allow-only" (default "normal"), fallback: {read_only, file_write, execute, out_of_workdir}, per_tool_overrides: {}, mcp_default_mode: "allow"|"ask"|"deny" (default "ask")}`. A global floor a preset can still override — no clamping; guardrails presets cannot loosen are future scope.
-- **`settings.json`** — `default_agent_preset, default_model (a `<provider>/<model>` reference), default_theme, max_concurrent_subagents (default 4), memory.{auto_compact (default true), context_compaction_trigger (a one-of object: `{"percent": 1..100}` | `{"tokens": >0}` | `{"buffer_tokens": >0}`; absent = never; exactly one key or the loader rejects the file; the window-relative strategies resolve against the active MODEL's context_window_tokens and never fire without one — see Context compaction; the pre-strategy flat key context_compaction_trigger_tokens still parses as the fixed strategy, and the new object wins when both are present; the seeded settings.json sets `{"percent": 80}`), compaction_keep_recent_tokens (NOT YET HONORED — see Context compaction), scrollback_page_size (default 100 when unset, applied by the RPC layer to both GetMessages and ListSessions)}, tools.{read,edit,bash}.*, tools_view.stdout_buffer_lines (default 100), session_db_path, logging.{level, path, max_size_mb, max_files}`. `logging` backs a **spdlog** rotating file sink (no custom rotation code), with `path` alongside `session_db_path` under the platform *data* dir, not the config dir.
-- **`plugins.json`** — an object, not a bare array (an earlier draft said array while also placing `command_aliases` at the top level; both cannot hold):
+- **`settings.json`** — `default_agent_preset, default_model (a `<provider>/<model>` reference), default_theme, max_concurrent_subagents (default 4), memory.{auto_compact (default true), context_compaction_trigger (a one-of object: `{"percent": 1..100}` | `{"tokens": >0}` | `{"buffer_tokens": >0}`; absent = never; exactly one key or the loader rejects the file; the window-relative strategies resolve against the active MODEL's context_window_tokens and never fire without one — see Context compaction; the pre-strategy flat key context_compaction_trigger_tokens still parses as the fixed strategy, and the new object wins when both are present; the seeded settings.json sets `{"percent": 80}`), compaction_keep_recent_tokens (NOT YET HONORED — see Context compaction), scrollback_page_size (default 100 when unset, applied by the RPC layer to both GetMessages and ListSessions)}, tools.{read,edit,bash}.*, tools_view.stdout_buffer_lines (default 100), session_db_path, logging.{level, path, max_size_mb, max_files}`. `logging` backs a **spdlog** rotating file sink (no custom rotation code), with `path` alongside `session_db_path` under the platform *data* dir, not the config dir. Applied by `common::ConfigureLogging` at the very top of `main`, before anything logs -- `DefaultLogger()` caches spdlog's default on first use for the process lifetime, so the ordering is load-bearing. The console sink stays alongside the file one; a log file that cannot be opened degrades to console-only rather than refusing to start.
+- **`plugins.json`** — an object, not a bare array (an earlier draft said array while also placing the aliases at the top level; both cannot hold):
 
   ```json
   {
     "plugins": [ {"file": "tools-fs.so", "provenance": "bundled", "enabled": true} ],
-    "command_aliases": { "bash_over_ssh.bash": "ssh_bash" }
+    "aliases": { "bash_over_ssh.bash": "ssh_bash" }
   }
   ```
 
@@ -1222,7 +1270,7 @@ struct AgentPreset {
 
 class AgentPresetRegistry {
 public:
-    const AgentPreset& Resolve(const std::string& preset_name) const;
+    AgentPreset Resolve(const std::string& preset_name) const;  // by value; internally cached+locked
 };
 ```
 
@@ -1259,15 +1307,27 @@ public:
 
 ## MCP client — `src/server/mcp/`
 
-Core. Server subprocesses are **shared across sessions** (one per `mcps.json` entry, not one per session), matching the low-footprint goal.
+Core. Server subprocesses are **shared across sessions** (one per `mcps.json` entry, not one per session), matching the low-footprint goal. The `McpClientManager` owns them, constructed at serve stage with the parsed config.
 
-- **Liveness is checked when a session starts** with a preset listing the server in `allowed_mcp_servers` — i.e. on agent selection, not at server boot.
-- **Tool discovery happens once per MCP server process** and is cached there. The discovered tool list is a property of the shared subprocess, not of a session, so session start and `/agent` switches only **re-filter** that cache against `allowed_mcp_servers` — they never re-discover, and `BuildChatRequest` never queries a server per turn. Tool *invocations* remain lazy, dispatched on demand. Re-discovery happens only if a server process restarts.
-- A server failing the check is **disabled for that session** with a surfaced error; the session proceeds without it.
-- A subagent whose preset requires a dead server **does not start** — `SpawnSubagentTool` returns an MCP error as its `ToolResultBlock`.
+**Transports.** cpp-mcp (`stdio_client`) serves the stdio transport, but through a **shim island** (`mcp_stdio_shim.{hpp,cpp}`): cpp-mcp vendors its own older nlohmann/json whose ABI namespace differs from vcpkg's, so the two cannot share a translation unit — the shim's one TU sees only cpp-mcp's headers and crosses back as strings, bools and ints. cpp-mcp's bundled `sse_client` is **not used for http**: it speaks the legacy SSE protocol and cannot talk to a Streamable-HTTP server (verified against the official python SDK). The http transport is a minimal hand-rolled client over `llm::SseParser` and **`llm::HttpSession`** — one CURL handle kept alive across the connection's whole life (all calls run on the single worker thread, which is exactly HttpSession's contract), so consecutive requests to the same host ride one TCP+TLS connection instead of re-handshaking per tool call; HttpClient's stateless per-call handles remain the right shape for providers and are untouched. The client POSTs the JSON-RPC message with `Accept: application/json, text/event-stream`, echoes the `mcp-session-id` from the initialize response, and takes the answer from whichever shape the server picks — a JSON body, or an SSE stream aborted the moment the matching response frame arrives.
+
+**All protocol I/O runs on one dedicated thread per connection.** cpp-mcp's client blocks internally (up to a fixed 60 s) with no deadline parameter, so a caller-visible timeout or a `CancelTurn` cannot be honoured on the caller's thread. Callers wait on their turn's `tools::CancelToken` condition variable — completion and cancellation both notify it, so a waiter wakes on exactly the events that can change its outcome; no polling, no 25 ms slices (the polling `is_cancelled` function remains in `ToolContext` for tools that merely check it occasionally). A deadline or cancellation returns promptly while the underlying request may still complete in the background — the same accepted asymmetry as bash's killpg window — and any exception escaping a worker job is contained by the loop instead of reaching `std::terminate`. A worker wedged inside a blocking call is **detached, never joined** (it holds its state by `shared_ptr`), so destroying a connection cannot hang on a dead server — and `Connection::Open` bounds the initialize handshake itself, which cpp-mcp cannot do (verified: it blocks indefinitely if the subprocess dies during startup). Teardown also **kills the stdio child outright** (`Transport::Abort`): cpp-mcp's 60 s request cap would otherwise keep the child alive (and the wedged worker with it) for up to a minute past teardown, or orphan it forever if the server process exits first. The kill is safe against pid reuse — `waitpid(WNOHANG)` proves the target is alive and still our child — and SIGTERM escalates to SIGKILL from a detached watcher. To make that possible, the vendored cpp-mcp carries a tiny header patch (`patches/cpp-mcp-child-pid.patch`, applied idempotently by `cmake/ApplyCppMcpPatches.cmake`): an atomic `process_id_` plus a `child_pid()` accessor, readable from the teardown thread while a worker is still inside `initialize()`. Writing to a dead child's stdin raises SIGPIPE, whose default disposition kills the whole server process (observed as exit 141); the shim ignores SIGPIPE process-wide before spawning, so the write surfaces as EPIPE and degrades to a tool error. Children spawned afterwards inherit SIG_IGN — the same trade hosted runtimes (Python, Go) make.
+
+**Timeouts and limits are config**: `settings.json` `tools.mcp.{connect_timeout_ms (default 10000), request_timeout_ms (default 60000), max_list_pages (default 100)}`. The request deadline is **total, not idle**: the http transport caps the whole transfer (including the SSE stream it may answer through), so a server that accepts the connection and then goes silent degrades to a bounded error rather than wedging the connection's worker. `tools/list` pagination (http transport) is capped at `max_list_pages` pages — a server that never stops returning `nextCursor` pages would otherwise occupy the worker thread forever, since each page is individually within the request deadline.
+
+- **Liveness is checked when a session starts** with a preset listing the server in `allowed_mcp_servers` — i.e. on agent selection, not at server boot. The check's I/O runs under a **per-server mutex**: the manager-wide lock covers only the map lookup, so a slow or wedged server stalls its own callers, never other sessions' checks or the cheap status lookups. A successful check is a **verdict valid for 2 s** — near-simultaneous callers (a subagent spawn right after the parent's check, a child session starting while another caller's restart is still in flight) reuse it instead of paying another ping round trip (a full TCP+TLS handshake over http). Deliberately short: it is a dedup for near-simultaneous callers, not a liveness cache — a server dead 3 s is still caught by the next session's check, and one dead inside the window is surfaced immediately by its next tool call.
+- **Tool discovery happens once per MCP server process** and is cached there. The discovered tool list is a property of the shared subprocess, not of a session, so session start and `/agent` switches only **re-filter** that cache against `allowed_mcp_servers` — they never re-discover, and `BuildChatRequest` never queries a server per turn. Tool *invocations* remain lazy, dispatched on demand. Re-discovery happens only if a server process restarts: the manager respawns on the next liveness check and re-registers the tool set atomically.
+- A server failing the check is **disabled for that session** with a surfaced error (an `ErrorEvent` on the session's queue); the session proceeds without it, and later `/agent` switches do not re-test it.
+- A subagent whose preset requires a dead server **does not start** — `SpawnSubagentTool` returns an MCP error as its `ToolResultBlock`, checked against the parent-intersected server list before any child row exists.
 - `/agent` mid-session stops exposing a de-scoped server's tools but does **not** kill a subprocess other sessions may be using.
 
-`ToolRegistry` namespaces MCP-sourced tools as `mcp__<server_name>__<tool_name>` at registration, avoiding collisions with built-ins and across servers. MCP tools flow through the identical registry/executor/permission machinery as every other tool.
+`ToolRegistry` namespaces MCP-sourced tools as `mcp__<server_name>__<tool_name>` at registration, avoiding collisions with built-ins and across servers. MCP tools flow through the identical registry/executor/permission machinery as every other tool — with three qualifications:
+
+1. **They are registered and replaced through `ReplaceMcpTools(server, tools)`**, which bypasses attribution, aliasing and the shadowed list (the namespacing cannot collide). Registry-wide ownership is `shared_ptr` and `Find()` hands out a copy, so an executor that is inside a blocking permission Ask or `execute()` keeps its tool object alive no matter what a concurrent replacement does — the last reference destroys it, and there is no retired list to grow or reason about. Registry reads (`Find`/`DefinitionsFor`) run under a `shared_mutex` — MCP replacement is the first runtime mutation of a registry that was previously read-only after startup, and it overlaps session workers.
+2. **`allowed_tools` never governs them** — `DefinitionsFor` excludes `mcp__*` names so an `allowed_tools: ["*"]` cannot advertise a dead or de-scoped server's tools. The model sees exactly `DefinitionsForMcpServers(live_servers)`: the preset's allowed set minus per-session disabled, resolved with the manager.
+3. **MCP tools declare `ToolCategory::ReadOnly`**, which is display-only: the only gate consulted is the server-scoped `McpPermissionPolicy` (`mcp__<server>__<tool>` → `McpPermissionPolicy::mode_for(server)`), so `out_of_workdir` never folds in and `Disclose()` offers no session grants — the consent unit is the server. A cancelled or timed-out call returns an error `ToolResultBlock`, never a hung worker.
+
+**Known limitation**: cpp-mcp splits the stdio command line on whitespace, so a `mcps.json` `args[]` entry containing a space cannot be passed to the child.
 
 ## Session storage — SQLite
 
@@ -1300,7 +1360,7 @@ Names are therefore mutable after creation; `SessionMetadataEvent` notifies atta
 
 **Resume.** `CreateSessionRequest` carries an optional `session_id`; set, it means *resume that stored session* rather than create a new one. The contract: the stored row's `name`, `agent_preset`, and `project_root` govern and the request must not send its own (refused, not ignored — the client already has all three from `ListSessions`); `run_mode` still applies, being a property of the client. Subagent sessions are not resumable, and a session that is already open is refused. A failed resume never deletes the row — the asymmetry with fresh creation, whose just-minted row is rolled back.
 
-The load path is `SessionReader::LoadAll` — the one read allowed to materialize a whole transcript, ascending by seq, one-shot, because the loop's working history is what gets sent every turn and a resumed session must hold it exactly as a live one does. `AgentLoop` takes it as a constructor-seeded history, so "ran a turn before seeding" is inexpressible, and the store never sees it again: appends continue at `MAX(seq) + 1`, which is also what the store's `last_appended_seq()` initializes from — a store that assumed "started empty" would restart the seq accounting at -1 while SQL kept assigning the real continuation. Seeded history seeds the compaction trigger too (`TokenAccumulator::SeedOccupancy` with the same bytes/4 roughness the compactor's fallback uses, and like it, estimate-only: cumulative totals are never touched), so a resumed session over the trigger compacts *before* its first provider call instead of failing it.
+The load path depends on whether a compaction checkpoint exists. **With one** (the session compacted while alive), resume loads `[checkpoint summary] + SessionReader::LoadAfter(boundary_seq)` — the working set the live session had, with no summarization call and a load proportional to the kept context rather than the transcript (see *Context compaction* for why: re-summarizing a transcript beyond the model window was not merely costly, it could not converge). **Without one**, the load path is `SessionReader::LoadAll` — the one read allowed to materialize a whole transcript, ascending by seq, one-shot, because the loop's working history is what gets sent every turn and a resumed session must hold it exactly as a live one does. Either way `AgentLoop` takes it as a constructor-seeded history, so "ran a turn before seeding" is inexpressible, and the store never sees it again: appends continue at `MAX(seq) + 1`, which is also what the store's `last_appended_seq()` initializes from — a store that assumed "started empty" would restart the seq accounting at -1 while SQL kept assigning the real continuation. Seeded history seeds the compaction trigger too (`TokenAccumulator::SeedOccupancy` with the same bytes/4 roughness the compactor's fallback uses, and like it, estimate-only: cumulative totals are never touched), so a resumed session over the trigger compacts *before* its first provider call instead of failing it.
 
 One stored shape is not provider-valid: a transcript torn mid-tool-sequence — a cancel leaves denial results, but a process killed between the assistant append and the results append leaves an unanswered `tool_use`, a hard 400 on both wire formats. Resume persists one synthesized user message of error `ToolResultBlock`s for the unmatched calls (never a rewrite of the stored tail) before the session starts, so the transcript stays an exact, valid prefix.
 
@@ -1334,7 +1394,7 @@ public:
 };
 ```
 
-Checks: every config file parses; at least one usable `providers.json` entry exists with a resolvable key *and* a registered provider kind; at least one agent preset parses and `settings.json`'s `default_agent_preset` resolves end to end; referenced compression prompts exist; each `mcps.json` entry's `command` resolves on `PATH` (stdio) or `url` is well-formed (http); the config and data directories exist and are writable; the SQLite database is accessible and not newer than the binary; each discovered plugin's load status is reported with severity split by provenance; `max_concurrent_subagents` is sane; **no registration-name collisions** (fatal — see Name collisions and aliases); every `command_aliases` key resolves to something registered.
+Checks: every config file parses; at least one usable `providers.json` entry exists with a resolvable key *and* a registered provider kind; at least one agent preset parses and `settings.json`'s `default_agent_preset` resolves end to end; referenced compression prompts exist; each `mcps.json` entry's `command` resolves on `PATH` (stdio) or `url` is well-formed (http); the config and data directories exist and are writable; the SQLite database is accessible and not newer than the binary; each discovered plugin's load status is reported with severity split by provenance; `max_concurrent_subagents` is sane; **no registration-name collisions** (fatal — see Name collisions and aliases); every `aliases` key resolves to something registered.
 
 `project_root` is per-session, supplied by the client in `CreateSessionRequest`, so it is **not** a startup check. It is validated in `CreateSession` — it must exist, be a directory, and be writable — with a `FAILED_PRECONDITION` reason rather than failing later inside tool execution.
 
@@ -1352,3 +1412,4 @@ Two checks specifically for the naming model: warn when a `per_tool_overrides` /
 - Status-bar segment and panel/picker column slots for client plugins (renderer slot ships in v1).
 - Tab-bar overflow behavior with many sessions × subagents.
 - Backend-reported `usage` of `0` from some OpenAI-compatible proxies — no fallback estimate designed.
+- **Sessions that last compacted before compaction checkpoints existed (schema v4) have no checkpoint row, so they still resume from the full uncompacted transcript** — correct, and cost-free for transcripts that fit the window, but a transcript well beyond the model window cannot converge its first compaction, checkpoint or no checkpoint: the halving strategy's summarization input must fit the window, and re-summarizing only ever writes a checkpoint once it succeeds (see *Context compaction*). For such a session the honest remedies are a larger-window model for one manual `/compact`, or starting fresh.

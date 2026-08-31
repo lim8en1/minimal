@@ -72,3 +72,42 @@ TEST_CASE("LoadPermissionsConfig: reads and parses a real file", "[permissions_c
 TEST_CASE("LoadPermissionsConfig: missing file throws", "[permissions_config]") {
     CHECK_THROWS_AS(LoadPermissionsConfig("/nonexistent/permissions.json"), std::runtime_error);
 }
+
+TEST_CASE("ParsePermissionsConfig: advisor fields parse and default off", "[permissions_config][advisor]") {
+    auto config = ParsePermissionsConfig(nlohmann::json::object());
+    CHECK_FALSE(config.advisor.has_value());
+    CHECK_FALSE(config.advisor_inherit);
+    CHECK(config.advisor_timeout_ms == 30000);  // the default budget, on
+
+    nlohmann::json doc = {{"advisor", "auto-approve"}, {"advisor_inherit", true},
+                          {"advisor_timeout_ms", 5000}};
+    config = ParsePermissionsConfig(doc);
+    REQUIRE(config.advisor.has_value());
+    CHECK(*config.advisor == "auto-approve");
+    CHECK(config.advisor_inherit);
+    CHECK(config.advisor_timeout_ms == 5000);
+}
+
+TEST_CASE("ParsePermissionsConfig: advisor_timeout_ms 0 disables the budget; negatives refused",
+          "[permissions_config][advisor]") {
+    auto config = ParsePermissionsConfig(nlohmann::json{{"advisor_timeout_ms", 0}});
+    CHECK(config.advisor_timeout_ms == 0);
+
+    bool threw = false;
+    try {
+        (void)ParsePermissionsConfig(nlohmann::json{{"advisor_timeout_ms", -1}});
+    } catch (const std::runtime_error& e) {
+        threw = true;
+        CHECK(std::string(e.what()).find("advisor_timeout_ms") != std::string::npos);
+    }
+    CHECK(threw);  // silently disabling a safety timeout is never intended
+}
+
+TEST_CASE("ParsePermissionsConfig: advisor_inherit false does not enable the advisor",
+          "[permissions_config][advisor]") {
+    // advisor_inherit alone governs children; with no advisor named it is inert.
+    nlohmann::json doc = {{"advisor_inherit", true}};
+    auto config = ParsePermissionsConfig(doc);
+    CHECK_FALSE(config.advisor.has_value());
+    CHECK(config.advisor_inherit);
+}

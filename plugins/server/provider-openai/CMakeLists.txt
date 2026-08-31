@@ -4,4 +4,5 @@ minimal_add_plugin(provider-openai
     openai_response.cpp
     openai_stream_reassembler.cpp
     openai_error_mapping.cpp
+    openai_model_catalog.cpp
     openai_provider.cpp)

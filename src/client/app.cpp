@@ -5,13 +5,19 @@
 // Building it first is what proves the proto is a real boundary rather than a
 // TUI-shaped hole, and it is the natural end-to-end test harness.
 
+#include <atomic>
+#include <cerrno>
 #include <chrono>
+#include <csignal>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
+
+#include <unistd.h>
 
 #include <nlohmann/json.hpp>
 
@@ -31,6 +37,7 @@
 #include "minimal/client/keybindings.hpp"
 #include "minimal/client/session_client.hpp"
 #include "minimal/client/status_format.hpp"
+#include "minimal/client/utf8.hpp"
 #include "minimal/client/view/chat_view.hpp"
 #include "minimal/client/view/prompt_editor.hpp"
 #include "minimal/client/view/prompt_modal.hpp"
@@ -48,6 +55,7 @@
 namespace {
 
 using minimal::client::HeadlessOptions;
+using minimal::client::TruncateUtf8;
 
 // Exit codes are part of the interface: a script piping `minimal -p` needs to
 // distinguish "the model finished" from "it was cut off" from "the call failed".
@@ -60,11 +68,21 @@ enum ExitCode {
     kUnavailable = 69,  // no server, or it refused the session
 };
 
+// ONE WRITE, UNDER ONE LOCK. This was fputs(dump) followed by fputc('\n') --
+// two separate stdio calls, each taking stdout's own lock independently -- and
+// it is called from the main thread AND from every subagent-attach thread. So
+// another thread's line could land between a JSON body and its newline, which
+// breaks the "one JSON value per line" contract this file states outright and
+// which is the entire point of the format. The mutex covers the flush too, so a
+// partially flushed line cannot interleave either.
 void PrintJsonLine(const nlohmann::json& value) {
-    std::fputs(value.dump().c_str(), stdout);
-    std::fputc('\n', stdout);
+    static std::mutex mu;
+    const std::string line = value.dump() + "\n";
+    std::lock_guard<std::mutex> lock(mu);
+    std::fwrite(line.data(), 1, line.size(), stdout);
     std::fflush(stdout);
 }
+
 
 int ExitCodeFor(minimal::v1::StopReason stop_reason) {
     switch (stop_reason) {
@@ -79,6 +97,47 @@ int ExitCodeFor(minimal::v1::StopReason stop_reason) {
         default:
             return kOk;
     }
+}
+
+// SIGINT/SIGTERM during a turn cancel it through the protocol -- a CancelTurn
+// ClientEvent -- instead of killing the process, so the exit code reflects the
+// server's own StopReason::Cancelled (exit 4) rather than dying with 130.
+//
+// The handler itself may only do async-signal-safe work: set a flag, write one
+// byte to a self-pipe. The gRPC write happens on the watcher thread, which
+// blocks on the pipe and acts on what it reads: 'c' means a signal arrived,
+// 'q' is the main thread's wake so the watcher can be joined once the turn has
+// ended on its own.
+std::atomic<bool> g_cancel_requested{false};
+int g_cancel_pipe[2] = {-1, -1};
+
+void CancelSignalHandler(int) {
+    g_cancel_requested.store(true, std::memory_order_relaxed);
+    const char byte = 'c';
+    const ssize_t ignored = write(g_cancel_pipe[1], &byte, 1);
+    (void)ignored;
+}
+
+void InstallCancelHandlers() {
+    struct sigaction action;
+    std::memset(&action, 0, sizeof(action));
+    action.sa_handler = CancelSignalHandler;
+    sigaction(SIGINT, &action, nullptr);
+    sigaction(SIGTERM, &action, nullptr);
+}
+
+void RestoreDefaultHandlers() {
+    struct sigaction action;
+    std::memset(&action, 0, sizeof(action));
+    action.sa_handler = SIG_DFL;
+    sigaction(SIGINT, &action, nullptr);
+    sigaction(SIGTERM, &action, nullptr);
+}
+
+void CloseCancelPipe() {
+    if (g_cancel_pipe[0] != -1) close(g_cancel_pipe[0]);
+    if (g_cancel_pipe[1] != -1) close(g_cancel_pipe[1]);
+    g_cancel_pipe[0] = g_cancel_pipe[1] = -1;
 }
 
 int RunHeadless(const HeadlessOptions& options) {
@@ -103,7 +162,7 @@ int RunHeadless(const HeadlessOptions& options) {
     } else {
         create.project_root = std::filesystem::current_path().string();
         create.agent_preset = options.agent_preset;
-        create.name = options.prompt.substr(0, 60);
+        create.name = TruncateUtf8(options.prompt, 60);
     }
     // OUTSIDE the branch, like run_mode: a model the user names is a property of
     // this invocation, not of the stored session -- and the override is in-memory
@@ -165,8 +224,56 @@ int RunHeadless(const HeadlessOptions& options) {
         return saw_error ? kModelError : kOk;
     }
 
+    // Wire SIGINT/SIGTERM to a protocol-level cancel before the turn starts.
+    // Before this point (connection, CreateSession) the default disposition
+    // applies: dying mid-setup is fine, there is no turn to abandon.
+    const bool cancel_wired = pipe(g_cancel_pipe) == 0;
+    if (!cancel_wired) g_cancel_pipe[0] = g_cancel_pipe[1] = -1;
+    // Published by the RunTurn thread through on_handle, then flagged
+    // release-style: the watcher acquires the flag before reading the
+    // shared_ptr. Polling the shared_ptr itself was a data race -- the
+    // watcher thread read what the turn thread was writing, with only a
+    // sleep as "synchronisation" (TSan).
+    std::shared_ptr<minimal::client::SessionClient::TurnHandle> turn_handle;
+    std::atomic<bool> turn_handle_ready{false};
+    std::thread cancel_watcher;
+    if (cancel_wired) {
+        InstallCancelHandlers();
+        cancel_watcher = std::thread([&turn_handle, &turn_handle_ready] {
+            char byte = 0;
+            ssize_t n;
+            do {
+                n = read(g_cancel_pipe[0], &byte, 1);
+            } while (n == -1 && errno == EINTR);
+            if (n != 1 || byte != 'c') return;
+            // RunTurn publishes the handle before its first event; allow a
+            // short window for that rather than dropping a cancel that raced
+            // the turn's start.
+            for (int waited_ms = 0;
+                 !turn_handle_ready.load(std::memory_order_acquire) && waited_ms < 5000;
+                 waited_ms += 5) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            }
+            if (turn_handle_ready.load(std::memory_order_acquire)) turn_handle->Cancel();
+            // Cancelled, or no handle ever arrived (nothing to cancel). Either
+            // way a second signal kills instead of deferring.
+            RestoreDefaultHandlers();
+        });
+    }
+    std::function<void(const std::shared_ptr<minimal::client::SessionClient::TurnHandle>&)>
+        publish_turn_handle;
+    if (cancel_wired) {
+        publish_turn_handle = [&turn_handle, &turn_handle_ready](
+                                  const std::shared_ptr<
+                                      minimal::client::SessionClient::TurnHandle>& handle) {
+            turn_handle = handle;
+            turn_handle_ready.store(true, std::memory_order_release);
+        };
+    }
+
     const auto status = client.RunTurn(
-        created.session_id, options.prompt, [&](const minimal::v1::ServerEvent& event) {
+        created.session_id, options.prompt,
+        [&](const minimal::v1::ServerEvent& event) {
             if (options.jsonl) {
                 // One JSON value per line, so the stream stays parseable
                 // incrementally rather than only once complete.
@@ -194,6 +301,12 @@ int RunHeadless(const HeadlessOptions& options) {
                 } else if (event.has_subagent_started()) {
                     line["type"] = "subagent_started";
                     line["child_session_id"] = event.subagent_started().child_session_id();
+                } else if (event.has_turn_completed()) {
+                    // The child branch had this and the parent's did not, so a
+                    // JSONL consumer could see a subagent's turn end but never
+                    // the top-level one -- it arrived as {"type":"event"}.
+                    line["type"] = "turn_completed";
+                    line["hit_max_turns"] = event.turn_completed().hit_max_turns();
                 } else {
                     line["type"] = "event";
                 }
@@ -206,6 +319,21 @@ int RunHeadless(const HeadlessOptions& options) {
 
             if (event.has_stream_event() && event.stream_event().has_message_delta()) {
                 exit_code = ExitCodeFor(event.stream_event().message_delta().stop_reason());
+            }
+            // TurnCompletedEvent WINS, and it is the only source that is always
+            // present. ARCHITECTURE.md says the headless exit code derives from
+            // the turn's stop reason, and §11.4 changed the server specifically
+            // so a cancel inside retry backoff reports Cancelled rather than
+            // Unknown -- but that path emits no message_delta at all, so reading
+            // only the delta left the exit code at 0 and made that fix
+            // unobservable from here. This file already asserts that
+            // TurnCompletedEvent is the only reliable end-of-turn signal; now it
+            // acts on it.
+            if (event.has_turn_completed()) {
+                exit_code = ExitCodeFor(event.turn_completed().stop_reason());
+                // Hitting the turn ceiling is not success: the work stopped
+                // short of an answer, which is the same shape as truncation.
+                if (event.turn_completed().hit_max_turns()) exit_code = kTruncated;
             }
             if (event.has_error()) saw_error = true;
 
@@ -250,7 +378,20 @@ int RunHeadless(const HeadlessOptions& options) {
                 });
             }
             return true;
-        });
+        },
+        publish_turn_handle);
+
+    if (cancel_wired) {
+        // Wake the watcher (it exits without cancelling on 'q') and take the
+        // signal disposition back down: past this point there is no turn to
+        // abandon, and a late signal should kill, not defer.
+        const char wake = 'q';
+        const ssize_t ignored = write(g_cancel_pipe[1], &wake, 1);
+        (void)ignored;
+        cancel_watcher.join();
+        RestoreDefaultHandlers();
+        CloseCancelPipe();
+    }
 
     // Wait out every child before reporting: their streams hold the server's
     // refcount, and jsonl consumers expect the children's events too.

@@ -118,6 +118,14 @@ EditOutcome FileEditor::Insert(const std::filesystem::path& path, int insert_lin
         return outcome;
     }
 
+    // Whether the file ended in a newline. getline erases the distinction ("a\nb"
+    // and "a\nb\n" both read as {a, b}), and rejoining below used to append '\n'
+    // to every line unconditionally -- so a file not ending in one GAINED one,
+    // editing bytes the caller never named. str_replace (same file, same tool)
+    // never touches the terminator; the two paths must agree.
+    const bool ends_with_newline =
+        !loaded.content.empty() && loaded.content.back() == '\n';
+
     std::vector<std::string> lines;
     {
         std::istringstream in(loaded.content);
@@ -139,9 +147,11 @@ EditOutcome FileEditor::Insert(const std::filesystem::path& path, int insert_lin
     lines.insert(lines.begin() + insert_line, std::move(text));
 
     std::string updated;
-    for (const auto& line : lines) {
-        updated += line;
-        updated += '\n';
+    for (std::size_t i = 0; i < lines.size(); ++i) {
+        updated += lines[i];
+        // Every line except the last keeps its terminator; the last only if the
+        // file had one before the edit.
+        if (i + 1 < lines.size() || ends_with_newline) updated += '\n';
     }
 
     const auto written = tools::write_file(path, updated);

@@ -2,7 +2,7 @@
 
 Companion to `ARCHITECTURE.md`, which remains the single source of truth for *design*. This document covers only *sequencing*: what is built, what blocks what, and what "done" means for each remaining piece. Every milestone cites the `ARCHITECTURE.md` section that specifies it; where this plan and that document disagree, that document wins and this one is stale.
 
-**Status: Milestones A, B, C, D, F and H are complete, and a post-merge review of A+B+H has been actioned (§8). Of the TUI (track E), the render layer (E1), the client transport + state core (E2), server-side @-mentions (E3), and the frame & views (E4) are done; E5 (extension seams) and G (MCP) remain. Clean build, zero warnings.** J (permission advisor) is designed (`docs/EXTENSIBILITY.md` §3) and scheduled (§4 J) but not started.
+**Status: Milestones A, B, C, D, F, G and H are complete, and a post-merge review of A+B+H has been actioned (§8). Of the TUI (track E), the render layer (E1), the client transport + state core (E2), server-side @-mentions (E3), and the frame & views (E4) are done; E5 (extension seams) remains. Clean build, zero warnings.** Track **J (permission advisor) is complete** — including the SessionChannels extraction, the E2E over a real socket through the real plugin loader, and the three §6 invariant proofs. Tracks **K (per-plugin config)**, **L (cross-plugin services)** and **M (tool history access)** are also complete. Track **N (model auto-discovery) is complete** — lazy discovery through a `ModelCatalogRegistry` keyed by the provider kind string, `/providers refresh`, network-free structural sanity checks. A post-N review hardened the transport (the loopback + live-backend tests), the concurrency (per-provider fetch gates — no config lock is ever held across the network call), and the resolve contract (`Resolve` returns a snapshot; refresh replaces entries without pulling them out from under a holder).
 
 `minimal -p` holds real conversations against a local model using `read`, `bash`, and `skill`; a permission prompt round-trips over the wire in both directions; a session grant silences the second prompt; the server exits when the last client detaches. Transcripts persist to SQLite, survive the server process, and are **resumable**: `CreateSession` with a `session_id` reopens a stored session, loads its transcript as the loop's working history without re-appending it, and the next turn continues the conversation (`minimal -p --resume <id> PROMPT`). **Subagents work** (§5 D): a model can spawn blocking and non-blocking children over the `spawn_subagent` tool, permission inheritance is enforced as ceilings, and the headless client honours its attach obligation over a real socket. `cmake --install` produces a config dir the server actually starts against (§8), and the startup sanity check reports every problem with it at once (§4 F).
 
@@ -64,7 +64,7 @@ Companion to `ARCHITECTURE.md`, which remains the single source of truth for *de
 
 ### Still not built
 
-`src/server/mcp/` (track G) and the TUI (track E).
+The TUI (track E).
 
 ### The risk this creates
 
@@ -97,6 +97,10 @@ Test depth was inverted relative to integration risk: every well-tested layer wa
 - ~~**H. Production compactor**~~ — **done.** `compact_messages` replaces `Session`'s no-op stub, and the bundled prompt is delivered (§4 H).
 - ~~**I. `SessionObserver` registry**~~ — **done**, landed with A2. `minimal_plugin_register_session_observer` is live in the plugin ABI and `tools-bash` implements it.
 - **J. Permission advisor** — independent of E and G; designed in `docs/EXTENSIBILITY.md` §3, specified below (§4 J).
+- ~~**K. Per-plugin config**~~ — **done** (§4 K). `PluginRegistrationContext` carries the per-plugin `config` on every registration seam.
+- ~~**L. Cross-plugin services (ServiceRegistry)**~~ — **done** (§4 L). `minimal_plugin_register_services` is live, `NameKind::Service` collisions are fatal, and `tools-bash` provides `BashSessionStateService` under `tools-bash.session_state`; `/restart-shell` resolves through the service. One deviation from the spec below: the command stayed in `tools-bash` (a command belongs to the plugin that owns the state it touches) — the service path and the absent-provider degrade are covered by tests against the extracted `RestartShellCommand`.
+- ~~**M. Tool history access**~~ — **done** (§4 M). `ToolContext::history` is a `session::HistoryWindow` — a bound, windowed slice of `SessionReader` exposing only keyset-paged reads, so the windowed-only rule is a property of the type. `SessionReader` and `history_window.hpp` joined the frozen include set in `plugin_abi.h`.
+- ~~**N. Model auto-discovery**~~ — **done** (§4 N). `minimal_plugin_register_model_catalogs` is live, `providers.json` accepts `"discover": true` (with or without a static `models` object), discovery fetches lazily at first resolve with negative caching, `/providers refresh` evicts and refetches, and the discovered `context_window_tokens` reaches the compaction trigger. Two spec deviations, both decisions recorded in §4 N below: the sanity check stays **network-free** (structural warnings only), and persistence/TTL caching was **rejected** — the server is short-lived, so a runtime cache needs no TTL, and a month-old cached window is the exact staleness the track exists to eliminate.
 
 **Strictly dependent on A:** C, D, E, G, and every RPC beyond `CreateSession`/`OpenSession`. **A is now done, so all of them were unblocked; D is now done too.**
 
@@ -301,7 +305,7 @@ All four invariant proofs were run per §6: suppressing the seeded load, the rep
 - [x] Each discovered plugin's load outcome is reported; bundled failures are Fatal, user failures Warning, deliberate disables silent.
 - [x] `max_concurrent_subagents` warns at ≤ 0 and > 8.
 - [x] **No registration-name collisions (fatal)** — wired through `NameRegistry` at last; the diagnostic names both plugins.
-- [x] Every `command_aliases` key resolves to something registered; dangling aliases warn.
+- [x] Every `aliases` key resolves to something registered; dangling aliases warn.
 
 **Test cases** (`tests/sanity_check_test.cpp`)
 - [x] Each check fires on its own broken fixture and passes on a good one.
@@ -358,26 +362,186 @@ All four invariant proofs were run per §6: suppressing the seeded load, the rep
 
 > Specified by `docs/EXTENSIBILITY.md` §3. Independent of E and G — the permission substrate it composes with is built and tested (A3's wire checker, the executor's mode resolution, D's ceilings).
 
-A plugin answers `Ask`-gated tool calls automatically and abstains to the wire checker — the human — when it has no answer. The substrate (mode lattice, precedence chains, out-of-workdir fold, subagent ceilings, run modes, grant ownership) is untouched; the **decision source for `Ask`** becomes pluggable. Composition is an advisor *above* the wire checker, never a replacement of it: abstain and throw both fall through to the human.
+A plugin answers `Ask`-gated tool calls automatically and abstains to the wire checker — the human — when it has no answer. The substrate (mode lattice, precedence chains, out-of-workdir fold, subagent ceilings, run modes, grant ownership) is untouched; the **decision source for `Ask`** becomes pluggable. Composition is an advisor *above* the wire checker, never a replacement of it: abstain and throw both fall through to the human. **A post-J review added a budget:** `permissions.json` `advisor_timeout_ms` (default 30 s, 0 = off) bounds one `Advise` — the call runs on its own thread, the wait polls the cancel source, and a wedged advisor (one that ignores its cancellation contract) is abandoned at the budget's edge and the human prompted, instead of wedging the worker join, the reaper and process shutdown.
 
 **What.** Checker injection in `Session` (`SessionParams` carries `std::unique_ptr<tools::PermissionChecker>`; `WirePermissionChecker` is the default and stops being a by-value member — `session.hpp:276` is the only structural change), `PermissionAdvisorRegistry` + `minimal_plugin_register_permission_advisor` in the plugin ABI, an `AdvisedPermissionChecker` decorator (advise → abstain/throw → wire), `permissions.json` `"advisor": "<plugin>"` with `"advisor_inherit"` for subagents (default **off**), and a sanity-check warning for an advisor name that resolves to nothing.
 
-**Acceptance criteria**
-- [ ] An advisor's Allow runs the tool; its Deny produces the same error `ToolResultBlock` a human deny does; its abstain round-trips a real permission prompt over the wire.
-- [ ] An advisor never sees — let alone approves — a tool the substrate resolved to `AlwaysDeny`, including via the `AllowOnly` run mode (`Ask` short-circuits before the advisor is consulted).
-- [ ] Subagent ceilings hold with an advisor active in the parent; a child defaults to **no** advisor, and `advisor_inherit: true` still cannot exceed the parent ceilings.
-- [ ] Grants returned by an advisor are filtered against the disclosure exactly as a human's are — the existing double filter (`tool_executor.cpp` + `proto_convert.cpp`) must hold unchanged.
-- [ ] A wedged advisor does not outlive cancellation (deadline-harnessed, `tests/support/deadline.hpp`).
-- [ ] A throwing advisor degrades to the wire prompt, never a lost turn.
+**How.** `SessionParams` carries the full checker, as the spec says. That forces one structural prerequisite: `WirePermissionChecker` is constructed from `Session`'s `queue_`/`pending_` (`session.hpp:286-288`), so no producer can build a *composed* checker until those exist outside `Session`. They are extracted into a per-session `SessionChannels { EventQueue; PendingRequests; }` block, created by the params producer and owned by `Session` through a `shared_ptr`; `Session`'s member-init constructs the default `WirePermissionChecker` from it when `params.permission_checker` is null. Every producer (`CreateSession`/`ResumeSession` at `session_service.cpp:65,195`, `SubagentManager::Spawn` at `subagent_manager.cpp:108-116`, the test helpers) creates the block. Composition then lives with the producers, who have both ingredients: `SessionServiceImpl` resolves `permissions.json`'s `"advisor"` through the `PermissionAdvisorRegistry` and, when set, assigns `params.permission_checker = AdvisedPermissionChecker(advisor, wire)` — the advised checker **owns** its inner wire checker. `SubagentManager` receives the resolved advisor + `advisor_inherit` at construction and repeats the composition for children only when opted in; ceilings already travel separately and are enforced before the advisor runs (`tool_executor.cpp:95`). The payoff: tests inject fake checkers through params directly, and the invariant "making `checker_` concrete again fails any test that injects a fake" holds literally.
+
+**`Advise` signature** (§3.2 of the extensibility spec left the shape to this track): `std::optional<PermissionResponse> Advise(const PermissionRequest&, const AdvisorContext&)` with `AdvisorContext { std::function<bool()> is_cancelled; }` — the request struct stays a plain proto-adjacent value; cancellation reaches the advisor as a predicate supplied by `Session`.
+
+**Implementation order** (each step testable before the next):
+
+1. `src/server/tools/permission_advisor.{hpp,cpp}`: `PermissionAdvisor`, `AdvisorContext`, `AdvisedPermissionChecker` (advise → response; abstain **or throw** → inner checker), `PermissionAdvisorRegistry` with the `SetAttribution`/`ClearAttribution` window (`tool_registry.hpp:56-73`) so the loader stamps plugin names. Unit tests: allow/deny/abstain/throw fall-through; an undisclosed granted key leaves `session_grants_` untouched (executor-level; fakes at `tests/support/fakes.hpp:254-288`).
+2. `SessionChannels` extraction + `SessionParams::permission_checker` (`session.hpp:61-98, 286-288`; `session.cpp:26-43`). Update all params producers (`session_service.cpp:65,195`; `subagent_manager.cpp:108`; test helpers `session_registry_test.cpp:90`, `subagent_test.cpp:148`, `session_test.cpp`). Session tests: default path unchanged; a fake checker injected through params is honored end to end.
+3. Config: `PermissionsConfig` gains `std::optional<std::string> advisor` + `bool advisor_inherit = false` (`permissions_config.hpp:11-19`; parse tests in `permissions_config_test.cpp`). The first plugin-name field in `permissions.json` — the sanity check gains a new consumer rather than extending an existing pattern.
+4. ABI + loader: `minimal_plugin_register_permission_advisor(PermissionAdvisorRegistry&)` (pattern ×4 live, `plugin_abi.h:60-99`); loader dispatch + attribution window; `PluginRecord::registered_permission_advisor`; startup printout (`main.cpp:127-148`). `main.cpp` constructs the registry (~`:109`), passes it to the loader, `SanityCheckInputs`, and `SessionServiceImpl`.
+5. Producer composition: `session_service` sets `params.permission_checker` from the resolved advisor; subagent inheritance via the `SubagentManager` ctor flag (child default: no advisor).
+6. Sanity check: `check_advisor()` in the `RunAll` list (`sanity_check.cpp:78-98`) — the configured name must resolve to a loaded plugin's registration, else Warning; registry passed via `SanityCheckInputs` like `command_registry` (`sanity_check.hpp:48`). Tests in `sanity_check_test.cpp`.
+7. E2E: `tests/fixtures/fixture_advisor.cpp` — the first fixture to exercise a registration seam beyond tools/providers (modeled on `fixture_good.cpp`, built by `minimal_add_fixture_plugin`, `tests/fixtures/CMakeLists.txt:4-16`); allows one tool, abstains on another. The advisor E2E is also the first service/e2e test that runs `PluginLoader` (none do today — `session_service_test.cpp:45-127` loads none): abstained tool → real wire prompt → answer returns → `TurnCompletedEvent`; allowed tool never prompts.
+
+**File map:** `tools/permission_advisor.{hpp,cpp}` (new); `agent/session.{hpp,cpp}`; `rpc/session_service.{hpp,cpp}`; `agent/subagent_manager.{hpp,cpp}`; `config/permissions_config.{hpp,cpp}`; `plugins/plugin_abi.h`, `plugin_loader.{hpp,cpp}`; `main.cpp`; `config/sanity_check.{hpp,cpp}`; tests: `permission_advisor_test.cpp` (new), `permissions_config_test.cpp`, `sanity_check_test.cpp`, `session_test.cpp`, `session_registry_test.cpp`, `subagent_test.cpp`, `fixture_advisor.cpp` + fixtures CMake, advisor E2E.
+
+**Acceptance criteria — all met:**
+- [x] An advisor's Allow runs the tool; its Deny produces the same error `ToolResultBlock` a human deny does; its abstain round-trips a real permission prompt over the wire. *(E2E: `session_service_test.cpp`, the abstained tool is the only prompt on the stream.)*
+- [x] An advisor never sees — let alone approves — a tool the substrate resolved to `AlwaysDeny`, including via the `AllowOnly` run mode (`Ask` short-circuits before the advisor is consulted). *(executor-level: `permission_advisor_test.cpp` AllowOnly + ceiling cases, both assert `advisor->seen` stays empty.)*
+- [x] Subagent ceilings hold with an advisor active in the parent; a child defaults to **no** advisor, and `advisor_inherit: true` still cannot exceed the parent ceilings. *(subagent-level inherit-gate tests + the executor-level ceiling-ordering test.)*
+- [x] Grants returned by an advisor are filtered against the disclosure exactly as a human's are — the existing double filter (`tool_executor.cpp` + `proto_convert.cpp`) holds unchanged, proven by the undisclosed-key case.
+- [x] A throwing advisor degrades to the wire prompt, never a lost turn. *(std and non-standard exceptions.)*
+- [x] A wedged advisor that ignores its cancellation contract costs only its budget (`advisor_timeout_ms`), then the human decides; cancellation abandons the wait before the budget is spent. *(deadline-harnessed, `tests/support/deadline.hpp`.)*
+- [x] A throwing advisor degrades to the wire prompt, never a lost turn. *(std and non-standard exceptions.)*
 
 **Test cases**
-- [ ] Unit: advisor allow / deny / abstain / throw — abstain and throw both fall through to the wire checker.
-- [ ] Unit: `AllowOnly` + advisor → the tool is denied before the advisor runs (assert it is never consulted).
-- [ ] Unit: grant filter — an advisor returning an undisclosed key leaves `session_grants_` untouched.
-- [ ] Unit: cancellation mid-`Advise` → the call returns (detached-thread deadline harness; a joined future would hang the suite).
-- [ ] Integration: subagent spawned from an advisor-governed parent — child has no advisor by default; with `advisor_inherit` the child's advisor sees only requests that passed the parent ceilings.
-- [ ] E2E over a real socket: a scripted advisor plugin allows one tool and abstains on another; the prompt reaches the client, the answer returns, the turn completes with `TurnCompletedEvent`.
-- [ ] **Invariant tests:** removing the abstain fall-through (advisor abstain → Deny) fails the abstain test; removing the grant filter fails the undisclosed-key test; making `checker_` concrete again fails any test that injects a fake.
+- [x] Unit: advisor allow / deny / abstain / throw — abstain and throw both fall through to the wire checker.
+- [x] Unit: `AllowOnly` + advisor → the tool is denied before the advisor runs (assert it is never consulted).
+- [x] Unit: grant filter — an advisor returning an undisclosed key leaves `session_grants_` untouched.
+- [x] Unit: cancellation mid-`Advise` → the call returns (detached-thread deadline harness; a joined future would hang the suite).
+- [x] Integration: subagent spawned from an advisor-governed parent — child has no advisor by default (the prompt arriving IS the proof the advisor never ran); with `advisor_inherit` the child's advisor sees only requests that passed the parent ceilings.
+- [x] E2E over a real socket: `fixture-advisor` — the first fixture to exercise a registration seam beyond tools/providers, loaded through the real `PluginLoader` (the first service test to do so) — allows one tool and abstains on another; the prompt reaches the client, the answer returns, the turn completes with `TurnCompletedEvent`.
+- [x] **Invariant tests, all proven load-bearing per §6:** removing the abstain fall-through (abstain → Deny) fails the abstain, throw-degradation and cancellation tests; removing the grant filter fails the undisclosed-key test; making the session's checker concrete again fails both fake-injection tests (session-level and the E2E).
+
+### K. Per-plugin config
+
+> Specified by `docs/EXTENSIBILITY.md` §2.3. Independent of everything; sequenced **before L** so the new `register_services` symbol ships with the registration context and never needs a second signature sweep.
+
+**What.** `ToolRegistrationContext` (`plugin_abi.h:51-56`) generalizes to `PluginRegistrationContext`: it keeps the verbatim `tools` object from `settings.json` and gains `config` — the plugin's own slice from its `plugins.json` entry:
+
+```json
+{"plugins": [{"file": "tools-bash.so", "enabled": true, "config": {"timeout_ms": 30000}}]}
+```
+
+Core imposes no schema — the same rule as `tools_settings` today. Every `register_*` symbol takes the context: tools, provider factories, session observers, commands, and auth (unwired, but swept for uniformity). Today only tool-registering plugins receive anything, and only the whole `tools` blob (`main.cpp:115-125`); a provider, observer, or command plugin has no sanctioned way to read its own settings.
+
+**How.**
+
+- `PluginConfig::Entry` (`plugin_discovery.hpp:22-34`) gains `nlohmann::json config`. Parse degrades to `{}` with a warning on a non-object value — the file's existing degrade-don't-throw rule. **The serializer must round-trip `config`:** `main.cpp:96` rewrites `plugins.json` after discovery, and a config that vanishes on the next save is user config silently dropped.
+- `plugin_abi.h`: the signature sweep. Source compatibility makes it a rebuild for plugin authors, not a break.
+- `plugin_loader.cpp` copies the entry's config into the context before each register call, inside the attribution window it already opens (pattern: tools at `:114-118`, commands at `:141-146`).
+- Bundled plugins update mechanically. **Implemented deviation:** the knob migration was taken immediately and strict — `tools-bash` and `tools-fs` parse their settings from `context.config` with **no** `tools.*` fallback (`tools.bash.*` / `tools.read.*` / `tools.edit.*` in settings.json are no longer honored); `bundled/settings.json`'s `tools` object is now empty and remains only as the verbatim channel for third-party tool plugins.
+
+**Acceptance criteria**
+- [x] A plugin's `config` object reaches every register symbol verbatim, and only that plugin's.
+- [x] A malformed `config` (non-object) degrades to `{}` with a startup warning; the plugin still loads.
+- [x] The `main.cpp:96` rewrite preserves `config` — no user-config loss on save.
+- [x] `tools_settings` still carries the whole verbatim `tools` object to tool plugins.
+
+**Test cases** (`tests/plugin_discovery_test.cpp` — new, parse/serialize/discovery — and `tests/plugin_loader_test.cpp`)
+- [x] Parse: `config` present / absent / non-object; serialize round-trips it through a load→save→load cycle (plus discovery propagation: entry config → candidate → context).
+- [x] Two plugins with different configs — each context sees only its own slice (isolation; observed through the real dlopen via the fixtures' config-echo tools).
+- [x] **Invariant test:** removing the per-plugin copy (every context gets one shared entry's config) fails the isolation test.
+- [x] One bundled plugin compiles through the new signature and still parses its settings unchanged.
+
+### L. Cross-plugin services (ServiceRegistry)
+
+> Specified by `docs/EXTENSIBILITY.md` §2.2. Sequenced after K. **Done.** The missing half of plugin-owned state: `SessionObserver` covers ordered notification (push), this covers queries (pull). §2.5's server half dispatches `PluginCall` *through* this registry when E lands the client half.
+
+**What.** A sanctioned channel by which one `.so` can reach another's services:
+
+```cpp
+// src/server/plugins/include/minimal/plugins/service_registry.hpp
+class ServiceRegistry {
+public:
+    // Register an abstract interface under a name. Non-owning: plugin handles
+    // are never dlclosed, so a process-lifetime pointer is safe.
+    void Provide(std::string name, void* service);
+    // Null when absent: the provider plugin may be disabled -- a runtime
+    // condition, not an error.
+    void* Find(std::string_view name) const;
+};
+```
+
+**Typed at the edges, named in the middle.** The provider ships its interface header (e.g. `bash_state.hpp` with `tools-bash`); a consumer `static_cast`s `Find`'s result to it. The name is the only coupling; the header is the contract, under the same source-compatibility model as everything else. Collisions resolve through the existing `NameRegistry` as a new kind — **fatal, not shadowed**. No bus, no subscribe: push already exists, and an event bus would put ordering/concurrency burden back on plugin authors — exactly what serialized observer dispatch removed.
+
+**How.** As specified, plus three implementation details:
+
+- `NameKind::Service` in `name_registry.hpp:11`; `ResolveRegistrationNames` picks up service attributions, and `main.cpp` feeds them through the existing collision/sanity path (`sanity_check.cpp` turns them Fatal, naming both plugins). **Post-L review:** `main.cpp` also `Seal()`s the registry right after `LoadAll` — after that a `Provide` is logged and ignored, so the unguarded map's safety is a property of the registry, not a comment about load order (a runtime registration would race concurrent `Find`s and slip past collision detection besides).
+- `minimal_plugin_register_services(ServiceRegistry&, const PluginRegistrationContext&)` — loader dispatch with an attribution window, like tools and commands. `PluginRegistrationContext` gains `ServiceRegistry* services` — the CONSUMER side: a plugin captures the pointer at registration and resolves with `Find` lazily at use time, since plugin load order is file order and a consumer can load before its provider.
+- The provider's shipped interface must be **abstract** (header-only, pure virtual): the concrete store's symbols live inside the providing `.so` (`RTLD_LOCAL`), so a consumer calling them by symbol would fail at `dlopen(RTLD_NOW)`; virtual dispatch needs no symbols. `tools-bash` ships `bash_state_service.hpp` (`BashSessionStateService`: `Erase`/`Reset`) and `BashSessionStateStore` implements it.
+- **First consumer:** `/restart-shell` (extracted to `restart_shell.{hpp,cpp}` so tests drive it in-process) resolves the store through `Find` and answers a clear `kError` when the service is absent. One deviation: the command STAYED in `tools-bash` rather than moving to `commands-core` — the reasoning is that a command belongs to the plugin that owns the state it touches; the service path and the absent-provider degrade are exercised by tests against the extracted command.
+
+**Acceptance criteria**
+- [x] A plugin Provides at registration; another consumer Finds, casts, and calls through the interface.
+- [x] `Find` for a name no plugin provided returns null — no error, no warning.
+- [x] Two plugins providing the same name are fatal at startup, naming both.
+- [x] `/restart-shell` works through the service path and degrades cleanly when the service is absent.
+
+**Test cases**
+- [x] Provide/Find round-trip; Find-before-Provide and Find-never-provided both null.
+- [x] Collision: fatal, diagnostic names both claimants.
+- [x] Loader attribution records the providing plugin; `NameRegistry::Resolve()` surfaces it.
+- [x] `/restart-shell` through the registry (in-process); the absent-provider error path.
+- [x] **Invariant test:** removing the collision check for `NameKind::Service` (last-wins) fails the collision test.
+
+### M. Tool history access — done
+
+> Specified by `docs/EXTENSIBILITY.md` §2.1. Independent. Two refinements found while wiring it: **ownership** (as planned below) and **the window** (the tool-facing type).
+
+**What.** `ToolContext` (`tool.hpp:29-60`) gains an optional read-only handle on the conversation it runs inside — **as `session::HistoryWindow`**, not the raw `SessionReader` the spec sketched:
+
+```cpp
+// tool.hpp -- set by the agent loop per invocation; null when unavailable
+const session::HistoryWindow* history = nullptr;
+```
+
+Anything context-aware — a "summarize the thread so far" tool, retrieval keyed to recent turns, a wrapper referencing what was last edited — becomes expressible.
+
+**How.**
+
+- **Ownership.** The agent loop has no `SessionReader` today (only `HistoryStore&`, `agent_loop.hpp:191`) and `Session` doesn't hold one; `CreateResolved` builds one ad-hoc for resume (`session_registry.cpp:121`). `SessionParams` gained a reader pointer, owned by `Session`; the agent loop sets `ctx.history` from it per invocation (`agent_loop.cpp:386-397`). Stores that are not SQLite-backed (test fakes) leave it null, so `history == nullptr` is the natural "unavailable" case, not an error path.
+- **The window — the refinement.** The spec had the constraint stated as a comment and the pointer typed `const SessionReader*`, whose `LoadAll()` is public (it is the resume path). Implemented instead as `session::HistoryWindow` (`history_window.hpp`): a header-only, non-owning wrapper holding the reader pointer **and the session id it is bound to**, exposing only keyset-paged `GetMessages(before_seq, limit)`. The windowed-only rule is a property of the type, not a comment — no path a tool can reach materializes the full history, and the isolation is structural (a tool cannot page another session's transcript, because it has no way to name one). `SessionReader` itself is unchanged; `LoadAll` stays the resume path's alone.
+- **Wiring.** `Session` owns `history_reader_` + the `HistoryWindow` built from it in the constructor body, both declared before `loop_` so destruction order keeps the loop's borrowed pointer safe; `SessionContext` carries the window pointer. The registry is the one funnel every session passes through — top-level and `SubagentManager` spawns alike — so injecting the reader there binds a child's window to the child's own id with no extra code.
+- **Frozen surface.** `history_window.hpp` (with `session_reader.hpp`) joined the utilities include set in `plugin_abi.h`: a plugin tool using `ctx.history` needs it declared surface.
+
+**Acceptance criteria**
+- [x] A tool reads a windowed range of the transcript through `ctx.history` during a live turn.
+- [x] Sessions on non-SQLite stores (tests) see `history == nullptr` and tools handle it.
+- [x] A subagent's tool sees the child's transcript only — never the parent's.
+- [x] No path a tool can reach materializes the full history — enforced by the wrapper, not just stated.
+
+**Test cases** (`tests/tool_history_test.cpp`)
+- [x] End-to-end with a scripted provider over a real SQLite store: a tool reads the last messages via `ctx.history` mid-turn (user turn + its own tool_use, newest first) and the result reaches the model.
+- [x] Null-history path (in-memory fake store) — the tool's degrade works, no crash.
+- [x] Subagent isolation: parent has N messages, child M; the child's tool observes M, and the parent's text is nowhere in its window.
+- [x] `HistoryWindow` direct: newest-first paging, keyset cursor, `has_more`, and binding (another session's row never appears).
+- [x] **Invariant test:** the end-to-end read asserts `history != nullptr`, so the agent loop building the context without the reader fails it.
+
+### N. Model auto-discovery — done
+
+> Specified by `docs/EXTENSIBILITY.md` §2.6. Independent of E and G. The payoff is concrete: `context_window_tokens` — the field window-relative compaction resolves against (§10) — stops being the one most likely to be stale or absent, and a provider serving fifty models stops being unconfigurable by hand.
+
+**Status: implemented as specified, with the decisions below.** `src/server/llm/model_catalog.hpp` (`DiscoveredModel`, `ModelCatalog::List` — const, per the same no-mutable-state contract as `LlmProvider` — and `ModelCatalogRegistry` mirroring `ProviderFactoryRegistry`); `minimal_plugin_register_model_catalogs` in the ABI (additive, no signature sweep); `providers.json` `"discover": true` accepted with or without a static `models` object (the legacy array still refused by name); `ProvidersConfig` retains per-provider entries, injects a discovery hook from `main.cpp` after plugin load (config layer never links plugins), caches per provider (generation-keyed, always 0), negative-caches failures, and returns discovered/enriched models from an overlay map. The one OpenAI-shape catalog ships beside `provider-openai` (`openai_model_catalog.{hpp,cpp}`: pure `ParseModelList` + an `HttpClient::Get` on `<url>/models`, reading `context_length` / `meta.n_ctx_train` / `max_model_len`, missing fields degrading to `nullopt`); its listing request timeout is 10 s, not the chat-length one, because a hung catalog must not wedge a resolver.
+
+**Concurrency — the post-N review's restructure (recorded because the first draft got it wrong).** The first draft called the hook under the single global config mutex: one hung catalog stalled *every* `Resolve` — all session creation — for the full 10 s, and `/providers refresh` held the lock across serial fetches of every discover-provider (N×10 s process-wide). It also erased overlay entries on refresh while `Resolve` handed out raw pointers into them — a use-after-free window between the RPC pool and a concurrent refresh. The shipped shape:
+
+- **`Resolve` returns `std::shared_ptr<const ResolvedModel>`** — a snapshot. Overlay entries are written once and never mutated in place; refresh *replaces* entries, and outstanding holders keep their snapshot alive. A vanished model leaves the listing immediately without dangling anyone.
+- **Per-provider fetch gates.** The network call (`FetchOutcome`, the hook) runs holding ONLY the provider's gate — never the global mutex — with a double-check under the gate after waiting (another resolver may have fetched first). The gate preserves the "N threads, one fetch" property per provider; unrelated providers, and all plain config reads, proceed regardless of how slow one catalog is. Lock order is gate → mutex, never the reverse.
+- **`/providers refresh` fetches per provider outside the global mutex** too — providers refresh in parallel, a hung catalog costs its own 10 s, not the process's.
+- **The transport is loopback-tested.** `Mode::Get` originally fell into the streaming branch of the curl write callback and silently dropped every GET body — every real catalog fetch was misread as a malformed response and negative-cached, invisible to the canned-body tests. `tests/http_client_test.cpp` now runs a loopback HTTP server (Get round-trip, Post round-trip, body-cap abort), and `tests/model_catalog_live_test.cpp` exercises the real catalog against a running backend when `MINIMAL_LLM_BASE_URL` is set (skip otherwise). Buffered responses are capped at 8 MiB in bytes, not just seconds.
+
+**Decisions taken during implementation (recorded here because the spec text left them open):**
+
+1. **The sanity check is network-free.** "Never at startup" and "warns when a catalog is unreachable" conflict unless *unreachable* is structural. The check warns when a discover-entry's backend kind registers no `ModelCatalog` and warns once per provider when its backend is unregistered; a discover-entry with a registered backend counts as usable with zero static models (the "zero discovered" fatal materializes at first resolve instead, with the miss reporting naming the failure); preset/`default_model` refs under a discover-entry that resolve to no static model are not flagged — unverifiable without a network call.
+2. **No persisted cache, no TTL.** Evaluated and rejected: the server is short-lived (auto-spawned, exits with the last client), so a TTL on a runtime cache is meaningless and a persisted cache would add a state file plus invalidation keys while reintroducing month-stale windows — the exact problem the track fixes. The hook + generation-keyed cache shape leaves the door open if a deployment ever shows the pain.
+3. **`/providers refresh` shipped in v1.** Mid-process backend changes (llama.cpp restarted serving a different model set) are real; the refresh command evicts the cache and refetches immediately, reporting per provider, so the operator gets the fresh list rather than a promise. It is `ReadOnly()` — meaning it never touches the conversation path, which is what qualifies it for the RPC pool beside live turns; the per-provider fetch gates (above) are what make the network I/O and cache mutation safe there, not the label. The `/providers` listing also resolves each ref's context window, which warms cold discover-entries' caches — a listing fetches, by operator decision, because the listing is where the operator looks for the fresh list; the gated fetch means it costs one catalog call per cold provider, never a stall.
+4. **Resume after the backend's list changed** needs no mechanism: it degrades to today's fail-loud shape (session creation throws "unknown model"), now with the honest reason — "discovery succeeded, model not served" vs "discovery failed: <reason>". No silent substitution of another discovered model behind an existing transcript.
+
+**Acceptance criteria**
+- [x] A provider with `"discover": true` and no `models` parses and serves discovered refs at first resolve.
+- [x] Discovery failure degrades: static models still resolve, and the miss error distinguishes typo from dead catalog.
+- [x] A discovered model's `context_window_tokens` reaches the compaction trigger (via `ApplyModel` into the preset; proven through the command fixture and the preset registry tests).
+- [x] Nothing ever writes discovery results back to `providers.json`.
+- [x] Sanity check: unreachable catalog warns (structurally); zero static ∪ zero discovered still fails usable-provider.
+
+**Test cases** (`tests/providers_config_test.cpp`, `tests/model_catalog_test.cpp`, `tests/commands_test.cpp`, `tests/sanity_check_test.cpp`, `tests/agent_preset_registry_test.cpp`, `tests/plugin_loader_test.cpp` + `fixture-good`)
+- [x] Parse: `discover` + no-`models` accepted; the legacy array still refused by name; non-boolean `discover` refused.
+- [x] Lazy fetch: `List` called once on first miss; a second resolve of the same ref hits the cache (assert the call count).
+- [x] Negative cache: a failed discovery is not re-attempted per resolve.
+- [x] Union: `ModelRefs()` includes cached discovered entries, sorted; a cold cache contributes none.
+- [x] Catalog impl: canned JSON bodies — llama.cpp shape, OpenRouter shape, vLLM shape (`max_model_len`), missing metadata fields degrade to `nullopt`.
+- [x] Enrichment: a static model with an omitted window gains the discovered window (overlay copy; the parsed entry is never mutated); a static model with its own window is untouched.
+- [x] Refresh: evict-then-refetch visible to a subsequent `Resolve` and to the listing; per-provider outcomes; a dead catalog reports instead of throwing; no discover-entries is an honest error.
+- [x] Concurrency: parallel `Resolve` from eight threads fetches once and resolves for all.
+- [x] **Invariant tests:** removing the miss→discovery fallback fails the lazy-fetch test; resolving `context_window_tokens` from static-only fails the compaction-window test.
 
 ---
 
@@ -422,7 +586,7 @@ without a worker thread, a provider and a transcript store.
 **Two things this track fixed that were not on the list.** `NameRegistry` had existed and been
 unit-tested since the plugin work landed while nothing outside its own tests ever *constructed* one,
 so duplicate registrations shadowed silently via `insert_or_assign` and which plugin won depended on
-directory iteration order; `command_aliases` was likewise parsed from `plugins.json` and
+directory iteration order; the aliases map was likewise parsed from `plugins.json` and
 re-serialized without ever being applied. C is the first track with a second registry, which is what
 made connecting them worth more than reimplementing per registry. Collisions are now fatal at
 startup, naming both claimants.
@@ -560,16 +724,31 @@ panel slots.
 - [ ] `ChatSurface` exclusive slot — one plugin may replace the whole chat view; second registration warns and is ignored.
 - [ ] Markdown engine exclusive slot + language-keyed grammar registration.
 
-### G. MCP client
+### G. MCP client — done
 
-> § *MCP client — `src/server/mcp/`*. cpp-mcp is pinned and fetched but never referenced; only permission plumbing exists.
+> § *MCP client — `src/server/mcp/`*. **Built, wired, and exercised end to end over a real socket plus a live real-server smoke test.**
 
-Lazy connection on first MCP tool call. Tools register as `mcp__<server>__<tool>` — `mcp_server_of` and the per-server permission chain are already built and tested.
+`src/server/mcp/`: `naming` (mangling + validation), `env_interpolation` (connection-time `${ENV_VAR}`, fail-closed), `mcp_tool` (the `Tool` adapter + result conversion), `mcp_connection` (per-connection worker thread, deadlines, cancellation; stdio via a cpp-mcp **shim island**, http via a hand-rolled Streamable-HTTP client over `HttpClient`+`SseParser`), and `mcp_client_manager` (shared processes, discovery cache, liveness, respawn). Wired into `SessionRegistry`/`Session` (liveness at session start and `/agent`), `BuildChatRequest` (`DefinitionsForMcpServers`), `SpawnSubagentTool` (dead-server gating), and `main.cpp` (serve-stage construction).
 
-- [ ] Tools from a stdio MCP server appear as `mcp__<server>__<tool>` and execute.
-- [ ] Per-server permission policy governs them (already tested in isolation — assert it end to end).
-- [ ] A dead/hanging MCP server degrades to a tool error, never a hung worker.
-- [ ] Connection is lazy: no MCP process spawns until a tool is actually called.
+The plan-vs-architecture "lazy connection" discrepancy was resolved in the architecture's favour: liveness and discovery fire at session start (and `/agent` switches) for allowed servers, never at boot; the `mcps.json` env/header `${ENV_VAR}` interpolation promised by `mcps_config.hpp` is resolved at connect time.
+
+- [x] Tools from a stdio MCP server appear as `mcp__<server>__<tool>` and execute. *(E2E over a real socket: discovery at session start, `ToolExecutionEvent` round-trip, `TurnCompletedEvent` last.)*
+- [x] Per-server permission policy governs them. *(E2E: `mcp_default_mode: ask` prompts over the wire; allow runs the tool, deny produces an error `ToolResultBlock`.)*
+- [x] A dead/hanging MCP server degrades to a tool error, never a hung worker. *(Deadlines at every layer — open, discovery, call — against scripted hang/garbage/die-after-init fakes, all under the deadline harness; `SIGPIPE` from a dead child is disabled, exit 141 verified before the fix.)*
+- [x] No MCP process spawns at boot. *(Manager construction spawns nothing; liveness checks at session start spawn per allowed server — the original "lazy until first tool call" wording was stale, see § *MCP client*.)*
+
+#### What first contact found
+
+1. **cpp-mcp and the harness cannot share a translation unit.** cpp-mcp vendors its own older nlohmann/json (ABI `v3_11_310`) while the tree links vcpkg's (`v3_12_0`); the static library's symbols simply do not bind. The `mcp_stdio_shim` island (one TU, cpp-mcp headers only, string/bool facade) is the resolution — recorded in ARCHITECTURE.md, since any future consumer of cpp-mcp must go through it.
+2. **cpp-mcp's `sse_client` cannot speak to a modern http MCP server.** The gateway (official python SDK) answers Streamable HTTP; the probe caught this before any wrapper was built on the wrong transport. Hand-rolled client over `HttpClient`/`SseParser` instead — both already exposed as utilities.
+3. **cpp-mcp's `initialize` blocks indefinitely if the child dies during startup**, and a request blocks up to a fixed internal 60 s. All deadlines are therefore ours: one worker thread per connection, callers wait in slices on their own slots, wedged workers are detached rather than joined.
+4. **A dead child's stdin write killed the whole test process with SIGPIPE (exit 141).** The shim ignores SIGPIPE process-wide before spawning; children inherit SIG_IGN — the hosted-runtime trade, and a real server-hosting hazard that no unit test of the happy path would have found.
+5. **`allowed_tools: ["*"]` swept MCP tools into every request.** `DefinitionsFor` now excludes `mcp__*` names; the model sees `DefinitionsForMcpServers(live_servers)` only. A de-scope test (assert the tools vanish after `/agent`) failed against the original code — the invariant test earning its keep.
+6. **ToolRegistry went from read-only-after-startup to concurrently mutated.** Re-discovery replaces a server's tool set while session workers call `DefinitionsFor`/`Find`; a `shared_mutex` plus the never-destroy retired list (the executor holds the raw pointer across `execute()`) make replacement safe. Verified with a concurrent read-during-replace test.
+7. **First registration of the invoker was moved-from**, leaving every McpTool after the first with a null invoker and a "not connected" error — caught by the env-marker round-trip test, not by review.
+8. **Header names arrive verbatim from the wire.** Comparing `"Content-Type"` case-sensitively silently disabled SSE parsing (the body then failed to parse as JSON); the same class of bug `FindHeaderCI` already existed for.
+
+**Test infrastructure.** A scripted stdio MCP server (built on cpp-mcp's own `mcp::server`) provides deterministic hang/slow/die-after-init/garbage modes; it carries an orphan watchdog because a fake server outliving its parent holds the parent's stdio pipes open and ctests waits for EOF — a run that has passed but will not end. The live smoke test (`mcp_live_test.cpp`, `MINIMAL_ENABLE_LIVE_MCP_TESTS=ON`) is a hard requirement where enabled — a missing `gateway` FAILS — and CI never sets the option.
 
 ---
 
@@ -581,6 +760,29 @@ Applies to every milestone. These are existing project practice, recorded so the
 - **Verify by execution, not inspection.** Plugin linkage was confirmed with `nm -u`/`otool -L`; the ABI mismatch was demonstrated against a running server; the bash hangs were measured (8008 ms → 0 ms). Claims about behaviour need a run behind them.
 - **The pinned toolchain does not synthesize implicit `operator==` for user-defined classes** (verified against AppleClang 21: even `struct E { bool b; };` has no `==`; an explicit `= default` works). Compare fields explicitly, as the existing tests do — do not add defaulted operators to production types just for test convenience.
 - **Zero warnings.** `-Wall -Wextra` on all first-party targets; the tree is clean and must stay so.
+- **ASan is a preset, not a memory.** `cmake --preset asan && cmake --build --preset asan && ctest
+  --preset asan` runs the whole suite with first-party code AND dependencies instrumented
+  (`cmake/triplets/arm64-osx-asan.cmake`; the triplet name keys vcpkg's cache, so the instrumented
+  dependency tree installs beside the normal one and the preset's first run is the slow one). Leak
+  detection is off by decision: plugin handles are held for process lifetime on purpose
+  (ARCHITECTURE.md, "Server plugins"), and uninstrumented third-party allocators made LSan noise
+  exceed signal. Sanitizer findings are test bugs until proven otherwise — the preset's first run
+  caught a use-after-scope in a test that destroyed its release flag before the worker polling it.
+- **TSan is a preset, not an accident.** `cmake --preset tsan && cmake --build --preset tsan && ctest
+  --preset tsan` is the same overlay-triplet shape (`cmake/triplets/arm64-osx-tsan.cmake`), for the
+  same reason with the opposite sign: an uninstrumented dependency hides races in happens-before
+  terms, so the false-negative risk argues for instrumenting everything, not just first-party code.
+  Unlike ASan there is no option to turn off — a race report fails ctest by default. The suite is
+  otherwise the same 678 tests, no TSAN_OPTIONS tuning. The first run caught exactly one finding: the
+  cancel-during-backoff rendezvous spun on `FakeLlmProvider::call_count()` while the session worker
+  recorded the request — a data race whose practical harm was zero and whose existence contradicted
+  the test's own "deterministic rendezvous" comment. The fix is the mutex `ScriptedProviderScript`
+  already wore; `requests()` deliberately stays a bare reference read after join. The races the
+  review pass found (#4, #7, #9, the client's command counter) were fixed without TSan available to
+  verify them, so this run was their verification, and it is what keeps them caught.
+- **The presets pin the generator** (`Ninja`); ad-hoc `-G Ninja` configurations were how every
+  build here has actually been made, and a preset that cannot configure from a clean checkout is a
+  gap, not a default.
 - **`ARCHITECTURE.md` is updated in the same change that diverges from it.** The bash rework's core finding was a restriction that outlived its rationale because the doc was updated without re-deriving the rule.
 - **Test tiers** (§ *Testing*): pure logic → agent loop against `FakeLlmProvider` → tools against a temp `project_root` → end-to-end over a real socket.
 
@@ -590,8 +792,9 @@ Applies to every milestone. These are existing project practice, recorded so the
 
 Not scheduled, recorded so they are decisions rather than oversights.
 
-- **Server-wide fd hygiene** — no `CLOEXEC` discipline on gRPC/SQLite/log fds; every bash command inherits them. The bash pipes are handled; the rest is not.
-- **`tree-sitter-bash` for command disclosure** — the hand-rolled scanner is conservative and its failure mode is safe (fewer grants offered). Upgrading raises the hit rate, not the safety floor. The grammar is already a planned client dependency.
+- **Server-wide fd hygiene** — no `CLOEXEC` discipline on gRPC/SQLite/log fds; every bash command inherits them. The bash pipes are handled; the rest is not. MCP stdio children are spawned through cpp-mcp and have the same gap.
+- **`mcps.json` `args[]` entries containing spaces cannot reach the child** — cpp-mcp splits the stdio command line on whitespace; the shim inherits the limitation. Recorded in ARCHITECTURE.md.
+- ~~**`tree-sitter-bash` for command disclosure**~~ — **landed** (§12.40). The original deferral reason recorded here was wrong and had to be corrected first: it said the hand-rolled scanner's "failure mode is safe (fewer grants offered)". It was not safe: shell reserved words were recorded as programs, which consumed the command slot and demoted the real program to an argument, so `ls; if true; then rm -rf /; fi` disclosed only `{ls}` and reported itself *complete* — more authorised than the operator saw, not less (§12.1). That hole was closed first (§12.1 again), and the grammar now replaces the walker: `command_name` nodes at every command position, ERROR/MISSING nodes mapped onto `complete = false` — the error signal being the point, since it is the one thing a hand-rolled walker cannot produce. The `FetchContent` grammar-vendoring path this built (tree-sitter-bash has no vcpkg port) is the same plumbing track E needs for highlighting grammars. Every §12.1 scanner test passes unchanged; the grammar version adds fail-closed-on-error, heredoc-bodies-are-data, and no-junk-words guarantees the walker could not make.
 - ~~**Unknown `allowed_skills` entries are silently dropped**~~ — still true of resolution (correct for lookup), but now *reported* at startup by F (`naming_model` check).
 - ~~**`themes/*.json` and `keybindings.json` are specified but unread**~~ — shipped, seeded, and read as of E1/E4 (E4 closed the keybindings half with its loader and defaults).
 - **The compaction trigger now follows the model's window** (`{"percent": 80}` by default), so the
@@ -602,7 +805,7 @@ Not scheduled, recorded so they are decisions rather than oversights.
 - **No HTTP connection reuse** — a fresh CURL handle per provider call is the deliberate shape of the statelessness contract ("no mutable state across calls"), but a remote backend pays a TCP/TLS handshake per tool cycle. A per-call handle *pool* would recover most of it without shared state; deferred until a remote-backend deployment actually feels it.
 - **Terminate latency can hit `stream_idle_timeout`** — a backend that stalls silently is observed as cancelled only at event boundaries and the 25 ms backoff poll, so `Terminate`'s join can block for up to the 60 s idle timeout before the sink abort propagates. Bounded, and local llama.cpp does not stall this way; recorded rather than tuned.
 - **The shared-token auth plugin is deferred** — the `AuthProvider` registry, the pass-through default, and the wire guard are built (§11); the example plugin that registers one is not.
-- **`tree-sitter` grammars** — claimed by the architecture's vendoring note and absent from the tree (dead vcpkg entry included). They arrive with track E, the only consumer.
+- ~~**`tree-sitter` grammars**~~ — the dead vcpkg entry is real now: `tree-sitter` core moved to base dependencies and `tree-sitter-bash` is vendored via `FetchContent` (the command scanner, §12.40). The rest of the curated set arrives with track E, which now only needs to declare targets on plumbing that already exists.
 - Everything under § *Deferred / open items*: Anthropic provider, Windows, `llamacpp-kv`, parallel tool dispatch, session detach, tab-bar overflow.
 
 ---
@@ -679,8 +882,11 @@ One aside worth keeping: a Catch2 `TEST_CASE` name that *starts* with `-` breaks
 ### Practice this confirmed
 
 - **The from-scratch build and the sanitizer both earned their keep**, and both required reading the
-  output rather than the exit code. ASan's one report is inside gRPC's own `send_goaway` frame and
-  reproduces with every change stashed — an uninstrumented dependency, not a defect.
+  output rather than the exit code. ASan's one report back then was inside gRPC's own `send_goaway`
+  frame and reproduced with every change stashed — an uninstrumented dependency, not a defect.
+  Closed since: §11's `asan` preset instruments the dependencies too (overlay triplet), and the
+  suite runs clean under it. Instrumenting only first-party code is not an option — that same
+  mismatch is what produced the report.
 - **A ceiling is not an invariant test.** The first "the retry waited" assertion was `elapsed < 2s`,
   which passes with the backoff deleted. Under full jitter no single run *can* assert a floor; the
   fix was to change the algorithm to equal jitter so the floor exists, not to loosen the test.
@@ -862,5 +1068,527 @@ the tree and green.
 
 - **HTTP connection reuse, `stream_idle_timeout`-bounded terminate latency, the shared-token
   plugin, tree-sitter grammars** — all recorded in §7 with the reason each is a decision.
-- **A `catch(...)`-shaped seam test for the compactor** — the compactor already returns failure as
+- **A `catch(...)`-shaped seam test for the compactor** —    the compactor already returns failure as
   a value; only the loop's bookkeeping needed the guard, and that is tested.
+
+## 12. Third-pass review
+
+A third deliberate read of the whole tree, after §8 (merge seams) and §11 (correctness and
+efficiency). This one was aimed at what those two did not look at: the permission scanner's actual
+parse, extension points that are declared but never fire, config the server promises to honour and
+doesn't, and races no sanitizer in the tree can see.
+
+The through-line is worth stating, because it predicts where the next one will find things: **almost
+every remaining defect is a comment describing a mechanism that isn't there.** A guard that never
+receives its trigger, a hook nothing calls, a settings block nothing reads, a containment claim a
+bounded queue contradicts, a totality guarantee `if constexpr` doesn't give — and the one below, a
+conjunction the scanner does not actually compute. That gap is worse than an honest absence, because
+every one of them reads as done.
+
+### Authorisation
+
+1. **Shell keywords ate the command slot, and a held grant then ran an ungranted program.** The
+   scanner recorded the first word after a separator as the program; reserved words are not
+   separators, so `then` was recorded *as* the program of its list and the real one was demoted to
+   an argument. `ls; if true; then rm -rf /; fi` disclosed `{ls, if, then, fi}` — `if`/`then`/`fi`
+   resolve to no binary and are dropped — leaving `{bash:/bin/ls}` with `complete = true`. A session
+   already holding a grant on `ls` satisfied the conjunction and ran it with no prompt.
+
+   **This was not the accepted lower bound.** `complete = false` is scoped to *syntactic* blindness
+   — `$X args`, `eval "$CMD"` — and `find | xargs rm` is the recorded semantic limit. Neither
+   applies: `rm` is a literal in a command position, the operator granted `ls` and nothing else, and
+   the harness told them the disclosure was complete. The difference from the `xargs` case is what
+   the operator was *shown*: granting xargs is a decision about xargs, taken knowingly. Nobody
+   decides anything about a program that was never disclosed.
+
+   The whole reserved set is skipped, not just the subset followed by a command list: skipping `for`
+   or `[[` records one extra word (`f`, `-f`) that resolves to no binary and is dropped at
+   disclosure, which is the same over-approximation `ResolveOnPath` already accepts and errs toward
+   more keys in the conjunction, never fewer. `ARCHITECTURE.md` gains the floor this owes rule 1 —
+   *a literal program in a command position is either named or `complete` is false* — since the
+   lower-bound wording alone did not distinguish the two cases and that is what let this look
+   acceptable.
+
+   Fixed alongside, same file: `$'...'` was consumed as a bare `$x` token, so the closing quote
+   opened a fresh quote region and swallowed the rest of the line — dropping every later pipeline
+   stage from the disclosure. It is a quoted literal, so `$'rm'` now names `rm`.
+
+   Invariant tests at both levels: the disclosure must name `rm`, and at the executor seam a grant
+   on `ls` must not silence a second command hiding another program behind `then`. Both fail against
+   the old scanner (12 assertions), including the one that asserts the prompt count — i.e. the
+   unprompted execution itself.
+
+   §7's deferral of `tree-sitter-bash` is corrected in place: it was recorded as safe-by-failure-mode,
+   which is what this disproves. Still deferred now that the hole is closed, but the argument for it
+   is no longer only hit rate — a hand-rolled walker cannot tell "I parsed this" from "I mis-parsed
+   this", which is exactly how this produced `complete = true`, and a grammar can.
+
+### Correctness
+
+2. **A throwing tool poisoned the session for good.** `ToolExecutor::Run` called plugin code --
+   `category_for`, `Disclose`, `execute`, all arbitrary native code by design -- with no guard, and
+   the agent loop did not wrap it either. The loop persists the assistant message carrying the
+   `tool_use` BEFORE running any tool and appends results AFTER all of them, so a throw left an
+   orphaned `tool_use` in history: the exact state `snap_compaction_boundary` exists to prevent, and
+   a hard 400 on both wire formats. `Session::RunOneTurn` caught the exception, the session
+   survived, and then failed every subsequent turn forever.
+
+   Three live routes, none exotic, all reading input the MODEL wrote: `fs_tools` used `value()` and
+   `get<int>()` on `offset`/`limit`/`view_range`/`command` without checking type, so
+   `{"offset": "1"}` was a `type_error` out of the tool; and `SessionDatabase::AppendMessage` called
+   `dump()` with the default strict UTF-8 handler, which throws on invalid UTF-8 -- nothing between
+   a child process's raw stdout and that line validates encoding, so one `cat` of a binary file did
+   it. All three fixed: the executor answers every call on every path (`Run` is now a `try` around
+   `RunGuarded`, so a later edit cannot slip a return past the catch), `fs_tools` type-checks the way
+   its own `Insert` already did, and persisted content substitutes U+FFFD. `Run` never throwing is
+   stated on the declaration, since it is a contract the loop depends on rather than an
+   implementation detail.
+
+3. **The server never exited after an `OpenSession` exception.** The catch path restored the attach
+   count and stopped; the success path fires `on_last_client_detached_` on the zero transition, which
+   `main()` wires to `RequestShutdown()`. So a client whose stream unwound decremented to zero
+   without ever firing it, and the no-daemon design -- "refcounted by attached clients, gone when the
+   last one leaves" -- silently did not hold: the process kept the socket forever and the next
+   auto-spawning client would find a zombie it could not replace. The catch block existed precisely
+   so the refcount could not leak, and its comment says so; it just did not carry the consequence of
+   reaching zero. Both exits call one `ReleaseAttachment` now, because splitting that decision across
+   two sites is what let them drift.
+
+4. **`AgentPresetRegistry::Resolve` raced on its own cache.** A `mutable unordered_map` populated
+   lazily, with no mutex in the class, called from `SessionRegistry::Create` on a gRPC handler thread
+   (before it takes its own lock) and from `SubagentManager::Spawn` on a session worker. Two
+   concurrent `CreateSession`s, or a `CreateSession` racing a `spawn_subagent`, is a concurrent
+   `emplace` into one map -- and it returned a `const AgentPreset&` into a container a rehash could
+   move. The class comment's "config is read once at startup, there is no hot-reload" is true of the
+   FILES; the cache is built at runtime from whichever thread asks first. Now mutex-guarded and
+   returning by value, with `ResolveUncached` run OUTSIDE the lock so disk I/O does not serialize
+   every concurrent session creation -- two threads racing an unseen preset may both parse it, which
+   is harmless because the result is a pure function of files that do not change at runtime.
+
+5. **A client-supplied page limit was trusted.** `limit` is a wire `int32` with a floor and no
+   ceiling; `SessionDatabase` binds `limit + 1` for the has-more probe, so `INT32_MAX` is signed
+   overflow -- and in practice binds a NEGATIVE limit, which SQLite reads as no limit at all. One
+   `GetMessages{limit: 2147483647}` then loaded an entire transcript, every row decoded and copied
+   into one proto response: the O(n) blowup the keyset paging (§11.8) exists to prevent, reachable
+   from any client since authentication is pass-through by default. `ListSessions` had the same gap,
+   and its proto comment already documented a bound it did not have. Both clamp to 1000 now --
+   clamped rather than refused, because asking for more than we serve is not an error and `has_more`
+   already tells the client to page.
+
+### Mechanisms that were described but not wired
+
+6. **A hung observer stalled the gRPC reader thread.** `Dispatch` posted with `EventQueue::Push`,
+   which BLOCKS at the cap -- while `NotifySessionCreated` runs inside `Session`'s constructor,
+   reached from `SessionRegistry::CreateResolved` on the gRPC HANDLER thread, and
+   `NotifySessionEnded` runs from `Terminate` on the reaper and in `~SessionRegistry`. So the
+   containment property both the header and `ARCHITECTURE.md` state outright -- "a hung observer
+   stalls further notifications rather than leaking one pool thread; contained (sessions keep
+   running; only notifications stop)" -- was the opposite of what happened: a wedged plugin observer
+   filled the queue and then blocked session creation and teardown, including the one thread the
+   three-thread topology forbids from blocking. `TryPush` now, with dropped notifications counted and
+   logged, since a plugin that misses an `OnSessionEnded` leaks its per-session state and the leak
+   would otherwise be the only evidence. The queue bound also became explicit (1024): inheriting
+   `EventQueue`'s 65536 default silently reserved a stream-event-sized backlog for notification
+   tasks that each carry a `SessionInfo` copy.
+
+7. **`SessionObserver` was half a contract.** `ARCHITECTURE.md` documents `OnToolExecuted` and
+   `TurnSummary::tool_names_invoked`; track I is checked off. `NotifyToolExecuted`'s only caller in
+   the tree was its own unit test, and `RunOneTurn` built `TurnSummary` without ever setting
+   `tool_names_invoked`. A plugin author implementing the documented interface got silence and an
+   empty vector -- worse than the hook not existing, because it reads as working. The loop now
+   records each tool name (before the call, so a failed tool still appears -- what ran is the
+   question, not what succeeded) and times it, and the session's lifecycle sink fires
+   `NotifyToolExecuted` on the FINISH event: a started/finished pair is the wire's concern, an
+   observer wants one record of a completed call.
+
+8. **`/compact` was queued behind the running turn instead of refused.** `Dispatch` takes a `busy`
+   flag for exactly this, and both production callers passed `false` unconditionally -- so only the
+   unit tests ever exercised it, and the behaviour was verbatim what `command_dispatcher.hpp`
+   forbids: "queueing would make /compact silently run minutes later against a context that had
+   moved on." The check now runs on the reader, where the answer can be returned without queueing
+   the thing being refused.
+
+   The rule is an **LLMCommand**, not any non-read-only command, and the old `!ReadOnly()` predicate
+   conflated two real behaviours: a mutating `HarnessCommand` (`/agent`, `/model`) is MEANT to queue
+   and land at the next turn boundary -- that is what the shared work queue is for -- while an
+   LLMCommand needs the provider and history to itself. The type exists to carry that distinction
+   ("a type cannot be forgotten the way a flag can"), so the type is what is asked, in both places.
+   An unknown command is also answered immediately now, rather than queued behind a long turn purely
+   to be told it was unknown.
+
+9. **`AgentLoop::ClearHistory` touched `injected_` without its mutex.** `/clear` runs on this
+   session's worker; `QueueInjectedMessage` runs on a NON-BLOCKING SUBAGENT's worker from its
+   completion hook. A background child finishing while the user types `/clear` is a data race on a
+   `vector<Message>` -- the kind that corrupts rather than crashes. Now locked, and the occupancy
+   estimate is reset with the history it described.
+
+### Errors that were not errors
+
+10. **`sqlite3_step` failures were indistinguishable from end-of-rows.** All three row loops were
+    `while (step(stmt) == SQLITE_ROW)` with the terminating code discarded, so `SQLITE_BUSY`,
+    `SQLITE_IOERR` and `SQLITE_CORRUPT` all exited the loop exactly as `SQLITE_DONE` did and every
+    caller read the short result as a complete one. `LoadMessages` is the resume path and the worst
+    of them: a partial read becomes the loop's working history while `SqliteHistoryStore` keeps
+    appending at `MAX(seq) + 1`, so the session runs on a transcript with a hole in it and nothing
+    ever reports it. `GetMessagesPage` returned `has_more = false` on failure, rendering a truncated
+    page as the top of the conversation. The file's own comment says an unparseable row is "surfaced
+    at read time rather than smuggled to the client as garbage" -- the JSON decode was strict, the
+    read beneath it was not, so the strict half was guarding the lax half's output.
+
+    Two neighbours in the same file, same shape: `SessionExists` returned false for a LOCKED
+    database exactly as for a missing row, so the RPC layer told the client its session had been
+    deleted; and the append path reported any `UPDATE` failure as "cannot append to unknown session",
+    sending the next reader after a wiring bug when the disk was full.
+
+    The proof is a deliberately corrupted database: without the check `LoadMessages` returns a
+    plausible short transcript, with it the failure surfaces.
+
+11. **Two registration namespaces had no guard.**
+
+    *Provider kinds had no collision rule.* `ProviderFactoryRegistry::Register` returned false on a
+    duplicate and its own header said the caller "wants to report which two plugins collided" -- the
+    loader ignored the return value, so a second plugin registering `openai` was dropped in silence
+    and which backend a session actually got depended on plugin load order. Tools and commands both
+    feed `ResolveRegistrationNames` and collide fatally; this was the one namespace exempt from the
+    rule that exists to prevent exactly this. The registry now carries the same attribution window
+    the other two use, records the loser, and the sanity check reports it as fatal -- fatal rather
+    than aliasable, because there is no alias mechanism for a kind.
+
+    *A throwing registration callback killed the server.* `LoadOne` invoked five third-party
+    callbacks bare, so a throw propagated out of `LoadAll` into `main()`, which has no handler: the
+    process died without naming the plugin, and the attribution window stayed open, filing every
+    later plugin's registrations under the one that had already failed. Every other plugin entry
+    point in the tree was already wrapped -- observers, commands, and (after §12.2) tool execution.
+    A throw is now the `RegistrationThrew` load outcome, reported like any other. Tested against a
+    real `.so` that really throws, because a mock cannot demonstrate a process dying.
+
+12. **The streaming provider had three ways to turn an error into a silent empty turn.**
+
+    *A non-2xx with an empty body read as success.* `MaybeFireHeadersReady` is reachable only from
+    `WriteCallback` -- the first body byte -- so a 4xx/5xx with no body never fired it at all:
+    `is_error_status` stayed false, `response_status` stayed 0, and `StreamComplete` fell through to
+    `Finalize()` and returned an EMPTY ASSISTANT MESSAGE for an error the server had already
+    reported. Fired after `curl_easy_perform` too, idempotently.
+
+    *Non-`OpenAiParseError` exceptions were caught and dropped.* `FeedFrame` reaches raw nlohmann
+    accessors in several places -- the content delta, the tool-call fields, `ParseUsage` -- and only
+    `json::parse` was wrapped. A proxy sending `usage: null` threw a `type_error` that the
+    stash-and-rethrow lambda caught and then discarded, because its only handler was for
+    `OpenAiParseError`. The NON-streaming path has caught `json::exception` all along; the streaming
+    path had drifted. Now classified, with `LlmError` rethrown unchanged so it keeps its category.
+
+    *Blocks that opened never closed on a truncated stream.* `ContentBlockStop` was emitted only
+    inside the `finish_reason` branch, so an idle timeout, a dropped connection or a cancelled sink
+    left the client holding a block it had been told about and would never be told ended -- the same
+    rule the tool lifecycle already states for the running-tools panel. `CloseOpenBlocks` runs on
+    both exits, idempotently. And a tool call whose id/name never arrived is DROPPED rather than
+    finalized with empty fields, which used to reach the executor as `unknown tool: ` -- an error
+    attributed to a call the model believes it made. Nothing is orphaned by dropping it: there is no
+    tool_use in history to answer, and the loop already handles a ToolUse stop reason with no blocks.
+
+### Config the server promised and did not keep
+
+13. **`logging.*` was parsed, seeded, documented, and never applied.** `LoggingSettings` is fully
+    parsed, seeded into `bundled/settings.json`, and `ARCHITECTURE.md` describes it as backing a
+    spdlog rotating file sink under the data dir. Nothing read it: `DefaultLogger()` returned
+    spdlog's console default, so there was no file sink, `level` was ignored, and every
+    `logger_.debug()` in the tree was dead output.
+
+    That is worse than a missing feature, because a large share of this codebase's error handling IS
+    the log -- dropped `CommandResult`s, a dropped subagent result, the plugin-exists-twice warning,
+    compaction disabled for a session. They are visible today only because the server happens to run
+    in its own terminal; the moment a client auto-spawns it (which `main` already anticipates: "NO
+    DAEMON: refcounted by attached clients") they go nowhere. `common::ConfigureLogging` runs at the
+    top of `main`, before anything logs, because `DefaultLogger()` caches spdlog's default on first
+    use for the process lifetime. The console sink stays; a log file that cannot be opened degrades
+    to console-only rather than refusing to start.
+
+14. **`plugins.json` was rewritten every boot, non-atomically and lossily.** A plain truncating
+    `ofstream`, on every start, whether or not discovery changed anything -- while the tree already
+    had `tools::write_file` (same-directory temp, fsync, rename, mode preserved, §11.7) doing this
+    correctly for model-written files. The operator's own config deserved at least what a tool call
+    gets. And the serializer reconstructed the document from the two fields the parser models, so
+    any other top-level key a user added was silently deleted on the next boot. Unknown keys now
+    round-trip, and the write happens only when the content actually changed.
+
+15. **The headless client.** Four, all small, all in the same file:
+    - `PrintJsonLine` was `fputs(dump)` then `fputc('\n')` -- two stdio calls, each taking stdout's
+      lock separately -- called from the main thread AND every subagent-attach thread, so another
+      thread's line could land between a JSON body and its newline. That breaks the "one JSON value
+      per line" contract the file states outright. One locked `fwrite` now.
+    - The exit code derived from the last `message_delta`, not from `TurnCompletedEvent`.
+      `ARCHITECTURE.md` says the opposite, and §11.4 changed the server specifically so a cancel
+      inside retry backoff reports `Cancelled` rather than `Unknown` -- but that path emits no
+      `message_delta`, so the exit code stayed 0 and the §11.4 fix was unobservable from the client.
+      `hit_max_turns` was dropped entirely; it now maps to the truncation code, since stopping at the
+      turn ceiling is not success.
+    - `prompt.substr(0, 60)` could split a UTF-8 sequence, and `CreateSessionRequest.name` is a
+      proto3 `string`: the SERVER's parser rejects invalid UTF-8 while the client's serializer only
+      logs. Any non-ASCII prompt whose 60th byte fell mid-character failed session creation with an
+      opaque parse error.
+    - `command_counter_` was a plain `uint64_t` incremented from concurrent streams -- its own
+      comment describes that exact scenario as the reason it exists, and `++` from two threads is a
+      race that can produce the duplicate id it is meant to prevent.
+
+### Efficiency (against the 512k-1M token goal)
+
+16. **`CappedBuffer::Append` was O(cap) per 8 KiB chunk.** It erased down to exactly `tail_cap_` on
+    every append, and reads arrive in 8 KiB chunks -- so once the tail was full, every chunk memmoved
+    ~768 KB to discard 8 KB. A 200 MB build log (an ordinary `make`) meant ~25,000 erases of ~768 KB,
+    about 19 GB of memmove on the session worker, spent entirely on throwing bytes away. Compacting
+    only past 2x makes the work proportional to the data. **Measured: 260 ms -> 5.1 ms for 200 MB,
+    51x, with an identical dropped-byte count.** Adjacent: the fd-9 state payload restarted
+    accumulating after an overflow, so `yes >&9` refilled and cleared 1 MiB for the whole timeout;
+    the overflow is latched now.
+
+17. **The session picker's keyset cursor had no index to seek.** §11.8 made the MESSAGE cursor a real
+    seek; `ListSessions` was still a full table scan plus `USE TEMP B-TREE FOR ORDER BY` on every
+    page, because nothing indexed `(updated_at, id)` -- so the cursor predicate filtered instead of
+    sought and paging stayed O(total sessions) per page, the exact growth it exists to remove.
+    Migration v3 adds it with DESC/ASC matching the ORDER BY so the sort disappears too, plus
+    `sessions(parent_session_id)` -- the canonical unindexed-foreign-key case, where every
+    `DELETE FROM sessions` full-scanned looking for cascade children.
+
+18. **Three copies of every persisted message became two.** `AppendMessage` built a JSON DOM, dumped
+    it to a string, then bound it `SQLITE_TRANSIENT`, which tells SQLite to malloc and memcpy the
+    whole thing again -- for a tool result that can be hundreds of KB. `SQLITE_STATIC` with an
+    explicit length (no `strlen` either) removes the third. `~CachedStmt` now clears bindings as well
+    as resetting, since a borrowed pointer parked in a cached statement is not something to leave to
+    "nothing steps it".
+
+19. **Smaller, same path.** The assistant message copied `response.content` where it could move it --
+    `response` is loop-local and dead immediately after, so this duplicated every block and string of
+    the turn. `estimate_tokens` called `input.dump()` to read `.size()` and threw the string away,
+    over the whole transcript, on the resume path; it estimates structurally now.
+
+20. **`read_window` did not keep its documented memory bound.** `ARCHITECTURE.md` promises "memory
+    proportional to `limit`, not file size", and `std::getline` materializes the WHOLE line before
+    anything truncates it -- so a 40 MB minified file with no newline (and no NUL, so the binary
+    probe passes) was a 40 MB allocation to display 2000 characters. It reads into a fixed buffer and
+    discards the remainder now, with a 1 MiB hard cap when no `max_line_length` is configured,
+    because "no configured truncation" is not the same as "willing to allocate a whole file for one
+    line". `offset + limit - 1` also overflowed for model-written values near INT_MAX; computed in
+    int64 and clamped.
+
+    The test covers the behaviour (an enormous line still yields a truncated one), not the bound
+    itself: a peak-RSS assertion inside a shared test binary is not dependable, so the memory
+    property rests on the structure -- one fixed-size buffer, nothing else retaining the line.
+
+### Tier 4 — correctness nits and stale contracts
+
+The third pass's bottom tier, folded in two commits. Each is small; each is a case of the code
+disagreeing with what a nearby comment or doc claims, which is the theme of the whole pass.
+
+21. **`proto_convert`'s int64 guard admitted the one value it existed to stop.**
+    `static_cast<double>(INT64_MAX)` rounds *up* to 2^63, so a `<=` against it accepted
+    `9223372036854775808.0` — whose cast to `int64_t` is the UB the guard was written to prevent,
+    wire-reachable through any tool_use input. Strict `<` at the top; INT64_MIN is exactly -2^63 and
+    needs no such care, so the bounds are deliberately asymmetric. Same file: the header's totality
+    guarantee ("a missing mapping is a compile error") held for the enum switches via `-Wswitch` and
+    for neither `std::visit` + `if constexpr` chain — a future `ContentBlock` alternative would have
+    compiled silently, serialized as `BLOCK_NOT_SET`, and been *dropped* on the way back. Both chains
+    now end in `static_assert` on a dependent false.
+
+22. **`Session::RunOneTurn` used `store` where its own exactly-once claim names `exchange`.** The
+    claim was true, but only because `Terminate` joins the worker before reading the flag — correct
+    by a mechanism other than the one documented, which is how the next edit breaks it. Firing twice
+    would set a `std::promise` twice. Both sides exchange now; the property holds whatever the
+    ordering.
+
+23. **`sanity_check`'s error checks were half inert.** `!ec && is_regular_file(path, ec)` tested a
+    default-constructed `error_code` before the call wrote it, so the code `is_regular_file` reported
+    was never read — three copies of the pattern in the tree, one inert. And the presets scan's
+    range-for over `directory_iterator(dir, ec)` made only *construction* non-throwing: `operator++`
+    is the throwing overload, so one unreadable entry escaped `RunAll` and skipped every later check
+    — breaking the linter property the class documents. `it.increment(ec)` throughout.
+
+24. **`ProviderInstanceCache::GetOrCreate` read `generation_` outside `mu_`.** Harmless while the
+    field is always zero; the field exists *solely* for the day a config reload bumps it, which is
+    precisely the day the unsynchronised read becomes a race between the key and the bump. Lock
+    first, then build the key.
+
+25. **`SessionServiceImpl` stored a `PermissionsConfig` it never read**, and its run-mode comment
+    pointed a future reader at this service for a security-relevant default that is actually applied
+    in `AgentPresetRegistry`. The member, the constructor parameter, and the wrong pointer are all
+    gone.
+
+26. **`skill_registry`'s `LoadCandidate` used the throwing `is_directory`/`is_regular_file`** in a
+    function documented never to throw — an unreadable parent directory escaped the loader as a
+    `filesystem_error` instead of becoming a load-error entry. The `error_code` overloads, which the
+    same file already used elsewhere.
+
+27. **`InheritNumber` accepted floats.** `is_number()` is true for `4096.7` and `get<int>` truncates,
+    so a typo'd `max_tokens` silently became a different, valid-looking limit. Present-but-fractional
+    is now a named parse error carrying the model reference — same integer-only rule
+    `settings_config` already applied.
+
+28. **A typo'd top-level key in providers.json parsed as a valid empty config.** `"provider"`
+    instead of `"providers"` surfaced much later as "providers.json is empty", pointing at the
+    preset. A non-empty object with no `"providers"` key is refused at parse time, naming the first
+    key actually found; `{}` stays a valid empty config.
+
+29. **`mcps.json` leaked nlohmann's exceptions to users.** `entry.at("name")` threw
+    `json.exception.out_of_range` into a blanket catch, so a missing key read like a library bug
+    while every neighbouring field had a hand-written message. `name` and `transport` get the
+    hand-written treatment.
+
+30. **`insert` rewrote line endings `str_replace` left alone.** Rejoining lines unconditionally
+    appended `\n` to the last line, so a file not ending in a newline gained one — editing bytes
+    the caller never named. The original terminator state is preserved; the two mutating paths of
+    one tool agree.
+
+31. **`ResolveOnPath`'s two branches had drifted.** The slash branch omitted `is_regular_file`, so
+    `access(dir, X_OK)` — which succeeds for directories on POSIX — offered a *grant* for a path
+    that cannot be a program. Over-disclosure only, but disclosure is what consent is given against.
+
+32. **`WrapCommand` spliced the state trailer onto a trailing `\`.** Backslash-newline is a line
+    continuation, so the plain separator made `ls \` run `ls __minimal_rc=$?` — the marker became
+    an argument and the state the trailer exists to report was lost. An extra newline first is
+    correct for both backslash parities.
+
+33. **The unbounded-response gaps §11.13 missed.** The blocking HTTP path accumulated the response
+    body with no cap (a misbehaving proxy grows a string until the process dies); now a 64 MiB cap
+    enforced in the write callback — deterministic, unlike `CURLOPT_MAXFILESIZE_LARGE`, which is
+    advisory without a Content-Length — with the failure named after the cap. The SSE parser grew
+    `line_buffer_`/`pending_data_` without bound on a stream with no newline; past 1 MiB it throws,
+    and the streaming path's existing catch-and-classify turns that into an `LlmError` — the
+    fail-closed posture of §12.11. The provider's `error_body` accumulator (classification only,
+    never parsed) is capped at 64 KiB.
+
+34. **settings.json was parsed three times at startup, from two sources of truth.** main ran the
+    loop on the sanity check's parse while `AgentPresetRegistry` resolved `default_model` from its
+    own — the sanity check could validate content the server was not running. The registry takes
+    the caller's `SettingsConfig` now; one parse, in the sanity check, handed to both. (The early
+    logging-only read in main stays: it must run before the sanity check so its findings have
+    somewhere to go.)
+
+35. **`compact_messages` logged to `DefaultLogger()`**, so its diagnostics carried no session id
+    while the agent loop's adjacent compaction log did. `CompactionRequest` carries a `Logger*`
+    and a session label; the compactor's lines read as one stream with the loop's.
+
+36. **`SpawnSubagentTool` held a bare reference to the `SubagentManager`**, which declaration order
+    in `main()` destroys *before* the registry holding the tool — safe only because
+    `sessions.TerminateAll()` runs first on the normal path. The capture owns a `shared_ptr`; the
+    order no longer matters.
+
+37. **`command_aliases` was renamed to `aliases`, with no fallback.** The old name claimed a scope
+    it did not have: the one flat `plugin.name`-keyed namespace aliases TOOLS as well as commands.
+    A leftover `command_aliases` key is ignored and warned about on every boot (it round-trips
+    verbatim rather than being deleted), because with no fallback the alternative to the warning is
+    aliases silently not applying after an upgrade. The serializer also no longer writes an empty
+    `aliases: {}` into everyone's plugins.json.
+
+38. **The permission path's blocking `Push` was safe only by a two-file dependency nothing
+    documented.** `WirePermissionChecker::check` parks the worker on a full queue; it is woken by
+    `EventQueue::Close()`, which `Session::Terminate` calls only *after* `PendingRequests::Shutdown`
+    has unblocked the `AwaitResponse`. Swapping those two lines deadlocks the worker on an unasked
+    question. Both ends now say so, each pointing at the other.
+
+39. **The wedged-observer test itself was a stack-use-after-scope at teardown.** Found by the
+    ASan preset, which had not been run since the test landed in item 7's commit: the test's
+    `release`/`entered` atomics were declared AFTER the registry, so destruction (reverse order)
+    destroyed them BEFORE the registry's destructor joined the wedged dispatcher — which drains its
+    queued tasks, each touching `entered`, in exactly that window. The atomics are declared first
+    now, with the ordering rule written down where the next test of this shape will read it. This is
+    also why the verification bar is "the ASan preset runs", not "it ran once".
+
+40. **The bash command scanner is `tree-sitter-bash` now.** The hand-rolled walker that closed #1
+    was replaced by the grammar, as the review's sequencing planned. What it bought, concretely:
+    `command_name` nodes at every command position (function bodies, subshells, case arms,
+    substitutions) instead of the walker's separator approximation; heredoc bodies come back as
+    data, so `cat <<EOF` blocks no longer offer grants for programs that only ever existed as
+    echoed text; junk words the walker recorded as programs (the loop variable `f`, `[`) are gone;
+    and a word like `foo$(nproc)` as the program is `complete = false` rather than confidently
+    recorded as `foo`. The structural win is the error signal: the walker could not tell "I parsed
+    this" from "I mis-parsed this", which is exactly how #1 produced `complete = true` on a string
+    it had misread; a parse whose tree contains ERROR or MISSING nodes now fails closed, root check
+    included so missing *unnamed* tokens (`)`, `fi`) are caught too. The caveats the review named
+    were honoured: `time` and `coproc` are the two keywords the grammar leaves unstructured — they
+    parse as a plain command with the real program demoted to an argument, the exact shape of #1 —
+    so the reserved-word rule survived as a targeted check that names the program from among the
+    arguments; and every §12.1 scanner test passes unchanged, as the replacement's contract.
+    Plumbers' notes: tree-sitter core moved from the `client` vcpkg feature to base dependencies
+    (it was a dead entry — nothing linked it), the grammar is `FetchContent`-vendored at `v0.25.1`
+    with the `SOURCE_SUBDIR` trick so its standalone-oriented CMakeLists is never invoked, and the
+    two C files are compiled without our warning flags — third-party C, same policy as cpp-mcp.
+
+### Deliberately not done
+
+- **Memoizing `ToolRegistry::DefinitionsFor`.** It deep-copies every tool's `ToolDefinition`,
+  `input_schema` included, once per tool round. Real, and the same family as §11.11-11.12 -- but
+  order ~20 us against a provider call measured in hundreds of milliseconds, and a cache would need
+  an invalidation rule plus a span-lifetime rule (MCP tools register after startup, and a session
+  worker could hold a span across an invalidation). That is a genuine complexity increase for a cost
+   that does not show up. Recorded rather than done, so the next reader does not rediscover it as an
+   oversight.
+
+---
+
+## 13. MCP client remediation
+
+The §11 exercise, aimed at the track-G MCP client after its first review. Each item landed as its
+own commit with the invariant test that proves it load-bearing (delete the fix, watch the test
+fail). One item retires a §11 deliberate-deferral: **HTTP connection reuse** is now built
+(item 7 below) — the deferral was written before the MCP http transport existed to want it.
+
+### Correctness
+
+1. **The http transport could wedge its worker forever.** `StreamPost` set no total timeout in
+   streaming mode, so a server that accepted the connection and went silent held the connection's
+   worker thread indefinitely (stdio was capped inside cpp-mcp at 60 s; http had nothing).
+   `request_timeout` now caps the WHOLE transfer in both modes — providers leave it 0 for streams
+   and are unchanged — which also aligns the transport's failure with the caller's deadline.
+2. **`tools/list` pagination had no cap.** Each page was individually within the request deadline,
+   so a server that never stops returning `nextCursor` occupied the worker forever. Capped by the
+   new `tools.mcp.max_list_pages` (default 100, loader rejects < 1); a cap hit is a named discovery
+   failure, and a truncated listing can no longer silently hide tools by wedging instead.
+3. **A wedged stdio call leaked the child process.** Teardown detached the worker and relied on
+   cpp-mcp's internal 60 s cap — or, if the server process exited inside that window, orphaned the
+   child forever (the detached worker's destructors never run at exit). Teardown now aborts the
+   transport first: the stdio child is SIGTERMed (waitpid(WNOHANG) proves liveness AND ownership at
+   signal time, so a reused pid is never signalled; a detached watcher escalates to SIGKILL after
+   5 s), the blocking read ends, and the worker unwinds. The vendored cpp-mcp — pinned, no releases
+   to track — carries a tiny header patch (atomic `process_id_` + `child_pid()`), applied
+   idempotently by `cmake/ApplyCppMcpPatches.cmake`, which fails loudly on a half-applied or
+   diverged tree rather than building silently.
+4. **One odd exception in a worker job killed the server.** `WorkerState::Loop` ran jobs bare; an
+   exception escaping the thread function reaches `std::terminate`. Contained: log, continue, the
+   caller's deadline is the backstop.
+5. **Wire hardening on the http path.** A stringified integer id echo (some SDKs stringify) now
+   matches; an SSE stream that ends without the matching frame is a NAMED error ("closed the stream
+   without a response to request N") instead of the misleading "unparseable response" the empty
+   buffer produced; the slot's `done`/`value` reads happen under the slot mutex instead of leaning
+   on same-thread callback timing documented three files away.
+
+### Efficiency
+
+6. **Cancellation stopped polling.** Callers waited in 25 ms condition-variable slices — 40
+   wakeups per second per in-flight MCP call — solely to notice a cancellation flag.
+   `tools::CancelToken` makes it event-driven end to end: one mutex+cv+flag per turn; BOTH events a
+   waiter cares about (its slot completing, cancellation firing) notify the same cv; `Session`
+   mints a token per turn pop, `Cancel`/`Terminate` fire every live one, the agent loop hands it to
+   every `ToolContext`, and `McpConnection::WaitSlot` is a zero-poll `wait_until` loop. The
+   polling `is_cancelled` stays for tools that merely check it occasionally (bash). Lock order is
+   one-directional (worker: slot.mu → token.mu; waiter releases token.mu before slot.mu) — holding
+   both would close a deadlock cycle, so the invariant is in the code shape, not just the comment.
+7. **HTTP connection reuse (retires the §11 deferral).** `llm::HttpSession` keeps one CURL handle
+   across transfers — reset after EVERY transfer by scope guard, so per-transfer options cannot
+   leak while the connection cache survives — and the MCP http transport holds one for its life.
+   Providers keep the stateless per-call-handle `HttpClient` untouched. Proven by a hand-framed
+   HTTP server that counts ACCEPTED CONNECTIONS: three requests, one connection.
+8. **`EnsureAlive` stopped serializing the world.** The manager-wide mutex was held across ping +
+   connect + discovery — up to ~2 minutes of I/O per dead server, across ALL sessions, with
+   `StatusOf`/`ServerNames` blocked behind it. The manager mutex now covers only the map lookup;
+   per-server start mutexes serialize each server's own I/O. A 2 s verified-TTL dedups
+   near-simultaneous checks (subagent spawn after the parent's check, concurrent session starts) —
+   deliberately short: the first draft's 10 s masked a scripted death in the existing respawn test,
+   which now guards exactly that trade.
+9. **`ToolRegistry` lost its retired list.** Superseded MCP tools were parked in an unbounded
+   `retired_` vector for the process lifetime (a flapping server retired its whole tool set per
+   re-discovery), and the entire safety argument for it lived in comments — `Find()` handed out a
+   raw pointer used across a permission Ask that can block minutes on a human. Registry-wide
+   `shared_ptr` makes the executor's reference the lifetime guarantee, structurally; the old
+   invariant test now proves the superseded object stays callable AND that dropping the executor's
+   reference destroys it.
+10. **`McpClientManager::config_` was dead weight** — a full copy of the parsed mcps.json kept for
+     the process lifetime after the constructor consumed it. Now a local.

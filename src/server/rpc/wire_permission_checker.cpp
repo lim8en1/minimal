@@ -32,10 +32,17 @@ tools::PermissionResponse WirePermissionChecker::check(const tools::PermissionRe
     auto* permission = event.mutable_permission_request();
     *permission = ToProto(request);
     permission->set_request_id(request_id);
+    // BLOCKING Push, and its safety is a two-file dependency: a worker parked
+    // here on a full queue is woken only by EventQueue::Close() -- which
+    // Session::Terminate deliberately calls BEFORE joining the worker, and
+    // only after PendingRequests::Shutdown() has already unblocked the
+    // AwaitResponse below (see Session::Terminate in agent/session.cpp).
+    // Swap those two lines in Terminate and this call deadlocks the worker on
+    // a question nobody will ever answer.
     queue_.Push(std::move(event));
 
-    const std::optional<std::string> answer = registration.AwaitResponse();
-    if (!answer) {
+    const std::optional<PendingAnswer> registration_answer = registration.AwaitResponse();
+    if (!registration_answer) {
         // Cancelled: the session is terminating. Deny is the correct outcome --
         // the work is being torn down, so the tool must not run -- but it is a
         // decision made HERE, not inside the synchronisation primitive, which
@@ -43,11 +50,18 @@ tools::PermissionResponse WirePermissionChecker::check(const tools::PermissionRe
         return tools::PermissionResponse{tools::PermissionDecision::Deny, {}};
     }
 
-    // The reader hands the serialized PermissionResponse across as the resolved
-    // value. Parsing it here rather than at the dispatch site keeps the reader
-    // thread free of anything that could fail or allocate meaningfully.
+    // The reader hands the serialized PermissionResponse across as the typed
+    // variant. A ConfirmationAnswer landing here -- a client answering the
+    // wrong kind of request -- is structurally unreadable (get_if returns
+    // null), which is the same fail-closed outcome a malformed payload had.
+    // Parsing it HERE rather than at the dispatch site keeps the reader thread
+    // free of anything that could fail or allocate meaningfully.
+    const auto* answer = std::get_if<PermissionAnswer>(&*registration_answer);
+    if (answer == nullptr) {
+        return tools::PermissionResponse{tools::PermissionDecision::Deny, {}};
+    }
     v1::PermissionResponse decoded;
-    if (!decoded.ParseFromString(*answer)) {
+    if (!decoded.ParseFromString(answer->serialized_response)) {
         return tools::PermissionResponse{tools::PermissionDecision::Deny, {}};
     }
     return FromProto(decoded, request.disclosure);

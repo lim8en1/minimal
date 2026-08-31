@@ -97,6 +97,9 @@ std::string UsageText() {
            "      --dangerously-bypass  skip every permission check\n"
            "      --version\n"
            "\n"
+           "SIGINT/SIGTERM during a -p turn cancels it through the protocol: the\n"
+           "process exits 4 once the server reports the turn cancelled.\n"
+           "\n"
            "Values that start with '-' must use the --flag=value form, e.g.\n"
            "  minimal --print=--version-is-not-a-flag-here\n";
 }

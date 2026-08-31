@@ -6,6 +6,7 @@
 #include <nlohmann/json.hpp>
 
 #include "minimal/common/bundled_assets.hpp"
+#include "minimal/common/logger.hpp"
 
 namespace minimal::plugins {
 namespace {
@@ -37,29 +38,68 @@ PluginConfig ParsePluginConfig(const std::string& json_text) {
                 item.value("provenance", std::string{kUser}) == kBundled ? Provenance::Bundled
                                                                          : Provenance::User;
             entry.enabled = item.value("enabled", false);
+            if (auto config_it = item.find("config"); config_it != item.end()) {
+                if (config_it->is_object()) {
+                    entry.config = *config_it;
+                } else {
+                    // Degrade-don't-throw, like the rest of this file: a
+                    // malformed config must not stop the plugin from loading.
+                    // The plugin sees {} and the warning says what was dropped.
+                    common::DefaultLogger().warn(
+                        "plugins.json: entry '{}' has a non-object 'config' ({}); "
+                        "ignoring it -- the plugin will receive an empty config",
+                        entry.file, config_it->type_name());
+                }
+            }
             config.plugins.push_back(std::move(entry));
         }
     }
 
-    if (auto it = parsed.find("command_aliases"); it != parsed.end() && it->is_object()) {
+    if (auto it = parsed.find("aliases"); it != parsed.end() && it->is_object()) {
         for (const auto& [key, value] : it->items()) {
-            if (value.is_string()) config.command_aliases.emplace(key, value.get<std::string>());
+            if (value.is_string()) config.aliases.emplace(key, value.get<std::string>());
         }
+    }
+    // No legacy fallback: the old key is IGNORED (it round-trips via
+    // `preserved`, so it is not deleted either). Silence would mean aliases
+    // quietly not applying after an upgrade, so say so on every boot -- the
+    // noise is the feature.
+    if (parsed.contains("command_aliases")) {
+        common::DefaultLogger().warn(
+            "plugins.json: \"command_aliases\" was renamed to \"aliases\" and no longer "
+            "applies; rename the key");
+    }
+
+    // Anything this parser does not model is kept verbatim, so serializing back
+    // does not silently delete it. See PluginConfig::preserved.
+    for (const auto& [key, value] : parsed.items()) {
+        if (key == "plugins" || key == "aliases") continue;
+        config.preserved[key] = value;
     }
     return config;
 }
 
 std::string SerializePluginConfig(const PluginConfig& config) {
-    nlohmann::json out;
+    // Starts from what was read, so unmodelled keys survive the round trip.
+    nlohmann::json out = config.preserved;
     out["plugins"] = nlohmann::json::array();
     for (const auto& entry : config.plugins) {
-        out["plugins"].push_back({
+        nlohmann::json item = {
             {"file", entry.file},
             {"provenance", entry.provenance == Provenance::Bundled ? kBundled : kUser},
             {"enabled", entry.enabled},
-        });
+        };
+        // User config must survive the load->save cycle: main rewrites this file
+        // on every startup, so dropping config here would silently erase it.
+        // Emitted unconditionally (object or not) so what round-trips is what
+        // was parsed -- a malformed value was already flattened to {} at parse.
+        item["config"] = entry.config;
+        out["plugins"].push_back(std::move(item));
     }
-    out["command_aliases"] = nlohmann::json(config.command_aliases);
+    // Only when non-empty: an always-present empty key is noise in a file the
+    // user is invited to edit, and would resurrect "aliases": {} on the very
+    // boot after an operator removed their last one.
+    if (!config.aliases.empty()) out["aliases"] = nlohmann::json(config.aliases);
     return out.dump(2) + "\n";
 }
 
@@ -134,7 +174,8 @@ std::vector<PluginCandidate> DiscoverPlugins(const std::filesystem::path& bundle
                 item.file);
         }
 
-        candidates.push_back(PluginCandidate{item.path, item.provenance, existing->enabled});
+        candidates.push_back(
+            PluginCandidate{item.path, item.provenance, existing->enabled, existing->config});
     }
 
     return candidates;

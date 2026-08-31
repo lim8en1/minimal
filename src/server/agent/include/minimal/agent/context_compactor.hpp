@@ -10,6 +10,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "minimal/common/logger.hpp"
 #include "minimal/llm/message.hpp"
 #include "minimal/llm/provider.hpp"
 
@@ -58,6 +59,15 @@ struct CompactionRequest {
     // the backend reported nothing. Measured over the same span as the ground
     // truth so the two branches are comparable.
     const std::vector<llm::Message>* full_history = nullptr;
+
+    // Where the compactor's own diagnostics go. Null means DefaultLogger --
+    // which is what every call used to get, so its lines carried no session id
+    // while the agent loop's adjacent compaction log did. Callers that have a
+    // session pass both this and `session_label`.
+    const common::Logger* logger = nullptr;
+    // Prefixed onto the compactor's log lines ("session <id>: ..."), matching
+    // the agent loop's format so the two interleaved streams read as one.
+    std::string_view session_label;
 
     std::function<bool()> is_cancelled;
 };

@@ -33,11 +33,17 @@ commands::ConfirmationResponse WireConfirmationBroker::RequestConfirmation(
     const auto answer = registration.AwaitResponse();
     if (!answer) return {};  // cancelled or terminating: no answer, not a choice
 
+    // Typed variant: a PermissionAnswer delivered against this id -- a client
+    // answering the wrong kind of request -- is structurally unreadable here,
+    // the same fail-closed outcome an unoffered option gets below.
+    const auto* confirmation = std::get_if<ConfirmationAnswer>(&*answer);
+    if (confirmation == nullptr) return {};
+
     // Only an option that was OFFERED counts. A client cannot invent one, for
     // the same reason granted_keys is filtered against what the permission
     // prompt offered: the server decides what the choices were.
     for (const auto& option : request.options) {
-        if (*answer == option) return commands::ConfirmationResponse{*answer};
+        if (confirmation->chosen_option == option) return commands::ConfirmationResponse{option};
     }
     return {};
 }

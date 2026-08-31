@@ -14,16 +14,16 @@ T ValueOr(const nlohmann::json& parent, const char* section, const char* key, T 
 
 }  // namespace
 
-FsSettings ParseFsSettings(const nlohmann::json& tools_settings) {
+FsSettings ParseFsSettings(const nlohmann::json& config) {
     FsSettings settings;
-    if (!tools_settings.is_object()) return settings;
+    if (!config.is_object()) return settings;
 
     settings.read_default_limit_lines =
-        ValueOr(tools_settings, "read", "default_limit_lines", settings.read_default_limit_lines);
+        ValueOr(config, "read", "default_limit_lines", settings.read_default_limit_lines);
     settings.read_max_line_length =
-        ValueOr(tools_settings, "read", "max_line_length", settings.read_max_line_length);
+        ValueOr(config, "read", "max_line_length", settings.read_max_line_length);
     settings.edit_max_editable_file_bytes = ValueOr(
-        tools_settings, "edit", "max_editable_file_bytes", settings.edit_max_editable_file_bytes);
+        config, "edit", "max_editable_file_bytes", settings.edit_max_editable_file_bytes);
 
     // A non-positive limit would mean "read nothing", which is never what a user
     // meant to configure; fall back rather than silently returning empty windows.

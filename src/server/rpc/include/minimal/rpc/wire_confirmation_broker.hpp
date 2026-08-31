@@ -39,9 +39,10 @@ private:
     std::string session_id_;
     EventQueue<v1::ServerEvent>& queue_;
     PendingRequests& pending_;
-    // Distinct prefix from WirePermissionChecker's "perm-": both resolve against
-    // the SAME PendingRequests, so overlapping ids would let one answer wake the
-    // other's waiter.
+    // "confirm-" keeps ids distinct from WirePermissionChecker's "perm-" for
+    // logs and diagnostics. It is NOT the safety mechanism -- the typed
+    // PendingAnswer variant is: a permission answer delivered against this id
+    // is structurally unreadable at the waiter.
     std::atomic<std::uint64_t> next_id_{0};
 };
 

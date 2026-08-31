@@ -40,7 +40,9 @@ AgentLoop::AgentLoop(llm::LlmProvider& provider, tools::ToolExecutor& executor,
                       tools::ToolRegistry& registry, HistoryStore& store, AgentPreset preset,
                       LoopConfig config, SessionContext session,
                       std::function<bool()> is_cancelled, llm::StreamEventSink event_sink,
-                      Compactor compactor, std::vector<llm::Message> seeded_history)
+                      Compactor compactor, std::vector<llm::Message> seeded_history,
+                      std::optional<std::int64_t> seed_first_persisted_seq,
+                      bool seed_head_is_summary)
     : provider_(provider),
       executor_(executor),
       registry_(registry),
@@ -51,7 +53,9 @@ AgentLoop::AgentLoop(llm::LlmProvider& provider, tools::ToolExecutor& executor,
       is_cancelled_(std::move(is_cancelled)),
       event_sink_(std::move(event_sink)),
       compactor_(std::move(compactor)),
-      history_(std::move(seeded_history)) {
+      history_(std::move(seeded_history)),
+      first_persisted_seq_(seed_first_persisted_seq),
+      head_is_summary_(seed_head_is_summary) {
     if (!history_.empty()) {
         // A resumed context has no backend usage behind it yet, so give the
         // compaction trigger an estimate to work with. Deliberately the same
@@ -91,6 +95,12 @@ bool AgentLoop::SleepForBackoff(int attempt) {
 
 void AgentLoop::AppendAndPersist(llm::Message message, std::optional<int> output_tokens) {
     store_.Append(message, output_tokens);
+    // The persisted suffix gains its first member. Appends land at the END of
+    // both history_ and the store, so this is the only place the boundary can
+    // move forward.
+    if (!first_persisted_seq_.has_value()) {
+        first_persisted_seq_ = store_.last_appended_seq();
+    }
     history_.push_back(std::move(message));
 }
 
@@ -130,6 +140,18 @@ llm::ChatRequest AgentLoop::BuildChatRequest() const {
     }
 
     request.tools = registry_.DefinitionsFor(allowed);
+    // Live MCP tools for the allowed-and-alive servers, merged into the same
+    // sorted order -- this request is rebuilt every turn, so the merge must
+    // preserve the deterministic prefix the prompt cache keys on.
+    {
+        std::vector<llm::ToolDefinition> mcp_defs =
+            registry_.DefinitionsForMcpServers(mcp_servers_);
+        request.tools.insert(request.tools.end(), mcp_defs.begin(), mcp_defs.end());
+        std::sort(request.tools.begin(), request.tools.end(),
+                  [](const llm::ToolDefinition& a, const llm::ToolDefinition& b) {
+                      return a.name < b.name;
+                  });
+    }
     if (preset_.is_subagent) {
         // DefinitionsFor("*") would have re-admitted it.
         request.tools.erase(std::remove_if(request.tools.begin(), request.tools.end(),
@@ -207,7 +229,35 @@ std::optional<std::size_t> AgentLoop::CompactNow() {
 
 void AgentLoop::ClearHistory() {
     history_.clear();
-    injected_.clear();
+    {
+        // UNDER THE LOCK, like every other touch of injected_. This one was not,
+        // and the two sides are genuinely concurrent: /clear runs on THIS
+        // session's worker, while QueueInjectedMessage runs on a NON-BLOCKING
+        // SUBAGENT's worker from its completion hook. A background child
+        // finishing while the user types /clear is a data race on a
+        // vector<Message> -- the kind that corrupts rather than crashes.
+        std::lock_guard<std::mutex> lock(injected_mu_);
+        injected_.clear();
+    }
+    // The occupancy estimate goes with the history it described. It self-heals
+    // on the next RecordTurn, so leaving it stale only cost one no-op Compact()
+    // -- but a token count that outlives its messages is the sort of thing a
+    // later change trips over, and the compaction trigger reads it.
+    tokens_ = llm::TokenAccumulator{};
+    // /clear drops the VIEW, and the checkpoint IS a view: leaving it would
+    // make a resume load [summary + tail] of a conversation the user wiped
+    // from context, when clear's contract is that only the transcript survives
+    // -- so resume goes back to the full-transcript load. Best-effort, like
+    // the save: a failed delete degrades to a resume that restores the last
+    // summary, not to a lost transcript.
+    try {
+        store_.ClearCompactionCheckpoint();
+    } catch (const std::exception& error) {
+        session_.logger.warn("session {}: failed to clear compaction checkpoint: {}",
+                             session_.session_id, error.what());
+    }
+    first_persisted_seq_.reset();
+    head_is_summary_ = false;
     // Not the store. Compaction established that the in-memory working set and
     // the durable transcript are different things; /clear drops the first and
     // leaves scrollback whole.
@@ -254,6 +304,10 @@ std::optional<std::size_t> AgentLoop::Compact() {
     params.max_tokens = preset_.max_tokens;
     params.last_reported_input_tokens = tokens_.last_input_tokens();
     params.full_history = &history_;
+    // The session's logger, not DefaultLogger: compaction lines belong beside
+    // this loop's own compaction diagnostics, session id and all.
+    params.logger = &session_.logger;
+    params.session_label = session_.session_id;
     params.is_cancelled = is_cancelled_;
 
     const auto result = compactor_(to_compact, provider_.get(), params);
@@ -261,6 +315,35 @@ std::optional<std::size_t> AgentLoop::Compact() {
         // No compaction this cycle; do not retry on every tool cycle of this turn.
         compaction_failed_this_turn_ = true;
         return std::nullopt;
+    }
+
+    // Persist the VIEW checkpoint so a resume reconstructs [summary + tail]
+    // instead of re-summarizing the full uncompacted transcript -- which for a
+    // transcript well beyond the model window could not even fit its own
+    // summarization request. The checkpoint is a cache of derived state, never
+    // part of the transcript: `messages` is untouched, and a failed write is an
+    // optimization miss (log and continue), because the fold below is correct
+    // with or without it.
+    //
+    // boundary_seq arithmetic rests on one invariant: the persisted messages
+    // in history_ are always a contiguous suffix of the stored transcript
+    // (appends continue at MAX(seq)+1; compaction only folds from the head).
+    // Persisted messages folded away = `cut` minus the synthetic head, so the
+    // new first persisted seq is the boundary, +1.
+    if (first_persisted_seq_.has_value()) {
+        const std::int64_t persisted_removed =
+            static_cast<std::int64_t>(cut) - (head_is_summary_ ? 1 : 0);
+        const std::int64_t boundary_seq = *first_persisted_seq_ + persisted_removed - 1;
+        try {
+            store_.SaveCompactionCheckpoint(boundary_seq, result->summary_message);
+        } catch (const std::exception& error) {
+            // Resume falls back to the full-transcript load: today's behavior,
+            // degraded only in cost, never in correctness.
+            session_.logger.warn("session {}: failed to save compaction checkpoint: {}",
+                                 session_.session_id, error.what());
+        }
+        first_persisted_seq_ = boundary_seq + 1;
+        head_is_summary_ = true;
     }
 
     // Rebuilt with moves, not copies: the kept tail is shifted once (moving
@@ -294,8 +377,8 @@ std::optional<std::size_t> AgentLoop::Compact() {
     // again once new messages have pushed occupancy back over the trigger is the
     // intended behaviour, not a runaway.
 
-    // Deliberately not persisted: compaction changes only what the NEXT request
-    // contains. The store keeps the full uncompacted record, so scrollback is
+    // The VIEW produced here is checkpointed above; the transcript is not
+    // touched. The store keeps the full uncompacted record, so scrollback is
     // unaffected no matter how many times this runs.
     return cut;
 }
@@ -363,7 +446,13 @@ TurnResult AgentLoop::RunTurn(llm::Message seed_message) {
         tokens_.RecordTurn(response.usage);
         result.stop_reason = response.stop_reason;
 
-        llm::Message assistant{llm::Role::Assistant, response.content};
+        // MOVED, not copied. `response` is loop-local and dead after this point
+        // -- the next iteration reassigns it -- and content can be the whole
+        // assistant turn, so this was a full duplicate of every block and string
+        // on the hottest path there is. The tool_uses pointers below stay valid
+        // across the later move into history_: a vector move relocates the
+        // heap buffer's ownership, not the elements.
+        llm::Message assistant{llm::Role::Assistant, std::move(response.content)};
         result.final_text = TextOf(assistant);
         const auto tool_uses = ToolUsesOf(assistant);
         // The only per-message token count that exists: this response's output.
@@ -389,6 +478,11 @@ TurnResult AgentLoop::RunTurn(llm::Message seed_message) {
             ctx.project_root = session_.project_root;
             ctx.allowed_skills = preset_.allowed_skills;
             ctx.is_cancelled = is_cancelled_;
+            ctx.cancel_token = cancel_token_;
+            // Per invocation, from the Session-owned window: a subagent sees
+            // only its own transcript, because the window is bound to THIS
+            // session's id (docs/EXTENSIBILITY.md §2.1).
+            ctx.history = session_.history;
             if (session_.tool_output_sink) {
                 const std::string tool_use_id = use->id;
                 ctx.emit_output = [this, tool_use_id](std::string_view chunk) {
@@ -407,6 +501,11 @@ TurnResult AgentLoop::RunTurn(llm::Message seed_message) {
                     .count();
             if (session_.tool_lifecycle_sink) session_.tool_lifecycle_sink(lifecycle);
 
+            // Recorded before the call, so a tool that fails still appears in
+            // the turn summary. What ran is the question, not what succeeded.
+            result.tool_names_invoked.push_back(use->name);
+
+            const auto tool_started = std::chrono::steady_clock::now();
             llm::ToolResultBlock tool_result = executor_.Run(use->id, use->name, use->input, ctx);
 
             // Emitted even when Run() reports an error, and before the result is
@@ -415,6 +514,8 @@ TurnResult AgentLoop::RunTurn(llm::Message seed_message) {
             // clear.
             lifecycle.started = false;
             lifecycle.is_error = tool_result.is_error;
+            lifecycle.duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - tool_started);
             if (session_.tool_lifecycle_sink) session_.tool_lifecycle_sink(lifecycle);
 
             results.push_back(std::move(tool_result));

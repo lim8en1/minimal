@@ -41,9 +41,11 @@ public:
     };
 
     void PushResponse(llm::ChatResponse response, std::vector<llm::StreamEvent> events = {}) {
+        std::lock_guard<std::mutex> lock(mu_);
         steps_.push_back(Step{std::move(response), std::nullopt, std::move(events)});
     }
     void PushError(llm::LlmError error) {
+        std::lock_guard<std::mutex> lock(mu_);
         steps_.push_back(Step{std::nullopt, std::move(error), {}});
     }
 
@@ -61,17 +63,26 @@ public:
         //
         // A deque, not a vector: recorded spans point INTO the elements, so the
         // container must not move them when it grows.
-        auto& owned = recorded_messages_.emplace_back(request.messages.begin(),
-                                                      request.messages.end());
-        llm::ChatRequest copy = request;
-        copy.messages = owned;
-        requests_.push_back(std::move(copy));
-        if (steps_.empty()) {
-            throw llm::LlmError(llm::LlmErrorCategory::RequestError,
-                                "FakeLlmProvider: no scripted step remaining");
+        //
+        // The mutex, not merely paranoia: a Session's worker thread runs the
+        // call while the test's main thread spins on call_count() -- the
+        // cancel-during-backoff rendezvous -- so the recorded state is written
+        // and read from two threads with no other happens-before edge.
+        Step step;
+        {
+            std::lock_guard<std::mutex> lock(mu_);
+            auto& owned = recorded_messages_.emplace_back(request.messages.begin(),
+                                                          request.messages.end());
+            llm::ChatRequest copy = request;
+            copy.messages = owned;
+            requests_.push_back(std::move(copy));
+            if (steps_.empty()) {
+                throw llm::LlmError(llm::LlmErrorCategory::RequestError,
+                                    "FakeLlmProvider: no scripted step remaining");
+            }
+            step = std::move(steps_.front());
+            steps_.pop_front();
         }
-        Step step = std::move(steps_.front());
-        steps_.pop_front();
 
         for (const auto& event : step.events) {
             if (sink && !sink(event)) {
@@ -86,10 +97,19 @@ public:
         return *step.response;
     }
 
+    std::size_t call_count() const {
+        std::lock_guard<std::mutex> lock(mu_);
+        return requests_.size();
+    }
+
+    // Synchronised access ends here. The reference return is read-only, and
+    // every caller reads it after the loop (or the session worker, via
+    // Terminate) has joined -- thread join is a happens-before edge, so no
+    // lock is taken and none may be: the references point into the container.
     const std::vector<llm::ChatRequest>& requests() const { return requests_; }
-    std::size_t call_count() const { return requests_.size(); }
 
 private:
+    mutable std::mutex mu_;
     std::deque<Step> steps_;
     std::deque<std::vector<llm::Message>> recorded_messages_;
     std::vector<llm::ChatRequest> requests_;
@@ -110,6 +130,21 @@ public:
 
 // NOT read-only, so it must be queued for the worker and land at a turn
 // boundary rather than mid-cycle.
+// An LLMCommand, which is a DIFFERENT rule from "not read-only": a mutating
+// HarnessCommand is meant to queue and run at the next turn boundary, while an
+// LLMCommand needs the provider and the history to itself and must be refused
+// while a turn is in flight. Only the type distinguishes them.
+class RecordingLlmCommand : public commands::LLMCommand {
+public:
+    std::string_view Name() const override { return "llmrecord"; }
+    std::string_view Summary() const override { return "an LLM command that records"; }
+    std::string_view Usage() const override { return "/llmrecord"; }
+    commands::CommandResult Execute(commands::CommandContext&,
+                                     const commands::CommandArgs&) override {
+        return commands::CommandResult::Ok("llm recorded");
+    }
+};
+
 class RecordingCommand : public commands::HarnessCommand {
 public:
     std::string_view Name() const override { return "record"; }
@@ -248,7 +283,22 @@ public:
     std::int64_t last_appended_seq() const override {
         return static_cast<std::int64_t>(messages.size()) - 1;
     }
+    // Checkpoint tracking mirrors the real store, so compaction tests can
+    // assert what a resume would consume.
+    void SaveCompactionCheckpoint(std::int64_t boundary_seq, const llm::Message& summary) override {
+        checkpoint_boundary = boundary_seq;
+        checkpoint_summary = summary;
+        checkpoint_cleared = false;
+    }
+    void ClearCompactionCheckpoint() override {
+        checkpoint_cleared = true;
+        checkpoint_boundary.reset();
+        checkpoint_summary = llm::Message{};
+    }
     std::vector<llm::Message> messages;
+    std::optional<std::int64_t> checkpoint_boundary;
+    llm::Message checkpoint_summary;
+    bool checkpoint_cleared = false;
 };
 
 class AlwaysAllowPermissionChecker : public tools::PermissionChecker {

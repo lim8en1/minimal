@@ -86,13 +86,24 @@ std::string DescribeAvailableModels(const config::ProvidersConfig& providers) {
     return out.str();
 }
 
+// Miss reporting (track N): a typo and a dead catalog must read differently.
+// Silent when discovery was never attempted or succeeded -- the latter means
+// the model is genuinely not served, which the listing above already says.
+std::string DescribeDiscovery(const config::ProvidersConfig& providers,
+                              const std::string& provider_name) {
+    const auto status = providers.discovery_status(provider_name);
+    if (!status.attempted || status.ok) return {};
+    return "; discovery for provider '" + provider_name + "' failed: " + status.error;
+}
+
 }  // namespace
 
 AgentPresetRegistry::AgentPresetRegistry(std::filesystem::path config_dir,
-                                         const config::SkillRegistry& skills)
+                                         const config::SkillRegistry& skills,
+                                         const config::SettingsConfig& settings)
     : config_dir_(std::move(config_dir)),
       providers_(config::LoadProvidersConfig(config_dir_ / "providers.json")),
-      settings_(config::LoadSettingsConfig(config_dir_ / "settings.json")),
+      settings_(settings),
       permissions_(config::LoadPermissionsConfig(config_dir_ / "permissions.json")),
       skills_(skills) {
     // Both optional at this phase -- a real deployment's absence is the
@@ -102,11 +113,23 @@ AgentPresetRegistry::AgentPresetRegistry(std::filesystem::path config_dir,
         config::parse_frontmatter_markdown(ReadFileOrEmpty(config_dir_ / "prompts" / "compression.md")).body;
 }
 
-const AgentPreset& AgentPresetRegistry::Resolve(const std::string& preset_name) const {
-    if (auto it = cache_.find(preset_name); it != cache_.end()) return it->second;
-    auto [it, inserted] = cache_.emplace(preset_name, ResolveUncached(preset_name));
-    (void)inserted;
-    return it->second;
+AgentPreset AgentPresetRegistry::Resolve(const std::string& preset_name) const {
+    {
+        std::lock_guard<std::mutex> lock(cache_mu_);
+        if (auto it = cache_.find(preset_name); it != cache_.end()) return it->second;
+    }
+
+    // Resolved OUTSIDE the lock: ResolveUncached reads files and can throw, and
+    // holding the cache mutex across disk I/O would serialize every concurrent
+    // session creation behind one preset parse. The cost is that two threads
+    // racing the same unseen preset may both parse it -- harmless, since the
+    // result is a pure function of files that do not change at runtime, and the
+    // insert below keeps whichever landed first so every later caller still sees
+    // one consistent value.
+    AgentPreset resolved = ResolveUncached(preset_name);
+
+    std::lock_guard<std::mutex> lock(cache_mu_);
+    return cache_.emplace(preset_name, std::move(resolved)).first->second;
 }
 
 void ApplyModel(AgentPreset& preset, const config::ResolvedModel& model) {
@@ -144,11 +167,12 @@ AgentPreset AgentPresetRegistry::ResolveUncached(const std::string& preset_name)
         throw std::runtime_error("agent preset '" + preset_name + "': model '" + model_text +
                                  "' must be <provider>/<model>, e.g. local/qwen4");
     }
-    const config::ResolvedModel* model = providers_.Resolve(*ref);
+    const auto model = providers_.Resolve(*ref);  // snapshot; see ProvidersConfig::Resolve
     if (!model) {
         throw std::runtime_error("agent preset '" + preset_name + "' names unknown model '" +
                                  model_text + "'; providers.json defines " +
-                                 DescribeAvailableModels(providers_));
+                                 DescribeAvailableModels(providers_) +
+                                 DescribeDiscovery(providers_, ref->provider));
     }
 
     AgentPreset preset;

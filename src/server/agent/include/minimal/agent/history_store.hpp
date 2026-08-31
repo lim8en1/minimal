@@ -39,6 +39,20 @@ public:
     // its own count would be right only for a session that started empty. It is
     // what TurnSummary's first_seq/last_seq bounds are computed from.
     virtual std::int64_t last_appended_seq() const = 0;
+
+    // --- Compaction checkpoint (the persisted VIEW, not history) -------------
+    //
+    // Compaction never touches `messages`; what it produces -- one summary
+    // covering everything through boundary_seq -- is cached here so a RESUME
+    // reconstructs [summary + tail] instead of re-summarizing the full
+    // uncompacted transcript. The loop calls Save after every successful
+    // Compact and Clear from /clear; session deletion cascades at the SQL
+    // layer.
+
+    // Upsert: the latest compaction replaces any earlier one.
+    virtual void SaveCompactionCheckpoint(std::int64_t boundary_seq,
+                                          const llm::Message& summary) = 0;
+    virtual void ClearCompactionCheckpoint() = 0;
 };
 
 }  // namespace minimal::agent

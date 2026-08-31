@@ -23,6 +23,16 @@ std::string DescribeModels(const config::ProvidersConfig& providers) {
     return out;
 }
 
+// Miss reporting (track N): a typo and a dead catalog must read differently.
+// Silent when discovery was never attempted or succeeded -- the latter means
+// the model is genuinely not served, which the listing above already says.
+std::string DescribeDiscovery(const config::ProvidersConfig& providers,
+                              const std::string& provider_name) {
+    const auto status = providers.discovery_status(provider_name);
+    if (!status.attempted || status.ok) return {};
+    return "; discovery for provider '" + provider_name + "' failed: " + status.error;
+}
+
 }  // namespace
 
 SessionRegistry::SessionRegistry(const AgentPresetRegistry& presets, tools::ToolRegistry& tools,
@@ -76,11 +86,13 @@ std::shared_ptr<Session> SessionRegistry::CreateResolved(SessionParams params,
     // CreateResolved rather than Create so a SUBAGENT spawned with an inherited
     // preset honours it too.
     if (params.model_override) {
-        const config::ResolvedModel* model = presets_.providers().Resolve(*params.model_override);
+        const auto model = presets_.providers().Resolve(*params.model_override);
         if (model == nullptr) {
             throw std::runtime_error("unknown model '" + params.model_override->str() +
                                      "'; providers.json defines " +
-                                     DescribeModels(presets_.providers()));
+                                     DescribeModels(presets_.providers()) +
+                                     DescribeDiscovery(presets_.providers(),
+                                                       params.model_override->provider));
         }
         ApplyModel(preset, *model);
     }
@@ -112,15 +124,52 @@ std::shared_ptr<Session> SessionRegistry::CreateResolved(SessionParams params,
 
     const std::string session_id = params.session_id;
 
+    // Track M (docs/EXTENSIBILITY.md §2.1): the read side of the transcript.
+    // Set here because this is the one funnel every session passes through --
+    // top-level and SubagentManager spawns alike -- so a child's window is
+    // bound to the child's own id with no extra code, and its tools see its
+    // transcript only. Sessions built outside the registry (plain tests on
+    // fake stores) leave it null, and ctx.history is null with it.
+    params.history_reader = std::make_shared<session::SessionReader>(db_);
+
     // RESUME: load the stored transcript as the loop's working history. Loaded,
     // not replayed -- everything below appends NEW messages at MAX(seq) + 1, so
     // the stored rows must not go through the store again or the transcript
     // would duplicate itself.
+    //
+    // Two load paths. A persisted compaction CHECKPOINT (the cached view the
+    // live session left behind) means the working set is [summary + tail]:
+    // reconstructing it costs no provider call and stays bounded by the KEPT
+    // context rather than the transcript, which is the difference between
+    // resuming a session that compacted four times over 3M tokens and trying
+    // to summarize half of a 3M-token history through one model window. No
+    // checkpoint (never compacted, or a pre-checkpoint session) falls back to
+    // the full-transcript load.
     std::vector<llm::Message> seeded_history;
+    std::optional<std::int64_t> seed_first_persisted_seq;
+    bool seed_head_is_summary = false;
     if (params.resume) {
         const session::SessionReader reader(db_);
-        for (auto& stored : reader.LoadAll(session_id)) {
-            seeded_history.push_back(std::move(stored.message));
+        const auto checkpoint = db_.LoadCompactionCheckpoint(session_id);
+        if (checkpoint) {
+            seeded_history.push_back(checkpoint->summary);
+            for (auto& stored : reader.LoadAfter(session_id, checkpoint->boundary_seq)) {
+                if (!seed_first_persisted_seq) seed_first_persisted_seq = stored.seq;
+                seeded_history.push_back(std::move(stored.message));
+            }
+            seed_head_is_summary = true;
+            if (!seed_first_persisted_seq) {
+                // Empty tail: the boundary is still exactly where the persisted
+                // portion will resume on the next append.
+                seed_first_persisted_seq = checkpoint->boundary_seq + 1;
+            }
+            logger_.info("session {}: resuming from compaction checkpoint (covers seq <= {})",
+                         session_id, checkpoint->boundary_seq);
+        } else {
+            for (auto& stored : reader.LoadAll(session_id)) {
+                if (!seed_first_persisted_seq) seed_first_persisted_seq = stored.seq;
+                seeded_history.push_back(std::move(stored.message));
+            }
         }
 
         // A session cancelled mid-tool-execution -- or a process killed between
@@ -128,7 +177,9 @@ std::shared_ptr<Session> SessionRegistry::CreateResolved(SessionParams params,
         // unanswered tool_use, which no provider accepts. Synthesize the
         // missing error results as one REAL message (persisted like any other
         // append) rather than refusing to resume: cancellation is ordinary,
-        // and the transcript stays an exact, valid prefix either way.
+        // and the transcript stays an exact, valid prefix either way. The
+        // repair appends at MAX(seq)+1, so a checkpoint boundary (which only
+        // covers earlier seqs) is unaffected by it.
         if (auto repair = synthesize_missing_tool_results(seeded_history)) {
             logger_.info(
                 "session {}: stored transcript ends mid tool call; appending synthesized "
@@ -145,7 +196,8 @@ std::shared_ptr<Session> SessionRegistry::CreateResolved(SessionParams params,
     auto session = std::make_shared<Session>(std::move(params), std::move(preset),
                                              std::move(provider), std::move(store), tools_,
                                              loop_config, observers_, logger_,
-                                             std::move(seeded_history));
+                                             std::move(seeded_history), seed_first_persisted_seq,
+                                             seed_head_is_summary);
     // Wired before the session is findable, so the first command a client sends
     // cannot arrive at a session that has no registry yet.
     session->set_presets(&presets_);

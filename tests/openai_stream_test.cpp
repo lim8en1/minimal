@@ -169,3 +169,52 @@ TEST_CASE("OpenAiStreamReassembler: malformed chunk JSON throws OpenAiParseError
     auto sink = CollectInto(events);
     CHECK_THROWS_AS(reassembler.FeedFrame("not json", sink), OpenAiParseError);
 }
+
+TEST_CASE("a stream cut before finish_reason still closes every block it opened",
+          "[openai_stream][invariant]") {
+    // ContentBlockStop was emitted ONLY inside the finish_reason branch, so an
+    // idle timeout, a dropped connection or a cancelled sink left the client
+    // holding a block it had been told about and would never be told ended --
+    // the same failure the tool-lifecycle rule already names for the running-
+    // tools panel, applied to content blocks.
+    OpenAiStreamReassembler reassembler;
+    std::vector<llm::StreamEvent> events;
+    auto sink = CollectInto(events);
+
+    REQUIRE(reassembler.FeedFrame(
+        R"({"id":"c1","model":"m","choices":[{"delta":{"content":"partial"},"finish_reason":null}]})",
+        sink));
+    // ...and here the connection dies. No finish_reason, no [DONE].
+    const std::size_t before = events.size();
+    reassembler.CloseOpenBlocks(sink);
+
+    REQUIRE(events.size() == before + 1);
+    CHECK(Has<llm::ContentBlockStopEvent>(events, before));
+    CHECK(As<llm::ContentBlockStopEvent>(events, before).block_index == 0);
+
+    // Idempotent: a normal stream must not get two stops for one block.
+    reassembler.CloseOpenBlocks(sink);
+    CHECK(events.size() == before + 1);
+}
+
+TEST_CASE("a tool call cut before its id and name arrive is dropped, not half-emitted",
+          "[openai_stream][invariant]") {
+    // Finalize() emitted a ToolUseBlock with empty id and name, which reached
+    // ToolExecutor as `unknown tool: ` -- an error attributed to a call the
+    // model believes it made. Dropping it leaves nothing orphaned: there is no
+    // tool_use in history to answer, and the loop already handles a ToolUse stop
+    // reason with no blocks.
+    OpenAiStreamReassembler reassembler;
+    std::vector<llm::StreamEvent> events;
+    auto sink = CollectInto(events);
+
+    // Arguments arrive before the id/name -- a real ordering some proxies use --
+    // and then the stream stops.
+    REQUIRE(reassembler.FeedFrame(
+        R"({"id":"c1","model":"m","choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"a\":1}"}}]},"finish_reason":null}]})",
+        sink));
+    reassembler.CloseOpenBlocks(sink);
+
+    const auto response = reassembler.Finalize();
+    CHECK(response.content.empty());
+}

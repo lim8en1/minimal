@@ -3,7 +3,8 @@ add_library(minimal_common STATIC
     bundled_assets.cpp
     config_paths.cpp
     model_ref.cpp
-    logger.cpp)
+    logger.cpp
+    logging_setup.cpp)
 add_library(minimal::common ALIAS minimal_common)
 
 target_include_directories(minimal_common PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")

@@ -1,4 +1,5 @@
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 
 #include <filesystem>
 #include <memory>
@@ -505,4 +506,79 @@ TEST_CASE("an aliased tool still hits the ceiling's per-tool deny",
     CHECK(block.is_error);           // denied outright: the ceiling's deny is the answer
     CHECK(f.tool->calls.empty());    // never executed
     CHECK_FALSE(checker.called);     // never even consulted
+}
+
+// --- a throwing tool must still answer its call ------------------------------------------
+
+namespace {
+
+// Throws from whichever plugin entry point the test selects. All three are
+// reachable with input the MODEL wrote, and all three used to escape Run().
+class ThrowingTool : public tools::Tool {
+public:
+    enum class Where { Execute, CategoryFor, Disclose };
+
+    explicit ThrowingTool(Where where) : where_(where) {
+        spec_.name = "boom";
+        spec_.category = ToolCategory::Execute;
+        spec_.definition.name = spec_.name;
+        spec_.definition.input_schema = nlohmann::json::object();
+    }
+
+    const tools::ToolSpec& spec() const override { return spec_; }
+
+    tools::ToolResult execute(const nlohmann::json&, tools::ToolContext&) override {
+        if (where_ == Where::Execute) throw std::runtime_error("kaboom");
+        return tools::ToolResult{false, "ok"};
+    }
+
+    std::optional<ToolCategory> category_for(const nlohmann::json&) const override {
+        if (where_ == Where::CategoryFor) throw std::runtime_error("kaboom");
+        return std::nullopt;
+    }
+
+    tools::PermissionDisclosure Disclose(const nlohmann::json&,
+                                         const tools::ToolContext&) const override {
+        if (where_ == Where::Disclose) throw std::runtime_error("kaboom");
+        return {};
+    }
+
+private:
+    tools::ToolSpec spec_;
+    Where where_;
+};
+
+}  // namespace
+
+TEST_CASE("a throwing tool is answered, not propagated", "[tool_executor][robustness]") {
+    // HISTORY INTEGRITY, not politeness. The loop persists the assistant message
+    // carrying the tool_use before running any tool and appends results after
+    // all of them, so an escaping exception leaves an orphaned tool_use that
+    // both wire formats reject -- one bad input poisons every later turn of the
+    // session. Every entry point below Find() is plugin code reading model-written
+    // JSON, so a throw is expected rather than exceptional.
+    const auto where = GENERATE(ThrowingTool::Where::Execute, ThrowingTool::Where::CategoryFor,
+                                ThrowingTool::Where::Disclose);
+
+    tools::ToolRegistry registry;
+    registry.Register(std::make_unique<ThrowingTool>(where));
+
+    AlwaysAllowPermissionChecker checker;
+    tools::PermissionPolicy policy;
+    policy.execute = PermissionMode::Ask;  // reaches category_for AND Disclose
+    tools::ToolExecutor executor(registry, checker, policy, {}, PermissionRunMode::Normal);
+
+    tools::ToolContext ctx{common::DefaultLogger()};
+    ctx.session_id = "s1";
+    ctx.project_root = std::filesystem::temp_directory_path();
+
+    llm::ToolResultBlock block;
+    REQUIRE_NOTHROW(block = executor.Run("tu-42", "boom", nlohmann::json::object(), ctx));
+
+    // The call is ANSWERED: same id, marked failed, with text. An unanswered or
+    // misidentified block is the orphan this exists to prevent.
+    CHECK(block.tool_use_id == "tu-42");
+    CHECK(block.is_error);
+    CHECK_FALSE(block.content.empty());
+    CHECK(TextOf(block).find("boom") != std::string::npos);
 }

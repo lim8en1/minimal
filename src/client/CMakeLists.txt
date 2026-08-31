@@ -26,8 +26,8 @@ target_include_directories(minimal_client_core PUBLIC "${CMAKE_CURRENT_SOURCE_DI
 # the grammar repos' own CMake.
 include("${CMAKE_SOURCE_DIR}/cmake/TreeSitterGrammars.cmake")
 
-# tree-sitter's vcpkg package has been named both ways; the root CMakeLists
-# finds whichever this install provides and normalizes to minimal::tree_sitter.
+# tree-sitter core is normalized at the top level as minimal_tree_sitter; the
+# grammar set below supplies the per-language parsers.
 target_link_libraries(minimal_client_core
     PUBLIC
         minimal::common
@@ -37,7 +37,7 @@ target_link_libraries(minimal_client_core
         ftxui::dom
         ftxui::component
         md4c::md4c
-        minimal::tree_sitter
+        minimal_tree_sitter
     PRIVATE
         tsgrammar_cpp
         tsgrammar_python

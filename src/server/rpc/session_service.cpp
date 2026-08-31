@@ -1,5 +1,7 @@
 #include "minimal/rpc/session_service.hpp"
 
+#include <algorithm>
+
 #include <unistd.h>
 
 #include <chrono>
@@ -17,6 +19,24 @@ namespace {
 // unset, which is its default. Named rather than repeated as a literal: two
 // call sites drifting apart is how a "default" becomes two different defaults.
 constexpr int kFallbackPageSize = 100;
+
+// CEILING on a client-supplied page size, and it is load-bearing rather than
+// tidy. `limit` arrives as a wire int32 with a floor and nothing above it, and
+// SessionDatabase binds `limit + 1` to reserve the has-more probe: INT32_MAX is
+// signed-overflow UB, and in practice binds a NEGATIVE limit, which SQLite reads
+// as no limit at all. One GetMessages{limit: 2147483647} then loads an entire
+// transcript -- every row, every JSON decode, every proto copy, in one response
+// -- which is precisely the O(n) blowup the keyset paging exists to prevent.
+// ListSessions' proto comment already documented a bound it did not have.
+constexpr int kMaxPageSize = 1000;
+
+// Clamped, never rejected: a client asking for more than we will serve is not
+// making an error, and paging is the caller's answer either way. `has_more`
+// already tells it there is another page.
+int ClampPageSize(int requested, int fallback) {
+    if (requested <= 0) requested = fallback;
+    return std::min(requested, kMaxPageSize);
+}
 
 grpc::Status NotYet(const char* what) {
     return grpc::Status(grpc::StatusCode::UNIMPLEMENTED,
@@ -36,13 +56,40 @@ SessionServiceImpl::SessionServiceImpl(agent::SessionRegistry& sessions,
                                        session::SessionDatabase& db,
                                        config::SettingsConfig settings,
                                        config::PermissionsConfig permissions,
-                                       common::Logger& logger)
+                                       common::Logger& logger,
+                                       const tools::PermissionAdvisorRegistry* permission_advisors)
     : sessions_(sessions),
       db_(db),
       reader_(db),
       settings_(std::move(settings)),
+      permission_advisors_(permission_advisors),
       permissions_(std::move(permissions)),
       logger_(logger) {}
+
+namespace {
+
+// The advisor composition for one session: the channels block comes first
+// (the wire checker is built against it), then the advised checker owns that
+// wire checker, and the shared cancel holder travels in params so the Session
+// can install its own predicate. No advisor configured, or the named plugin
+// not loaded (a runtime condition the sanity check warns about): params carry
+// no checker and Session builds the wire default -- the human, as always.
+void ApplyAdvisor(const config::PermissionsConfig& permissions,
+                  const tools::PermissionAdvisorRegistry* advisors, agent::SessionParams& params) {
+    if (!permissions.advisor || advisors == nullptr) return;
+    auto advisor = advisors->Find(*permissions.advisor);
+    if (advisor == nullptr) return;
+    params.channels = agent::MakeSessionChannels();
+    auto cancel_source = std::make_shared<tools::AdvisorCancelSource>();
+    params.permission_checker = std::make_unique<tools::AdvisedPermissionChecker>(
+        std::move(advisor),
+        std::make_unique<WirePermissionChecker>(params.session_id, params.channels->queue,
+                                                params.channels->pending),
+        cancel_source, std::chrono::milliseconds(permissions.advisor_timeout_ms));
+    params.advisor_cancel_source = std::move(cancel_source);
+}
+
+}  // namespace
 
 void SessionServiceImpl::set_on_last_client_detached(std::function<void()> callback) {
     on_last_client_detached_ = std::move(callback);
@@ -83,10 +130,16 @@ grpc::Status SessionServiceImpl::CreateSession(grpc::ServerContext* context,
     params.project_root = request->project_root();
 
     // UNSPECIFIED means "the client did not ask", which is why FromProto reports
-    // nullopt rather than a default: only here is the config available to
-    // resolve it, and collapsing the two earlier would silently override a
-    // deliberate client choice with permissions.json.
+    // nullopt rather than a default: this service deliberately holds no
+    // permissions.json -- the run-mode default is applied where the rest of it
+    // is, in AgentPresetRegistry (agent_preset_registry.cpp,
+    // LoadPermissionsConfig). An earlier revision stored a PermissionsConfig
+    // here and never read it, which made this comment read as if the default
+    // were resolved on this path. Collapsing the wire value into a default
+    // anywhere before the registry would silently override a deliberate client
+    // choice with the file's.
     params.run_mode_override = FromProto(request->run_mode());
+    params.mcp_manager = mcp_manager_;
 
     if (const auto status = ApplyModelOverride(*request, params); !status.ok()) return status;
 
@@ -131,9 +184,13 @@ grpc::Status SessionServiceImpl::CreateSession(grpc::ServerContext* context,
     }
     params.session_id = row.session_id;
 
+    // After the id is minted: the wire checker inside the composition captures
+    // the session_id, so the advisor cannot be applied earlier.
+    ApplyAdvisor(permissions_, permission_advisors_, params);
+
     std::shared_ptr<agent::Session> session;
     try {
-        session = sessions_.Create(params);
+        session = sessions_.Create(std::move(params));
     } catch (const std::exception& e) {
         // Preset and provider problems are configuration errors the operator has
         // to see and fix, so they come back with their reason attached rather
@@ -206,7 +263,9 @@ grpc::Status SessionServiceImpl::ResumeSession(const v1::CreateSessionRequest* r
     params.agent_preset = stored->agent_preset;
     params.project_root = stored->project_root;
     params.run_mode_override = FromProto(request->run_mode());
+    params.mcp_manager = mcp_manager_;
     params.resume = true;
+    ApplyAdvisor(permissions_, permission_advisors_, params);
     // APPLIES ON RESUME TOO, like run_mode and for the same reason: a model the
     // user names is a property of this invocation, not of the stored session --
     // and the override is in-memory only, so a resumed session has none of its
@@ -218,7 +277,7 @@ grpc::Status SessionServiceImpl::ResumeSession(const v1::CreateSessionRequest* r
     try {
         // Loads the stored transcript, repairs a torn tool-call tail if there
         // is one, and starts the session.
-        (void)sessions_.Create(params);
+        (void)sessions_.Create(std::move(params));
     } catch (const std::exception& e) {
         // NO ROLLBACK here, unlike fresh creation: the row is the user's
         // existing session, not one this call just minted. A failure (the
@@ -244,15 +303,18 @@ void SessionServiceImpl::Dispatch(const v1::ClientEvent& event, agent::Session& 
             return;
 
         case v1::ClientEvent::kPermissionResponse:
-            // Carried across as bytes: parsing belongs on the worker, which can
-            // afford to fail, not on the reader, which must not stall.
+            // Carried across as the typed variant, still unparsed: parsing
+            // belongs on the worker, which can afford to fail, not on the
+            // reader, which must not stall. The payload case IS the type --
+            // the variant makes a wrong-kind answer structurally unreadable
+            // at the waiter rather than merely failing to parse there.
             session.pending().Resolve(event.permission_response().request_id(),
-                                      event.permission_response().SerializeAsString());
+                                      PermissionAnswer{event.permission_response().SerializeAsString()});
             return;
 
         case v1::ClientEvent::kConfirmationResponse:
             session.pending().Resolve(event.confirmation_response().request_id(),
-                                      event.confirmation_response().chosen_option());
+                                      ConfirmationAnswer{event.confirmation_response().chosen_option()});
             return;
 
         case v1::ClientEvent::kCancel:
@@ -311,6 +373,42 @@ void SessionServiceImpl::DispatchCommand(const v1::CommandInvocation& invocation
             return;
         }
     }
+
+    // THE BUSY CHECK, which until now nothing ever performed: both callers of
+    // Dispatch() passed `busy = false` unconditionally, so only the tests ever
+    // exercised the refusal and `/compact` typed mid-turn was quietly queued --
+    // exactly what command_dispatcher.hpp says must not happen ("queueing would
+    // make /compact silently run minutes later against a context that had moved
+    // on").
+    //
+    // AN LLMCommand, not merely a non-read-only one. The two are different
+    // rules and both are real: a mutating HarnessCommand (`/agent`, `/model`)
+    // SHOULD queue and run at the turn boundary -- that is what the shared work
+    // queue is for -- while an LLMCommand needs the provider and the history to
+    // itself and has nothing useful to do afterwards. The type exists precisely
+    // to carry this distinction ("a type cannot be forgotten the way a flag
+    // can"), so it is the type that is asked.
+    //
+    // Answered here rather than by passing `busy` down, because the answer has
+    // to reach the client from the READER: queueing it for the worker is the
+    // very thing being refused.
+    if (!session.idle() && dynamic_cast<const commands::LLMCommand*>(command) != nullptr) {
+        session.RejectCommand(queued, "/" + queued.name +
+                                          " cannot run while a turn is in flight; cancel it first");
+        return;
+    }
+    // An unknown command is answered now too. Queueing it to be told "unknown
+    // command" after a minutes-long turn is a worse answer than the same answer
+    // immediately, and nothing about the reply depends on the worker.
+    //
+    // Only when a registry EXISTS to be unknown to: with commands_ unset the
+    // right answer is the session's "the /-command subsystem is not available",
+    // which is a different fact and belongs where it already lives.
+    if (commands_ != nullptr && command == nullptr) {
+        session.RejectCommand(queued, "unknown command: /" + queued.name + " (try /help)");
+        return;
+    }
+
     session.SubmitCommand(std::move(queued));
 }
 
@@ -379,8 +477,7 @@ grpc::Status SessionServiceImpl::OpenSession(
         sessions_.Terminate(session->info().session_id);
         session->queue().Close();
         if (writer.joinable()) writer.join();
-        session->Detach();
-        attached_.fetch_sub(1, std::memory_order_acq_rel);
+        ReleaseAttachment(*session);
         return grpc::Status(grpc::StatusCode::INTERNAL, e.what());
     }
 
@@ -391,12 +488,27 @@ grpc::Status SessionServiceImpl::OpenSession(
     // blocking forever on Pop().
     sessions_.Terminate(session->info().session_id);
     if (writer.joinable()) writer.join();
-    session->Detach();
+    ReleaseAttachment(*session);
+    return grpc::Status::OK;
+}
 
+void SessionServiceImpl::ReleaseAttachment(agent::Session& session) {
+    // ONE function, called by both exits, because the two used to differ in the
+    // half that matters. The catch path restored the count and stopped there --
+    // so a client whose stream unwound decremented to zero without ever firing
+    // the callback, and main() wires that callback to RequestShutdown(). The
+    // whole no-daemon design ("refcounted by attached clients, gone when the
+    // last one leaves") then never fired: the process held the socket forever
+    // and the next auto-spawning client found a zombie it could not replace.
+    //
+    // The catch block existed precisely for a stream that unwinds, and its own
+    // comment says it is there so the refcount cannot leak -- it just did not
+    // carry the consequence of reaching zero. Splitting that decision across two
+    // call sites is what let them drift, so there is now only one.
+    session.Detach();
     if (attached_.fetch_sub(1, std::memory_order_acq_rel) == 1 && on_last_client_detached_) {
         on_last_client_detached_();
     }
-    return grpc::Status::OK;
 }
 
 grpc::Status SessionServiceImpl::GetMessages(grpc::ServerContext* context,
@@ -415,7 +527,7 @@ grpc::Status SessionServiceImpl::GetMessages(grpc::ServerContext* context,
                             "no such session: " + request->session_id());
     }
 
-    const int limit = request->limit() > 0 ? request->limit() : ScrollbackPageSize();
+    const int limit = ClampPageSize(request->limit(), ScrollbackPageSize());
 
     try {
         // has_before_seq(), not a value test: the wire field is optional
@@ -457,7 +569,7 @@ grpc::Status SessionServiceImpl::ListSessions(grpc::ServerContext* context,
         filter.project_root = request->project_root();
     }
     filter.include_subagents = request->include_subagents();
-    filter.limit = request->limit() > 0 ? request->limit() : ScrollbackPageSize();
+    filter.limit = ClampPageSize(request->limit(), ScrollbackPageSize());
     // Both halves or neither: the cursor is a (updated_at, id) pair because the
     // sort key is, and half a cursor would silently page from the wrong place.
     if (request->has_before_updated_at() && request->has_before_id()) {

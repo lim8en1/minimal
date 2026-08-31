@@ -1,8 +1,11 @@
+.opencode/
+
 # Build output
 build/
 build-debug/
 build-server/
 build-asan/
+build-tsan/
 out/
 cmake-build-*/
 install/

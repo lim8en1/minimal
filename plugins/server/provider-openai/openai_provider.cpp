@@ -85,7 +85,13 @@ llm::ChatResponse OpenAiProvider::StreamComplete(const llm::ChatRequest& request
     // behavior) -- caught here, stashed, and rethrown once StreamPost unwinds.
     auto on_chunk = [&](std::string_view chunk) -> bool {
         if (is_error_status) {
-            error_body.append(chunk);
+            // For classification and the error message only -- never parsed as
+            // a completion. A proxy streaming an endless "error" body would
+            // otherwise grow this string for as long as the connection held.
+            constexpr std::size_t kMaxErrorBody = 64 * 1024;
+            if (error_body.size() < kMaxErrorBody) {
+                error_body.append(chunk.substr(0, kMaxErrorBody - error_body.size()));
+            }
             return true;
         }
         try {
@@ -108,6 +114,22 @@ llm::ChatResponse OpenAiProvider::StreamComplete(const llm::ChatRequest& request
             std::rethrow_exception(pending_error);
         } catch (const OpenAiParseError& error) {
             RethrowParseErrorAsLlmError(error);
+        } catch (const llm::LlmError&) {
+            throw;  // already classified; re-wrapping would lose its category
+        } catch (const nlohmann::json::exception& error) {
+            // FeedFrame reaches raw nlohmann accessors in several places --
+            // delta.at("content").get<std::string>(), the tool-call fields, and
+            // ParseUsage -- and only json::parse was wrapped in OpenAiParseError.
+            // A proxy sending `usage: null` or a null content field therefore
+            // threw a type_error that this lambda caught and then DROPPED on the
+            // floor, since the only handler was for OpenAiParseError: the turn
+            // came back empty with no error at all. The non-streaming path has
+            // caught json::exception all along; the streaming path had drifted.
+            throw llm::LlmError(llm::LlmErrorCategory::ParseError, error.what());
+        } catch (const std::exception& error) {
+            // Anything else out of the sink or the reassembler. Unclassified is
+            // still infinitely better than silently discarded.
+            throw llm::LlmError(llm::LlmErrorCategory::ParseError, error.what());
         }
     };
 
@@ -117,6 +139,10 @@ llm::ChatResponse OpenAiProvider::StreamComplete(const llm::ChatRequest& request
         rethrow_pending_if_any();
         if (cancelled_by_sink || error.kind() == llm::HttpErrorKind::Cancelled) {
             try {
+                // Blocks announced but never closed: the client's view has to be
+                // consistent even when the stream was cut. The sink is passed
+                // because these are wire events, not response content.
+                reassembler.CloseOpenBlocks(sink);
                 llm::ChatResponse response = reassembler.Finalize();
                 response.stop_reason = llm::StopReason::Cancelled;
                 return response;
@@ -134,6 +160,9 @@ llm::ChatResponse OpenAiProvider::StreamComplete(const llm::ChatRequest& request
     }
 
     try {
+        // A stream that stopped without a finish_reason still owes the client a
+        // stop for every block it opened.
+        reassembler.CloseOpenBlocks(sink);
         return reassembler.Finalize();
     } catch (const OpenAiParseError& error) {
         RethrowParseErrorAsLlmError(error);

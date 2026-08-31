@@ -32,10 +32,16 @@ TEST_CASE("TryPost refuses past the backlog instead of queueing unboundedly",
     // The pool exists because detached per-command threads made a flood of
     // read-only commands an unbounded pile. Unbounding the backlog here would
     // restore exactly that, one layer down.
+    //
+    // `release` is declared BEFORE the pool on purpose: members are destroyed
+    // in reverse order, and the pool's destructor joins a worker that may still
+    // be inside the blocker's sleep-then-poll loop. The other order -- which
+    // this test once had -- destroyed `release` first, and ASan caught the
+    // worker reading a dead atomic on its wake-up.
+    std::atomic<bool> release{false};
     rpc::CommandExecutor pool(/*threads=*/1, /*max_backlog=*/2);
 
     // Park the only worker; nothing drains while it is blocked.
-    std::atomic<bool> release{false};
     REQUIRE(pool.TryPost([&release] {
         while (!release.load()) std::this_thread::sleep_for(1ms);
     }));

@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <chrono>
 #include <filesystem>
+#include <fstream>
 #include <optional>
 #include <set>
 #include <string>
@@ -601,6 +602,57 @@ TEST_CASE("LoadMessages on an empty or unknown session is empty, not an error",
     CHECK(SessionReader(db).LoadAll("no-such-session").empty());
 }
 
+TEST_CASE("compaction checkpoints round-trip, upsert, and clear", "[session][checkpoint]") {
+    TempDir dir;
+    SessionDatabase db(dir.path() / "ckpt.db");
+    const auto id = db.CreateSession("", std::nullopt, "/p", "build").session_id;
+    db.AppendMessage(id, UserMsg("one"));
+    db.AppendMessage(id, UserMsg("two"));
+
+    // No checkpoint until one is written -- and that is clean, not an error.
+    CHECK_FALSE(db.LoadCompactionCheckpoint(id).has_value());
+    CHECK_FALSE(db.LoadCompactionCheckpoint("no-such-session").has_value());
+
+    const llm::Message summary{llm::Role::User,
+                               {llm::TextBlock{"earlier context was compacted"}}};
+    db.SaveCompactionCheckpoint(id, 0, summary);
+
+    const auto loaded = db.LoadCompactionCheckpoint(id);
+    REQUIRE(loaded.has_value());
+    CHECK(loaded->session_id == id);
+    CHECK(loaded->boundary_seq == 0);
+    CHECK(loaded->created_at_unix_ms > 0);
+    REQUIRE(MessagesEqual(loaded->summary, summary));
+
+    // Upsert: the second compaction replaces, never stacks.
+    const llm::Message newer{llm::Role::User, {llm::TextBlock{"covers more"}}};
+    db.SaveCompactionCheckpoint(id, 1, newer);
+    const auto replaced = db.LoadCompactionCheckpoint(id);
+    REQUIRE(replaced.has_value());
+    CHECK(replaced->boundary_seq == 1);
+    CHECK(MessagesEqual(replaced->summary, newer));
+
+    // The resume tail is everything the summary does not cover.
+    db.AppendMessage(id, UserMsg("three"));
+    const auto tail = SessionReader(db).LoadAfter(id, replaced->boundary_seq);
+    REQUIRE(tail.size() == 1);
+    CHECK(tail[0].seq == 2);
+    CHECK(MessagesEqual(tail[0].message, UserMsg("three")));
+
+    db.ClearCompactionCheckpoint(id);
+    CHECK_FALSE(db.LoadCompactionCheckpoint(id).has_value());
+}
+
+TEST_CASE("deleting a session cascades to its compaction checkpoint", "[session][checkpoint]") {
+    TempDir dir;
+    SessionDatabase db(dir.path() / "ckpt-cascade.db");
+    const auto id = db.CreateSession("", std::nullopt, "/p", "build").session_id;
+    db.SaveCompactionCheckpoint(id, 3, llm::Message{llm::Role::User, {llm::TextBlock{"s"}}});
+
+    REQUIRE(db.DeleteSession(id));
+    CHECK_FALSE(db.LoadCompactionCheckpoint(id).has_value());
+}
+
 TEST_CASE("LastMessageSeq reports the highest seq, and -1 when there are none",
           "[session][resume]") {
     TempDir dir;
@@ -1044,4 +1096,58 @@ TEST_CASE("concurrent appends across sessions stay consistent", "[session][concu
             CHECK(page.messages[i].seq == expected - 1 - i);
         }
     }
+}
+
+TEST_CASE("a read that fails mid-scan raises instead of returning a short result",
+          "[session][robustness]") {
+    // `while (sqlite3_step(stmt) == SQLITE_ROW)` exits on SQLITE_DONE and
+    // equally on SQLITE_CORRUPT/BUSY/IOERR, with nothing checking which. The
+    // resume path is where that hurts: a truncated read becomes the loop's
+    // working history while SqliteHistoryStore keeps appending at MAX(seq)+1, so
+    // the session runs on a transcript with a hole in it and nothing says so.
+    // The JSON decode under these loops is strict about a row it cannot parse,
+    // which made the strict half a guard over the lax half's output.
+    TempDir dir;
+    const auto path = dir.path() / "sessions.db";
+    std::string session_id;
+    {
+        SessionDatabase db(path);
+        session_id = db.CreateSession("s", std::nullopt, "/p", "main").session_id;
+        // Enough rows to span several b-tree pages, so corrupting one lands
+        // inside the scan rather than before it starts.
+        for (int i = 0; i < 400; ++i) {
+            db.AppendMessage(session_id,
+                             llm::Message{llm::Role::User,
+                                          {llm::TextBlock{std::string(200, 'x') +
+                                                          std::to_string(i)}}},
+                             0);
+        }
+    }
+
+    // Scribble over the tail of the file: the header and first pages stay valid,
+    // so the database opens and the scan begins, and the damage is met partway
+    // through.
+    {
+        std::fstream file(path, std::ios::in | std::ios::out | std::ios::binary);
+        REQUIRE(file);
+        file.seekp(0, std::ios::end);
+        const auto size = file.tellp();
+        REQUIRE(size > 8192);
+        file.seekp(size / 2);
+        const std::string garbage(static_cast<std::size_t>(size) / 4, '\xa5');
+        file.write(garbage.data(), static_cast<std::streamsize>(garbage.size()));
+    }
+
+    SessionDatabase reopened(path);
+    // The point is NOT which error: it is that a failed read is an error at all,
+    // rather than a plausible-looking short transcript.
+    bool threw = false;
+    std::vector<StoredMessage> loaded;
+    try {
+        loaded = reopened.LoadMessages(session_id);
+    } catch (const std::exception&) {
+        threw = true;
+    }
+    CHECK((threw || loaded.size() == 400));
+    CHECK_FALSE((!threw && loaded.size() < 400));  // never short AND silent
 }

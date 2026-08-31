@@ -170,3 +170,60 @@ TEST_CASE("queued notifications still run during shutdown", "[session_observer]"
     }  // destructor drains, then joins
     CHECK(observer->ended.size() == 50);
 }
+
+TEST_CASE("a wedged observer drops notifications instead of blocking its dispatcher",
+          "[session_observer][invariant]") {
+    // THE CONTAINMENT PROPERTY, which the class and ARCHITECTURE.md both state
+    // and a blocking Push contradicted: "a hung observer stalls further
+    // notifications rather than leaking one pool thread -- contained (sessions
+    // keep running; only notifications stop)."
+    //
+    // Dispatch used EventQueue::Push, which BLOCKS at the cap. NotifySessionCreated
+    // runs inside Session's constructor -- reached from SessionRegistry::CreateResolved
+    // on the gRPC HANDLER thread -- and NotifySessionEnded runs from Terminate.
+    // So once a wedged observer filled the queue, session creation and teardown
+    // blocked outright, including the one thread the three-thread topology
+    // forbids from blocking. Which is the opposite of contained.
+    constexpr std::size_t kQueue = 8;
+
+    // The atomics are declared BEFORE the registry on purpose: destruction runs
+    // in reverse, so the registry (whose destructor JOINS the wedged dispatcher
+    // thread) goes away first and the thread is provably no longer touching
+    // them when they go. The other order is a stack-use-after-scope at teardown
+    // -- real, and ASan's whole point -- when the dispatcher drains its queued
+    // tasks after `release` is set but before the join.
+    std::atomic<bool> release{false};
+    std::atomic<int> entered{0};
+    agent::SessionObserverRegistry registry(common::DefaultLogger(), kQueue);
+
+    // Wedged: the dispatcher thread parks in the first task and never returns,
+    // so nothing is ever drained and the queue fills and stays full.
+    struct Wedged : agent::SessionObserver {
+        std::atomic<bool>* release;
+        std::atomic<int>* entered;
+        void OnSessionCreated(const agent::SessionInfo&) override {
+            entered->fetch_add(1);
+            while (!release->load()) std::this_thread::yield();
+        }
+    };
+    auto observer = std::make_shared<Wedged>();
+    observer->release = &release;
+    observer->entered = &entered;
+    registry.Register(observer);
+
+    registry.NotifySessionCreated(MakeInfo("s0"));
+    while (entered.load() == 0) std::this_thread::yield();  // dispatcher is now stuck
+
+    // Far more than the queue holds. Every one of these must RETURN -- the
+    // assertion is simply that this loop finishes at all. Against the old
+    // Push() it deadlocks on the ninth, which is what the deadline below turns
+    // into a failure rather than a hung suite.
+    const auto started = std::chrono::steady_clock::now();
+    for (int i = 0; i < 200; ++i) registry.NotifySessionCreated(MakeInfo("s" + std::to_string(i)));
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+
+    CHECK(elapsed < std::chrono::seconds(5));
+    CHECK(registry.dropped_notifications() > 0);  // and it says so rather than losing them silently
+
+    release.store(true);
+}

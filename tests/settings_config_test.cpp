@@ -18,6 +18,9 @@ TEST_CASE("ParseSettingsConfig: empty doc yields every documented default", "[se
     CHECK(config.memory.context_compaction_trigger.kind == CompactionTriggerSettings::Kind::Never);
     CHECK(config.memory.compaction_keep_recent_tokens == 0);
     CHECK(config.memory.scrollback_page_size == 0);
+    CHECK(config.tools.mcp.connect_timeout_ms == 10000);
+    CHECK(config.tools.mcp.request_timeout_ms == 60000);
+    CHECK(config.tools.mcp.max_list_pages == 100);
     CHECK(config.tools_view.stdout_buffer_lines == 100);
     CHECK(config.session_db_path.empty());
     CHECK(config.logging.level == "info");
@@ -148,6 +151,22 @@ TEST_CASE("ParseSettingsConfig: tools settings pass through as raw JSON", "[sett
     auto config = ParseSettingsConfig(doc);
     CHECK(config.tools.bash == nlohmann::json{{"timeout_ms", 5000}, {"max_output_bytes", 64}});
     CHECK(config.tools.read == nlohmann::json::object());
+}
+
+TEST_CASE("ParseSettingsConfig: tools.mcp knobs overridable, max_list_pages must be positive",
+          "[settings_config]") {
+    nlohmann::json doc = {{"tools", {{"mcp", {{"connect_timeout_ms", 1000},
+                                               {"request_timeout_ms", 2000},
+                                               {"max_list_pages", 7}}}}}};
+    auto config = ParseSettingsConfig(doc);
+    CHECK(config.tools.mcp.connect_timeout_ms == 1000);
+    CHECK(config.tools.mcp.request_timeout_ms == 2000);
+    CHECK(config.tools.mcp.max_list_pages == 7);
+
+    CHECK_THROWS_AS(ParseSettingsConfig(nlohmann::json{
+                        {"tools", {{"mcp", {{"max_list_pages", 0}}}}}}), std::runtime_error);
+    CHECK_THROWS_AS(ParseSettingsConfig(nlohmann::json{
+                        {"tools", {{"mcp", {{"max_list_pages", -3}}}}}}), std::runtime_error);
 }
 
 TEST_CASE("ParseSettingsConfig: tools_view and logging overridable", "[settings_config]") {

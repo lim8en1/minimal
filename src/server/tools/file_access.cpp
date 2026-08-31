@@ -10,6 +10,12 @@ namespace {
 constexpr std::size_t kBinarySniffBytes = 8192;
 constexpr const char* kTruncationMarker = "... [line truncated]";
 
+// The ceiling when no max_line_length is configured. There has to be one: the
+// promise this function makes is that memory tracks `limit`, and "no configured
+// truncation" is not the same as "willing to allocate a whole file for one
+// line". Generous enough that no real source line reaches it.
+constexpr std::size_t kHardLineCap = 1 << 20;  // 1 MiB
+
 bool LooksBinary(std::ifstream& in) {
     std::array<char, kBinarySniffBytes> buffer{};
     in.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
@@ -46,30 +52,61 @@ FileWindow read_window(const std::filesystem::path& confined_abs_path, int offse
         return window;
     }
 
-    const int window_end = (limit == 0) ? 0 : offset_1based + limit - 1;
+    // offset + limit in int64 first: both come from model-written JSON, and
+    // `offset_1based + limit - 1` overflowed for values near INT_MAX. Clamped to
+    // INT_MAX, which means "to the end of the file" here anyway.
+    const std::int64_t raw_end =
+        static_cast<std::int64_t>(offset_1based) + static_cast<std::int64_t>(limit) - 1;
+    const int window_end =
+        (limit == 0) ? 0
+                     : static_cast<int>(std::min<std::int64_t>(
+                           raw_end, std::numeric_limits<int>::max()));
+
+    // BOUNDED PER LINE, which is what makes the documented promise -- "memory
+    // proportional to `limit`, not file size" -- actually true. std::getline
+    // materializes the WHOLE line before anything truncates it, so a 500 MB
+    // minified file with no newline (and no NUL, so the binary probe passes) was
+    // a 500 MB allocation to display 2000 characters. Reading into a bounded
+    // buffer and discarding the remainder keeps the peak at the buffer size.
+    const std::size_t keep =
+        max_line_length > 0 ? static_cast<std::size_t>(max_line_length) : kHardLineCap;
+    std::vector<char> buffer(keep + 2);  // room for the delimiter slot getline needs
 
     std::string line;
     int line_number = 0;
-    while (std::getline(in, line)) {
+    while (true) {
+        in.getline(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+        const auto extracted = in.gcount();
+        if (extracted == 0 && in.eof()) break;
         ++line_number;
 
+        bool overlong = false;
+        if (in.fail() && !in.eof()) {
+            // The line did not fit: getline set failbit without consuming the
+            // delimiter. Clear it and drop the rest of the line WITHOUT storing
+            // it -- that discard is the whole point.
+            in.clear();
+            in.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+            overlong = true;
+        }
+
+        const bool wanted = line_number >= offset_1based &&
+                            (limit == 0 || line_number <= window_end);
+        if (!wanted) {
+            if (limit != 0 && line_number > window_end) window.truncated = true;
+            continue;  // counted for total_lines, never materialized
+        }
+
+        line.assign(buffer.data());
         // A trailing "\r" survives getline on CRLF files and would otherwise be
         // rendered into the model's context as a stray control character.
         if (!line.empty() && line.back() == '\r') line.pop_back();
-
-        if (line_number < offset_1based) continue;
-        if (limit != 0 && line_number > window_end) {
-            // Keep counting to report an accurate total, but stop retaining.
-            window.truncated = true;
-            continue;
-        }
-
-        if (max_line_length > 0 && static_cast<int>(line.size()) > max_line_length) {
-            line.resize(static_cast<std::size_t>(max_line_length));
+        if (overlong || (max_line_length > 0 && static_cast<int>(line.size()) > max_line_length)) {
+            if (max_line_length > 0) line.resize(static_cast<std::size_t>(max_line_length));
             line += kTruncationMarker;
         }
         window.lines.push_back(std::move(line));
-        line = {};
+        line.clear();
     }
 
     window.total_lines = line_number;

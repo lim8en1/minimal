@@ -4,34 +4,29 @@ namespace minimal::tools_bash {
 namespace {
 
 template <typename T>
-T ValueOr(const nlohmann::json& parent, const char* section, const char* key, T fallback) {
-    auto section_it = parent.find(section);
-    if (section_it == parent.end() || !section_it->is_object()) return fallback;
-    auto key_it = section_it->find(key);
-    if (key_it == section_it->end() || !key_it->is_number()) return fallback;
+T ValueOr(const nlohmann::json& parent, const char* key, T fallback) {
+    auto key_it = parent.find(key);
+    if (key_it == parent.end() || !key_it->is_number()) return fallback;
     return key_it->get<T>();
 }
 
 }  // namespace
 
-BashSettings ParseBashSettings(const nlohmann::json& tools_settings) {
+BashSettings ParseBashSettings(const nlohmann::json& config) {
     BashSettings settings;
-    if (!tools_settings.is_object()) return settings;
+    if (!config.is_object()) return settings;
 
-    settings.timeout_ms = ValueOr(tools_settings, "bash", "timeout_ms", settings.timeout_ms);
-    settings.max_timeout_ms =
-        ValueOr(tools_settings, "bash", "max_timeout_ms", settings.max_timeout_ms);
-    settings.max_output_bytes =
-        ValueOr(tools_settings, "bash", "max_output_bytes", settings.max_output_bytes);
+    // The plugin's own plugins.json "config" object, verbatim -- keys are flat
+    // because every knob in this schema belongs to this one tool.
+    settings.timeout_ms = ValueOr(config, "timeout_ms", settings.timeout_ms);
+    settings.max_timeout_ms = ValueOr(config, "max_timeout_ms", settings.max_timeout_ms);
+    settings.max_output_bytes = ValueOr(config, "max_output_bytes", settings.max_output_bytes);
     settings.max_file_size_bytes =
-        ValueOr(tools_settings, "bash", "max_file_size_bytes", settings.max_file_size_bytes);
+        ValueOr(config, "max_file_size_bytes", settings.max_file_size_bytes);
 
-    auto bash_it = tools_settings.find("bash");
-    if (bash_it != tools_settings.end() && bash_it->is_object()) {
-        auto shell_it = bash_it->find("shell");
-        if (shell_it != bash_it->end() && shell_it->is_string()) {
-            settings.shell = shell_it->get<std::string>();
-        }
+    auto shell_it = config.find("shell");
+    if (shell_it != config.end() && shell_it->is_string()) {
+        settings.shell = shell_it->get<std::string>();
     }
 
     // A non-positive timeout would kill every command instantly; a non-positive

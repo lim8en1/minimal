@@ -73,6 +73,16 @@ public:
         const auto resolved = ResolveForUse(ctx, input, /*must_exist=*/true, error);
         if (!error.empty()) return Error(error);
 
+        // Checked, not value()d: nlohmann's value() throws type_error when the
+        // key is present with the wrong type, and the MODEL writes this input --
+        // `{"offset": "1"}` is an ordinary mistake, not a bug to escape through.
+        // Same shape Insert() already uses.
+        if (input.contains("offset") && !input.at("offset").is_number_integer()) {
+            return Error("offset must be an integer");
+        }
+        if (input.contains("limit") && !input.at("limit").is_number_integer()) {
+            return Error("limit must be an integer");
+        }
         const int offset = input.value("offset", 1);
         const int limit = input.value("limit", settings_.read_default_limit_lines);
 
@@ -177,12 +187,19 @@ public:
     // viewing a file never raises a write prompt, which is the same trick that
     // keeps Read cheap.
     std::optional<ToolCategory> category_for(const nlohmann::json& input) const override {
-        if (input.value("command", std::string{}) == "view") return ToolCategory::ReadOnly;
+        // is_string() first: value() throws on a present-but-wrong-typed key,
+        // and this runs during permission resolution, ahead of any validation
+        // execute() could do. A non-string command falls through to the tool's
+        // declared (write) category, which is the safe direction anyway.
+        if (CommandOf(input) == "view") return ToolCategory::ReadOnly;
         return std::nullopt;
     }
 
     ToolResult execute(const nlohmann::json& input, ToolContext& ctx) override {
-        const auto command = input.value("command", std::string{});
+        if (input.contains("command") && !input.at("command").is_string()) {
+            return Error("command must be a string");
+        }
+        const auto command = CommandOf(input);
         if (command.empty()) return Error("missing required string field: command");
 
         const bool must_exist = (command != "create");
@@ -198,11 +215,26 @@ public:
     }
 
 private:
+    // The command name, or empty when absent or not a string. Never throws --
+    // category_for() reads it before execute() has had a chance to validate.
+    static std::string CommandOf(const nlohmann::json& input) {
+        const auto it = input.find("command");
+        if (it == input.end() || !it->is_string()) return {};
+        return it->get<std::string>();
+    }
+
     ToolResult View(const nlohmann::json& input, const std::filesystem::path& path) {
         int offset = 1;
         int limit = settings_.read_default_limit_lines;
         if (auto it = input.find("view_range");
             it != input.end() && it->is_array() && it->size() == 2) {
+            // The shape is checked but the ELEMENTS were not, so
+            // `view_range: ["a", "b"]` threw type_error straight out of the
+            // tool. Reported instead: a malformed range is the model's mistake
+            // to see and correct.
+            if (!(*it)[0].is_number_integer() || !(*it)[1].is_number_integer()) {
+                return Error("view_range must be two integers");
+            }
             offset = (*it)[0].get<int>();
             const int end = (*it)[1].get<int>();
             limit = (end < offset) ? 0 : end - offset + 1;

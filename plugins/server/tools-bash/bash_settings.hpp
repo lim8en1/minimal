@@ -7,9 +7,9 @@
 
 namespace minimal::tools_bash {
 
-// This plugin's slice of settings.json's `tools` object, under the `bash` key.
-// Core keeps that object as raw JSON precisely so each plugin owns its own
-// schema -- this is that schema, and nothing outside tools-bash needs to know it.
+// This plugin's own config, the "config" object on its plugins.json entry.
+// Core keeps it as raw JSON precisely so each plugin owns its own schema --
+// this is that schema, and nothing outside tools-bash needs to know it.
 struct BashSettings {
     // Wall-clock cap per invocation; the whole process group is killed at the
     // deadline. The RLIMIT_CPU backstop derives from this (see bash_tool.cpp).
@@ -30,7 +30,7 @@ struct BashSettings {
 };
 
 // Every field optional; missing values keep the struct's defaults, so an absent
-// or partial `bash` object is normal rather than an error.
-BashSettings ParseBashSettings(const nlohmann::json& tools_settings);
+// or partial config object is normal rather than an error.
+BashSettings ParseBashSettings(const nlohmann::json& config);
 
 }  // namespace minimal::tools_bash

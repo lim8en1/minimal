@@ -7,38 +7,42 @@
 namespace minimal::common {
 
 // One process-wide logging handle that tools and plugins share. Deliberately
-// thin: it forwards to an spdlog logger so the sink (console today, the
-// rotating file from settings.json's `logging.*` later) can change without
-// touching a single call site.
+// thin: it forwards to spdlog's CURRENT default logger on every call, so the
+// sink (console default, the rotating file from settings.json's `logging.*`)
+// can be swapped by ConfigureLogging without touching a single call site.
+//
+// The indirection is load-bearing. An earlier version pinned
+// spdlog::default_logger() on first use -- and first use happens during
+// plugin-config parsing, BEFORE ConfigureLogging runs -- so the file sink was
+// wired into a logger nothing used anymore, and logging.path was silently
+// inert. Resolving per call is what makes the swap real.
 class Logger {
 public:
-    explicit Logger(std::shared_ptr<spdlog::logger> impl) : impl_(std::move(impl)) {}
+    Logger() = default;
 
     template <typename... Args>
     void debug(fmt::format_string<Args...> format, Args&&... args) const {
-        if (impl_) impl_->debug(format, std::forward<Args>(args)...);
+        current()->debug(format, std::forward<Args>(args)...);
     }
     template <typename... Args>
     void info(fmt::format_string<Args...> format, Args&&... args) const {
-        if (impl_) impl_->info(format, std::forward<Args>(args)...);
+        current()->info(format, std::forward<Args>(args)...);
     }
     template <typename... Args>
     void warn(fmt::format_string<Args...> format, Args&&... args) const {
-        if (impl_) impl_->warn(format, std::forward<Args>(args)...);
+        current()->warn(format, std::forward<Args>(args)...);
     }
     template <typename... Args>
     void error(fmt::format_string<Args...> format, Args&&... args) const {
-        if (impl_) impl_->error(format, std::forward<Args>(args)...);
+        current()->error(format, std::forward<Args>(args)...);
     }
 
 private:
-    std::shared_ptr<spdlog::logger> impl_;
+    static std::shared_ptr<spdlog::logger> current() { return spdlog::default_logger(); }
 };
 
-// The process-wide instance, created once on first use with spdlog's default
-// console logger. When the `logging.*` settings land they will configure the
-// sink this wraps (rotating file) -- references to the Logger itself stay valid
-// either way.
+// The process-wide instance. Stateless: what it logs TO follows whatever
+// spdlog::set_default_logger() has installed.
 Logger& DefaultLogger();
 
 }  // namespace minimal::common

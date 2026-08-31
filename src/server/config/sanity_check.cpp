@@ -45,7 +45,12 @@ bool CommandResolves(const std::string& command) {
     if (command.empty()) return false;
     const auto executable = [](const std::filesystem::path& path) {
         std::error_code ec;
-        return !ec && std::filesystem::is_regular_file(path, ec) && ::access(path.c_str(), X_OK) == 0;
+        // `is_regular_file` writes ec; testing it BEFORE the call tested a
+    // default-constructed value, so `!ec` was unconditionally true and the code
+    // the call reported was never read. Written correctly at bash_tool.cpp:439
+    // and again below in this same file -- three copies, one inert.
+    const bool regular = std::filesystem::is_regular_file(path, ec);
+    return regular && !ec && ::access(path.c_str(), X_OK) == 0;
     };
     if (command.find('/') != std::string::npos) {
         return executable(command);
@@ -93,6 +98,7 @@ std::vector<CheckResult> StartupSanityCheck::RunAll() {
     append(check_plugins());
     append(check_name_collisions());
     append(check_naming_model());
+    append(check_advisor());
     append(check_subagent_limit());
     return results;
 }
@@ -165,7 +171,7 @@ std::vector<CheckResult> StartupSanityCheck::check_providers() {
     for (const auto& ref_text : refs) {
         const auto ref = common::ParseModelRef(ref_text);
         if (!ref) continue;  // ParseProvidersConfig rejects these already
-        const ResolvedModel* model = providers_.Resolve(*ref);
+        const auto model = providers_.Resolve(*ref);
         if (model == nullptr) continue;
 
         const bool registered =
@@ -185,6 +191,39 @@ std::vector<CheckResult> StartupSanityCheck::check_providers() {
         any_usable = true;
     }
 
+    // Discover-entries (track N): addressable through their backend's catalog
+    // even with no static model. Checked STRUCTURALLY -- which plugins
+    // registered what -- never by probing, because discovery is fetched lazily
+    // at first resolve, never at startup. A discover-entry with a registered
+    // backend counts as usable: whether the catalog actually answers is a
+    // runtime condition, reported at first resolve and by /providers refresh.
+    for (const auto& [name, entry] : providers_.provider_entries()) {
+        if (!entry.discover) continue;
+        const bool backend_registered =
+            std::find(kinds.begin(), kinds.end(), entry.backend) != kinds.end();
+        if (!backend_registered) {
+            if (!backend_reported[name]) {
+                results.push_back(Warning(
+                    "usable_provider", "providers.json provider '" + name + "': backend '" +
+                                           entry.backend +
+                                           "' is not registered by any loaded plugin; discovery "
+                                           "cannot run and its static models do not resolve"));
+            }
+            continue;
+        }
+        any_usable = true;
+        const bool catalog_registered =
+            inputs_.model_catalogs != nullptr && inputs_.model_catalogs->Has(entry.backend);
+        if (!catalog_registered) {
+            results.push_back(
+                Warning("usable_provider",
+                        "providers.json provider '" + name + "': sets \"discover\": true but no "
+                        "loaded plugin registers a model catalog for backend '" +
+                            entry.backend +
+                            "'; discovery will fail at first resolve (its static models, if any, "
+                            "still resolve)"));
+        }
+    }
     if (!any_usable) {
         // A harness that cannot talk to an LLM is useless, not degraded -- the
         // same standard as a failed bundled plugin.
@@ -210,10 +249,18 @@ std::vector<CheckResult> StartupSanityCheck::check_providers() {
                                       "settings.json default_model '" + settings_.default_model +
                                           "' is not <provider>/<model>"));
         } else if (providers_.Resolve(*ref) == nullptr) {
-            results.push_back(Warning("usable_provider",
-                                      "settings.json default_model '" + settings_.default_model +
-                                          "' matches no configured model" +
-                                          (refs.empty() ? "" : " (have: " + JoinNames(refs) + ")")));
+            // Under a discover-entry a non-static model cannot be verified at
+            // startup without a network call, which the check never makes --
+            // the provider exists and discovery answers at first resolve.
+            const auto entry = providers_.provider_entries().find(ref->provider);
+            const bool unverifiable = entry != providers_.provider_entries().end() &&
+                                      entry->second.discover;
+            if (!unverifiable) {
+                results.push_back(Warning("usable_provider",
+                                          "settings.json default_model '" + settings_.default_model +
+                                              "' matches no configured model" +
+                                              (refs.empty() ? "" : " (have: " + JoinNames(refs) + ")")));
+            }
         }
     }
 
@@ -231,6 +278,24 @@ std::vector<CheckResult> StartupSanityCheck::check_providers() {
         }
     }
 
+    // Same for catalogs (track N): they share the provider kind string, but are
+    // a separate namespace -- a duplicate catalog silently determines what
+    // "discover": true lists.
+    std::unordered_map<std::string, std::string> catalog_owner;
+    for (const auto& record : inputs_.plugin_records) {
+        if (record.status != plugins::LoadStatus::Loaded) continue;
+        const auto label = record.name.empty() ? record.file.filename().string() : record.name;
+        for (const auto& kind : record.registered_model_catalog_kinds) {
+            const auto [it, inserted] = catalog_owner.try_emplace(kind, label);
+            if (!inserted) {
+                results.push_back(Warning("provider_catalogs",
+                                          "model catalog for kind '" + kind +
+                                              "' is registered by both " + it->second + " and " +
+                                              label + "; the first wins"));
+            }
+        }
+    }
+
     return results;
 }
 
@@ -242,7 +307,15 @@ std::vector<CheckResult> StartupSanityCheck::check_presets() {
     // is exactly why a broken one stayed silent until the first session.
     std::error_code ec;
     if (std::filesystem::is_directory(agents_dir, ec)) {
-        for (const auto& entry : std::filesystem::directory_iterator(agents_dir, ec)) {
+        // increment(ec), not the range-for. `directory_iterator(dir, ec)` only makes
+    // CONSTRUCTION non-throwing; the range-for's operator++ is the throwing
+    // overload, so one unreadable entry threw straight out of RunAll and skipped
+    // every later check -- breaking the linter property this class documents
+    // ("EVERY check runs regardless of what the earlier ones found").
+    // skill_registry.cpp:153 already had the right shape.
+    for (auto it = std::filesystem::directory_iterator(agents_dir, ec);
+         !ec && it != std::filesystem::directory_iterator(); it.increment(ec)) {
+        const auto& entry = *it;
             if (!entry.is_regular_file(ec) || entry.path().extension() != ".md") continue;
             const auto preset_name = entry.path().stem().string();
             // subagent.md is plain Markdown without frontmatter -- a session-level
@@ -278,11 +351,22 @@ std::vector<CheckResult> StartupSanityCheck::check_presets() {
         }
         const auto ref = common::ParseModelRef(model_text);
         if (!ref) return "model '" + model_text + "' is not <provider>/<model>";
-        const ResolvedModel* model = providers_.Resolve(*ref);
-        if (model == nullptr) return "names unknown model '" + model_text + "'";
+        // A discover-entry's backend kind can be checked without the model
+        // resolving -- the model list is a runtime answer the check never
+        // probes.
+        std::string discover_backend;
+        if (auto entry = providers_.provider_entries().find(ref->provider);
+            entry != providers_.provider_entries().end() && entry->second.discover) {
+            discover_backend = entry->second.backend;
+        }
+        const auto model = providers_.Resolve(*ref);
+        if (model == nullptr && discover_backend.empty()) {
+            return "names unknown model '" + model_text + "'";
+        }
         const auto kinds = inputs_.provider_factories.kinds();
-        if (std::find(kinds.begin(), kinds.end(), model->backend) == kinds.end()) {
-            return "model '" + model_text + "' needs backend '" + model->backend +
+        const std::string& backend = model != nullptr ? model->backend : discover_backend;
+        if (std::find(kinds.begin(), kinds.end(), backend) == kinds.end()) {
+            return "model '" + model_text + "' needs backend '" + backend +
                    "', which no loaded plugin registers";
         }
         return std::nullopt;
@@ -418,16 +502,24 @@ std::vector<CheckResult> StartupSanityCheck::check_plugins() {
     return results;
 }
 
+namespace {
+// An empty attribution means core registered it itself, which reads badly as ''.
+std::string PluginLabel(const std::string& plugin_name) {
+    return plugin_name.empty() ? std::string("the harness itself") : "plugin '" + plugin_name + "'";
+}
+}  // namespace
+
 std::vector<CheckResult> StartupSanityCheck::check_name_collisions() {
     std::vector<CheckResult> results;
     const auto& resolution = inputs_.name_resolution;
 
-    // Who claims a surface name, across BOTH registries. NameRegistry reports the
+    // Who claims a surface name, across ALL registries. NameRegistry reports the
     // colliding name; the attributions supply the claimants, which is what makes
     // the diagnostic actionable -- the name alone does not say which plugin to
-    // disable. Tools and commands are separate namespaces, so the kind is part of
-    // the answer rather than an aside.
-    const auto claimants = [this](const std::string& surface, bool& is_command) {
+    // disable. Tools, commands and services are separate namespaces, so the kind
+    // is part of the answer rather than an aside.
+    enum class ClaimKind { kTool, kCommand, kService };
+    const auto claimants = [this](const std::string& surface, ClaimKind& kind) {
         std::vector<std::string> owners;
         const auto add = [&owners](const std::string& plugin_name) {
             const auto label = plugin_name.empty() ? "core" : plugin_name;
@@ -439,13 +531,16 @@ std::vector<CheckResult> StartupSanityCheck::check_name_collisions() {
         for (const auto& attr : inputs_.tool_registry.attributions()) {
             std::string s = attr.tool_name;
             const auto qualified = attr.plugin_name + "." + attr.tool_name;
-            if (auto it = inputs_.plugin_config.command_aliases.find(qualified);
-                it != inputs_.plugin_config.command_aliases.end()) {
+            if (auto it = inputs_.plugin_config.aliases.find(qualified);
+                it != inputs_.plugin_config.aliases.end()) {
                 s = it->second;
             }
             if (s == surface) add(attr.plugin_name);
         }
-        if (!owners.empty()) return owners;
+        if (!owners.empty()) {
+            kind = ClaimKind::kTool;
+            return owners;
+        }
 
         // A command collision, then. Its registry has already applied aliases, so
         // surface_name is what to compare -- no second alias lookup here.
@@ -453,24 +548,58 @@ std::vector<CheckResult> StartupSanityCheck::check_name_collisions() {
             for (const auto& attr : inputs_.command_registry->attributions()) {
                 if (attr.surface_name == surface) add(attr.plugin_name);
             }
-            if (!owners.empty()) is_command = true;
+            if (!owners.empty()) kind = ClaimKind::kCommand;
+        }
+        if (!owners.empty()) return owners;
+
+        // A service collision, then. Original names register unaliased, so the
+        // attribution's name is what to compare.
+        if (inputs_.service_registry != nullptr) {
+            for (const auto& attr : inputs_.service_registry->attributions()) {
+                if (attr.service_name == surface) add(attr.plugin_name);
+            }
+            if (!owners.empty()) kind = ClaimKind::kService;
         }
         return owners;
     };
 
     for (const auto& surface : resolution.result.fatal_collisions) {
-        bool is_command = false;
-        const auto owners = claimants(surface, is_command);
+        ClaimKind kind = ClaimKind::kTool;
+        const auto owners = claimants(surface, kind);
+        if (kind == ClaimKind::kService) {
+            results.push_back(Fatal("name_collisions",
+                                    "service name '" + surface + "' is provided by " +
+                                        JoinNames(owners) + " -- disable one of the plugins"));
+            continue;
+        }
         results.push_back(
             Fatal("name_collisions",
-                  std::string(is_command ? "command name '/" : "tool name '") + surface +
+                  std::string(kind == ClaimKind::kCommand ? "command name '/" : "tool name '") +
+                      surface +
                       "' is provided by " + JoinNames(owners) +
-                      " -- disable one plugin, or give one of them a command_aliases entry"));
+                      " -- disable one plugin, or give one of them an aliases entry"));
     }
 
     for (const auto& key : resolution.result.dangling_aliases) {
-        results.push_back(Warning("aliases", "command_aliases key '" + key +
+        results.push_back(Warning("aliases", "aliases key '" + key +
                                   "' resolves to nothing registered (typo, or the providing plugin is disabled)"));
+    }
+
+    // THE THIRD REGISTRATION NAMESPACE. Tools and commands both feed
+    // ResolveRegistrationNames and collide fatally; provider kinds were exempt,
+    // because ProviderFactoryRegistry::Register signalled a duplicate only
+    // through a return value the loader ignored. A second plugin registering
+    // `openai` was therefore dropped in silence, and which backend a session
+    // actually got depended on plugin load order -- the precise outcome the
+    // collision rule exists to prevent. Fatal like the other two: there is no
+    // alias mechanism for a kind, so disabling one plugin is the only fix.
+    for (const auto& collision : inputs_.provider_factories.collisions()) {
+        results.push_back(
+            Fatal("name_collisions",
+                  "provider kind '" + collision.kind + "' is registered by both " +
+                      PluginLabel(collision.first_plugin) + " and " +
+                      PluginLabel(collision.second_plugin) +
+                      " -- disable one of them; provider kinds cannot be aliased"));
     }
     return results;
 }
@@ -555,6 +684,25 @@ std::vector<CheckResult> StartupSanityCheck::check_naming_model() {
         }
     }
 
+    return results;
+}
+
+std::vector<CheckResult> StartupSanityCheck::check_advisor() {
+    std::vector<CheckResult> results;
+    if (permissions_.advisor) {
+        const bool resolved = inputs_.permission_advisors != nullptr &&
+                              inputs_.permission_advisors->Has(*permissions_.advisor);
+        if (!resolved) {
+            results.push_back(Warning(
+                "advisor", "permissions.json names advisor '" + *permissions_.advisor +
+                               "' but no loaded plugin registered one (typo, or the providing "
+                               "plugin is disabled); prompts fall through to the human"));
+        }
+    } else if (permissions_.advisor_inherit) {
+        results.push_back(Warning(
+            "advisor", "permissions.json sets advisor_inherit but names no advisor; "
+                       "the flag is inert"));
+    }
     return results;
 }
 

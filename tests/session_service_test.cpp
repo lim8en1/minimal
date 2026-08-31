@@ -11,6 +11,7 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -26,6 +27,7 @@
 #include "deadline.hpp"
 #include "fakes.hpp"
 #include "temp_dir.hpp"
+#include "minimal/plugins/plugin_loader.hpp"
 #include "minimal/rpc/server.hpp"
 #include "minimal/rpc/session_service.hpp"
 #include "minimal/v1/session_service.grpc.pb.h"
@@ -90,9 +92,26 @@ struct ServiceFixture {
         script->Push(std::move(response), std::move(events));
     }
 
+    // Loads the advisor fixture through the REAL loader -- the first
+    // service-level test to run PluginLoader, because a registration seam
+    // proven only in-process proves nothing about symbol lookup or attribution.
+    void LoadAdvisorPlugin() {
+        plugins::PluginCandidate candidate;
+        candidate.file = std::filesystem::path(MINIMAL_FIXTURE_DIR) / "fixture-advisor.so";
+        candidate.provenance = plugins::Provenance::User;
+        candidate.enabled = true;
+        plugins::PluginLoader loader(tools, providers, nlohmann::json::object(), nullptr, nullptr,
+                                     nullptr, &permission_advisors);
+        const auto records = loader.LoadAll({candidate});
+        REQUIRE(records.size() == 1);
+        REQUIRE(records.front().ok());
+        REQUIRE(records.front().registered_permission_advisor);
+    }
+
     // Built after the script and any tools, so a session sees the finished setup.
     void Start() {
-        presets = std::make_unique<agent::AgentPresetRegistry>(dir, skills);
+        presets = std::make_unique<agent::AgentPresetRegistry>(
+            dir, skills, config::LoadSettingsConfig(dir / "settings.json"));
         auto script_copy = script;
         providers.Register("fake", [script_copy](const llm::ProviderConfig&) {
             return std::make_unique<testing::ScriptedProvider>(script_copy);
@@ -104,8 +123,8 @@ struct ServiceFixture {
             *presets, tools, providers, *observers, *db, agent::LoopConfig{},
             common::DefaultLogger(), attach_guard);
         service = std::make_unique<rpc::SessionServiceImpl>(
-            *sessions, *db, config::SettingsConfig{}, config::PermissionsConfig{},
-            common::DefaultLogger());
+            *sessions, *db, config::SettingsConfig{}, service_permissions,
+            common::DefaultLogger(), &permission_advisors);
         sessions->set_commands(&commands);
         service->set_commands(&commands);
         service->set_mention_resolvers(&mention_resolvers);
@@ -157,6 +176,9 @@ struct ServiceFixture {
     std::unique_ptr<v1::SessionService::Stub> stub;
     std::chrono::milliseconds attach_guard = std::chrono::seconds(10);
     std::atomic<bool> last_detach{false};
+    // Set by tests before Start(): what the service resolves sessions with.
+    config::PermissionsConfig service_permissions;
+    tools::PermissionAdvisorRegistry permission_advisors;
 };
 
 v1::ClientEvent ChatTurn(const std::string& session_id, const std::string& text) {
@@ -1492,4 +1514,269 @@ TEST_CASE("the model flag applies on resume, and a malformed one is refused ther
         CHECK(status.error_code() == grpc::StatusCode::INVALID_ARGUMENT);
         CHECK(fixture.sessions->Find(session_id) == nullptr);  // not opened
     }
+}
+
+TEST_CASE("a client-supplied page limit is clamped, not trusted",
+          "[session_service][scrollback]") {
+    // `limit` is a wire int32 with a floor and, until this, no ceiling.
+    // SessionDatabase binds `limit + 1` for the has-more probe, so INT32_MAX is
+    // signed overflow -- and in practice binds a NEGATIVE limit, which SQLite
+    // reads as no limit at all. One request then loads the whole transcript:
+    // every row decoded, every message copied into one proto response. That is
+    // the O(n) blowup the keyset paging exists to prevent, and it is reachable
+    // from any client, since authentication is pass-through by default.
+    ServiceFixture fixture;
+    fixture.Start();
+
+    const std::string session_id = fixture.CreateSession();
+    // More rows than the ceiling, or the assertion below passes on a short
+    // transcript whether or not anything clamps.
+    for (int i = 0; i < 1010; ++i) {
+        fixture.db->AppendMessage(
+            session_id, llm::Message{llm::Role::User, {llm::TextBlock{"m" + std::to_string(i)}}}, 0);
+    }
+
+    grpc::ClientContext context;
+    v1::GetMessagesRequest request;
+    request.set_session_id(session_id);
+    request.set_limit(std::numeric_limits<std::int32_t>::max());
+    v1::GetMessagesResponse response;
+
+    // Answered normally rather than refused: asking for more than we serve is
+    // not an error, and has_more already tells the client to page.
+    REQUIRE(fixture.stub->GetMessages(&context, request, &response).ok());
+    CHECK(response.messages_size() == 1000);
+    CHECK(response.has_more());
+
+    grpc::ClientContext list_context;
+    v1::ListSessionsRequest list;
+    list.set_include_all_dirs(true);
+    list.set_limit(std::numeric_limits<std::int32_t>::max());
+    v1::ListSessionsResponse listed;
+    REQUIRE(fixture.stub->ListSessions(&list_context, list, &listed).ok());
+    CHECK(listed.sessions_size() <= 1000);  // one session here; the clamp is the same call
+}
+
+TEST_CASE("an LLM command is refused mid-turn while a mutating one still queues",
+          "[session_service][commands][invariant]") {
+    // THE GUARD THAT NOTHING EVER TRIGGERED. Dispatch() takes a `busy` flag
+    // whose whole purpose is this refusal, and both production callers passed
+    // `false` unconditionally -- so only the unit tests exercised it, and
+    // /compact typed during a long turn was quietly queued instead. That is
+    // verbatim what command_dispatcher.hpp says must not happen: "queueing
+    // would make /compact silently run minutes later against a context that had
+    // moved on."
+    //
+    // The pair is the point. An LLMCommand is refused; a mutating
+    // HarnessCommand still QUEUES and lands at the turn boundary, because the
+    // shared work queue exists to serve exactly that. Refusing on !ReadOnly()
+    // would have taken both.
+    ServiceFixture fixture;
+    fixture.commands.Register(std::make_unique<testing::RecordingLlmCommand>());
+    fixture.commands.Register(std::make_unique<testing::RecordingCommand>());
+    fixture.tools.Register(
+        std::make_unique<testing::FakeTool>("read", tools::ToolCategory::ReadOnly, "contents"));
+    fixture.Script(testing::ToolUseResponse("call-1", "read", {{"path", "a.txt"}}));
+    fixture.Script(testing::TextResponse("done"));
+    fixture.Start();
+
+    const std::string session_id = fixture.CreateSession();
+    grpc::ClientContext context;
+    auto stream = fixture.stub->OpenSession(&context);
+
+    // All three written before any read, so both commands are dispatched while
+    // the turn is still queued or running -- idle() is false the moment
+    // SubmitTurn lands, and the reader dispatches these in order.
+    REQUIRE(stream->Write(ChatTurn(session_id, "read it")));
+    v1::ClientEvent llm_invocation;
+    llm_invocation.set_session_id(session_id);
+    llm_invocation.mutable_command()->set_request_id("cmd-llm");
+    llm_invocation.mutable_command()->set_name("llmrecord");
+    REQUIRE(stream->Write(llm_invocation));
+    v1::ClientEvent harness_invocation;
+    harness_invocation.set_session_id(session_id);
+    harness_invocation.mutable_command()->set_request_id("cmd-harness");
+    harness_invocation.mutable_command()->set_name("record");
+    REQUIRE(stream->Write(harness_invocation));
+
+    std::optional<v1::CommandResult> llm_result;
+    std::optional<v1::CommandResult> harness_result;
+    v1::ServerEvent event;
+    while (stream->Read(&event)) {
+        if (!event.has_command_result()) continue;
+        if (event.command_result().request_id() == "cmd-llm") llm_result = event.command_result();
+        if (event.command_result().request_id() == "cmd-harness") {
+            harness_result = event.command_result();
+        }
+        if (llm_result && harness_result) break;
+    }
+    (void)DrainAndFinish(stream);
+
+    REQUIRE(llm_result.has_value());
+    CHECK(llm_result->status() == v1::COMMAND_STATUS_ERROR);
+    CHECK(llm_result->message().find("in flight") != std::string::npos);
+
+    REQUIRE(harness_result.has_value());
+    CHECK(harness_result->status() == v1::COMMAND_STATUS_OK);
+}
+
+TEST_CASE("an unknown command is answered immediately, not after the turn",
+          "[session_service][commands]") {
+    // It used to be queued behind the running turn purely to be told "unknown
+    // command" minutes later. Nothing about that reply depends on the worker.
+    ServiceFixture fixture;
+    fixture.commands.Register(std::make_unique<testing::RecordingCommand>());
+    fixture.tools.Register(
+        std::make_unique<testing::FakeTool>("read", tools::ToolCategory::ReadOnly, "contents"));
+    fixture.Script(testing::ToolUseResponse("call-1", "read", {{"path", "a.txt"}}));
+    fixture.Script(testing::TextResponse("done"));
+    fixture.Start();
+
+    const std::string session_id = fixture.CreateSession();
+    grpc::ClientContext context;
+    auto stream = fixture.stub->OpenSession(&context);
+    REQUIRE(stream->Write(ChatTurn(session_id, "read it")));
+    v1::ClientEvent invocation;
+    invocation.set_session_id(session_id);
+    invocation.mutable_command()->set_request_id("cmd-x");
+    invocation.mutable_command()->set_name("no-such-command");
+    REQUIRE(stream->Write(invocation));
+
+    // Arrives BEFORE turn_completed: the answer overtakes the turn it was not
+    // waiting on.
+    bool saw_turn_completed = false;
+    std::optional<v1::CommandResult> result;
+    v1::ServerEvent event;
+    while (stream->Read(&event)) {
+        if (event.has_turn_completed()) saw_turn_completed = true;
+        if (event.has_command_result()) {
+            result = event.command_result();
+            break;
+        }
+    }
+    (void)DrainAndFinish(stream);
+
+    REQUIRE(result.has_value());
+    CHECK(result->status() == v1::COMMAND_STATUS_ERROR);
+    CHECK(result->message().find("unknown command") != std::string::npos);
+    CHECK_FALSE(saw_turn_completed);
+}
+
+TEST_CASE("observers see every tool call and the turn's tool list",
+          "[session_service][observer][invariant]") {
+    // BOTH HALVES OF THE CONTRACT WERE DECLARED AND NEITHER WAS PRODUCED.
+    // ARCHITECTURE.md documents OnToolExecuted as one of the four SessionObserver
+    // hooks and TurnSummary::tool_names_invoked as part of the payload; track I
+    // is checked off. But NotifyToolExecuted's only caller in the entire tree was
+    // its own unit test, and RunOneTurn built TurnSummary without ever setting
+    // tool_names_invoked. A plugin author implementing the documented interface
+    // got silence and an empty vector -- worse than the hook not existing,
+    // because it reads as working.
+    struct Recorder : agent::SessionObserver {
+        std::mutex mu;
+        std::vector<std::string> executed;
+        std::vector<std::string> summarized;
+        void OnToolExecuted(const agent::SessionInfo&,
+                            const agent::ToolInvocation& invocation) override {
+            std::lock_guard<std::mutex> lock(mu);
+            executed.push_back(invocation.tool_name);
+        }
+        void OnTurnCompleted(const agent::SessionInfo&,
+                             const agent::TurnSummary& summary) override {
+            std::lock_guard<std::mutex> lock(mu);
+            summarized = summary.tool_names_invoked;
+        }
+    };
+
+    ServiceFixture fixture;
+    auto recorder = std::make_shared<Recorder>();
+    fixture.tools.Register(
+        std::make_unique<testing::FakeTool>("read", tools::ToolCategory::ReadOnly, "contents"));
+    fixture.Script(testing::ToolUseResponse("call-1", "read", {{"path", "a.txt"}}));
+    fixture.Script(testing::TextResponse("done"));
+    fixture.Start();
+    // After Start(): the fixture builds the observer registry there, and every
+    // session is created later still, so nothing is missed.
+    fixture.observers->Register(recorder);
+
+    const std::string session_id = fixture.CreateSession();
+    grpc::ClientContext context;
+    auto stream = fixture.stub->OpenSession(&context);
+    REQUIRE(stream->Write(ChatTurn(session_id, "read it")));
+    REQUIRE(WaitForTurnCompleted(*stream));
+    (void)DrainAndFinish(stream);
+    fixture.observers->WaitForIdleForTesting();
+
+    std::lock_guard<std::mutex> lock(recorder->mu);
+    CHECK((recorder->executed == std::vector<std::string>{"read"}));
+    CHECK((recorder->summarized == std::vector<std::string>{"read"}));
+}
+
+TEST_CASE("an advisor answers Ask; abstention still reaches the human over the wire",
+          "[session_service][advisor]") {
+    // The full advisor path over a real socket, through the real plugin loader:
+    // auto_tool is allowed by the fixture advisor without a prompt; manual_tool
+    // is abstained on, so the wire prompt arrives and a human answer -- the
+    // AllowOnly-forbidden path -- completes the turn.
+    ServiceFixture fixture;
+    fixture.service_permissions.advisor = "fixture-advisor";
+    fixture.tools.Register(std::make_unique<testing::FakeTool>("auto_tool",
+                                                               tools::ToolCategory::Execute,
+                                                               "auto ran"));
+    fixture.tools.Register(std::make_unique<testing::FakeTool>("manual_tool",
+                                                               tools::ToolCategory::Execute,
+                                                               "manual ran"));
+    fixture.LoadAdvisorPlugin();
+    fixture.Script(testing::ToolUseResponse("call-1", "auto_tool", nlohmann::json::object()));
+    fixture.Script(testing::TextResponse("auto done"));
+    fixture.Script(testing::ToolUseResponse("call-2", "manual_tool", nlohmann::json::object()));
+    fixture.Script(testing::TextResponse("manual done"));
+    fixture.Write("permissions.json", nlohmann::json{{"fallback", {{"execute", "ask"}}}}.dump());
+    fixture.Start();
+
+    const std::string session_id = fixture.CreateSession();
+    grpc::ClientContext context;
+    auto stream = fixture.stub->OpenSession(&context);
+    REQUIRE(stream->Write(ChatTurn(session_id, "run auto")));
+
+    v1::ServerEvent event;
+    bool prompted = false;
+    bool answered = false;
+    int tool_finishes = 0;
+    int turn_completions = 0;
+    bool second_turn_sent = false;
+    while (stream->Read(&event)) {
+        if (event.has_permission_request()) {
+            prompted = true;
+            // The advisor allowed auto_tool without a prompt; the ONLY prompt on
+            // this stream is the abstained manual_tool.
+            CHECK(event.permission_request().tool_name() == "manual_tool");
+            v1::ClientEvent answer;
+            answer.set_session_id(session_id);
+            auto* response = answer.mutable_permission_response();
+            response->set_request_id(event.permission_request().request_id());
+            response->set_decision(v1::PERMISSION_DECISION_ALLOW);
+            REQUIRE(stream->Write(answer));
+            answered = true;
+        }
+        if (event.has_tool_execution() && !event.tool_execution().started()) ++tool_finishes;
+        if (event.has_turn_completed()) {
+            ++turn_completions;
+            if (turn_completions == 1) {
+                // The stream stays open across the terminator; turn 2 exercises
+                // the abstention path.
+                REQUIRE(stream->Write(ChatTurn(session_id, "run manual")));
+                second_turn_sent = true;
+            }
+        }
+        if (event.has_error()) break;
+        if (turn_completions == 2) break;
+    }
+    (void)DrainAndFinish(stream);
+
+    CHECK(answered);
+    CHECK(prompted);
+    CHECK(second_turn_sent);
+    CHECK(tool_finishes == 2);        // both tools ran
+    CHECK(turn_completions == 2);     // and the turn terminator closed each turn
 }

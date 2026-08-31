@@ -28,7 +28,7 @@ PendingRequests::Registration::~Registration() {
     if (owner_ != nullptr) owner_->Unregister(request_id_);
 }
 
-std::optional<std::string> PendingRequests::Registration::AwaitResponse() {
+std::optional<PendingAnswer> PendingRequests::Registration::AwaitResponse() {
     if (owner_ == nullptr) return std::nullopt;
 
     std::unique_lock<std::mutex> lock(owner_->mutex_);
@@ -61,7 +61,7 @@ PendingRequests::Registration PendingRequests::Register(std::string request_id) 
     return Registration(this, std::move(request_id), epoch);
 }
 
-bool PendingRequests::Resolve(const std::string& request_id, std::string chosen_option) {
+bool PendingRequests::Resolve(const std::string& request_id, PendingAnswer answer) {
     {
         std::lock_guard<std::mutex> lock(mutex_);
         const auto it = slots_.find(request_id);
@@ -69,7 +69,7 @@ bool PendingRequests::Resolve(const std::string& request_id, std::string chosen_
         // First answer wins. A duplicate is a client retransmitting, not a
         // change of mind, and silently overwriting an answer a worker may
         // already have acted on would be worse than ignoring it.
-        if (!it->second.answer.has_value()) it->second.answer = std::move(chosen_option);
+        if (!it->second.answer.has_value()) it->second.answer = std::move(answer);
     }
     cv_.notify_all();
     return true;

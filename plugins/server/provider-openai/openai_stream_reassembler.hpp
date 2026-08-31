@@ -29,6 +29,11 @@ public:
     // FeedFrame returned false) to get the response assembled so far. Throws
     // OpenAiParseError if an accumulated tool-call `arguments` string isn't
     // valid JSON.
+    // Emits ContentBlockStop for every block still open, for a stream that
+    // ended without a finish_reason (idle timeout, dropped connection, cancelled
+    // sink). Idempotent with the finish_reason path.
+    void CloseOpenBlocks(const llm::StreamEventSink& sink);
+
     llm::ChatResponse Finalize() const;
 
 private:

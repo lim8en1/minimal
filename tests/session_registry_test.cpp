@@ -57,7 +57,8 @@ struct RegistryFixture {
         : skills(config::SkillRegistry::Load(config.dir)), guard_(guard) {}
 
     void Build(bool register_provider_kind = true) {
-        presets = std::make_unique<agent::AgentPresetRegistry>(config.dir, skills);
+        presets = std::make_unique<agent::AgentPresetRegistry>(
+            config.dir, skills, config::LoadSettingsConfig(config.dir / "settings.json"));
         if (register_provider_kind) {
             providers.Register("fake", [](const llm::ProviderConfig&) {
                 return std::make_unique<testing::FakeLlmProvider>();
@@ -134,7 +135,7 @@ TEST_CASE("a user-chosen model outranks the preset's", "[session_registry][invar
 
     auto params = Params("s1");
     params.model_override = minimal::common::ModelRef{"main", "other-model"};
-    auto session = fixture.registry->Create(params);
+    auto session = fixture.registry->Create(std::move(params));
     REQUIRE(session != nullptr);
 
     // The preset still says test-model; this session runs other-model, with that
@@ -154,7 +155,7 @@ TEST_CASE("an unknown model override is named, with what is available",
     auto params = Params("s1");
     params.model_override = minimal::common::ModelRef{"main", "nope"};
     try {
-        fixture.registry->Create(params);
+        fixture.registry->Create(std::move(params));
         FAIL("expected an unknown model to throw");
     } catch (const std::runtime_error& error) {
         const std::string message = error.what();
@@ -302,7 +303,7 @@ TEST_CASE("resume loads the stored transcript and repairs a torn tool tail",
 
     auto params = Params(row.session_id);
     params.resume = true;
-    auto session = fixture.registry->Create(params);
+    auto session = fixture.registry->Create(std::move(params));
     REQUIRE(session != nullptr);
 
     const auto loaded = fixture.db->LoadMessages(row.session_id);
@@ -329,11 +330,63 @@ TEST_CASE("resume of a clean transcript appends nothing", "[session_registry][re
 
     auto params = Params(row.session_id);
     params.resume = true;
-    auto session = fixture.registry->Create(params);
+    auto session = fixture.registry->Create(std::move(params));
     REQUIRE(session != nullptr);
 
     // Exactly the stored rows -- resume itself never re-appends history.
     CHECK(fixture.db->LoadMessages(row.session_id).size() == 2);
+}
+
+TEST_CASE("resume with a compaction checkpoint reconstructs the compacted view",
+          "[session_registry][resume][checkpoint]") {
+    // The checkpoint is the cached view the live session left behind. Resume
+    // must seed the loop with [summary + tail] -- what the live session's
+    // working set actually was -- not the full uncompacted transcript, and it
+    // must not spend a provider call re-summarizing on the way in.
+    RegistryFixture fixture;
+    fixture.config.WriteDefaults();
+
+    // Capture the provider instance the resumed session constructs, so the
+    // first request can be inspected after the turn.
+    testing::FakeLlmProvider* provider = nullptr;
+    fixture.providers.Register("fake", [&provider](const llm::ProviderConfig&) {
+        auto owned = std::make_unique<testing::FakeLlmProvider>();
+        provider = owned.get();
+        return owned;
+    });
+    fixture.Build(/*register_provider_kind=*/false);
+
+    const auto row = fixture.db->CreateSession("ckpt", std::nullopt, "/proj", "build");
+    fixture.db->AppendMessage(row.session_id,
+                              llm::Message{llm::Role::User, {llm::TextBlock{"old-1"}}});
+    fixture.db->AppendMessage(row.session_id,
+                              llm::Message{llm::Role::Assistant, {llm::TextBlock{"old-2"}}});
+    fixture.db->AppendMessage(row.session_id,
+                              llm::Message{llm::Role::User, {llm::TextBlock{"tail"}}});
+    // The live session compacted everything through seq 1 into one summary.
+    fixture.db->SaveCompactionCheckpoint(
+        row.session_id, 1, llm::Message{llm::Role::User, {llm::TextBlock{"[compacted]"}}});
+
+    auto params = Params(row.session_id);
+    params.resume = true;
+    auto session = fixture.registry->Create(std::move(params));
+    REQUIRE(session != nullptr);
+
+    REQUIRE(provider != nullptr);
+    provider->PushResponse(testing::TextResponse("ok"));
+
+    session->SubmitTurn("new");
+    REQUIRE(session->WaitForIdleForTesting(5s));
+
+    // Exactly one provider call -- the turn itself, no summarization -- and
+    // its context is [summary, tail, turn], not the four stored messages.
+    CHECK(provider->call_count() == 1);
+    const auto& requests = provider->requests();
+    REQUIRE(requests.size() == 1);
+    REQUIRE(requests[0].messages.size() == 3);
+    CHECK(std::get<llm::TextBlock>(requests[0].messages[0].content.front()).text == "[compacted]");
+    CHECK(std::get<llm::TextBlock>(requests[0].messages[1].content.front()).text == "tail");
+    CHECK(std::get<llm::TextBlock>(requests[0].messages[2].content.front()).text == "new");
 }
 
 TEST_CASE("resume of an already-open session is refused", "[session_registry][resume]") {
@@ -345,8 +398,10 @@ TEST_CASE("resume of an already-open session is refused", "[session_registry][re
     const auto row = fixture.db->CreateSession("live", std::nullopt, "/proj", "build");
     auto params = Params(row.session_id);
     params.resume = true;
-    REQUIRE(fixture.registry->Create(params) != nullptr);
-    CHECK_THROWS_AS(fixture.registry->Create(params), std::runtime_error);
+    REQUIRE(fixture.registry->Create(std::move(params)) != nullptr);
+    auto dup = Params(row.session_id);
+    dup.resume = true;
+    CHECK_THROWS_AS(fixture.registry->Create(std::move(dup)), std::runtime_error);
     CHECK(fixture.registry->size() == 1);
 }
 
@@ -382,9 +437,9 @@ TEST_CASE("ChildCount counts only live sessions of that parent", "[session_regis
     agent::SessionParams child_b = Params("cb");
     child_b.parent_session_id = "p";
     agent::SessionParams other = Params("other");
-    fixture.registry->Create(child_a);
-    fixture.registry->Create(child_b);
-    fixture.registry->Create(other);
+    fixture.registry->Create(std::move(child_a));
+    fixture.registry->Create(std::move(child_b));
+    fixture.registry->Create(std::move(other));
 
     CHECK(fixture.registry->ChildCount("p") == 2);
     CHECK(fixture.registry->ChildCount("other") == 0);

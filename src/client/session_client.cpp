@@ -18,7 +18,8 @@ inline constexpr std::chrono::milliseconds kWriterWakeup = std::chrono::millisec
 // ---------------------------------------------------------------------------
 
 SessionClient::SessionClient(std::string server_address)
-    : channel_(grpc::CreateChannel(server_address, grpc::InsecureChannelCredentials())),
+    : server_address_(std::move(server_address)),
+      channel_(grpc::CreateChannel(server_address_, grpc::InsecureChannelCredentials())),
       stub_(v1::SessionService::NewStub(channel_)) {}
 
 SessionClient::~SessionClient() = default;
@@ -105,8 +106,10 @@ SessionClient::SuggestPathsResult SessionClient::SuggestPaths(const std::string&
     return result;
 }
 
-grpc::Status SessionClient::RunTurn(const std::string& session_id, const std::string& text,
-                                    const std::function<bool(const ServerEvent&)>& on_event) {
+grpc::Status SessionClient::RunTurn(
+    const std::string& session_id, const std::string& text,
+    const std::function<bool(const ServerEvent&)>& on_event,
+    const std::function<void(const std::shared_ptr<TurnHandle>&)>& on_handle) {
     grpc::ClientContext context;
     auto stream = stub_->OpenSession(&context);
 
@@ -118,6 +121,21 @@ grpc::Status SessionClient::RunTurn(const std::string& session_id, const std::st
     if (!stream->Write(turn)) {
         stream->WritesDone();
         return stream->Finish();
+    }
+
+    // Published (on THIS thread) before the first read so a cancel can land at
+    // any point of the turn. The handle is cleared before RunTurn returns,
+    // which turns every later Cancel into a no-op rather than a write on a
+    // finished stream.
+    auto control = std::make_shared<TurnControl>();
+    control->cancel_event.set_session_id(session_id);
+    control->cancel_event.mutable_cancel();
+    if (on_handle) {
+        on_handle(std::make_shared<TurnHandle>(control, TurnHandle::Token{}));
+    }
+    {
+        std::lock_guard<std::mutex> lock(control->mu);
+        control->stream = stream.get();
     }
 
     v1::ServerEvent event;
@@ -135,6 +153,7 @@ grpc::Status SessionClient::RunTurn(const std::string& session_id, const std::st
             auto* response = answer.mutable_permission_response();
             response->set_request_id(event.permission_request().request_id());
             response->set_decision(v1::PERMISSION_DECISION_DENY);
+            std::lock_guard<std::mutex> lock(control->mu);
             stream->Write(answer);
         }
         bool done = false;
@@ -151,6 +170,10 @@ grpc::Status SessionClient::RunTurn(const std::string& session_id, const std::st
             // entitle us to stop receiving, and abandoning the read side would
             // wedge the server's writer mid-Write().
         }
+    }
+    {
+        std::lock_guard<std::mutex> lock(control->mu);
+        control->stream = nullptr;
     }
     if (!half_closed) stream->WritesDone();
     return stream->Finish();
@@ -171,7 +194,8 @@ grpc::Status SessionClient::RunCommand(
     // A per-client counter, not a constant: two commands on different streams
     // of the same client would echo-collide on a shared "cmd-1" if a future
     // change ever multiplexed them.
-    command->set_request_id("cmd-" + std::to_string(++command_counter_));
+    command->set_request_id(
+        "cmd-" + std::to_string(command_counter_.fetch_add(1, std::memory_order_relaxed) + 1));
     command->set_name(options.name);
     for (const auto& value : options.positional) command->mutable_args()->add_positional(value);
     command->mutable_args()->set_raw(options.raw);
