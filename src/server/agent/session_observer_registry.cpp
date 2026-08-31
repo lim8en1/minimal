@@ -107,6 +107,13 @@ void SessionObserverRegistry::NotifyToolExecuted(SessionInfo info, ToolInvocatio
         });
 }
 
+void SessionObserverRegistry::NotifySessionRewound(SessionInfo info,
+                                                   std::int64_t truncated_to_seq) {
+    Dispatch([info = std::move(info), truncated_to_seq](SessionObserver& observer) {
+        observer.OnSessionRewound(info, truncated_to_seq);
+    });
+}
+
 void SessionObserverRegistry::NotifySessionEnded(SessionInfo info) {
     Dispatch([info = std::move(info)](SessionObserver& observer) {
         observer.OnSessionEnded(info);

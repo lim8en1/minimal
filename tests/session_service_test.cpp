@@ -1696,3 +1696,170 @@ TEST_CASE("an advisor answers Ask; abstention still reaches the human over the w
     CHECK(tool_finishes == 2);        // both tools ran
     CHECK(turn_completions == 2);     // and the turn terminator closed each turn
 }
+
+// --- Session traversal (rewind) over the real channel ------------------------
+
+// Drives a full interactive session on ONE stream -- closing a stream
+// terminates the session, so turn 1, the rewind, and the fork turn all share
+// it, exactly as a tab would.
+TEST_CASE("a rewind round-trips over the wire and the fork turn replaces the branch",
+          "[session_service][rewind]") {
+    ServiceFixture fixture;
+    fixture.Script(testing::TextResponse("one"));
+    fixture.Script(testing::TextResponse("two"));
+    fixture.Script(testing::TextResponse("edited reply"));
+    fixture.Start();
+    const std::string session_id = fixture.CreateSession();
+
+    grpc::ClientContext context;
+    auto stream = fixture.stub->OpenSession(&context);
+    REQUIRE(stream->Write(ChatTurn(session_id, "first")));
+    REQUIRE(WaitForTurnCompleted(*stream));
+    REQUIRE(stream->Write(ChatTurn(session_id, "second")));
+    REQUIRE(WaitForTurnCompleted(*stream));
+    // seqs: first=0, re=1, second=2, re=3.
+
+    v1::ClientEvent rewind;
+    rewind.set_session_id(session_id);
+    rewind.mutable_rewind()->set_target_seq(2);
+    REQUIRE(stream->Write(rewind));
+
+    // The rewind's answer comes on the same stream. Read until it arrives,
+    // failing on an error event -- silence here would hang the test.
+    bool saw_rewound = false;
+    v1::ServerEvent event;
+    while (stream->Read(&event)) {
+        if (event.has_session_rewound()) {
+            saw_rewound = true;
+            CHECK(event.session_rewound().truncated_to_seq() == 2);
+            CHECK(event.session_rewound().active_last_seq() == 1);
+            break;
+        }
+        REQUIRE_FALSE(event.has_error());
+    }
+    REQUIRE(saw_rewound);
+
+    // THE FORK: the next turn reclaims the discarded branch and appends at
+    // its seq.
+    REQUIRE(stream->Write(ChatTurn(session_id, "edited")));
+    REQUIRE(WaitForTurnCompleted(*stream));
+    (void)DrainAndFinish(stream);
+
+    const auto page = fixture.db->GetMessagesPage(session_id, std::nullopt, 50);
+    REQUIRE(page.messages.size() == 4);  // kept turn + fork turn (seed and reply)
+    // The new seed continued the ACTIVE sequence: seq 2 is the edited prompt,
+    // not the discarded "second".
+    const auto seed_row = std::find_if(page.messages.begin(), page.messages.end(),
+                                       [](const auto& stored) { return stored.seq == 2; });
+    REQUIRE(seed_row != page.messages.end());
+    const auto& seed = seed_row->message;
+    const auto* text = std::get_if<llm::TextBlock>(&seed.content.front());
+    REQUIRE(text != nullptr);
+    CHECK(text->text == "edited");
+
+    // And the fork turn ran on the truncated context: the kept prefix (2) plus
+    // its own seed -- no trace of the discarded branch.
+    REQUIRE(fixture.script->requests.size() == 3);
+    const auto& sent = fixture.script->requests.back().messages;
+    REQUIRE(sent.size() == 3);
+    const auto* first_text = std::get_if<llm::TextBlock>(&sent[0].content.front());
+    REQUIRE(first_text != nullptr);
+    CHECK(first_text->text == "first");
+}
+
+TEST_CASE("a redo over the wire restores the rewound tail", "[session_service][rewind]") {
+    ServiceFixture fixture;
+    fixture.Script(testing::TextResponse("one"));
+    fixture.Script(testing::TextResponse("two"));
+    fixture.Script(testing::TextResponse("back on the branch"));
+    fixture.Start();
+    const std::string session_id = fixture.CreateSession();
+
+    grpc::ClientContext context;
+    auto stream = fixture.stub->OpenSession(&context);
+    REQUIRE(stream->Write(ChatTurn(session_id, "first")));
+    REQUIRE(WaitForTurnCompleted(*stream));
+    REQUIRE(stream->Write(ChatTurn(session_id, "second")));
+    REQUIRE(WaitForTurnCompleted(*stream));
+
+    v1::ClientEvent rewind;
+    rewind.set_session_id(session_id);
+    rewind.mutable_rewind()->set_target_seq(2);
+    REQUIRE(stream->Write(rewind));
+
+    bool saw_rewound = false;
+    v1::ServerEvent event;
+    while (stream->Read(&event)) {
+        if (event.has_session_rewound()) {
+            saw_rewound = true;
+            break;
+        }
+        REQUIRE_FALSE(event.has_error());
+    }
+    REQUIRE(saw_rewound);
+
+    v1::ClientEvent redo;
+    redo.set_session_id(session_id);
+    redo.mutable_rewind()->set_redo(true);
+    REQUIRE(stream->Write(redo));
+
+    saw_rewound = false;
+    while (stream->Read(&event)) {
+        if (event.has_session_rewound()) {
+            saw_rewound = true;
+            CHECK(event.session_rewound().truncated_to_seq() == -1);
+            CHECK(event.session_rewound().active_last_seq() == 3);
+            break;
+        }
+        REQUIRE_FALSE(event.has_error());
+    }
+    REQUIRE(saw_rewound);
+
+    // The restored branch serves the next turn in full.
+    REQUIRE(stream->Write(ChatTurn(session_id, "continue")));
+    REQUIRE(WaitForTurnCompleted(*stream));
+    (void)DrainAndFinish(stream);
+
+    CHECK(fixture.db->GetMessagesPage(session_id, std::nullopt, 50).messages.size() == 6);
+    REQUIRE(fixture.script->requests.size() == 3);
+    CHECK(fixture.script->requests.back().messages.size() == 5);
+}
+
+TEST_CASE("an invalid rewind target is refused on the wire",
+          "[session_service][rewind]") {
+    ServiceFixture fixture;
+    fixture.Script(testing::TextResponse("one"));
+    fixture.Script(testing::TextResponse("still here"));
+    fixture.Start();
+    const std::string session_id = fixture.CreateSession();
+
+    grpc::ClientContext context;
+    auto stream = fixture.stub->OpenSession(&context);
+    REQUIRE(stream->Write(ChatTurn(session_id, "first")));
+    REQUIRE(WaitForTurnCompleted(*stream));
+    // seq 1 is the assistant's reply, not a prompt to re-enter.
+
+    v1::ClientEvent rewind;
+    rewind.set_session_id(session_id);
+    rewind.mutable_rewind()->set_target_seq(1);
+    REQUIRE(stream->Write(rewind));
+
+    bool saw_error = false;
+    v1::ServerEvent event;
+    while (stream->Read(&event)) {
+        if (event.has_error()) {
+            saw_error = true;
+            CHECK(event.error().message().find("not an active user message") !=
+                  std::string::npos);
+            break;
+        }
+        REQUIRE_FALSE(event.has_session_rewound());
+    }
+    CHECK(saw_error);
+
+    // The session survives a refused rewind and keeps accepting turns.
+    REQUIRE(stream->Write(ChatTurn(session_id, "still here")));
+    REQUIRE(WaitForTurnCompleted(*stream));
+    (void)DrainAndFinish(stream);
+    CHECK(fixture.db->GetMessagesPage(session_id, std::nullopt, 50).messages.size() == 4);
+}

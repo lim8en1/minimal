@@ -100,6 +100,19 @@ const std::vector<Migration>& DefaultMigrationsImpl() {
              "  created_at INTEGER NOT NULL"
              ");",
          }},
+        // Session traversal (rewind). A discarded row is still stored -- the
+        // flag is what keeps redo possible -- but every reader filters it, so
+        // scrollback, resume and the compaction boundary all see exactly the
+        // active transcript. The index serves both this flag's two query
+        // shapes: the mark/unmark scans (session_id, discarded) and the
+        // active-only reads that also bound seq. Rows are physically reclaimed
+        // by the first append after the rewind (see AppendMessage).
+        {5,
+         {
+             "ALTER TABLE messages ADD COLUMN discarded INTEGER NOT NULL DEFAULT 0;",
+             "CREATE INDEX IF NOT EXISTS idx_messages_active"
+             " ON messages(session_id, discarded, seq);",
+         }},
     }};
     return migrations;
 }
@@ -422,6 +435,22 @@ std::int64_t SessionDatabase::AppendMessage(const std::string& session_id,
     std::int64_t assigned_seq = 0;
     ExecChecked(db_, "BEGIN IMMEDIATE;", "failed to begin append");
     try {
+        // THE FORK, and it must be the transaction's first statement. The first
+        // append after a rewind permanently discards the marked tail: doing it
+        // here makes the branch discard atomic with the append that replaces
+        // it (a crash before this transaction keeps redo alive; a crash after
+        // it leaves the fork standing), and it guarantees the MAX(seq)
+        // subquery below reads the ACTIVE transcript -- the new append
+        // continues the sequence the user sees rather than landing above rows
+        // they rewound away.
+        CachedStmt reclaim(db_, prepared_,
+                           "DELETE FROM messages WHERE session_id = ? AND discarded = 1;",
+                           "failed to reclaim discarded messages");
+        sqlite3_bind_text(reclaim.stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
+        if (sqlite3_step(reclaim.stmt) != SQLITE_DONE) {
+            ThrowSqliteError(db_, "failed to reclaim discarded messages");
+        }
+
         // Validate the session and touch last-activity first: appending to a
         // session that does not exist is a wiring bug and must be loud, not a
         // silently dropped row. The message_count bump rides the same
@@ -445,12 +474,17 @@ std::int64_t SessionDatabase::AppendMessage(const std::string& session_id,
             throw std::runtime_error("cannot append to unknown session: " + session_id);
         }
 
-        // seq is the next per-session value; the UNIQUE(session_id, seq)
-        // constraint is the backstop if this arithmetic is ever wrong.
+        // seq is the next per-session value over the ACTIVE transcript. The
+        // discarded=0 filter is defense in depth -- the reclaim above should
+        // have removed every marked row -- because a collision here would
+        // otherwise be a silent seq gap the contiguous-suffix invariant
+        // cannot describe. The UNIQUE(session_id, seq) constraint is the
+        // backstop if this arithmetic is ever wrong either way.
         CachedStmt insert(
             db_, prepared_,
             "INSERT INTO messages (session_id, seq, role, content_json, token_count, created_at)"
-            " VALUES (?, COALESCE((SELECT MAX(seq) FROM messages WHERE session_id = ?), -1) + 1,"
+            " VALUES (?, COALESCE((SELECT MAX(seq) FROM messages"
+            " WHERE session_id = ? AND discarded = 0), -1) + 1,"
             " ?, ?, ?, ?);",
             "failed to append message");
         sqlite3_bind_text(insert.stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
@@ -653,7 +687,7 @@ MessagePage SessionDatabase::GetMessagesPage(const std::string& session_id,
     CachedStmt query(
         db_, prepared_,
         "SELECT seq, content_json, token_count, created_at FROM messages"
-        " WHERE session_id = ?1 AND seq < COALESCE(?2, 9223372036854775807)"
+        " WHERE session_id = ?1 AND discarded = 0 AND seq < COALESCE(?2, 9223372036854775807)"
         " ORDER BY seq DESC LIMIT ?3;",
         "failed to page messages");
     sqlite3_bind_text(query.stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
@@ -712,7 +746,7 @@ std::vector<StoredMessage> SessionDatabase::LoadMessages(const std::string& sess
         std::lock_guard lock(mu_);
         CachedStmt query(db_, prepared_,
                          "SELECT seq, content_json, token_count, created_at FROM messages"
-                         " WHERE session_id = ?1 ORDER BY seq ASC;",
+                         " WHERE session_id = ?1 AND discarded = 0 ORDER BY seq ASC;",
                          "failed to load messages");
         sqlite3_bind_text(query.stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
         int rc = SQLITE_OK;
@@ -749,7 +783,12 @@ std::vector<StoredMessage> SessionDatabase::LoadMessages(const std::string& sess
 
 std::int64_t SessionDatabase::LastMessageSeq(const std::string& session_id) const {
     std::lock_guard lock(mu_);
-    CachedStmt query(db_, prepared_, "SELECT MAX(seq) FROM messages WHERE session_id = ?;",
+    // ACTIVE transcript only: a rewound session's HistoryStore must seed its
+    // seq accounting from the transcript the user sees, and the next append --
+    // which reclaims the discarded tail in its own transaction -- continues
+    // that sequence.
+    CachedStmt query(db_, prepared_,
+                     "SELECT MAX(seq) FROM messages WHERE session_id = ? AND discarded = 0;",
                      "failed to read last message seq");
     sqlite3_bind_text(query.stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
     if (sqlite3_step(query.stmt) != SQLITE_ROW || sqlite3_column_type(query.stmt, 0) == SQLITE_NULL) {
@@ -846,7 +885,7 @@ std::vector<StoredMessage> SessionDatabase::LoadMessagesFrom(const std::string& 
         std::lock_guard lock(mu_);
         CachedStmt query(db_, prepared_,
                          "SELECT seq, content_json, token_count, created_at FROM messages"
-                         " WHERE session_id = ?1 AND seq > ?2 ORDER BY seq ASC;",
+                         " WHERE session_id = ?1 AND discarded = 0 AND seq > ?2 ORDER BY seq ASC;",
                          "failed to load messages after seq");
         sqlite3_bind_text(query.stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_int64(query.stmt, 2, after_seq);
@@ -873,6 +912,119 @@ std::vector<StoredMessage> SessionDatabase::LoadMessagesFrom(const std::string& 
         out.push_back(std::move(stored));
     }
     return out;
+}
+
+std::optional<StoredMessage> SessionDatabase::LoadMessage(const std::string& session_id,
+                                                          std::int64_t seq) const {
+    std::lock_guard lock(mu_);
+    // discarded = 0 in the predicate: a discarded seq IS found by this query
+    // as "absent", which is exactly what the rewind path's validation wants --
+    // a rewound-away position is not a rewindable one. Strict decode, same
+    // contract as every other read path.
+    CachedStmt query(db_, prepared_,
+                     "SELECT content_json, token_count, created_at FROM messages"
+                     " WHERE session_id = ?1 AND seq = ?2 AND discarded = 0;",
+                     "failed to load message");
+    sqlite3_bind_text(query.stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(query.stmt, 2, seq);
+    const int rc = sqlite3_step(query.stmt);
+    if (rc == SQLITE_DONE) return std::nullopt;
+    if (rc != SQLITE_ROW) ThrowSqliteError(db_, "failed to load message");
+    StoredMessage stored;
+    stored.seq = seq;
+    const char* json_text = reinterpret_cast<const char*>(sqlite3_column_text(query.stmt, 0));
+    stored.message = JsonToMessage(nlohmann::json::parse(json_text));
+    stored.token_count = sqlite3_column_int(query.stmt, 1);
+    stored.created_at_unix_ms = sqlite3_column_int64(query.stmt, 2);
+    // PRIMARY KEY is (id), UNIQUE is (session_id, seq): confirm the scan is
+    // over rather than trusting that one row was all there was.
+    CheckRowLoopEnd(db_, sqlite3_step(query.stmt), "failed to load message");
+    return stored;
+}
+
+std::int64_t SessionDatabase::SetDiscardedAfter(const std::string& session_id,
+                                                std::int64_t target_seq) {
+    std::lock_guard lock(mu_);
+    std::int64_t marked = 0;
+    ExecChecked(db_, "BEGIN IMMEDIATE;", "failed to begin discard");
+    try {
+        // Idempotent by construction: rows already discarded from an earlier,
+        // deeper rewind are not matched by discarded = 0, so moving the cursor
+        // further back marks exactly the newly-discarded range.
+        CachedStmt mark(db_, prepared_,
+                        "UPDATE messages SET discarded = 1"
+                        " WHERE session_id = ?1 AND seq >= ?2 AND discarded = 0;",
+                        "failed to discard messages");
+        sqlite3_bind_text(mark.stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int64(mark.stmt, 2, target_seq);
+        if (sqlite3_step(mark.stmt) != SQLITE_DONE) {
+            ThrowSqliteError(db_, "failed to discard messages");
+        }
+        marked = sqlite3_changes(db_);
+
+        // message_count is the ACTIVE count now. Recomputed rather than
+        // decremented by `marked`: one exact statement on a path a human
+        // invoked beats two decrement rules that can drift, and the touch
+        // keeps the picker's sort key honest about the session's activity.
+        CachedStmt count(db_, prepared_,
+                         "UPDATE sessions SET message_count ="
+                         " (SELECT COUNT(*) FROM messages WHERE session_id = ?1 AND discarded = 0),"
+                         " updated_at = ?2 WHERE id = ?1;",
+                         "failed to recount session messages");
+        sqlite3_bind_text(count.stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int64(count.stmt, 2, NextTimestamp());
+        if (sqlite3_step(count.stmt) != SQLITE_DONE) {
+            ThrowSqliteError(db_, "failed to recount session messages");
+        }
+
+        ExecChecked(db_, "COMMIT;", "failed to commit discard");
+    } catch (...) {
+        char* err = nullptr;
+        if (sqlite3_exec(db_, "ROLLBACK;", nullptr, nullptr, &err) != SQLITE_OK && err) {
+            sqlite3_free(err);
+        }
+        throw;
+    }
+    return marked;
+}
+
+std::int64_t SessionDatabase::UnmarkDiscarded(const std::string& session_id) {
+    std::lock_guard lock(mu_);
+    std::int64_t restored = 0;
+    ExecChecked(db_, "BEGIN IMMEDIATE;", "failed to begin restore");
+    try {
+        CachedStmt unmark(db_, prepared_,
+                          "UPDATE messages SET discarded = 0"
+                          " WHERE session_id = ?1 AND discarded = 1;",
+                          "failed to restore discarded messages");
+        sqlite3_bind_text(unmark.stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
+        if (sqlite3_step(unmark.stmt) != SQLITE_DONE) {
+            ThrowSqliteError(db_, "failed to restore discarded messages");
+        }
+        restored = sqlite3_changes(db_);
+
+        // Same recount as the mark path: the picker's count is the ACTIVE
+        // count, whichever way the cursor last moved.
+        CachedStmt count(db_, prepared_,
+                         "UPDATE sessions SET message_count ="
+                         " (SELECT COUNT(*) FROM messages WHERE session_id = ?1 AND discarded = 0),"
+                         " updated_at = ?2 WHERE id = ?1;",
+                         "failed to recount session messages");
+        sqlite3_bind_text(count.stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int64(count.stmt, 2, NextTimestamp());
+        if (sqlite3_step(count.stmt) != SQLITE_DONE) {
+            ThrowSqliteError(db_, "failed to recount session messages");
+        }
+
+        ExecChecked(db_, "COMMIT;", "failed to commit restore");
+    } catch (...) {
+        char* err = nullptr;
+        if (sqlite3_exec(db_, "ROLLBACK;", nullptr, nullptr, &err) != SQLITE_OK && err) {
+            sqlite3_free(err);
+        }
+        throw;
+    }
+    return restored;
 }
 
 std::filesystem::path ResolveSessionDbPath(const std::string& configured) {

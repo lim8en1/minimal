@@ -247,6 +247,53 @@ public:
     // the same rule compaction follows. Scrollback is unaffected.
     void ClearHistory();
 
+    // --- Session traversal (rewind). WORKER THREAD ONLY, like every other
+    // seam above. The Session orchestrates: it marks the durable tail
+    // discarded (or restores it, for a redo) and then calls one of the two
+    // methods below to bring the in-memory working set in line. A turn can
+    // never run against a half-migrated state because both run between turns,
+    // on this thread.
+
+    // The seq bound the synthetic summary head covers, when there is one:
+    // everything with seq <= this is summarized in history_[0]. The same
+    // number a compaction checkpoint was written with, so the rewind path can
+    // tell "the summary still describes kept turns" from "the summary
+    // describes turns that did not happen". nullopt when history_ has no
+    // summary head (never compacted, or the checkpoint was cleared).
+    std::optional<std::int64_t> CheckpointBoundary() const {
+        if (head_is_summary_ && first_persisted_seq_.has_value()) {
+            return *first_persisted_seq_ - 1;
+        }
+        return std::nullopt;
+    }
+
+    // Drops the working set from `target_seq` onward -- the memory half of a
+    // rewind whose cut landed ABOVE the checkpoint boundary, so the synthetic
+    // summary (when present) still describes only kept turns and survives.
+    // Re-seeds the occupancy estimate from the kept set -- a stale count
+    // describing discarded turns would fire the compaction trigger early --
+    // and drops pending subagent completions, which belong to the tail.
+    void TruncateAfter(std::int64_t target_seq);
+
+    // The memory half of a rewind whose cut landed AT OR BELOW the checkpoint
+    // boundary. There the summary over-covers turns that did not happen, and
+    // dropping it wholesale would lose the still-active turns BELOW the cut
+    // that it also summarized -- so the working set is rebuilt from the
+    // store's ACTIVE prefix, which the Session loads and hands in here. The
+    // checkpoint is a cache of the discarded view and the Session clears it;
+    // this method replaces history_ wholesale, resets the seq bookkeeping to
+    // the loaded prefix, and re-seeds the occupancy estimate. The load is the
+    // resume-shaped cost: bounded by the active prefix, paid only on a
+    // user-invoked rewind under a compaction boundary.
+    void ReseedFromStore(std::vector<llm::Message> rows, std::int64_t first_seq);
+
+    // The memory half of a REDO: the store restored rows [first_seq, ...] and
+    // they join the working set WITHOUT being re-appended -- resume's seed
+    // shape, applied to a live loop. Fixes first_persisted_seq_ when the
+    // working set was empty (rewound to the transcript's start, then redone),
+    // and re-seeds the occupancy estimate over the whole set.
+    void RestorePersisted(std::vector<llm::Message> rows, std::int64_t first_seq);
+
     // /agent, /model. The preset carries the model, so both go through here.
     void SetPreset(AgentPreset preset) { preset_ = std::move(preset); }
     const AgentPreset& preset() const { return preset_; }
