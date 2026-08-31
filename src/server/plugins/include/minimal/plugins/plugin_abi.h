@@ -18,11 +18,15 @@
 //
 //   2. UTILITIES a plugin consumes -- included below. A plugin tool must call
 //      path_confinement::confine rather than reimplementing path safety, which
-//      is precisely why these are ABI surface too, just inbound.
+//      is precisely why these are ABI surface too, just inbound. ConfigDir()
+//      is here for the same reason: a plugin whose data ships as a seeded
+//      config file (the providers.json treatment -- user-editable text, never
+//      compiled in) needs the same directory resolution the server uses.
 
 #include <filesystem>
 
 #include "minimal/common/abi_tag.hpp"
+#include "minimal/common/config_paths.hpp"
 
 // --- Half 2: utilities plugins consume -------------------------------------
 #include "minimal/agent/session_observer.hpp"

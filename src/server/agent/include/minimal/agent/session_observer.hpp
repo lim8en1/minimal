@@ -35,6 +35,11 @@ struct TurnSummary {
     llm::Usage usage;
     std::chrono::milliseconds duration{0};
     std::vector<std::string> tool_names_invoked;
+    // The model the turn's provider calls were made with (the request's model).
+    // A usage-tracking observer cannot price a turn without it: /model can
+    // switch mid-session, so the preset or provider entry alone underdetermines
+    // the rate.
+    std::string model;
 };
 
 struct ToolInvocation {

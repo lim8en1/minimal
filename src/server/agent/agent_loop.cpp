@@ -551,6 +551,10 @@ void AgentLoop::RunTurnLoop(TurnResult& result, bool flush_first) {
         // across retries (nothing this loop does mutates preset or registry),
         // and rebuilding it re-serialized the whole history on every retry.
         const llm::ChatRequest chat_request = BuildChatRequest();
+        // Set before the call, not from the response: a turn that fails or is
+        // cancelled before any response still reports the model it was aimed
+        // at, and TurnSummary::model is populated on every exit path.
+        result.model = chat_request.model;
         llm::ChatResponse response;
         bool got_response = false;
         bool cancelled_in_backoff = false;
