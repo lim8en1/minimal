@@ -58,6 +58,20 @@ grpc::Status SessionClient::RunTurn(
     v1::ServerEvent event;
     bool half_closed = false;
     while (stream->Read(&event)) {
+        if (!half_closed && event.has_permission_request()) {
+            // RunTurn write-closes nothing but sends no answers either -- this
+            // client cannot respond to a mid-turn permission prompt, and the
+            // server worker would block on one forever. Auto-deny instead of
+            // wedging: the headless path forces AllowOnly at the session level
+            // (app.cpp), so reaching here means a non-conforming run-mode
+            // arrived somehow -- degrade loudly, never hang.
+            v1::ClientEvent answer;
+            answer.set_session_id(session_id);
+            auto* response = answer.mutable_permission_response();
+            response->set_request_id(event.permission_request().request_id());
+            response->set_decision(v1::PERMISSION_DECISION_DENY);
+            stream->Write(answer);
+        }
         bool done = false;
         if (!half_closed) {
             // TurnCompletedEvent is the ONLY reliable end-of-turn signal. A
@@ -89,7 +103,10 @@ grpc::Status SessionClient::RunCommand(
     v1::ClientEvent invocation;
     invocation.set_session_id(session_id);
     auto* command = invocation.mutable_command();
-    command->set_request_id("cmd-1");
+    // A per-client counter, not a constant: two commands on different streams
+    // of the same client would echo-collide on a shared "cmd-1" if a future
+    // change ever multiplexed them.
+    command->set_request_id("cmd-" + std::to_string(++command_counter_));
     command->set_name(options.name);
     for (const auto& value : options.positional) command->mutable_args()->add_positional(value);
     command->mutable_args()->set_raw(options.raw);

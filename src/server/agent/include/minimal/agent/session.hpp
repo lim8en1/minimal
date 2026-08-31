@@ -156,8 +156,10 @@ public:
     void RunCommandNow(const QueuedCommand& command);
     // Cross-session splice point: a non-blocking subagent's worker queues its
     // completion here when it finishes; the session's own worker flushes it at
-    // a turn boundary.
-    void QueueInjectedMessage(llm::Message message);
+    // a turn boundary. False means the session is already terminating and the
+    // message was NOT queued -- the caller (the spawner) logs the loss rather
+    // than reporting a completion nobody will ever see.
+    bool QueueInjectedMessage(llm::Message message);
 
     // Reader thread. Interrupts the in-flight turn, leaving the session alive
     // and able to accept the next one.

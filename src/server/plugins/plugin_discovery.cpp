@@ -121,6 +121,17 @@ std::vector<PluginCandidate> DiscoverPlugins(const std::filesystem::path& bundle
             entry.enabled = (item.provenance == Provenance::Bundled);
             config.plugins.push_back(entry);
             existing = std::prev(config.plugins.end());
+        } else if (existing->provenance != item.provenance) {
+            // The same basename discovered from BOTH directories: enablement is
+            // keyed by bare filename, so the two share one entry -- and both .so
+            // files still load, which is a guaranteed fatal name collision the
+            // user cannot see coming from plugins.json. Say so at discovery time;
+            // the documented replacement flow is disabling the bundled entry, and
+            // that needs the two to be distinguishable on disk at least.
+            common::DefaultLogger().warn(
+                "plugin '{}' exists both bundled and in the user plugin dir; both will load and "
+                "the names will collide -- disable one of the two in plugins.json",
+                item.file);
         }
 
         candidates.push_back(PluginCandidate{item.path, item.provenance, existing->enabled});

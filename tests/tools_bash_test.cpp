@@ -592,3 +592,25 @@ TEST_CASE("/restart-shell resets the same state `restart: true` does",
     CHECK(store.Has("s2"));  // only that session's, as OnSessionEnded also requires
     CHECK(store.size() == 1);
 }
+
+TEST_CASE("a flooded fd-9 payload is discarded wholesale, not truncated into adoption",
+          "[tools_bash][state][invariant]") {
+    // The state payload is kilobytes at worst. Unbounded, a command pumping fd 9
+    // (`yes >&9`) grew one string for the whole timeout. This test drives the
+    // overflow path and asserts the all-or-nothing rule: a flooded (necessarily
+    // truncated) payload leaves cwd AND environment untouched. The byte cap
+    // itself is not externally observable -- there is no seam through the
+    // process-internal buffer -- so the memory bound is held by the constant,
+    // and this test holds the observable half.
+    Fixture f;
+    std::filesystem::create_directories(f.dir.path() / "sub");
+    const auto before = f.Cwd();
+    REQUIRE_FALSE(f.Run({{"command", "export KEEP_ME=1"}}).result.is_error);
+
+    const auto out = f.Run(
+        {{"command", "yes 'junk' >&9 & true"}, {{"timeout_ms", "1500"}}});
+
+    CHECK(f.Cwd() == before);  // no state adopted from the flood
+    // Previous state survived whole -- not merged away, not partially replaced.
+    CHECK(f.store.Snapshot("s1", f.dir.path()).env.count("KEEP_ME") == 1);
+}

@@ -4,6 +4,7 @@
 #include <vector>
 #include <memory>
 #include <optional>
+#include <cstdint>
 #include <string>
 
 #include <grpcpp/grpcpp.h>
@@ -93,6 +94,8 @@ private:
     std::string server_address_;
     std::shared_ptr<grpc::Channel> channel_;
     std::unique_ptr<v1::SessionService::Stub> stub_;
+    // Monotonic command request ids; the server echoes them verbatim.
+    std::uint64_t command_counter_ = 0;
 };
 
 }  // namespace minimal::client

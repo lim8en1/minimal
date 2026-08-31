@@ -305,9 +305,10 @@ void Session::RunOneCommand(const QueuedCommand& command) {
     ExecuteCommand(command, /*busy=*/false);
 }
 
-void Session::QueueInjectedMessage(llm::Message message) {
-    if (terminated_.load(std::memory_order_acquire)) return;
+bool Session::QueueInjectedMessage(llm::Message message) {
+    if (terminated_.load(std::memory_order_acquire)) return false;
     loop_->QueueInjectedMessage(std::move(message));
+    return true;
 }
 
 void Session::Cancel() {

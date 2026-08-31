@@ -137,9 +137,16 @@ SubagentOutcome SubagentManager::Spawn(const SubagentRequest& request,
         block.tool_use_id = tool_use_id;
         block.is_error = child_result.is_error;
         block.content.push_back(llm::TextBlock{child_result.text});
-        parent_ref->QueueInjectedMessage(llm::Message{llm::Role::User, {std::move(block)}});
-        logger.info("subagent {} finished ({}); result queued for its parent", child_id,
-                    child_result.is_error ? "error" : "ok");
+        if (parent_ref->QueueInjectedMessage(llm::Message{llm::Role::User, {std::move(block)}})) {
+            logger.info("subagent {} finished ({}); result queued for its parent", child_id,
+                        child_result.is_error ? "error" : "ok");
+        } else {
+            // The parent is already terminating; the result goes nowhere. Saying
+            // "queued" here sent the next reader of this log chasing a message
+            // that was dropped.
+            logger.warn("subagent {} finished ({}); parent already terminating, result dropped",
+                        child_id, child_result.is_error ? "error" : "ok");
+        }
     };
 
     std::shared_ptr<Session> child;

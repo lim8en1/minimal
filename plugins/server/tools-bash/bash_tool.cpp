@@ -37,12 +37,22 @@ ToolResult Error(std::string message) { return ToolResult{true, std::move(messag
 // than on picking a lucky number -- see ParseStatePayload.
 constexpr int kStateFd = 9;
 
+// The state payload is `pwd -P` plus `env -0` -- kilobytes at most. Bounded so a
+// command pumping fd 9 (`yes >&9`) cannot grow one string without limit for the
+// whole timeout; on overflow the payload is discarded WHOLESALE, preserving the
+// all-or-nothing rule: adopting a truncated prefix would silently apply partial
+// environment state.
+constexpr std::size_t kMaxStatePayloadBytes = 1 << 20;  // 1 MiB
+
 // --- Capped output buffer ------------------------------------------------------
 //
 // Head (1/4 of the cap) + tail (3/4): in a long build log both the first error
 // and the final status matter. This bounds only what is PERSISTED into the
 // ToolResultBlock; live streaming through emit_output is uncapped because that
-// channel is lossy by design (the server coalesces to a tail for the client).
+// channel is lossy by design -- the session's outbound queue is the backpressure
+// boundary, and the authoritative record is the capped result block here (the
+// running-tools panel's tail behavior is a track-E client concern; see
+// ARCHITECTURE.md "Running-tools panel").
 class CappedBuffer {
 public:
     explicit CappedBuffer(std::int64_t cap)
@@ -147,6 +157,7 @@ struct RunOutcome {
     int wait_status = 0;   // valid unless spawn_failed
     std::string output;    // the capped, rendered stdout+stderr captured so far
     std::string state_payload;
+    bool state_overflow = false;  // fd-9 payload exceeded the cap; state untouched
 };
 
 class ScopedFd {
@@ -338,7 +349,12 @@ RunOutcome RunProcess(const std::string& wrapped, const SessionShellState& state
         if (state_slot >= 0 && (fds[state_slot].revents & (POLLIN | POLLHUP | POLLERR))) {
             const ssize_t n = read(state_read.get(), chunk, sizeof(chunk));
             if (n > 0) {
-                state_payload.append(chunk, static_cast<std::size_t>(n));
+                if (state_payload.size() + static_cast<std::size_t>(n) <= kMaxStatePayloadBytes) {
+                    state_payload.append(chunk, static_cast<std::size_t>(n));
+                } else {
+                    outcome.state_overflow = true;
+                    state_payload.clear();  // discard wholesale: never adopt a prefix
+                }
             } else if (n == 0 || errno != EINTR) {
                 state_open = false;
             }
@@ -549,7 +565,13 @@ public:
             return Error("failed to start shell: " + outcome.spawn_error);
         }
 
-        AdoptShellState(ctx, outcome.state_payload);
+        if (outcome.state_overflow) {
+            ctx.logger.warn("bash[{}] fd-9 state payload exceeded {} bytes; cwd and environment "
+                            "left unchanged",
+                            ctx.session_id, kMaxStatePayloadBytes);
+        } else {
+            AdoptShellState(ctx, outcome.state_payload);
+        }
 
         if (outcome.io_error) {
             ctx.logger.warn("bash[{}] io error running '{}': {} ({} ms)", ctx.session_id, command,
