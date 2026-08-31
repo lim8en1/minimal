@@ -53,6 +53,12 @@ struct SanityCheckInputs {
     // Optional: absent means no services were offered to plugins, so no service
     // collision can exist. Borrowed -- it outlives the check.
     const plugins::ServiceRegistry* service_registry = nullptr;
+    // Optional: absent means no discover-entry can resolve, which only matters
+    // when providers.json sets "discover": true. Borrowed -- it outlives the
+    // check. Deliberately consulted STRUCTURALLY only (which kinds registered,
+    // never a live List()): discovery is fetched lazily at first resolve,
+    // never at startup.
+    const llm::ModelCatalogRegistry* model_catalogs = nullptr;
 };
 
 // Runs after config and plugin load, before serving. A linter, not a fail-fast

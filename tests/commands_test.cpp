@@ -89,8 +89,84 @@ TEST_CASE("agent reports an unknown preset rather than throwing", "[commands]") 
     CHECK(fixture.preset().name == "build");  // unchanged
 }
 
-TEST_CASE("model refuses what it cannot resolve", "[commands]") {
+TEST_CASE("/providers refresh re-lists discoverable providers and switching works",
+          "[commands][discover]") {
+    // Track N end to end through the command surface: a discover-entry nobody
+    // configured models for serves /model after a refresh, and the discovered
+    // context window rides ApplyModel into the preset -- which is what the
+    // compaction trigger reads.
     CommandFixture fixture;
+    fixture.WriteProviders(R"({"providers":{"main":{"backend":"fake","url":"http://x/v1",
+                              "models":{"fast":{"context_window_tokens":1000}}},
+                             "disc":{"backend":"fake","url":"http://disc/v1",
+                                     "discover":true}}})");
+    fixture.ReloadPresets();
+
+    auto hook_models = std::vector<llm::DiscoveredModel>{
+        {"newmodel", 12345, nlohmann::json::object()}};
+    int calls = 0;
+    fixture.SetDiscoveryHook(
+        [&calls, &hook_models](const std::string&, const llm::ProviderConfig&) {
+            ++calls;
+            return config::DiscoveryOutcome{/*catalog_present=*/true, /*ok=*/true, {},
+                                            hook_models};
+        });
+
+    // Static-only listing: the cold discover-entry contributes nothing.
+    const auto cold = fixture.Run("providers");
+    REQUIRE(cold.status == Status::kOk);
+    CHECK(cold.message.find("main/fast") != std::string::npos);
+    CHECK(cold.message.find("disc/") == std::string::npos);
+
+    // Refresh fetches NOW and reports the count.
+    const auto refreshed = fixture.Run("providers", {"refresh"});
+    REQUIRE(refreshed.status == Status::kOk);
+    CHECK(refreshed.message.find("disc: 1 model(s)") != std::string::npos);
+    CHECK(calls == 1);
+
+    // The listing now includes the discovered model, with its window.
+    const auto warm = fixture.Run("providers");
+    CHECK(warm.message.find("disc/newmodel") != std::string::npos);
+    CHECK(warm.message.find("12345 ctx") != std::string::npos);
+    CHECK(calls == 1);  // cached; listing did not refetch
+
+    // And the discovered model is switchable, window and all.
+    const auto switched = fixture.Run("model", {"disc/newmodel"});
+    REQUIRE(switched.status == Status::kOk);
+    CHECK(fixture.preset().model_ref.str() == "disc/newmodel");
+    REQUIRE(fixture.preset().context_window_tokens.has_value());
+    CHECK(*fixture.preset().context_window_tokens == 12345);
+    CHECK(calls == 1);
+}
+
+TEST_CASE("/providers refresh with no discoverable providers is an honest error",
+          "[commands][discover]") {
+    CommandFixture fixture;  // static config only
+    const auto result = fixture.Run("providers", {"refresh"});
+    CHECK(result.status == Status::kError);
+    CHECK(result.message.find("no discoverable providers") != std::string::npos);
+}
+
+TEST_CASE("/providers refresh reports a dead catalog instead of throwing",
+          "[commands][discover]") {
+    CommandFixture fixture;
+    fixture.WriteProviders(R"({"providers":{"main":{"backend":"fake","url":"http://x/v1",
+                              "models":{"fast":{"context_window_tokens":1000}}},
+                             "disc":{"backend":"fake","url":"http://disc/v1",
+                                     "discover":true}}})");
+    fixture.ReloadPresets();
+    fixture.SetDiscoveryHook([](const std::string&, const llm::ProviderConfig&) {
+        return config::DiscoveryOutcome{/*catalog_present=*/true, /*ok=*/false,
+                                        "connection refused", {}};
+    });
+
+    const auto refreshed = fixture.Run("providers", {"refresh"});
+    REQUIRE(refreshed.status == Status::kOk);  // the command ran; the CATALOG failed
+    CHECK(refreshed.message.find("disc: discovery failed -- connection refused") !=
+          std::string::npos);
+}
+
+TEST_CASE("model refuses what it cannot resolve", "[commands]") {    CommandFixture fixture;
 
     const auto malformed = fixture.Run("model", {"slow"});
     CHECK(malformed.status == Status::kError);

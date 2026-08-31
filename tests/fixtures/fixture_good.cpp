@@ -31,6 +31,16 @@ public:
     }
 };
 
+// Track N: the plugin also registers a model catalog under the SAME kind
+// string, so the loader tests can observe the seam through a real dlopen.
+class FixtureCatalog : public minimal::llm::ModelCatalog {
+public:
+    std::vector<minimal::llm::DiscoveredModel> List(
+        const minimal::llm::ProviderConfig&) const override {
+        return {{"fixture-model", 4321, nlohmann::json::object()}};
+    }
+};
+
 }  // namespace
 
 extern "C" {
@@ -59,5 +69,10 @@ void minimal_plugin_register_provider_factories(
     registry.Register("fixture", [](const minimal::llm::ProviderConfig&) {
         return std::make_unique<FixtureProvider>();
     });
+}
+void minimal_plugin_register_model_catalogs(
+    minimal::llm::ModelCatalogRegistry& registry,
+    const minimal::plugins::PluginRegistrationContext&) {
+    registry.Register("fixture", std::make_shared<FixtureCatalog>());
 }
 }

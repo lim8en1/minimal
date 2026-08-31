@@ -47,9 +47,11 @@ PluginCandidate Enabled(const std::string& stem, Provenance provenance = Provena
 struct Harness {
     tools::ToolRegistry tool_registry;
     llm::ProviderFactoryRegistry provider_registry;
+    llm::ModelCatalogRegistry model_catalog_registry;
     plugins::ServiceRegistry service_registry;
     plugins::PluginLoader loader{tool_registry, provider_registry, nlohmann::json::object(),
-                                 nullptr, nullptr, nullptr, nullptr, &service_registry};
+                                 nullptr, nullptr, nullptr, nullptr, &model_catalog_registry,
+                                 &service_registry};
 };
 
 }  // namespace
@@ -67,11 +69,18 @@ TEST_CASE("a well-formed plugin loads and contributes its registrations", "[plug
 
     CHECK(record.registered_tools == std::vector<std::string>{"fixture_tool"});
     CHECK(record.registered_provider_kinds == std::vector<std::string>{"fixture"});
+    CHECK(record.registered_model_catalog_kinds == std::vector<std::string>{"fixture"});
 
     // The registrations reached the real registries, not just the record.
     CHECK(h.tool_registry.Find("fixture_tool") != nullptr);
     CHECK(h.provider_registry.Has("fixture"));
     CHECK(h.provider_registry.Create("fixture", {}) != nullptr);
+    // ... including the catalog (track N): it answers under the same kind.
+    const auto* catalog = h.model_catalog_registry.Find("fixture");
+    REQUIRE(catalog != nullptr);
+    const auto listed = catalog->List({});
+    REQUIRE(listed.size() == 1);
+    CHECK(listed[0].id == "fixture-model");
 }
 
 TEST_CASE("an ABI-mismatched plugin is skipped without running its code",

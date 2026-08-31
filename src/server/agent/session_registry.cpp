@@ -23,6 +23,16 @@ std::string DescribeModels(const config::ProvidersConfig& providers) {
     return out;
 }
 
+// Miss reporting (track N): a typo and a dead catalog must read differently.
+// Silent when discovery was never attempted or succeeded -- the latter means
+// the model is genuinely not served, which the listing above already says.
+std::string DescribeDiscovery(const config::ProvidersConfig& providers,
+                              const std::string& provider_name) {
+    const auto status = providers.discovery_status(provider_name);
+    if (!status.attempted || status.ok) return {};
+    return "; discovery for provider '" + provider_name + "' failed: " + status.error;
+}
+
 }  // namespace
 
 SessionRegistry::SessionRegistry(const AgentPresetRegistry& presets, tools::ToolRegistry& tools,
@@ -76,11 +86,13 @@ std::shared_ptr<Session> SessionRegistry::CreateResolved(SessionParams params,
     // CreateResolved rather than Create so a SUBAGENT spawned with an inherited
     // preset honours it too.
     if (params.model_override) {
-        const config::ResolvedModel* model = presets_.providers().Resolve(*params.model_override);
+        const auto model = presets_.providers().Resolve(*params.model_override);
         if (model == nullptr) {
             throw std::runtime_error("unknown model '" + params.model_override->str() +
                                      "'; providers.json defines " +
-                                     DescribeModels(presets_.providers()));
+                                     DescribeModels(presets_.providers()) +
+                                     DescribeDiscovery(presets_.providers(),
+                                                       params.model_override->provider));
         }
         ApplyModel(preset, *model);
     }

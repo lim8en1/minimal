@@ -86,6 +86,16 @@ std::string DescribeAvailableModels(const config::ProvidersConfig& providers) {
     return out.str();
 }
 
+// Miss reporting (track N): a typo and a dead catalog must read differently.
+// Silent when discovery was never attempted or succeeded -- the latter means
+// the model is genuinely not served, which the listing above already says.
+std::string DescribeDiscovery(const config::ProvidersConfig& providers,
+                              const std::string& provider_name) {
+    const auto status = providers.discovery_status(provider_name);
+    if (!status.attempted || status.ok) return {};
+    return "; discovery for provider '" + provider_name + "' failed: " + status.error;
+}
+
 }  // namespace
 
 AgentPresetRegistry::AgentPresetRegistry(std::filesystem::path config_dir,
@@ -144,11 +154,12 @@ AgentPreset AgentPresetRegistry::ResolveUncached(const std::string& preset_name)
         throw std::runtime_error("agent preset '" + preset_name + "': model '" + model_text +
                                  "' must be <provider>/<model>, e.g. local/qwen4");
     }
-    const config::ResolvedModel* model = providers_.Resolve(*ref);
+    const auto model = providers_.Resolve(*ref);  // snapshot; see ProvidersConfig::Resolve
     if (!model) {
         throw std::runtime_error("agent preset '" + preset_name + "' names unknown model '" +
                                  model_text + "'; providers.json defines " +
-                                 DescribeAvailableModels(providers_));
+                                 DescribeAvailableModels(providers_) +
+                                 DescribeDiscovery(providers_, ref->provider));
     }
 
     AgentPreset preset;

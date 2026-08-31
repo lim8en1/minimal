@@ -184,6 +184,61 @@ TEST_CASE("AgentPresetRegistry: an unknown model names what is available",
     }
 }
 
+TEST_CASE("AgentPresetRegistry: a preset naming a discover-only model resolves through discovery",
+          "[agent_preset_registry][discover]") {
+    // Track N: providers.json need not name every model. The preset resolves at
+    // first use, the catalog is consulted lazily through the injected hook, and
+    // the discovered context window reaches the preset -- which is what the
+    // window-relative compaction triggers read.
+    TempConfigDir config;
+    config.WriteJson("providers.json",
+                     {{"providers",
+                       {{"disc",
+                         {{"backend", "openai"},
+                          {"url", "http://localhost:8000/v1"},
+                          {"discover", true}}}}}});
+    config.WriteJson("settings.json", nlohmann::json::object());
+    config.WriteJson("permissions.json", nlohmann::json::object());
+    config.Write("agents/build.md",
+                 "---\nname: build\nmodel: disc/served-model\n---\nbody\n");
+    config::SkillRegistry skills = config::SkillRegistry::Load(config.dir);
+    AgentPresetRegistry registry(config.dir, skills);
+
+    int calls = 0;
+    registry.SetDiscoveryHook(
+        [&calls](const std::string& kind, const llm::ProviderConfig& c) {
+            ++calls;
+            CHECK(kind == "openai");
+            CHECK(c.base_url == "http://localhost:8000/v1");
+            return config::DiscoveryOutcome{
+                /*catalog_present=*/true, /*ok=*/true, {},
+                {llm::DiscoveredModel{"served-model", 262144, nlohmann::json::object()}}};
+        });
+
+    const AgentPreset& preset = registry.Resolve("build");
+    REQUIRE(preset.context_window_tokens.has_value());
+    CHECK(*preset.context_window_tokens == 262144);
+    CHECK(preset.provider.model_name == "served-model");
+    CHECK(calls == 1);  // the fetch happened once, at first resolve
+
+    // And a preset naming a model the catalog does not serve reports why.
+    config.Write("agents/other.md",
+                 "---\nname: other\nmodel: disc/absent\n---\nbody\n");
+    bool threw = false;
+    try {
+        registry.Resolve("other");
+    } catch (const std::runtime_error& error) {
+        threw = true;
+        const std::string message = error.what();
+        CHECK(message.find("disc/absent") != std::string::npos);
+        // The listing shows the DISCOVERED model, not nothing -- the miss is
+        // distinguishable from a dead catalog, which names the failure instead.
+        CHECK(message.find("disc/served-model") != std::string::npos);
+    }
+    CHECK(threw);
+    CHECK(calls == 1);  // negative answer, but no refetch: negative-cached
+}
+
 TEST_CASE("AgentPresetRegistry: unknown preset name throws", "[agent_preset_registry]") {
     TempConfigDir config;
     config.WriteDefaults();

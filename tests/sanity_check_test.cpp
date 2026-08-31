@@ -86,6 +86,7 @@ struct Fixture {
     std::filesystem::path data_dir = xdg_data / "minimal";
     tools::ToolRegistry tool_registry;
     llm::ProviderFactoryRegistry provider_factories;
+    llm::ModelCatalogRegistry model_catalogs;
     config::SkillRegistry skills;
     plugins::ServiceRegistry service_registry;
 
@@ -132,7 +133,7 @@ struct Fixture {
         return config::SanityCheckInputs{config_dir,         records, tool_registry,
                                          provider_factories, skills,  plugin_config,
                                          resolution,         command_registry, advisors,
-                                         services};
+                                         services,           &model_catalogs};
     }
 };
 
@@ -285,6 +286,117 @@ TEST_CASE("two plugins registering one provider kind warns", "[sanity_check][pro
     CHECK(hits[0]->severity == CheckSeverity::Warning);
     CHECK(hits[0]->message.find("plugin-a") != std::string::npos);
     CHECK(hits[0]->message.find("plugin-b") != std::string::npos);
+}
+
+TEST_CASE("two plugins registering one model catalog warns", "[sanity_check][provider_catalogs]") {
+    // Track N: catalogs share the provider kind string but are a separate
+    // namespace -- which plugin's catalog answers "discover": true must be loud.
+    Fixture f;
+    WriteGoodConfig(f.config_dir);
+    ScopedEnv data("XDG_DATA_HOME", f.xdg_data.string().c_str());
+
+    std::vector<plugins::PluginRecord> records = {
+        Record("a.so", "plugin-a", plugins::Provenance::User, plugins::LoadStatus::Loaded),
+        Record("b.so", "plugin-b", plugins::Provenance::User, plugins::LoadStatus::Loaded)};
+    records[0].registered_model_catalog_kinds = {"fixture"};
+    records[1].registered_model_catalog_kinds = {"fixture"};
+
+    const auto results = RunChecks(f, records);
+    const auto hits = ByCheck(results, "provider_catalogs");
+    REQUIRE(hits.size() == 1);
+    CHECK(hits[0]->severity == CheckSeverity::Warning);
+    CHECK(hits[0]->message.find("plugin-a") != std::string::npos);
+    CHECK(hits[0]->message.find("plugin-b") != std::string::npos);
+}
+
+// --- discover-entries (track N) ----------------------------------------------------
+//
+// The check is STRUCTURAL: which plugins registered what, never a live probe --
+// discovery is fetched lazily at first resolve, never at startup.
+
+// A config whose only provider is a discover-entry, and whose preset names a
+// model the catalog (not the file) defines.
+void WriteDiscoverConfig(const std::filesystem::path& dir, const char* backend = "fixture") {
+    WriteFile(dir / "settings.json", R"({"default_agent_preset":"build"})");
+    WriteFile(dir / "permissions.json", R"({})");
+    WriteFile(dir / "providers.json",
+              std::string(R"({"providers":{"disc":{"backend":")") + backend +
+                          R"(","url":"http://localhost:1/v1","discover":true}}})");
+    WriteFile(dir / "agents/build.md",
+              "---\nname: build\nmodel: disc/some-model\nallowed_tools:\n  - bash\n---\n"
+              "You are a test preset.\n");
+    WriteFile(dir / "prompts/compression.md", "# compression\nSummarize the earlier messages.\n");
+}
+
+class FakeCatalog : public llm::ModelCatalog {
+public:
+    std::vector<llm::DiscoveredModel> List(const llm::ProviderConfig&) const override {
+        return {{"some-model", 8192, nlohmann::json::object()}};
+    }
+};
+
+TEST_CASE("a discover-only provider with a registered catalog is usable and silent",
+          "[sanity_check][usable_provider][discover]") {
+    Fixture f;
+    WriteDiscoverConfig(f.config_dir);
+    ScopedEnv data("XDG_DATA_HOME", f.xdg_data.string().c_str());
+    f.RegisterTool("tools-bash", "bash");
+    f.model_catalogs.Register("fixture", std::make_shared<FakeCatalog>());
+
+    const auto results = RunChecks(f);
+    // Zero findings: the backend is registered, the catalog exists, and the
+    // preset's model is unverifiable at startup -- which is not a problem.
+    CHECK(results.empty());
+}
+
+TEST_CASE("a discover-entry whose backend registers no catalog warns",
+          "[sanity_check][usable_provider][discover]") {
+    Fixture f;
+    WriteGoodConfig(f.config_dir);
+    ScopedEnv data("XDG_DATA_HOME", f.xdg_data.string().c_str());
+    // Has a static model (so the entry itself is usable) but no catalog exists.
+    f.Write("providers.json",
+            R"({"providers":{"disc":{"backend":"fixture",)"
+            R"("url":"http://localhost:1/v1","discover":true,"models":{"m":{}}}}})");
+
+    const auto results = RunChecks(f);
+    const auto hits = ByCheck(results, "usable_provider");
+    REQUIRE(hits.size() == 1);
+    CHECK(hits[0]->severity == CheckSeverity::Warning);
+    CHECK(hits[0]->message.find("model catalog") != std::string::npos);
+    CHECK(hits[0]->message.find("disc") != std::string::npos);
+}
+
+TEST_CASE("a discover-only provider with an unregistered backend is fatal",
+          "[sanity_check][usable_provider][discover]") {
+    Fixture f;
+    WriteDiscoverConfig(f.config_dir, /*backend=*/"anthropic");
+    ScopedEnv data("XDG_DATA_HOME", f.xdg_data.string().c_str());
+    f.RegisterTool("tools-bash", "bash");
+    f.model_catalogs.Register("anthropic", std::make_shared<FakeCatalog>());  // catalog, not backend
+
+    const auto results = RunChecks(f);
+    const auto hits = ByCheck(results, "usable_provider");
+    REQUIRE(hits.size() == 2);
+    CHECK(hits[0]->severity == CheckSeverity::Warning);  // names the entry and the kind
+    CHECK(hits[0]->message.find("discovery") != std::string::npos);
+    CHECK(hits[1]->severity == CheckSeverity::Fatal);    // nothing usable remains
+}
+
+TEST_CASE("a default_model under a discover-entry is not flagged",
+          "[sanity_check][usable_provider][discover]") {
+    Fixture f;
+    WriteDiscoverConfig(f.config_dir);
+    ScopedEnv data("XDG_DATA_HOME", f.xdg_data.string().c_str());
+    f.RegisterTool("tools-bash", "bash");
+    f.model_catalogs.Register("fixture", std::make_shared<FakeCatalog>());
+    // The model names nothing static -- only the catalog would know -- and the
+    // check never probes, so it stays silent.
+    f.Write("settings.json", R"({"default_agent_preset":"build","default_model":"disc/other"})");
+
+    const auto results = RunChecks(f);
+    CHECK(ByCheck(results, "usable_provider").empty());
+    CHECK(ByCheck(results, "presets").empty());
 }
 
 // --- presets -----------------------------------------------------------------------

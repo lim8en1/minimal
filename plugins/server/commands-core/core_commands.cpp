@@ -60,10 +60,14 @@ class ProvidersCommand : public HarnessCommand {
 public:
     std::string_view Name() const override { return "providers"; }
     std::string_view Summary() const override { return "List configured models"; }
-    std::string_view Usage() const override { return "/providers"; }
+    std::string_view Usage() const override { return "/providers [refresh]"; }
     bool ReadOnly() const override { return true; }
 
-    CommandResult Execute(CommandContext& context, const CommandArgs&) override {
+    CommandResult Execute(CommandContext& context, const CommandArgs& args) override {
+        if (!args.positional.empty() && args.positional.front() == "refresh") {
+            return Refresh(context);
+        }
+
         const auto refs = context.providers().ModelRefs();
         if (refs.empty()) {
             return CommandResult::Error(
@@ -81,12 +85,36 @@ public:
         std::ostringstream out;
         for (const auto& ref : refs) {
             const auto parsed = minimal::common::ParseModelRef(ref);
-            const auto* model = parsed ? context.providers().Resolve(*parsed) : nullptr;
+            const auto model = parsed ? context.providers().Resolve(*parsed) : nullptr;
             out << (ref == active ? "* " : "  ") << ref;
             if (model != nullptr && model->context_window_tokens) {
                 out << "  (" << *model->context_window_tokens << " ctx)";
             }
             out << "\n";
+        }
+        return CommandResult::Ok(out.str());
+    }
+
+private:
+    // Re-lists every "discover": true provider NOW (evicts the runtime cache
+    // and refetches). ReadOnly like the listing itself: it runs on the RPC
+    // layer's pool -- network I/O must never land on a session worker -- and
+    // the discovery cache is mutex-guarded against exactly that concurrency.
+    // Note this lists freshly discovered models under STATIC entries too; the
+    // conversation is untouched either way.
+    static CommandResult Refresh(CommandContext& context) {
+        const auto outcomes = context.providers().RefreshDiscovery();
+        if (outcomes.empty()) {
+            return CommandResult::Error(
+                "no discoverable providers: set \"discover\": true on a providers.json entry");
+        }
+        std::ostringstream out;
+        for (const auto& outcome : outcomes) {
+            if (outcome.ok) {
+                out << outcome.provider << ": " << outcome.model_count << " model(s)\n";
+            } else {
+                out << outcome.provider << ": discovery failed -- " << outcome.error << "\n";
+            }
         }
         return CommandResult::Ok(out.str());
     }
@@ -161,7 +189,7 @@ public:
         // user chose is a decision and survives the switch. Without this,
         // /agent would silently undo /model.
         if (const auto& override_ref = context.session().model_override()) {
-            const auto* model = context.providers().Resolve(*override_ref);
+            const auto model = context.providers().Resolve(*override_ref);
             if (model != nullptr) minimal::agent::ApplyModel(resolved, *model);
         }
 
@@ -190,7 +218,7 @@ public:
             return CommandResult::Error("'" + text +
                                         "' must be <provider>/<model>, e.g. local/qwen4");
         }
-        const auto* model = context.providers().Resolve(*ref);
+        const auto model = context.providers().Resolve(*ref);
         if (model == nullptr) {
             return CommandResult::Error("unknown model '" + text + "' (see /providers)");
         }

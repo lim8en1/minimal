@@ -34,6 +34,8 @@ add_executable(minimal_tests
     plugin_discovery_test.cpp
     aliased_tool_test.cpp
     provider_factory_registry_test.cpp
+    model_catalog_test.cpp
+    model_catalog_live_test.cpp
     permission_codec_test.cpp
     providers_config_test.cpp
     mcps_config_test.cpp
@@ -73,6 +75,7 @@ add_executable(minimal_tests
     "${CMAKE_SOURCE_DIR}/plugins/server/provider-openai/openai_response.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/provider-openai/openai_stream_reassembler.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/provider-openai/openai_error_mapping.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/provider-openai/openai_model_catalog.cpp"
     # Same pattern for tools-fs: pure logic depending only on core headers, so
     # linked directly rather than exercised through dlopen.
     "${CMAKE_SOURCE_DIR}/plugins/server/tools-fs/fs_tools.cpp"

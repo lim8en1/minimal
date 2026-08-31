@@ -45,6 +45,7 @@ add_library(minimal_server_core SHARED
     tools/tool_executor.cpp
     tools/skill_tool.cpp
     llm/provider_factory_registry.cpp
+    llm/model_catalog.cpp
     plugins/plugin_loader.cpp
     plugins/plugin_discovery.cpp
     rpc/proto_convert.cpp

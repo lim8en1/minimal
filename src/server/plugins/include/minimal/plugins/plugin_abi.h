@@ -31,6 +31,7 @@
 #include "minimal/common/logger.hpp"
 #include "minimal/rpc/auth_provider.hpp"
 #include "minimal/llm/http_client.hpp"
+#include "minimal/llm/model_catalog.hpp"
 #include "minimal/llm/provider.hpp"
 #include "minimal/llm/provider_factory_registry.hpp"
 #include "minimal/llm/sse_parser.hpp"
@@ -152,6 +153,16 @@ void minimal_plugin_register_auth_provider(minimal::rpc::AuthProviderRegistry&,
 void minimal_plugin_register_permission_advisor(
     minimal::tools::PermissionAdvisorRegistry&,
     const minimal::plugins::PluginRegistrationContext&);
+
+// OPTIONAL, additive: contributes a model catalog, keyed by the SAME kind
+// string the provider factory registry uses -- a providers.json entry's
+// `backend` selects both how to chat and how to list. A catalog serves
+// "discover": true entries: List() is fetched lazily at first resolve (never
+// at startup), results are runtime-only and never written back to
+// providers.json, and a failed fetch is negative-cached and degrades to the
+// entry's static models.
+void minimal_plugin_register_model_catalogs(minimal::llm::ModelCatalogRegistry&,
+                                            const minimal::plugins::PluginRegistrationContext&);
 
 // Not yet wired -- declared nowhere until the subsystem it registers into
 // exists, so that this ABI is not frozen before it has consumers:

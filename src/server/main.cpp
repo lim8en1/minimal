@@ -111,6 +111,10 @@ int main(int argc, char** argv) {
     // name; permissions.json's "advisor" selects one. An empty registry is the
     // default -- every Ask reaches the human.
     minimal::tools::PermissionAdvisorRegistry permission_advisors;
+    // Additive across plugins, keyed by the provider kind string: a backend can
+    // be asked to LIST its models ("discover": true in providers.json), fetched
+    // lazily at first resolve and never written back to the file.
+    minimal::llm::ModelCatalogRegistry model_catalogs;
     // The sanctioned cross-plugin channel (pull; SessionObserver is push).
     // Additive: many plugins may each provide services, and a duplicate name is
     // fatal at startup via the name resolution below. Also handed to every
@@ -130,7 +134,8 @@ int main(int argc, char** argv) {
     }
 
     minimal::plugins::PluginLoader loader(tools, providers, tools_settings, &observers, &commands,
-                                          &auth_providers, &permission_advisors, &services);
+                                          &auth_providers, &permission_advisors, &model_catalogs,
+                                          &services);
     const auto records = loader.LoadAll(candidates);
 
     std::printf("plugins (%zu discovered):\n", records.size());
@@ -144,6 +149,9 @@ int main(int argc, char** argv) {
         }
         for (const auto& kind : record.registered_provider_kinds) {
             std::printf("      provider %s\n", kind.c_str());
+        }
+        for (const auto& kind : record.registered_model_catalog_kinds) {
+            std::printf("      catalog  %s\n", kind.c_str());
         }
         for (const auto& command : record.registered_commands) {
             std::printf("      command  /%s\n", command.c_str());
@@ -216,6 +224,7 @@ int main(int argc, char** argv) {
         &commands,
         &permission_advisors,
         &services,
+        &model_catalogs,
     });
     const auto check_results = sanity.RunAll();
 
@@ -252,6 +261,30 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "\nconfiguration error (%s): %s\n", config_dir.c_str(), e.what());
         return 1;
     }
+
+    // Inject discovery (track N): providers.json "discover": true entries list
+    // their models through the catalog the backend kind names. AFTER plugin
+    // load and BEFORE any Resolve() -- presets resolve lazily, so this is the
+    // last point at which the hook can be set before first use. The hook never
+    // throws: a failed List is cached as a failed discovery and reported
+    // through the miss reporting and /providers refresh, not here.
+    presets->SetDiscoveryHook(
+        [&model_catalogs, &logger = minimal::common::DefaultLogger()](
+            const std::string& kind,
+            const minimal::llm::ProviderConfig& connection) -> minimal::config::DiscoveryOutcome {
+            minimal::config::DiscoveryOutcome outcome;
+            auto* catalog = model_catalogs.Find(kind);
+            if (catalog == nullptr) return outcome;  // catalog_present stays false
+            outcome.catalog_present = true;
+            try {
+                outcome.models = catalog->List(connection);
+                outcome.ok = true;
+            } catch (const std::exception& error) {
+                outcome.error = error.what();
+                logger.warn("model discovery for backend kind '{}' failed: {}", kind, outcome.error);
+            }
+            return outcome;
+        });
 
     minimal::agent::LoopConfig loop_config;
     loop_config.auto_compact = settings.memory.auto_compact;

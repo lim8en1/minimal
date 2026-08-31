@@ -28,6 +28,8 @@ using RegisterAuthProviderFn =
     void (*)(rpc::AuthProviderRegistry&, const PluginRegistrationContext&);
 using RegisterPermissionAdvisorFn =
     void (*)(tools::PermissionAdvisorRegistry&, const PluginRegistrationContext&);
+using RegisterModelCatalogsFn =
+    void (*)(llm::ModelCatalogRegistry&, const PluginRegistrationContext&);
 using RegisterServicesFn =
     void (*)(ServiceRegistry&, const PluginRegistrationContext&);
 
@@ -62,11 +64,13 @@ PluginLoader::PluginLoader(tools::ToolRegistry& tools, llm::ProviderFactoryRegis
                            commands::CommandRegistry* commands,
                            rpc::AuthProviderRegistry* auth_providers,
                            tools::PermissionAdvisorRegistry* permission_advisors,
+                           llm::ModelCatalogRegistry* model_catalogs,
                            ServiceRegistry* services)
     : tools_(tools),
       providers_(providers),
       tools_settings_(std::move(tools_settings)),
       observers_(observers),
+      model_catalogs_(model_catalogs),
       commands_(commands),
       auth_providers_(auth_providers),
       permission_advisors_(permission_advisors),
@@ -203,6 +207,20 @@ PluginRecord PluginLoader::LoadOne(const PluginCandidate& candidate) {
         permission_advisors_->ClearAttribution();
         record.registered_permission_advisor =
             permission_advisors_->attributions().size() > advisors_before;
+    }
+
+    if (model_catalogs_ != nullptr) {
+        // Same attribution window as tools and commands: a kind two plugins
+        // both register must be diagnosable down to both, which the
+        // attributions feed the sanity check for.
+        const auto kinds_before = model_catalogs_->kinds();
+        if (auto register_catalogs = Lookup<RegisterModelCatalogsFn>(
+                handle, "minimal_plugin_register_model_catalogs")) {
+            register_catalogs(*model_catalogs_, context);
+        }
+        const auto kinds_after = model_catalogs_->kinds();
+        std::set_difference(kinds_after.begin(), kinds_after.end(), kinds_before.begin(),
+                            kinds_before.end(), std::back_inserter(record.registered_model_catalog_kinds));
     }
 
     record.status = LoadStatus::Loaded;

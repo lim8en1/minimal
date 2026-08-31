@@ -13,6 +13,7 @@
 
 #include "minimal/plugins/plugin_abi.h"
 
+#include "openai_model_catalog.hpp"
 #include "openai_provider.hpp"
 
 extern "C" {
@@ -27,6 +28,17 @@ void minimal_plugin_register_provider_factories(
     registry.Register("openai", [](const minimal::llm::ProviderConfig& config) {
         return std::make_unique<minimal::provider_openai::OpenAiProvider>(config);
     });
+}
+
+void minimal_plugin_register_model_catalogs(
+    minimal::llm::ModelCatalogRegistry& registry,
+    const minimal::plugins::PluginRegistrationContext&) {
+    // The SAME kind string as the factory above: a providers.json entry's
+    // `backend` selects both how to chat and how to list. The catalog is a
+    // stateless utility (one CURL handle per call), so one shared instance is
+    // safe across concurrent resolvers.
+    registry.Register("openai", std::make_shared<minimal::provider_openai::OpenAiModelCatalog>(
+                                    minimal::llm::HttpClient{}));
 }
 
 }  // extern "C"

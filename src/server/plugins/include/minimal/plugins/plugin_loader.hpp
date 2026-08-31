@@ -8,6 +8,7 @@
 
 #include "minimal/agent/session_observer_registry.hpp"
 #include "minimal/commands/command_registry.hpp"
+#include "minimal/llm/model_catalog.hpp"
 #include "minimal/llm/provider_factory_registry.hpp"
 #include "minimal/plugins/service_registry.hpp"
 #include "minimal/rpc/auth_provider.hpp"
@@ -64,6 +65,10 @@ struct PluginRecord {
     // ORIGINAL service names, as the plugin declared them. Services live in
     // their own namespace -- no aliasing, no permission keys.
     std::vector<std::string> registered_services;
+    // Catalog kinds, keyed like registered_provider_kinds (the same kind string
+    // a providers.json `backend` names). Feeds the sanity check's discover-entry
+    // warnings and its duplicate-catalog report.
+    std::vector<std::string> registered_model_catalog_kinds;
 
     bool ok() const { return status == LoadStatus::Loaded; }
 };
@@ -92,6 +97,7 @@ public:
                  commands::CommandRegistry* commands = nullptr,
                  rpc::AuthProviderRegistry* auth_providers = nullptr,
                  tools::PermissionAdvisorRegistry* permission_advisors = nullptr,
+                 llm::ModelCatalogRegistry* model_catalogs = nullptr,
                  ServiceRegistry* services = nullptr);
     ~PluginLoader();
 
@@ -109,6 +115,10 @@ private:
     llm::ProviderFactoryRegistry& providers_;
     nlohmann::json tools_settings_;
     agent::SessionObserverRegistry* observers_ = nullptr;
+    // Optional like the others; null means plugins cannot register a model
+    // catalog. Additive across plugins, keyed by the provider kind string;
+    // a duplicate kind is refused and reported by the sanity check.
+    llm::ModelCatalogRegistry* model_catalogs_ = nullptr;
     // Optional for the same reason observers_ is: a test exercising only tool
     // registration has no command surface to offer, and building one would be
     // scaffolding for nothing.

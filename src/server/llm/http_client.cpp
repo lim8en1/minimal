@@ -57,7 +57,7 @@ bool ParseHeaderLine(std::string_view line, HttpHeader& out) {
     return true;
 }
 
-enum class Mode { Blocking, Streaming };
+enum class Mode { Blocking, Streaming, Get };
 
 struct TransferState {
     Mode mode = Mode::Blocking;
@@ -67,6 +67,7 @@ struct TransferState {
     const HttpBodyChunkSink* on_chunk = nullptr;
     bool headers_ready_fired = false;
     bool cancelled_by_sink = false;
+    bool body_limit_exceeded = false;
 
     // Idle-timeout bookkeeping -- StreamPost() only.
     std::chrono::milliseconds idle_timeout{0};
@@ -100,7 +101,15 @@ std::size_t HeaderCallback(char* buffer, std::size_t size, std::size_t nitems, v
 std::size_t WriteCallback(char* ptr, std::size_t size, std::size_t nmemb, void* userdata) {
     auto& state = *static_cast<TransferState*>(userdata);
     std::size_t total = size * nmemb;
-    if (state.mode == Mode::Blocking) {
+    if (state.mode != Mode::Streaming) {
+        // Blocking and Get both buffer the full body; only Streaming hands it
+        // to a sink. (Mode::Get originally fell into the streaming branch here,
+        // silently dropping every GET response body -- the bug the loopback
+        // transport test exists to catch.)
+        if (state.response.body.size() + total > kMaxResponseBodyBytes) {
+            state.body_limit_exceeded = true;
+            return 0;  // short count -> CURLE_WRITE_ERROR
+        }
         state.response.body.append(ptr, total);
         return total;
     }
@@ -128,6 +137,9 @@ int XferInfoCallback(void* clientp, curl_off_t /*dltotal*/, curl_off_t dlnow, cu
 [[noreturn]] void ThrowForCurlCode(CURLcode code, const TransferState& state) {
     if (code == CURLE_WRITE_ERROR && state.cancelled_by_sink) {
         throw HttpError(HttpErrorKind::Cancelled, "aborted by sink");
+    }
+    if (code == CURLE_WRITE_ERROR && state.body_limit_exceeded) {
+        throw HttpError(HttpErrorKind::Other, "response body exceeds limit");
     }
     switch (code) {
         case CURLE_ABORTED_BY_CALLBACK:
@@ -166,13 +178,20 @@ HttpResponse PerformRequest(const HttpRequest& request, Mode mode, const HttpHea
 
     CURL* handle = curl.handle;
     curl_easy_setopt(handle, CURLOPT_URL, request.url.c_str());
-    curl_easy_setopt(handle, CURLOPT_POST, 1L);
-    curl_easy_setopt(handle, CURLOPT_POSTFIELDS, request.body.data());
-    curl_easy_setopt(handle, CURLOPT_POSTFIELDSIZE_LARGE, static_cast<curl_off_t>(request.body.size()));
+    if (mode == Mode::Get) {
+        // A GET carries no body; everything else (headers, timeouts, callbacks)
+        // is shared with the POST path below.
+        curl_easy_setopt(handle, CURLOPT_HTTPGET, 1L);
+    } else {
+        curl_easy_setopt(handle, CURLOPT_POST, 1L);
+        curl_easy_setopt(handle, CURLOPT_POSTFIELDS, request.body.data());
+        curl_easy_setopt(handle, CURLOPT_POSTFIELDSIZE_LARGE,
+                         static_cast<curl_off_t>(request.body.size()));
+    }
     curl_easy_setopt(handle, CURLOPT_NOSIGNAL, 1L);
     curl_easy_setopt(handle, CURLOPT_CONNECTTIMEOUT_MS, static_cast<long>(request.connect_timeout.count()));
 
-    if (mode == Mode::Blocking && request.request_timeout.count() > 0) {
+    if (mode != Mode::Streaming && request.request_timeout.count() > 0) {
         curl_easy_setopt(handle, CURLOPT_TIMEOUT_MS, static_cast<long>(request.request_timeout.count()));
     }
 
@@ -213,6 +232,14 @@ std::optional<std::string> FindHeaderCI(const std::vector<HttpHeader>& headers, 
 
 HttpResponse HttpClient::Post(const HttpRequest& request) const {
     return PerformRequest(request, Mode::Blocking, nullptr, nullptr);
+}
+
+// Model catalogs (track N) list via GET <url>/models; the request body is
+// ignored. request_timeout is honored exactly as for Post() -- the catalog
+// implementation sets a bounded one, since a hung backend must not wedge the
+// caller (a session worker or the command pool) for the chat-length timeout.
+HttpResponse HttpClient::Get(const HttpRequest& request) const {
+    return PerformRequest(request, Mode::Get, nullptr, nullptr);
 }
 
 HttpResponse HttpClient::StreamPost(const HttpRequest& request, const HttpHeadersReadySink& on_headers,

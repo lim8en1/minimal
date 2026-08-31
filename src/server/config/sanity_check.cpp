@@ -166,7 +166,7 @@ std::vector<CheckResult> StartupSanityCheck::check_providers() {
     for (const auto& ref_text : refs) {
         const auto ref = common::ParseModelRef(ref_text);
         if (!ref) continue;  // ParseProvidersConfig rejects these already
-        const ResolvedModel* model = providers_.Resolve(*ref);
+        const auto model = providers_.Resolve(*ref);
         if (model == nullptr) continue;
 
         const bool registered =
@@ -186,6 +186,39 @@ std::vector<CheckResult> StartupSanityCheck::check_providers() {
         any_usable = true;
     }
 
+    // Discover-entries (track N): addressable through their backend's catalog
+    // even with no static model. Checked STRUCTURALLY -- which plugins
+    // registered what -- never by probing, because discovery is fetched lazily
+    // at first resolve, never at startup. A discover-entry with a registered
+    // backend counts as usable: whether the catalog actually answers is a
+    // runtime condition, reported at first resolve and by /providers refresh.
+    for (const auto& [name, entry] : providers_.provider_entries()) {
+        if (!entry.discover) continue;
+        const bool backend_registered =
+            std::find(kinds.begin(), kinds.end(), entry.backend) != kinds.end();
+        if (!backend_registered) {
+            if (!backend_reported[name]) {
+                results.push_back(Warning(
+                    "usable_provider", "providers.json provider '" + name + "': backend '" +
+                                           entry.backend +
+                                           "' is not registered by any loaded plugin; discovery "
+                                           "cannot run and its static models do not resolve"));
+            }
+            continue;
+        }
+        any_usable = true;
+        const bool catalog_registered =
+            inputs_.model_catalogs != nullptr && inputs_.model_catalogs->Has(entry.backend);
+        if (!catalog_registered) {
+            results.push_back(
+                Warning("usable_provider",
+                        "providers.json provider '" + name + "': sets \"discover\": true but no "
+                        "loaded plugin registers a model catalog for backend '" +
+                            entry.backend +
+                            "'; discovery will fail at first resolve (its static models, if any, "
+                            "still resolve)"));
+        }
+    }
     if (!any_usable) {
         // A harness that cannot talk to an LLM is useless, not degraded -- the
         // same standard as a failed bundled plugin.
@@ -211,10 +244,18 @@ std::vector<CheckResult> StartupSanityCheck::check_providers() {
                                       "settings.json default_model '" + settings_.default_model +
                                           "' is not <provider>/<model>"));
         } else if (providers_.Resolve(*ref) == nullptr) {
-            results.push_back(Warning("usable_provider",
-                                      "settings.json default_model '" + settings_.default_model +
-                                          "' matches no configured model" +
-                                          (refs.empty() ? "" : " (have: " + JoinNames(refs) + ")")));
+            // Under a discover-entry a non-static model cannot be verified at
+            // startup without a network call, which the check never makes --
+            // the provider exists and discovery answers at first resolve.
+            const auto entry = providers_.provider_entries().find(ref->provider);
+            const bool unverifiable = entry != providers_.provider_entries().end() &&
+                                      entry->second.discover;
+            if (!unverifiable) {
+                results.push_back(Warning("usable_provider",
+                                          "settings.json default_model '" + settings_.default_model +
+                                              "' matches no configured model" +
+                                              (refs.empty() ? "" : " (have: " + JoinNames(refs) + ")")));
+            }
         }
     }
 
@@ -228,6 +269,24 @@ std::vector<CheckResult> StartupSanityCheck::check_providers() {
             if (!inserted) {
                 results.push_back(Warning("provider_kinds", "provider kind '" + kind + "' is registered by both " +
                                      it->second + " and " + label + "; the first wins"));
+            }
+        }
+    }
+
+    // Same for catalogs (track N): they share the provider kind string, but are
+    // a separate namespace -- a duplicate catalog silently determines what
+    // "discover": true lists.
+    std::unordered_map<std::string, std::string> catalog_owner;
+    for (const auto& record : inputs_.plugin_records) {
+        if (record.status != plugins::LoadStatus::Loaded) continue;
+        const auto label = record.name.empty() ? record.file.filename().string() : record.name;
+        for (const auto& kind : record.registered_model_catalog_kinds) {
+            const auto [it, inserted] = catalog_owner.try_emplace(kind, label);
+            if (!inserted) {
+                results.push_back(Warning("provider_catalogs",
+                                          "model catalog for kind '" + kind +
+                                              "' is registered by both " + it->second + " and " +
+                                              label + "; the first wins"));
             }
         }
     }
@@ -279,11 +338,22 @@ std::vector<CheckResult> StartupSanityCheck::check_presets() {
         }
         const auto ref = common::ParseModelRef(model_text);
         if (!ref) return "model '" + model_text + "' is not <provider>/<model>";
-        const ResolvedModel* model = providers_.Resolve(*ref);
-        if (model == nullptr) return "names unknown model '" + model_text + "'";
+        // A discover-entry's backend kind can be checked without the model
+        // resolving -- the model list is a runtime answer the check never
+        // probes.
+        std::string discover_backend;
+        if (auto entry = providers_.provider_entries().find(ref->provider);
+            entry != providers_.provider_entries().end() && entry->second.discover) {
+            discover_backend = entry->second.backend;
+        }
+        const auto model = providers_.Resolve(*ref);
+        if (model == nullptr && discover_backend.empty()) {
+            return "names unknown model '" + model_text + "'";
+        }
         const auto kinds = inputs_.provider_factories.kinds();
-        if (std::find(kinds.begin(), kinds.end(), model->backend) == kinds.end()) {
-            return "model '" + model_text + "' needs backend '" + model->backend +
+        const std::string& backend = model != nullptr ? model->backend : discover_backend;
+        if (std::find(kinds.begin(), kinds.end(), backend) == kinds.end()) {
+            return "model '" + model_text + "' needs backend '" + backend +
                    "', which no loaded plugin registers";
         }
         return std::nullopt;
