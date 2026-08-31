@@ -77,6 +77,9 @@ add_executable(minimal_tests
     session_service_test.cpp
     subagent_e2e_test.cpp
     headless_e2e_test.cpp
+    plugin_storage_test.cpp
+    plugin_rpc_test.cpp
+    checklist_test.cpp
     # provider-openai's pure translation logic, compiled directly into the test
     # binary rather than via the plugin .so -- these files have no ABI/plugin
     # dependency, only core headers, so this is real linkage, not dlopen.
@@ -101,6 +104,12 @@ add_executable(minimal_tests
     "${CMAKE_SOURCE_DIR}/plugins/server/tools-bash/restart_shell.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/tools-bash/tasks_command.cpp"
     bash_background_test.cpp
+    # Same pattern for checklist: store, tool and rpc service are pure plugin
+    # logic over core headers; plugin.cpp (the extern "C" entry points) stays
+    # out, like every other bundled plugin.
+    "${CMAKE_SOURCE_DIR}/plugins/server/checklist/checklist_store.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/checklist/checklist_tool.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/checklist/rpc_service.cpp"
     service_registry_test.cpp)
 
 target_include_directories(minimal_tests PRIVATE
@@ -111,6 +120,9 @@ target_include_directories(minimal_tests PRIVATE
 
 target_include_directories(minimal_tests PRIVATE
     "${CMAKE_SOURCE_DIR}/plugins/server/tools-bash")
+
+target_include_directories(minimal_tests PRIVATE
+    "${CMAKE_SOURCE_DIR}/plugins/server/checklist")
 
 # minimal::test_support is the test-dependency bundle: it carries server_core,
 # which carries common publicly. Listing those again here is redundant and makes

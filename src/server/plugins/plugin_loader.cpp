@@ -97,7 +97,9 @@ PluginLoader::PluginLoader(tools::ToolRegistry& tools, llm::ProviderFactoryRegis
                            rpc::AuthProviderRegistry* auth_providers,
                            tools::PermissionAdvisorRegistry* permission_advisors,
                            llm::ModelCatalogRegistry* model_catalogs,
-                           ServiceRegistry* services)
+                           ServiceRegistry* services,
+                           PluginStorage* storage,
+                           std::filesystem::path plugin_data_root)
     : tools_(tools),
       providers_(providers),
       tools_settings_(std::move(tools_settings)),
@@ -106,7 +108,9 @@ PluginLoader::PluginLoader(tools::ToolRegistry& tools, llm::ProviderFactoryRegis
       commands_(commands),
       auth_providers_(auth_providers),
       permission_advisors_(permission_advisors),
-      services_(services) {}
+      services_(services),
+      storage_(storage),
+      plugin_data_root_(std::move(plugin_data_root)) {}
 
 // Handles are intentionally leaked -- see LIFETIME in the header.
 PluginLoader::~PluginLoader() = default;
@@ -166,6 +170,21 @@ PluginRecord PluginLoader::LoadOne(const PluginCandidate& candidate) {
     // register_services below dispatches into, so a plugin capturing this
     // pointer at registration resolves services from this process's registry.
     context.services = services_;
+    // Per-plugin storage and its own data dir. The dir is provisioned HERE,
+    // keyed by the plugin's declared name, because only the host can guarantee
+    // it exists before the hooks that will use it run.
+    context.storage = storage_;
+    if (!plugin_data_root_.empty() && !record.name.empty()) {
+        std::error_code ec;
+        const auto dir = plugin_data_root_ / record.name;
+        std::filesystem::create_directories(dir, ec);
+        if (ec) {
+            common::DefaultLogger().warn("plugin '{}': could not create data dir {}: {}",
+                                         record.name, dir.string(), ec.message());
+        } else {
+            context.data_dir = dir;
+        }
+    }
 
     // Attribution window: every tool registered inside it belongs to this
     // plugin, which is what lets a later collision name both culprits.

@@ -54,6 +54,8 @@ add_library(minimal_server_core SHARED
     llm/provider_factory_registry.cpp
     llm/model_catalog.cpp
     plugins/plugin_loader.cpp
+    plugins/plugin_rpc.cpp
+    plugins/plugin_storage.cpp
     plugins/plugin_discovery.cpp
     rpc/proto_convert.cpp
     rpc/pending_requests.cpp

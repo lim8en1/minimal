@@ -21,7 +21,7 @@ Companion to `ARCHITECTURE.md`, which remains the single source of truth for *de
 
 Interfaces a plugin implements today: `Tool` (with `Disclose` / `category_for` / `ExtractPath`), `Command` → `HarnessCommand`/`LLMCommand`, `LlmProvider` plus a factory, `SessionObserver`, `PermissionAdvisor` (composing above the wire checker — see §3), and the service interfaces a provider ships (abstract, header-only — see §2.2).
 
-**Utilities half** — included from `plugin_abi.h`: `path_confinement`, `file_access`, `atomic_write`, `HttpClient`, `SseParser`, `Logger`, `SessionReader` + `HistoryWindow` (landed with track M), plus the registry headers. The frontmatter parser remains reachable through ordinary core linkage (plugins link `minimal_server_core`, a shared library) but is not declared surface.
+**Utilities half** — included from `plugin_abi.h`: `path_confinement`, `file_access`, `atomic_write`, `HttpClient`, `SseParser`, `Logger`, `SessionReader` + `HistoryWindow` (landed with track M), `PluginStorage` (per-plugin KV, plus a per-plugin `data_dir` on the context) and `plugin_rpc.hpp` (the `PluginCall` dispatch convention), plus the registry headers. The frontmatter parser remains reachable through ordinary core linkage (plugins link `minimal_server_core`, a shared library) but is not declared surface.
 
 **Client ABI**: does not exist. `src/client/plugins/` is unbuilt and `PluginCall`/`PluginSubscribe` are not in the proto. Client extensibility is track E in the development plan.
 
@@ -157,11 +157,11 @@ Payloads are owned values (copies) for the same reason `SessionObserver`'s are �
 
 ### 2.5 No UI surface for server-plugin data
 
-**Hole.** A plugin command's result has exactly one sanctioned presentation (since §4.4: a status line or a named view — never a chat row), and a plugin tool renders only as a generic collapsible row unless the plugin ships a client-side renderer. What does not exist at all is the **data channel**: a server plugin cannot push richer, live data to a client view of its own, because the generic `PluginCall`/`PluginSubscribe` RPCs are not in the proto yet.
+**Status: server half LANDED** (with the `checklist` plugin, before track E). The unary `PluginCall` RPC is implemented in `session_service.cpp` and dispatches through §2.2's registry; `PluginSubscribe` remains `UNIMPLEMENTED` until a consumer needs live push (the checklist is model-driven and low-frequency — poll first). The dispatch convention lives in `src/server/plugins/plugin_rpc.hpp`: a plugin serves UI consumers by providing a `PluginRpcHandler` under **`<plugin_name>.rpc`** (the `.rpc` suffix keeps the dispatch target clear of plain §2.2 service names). Core defines the convention, never the payloads; `DispatchPluginCall` is grpc-free and unit-testable, and the transport only maps outcomes to statuses (`NOT_FOUND` = plugin disabled/absent, `INVALID_ARGUMENT` = bad request or handler refusal, `INTERNAL` = handler threw). The client half is unchanged, below. **Hole remaining.** A plugin command's result has exactly one sanctioned presentation (since §4.4: a status line or a named view — never a chat row), and a plugin tool renders only as a generic collapsible row unless the plugin ships a client-side renderer. Live push does not exist.
 
 **Suggested architecture.** Two halves, split because they land in different tracks:
 
-- **Server half (with 2.2):** the generic `PluginCall`/`PluginSubscribe` RPCs from § *Client plugins*. Core defines neither payload nor semantics; a plugin dispatches by `plugin_name` + `method` through the service registry from 2.2. Until the RPCs exist, plugin data reaches the screen only via the two paths above.
+- **Server half (with 2.2):** ~~the generic `PluginCall`/`PluginSubscribe` RPCs from § *Client plugins*~~ — `PluginCall` done as above.
 - **Client half (track E):** `ViewRegistry` + `ToolResultRendererRegistry` per § *Client plugins* — the renderer slot first, views and other slots later.
 
 The design intent is unchanged from `ARCHITECTURE.md`: one generic channel, plugin-owned JSON, renderers keyed by tool name with fallback to default rendering. What this document adds is the server-side dispatch story — 2.2's registry is what `PluginCall` routes *to* — which `ARCHITECTURE.md` leaves implicit.

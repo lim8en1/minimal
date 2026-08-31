@@ -27,7 +27,8 @@ minimal/
   docs/                       # design notes beyond this file
   proto/minimal/v1/{common,session_service}.proto
   plugins/                    # bundled plugin IMPLEMENTATIONS -- what the harness loads
-    server/                       # tools-fs, tools-bash, provider-openai, commands-core
+    server/                       # tools-fs, tools-bash, provider-openai, commands-core,
+                                  #   checklist
     client/                       # (none bundled yet)
   bundled/                    # non-code assets that ship WITH the binary
     prompts/compression.md        # all of it copied into the config dir by
@@ -52,6 +53,7 @@ minimal/
       commands/ # Command iface, registry, dispatcher, ConfirmationBroker,
                 #   CommandContext + the SessionControl interface it borrows
       plugins/  # the plugin HOST: loader, plugin_abi.h, name/collision registry,
+                #   plugin_storage (per-plugin KV), plugin_rpc (PluginCall dispatch),
                 #   observer/mention/auth registries. Harness code -- distinct from
                 #   the top-level plugins/, which is what gets loaded.
       rpc/      # SessionService impl, server, pending_requests, event_queue,
@@ -704,7 +706,7 @@ extern "C" {
 The ABI header has **two halves**, and both are frozen surface:
 
 - **Extension points** plugins *implement*: `Tool`, `Command`, provider factory, `SessionObserver`, service provider, `PermissionAdvisor`, `MentionResolver`, `AuthProvider`.
-- **Utilities** plugins *consume*: `path_confinement`, `file_access`, `atomic_write`, `HttpClient`, `Logger`, `SessionReader` (read-only history access), the frontmatter parser — and the `ServiceRegistry` pointer carried on `PluginRegistrationContext`, which is the consumer side of the service channel (§ Cross-plugin services).
+- **Utilities** plugins *consume*: `path_confinement`, `file_access`, `atomic_write`, `HttpClient`, `Logger`, `SessionReader` (read-only history access), the frontmatter parser, `PluginStorage` (§ Plugin storage), the `PluginRpcHandler` calling convention — and the `ServiceRegistry` pointer carried on `PluginRegistrationContext`, which is the consumer side of the service channel (§ Cross-plugin services).
 
 The surface above is verified against the tree. The remaining designed points — MCP lifecycle observers, model auto-discovery — are catalogued with suggested architectures in `docs/EXTENSIBILITY.md`.
 
@@ -764,6 +766,18 @@ Three rules keep it from becoming an event bus or a hidden dependency:
 
 First consumer: `tools-bash` provides its per-session shell state as `BashSessionStateService` (shipped header `bash_state_service.hpp`, name `tools-bash.session_state`), and `/restart-shell` resolves the store through `Find` — the same lookup a third-party consumer would use. The full §2.2 spec is `docs/EXTENSIBILITY.md`.
 
+### Plugin storage — `src/server/plugins/plugin_storage.{hpp,cpp}`
+
+The sanctioned way a plugin persists state across restarts, and the reason it is core rather than convention: without it every plugin that needs durable state either rolls its own file format in the data dir or re-derives the session store's concurrency discipline — one connection, one mutex, WAL, migrations — with each author getting it independently right or wrong. "A plugin must call these, never reimplement" applied to `path_confinement`; this applies the same rule to persistence.
+
+- **One shared SQLite file** (`DataDir()/plugins.db`), namespaced by plugin: `plugin` is part of the primary key and the first argument of every method, so one plugin cannot read another's rows — structural, not conventional. A plugin that wants another's data uses the service channel, not storage.
+- **Values are opaque strings** (plugins serialize their own JSON, like everything else in this tree). Schema, semantics, and retention are the providing plugin's business.
+- **The escape hatch** for state that does not fit a KV shape: the loader provisions `<DataDir()>/plugins/<plugin_name>/` and carries it on `PluginRegistrationContext::data_dir` (created before the hooks that would use it run). A plugin may keep its own database there, inheriting the discipline as its own obligation.
+- **Not session-scoped by mechanism.** Scoping is a keying decision (the checklist plugin keys by session id); cleanup is a plugin decision. There is no session-deleted observer hook, so a plugin that keys rows by session either purges on `OnSessionEnded` — which breaks resume — or keeps the small rows and accepts the growth. Neither is hidden: choose deliberately per plugin.
+- Open failure is **fatal at startup** (a newer-schema store is refused like a newer session DB), because the seam is handed to plugins at load time and bundled plugins may depend on it.
+
+The `PluginCall` server half (session_service.cpp) is the *transport* side of this: it resolves `plugin_name + ".rpc"` through the sealed `ServiceRegistry` and maps the outcome to statuses (`NOT_FOUND` = plugin disabled or absent, `INVALID_ARGUMENT` = bad request or handler refusal, `INTERNAL` = handler threw). Core defines the calling convention (`plugin_rpc.hpp`) but neither payload nor semantics — a web or mobile frontend consumes the same unary RPC the TUI would.
+
 ### `MentionResolver` and `AuthProvider`
 
 ```cpp
@@ -794,7 +808,9 @@ Default is no authentication, matching the local-only topology. `src/server/rpc/
 |---|---|---|
 | Permission model, config + frontmatter loader, agent/subagent loops, tool-calling machinery, MCP client, session storage, gRPC transport, concurrency | **Core** | Mechanisms everything else calls into — the stable foundation, not customization points. |
 | `path_confinement` / `file_access` / `atomic_write` / `HttpClient` / `Logger` | **Core, exposed to plugins as utilities** | A plugin tool must call these, never reimplement path safety. Inbound ABI surface. |
+| `PluginStorage` (per-plugin KV) + per-plugin `data_dir` | **Core, exposed to plugins as utilities** | The same rule one level up: plugins must not each reinvent SQLite's concurrency discipline in the data dir. The namespace is the boundary; state that needs its own schema gets its own database under `data_dir`. |
 | `read`/`write`/`edit` (`tools-fs`), `bash` (`tools-bash`) | **Bundled plugins** | Not structurally privileged. Bash is split out: distinct security profile, and the one with a plausible alternate implementation (container/remote executor) someone would actually swap. |
+| `checklist` tool + `checklist.rpc` service | **Bundled plugin** | The model's per-session task scratchpad. Exercises the PluginStorage seam and the PluginCall dispatch convention as a third-party plugin would; UI presentation lives in consumers, fetched over the generic channel. |
 | OpenAI provider (`provider-openai`) | **Bundled plugin** | Two-method interface; the obvious thing to fork. |
 | Built-in `/`-commands (`commands-core`) | **Bundled plugin** | One plugin, not nine. |
 | llama.cpp KV-cache commands (`llamacpp-kv`) | **Deferred to v1.x+** | Retained below as the worked example that drove the plugin design, not shipped in v1. |

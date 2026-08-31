@@ -1,10 +1,10 @@
 #pragma once
 
-// The gRPC surface. Implements CreateSession, OpenSession, GetMessages and
-// ListSessions; the rest answer UNIMPLEMENTED until the subsystem behind them
-// exists (SuggestPaths needs the TUI's resolver, PluginCall needs client
-// plugins). Answering explicitly matters: a client that calls one gets a clear
-// status instead of a hang.
+// The gRPC surface. Implements CreateSession, OpenSession, GetMessages,
+// ListSessions and PluginCall; the rest answer UNIMPLEMENTED until the
+// subsystem behind them exists (SuggestPaths needs the TUI's resolver,
+// PluginSubscribe needs live push demand). Answering explicitly matters: a
+// client that calls one gets a clear status instead of a hang.
 //
 // The two read RPCs go to the DATABASE, not to a live Session, and that is the
 // point: the picker lists sessions the server has no Session object for, and
@@ -44,6 +44,10 @@
 namespace minimal::mcp {
 class McpClientManager;
 }  // namespace minimal::mcp
+
+namespace minimal::plugins {
+class ServiceRegistry;
+}  // namespace minimal::plugins
 
 namespace minimal::rpc {
 
@@ -89,6 +93,12 @@ public:
     void set_auth_providers(const AuthProviderRegistry* registry) {
         auth_providers_ = registry;
     }
+
+    // The PluginCall dispatch target: the ServiceRegistry plugins provided
+    // their "<plugin_name>.rpc" handlers into at load, sealed before serving
+    // (which is what makes unguarded Find from these handler threads safe).
+    // Borrowed and optional; null means PluginCall answers UNIMPLEMENTED.
+    void set_services(const plugins::ServiceRegistry* services) { services_ = services; }
 
     std::size_t attached_clients() const;
 
@@ -136,6 +146,8 @@ private:
     mcp::McpClientManager* mcp_manager_ = nullptr;
     // Borrowed and optional: absent = pass-through (see auth_provider.hpp).
     const AuthProviderRegistry* auth_providers_ = nullptr;
+    // Borrowed and optional: absent = PluginCall answers UNIMPLEMENTED.
+    const plugins::ServiceRegistry* services_ = nullptr;
     session::SessionDatabase& db_;
     session::SessionReader reader_;
     config::SettingsConfig settings_;
