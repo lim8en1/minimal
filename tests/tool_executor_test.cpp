@@ -475,3 +475,34 @@ TEST_CASE("the executor tells the tool which invocation it is running",
     CHECK_FALSE(executor.Run("tu-42", "capture", nlohmann::json::object(), ctx).is_error);
     CHECK(tool->seen == "tu-42");
 }
+
+TEST_CASE("an aliased tool still hits the ceiling's per-tool deny",
+          "[tool_executor][ceiling][invariant]") {
+    // THE PERMISSION-KEY RULE, second enforcement point. The ceiling is the
+    // PARENT's policy, whose per_tool_overrides are keyed by permission key --
+    // so matching the ceiling on the SURFACE name missed every aliased tool,
+    // and the child ran exactly the tool the parent's operator had denied,
+    // under its alias. The lookup must go through PermissionKeyFor() like the
+    // base policy's.
+    Fixture f;
+    f.registry.SetAttribution("tools-x");
+    f.AddTool("bash", ToolCategory::Execute);
+    f.registry.ClearAttribution();
+    f.registry.ApplyAliases({{"tools-x.bash", "ssh_bash"}});
+    REQUIRE(f.registry.Find("ssh_bash") != nullptr);
+    f.registry.SetPermissionKeys({{"ssh_bash", "bash"}});
+
+    UnreachablePermissionChecker checker;
+
+    tools::PermissionPolicy child = AllowAllPolicy();  // the child would run it freely
+    tools::PermissionPolicy ceiling = AllowAllPolicy();
+    ceiling.per_tool_overrides["bash"] = PermissionMode::AlwaysDeny;  // the parent denied it
+
+    tools::ToolExecutor executor(f.registry, checker, child, {}, PermissionRunMode::Normal,
+                                 ceiling);
+    auto ctx = f.Context();
+    const auto block = executor.Run("tu1", "ssh_bash", nlohmann::json::object(), ctx);
+    CHECK(block.is_error);           // denied outright: the ceiling's deny is the answer
+    CHECK(f.tool->calls.empty());    // never executed
+    CHECK_FALSE(checker.called);     // never even consulted
+}

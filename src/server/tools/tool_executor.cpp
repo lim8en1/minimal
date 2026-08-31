@@ -79,9 +79,21 @@ PermissionMode ToolExecutor::ResolveMode(const Tool& tool, const nlohmann::json&
     //     permissive than its parent. Folds like out_of_workdir -- it can only
     //     tighten -- and sits before run mode so the clamped run mode still
     //     wraps the whole decision.
+    // 2b. Subagent ceiling, when one was handed down: a child is never more
+    //     permissive than its parent. Folds like out_of_workdir -- it can only
+    //     tighten -- and sits before run mode so the clamped run mode still
+    //     wraps the whole decision.
+    //
+    //     Same key rule as the lookup above: the ceiling's per_tool_overrides
+    //     are keyed by PERMISSION key (they come from the parent's resolved
+    //     policy), so an aliased tool would miss its parent's deny if this
+    //     matched on the surface name -- the child could run exactly the tools
+    //     the parent's operator had renamed out of the deny list.
     if (mode != PermissionMode::AlwaysDeny) {
         if (mcp_server.empty()) {
-            if (policy_ceiling_) mode = most_restrictive(mode, policy_ceiling_->mode_for(name, category));
+            if (policy_ceiling_) {
+                mode = most_restrictive(mode, policy_ceiling_->mode_for(permission_key, category));
+            }
         } else if (mcp_ceiling_) {
             mode = most_restrictive(mode, mcp_ceiling_->mode_for(mcp_server));
         }

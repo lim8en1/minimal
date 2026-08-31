@@ -392,3 +392,51 @@ TEST_CASE("per_tool_overrides govern an aliased tool through its permission key"
     CHECK_FALSE(allowed.is_error);
     CHECK(!checker.called);
 }
+
+TEST_CASE("a reserved core tool name collides with a plugin claiming it",
+          "[plugin_loader][collision][invariant]") {
+    // spawn_subagent is registered by CORE at serve stage -- after the
+    // startup collision check has run. Unreserved, a plugin tool claiming the
+    // name silently shadowed (or was shadowed by) the core tool via
+    // insert_or_assign: the exact failure mode the fatal-collision rule
+    // exists to prevent, reopened through registration order alone. The
+    // reservation feeds the name into the check as the built-in it is.
+    tools::ToolRegistry registry;
+    registry.SetAttribution("bash_over_ssh");
+    registry.Register(std::make_unique<testing::FakeTool>("spawn_subagent",
+                                                          tools::ToolCategory::Execute));
+    registry.ClearAttribution();
+
+    const auto resolution =
+        plugins::ResolveRegistrationNames(registry, {}, nullptr,
+                                          /*core_tool_names=*/{"spawn_subagent"});
+    REQUIRE(resolution.result.fatal_collisions.size() == 1);
+    CHECK(resolution.result.fatal_collisions[0] == "spawn_subagent");
+
+    // The proof the reservation is load-bearing: the same registration WITHOUT
+    // it produced no collision, which is the hole.
+    const auto unreserved = plugins::ResolveRegistrationNames(registry, {});
+    CHECK(unreserved.result.fatal_collisions.empty());
+}
+
+TEST_CASE("a late-registered duplicate does not silently shadow the incumbent",
+          "[plugin_loader][collision][invariant]") {
+    // ToolRegistry::Register once took the insert_or_assign branch after alias
+    // application, so any post-alias duplicate replaced the incumbent with no
+    // diagnostic and the loser was destroyed. First-wins everywhere: the
+    // duplicate is parked as shadowed and the incumbent stays served.
+    tools::ToolRegistry registry;
+    auto first = std::make_unique<testing::FakeTool>("bash", tools::ToolCategory::Execute,
+                                                     "first");
+    auto* first_ptr = first.get();
+    auto second = std::make_unique<testing::FakeTool>("bash", tools::ToolCategory::Execute,
+                                                      "second");
+    registry.Register(std::move(first));
+    registry.ApplyAliases({});  // closes the pre-alias path
+    registry.Register(std::move(second));
+
+    tools::ToolContext ctx(common::DefaultLogger());
+    const auto served = registry.Find("bash")->execute({}, ctx);
+    CHECK(served.content_text == "first");  // the incumbent, not the latecomer
+    CHECK(first_ptr->calls.size() == 1);
+}

@@ -171,8 +171,12 @@ int main(int argc, char** argv) {
     // be re-keyed and wrapped so spec() advertises its surface name, which cannot
     // happen until every registration is in, whereas a command's Name() IS its
     // surface. Same rule, different amount of machinery to enforce it.
-    auto name_resolution =
-        minimal::plugins::ResolveRegistrationNames(tools, plugin_config.command_aliases, &commands);
+    auto name_resolution = minimal::plugins::ResolveRegistrationNames(
+        tools, plugin_config.command_aliases, &commands,
+        /*core_tool_names=*/{minimal::agent::kSpawnSubagentToolName});
+    // The name above is RESERVED here but the tool object itself registers at
+    // serve stage (main registers SpawnSubagentTool only once subagents exist).
+    // The reservation is what puts it inside the fatal-collision scan.
     tools.SetPermissionKeys(name_resolution.permission_keys);
 
     // A linter, not a fail-fast validator: RunAll() surfaces every problem at

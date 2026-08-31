@@ -605,7 +605,7 @@ The ABI header has **two halves**, and both are frozen surface:
 - **Extension points** plugins *implement*: `Tool`, `Command`, provider factory, `SessionObserver`, `MentionResolver`, `AuthProvider`.
 - **Utilities** plugins *consume*: `path_confinement`, `file_access`, `atomic_write`, `HttpClient`, `Logger`, `SessionReader` (read-only history access), the frontmatter parser.
 
-The surface above is verified against the tree, and the designed next points — cross-plugin services, per-plugin config, MCP lifecycle observers, the permission advisor — are catalogued with suggested architectures in `docs/EXTENSIBILITY.md`.
+The surface above is verified against the tree, and the designed next points — cross-plugin services, per-plugin config, MCP lifecycle observers, the permission advisor, model auto-discovery — are catalogued with suggested architectures in `docs/EXTENSIBILITY.md`.
 
 ### `SessionObserver` — observe and react
 

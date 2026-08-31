@@ -14,10 +14,15 @@ void ToolRegistry::Register(std::unique_ptr<Tool> tool) {
     // sides to name them in its diagnostic.
     attributions_.push_back(Attribution{attribution_, name});
     owners_.push_back(tool.get());
-    if (aliases_applied_ || !tools_.count(name)) {
-        tools_.insert_or_assign(std::move(name), std::move(tool));
-    } else {
+    // First registration owns the map slot, always -- before AND after alias
+    // application. The post-alias branch once used insert_or_assign, which made
+    // a late-registered duplicate (spawn_subagent registered at serve stage)
+    // silently shadow or be shadowed; first-wins matches the pre-alias rule and
+    // parks the loser where the collision diagnostics can still see it.
+    if (tools_.count(name)) {
         shadowed_.push_back(Pending{attributions_.back(), std::move(tool)});
+    } else {
+        tools_.emplace(name, std::move(tool));
     }
 }
 

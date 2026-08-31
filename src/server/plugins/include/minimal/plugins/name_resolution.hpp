@@ -3,6 +3,7 @@
 #include <map>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 #include "minimal/plugins/name_registry.hpp"
 #include "minimal/commands/command_registry.hpp"
@@ -35,6 +36,13 @@ struct RegistrationNames {
 // name: core built-ins under an empty plugin name, plugin registrations under
 // their plugin's name, aliased ones still under the name they registered with.
 //
+// `core_tool_names` reserves names the harness itself registers LATER, at serve
+// stage, after this check has run -- `spawn_subagent` is the one. Without the
+// reservation the name was invisible to the fatal-collision scan, and a plugin
+// tool claiming it was silently replaced (or silently replaced it) via
+// insert_or_assign: the exact shadowing failure mode the collision rule exists
+// to prevent, reopened through registration order alone.
+//
 // Each key in `aliases` is routed to the kind that actually claims it, so a
 // command alias is not reported dangling merely because no tool answers to it.
 // A key no registration of either kind claims lands in dangling_aliases once.
@@ -43,6 +51,7 @@ struct RegistrationNames {
 // maps, and startup diagnostics must be stable run to run.
 RegistrationNames ResolveRegistrationNames(const tools::ToolRegistry& registry,
                                            const std::map<std::string, std::string>& aliases,
-                                           const commands::CommandRegistry* commands = nullptr);
+                                           const commands::CommandRegistry* commands = nullptr,
+                                           const std::vector<std::string>& core_tool_names = {});
 
 }  // namespace minimal::plugins

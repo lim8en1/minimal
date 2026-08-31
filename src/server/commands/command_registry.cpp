@@ -21,7 +21,11 @@ void CommandRegistry::Register(std::unique_ptr<Command> command) {
     // needs BOTH sides to name them, and a registry that dropped the loser would
     // leave it with only one.
     attributions_.push_back(Attribution{attribution_, original, surface});
-    commands_.insert_or_assign(std::move(surface), std::move(command));
+    // First registration owns the slot, matching ToolRegistry -- insert_or_assign
+    // here made the two registries disagree about who held the slot while the
+    // fatal check was pending, for no reason: which object wins is moot when the
+    // collision is fatal, so the registries should not disagree at all.
+    commands_.emplace(std::move(surface), std::move(command));
 }
 
 Command* CommandRegistry::Find(std::string_view name) const {
