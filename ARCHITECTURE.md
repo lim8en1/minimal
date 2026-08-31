@@ -318,7 +318,7 @@ private:
 
 **Token accounting — two distinct quantities, never conflated:**
 
-- **Context occupancy** (status-bar `used/max`, compaction trigger) = `last_turn.input_tokens + last_turn.output_tokens`. Each turn's `input_tokens` already contains the whole history, so *summing* across turns double-counts quadratically and would fire compaction far too early.
+- **Context occupancy** (status-bar `used/max`, compaction trigger) = `last_turn.input_tokens + last_turn.output_tokens`. Each turn's `input_tokens` already contains the whole history, so *summing* across turns double-counts quadratically and would fire compaction far too early. (The TUI's status bar currently renders the used half only: `context_window_tokens` is server config with no wire surface — the `max` half waits on the metadata emission in the extension-seams track.)
 - **Cumulative totals** (genuinely additive) = running sum of `output_tokens`, plus summed `input_tokens` if cost display is added later.
 
 Counts come from the backend's own reported usage; there is no separate tokenizer. Some OpenAI-compatible proxies report `0` — no fallback estimate is designed for that, flagged as a known gap.
@@ -902,7 +902,7 @@ The highlighter never hardcodes a color; the theme supplies one per `HighlightCa
 | Running-tools view | **Panel** (`ResizableSplit`) | A *monitor* — wanted visible *while* working |
 | Command results (`/help`, `/providers`, config changes) | view, status line, or transient error — **never a chat row** (§ `/-command system`) | `CommandResult.display` decides |
 
-Frame: `tab bar / active session view / optional panel / status bar`, plus a modal layer. There is no separate "agent view" — that *is* the tab.
+Frame: `tab bar / active session view / optional panel / status bar`, plus a modal layer. There is no separate "agent view" — that *is* the tab. The panel is a capped region in v1; a `ResizableSplit` drag handle is polish that lands with the panel-column slots. The client redraws from state snapshots at a fixed cadence: gRPC reader threads mutate client state only and never touch components, so the bridge is a snapshot pump rather than per-event posts.
 
 ```
 +----------------------------------------------------+

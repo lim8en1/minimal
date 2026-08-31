@@ -1,0 +1,12 @@
+{
+  "tab.next": "ctrl+tab",
+  "tab.previous": "ctrl+shift+tab",
+  "group.previous": "alt+left",
+  "group.next": "alt+right",
+  "jump.attention": "alt+a",
+  "session.picker": "ctrl+o",
+  "panel.toggle": "ctrl+t",
+  "tab.close": "ctrl+w",
+  "chat.load_older": "pageup",
+  "app.quit": "ctrl+q"
+}

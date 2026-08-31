@@ -1,6 +1,7 @@
 #pragma once
 
 #include <chrono>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -11,6 +12,7 @@
 
 #include "minimal/v1/common.pb.h"
 #include "minimal/v1/session_service.pb.h"
+#include "minimal/client/chat_model.hpp"
 #include "minimal/client/session_client.hpp"
 
 namespace minimal::client {
@@ -108,6 +110,16 @@ public:
         // Status-bar occupancy from the LAST turn only (NOT cumulative — see ARCH).
         int64_t input_tokens = 0;
         int64_t output_tokens = 0;
+
+        // Bumped whenever the persisted transcript changed in a way the chat
+        // view should re-fetch (new scrollback page applied, turn completed).
+        // The view compares its cached value to decide a refresh; no timer.
+        uint64_t transcript_version = 0;
+
+        // The latest /-command outcome, for the transient notice line. NEVER a
+        // chat row (EXTENSIBILITY §4.4) — that is a type-level property of
+        // CommandNotice, not a rendering choice made here.
+        std::optional<CommandNotice> latest_notice;
     };
 
     Snapshot TakeSnapshot();
@@ -123,6 +135,15 @@ public:
     // --- Turn boundaries (ToolExecution / TextDelta set Working/Thinking; these clear it) ---
     void OnTurnCompleted(const v1::TurnCompletedEvent& evt);
     void OnError(const std::string& error_message);
+
+    // /-command outcome. Stored as a transient notice for the notice line;
+    // never enters the chat rows.
+    void OnCommandResult(const v1::CommandResult& evt);
+
+    // Drops the accumulated streaming text. The chat view calls this after a
+    // post-turn scrollback refresh, when the streamed message has become a
+    // persisted row -- otherwise the same content would render twice.
+    void ClearStreaming();
 
     // The session's stream ended (server closed it / session terminated) --
     // the real "Done" (✓) signal, distinct from a turn merely completing.
@@ -155,6 +176,10 @@ private:
     std::vector<v1::StoredMessage> scrollback_page_;
     int64_t last_loaded_seq_ = -1;      // oldest seq loaded so far (descending)
     bool has_earlier_ = false;
+    uint64_t transcript_version_ = 0;
+
+    // Latest /-command outcome (transient notice line; never a chat row).
+    std::optional<CommandNotice> latest_notice_;
 
     // Streaming assistant text
     std::string streaming_accumulated_;
@@ -221,6 +246,23 @@ public:
 
     void SendChatTurn(const std::string& session_id, const std::string& text);
 
+    // A `/name args` prompt from the prompt editor. Split client-side (the same
+    // parser the headless flag uses) and sent as a CommandInvocation; the
+    // CommandResult arrives back as the tab's transient notice.
+    void SendCommand(const std::string& session_id, const std::string& line);
+
+    // Ctrl-style interrupt of the tab's in-flight turn, if any.
+    void SendCancel(const std::string& session_id);
+
+    // Synchronously re-fetches the scrollback window for a tab and applies it.
+    //   newest=true: replace the window with the freshest page (post-turn).
+    //   newest=false: page OLDER via the keyset cursor (scroll-up "load more").
+    // Blocking on the calling thread by design -- the caller runs it as a
+    // posted task inside the FTXUI loop, with a short RPC deadline; the
+    // bounded pause at a fetch moment beats detached threads whose lifetime
+    // would race the screen's teardown.
+    void RefreshScrollback(const std::string& session_id, bool newest);
+
     // --- User answers to pending prompts (UI calls these; routes ClientEvents back) ---
 
     void AnswerPermission(const std::string& session_id, const std::string& request_id,
@@ -236,6 +278,18 @@ public:
 
     // --- Rendering ---
     std::vector<TabSnapshot> GetAllTabs() const;   // in render order
+
+    // Per-tab full snapshots (tools, streaming text, notices) for the views
+    // that show cross-session detail. One lock pass, no per-tab fetches.
+    std::map<std::string, SessionState::Snapshot> GetAllDetails() const;
+
+    // The focused tab's session id ("" when no tabs). The prompt editor and
+    // status bar target it.
+    std::string FocusedSessionId() const;
+
+    // Closes every tab: the TUI's quit path. Terminate-all is the session
+    // lifetime rule -- nothing outlives its client.
+    void CloseAllTabs();
 
 private:
     struct TabEntry {

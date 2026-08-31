@@ -59,6 +59,12 @@ struct ParsedArgs {
 
 ParsedArgs ParseArgs(int argc, const char* const* argv);
 
+// Splits "/name arg1 arg2" into its parts. Client-side because this is the side
+// holding the text a human typed; the wire carries the result, so the server
+// never re-splits a command line. The prompt editor's `/` path uses the same
+// split the headless flag does -- one parser, not two opinions.
+CommandInvocationText SplitCommand(std::string_view text);
+
 // A --server value to a gRPC target.
 //
 // Accepts a bare filesystem path, because `minimal-server --listen` takes one

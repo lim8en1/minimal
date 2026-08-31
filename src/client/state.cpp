@@ -1,7 +1,11 @@
 #include "minimal/client/state.hpp"
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <utility>
+
+#include "minimal/client/cli_args.hpp"
 
 namespace minimal::client {
 
@@ -34,6 +38,8 @@ SessionState::Snapshot SessionState::TakeSnapshot() {
     s.tools = tools_;
     s.input_tokens = input_tokens_;
     s.output_tokens = output_tokens_;
+    s.transcript_version = transcript_version_;
+    s.latest_notice = latest_notice_;
     return s;
 }
 
@@ -92,6 +98,24 @@ void SessionState::OnTurnCompleted(const v1::TurnCompletedEvent& evt) {
     // preceding message_stop already resolved state_ (normally to Idle). An
     // in-flight Error is left alone rather than silently cleared here.
     tools_.clear();   // the panel resets when a new turn begins
+    // The completed turn's messages are persisted now but NOT yet in the
+    // scrollback window; bumping the version is what makes the chat view
+    // re-fetch and swap its streaming block for the real rows.
+    ++transcript_version_;
+}
+
+void SessionState::OnCommandResult(const v1::CommandResult& evt) {
+    std::lock_guard lk(mtx_);
+    CommandNotice notice;
+    notice.message = evt.message();
+    notice.is_error = evt.status() == v1::COMMAND_STATUS_ERROR;
+    latest_notice_ = std::move(notice);
+}
+
+void SessionState::ClearStreaming() {
+    std::lock_guard lk(mtx_);
+    streaming_accumulated_.clear();
+    is_streaming_ = false;
 }
 
 void SessionState::OnError(const std::string&) {
@@ -208,6 +232,7 @@ void SessionState::ApplyScrollbackPage(const v1::GetMessagesResponse& resp) {
 
     last_loaded_seq_ = scrollback_page_.empty() ? -1 : scrollback_page_.back().seq();
     has_earlier_ = resp.has_more();
+    ++transcript_version_;
 }
 
 bool SessionState::CanLoadMore() const {
@@ -360,11 +385,14 @@ void AppState::DispatchToTab(const std::string& session_id, const v1::ServerEven
     } else if (event.has_tool_output_delta()) {
         target->OnToolOutputDelta(event.tool_output_delta().tool_use_id(),
                                    event.tool_output_delta().chunk());
+    } else if (event.has_command_result()) {
+        target->OnCommandResult(event.command_result());
     } else if (event.has_subagent_started()) {
         std::lock_guard lk(mtx_);   // append only; deferred spawn happens after unlock below
         pending_subagents_.emplace_back(session_id, event.subagent_started());
     }
-    // command_result / plugin calls are consumed later by the E4 render layer.
+    // command_result is stored as the tab's transient notice above; plugin
+    // calls are consumed later (E5).
 
     // The app lock is released now. Spawn any deferred subagent tabs so child streams attach
     // on their own reader threads without ever holding mtx_ while opening (which could deadlock).
@@ -490,6 +518,67 @@ void AppState::AnswerConfirmation(const std::string& session_id, const std::stri
     if (auto state = GetState(session_id)) state->ClearPendingFor(request_id);
 }
 
+void AppState::SendCommand(const std::string& session_id, const std::string& line) {
+    auto stream = GetStream(session_id);
+    if (!stream) return;
+
+    const auto invocation = SplitCommand(line);
+    v1::ClientEvent ev;
+    ev.set_session_id(session_id);
+    auto* command = ev.mutable_command();
+    // Client-generated, echoed on the CommandResult. The counter is per client,
+    // not a constant: two commands on two streams must not echo-collide.
+    static std::atomic<uint64_t> next_request_id{0};
+    command->set_request_id("cmd-" + std::to_string(next_request_id.fetch_add(1)));
+    command->set_name(invocation.name);
+    for (const auto& value : invocation.positional) {
+        command->mutable_args()->add_positional(value);
+    }
+    command->mutable_args()->set_raw(invocation.raw);
+    stream->Send(ev);
+}
+
+void AppState::SendCancel(const std::string& session_id) {
+    auto stream = GetStream(session_id);
+    if (!stream) return;
+
+    v1::ClientEvent ev;
+    ev.set_session_id(session_id);
+    ev.mutable_cancel();
+    stream->Send(ev);
+}
+
+void AppState::RefreshScrollback(const std::string& session_id, bool newest) {
+    SessionState* state = GetState(session_id);
+    if (state == nullptr) return;
+
+    std::optional<int64_t> cursor;
+    if (!newest) {
+        const auto snapshot = state->TakeSnapshot();
+        cursor = NextScrollbackCursor(snapshot.last_loaded_seq, snapshot.has_earlier_messages);
+        if (!cursor.has_value()) return;   // history exhausted; nothing to ask
+    }
+
+    v1::GetMessagesResponse resp;
+    {
+        grpc::ClientContext context;
+        // Bounded: a fetch pauses the UI thread for at most this long, and a
+        // wedged server must not wedge the frame loop past that.
+        context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(2));
+        v1::GetMessagesRequest request;
+        request.set_session_id(session_id);
+        if (cursor.has_value()) request.set_before_seq(*cursor);
+        request.set_limit(100);
+        if (const grpc::Status status = client_->GetMessages(&context, request, &resp);
+            !status.ok()) {
+            return;   // keep the window we have; the next trigger retries
+        }
+    }
+
+    state->ApplyScrollbackPage(resp);
+    if (newest) state->ClearStreaming();
+}
+
 std::vector<AppState::TabSnapshot> AppState::GetAllTabs() const {
     std::lock_guard lk(mtx_);
     std::vector<TabSnapshot> out;
@@ -508,6 +597,32 @@ std::vector<AppState::TabSnapshot> AppState::GetAllTabs() const {
         out.push_back(std::move(snap));
     }
     return out;
+}
+
+std::map<std::string, SessionState::Snapshot> AppState::GetAllDetails() const {
+    std::lock_guard lk(mtx_);
+    std::map<std::string, SessionState::Snapshot> out;
+    for (const auto& tab : tabs_) {
+        out.emplace(tab.info.session_id, tab.info.state->TakeSnapshot());
+    }
+    return out;
+}
+
+std::string AppState::FocusedSessionId() const {
+    std::lock_guard lk(mtx_);
+    return focused_id_;
+}
+
+void AppState::CloseAllTabs() {
+    std::vector<std::shared_ptr<SessionClient::Stream>> to_close;
+    {
+        std::lock_guard lk(mtx_);
+        for (auto& tab : tabs_) to_close.push_back(tab.stream);
+        tabs_.clear();
+        focused_id_.clear();
+    }
+    // Outside the lock: Close() drains and joins the stream's threads.
+    for (auto& stream : to_close) stream->Close();
 }
 
 AppState::TabEntry* AppState::FindTab(const std::string& session_id) {

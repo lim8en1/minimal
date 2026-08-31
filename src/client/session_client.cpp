@@ -70,6 +70,27 @@ SessionClient::GetMessagesResult SessionClient::GetMessages(const std::string& s
     return result;
 }
 
+grpc::Status SessionClient::GetMessages(grpc::ClientContext* context,
+                                        const v1::GetMessagesRequest& request,
+                                        v1::GetMessagesResponse* response) {
+    return stub_->GetMessages(context, request, response);
+}
+
+SessionClient::ListSessionsResult SessionClient::ListSessions(const std::string& project_root,
+                                                              bool include_all_dirs,
+                                                              int32_t limit) {
+    grpc::ClientContext context;
+    context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(2));
+    v1::ListSessionsRequest request;
+    request.set_project_root(project_root);
+    request.set_include_all_dirs(include_all_dirs);
+    request.set_limit(limit);
+
+    ListSessionsResult result;
+    result.status = stub_->ListSessions(&context, request, &result.response);
+    return result;
+}
+
 SessionClient::SuggestPathsResult SessionClient::SuggestPaths(const std::string& session_id,
                                                               const std::string& prefix,
                                                               int32_t limit) {

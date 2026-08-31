@@ -26,9 +26,12 @@ std::string ExpandTilde(std::string_view path) {
     return std::string(home) + std::string(path.substr(1));
 }
 
+}  // namespace
+
 // Splits "/name arg1 arg2" into its parts. Client-side because this is the side
 // holding the text a human typed; the wire carries the result, so the server
-// never re-splits a command line.
+// never re-splits a command line. Declared in the header: the TUI's prompt
+// editor sends commands through the same split the headless flag uses.
 CommandInvocationText SplitCommand(std::string_view text) {
     CommandInvocationText out;
     std::size_t i = 1;  // past the '/'
@@ -51,8 +54,6 @@ CommandInvocationText SplitCommand(std::string_view text) {
     }
     return out;
 }
-
-}  // namespace
 
 std::string ResolveServerTarget(std::string_view value) {
     if (value.empty()) return DefaultServerTarget();

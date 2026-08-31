@@ -161,6 +161,18 @@ public:
     GetMessagesResult GetMessages(const std::string& session_id,
                                   std::optional<int64_t> before_seq, int32_t limit);
 
+    // Caller-owned-context variant (the TUI bounds its fetches with a deadline).
+    grpc::Status GetMessages(grpc::ClientContext* context, const v1::GetMessagesRequest& request,
+                             v1::GetMessagesResponse* response);
+
+    // The session picker's list. project_root empty requires include_all_dirs.
+    struct ListSessionsResult {
+        v1::ListSessionsResponse response;
+        grpc::Status status;
+    };
+    ListSessionsResult ListSessions(const std::string& project_root, bool include_all_dirs,
+                                    int32_t limit);
+
     // @-mention suggestions, resolved by the server's MentionResolver so the
     // strategy is pluggable server-side and every frontend inherits it. Paths
     // are relative to the session's project_root; directories carry a trailing

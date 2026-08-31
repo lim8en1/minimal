@@ -2,6 +2,16 @@ add_library(minimal_client_core STATIC
     cli_args.cpp
     session_client.cpp
     state.cpp
+    keybindings.cpp
+    status_format.cpp
+    chat_model.cpp
+    view/tab_bar.cpp
+    view/chat_view.cpp
+    view/prompt_editor.cpp
+    view/status_bar.cpp
+    view/tools_panel.cpp
+    view/session_picker.cpp
+    view/prompt_modal.cpp
     render/color_downsample.cpp
     render/theme.cpp
     render/syntax_highlighter.cpp

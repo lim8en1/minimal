@@ -2,7 +2,7 @@
 
 Companion to `ARCHITECTURE.md`, which remains the single source of truth for *design*. This document covers only *sequencing*: what is built, what blocks what, and what "done" means for each remaining piece. Every milestone cites the `ARCHITECTURE.md` section that specifies it; where this plan and that document disagree, that document wins and this one is stale.
 
-**Status: Milestones A, B, C, D, F and H are complete, and a post-merge review of A+B+H has been actioned (§8). Of the TUI (track E), the render layer (E1), the client transport + state core (E2), and server-side @-mentions (E3) are done; the FTXUI frame (E4) and G (MCP) remain. Clean build, zero warnings.** J (permission advisor) is designed (`docs/EXTENSIBILITY.md` §3) and scheduled (§4 J) but not started.
+**Status: Milestones A, B, C, D, F and H are complete, and a post-merge review of A+B+H has been actioned (§8). Of the TUI (track E), the render layer (E1), the client transport + state core (E2), server-side @-mentions (E3), and the frame & views (E4) are done; E5 (extension seams) and G (MCP) remain. Clean build, zero warnings.** J (permission advisor) is designed (`docs/EXTENSIBILITY.md` §3) and scheduled (§4 J) but not started.
 
 `minimal -p` holds real conversations against a local model using `read`, `bash`, and `skill`; a permission prompt round-trips over the wire in both directions; a session grant silences the second prompt; the server exits when the last client detaches. Transcripts persist to SQLite, survive the server process, and are **resumable**: `CreateSession` with a `session_id` reopens a stored session, loads its transcript as the loop's working history without re-appending it, and the next turn continues the conversation (`minimal -p --resume <id> PROMPT`). **Subagents work** (§5 D): a model can spawn blocking and non-blocking children over the `spawn_subagent` tool, permission inheritance is enforced as ceilings, and the headless client honours its attach obligation over a real socket. `cmake --install` produces a config dir the server actually starts against (§8), and the startup sanity check reports every problem with it at once (§4 F).
 
@@ -523,10 +523,21 @@ Largest remaining surface: FTXUI layout, md4c markdown rendering, tree-sitter hi
 
 The permission modal is where consent scoping becomes real UI — and where the **wording obligations** in § *Consent scoping* must be honoured: a grant is blanket permission for a binary, and disclosure is a lower bound.
 
-- [ ] Permission modal renders `PermissionDisclosure` including per-binary session grants.
-- [ ] Streaming tokens render without full-buffer reflow at 512k–1M context.
-- [ ] Tab bar: colour + single `!` attention glyph only (no metadata clutter).
-- [ ] Scrollback pages via `GetMessages` without competing with live turn traffic.
+E4 (frame & views) is built and exercised by execution: frame assembled
+(tab bar / chat / capped tools panel / status bar + modal layer, permission
+prompt topmost), 20 Hz snapshot pump as the reader→screen bridge, keybindings
+shipped and seeded, `/`-commands sent and rendered as a transient notice (never
+a chat row), scrollback paging on the keyset cursor, streaming through the
+debounced view. Full record and divergences in `.opencode/plans/track-e-tui.md`
+§ E4: status-bar `max` and `/`-autocomplete await E5's server-side additions
+(metadata emission, `ListCommands`), picker deletion awaits a `DeleteSession`
+RPC, and the tools panel is capped rather than `ResizableSplit` until E5's
+panel slots.
+
+- [x] Permission modal renders `PermissionDisclosure` including per-binary session grants (wording obligations honoured; grant keys filtered to what was offered).
+- [x] Streaming tokens render without full-buffer reflow at 512k–1M context (bounded window; rows rebuilt only on transcript-version change; streaming through the debounced view).
+- [x] Tab bar: colour + single `!` attention glyph only (no metadata clutter).
+- [x] Scrollback pages via `GetMessages` without competing with live turn traffic (separate unary RPC, keyset cursor, 2 s deadline; load-older bound to a key).
 
 #### E additions — extension seams (added post-hoc; sequenced after the original E definition-of-done)
 
@@ -582,7 +593,7 @@ Not scheduled, recorded so they are decisions rather than oversights.
 - **Server-wide fd hygiene** — no `CLOEXEC` discipline on gRPC/SQLite/log fds; every bash command inherits them. The bash pipes are handled; the rest is not.
 - **`tree-sitter-bash` for command disclosure** — the hand-rolled scanner is conservative and its failure mode is safe (fewer grants offered). Upgrading raises the hit rate, not the safety floor. The grammar is already a planned client dependency.
 - ~~**Unknown `allowed_skills` entries are silently dropped**~~ — still true of resolution (correct for lookup), but now *reported* at startup by F (`naming_model` check).
-- **`themes/*.json` and `keybindings.json` are specified but unread** — `themes/dark.json` and `themes/light.json` now ship in `bundled/` and are seeded (E1); nothing loads them until E4 assembles the frame. `keybindings.json` is still neither seeded nor read: bundling a file whose schema has no loader yet is the drift-prone manifest the command system rejected, so it lands with its loader in E4.
+- ~~**`themes/*.json` and `keybindings.json` are specified but unread**~~ — shipped, seeded, and read as of E1/E4 (E4 closed the keybindings half with its loader and defaults).
 - **The compaction trigger now follows the model's window** (`{"percent": 80}` by default), so the
   "0 means never, and nothing says so" gap is closed: a window-relative strategy against a model with
   no declared `context_window_tokens` logs once and disables itself rather than staying silent.
