@@ -134,7 +134,7 @@ TEST_CASE("a user-chosen model outranks the preset's", "[session_registry][invar
 
     auto params = Params("s1");
     params.model_override = minimal::common::ModelRef{"main", "other-model"};
-    auto session = fixture.registry->Create(params);
+    auto session = fixture.registry->Create(std::move(params));
     REQUIRE(session != nullptr);
 
     // The preset still says test-model; this session runs other-model, with that
@@ -154,7 +154,7 @@ TEST_CASE("an unknown model override is named, with what is available",
     auto params = Params("s1");
     params.model_override = minimal::common::ModelRef{"main", "nope"};
     try {
-        fixture.registry->Create(params);
+        fixture.registry->Create(std::move(params));
         FAIL("expected an unknown model to throw");
     } catch (const std::runtime_error& error) {
         const std::string message = error.what();
@@ -302,7 +302,7 @@ TEST_CASE("resume loads the stored transcript and repairs a torn tool tail",
 
     auto params = Params(row.session_id);
     params.resume = true;
-    auto session = fixture.registry->Create(params);
+    auto session = fixture.registry->Create(std::move(params));
     REQUIRE(session != nullptr);
 
     const auto loaded = fixture.db->LoadMessages(row.session_id);
@@ -329,7 +329,7 @@ TEST_CASE("resume of a clean transcript appends nothing", "[session_registry][re
 
     auto params = Params(row.session_id);
     params.resume = true;
-    auto session = fixture.registry->Create(params);
+    auto session = fixture.registry->Create(std::move(params));
     REQUIRE(session != nullptr);
 
     // Exactly the stored rows -- resume itself never re-appends history.
@@ -345,8 +345,10 @@ TEST_CASE("resume of an already-open session is refused", "[session_registry][re
     const auto row = fixture.db->CreateSession("live", std::nullopt, "/proj", "build");
     auto params = Params(row.session_id);
     params.resume = true;
-    REQUIRE(fixture.registry->Create(params) != nullptr);
-    CHECK_THROWS_AS(fixture.registry->Create(params), std::runtime_error);
+    REQUIRE(fixture.registry->Create(std::move(params)) != nullptr);
+    auto dup = Params(row.session_id);
+    dup.resume = true;
+    CHECK_THROWS_AS(fixture.registry->Create(std::move(dup)), std::runtime_error);
     CHECK(fixture.registry->size() == 1);
 }
 
@@ -382,9 +384,9 @@ TEST_CASE("ChildCount counts only live sessions of that parent", "[session_regis
     agent::SessionParams child_b = Params("cb");
     child_b.parent_session_id = "p";
     agent::SessionParams other = Params("other");
-    fixture.registry->Create(child_a);
-    fixture.registry->Create(child_b);
-    fixture.registry->Create(other);
+    fixture.registry->Create(std::move(child_a));
+    fixture.registry->Create(std::move(child_b));
+    fixture.registry->Create(std::move(other));
 
     CHECK(fixture.registry->ChildCount("p") == 2);
     CHECK(fixture.registry->ChildCount("other") == 0);

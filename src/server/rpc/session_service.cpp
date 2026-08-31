@@ -125,7 +125,7 @@ grpc::Status SessionServiceImpl::CreateSession(grpc::ServerContext* context,
 
     std::shared_ptr<agent::Session> session;
     try {
-        session = sessions_.Create(params);
+        session = sessions_.Create(std::move(params));
     } catch (const std::exception& e) {
         // Preset and provider problems are configuration errors the operator has
         // to see and fix, so they come back with their reason attached rather
@@ -210,7 +210,7 @@ grpc::Status SessionServiceImpl::ResumeSession(const v1::CreateSessionRequest* r
     try {
         // Loads the stored transcript, repairs a torn tool-call tail if there
         // is one, and starts the session.
-        (void)sessions_.Create(params);
+        (void)sessions_.Create(std::move(params));
     } catch (const std::exception& e) {
         // NO ROLLBACK here, unlike fresh creation: the row is the user's
         // existing session, not one this call just minted. A failure (the

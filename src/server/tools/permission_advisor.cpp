@@ -11,10 +11,22 @@ AdvisedPermissionChecker::AdvisedPermissionChecker(std::shared_ptr<PermissionAdv
                                                    std::function<bool()> is_cancelled)
     : advisor_(std::move(advisor)),
       inner_(std::move(inner)),
-      is_cancelled_(std::move(is_cancelled)) {}
+      cancel_source_(std::make_shared<AdvisorCancelSource>(
+          AdvisorCancelSource{std::move(is_cancelled)})) {}
+
+AdvisedPermissionChecker::AdvisedPermissionChecker(std::shared_ptr<PermissionAdvisor> advisor,
+                                                   std::unique_ptr<PermissionChecker> inner,
+                                                   std::shared_ptr<AdvisorCancelSource> cancel_source)
+    : advisor_(std::move(advisor)),
+      inner_(std::move(inner)),
+      cancel_source_(std::move(cancel_source)) {
+    if (!cancel_source_) {
+        cancel_source_ = std::make_shared<AdvisorCancelSource>();
+    }
+}
 
 PermissionResponse AdvisedPermissionChecker::check(const PermissionRequest& request) {
-    AdvisorContext context{is_cancelled_};
+    AdvisorContext context{cancel_source_->is_cancelled};
     try {
         if (auto answer = advisor_->Advise(request, context)) {
             common::DefaultLogger().info(

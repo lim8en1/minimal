@@ -22,6 +22,18 @@ struct AdvisorContext {
     std::function<bool()> is_cancelled;
 };
 
+// Cancellation reaches an advisor through this holder, because the producer of
+// the checker and the owner of the cancel predicate are different objects: the
+// params producer composes the advised checker BEFORE the Session exists, but
+// only the Session knows when its turn is cancelled or it is terminating. The
+// producer creates the source (defaulting to "never cancelled") and hands the
+// same shared_ptr to the checker and to SessionParams; the Session installs its
+// own predicate in its constructor body -- before the worker starts, so there
+// is no window in which an advisor could observe a stale predicate.
+struct AdvisorCancelSource {
+    std::function<bool()> is_cancelled = [] { return false; };
+};
+
 // Answers an Ask automatically, or abstains. nullopt falls through to the
 // inner checker -- the wire checker, i.e. the human. An advisor therefore
 // narrows what reaches a person; it can never widen what runs, because
@@ -41,9 +53,14 @@ public:
 // session setup.
 class AdvisedPermissionChecker : public PermissionChecker {
 public:
+    // Owns its cancel source; use when the holder need not be shared (tests).
     AdvisedPermissionChecker(std::shared_ptr<PermissionAdvisor> advisor,
                              std::unique_ptr<PermissionChecker> inner,
                              std::function<bool()> is_cancelled);
+    // Shares the holder with the Session, which installs its own predicate.
+    AdvisedPermissionChecker(std::shared_ptr<PermissionAdvisor> advisor,
+                             std::unique_ptr<PermissionChecker> inner,
+                             std::shared_ptr<AdvisorCancelSource> cancel_source);
 
     // try advisor; abstain (nullopt) or throw both fall through to the inner
     // checker -- one plugin's failure is not a lost turn. A response returned
@@ -56,7 +73,7 @@ public:
 private:
     std::shared_ptr<PermissionAdvisor> advisor_;
     std::unique_ptr<PermissionChecker> inner_;
-    std::function<bool()> is_cancelled_;
+    std::shared_ptr<AdvisorCancelSource> cancel_source_;
 };
 
 // Keyed by plugin name; permissions.json's "advisor" field selects one by that

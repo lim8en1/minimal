@@ -150,7 +150,7 @@ struct SubagentFixture {
         params.agent_preset = "main";
         params.project_root = workdir;
         params.run_mode_override = run_mode;
-        auto session = sessions->Create(params);
+        auto session = sessions->Create(std::move(params));
         session->TryAttach();  // a client is present in every designed flow
         return session;
     }

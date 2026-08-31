@@ -50,6 +50,8 @@
 #include "minimal/rpc/pending_requests.hpp"
 #include "minimal/rpc/wire_confirmation_broker.hpp"
 #include "minimal/rpc/wire_permission_checker.hpp"
+#include "minimal/tools/permission_advisor.hpp"
+#include "minimal/tools/permission_checker.hpp"
 #include "minimal/tools/tool_executor.hpp"
 #include "minimal/tools/tool_registry.hpp"
 #include "minimal/v1/session_service.pb.h"
@@ -58,12 +60,41 @@ namespace minimal::agent {
 
 class ProviderInstanceCache;  // borrowed via set_provider_instance_cache
 
+// The session's two transport-side primitives, extracted from Session into a
+// shareable block: the params PRODUCER creates them so it can also build a
+// WirePermissionChecker (or a decoration over one) before the Session exists --
+// the seam the permission advisor composes through (docs/EXTENSIBILITY.md §3).
+// Session owns the block through a shared_ptr; the queue and pending maps are
+// exactly the members Session used to hold, unchanged in behavior.
+struct SessionChannels {
+    rpc::EventQueue<v1::ServerEvent> queue;
+    rpc::PendingRequests pending;
+};
+
+inline std::shared_ptr<SessionChannels> MakeSessionChannels() {
+    return std::make_shared<SessionChannels>();
+}
+
 struct SessionParams {
     std::string session_id;
     std::string parent_session_id;  // empty for a top-level session
     std::string name;
     std::string agent_preset;
     std::filesystem::path project_root;
+    // The transport-side primitives this session uses. Producers create one via
+    // MakeSessionChannels() whenever they also build a checker (below); null
+    // means Session creates its own -- the path every plain test takes.
+    std::shared_ptr<SessionChannels> channels;
+    // The permission decision source for this session. Null means the wire
+    // checker (the default -- prompts round-trip to the client). A producer
+    // that configured an advisor composes AdvisedPermissionChecker(wire) and
+    // injects it; a test injects any fake. ToolExecutor sees one checker
+    // either way.
+    std::unique_ptr<tools::PermissionChecker> permission_checker;
+    // Set only when permission_checker is an AdvisedPermissionChecker composed
+    // around this shared holder: Session installs its own cancel predicate into
+    // it in the constructor body, before the worker starts. Null otherwise.
+    std::shared_ptr<tools::AdvisorCancelSource> advisor_cancel_source;
     // Set when the client asked for a specific mode (the headless client asks
     // for AllowOnly); unset means the preset's configured mode stands. For a
     // subagent the spawner has ALREADY clamped it against the parent's via
@@ -170,10 +201,10 @@ public:
     void Terminate();
 
     // Drained by the writer thread; the sole Write() source.
-    rpc::EventQueue<v1::ServerEvent>& queue() { return queue_; }
+    rpc::EventQueue<v1::ServerEvent>& queue() { return channels_->queue; }
     // Resolved from the reader thread when a Permission/Confirmation response
     // arrives.
-    rpc::PendingRequests& pending() { return pending_; }
+    rpc::PendingRequests& pending() { return channels_->pending; }
 
     const SessionInfo& info() const { return info_; }
 
@@ -283,9 +314,12 @@ private:
     std::shared_ptr<llm::LlmProvider> provider_;
     std::unique_ptr<HistoryStore> store_;
 
-    rpc::EventQueue<v1::ServerEvent> queue_;
-    rpc::PendingRequests pending_;
-    rpc::WirePermissionChecker checker_;
+    // The transport-side primitives, created here or shared in via params (see
+    // SessionParams::channels).
+    std::shared_ptr<SessionChannels> channels_;
+    // The permission decision source: the wire default built here, or the
+    // producer's composition (an advised checker, a test fake) moved in.
+    std::unique_ptr<tools::PermissionChecker> checker_;
     rpc::WireConfirmationBroker confirmations_;
 
     tools::ToolExecutor executor_;

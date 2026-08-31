@@ -668,7 +668,7 @@ TEST_CASE("a client-requested run mode overrides the preset's", "[session]") {
 
     auto owned_store = std::make_unique<testing::InMemoryHistoryStore>();
     auto* store = owned_store.get();
-    agent::Session session(params, fixture.preset, std::move(provider), std::move(owned_store),
+    agent::Session session(std::move(params), fixture.preset, std::move(provider), std::move(owned_store),
                            fixture.tools_registry, fixture.loop_config, fixture.observers,
                            common::DefaultLogger());
     session.SubmitTurn("run something");
@@ -866,7 +866,7 @@ TEST_CASE("a policy ceiling reaches the session's executor", "[session][subagent
 
     auto owned_store = std::make_unique<testing::InMemoryHistoryStore>();
     auto* store = owned_store.get();
-    agent::Session session(params, fixture.preset, std::move(provider), std::move(owned_store),
+    agent::Session session(std::move(params), fixture.preset, std::move(provider), std::move(owned_store),
                            fixture.tools_registry, fixture.loop_config, fixture.observers,
                            common::DefaultLogger());
     session.SubmitTurn("run something");
