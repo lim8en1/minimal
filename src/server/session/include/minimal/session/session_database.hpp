@@ -88,7 +88,7 @@ struct OpenOptions {
 // therefore leaves an exact prefix of the transcript -- never a torn row.
 class SessionDatabase {
 public:
-    static constexpr int kSchemaVersion = 4;
+    static constexpr int kSchemaVersion = 5;
 
     // Opens (creating if needed) and migrates. Throws std::runtime_error on any
     // failure, including a database whose user_version is newer than this
@@ -103,10 +103,16 @@ public:
     SessionSummary CreateSession(std::string name, std::optional<std::string> parent_session_id,
                                  std::string project_root, std::string agent_preset);
 
-    // One durable transcript row. Assigns the next per-session seq and returns
-    // it; sets the default name (truncated first user text) when the session
-    // still has none; touches updated_at. token_count is the assistant output
-    // count, 0 otherwise.
+    // One durable transcript row. Assigns the next per-session seq over the
+    // ACTIVE transcript and returns it; sets the default name (truncated first
+    // user text) when the session still has none; touches updated_at.
+    // token_count is the assistant output count, 0 otherwise.
+    //
+    // THE FORK: the first append after a rewind reclaims the discarded tail --
+    // the DELETE rides this transaction, so a crash before it keeps redo alive
+    // and a crash after it leaves the fork standing, and the seq this method
+    // assigns always continues the active sequence rather than landing above
+    // rows the user rewound away.
     //
     // The seq is read back inside the transaction rather than computed by the
     // caller, because SQL is what assigns it -- anything else would be a second
@@ -145,10 +151,29 @@ public:
     std::vector<StoredMessage> LoadMessagesFrom(const std::string& session_id,
                                                 std::int64_t after_seq) const;
 
-    // MAX(seq) of the session's messages, or -1 when it has none. What a
-    // resumed session's HistoryStore initializes its seq tracking from, so the
-    // next append continues the stored sequence instead of restarting it.
+    // One ACTIVE message by exact seq; nullopt when the row does not exist or
+    // is discarded. The rewind path's target validation reads through here: a
+    // discarded or absent seq is not a rewindable position.
+    std::optional<StoredMessage> LoadMessage(const std::string& session_id,
+                                             std::int64_t seq) const;
+
+    // MAX(seq) over the ACTIVE transcript, -1 when there are none. Discarded
+    // rows are excluded so a resumed session's HistoryStore seeds its seq
+    // accounting from the transcript the user actually sees.
     std::int64_t LastMessageSeq(const std::string& session_id) const;
+
+    // --- Session traversal (rewind) ------------------------------------------
+
+    // Marks every ACTIVE message with seq >= target_seq discarded. Returns how
+    // many rows changed state (>= 1 for a valid target, which is itself
+    // active). message_count is recomputed over the active set in the same
+    // transaction, so the picker never counts a discarded tail.
+    std::int64_t SetDiscardedAfter(const std::string& session_id, std::int64_t target_seq);
+
+    // Restores every discarded message of this session. Returns how many rows
+    // came back; zero means nothing to redo. The physical reclaim happens in
+    // AppendMessage (see THE FORK above), so a zero here is final.
+    std::int64_t UnmarkDiscarded(const std::string& session_id);
 
     // --- Compaction checkpoints (see CompactionCheckpoint above) -------------
 

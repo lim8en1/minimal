@@ -60,6 +60,12 @@ public:
     virtual void OnSessionCreated(const SessionInfo&) {}
     virtual void OnTurnCompleted(const SessionInfo&, const TurnSummary&) {}
     virtual void OnToolExecuted(const SessionInfo&, const ToolInvocation&) {}
+    // The session's transcript was rewound (truncated_to_seq >= 0: the cut
+    // landed before that seq) or redone (-1: the discarded tail came back).
+    // This is the seam a file-checkpointing plugin keys on: it maps its own
+    // file snapshots to tool-invocation seqs (via OnToolExecuted) and restores
+    // the snapshot at the cut when notified. Core never restores files.
+    virtual void OnSessionRewound(const SessionInfo&, std::int64_t truncated_to_seq) {}
     virtual void OnSessionEnded(const SessionInfo&) {}
 };
 

@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <optional>
+#include <stdexcept>
 
 #include "minimal/llm/message.hpp"
 
@@ -53,6 +54,37 @@ public:
     virtual void SaveCompactionCheckpoint(std::int64_t boundary_seq,
                                           const llm::Message& summary) = 0;
     virtual void ClearCompactionCheckpoint() = 0;
+
+    // --- Session traversal (rewind) ------------------------------------------
+    //
+    // Conversation rewind marks a tail of the durable transcript DISCARDED
+    // rather than deleting it. The mark is what keeps redo possible; the fork
+    // (the first real append after the rewind) performs the physical reclaim
+    // inside its own transaction -- SessionDatabase::AppendMessage does it, so
+    // the discard is exactly-once with the turn that replaces the branch and
+    // the seq space stays contiguous over the ACTIVE transcript.
+    //
+    // Deliberately not part of the minimal core above: a store that cannot
+    // traverse (a test fake, a future non-SQLite backend) reports
+    // SupportsRewind() == false and Session refuses the request with a clear
+    // error instead of pretending to have honoured it.
+    virtual bool SupportsRewind() const { return false; }
+
+    // Marks every ACTIVE message with seq >= target_seq discarded; returns how
+    // many rows changed state. The target's validity is the caller's problem:
+    // Session validates it against the read side before coming here.
+    virtual std::int64_t SetDiscardedAfter(std::int64_t target_seq) {
+        (void)target_seq;
+        throw std::logic_error("this history store does not support rewind");
+    }
+
+    // Restores every discarded message of this session; returns how many rows
+    // came back. Zero means there was nothing to restore -- either nothing was
+    // ever discarded or the fork already reclaimed it -- and the caller
+    // answers that as "nothing to redo".
+    virtual std::int64_t UnmarkDiscarded() {
+        throw std::logic_error("this history store does not support rewind");
+    }
 };
 
 }  // namespace minimal::agent

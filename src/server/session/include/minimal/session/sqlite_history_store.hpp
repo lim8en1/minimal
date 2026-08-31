@@ -29,6 +29,14 @@ public:
     void SaveCompactionCheckpoint(std::int64_t boundary_seq, const llm::Message& summary) override;
     void ClearCompactionCheckpoint() override;
 
+    // --- Session traversal (rewind) ------------------------------------------
+    // Thin delegates; the transactions and the active-set semantics live in
+    // SessionDatabase. last_seq_ is deliberately left alone by both: it tracks
+    // the last APPENDED seq, and neither a mark nor an unmark appends.
+    bool SupportsRewind() const override { return true; }
+    std::int64_t SetDiscardedAfter(std::int64_t target_seq) override;
+    std::int64_t UnmarkDiscarded() override;
+
 private:
     SessionDatabase& db_;
     std::string session_id_;

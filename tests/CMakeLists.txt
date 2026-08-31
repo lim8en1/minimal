@@ -68,6 +68,7 @@ add_executable(minimal_tests
     session_observer_test.cpp
     session_store_test.cpp
     session_test.cpp
+    rewind_test.cpp
     session_registry_test.cpp
     subagent_spawn_test.cpp
     subagent_test.cpp

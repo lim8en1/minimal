@@ -54,6 +54,32 @@ message CancelTurn {} // interrupts the in-flight LLM turn for this session, if 
 // so the obligation was inexpressible.
 message Attach {}
 
+// --- Session traversal (rewind) ---
+//
+// Discards the ACTIVE transcript from `target_seq` onward. The target must be
+// the seq of an active, text-bearing user message and the cut lands BEFORE it
+// (the edit-your-previous-prompt model): that user message and everything
+// after it leave the conversation, and the client re-sends the edited prompt.
+//
+// Discard is a MARK, not a delete: a later redo restores the tail, and the
+// first real append after the rewind -- the fork -- reclaims it permanently
+// (the reclaim rides the append's own transaction, so a crash before it keeps
+// redo alive and a crash after it leaves the fork standing).
+//
+// Mutating, so like a turn or a mutating command it is queued for the session
+// worker and runs at a turn boundary -- never between a tool_use and its
+// tool_result. Refusals come back as ErrorEvents, never as silence.
+message RewindRequest {
+  oneof action {
+    // Rewind: discard every active message with seq >= target_seq.
+    int64 target_seq = 1;
+    // Redo: restore the tail the most recent rewind discarded. Valid only
+    // while nothing has been appended since -- after the fork the rows are
+    // gone and redo answers "nothing to redo".
+    bool redo = 2;
+  }
+}
+
 message ClientEvent {
   // Redundant on every message rather than bound once via stream metadata —
   // trades a few bytes for messages that are self-describing on their own
@@ -66,6 +92,7 @@ message ClientEvent {
     ConfirmationResponse confirmation_response = 5;
     CancelTurn cancel = 6;
     Attach attach = 7;
+    RewindRequest rewind = 8;
   }
 }
 
@@ -166,6 +193,19 @@ message TurnCompletedEvent {
   bool hit_max_turns = 3;
 }
 
+// The session's transcript was rewound or redone. The client trims its
+// scrollback to the ACTIVE transcript (messages with seq <= active_last_seq,
+// which is -1 when the transcript is now empty) and clears any streaming or
+// pending-turn state for the session. Not a turn terminator: no
+// TurnCompletedEvent accompanies it.
+message SessionRewoundEvent {
+  // The seq the cut landed before -- the target of the RewindRequest. -1 for a
+  // redo, which restores rather than cuts.
+  int64 truncated_to_seq = 1;
+  // MAX(seq) over the ACTIVE transcript after the operation, or -1 when empty.
+  int64 active_last_seq = 2;
+}
+
 message ServerEvent {
   // Which session this event belongs to. Required because one client multiplexes
   // several sessions (tabs), including subagent children of the focused session.
@@ -181,6 +221,7 @@ message ServerEvent {
     SessionMetadataEvent session_metadata = 9;
     ErrorEvent error = 10;
     TurnCompletedEvent turn_completed = 11;
+    SessionRewoundEvent session_rewound = 12;
   }
 }
 

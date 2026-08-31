@@ -324,6 +324,25 @@ void SessionServiceImpl::Dispatch(const v1::ClientEvent& event, agent::Session& 
             DispatchCommand(event.command(), session);
             return;
 
+        case v1::ClientEvent::kRewind: {
+            // Queued for the worker like a mutating command: the rewind runs
+            // at a turn boundary and refuses itself on the wire if the target
+            // is not a rewoundable position. Nothing here blocks.
+            //
+            // The oneof is carried across explicitly: an UNSET action must
+            // reach the session as "neither", not as the proto3 default that
+            // `target_seq()` returns -- which would silently read as a rewind
+            // to seq 0.
+            agent::QueuedRewind queued;
+            if (event.rewind().has_target_seq()) {
+                queued.target_seq = event.rewind().target_seq();
+            } else if (event.rewind().redo()) {
+                queued.redo = true;
+            }
+            session.SubmitRewind(queued);
+            return;
+        }
+
         case v1::ClientEvent::PAYLOAD_NOT_SET:
             logger_.warn("session {}: client event with no payload", session.info().session_id);
             return;

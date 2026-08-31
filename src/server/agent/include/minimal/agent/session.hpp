@@ -155,7 +155,18 @@ struct QueuedCommand {
     std::string name;
     commands::CommandArgs args;
 };
-using WorkItem = std::variant<std::string, QueuedCommand>;  // string = a user turn
+
+// One traversal request for the session worker. A rewind cuts the ACTIVE
+// transcript before target_seq (the target must be an active, text-bearing
+// user message); a redo restores the tail the most recent rewind discarded.
+// See ARCHITECTURE.md "Session traversal" and the RewindRequest proto comment
+// for the mark/fork/reclaim model.
+struct QueuedRewind {
+    std::int64_t target_seq = -1;  // meaningful only when redo == false
+    bool redo = false;
+};
+
+using WorkItem = std::variant<std::string, QueuedCommand, QueuedRewind>;  // string = a user turn
 
 class Session : public commands::SessionControl {
 public:
@@ -208,6 +219,15 @@ public:
     // only, dispatched by the RPC layer onto its bounded command pool -- never
     // inline on the reader, which must not block.
     void RunCommandNow(const QueuedCommand& command);
+
+    // Reader thread. Queues a rewind/redo for the worker, which runs it at a
+    // turn boundary -- the same structural guarantee a mutating command has:
+    // never between a tool_use and its tool_result. False means refused
+    // (terminated, a subagent session, a malformed request, or the work queue
+    // is full), and an error event answering the refusal has been pushed
+    // where the queue can still carry one -- a client is never left waiting
+    // on a rewind that was silently dropped.
+    bool SubmitRewind(QueuedRewind request);
     // Cross-session splice point: a non-blocking subagent's worker queues its
     // completion here when it finishes; the session's own worker flushes it at
     // a turn boundary. False means the session is already terminating and the
@@ -321,6 +341,16 @@ private:
     void WorkerMain();
     void RunOneTurn(std::string text);
     void RunOneCommand(const QueuedCommand& command);
+    void RunOneRewind(const QueuedRewind& request);
+    void RunRewind(std::int64_t target_seq);
+    void RunRedo();
+    // Answers a rewind with an ErrorEvent. Worker paths may Push (blocking is
+    // allowed there); reader-side refusals go through SubmitRewind's TryPush
+    // path instead.
+    void EmitRewindRefusal(const std::string& reason);
+    // The success event: what the active transcript now ends at, so the client
+    // can trim its scrollback and clear streaming state.
+    void EmitSessionRewound(std::int64_t truncated_to_seq, std::int64_t active_last_seq);
     // Builds the context and dispatches. Shared by the worker path and the
     // read-only pool path so the two cannot diverge on what a command may reach.
     void ExecuteCommand(const QueuedCommand& command, bool busy);

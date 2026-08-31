@@ -263,6 +263,89 @@ void AgentLoop::ClearHistory() {
     // leaves scrollback whole.
 }
 
+void AgentLoop::TruncateAfter(std::int64_t target_seq) {
+    // Nothing in memory to truncate. Reachable legitimately: a second rewind
+    // after one to the transcript's start left the working set empty, and the
+    // durable marks are still the Session's to make.
+    if (history_.empty()) return;
+    if (!first_persisted_seq_.has_value() && !head_is_summary_) {
+        // No mapping to seq space. Defensive -- the Session validates the
+        // target against the store before calling, and every path that fills
+        // history_ also establishes the mapping -- but silent corruption
+        // would be worse than an early return.
+        session_.logger.warn("session {}: rewind ignored: no persisted portion to map onto",
+                             session_.session_id);
+        return;
+    }
+    // Index in history_ of the first message that must go. The contiguous-
+    // suffix invariant makes this arithmetic exact: history_'s persisted
+    // portion starts at first_persisted_seq_, and the synthetic summary (when
+    // present) sits one slot above the arithmetic.
+    const std::int64_t base = first_persisted_seq_.value_or(0);
+    const std::int64_t signed_idx = target_seq - base + (head_is_summary_ ? 1 : 0);
+    // A rewind to the transcript's very start leaves the working set empty.
+    const std::size_t idx =
+        static_cast<std::size_t>(std::max<std::int64_t>(signed_idx, 0));
+    history_.erase(history_.begin() + static_cast<long>(idx), history_.end());
+    if (history_.empty()) {
+        // Mirrors ClearHistory: an empty working set has no persisted portion
+        // to be contiguous with, and the next append establishes it.
+        first_persisted_seq_.reset();
+    }
+
+    // Same reset the constructor and /clear apply: the estimate described the
+    // discarded tail too.
+    tokens_ = llm::TokenAccumulator{};
+    if (!history_.empty()) tokens_.SeedOccupancy(estimate_tokens(history_));
+
+    {
+        // Under the lock, like every other touch of injected_: a background
+        // subagent's worker can be queueing a completion while the user
+        // rewinds. Those completions answer turns that no longer happened.
+        std::lock_guard<std::mutex> lock(injected_mu_);
+        injected_.clear();
+    }
+
+    session_.logger.info(
+        "session {}: rewound to seq {}; {} messages remain in the working set",
+        session_.session_id, target_seq, history_.size());
+}
+
+void AgentLoop::ReseedFromStore(std::vector<llm::Message> rows, std::int64_t first_seq) {
+    history_ = std::move(rows);
+    first_persisted_seq_ = history_.empty() ? std::nullopt
+                                            : std::optional<std::int64_t>(first_seq);
+    head_is_summary_ = false;
+    tokens_ = llm::TokenAccumulator{};
+    if (!history_.empty()) tokens_.SeedOccupancy(estimate_tokens(history_));
+    {
+        // Same obligation TruncateAfter carries: the discarded tail owned any
+        // completions queued against it.
+        std::lock_guard<std::mutex> lock(injected_mu_);
+        injected_.clear();
+    }
+    session_.logger.info(
+        "session {}: rewound under the compaction boundary to seq {}; working set rebuilt "
+        "with {} messages",
+        session_.session_id, first_seq, history_.size());
+}
+
+void AgentLoop::RestorePersisted(std::vector<llm::Message> rows, std::int64_t first_seq) {
+    if (rows.empty()) return;
+    if (!first_persisted_seq_.has_value()) {
+        // The working set was empty -- rewound to the transcript's start and
+        // then redone. The restored rows ARE the persisted portion now.
+        first_persisted_seq_ = first_seq;
+        head_is_summary_ = false;
+    }
+    history_.insert(history_.end(), std::make_move_iterator(rows.begin()),
+                    std::make_move_iterator(rows.end()));
+    tokens_ = llm::TokenAccumulator{};
+    tokens_.SeedOccupancy(estimate_tokens(history_));
+    session_.logger.info("session {}: redo restored {} messages from seq {}",
+                         session_.session_id, history_.size(), first_seq);
+}
+
 std::optional<std::size_t> AgentLoop::Compact() {
     if (!compactor_) return std::nullopt;
     if (history_.size() < 2) return std::nullopt;

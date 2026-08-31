@@ -52,6 +52,15 @@ public:
     std::vector<StoredMessage> LoadAfter(const std::string& session_id,
                                          std::int64_t after_seq) const;
 
+    // One ACTIVE message by exact seq; nullopt when the row does not exist or
+    // is discarded. The rewind path's target validation reads through here.
+    std::optional<StoredMessage> LoadMessage(const std::string& session_id,
+                                             std::int64_t seq) const;
+
+    // MAX(seq) over the ACTIVE transcript, -1 when empty. The rewind event's
+    // active_last_seq, and what a redo's restore range is computed from.
+    std::int64_t ActiveLastSeq(const std::string& session_id) const;
+
 private:
     SessionDatabase& db_;
 };

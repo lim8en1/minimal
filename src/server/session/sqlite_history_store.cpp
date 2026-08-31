@@ -27,4 +27,12 @@ void SqliteHistoryStore::ClearCompactionCheckpoint() {
     db_.ClearCompactionCheckpoint(session_id_);
 }
 
+std::int64_t SqliteHistoryStore::SetDiscardedAfter(std::int64_t target_seq) {
+    return db_.SetDiscardedAfter(session_id_, target_seq);
+}
+
+std::int64_t SqliteHistoryStore::UnmarkDiscarded() {
+    return db_.UnmarkDiscarded(session_id_);
+}
+
 }  // namespace minimal::session
