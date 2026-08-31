@@ -4,7 +4,13 @@
 
 #include "minimal/mcp/mcp_stdio_shim.hpp"
 
+#include <cerrno>
+#include <chrono>
 #include <csignal>
+#include <thread>
+
+#include <sys/wait.h>
+#include <unistd.h>
 
 #include <mcp_message.h>
 #include <mcp_stdio_client.h>
@@ -35,7 +41,7 @@ McpStdioShim::McpStdioShim(const std::string& command_line,
 McpStdioShim::~McpStdioShim() { delete static_cast<::mcp::stdio_client*>(client_); }
 
 bool McpStdioShim::Initialize(const std::string& client_name,
-                              const std::string& client_version) {
+                              const std::string& client_version, std::string* error) {
     if (client_ == nullptr) {
         DisableSigpipe();
         ::mcp::json env_json = ::mcp::json::object();
@@ -44,9 +50,11 @@ bool McpStdioShim::Initialize(const std::string& client_name,
     }
     try {
         return static_cast<::mcp::stdio_client*>(client_)->initialize(client_name, client_version);
-    } catch (const ::mcp::mcp_exception&) {
+    } catch (const ::mcp::mcp_exception& e) {
+        if (error != nullptr) *error = e.what();
         return false;
-    } catch (const std::exception&) {
+    } catch (const std::exception& e) {
+        if (error != nullptr) *error = e.what();
         return false;
     }
 }
@@ -92,6 +100,41 @@ bool McpStdioShim::CallTool(const std::string& name, const std::string& argument
         error = e.what();
         return false;
     }
+}
+
+int McpStdioShim::ChildPid() const {
+    if (client_ == nullptr) return -1;
+    return static_cast<const ::mcp::stdio_client*>(client_)->child_pid();
+}
+
+void McpStdioShim::AbortChild() {
+    if (client_ == nullptr) return;
+    const int pid = static_cast<::mcp::stdio_client*>(client_)->child_pid();
+    if (pid <= 0) return;
+
+    // waitpid(WNOHANG): 0 = alive and still our child (signal it); pid = dead
+    // but unreaped (nothing to do); -1 = reaped or never ours (never signal).
+    // The check runs at signal time, so a child that already died cannot be
+    // confused with a reused pid.
+    int status = 0;
+    if (waitpid(pid, &status, WNOHANG) != 0) return;
+    kill(pid, SIGTERM);
+
+    // SIGTERM grace, then SIGKILL: the teardown thread cannot wait for the
+    // child, so the escalation lives in a short detached watcher. The child
+    // is our direct child, so waitpid is legal here; double-reaping against
+    // cpp-mcp's own destructor is benign (the loser sees ECHILD).
+    std::thread([pid] {
+        for (int i = 0; i < 50; ++i) {  // 50 * 100 ms = 5 s of grace
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            int watcher_status = 0;
+            const pid_t result = waitpid(pid, &watcher_status, WNOHANG);
+            if (result == pid || (result == -1 && errno == ECHILD)) return;  // gone
+            if (result == -1) return;  // unexpected errno: nothing more to do
+        }
+        kill(pid, SIGKILL);
+        waitpid(pid, nullptr, 0);  // reap the SIGKILLed child
+    }).detach();
 }
 
 }  // namespace minimal::mcp

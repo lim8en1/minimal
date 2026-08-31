@@ -102,6 +102,12 @@ struct McpConnection::Transport {
     virtual void ListTools(Slot<std::vector<ToolListing>>& slot) = 0;
     virtual void CallTool(const std::string& tool_name, const nlohmann::json& arguments,
                           Slot<nlohmann::json>& slot) = 0;
+    // Teardown support, called from the DESTROYING thread while the worker may
+    // be wedged inside a blocking call above: unblock the underlying I/O the
+    // only way it can be unblocked (kill the stdio child; the blocking read
+    // then ends, cpp-mcp's 60 s request cap fires, and the detached worker
+    // unwinds). A no-op for transports without a process to kill.
+    virtual void Abort() {}
 };
 
 namespace {
@@ -119,14 +125,22 @@ public:
     }
 
     void Initialize(Slot<bool>& slot) override {
-        if (shim_->Initialize(client_name_, client_version_)) {
+        std::string error;
+        if (shim_->Initialize(client_name_, client_version_, &error)) {
             slot.Complete(true, {});
         } else {
             slot.Complete(std::nullopt,
                           "MCP initialize failed: server rejected the handshake or died "
-                          "during startup");
+                          "during startup" +
+                              (error.empty() ? std::string() : ": " + error));
         }
     }
+
+    // Kill the child NOW, from the destroying thread: a wedged blocking call
+    // would otherwise hold the child (and the detached worker's shared_ptrs)
+    // for up to cpp-mcp's internal 60 s per request -- and an orphaned child
+    // forever if the server process exits first.
+    void Abort() override { shim_->AbortChild(); }
 
     void Ping(Slot<bool>& slot) override { slot.Complete(std::optional<bool>(shim_->Ping()), {}); }
 
@@ -466,6 +480,10 @@ McpConnection::~McpConnection() { Teardown(); }
 
 void McpConnection::Teardown() {
     if (!worker_) return;
+    // Abort the transport BEFORE stopping the worker: killing the stdio child
+    // is what lets a wedged blocking call end, so the detached worker and the
+    // child it holds unwind instead of lingering.
+    transport_->Abort();
     {
         std::lock_guard<std::mutex> lock(worker_->mu);
         worker_->stopped = true;

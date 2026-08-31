@@ -24,6 +24,18 @@
 
 namespace {
 
+// When set, the fake server writes its own pid here at startup. Teardown
+// tests read it to verify the harness killed the child (the test binary is
+// the child's parent, so waitpid observes the death directly).
+void WritePidFileIfRequested() {
+    const char* path = std::getenv("MINIMAL_FAKE_PID_FILE");
+    if (path == nullptr || *path == '\0') return;
+    if (FILE* file = std::fopen(path, "w")) {
+        std::fprintf(file, "%d\n", static_cast<int>(getpid()));
+        std::fclose(file);
+    }
+}
+
 // ctest waits for EOF on the test binary's stdio pipes, so a fake server that
 // outlives its parent (parent killed at timeout, wedged call, orphaned child)
 // makes the whole ctest run hang even though the test itself finished. The
@@ -97,6 +109,7 @@ void RegisterStandardTools(::mcp::server& server, bool with_hang) {
 int main(int argc, char** argv) {
     const std::string mode = argc > 1 ? argv[1] : "normal";
     StartOrphanWatchdog();
+    WritePidFileIfRequested();
 
     if (mode == "garbage") {
         // Corrupt the protocol channel deliberately: junk on the pipe stdout.

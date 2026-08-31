@@ -1,6 +1,12 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <sys/wait.h>
+#include <unistd.h>
+
 #include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <fstream>
 #include <memory>
 #include <nlohmann/json.hpp>
 #include <string>
@@ -277,6 +283,62 @@ TEST_CASE("McpConnection stdio: server dying mid-life degrades to a bounded erro
     if (run.Ready()) {
         CHECK_FALSE(run.Get());  // dead server: false, not a hang
     }
+}
+
+TEST_CASE("McpConnection stdio: teardown kills a wedged call's child process", "[mcp_connection]") {
+    // The hang tool parks the worker inside cpp-mcp's blocking call well past
+    // every deadline; the child used to linger for cpp-mcp's internal 60 s
+    // (or forever, had the server process exited first). Teardown must kill
+    // it: the fake server writes its pid to a file, and the test -- being the
+    // child's parent -- observes the death via waitpid.
+    char pid_file[] = "/tmp/minimal_fake_mcp_pid_XXXXXX";
+    const int pid_fd = mkstemp(pid_file);
+    REQUIRE(pid_fd != -1);
+    close(pid_fd);  // only the name matters; the child writes the file
+
+    McpEndpoint endpoint = StdioEndpoint("hang");
+    endpoint.env["MINIMAL_FAKE_PID_FILE"] = pid_file;
+    McpConnection::Failure error;
+    auto connection = McpConnection::Open(endpoint, {std::chrono::seconds(10), std::chrono::seconds(1)},
+                                          "test", "0.0.1", error);
+    REQUIRE(connection != nullptr);
+
+    // Read the pid the child reported, then stop the caller's deadline from
+    // mattering: the call itself times out at 1 s while the child hangs on.
+    int child_pid = -1;
+    for (int i = 0; i < 100 && child_pid <= 0; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        std::ifstream in(pid_file);
+        int pid = -1;
+        if (in >> pid) child_pid = pid;
+    }
+    REQUIRE(child_pid > 0);
+
+    const auto run = RunInBackground([&] {
+        return connection->CallTool("hang", nlohmann::json::object(), nullptr);
+    });
+    CHECK(run.WaitFor(std::chrono::seconds(5)));
+
+    // Teardown (the destructor) while the worker is still wedged inside the
+    // hung call: the child must die promptly -- not at cpp-mcp's internal
+    // 60 s cap.
+    connection.reset();
+
+    bool child_dead = false;
+    for (int i = 0; i < 40; ++i) {  // 40 * 100 ms = 4 s bound
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        int status = 0;
+        // The test process is the child's parent: 0 = still alive, pid =
+        // dead (zombie or reaped by the shim's own destructor path), ECHILD
+        // = already reaped by that path. All but 0 prove death.
+        const pid_t result = waitpid(child_pid, &status, WNOHANG);
+        if (result != 0) {
+            child_dead = true;
+            break;
+        }
+    }
+    CHECK(child_dead);
+    std::remove(pid_file);
 }
 
 TEST_CASE("McpConnection stdio: garbage protocol output fails Open within the deadline", "[mcp_connection]") {

@@ -31,8 +31,11 @@ public:
 
     // Spawns the child and runs the handshake. May block indefinitely if the
     // child dies during startup (cpp-mcp has no deadline here) -- callers own
-    // the deadline.
-    bool Initialize(const std::string& client_name, const std::string& client_version);
+    // the deadline. On false, *error (when non-null) carries the exception
+    // message: "rejected the handshake" alone hid whether the child died,
+    // crashed on startup, or answered a protocol error.
+    bool Initialize(const std::string& client_name, const std::string& client_version,
+                    std::string* error = nullptr);
     bool Ping();
     std::vector<ShimTool> ListTools();
 
@@ -42,6 +45,19 @@ public:
     // rather than an exception.
     bool CallTool(const std::string& name, const std::string& arguments_json,
                   std::string& result_json, std::string& error);
+
+    // The spawned child's pid, -1 before Initialize. Reads cpp-mcp's atomic
+    // field, so it is safe to call from the teardown thread while a worker
+    // thread is still inside a blocking call (that is the whole point).
+    int ChildPid() const;
+
+    // Best-effort kill of the child subprocess, for teardown while a worker
+    // thread may be wedged inside a blocking call: SIGTERM, with a detached
+    // watcher escalating to SIGKILL after 5 s. Guarded by waitpid(WNOHANG):
+    // only a live process that is still OUR child is signalled, so a dead-
+    // and-reaped child never causes a reused pid to be signalled. Children of
+    // the child are not touched (cpp-mcp spawns no process group).
+    void AbortChild();
 
 private:
     std::string command_line_;

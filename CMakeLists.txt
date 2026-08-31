@@ -99,6 +99,12 @@ FetchContent_Declare(cpp_mcp
     EXCLUDE_FROM_ALL)
 FetchContent_MakeAvailable(cpp_mcp)
 # Exports a plain, un-namespaced static target: `mcp`.
+#
+# Patched in place, idempotently (existing build trees are already patched):
+# the stdio child-pid accessor lets the harness kill a wedged stdio child on
+# teardown. cmake/ApplyCppMcpPatches.cmake fails loudly on a half-applied or
+# diverged tree.
+include(cmake/ApplyCppMcpPatches.cmake)
 
 add_subdirectory(proto)
 add_subdirectory(src/common)
