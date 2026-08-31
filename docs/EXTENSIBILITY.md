@@ -4,7 +4,7 @@ Companion to `ARCHITECTURE.md`, which remains the single source of truth for *de
 
 ## 1. The surface as it exists
 
-**Server ABI** (`src/server/plugins/include/minimal/plugins/plugin_abi.h`) — seven `extern "C"` symbols on the merged tree (eight once the `tui` branch's mention-resolver registration lands), each `dlsym`'d by `plugin_loader.cpp`:
+**Server ABI** (`src/server/plugins/include/minimal/plugins/plugin_abi.h`) — eight `extern "C"` symbols on the merged tree (nine once the `tui` branch's mention-resolver registration lands), each `dlsym`'d by `plugin_loader.cpp`:
 
 | Symbol | Status | What it grants |
 |---|---|---|
@@ -14,9 +14,10 @@ Companion to `ARCHITECTURE.md`, which remains the single source of truth for *de
 | `minimal_plugin_register_session_observer(SessionObserverRegistry&)` | live | fire-and-forget lifecycle reactions; cannot veto anything |
 | `minimal_plugin_register_commands(CommandRegistry&)` | live | `/`-commands |
 | `minimal_plugin_register_mention_resolver(...)` | **wired on the `tui` branch (E3)** — `PrefixMentionResolver` is the core default, exclusive first-wins; pending merge | pluggable `@`-mention resolution |
-| `minimal_plugin_register_auth_provider(...)` | named but unwired (the comment at `plugin_abi.h:94-97`) | — |
+| `minimal_plugin_register_auth_provider(...)` | live | exclusive connection policy; pass-through default |
+| `minimal_plugin_register_permission_advisor(PermissionAdvisorRegistry&)` | **live (track J)** | answers `Ask` automatically; abstains/throws to the wire checker — the human |
 
-Interfaces a plugin implements today: `Tool` (with `Disclose` / `category_for` / `ExtractPath`), `Command` → `HarnessCommand`/`LLMCommand`, `LlmProvider` plus a factory, `SessionObserver`.
+Interfaces a plugin implements today: `Tool` (with `Disclose` / `category_for` / `ExtractPath`), `Command` → `HarnessCommand`/`LLMCommand`, `LlmProvider` plus a factory, `SessionObserver`, `PermissionAdvisor` (composing above the wire checker — see §3).
 
 **Utilities half** — included from `plugin_abi.h`: `path_confinement`, `file_access`, `atomic_write`, `HttpClient`, `SseParser`, `Logger`, plus the registry headers. Two utilities exist in core but are **not** in the frozen include set: `SessionReader` and the frontmatter parser. They are reachable through ordinary core linkage (plugins link `minimal_server_core`, a shared library), but they are not yet declared surface.
 
@@ -189,6 +190,8 @@ The one OpenAI-shape catalog implementation (`GET <url>/models`, read `context_l
 **Cost.** Low-moderate — the plugin half is small; the work is the `ProvidersConfig` lazy path and the four consumers. Independent of E and G.
 
 ## 3. Permission advisor — "auto" mode as a plugin
+
+**Status: landed as track J.** The composition below is implemented as specified: `AdvisedPermissionChecker` over the wire checker, substrate untouched, `permissions.json` `"advisor"`/`"advisor_inherit"`, sanity-check warning for an unresolvable name, and the full test list from DEVELOPMENT_PLAN §4 J (including the E2E through the real plugin loader and the three §6 invariant proofs). The one implementation addition is the `SessionChannels` extraction in DEVELOPMENT_PLAN §4 J's How.
 
 **The request.** A plugin that answers tool-permission prompts automatically — rules, an LLM judge, a remote policy service — falling back to a human only when it abstains.
 
@@ -419,7 +422,7 @@ Command (the abstract -- already named Command; no rename)
 | 2.4 MCP lifecycle | track G | designed, waits on G |
 | 2.5 Plugin UI surface | track E + 2.2 | designed, lands with E; the server half dispatches through 2.2's registry (built by track L) |
 | 2.6 Model auto-discovery | nothing | designed, **track N** (DEVELOPMENT_PLAN §4 N) |
-| 3 Permission advisor | nothing | designed, **track J (scheduled)** |
+| 3 Permission advisor | nothing | **done (track J)** |
 | 4.2 TUI slots | E's frame first | specified; E additions (DEVELOPMENT_PLAN §5 E) |
 | 4.3 `ListCommands` | nothing (server half trivial) | specified; lands with E |
 | 4.4 Command display modes | nothing | specified; server half lands with E |

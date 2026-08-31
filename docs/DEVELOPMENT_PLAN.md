@@ -2,7 +2,7 @@
 
 Companion to `ARCHITECTURE.md`, which remains the single source of truth for *design*. This document covers only *sequencing*: what is built, what blocks what, and what "done" means for each remaining piece. Every milestone cites the `ARCHITECTURE.md` section that specifies it; where this plan and that document disagree, that document wins and this one is stale.
 
-**Status: Milestones A, B, C, D, F and H are complete, and a post-merge review of A+B+H has been actioned (§8). Only E (the TUI) and G (MCP) remain. Clean build, zero warnings.** The extensibility work is now sequenced as five tracks: **J** (permission advisor — designed in `docs/EXTENSIBILITY.md` §3, previously scheduled, not started), followed by **K** (per-plugin config), **L** (cross-plugin services), **M** (tool history access) and **N** (model auto-discovery) — all designed in `docs/EXTENSIBILITY.md` §2 and appended below as §4 K–N. K precedes L so the new `register_services` ABI symbol ships with the registration context and never needs a second signature sweep; M and N are independent of everything and each other.
+**Status: Milestones A, B, C, D, F and H are complete, and a post-merge review of A+B+H has been actioned (§8). Only E (the TUI) and G (MCP) remain. Clean build, zero warnings.** Track **J (permission advisor) is complete** — including the SessionChannels extraction, the E2E over a real socket through the real plugin loader, and the three §6 invariant proofs. The remaining extensibility tracks are **K** (per-plugin config), **L** (cross-plugin services), **M** (tool history access) and **N** (model auto-discovery) — all designed in `docs/EXTENSIBILITY.md` §2 and appended below as §4 K–N. K precedes L so the new `register_services` ABI symbol ships with the registration context and never needs a second signature sweep; M and N are independent of everything and each other.
 
 `minimal -p` holds real conversations against a local model using `read`, `bash`, and `skill`; a permission prompt round-trips over the wire in both directions; a session grant silences the second prompt; the server exits when the last client detaches. Transcripts persist to SQLite, survive the server process, and are **resumable**: `CreateSession` with a `session_id` reopens a stored session, loads its transcript as the loop's working history without re-appending it, and the next turn continues the conversation (`minimal -p --resume <id> PROMPT`). **Subagents work** (§5 D): a model can spawn blocking and non-blocking children over the `spawn_subagent` tool, permission inheritance is enforced as ceilings, and the headless client honours its attach obligation over a real socket. `cmake --install` produces a config dir the server actually starts against (§8), and the startup sanity check reports every problem with it at once (§4 F).
 
@@ -382,22 +382,22 @@ A plugin answers `Ask`-gated tool calls automatically and abstains to the wire c
 
 **File map:** `tools/permission_advisor.{hpp,cpp}` (new); `agent/session.{hpp,cpp}`; `rpc/session_service.{hpp,cpp}`; `agent/subagent_manager.{hpp,cpp}`; `config/permissions_config.{hpp,cpp}`; `plugins/plugin_abi.h`, `plugin_loader.{hpp,cpp}`; `main.cpp`; `config/sanity_check.{hpp,cpp}`; tests: `permission_advisor_test.cpp` (new), `permissions_config_test.cpp`, `sanity_check_test.cpp`, `session_test.cpp`, `session_registry_test.cpp`, `subagent_test.cpp`, `fixture_advisor.cpp` + fixtures CMake, advisor E2E.
 
-**Acceptance criteria**
-- [ ] An advisor's Allow runs the tool; its Deny produces the same error `ToolResultBlock` a human deny does; its abstain round-trips a real permission prompt over the wire.
-- [ ] An advisor never sees — let alone approves — a tool the substrate resolved to `AlwaysDeny`, including via the `AllowOnly` run mode (`Ask` short-circuits before the advisor is consulted).
-- [ ] Subagent ceilings hold with an advisor active in the parent; a child defaults to **no** advisor, and `advisor_inherit: true` still cannot exceed the parent ceilings.
-- [ ] Grants returned by an advisor are filtered against the disclosure exactly as a human's are — the existing double filter (`tool_executor.cpp` + `proto_convert.cpp`) must hold unchanged.
-- [ ] A wedged advisor does not outlive cancellation (deadline-harnessed, `tests/support/deadline.hpp`).
-- [ ] A throwing advisor degrades to the wire prompt, never a lost turn.
+**Acceptance criteria — all met:**
+- [x] An advisor's Allow runs the tool; its Deny produces the same error `ToolResultBlock` a human deny does; its abstain round-trips a real permission prompt over the wire. *(E2E: `session_service_test.cpp`, the abstained tool is the only prompt on the stream.)*
+- [x] An advisor never sees — let alone approves — a tool the substrate resolved to `AlwaysDeny`, including via the `AllowOnly` run mode (`Ask` short-circuits before the advisor is consulted). *(executor-level: `permission_advisor_test.cpp` AllowOnly + ceiling cases, both assert `advisor->seen` stays empty.)*
+- [x] Subagent ceilings hold with an advisor active in the parent; a child defaults to **no** advisor, and `advisor_inherit: true` still cannot exceed the parent ceilings. *(subagent-level inherit-gate tests + the executor-level ceiling-ordering test.)*
+- [x] Grants returned by an advisor are filtered against the disclosure exactly as a human's are — the existing double filter (`tool_executor.cpp` + `proto_convert.cpp`) holds unchanged, proven by the undisclosed-key case.
+- [x] A wedged advisor does not outlive cancellation (deadline-harnessed, `tests/support/deadline.hpp`).
+- [x] A throwing advisor degrades to the wire prompt, never a lost turn. *(std and non-standard exceptions.)*
 
 **Test cases**
-- [ ] Unit: advisor allow / deny / abstain / throw — abstain and throw both fall through to the wire checker.
-- [ ] Unit: `AllowOnly` + advisor → the tool is denied before the advisor runs (assert it is never consulted).
-- [ ] Unit: grant filter — an advisor returning an undisclosed key leaves `session_grants_` untouched.
-- [ ] Unit: cancellation mid-`Advise` → the call returns (detached-thread deadline harness; a joined future would hang the suite).
-- [ ] Integration: subagent spawned from an advisor-governed parent — child has no advisor by default; with `advisor_inherit` the child's advisor sees only requests that passed the parent ceilings.
-- [ ] E2E over a real socket: a scripted advisor plugin allows one tool and abstains on another; the prompt reaches the client, the answer returns, the turn completes with `TurnCompletedEvent`.
-- [ ] **Invariant tests:** removing the abstain fall-through (advisor abstain → Deny) fails the abstain test; removing the grant filter fails the undisclosed-key test; making `checker_` concrete again fails any test that injects a fake.
+- [x] Unit: advisor allow / deny / abstain / throw — abstain and throw both fall through to the wire checker.
+- [x] Unit: `AllowOnly` + advisor → the tool is denied before the advisor runs (assert it is never consulted).
+- [x] Unit: grant filter — an advisor returning an undisclosed key leaves `session_grants_` untouched.
+- [x] Unit: cancellation mid-`Advise` → the call returns (detached-thread deadline harness; a joined future would hang the suite).
+- [x] Integration: subagent spawned from an advisor-governed parent — child has no advisor by default (the prompt arriving IS the proof the advisor never ran); with `advisor_inherit` the child's advisor sees only requests that passed the parent ceilings.
+- [x] E2E over a real socket: `fixture-advisor` — the first fixture to exercise a registration seam beyond tools/providers, loaded through the real `PluginLoader` (the first service test to do so) — allows one tool and abstains on another; the prompt reaches the client, the answer returns, the turn completes with `TurnCompletedEvent`.
+- [x] **Invariant tests, all proven load-bearing per §6:** removing the abstain fall-through (abstain → Deny) fails the abstain, throw-degradation and cancellation tests; removing the grant filter fails the undisclosed-key test; making the session's checker concrete again fails both fake-injection tests (session-level and the E2E).
 
 ### K. Per-plugin config
 
