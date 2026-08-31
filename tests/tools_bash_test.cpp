@@ -163,6 +163,48 @@ TEST_CASE("scanner names an interpreter without special-casing it", "[tools_bash
     CHECK((result.command_words == std::vector<std::string>{"bash"}));
 }
 
+TEST_CASE("shell keywords do not consume the command slot", "[tools_bash][scanner]") {
+    // THE REGRESSION, and it was a live authorisation hole rather than a missed
+    // grant. `then` was recorded as the program of its list, which demoted `rm`
+    // to an argument -- so `rm` was never disclosed, `complete` stayed true
+    // because nothing had failed, and a session already holding a grant on the
+    // harmless `ls` satisfied the whole conjunction and ran `rm -rf /` with no
+    // prompt at all. See the invariant in command_scanner.hpp.
+    const auto branch = ScanCommand("ls; if true; then rm -rf /; fi");
+    CHECK(Names(branch, "rm"));
+    CHECK_FALSE(Names(branch, "then"));
+    CHECK_FALSE(Names(branch, "if"));
+    CHECK_FALSE(Names(branch, "fi"));
+
+    // The same slot-stealing shape in every other compound form.
+    CHECK(Names(ScanCommand("for f in *.o; do rm $f; done"), "rm"));
+    CHECK(Names(ScanCommand("while read -r l; do rm $l; done"), "rm"));
+    CHECK(Names(ScanCommand("time rm -rf /"), "rm"));
+    CHECK(Names(ScanCommand("! rm -rf /"), "rm"));
+    CHECK(Names(ScanCommand("if [ -f x ]; then rm x; else mv y x; fi"), "mv"));
+
+    // A keyword alone names nothing, and nothing nameable means incomplete --
+    // it must not resolve to a complete, empty disclosure that grants itself.
+    CHECK_FALSE(ScanCommand("fi").complete);
+}
+
+TEST_CASE("scanner treats $'...' as the literal word it is", "[tools_bash][scanner]") {
+    // `$'` used to be consumed as a two-character `$x` token, leaving the
+    // closing quote to open a fresh quote region that swallowed the rest of the
+    // line -- so the pipeline stage after it vanished from the disclosure.
+    const auto ansi = ScanCommand("grep $'\\t' file | wc -l");
+    CHECK(ansi.complete);
+    CHECK(Names(ansi, "grep"));
+    CHECK(Names(ansi, "wc"));
+
+    // A program spelled with ANSI-C quoting is still a literal program.
+    const auto quoted = ScanCommand("$'rm' -rf /");
+    CHECK(quoted.complete);
+    CHECK((quoted.command_words == std::vector<std::string>{"rm"}));
+
+    CHECK_FALSE(ScanCommand("grep $'unterminated").complete);
+}
+
 TEST_CASE("scanner disclosure is a lower bound", "[tools_bash][scanner]") {
     // Documenting the accepted limit rather than pretending it away: semantic
     // indirection is invisible to any parser, so the prompt wording must not
@@ -549,6 +591,42 @@ TEST_CASE("granting a real pipeline silences the prompt for the next one",
     // A third binary was never disclosed before, so it must ask again.
     const auto third = executor.Run("tu3", "bash", {{"command", "ls | sort | wc -l"}}, ctx);
     CHECK_FALSE(third.is_error);
+    CHECK(checker.seen.size() == 2);
+}
+
+TEST_CASE("a keyword-hidden program is not silenced by an unrelated grant",
+          "[tools_bash][disclosure][integration]") {
+    // The whole hole, end to end. Disclose() executes nothing, so this half can
+    // carry the real string: `rm` must reach the operator's prompt.
+    Fixture f;
+    const auto disclosure = f.Disclose({{"command", "ls; if true; then rm -rf /; fi"}});
+    CHECK(disclosure.complete);
+    CHECK(Offers(disclosure, "/rm"));
+    CHECK(Offers(disclosure, "/ls"));
+
+    // And the half that runs: a grant on `ls` must NOT satisfy the conjunction
+    // for a second command hiding another program behind `then`. `sort` stands
+    // in for `rm` here for the obvious reason; the scanner cannot tell them
+    // apart, which is the point. Before the fix the disclosure named only `ls`,
+    // reported itself complete, and this ran with checker.seen still at 1.
+    tools::ToolRegistry registry;
+    registry.Register(tools_bash::MakeBashTool(f.settings, f.store));
+
+    testing::GrantingPermissionChecker checker;
+    tools::PermissionPolicy policy;
+    policy.execute = tools::PermissionMode::Ask;
+    tools::ToolExecutor executor(registry, checker, policy, {}, tools::PermissionRunMode::Normal);
+
+    tools::ToolContext ctx{common::DefaultLogger()};
+    ctx.session_id = "s1";
+    ctx.project_root = f.dir.path();
+
+    CHECK_FALSE(executor.Run("tu1", "bash", {{"command", "ls"}}, ctx).is_error);
+    REQUIRE(checker.seen.size() == 1);
+
+    CHECK_FALSE(
+        executor.Run("tu2", "bash", {{"command", "ls; if true; then sort /dev/null; fi"}}, ctx)
+            .is_error);
     CHECK(checker.seen.size() == 2);
 }
 

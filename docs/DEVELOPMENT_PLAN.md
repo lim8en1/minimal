@@ -537,7 +537,7 @@ Applies to every milestone. These are existing project practice, recorded so the
 Not scheduled, recorded so they are decisions rather than oversights.
 
 - **Server-wide fd hygiene** — no `CLOEXEC` discipline on gRPC/SQLite/log fds; every bash command inherits them. The bash pipes are handled; the rest is not.
-- **`tree-sitter-bash` for command disclosure** — the hand-rolled scanner is conservative and its failure mode is safe (fewer grants offered). Upgrading raises the hit rate, not the safety floor. The grammar is already a planned client dependency.
+- **`tree-sitter-bash` for command disclosure** — still deferred, but **the reason recorded here was wrong and is corrected**. This said the hand-rolled scanner's "failure mode is safe (fewer grants offered)", so upgrading would raise the hit rate and not the safety floor. It was not safe: shell reserved words were recorded as programs, which consumed the command slot and demoted the real program to an argument, so `ls; if true; then rm -rf /; fi` disclosed only `{ls}` and reported itself *complete* — more authorised than the operator saw, not less (§12.1). A hand-rolled walker cannot distinguish "I parsed this" from "I mis-parsed this", which is exactly how that produced `complete = true`; a grammar can, because ERROR/MISSING nodes map onto `complete = false`. The keyword hole is closed, so this is no longer urgent — but it is now a hit-rate *and* soundness argument. Note when it lands: `tree-sitter-bash` has no vcpkg port (only `tree-sitter`, `-c`, `-cli`), so it needs the `FetchContent` grammar-vendoring path that track E has to build anyway; and being error-recovering, it must be walked for ERROR/MISSING explicitly or it trades a known-shape bug for an unknown-shape one.
 - ~~**Unknown `allowed_skills` entries are silently dropped**~~ — still true of resolution (correct for lookup), but now *reported* at startup by F (`naming_model` check).
 - **`themes/*.json` and `keybindings.json` are specified but unread** — nothing outside a comment in `config_paths.hpp` refers to them, so they are deliberately not seeded either. They arrive with the TUI (track E), which is the first thing that would read one.
 - **The compaction trigger now follows the model's window** (`{"percent": 80}` by default), so the
@@ -813,3 +813,55 @@ the tree and green.
   plugin, tree-sitter grammars** — all recorded in §7 with the reason each is a decision.
 - **A `catch(...)`-shaped seam test for the compactor** — the compactor already returns failure as
   a value; only the loop's bookkeeping needed the guard, and that is tested.
+
+## 12. Third-pass review
+
+A third deliberate read of the whole tree, after §8 (merge seams) and §11 (correctness and
+efficiency). This one was aimed at what those two did not look at: the permission scanner's actual
+parse, extension points that are declared but never fire, config the server promises to honour and
+doesn't, and races no sanitizer in the tree can see.
+
+The through-line is worth stating, because it predicts where the next one will find things: **almost
+every remaining defect is a comment describing a mechanism that isn't there.** A guard that never
+receives its trigger, a hook nothing calls, a settings block nothing reads, a containment claim a
+bounded queue contradicts, a totality guarantee `if constexpr` doesn't give — and the one below, a
+conjunction the scanner does not actually compute. That gap is worse than an honest absence, because
+every one of them reads as done.
+
+### Authorisation
+
+1. **Shell keywords ate the command slot, and a held grant then ran an ungranted program.** The
+   scanner recorded the first word after a separator as the program; reserved words are not
+   separators, so `then` was recorded *as* the program of its list and the real one was demoted to
+   an argument. `ls; if true; then rm -rf /; fi` disclosed `{ls, if, then, fi}` — `if`/`then`/`fi`
+   resolve to no binary and are dropped — leaving `{bash:/bin/ls}` with `complete = true`. A session
+   already holding a grant on `ls` satisfied the conjunction and ran it with no prompt.
+
+   **This was not the accepted lower bound.** `complete = false` is scoped to *syntactic* blindness
+   — `$X args`, `eval "$CMD"` — and `find | xargs rm` is the recorded semantic limit. Neither
+   applies: `rm` is a literal in a command position, the operator granted `ls` and nothing else, and
+   the harness told them the disclosure was complete. The difference from the `xargs` case is what
+   the operator was *shown*: granting xargs is a decision about xargs, taken knowingly. Nobody
+   decides anything about a program that was never disclosed.
+
+   The whole reserved set is skipped, not just the subset followed by a command list: skipping `for`
+   or `[[` records one extra word (`f`, `-f`) that resolves to no binary and is dropped at
+   disclosure, which is the same over-approximation `ResolveOnPath` already accepts and errs toward
+   more keys in the conjunction, never fewer. `ARCHITECTURE.md` gains the floor this owes rule 1 —
+   *a literal program in a command position is either named or `complete` is false* — since the
+   lower-bound wording alone did not distinguish the two cases and that is what let this look
+   acceptable.
+
+   Fixed alongside, same file: `$'...'` was consumed as a bare `$x` token, so the closing quote
+   opened a fresh quote region and swallowed the rest of the line — dropping every later pipeline
+   stage from the disclosure. It is a quoted literal, so `$'rm'` now names `rm`.
+
+   Invariant tests at both levels: the disclosure must name `rm`, and at the executor seam a grant
+   on `ls` must not silence a second command hiding another program behind `then`. Both fail against
+   the old scanner (12 assertions), including the one that asserts the prompt count — i.e. the
+   unprompted execution itself.
+
+   §7's deferral of `tree-sitter-bash` is corrected in place: it was recorded as safe-by-failure-mode,
+   which is what this disproves. Still deferred now that the hole is closed, but the argument for it
+   is no longer only hit rate — a hand-rolled walker cannot tell "I parsed this" from "I mis-parsed
+   this", which is exactly how this produced `complete = true`, and a grammar can.

@@ -17,6 +17,32 @@ bool RunsUnnamedCode(std::string_view word) {
     return word == "eval" || word == "." || word == "source" || word == "exec";
 }
 
+// Shell reserved words. These sit in a command position without BEING commands:
+// in `if true; then rm -rf /; fi` the program of the second list is `rm`, and
+// `then` is grammar.
+//
+// Recording them as programs was not merely untidy, it was unsound. Consuming
+// the command slot made the real program an argument, so `rm` was never named --
+// while `complete` stayed true, because nothing here had failed. A held grant on
+// some other, harmless program in the same string then satisfied the whole
+// conjunction and the command ran unprompted. Skipping them leaves
+// `expecting_command_` set, so the next word is scanned as the program it is.
+//
+// The list is deliberately the WHOLE reserved set rather than the subset that
+// is followed by a command list. `for`/`in`/`[[` are followed by a name, a word
+// list and an expression respectively, so skipping them records one extra word
+// -- `f`, `*.txt`, `-f` -- that resolves to no binary and is dropped at
+// disclosure. That is the same over-approximation ResolveOnPath already accepts,
+// and it errs toward more keys in the conjunction, never fewer.
+bool IsReservedWord(std::string_view word) {
+    static constexpr std::string_view kReserved[] = {
+        "!",    "[[",       "]]", "case",   "coproc", "do",   "done",
+        "elif", "else",     "esac", "fi",   "for",    "function",
+        "if",   "in",       "select", "then", "time", "until", "while",
+    };
+    return std::find(std::begin(kReserved), std::end(kReserved), word) != std::end(kReserved);
+}
+
 bool IsAssignmentPrefix(std::string_view word) {
     const auto eq = word.find('=');
     if (eq == std::string_view::npos || eq == 0) return false;
@@ -146,6 +172,7 @@ private:
             return;
         }
         if (IsAssignmentPrefix(word)) return;  // `FOO=1 cmd`: still expecting
+        if (IsReservedWord(word)) return;      // grammar, not a program: still expecting
 
         if (RunsUnnamedCode(word)) out_.complete = false;
         Record(out_, word);
@@ -207,6 +234,30 @@ private:
             MarkExpansion(at_word_start);
             return close;
         }
+
+        // `$'...'` (ANSI-C quoting) and `$"..."` (locale lookup) are QUOTED
+        // LITERALS, not expansions. The bare-`$name` fallthrough below consumed
+        // the `$` and the OPENING quote as one two-character token, which left
+        // the closing quote to open a fresh quote region and swallow the rest of
+        // the line. Handled here, `$'rm'` is the literal word it is -- so this
+        // deliberately does not MarkExpansion: there is a program named, and
+        // calling it an expansion would report the disclosure incomplete for a
+        // string that names its program perfectly well.
+        if (s_.compare(i, 2, "$'") == 0) {
+            for (std::size_t j = i + 2; j < s_.size(); ++j) {
+                if (s_[j] == '\\' && j + 1 < s_.size()) {
+                    Append(s_.substr(++j, 1));
+                    continue;
+                }
+                if (s_[j] == '\'') {
+                    has_word_ = true;  // `$''` is an empty word, but still a word
+                    return j;
+                }
+                Append(s_.substr(j, 1));
+            }
+            return std::string_view::npos;  // unterminated: fails closed
+        }
+        if (s_.compare(i, 2, "$\"") == 0) return ScanDoubleQuoted(i + 1);
 
         // Bare `$name` / `$1` / `$?`.
         std::size_t end = i + 1;

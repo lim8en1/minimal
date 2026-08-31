@@ -25,10 +25,24 @@ namespace minimal::tools_bash {
 // {make, nproc}. Treating substitution as blindness would strand a large slice
 // of everyday commands in permanent re-prompting.
 //
+// THE INVARIANT THIS OWES ITS CALLER: a program that appears as a LITERAL in a
+// command position is either named in `command_words` or `complete` is false.
+// Never both missing. `complete` is what lets ToolExecutor satisfy the grant
+// conjunction without a prompt, so a string this claims to have understood
+// fully, while having silently dropped one of its programs, authorises more than
+// the operator ever saw. Shell reserved words broke exactly this: `then` and
+// `if` were recorded AS programs, which consumed the command slot and demoted
+// the real program to an argument, so `ls; if true; then rm -rf /; fi` disclosed
+// only {ls} and reported itself complete. They are skipped now, so the word
+// after them is scanned as the program it is.
+//
 // Known and accepted limit: this can only see SYNTACTIC invocations. Semantic
 // indirection is invisible to any parser -- `find . | xargs rm` yields
 // {find, xargs} and never names rm; `make` runs whatever the Makefile says. The
-// disclosure is a lower bound and the prompt must say so.
+// disclosure is a lower bound and the prompt must say so. That is a DIFFERENT
+// thing from the bug above, and the difference is what the operator was shown:
+// granting xargs is a decision about xargs, taken knowingly. Nobody decides
+// anything about a program that was never disclosed.
 struct ScanResult {
     std::vector<std::string> command_words;  // in first-appearance order, deduplicated
     bool complete = true;

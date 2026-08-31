@@ -466,6 +466,8 @@ virtual PermissionDisclosure Tool::Disclose(const nlohmann::json&, const ToolCon
 
 **Disclosure is a lower bound**, and the prompt must say so. `complete = false` covers only *syntactic* blindness, where the program is not a literal in the string (`$X args`, `eval "$CMD"`). It cannot cover semantic indirection: `find . | xargs rm` names `find` and `xargs`, never `rm`. No parser fixes that.
 
+That lower bound has a floor the scanner owes rule 1, and it is the line between the two cases: **a program that appears as a literal in a command position is either named or `complete` is false — never both missing.** The difference from `xargs rm` is what the operator was shown. Granting xargs is a decision about xargs, taken knowingly with the lower bound stated; nobody decides anything about a program that was never disclosed. Shell reserved words broke this floor — `then` and `if` were recorded *as* the program of their list, which demoted the real one to an argument, so `ls; if true; then rm -rf /; fi` disclosed `{ls}`, called itself complete, and a held grant on `ls` satisfied the conjunction (§12.1). Keywords are skipped now, so the word after them is scanned as the program it is.
+
 **Non-interactive mode is unaffected.** `AllowOnly` still means Ask → auto-deny; grants start empty in a headless session and stay empty, because nothing can prompt to create one. Running bash headless is `per_tool_overrides: {"bash": "allow"}` — containerisation is then the operator's responsibility, which is the contract either way.
 
 
