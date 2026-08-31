@@ -26,6 +26,7 @@
 #include "deadline.hpp"
 #include "fakes.hpp"
 #include "temp_dir.hpp"
+#include "minimal/plugins/plugin_loader.hpp"
 #include "minimal/rpc/server.hpp"
 #include "minimal/rpc/session_service.hpp"
 #include "minimal/v1/session_service.grpc.pb.h"
@@ -90,6 +91,22 @@ struct ServiceFixture {
         script->Push(std::move(response), std::move(events));
     }
 
+    // Loads the advisor fixture through the REAL loader -- the first
+    // service-level test to run PluginLoader, because a registration seam
+    // proven only in-process proves nothing about symbol lookup or attribution.
+    void LoadAdvisorPlugin() {
+        plugins::PluginCandidate candidate;
+        candidate.file = std::filesystem::path(MINIMAL_FIXTURE_DIR) / "fixture-advisor.so";
+        candidate.provenance = plugins::Provenance::User;
+        candidate.enabled = true;
+        plugins::PluginLoader loader(tools, providers, nlohmann::json::object(), nullptr, nullptr,
+                                     nullptr, &permission_advisors);
+        const auto records = loader.LoadAll({candidate});
+        REQUIRE(records.size() == 1);
+        REQUIRE(records.front().ok());
+        REQUIRE(records.front().registered_permission_advisor);
+    }
+
     // Built after the script and any tools, so a session sees the finished setup.
     void Start() {
         presets = std::make_unique<agent::AgentPresetRegistry>(dir, skills);
@@ -104,8 +121,8 @@ struct ServiceFixture {
             *presets, tools, providers, *observers, *db, agent::LoopConfig{},
             common::DefaultLogger(), attach_guard);
         service = std::make_unique<rpc::SessionServiceImpl>(
-            *sessions, *db, config::SettingsConfig{}, config::PermissionsConfig{},
-            common::DefaultLogger());
+            *sessions, *db, config::SettingsConfig{}, service_permissions,
+            common::DefaultLogger(), &permission_advisors);
         sessions->set_commands(&commands);
         service->set_commands(&commands);
         service->set_on_last_client_detached([this] { last_detach.store(true); });
@@ -155,6 +172,9 @@ struct ServiceFixture {
     std::unique_ptr<v1::SessionService::Stub> stub;
     std::chrono::milliseconds attach_guard = std::chrono::seconds(10);
     std::atomic<bool> last_detach{false};
+    // Set by tests before Start(): what the service resolves sessions with.
+    config::PermissionsConfig service_permissions;
+    tools::PermissionAdvisorRegistry permission_advisors;
 };
 
 v1::ClientEvent ChatTurn(const std::string& session_id, const std::string& text) {
@@ -1408,4 +1428,73 @@ TEST_CASE("the model flag applies on resume, and a malformed one is refused ther
         CHECK(status.error_code() == grpc::StatusCode::INVALID_ARGUMENT);
         CHECK(fixture.sessions->Find(session_id) == nullptr);  // not opened
     }
+}
+
+TEST_CASE("an advisor answers Ask; abstention still reaches the human over the wire",
+          "[session_service][advisor]") {
+    // The full advisor path over a real socket, through the real plugin loader:
+    // auto_tool is allowed by the fixture advisor without a prompt; manual_tool
+    // is abstained on, so the wire prompt arrives and a human answer -- the
+    // AllowOnly-forbidden path -- completes the turn.
+    ServiceFixture fixture;
+    fixture.service_permissions.advisor = "fixture-advisor";
+    fixture.tools.Register(std::make_unique<testing::FakeTool>("auto_tool",
+                                                               tools::ToolCategory::Execute,
+                                                               "auto ran"));
+    fixture.tools.Register(std::make_unique<testing::FakeTool>("manual_tool",
+                                                               tools::ToolCategory::Execute,
+                                                               "manual ran"));
+    fixture.LoadAdvisorPlugin();
+    fixture.Script(testing::ToolUseResponse("call-1", "auto_tool", nlohmann::json::object()));
+    fixture.Script(testing::TextResponse("auto done"));
+    fixture.Script(testing::ToolUseResponse("call-2", "manual_tool", nlohmann::json::object()));
+    fixture.Script(testing::TextResponse("manual done"));
+    fixture.Write("permissions.json", nlohmann::json{{"fallback", {{"execute", "ask"}}}}.dump());
+    fixture.Start();
+
+    const std::string session_id = fixture.CreateSession();
+    grpc::ClientContext context;
+    auto stream = fixture.stub->OpenSession(&context);
+    REQUIRE(stream->Write(ChatTurn(session_id, "run auto")));
+
+    v1::ServerEvent event;
+    bool prompted = false;
+    bool answered = false;
+    int tool_finishes = 0;
+    int turn_completions = 0;
+    bool second_turn_sent = false;
+    while (stream->Read(&event)) {
+        if (event.has_permission_request()) {
+            prompted = true;
+            // The advisor allowed auto_tool without a prompt; the ONLY prompt on
+            // this stream is the abstained manual_tool.
+            CHECK(event.permission_request().tool_name() == "manual_tool");
+            v1::ClientEvent answer;
+            answer.set_session_id(session_id);
+            auto* response = answer.mutable_permission_response();
+            response->set_request_id(event.permission_request().request_id());
+            response->set_decision(v1::PERMISSION_DECISION_ALLOW);
+            REQUIRE(stream->Write(answer));
+            answered = true;
+        }
+        if (event.has_tool_execution() && !event.tool_execution().started()) ++tool_finishes;
+        if (event.has_turn_completed()) {
+            ++turn_completions;
+            if (turn_completions == 1) {
+                // The stream stays open across the terminator; turn 2 exercises
+                // the abstention path.
+                REQUIRE(stream->Write(ChatTurn(session_id, "run manual")));
+                second_turn_sent = true;
+            }
+        }
+        if (event.has_error()) break;
+        if (turn_completions == 2) break;
+    }
+    (void)DrainAndFinish(stream);
+
+    CHECK(answered);
+    CHECK(prompted);
+    CHECK(second_turn_sent);
+    CHECK(tool_finishes == 2);        // both tools ran
+    CHECK(turn_completions == 2);     // and the turn terminator closed each turn
 }
