@@ -50,6 +50,8 @@
 #include "minimal/rpc/pending_requests.hpp"
 #include "minimal/rpc/wire_confirmation_broker.hpp"
 #include "minimal/rpc/wire_permission_checker.hpp"
+#include "minimal/session/history_window.hpp"
+#include "minimal/session/session_reader.hpp"
 #include "minimal/tools/permission_advisor.hpp"
 #include "minimal/tools/permission_checker.hpp"
 #include "minimal/tools/tool_executor.hpp"
@@ -109,6 +111,14 @@ struct SessionParams {
     // before construction. The session row must already exist either way --
     // the database mints ids -- but a fresh session's transcript is empty.
     bool resume = false;
+
+    // The read side of the session's durable transcript, injected by the
+    // registry (which owns the database). Session owns it and builds the
+    // HistoryWindow that reaches tools as ToolContext::history
+    // (docs/EXTENSIBILITY.md §2.1, track M). Null when a session's store is
+    // not SQLite-backed -- plain test Sessions on fake stores -- which makes
+    // ctx.history null: the natural "unavailable" case, not an error path.
+    std::shared_ptr<const session::SessionReader> history_reader;
 
     // --- Subagent inheritance (empty/unset for a top-level session) ----------
     // Grants the parent already held at spawn time. Re-prompting for every
@@ -313,6 +323,14 @@ private:
     // ownership. Stateless-by-contract providers are freely shareable.
     std::shared_ptr<llm::LlmProvider> provider_;
     std::unique_ptr<HistoryStore> store_;
+
+    // Track M: the read side of the durable transcript and the tool-facing
+    // window over it (docs/EXTENSIBILITY.md §2.1). Declared BEFORE loop_ so
+    // destruction order is safe: loop_ is destroyed first, and it is what
+    // borrows history_window_ -- the borrowed pointer never outlives the
+    // window. Null pair when the store is not SQLite-backed (plain tests).
+    std::shared_ptr<const session::SessionReader> history_reader_;
+    std::unique_ptr<session::HistoryWindow> history_window_;
 
     // The transport-side primitives, created here or shared in via params (see
     // SessionParams::channels).

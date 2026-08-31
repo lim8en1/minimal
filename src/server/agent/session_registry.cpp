@@ -112,6 +112,14 @@ std::shared_ptr<Session> SessionRegistry::CreateResolved(SessionParams params,
 
     const std::string session_id = params.session_id;
 
+    // Track M (docs/EXTENSIBILITY.md §2.1): the read side of the transcript.
+    // Set here because this is the one funnel every session passes through --
+    // top-level and SubagentManager spawns alike -- so a child's window is
+    // bound to the child's own id with no extra code, and its tools see its
+    // transcript only. Sessions built outside the registry (plain tests on
+    // fake stores) leave it null, and ctx.history is null with it.
+    params.history_reader = std::make_shared<session::SessionReader>(db_);
+
     // RESUME: load the stored transcript as the loop's working history. Loaded,
     // not replayed -- everything below appends NEW messages at MAX(seq) + 1, so
     // the stored rows must not go through the store again or the transcript

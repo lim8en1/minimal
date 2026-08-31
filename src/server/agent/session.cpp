@@ -29,6 +29,17 @@ Session::Session(SessionParams params, AgentPreset preset,
       observers_(observers),
       provider_(std::move(provider)),
       store_(std::move(store)),
+      // Track M: the registry injects the reader when the transcript is
+      // SQLite-backed; plain tests on fake stores leave it null and tools see
+      // ctx.history == nullptr. The window is built here, bound to THIS
+      // session's id -- a subagent's window is bound to the child's id the
+      // same way, which is what isolates the child's transcript from the
+      // parent's (docs/EXTENSIBILITY.md §2.1).
+      history_reader_(std::move(params_.history_reader)),
+      history_window_(history_reader_
+                          ? std::make_unique<session::HistoryWindow>(*history_reader_,
+                                                                     params_.session_id)
+                          : nullptr),
       // The channels block comes from the producer when it composed a checker
       // that had to be built against the queue and pending maps (an advised
       // permission checker, docs/EXTENSIBILITY.md §3); otherwise Session makes
@@ -72,6 +83,9 @@ Session::Session(SessionParams params, AgentPreset preset,
     SessionContext context{logger_};
     context.session_id = params_.session_id;
     context.project_root = params_.project_root;
+    // ToolContext::history for every tool this session runs; null when there
+    // is no SQLite-backed reader behind it.
+    context.history = history_window_.get();
 
     const std::string session_id = params_.session_id;
     auto* queue = &channels_->queue;

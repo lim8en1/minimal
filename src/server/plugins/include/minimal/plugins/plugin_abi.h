@@ -34,6 +34,8 @@
 #include "minimal/llm/provider.hpp"
 #include "minimal/llm/provider_factory_registry.hpp"
 #include "minimal/llm/sse_parser.hpp"
+#include "minimal/session/history_window.hpp"
+#include "minimal/session/session_reader.hpp"
 #include "minimal/tools/atomic_write.hpp"
 #include "minimal/tools/file_access.hpp"
 #include "minimal/tools/path_confinement.hpp"
@@ -154,5 +156,12 @@ void minimal_plugin_register_permission_advisor(
 // Not yet wired -- declared nowhere until the subsystem it registers into
 // exists, so that this ABI is not frozen before it has consumers:
 //   minimal_plugin_register_mention_resolver(MentionResolverRegistry&)
+//
+// Frozen-surface note (track M): ToolContext::history is a
+// session::HistoryWindow -- a bound, windowed slice of SessionReader exposing
+// only keyset-paged GetMessages. Both headers above are the surface; a plugin
+// tool reading the conversation reads bounded pages through it and has no
+// full-materialization path (LoadAll stays on SessionReader, the resume path,
+// which no tool holds).
 
 }  // extern "C"

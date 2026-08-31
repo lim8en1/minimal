@@ -2,7 +2,7 @@
 
 Companion to `ARCHITECTURE.md`, which remains the single source of truth for *design*. This document covers only *sequencing*: what is built, what blocks what, and what "done" means for each remaining piece. Every milestone cites the `ARCHITECTURE.md` section that specifies it; where this plan and that document disagree, that document wins and this one is stale.
 
-**Status: Milestones A, B, C, D, F and H are complete, and a post-merge review of A+B+H has been actioned (§8). Only E (the TUI) and G (MCP) remain. Clean build, zero warnings.** Track **J (permission advisor) is complete** — including the SessionChannels extraction, the E2E over a real socket through the real plugin loader, and the three §6 invariant proofs. Tracks **K (per-plugin config)** and **L (cross-plugin services)** are also complete. The remaining extensibility tracks are **M** (tool history access) and **N** (model auto-discovery) — both designed in `docs/EXTENSIBILITY.md` §2 and appended below as §4 M–N, and independent of everything and each other.
+**Status: Milestones A, B, C, D, F and H are complete, and a post-merge review of A+B+H has been actioned (§8). Only E (the TUI) and G (MCP) remain. Clean build, zero warnings.** Track **J (permission advisor) is complete** — including the SessionChannels extraction, the E2E over a real socket through the real plugin loader, and the three §6 invariant proofs. Tracks **K (per-plugin config)**, **L (cross-plugin services)** and **M (tool history access)** are also complete. The remaining extensibility track is **N** (model auto-discovery), designed in `docs/EXTENSIBILITY.md` §2.6 and specified below as §4 N, independent of everything.
 
 `minimal -p` holds real conversations against a local model using `read`, `bash`, and `skill`; a permission prompt round-trips over the wire in both directions; a session grant silences the second prompt; the server exits when the last client detaches. Transcripts persist to SQLite, survive the server process, and are **resumable**: `CreateSession` with a `session_id` reopens a stored session, loads its transcript as the loop's working history without re-appending it, and the next turn continues the conversation (`minimal -p --resume <id> PROMPT`). **Subagents work** (§5 D): a model can spawn blocking and non-blocking children over the `spawn_subagent` tool, permission inheritance is enforced as ceilings, and the headless client honours its attach obligation over a real socket. `cmake --install` produces a config dir the server actually starts against (§8), and the startup sanity check reports every problem with it at once (§4 F).
 
@@ -99,7 +99,7 @@ Test depth was inverted relative to integration risk: every well-tested layer wa
 - **J. Permission advisor** — independent of E and G; designed in `docs/EXTENSIBILITY.md` §3, specified below (§4 J).
 - ~~**K. Per-plugin config**~~ — **done** (§4 K). `PluginRegistrationContext` carries the per-plugin `config` on every registration seam.
 - ~~**L. Cross-plugin services (ServiceRegistry)**~~ — **done** (§4 L). `minimal_plugin_register_services` is live, `NameKind::Service` collisions are fatal, and `tools-bash` provides `BashSessionStateService` under `tools-bash.session_state`; `/restart-shell` resolves through the service. One deviation from the spec below: the command stayed in `tools-bash` (a command belongs to the plugin that owns the state it touches) — the service path and the absent-provider degrade are covered by tests against the extracted `RestartShellCommand`.
-- **M. Tool history access** — designed in `docs/EXTENSIBILITY.md` §2.1, specified below (§4 M).
+- ~~**M. Tool history access**~~ — **done** (§4 M). `ToolContext::history` is a `session::HistoryWindow` — a bound, windowed slice of `SessionReader` exposing only keyset-paged reads, so the windowed-only rule is a property of the type. `SessionReader` and `history_window.hpp` joined the frozen include set in `plugin_abi.h`.
 - **N. Model auto-discovery** — designed in `docs/EXTENSIBILITY.md` §2.6, specified below (§4 N).
 
 **Strictly dependent on A:** C, D, E, G, and every RPC beyond `CreateSession`/`OpenSession`. **A is now done, so all of them were unblocked; D is now done too.**
@@ -471,37 +471,38 @@ public:
 - [x] `/restart-shell` through the registry (in-process); the absent-provider error path.
 - [x] **Invariant test:** removing the collision check for `NameKind::Service` (last-wins) fails the collision test.
 
-### M. Tool history access
+### M. Tool history access — done
 
-> Specified by `docs/EXTENSIBILITY.md` §2.1. Independent. One design adjustment found while wiring it: ownership (below).
+> Specified by `docs/EXTENSIBILITY.md` §2.1. Independent. Two refinements found while wiring it: **ownership** (as planned below) and **the window** (the tool-facing type).
 
-**What.** `ToolContext` (`tool.hpp:29-60`) gains an optional read-only handle on the conversation it runs inside:
+**What.** `ToolContext` (`tool.hpp:29-60`) gains an optional read-only handle on the conversation it runs inside — **as `session::HistoryWindow`**, not the raw `SessionReader` the spec sketched:
 
 ```cpp
 // tool.hpp -- set by the agent loop per invocation; null when unavailable
-const session::SessionReader* history = nullptr;  // read-only
+const session::HistoryWindow* history = nullptr;
 ```
 
 Anything context-aware — a "summarize the thread so far" tool, retrieval keyed to recent turns, a wrapper referencing what was last edited — becomes expressible.
 
 **How.**
 
-- **Ownership — the adjustment.** The agent loop has no `SessionReader` today (only `HistoryStore&`, `agent_loop.hpp:191`) and `Session` doesn't hold one; `CreateResolved` builds one ad-hoc for resume (`session_registry.cpp:121`). `SessionParams` gains a reader pointer, owned by `Session`; the agent loop sets `ctx.history` from it per invocation (`agent_loop.cpp:386-397`). Stores that are not SQLite-backed (test fakes) leave it null, so `history == nullptr` is the natural "unavailable" case, not an error path.
-- **Windowed access only.** The constraint is stated on the member: a tool must never call `LoadAll()` — that materializes a whole transcript and exists solely for resume. A tool reads bounded pages through `GetMessages`, exactly as the `GetMessages` RPC does. Nothing is held, so the 512k–1M goal is untouched.
-- **A subagent sees only its own history** — automatic, since the context is built from the child's own session; the parent's is deliberately out of reach.
-- `SessionReader` joins the frozen include set in `plugin_abi.h` (§1 of the extensibility doc notes it is reachable but not declared surface; a plugin tool using `ctx.history` needs it declared).
+- **Ownership.** The agent loop has no `SessionReader` today (only `HistoryStore&`, `agent_loop.hpp:191`) and `Session` doesn't hold one; `CreateResolved` builds one ad-hoc for resume (`session_registry.cpp:121`). `SessionParams` gained a reader pointer, owned by `Session`; the agent loop sets `ctx.history` from it per invocation (`agent_loop.cpp:386-397`). Stores that are not SQLite-backed (test fakes) leave it null, so `history == nullptr` is the natural "unavailable" case, not an error path.
+- **The window — the refinement.** The spec had the constraint stated as a comment and the pointer typed `const SessionReader*`, whose `LoadAll()` is public (it is the resume path). Implemented instead as `session::HistoryWindow` (`history_window.hpp`): a header-only, non-owning wrapper holding the reader pointer **and the session id it is bound to**, exposing only keyset-paged `GetMessages(before_seq, limit)`. The windowed-only rule is a property of the type, not a comment — no path a tool can reach materializes the full history, and the isolation is structural (a tool cannot page another session's transcript, because it has no way to name one). `SessionReader` itself is unchanged; `LoadAll` stays the resume path's alone.
+- **Wiring.** `Session` owns `history_reader_` + the `HistoryWindow` built from it in the constructor body, both declared before `loop_` so destruction order keeps the loop's borrowed pointer safe; `SessionContext` carries the window pointer. The registry is the one funnel every session passes through — top-level and `SubagentManager` spawns alike — so injecting the reader there binds a child's window to the child's own id with no extra code.
+- **Frozen surface.** `history_window.hpp` (with `session_reader.hpp`) joined the utilities include set in `plugin_abi.h`: a plugin tool using `ctx.history` needs it declared surface.
 
 **Acceptance criteria**
-- [ ] A tool reads a windowed range of the transcript through `ctx.history` during a live turn.
-- [ ] Sessions on non-SQLite stores (tests) see `history == nullptr` and tools handle it.
-- [ ] A subagent's tool sees the child's transcript only — never the parent's.
-- [ ] No path a tool can reach materializes the full history.
+- [x] A tool reads a windowed range of the transcript through `ctx.history` during a live turn.
+- [x] Sessions on non-SQLite stores (tests) see `history == nullptr` and tools handle it.
+- [x] A subagent's tool sees the child's transcript only — never the parent's.
+- [x] No path a tool can reach materializes the full history — enforced by the wrapper, not just stated.
 
-**Test cases**
-- [ ] End-to-end with a scripted provider: a tool reads the last messages via `ctx.history` and the result reaches the model.
-- [ ] Null-history path (fake store) — the tool's degrade works, no crash.
-- [ ] Subagent isolation: parent has N messages, child M; the child's tool observes M.
-- [ ] **Invariant test:** the agent loop building the context without the reader (history always null) fails the end-to-end read test.
+**Test cases** (`tests/tool_history_test.cpp`)
+- [x] End-to-end with a scripted provider over a real SQLite store: a tool reads the last messages via `ctx.history` mid-turn (user turn + its own tool_use, newest first) and the result reaches the model.
+- [x] Null-history path (in-memory fake store) — the tool's degrade works, no crash.
+- [x] Subagent isolation: parent has N messages, child M; the child's tool observes M, and the parent's text is nowhere in its window.
+- [x] `HistoryWindow` direct: newest-first paging, keyset cursor, `has_more`, and binding (another session's row never appears).
+- [x] **Invariant test:** the end-to-end read asserts `history != nullptr`, so the agent loop building the context without the reader fails it.
 
 ### N. Model auto-discovery
 

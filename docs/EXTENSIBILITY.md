@@ -20,7 +20,7 @@ Companion to `ARCHITECTURE.md`, which remains the single source of truth for *de
 
 Interfaces a plugin implements today: `Tool` (with `Disclose` / `category_for` / `ExtractPath`), `Command` → `HarnessCommand`/`LLMCommand`, `LlmProvider` plus a factory, `SessionObserver`, `PermissionAdvisor` (composing above the wire checker — see §3), and the service interfaces a provider ships (abstract, header-only — see §2.2).
 
-**Utilities half** — included from `plugin_abi.h`: `path_confinement`, `file_access`, `atomic_write`, `HttpClient`, `SseParser`, `Logger`, plus the registry headers. Two utilities exist in core but are **not** in the frozen include set: `SessionReader` and the frontmatter parser. They are reachable through ordinary core linkage (plugins link `minimal_server_core`, a shared library), but they are not yet declared surface.
+**Utilities half** — included from `plugin_abi.h`: `path_confinement`, `file_access`, `atomic_write`, `HttpClient`, `SseParser`, `Logger`, `SessionReader` + `HistoryWindow` (landed with track M), plus the registry headers. The frontmatter parser remains reachable through ordinary core linkage (plugins link `minimal_server_core`, a shared library) but is not declared surface.
 
 **Client ABI**: does not exist. `src/client/plugins/` is unbuilt and `PluginCall`/`PluginSubscribe` are not in the proto. Client extensibility is track E in the development plan.
 
@@ -31,6 +31,13 @@ Interfaces a plugin implements today: `Tool` (with `Disclose` / `category_for` /
 Ordered roughly by the size of the ceiling each imposes. Each entry states the hole with evidence, the suggested architecture, and the cost. None is scheduled except where § 4 says otherwise.
 
 ### 2.1 A tool cannot see the conversation
+
+**Status: landed as track M.** Implemented with two refinements over the sketch below — the handle is typed `session::HistoryWindow`, not `const SessionReader*`, which turns the two stated constraints into properties of the type:
+
+- **The window.** `history_window.hpp` (frozen surface in `plugin_abi.h`, with `SessionReader`) is a header-only, non-owning wrapper holding the reader pointer **and the session id it is bound to**, exposing only keyset-paged `GetMessages(before_seq, limit)`. There is no `LoadAll` on it — full materialization stays the resume path's job on `SessionReader`, which no tool holds — so "no path a tool can reach materializes the full history" is structural, not a documented rule. Binding is also what isolates subagents: the registry is the one funnel every session passes through, so injecting the reader there binds each session's window to its own id with no extra code.
+- **Ownership.** As planned below: `SessionParams` gained a reader pointer, owned by `Session` alongside the window built from it (declared before the loop, so the loop's borrowed pointer never outlives it); the agent loop sets `ctx.history` from it per invocation. Stores that are not SQLite-backed (test fakes) leave it null — `history == nullptr` is the natural "unavailable" case, not an error path.
+
+The windowed-access and 512k–1M notes below still describe the semantics; the type now enforces the first.
 
 **Hole.** `ToolContext` (`tool.hpp:29-60`) carries `session_id`, `project_root`, `tool_use_id`, `allowed_skills`, `is_cancelled`, `emit_output`, `logger` — and nothing else. A tool cannot inspect the conversation it runs inside. Anything context-aware — a "summarize the thread so far" tool, a retrieval tool keyed to recent turns, a wrapper that references what was last edited — is inexpressible.
 
@@ -425,7 +432,7 @@ Command (the abstract -- already named Command; no rename)
 
 | Item | Depends on | Status |
 |---|---|---|
-| 2.1 Tool history access | nothing | designed, **track M** (DEVELOPMENT_PLAN §4 M) |
+| 2.1 Tool history access | nothing | **done (track M)**; the tool-facing type is `session::HistoryWindow` |
 | 2.2 Cross-plugin services | nothing | **done (track L)**; first consumer: `/restart-shell` |
 | 2.3 Per-plugin config | nothing | **done (track K)** |
 | 2.4 MCP lifecycle | track G | designed, waits on G |

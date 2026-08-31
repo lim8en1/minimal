@@ -62,6 +62,7 @@ add_executable(minimal_tests
     session_registry_test.cpp
     subagent_spawn_test.cpp
     subagent_test.cpp
+    tool_history_test.cpp
     session_service_test.cpp
     subagent_e2e_test.cpp
     headless_e2e_test.cpp

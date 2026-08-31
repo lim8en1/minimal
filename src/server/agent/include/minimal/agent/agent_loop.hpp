@@ -23,6 +23,7 @@
 #include "minimal/llm/provider.hpp"
 #include "minimal/llm/stream_event.hpp"
 #include "minimal/llm/token_accounting.hpp"
+#include "minimal/session/history_window.hpp"
 #include "minimal/tools/tool.hpp"
 #include "minimal/tools/tool_executor.hpp"
 #include "minimal/tools/tool_registry.hpp"
@@ -90,6 +91,12 @@ struct SessionContext {
     // a free function so a later per-session sink (session-id prefix) is an
     // implementation detail of the wiring, not of the tools.
     common::Logger& logger;
+
+    // The session's tool-facing history window (see ToolContext::history). Owned
+    // by the Session, which outlives this loop; null when the session's store is
+    // not SQLite-backed (test fakes), which makes ctx.history null -- the
+    // natural "unavailable" case, not an error path.
+    const session::HistoryWindow* history = nullptr;
 };
 
 struct TurnResult {
