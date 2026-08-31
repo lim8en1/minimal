@@ -7,7 +7,7 @@ cmake_minimum_required(VERSION 3.28)
 project(minimal
     VERSION 0.1.0
     DESCRIPTION "Local-first coding-agent harness"
-    LANGUAGES CXX)
+    LANGUAGES C CXX)  # C for the vendored tree-sitter grammar sources
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -71,13 +71,24 @@ find_package(nlohmann_json CONFIG REQUIRED)
 find_package(yaml-cpp CONFIG REQUIRED)
 find_package(spdlog CONFIG REQUIRED)
 
+# tree-sitter core is a BASE dependency: the tools-bash plugin's command
+# scanner uses it, and bundled plugins are always built (the client's future
+# highlighting is a second consumer, not the first). Two config names because
+# vcpkg exports `unofficial-tree-sitter` while brew exports `tree-sitter`;
+# normalized behind one interface target so consumers never see the difference.
+find_package(unofficial-tree-sitter CONFIG QUIET)
+if(unofficial-tree-sitter_FOUND)
+    add_library(minimal_tree_sitter INTERFACE)
+    target_link_libraries(minimal_tree_sitter INTERFACE unofficial::tree-sitter::tree-sitter)
+else()
+    find_package(tree-sitter CONFIG REQUIRED)
+    add_library(minimal_tree_sitter INTERFACE)
+    target_link_libraries(minimal_tree_sitter INTERFACE tree-sitter::tree-sitter)
+endif()
+
 if(MINIMAL_BUILD_CLIENT)
     find_package(ftxui CONFIG REQUIRED)
     find_package(md4c CONFIG REQUIRED)   # exports md4c::md4c (verified: vcpkg + brew agree)
-    find_package(unofficial-tree-sitter CONFIG QUIET)
-    if(NOT unofficial-tree-sitter_FOUND)
-        find_package(tree-sitter CONFIG QUIET)
-    endif()
 endif()
 
 if(MINIMAL_BUILD_TESTS)
@@ -99,6 +110,36 @@ FetchContent_Declare(cpp_mcp
     EXCLUDE_FROM_ALL)
 FetchContent_MakeAvailable(cpp_mcp)
 # Exports a plain, un-namespaced static target: `mcp`.
+
+# The second vendored dependency, and the first tree-sitter GRAMMAR: the
+# registry packages the core runtime but not the per-language parsers (see
+# ARCHITECTURE.md -- Dependency management). Grammars ship a generated
+# parser.c, so vendoring means compiling two C files, not running the
+# tree-sitter CLI/Node toolchain.
+#
+# Pinned to a tag: unlike cpp-mcp, this repo publishes releases. SOURCE_SUBDIR
+# points at a directory that does not exist, which stops MakeAvailable from
+# add_subdirectory-ing the grammar's own CMakeLists -- that file is written for
+# standalone distribution (BUILD_SHARED_LIBS ON, a tree-sitter-CLI regeneration
+# rule) and we want neither. We compile the two C files ourselves below.
+FetchContent_Declare(tree_sitter_bash
+    GIT_REPOSITORY https://github.com/tree-sitter/tree-sitter-bash.git
+    GIT_TAG        v0.25.1  # 2026-08; ABI 14/15, loads into tree-sitter core >= 0.24
+    SOURCE_SUBDIR  cmake/no-upstream-build)
+FetchContent_MakeAvailable(tree_sitter_bash)
+
+# No MINIMAL_WARNING_FLAGS here, deliberately: this is third-party generated C
+# (a ~10 MB parser table), compiled with default flags for the same reason
+# cpp-mcp is excluded from our warning set. PIC because it links into plugin
+# MODULEs.
+add_library(minimal_tree_sitter_bash STATIC
+    "${tree_sitter_bash_SOURCE_DIR}/src/parser.c"
+    "${tree_sitter_bash_SOURCE_DIR}/src/scanner.c")
+target_include_directories(minimal_tree_sitter_bash
+    PUBLIC "${tree_sitter_bash_SOURCE_DIR}/src")
+set_target_properties(minimal_tree_sitter_bash PROPERTIES
+    C_STANDARD 11
+    POSITION_INDEPENDENT_CODE ON)
 
 add_subdirectory(proto)
 add_subdirectory(src/common)

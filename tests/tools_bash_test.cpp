@@ -215,6 +215,85 @@ TEST_CASE("scanner disclosure is a lower bound", "[tools_bash][scanner]") {
     CHECK_FALSE(Names(result, "rm"));  // rm is xargs' argument, not a command word
 }
 
+// --- scanner: the grammar ----------------------------------------------------------
+//
+// The tree-sitter-bash rewrite adds two guarantees the hand-rolled walker
+// could not make: input the parser does not understand fails closed, and
+// constructs that are data rather than commands are no longer scanned as
+// commands. The tests above are the contract this half must keep unchanged.
+
+TEST_CASE("scanner fails closed on input the grammar does not understand",
+          "[tools_bash][scanner]") {
+    // tree-sitter is error-recovering: it produces a tree for garbage rather
+    // than refusing. ERROR and MISSING nodes are the only signal that it
+    // guessed, and a guessed parse must not report itself complete -- that is
+    // exactly how the reserved-word hole once authorized more than the
+    // operator saw.
+    CHECK_FALSE(ScanCommand("echo \"unclosed").complete);   // ERROR node
+    CHECK_FALSE(ScanCommand("foo $( bar").complete);        // MISSING ')'
+    CHECK_FALSE(ScanCommand("rm -rf /; if true; then").complete);  // MISSING fi
+
+    // Failing closed does not mean failing usefully-blind: what DID parse is
+    // still named, so a grant on the literal prefix can do its job once the
+    // operator has seen the rest.
+    CHECK(Names(ScanCommand("foo $( bar"), "foo"));
+    CHECK(Names(ScanCommand("rm -rf /; if true; then"), "rm"));
+}
+
+TEST_CASE("heredoc bodies are data, not commands", "[tools_bash][scanner]") {
+    // The hand-rolled walker scanned heredoc bodies as commands, so this
+    // offered a grant for rm -- a program that only ever existed as an
+    // echoed line of text.
+    const auto result = ScanCommand("cat <<'EOF'\nrm -rf /\nEOF");
+    CHECK(result.complete);
+    CHECK((result.command_words == std::vector<std::string>{"cat"}));
+    CHECK_FALSE(Names(result, "rm"));
+}
+
+TEST_CASE("scanner names command positions the grammar structures",
+          "[tools_bash][scanner]") {
+    // Function bodies, subshells, case arms: the grammar yields command_name
+    // nodes at each, where the walker approximated or over-recorded.
+    CHECK(Names(ScanCommand("f() { rm -rf /; }"), "rm"));
+    CHECK(Names(ScanCommand("(cd /tmp && ls)"), "cd"));
+    CHECK(Names(ScanCommand("(cd /tmp && ls)"), "ls"));
+    CHECK(Names(ScanCommand("case $x in a) rm -rf /;; esac"), "rm"));
+
+    // `coproc` is one of the two keywords the grammar leaves UNstructured --
+    // it parses as a plain command with `{ rm -rf /; }` smeared into its
+    // arguments -- so the reserved-word rule must recover the real program
+    // from among them.
+    CHECK(Names(ScanCommand("coproc thing { rm -rf /; }"), "rm"));
+
+    // Conversely, positions that are NOT commands are no longer recorded as
+    // programs. The old walker named the loop variable `f` (and `[`), each of
+    // which could only ever contribute a junk grant offer.
+    CHECK_FALSE(Names(ScanCommand("for f in *.o; do rm $f; done"), "f"));
+    CHECK_FALSE(Names(ScanCommand("if [ -f x ]; then rm x; fi"), "["));
+}
+
+TEST_CASE("a computed program is incomplete even mid-word", "[tools_bash][scanner]") {
+    // `foo$(nproc) bar`: the program is built by substitution, so there is no
+    // literal to name. The old walker saw a word that merely BEGAN with a
+    // literal and confidently recorded `foo` -- over-confident in exactly the
+    // way `complete` exists to prevent. The substitution's own command is
+    // still a literal and still named.
+    const auto computed = ScanCommand("foo$(nproc) bar");
+    CHECK_FALSE(computed.complete);
+    CHECK(Names(computed, "nproc"));
+    CHECK_FALSE(Names(computed, "foo"));
+
+    CHECK_FALSE(ScanCommand("v$i").complete);
+}
+
+TEST_CASE("quoted programs are named unquoted", "[tools_bash][scanner]") {
+    // The disclosure feeds PATH resolution, so the program a quoted spelling
+    // invokes -- not its quote characters -- is what must be named.
+    CHECK((ScanCommand("'ls' -la").command_words == std::vector<std::string>{"ls"}));
+    CHECK((ScanCommand("\"echo\" hi").command_words == std::vector<std::string>{"echo"}));
+    CHECK((ScanCommand("$'rm' -rf /").command_words == std::vector<std::string>{"rm"}));
+}
+
 // --- settings ----------------------------------------------------------------------
 
 TEST_CASE("bash settings take defaults when absent or nonsensical", "[tools_bash][settings]") {

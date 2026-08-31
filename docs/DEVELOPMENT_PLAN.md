@@ -548,7 +548,7 @@ Not scheduled, recorded so they are decisions rather than oversights.
   fails and denies), so this is complexity rather than a bug — a `variant` payload would protect the
   same invariant with less machinery, and is not worth the churn now.
 - **Server-wide fd hygiene** — no `CLOEXEC` discipline on gRPC/SQLite/log fds; every bash command inherits them. The bash pipes are handled; the rest is not.
-- **`tree-sitter-bash` for command disclosure** — still deferred, but **the reason recorded here was wrong and is corrected**. This said the hand-rolled scanner's "failure mode is safe (fewer grants offered)", so upgrading would raise the hit rate and not the safety floor. It was not safe: shell reserved words were recorded as programs, which consumed the command slot and demoted the real program to an argument, so `ls; if true; then rm -rf /; fi` disclosed only `{ls}` and reported itself *complete* — more authorised than the operator saw, not less (§12.1). A hand-rolled walker cannot distinguish "I parsed this" from "I mis-parsed this", which is exactly how that produced `complete = true`; a grammar can, because ERROR/MISSING nodes map onto `complete = false`. The keyword hole is closed, so this is no longer urgent — but it is now a hit-rate *and* soundness argument. Note when it lands: `tree-sitter-bash` has no vcpkg port (only `tree-sitter`, `-c`, `-cli`), so it needs the `FetchContent` grammar-vendoring path that track E has to build anyway; and being error-recovering, it must be walked for ERROR/MISSING explicitly or it trades a known-shape bug for an unknown-shape one.
+- ~~**`tree-sitter-bash` for command disclosure**~~ — **landed** (§12.40). The original deferral reason recorded here was wrong and had to be corrected first: it said the hand-rolled scanner's "failure mode is safe (fewer grants offered)". It was not safe: shell reserved words were recorded as programs, which consumed the command slot and demoted the real program to an argument, so `ls; if true; then rm -rf /; fi` disclosed only `{ls}` and reported itself *complete* — more authorised than the operator saw, not less (§12.1). That hole was closed first (§12.1 again), and the grammar now replaces the walker: `command_name` nodes at every command position, ERROR/MISSING nodes mapped onto `complete = false` — the error signal being the point, since it is the one thing a hand-rolled walker cannot produce. The `FetchContent` grammar-vendoring path this built (tree-sitter-bash has no vcpkg port) is the same plumbing track E needs for highlighting grammars. Every §12.1 scanner test passes unchanged; the grammar version adds fail-closed-on-error, heredoc-bodies-are-data, and no-junk-words guarantees the walker could not make.
 - ~~**Unknown `allowed_skills` entries are silently dropped**~~ — still true of resolution (correct for lookup), but now *reported* at startup by F (`naming_model` check).
 - **`themes/*.json` and `keybindings.json` are specified but unread** — nothing outside a comment in `config_paths.hpp` refers to them, so they are deliberately not seeded either. They arrive with the TUI (track E), which is the first thing that would read one.
 - **The compaction trigger now follows the model's window** (`{"percent": 80}` by default), so the
@@ -559,7 +559,7 @@ Not scheduled, recorded so they are decisions rather than oversights.
 - **No HTTP connection reuse** — a fresh CURL handle per provider call is the deliberate shape of the statelessness contract ("no mutable state across calls"), but a remote backend pays a TCP/TLS handshake per tool cycle. A per-call handle *pool* would recover most of it without shared state; deferred until a remote-backend deployment actually feels it.
 - **Terminate latency can hit `stream_idle_timeout`** — a backend that stalls silently is observed as cancelled only at event boundaries and the 25 ms backoff poll, so `Terminate`'s join can block for up to the 60 s idle timeout before the sink abort propagates. Bounded, and local llama.cpp does not stall this way; recorded rather than tuned.
 - **The shared-token auth plugin is deferred** — the `AuthProvider` registry, the pass-through default, and the wire guard are built (§11); the example plugin that registers one is not.
-- **`tree-sitter` grammars** — claimed by the architecture's vendoring note and absent from the tree (dead vcpkg entry included). They arrive with track E, the only consumer.
+- ~~**`tree-sitter` grammars**~~ — the dead vcpkg entry is real now: `tree-sitter` core moved to base dependencies and `tree-sitter-bash` is vendored via `FetchContent` (the command scanner, §12.40). The rest of the curated set arrives with track E, which now only needs to declare targets on plumbing that already exists.
 - Everything under § *Deferred / open items*: Anthropic provider, Windows, `llamacpp-kv`, parallel tool dispatch, session detach, tab-bar overflow.
 
 ---
@@ -1245,6 +1245,26 @@ disagreeing with what a nearby comment or doc claims, which is the theme of the 
     queued tasks, each touching `entered`, in exactly that window. The atomics are declared first
     now, with the ordering rule written down where the next test of this shape will read it. This is
     also why the verification bar is "the ASan preset runs", not "it ran once".
+
+40. **The bash command scanner is `tree-sitter-bash` now.** The hand-rolled walker that closed #1
+    was replaced by the grammar, as the review's sequencing planned. What it bought, concretely:
+    `command_name` nodes at every command position (function bodies, subshells, case arms,
+    substitutions) instead of the walker's separator approximation; heredoc bodies come back as
+    data, so `cat <<EOF` blocks no longer offer grants for programs that only ever existed as
+    echoed text; junk words the walker recorded as programs (the loop variable `f`, `[`) are gone;
+    and a word like `foo$(nproc)` as the program is `complete = false` rather than confidently
+    recorded as `foo`. The structural win is the error signal: the walker could not tell "I parsed
+    this" from "I mis-parsed this", which is exactly how #1 produced `complete = true` on a string
+    it had misread; a parse whose tree contains ERROR or MISSING nodes now fails closed, root check
+    included so missing *unnamed* tokens (`)`, `fi`) are caught too. The caveats the review named
+    were honoured: `time` and `coproc` are the two keywords the grammar leaves unstructured — they
+    parse as a plain command with the real program demoted to an argument, the exact shape of #1 —
+    so the reserved-word rule survived as a targeted check that names the program from among the
+    arguments; and every §12.1 scanner test passes unchanged, as the replacement's contract.
+    Plumbers' notes: tree-sitter core moved from the `client` vcpkg feature to base dependencies
+    (it was a dead entry — nothing linked it), the grammar is `FetchContent`-vendored at `v0.25.1`
+    with the `SOURCE_SUBDIR` trick so its standalone-oriented CMakeLists is never invoked, and the
+    two C files are compiled without our warning flags — third-party C, same policy as cpp-mcp.
 
 ### Deliberately not done
 

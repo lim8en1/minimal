@@ -114,7 +114,12 @@ target_link_libraries(minimal_tests PRIVATE
     minimal::test_support
     minimal::client_core
     Catch2::Catch2WithMain
-    SQLite3::SQLite3)
+    SQLite3::SQLite3
+    # command_scanner.cpp is compiled directly into the test binary (see the
+    # sources list above), so the scanner's tree-sitter dependencies come with
+    # it -- same linkage as the plugin.
+    minimal_tree_sitter
+    minimal_tree_sitter_bash)
 
 catch_discover_tests(minimal_tests)
 
