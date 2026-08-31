@@ -10,6 +10,7 @@
 #include "minimal/commands/command_registry.hpp"
 #include "minimal/llm/provider_factory_registry.hpp"
 #include "minimal/rpc/auth_provider.hpp"
+#include "minimal/tools/permission_advisor.hpp"
 #include "minimal/tools/tool_registry.hpp"
 
 namespace minimal::plugins {
@@ -52,6 +53,9 @@ struct PluginRecord {
     std::vector<std::string> registered_commands;  // surface names, after aliasing
     bool registered_session_observer = false;
     bool registered_auth_provider = false;
+    // True when the plugin registered an advisor that actually landed (a
+    // duplicate from the same plugin is refused and does not count twice).
+    bool registered_permission_advisor = false;
 
     bool ok() const { return status == LoadStatus::Loaded; }
 };
@@ -78,7 +82,8 @@ public:
                  nlohmann::json tools_settings = nlohmann::json::object(),
                  agent::SessionObserverRegistry* observers = nullptr,
                  commands::CommandRegistry* commands = nullptr,
-                 rpc::AuthProviderRegistry* auth_providers = nullptr);
+                 rpc::AuthProviderRegistry* auth_providers = nullptr,
+                 tools::PermissionAdvisorRegistry* permission_advisors = nullptr);
     ~PluginLoader();
 
     PluginLoader(const PluginLoader&) = delete;
@@ -102,6 +107,9 @@ private:
     // Optional like the others; null means plugins cannot register an auth
     // provider. Exclusive registry: the first plugin to register wins.
     rpc::AuthProviderRegistry* auth_providers_ = nullptr;
+    // Optional like the others; null means plugins cannot register a permission
+    // advisor. Additive across plugins; permissions.json selects one by name.
+    tools::PermissionAdvisorRegistry* permission_advisors_ = nullptr;
     std::vector<void*> handles_;  // never closed; see LIFETIME above
 };
 

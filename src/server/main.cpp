@@ -107,6 +107,10 @@ int main(int argc, char** argv) {
     // registry is the pass-through default -- no authentication, matching the
     // local-only single-user topology.
     minimal::rpc::AuthProviderRegistry auth_providers;
+    // Additive across plugins: each may contribute one advisor keyed by its
+    // name; permissions.json's "advisor" selects one. An empty registry is the
+    // default -- every Ask reaches the human.
+    minimal::tools::PermissionAdvisorRegistry permission_advisors;
 
     // The tools slice of settings.json is forwarded verbatim to every plugin;
     // core imposes no schema on it. Loaded defensively because a missing or
@@ -121,7 +125,7 @@ int main(int argc, char** argv) {
     }
 
     minimal::plugins::PluginLoader loader(tools, providers, tools_settings, &observers, &commands,
-                                          &auth_providers);
+                                          &auth_providers, &permission_advisors);
     const auto records = loader.LoadAll(candidates);
 
     std::printf("plugins (%zu discovered):\n", records.size());
@@ -144,6 +148,9 @@ int main(int argc, char** argv) {
         }
         if (record.registered_auth_provider) {
             std::printf("      auth provider registered\n");
+        }
+        if (record.registered_permission_advisor) {
+            std::printf("      advisor  permission prompts\n");
         }
     }
 

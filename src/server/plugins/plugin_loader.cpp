@@ -21,6 +21,7 @@ using RegisterProviderFactoriesFn = void (*)(llm::ProviderFactoryRegistry&);
 using RegisterSessionObserverFn = void (*)(agent::SessionObserverRegistry&);
 using RegisterCommandsFn = void (*)(commands::CommandRegistry&);
 using RegisterAuthProviderFn = void (*)(rpc::AuthProviderRegistry&);
+using RegisterPermissionAdvisorFn = void (*)(tools::PermissionAdvisorRegistry&);
 
 template <typename Fn>
 Fn Lookup(void* handle, const char* symbol) {
@@ -50,13 +51,16 @@ std::string_view ToString(LoadStatus status) {
 PluginLoader::PluginLoader(tools::ToolRegistry& tools, llm::ProviderFactoryRegistry& providers,
                             nlohmann::json tools_settings,
                             agent::SessionObserverRegistry* observers,
-                           commands::CommandRegistry* commands, rpc::AuthProviderRegistry* auth_providers)
+                           commands::CommandRegistry* commands,
+                           rpc::AuthProviderRegistry* auth_providers,
+                           tools::PermissionAdvisorRegistry* permission_advisors)
     : tools_(tools),
       providers_(providers),
       tools_settings_(std::move(tools_settings)),
       observers_(observers),
       commands_(commands),
-      auth_providers_(auth_providers) {}
+      auth_providers_(auth_providers),
+      permission_advisors_(permission_advisors) {}
 
 // Handles are intentionally leaked -- see LIFETIME in the header.
 PluginLoader::~PluginLoader() = default;
@@ -165,6 +169,21 @@ PluginRecord PluginLoader::LoadOne(const PluginCandidate& candidate) {
             register_auth(*auth_providers_);
             record.registered_auth_provider = true;
         }
+    }
+
+    if (permission_advisors_ != nullptr) {
+        // Same attribution window as tools and commands: registrations arriving
+        // inside it are keyed by this plugin's name, which is what
+        // permissions.json's "advisor" field selects on.
+        const std::size_t advisors_before = permission_advisors_->attributions().size();
+        permission_advisors_->SetAttribution(record.name);
+        if (auto register_advisor = Lookup<RegisterPermissionAdvisorFn>(
+                handle, "minimal_plugin_register_permission_advisor")) {
+            register_advisor(*permission_advisors_);
+        }
+        permission_advisors_->ClearAttribution();
+        record.registered_permission_advisor =
+            permission_advisors_->attributions().size() > advisors_before;
     }
 
     record.status = LoadStatus::Loaded;

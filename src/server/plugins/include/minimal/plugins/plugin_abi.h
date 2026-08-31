@@ -37,6 +37,7 @@
 #include "minimal/tools/atomic_write.hpp"
 #include "minimal/tools/file_access.hpp"
 #include "minimal/tools/path_confinement.hpp"
+#include "minimal/tools/permission_advisor.hpp"
 #include "minimal/tools/tool.hpp"
 #include "minimal/tools/tool_registry.hpp"
 
@@ -97,6 +98,16 @@ void minimal_plugin_register_commands(minimal::commands::CommandRegistry&);
 // authentication -- an empty registry passes everything through, matching the
 // local-only single-user topology (ARCHITECTURE.md).
 void minimal_plugin_register_auth_provider(minimal::rpc::AuthProviderRegistry&);
+
+// OPTIONAL, additive: contributes a permission advisor, keyed by the plugin's
+// name. permissions.json's "advisor" field selects one by that name; an
+// unselected advisor is inert. The advisor answers Ask-gated tool calls
+// automatically and abstains (or throws) to the wire checker -- the human.
+// It can only NARROW what reaches a person: ToolExecutor has already applied
+// the mode lattice, precedence chains, subagent ceilings, and run modes before
+// the checker runs, and the grant filter at the call site holds for an
+// advisor's answer exactly as for a human's.
+void minimal_plugin_register_permission_advisor(minimal::tools::PermissionAdvisorRegistry&);
 
 // Not yet wired -- declared nowhere until the subsystem it registers into
 // exists, so that this ABI is not frozen before it has consumers:
