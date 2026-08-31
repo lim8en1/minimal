@@ -516,6 +516,17 @@ Applies to every milestone. These are existing project practice, recorded so the
 - **Verify by execution, not inspection.** Plugin linkage was confirmed with `nm -u`/`otool -L`; the ABI mismatch was demonstrated against a running server; the bash hangs were measured (8008 ms → 0 ms). Claims about behaviour need a run behind them.
 - **The pinned toolchain does not synthesize implicit `operator==` for user-defined classes** (verified against AppleClang 21: even `struct E { bool b; };` has no `==`; an explicit `= default` works). Compare fields explicitly, as the existing tests do — do not add defaulted operators to production types just for test convenience.
 - **Zero warnings.** `-Wall -Wextra` on all first-party targets; the tree is clean and must stay so.
+- **ASan is a preset, not a memory.** `cmake --preset asan && cmake --build --preset asan && ctest
+  --preset asan` runs the whole suite with first-party code AND dependencies instrumented
+  (`cmake/triplets/arm64-osx-asan.cmake`; the triplet name keys vcpkg's cache, so the instrumented
+  dependency tree installs beside the normal one and the preset's first run is the slow one). Leak
+  detection is off by decision: plugin handles are held for process lifetime on purpose
+  (ARCHITECTURE.md, "Server plugins"), and uninstrumented third-party allocators made LSan noise
+  exceed signal. Sanitizer findings are test bugs until proven otherwise — the preset's first run
+  caught a use-after-scope in a test that destroyed its release flag before the worker polling it.
+- **The presets pin the generator** (`Ninja`); ad-hoc `-G Ninja` configurations were how every
+  build here has actually been made, and a preset that cannot configure from a clean checkout is a
+  gap, not a default.
 - **`ARCHITECTURE.md` is updated in the same change that diverges from it.** The bash rework's core finding was a restriction that outlived its rationale because the doc was updated without re-deriving the rule.
 - **Test tiers** (§ *Testing*): pure logic → agent loop against `FakeLlmProvider` → tools against a temp `project_root` → end-to-end over a real socket.
 
@@ -614,8 +625,11 @@ One aside worth keeping: a Catch2 `TEST_CASE` name that *starts* with `-` breaks
 ### Practice this confirmed
 
 - **The from-scratch build and the sanitizer both earned their keep**, and both required reading the
-  output rather than the exit code. ASan's one report is inside gRPC's own `send_goaway` frame and
-  reproduces with every change stashed — an uninstrumented dependency, not a defect.
+  output rather than the exit code. ASan's one report back then was inside gRPC's own `send_goaway`
+  frame and reproduced with every change stashed — an uninstrumented dependency, not a defect.
+  Closed since: §11's `asan` preset instruments the dependencies too (overlay triplet), and the
+  suite runs clean under it. Instrumenting only first-party code is not an option — that same
+  mismatch is what produced the report.
 - **A ceiling is not an invariant test.** The first "the retry waited" assertion was `elapsed < 2s`,
   which passes with the backoff deleted. Under full jitter no single run *can* assert a floor; the
   fix was to change the algorithm to equal jitter so the floor exists, not to loosen the test.

@@ -7,6 +7,7 @@
       "displayName": "Default (vcpkg, RelWithDebInfo)",
       "description": "Requires $VCPKG_ROOT to point at a vcpkg checkout.",
       "binaryDir": "${sourceDir}/build",
+      "generator": "Ninja",
       "cacheVariables": {
         "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
@@ -27,18 +28,42 @@
       "displayName": "Server only (no TUI client)",
       "binaryDir": "${sourceDir}/build-server",
       "cacheVariables": { "MINIMAL_BUILD_CLIENT": "OFF" }
+    },
+    {
+      "name": "asan",
+      "inherits": "default",
+      "displayName": "AddressSanitizer (first-party code and dependencies instrumented)",
+      "binaryDir": "${sourceDir}/build-asan",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_C_FLAGS": "-fsanitize=address -fno-omit-frame-pointer",
+        "CMAKE_CXX_FLAGS": "-fsanitize=address -fno-omit-frame-pointer",
+        "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=address",
+        "CMAKE_SHARED_LINKER_FLAGS": "-fsanitize=address",
+        "VCPKG_TARGET_TRIPLET": "arm64-osx-asan",
+        "VCPKG_OVERLAY_TRIPLETS": "${sourceDir}/cmake/triplets"
+      }
     }
   ],
   "buildPresets": [
     { "name": "default", "configurePreset": "default" },
     { "name": "debug", "configurePreset": "debug" },
-    { "name": "server-only", "configurePreset": "server-only" }
+    { "name": "server-only", "configurePreset": "server-only" },
+    { "name": "asan", "configurePreset": "asan" }
   ],
   "testPresets": [
     {
       "name": "default",
       "configurePreset": "default",
       "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "asan",
+      "configurePreset": "asan",
+      "output": { "outputOnFailure": true },
+      "environment": {
+        "ASAN_OPTIONS": "detect_leaks=0"
+      }
     }
   ]
 }
