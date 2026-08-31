@@ -6,6 +6,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "minimal/agent/mention_resolver.hpp"
 #include "minimal/agent/session_observer_registry.hpp"
 #include "minimal/commands/command_registry.hpp"
 #include "minimal/llm/provider_factory_registry.hpp"
@@ -52,6 +53,7 @@ struct PluginRecord {
     std::vector<std::string> registered_commands;  // surface names, after aliasing
     bool registered_session_observer = false;
     bool registered_auth_provider = false;
+    bool registered_mention_resolver = false;
 
     bool ok() const { return status == LoadStatus::Loaded; }
 };
@@ -78,7 +80,8 @@ public:
                  nlohmann::json tools_settings = nlohmann::json::object(),
                  agent::SessionObserverRegistry* observers = nullptr,
                  commands::CommandRegistry* commands = nullptr,
-                 rpc::AuthProviderRegistry* auth_providers = nullptr);
+                 rpc::AuthProviderRegistry* auth_providers = nullptr,
+                 agent::MentionResolverRegistry* mention_resolvers = nullptr);
     ~PluginLoader();
 
     PluginLoader(const PluginLoader&) = delete;
@@ -102,6 +105,10 @@ private:
     // Optional like the others; null means plugins cannot register an auth
     // provider. Exclusive registry: the first plugin to register wins.
     rpc::AuthProviderRegistry* auth_providers_ = nullptr;
+    // Optional for the same reason again: the seam is exclusive (first plugin
+    // wins) and the registry itself carries the core default, so null just
+    // means plugins cannot override the resolver.
+    agent::MentionResolverRegistry* mention_resolvers_ = nullptr;
     std::vector<void*> handles_;  // never closed; see LIFETIME above
 };
 

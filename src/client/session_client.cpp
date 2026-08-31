@@ -70,6 +70,20 @@ SessionClient::GetMessagesResult SessionClient::GetMessages(const std::string& s
     return result;
 }
 
+SessionClient::SuggestPathsResult SessionClient::SuggestPaths(const std::string& session_id,
+                                                              const std::string& prefix,
+                                                              int32_t limit) {
+    grpc::ClientContext context;
+    v1::SuggestPathsRequest request;
+    request.set_session_id(session_id);
+    request.set_prefix(prefix);
+    request.set_limit(limit);
+
+    SuggestPathsResult result;
+    result.status = stub_->SuggestPaths(&context, request, &result.response);
+    return result;
+}
+
 grpc::Status SessionClient::RunTurn(const std::string& session_id, const std::string& text,
                                     const std::function<bool(const ServerEvent&)>& on_event) {
     grpc::ClientContext context;

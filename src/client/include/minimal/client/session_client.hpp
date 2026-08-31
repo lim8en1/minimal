@@ -31,8 +31,16 @@ public:
     struct CreateOptions {
         std::string project_root;
         std::string agent_preset;
+        // "<provider>/<model>", empty = the preset's own. Outranks it.
+        std::string model;
         std::string name;
+        // UNSPECIFIED lets permissions.json decide. The headless client asks for
+        // ALLOW_ONLY explicitly, because it has no human to answer a prompt.
         v1::PermissionRunMode run_mode = v1::PERMISSION_RUN_MODE_UNSPECIFIED;
+        // Non-empty means RESUME this stored session instead of creating a new
+        // one. The stored row's name/preset/project_root govern, so the three
+        // fields above are not sent with it; only run_mode still applies.
+        std::string resume_session_id;
     };
 
     // One persistent session stream: a single gRPC bidi with its own reader thread
@@ -127,21 +135,6 @@ public:
     // thrown: "no server running" is ordinary for a client expected to spawn one.
     bool WaitForConnected(std::chrono::milliseconds timeout);
 
-    struct CreateOptions {
-        std::string project_root;
-        std::string agent_preset;
-        // "<provider>/<model>", empty = the preset's own. Outranks it.
-        std::string model;
-        std::string name;
-        // UNSPECIFIED lets permissions.json decide. The headless client asks for
-        // ALLOW_ONLY explicitly, because it has no human to answer a prompt.
-        v1::PermissionRunMode run_mode = v1::PERMISSION_RUN_MODE_UNSPECIFIED;
-        // Non-empty means RESUME this stored session instead of creating a new
-        // one. The stored row's name/preset/project_root govern, so the three
-        // fields above are not sent with it; only run_mode still applies.
-        std::string resume_session_id;
-    };
-
     // Creates a new persistent Stream sharing this channel. The callback is the one place
     // every tab's reader funnels events: AppState.DispatchToTab keys off each event's own
     // session_id, so all streams can share a single dispatcher.
@@ -167,6 +160,17 @@ public:
     };
     GetMessagesResult GetMessages(const std::string& session_id,
                                   std::optional<int64_t> before_seq, int32_t limit);
+
+    // @-mention suggestions, resolved by the server's MentionResolver so the
+    // strategy is pluggable server-side and every frontend inherits it. Paths
+    // are relative to the session's project_root; directories carry a trailing
+    // '/'. An unknown session is NOT_FOUND.
+    struct SuggestPathsResult {
+        v1::SuggestPathsResponse response;
+        grpc::Status status;
+    };
+    SuggestPathsResult SuggestPaths(const std::string& session_id, const std::string& prefix,
+                                    int32_t limit);
 
     // Opens a bidi stream for one turn: sends UserChatTurn, pumps ServerEvents to
     // `on_event` until TurnCompletedEvent or stream end. Reads TO END before Finish()

@@ -5,6 +5,7 @@
 #include <exception>
 #include <utility>
 
+#include "minimal/agent/mention_expansion.hpp"
 #include "minimal/rpc/proto_convert.hpp"
 
 namespace minimal::agent {
@@ -414,11 +415,20 @@ void Session::WorkerMain() {
 void Session::RunOneTurn(std::string text) {
     const auto started = std::chrono::steady_clock::now();
 
+    // @-mention expansion is for the HUMAN's typed turns only: a subagent's
+    // task arrives from the model, and expanding '@' in model-generated prose
+    // would misfire on emails and ordinary sentences. No mentions -> a message
+    // byte-identical to the plain wrap (mention_expansion.hpp), so the
+    // unconditional-looking ternary changes nothing for anyone else.
+    llm::Message seed = params_.parent_session_id.empty()
+                            ? ExpandMentions(text, params_.project_root, logger_)
+                            : llm::Message{llm::Role::User, {llm::TextBlock{std::move(text)}}};
+
     TurnResult result;
     std::int64_t first_seq = 0;
     try {
         first_seq = store_->last_appended_seq() + 1;
-        result = loop_->RunTurn(llm::Message{llm::Role::User, {llm::TextBlock{std::move(text)}}});
+        result = loop_->RunTurn(std::move(seed));
     } catch (const llm::LlmError& error) {
         // The loop rethrows once retries are exhausted. The session survives:
         // one failed turn is not a reason to tear down a conversation the user

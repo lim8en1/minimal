@@ -7,6 +7,7 @@
 #include <thread>
 #include <utility>
 
+#include "minimal/agent/mention_resolver.hpp"
 #include "minimal/rpc/proto_convert.hpp"
 
 namespace minimal::rpc {
@@ -20,6 +21,13 @@ constexpr int kFallbackPageSize = 100;
 grpc::Status NotYet(const char* what) {
     return grpc::Status(grpc::StatusCode::UNIMPLEMENTED,
                         std::string(what) + " is not implemented yet");
+}
+
+// The fallback when no registry was wired (tests, or a service built before
+// plugin load completes). Stateless and const, so one shared instance is safe.
+const agent::MentionResolver& DefaultMentionResolver() {
+    static const agent::PrefixMentionResolver resolver;
+    return resolver;
 }
 
 }  // namespace
@@ -471,9 +479,30 @@ grpc::Status SessionServiceImpl::ListSessions(grpc::ServerContext* context,
     return grpc::Status::OK;
 }
 
-grpc::Status SessionServiceImpl::SuggestPaths(grpc::ServerContext*, const v1::SuggestPathsRequest*,
-                                              v1::SuggestPathsResponse*) {
-    return NotYet("SuggestPaths");
+grpc::Status SessionServiceImpl::SuggestPaths(grpc::ServerContext*,
+                                              const v1::SuggestPathsRequest* request,
+                                              v1::SuggestPathsResponse* response) {
+    // The project root of the session named in the request. A LIVE session wins;
+    // a terminated one still answers from its database row, matching GetMessages,
+    // which reads the same way whether or not a tab happens to be open. An id
+    // that is neither is NOT_FOUND, not an empty result that reads like "no
+    // matches here".
+    std::filesystem::path project_root;
+    if (const auto session = sessions_.Find(request->session_id())) {
+        project_root = session->info().project_root;
+    } else if (const auto row = db_.GetSession(request->session_id())) {
+        project_root = row->project_root;
+    } else {
+        return grpc::Status(grpc::StatusCode::NOT_FOUND,
+                            "unknown session: " + request->session_id());
+    }
+
+    const agent::MentionResolver& resolver =
+        mention_resolvers_ != nullptr ? mention_resolvers_->Active() : DefaultMentionResolver();
+    for (auto& path : resolver.Suggest(request->prefix(), project_root, request->limit())) {
+        response->add_paths(std::move(path));
+    }
+    return grpc::Status::OK;
 }
 
 grpc::Status SessionServiceImpl::PluginCall(grpc::ServerContext*, const v1::PluginCallRequest*,

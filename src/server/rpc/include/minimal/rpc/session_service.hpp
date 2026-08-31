@@ -1,10 +1,10 @@
 #pragma once
 
-// The gRPC surface. Implements CreateSession, OpenSession, GetMessages and
-// ListSessions; the rest answer UNIMPLEMENTED until the subsystem behind them
-// exists (SuggestPaths needs the TUI's resolver, PluginCall needs client
-// plugins). Answering explicitly matters: a client that calls one gets a clear
-// status instead of a hang.
+// The gRPC surface. Implements CreateSession, OpenSession, GetMessages,
+// ListSessions and SuggestPaths; the rest answer UNIMPLEMENTED until the
+// subsystem behind them exists (PluginCall needs client plugins). Answering
+// explicitly matters: a client that calls one gets a clear status instead of a
+// hang.
 //
 // The two read RPCs go to the DATABASE, not to a live Session, and that is the
 // point: the picker lists sessions the server has no Session object for, and
@@ -30,6 +30,7 @@
 
 #include <grpcpp/grpcpp.h>
 
+#include "minimal/agent/mention_resolver.hpp"
 #include "minimal/agent/session_registry.hpp"
 #include "minimal/commands/command_registry.hpp"
 #include "minimal/common/logger.hpp"
@@ -83,6 +84,12 @@ public:
         auth_providers_ = registry;
     }
 
+    // Optional: unset, SuggestPaths uses the core-default PrefixMentionResolver;
+    // set (main.cpp after plugin load), a plugin's override takes precedence.
+    void set_mention_resolvers(const agent::MentionResolverRegistry* resolvers) {
+        mention_resolvers_ = resolvers;
+    }
+
     std::size_t attached_clients() const;
 
 private:
@@ -121,6 +128,8 @@ private:
     const commands::CommandRegistry* commands_ = nullptr;
     // Borrowed and optional: absent = pass-through (see auth_provider.hpp).
     const AuthProviderRegistry* auth_providers_ = nullptr;
+    // Borrowed and optional: null falls back to the core default resolver.
+    const agent::MentionResolverRegistry* mention_resolvers_ = nullptr;
     session::SessionDatabase& db_;
     session::SessionReader reader_;
     config::SettingsConfig settings_;

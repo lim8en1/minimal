@@ -108,6 +108,7 @@ struct ServiceFixture {
             common::DefaultLogger());
         sessions->set_commands(&commands);
         service->set_commands(&commands);
+        service->set_mention_resolvers(&mention_resolvers);
         service->set_on_last_client_detached([this] { last_detach.store(true); });
 
         socket = dir / "test.sock";
@@ -139,6 +140,7 @@ struct ServiceFixture {
 
     commands::CommandRegistry commands;
     const commands::CommandRegistry* sessions_commands = nullptr;
+    agent::MentionResolverRegistry mention_resolvers{common::DefaultLogger()};
     testing::TempDir tempdir;
     std::filesystem::path dir, socket;
     config::SkillRegistry skills;
@@ -582,16 +584,11 @@ TEST_CASE("two sessions on one channel do not cross-talk", "[session_service]") 
 TEST_CASE("a deferred RPC answers UNIMPLEMENTED rather than hanging", "[session_service]") {
     // A client calling one of these gets a clear status. Silence would look
     // exactly like a server that is merely slow.
+    // (SuggestPaths used to be in this test; it is implemented now -- see the
+    // [mention] cases below.)
     ServiceFixture fixture;
     fixture.Start();
 
-    {
-        grpc::ClientContext context;
-        v1::SuggestPathsRequest request;
-        v1::SuggestPathsResponse response;
-        CHECK(fixture.stub->SuggestPaths(&context, request, &response).error_code() ==
-              grpc::StatusCode::UNIMPLEMENTED);
-    }
     {
         grpc::ClientContext context;
         v1::PluginCallRequest request;
@@ -673,6 +670,93 @@ TEST_CASE("scrollback for an unknown session is NOT_FOUND, not an empty page",
     v1::GetMessagesResponse response;
     CHECK(fixture.stub->GetMessages(&context, request, &response).error_code() ==
           grpc::StatusCode::NOT_FOUND);
+}
+
+TEST_CASE("SuggestPaths answers for the session's project root, relative paths only",
+          "[session_service][mention]") {
+    ServiceFixture fixture;
+    fixture.Start();
+
+    const std::string session_id = fixture.CreateSession();
+    std::filesystem::create_directories(fixture.dir / "work" / "src");
+    { std::ofstream out(fixture.dir / "work" / "src" / "main.cpp"); out << "x"; }
+    { std::ofstream out(fixture.dir / "work" / "README.md"); out << "y"; }
+
+    grpc::ClientContext context;
+    v1::SuggestPathsRequest request;
+    request.set_session_id(session_id);
+    request.set_prefix("");
+    request.set_limit(50);
+    v1::SuggestPathsResponse response;
+    REQUIRE(fixture.stub->SuggestPaths(&context, request, &response).ok());
+
+    // Sorted, relative to project_root, directories carrying the descending '/'.
+    REQUIRE(response.paths_size() == 2);
+    CHECK(response.paths(0) == "README.md");
+    CHECK(response.paths(1) == "src/");
+}
+
+TEST_CASE("SuggestPaths falls back to the stored row for a terminated session",
+          "[session_service][mention]") {
+    // Same rule as GetMessages: a terminated session still answers. A tab may
+    // outlive the session object that backed it mid-keystroke.
+    ServiceFixture fixture;
+    fixture.Start();
+
+    const std::string session_id = fixture.CreateSession();
+    fixture.sessions->Terminate(session_id);  // session object gone; row remains
+
+    grpc::ClientContext context;
+    v1::SuggestPathsRequest request;
+    request.set_session_id(session_id);
+    v1::SuggestPathsResponse response;
+    REQUIRE(fixture.stub->SuggestPaths(&context, request, &response).ok());
+    CHECK(response.paths_size() == 0);  // the (empty) work dir, not an error
+}
+
+TEST_CASE("SuggestPaths for an unknown session is NOT_FOUND, not an empty page",
+          "[session_service][mention]") {
+    ServiceFixture fixture;
+    fixture.Start();
+
+    grpc::ClientContext context;
+    v1::SuggestPathsRequest request;
+    request.set_session_id("01ARZ3NDEKTSV4RRFFQ69G5FAV");
+    v1::SuggestPathsResponse response;
+    CHECK(fixture.stub->SuggestPaths(&context, request, &response).error_code() ==
+          grpc::StatusCode::NOT_FOUND);
+}
+
+TEST_CASE("a turn with @-mentions persists the verbatim text plus framed blocks",
+          "[session_service][mention]") {
+    ServiceFixture fixture;
+    fixture.Script(testing::TextResponse("looked"));
+    fixture.Start();
+
+    const std::string session_id = fixture.CreateSession();
+    { std::ofstream out(fixture.dir / "work" / "notes.md"); out << "file body"; }
+
+    grpc::ClientContext open_context;
+    auto stream = fixture.stub->OpenSession(&open_context);
+    REQUIRE(stream->Write(ChatTurn(session_id, "see @notes.md")));
+    REQUIRE(WaitForTurnCompleted(*stream));
+    (void)DrainAndFinish(stream);
+
+    // The persisted user message IS the expanded one -- the transcript records
+    // what the model saw. Blocks, not a rewritten single text: the original
+    // sentence survives verbatim as its own block.
+    grpc::ClientContext context;
+    v1::GetMessagesRequest request;
+    request.set_session_id(session_id);
+    v1::GetMessagesResponse response;
+    REQUIRE(fixture.stub->GetMessages(&context, request, &response).ok());
+    REQUIRE(response.messages_size() == 2);
+    const auto& user = response.messages(1);
+    REQUIRE(user.message().role() == v1::ROLE_USER);
+    REQUIRE(user.message().content_size() == 2);
+    CHECK(user.message().content(0).text().text() == "see @notes.md");
+    CHECK(user.message().content(1).text().text() ==
+          "<file path=\"notes.md\">\nfile body\n</file>");
 }
 
 TEST_CASE("ListSessions without a project_root is refused rather than answered empty",

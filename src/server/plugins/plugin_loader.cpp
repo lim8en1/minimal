@@ -21,6 +21,7 @@ using RegisterProviderFactoriesFn = void (*)(llm::ProviderFactoryRegistry&);
 using RegisterSessionObserverFn = void (*)(agent::SessionObserverRegistry&);
 using RegisterCommandsFn = void (*)(commands::CommandRegistry&);
 using RegisterAuthProviderFn = void (*)(rpc::AuthProviderRegistry&);
+using RegisterMentionResolverFn = void (*)(agent::MentionResolverRegistry&);
 
 template <typename Fn>
 Fn Lookup(void* handle, const char* symbol) {
@@ -50,13 +51,15 @@ std::string_view ToString(LoadStatus status) {
 PluginLoader::PluginLoader(tools::ToolRegistry& tools, llm::ProviderFactoryRegistry& providers,
                             nlohmann::json tools_settings,
                             agent::SessionObserverRegistry* observers,
-                           commands::CommandRegistry* commands, rpc::AuthProviderRegistry* auth_providers)
+                           commands::CommandRegistry* commands, rpc::AuthProviderRegistry* auth_providers,
+                           agent::MentionResolverRegistry* mention_resolvers)
     : tools_(tools),
       providers_(providers),
       tools_settings_(std::move(tools_settings)),
       observers_(observers),
       commands_(commands),
-      auth_providers_(auth_providers) {}
+      auth_providers_(auth_providers),
+      mention_resolvers_(mention_resolvers) {}
 
 // Handles are intentionally leaked -- see LIFETIME in the header.
 PluginLoader::~PluginLoader() = default;
@@ -164,6 +167,14 @@ PluginRecord PluginLoader::LoadOne(const PluginCandidate& candidate) {
                 handle, "minimal_plugin_register_auth_provider")) {
             register_auth(*auth_providers_);
             record.registered_auth_provider = true;
+        }
+    }
+
+    if (mention_resolvers_ != nullptr) {
+        if (auto register_resolver = Lookup<RegisterMentionResolverFn>(
+                handle, "minimal_plugin_register_mention_resolver")) {
+            register_resolver(*mention_resolvers_);
+            record.registered_mention_resolver = true;
         }
     }
 

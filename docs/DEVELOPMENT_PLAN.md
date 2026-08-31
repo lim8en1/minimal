@@ -2,7 +2,7 @@
 
 Companion to `ARCHITECTURE.md`, which remains the single source of truth for *design*. This document covers only *sequencing*: what is built, what blocks what, and what "done" means for each remaining piece. Every milestone cites the `ARCHITECTURE.md` section that specifies it; where this plan and that document disagree, that document wins and this one is stale.
 
-**Status: Milestones A, B, C, D, F and H are complete, and a post-merge review of A+B+H has been actioned (§8). Only E (the TUI) and G (MCP) remain. Clean build, zero warnings.** J (permission advisor) is designed (`docs/EXTENSIBILITY.md` §3) and scheduled (§4 J) but not started.
+**Status: Milestones A, B, C, D, F and H are complete, and a post-merge review of A+B+H has been actioned (§8). Of the TUI (track E), the render layer (E1), the client transport + state core (E2), and server-side @-mentions (E3) are done; the FTXUI frame (E4) and G (MCP) remain. Clean build, zero warnings.** J (permission advisor) is designed (`docs/EXTENSIBILITY.md` §3) and scheduled (§4 J) but not started.
 
 `minimal -p` holds real conversations against a local model using `read`, `bash`, and `skill`; a permission prompt round-trips over the wire in both directions; a session grant silences the second prompt; the server exits when the last client detaches. Transcripts persist to SQLite, survive the server process, and are **resumable**: `CreateSession` with a `session_id` reopens a stored session, loads its transcript as the loop's working history without re-appending it, and the next turn continues the conversation (`minimal -p --resume <id> PROMPT`). **Subagents work** (§5 D): a model can spawn blocking and non-blocking children over the `spawn_subagent` tool, permission inheritance is enforced as ceilings, and the headless client honours its attach obligation over a real socket. `cmake --install` produces a config dir the server actually starts against (§8), and the startup sanity check reports every problem with it at once (§4 F).
 
@@ -461,11 +461,65 @@ Fills the empty `commands-core` plugin and unblocks `/restart-shell` in `tools-b
 4. **A completion is an error, not an empty success, when the child stopped with nothing to say** (cancelled, failed, or `max_turns`-capped mid-loop). The parent model adapting to a named reason is the design intent of every spawn error; an empty block reading like success is the failure the bundled `subagent.md` itself warns against.
 5. **Testing infrastructure, again.** Parallel `ctest` runs discovered cases against the same binary sharing fixed temp arenas — one case's constructor `remove_all()` wiping another's socket mid-test. Every multi-case fixture arena is now unique per process and per fixture (`pid` + counter). Also: ASan over the in-process tiers found a pre-existing one-byte out-of-bounds read in `file_access_test.cpp` (a 14-byte `std::string` built from a 13-byte literal); fixed.
 
+### E3 — Server-side @-mention support — done
+
+> § *@-mention file references*. Split out of the TUI track (the plan lives in
+> `.opencode/plans/track-e-tui.md`) because the work is server-side: every
+> frontend inherits it, not just the TUI.
+
+**Status: built, wired, and exercised over a real socket.** `src/server/agent/mention_resolver.{hpp,cpp}`
+(interface, `PrefixMentionResolver` core default, exclusive `MentionResolverRegistry`),
+`mention_expansion.{hpp,cpp}` (the scan+inline), expansion hooked in
+`Session::RunOneTurn` — top-level sessions only, because a subagent's task is
+model-generated prose and expanding `@` in it would misfire on emails — the
+resolver seam wired through `plugin_abi.h`/`PluginLoader`/`main.cpp`, `SuggestPaths`
+implemented, and a `SessionClient::SuggestPaths` wrapper so the RPC is proven on
+the wire before the prompt editor (E4) consumes it.
+
+Decisions the implementation locked (recorded in `ARCHITECTURE.md` § *@-mention*):
+
+- Expansion produces **blocks in one message** — the verbatim text as the first
+  `TextBlock`, then one framed `<file path>`/`<file-tree path>` block per
+  resolved mention. Never one message per file (the Anthropic Messages API
+  refuses consecutive same-role messages) and never a rewritten single text
+  (the user's sentence survives verbatim, and scrollback can render attachments
+  separately because `message_codec` persists the block array).
+- **Capping is per file, never a split** — 1000 lines with a visible truncation
+  note pointing at the read tool; directory trees depth- and entry-bounded.
+- **Outside-`project_root` mentions are allowed** (as-if-pasted trust; only
+  paths that cannot be safely resolved fail), and an unresolvable mention stays
+  verbatim with no error channel — the model sees the token and can say so.
+- Regular-files-only guard: a FIFO or device mention is treated as unresolvable
+  rather than letting `read_window` block the session worker on `open()`.
+
+**What writing the tests found.** The first draft of the whitespace-boundary
+test was not discriminating: it used `a@b.com`, and a mid-word `@b.com` stays
+verbatim either way (unresolvable tokens produce no block), so deleting the
+boundary rule did not fail it. The rule is only observable when the mid-word
+path *would resolve* — the test now uses a mid-word `@b.txt` next to a real one.
+All three invariants (descent-only-on-`/`, the boundary, the no-mention
+byte-identity passthrough) were then proven by delete-and-watch-fail (§6).
+
+- [x] Resolver listing rules: prefix match, descent on `/`, dotfile rule, sorted,
+      limit clamp, nonexistent dir → empty not error; registry exclusive,
+      first-wins, core-default fallback.
+- [x] Expansion: multiple mentions, same file twice (no dedup — a mention means
+      "read this now"), truncation, binary/FIFO/symlink-loop → verbatim,
+      outside-root allowed, bare/mid-word `@` untouched.
+- [x] Wire: suggestions over a real socket (live session, terminated-session
+      fallback via the stored row, unknown → `NOT_FOUND`); a turn with `@file`
+      persists the verbatim block plus the framed block, asserted through
+      `GetMessages`; the loader dlsyms the seam and a fixture plugin's override
+      reaches `Active()`.
+- [x] Codec + provider: the multi-block message round-trips `message_codec`, and
+      the OpenAI serializer's block concatenation is re-proven safe for exactly
+      this shape.
+
 ### E. TUI client
 
 > § *TUI rendering*, § *TUI layout*, § *Tab states and attention*, § *Message-kind rendering*, § *@-mention file references*.
 
-Largest remaining surface: FTXUI layout, md4c markdown rendering, tree-sitter highlighting, themes, session picker, running-tools panel, permission modal, @-mentions (`SuggestPaths`). Depends on A3 for every RPC it uses and on B for scrollback.
+Largest remaining surface: FTXUI layout, md4c markdown rendering, tree-sitter highlighting, themes, session picker, running-tools panel, permission modal, the prompt editor's inline @-mention suggestions (the server-side half is E3, done). Depends on A3 for every RPC it uses and on B for scrollback.
 
 The permission modal is where consent scoping becomes real UI — and where the **wording obligations** in § *Consent scoping* must be honoured: a grant is blanket permission for a binary, and disclosure is a lower bound.
 

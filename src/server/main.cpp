@@ -107,6 +107,7 @@ int main(int argc, char** argv) {
     // registry is the pass-through default -- no authentication, matching the
     // local-only single-user topology.
     minimal::rpc::AuthProviderRegistry auth_providers;
+    minimal::agent::MentionResolverRegistry mention_resolvers(minimal::common::DefaultLogger());
 
     // The tools slice of settings.json is forwarded verbatim to every plugin;
     // core imposes no schema on it. Loaded defensively because a missing or
@@ -121,7 +122,7 @@ int main(int argc, char** argv) {
     }
 
     minimal::plugins::PluginLoader loader(tools, providers, tools_settings, &observers, &commands,
-                                          &auth_providers);
+                                          &auth_providers, &mention_resolvers);
     const auto records = loader.LoadAll(candidates);
 
     std::printf("plugins (%zu discovered):\n", records.size());
@@ -144,6 +145,9 @@ int main(int argc, char** argv) {
         }
         if (record.registered_auth_provider) {
             std::printf("      auth provider registered\n");
+        }
+        if (record.registered_mention_resolver) {
+            std::printf("      mention resolver\n");
         }
     }
 
@@ -264,6 +268,7 @@ int main(int argc, char** argv) {
                                              minimal::common::DefaultLogger());
     service.set_commands(&commands);
     service.set_auth_providers(&auth_providers);
+    service.set_mention_resolvers(&mention_resolvers);
     minimal::rpc::Server server(service, socket_path);
 
     if (!server.listening()) {

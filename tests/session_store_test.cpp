@@ -224,6 +224,18 @@ TEST_CASE("codec round-trips an empty-content message", "[session][codec]") {
     CHECK(MessagesEqual(RoundTrip(message), message));
 }
 
+TEST_CASE("codec round-trips the multi-block message @-mention expansion produces",
+          "[session][codec][mention]") {
+    // Verbatim text block + one framed attachment block per mention -- the shape
+    // ExpandMentions returns and scrollback must be able to render separately.
+    const llm::Message message{
+        llm::Role::User,
+        {llm::TextBlock{"see @a.md and @b.md"},
+         llm::TextBlock{"<file path=\"a.md\">\nA\n</file>"},
+         llm::TextBlock{"<file path=\"b.md\">\nB\n</file>"}}};
+    CHECK(MessagesEqual(RoundTrip(message), message));
+}
+
 TEST_CASE("codec refuses unknown block types on decode", "[session][codec]") {
     nlohmann::json doc = {{"role", "user"},
                           {"content", {{{"type", "warp_drive"}, {"text", "hi"}}}}};

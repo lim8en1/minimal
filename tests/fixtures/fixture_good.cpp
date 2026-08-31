@@ -30,6 +30,14 @@ public:
     }
 };
 
+class FixtureResolver : public minimal::agent::MentionResolver {
+public:
+    std::vector<std::string> Suggest(std::string_view, const std::filesystem::path&,
+                                     int) const override {
+        return {"fixture-resolved"};
+    }
+};
+
 }  // namespace
 
 extern "C" {
@@ -45,5 +53,9 @@ void minimal_plugin_register_provider_factories(minimal::llm::ProviderFactoryReg
     registry.Register("fixture", [](const minimal::llm::ProviderConfig&) {
         return std::make_unique<FixtureProvider>();
     });
+}
+void minimal_plugin_register_mention_resolver(
+    minimal::agent::MentionResolverRegistry& registry) {
+    registry.Register(std::make_shared<FixtureResolver>());
 }
 }

@@ -23,6 +23,7 @@
 #include "minimal/common/abi_tag.hpp"
 
 // --- Half 2: utilities plugins consume -------------------------------------
+#include "minimal/agent/mention_resolver.hpp"
 #include "minimal/agent/session_observer.hpp"
 #include "minimal/agent/session_observer_registry.hpp"
 #include "minimal/commands/command.hpp"
@@ -92,14 +93,15 @@ void minimal_plugin_register_session_observer(minimal::agent::SessionObserverReg
 // than one "kind" of plugin that has to be either/or.
 void minimal_plugin_register_commands(minimal::commands::CommandRegistry&);
 
+// OPTIONAL, exclusive: one @-mention suggestion strategy. First plugin wins; a
+// second registration logs a warning and is ignored. The core default
+// (PrefixMentionResolver) stays in force until a plugin registers.
+void minimal_plugin_register_mention_resolver(minimal::agent::MentionResolverRegistry&);
+
 // Exclusive: one global choice. First registration wins; a second logs a
 // warning and is ignored (the registry enforces this). The default is NO
 // authentication -- an empty registry passes everything through, matching the
 // local-only single-user topology (ARCHITECTURE.md).
 void minimal_plugin_register_auth_provider(minimal::rpc::AuthProviderRegistry&);
-
-// Not yet wired -- declared nowhere until the subsystem it registers into
-// exists, so that this ABI is not frozen before it has consumers:
-//   minimal_plugin_register_mention_resolver(MentionResolverRegistry&)
 
 }  // extern "C"
