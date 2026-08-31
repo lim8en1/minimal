@@ -4,7 +4,7 @@ Companion to `ARCHITECTURE.md`, which remains the single source of truth for *de
 
 ## 1. The surface as it exists
 
-**Server ABI** (`src/server/plugins/include/minimal/plugins/plugin_abi.h`) — seven `extern "C"` symbols, each `dlsym`'d by `plugin_loader.cpp`:
+**Server ABI** (`src/server/plugins/include/minimal/plugins/plugin_abi.h`) — seven `extern "C"` symbols on the merged tree (eight once the `tui` branch's mention-resolver registration lands), each `dlsym`'d by `plugin_loader.cpp`:
 
 | Symbol | Status | What it grants |
 |---|---|---|
@@ -13,7 +13,8 @@ Companion to `ARCHITECTURE.md`, which remains the single source of truth for *de
 | `minimal_plugin_register_provider_factories(ProviderFactoryRegistry&)` | live | provider kinds addressable from `providers.json` |
 | `minimal_plugin_register_session_observer(SessionObserverRegistry&)` | live | fire-and-forget lifecycle reactions; cannot veto anything |
 | `minimal_plugin_register_commands(CommandRegistry&)` | live | `/`-commands |
-| `minimal_plugin_register_mention_resolver(...)` / `_auth_provider(...)` | named but unwired (the comment at `plugin_abi.h:94-97`) | — |
+| `minimal_plugin_register_mention_resolver(...)` | **wired on the `tui` branch (E3)** — `PrefixMentionResolver` is the core default, exclusive first-wins; pending merge | pluggable `@`-mention resolution |
+| `minimal_plugin_register_auth_provider(...)` | named but unwired (the comment at `plugin_abi.h:94-97`) | — |
 
 Interfaces a plugin implements today: `Tool` (with `Disclose` / `category_for` / `ExtractPath`), `Command` → `HarnessCommand`/`LLMCommand`, `LlmProvider` plus a factory, `SessionObserver`.
 
@@ -300,7 +301,7 @@ The "write a different frontend" tier shrinks to exactly this list.
 | Markdown engine | **exclusive** | md4c adapter |
 | Syntax-highlight languages (keyed by language) | additive, collisions fatal | vendored grammars |
 | Views (Panel/Modal) | additive | — |
-| MentionResolver (server-side) | exclusive | `PrefixMentionResolver` — designed, unwired (`plugin_abi.h` names the symbol) |
+| MentionResolver (server-side) | exclusive | `PrefixMentionResolver` — wired on the `tui` branch (E3), pending merge |
 | Attention source | additive | core event derivation |
 | Theme sections (config) | namespaced roles | core roles |
 
