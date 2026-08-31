@@ -2,7 +2,7 @@
 
 Companion to `ARCHITECTURE.md`, which remains the single source of truth for *design*. This document covers only *sequencing*: what is built, what blocks what, and what "done" means for each remaining piece. Every milestone cites the `ARCHITECTURE.md` section that specifies it; where this plan and that document disagree, that document wins and this one is stale.
 
-**Status: Milestones A, B, C, D, F and H are complete, and a post-merge review of A+B+H has been actioned (§8). Only E (the TUI) and G (MCP) remain. Clean build, zero warnings.** J (permission advisor) is designed (`docs/EXTENSIBILITY.md` §3) and scheduled (§4 J) but not started.
+**Status: Milestones A, B, C, D, F and H are complete, and a post-merge review of A+B+H has been actioned (§8). Only E (the TUI) and G (MCP) remain. Clean build, zero warnings.** The extensibility work is now sequenced as five tracks: **J** (permission advisor — designed in `docs/EXTENSIBILITY.md` §3, previously scheduled, not started), followed by **K** (per-plugin config), **L** (cross-plugin services), **M** (tool history access) and **N** (model auto-discovery) — all designed in `docs/EXTENSIBILITY.md` §2 and appended below as §4 K–N. K precedes L so the new `register_services` ABI symbol ships with the registration context and never needs a second signature sweep; M and N are independent of everything and each other.
 
 `minimal -p` holds real conversations against a local model using `read`, `bash`, and `skill`; a permission prompt round-trips over the wire in both directions; a session grant silences the second prompt; the server exits when the last client detaches. Transcripts persist to SQLite, survive the server process, and are **resumable**: `CreateSession` with a `session_id` reopens a stored session, loads its transcript as the loop's working history without re-appending it, and the next turn continues the conversation (`minimal -p --resume <id> PROMPT`). **Subagents work** (§5 D): a model can spawn blocking and non-blocking children over the `spawn_subagent` tool, permission inheritance is enforced as ceilings, and the headless client honours its attach obligation over a real socket. `cmake --install` produces a config dir the server actually starts against (§8), and the startup sanity check reports every problem with it at once (§4 F).
 
@@ -97,6 +97,10 @@ Test depth was inverted relative to integration risk: every well-tested layer wa
 - ~~**H. Production compactor**~~ — **done.** `compact_messages` replaces `Session`'s no-op stub, and the bundled prompt is delivered (§4 H).
 - ~~**I. `SessionObserver` registry**~~ — **done**, landed with A2. `minimal_plugin_register_session_observer` is live in the plugin ABI and `tools-bash` implements it.
 - **J. Permission advisor** — independent of E and G; designed in `docs/EXTENSIBILITY.md` §3, specified below (§4 J).
+- **K. Per-plugin config** — designed in `docs/EXTENSIBILITY.md` §2.3, specified below (§4 K); sequenced before L.
+- **L. Cross-plugin services (ServiceRegistry)** — designed in `docs/EXTENSIBILITY.md` §2.2, specified below (§4 L).
+- **M. Tool history access** — designed in `docs/EXTENSIBILITY.md` §2.1, specified below (§4 M).
+- **N. Model auto-discovery** — designed in `docs/EXTENSIBILITY.md` §2.6, specified below (§4 N).
 
 **Strictly dependent on A:** C, D, E, G, and every RPC beyond `CreateSession`/`OpenSession`. **A is now done, so all of them were unblocked; D is now done too.**
 
@@ -362,6 +366,22 @@ A plugin answers `Ask`-gated tool calls automatically and abstains to the wire c
 
 **What.** Checker injection in `Session` (`SessionParams` carries `std::unique_ptr<tools::PermissionChecker>`; `WirePermissionChecker` is the default and stops being a by-value member — `session.hpp:276` is the only structural change), `PermissionAdvisorRegistry` + `minimal_plugin_register_permission_advisor` in the plugin ABI, an `AdvisedPermissionChecker` decorator (advise → abstain/throw → wire), `permissions.json` `"advisor": "<plugin>"` with `"advisor_inherit"` for subagents (default **off**), and a sanity-check warning for an advisor name that resolves to nothing.
 
+**How.** `SessionParams` carries the full checker, as the spec says. That forces one structural prerequisite: `WirePermissionChecker` is constructed from `Session`'s `queue_`/`pending_` (`session.hpp:286-288`), so no producer can build a *composed* checker until those exist outside `Session`. They are extracted into a per-session `SessionChannels { EventQueue; PendingRequests; }` block, created by the params producer and owned by `Session` through a `shared_ptr`; `Session`'s member-init constructs the default `WirePermissionChecker` from it when `params.permission_checker` is null. Every producer (`CreateSession`/`ResumeSession` at `session_service.cpp:65,195`, `SubagentManager::Spawn` at `subagent_manager.cpp:108-116`, the test helpers) creates the block. Composition then lives with the producers, who have both ingredients: `SessionServiceImpl` resolves `permissions.json`'s `"advisor"` through the `PermissionAdvisorRegistry` and, when set, assigns `params.permission_checker = AdvisedPermissionChecker(advisor, wire)` — the advised checker **owns** its inner wire checker. `SubagentManager` receives the resolved advisor + `advisor_inherit` at construction and repeats the composition for children only when opted in; ceilings already travel separately and are enforced before the advisor runs (`tool_executor.cpp:95`). The payoff: tests inject fake checkers through params directly, and the invariant "making `checker_` concrete again fails any test that injects a fake" holds literally.
+
+**`Advise` signature** (§3.2 of the extensibility spec left the shape to this track): `std::optional<PermissionResponse> Advise(const PermissionRequest&, const AdvisorContext&)` with `AdvisorContext { std::function<bool()> is_cancelled; }` — the request struct stays a plain proto-adjacent value; cancellation reaches the advisor as a predicate supplied by `Session`.
+
+**Implementation order** (each step testable before the next):
+
+1. `src/server/tools/permission_advisor.{hpp,cpp}`: `PermissionAdvisor`, `AdvisorContext`, `AdvisedPermissionChecker` (advise → response; abstain **or throw** → inner checker), `PermissionAdvisorRegistry` with the `SetAttribution`/`ClearAttribution` window (`tool_registry.hpp:56-73`) so the loader stamps plugin names. Unit tests: allow/deny/abstain/throw fall-through; an undisclosed granted key leaves `session_grants_` untouched (executor-level; fakes at `tests/support/fakes.hpp:254-288`).
+2. `SessionChannels` extraction + `SessionParams::permission_checker` (`session.hpp:61-98, 286-288`; `session.cpp:26-43`). Update all params producers (`session_service.cpp:65,195`; `subagent_manager.cpp:108`; test helpers `session_registry_test.cpp:90`, `subagent_test.cpp:148`, `session_test.cpp`). Session tests: default path unchanged; a fake checker injected through params is honored end to end.
+3. Config: `PermissionsConfig` gains `std::optional<std::string> advisor` + `bool advisor_inherit = false` (`permissions_config.hpp:11-19`; parse tests in `permissions_config_test.cpp`). The first plugin-name field in `permissions.json` — the sanity check gains a new consumer rather than extending an existing pattern.
+4. ABI + loader: `minimal_plugin_register_permission_advisor(PermissionAdvisorRegistry&)` (pattern ×4 live, `plugin_abi.h:60-99`); loader dispatch + attribution window; `PluginRecord::registered_permission_advisor`; startup printout (`main.cpp:127-148`). `main.cpp` constructs the registry (~`:109`), passes it to the loader, `SanityCheckInputs`, and `SessionServiceImpl`.
+5. Producer composition: `session_service` sets `params.permission_checker` from the resolved advisor; subagent inheritance via the `SubagentManager` ctor flag (child default: no advisor).
+6. Sanity check: `check_advisor()` in the `RunAll` list (`sanity_check.cpp:78-98`) — the configured name must resolve to a loaded plugin's registration, else Warning; registry passed via `SanityCheckInputs` like `command_registry` (`sanity_check.hpp:48`). Tests in `sanity_check_test.cpp`.
+7. E2E: `tests/fixtures/fixture_advisor.cpp` — the first fixture to exercise a registration seam beyond tools/providers (modeled on `fixture_good.cpp`, built by `minimal_add_fixture_plugin`, `tests/fixtures/CMakeLists.txt:4-16`); allows one tool, abstains on another. The advisor E2E is also the first service/e2e test that runs `PluginLoader` (none do today — `session_service_test.cpp:45-127` loads none): abstained tool → real wire prompt → answer returns → `TurnCompletedEvent`; allowed tool never prompts.
+
+**File map:** `tools/permission_advisor.{hpp,cpp}` (new); `agent/session.{hpp,cpp}`; `rpc/session_service.{hpp,cpp}`; `agent/subagent_manager.{hpp,cpp}`; `config/permissions_config.{hpp,cpp}`; `plugins/plugin_abi.h`, `plugin_loader.{hpp,cpp}`; `main.cpp`; `config/sanity_check.{hpp,cpp}`; tests: `permission_advisor_test.cpp` (new), `permissions_config_test.cpp`, `sanity_check_test.cpp`, `session_test.cpp`, `session_registry_test.cpp`, `subagent_test.cpp`, `fixture_advisor.cpp` + fixtures CMake, advisor E2E.
+
 **Acceptance criteria**
 - [ ] An advisor's Allow runs the tool; its Deny produces the same error `ToolResultBlock` a human deny does; its abstain round-trips a real permission prompt over the wire.
 - [ ] An advisor never sees — let alone approves — a tool the substrate resolved to `AlwaysDeny`, including via the `AllowOnly` run mode (`Ask` short-circuits before the advisor is consulted).
@@ -378,6 +398,154 @@ A plugin answers `Ask`-gated tool calls automatically and abstains to the wire c
 - [ ] Integration: subagent spawned from an advisor-governed parent — child has no advisor by default; with `advisor_inherit` the child's advisor sees only requests that passed the parent ceilings.
 - [ ] E2E over a real socket: a scripted advisor plugin allows one tool and abstains on another; the prompt reaches the client, the answer returns, the turn completes with `TurnCompletedEvent`.
 - [ ] **Invariant tests:** removing the abstain fall-through (advisor abstain → Deny) fails the abstain test; removing the grant filter fails the undisclosed-key test; making `checker_` concrete again fails any test that injects a fake.
+
+### K. Per-plugin config
+
+> Specified by `docs/EXTENSIBILITY.md` §2.3. Independent of everything; sequenced **before L** so the new `register_services` symbol ships with the registration context and never needs a second signature sweep.
+
+**What.** `ToolRegistrationContext` (`plugin_abi.h:51-56`) generalizes to `PluginRegistrationContext`: it keeps the verbatim `tools` object from `settings.json` and gains `config` — the plugin's own slice from its `plugins.json` entry:
+
+```json
+{"plugins": [{"file": "tools-bash.so", "enabled": true, "config": {"timeout_ms": 30000}}]}
+```
+
+Core imposes no schema — the same rule as `tools_settings` today. Every `register_*` symbol takes the context: tools, provider factories, session observers, commands, and auth (unwired, but swept for uniformity). Today only tool-registering plugins receive anything, and only the whole `tools` blob (`main.cpp:115-125`); a provider, observer, or command plugin has no sanctioned way to read its own settings.
+
+**How.**
+
+- `PluginConfig::Entry` (`plugin_discovery.hpp:22-34`) gains `nlohmann::json config`. Parse degrades to `{}` with a warning on a non-object value — the file's existing degrade-don't-throw rule. **The serializer must round-trip `config`:** `main.cpp:96` rewrites `plugins.json` after discovery, and a config that vanishes on the next save is user config silently dropped.
+- `plugin_abi.h`: the signature sweep. Source compatibility makes it a rebuild for plugin authors, not a break.
+- `plugin_loader.cpp` copies the entry's config into the context before each register call, inside the attribution window it already opens (pattern: tools at `:114-118`, commands at `:141-146`).
+- Bundled plugins update mechanically; none change behavior. Each may keep parsing its slice from `tools_settings` — the context carries both, and moving a plugin's knobs to its own `config` is optional per plugin.
+
+**Acceptance criteria**
+- [ ] A plugin's `config` object reaches every register symbol verbatim, and only that plugin's.
+- [ ] A malformed `config` (non-object) degrades to `{}` with a startup warning; the plugin still loads.
+- [ ] The `main.cpp:96` rewrite preserves `config` — no user-config loss on save.
+- [ ] `tools_settings` still carries the whole verbatim `tools` object to tool plugins.
+
+**Test cases** (`tests/plugin_discovery_test.cpp`, `tests/plugin_loader_test.cpp`)
+- [ ] Parse: `config` present / absent / non-object; serialize round-trips it through a load→save→load cycle.
+- [ ] Two plugins with different configs — each context sees only its own slice (isolation).
+- [ ] **Invariant test:** removing the per-plugin copy (every context gets one shared entry's config) fails the isolation test.
+- [ ] One bundled plugin compiles through the new signature and still parses its settings unchanged.
+
+### L. Cross-plugin services (ServiceRegistry)
+
+> Specified by `docs/EXTENSIBILITY.md` §2.2. Sequenced after K. The missing half of plugin-owned state: `SessionObserver` covers ordered notification (push), this covers queries (pull). §2.5's server half dispatches `PluginCall` *through* this registry when E lands the client half.
+
+**What.** A sanctioned channel by which one `.so` can reach another's services:
+
+```cpp
+// src/server/plugins/include/minimal/plugins/service_registry.hpp
+class ServiceRegistry {
+public:
+    // Register an abstract interface under a name. Non-owning: plugin handles
+    // are never dlclosed, so a process-lifetime pointer is safe.
+    void Provide(std::string name, void* service);
+    // Null when absent: the provider plugin may be disabled -- a runtime
+    // condition, not an error.
+    void* Find(std::string_view name) const;
+};
+```
+
+**Typed at the edges, named in the middle.** The provider ships its interface header (e.g. `bash_state.hpp` with `tools-bash`); a consumer `static_cast`s `Find`'s result to it. The name is the only coupling; the header is the contract, under the same source-compatibility model as everything else. Collisions resolve through the existing `NameRegistry` as a new kind — **fatal, not shadowed**. No bus, no subscribe: push already exists, and an event bus would put ordering/concurrency burden back on plugin authors — exactly what serialized observer dispatch removed.
+
+**How.**
+
+- `NameKind::Service` in `name_registry.hpp:11`; `ResolveRegistrationNames` picks up service attributions, and `main.cpp:182-188` feeds them through the existing collision/sanity path (`sanity_check.cpp:421` turns them Fatal, naming both plugins).
+- `minimal_plugin_register_services(ServiceRegistry&, const PluginRegistrationContext&)` — loader dispatch with an attribution window, like tools (`plugin_loader.cpp:114-118`) and commands (`:141-146`).
+- **First consumer, proving the pattern with a real one:** `tools-bash` Provides its `BashSessionStateStore` under a name; `/restart-shell` resolves it through `Find` and degrades with a clear error when the provider is absent (tools-bash disabled is a runtime condition, not a startup failure). State ownership stays with tools-bash — a service is the sanctioned way *to ask*, not a state grab.
+
+**Acceptance criteria**
+- [ ] A plugin Provides at registration; another consumer Finds, casts, and calls through the interface.
+- [ ] `Find` for a name no plugin provided returns null — no error, no warning.
+- [ ] Two plugins providing the same name are fatal at startup, naming both.
+- [ ] `/restart-shell` works through the service path and degrades cleanly when tools-bash is disabled.
+
+**Test cases**
+- [ ] Provide/Find round-trip; Find-before-Provide and Find-never-provided both null.
+- [ ] Collision: fatal, diagnostic names both claimants.
+- [ ] Loader attribution records the providing plugin; `NameRegistry::Resolve()` surfaces it.
+- [ ] `/restart-shell` through the registry (in-process); the absent-provider error path.
+- [ ] **Invariant test:** removing the collision check for `NameKind::Service` (last-wins) fails the collision test.
+
+### M. Tool history access
+
+> Specified by `docs/EXTENSIBILITY.md` §2.1. Independent. One design adjustment found while wiring it: ownership (below).
+
+**What.** `ToolContext` (`tool.hpp:29-60`) gains an optional read-only handle on the conversation it runs inside:
+
+```cpp
+// tool.hpp -- set by the agent loop per invocation; null when unavailable
+const session::SessionReader* history = nullptr;  // read-only
+```
+
+Anything context-aware — a "summarize the thread so far" tool, retrieval keyed to recent turns, a wrapper referencing what was last edited — becomes expressible.
+
+**How.**
+
+- **Ownership — the adjustment.** The agent loop has no `SessionReader` today (only `HistoryStore&`, `agent_loop.hpp:191`) and `Session` doesn't hold one; `CreateResolved` builds one ad-hoc for resume (`session_registry.cpp:121`). `SessionParams` gains a reader pointer, owned by `Session`; the agent loop sets `ctx.history` from it per invocation (`agent_loop.cpp:386-397`). Stores that are not SQLite-backed (test fakes) leave it null, so `history == nullptr` is the natural "unavailable" case, not an error path.
+- **Windowed access only.** The constraint is stated on the member: a tool must never call `LoadAll()` — that materializes a whole transcript and exists solely for resume. A tool reads bounded pages through `GetMessages`, exactly as the `GetMessages` RPC does. Nothing is held, so the 512k–1M goal is untouched.
+- **A subagent sees only its own history** — automatic, since the context is built from the child's own session; the parent's is deliberately out of reach.
+- `SessionReader` joins the frozen include set in `plugin_abi.h` (§1 of the extensibility doc notes it is reachable but not declared surface; a plugin tool using `ctx.history` needs it declared).
+
+**Acceptance criteria**
+- [ ] A tool reads a windowed range of the transcript through `ctx.history` during a live turn.
+- [ ] Sessions on non-SQLite stores (tests) see `history == nullptr` and tools handle it.
+- [ ] A subagent's tool sees the child's transcript only — never the parent's.
+- [ ] No path a tool can reach materializes the full history.
+
+**Test cases**
+- [ ] End-to-end with a scripted provider: a tool reads the last messages via `ctx.history` and the result reaches the model.
+- [ ] Null-history path (fake store) — the tool's degrade works, no crash.
+- [ ] Subagent isolation: parent has N messages, child M; the child's tool observes M.
+- [ ] **Invariant test:** the agent loop building the context without the reader (history always null) fails the end-to-end read test.
+
+### N. Model auto-discovery
+
+> Specified by `docs/EXTENSIBILITY.md` §2.6. Independent of E and G. The payoff is concrete: `context_window_tokens` — the field window-relative compaction resolves against (§10) — stops being the one most likely to be stale or absent, and a provider serving fifty models stops being unconfigurable by hand.
+
+**What.** A catalog registry keyed by the same kind string the provider factory uses — a second registry, not a capability query on `LlmProvider` (that two-method interface stays two methods; `ARCHITECTURE.md` deleted a capability-query layer for having no users, and this is its user, arriving as a registry instead):
+
+```cpp
+// src/server/llm/model_catalog.hpp
+struct DiscoveredModel {
+    std::string id;   // the <model> half of <provider>/<model>
+    std::optional<std::int64_t> context_window_tokens;  // feeds compaction + status
+    nlohmann::json metadata;  // pricing, quantization, ... -- opaque to core
+};
+class ModelCatalog {
+public:
+    virtual std::vector<DiscoveredModel> List(const ProviderConfig&) = 0;
+};
+```
+
+`minimal_plugin_register_model_catalogs(ModelCatalogRegistry&)` — optional, keyed by kind.
+
+**How.**
+
+- **Parse.** `providers.json` gains `"discover": true`; the parse stops rejecting a provider with no `models` object when it is set (`providers_config.cpp:117-124` throws on exactly that shape today). The legacy array is still refused by name.
+- **Lazy resolution.** `ProvidersConfig` gains an injected discovery hook, set from `main.cpp` after plugin load (the config layer never links plugins). `Resolve` for a model absent from the static map under a discover-entry consults a per-entry runtime cache on first miss; the cache keys on the config-generation counter, like `ProviderInstanceCache` (generation is 0 until a reload ever exists). Discovered models are **never written back** to `providers.json` — config-read-once stands.
+- **Miss reporting.** A miss reports both the static alternatives and whether discovery itself failed, so a typo and a dead catalog are distinguishable errors (extends the `DescribeModels` text, `session_registry.cpp:15`).
+- **Consumers.** `ModelRefs()` unions static ∪ cached-discovered; `context_window_tokens` resolves from discovery when the static entry omits it, flowing to the compaction trigger and the status surface; `/providers` lists the union.
+- **The implementation** ships beside `provider-openai`: `GET <url>/models`, reading `context_length` (OpenRouter) / `meta.n_ctx_train` (llama.cpp) when present — one catalog covering llama.cpp, vLLM, and OpenRouter alike. Config knobs (model filters, refresh) ride K's per-plugin config when convenient; none are required for v1.
+- **Failure posture.** Discovery is a live network call: fetched lazily at first resolve, never at startup. The sanity check *warns* when a discover-entry's catalog is unreachable (the entry may still have static models); the existing "at least one usable provider" fatal stays the only fatal — a discover entry with zero static and zero discovered models fails it as today.
+
+**Acceptance criteria**
+- [ ] A provider with `"discover": true` and no `models` parses and serves discovered refs at first resolve.
+- [ ] Discovery failure degrades: static models still resolve, and the miss error distinguishes typo from dead catalog.
+- [ ] A discovered model's `context_window_tokens` reaches the compaction trigger.
+- [ ] Nothing ever writes discovery results back to `providers.json`.
+- [ ] Sanity check: unreachable catalog warns; zero static ∪ zero discovered still fails usable-provider.
+
+**Test cases** (`tests/providers_config_test.cpp`, `tests/model_catalog_test.cpp`)
+- [ ] Parse: `discover` + no-`models` accepted; the legacy array still refused by name.
+- [ ] Lazy fetch: `List` called once on first miss; a second resolve of the same ref hits the cache (assert the call count).
+- [ ] Negative cache: a failed discovery is not re-attempted per resolve.
+- [ ] Union: `ModelRefs()` includes cached discovered entries, sorted; a cold cache contributes none.
+- [ ] Catalog impl: canned JSON bodies — llama.cpp shape, OpenRouter shape, missing metadata fields degrade to `nullopt`.
+- [ ] **Invariant tests:** removing the miss→discovery fallback fails the lazy-fetch test; resolving `context_window_tokens` from static-only fails the compaction-window test.
 
 ---
 

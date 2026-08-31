@@ -249,7 +249,7 @@ Zero changes to `clamp_run_mode`, `most_restrictive`, the precedence chains, or 
 
 ### 3.4 What actually has to change
 
-1. **Checker injection in `Session`** — the only structural change. `SessionParams` gains `std::unique_ptr<tools::PermissionChecker> permission_checker` (or a factory); `WirePermissionChecker` remains the default, constructed with the session's `queue_`/`pending_` by whoever builds the params; the by-value member becomes the pointer. Small, mechanical, testable with the existing fakes.
+1. **Checker injection in `Session`** — the only structural change, with one prerequisite: `WirePermissionChecker` is built from `Session`'s `queue_`/`pending_`, so a *composed* checker cannot be built until those exist outside `Session`. They are extracted into a per-session `SessionChannels` block, created by the params producer and owned by `Session` through a `shared_ptr`. `SessionParams` gains `std::unique_ptr<tools::PermissionChecker> permission_checker` (null → `Session` constructs the wire default from the channels); producers compose `AdvisedPermissionChecker(advisor, wire)` when an advisor is configured. Small, mechanical, testable with the existing fakes.
 2. **`PermissionAdvisorRegistry` + ABI symbol + loader wiring** — the pattern exists four times live and twice prepared-but-unwired (`plugin_abi.h:94-97`).
 3. **Composition** — an `AdvisedPermissionChecker` decorator wrapping {advisor, wire checker}: try advisor, fall through on abstain or throw. `ToolExecutor` is untouched; it still sees one `PermissionChecker`.
 4. **Config + selection.** Not a new `PermissionRunMode` — adding `Auto` to the ordered enum would touch `apply_run_mode`, `clamp_run_mode`, the wire enum, and subagent clamping for no gain over selection. Instead: `permissions.json` gains `"advisor": "<plugin-name>"`. The named advisor applies to **top-level sessions by default and to subagents only if opted in** (`"advisor_inherit": true`) — an auto-approver silently governing children violates the spirit of "a child is never more permissive than its parent" even though the ceilings technically hold. The startup sanity check reports an advisor naming no loaded plugin (warning, the `naming_model` pattern).
@@ -413,15 +413,15 @@ Command (the abstract -- already named Command; no rename)
 
 | Item | Depends on | Status |
 |---|---|---|
-| 2.1 Tool history access | nothing | designed, unscheduled |
-| 2.2 Cross-plugin services | nothing | designed, unscheduled |
-| 2.3 Per-plugin config | nothing | designed, unscheduled |
+| 2.1 Tool history access | nothing | designed, **track M** (DEVELOPMENT_PLAN §4 M) |
+| 2.2 Cross-plugin services | nothing | designed, **track L** (DEVELOPMENT_PLAN §4 L), sequenced after K; first consumer: `/restart-shell` |
+| 2.3 Per-plugin config | nothing | designed, **track K** (DEVELOPMENT_PLAN §4 K), sequenced before L |
 | 2.4 MCP lifecycle | track G | designed, waits on G |
-| 2.5 Plugin UI surface | track E + 2.2 | designed, lands with E |
-| 2.6 Model auto-discovery | nothing | designed, unscheduled |
+| 2.5 Plugin UI surface | track E + 2.2 | designed, lands with E; the server half dispatches through 2.2's registry (built by track L) |
+| 2.6 Model auto-discovery | nothing | designed, **track N** (DEVELOPMENT_PLAN §4 N) |
 | 3 Permission advisor | nothing | designed, **track J (scheduled)** |
 | 4.2 TUI slots | E's frame first | specified; E additions (DEVELOPMENT_PLAN §5 E) |
 | 4.3 `ListCommands` | nothing (server half trivial) | specified; lands with E |
 | 4.4 Command display modes | nothing | specified; server half lands with E |
 
-2.1–2.3 are independent of everything and small; they can ride along any track that touches their files. 2.5's server half and 2.2 are the same mechanism — build the registry once, wire `PluginCall` to it when E lands the client half.
+Track order: **J → K → L → M → N**. K precedes L so the new `register_services` ABI symbol ships with `PluginRegistrationContext` and never needs a second signature sweep; M and N are independent of everything and each other. 2.1–2.3 were independent of everything and small; 2.5's server half and 2.2 are the same mechanism — the registry is built once by L, and `PluginCall` wires to it when E lands the client half.
