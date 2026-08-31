@@ -70,6 +70,18 @@ const std::vector<Migration>& DefaultMigrationsImpl() {
     throw std::runtime_error(context + ": " + sqlite3_errmsg(db));
 }
 
+// The terminating code of a row loop, checked. `while (step() == SQLITE_ROW)`
+// exits on SQLITE_DONE and equally on SQLITE_BUSY, SQLITE_IOERR and
+// SQLITE_CORRUPT -- so a mid-scan failure returned a SHORT result that every
+// caller read as a complete one. On the resume path that is a transcript with a
+// hole in it, which the loop then continues appending to at MAX(seq)+1; on the
+// scrollback path it is a truncated page rendered as the top of the
+// conversation. The JSON decode below these loops is strict about a row it
+// cannot parse, which made the strict half a guard over the lax half's output.
+void CheckRowLoopEnd(sqlite3* db, int rc, const std::string& context) {
+    if (rc != SQLITE_DONE) ThrowSqliteError(db, context);
+}
+
 void ExecChecked(sqlite3* db, const char* sql, const std::string& context) {
     char* err = nullptr;
     if (sqlite3_exec(db, sql, nullptr, nullptr, &err) != SQLITE_OK) {
@@ -375,7 +387,15 @@ std::int64_t SessionDatabase::AppendMessage(const std::string& session_id,
                          "failed to touch session");
         sqlite3_bind_int64(touch.stmt, 1, now);
         sqlite3_bind_text(touch.stmt, 2, session_id.c_str(), -1, SQLITE_TRANSIENT);
-        if (sqlite3_step(touch.stmt) != SQLITE_DONE || sqlite3_changes(db_) == 0) {
+        // The two conditions are SEPARATE because they are different problems.
+        // Folding them reported a full disk, a locked database or an I/O error
+        // as "unknown session" -- and the comment above says this message is
+        // meant to be loud about a WIRING BUG, so it sent the next reader
+        // hunting one that was not there.
+        if (const int rc = sqlite3_step(touch.stmt); rc != SQLITE_DONE) {
+            ThrowSqliteError(db_, "failed to touch session " + session_id);
+        }
+        if (sqlite3_changes(db_) == 0) {
             throw std::runtime_error("cannot append to unknown session: " + session_id);
         }
 
@@ -490,7 +510,14 @@ bool SessionDatabase::SessionExists(const std::string& session_id) const {
     CachedStmt query(db_, prepared_, "SELECT 1 FROM sessions WHERE id = ?;",
                      "failed to check session");
     sqlite3_bind_text(query.stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
-    return sqlite3_step(query.stmt) == SQLITE_ROW;
+    const int rc = sqlite3_step(query.stmt);
+    if (rc == SQLITE_ROW) return true;
+    // A LOCKED DATABASE IS NOT A MISSING SESSION. Returning false for
+    // SQLITE_BUSY/SQLITE_IOERR exactly as for an absent row made the RPC layer
+    // answer "no such session" -- so a transient lock told the client its
+    // session had been deleted, which is the one answer it cannot recover from.
+    CheckRowLoopEnd(db_, rc, "failed to check session");
+    return false;
 }
 
 std::vector<SessionSummary> SessionDatabase::ListSessions(const ListSessionsFilter& filter) const {
@@ -532,7 +559,8 @@ std::vector<SessionSummary> SessionDatabase::ListSessions(const ListSessionsFilt
     sqlite3_bind_int(query.stmt, 5, filter.limit > 0 ? filter.limit : -1);
 
     std::vector<SessionSummary> out;
-    while (sqlite3_step(query.stmt) == SQLITE_ROW) {
+    int rc = SQLITE_OK;
+    while ((rc = sqlite3_step(query.stmt)) == SQLITE_ROW) {
         SessionSummary summary;
         summary.session_id = reinterpret_cast<const char*>(sqlite3_column_text(query.stmt, 0));
         if (sqlite3_column_type(query.stmt, 1) == SQLITE_TEXT) {
@@ -547,6 +575,7 @@ std::vector<SessionSummary> SessionDatabase::ListSessions(const ListSessionsFilt
         summary.message_count = sqlite3_column_int(query.stmt, 7);
         out.push_back(std::move(summary));
     }
+    CheckRowLoopEnd(db_, rc, "failed to list sessions");
     return out;
 }
 
@@ -584,10 +613,14 @@ MessagePage SessionDatabase::GetMessagesPage(const std::string& session_id,
     sqlite3_bind_int(query.stmt, 3, limit + 1);
 
     MessagePage page;
-    while (sqlite3_step(query.stmt) == SQLITE_ROW) {
+    int rc = SQLITE_OK;
+    while ((rc = sqlite3_step(query.stmt)) == SQLITE_ROW) {
         if (static_cast<int>(page.messages.size()) == limit) {
             page.has_more = true;
-            break;
+            // Deliberately leaves rc == SQLITE_ROW: this loop ends early ON
+            // PURPOSE when the probe row appears, which is not an error and must
+            // not be checked as one.
+            return page;
         }
         StoredMessage stored;
         stored.seq = sqlite3_column_int64(query.stmt, 0);
@@ -601,6 +634,10 @@ MessagePage SessionDatabase::GetMessagesPage(const std::string& session_id,
         stored.created_at_unix_ms = sqlite3_column_int64(query.stmt, 3);
         page.messages.push_back(std::move(stored));
     }
+    // Reached only when the scan ran out of rows, so anything but DONE is a real
+    // failure. Returning short here reported has_more = false, which renders a
+    // truncated page as the top of the transcript.
+    CheckRowLoopEnd(db_, rc, "failed to read message page");
     return page;
 }
 
@@ -623,7 +660,8 @@ std::vector<StoredMessage> SessionDatabase::LoadMessages(const std::string& sess
                          " WHERE session_id = ?1 ORDER BY seq ASC;",
                          "failed to load messages");
         sqlite3_bind_text(query.stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
-        while (sqlite3_step(query.stmt) == SQLITE_ROW) {
+        int rc = SQLITE_OK;
+        while ((rc = sqlite3_step(query.stmt)) == SQLITE_ROW) {
             RawRow row;
             row.seq = sqlite3_column_int64(query.stmt, 0);
             row.json = reinterpret_cast<const char*>(sqlite3_column_text(query.stmt, 1));
@@ -631,6 +669,11 @@ std::vector<StoredMessage> SessionDatabase::LoadMessages(const std::string& sess
             row.created_at = sqlite3_column_int64(query.stmt, 3);
             rows.push_back(std::move(row));
         }
+        // THE RESUME PATH, and the most damaging place to return short: a
+        // partial read becomes the loop's working history while
+        // SqliteHistoryStore keeps appending at MAX(seq) + 1, so the session
+        // runs on a transcript with a hole in it and nothing ever says so.
+        CheckRowLoopEnd(db_, rc, "failed to load messages");
     }
 
     // Decode OUTSIDE the lock. The JSON parse is the expensive part of a large

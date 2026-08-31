@@ -964,3 +964,43 @@ every one of them reads as done.
    completion hook. A background child finishing while the user types `/clear` is a data race on a
    `vector<Message>` -- the kind that corrupts rather than crashes. Now locked, and the occupancy
    estimate is reset with the history it described.
+
+### Errors that were not errors
+
+10. **`sqlite3_step` failures were indistinguishable from end-of-rows.** All three row loops were
+    `while (step(stmt) == SQLITE_ROW)` with the terminating code discarded, so `SQLITE_BUSY`,
+    `SQLITE_IOERR` and `SQLITE_CORRUPT` all exited the loop exactly as `SQLITE_DONE` did and every
+    caller read the short result as a complete one. `LoadMessages` is the resume path and the worst
+    of them: a partial read becomes the loop's working history while `SqliteHistoryStore` keeps
+    appending at `MAX(seq) + 1`, so the session runs on a transcript with a hole in it and nothing
+    ever reports it. `GetMessagesPage` returned `has_more = false` on failure, rendering a truncated
+    page as the top of the conversation. The file's own comment says an unparseable row is "surfaced
+    at read time rather than smuggled to the client as garbage" -- the JSON decode was strict, the
+    read beneath it was not, so the strict half was guarding the lax half's output.
+
+    Two neighbours in the same file, same shape: `SessionExists` returned false for a LOCKED
+    database exactly as for a missing row, so the RPC layer told the client its session had been
+    deleted; and the append path reported any `UPDATE` failure as "cannot append to unknown session",
+    sending the next reader after a wiring bug when the disk was full.
+
+    The proof is a deliberately corrupted database: without the check `LoadMessages` returns a
+    plausible short transcript, with it the failure surfaces.
+
+11. **Two registration namespaces had no guard.**
+
+    *Provider kinds had no collision rule.* `ProviderFactoryRegistry::Register` returned false on a
+    duplicate and its own header said the caller "wants to report which two plugins collided" -- the
+    loader ignored the return value, so a second plugin registering `openai` was dropped in silence
+    and which backend a session actually got depended on plugin load order. Tools and commands both
+    feed `ResolveRegistrationNames` and collide fatally; this was the one namespace exempt from the
+    rule that exists to prevent exactly this. The registry now carries the same attribution window
+    the other two use, records the loser, and the sanity check reports it as fatal -- fatal rather
+    than aliasable, because there is no alias mechanism for a kind.
+
+    *A throwing registration callback killed the server.* `LoadOne` invoked five third-party
+    callbacks bare, so a throw propagated out of `LoadAll` into `main()`, which has no handler: the
+    process died without naming the plugin, and the attribution window stayed open, filing every
+    later plugin's registrations under the one that had already failed. Every other plugin entry
+    point in the tree was already wrapped -- observers, commands, and (after §12.2) tool execution.
+    A throw is now the `RegistrationThrew` load outcome, reported like any other. Tested against a
+    real `.so` that really throws, because a mock cannot demonstrate a process dying.

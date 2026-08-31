@@ -34,6 +34,37 @@ Fn Lookup(void* handle, const char* symbol) {
     return fn;
 }
 
+// Runs a plugin's registration callback with the attribution window open,
+// closing it and reporting on either exit.
+//
+// PLUGIN CODE IS NOT TRUSTED TO RETURN NORMALLY. These callbacks were called
+// bare: a throw propagated out of LoadOne, out of LoadAll, into main() -- which
+// has no handler -- so the process died with no diagnostic naming the plugin,
+// and the attribution window stayed open, mis-attributing every registration
+// after it to a plugin that had already failed. Every OTHER plugin entry point
+// in this tree is wrapped (observers in Dispatch, commands in Dispatch, tools in
+// ToolExecutor::Run); registration was the one that was not.
+template <typename Open, typename Body, typename Close>
+bool GuardedRegistration(PluginRecord& record, const char* what, Open&& open, Body&& body,
+                          Close&& close) {
+    open();
+    try {
+        body();
+    } catch (const std::exception& error) {
+        close();
+        record.status = LoadStatus::RegistrationThrew;
+        record.error = std::string(what) + " threw: " + error.what();
+        return false;
+    } catch (...) {
+        close();
+        record.status = LoadStatus::RegistrationThrew;
+        record.error = std::string(what) + " threw a non-standard exception";
+        return false;
+    }
+    close();
+    return true;
+}
+
 }  // namespace
 
 std::string_view ToString(LoadStatus status) {
@@ -43,6 +74,7 @@ std::string_view ToString(LoadStatus status) {
         case LoadStatus::OpenFailed:            return "open failed";
         case LoadStatus::MissingRequiredSymbol: return "missing required symbol";
         case LoadStatus::AbiMismatch:           return "abi mismatch";
+        case LoadStatus::RegistrationThrew:     return "registration threw";
     }
     return "unknown";
 }
@@ -109,15 +141,18 @@ PluginRecord PluginLoader::LoadOne(const PluginCandidate& candidate) {
     // Attribution window: every tool registered inside it belongs to this
     // plugin, which is what lets a later collision name both culprits.
     const std::size_t tools_before = tools_.attributions().size();
-    tools_.SetAttribution(record.name);
-
     if (auto register_tools = Lookup<RegisterToolsFn>(handle, "minimal_plugin_register_tools")) {
-        ToolRegistrationContext context;
-        context.tools_settings = tools_settings_;
-        register_tools(tools_, context);
+        const bool ok = GuardedRegistration(
+            record, "minimal_plugin_register_tools",
+            [&] { tools_.SetAttribution(record.name); },
+            [&] {
+                ToolRegistrationContext context;
+                context.tools_settings = tools_settings_;
+                register_tools(tools_, context);
+            },
+            [&] { tools_.ClearAttribution(); });
+        if (!ok) return record;
     }
-
-    tools_.ClearAttribution();
 
     const auto& attributions = tools_.attributions();
     for (std::size_t i = tools_before; i < attributions.size(); ++i) {
@@ -127,7 +162,12 @@ PluginRecord PluginLoader::LoadOne(const PluginCandidate& candidate) {
     if (auto register_providers = Lookup<RegisterProviderFactoriesFn>(
             handle, "minimal_plugin_register_provider_factories")) {
         const auto before = providers_.kinds();
-        register_providers(providers_);
+        const bool ok = GuardedRegistration(
+            record, "minimal_plugin_register_provider_factories",
+            [&] { providers_.SetAttribution(record.name); },
+            [&] { register_providers(providers_); },
+            [&] { providers_.ClearAttribution(); });
+        if (!ok) return record;
         const auto after = providers_.kinds();
         std::set_difference(after.begin(), after.end(), before.begin(), before.end(),
                             std::back_inserter(record.registered_provider_kinds));
@@ -138,12 +178,15 @@ PluginRecord PluginLoader::LoadOne(const PluginCandidate& candidate) {
         // collision must be able to name both plugins, and an alias is keyed by
         // "plugin.original_name" so the registry has to know whose it is.
         const std::size_t commands_before = commands_->attributions().size();
-        commands_->SetAttribution(record.name);
         if (auto register_commands =
                 Lookup<RegisterCommandsFn>(handle, "minimal_plugin_register_commands")) {
-            register_commands(*commands_);
+            const bool ok = GuardedRegistration(
+                record, "minimal_plugin_register_commands",
+                [&] { commands_->SetAttribution(record.name); },
+                [&] { register_commands(*commands_); },
+                [&] { commands_->ClearAttribution(); });
+            if (!ok) return record;
         }
-        commands_->ClearAttribution();
 
         const auto& command_attributions = commands_->attributions();
         for (std::size_t i = commands_before; i < command_attributions.size(); ++i) {
@@ -154,7 +197,10 @@ PluginRecord PluginLoader::LoadOne(const PluginCandidate& candidate) {
     if (observers_ != nullptr) {
         if (auto register_observer = Lookup<RegisterSessionObserverFn>(
                 handle, "minimal_plugin_register_session_observer")) {
-            register_observer(*observers_);
+            if (!GuardedRegistration(record, "minimal_plugin_register_session_observer",
+                                      [] {}, [&] { register_observer(*observers_); }, [] {})) {
+                return record;
+            }
             record.registered_session_observer = true;
         }
     }
@@ -162,7 +208,10 @@ PluginRecord PluginLoader::LoadOne(const PluginCandidate& candidate) {
     if (auth_providers_ != nullptr) {
         if (auto register_auth = Lookup<RegisterAuthProviderFn>(
                 handle, "minimal_plugin_register_auth_provider")) {
-            register_auth(*auth_providers_);
+            if (!GuardedRegistration(record, "minimal_plugin_register_auth_provider", [] {},
+                                      [&] { register_auth(*auth_providers_); }, [] {})) {
+                return record;
+            }
             record.registered_auth_provider = true;
         }
     }

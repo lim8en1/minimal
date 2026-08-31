@@ -418,6 +418,13 @@ std::vector<CheckResult> StartupSanityCheck::check_plugins() {
     return results;
 }
 
+namespace {
+// An empty attribution means core registered it itself, which reads badly as ''.
+std::string PluginLabel(const std::string& plugin_name) {
+    return plugin_name.empty() ? std::string("the harness itself") : "plugin '" + plugin_name + "'";
+}
+}  // namespace
+
 std::vector<CheckResult> StartupSanityCheck::check_name_collisions() {
     std::vector<CheckResult> results;
     const auto& resolution = inputs_.name_resolution;
@@ -471,6 +478,23 @@ std::vector<CheckResult> StartupSanityCheck::check_name_collisions() {
     for (const auto& key : resolution.result.dangling_aliases) {
         results.push_back(Warning("aliases", "command_aliases key '" + key +
                                   "' resolves to nothing registered (typo, or the providing plugin is disabled)"));
+    }
+
+    // THE THIRD REGISTRATION NAMESPACE. Tools and commands both feed
+    // ResolveRegistrationNames and collide fatally; provider kinds were exempt,
+    // because ProviderFactoryRegistry::Register signalled a duplicate only
+    // through a return value the loader ignored. A second plugin registering
+    // `openai` was therefore dropped in silence, and which backend a session
+    // actually got depended on plugin load order -- the precise outcome the
+    // collision rule exists to prevent. Fatal like the other two: there is no
+    // alias mechanism for a kind, so disabling one plugin is the only fix.
+    for (const auto& collision : inputs_.provider_factories.collisions()) {
+        results.push_back(
+            Fatal("name_collisions",
+                  "provider kind '" + collision.kind + "' is registered by both " +
+                      PluginLabel(collision.first_plugin) + " and " +
+                      PluginLabel(collision.second_plugin) +
+                      " -- disable one of them; provider kinds cannot be aliased"));
     }
     return results;
 }

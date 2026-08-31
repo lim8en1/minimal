@@ -26,6 +26,11 @@ enum class LoadStatus {
     OpenFailed,             // dlopen failed (missing file, bad arch, unresolved symbol)
     MissingRequiredSymbol,  // not a minimal plugin, or built against a different ABI header
     AbiMismatch,            // built against a different toolchain; rebuild it
+    // A registration callback threw. Plugin code is arbitrary native code by
+    // design, so a throw is a load outcome like any other -- it used to
+    // propagate through LoadAll into main(), which has no handler, killing the
+    // process without naming the plugin responsible.
+    RegistrationThrew,
 };
 
 struct PluginCandidate {

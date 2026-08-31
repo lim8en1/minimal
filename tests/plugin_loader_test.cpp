@@ -440,3 +440,68 @@ TEST_CASE("a late-registered duplicate does not silently shadow the incumbent",
     CHECK(served.content_text == "first");  // the incumbent, not the latecomer
     CHECK(first_ptr->calls.size() == 1);
 }
+
+TEST_CASE("a plugin whose registration throws is reported, not fatal to the process",
+          "[plugin_loader][invariant]") {
+    // The callbacks used to be invoked bare, so a throw propagated out of
+    // LoadOne, out of LoadAll, into main() -- which has no handler -- and killed
+    // the server with no diagnostic naming the plugin. Registration was the one
+    // plugin entry point in the tree not wrapped; observers, commands and tool
+    // execution all already were.
+    Harness h;
+    std::vector<plugins::PluginRecord> records;
+    REQUIRE_NOTHROW(records = h.loader.LoadAll({Enabled("fixture-throws")}));
+
+    REQUIRE(records.size() == 1);
+    CHECK(records.front().status == LoadStatus::RegistrationThrew);
+    CHECK(records.front().name == "fixture-throws");  // named, so it can be disabled
+    CHECK(records.front().error.find("registration is broken") != std::string::npos);
+}
+
+TEST_CASE("a throwing plugin does not mis-attribute the next plugin's registrations",
+          "[plugin_loader][invariant]") {
+    // The attribution window is what lets a collision name both culprits. An
+    // unwinding callback skipped ClearAttribution(), so every registration after
+    // it -- from entirely unrelated plugins -- was filed under the plugin that
+    // had already failed, and the collision diagnostic would then name the wrong
+    // one.
+    Harness h;
+    const auto records = h.loader.LoadAll({Enabled("fixture-throws"), Enabled("fixture-good")});
+
+    REQUIRE(records.size() == 2);
+    CHECK(records[0].status == LoadStatus::RegistrationThrew);
+    CHECK(records[1].status == LoadStatus::Loaded);
+
+    for (const auto& attribution : h.tool_registry.attributions()) {
+        if (attribution.tool_name == "fixture_tool") {
+            CHECK(attribution.plugin_name == "fixture-good");
+        }
+    }
+}
+
+TEST_CASE("two plugins claiming one provider kind is a reported collision",
+          "[plugin_loader][invariant]") {
+    // The third registration namespace, and the one that had no rule. Register()
+    // returned false on a duplicate and its own header said the caller would
+    // report which two plugins collided -- the loader ignored the return, so the
+    // loser was dropped in silence and which backend a session got depended on
+    // plugin load order. Tools and commands are both fatal on collision; this
+    // was exempt.
+    llm::ProviderFactoryRegistry registry;
+    const auto factory = [](const llm::ProviderConfig&) -> std::unique_ptr<llm::LlmProvider> {
+        return nullptr;
+    };
+
+    registry.SetAttribution("plugin-a");
+    CHECK(registry.Register("openai", factory));
+    registry.ClearAttribution();
+
+    registry.SetAttribution("plugin-b");
+    CHECK_FALSE(registry.Register("openai", factory));  // first registration keeps the slot
+    registry.ClearAttribution();
+
+    REQUIRE(registry.collisions().size() == 1);
+    CHECK(registry.collisions().front().kind == "openai");
+    CHECK(registry.collisions().front().first_plugin == "plugin-a");
+    CHECK(registry.collisions().front().second_plugin == "plugin-b");
+}

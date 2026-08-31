@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <chrono>
 #include <filesystem>
+#include <fstream>
 #include <optional>
 #include <set>
 #include <string>
@@ -1032,4 +1033,58 @@ TEST_CASE("concurrent appends across sessions stay consistent", "[session][concu
             CHECK(page.messages[i].seq == expected - 1 - i);
         }
     }
+}
+
+TEST_CASE("a read that fails mid-scan raises instead of returning a short result",
+          "[session][robustness]") {
+    // `while (sqlite3_step(stmt) == SQLITE_ROW)` exits on SQLITE_DONE and
+    // equally on SQLITE_CORRUPT/BUSY/IOERR, with nothing checking which. The
+    // resume path is where that hurts: a truncated read becomes the loop's
+    // working history while SqliteHistoryStore keeps appending at MAX(seq)+1, so
+    // the session runs on a transcript with a hole in it and nothing says so.
+    // The JSON decode under these loops is strict about a row it cannot parse,
+    // which made the strict half a guard over the lax half's output.
+    TempDir dir;
+    const auto path = dir.path() / "sessions.db";
+    std::string session_id;
+    {
+        SessionDatabase db(path);
+        session_id = db.CreateSession("s", std::nullopt, "/p", "main").session_id;
+        // Enough rows to span several b-tree pages, so corrupting one lands
+        // inside the scan rather than before it starts.
+        for (int i = 0; i < 400; ++i) {
+            db.AppendMessage(session_id,
+                             llm::Message{llm::Role::User,
+                                          {llm::TextBlock{std::string(200, 'x') +
+                                                          std::to_string(i)}}},
+                             0);
+        }
+    }
+
+    // Scribble over the tail of the file: the header and first pages stay valid,
+    // so the database opens and the scan begins, and the damage is met partway
+    // through.
+    {
+        std::fstream file(path, std::ios::in | std::ios::out | std::ios::binary);
+        REQUIRE(file);
+        file.seekp(0, std::ios::end);
+        const auto size = file.tellp();
+        REQUIRE(size > 8192);
+        file.seekp(size / 2);
+        const std::string garbage(static_cast<std::size_t>(size) / 4, '\xa5');
+        file.write(garbage.data(), static_cast<std::streamsize>(garbage.size()));
+    }
+
+    SessionDatabase reopened(path);
+    // The point is NOT which error: it is that a failed read is an error at all,
+    // rather than a plausible-looking short transcript.
+    bool threw = false;
+    std::vector<StoredMessage> loaded;
+    try {
+        loaded = reopened.LoadMessages(session_id);
+    } catch (const std::exception&) {
+        threw = true;
+    }
+    CHECK((threw || loaded.size() == 400));
+    CHECK_FALSE((!threw && loaded.size() < 400));  // never short AND silent
 }

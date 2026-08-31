@@ -97,7 +97,8 @@ target_include_directories(minimal_tests PRIVATE
 # warns about it). Depend on the bundle.
 add_subdirectory(fixtures)
 add_dependencies(minimal_tests
-    fixture-good fixture-collision fixture-bad-abi fixture-minimal fixture-not-a-plugin)
+    fixture-good fixture-collision fixture-bad-abi fixture-minimal fixture-not-a-plugin
+    fixture-throws)
 target_compile_definitions(minimal_tests PRIVATE
     MINIMAL_FIXTURE_DIR="${CMAKE_CURRENT_BINARY_DIR}/fixtures")
 
