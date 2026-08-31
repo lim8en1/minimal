@@ -515,8 +515,16 @@ void Session::RunOneTurn(std::string text) {
         // flight. Fired on EVERY exit path -- `result` is default-constructed
         // after a failed turn, which is exactly what a waiter needs to unblock
         // with an error.
-        if (params_.on_turn_finished) {
-            subagent_finished_.store(true, std::memory_order_release);
+        // EXCHANGE, not store. Terminate() guards the same hook with an
+        // exchange and its comment claims that makes the pair exactly-once --
+        // which was true only because Terminate joins this worker before reading
+        // the flag, i.e. because of the JOIN, not because of the exchange. A
+        // claim resting on a mechanism other than the one it names is how the
+        // next edit breaks it; with both sides exchanging, exactly-once holds
+        // whatever the ordering. Firing twice would set a std::promise twice,
+        // which throws.
+        if (params_.on_turn_finished &&
+            !subagent_finished_.exchange(true, std::memory_order_acq_rel)) {
             params_.on_turn_finished(result);
         }
     } catch (...) {

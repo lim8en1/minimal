@@ -17,9 +17,23 @@ namespace {
 bool IsExactInteger(double value) {
     if (!std::isfinite(value)) return false;
     if (value != std::trunc(value)) return false;
+    // STRICTLY LESS at the top, and the asymmetry is the point.
+    // static_cast<double>(INT64_MAX) is not INT64_MAX: 2^63-1 is not
+    // representable, so the conversion rounds UP to exactly 2^63 -- and a `<=`
+    // against that admitted 9223372036854775808.0, whose cast to int64_t is the
+    // precise UB this guard was written to prevent. INT64_MIN is exactly -2^63
+    // and needs no such care, so the bounds are deliberately not symmetric.
+    // Reachable from the wire: any tool_use input carrying a number that large.
+    constexpr double kTwoToThe63 = 9223372036854775808.0;  // -static_cast<double>(INT64_MIN)
     return value >= static_cast<double>(std::numeric_limits<std::int64_t>::min()) &&
-           value <= static_cast<double>(std::numeric_limits<std::int64_t>::max());
+           value < kTwoToThe63;
 }
+
+// Makes the terminal `else` of an if-constexpr chain a COMPILE ERROR rather than
+// a silent no-op. Dependent on T so it only fires when that branch is actually
+// instantiated.
+template <typename>
+constexpr bool kAlwaysFalse = false;
 
 }  // namespace
 
@@ -303,6 +317,14 @@ v1::ContentBlock ToProto(const llm::ContentBlock& block) {
                         },
                         inner);
                 }
+            } else {
+                // THE TOTALITY GUARANTEE THE HEADER CLAIMS, made real. The enum
+                // switches get it from -Wswitch; this chain had no terminal
+                // else, so adding a ContentBlock alternative compiled silently,
+                // serialized as BLOCK_NOT_SET, and was then DROPPED by the
+                // reverse direction -- silently deleted transcript content,
+                // which is exactly what the header says cannot happen.
+                static_assert(kAlwaysFalse<T>, "ToProto: unhandled ContentBlock alternative");
             }
         },
         block);
@@ -406,6 +428,10 @@ v1::StreamEvent ToProto(const llm::StreamEvent& event) {
                 *out.mutable_usage()->mutable_usage() = ToProto(value.usage);
             } else if constexpr (std::is_same_v<T, llm::MessageStopEvent>) {
                 out.mutable_message_stop();
+            } else {
+                // Same guarantee as the ContentBlock visit above: a new
+                // StreamEvent alternative must not compile into EVENT_NOT_SET.
+                static_assert(kAlwaysFalse<T>, "ToProto: unhandled StreamEvent alternative");
             }
         },
         event);

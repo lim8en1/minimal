@@ -45,7 +45,12 @@ bool CommandResolves(const std::string& command) {
     if (command.empty()) return false;
     const auto executable = [](const std::filesystem::path& path) {
         std::error_code ec;
-        return !ec && std::filesystem::is_regular_file(path, ec) && ::access(path.c_str(), X_OK) == 0;
+        // `is_regular_file` writes ec; testing it BEFORE the call tested a
+    // default-constructed value, so `!ec` was unconditionally true and the code
+    // the call reported was never read. Written correctly at bash_tool.cpp:439
+    // and again below in this same file -- three copies, one inert.
+    const bool regular = std::filesystem::is_regular_file(path, ec);
+    return regular && !ec && ::access(path.c_str(), X_OK) == 0;
     };
     if (command.find('/') != std::string::npos) {
         return executable(command);
@@ -242,7 +247,15 @@ std::vector<CheckResult> StartupSanityCheck::check_presets() {
     // is exactly why a broken one stayed silent until the first session.
     std::error_code ec;
     if (std::filesystem::is_directory(agents_dir, ec)) {
-        for (const auto& entry : std::filesystem::directory_iterator(agents_dir, ec)) {
+        // increment(ec), not the range-for. `directory_iterator(dir, ec)` only makes
+    // CONSTRUCTION non-throwing; the range-for's operator++ is the throwing
+    // overload, so one unreadable entry threw straight out of RunAll and skipped
+    // every later check -- breaking the linter property this class documents
+    // ("EVERY check runs regardless of what the earlier ones found").
+    // skill_registry.cpp:153 already had the right shape.
+    for (auto it = std::filesystem::directory_iterator(agents_dir, ec);
+         !ec && it != std::filesystem::directory_iterator(); it.increment(ec)) {
+        const auto& entry = *it;
             if (!entry.is_regular_file(ec) || entry.path().extension() != ".md") continue;
             const auto preset_name = entry.path().stem().string();
             // subagent.md is plain Markdown without frontmatter -- a session-level
