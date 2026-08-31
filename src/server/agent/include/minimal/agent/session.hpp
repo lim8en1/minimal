@@ -54,6 +54,10 @@
 #include "minimal/tools/tool_registry.hpp"
 #include "minimal/v1/session_service.pb.h"
 
+namespace minimal::mcp {
+class McpClientManager;       // borrowed via SessionParams::mcp_manager
+}  // namespace minimal::mcp
+
 namespace minimal::agent {
 
 class ProviderInstanceCache;  // borrowed via set_provider_instance_cache
@@ -95,6 +99,11 @@ struct SessionParams {
     // the final text, release a blocking parent, and queue a non-blocking
     // parent's completion injection.
     std::function<void(const TurnResult&)> on_turn_finished;
+
+    // Borrowed, like the registry: the manager outlives every session. Null
+    // (no mcps.json entries, or tests without MCP) simply means no live MCP
+    // servers and no liveness checks.
+    mcp::McpClientManager* mcp_manager = nullptr;
 };
 
 // One item of work for the session worker. A variant rather than two queues,
@@ -196,6 +205,14 @@ public:
     // read-only commands (running off the worker) read.
     AgentPreset preset_snapshot() const override;
     void ApplyPreset(AgentPreset preset) override;
+
+    // Session-start and /agent liveness resolution against the McpClientManager:
+    // for every server in the preset's allowed_mcp_servers, EnsureAlive; a
+    // failure disables the server FOR THIS SESSION (recorded, surfaced as an
+    // ErrorEvent) and the session proceeds without it. Sets the loop's live
+    // server list. Runs where blocking is allowed -- session construction and
+    // the worker at a preset-switch boundary -- never the RPC reader.
+    void RefreshMcpServers();
     const std::optional<common::ModelRef>& model_override() const override {
         return model_override_;
     }
@@ -217,6 +234,7 @@ public:
     }
     // The shared instance cache the rebuild above routes through. Optional:
     // without it the rebuild constructs a private instance (test sessions).
+    void set_mcp_manager(mcp::McpClientManager* manager) { mcp_manager_ = manager; }
     void set_provider_instance_cache(ProviderInstanceCache* cache) {
         provider_instance_cache_ = cache;
     }
@@ -300,6 +318,11 @@ private:
     const AgentPresetRegistry* presets_ = nullptr;
     const llm::ProviderFactoryRegistry* provider_factories_ = nullptr;
     ProviderInstanceCache* provider_instance_cache_ = nullptr;
+    mcp::McpClientManager* mcp_manager_ = nullptr;
+    // Servers that failed a liveness check in THIS session. Disabled for the
+    // session's life: the session proceeds without them (ARCHITECTURE.md, MCP
+    // client), and later /agent switches do not re-test them.
+    std::vector<std::string> disabled_mcp_servers_;
     // The user's explicit model choice. Outranks the preset's, and survives
     // /agent re-resolving it.
     std::optional<common::ModelRef> model_override_;
@@ -320,6 +343,11 @@ private:
     // Written by the worker when it pops a turn; read by IsCancelled on the
     // worker's own call stack (loop, sink, tools, compactor).
     std::atomic<std::uint64_t> turn_cancel_base_{0};
+    // The event-driven face of the same mechanism: the worker mints a token
+    // per turn (recorded in the agent loop, handed to every ToolContext), and
+    // Cancel/Terminate fire every live one, so a tool blocked on a condition
+    // variable wakes immediately instead of polling. See tools/cancel_token.hpp.
+    tools::CancelSource cancel_source_;
     std::atomic<bool> terminated_{false};
     // A subagent's life is one seeded turn; once its completion hook has fired,
     // a stray client-submitted turn would fire it a second time, so SubmitTurn

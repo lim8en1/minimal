@@ -36,6 +36,12 @@ add_executable(minimal_tests
     permission_codec_test.cpp
     providers_config_test.cpp
     mcps_config_test.cpp
+    mcp_naming_test.cpp
+    mcp_tool_test.cpp
+    mcp_connection_test.cpp
+    mcp_client_manager_test.cpp
+    session_mcp_test.cpp
+    mcp_e2e_test.cpp
     sanity_check_test.cpp
     settings_config_test.cpp
     permissions_config_test.cpp
@@ -122,9 +128,40 @@ target_link_libraries(minimal_tests PRIVATE
     minimal_tree_sitter
     minimal_tree_sitter_bash)
 
+# Scripted stdio MCP server spawned by the MCP tests as a real child process.
+# Island build like mcp_stdio_shim.cpp: cpp-mcp's bundled json only.
+add_executable(minimal_mcp_fake_server support/mcp_fake_server.cpp)
+target_include_directories(minimal_mcp_fake_server SYSTEM PRIVATE
+    "${cpp_mcp_SOURCE_DIR}/include"
+    "${cpp_mcp_SOURCE_DIR}/common")
+target_link_libraries(minimal_mcp_fake_server PRIVATE mcp)
+target_compile_options(minimal_mcp_fake_server PRIVATE ${MINIMAL_WARNING_FLAGS})
+add_dependencies(minimal_tests minimal_mcp_fake_server)
+target_compile_definitions(minimal_tests PRIVATE
+    MINIMAL_MCP_FAKE_SERVER="$<TARGET_FILE:minimal_mcp_fake_server>")
+
+# The http-side tests use cpp-mcp's bundled (header-only) httplib as an
+# in-process streamable-http server fixture. SYSTEM: third-party header.
+target_include_directories(minimal_tests SYSTEM PRIVATE
+    "${cpp_mcp_SOURCE_DIR}/common")
+
 catch_discover_tests(minimal_tests)
 
 target_compile_options(minimal_tests PRIVATE ${MINIMAL_WARNING_FLAGS})
+
+# Live MCP smoke test against a real MCP server (stdio + streamable-http).
+# Opt-in: OFF by default so CI never builds or runs it; when ON, a missing
+# server is a FAIL, not a skip -- it is a hard requirement where enabled.
+option(MINIMAL_ENABLE_LIVE_MCP_TESTS
+       "Build the live MCP smoke test (needs 'gateway' on PATH or MINIMAL_MCP_LIVE_SERVER)" OFF)
+if(MINIMAL_ENABLE_LIVE_MCP_TESTS)
+    add_executable(minimal_mcp_live_test mcp_live_test.cpp)
+    target_link_libraries(minimal_mcp_live_test PRIVATE
+        minimal::test_support
+        Catch2::Catch2WithMain)
+    target_compile_options(minimal_mcp_live_test PRIVATE ${MINIMAL_WARNING_FLAGS})
+    catch_discover_tests(minimal_mcp_live_test)
+endif()
 
 # Config seeding is CMake, so its test is CMake. Reimplementing the copy in C++
 # to test it would assert that two copies of the logic agree -- which is the

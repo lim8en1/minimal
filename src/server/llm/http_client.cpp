@@ -170,21 +170,21 @@ int XferInfoCallback(void* clientp, curl_off_t /*dltotal*/, curl_off_t dlnow, cu
     }
 }
 
-HttpResponse PerformRequest(const HttpRequest& request, Mode mode, const HttpHeadersReadySink* on_headers,
-                             const HttpBodyChunkSink* on_chunk) {
-    EnsureGlobalInit();
-    CurlHandle curl;
-    if (!curl.handle) throw HttpError(HttpErrorKind::Other, "curl_easy_init failed");
-
+// Configures `handle` for one POST transfer, performs it, and returns the
+// response. The caller owns the handle's lifetime; everything set here is
+// per-transfer, undone by a curl_easy_reset between transfers on a reused
+// handle.
+HttpResponse ConfigureAndPerform(CURL* handle, const HttpRequest& request, Mode mode,
+                                 const HttpHeadersReadySink* on_headers,
+                                 const HttpBodyChunkSink* on_chunk) {
     TransferState state;
     state.mode = mode;
-    state.handle = curl.handle;
+    state.handle = handle;
     state.on_headers = on_headers;
     state.on_chunk = on_chunk;
     state.idle_timeout = request.idle_timeout;
     state.last_progress = std::chrono::steady_clock::now();
 
-    CURL* handle = curl.handle;
     curl_easy_setopt(handle, CURLOPT_URL, request.url.c_str());
     curl_easy_setopt(handle, CURLOPT_POST, 1L);
     curl_easy_setopt(handle, CURLOPT_POSTFIELDS, request.body.data());
@@ -195,7 +195,11 @@ HttpResponse PerformRequest(const HttpRequest& request, Mode mode, const HttpHea
     // WriteCallback check remains the authority for chunked responses.
     curl_easy_setopt(handle, CURLOPT_MAXFILESIZE_LARGE, static_cast<curl_off_t>(kMaxBodyBytes));
 
-    if (mode == Mode::Blocking && request.request_timeout.count() > 0) {
+    // The cap is total, not per-phase, in BOTH modes: a streaming server that
+    // accepts the connection and then goes silent must degrade to a bounded
+    // error, never wedge the calling thread. Streaming callers that need an
+    // unbounded transfer (LLM providers) leave this 0.
+    if (request.request_timeout.count() > 0) {
         curl_easy_setopt(handle, CURLOPT_TIMEOUT_MS, static_cast<long>(request.request_timeout.count()));
     }
 
@@ -232,7 +236,15 @@ HttpResponse PerformRequest(const HttpRequest& request, Mode mode, const HttpHea
     long status = 0;
     curl_easy_getinfo(handle, CURLINFO_RESPONSE_CODE, &status);
     state.response.status = static_cast<int>(status);
-    return state.response;
+    return std::move(state.response);
+}
+
+HttpResponse PerformRequest(const HttpRequest& request, Mode mode, const HttpHeadersReadySink* on_headers,
+                            const HttpBodyChunkSink* on_chunk) {
+    EnsureGlobalInit();
+    CurlHandle curl;
+    if (!curl.handle) throw HttpError(HttpErrorKind::Other, "curl_easy_init failed");
+    return ConfigureAndPerform(curl.handle, request, mode, on_headers, on_chunk);
 }
 
 }  // namespace
@@ -251,6 +263,54 @@ HttpResponse HttpClient::Post(const HttpRequest& request) const {
 HttpResponse HttpClient::StreamPost(const HttpRequest& request, const HttpHeadersReadySink& on_headers,
                                      const HttpBodyChunkSink& on_chunk) const {
     return PerformRequest(request, Mode::Streaming, &on_headers, &on_chunk);
+}
+
+// --- HttpSession -------------------------------------------------------------
+
+namespace {
+
+CURL* AsCurl(void* handle) { return static_cast<CURL*>(handle); }
+
+}  // namespace
+
+HttpSession::HttpSession() {
+    EnsureGlobalInit();
+    handle_ = curl_easy_init();
+    if (handle_ == nullptr) throw HttpError(HttpErrorKind::Other, "curl_easy_init failed");
+}
+
+HttpSession::~HttpSession() {
+    if (handle_ != nullptr) curl_easy_cleanup(AsCurl(handle_));
+}
+
+// The reset must run after EVERY transfer -- success, transport failure, or
+// sink abort: options are per-transfer (a request_timeout set once would leak
+// into an unbounded later transfer), while the connection cache survives the
+// reset. That asymmetry is the whole reason this class works.
+namespace {
+
+// The reset must run after EVERY transfer -- success, transport failure, or
+// sink abort: options are per-transfer (a request_timeout set once would leak
+// into an unbounded later transfer), while the connection cache survives the
+// reset. That asymmetry is the whole reason HttpSession works.
+struct ResetOnScopeExit {
+    CURL* handle;
+    ~ResetOnScopeExit() { curl_easy_reset(handle); }
+};
+
+}  // namespace
+
+HttpResponse HttpSession::Post(const HttpRequest& request) const {
+    CURL* curl = AsCurl(handle_);
+    ResetOnScopeExit reset{curl};
+    return ConfigureAndPerform(curl, request, Mode::Blocking, nullptr, nullptr);
+}
+
+HttpResponse HttpSession::StreamPost(const HttpRequest& request, const HttpHeadersReadySink& on_headers,
+                                     const HttpBodyChunkSink& on_chunk) const {
+    CURL* curl = AsCurl(handle_);
+    ResetOnScopeExit reset{curl};
+    return ConfigureAndPerform(curl, request, Mode::Streaming, &on_headers, &on_chunk);
 }
 
 }  // namespace minimal::llm

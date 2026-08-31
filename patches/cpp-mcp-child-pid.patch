@@ -1,0 +1,34 @@
+diff --git a/include/mcp_stdio_client.h b/include/mcp_stdio_client.h
+index 012b934..048dab4 100644
+--- a/include/mcp_stdio_client.h
++++ b/include/mcp_stdio_client.h
+@@ -162,6 +162,17 @@ public:
+      */
+     bool is_running() const override;
+ 
++    /**
++     * @brief The spawned server child's process id (minimal-mcp patch).
++     *
++     * The caller owns killing the child on teardown: a wedged blocking call
++     * can outlive every caller-side deadline, and only the pid gives the
++     * caller a handle on the subprocess. Atomic so a teardown racing an
++     * in-flight initialize() still reads the pid the moment fork() records
++     * it. Returns -1 before start_server_process().
++     */
++    int child_pid() const { return process_id_.load(std::memory_order_acquire); }
++
+ private:
+     // Start server process
+     bool start_server_process();
+@@ -178,8 +189,9 @@ private:
+     // Server command
+     std::string command_;
+     
+-    // Process ID
+-    int process_id_ = -1;
++    // Process ID (atomic since the minimal-mcp child-pid patch: read from the
++    // teardown path while the worker thread may still be inside initialize()).
++    std::atomic<int> process_id_{-1};
+     
+ #if defined(_WIN32)
+     // Windows platform specific process handle

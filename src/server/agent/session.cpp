@@ -1,5 +1,9 @@
 #include "minimal/agent/session.hpp"
 
+#include <algorithm>
+
+#include "minimal/mcp/mcp_client_manager.hpp"
+
 #include "minimal/agent/provider_instance_cache.hpp"
 
 #include <exception>
@@ -130,8 +134,46 @@ Session::Session(SessionParams params, AgentPreset preset,
                                          compact_messages, std::move(seeded_history),
                                          seed_first_persisted_seq, seed_head_is_summary);
 
+    // MCP liveness at session start, BEFORE the worker exists: this thread is
+    // allowed to block (the RPC reader is a different one), and the loop must
+    // already carry its final server set when the first turn can run.
+    mcp_manager_ = params_.mcp_manager;
+    if (mcp_manager_ != nullptr) RefreshMcpServers();
+
     observers_.NotifySessionCreated(info_);
     worker_ = std::thread([this] { WorkerMain(); });
+}
+
+void Session::RefreshMcpServers() {
+    std::vector<std::string> live;
+    live.reserve(preset_.allowed_mcp_servers.size());
+    for (const auto& server : preset_.allowed_mcp_servers) {
+        // Once failed, disabled for this session's life: re-testing on every
+        // /agent switch would make an operator's typo a per-switch stall, and
+        // the surfaced error already told the client what happened.
+        if (std::find(disabled_mcp_servers_.begin(), disabled_mcp_servers_.end(), server) !=
+            disabled_mcp_servers_.end()) {
+            continue;
+        }
+        std::string error;
+        if (mcp_manager_->EnsureAlive(server, error)) {
+            live.push_back(server);
+            continue;
+        }
+        disabled_mcp_servers_.push_back(server);
+        // Surfaced, not swallowed: an ErrorEvent on the outbound queue is the
+        // same channel a failed turn uses, so the client sees WHY the
+        // server's tools never appeared.
+        v1::ServerEvent event = MakeEvent(params_.session_id);
+        auto* err = event.mutable_error();
+        err->set_category(v1::LLM_ERROR_CATEGORY_UNSPECIFIED);
+        err->set_message(error);
+        err->set_is_retryable(false);
+        queue_.Push(std::move(event));
+        logger_.warn("session {}: MCP server '{}' disabled: {}", params_.session_id, server,
+                     error);
+    }
+    loop_->SetMcpServers(std::move(live));
 }
 
 Session::~Session() { Terminate(); }
@@ -249,6 +291,10 @@ void Session::ApplyPreset(AgentPreset preset) {
     }
     executor_.SetRunMode(params_.run_mode_override.value_or(preset_.run_mode));
     loop_->SetPreset(preset_);
+    // The new preset may allow different MCP servers. Runs on the worker at a
+    // turn boundary (the same blocking contract as a preset swap): a dead
+    // server in the new list is surfaced here, never discovered mid-turn.
+    if (mcp_manager_ != nullptr) RefreshMcpServers();
 
     if (!provider_changed) return;
     if (provider_factories_ == nullptr) {
@@ -342,6 +388,10 @@ void Session::Cancel() {
     // generation as its base and runs uncancelled. One mechanism, no
     // clear-timing race in either direction.
     cancel_gen_.fetch_add(1, std::memory_order_acq_rel);
+    // Fire the turn's token: a tool parked on its cv (MCP call) wakes now,
+    // not on its next poll slice. Everything a live token's waiters do from
+    // here is the same path a deadline takes -- a cancelled tool call.
+    cancel_source_.CancelAll();
     // Wakes a worker parked on a permission prompt. Without this, cancelling
     // during an Ask would set a flag nobody is in a position to read.
     //
@@ -362,10 +412,13 @@ void Session::Terminate() {
     }
 
     // NOT a cancel-generation bump: Terminate ends the SESSION, and IsCancelled
-    // already folds terminated_ in. Shutting pending requests is what wakes a
-    // worker parked on a gate mid-teardown -- including one parked in
+    // already folds terminated_ in. It DOES fire the cancel tokens, though --
+    // a tool blocked on a token cv must wake to unwind. Shutting pending
+    // requests is the other half of the same wakeup: it releases a worker
+    // parked on a gate mid-teardown -- including one parked in
     // WirePermissionChecker::check on a question the client will never answer
     // (the other half of the two-file dependency documented at that Push).
+    cancel_source_.CancelAll();
     pending_.Shutdown();
     turn_cv_.notify_all();
 
@@ -415,6 +468,13 @@ void Session::WorkerMain() {
             // member comment for why the generation exists at all.
             turn_cancel_base_.store(cancel_gen_.load(std::memory_order_acquire),
                                     std::memory_order_relaxed);
+            // The turn's cancellation token: the loop hands it to every
+            // ToolContext, so a tool blocked on a condition variable (MCP)
+            // wakes the moment Cancel or Terminate fires. Minted AFTER the
+            // generation snapshot, exactly like the base above: a token from
+            // the previous turn stays fired for its own stragglers, and this
+            // turn starts clean.
+            loop_->SetCancelToken(cancel_source_.Mint());
             item = std::move(work_.front());
             work_.pop_front();
             running_turn_ = true;

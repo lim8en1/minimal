@@ -11,6 +11,7 @@
 
 #include "minimal/common/logger.hpp"
 #include "minimal/llm/chat.hpp"
+#include "minimal/tools/cancel_token.hpp"
 #include "minimal/tools/permission.hpp"
 
 namespace minimal::tools {
@@ -47,6 +48,13 @@ struct ToolContext {
 
     // Checked before each tool runs and polled by long-running tools (bash).
     std::function<bool()> is_cancelled;
+
+    // The event-driven counterpart, set per turn by the agent loop. Tools that
+    // BLOCK on a condition_variable (the MCP connection layer) wait on this
+    // token's cv, so cancellation wakes them instead of relying on a poll
+    // slice. Null is legal and means "no cancellation path": call sites and
+    // tests that never cancel need not mint one. See cancel_token.hpp.
+    CancelTokenPtr cancel_token;
 
     // Incremental output, surfaced as ToolOutputDeltaEvent. Deliberately lossy
     // downstream: the server coalesces and sends only the tail that fits the

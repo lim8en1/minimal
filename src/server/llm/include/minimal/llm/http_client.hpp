@@ -23,7 +23,7 @@ struct HttpRequest {
     std::vector<HttpHeader> headers;
     std::string body;
     std::chrono::milliseconds connect_timeout{5000};
-    std::chrono::milliseconds request_timeout{0};  // 0 = uncapped; Post() only
+    std::chrono::milliseconds request_timeout{0};  // 0 = uncapped; caps the WHOLE transfer in both modes
     std::chrono::milliseconds idle_timeout{0};     // 0 = disabled; StreamPost() only
 };
 
@@ -69,6 +69,37 @@ public:
 
     HttpResponse StreamPost(const HttpRequest& request, const HttpHeadersReadySink& on_headers,
                              const HttpBodyChunkSink& on_chunk) const;
+};
+
+// One CURL handle, reused across transfers: the connection cache lives in the
+// handle, so consecutive requests to the same host ride one TCP+TLS
+// connection (keep-alive, session resumption) instead of paying a full
+// handshake per call. The MCP http transport -- one serialized worker thread
+// making many requests to one URL -- is exactly this shape; HttpClient's
+// per-call handles are right for providers, which stream for free minutes
+// apart and must stay usable from many threads.
+//
+// NOT thread-safe: one thread at a time, by contract. State is reset after
+// EVERY transfer -- success, transport failure, or sink abort -- so a
+// poisoned transfer cannot leak into the next one. Response code and
+// semantics are identical to HttpClient's.
+class HttpSession {
+public:
+    HttpSession();
+    ~HttpSession();
+    HttpSession(const HttpSession&) = delete;
+    HttpSession& operator=(const HttpSession&) = delete;
+
+    HttpResponse Post(const HttpRequest& request) const;
+    HttpResponse StreamPost(const HttpRequest& request, const HttpHeadersReadySink& on_headers,
+                             const HttpBodyChunkSink& on_chunk) const;
+
+private:
+    // The curl easy handle, type-erased: libcurl's CURL typedef differs
+    // across platforms (void* on some, a struct pointer on others), and this
+    // public header must stay curl-free (curl is a PRIVATE dependency;
+    // plugins include llm headers). The implementation casts.
+    void* handle_ = nullptr;  // never null after the constructor
 };
 
 }  // namespace minimal::llm

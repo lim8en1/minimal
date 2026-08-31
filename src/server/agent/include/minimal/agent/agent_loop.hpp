@@ -188,6 +188,19 @@ public:
     void SetPreset(AgentPreset preset) { preset_ = std::move(preset); }
     const AgentPreset& preset() const { return preset_; }
 
+    // The allowed-AND-alive MCP server set, resolved by the session against the
+    // McpClientManager at construction and at every /agent switch (a preset
+    // change can re-scope the servers). A dead server's exclusion is exactly
+    // this list: the model never sees tools for a server that is not in it.
+    // WORKER THREAD ONLY, like SetPreset.
+    void SetMcpServers(std::vector<std::string> servers) { mcp_servers_ = std::move(servers); }
+
+    // The current turn's cancellation token, minted by the session when it
+    // pops the turn. Handed to every ToolContext so blocking tools can wait
+    // on its cv instead of polling. May be null between turns (tools cannot
+    // observe that: they only run inside a turn). WORKER THREAD ONLY.
+    void SetCancelToken(tools::CancelTokenPtr token) { cancel_token_ = std::move(token); }
+
     // /model across providers: the session builds the new provider and rebinds
     // it. A reference, not an owner -- the session owns the object.
     void SetProvider(llm::LlmProvider& provider) { provider_ = provider; }
@@ -211,6 +224,8 @@ private:
     tools::ToolRegistry& registry_;
     HistoryStore& store_;
     AgentPreset preset_;
+    std::vector<std::string> mcp_servers_;
+    tools::CancelTokenPtr cancel_token_;
     LoopConfig config_;
     SessionContext session_;
     std::function<bool()> is_cancelled_;
