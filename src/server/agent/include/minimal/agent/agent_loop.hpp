@@ -65,6 +65,10 @@ struct ToolLifecycleEvent {
     bool started = false;
     bool is_error = false;  // meaningful only when started == false
     std::int64_t started_at_unix_ms = 0;
+    // Wall time the call took, set on the FINISH event only. SessionObserver's
+    // ToolInvocation carries a duration and this is the only place that knows
+    // it; the wire event derives its own from the start timestamp.
+    std::chrono::milliseconds duration{0};
 };
 
 // Session-scoped, as distinct from the preset (which is switchable via /agent)
@@ -100,6 +104,11 @@ struct TurnResult {
     llm::Usage last_usage;
     int provider_calls = 0;
     bool hit_max_turns = false;
+    // Every tool this turn invoked, in call order, duplicates included -- it is
+    // a record of what happened, not a set. Feeds TurnSummary::tool_names_invoked,
+    // which ARCHITECTURE.md has always specified and which was shipped
+    // permanently empty because nothing populated it.
+    std::vector<std::string> tool_names_invoked;
 };
 
 // Summarizes a message range into one synthetic message. Injected so the

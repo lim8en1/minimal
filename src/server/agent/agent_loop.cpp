@@ -207,7 +207,21 @@ std::optional<std::size_t> AgentLoop::CompactNow() {
 
 void AgentLoop::ClearHistory() {
     history_.clear();
-    injected_.clear();
+    {
+        // UNDER THE LOCK, like every other touch of injected_. This one was not,
+        // and the two sides are genuinely concurrent: /clear runs on THIS
+        // session's worker, while QueueInjectedMessage runs on a NON-BLOCKING
+        // SUBAGENT's worker from its completion hook. A background child
+        // finishing while the user types /clear is a data race on a
+        // vector<Message> -- the kind that corrupts rather than crashes.
+        std::lock_guard<std::mutex> lock(injected_mu_);
+        injected_.clear();
+    }
+    // The occupancy estimate goes with the history it described. It self-heals
+    // on the next RecordTurn, so leaving it stale only cost one no-op Compact()
+    // -- but a token count that outlives its messages is the sort of thing a
+    // later change trips over, and the compaction trigger reads it.
+    tokens_ = llm::TokenAccumulator{};
     // Not the store. Compaction established that the in-memory working set and
     // the durable transcript are different things; /clear drops the first and
     // leaves scrollback whole.
@@ -407,6 +421,11 @@ TurnResult AgentLoop::RunTurn(llm::Message seed_message) {
                     .count();
             if (session_.tool_lifecycle_sink) session_.tool_lifecycle_sink(lifecycle);
 
+            // Recorded before the call, so a tool that fails still appears in
+            // the turn summary. What ran is the question, not what succeeded.
+            result.tool_names_invoked.push_back(use->name);
+
+            const auto tool_started = std::chrono::steady_clock::now();
             llm::ToolResultBlock tool_result = executor_.Run(use->id, use->name, use->input, ctx);
 
             // Emitted even when Run() reports an error, and before the result is
@@ -415,6 +434,8 @@ TurnResult AgentLoop::RunTurn(llm::Message seed_message) {
             // clear.
             lifecycle.started = false;
             lifecycle.is_error = tool_result.is_error;
+            lifecycle.duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - tool_started);
             if (session_.tool_lifecycle_sink) session_.tool_lifecycle_sink(lifecycle);
 
             results.push_back(std::move(tool_result));

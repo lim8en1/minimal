@@ -69,7 +69,7 @@ Session::Session(SessionParams params, AgentPreset preset,
         queue->Push(std::move(event));
     };
 
-    context.tool_lifecycle_sink = [queue, session_id](const ToolLifecycleEvent& lifecycle) {
+    context.tool_lifecycle_sink = [this, queue, session_id](const ToolLifecycleEvent& lifecycle) {
         v1::ServerEvent event = MakeEvent(session_id);
         auto* execution = event.mutable_tool_execution();
         execution->set_tool_use_id(lifecycle.tool_use_id);
@@ -79,6 +79,28 @@ Session::Session(SessionParams params, AgentPreset preset,
         if (!lifecycle.started) execution->set_is_error(lifecycle.is_error);
         execution->set_started_at_unix_ms(lifecycle.started_at_unix_ms);
         queue->Push(std::move(event));
+
+        // AND THE OBSERVER SIDE, which had no producer at all. ARCHITECTURE.md
+        // documents OnToolExecuted as one of the four SessionObserver hooks, and
+        // NotifyToolExecuted's only caller in the whole tree was its own unit
+        // test -- so a plugin implementing the documented hook got silence,
+        // which is worse than the hook not existing.
+        //
+        // On the FINISH event only: a started/finished pair is the wire's
+        // concern (a client has a panel to clear), whereas an observer wants one
+        // record of a completed call. Fired for a FAILED tool too, for the same
+        // reason the wire event is.
+        if (lifecycle.started) return;
+        ToolInvocation invocation;
+        invocation.tool_use_id = lifecycle.tool_use_id;
+        invocation.tool_name = lifecycle.tool_name;
+        invocation.is_error = lifecycle.is_error;
+        invocation.duration = lifecycle.duration;
+        // `summary` stays empty deliberately: the only honest summary is the
+        // tool's own disclosure, which is built for a permission prompt and is
+        // not reached when the call is pre-approved. An observer that wants
+        // detail has SessionReader and the tool_use_id.
+        observers_.NotifyToolExecuted(info_, std::move(invocation));
     };
 
     // Returning false aborts the provider request. This is the cancellation path
@@ -477,6 +499,9 @@ void Session::RunOneTurn(std::string text) {
         summary.last_seq = store_->last_appended_seq();
         summary.stop_reason = result.stop_reason;
         summary.usage = result.last_usage;
+        // Specified by ARCHITECTURE.md since track I and shipped permanently
+        // empty, because the loop collected it nowhere and this never set it.
+        summary.tool_names_invoked = std::move(result.tool_names_invoked);
         summary.duration = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - started);
         observers_.NotifyTurnCompleted(info_, std::move(summary));

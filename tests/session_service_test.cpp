@@ -1451,3 +1451,158 @@ TEST_CASE("a client-supplied page limit is clamped, not trusted",
     REQUIRE(fixture.stub->ListSessions(&list_context, list, &listed).ok());
     CHECK(listed.sessions_size() <= 1000);  // one session here; the clamp is the same call
 }
+
+TEST_CASE("an LLM command is refused mid-turn while a mutating one still queues",
+          "[session_service][commands][invariant]") {
+    // THE GUARD THAT NOTHING EVER TRIGGERED. Dispatch() takes a `busy` flag
+    // whose whole purpose is this refusal, and both production callers passed
+    // `false` unconditionally -- so only the unit tests exercised it, and
+    // /compact typed during a long turn was quietly queued instead. That is
+    // verbatim what command_dispatcher.hpp says must not happen: "queueing
+    // would make /compact silently run minutes later against a context that had
+    // moved on."
+    //
+    // The pair is the point. An LLMCommand is refused; a mutating
+    // HarnessCommand still QUEUES and lands at the turn boundary, because the
+    // shared work queue exists to serve exactly that. Refusing on !ReadOnly()
+    // would have taken both.
+    ServiceFixture fixture;
+    fixture.commands.Register(std::make_unique<testing::RecordingLlmCommand>());
+    fixture.commands.Register(std::make_unique<testing::RecordingCommand>());
+    fixture.tools.Register(
+        std::make_unique<testing::FakeTool>("read", tools::ToolCategory::ReadOnly, "contents"));
+    fixture.Script(testing::ToolUseResponse("call-1", "read", {{"path", "a.txt"}}));
+    fixture.Script(testing::TextResponse("done"));
+    fixture.Start();
+
+    const std::string session_id = fixture.CreateSession();
+    grpc::ClientContext context;
+    auto stream = fixture.stub->OpenSession(&context);
+
+    // All three written before any read, so both commands are dispatched while
+    // the turn is still queued or running -- idle() is false the moment
+    // SubmitTurn lands, and the reader dispatches these in order.
+    REQUIRE(stream->Write(ChatTurn(session_id, "read it")));
+    v1::ClientEvent llm_invocation;
+    llm_invocation.set_session_id(session_id);
+    llm_invocation.mutable_command()->set_request_id("cmd-llm");
+    llm_invocation.mutable_command()->set_name("llmrecord");
+    REQUIRE(stream->Write(llm_invocation));
+    v1::ClientEvent harness_invocation;
+    harness_invocation.set_session_id(session_id);
+    harness_invocation.mutable_command()->set_request_id("cmd-harness");
+    harness_invocation.mutable_command()->set_name("record");
+    REQUIRE(stream->Write(harness_invocation));
+
+    std::optional<v1::CommandResult> llm_result;
+    std::optional<v1::CommandResult> harness_result;
+    v1::ServerEvent event;
+    while (stream->Read(&event)) {
+        if (!event.has_command_result()) continue;
+        if (event.command_result().request_id() == "cmd-llm") llm_result = event.command_result();
+        if (event.command_result().request_id() == "cmd-harness") {
+            harness_result = event.command_result();
+        }
+        if (llm_result && harness_result) break;
+    }
+    (void)DrainAndFinish(stream);
+
+    REQUIRE(llm_result.has_value());
+    CHECK(llm_result->status() == v1::COMMAND_STATUS_ERROR);
+    CHECK(llm_result->message().find("in flight") != std::string::npos);
+
+    REQUIRE(harness_result.has_value());
+    CHECK(harness_result->status() == v1::COMMAND_STATUS_OK);
+}
+
+TEST_CASE("an unknown command is answered immediately, not after the turn",
+          "[session_service][commands]") {
+    // It used to be queued behind the running turn purely to be told "unknown
+    // command" minutes later. Nothing about that reply depends on the worker.
+    ServiceFixture fixture;
+    fixture.commands.Register(std::make_unique<testing::RecordingCommand>());
+    fixture.tools.Register(
+        std::make_unique<testing::FakeTool>("read", tools::ToolCategory::ReadOnly, "contents"));
+    fixture.Script(testing::ToolUseResponse("call-1", "read", {{"path", "a.txt"}}));
+    fixture.Script(testing::TextResponse("done"));
+    fixture.Start();
+
+    const std::string session_id = fixture.CreateSession();
+    grpc::ClientContext context;
+    auto stream = fixture.stub->OpenSession(&context);
+    REQUIRE(stream->Write(ChatTurn(session_id, "read it")));
+    v1::ClientEvent invocation;
+    invocation.set_session_id(session_id);
+    invocation.mutable_command()->set_request_id("cmd-x");
+    invocation.mutable_command()->set_name("no-such-command");
+    REQUIRE(stream->Write(invocation));
+
+    // Arrives BEFORE turn_completed: the answer overtakes the turn it was not
+    // waiting on.
+    bool saw_turn_completed = false;
+    std::optional<v1::CommandResult> result;
+    v1::ServerEvent event;
+    while (stream->Read(&event)) {
+        if (event.has_turn_completed()) saw_turn_completed = true;
+        if (event.has_command_result()) {
+            result = event.command_result();
+            break;
+        }
+    }
+    (void)DrainAndFinish(stream);
+
+    REQUIRE(result.has_value());
+    CHECK(result->status() == v1::COMMAND_STATUS_ERROR);
+    CHECK(result->message().find("unknown command") != std::string::npos);
+    CHECK_FALSE(saw_turn_completed);
+}
+
+TEST_CASE("observers see every tool call and the turn's tool list",
+          "[session_service][observer][invariant]") {
+    // BOTH HALVES OF THE CONTRACT WERE DECLARED AND NEITHER WAS PRODUCED.
+    // ARCHITECTURE.md documents OnToolExecuted as one of the four SessionObserver
+    // hooks and TurnSummary::tool_names_invoked as part of the payload; track I
+    // is checked off. But NotifyToolExecuted's only caller in the entire tree was
+    // its own unit test, and RunOneTurn built TurnSummary without ever setting
+    // tool_names_invoked. A plugin author implementing the documented interface
+    // got silence and an empty vector -- worse than the hook not existing,
+    // because it reads as working.
+    struct Recorder : agent::SessionObserver {
+        std::mutex mu;
+        std::vector<std::string> executed;
+        std::vector<std::string> summarized;
+        void OnToolExecuted(const agent::SessionInfo&,
+                            const agent::ToolInvocation& invocation) override {
+            std::lock_guard<std::mutex> lock(mu);
+            executed.push_back(invocation.tool_name);
+        }
+        void OnTurnCompleted(const agent::SessionInfo&,
+                             const agent::TurnSummary& summary) override {
+            std::lock_guard<std::mutex> lock(mu);
+            summarized = summary.tool_names_invoked;
+        }
+    };
+
+    ServiceFixture fixture;
+    auto recorder = std::make_shared<Recorder>();
+    fixture.tools.Register(
+        std::make_unique<testing::FakeTool>("read", tools::ToolCategory::ReadOnly, "contents"));
+    fixture.Script(testing::ToolUseResponse("call-1", "read", {{"path", "a.txt"}}));
+    fixture.Script(testing::TextResponse("done"));
+    fixture.Start();
+    // After Start(): the fixture builds the observer registry there, and every
+    // session is created later still, so nothing is missed.
+    fixture.observers->Register(recorder);
+
+    const std::string session_id = fixture.CreateSession();
+    grpc::ClientContext context;
+    auto stream = fixture.stub->OpenSession(&context);
+    REQUIRE(stream->Write(ChatTurn(session_id, "read it")));
+    REQUIRE(WaitForTurnCompleted(*stream));
+    (void)DrainAndFinish(stream);
+    fixture.observers->WaitForIdleForTesting();
+
+    std::lock_guard<std::mutex> lock(recorder->mu);
+    CHECK((recorder->executed == std::vector<std::string>{"read"}));
+    CHECK((recorder->summarized == std::vector<std::string>{"read"}));
+}

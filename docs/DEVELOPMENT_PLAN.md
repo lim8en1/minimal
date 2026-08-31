@@ -917,3 +917,50 @@ every one of them reads as done.
    and its proto comment already documented a bound it did not have. Both clamp to 1000 now --
    clamped rather than refused, because asking for more than we serve is not an error and `has_more`
    already tells the client to page.
+
+### Mechanisms that were described but not wired
+
+6. **A hung observer stalled the gRPC reader thread.** `Dispatch` posted with `EventQueue::Push`,
+   which BLOCKS at the cap -- while `NotifySessionCreated` runs inside `Session`'s constructor,
+   reached from `SessionRegistry::CreateResolved` on the gRPC HANDLER thread, and
+   `NotifySessionEnded` runs from `Terminate` on the reaper and in `~SessionRegistry`. So the
+   containment property both the header and `ARCHITECTURE.md` state outright -- "a hung observer
+   stalls further notifications rather than leaking one pool thread; contained (sessions keep
+   running; only notifications stop)" -- was the opposite of what happened: a wedged plugin observer
+   filled the queue and then blocked session creation and teardown, including the one thread the
+   three-thread topology forbids from blocking. `TryPush` now, with dropped notifications counted and
+   logged, since a plugin that misses an `OnSessionEnded` leaks its per-session state and the leak
+   would otherwise be the only evidence. The queue bound also became explicit (1024): inheriting
+   `EventQueue`'s 65536 default silently reserved a stream-event-sized backlog for notification
+   tasks that each carry a `SessionInfo` copy.
+
+7. **`SessionObserver` was half a contract.** `ARCHITECTURE.md` documents `OnToolExecuted` and
+   `TurnSummary::tool_names_invoked`; track I is checked off. `NotifyToolExecuted`'s only caller in
+   the tree was its own unit test, and `RunOneTurn` built `TurnSummary` without ever setting
+   `tool_names_invoked`. A plugin author implementing the documented interface got silence and an
+   empty vector -- worse than the hook not existing, because it reads as working. The loop now
+   records each tool name (before the call, so a failed tool still appears -- what ran is the
+   question, not what succeeded) and times it, and the session's lifecycle sink fires
+   `NotifyToolExecuted` on the FINISH event: a started/finished pair is the wire's concern, an
+   observer wants one record of a completed call.
+
+8. **`/compact` was queued behind the running turn instead of refused.** `Dispatch` takes a `busy`
+   flag for exactly this, and both production callers passed `false` unconditionally -- so only the
+   unit tests ever exercised it, and the behaviour was verbatim what `command_dispatcher.hpp`
+   forbids: "queueing would make /compact silently run minutes later against a context that had
+   moved on." The check now runs on the reader, where the answer can be returned without queueing
+   the thing being refused.
+
+   The rule is an **LLMCommand**, not any non-read-only command, and the old `!ReadOnly()` predicate
+   conflated two real behaviours: a mutating `HarnessCommand` (`/agent`, `/model`) is MEANT to queue
+   and land at the next turn boundary -- that is what the shared work queue is for -- while an
+   LLMCommand needs the provider and history to itself. The type exists to carry that distinction
+   ("a type cannot be forgotten the way a flag can"), so the type is what is asked, in both places.
+   An unknown command is also answered immediately now, rather than queued behind a long turn purely
+   to be told it was unknown.
+
+9. **`AgentLoop::ClearHistory` touched `injected_` without its mutex.** `/clear` runs on this
+   session's worker; `QueueInjectedMessage` runs on a NON-BLOCKING SUBAGENT's worker from its
+   completion hook. A background child finishing while the user types `/clear` is a data race on a
+   `vector<Message>` -- the kind that corrupts rather than crashes. Now locked, and the occupancy
+   estimate is reset with the history it described.

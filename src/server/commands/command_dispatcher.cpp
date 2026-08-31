@@ -11,7 +11,14 @@ CommandResult Dispatch(const CommandRegistry& registry, const std::string& name,
         return CommandResult::Error("unknown command: /" + name + " (try /help)");
     }
 
-    if (busy && !command->ReadOnly()) {
+    // An LLMCommand specifically, not any non-read-only command. A mutating
+    // HarnessCommand (`/agent`, `/model`) is MEANT to queue and run at the next
+    // turn boundary -- that is what the session's shared work queue is for, and
+    // what keeps it from landing between a tool_use and its tool_result. Only an
+    // LLMCommand needs the provider and the history to itself, and only it is
+    // pointless once the context it was aimed at has moved on. `!ReadOnly()` was
+    // true of both, so this refused commands the queue exists to serve.
+    if (busy && dynamic_cast<const LLMCommand*>(command) != nullptr) {
         return CommandResult::Error("/" + name +
                                     " cannot run while a turn is in flight; cancel it first");
     }

@@ -110,6 +110,21 @@ public:
 
 // NOT read-only, so it must be queued for the worker and land at a turn
 // boundary rather than mid-cycle.
+// An LLMCommand, which is a DIFFERENT rule from "not read-only": a mutating
+// HarnessCommand is meant to queue and run at the next turn boundary, while an
+// LLMCommand needs the provider and the history to itself and must be refused
+// while a turn is in flight. Only the type distinguishes them.
+class RecordingLlmCommand : public commands::LLMCommand {
+public:
+    std::string_view Name() const override { return "llmrecord"; }
+    std::string_view Summary() const override { return "an LLM command that records"; }
+    std::string_view Usage() const override { return "/llmrecord"; }
+    commands::CommandResult Execute(commands::CommandContext&,
+                                     const commands::CommandArgs&) override {
+        return commands::CommandResult::Ok("llm recorded");
+    }
+};
+
 class RecordingCommand : public commands::HarnessCommand {
 public:
     std::string_view Name() const override { return "record"; }

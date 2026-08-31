@@ -22,6 +22,13 @@
 // keep running; only notifications stop) and it is the right trade against
 // silently racing plugin state.
 //
+// CONTAINMENT IS ENFORCED BY TryPush, not merely asserted here. Dispatch used
+// Push -- which blocks at the queue's cap -- while NotifySessionCreated runs on
+// the gRPC HANDLER thread (inside Session's constructor) and NotifySessionEnded
+// runs from Terminate on the reaper. A wedged observer therefore filled the
+// queue and then blocked session creation and teardown, which is the opposite of
+// the paragraph above. Notifications are dropped and counted instead.
+//
 // Observers are plugin code, so a throwing observer is expected rather than
 // exceptional: each call is wrapped, and one observer's failure never stops the
 // others from running.
@@ -42,7 +49,24 @@ namespace minimal::agent {
 
 class SessionObserverRegistry {
 public:
-    explicit SessionObserverRegistry(common::Logger& logger);
+    // The queue bound is EXPLICIT rather than EventQueue's default. That default
+    // (65536) was sized for stream events -- token deltas -- and a notification
+    // task is a different animal: each holds a copy of SessionInfo plus the
+    // observer snapshot, so inheriting it reserved tens of megabytes for a
+    // backlog that means "an observer has stopped consuming" long before it
+    // fills. A few hundred pending notifications is already pathological.
+    // Injectable so a test can wedge an observer and reach the bound without
+    // queueing 65536 of them.
+    static constexpr std::size_t kDefaultTaskQueueSize = 1024;
+
+    explicit SessionObserverRegistry(common::Logger& logger,
+                                     std::size_t task_queue_size = kDefaultTaskQueueSize);
+
+    // Notifications refused because the queue was full. Read by tests, and the
+    // number the warning reports.
+    std::size_t dropped_notifications() const {
+        return dropped_.load(std::memory_order_acquire);
+    }
     ~SessionObserverRegistry();
 
     SessionObserverRegistry(const SessionObserverRegistry&) = delete;
@@ -76,6 +100,9 @@ private:
     rpc::EventQueue<std::function<void()>> tasks_;
     std::thread dispatcher_;
     std::atomic<int> outstanding_{0};
+    // Notifications refused because the queue was full or closed. Counted so a
+    // plugin missing an OnSessionEnded has evidence other than its own leak.
+    std::atomic<std::size_t> dropped_{0};
 };
 
 }  // namespace minimal::agent

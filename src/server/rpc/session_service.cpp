@@ -323,6 +323,42 @@ void SessionServiceImpl::DispatchCommand(const v1::CommandInvocation& invocation
             return;
         }
     }
+
+    // THE BUSY CHECK, which until now nothing ever performed: both callers of
+    // Dispatch() passed `busy = false` unconditionally, so only the tests ever
+    // exercised the refusal and `/compact` typed mid-turn was quietly queued --
+    // exactly what command_dispatcher.hpp says must not happen ("queueing would
+    // make /compact silently run minutes later against a context that had moved
+    // on").
+    //
+    // AN LLMCommand, not merely a non-read-only one. The two are different
+    // rules and both are real: a mutating HarnessCommand (`/agent`, `/model`)
+    // SHOULD queue and run at the turn boundary -- that is what the shared work
+    // queue is for -- while an LLMCommand needs the provider and the history to
+    // itself and has nothing useful to do afterwards. The type exists precisely
+    // to carry this distinction ("a type cannot be forgotten the way a flag
+    // can"), so it is the type that is asked.
+    //
+    // Answered here rather than by passing `busy` down, because the answer has
+    // to reach the client from the READER: queueing it for the worker is the
+    // very thing being refused.
+    if (!session.idle() && dynamic_cast<const commands::LLMCommand*>(command) != nullptr) {
+        session.RejectCommand(queued, "/" + queued.name +
+                                          " cannot run while a turn is in flight; cancel it first");
+        return;
+    }
+    // An unknown command is answered now too. Queueing it to be told "unknown
+    // command" after a minutes-long turn is a worse answer than the same answer
+    // immediately, and nothing about the reply depends on the worker.
+    //
+    // Only when a registry EXISTS to be unknown to: with commands_ unset the
+    // right answer is the session's "the /-command subsystem is not available",
+    // which is a different fact and belongs where it already lives.
+    if (commands_ != nullptr && command == nullptr) {
+        session.RejectCommand(queued, "unknown command: /" + queued.name + " (try /help)");
+        return;
+    }
+
     session.SubmitCommand(std::move(queued));
 }
 
