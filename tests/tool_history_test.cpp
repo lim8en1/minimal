@@ -346,3 +346,29 @@ TEST_CASE("HistoryWindow pages the bound session only, with SessionReader cursor
           "first");
     // The other session's row never appears: the window is bound.
 }
+
+TEST_CASE("HistoryWindow clamps the page size instead of honoring a tool's huge limit",
+          "[tool_history][invariant]") {
+    // The 512k-1M guarantee is the CAP, not the tool's restraint: a limit of
+    // 10^8 must not turn one call into a full-transcript materialization, and
+    // a non-positive limit degrades rather than throwing out of a tool call.
+    testing::TempDir db_dir;
+    session::SessionDatabase db(db_dir.path() / "sessions.db");
+    const auto row = db.CreateSession("w", std::nullopt, "/p", "build");
+    for (int i = 0; i < 3; ++i) {
+        db.AppendMessage(row.session_id, testing::UserText("m" + std::to_string(i)));
+    }
+    session::SessionReader reader(db);
+    session::HistoryWindow window(reader, row.session_id);
+
+    const auto huge = window.GetMessages(std::nullopt, 100000000);
+    CHECK(huge.messages.size() == 3);  // transcript size, not 10^8 -- and the
+                                       // cap, not the data, would bound a real one
+    CHECK(window.GetMessages(std::nullopt, session::HistoryWindow::kMaxPageLimit + 1)
+              .messages.size() == 3);
+
+    const auto zero = window.GetMessages(std::nullopt, 0);
+    CHECK(zero.messages.size() == 1);
+    const auto negative = window.GetMessages(std::nullopt, -5);
+    CHECK(negative.messages.size() == 1);
+}

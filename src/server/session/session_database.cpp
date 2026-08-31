@@ -570,7 +570,10 @@ MessagePage SessionDatabase::GetMessagesPage(const std::string& session_id,
     } else {
         sqlite3_bind_null(query.stmt, 2);
     }
-    sqlite3_bind_int(query.stmt, 3, limit + 1);
+    // int64, not `limit + 1` as int: a limit at INT_MAX would overflow the
+    // increment and bind a negative LIMIT, which SQLite reads as "no limit" --
+    // a full-transcript materialization instead of a page.
+    sqlite3_bind_int64(query.stmt, 3, static_cast<std::int64_t>(limit) + 1);
 
     MessagePage page;
     while (sqlite3_step(query.stmt) == SQLITE_ROW) {
