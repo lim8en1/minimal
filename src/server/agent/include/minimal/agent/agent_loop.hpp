@@ -38,9 +38,12 @@ struct LoopConfig {
     int max_retries = 3;
     int max_turns = 0;  // 0 = unbounded; subagents bound their own life
 
-    // Exponential-with-full-jitter backoff between retries. Zero disables the
-    // wait, which is what the tests that assert on attempt COUNTS want -- they
-    // would otherwise pay the delay for nothing.
+    // Exponential-with-EQUAL-jitter backoff between retries: half the ceiling
+    // is a fixed floor, the other half random. Full jitter can legally draw
+    // zero, which leaves a real 429 unbackoffed and makes the wait
+    // unassertable. Zero base delay disables the wait, which is what the tests
+    // that assert on attempt COUNTS want -- they would otherwise pay the delay
+    // for nothing.
     std::chrono::milliseconds retry_base_delay{500};
     std::chrono::milliseconds retry_max_delay{8000};
 };

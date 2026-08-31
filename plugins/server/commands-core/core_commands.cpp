@@ -72,7 +72,11 @@ public:
         // Compared as a REFERENCE, not as a connection plus a model id: two
         // providers can serve the same model at the same url with different
         // limits, and matching on those would mark both.
-        const std::string active = context.session().preset().model_ref.str();
+        //
+        // Via preset_snapshot(), not preset(): this command is ReadOnly and
+        // runs on the RPC layer's pool, not the worker -- a reference into the
+        // live preset could race a concurrent /agent or /model rewriting it.
+        const std::string active = context.session().preset_snapshot().model_ref.str();
 
         std::ostringstream out;
         for (const auto& ref : refs) {

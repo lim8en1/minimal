@@ -110,37 +110,92 @@ Session::Session(SessionParams params, AgentPreset preset,
 Session::~Session() { Terminate(); }
 
 bool Session::IsCancelled() const {
-    return cancel_.load(std::memory_order_acquire) || terminated_.load(std::memory_order_acquire);
+    // A turn is cancelled iff the cancel generation moved past the base recorded
+    // when this turn was popped, or the session is terminating. See the member
+    // comment for why this is a generation rather than a flag.
+    return cancel_gen_.load(std::memory_order_acquire) !=
+               turn_cancel_base_.load(std::memory_order_relaxed) ||
+           terminated_.load(std::memory_order_acquire);
 }
 
-void Session::SubmitTurn(std::string text) {
+bool Session::SubmitTurn(std::string text) {
+    bool refused = false;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (terminated_.load(std::memory_order_acquire)) return;
+        if (terminated_.load(std::memory_order_acquire)) return false;
         // A subagent's life is ONE turn: once it has finished, a further turn
         // would run a session its spawner has already collected and reported on.
-        if (subagent_finished_.load(std::memory_order_acquire)) return;
-        work_.push_back(std::move(text));
+        if (subagent_finished_.load(std::memory_order_acquire)) return false;
+        if (work_.size() >= kMaxWorkItems) {
+            refused = true;
+        } else {
+            work_.push_back(std::move(text));
+        }
+    }
+    if (refused) {
+        // Answer the refusal rather than dropping it: the client sent a turn and
+        // must learn it was not accepted. TryPush because this runs on the
+        // reader, which must never block even on its own error path.
+        v1::ServerEvent event = MakeEvent(params_.session_id);
+        auto* error = event.mutable_error();
+        error->set_category(v1::LLM_ERROR_CATEGORY_UNSPECIFIED);
+        error->set_message("session backlog is full; turn refused");
+        error->set_is_retryable(false);
+        if (!queue_.TryPush(std::move(event))) {
+            logger_.warn("session {}: turn refused and the queue is full; client will not see it",
+                         params_.session_id);
+        }
+        return false;
     }
     turn_cv_.notify_one();
+    return true;
 }
 
-void Session::SubmitCommand(QueuedCommand command) {
+bool Session::SubmitCommand(QueuedCommand command) {
+    bool refused = false;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (terminated_.load(std::memory_order_acquire)) return;
+        if (terminated_.load(std::memory_order_acquire)) return false;
         // The SAME queue as turns, deliberately. Two queues would have no order
         // between them, so `/model x` typed before a turn could apply after it.
-        work_.push_back(std::move(command));
+        if (work_.size() >= kMaxWorkItems) {
+            refused = true;
+        } else {
+            work_.push_back(std::move(command));
+        }
+    }
+    if (refused) {
+        // Same contract as SubmitTurn, plus the request_id: a client waiting on
+        // a CommandResult must not hang because its command was not accepted.
+        RejectCommand(QueuedCommand{std::move(command)}, "session backlog is full");
+        return false;
     }
     turn_cv_.notify_one();
+    return true;
+}
+
+void Session::RejectCommand(const QueuedCommand& command, const std::string& reason) {
+    v1::ServerEvent event = MakeEvent(params_.session_id);
+    auto* result = event.mutable_command_result();
+    result->set_request_id(command.request_id);
+    result->set_status(v1::COMMAND_STATUS_ERROR);
+    result->set_message(reason);
+    if (!queue_.TryPush(std::move(event))) {
+        logger_.warn("session {}: command '{}' refused and the queue is full; client will not "
+                     "see it",
+                     params_.session_id, command.name);
+    }
+}
+
+AgentPreset Session::preset_snapshot() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return preset_;
 }
 
 void Session::RunCommandNow(const QueuedCommand& command) {
-    // Read-only only, and the caller guarantees that. Runs on whatever
-    // short-lived task the RPC layer dispatched it to -- never the reader.
-    // `busy` is irrelevant for a read-only command, which is the whole point of
-    // it being allowed to run here.
+    // Read-only only, and the caller guarantees that. Runs on the RPC layer's
+    // bounded command pool -- never the reader, which must not block, and never
+    // the worker, which must not be preempted mid-turn.
     ExecuteCommand(command, /*busy=*/false);
 }
 
@@ -157,7 +212,14 @@ void Session::ApplyPreset(AgentPreset preset) {
     // executor's run mode derived from it. A command updating only some is a bug
     // that surfaces a turn later, so there is one entry point and it updates all
     // of them.
-    preset_ = std::move(preset);
+    //
+    // The swap takes mutex_ because preset_snapshot() reads preset_ from the
+    // RPC layer's command pool, off the worker. The rest of this method touches
+    // only worker-visible state and stays lock-free.
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        preset_ = std::move(preset);
+    }
     executor_.SetRunMode(params_.run_mode_override.value_or(preset_.run_mode));
     loop_->SetPreset(preset_);
 
@@ -196,7 +258,7 @@ void Session::ExecuteCommand(const QueuedCommand& command, bool busy) {
         // CommandResult hangs on a request nobody will ever handle.
         result->set_status(v1::COMMAND_STATUS_ERROR);
         result->set_message("the /-command subsystem is not available in this session");
-        queue_.Push(std::move(event));
+        EmitCommandResult(std::move(event), command);
         return;
     }
 
@@ -207,7 +269,18 @@ void Session::ExecuteCommand(const QueuedCommand& command, bool busy) {
                            ? v1::COMMAND_STATUS_OK
                            : v1::COMMAND_STATUS_ERROR);
     result->set_message(outcome.message);
-    queue_.Push(std::move(event));
+    EmitCommandResult(std::move(event), command);
+}
+
+void Session::EmitCommandResult(v1::ServerEvent event, const QueuedCommand& command) {
+    // TryPush, never Push: ExecuteCommand runs on the worker AND on the RPC
+    // layer's command pool, and only the worker is allowed to block. A full
+    // queue means the client is stalled or gone; losing one command answer is
+    // the correct degradation there, logged so it is not silent.
+    if (!queue_.TryPush(std::move(event))) {
+        logger_.warn("session {}: queue is full; CommandResult for '{}' dropped",
+                     params_.session_id, command.name);
+    }
 }
 
 void Session::RunOneCommand(const QueuedCommand& command) {
@@ -223,7 +296,11 @@ void Session::QueueInjectedMessage(llm::Message message) {
 }
 
 void Session::Cancel() {
-    cancel_.store(true, std::memory_order_release);
+    // Bump the generation: every turn popped BEFORE this point observes a
+    // cancelled() that is now true; a turn popped after records the new
+    // generation as its base and runs uncancelled. One mechanism, no
+    // clear-timing race in either direction.
+    cancel_gen_.fetch_add(1, std::memory_order_acq_rel);
     // Wakes a worker parked on a permission prompt. Without this, cancelling
     // during an Ask would set a flag nobody is in a position to read.
     //
@@ -243,19 +320,39 @@ void Session::Terminate() {
         return;
     }
 
-    cancel_.store(true, std::memory_order_release);
-    // Shutdown, not CancelAll: the session is ending, so a worker that reaches a
-    // gate mid-teardown must return rather than park on a reader that has
-    // already stopped reading.
+    // NOT a cancel-generation bump: Terminate ends the SESSION, and IsCancelled
+    // already folds terminated_ in. Shutting pending requests is what wakes a
+    // worker parked on a gate mid-teardown.
     pending_.Shutdown();
     turn_cv_.notify_all();
 
+    // Close BEFORE the join, and the order is the whole point. Push() blocks at
+    // the queue's cap and is woken only by Close() or Pop(), so a worker parked
+    // on a full queue -- reachable whenever the writer stalls or the client dies
+    // mid-stream -- would deadlock a join that waits for it. Closing first wakes
+    // that producer; the drain-before-close rule in Pop() still delivers every
+    // already-queued event to a writer that is still attached. The only events
+    // lost are ones the dying turn pushes after this point, for a session whose
+    // consumer is going away regardless.
+    queue_.Close();
+
     if (worker_.joinable() && worker_.get_id() != std::this_thread::get_id()) worker_.join();
 
-    // Closed only after the worker is joined, so every event the dying turn
-    // produced is already queued. Close() drains before reporting closed, so the
-    // client still receives them.
-    queue_.Close();
+    // The subagent completion hook fires on EVERY exit path -- including a
+    // terminate that lands before the seeded turn ever ran (the initial-attach
+    // reaper, or a terminate racing SubmitTurn). Without this, a blocking parent
+    // waits on a promise that nothing will ever set. The exchange makes
+    // exactly-once certain against the store in RunOneTurn.
+    if (params_.on_turn_finished && !subagent_finished_.exchange(true, std::memory_order_acq_rel)) {
+        TurnResult cancelled;
+        cancelled.stop_reason = llm::StopReason::Cancelled;
+        try {
+            params_.on_turn_finished(cancelled);
+        } catch (...) {
+            logger_.warn("session {}: on_turn_finished threw during teardown", params_.session_id);
+        }
+    }
+
     observers_.NotifySessionEnded(info_);
 }
 
@@ -268,15 +365,18 @@ void Session::WorkerMain() {
                 return !work_.empty() || terminated_.load(std::memory_order_acquire);
             });
             if (terminated_.load(std::memory_order_acquire)) return;
+            // Record the cancel generation THIS turn must be measured against,
+            // under the same lock as the pop. A Cancel before this point
+            // belongs to the turn that already ended (the worker is between
+            // turns); one after it targets the turn about to run. See the
+            // member comment for why the generation exists at all.
+            turn_cancel_base_.store(cancel_gen_.load(std::memory_order_acquire),
+                                    std::memory_order_relaxed);
             item = std::move(work_.front());
             work_.pop_front();
             running_turn_ = true;
         }
 
-        // A new turn starts uncancelled: Cancel() ends the turn in flight, not
-        // the session. Terminate() is what ends the session, and it is checked
-        // separately above.
-        cancel_.store(false, std::memory_order_release);
         // The turn-boundary guarantee, and it is structural rather than checked:
         // this pops one item at a time and RunOneTurn is atomic from here, so a
         // command can only ever land BETWEEN turns -- never between a tool_use
@@ -297,10 +397,11 @@ void Session::WorkerMain() {
 
 void Session::RunOneTurn(std::string text) {
     const auto started = std::chrono::steady_clock::now();
-    const std::int64_t first_seq = store_->last_appended_seq() + 1;
 
     TurnResult result;
+    std::int64_t first_seq = 0;
     try {
+        first_seq = store_->last_appended_seq() + 1;
         result = loop_->RunTurn(llm::Message{llm::Role::User, {llm::TextBlock{std::move(text)}}});
     } catch (const llm::LlmError& error) {
         // The loop rethrows once retries are exhausted. The session survives:
@@ -318,6 +419,19 @@ void Session::RunOneTurn(std::string text) {
         error->set_is_retryable(false);
         queue_.Push(std::move(event));
         logger_.warn("session {}: turn threw: {}", params_.session_id, e.what());
+    } catch (...) {
+        // Neither an LlmError nor a std::exception. The catches above existed to
+        // keep one failed turn from taking down the worker -- and with it the
+        // process -- but anything else escaping here would still have reached
+        // std::terminate through WorkerMain. Same treatment: one degraded turn,
+        // a live session.
+        v1::ServerEvent event = MakeEvent(params_.session_id);
+        auto* error = event.mutable_error();
+        error->set_category(v1::LLM_ERROR_CATEGORY_UNSPECIFIED);
+        error->set_message("the turn threw an unrecognized exception");
+        error->set_is_retryable(false);
+        queue_.Push(std::move(event));
+        logger_.warn("session {}: turn threw a non-standard exception", params_.session_id);
     }
 
     // BOTH endings run through here, and that is the point. A failed turn leaves
@@ -330,25 +444,42 @@ void Session::RunOneTurn(std::string text) {
     // holding per-turn state has no other signal that the turn is over, so
     // returning early from a catch block leaked it once per failure. Same
     // argument as emitting tool-finish even when the tool errored.
-    EmitTurnCompleted(result.stop_reason, result.last_usage, result.hit_max_turns);
-
-    TurnSummary summary;
-    summary.first_seq = first_seq;
-    summary.last_seq = store_->last_appended_seq();
-    summary.stop_reason = result.stop_reason;
-    summary.usage = result.last_usage;
-    summary.duration = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now() - started);
-    observers_.NotifyTurnCompleted(info_, std::move(summary));
-
-    // Last, after every wire event and observer notification: a blocking parent
-    // waiting on this result may proceed the instant the callback returns, and
-    // must not observe a session that still has bookkeeping in flight. Fired on
-    // EVERY exit path -- `result` is default-constructed after a failed turn,
-    // which is exactly what a waiter needs to unblock with an error.
-    if (params_.on_turn_finished) {
-        subagent_finished_.store(true, std::memory_order_release);
-        params_.on_turn_finished(result);
+    //
+    // Each stage is guarded SEPARATELY: the bookkeeping after the turn is as
+    // fallible as the turn itself (the seq read touches SQLite, observers are
+    // plugin code), and one stage throwing must not skip the later ones -- a
+    // blocking subagent waiting on on_turn_finished must unblock even if the
+    // observer notify above it just failed.
+    try {
+        EmitTurnCompleted(result.stop_reason, result.last_usage, result.hit_max_turns);
+    } catch (...) {
+        logger_.warn("session {}: emitting TurnCompletedEvent failed", params_.session_id);
+    }
+    try {
+        TurnSummary summary;
+        summary.first_seq = first_seq;
+        summary.last_seq = store_->last_appended_seq();
+        summary.stop_reason = result.stop_reason;
+        summary.usage = result.last_usage;
+        summary.duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - started);
+        observers_.NotifyTurnCompleted(info_, std::move(summary));
+    } catch (...) {
+        logger_.warn("session {}: notifying turn observers failed", params_.session_id);
+    }
+    try {
+        // Last, after every wire event and observer notification: a blocking
+        // parent waiting on this result may proceed the instant the callback
+        // returns, and must not observe a session that still has bookkeeping in
+        // flight. Fired on EVERY exit path -- `result` is default-constructed
+        // after a failed turn, which is exactly what a waiter needs to unblock
+        // with an error.
+        if (params_.on_turn_finished) {
+            subagent_finished_.store(true, std::memory_order_release);
+            params_.on_turn_finished(result);
+        }
+    } catch (...) {
+        logger_.warn("session {}: on_turn_finished threw", params_.session_id);
     }
 }
 

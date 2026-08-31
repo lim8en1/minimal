@@ -313,6 +313,7 @@ TurnResult AgentLoop::RunTurn(llm::Message seed_message) {
 
         llm::ChatResponse response;
         bool got_response = false;
+        bool cancelled_in_backoff = false;
         for (int attempt = 0; attempt <= config_.max_retries; ++attempt) {
             try {
                 response = provider_.get().StreamComplete(BuildChatRequest(), event_sink_);
@@ -327,10 +328,22 @@ TurnResult AgentLoop::RunTurn(llm::Message seed_message) {
                 // Backoff, not a bare retry. Without it the four attempts land
                 // inside a few milliseconds, which turns a 429 into four 429s
                 // and is worse for the backend than not retrying at all.
-                if (!SleepForBackoff(attempt)) break;
+                if (!SleepForBackoff(attempt)) {
+                    // CancelTurn landed inside the backoff sleep. That is a
+                    // cancellation, not a mysterious failure: report it as the
+                    // Cancelled it is rather than letting the turn fall out with
+                    // StopReason::Unknown -- the headless exit code derives from
+                    // this value, and exit 3 ("model error") for a user cancel
+                    // is simply the wrong answer.
+                    cancelled_in_backoff = true;
+                    break;
+                }
             }
         }
-        if (!got_response) break;
+        if (!got_response) {
+            if (cancelled_in_backoff) result.stop_reason = llm::StopReason::Cancelled;
+            break;
+        }
 
         ++result.provider_calls;
         result.last_usage = response.usage;

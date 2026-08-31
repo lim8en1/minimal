@@ -328,6 +328,198 @@ TEST_CASE("terminating with a turn in flight joins cleanly", "[session]") {
     CHECK(fixture->session->terminated());
 }
 
+TEST_CASE("terminating a worker parked on a full queue returns instead of deadlocking",
+          "[session][invariant]") {
+    // THE INVARIANT: Push() blocks at the queue cap and only Close() or Pop()
+    // wakes it, so Terminate() must close the queue BEFORE joining the worker.
+    // It once joined first -- reachable whenever a client stalls or dies
+    // mid-stream and the queue fills: the writer stops draining, the worker
+    // parks in Push, and the join waits for a worker that waits for a close
+    // that was scheduled after the join. Restore the old order and this test
+    // deadlocks rather than fails.
+    SessionFixture fixture;
+    fixture.Script(testing::TextResponse("hi"), {llm::TextDeltaEvent{0, "a chatty response"}});
+    fixture.Start();
+
+    // Fill the queue to its cap; nothing will drain it -- the writer is the
+    // test's problem here, and it is not draining.
+    std::size_t pushed = 0;
+    while (true) {
+        v1::ServerEvent filler;
+        filler.set_session_id("sess-1");
+        if (!fixture.session->queue().TryPush(std::move(filler))) break;
+        ++pushed;
+    }
+    REQUIRE(pushed > 0);  // sanity: the cap is real and reachable
+
+    // The turn's first stream event has nowhere to go: the worker parks in Push.
+    fixture.session->SubmitTurn("hello");
+    std::this_thread::sleep_for(50ms);
+
+    auto terminated = testing::RunInBackground([&fixture] {
+        fixture.session->Terminate();
+        return true;
+    });
+    REQUIRE(terminated.WaitFor(5s));
+    CHECK(fixture.session->terminated());
+}
+
+TEST_CASE("a subagent terminated before its turn ran still fires the completion hook",
+          "[session][invariant]") {
+    // on_turn_finished is the promise a blocking parent waits on. The
+    // initial-attach reaper terminates a never-attached child, and a terminate
+    // can race SubmitTurn -- in both cases the seeded turn never runs, so
+    // RunOneTurn never fires the hook and the ONLY firing left is Terminate's.
+    // Without it, the parent's future.get() waits on a promise nothing will
+    // ever set, and the blocking parent hangs behind a child that is long gone.
+    SessionFixture fixture;
+    std::optional<agent::TurnResult> observed;
+    fixture.on_turn_finished = [&](const agent::TurnResult& result) { observed = result; };
+    fixture.Script(testing::TextResponse("never consumed"));
+    fixture.Start();
+
+    // No SubmitTurn: the work queue is empty when the session ends.
+    fixture.session->Terminate();
+
+    REQUIRE(observed.has_value());
+    CHECK(observed->stop_reason == llm::StopReason::Cancelled);
+}
+
+TEST_CASE("the work queue is bounded and refusals are answered on the wire", "[session]") {
+    // One turn can run for minutes, so an unbounded work queue let a client
+    // enqueue transcript-sized turns faster than the worker consumed them.
+    // Beyond the bound the submit must be REFUSED -- and answered, not dropped:
+    // a client whose turn silently vanished would simply wait forever.
+    auto fixture = std::make_shared<SessionFixture>();
+    fixture->preset.permission_mode = testing::AllowAllPolicy();
+    fixture->preset.permission_mode.execute = tools::PermissionMode::Ask;
+    fixture->tools_registry.Register(
+        std::make_unique<testing::FakeTool>("bash", tools::ToolCategory::Execute, "ran"));
+    fixture->Script(testing::ToolUseResponse("call-1", "bash"));  // parks on the prompt
+    fixture->Start();
+
+    fixture->session->SubmitTurn("go");
+    REQUIRE(WaitForPermissionRequest(*fixture).has_value());  // worker parked; consumes nothing
+
+    int accepted = 0;
+    int refused = 0;
+    for (int i = 0; i < 1000; ++i) {
+        if (fixture->session->SubmitTurn("flood " + std::to_string(i))) {
+            ++accepted;
+        } else {
+            ++refused;
+        }
+    }
+    CHECK(accepted > 0);
+    CHECK(refused > 0);
+    CHECK(accepted + refused == 1000);
+
+    // Every refusal produced exactly one ErrorEvent -- no silent refusals, and
+    // no fabricated answers for the accepted ones.
+    int refusal_events = 0;
+    for (const auto& event : fixture->DrainQueue()) {
+        if (event.has_error() &&
+            event.error().message().find("backlog") != std::string::npos) {
+            ++refusal_events;
+        }
+    }
+    CHECK(refusal_events == refused);
+
+    fixture->session->Cancel();  // unpark the worker from the prompt
+    fixture->session->Terminate();
+}
+
+TEST_CASE("cancelling during retry backoff reports Cancelled, not Unknown", "[session]") {
+    // CancelTurn landing inside a backoff sleep exits the retry loop without a
+    // response, and that path once fell out with StopReason::Unknown. The
+    // headless exit code derives from this value -- a user cancel must not
+    // report "model error".
+    SessionFixture fixture;
+    fixture.loop_config.retry_base_delay = 250ms;  // equal-jitter floor is 125ms
+    fixture.Start();
+    fixture.provider->PushError(
+        llm::LlmError(llm::LlmErrorCategory::Transport, "backend is down"));
+
+    fixture.session->SubmitTurn("hello");
+    // Deterministic rendezvous: once the failed call is recorded the worker is
+    // provably inside SleepForBackoff, so the cancel below cannot land before
+    // the turn started (which would make it a legal no-op) -- it must land in
+    // the window this test exists to cover.
+    const auto deadline = std::chrono::steady_clock::now() + 5s;
+    while (fixture.provider->call_count() == 0 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(1ms);
+    }
+    REQUIRE(fixture.provider->call_count() == 1);
+    fixture.session->Cancel();
+    REQUIRE(fixture.session->WaitForIdleForTesting(5s));
+
+    std::optional<v1::StopReason> reported;
+    for (const auto& event : fixture.DrainQueue()) {
+        if (event.has_turn_completed()) reported = event.turn_completed().stop_reason();
+    }
+    REQUIRE(reported.has_value());
+    CHECK(*reported == v1::STOP_REASON_CANCELLED);
+}
+
+TEST_CASE("a non-standard exception in the turn path degrades instead of terminating",
+          "[session][invariant]") {
+    // RunOneTurn once caught LlmError and std::exception only -- a throw of any
+    // other type escaped WorkerMain and std::terminate the whole server, taking
+    // every other session with it. The seq read and the observer notification
+    // after the turn are as fallible as the turn itself, so the guard covers
+    // them too. This store throws int, which no std::exception catch can see.
+    struct ThrowingStore : testing::InMemoryHistoryStore {
+        std::int64_t last_appended_seq() const override { throw 42; }
+    };
+
+    SessionFixture fixture;
+    auto provider = std::make_unique<testing::FakeLlmProvider>();
+    provider->PushResponse(testing::TextResponse("hi"));
+    auto store = std::make_unique<ThrowingStore>();
+
+    agent::SessionParams params;
+    params.session_id = "sess-throw";
+    params.agent_preset = "test";
+    params.project_root = fixture.project_root;
+
+    agent::Session session(std::move(params), fixture.preset, std::move(provider),
+                           std::move(store), fixture.tools_registry, fixture.loop_config,
+                           fixture.observers, common::DefaultLogger());
+
+    session.SubmitTurn("hello");
+    REQUIRE(session.WaitForIdleForTesting(5s));
+    CHECK_FALSE(session.terminated());  // one degraded turn, a live session
+
+    bool saw_error = false;
+    while (auto event = session.queue().TryPop()) {
+        if (event->has_error()) saw_error = true;
+    }
+    CHECK(saw_error);
+    session.Terminate();
+}
+
+TEST_CASE("RejectCommand answers the request id even when nothing ran", "[session]") {
+    // A saturated command pool refuses to run a command whose client is already
+    // waiting on a CommandResult. Silence there is a hang for the client, so
+    // refusal must still produce an answer.
+    SessionFixture fixture;
+    fixture.Start();
+
+    agent::QueuedCommand command;
+    command.request_id = "cmd-7";
+    command.name = "anything";
+    fixture.session->RejectCommand(command, "refused for testing");
+
+    const auto events = fixture.DrainQueue();
+    REQUIRE(events.size() == 1);
+    CHECK(events[0].has_command_result());
+    CHECK(events[0].command_result().request_id() == "cmd-7");
+    CHECK(events[0].command_result().status() == v1::COMMAND_STATUS_ERROR);
+    CHECK(events[0].command_result().message() == "refused for testing");
+    fixture.session->Terminate();
+}
+
+
 TEST_CASE("terminate is idempotent", "[session]") {
     SessionFixture fixture;
     fixture.Script(testing::TextResponse("hi"));

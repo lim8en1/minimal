@@ -285,11 +285,19 @@ void SessionServiceImpl::DispatchCommand(const v1::CommandInvocation& invocation
     const commands::Command* command =
         commands_ != nullptr ? commands_->Find(queued.name) : nullptr;
     if (command != nullptr && command->ReadOnly()) {
-        // Detached: the session outlives this by refcount, and joining would be
-        // the blocking this branch exists to avoid.
+        // On the bounded command pool, not a detached thread: a detached task
+        // per command made a flood of read-only commands an unbounded pile of
+        // never-joined threads and left a shutdown window where a still-running
+        // one held shared_ptrs into registries being destroyed. The pool is
+        // joined in this service's destructor, before those registries die.
         auto shared = sessions_.Find(session.info().session_id);
         if (shared != nullptr) {
-            std::thread([shared, queued] { shared->RunCommandNow(queued); }).detach();
+            if (command_executor_.TryPost([shared, queued] { shared->RunCommandNow(queued); })) {
+                return;
+            }
+            // Saturated: the caller holds a request_id a client waits on, so
+            // refusal must still produce an answer.
+            shared->RejectCommand(queued, "the command pool is saturated; retry shortly");
             return;
         }
     }
@@ -322,29 +330,53 @@ grpc::Status SessionServiceImpl::OpenSession(
         return grpc::Status(grpc::StatusCode::ALREADY_EXISTS,
                             "session '" + first.session_id() + "' already has a client attached");
     }
+    // A session the reaper or another stream is already tearing down must not be
+    // attached to at all: its queue is closing, and the client would see an
+    // immediately-empty stream with no error explaining why.
+    if (session->terminated()) {
+        session->Detach();
+        return grpc::Status(grpc::StatusCode::NOT_FOUND,
+                            "session '" + first.session_id() + "' is already terminated");
+    }
     attached_.fetch_add(1, std::memory_order_acq_rel);
 
     // The one and only Write() caller for this stream. It drains the SESSION's
     // queue, not a stream-owned one, so anything produced before this moment is
     // still here and goes out first.
-    std::thread writer([stream, session] {
-        while (auto event = session->queue().Pop()) {
-            if (!stream->Write(*event)) break;  // client went away
+    std::thread writer;
+    try {
+        writer = std::thread([stream, session] {
+            while (auto event = session->queue().Pop()) {
+                if (!stream->Write(*event)) break;  // client went away
+            }
+        });
+
+        Dispatch(first, *session);
+
+        v1::ClientEvent event;
+        while (stream->Read(&event)) {
+            Dispatch(event, *session);
         }
-    });
-
-    Dispatch(first, *session);
-
-    v1::ClientEvent event;
-    while (stream->Read(&event)) {
-        Dispatch(event, *session);
+    } catch (const std::exception& e) {
+        // Unwinding without restoring the attach count would leak it, and the
+        // refcounted server would then never believe it has zero clients. The
+        // Dispatch branches are non-throwing by contract; this guard exists so
+        // that contract can be violated without bricking shutdown.
+        logger_.warn("session {}: OpenSession failed: {}", first.session_id(), e.what());
+        sessions_.Terminate(session->info().session_id);
+        session->queue().Close();
+        if (writer.joinable()) writer.join();
+        session->Detach();
+        attached_.fetch_sub(1, std::memory_order_acq_rel);
+        return grpc::Status(grpc::StatusCode::INTERNAL, e.what());
     }
 
     // Stream close TERMINATES the session -- there is no detached state in v1,
-    // so a dropped stream is unambiguous. Terminate() closes the queue, which is
-    // what lets the writer finish rather than blocking forever on Pop().
+    // so a dropped stream is unambiguous. Terminate() closes the queue (before
+    // joining the worker, so a worker parked on a full queue is woken rather
+    // than deadlocked), which is what lets the writer finish rather than
+    // blocking forever on Pop().
     sessions_.Terminate(session->info().session_id);
-    session->queue().Close();
     if (writer.joinable()) writer.join();
     session->Detach();
 

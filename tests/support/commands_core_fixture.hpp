@@ -114,6 +114,7 @@ public:
     agent::AgentLoop& loop() override { return *loop_; }
     tools::ToolExecutor& executor() override { return *executor_; }
     const agent::AgentPreset& preset() const override { return preset_; }
+    agent::AgentPreset preset_snapshot() const override { return preset_; }
     void ApplyPreset(agent::AgentPreset preset) override {
         preset_ = std::move(preset);
         loop_->SetPreset(preset_);

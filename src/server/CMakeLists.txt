@@ -47,6 +47,7 @@ add_library(minimal_server_core SHARED
     plugins/plugin_discovery.cpp
     rpc/proto_convert.cpp
     rpc/pending_requests.cpp
+    rpc/command_executor.cpp
     rpc/wire_permission_checker.cpp
     rpc/wire_confirmation_broker.cpp
     rpc/session_service.cpp

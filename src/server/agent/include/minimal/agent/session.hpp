@@ -128,18 +128,29 @@ public:
     Session(const Session&) = delete;
     Session& operator=(const Session&) = delete;
 
-    // Reader thread. Queues a turn and wakes the worker; never blocks.
-    void SubmitTurn(std::string text);
+    // Reader thread. Queues a turn and wakes the worker; never blocks. False
+    // means the turn was REFUSED -- terminated, a finished subagent, or the
+    // work queue is full -- and an error event answering the refusal has been
+    // pushed onto the outbound queue, so a client is never left waiting on a
+    // turn that was silently dropped.
+    bool SubmitTurn(std::string text);
 
     // Reader thread. Queues a MUTATING command for the worker, which runs it at
     // a turn boundary -- never between a tool_use and its tool_result, because
     // the worker only pops between RunTurn calls. Read-only commands do not come
-    // through here; they run on a short-lived task instead (see RunCommandNow).
-    void SubmitCommand(QueuedCommand command);
+    // through here; they run on the RPC layer's command pool instead (see
+    // RunCommandNow). False means refused, with the same error-event guarantee
+    // as SubmitTurn.
+    bool SubmitCommand(QueuedCommand command);
+
+    // Answers a command with an error CommandResult without running it. Used
+    // when the command pool is saturated -- the caller holds a request_id a
+    // client is waiting on, so refusal must still produce an answer.
+    void RejectCommand(const QueuedCommand& command, const std::string& reason);
 
     // Runs a command immediately on the CALLING thread. For read-only commands
-    // only, dispatched by the RPC layer onto a short-lived task -- never inline
-    // on the reader, which must not block.
+    // only, dispatched by the RPC layer onto its bounded command pool -- never
+    // inline on the reader, which must not block.
     void RunCommandNow(const QueuedCommand& command);
     // Cross-session splice point: a non-blocking subagent's worker queues its
     // completion here when it finishes; the session's own worker flushes it at
@@ -169,7 +180,13 @@ public:
     const std::string& session_id() const override { return params_.session_id; }
     AgentLoop& loop() override { return *loop_; }
     tools::ToolExecutor& executor() override { return executor_; }
+    // WORKER-THREAD ONLY: a reference into state the worker rewrites in
+    // ApplyPreset. A read-only command runs on the RPC layer's pool, not the
+    // worker, and must use preset_snapshot() instead.
     const AgentPreset& preset() const override { return preset_; }
+    // Safe from any thread: a copy taken under the session lock. This is what
+    // read-only commands (running off the worker) read.
+    AgentPreset preset_snapshot() const override;
     void ApplyPreset(AgentPreset preset) override;
     const std::optional<common::ModelRef>& model_override() const override {
         return model_override_;
@@ -233,8 +250,11 @@ private:
     void RunOneTurn(std::string text);
     void RunOneCommand(const QueuedCommand& command);
     // Builds the context and dispatches. Shared by the worker path and the
-    // read-only task path so the two cannot diverge on what a command may reach.
+    // read-only pool path so the two cannot diverge on what a command may reach.
     void ExecuteCommand(const QueuedCommand& command, bool busy);
+    // Publishes a CommandResult. TryPush: ExecuteCommand also runs on the RPC
+    // layer's pool, and only the worker may block.
+    void EmitCommandResult(v1::ServerEvent event, const QueuedCommand& command);
     // The turn terminator. Emitted on EVERY exit path, including failures --
     // a client that learns a turn ended only by seeing it succeed hangs on
     // every error.
@@ -267,9 +287,22 @@ private:
     // /agent re-resolving it.
     std::optional<common::ModelRef> model_override_;
 
-    // Two flags, because they mean different things: cancel_ ends the current
-    // turn and is cleared for the next one; terminated_ ends the session.
-    std::atomic<bool> cancel_{false};
+    // Two signals, because they mean different things: cancel ends the CURRENT
+    // turn and is inert for the next one; terminated ends the session.
+    //
+    // Cancel is a GENERATION, not a flag, because a flag cannot express "this
+    // turn, not the next one" without a race in either clearing direction:
+    // clearing after the pop loses a Cancel that landed in the pop-to-clear
+    // window; clearing before the pop loses one that landed before the worker
+    // got there, which then runs a full turn the user cancelled. Instead the
+    // worker records the generation at pop time (turn_cancel_base_) and a turn
+    // is cancelled iff the generation has moved since. A Cancel for a turn that
+    // has already finished lands on the NEXT turn only if the user cancels
+    // again -- which is exactly what "cancel ends the current turn" means.
+    std::atomic<std::uint64_t> cancel_gen_{0};
+    // Written by the worker when it pops a turn; read by IsCancelled on the
+    // worker's own call stack (loop, sink, tools, compactor).
+    std::atomic<std::uint64_t> turn_cancel_base_{0};
     std::atomic<bool> terminated_{false};
     // A subagent's life is one seeded turn; once its completion hook has fired,
     // a stray client-submitted turn would fire it a second time, so SubmitTurn
@@ -285,6 +318,14 @@ private:
     std::condition_variable turn_cv_;
     std::deque<WorkItem> work_;
     bool running_turn_ = false;
+
+    // The work queue is BOUNDED, unlike the outbound EventQueue's backpressure
+    // there is nothing pulling from here at a predictable rate: one turn can run
+    // for minutes, so a client streaming turns could otherwise enqueue them
+    // faster than they are consumed and grow memory without limit. The bound is
+    // a ceiling against a runaway producer, not a tuning knob; beyond it the
+    // submit is refused with an error event rather than dropped silently.
+    static constexpr std::size_t kMaxWorkItems = 32;
 
     std::thread worker_;
 };

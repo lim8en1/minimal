@@ -11,7 +11,9 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -976,6 +978,95 @@ TEST_CASE("a read-only command answers while a turn is in flight",
     answer.mutable_permission_response()->set_request_id(permission_id);
     answer.mutable_permission_response()->set_decision(v1::PERMISSION_DECISION_DENY);
     stream->Write(answer);
+    (void)DrainAndFinish(stream);
+}
+
+namespace {
+
+// A read-only command that answers only when released -- the flood test parks
+// the whole command pool on it, which is the state in which saturation (and the
+// refusal answer it owes each client) becomes observable.
+class GatedReadOnlyCommand : public commands::HarnessCommand {
+public:
+    explicit GatedReadOnlyCommand(std::shared_ptr<std::atomic<bool>> release)
+        : release_(std::move(release)) {}
+
+    std::string_view Name() const override { return "gate"; }
+    std::string_view Summary() const override { return "waits to be released"; }
+    std::string_view Usage() const override { return "/gate"; }
+    bool ReadOnly() const override { return true; }
+
+    commands::CommandResult Execute(commands::CommandContext&,
+                                     const commands::CommandArgs&) override {
+        while (!release_->load(std::memory_order_acquire)) std::this_thread::sleep_for(1ms);
+        return commands::CommandResult::Ok("gated");
+    }
+
+private:
+    std::shared_ptr<std::atomic<bool>> release_;
+};
+
+}  // namespace
+
+TEST_CASE("a flood of read-only commands is bounded and every request is answered",
+          "[session_service][commands]") {
+    // The command pool replaced detached per-command threads, which made a
+    // flood of read-only commands an unbounded pile of never-joined threads and
+    // left a shutdown window where a still-running one held shared_ptrs into
+    // registries being destroyed. Bounded means saturated posts are REFUSED --
+    // and a refusal still owes each request_id an answer, never silence. If
+    // this test hangs, a command task is being lost or leaked.
+    ServiceFixture fixture;
+    auto gate = std::make_shared<std::atomic<bool>>(false);
+    fixture.commands.Register(std::make_unique<GatedReadOnlyCommand>(gate));
+    fixture.Start();
+
+    const std::string session_id = fixture.CreateSession();
+    grpc::ClientContext context;
+    auto stream = fixture.stub->OpenSession(&context);
+    v1::ClientEvent attach;
+    attach.set_session_id(session_id);
+    attach.mutable_attach();  // name the stream without submitting work
+    REQUIRE(stream->Write(attach));
+
+    constexpr int kCommands = 200;
+    for (int i = 0; i < kCommands; ++i) {
+        v1::ClientEvent invocation;
+        invocation.set_session_id(session_id);
+        auto* command = invocation.mutable_command();
+        command->set_request_id("cmd-" + std::to_string(i));
+        command->set_name("gate");
+        REQUIRE(stream->Write(invocation));
+    }
+
+    // Collect answers on a reader thread: the pool's accepted-but-parked tasks
+    // cannot answer until the gate opens, so a single-threaded Read() here
+    // would block waiting for events that need the release below first.
+    std::mutex mu;
+    std::map<std::string, int> answers;  // request_id -> how many times answered
+    auto reader = testing::RunInBackground([&] {
+        v1::ServerEvent event;
+        while (stream->Read(&event)) {
+            if (event.has_command_result()) {
+                std::lock_guard<std::mutex> lock(mu);
+                ++answers[event.command_result().request_id()];
+                if (static_cast<int>(answers.size()) >= kCommands) return true;
+            }
+        }
+        return true;
+    });
+
+    std::this_thread::sleep_for(100ms);  // the pool has now saturated or parked
+    gate->store(true, std::memory_order_release);
+    REQUIRE(reader.WaitFor(10s));
+
+    {
+        std::lock_guard<std::mutex> lock(mu);
+        REQUIRE(static_cast<int>(answers.size()) == kCommands);
+        for (const auto& [request_id, count] : answers) {
+            CHECK(count == 1);  // exactly one answer per request, ok or error
+        }
+    }
     (void)DrainAndFinish(stream);
 }
 

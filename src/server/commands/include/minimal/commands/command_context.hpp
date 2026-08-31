@@ -35,10 +35,11 @@ namespace minimal::commands {
 // The session, as much of it as a command may touch. Implemented by
 // agent::Session.
 //
-// EVERY METHOD HERE IS WORKER-THREAD ONLY, and that is what makes the mutating
-// ones safe without a lock: a command that changes session state is not
-// ReadOnly(), so it is queued and run by the worker between turns -- the same
-// thread that reads this state when building the next request.
+// EVERY METHOD HERE IS WORKER-THREAD ONLY unless its own comment says otherwise,
+// and that is what makes the mutating ones safe without a lock: a command that
+// changes session state is not ReadOnly(), so it is queued and run by the worker
+// between turns -- the same thread that reads this state when building the next
+// request. The exceptions (preset_snapshot) return copies and are safe anywhere.
 class SessionControl {
 public:
     virtual ~SessionControl() = default;
@@ -49,7 +50,16 @@ public:
 
     // The preset this session is actually running: the registry's copy with any
     // model override already applied.
+    //
+    // WORKER-THREAD ONLY -- it returns a reference into state ApplyPreset
+    // rewrites, so only a mutating command (which the worker runs between turns)
+    // may hold it. A read-only command executes on the RPC layer's pool, not the
+    // worker, and must use preset_snapshot() below.
     virtual const agent::AgentPreset& preset() const = 0;
+
+    // A copy taken under the session lock; safe from any thread. This is what a
+    // read-only command reads.
+    virtual agent::AgentPreset preset_snapshot() const = 0;
 
     // Replaces it, in the session AND in the loop -- there are two copies, and a
     // command updating only one is a bug that shows up a turn later.

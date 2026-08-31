@@ -35,6 +35,7 @@
 #include "minimal/common/logger.hpp"
 #include "minimal/config/permissions_config.hpp"
 #include "minimal/config/settings_config.hpp"
+#include "minimal/rpc/command_executor.hpp"
 #include "minimal/session/session_reader.hpp"
 #include "minimal/v1/session_service.grpc.pb.h"
 
@@ -94,13 +95,18 @@ private:
     // Reader thread. Every branch is non-blocking -- that is the property the
     // three-thread topology depends on, not an implementation detail.
     void Dispatch(const v1::ClientEvent& event, agent::Session& session);
-    // Read-only commands go to a short-lived task, everything else to the
+    // Read-only commands go to the bounded command pool, everything else to the
     // session's work queue. Reader thread; must not block on either path.
     // Parses CreateSessionRequest.model onto params. Shared by fresh creation
     // and resume, so the two cannot disagree about whether --model applies.
     grpc::Status ApplyModelOverride(const v1::CreateSessionRequest& request,
                                     agent::SessionParams& params) const;
     void DispatchCommand(const v1::CommandInvocation& invocation, agent::Session& session);
+
+    // Runs read-only commands off the reader thread. Its destructor joins the
+    // pool, and a task may borrow `sessions_`/`commands_` -- both outlive this
+    // service (main declares them first), so a task can never dangle.
+    CommandExecutor command_executor_{/*threads=*/4, /*max_backlog=*/64};
 
     agent::SessionRegistry& sessions_;
     // Borrowed and optional: a service built without commands answers every
