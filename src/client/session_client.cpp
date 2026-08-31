@@ -42,7 +42,7 @@ SessionClient::CreateResult SessionClient::CreateSession(const CreateOptions& op
 grpc::Status SessionClient::RunTurn(
     const std::string& session_id, const std::string& text,
     const std::function<bool(const v1::ServerEvent&)>& on_event,
-    std::shared_ptr<TurnHandle>* handle) {
+    const std::function<void(const std::shared_ptr<TurnHandle>&)>& on_handle) {
     grpc::ClientContext context;
     auto stream = stub_->OpenSession(&context);
 
@@ -56,14 +56,15 @@ grpc::Status SessionClient::RunTurn(
         return stream->Finish();
     }
 
-    // Published before the first read so a cancel can land at any point of the
-    // turn. Cleared before returning, which turns every later Cancel into a
-    // no-op rather than a write on a finished stream.
+    // Published (on THIS thread) before the first read so a cancel can land at
+    // any point of the turn. The handle is cleared before RunTurn returns,
+    // which turns every later Cancel into a no-op rather than a write on a
+    // finished stream.
     auto control = std::make_shared<TurnControl>();
     control->cancel_event.set_session_id(session_id);
     control->cancel_event.mutable_cancel();
-    if (handle != nullptr) {
-        *handle = std::make_shared<TurnHandle>(control, TurnHandle::Token{});
+    if (on_handle) {
+        on_handle(std::make_shared<TurnHandle>(control, TurnHandle::Token{}));
     }
     {
         std::lock_guard<std::mutex> lock(control->mu);

@@ -38,8 +38,10 @@ namespace {
 
 // A FakeLlmProvider that counts CALLS, release-stored before the scripted step
 // is consumed. The store-then-consume order is what lets a test observe "the
-// first attempt has failed" and know that anything the turn's thread published
-// before the call (the cancel handle RunTurn populates) is visible to it.
+// first attempt has failed" and know the server is inside its retry backoff.
+// It proves WHEN the turn reached the provider -- not visibility of anything
+// the client's turn thread published; that needs its own edge (the handle
+// tests below use RunTurn's on_handle publication).
 class CountingFakeProvider : public testing::FakeLlmProvider {
 public:
     explicit CountingFakeProvider(std::shared_ptr<std::atomic<int>> calls)
@@ -539,11 +541,13 @@ TEST_CASE("a client-side cancel ends the turn with STOP_REASON_CANCELLED",
     const auto created = fixture.client->CreateSession(options);
     REQUIRE(created.status.ok());
 
-    // RunTurn blocks, so it runs on a worker; the test thread rendezvous on
-    // the provider's first call -- by then the handle RunTurn populated before
-    // reading any event is visible (release/acquire through the counter), and
-    // the server is inside the backoff window.
+    // RunTurn blocks, so it runs on a worker. It publishes its cancel handle
+    // through the on_handle callback, on ITS OWN thread, and this test stores
+    // it behind a release-store flag: the rendezvous the provider-attempt
+    // counter provides (when to cancel -- during the retry backoff) is a
+    // server-side edge only, so the handle read needs its own.
     std::shared_ptr<client::SessionClient::TurnHandle> handle;
+    std::atomic<bool> handle_ready{false};
     v1::StopReason stop = v1::STOP_REASON_UNSPECIFIED;
     std::string text;
     grpc::Status status;
@@ -559,13 +563,16 @@ TEST_CASE("a client-side cancel ends the turn with STOP_REASON_CANCELLED",
                 }
                 return true;
             },
-            &handle);
+            [&](const std::shared_ptr<client::SessionClient::TurnHandle>& published) {
+                handle = published;
+                handle_ready.store(true, std::memory_order_release);
+            });
     });
 
     while (fixture.provider_attempts->load(std::memory_order_acquire) < 1) {
         std::this_thread::sleep_for(2ms);
     }
-    REQUIRE(handle != nullptr);
+    REQUIRE(handle_ready.load(std::memory_order_acquire));
     handle->Cancel();
 
     turn_thread.join();

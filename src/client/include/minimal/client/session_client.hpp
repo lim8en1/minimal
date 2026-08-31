@@ -64,14 +64,20 @@ public:
     // Write() when the peer is not reading, so finishing early with events still
     // in flight deadlocks both sides.
     //
-    // When `handle` is non-null it is populated BEFORE the first event is read,
-    // with a handle whose Cancel() interrupts the in-flight turn (a CancelTurn
-    // ClientEvent on this stream). Cancel is safe to call from another thread
-    // while RunTurn's thread reads, and a no-op once the stream has closed.
+    // `on_handle` is invoked ON RUNTURN'S THREAD, once, as soon as the handle
+    // exists and BEFORE the first event is read. The handle's Cancel()
+    // interrupts the in-flight turn (a CancelTurn ClientEvent on this stream);
+    // Cancel is safe to call from another thread while RunTurn's thread reads,
+    // and a no-op once the stream has closed. Publication is a callback rather
+    // than an out-param because the reader is BY DESIGN another thread (SIGINT
+    // watcher): a plain cross-thread read of a shared_ptr this thread wrote is
+    // a data race, while a callback lets the caller store the handle behind a
+    // release-store flag the cancel thread acquires.
     class TurnHandle;
     grpc::Status RunTurn(const std::string& session_id, const std::string& text,
                          const std::function<bool(const v1::ServerEvent&)>& on_event,
-                         std::shared_ptr<TurnHandle>* handle = nullptr);
+                         const std::function<void(const std::shared_ptr<TurnHandle>&)>&
+                             on_handle = nullptr);
 
     struct CommandOptions {
         std::string name;  // without the leading '/'

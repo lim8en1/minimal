@@ -204,28 +204,46 @@ int RunHeadless(const HeadlessOptions& options) {
     // applies: dying mid-setup is fine, there is no turn to abandon.
     const bool cancel_wired = pipe(g_cancel_pipe) == 0;
     if (!cancel_wired) g_cancel_pipe[0] = g_cancel_pipe[1] = -1;
+    // Published by the RunTurn thread through on_handle, then flagged
+    // release-style: the watcher acquires the flag before reading the
+    // shared_ptr. Polling the shared_ptr itself was a data race -- the
+    // watcher thread read what the turn thread was writing, with only a
+    // sleep as "synchronisation" (TSan).
     std::shared_ptr<minimal::client::SessionClient::TurnHandle> turn_handle;
+    std::atomic<bool> turn_handle_ready{false};
     std::thread cancel_watcher;
     if (cancel_wired) {
         InstallCancelHandlers();
-        cancel_watcher = std::thread([&turn_handle] {
+        cancel_watcher = std::thread([&turn_handle, &turn_handle_ready] {
             char byte = 0;
             ssize_t n;
             do {
                 n = read(g_cancel_pipe[0], &byte, 1);
             } while (n == -1 && errno == EINTR);
             if (n != 1 || byte != 'c') return;
-            // RunTurn populates the handle before its first event; allow a
+            // RunTurn publishes the handle before its first event; allow a
             // short window for that rather than dropping a cancel that raced
             // the turn's start.
-            for (int waited_ms = 0; !turn_handle && waited_ms < 5000; waited_ms += 5) {
+            for (int waited_ms = 0;
+                 !turn_handle_ready.load(std::memory_order_acquire) && waited_ms < 5000;
+                 waited_ms += 5) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(5));
             }
-            if (turn_handle) turn_handle->Cancel();
+            if (turn_handle_ready.load(std::memory_order_acquire)) turn_handle->Cancel();
             // Cancelled, or no handle ever arrived (nothing to cancel). Either
             // way a second signal kills instead of deferring.
             RestoreDefaultHandlers();
         });
+    }
+    std::function<void(const std::shared_ptr<minimal::client::SessionClient::TurnHandle>&)>
+        publish_turn_handle;
+    if (cancel_wired) {
+        publish_turn_handle = [&turn_handle, &turn_handle_ready](
+                                  const std::shared_ptr<
+                                      minimal::client::SessionClient::TurnHandle>& handle) {
+            turn_handle = handle;
+            turn_handle_ready.store(true, std::memory_order_release);
+        };
     }
 
     const auto status = client.RunTurn(
@@ -336,7 +354,7 @@ int RunHeadless(const HeadlessOptions& options) {
             }
             return true;
         },
-        cancel_wired ? &turn_handle : nullptr);
+        publish_turn_handle);
 
     if (cancel_wired) {
         // Wake the watcher (it exits without cancelling on 'q') and take the
