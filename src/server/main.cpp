@@ -137,6 +137,10 @@ int main(int argc, char** argv) {
                                           &auth_providers, &permission_advisors, &model_catalogs,
                                           &services);
     const auto records = loader.LoadAll(candidates);
+    // The load thread is the only writer; from here the map is read-only, which
+    // is what makes unguarded Find from session workers and the command pool
+    // safe. A runtime Provide is logged and ignored (the registry's own rule).
+    services.Seal();
 
     std::printf("plugins (%zu discovered):\n", records.size());
     for (const auto& record : records) {

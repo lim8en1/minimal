@@ -25,6 +25,8 @@
 // deliberately. An event bus would put the ordering/concurrency burden back on
 // plugin authors -- exactly what serialized observer dispatch removed.
 
+#include "minimal/common/logger.hpp"
+
 #include <functional>
 #include <string>
 #include <string_view>
@@ -49,8 +51,22 @@ public:
     // lifetime (plugin handles are never dlclosed -- see plugin_loader.hpp's
     // LIFETIME note). A null service is ignored: registering "nothing" would
     // turn Find's null contract ("absent") into a lie.
+    //
+    // Registration-time only. Provide is called from plugin load on the main
+    // thread; Find is called later, from session workers and the command pool.
+    // The map is unguarded by design -- a runtime Provide would race concurrent
+    // Finds AND slip past collision detection, which runs once at startup --
+    // so after Seal() a Provide is logged and ignored, and the frozen contract
+    // is a property of the registry rather than a comment about load order.
     void Provide(std::string name, void* service) {
         if (service == nullptr) return;
+        if (sealed_) {
+            common::DefaultLogger().warn(
+                "service '{}' provided after plugin load completed; ignored -- Provide is a "
+                "registration-time operation",
+                name);
+            return;
+        }
         services_[name] = service;
         // Recorded under the open attribution window -- empty for a
         // registration made by core itself, the same convention ToolRegistry
@@ -68,6 +84,10 @@ public:
         }
         return nullptr;
     }
+
+    // Called once by main.cpp after all plugins load. From then on the map is
+    // read-only, which is what makes unguarded Find safe from any thread.
+    void Seal() { sealed_ = true; }
 
     // --- Attribution, for collision reporting -------------------------------
     //
@@ -88,6 +108,7 @@ public:
 private:
     std::string attribution_;
     std::vector<Attribution> attributions_;
+    bool sealed_ = false;
     std::unordered_map<std::string, void*, TransparentStringHash, std::equal_to<>> services_;
 };
 

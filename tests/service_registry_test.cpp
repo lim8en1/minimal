@@ -51,6 +51,21 @@ TEST_CASE("Find before Provide and Find of a name nobody provided are null",
     CHECK(services.Find("a.service") != nullptr);
 }
 
+TEST_CASE("a Provide after Seal is ignored, not registered", "[service_registry]") {
+    // After plugin load the map must stay read-only: Find runs unguarded from
+    // session workers and the command pool, and a runtime registration would
+    // be a data race invisible to collision detection besides. main.cpp seals
+    // the registry right after LoadAll; a plugin holding the registration
+    // context and calling Provide later costs a warning, never the race.
+    plugins::ServiceRegistry services;
+    RecordingService service;
+    services.Seal();
+
+    services.Provide("late.service", &service);
+    CHECK(services.Find("late.service") == nullptr);
+    CHECK(services.attributions().empty());
+}
+
 TEST_CASE("a null Provide is ignored, not registered", "[service_registry]") {
     // Registering "nothing" would turn Find's null contract ("absent") into a
     // lie; it also must not leave an attribution behind.
