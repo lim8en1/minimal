@@ -30,9 +30,11 @@ struct ScriptedAdvisor : tools::PermissionAdvisor {
     bool throw_std = false;
     bool throw_unknown = false;
     std::vector<tools::PermissionRequest> seen;
+    std::thread::id advise_thread;  // which thread Advise ran on
 
     std::optional<PermissionResponse> Advise(const tools::PermissionRequest& request,
                                              const tools::AdvisorContext&) override {
+        advise_thread = std::this_thread::get_id();
         seen.push_back(request);
         if (throw_std) throw std::runtime_error("advisor exploded");
         if (throw_unknown) throw 42;
@@ -255,6 +257,94 @@ TEST_CASE("a wedged advisor does not outlive cancellation", "[permission_advisor
     // The abstention fell through to the inner checker rather than losing the turn.
     CHECK(call.Ready());
     CHECK(inner_ptr->seen.size() == 1);  // the advisor abstained; the fall-through answered
+}
+
+TEST_CASE("a wedged advisor that ignores cancellation costs only its budget",
+          "[permission_advisor][timeout]") {
+    using namespace std::chrono_literals;
+
+    // The contract-breaking case: an advisor that NEVER returns -- no polling,
+    // no answer. Before the budget existed this wedged the session worker, and
+    // through it Terminate, the reaper and process shutdown. Now it costs one
+    // bounded check and the human decides, as if the advisor had abstained.
+    struct Wedged : tools::PermissionAdvisor {
+        std::optional<PermissionResponse> Advise(const tools::PermissionRequest&,
+                                                 const tools::AdvisorContext&) override {
+            std::this_thread::sleep_for(60s);  // ignores is_cancelled entirely
+            return std::nullopt;
+        }
+    };
+    auto inner = std::make_unique<AlwaysAllowPermissionChecker>();
+    auto* inner_ptr = inner.get();
+    tools::AdvisedPermissionChecker checker(std::make_shared<Wedged>(), std::move(inner),
+                                            [] { return false; },
+                                            std::chrono::milliseconds{300});
+
+    minimal::testing::BackgroundResult<PermissionResponse> call(
+        [&] { return checker.check(tools::PermissionRequest{}); });
+
+    // Returns within a ceiling the budget dictates, not after the 60s sleep.
+    CHECK(call.WaitFor(5s));
+    REQUIRE(inner_ptr->seen.size() == 1);  // the budget = fall-through to the human
+}
+
+TEST_CASE("cancellation abandons the bounded wait before the budget is spent",
+          "[permission_advisor][timeout]") {
+    using namespace std::chrono_literals;
+
+    struct Wedged : tools::PermissionAdvisor {
+        std::optional<PermissionResponse> Advise(const tools::PermissionRequest&,
+                                                 const tools::AdvisorContext&) override {
+            std::this_thread::sleep_for(60s);
+            return std::nullopt;
+        }
+    };
+    std::atomic<bool> cancelled{false};
+    auto inner = std::make_unique<AlwaysAllowPermissionChecker>();
+    auto* inner_ptr = inner.get();
+    tools::AdvisedPermissionChecker checker(std::make_shared<Wedged>(), std::move(inner),
+                                            [&cancelled] { return cancelled.load(); },
+                                            std::chrono::milliseconds{10000});
+
+    minimal::testing::BackgroundResult<PermissionResponse> call(
+        [&] { return checker.check(tools::PermissionRequest{}); });
+
+    std::this_thread::sleep_for(50ms);
+    cancelled.store(true);
+    // Promptly -- milliseconds, not the 10s budget -- because Terminate cannot
+    // afford to wait out an advisor that will never answer.
+    CHECK(call.WaitFor(2s));
+    CHECK(inner_ptr->seen.size() == 1);
+}
+
+TEST_CASE("timeout 0 keeps Advise on the calling thread; a budget moves it off",
+          "[permission_advisor][timeout]") {
+    Fixture f;
+    f.AddTool("write", ToolCategory::FileWrite);
+    auto ctx = f.Context();
+
+    // Disabled budget: the pre-timeout shape, Advise synchronous.
+    auto advisor = std::make_shared<ScriptedAdvisor>();
+    advisor->next = PermissionResponse{PermissionDecision::Allow, {}};
+    {
+        tools::AdvisedPermissionChecker checker(advisor, std::make_unique<UnreachablePermissionChecker>(),
+                                                [] { return false; },
+                                                std::chrono::milliseconds{0});
+        tools::ToolExecutor executor = MakeExecutor(f.registry, checker);
+        CHECK_FALSE(executor.Run("tu1", "write", nlohmann::json::object(), ctx).is_error);
+        CHECK(advisor->advise_thread == std::this_thread::get_id());
+    }
+
+    // Budgeted: Advise runs on its own thread; the worker only waits.
+    auto advisor2 = std::make_shared<ScriptedAdvisor>();
+    advisor2->next = PermissionResponse{PermissionDecision::Allow, {}};
+    tools::AdvisedPermissionChecker checker2(advisor2, std::make_unique<UnreachablePermissionChecker>(),
+                                             [] { return false; },
+                                             std::chrono::milliseconds{2000});
+    tools::ToolExecutor executor2 = MakeExecutor(f.registry, checker2);
+    CHECK_FALSE(executor2.Run("tu2", "write", nlohmann::json::object(), ctx).is_error);
+    REQUIRE(f.tool->calls.size() == 2);
+    CHECK(advisor2->advise_thread != std::this_thread::get_id());
 }
 
 TEST_CASE("registry attributes registrations and refuses duplicates", "[permission_advisor]") {

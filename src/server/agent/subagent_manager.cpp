@@ -40,14 +40,16 @@ SubagentManager::SubagentManager(SessionRegistry& sessions, session::SessionData
                                   const AgentPresetRegistry& presets,
                                   std::int64_t max_concurrent_subagents, common::Logger& logger,
                                   std::shared_ptr<tools::PermissionAdvisor> advisor,
-                                  bool advisor_inherit)
+                                  bool advisor_inherit,
+                                  std::chrono::milliseconds advisor_timeout)
     : sessions_(sessions),
       db_(db),
       presets_(presets),
       max_concurrent_subagents_(max_concurrent_subagents),
       logger_(logger),
       advisor_(std::move(advisor)),
-      advisor_inherit_(advisor_inherit) {}
+      advisor_inherit_(advisor_inherit),
+      advisor_timeout_(advisor_timeout) {}
 
 SubagentOutcome SubagentManager::Spawn(const SubagentRequest& request,
                                         const tools::ToolContext& ctx) {
@@ -132,7 +134,7 @@ SubagentOutcome SubagentManager::Spawn(const SubagentRequest& request,
             advisor_,
             std::make_unique<rpc::WirePermissionChecker>(params.session_id, params.channels->queue,
                                                          params.channels->pending),
-            cancel_source);
+            cancel_source, advisor_timeout_);
         params.advisor_cancel_source = std::move(cancel_source);
     }
 

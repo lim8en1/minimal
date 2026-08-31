@@ -29,6 +29,14 @@ struct PermissionsConfig {
     // its parent" even though the ceilings technically hold. Opting in copies
     // the parent's advisor to the child at spawn; the ceilings still bound it.
     bool advisor_inherit = false;
+    // The budget an advisor gets to answer one Ask before the composition
+    // abandons it and falls through to the human. An external decider (an LLM
+    // judge, a remote policy service) can hang; without a budget a wedged
+    // advisor wedges the session worker -- and through it Terminate, the
+    // reaper and process shutdown. 0 disables the budget (Advise is then
+    // bounded only by its cancellation contract). Negative values are refused
+    // at parse -- silently disabling a safety timeout is never intended.
+    int advisor_timeout_ms = 30000;
 };
 
 // Pure. Throws on an empty-string key inside per_tool_overrides -- reserved as

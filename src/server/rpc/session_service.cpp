@@ -57,7 +57,7 @@ void ApplyAdvisor(const config::PermissionsConfig& permissions,
         std::move(advisor),
         std::make_unique<WirePermissionChecker>(params.session_id, params.channels->queue,
                                                 params.channels->pending),
-        cancel_source);
+        cancel_source, std::chrono::milliseconds(permissions.advisor_timeout_ms));
     params.advisor_cancel_source = std::move(cancel_source);
 }
 

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -53,14 +54,23 @@ public:
 // session setup.
 class AdvisedPermissionChecker : public PermissionChecker {
 public:
+    // Default advisor budget, used when permissions.json does not name one:
+    // long enough for a real policy decision, short enough that a wedged
+    // external decider converts into a human prompt within a minute.
+    static constexpr std::chrono::milliseconds kDefaultTimeout{30000};
+
     // Owns its cancel source; use when the holder need not be shared (tests).
+    // timeout <= 0 disables the budget: Advise runs synchronously, bounded only
+    // by the cancellation contract (the pre-timeout behavior, kept for tests).
     AdvisedPermissionChecker(std::shared_ptr<PermissionAdvisor> advisor,
                              std::unique_ptr<PermissionChecker> inner,
-                             std::function<bool()> is_cancelled);
+                             std::function<bool()> is_cancelled,
+                             std::chrono::milliseconds timeout = kDefaultTimeout);
     // Shares the holder with the Session, which installs its own predicate.
     AdvisedPermissionChecker(std::shared_ptr<PermissionAdvisor> advisor,
                              std::unique_ptr<PermissionChecker> inner,
-                             std::shared_ptr<AdvisorCancelSource> cancel_source);
+                             std::shared_ptr<AdvisorCancelSource> cancel_source,
+                             std::chrono::milliseconds timeout = kDefaultTimeout);
 
     // try advisor; abstain (nullopt) or throw both fall through to the inner
     // checker -- one plugin's failure is not a lost turn. A response returned
@@ -68,12 +78,25 @@ public:
     // human's answer: ToolExecutor re-checks every granted key against the
     // disclosure before remembering it, so an advisor returning an undisclosed
     // key mints nothing.
+    //
+    // With a positive timeout, Advise runs on its own thread and the wait
+    // polls the cancel source: a wedged advisor (one that ignores the
+    // cancellation contract) costs this check its budget -- then the human is
+    // prompted -- never the session worker, and through it Terminate, the
+    // reaper and process shutdown. An abandoned advisor thread is detached and
+    // self-contained (owned copies, no `this`); its discarded answer is
+    // harmless. Cancellation abandons the wait immediately, before the budget
+    // is spent.
     PermissionResponse check(const PermissionRequest& request) override;
 
 private:
+    PermissionResponse CheckDirect(const PermissionRequest& request);
+    PermissionResponse CheckWithTimeout(const PermissionRequest& request);
+
     std::shared_ptr<PermissionAdvisor> advisor_;
     std::unique_ptr<PermissionChecker> inner_;
     std::shared_ptr<AdvisorCancelSource> cancel_source_;
+    std::chrono::milliseconds timeout_;
 };
 
 // Keyed by plugin name; permissions.json's "advisor" field selects one by that

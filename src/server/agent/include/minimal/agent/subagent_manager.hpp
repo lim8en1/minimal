@@ -1,5 +1,7 @@
 #pragma once
 
+#include <chrono>
+
 // Everything a spawn_subagent call does besides parsing its input. A subagent
 // is the SAME Session entity as a top-level conversation -- one field
 // (parent_session_id) plus restrictions derived from it -- so this class is
@@ -37,7 +39,8 @@ public:
                     const AgentPresetRegistry& presets, std::int64_t max_concurrent_subagents,
                     common::Logger& logger,
                     std::shared_ptr<tools::PermissionAdvisor> advisor = nullptr,
-                    bool advisor_inherit = false);
+                    bool advisor_inherit = false,
+                    std::chrono::milliseconds advisor_timeout = tools::AdvisedPermissionChecker::kDefaultTimeout);
 
     // Runs on the PARENT's worker thread -- it is a tool execution, and that is
     // the thread permitted to block. A blocking request returns only after the
@@ -58,6 +61,7 @@ private:
     // checker (advised or not) is ever consulted.
     std::shared_ptr<tools::PermissionAdvisor> advisor_;
     bool advisor_inherit_ = false;
+    std::chrono::milliseconds advisor_timeout_;
 };
 
 }  // namespace minimal::agent
