@@ -34,6 +34,35 @@ bool IsBlank(std::string_view text) {
 
 }  // namespace
 
+// Serialized size of a JSON value, without serializing it. Structural
+// characters are counted the way dump() would emit them; the point is a stable
+// approximation, not byte equality with a string nobody keeps.
+std::int64_t JsonSizeEstimate(const nlohmann::json& value) {
+    switch (value.type()) {
+        case nlohmann::json::value_t::string:
+            return static_cast<std::int64_t>(value.get_ref<const std::string&>().size()) + 2;
+        case nlohmann::json::value_t::object: {
+            std::int64_t total = 2;  // {}
+            for (const auto& [key, child] : value.items()) {
+                total += static_cast<std::int64_t>(key.size()) + 4;  // "key":,
+                total += JsonSizeEstimate(child);
+            }
+            return total;
+        }
+        case nlohmann::json::value_t::array: {
+            std::int64_t total = 2;  // []
+            for (const auto& child : value) total += JsonSizeEstimate(child) + 1;
+            return total;
+        }
+        case nlohmann::json::value_t::null:
+            return 4;
+        case nlohmann::json::value_t::boolean:
+            return value.get<bool>() ? 4 : 5;
+        default:
+            return 8;  // numbers, binary: a fixed guess is within the noise of bytes/4
+    }
+}
+
 std::int64_t estimate_tokens(std::span<const llm::Message> messages) {
     std::int64_t bytes = 0;
     for (const auto& message : messages) {
@@ -43,7 +72,13 @@ std::int64_t estimate_tokens(std::span<const llm::Message> messages) {
             } else if (const auto* thinking = std::get_if<llm::ThinkingBlock>(&block)) {
                 bytes += static_cast<std::int64_t>(thinking->text.size());
             } else if (const auto* use = std::get_if<llm::ToolUseBlock>(&block)) {
-                bytes += static_cast<std::int64_t>(use->name.size() + use->input.dump().size());
+                // Sized, not serialized. dump() built the entire tool input as a
+                // heap string purely to read .size() and throw it away -- over
+                // the WHOLE transcript, on the resume path, where this runs to
+                // seed the compaction trigger. The estimate is bytes/4 either
+                // way, so an approximation of the serialized size is exactly as
+                // good as the real thing.
+                bytes += static_cast<std::int64_t>(use->name.size()) + JsonSizeEstimate(use->input);
             } else if (const auto* result = std::get_if<llm::ToolResultBlock>(&block)) {
                 for (const auto& item : result->content) {
                     if (const auto* text = std::get_if<llm::TextBlock>(&item)) {

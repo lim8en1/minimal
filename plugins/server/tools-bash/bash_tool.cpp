@@ -66,18 +66,37 @@ public:
             chunk.remove_prefix(take);
         }
         tail_.append(chunk.data(), chunk.size());
-        if (tail_.size() > tail_cap_) {
-            dropped_ += tail_.size() - tail_cap_;
-            tail_.erase(0, tail_.size() - tail_cap_);
-        }
+
+        // AMORTIZED, not per-chunk. This used to erase down to exactly tail_cap_
+        // on every append, and reads arrive in 8 KiB chunks: once the tail was
+        // full, every single chunk memmoved ~tail_cap_ bytes to discard 8 KiB.
+        // A 200 MB build log -- an entirely ordinary `make` -- meant ~25,000
+        // erases of ~768 KB each, about 19 GB of memmove on the session worker,
+        // spent purely on throwing bytes away.
+        //
+        // Letting the tail grow to 2x before compacting makes the work
+        // proportional to the data instead: each compaction discards at least
+        // tail_cap_ bytes, so the total moved is O(total output) rather than
+        // O(total output x tail_cap_ / chunk). The peak cost is one extra
+        // tail_cap_ of memory, which is the same order the buffer already holds.
+        if (tail_.size() > 2 * tail_cap_) Compact();
     }
 
     std::string Render() const {
+        // Render is the only reader, and it needs the tail at its true size --
+        // Append deliberately leaves it over-long between compactions.
+        const_cast<CappedBuffer*>(this)->Compact();
         if (dropped_ == 0) return head_ + tail_;
         return head_ + "\n[" + std::to_string(dropped_) + " bytes omitted]\n" + tail_;
     }
 
 private:
+    void Compact() {
+        if (tail_.size() <= tail_cap_) return;
+        dropped_ += tail_.size() - tail_cap_;
+        tail_.erase(0, tail_.size() - tail_cap_);
+    }
+
     std::size_t head_cap_, tail_cap_;
     std::string head_, tail_;
     std::size_t dropped_ = 0;
@@ -349,11 +368,17 @@ RunOutcome RunProcess(const std::string& wrapped, const SessionShellState& state
         if (state_slot >= 0 && (fds[state_slot].revents & (POLLIN | POLLHUP | POLLERR))) {
             const ssize_t n = read(state_read.get(), chunk, sizeof(chunk));
             if (n > 0) {
-                if (state_payload.size() + static_cast<std::size_t>(n) <= kMaxStatePayloadBytes) {
+                if (!outcome.state_overflow &&
+                    state_payload.size() + static_cast<std::size_t>(n) <= kMaxStatePayloadBytes) {
                     state_payload.append(chunk, static_cast<std::size_t>(n));
-                } else {
+                } else if (!outcome.state_overflow) {
                     outcome.state_overflow = true;
-                    state_payload.clear();  // discard wholesale: never adopt a prefix
+                    // Cleared AND latched: without the flag check on the next append the
+        // payload simply started re-accumulating, so `yes >&9` refilled and
+        // cleared 1 MiB over and over for the whole timeout. The payload is
+        // discarded wholesale once overflow is set, so there is nothing to keep.
+        state_payload.clear();
+        state_payload.shrink_to_fit();  // discard wholesale: never adopt a prefix
                 }
             } else if (n == 0 || errno != EINTR) {
                 state_open = false;

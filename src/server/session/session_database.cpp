@@ -62,6 +62,25 @@ const std::vector<Migration>& DefaultMigrationsImpl() {
              "UPDATE sessions SET message_count ="
              " (SELECT COUNT(*) FROM messages WHERE messages.session_id = sessions.id);",
          }},
+        // The indexes the session picker's keyset cursor has always assumed.
+        //
+        // §11.8 made the MESSAGE cursor a real seek; the SESSION cursor was
+        // still a full scan plus a temp b-tree sort on every page, because
+        // nothing indexed (updated_at, id) -- so the predicate filtered rather
+        // than sought and paging the picker stayed O(total sessions) per page,
+        // which is the exact growth the cursor exists to remove. DESC/ASC in the
+        // index matches the ORDER BY so the sort disappears too.
+        //
+        // The second is the canonical unindexed-foreign-key case: with
+        // foreign_keys=ON and ON DELETE CASCADE on the self-reference, every
+        // DELETE FROM sessions full-scanned the table looking for children.
+        {3,
+         {
+             "CREATE INDEX IF NOT EXISTS idx_sessions_activity"
+             " ON sessions(updated_at DESC, id ASC);",
+             "CREATE INDEX IF NOT EXISTS idx_sessions_parent"
+             " ON sessions(parent_session_id);",
+         }},
     }};
     return migrations;
 }
@@ -243,7 +262,15 @@ public:
         }
         stmt = it->second;
     }
-    ~CachedStmt() { sqlite3_reset(stmt); }
+    // Reset AND clear. Reset alone left the last call's bound pointers in the
+    // cached statement until its next use -- harmless while every binding was
+    // SQLITE_TRANSIENT (SQLite owned copies), but AppendMessage now binds
+    // content_json as SQLITE_STATIC, and a dangling borrowed pointer parked in a
+    // long-lived statement is not something to leave to "nothing steps it".
+    ~CachedStmt() {
+        sqlite3_reset(stmt);
+        sqlite3_clear_bindings(stmt);
+    }
     CachedStmt(const CachedStmt&) = delete;
     CachedStmt& operator=(const CachedStmt&) = delete;
 
@@ -410,7 +437,13 @@ std::int64_t SessionDatabase::AppendMessage(const std::string& session_id,
         sqlite3_bind_text(insert.stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_text(insert.stmt, 2, session_id.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_text(insert.stmt, 3, role, -1, SQLITE_STATIC);
-        sqlite3_bind_text(insert.stmt, 4, content_json.c_str(), -1, SQLITE_TRANSIENT);
+        // STATIC with an explicit length, not TRANSIENT with a strlen. content_json
+    // is the largest thing on this path -- a tool result can be hundreds of KB --
+    // and TRANSIENT tells SQLite to malloc and memcpy the whole thing, a third
+    // full copy after the JSON DOM and the dump(). It outlives the step() below,
+    // and ~CachedStmt clears bindings, so nothing retains the pointer.
+    sqlite3_bind_text(insert.stmt, 4, content_json.data(),
+                      static_cast<int>(content_json.size()), SQLITE_STATIC);
         sqlite3_bind_int(insert.stmt, 5, token_count);
         sqlite3_bind_int64(insert.stmt, 6, now);
         if (sqlite3_step(insert.stmt) != SQLITE_DONE) {

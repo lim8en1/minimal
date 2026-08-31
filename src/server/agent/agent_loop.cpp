@@ -377,7 +377,13 @@ TurnResult AgentLoop::RunTurn(llm::Message seed_message) {
         tokens_.RecordTurn(response.usage);
         result.stop_reason = response.stop_reason;
 
-        llm::Message assistant{llm::Role::Assistant, response.content};
+        // MOVED, not copied. `response` is loop-local and dead after this point
+        // -- the next iteration reassigns it -- and content can be the whole
+        // assistant turn, so this was a full duplicate of every block and string
+        // on the hottest path there is. The tool_uses pointers below stay valid
+        // across the later move into history_: a vector move relocates the
+        // heap buffer's ownership, not the elements.
+        llm::Message assistant{llm::Role::Assistant, std::move(response.content)};
         result.final_text = TextOf(assistant);
         const auto tool_uses = ToolUsesOf(assistant);
         // The only per-message token count that exists: this response's output.

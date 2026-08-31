@@ -1072,3 +1072,57 @@ every one of them reads as done.
     - `command_counter_` was a plain `uint64_t` incremented from concurrent streams -- its own
       comment describes that exact scenario as the reason it exists, and `++` from two threads is a
       race that can produce the duplicate id it is meant to prevent.
+
+### Efficiency (against the 512k-1M token goal)
+
+16. **`CappedBuffer::Append` was O(cap) per 8 KiB chunk.** It erased down to exactly `tail_cap_` on
+    every append, and reads arrive in 8 KiB chunks -- so once the tail was full, every chunk memmoved
+    ~768 KB to discard 8 KB. A 200 MB build log (an ordinary `make`) meant ~25,000 erases of ~768 KB,
+    about 19 GB of memmove on the session worker, spent entirely on throwing bytes away. Compacting
+    only past 2x makes the work proportional to the data. **Measured: 260 ms -> 5.1 ms for 200 MB,
+    51x, with an identical dropped-byte count.** Adjacent: the fd-9 state payload restarted
+    accumulating after an overflow, so `yes >&9` refilled and cleared 1 MiB for the whole timeout;
+    the overflow is latched now.
+
+17. **The session picker's keyset cursor had no index to seek.** §11.8 made the MESSAGE cursor a real
+    seek; `ListSessions` was still a full table scan plus `USE TEMP B-TREE FOR ORDER BY` on every
+    page, because nothing indexed `(updated_at, id)` -- so the cursor predicate filtered instead of
+    sought and paging stayed O(total sessions) per page, the exact growth it exists to remove.
+    Migration v3 adds it with DESC/ASC matching the ORDER BY so the sort disappears too, plus
+    `sessions(parent_session_id)` -- the canonical unindexed-foreign-key case, where every
+    `DELETE FROM sessions` full-scanned looking for cascade children.
+
+18. **Three copies of every persisted message became two.** `AppendMessage` built a JSON DOM, dumped
+    it to a string, then bound it `SQLITE_TRANSIENT`, which tells SQLite to malloc and memcpy the
+    whole thing again -- for a tool result that can be hundreds of KB. `SQLITE_STATIC` with an
+    explicit length (no `strlen` either) removes the third. `~CachedStmt` now clears bindings as well
+    as resetting, since a borrowed pointer parked in a cached statement is not something to leave to
+    "nothing steps it".
+
+19. **Smaller, same path.** The assistant message copied `response.content` where it could move it --
+    `response` is loop-local and dead immediately after, so this duplicated every block and string of
+    the turn. `estimate_tokens` called `input.dump()` to read `.size()` and threw the string away,
+    over the whole transcript, on the resume path; it estimates structurally now.
+
+20. **`read_window` did not keep its documented memory bound.** `ARCHITECTURE.md` promises "memory
+    proportional to `limit`, not file size", and `std::getline` materializes the WHOLE line before
+    anything truncates it -- so a 40 MB minified file with no newline (and no NUL, so the binary
+    probe passes) was a 40 MB allocation to display 2000 characters. It reads into a fixed buffer and
+    discards the remainder now, with a 1 MiB hard cap when no `max_line_length` is configured,
+    because "no configured truncation" is not the same as "willing to allocate a whole file for one
+    line". `offset + limit - 1` also overflowed for model-written values near INT_MAX; computed in
+    int64 and clamped.
+
+    The test covers the behaviour (an enormous line still yields a truncated one), not the bound
+    itself: a peak-RSS assertion inside a shared test binary is not dependable, so the memory
+    property rests on the structure -- one fixed-size buffer, nothing else retaining the line.
+
+### Deliberately not done
+
+- **Memoizing `ToolRegistry::DefinitionsFor`.** It deep-copies every tool's `ToolDefinition`,
+  `input_schema` included, once per tool round. Real, and the same family as §11.11-11.12 -- but
+  order ~20 us against a provider call measured in hundreds of milliseconds, and a cache would need
+  an invalidation rule plus a span-lifetime rule (MCP tools register after startup, and a session
+  worker could hold a span across an invalidation). That is a genuine complexity increase for a cost
+  that does not show up. Recorded rather than done, so the next reader does not rediscover it as an
+  oversight.

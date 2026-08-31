@@ -72,7 +72,7 @@ struct OpenOptions {
 // therefore leaves an exact prefix of the transcript -- never a torn row.
 class SessionDatabase {
 public:
-    static constexpr int kSchemaVersion = 2;
+    static constexpr int kSchemaVersion = 3;
 
     // Opens (creating if needed) and migrates. Throws std::runtime_error on any
     // failure, including a database whose user_version is newer than this

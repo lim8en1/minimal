@@ -1,6 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <fstream>
+#include <limits>
 #include <sstream>
 
 #include "file_editor.hpp"
@@ -332,4 +333,43 @@ TEST_CASE("fs settings take defaults when absent or nonsensical", "[tools_fs][se
     // purpose.
     const nlohmann::json nonsense = {{"read", {{"default_limit_lines", 0}}}};
     CHECK(tools_fs::ParseFsSettings(nonsense).read_default_limit_lines == 2000);
+}
+
+TEST_CASE("reading one enormous line does not allocate the whole file",
+          "[tools_fs][read][invariant]") {
+    // ARCHITECTURE.md promises "memory proportional to `limit`, not file size".
+    // std::getline materialized the WHOLE line before anything truncated it, so
+    // a minified file with no newline -- and no NUL, so the binary probe passes
+    // -- was a full-file allocation to display a couple of thousand characters.
+    Fixture f;
+    const std::size_t kHuge = 40u * 1024 * 1024;  // 40 MB on one line
+    const auto path = f.dir.path() / "minified.js";
+    {
+        std::ofstream out(path, std::ios::binary);
+        const std::string block(1u << 20, 'a');
+        for (int i = 0; i < 40; ++i) out << block;
+        out << "\n";
+    }
+    REQUIRE(std::filesystem::file_size(path) > kHuge);
+
+    const auto window = tools::read_window(path, 1, 10, /*max_line_length=*/2000);
+    REQUIRE(window.ok);
+    REQUIRE(window.lines.size() == 1);
+    // Truncated to the configured width plus the marker -- never the 40 MB.
+    CHECK(window.lines.front().size() < 2100);
+    CHECK(window.total_lines == 1);
+}
+
+TEST_CASE("a window past the end of a file is empty, not an overflow",
+          "[tools_fs][read]") {
+    // offset and limit are model-written: `offset + limit - 1` overflowed for
+    // values near INT_MAX, and signed overflow is UB rather than a large number.
+    Fixture f;
+    const auto path = f.dir.path() / "small.txt";
+    std::ofstream(path) << "one\ntwo\nthree\n";
+
+    const auto window = tools::read_window(path, 1, std::numeric_limits<int>::max(), 2000);
+    REQUIRE(window.ok);
+    CHECK(window.lines.size() == 3);
+    CHECK_FALSE(window.truncated);
 }
