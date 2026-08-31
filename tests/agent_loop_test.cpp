@@ -47,6 +47,76 @@ config::CompactionTriggerSettings BufferTrigger(std::int64_t buffer_tokens) {
     return trigger;
 }
 
+// Shared concurrency probe state: how many executions are inside execute()
+// right now, and the high-water mark. The parallel-dispatch tests assert on
+// `max`, so a regression to sequential dispatch fails a CHECK rather than
+// deadlocking a barrier.
+struct ConcurrencyCounter {
+    std::atomic<int> inside{0};
+    std::atomic<int> max{0};
+    void Enter() {
+        const int now = inside.fetch_add(1, std::memory_order_acq_rel) + 1;
+        int seen = max.load(std::memory_order_relaxed);
+        while (now > seen && !max.compare_exchange_weak(seen, now)) {}
+    }
+    void Exit() { inside.fetch_sub(1, std::memory_order_acq_rel); }
+};
+
+// A tool that tracks its own concurrency and optionally holds before returning.
+// The hold is the rendezvous point: a test waiting for N concurrent executions
+// spins with a deadline, so a concurrency regression degrades to a failed
+// assertion (after the timeout) instead of a hung suite.
+class ProbeTool : public tools::Tool {
+public:
+    ProbeTool(std::string name, std::shared_ptr<ConcurrencyCounter> counter,
+              std::function<void()> hold)
+        : counter_(std::move(counter)), hold_(std::move(hold)), name_(std::move(name)) {
+        spec_.name = name_;
+        spec_.category = ToolCategory::ReadOnly;
+        spec_.definition.name = name_;
+        spec_.definition.description = "concurrency probe";
+        spec_.definition.input_schema = nlohmann::json::object();
+    }
+
+    const tools::ToolSpec& spec() const override { return spec_; }
+
+    tools::ToolResult execute(const nlohmann::json&, tools::ToolContext&) override {
+        counter_->Enter();
+        if (hold_) hold_();
+        counter_->Exit();
+        return {false, name_};
+    }
+
+    bool parallel_safe() const override { return parallel_safe_.load(); }
+
+    std::atomic<bool> parallel_safe_{true};
+    std::function<void()> hold_;
+
+private:
+    tools::ToolSpec spec_;
+    std::shared_ptr<ConcurrencyCounter> counter_;
+    std::string name_;
+};
+
+// One assistant message carrying SEVERAL tool_use blocks -- the shape parallel
+// dispatch exists for.
+llm::ChatResponse MultiToolUseResponse(
+    std::initializer_list<std::pair<std::string, std::string>> calls) {
+    llm::ChatResponse response;
+    for (auto& [id, name] : calls) {
+        response.content.push_back(
+            llm::ToolUseBlock{std::move(id), std::move(name), nlohmann::json::object()});
+    }
+    response.stop_reason = llm::StopReason::ToolUse;
+    response.usage.input_tokens = 10;
+    response.usage.output_tokens = 5;
+    return response;
+}
+
+const llm::ToolResultBlock& ResultOf(const llm::Message& message, std::size_t index) {
+    return std::get<llm::ToolResultBlock>(message.content[index]);
+}
+
 // Assembles the loop and everything it needs. Members are declared in
 // destruction-safe order: the loop refers to the others, so it is destroyed
 // first.
@@ -60,6 +130,11 @@ struct Harness {
     FakeLlmProvider provider;
     tools::ToolRegistry registry;
     AlwaysAllowPermissionChecker checker;
+    // When set, the executor is built over this checker instead of `checker`.
+    std::unique_ptr<tools::PermissionChecker> checker_override;
+    // The policy the executor resolves with; AllowAll unless a test asks for
+    // prompts.
+    tools::PermissionPolicy executor_policy = AllowAllPolicy();
     InMemoryHistoryStore store;
     std::unique_ptr<tools::ToolExecutor> executor;
     std::unique_ptr<agent::AgentLoop> loop;
@@ -71,6 +146,15 @@ struct Harness {
     FakeTool& AddTool(std::string name, ToolCategory category = ToolCategory::ReadOnly) {
         auto owned = std::make_unique<FakeTool>(std::move(name), category);
         FakeTool* raw = owned.get();
+        registry.Register(std::move(owned));
+        return *raw;
+    }
+
+    ProbeTool& AddProbe(std::string name, std::shared_ptr<ConcurrencyCounter> counter,
+                        std::function<void()> hold = {}) {
+        auto owned =
+            std::make_unique<ProbeTool>(std::move(name), std::move(counter), std::move(hold));
+        ProbeTool* raw = owned.get();
         registry.Register(std::move(owned));
         return *raw;
     }
@@ -98,7 +182,10 @@ struct Harness {
         if (preset.provider.model_name.empty()) preset.provider.model_name = "test-model";
         preset.permission_mode = AllowAllPolicy();
 
-        executor = std::make_unique<tools::ToolExecutor>(registry, checker, AllowAllPolicy(),
+        executor = std::make_unique<tools::ToolExecutor>(registry,
+                                                         checker_override ? *checker_override
+                                                                          : checker,
+                                                         executor_policy,
                                                          tools::McpPermissionPolicy{},
                                                          PermissionRunMode::Normal);
         agent::SessionContext session{common::DefaultLogger()};
@@ -938,4 +1025,219 @@ TEST_CASE("a seeded history can trigger compaction before the first provider cal
     const auto& sent = h.provider.requests().front().messages;
     REQUIRE(sent.size() >= 1);
     CHECK(std::get<llm::TextBlock>(sent.front().content.front()).text == "[summary]");
+}
+
+// --- parallel dispatch ---------------------------------------------------------
+
+// Every hold spins with a deadline rather than waiting on a barrier: a
+// concurrency regression then fails the max-concurrency CHECK after the timeout
+// instead of wedging the suite (the deadline.hpp rationale, inlined -- here the
+// blocked side is a pool thread the loop itself joins, so a hard barrier could
+// deadlock the very join under test).
+
+// Rendezvous latch for the parallel tests: each arriving execution increments
+// `arrivals` (never decremented -- `inside` is transient, so waiting on it
+// races the first task's exit) and holds until the expected count is present
+// or the deadline passes. A concurrency regression therefore degrades to a
+// failed assertion after the timeout instead of a hung suite.
+struct Rendezvous {
+    std::atomic<int> arrivals{0};
+    void Hold(int expected) {
+        arrivals.fetch_add(1, std::memory_order_acq_rel);
+        const auto deadline = std::chrono::steady_clock::now() + 2s;
+        while (arrivals.load(std::memory_order_acquire) < expected &&
+               std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(1ms);
+        }
+    }
+};
+
+TEST_CASE("parallel-safe tools of one round execute concurrently", "[agent_loop][parallel]") {
+    Harness h;
+    auto counter = std::make_shared<ConcurrencyCounter>();
+    auto gate = std::make_shared<Rendezvous>();
+    auto hold = [gate] { gate->Hold(3); };
+    h.AddProbe("pa", counter, hold);
+    h.AddProbe("pb", counter, hold);
+    h.AddProbe("pc", counter, hold);
+    h.provider.PushResponse(MultiToolUseResponse({{"t1", "pa"}, {"t2", "pb"}, {"t3", "pc"}}));
+    h.provider.PushResponse(TextResponse("done"));
+    h.Build();
+
+    const auto result = h.loop->RunTurn(UserText("go"));
+
+    CHECK(result.stop_reason == llm::StopReason::EndTurn);
+    CHECK(result.provider_calls == 2);
+    // All three were inside execute() at once: the round ran in parallel.
+    CHECK(counter->max.load() == 3);
+}
+
+TEST_CASE("tool results are appended in block order regardless of completion order",
+          "[agent_loop][parallel]") {
+    // The FIRST block is the slowest and the LAST the fastest, so executions
+    // complete in exactly the reverse of block order -- and the persisted
+    // results message must still read t1, t2, t3.
+    Harness h2;
+    auto slow = std::make_shared<ConcurrencyCounter>();
+    auto mid = std::make_shared<ConcurrencyCounter>();
+    auto fast = std::make_shared<ConcurrencyCounter>();
+    auto sleep_hold = [](std::chrono::milliseconds how_long) {
+        return [how_long] { std::this_thread::sleep_for(how_long); };
+    };
+    h2.AddProbe("slow", slow, sleep_hold(300ms));
+    h2.AddProbe("mid", mid, sleep_hold(200ms));
+    h2.AddProbe("fast", fast, sleep_hold(100ms));
+    h2.provider.PushResponse(
+        MultiToolUseResponse({{"t1", "slow"}, {"t2", "mid"}, {"t3", "fast"}}));
+    h2.provider.PushResponse(TextResponse("done"));
+    h2.Build();
+
+    const auto result = h2.loop->RunTurn(UserText("go"));
+
+    CHECK(result.stop_reason == llm::StopReason::EndTurn);
+    REQUIRE(h2.store.messages.size() == 4);
+    const auto& results_message = h2.store.messages[2];
+    REQUIRE(results_message.content.size() == 3);
+    CHECK(ResultOf(results_message, 0).tool_use_id == "t1");
+    CHECK(ResultOf(results_message, 1).tool_use_id == "t2");
+    CHECK(ResultOf(results_message, 2).tool_use_id == "t3");
+    CHECK(std::get<llm::TextBlock>(ResultOf(results_message, 0).content.front()).text == "slow");
+    CHECK(std::get<llm::TextBlock>(ResultOf(results_message, 2).content.front()).text == "fast");
+    // Call order is the model's order, not completion order.
+    REQUIRE(result.tool_names_invoked.size() == 3);
+    CHECK(result.tool_names_invoked[0] == "slow");
+    CHECK(result.tool_names_invoked[2] == "fast");
+}
+
+TEST_CASE("a serial-only tool never overlaps itself but runs beside parallel-safe calls",
+          "[agent_loop][parallel]") {
+    Harness h;
+    auto serial_counter = std::make_shared<ConcurrencyCounter>();
+    auto parallel_counter = std::make_shared<ConcurrencyCounter>();
+    // The parallel pair rendezvous, so the serial executions genuinely overlap
+    // the batch rather than racing to finish before it starts.
+    auto gate = std::make_shared<Rendezvous>();
+    auto parallel_hold = [gate] { gate->Hold(2); };
+    auto& serial = h.AddProbe("serial", serial_counter, {});
+    serial.parallel_safe_ = false;
+    h.AddProbe("par1", parallel_counter, parallel_hold);
+    h.AddProbe("par2", parallel_counter, parallel_hold);
+    h.provider.PushResponse(MultiToolUseResponse(
+        {{"t1", "serial"}, {"t2", "serial"}, {"t3", "par1"}, {"t4", "par2"}}));
+    h.provider.PushResponse(TextResponse("done"));
+    h.Build();
+
+    const auto result = h.loop->RunTurn(UserText("go"));
+
+    CHECK(result.stop_reason == llm::StopReason::EndTurn);
+    // The serial-only tool's two invocations never overlapped each other...
+    CHECK(serial_counter->max.load() == 1);
+    // ...while the parallel-safe pair ran together.
+    CHECK(parallel_counter->max.load() == 2);
+    // Every call still answered, in block order.
+    const auto& results_message = h.store.messages[2];
+    REQUIRE(results_message.content.size() == 4);
+    CHECK(ResultOf(results_message, 0).tool_use_id == "t1");
+    CHECK_FALSE(ResultOf(results_message, 0).is_error);
+    CHECK(ResultOf(results_message, 3).tool_use_id == "t4");
+}
+
+TEST_CASE("gating stays sequential in a parallel round: one ask, and the grant satisfies later calls",
+          "[agent_loop][parallel][permissions]") {
+    Harness h;
+    h.checker_override = std::make_unique<GrantingPermissionChecker>();
+    // Ask for the probe's category (ReadOnly) so both calls need gating.
+    h.executor_policy.read_only = tools::PermissionMode::Ask;
+
+    auto& tool = h.AddTool("gated");
+    tool.set_disclosure(tools::PermissionDisclosure{
+        "gated: /usr/bin/probe", {tools::GrantOffer{"k1", "allow /usr/bin/probe this session"}},
+        true});
+
+    h.provider.PushResponse(MultiToolUseResponse({{"t1", "gated"}, {"t2", "gated"}}));
+    h.provider.PushResponse(TextResponse("done"));
+    h.Build();
+
+    const auto result = h.loop->RunTurn(UserText("go"));
+
+    CHECK(result.stop_reason == llm::StopReason::EndTurn);
+    auto* checker = static_cast<GrantingPermissionChecker*>(h.checker_override.get());
+    // Gate-then-run: both decisions resolved sequentially BEFORE either
+    // execution, so the grant the first call acquired satisfied the second.
+    // Concurrent checks would have asked twice.
+    REQUIRE(checker->seen.size() == 1);
+    const auto& results_message = h.store.messages[2];
+    REQUIRE(results_message.content.size() == 2);
+    CHECK_FALSE(ResultOf(results_message, 0).is_error);
+    CHECK_FALSE(ResultOf(results_message, 1).is_error);
+}
+
+TEST_CASE("a cancel mid-round still answers every tool_use and reports Cancelled",
+          "[agent_loop][parallel][cancel]") {
+    Harness h;
+    auto counter = std::make_shared<ConcurrencyCounter>();
+    auto& pa = h.AddProbe("pa", counter, {});
+    auto& pb = h.AddProbe("pb", counter, {});
+    auto& pc = h.AddProbe("pc", counter, {});
+    // The first execution to get in cancels the turn; every call must still be
+    // answered -- one orphaned tool_use is a hard 400 on the next request.
+    auto cancel_hold = [&h] {
+        h.cancel_flag = true;
+        std::this_thread::sleep_for(20ms);
+    };
+    pa.hold_ = cancel_hold;
+    pb.hold_ = cancel_hold;
+    pc.hold_ = cancel_hold;
+    h.provider.PushResponse(MultiToolUseResponse({{"t1", "pa"}, {"t2", "pb"}, {"t3", "pc"}}));
+    h.Build();
+
+    const auto result = h.loop->RunTurn(UserText("go"));
+
+    CHECK(result.stop_reason == llm::StopReason::Cancelled);
+    REQUIRE(h.store.messages.size() == 3);
+    const auto& results_message = h.store.messages[2];
+    REQUIRE(results_message.content.size() == 3);
+    CHECK(ResultOf(results_message, 0).tool_use_id == "t1");
+    CHECK(ResultOf(results_message, 1).tool_use_id == "t2");
+    CHECK(ResultOf(results_message, 2).tool_use_id == "t3");
+}
+
+TEST_CASE("max_parallel_tool_calls = 1 reproduces sequential dispatch",
+          "[agent_loop][parallel]") {
+    Harness h;
+    auto counter = std::make_shared<ConcurrencyCounter>();
+    auto hold = [] { std::this_thread::sleep_for(20ms); };
+    h.AddProbe("pa", counter, hold);
+    h.AddProbe("pb", counter, hold);
+    h.provider.PushResponse(MultiToolUseResponse({{"t1", "pa"}, {"t2", "pb"}}));
+    h.provider.PushResponse(TextResponse("done"));
+    agent::LoopConfig config;
+    config.max_parallel_tool_calls = 1;
+    h.Build({}, config);
+
+    const auto result = h.loop->RunTurn(UserText("go"));
+
+    CHECK(result.stop_reason == llm::StopReason::EndTurn);
+    CHECK(counter->max.load() == 1);
+    const auto& results_message = h.store.messages[2];
+    REQUIRE(results_message.content.size() == 2);
+    CHECK(ResultOf(results_message, 0).tool_use_id == "t1");
+}
+
+TEST_CASE("an unknown tool in a parallel round is answered, not fatal",
+          "[agent_loop][parallel]") {
+    Harness h;
+    h.AddProbe("real", std::make_shared<ConcurrencyCounter>(), {});
+    h.provider.PushResponse(MultiToolUseResponse({{"t1", "nope"}, {"t2", "real"}}));
+    h.provider.PushResponse(TextResponse("done"));
+    h.Build();
+
+    const auto result = h.loop->RunTurn(UserText("go"));
+
+    CHECK(result.stop_reason == llm::StopReason::EndTurn);
+    const auto& results_message = h.store.messages[2];
+    REQUIRE(results_message.content.size() == 2);
+    CHECK(ResultOf(results_message, 0).tool_use_id == "t1");
+    CHECK(ResultOf(results_message, 0).is_error);
+    CHECK_FALSE(ResultOf(results_message, 1).is_error);
 }

@@ -54,6 +54,7 @@ AgentLoop::AgentLoop(llm::LlmProvider& provider, tools::ToolExecutor& executor,
       event_sink_(std::move(event_sink)),
       compactor_(std::move(compactor)),
       history_(std::move(seeded_history)),
+      pool_(config.max_parallel_tool_calls),
       first_persisted_seq_(seed_first_persisted_seq),
       head_is_summary_(seed_head_is_summary) {
     if (!history_.empty()) {
@@ -467,29 +468,76 @@ TurnResult AgentLoop::RunTurn(llm::Message seed_message) {
 
         if (tool_uses.empty()) break;  // ToolUse with no blocks: nothing to do
 
-        // Sequential in v1: no per-session thread pool, permission prompts
-        // arrive one at a time, and no ordering rules are needed for interleaved
-        // tool events.
-        std::vector<llm::ContentBlock> results;
-        results.reserve(tool_uses.size());
-        for (const auto* use : tool_uses) {
-            tools::ToolContext ctx{session_.logger};
-            ctx.session_id = session_.session_id;
-            ctx.project_root = session_.project_root;
-            ctx.allowed_skills = preset_.allowed_skills;
-            ctx.is_cancelled = is_cancelled_;
-            ctx.cancel_token = cancel_token_;
-            // Per invocation, from the Session-owned window: a subagent sees
-            // only its own transcript, because the window is bound to THIS
-            // session's id (docs/EXTENSIBILITY.md §2.1).
-            ctx.history = session_.history;
-            if (session_.tool_output_sink) {
-                const std::string tool_use_id = use->id;
-                ctx.emit_output = [this, tool_use_id](std::string_view chunk) {
-                    session_.tool_output_sink(tool_use_id, chunk);
-                };
-            }
+        // Parallel dispatch (ARCHITECTURE.md "Tool dispatch"), in two phases.
+        //
+        // Phase 1 -- GATE. Every call's permission decision resolves here,
+        // sequentially on this worker, in assistant-block order. Prompts still
+        // arrive one at a time (better UX than five simultaneous modals); a
+        // grant an earlier call of the round acquires satisfies later ones; and
+        // nothing below can park in the permission checker on a pool thread,
+        // which is what keeps Session::Terminate's fixed order deadlock-free.
+        // Prepare never throws: a gate refusal or a plugin throw becomes the
+        // denial result Execute returns.
+        struct PendingCall {
+            std::size_t index;  // position in assistant-block order
+            tools::PreparedInvocation prepared;
+            tools::ToolContext ctx;
+            bool to_pool = false;
+        };
+        std::vector<PendingCall> calls;
+        calls.reserve(tool_uses.size());
+        for (std::size_t i = 0; i < tool_uses.size(); ++i) {
+            const auto* use = tool_uses[i];
+            // Aggregate-built around its context: ToolContext holds a Logger
+            // reference, so it (and therefore PendingCall) is construct-in-place
+            // only -- no default construction, no assignment.
+            PendingCall call{i,
+                             {},
+                             [&] {
+                                 tools::ToolContext ctx{session_.logger};
+                                 ctx.session_id = session_.session_id;
+                                 ctx.project_root = session_.project_root;
+                                 ctx.allowed_skills = preset_.allowed_skills;
+                                 ctx.is_cancelled = is_cancelled_;
+                                 ctx.cancel_token = cancel_token_;
+                                 // Per invocation, from the Session-owned window: a
+                                 // subagent sees only its own transcript, because the
+                                 // window is bound to THIS session's id
+                                 // (docs/EXTENSIBILITY.md §2.1).
+                                 ctx.history = session_.history;
+                                 if (session_.tool_output_sink) {
+                                     const std::string tool_use_id = use->id;
+                                     ctx.emit_output = [this, tool_use_id](std::string_view chunk) {
+                                         session_.tool_output_sink(tool_use_id, chunk);
+                                     };
+                                 }
+                                 return ctx;
+                             }(),
+                             false};
 
+            // Recorded at gate time, in block order: what ran is the question,
+            // not what succeeded, and call order is the model's order -- not
+            // the order executions happen to finish in.
+            result.tool_names_invoked.push_back(use->name);
+
+            call.prepared = executor_.Prepare(use->id, use->name, use->input, call.ctx);
+            // Unknown tools arrive here with no resolved tool; they execute as
+            // their denial result and have no exclusivity to protect.
+            call.to_pool = !call.prepared.tool || call.prepared.tool->parallel_safe();
+            calls.push_back(std::move(call));
+        }
+
+        // Phase 2 -- RUN. The brackets below run on whichever thread executes
+        // the call: both sinks are thread-safe (the lifecycle/output sinks end
+        // in the session's EventQueue, already multi-producer; the observer
+        // registry dispatches internally on its one ordered thread). Results
+        // land by index, so the appended User message is in block order
+        // regardless of completion order -- a deterministic transcript and a
+        // stable prompt-cache prefix.
+        std::vector<llm::ContentBlock> results;
+        results.resize(tool_uses.size());
+        auto execute_one = [&](PendingCall& call) {
+            const auto* use = tool_uses[call.index];
             ToolLifecycleEvent lifecycle;
             lifecycle.tool_use_id = use->id;
             lifecycle.tool_name = use->name;
@@ -501,25 +549,39 @@ TurnResult AgentLoop::RunTurn(llm::Message seed_message) {
                     .count();
             if (session_.tool_lifecycle_sink) session_.tool_lifecycle_sink(lifecycle);
 
-            // Recorded before the call, so a tool that fails still appears in
-            // the turn summary. What ran is the question, not what succeeded.
-            result.tool_names_invoked.push_back(use->name);
-
             const auto tool_started = std::chrono::steady_clock::now();
-            llm::ToolResultBlock tool_result = executor_.Run(use->id, use->name, use->input, ctx);
+            llm::ToolResultBlock tool_result = executor_.Execute(call.prepared, call.ctx);
 
-            // Emitted even when Run() reports an error, and before the result is
-            // appended: a client that showed a tool as started must always see it
-            // finish, or its running-tools panel accumulates entries that never
-            // clear.
+            // Emitted even when Execute() reports an error, and before the
+            // result is appended: a client that showed a tool as started must
+            // always see it finish, or its running-tools panel accumulates
+            // entries that never clear.
             lifecycle.started = false;
             lifecycle.is_error = tool_result.is_error;
             lifecycle.duration = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - tool_started);
             if (session_.tool_lifecycle_sink) session_.tool_lifecycle_sink(lifecycle);
 
-            results.push_back(std::move(tool_result));
+            results[call.index] = std::move(tool_result);
+        };
+
+        // Parallel-safe calls go to the pool first, so the serial ones below
+        // overlap as much of the batch as possible. Serial-only tools
+        // (parallel_safe() == false) run here on the worker, one at a time, in
+        // block order: their contract is "my invocations never overlap each
+        // other", and the worker is the thread that guarantees it.
+        for (auto& call : calls) {
+            if (call.to_pool) {
+                // `call` lives in `calls` on this stack until Wait() returns,
+                // which is why a reference capture is sound (ToolPool rule 3).
+                pool_.Submit([&call, &execute_one] { execute_one(call); });
+            }
         }
+        for (auto& call : calls) {
+            if (!call.to_pool) execute_one(call);
+        }
+        pool_.Wait();
+
         AppendAndPersist(llm::Message{llm::Role::User, std::move(results)});
 
         // Turn boundary: safe to splice in anything a background subagent

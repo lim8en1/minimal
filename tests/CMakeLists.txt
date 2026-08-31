@@ -57,6 +57,7 @@ add_executable(minimal_tests
     atomic_write_test.cpp
     tools_fs_test.cpp
     tools_bash_test.cpp
+    tool_pool_test.cpp
     skill_registry_test.cpp
     skill_tool_test.cpp
     proto_convert_test.cpp

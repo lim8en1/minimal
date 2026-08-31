@@ -99,6 +99,22 @@ public:
         return std::nullopt;
     }
 
+    // Declarative opt-OUT from parallel dispatch (see ARCHITECTURE.md "Tool
+    // dispatch"): a tool whose execute() cannot safely overlap another
+    // execution of the same tool in this session sets this false. The agent
+    // loop then runs its invocations one at a time on the session worker, in
+    // assistant-block order, while parallel-safe calls of the same round run on
+    // the pool. Default true: a tool that holds no per-session mutable state is
+    // safe by construction (ToolContext is per-invocation; providers are
+    // stateless by contract).
+    //
+    // bash opts out: its per-session cwd/env map (owned by the tools-bash
+    // plugin, adopted wholesale after each command) would race a concurrent
+    // invocation's adopt step. That is a data race the plugin can see, not a
+    // semantic ambiguity -- flipping this to true is safe once the plugin
+    // serializes adoption internally.
+    virtual bool parallel_safe() const { return true; }
+
     // Overridden only where one tool spans categories -- e.g. Edit's `view`
     // reports ReadOnly though the tool's static category is FileWrite.
     virtual std::optional<ToolCategory> category_for(const nlohmann::json& input) const {

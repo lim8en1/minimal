@@ -582,3 +582,67 @@ TEST_CASE("a client-side cancel ends the turn with STOP_REASON_CANCELLED",
     CHECK_FALSE(fixture.provider_attempts->load() >= 2);  // no second attempt ran
     CHECK(text.empty());                                  // its answer never arrived
 }
+
+TEST_CASE("a parallel tool round streams per-call lifecycle events and answers every call",
+          "[headless][parallel]") {
+    // Tier 4: the full wire path with two tool_use blocks in one assistant
+    // message. The client sees one ToolExecutionEvent pair PER CALL -- the
+    // correlation key is tool_use_id, which is what makes interleaved events
+    // from concurrent executions renderable -- and the turn ends cleanly.
+    HeadlessFixture fixture;
+    fixture.tools.Register(
+        std::make_unique<testing::FakeTool>("probe1", tools::ToolCategory::ReadOnly, "one"));
+    fixture.tools.Register(
+        std::make_unique<testing::FakeTool>("probe2", tools::ToolCategory::ReadOnly, "two"));
+
+    llm::ChatResponse two_calls;
+    two_calls.content.push_back(llm::ToolUseBlock{"call-1", "probe1", nlohmann::json::object()});
+    two_calls.content.push_back(llm::ToolUseBlock{"call-2", "probe2", nlohmann::json::object()});
+    two_calls.stop_reason = llm::StopReason::ToolUse;
+    two_calls.usage.input_tokens = 10;
+    two_calls.usage.output_tokens = 5;
+    fixture.Script(two_calls,
+                   {llm::StreamEvent{llm::MessageStartEvent{"m-1", "test-model"}},
+                    llm::StreamEvent{llm::MessageDeltaEvent{llm::StopReason::ToolUse}}});
+    fixture.Script(testing::TextResponse("both done"),
+                   TextStream("both done", llm::StopReason::EndTurn));
+    fixture.Start();
+
+    client::SessionClient::CreateOptions options;
+    options.project_root = (fixture.dir / "work").string();
+    options.agent_preset = "main";
+    const auto created = fixture.client->CreateSession(options);
+    REQUIRE(created.status.ok());
+
+    // started=true arrivals in wire order; finish/error flags per call id.
+    std::vector<std::string> started_order;
+    bool first_finished = false, second_finished = false, any_error = false;
+    std::string text;
+    const auto status = fixture.client->RunTurn(
+        created.session_id, "run both", [&](const v1::ServerEvent& event) {
+            if (event.has_tool_execution()) {
+                const auto& execution = event.tool_execution();
+                if (execution.started()) {
+                    started_order.push_back(execution.tool_use_id());
+                } else if (execution.tool_use_id() == "call-1") {
+                    first_finished = true;
+                } else if (execution.tool_use_id() == "call-2") {
+                    second_finished = true;
+                }
+                if (!execution.started() && execution.is_error()) any_error = true;
+            }
+            if (event.has_stream_event() && event.stream_event().has_text_delta()) {
+                text += event.stream_event().text_delta().text();
+            }
+            return true;
+        });
+
+    CHECK(status.ok());
+    CHECK(text == "both done");
+    // Both calls bracketed, no error, in a round that executed concurrently
+    // server-side (width defaults to 4 for this registry's LoopConfig).
+    CHECK(started_order.size() == 2);
+    CHECK(first_finished);
+    CHECK(second_finished);
+    CHECK_FALSE(any_error);
+}

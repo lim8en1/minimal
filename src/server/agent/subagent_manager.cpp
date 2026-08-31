@@ -65,12 +65,35 @@ SubagentOutcome SubagentManager::Spawn(const SubagentRequest& request,
 
     // Over-limit spawns are an error the model adapts to, not a queue it blocks
     // in -- a tool that hangs is a turn that never ends.
+    //
+    // Parallel dispatch made this check non-atomic: sibling spawns of one round
+    // run concurrently, and a child is not yet countable in ChildCount when its
+    // Spawn is still constructing it. The admission ticket below holds a place
+    // from this check until CreateResolved has inserted the row, so every
+    // concurrent checker sees either the ticket or the child, never neither.
     const std::size_t live_children = sessions_.ChildCount(parent_id);
-    if (static_cast<std::int64_t>(live_children) >= max_concurrent_subagents_) {
-        return SubagentOutcome::Error("subagent limit reached (" +
-                                      std::to_string(max_concurrent_subagents_) +
-                                      " concurrent); wait for one to finish");
+    {
+        std::lock_guard<std::mutex> lock(limit_mu_);
+        const std::int64_t starting = starting_children_[parent_id];
+        if (static_cast<std::int64_t>(live_children) + starting >= max_concurrent_subagents_) {
+            return SubagentOutcome::Error("subagent limit reached (" +
+                                          std::to_string(max_concurrent_subagents_) +
+                                          " concurrent); wait for one to finish");
+        }
+        ++starting_children_[parent_id];
     }
+    struct TicketGuard {
+        SubagentManager& self;
+        const std::string& parent_id;
+        bool released = false;
+        ~TicketGuard() {
+            if (released) return;
+            std::lock_guard<std::mutex> lock(self.limit_mu_);
+            if (--self.starting_children_[parent_id] <= 0) {
+                self.starting_children_.erase(parent_id);
+            }
+        }
+    } ticket{*this, parent_id};
 
     // The parent's own preset is the default, addressed by the name it was
     // resolved with -- not the frontmatter display name, which need not match.
@@ -205,6 +228,11 @@ SubagentOutcome SubagentManager::Spawn(const SubagentRequest& request,
         db_.DeleteSession(row.session_id);
         return SubagentOutcome::Error(e.what());
     }
+    // The child is countable in ChildCount from here; the ticket's job is done.
+    // (Microscopically conservative: a concurrent checker between these two
+    // lines may see both the child and the ticket, and refuse at the exact
+    // limit boundary -- the safe direction to err.)
+    ticket.released = true;
 
     // Announce BEFORE the child produces anything: attaching to the child is a
     // client protocol obligation, and this event is what starts it. The child's

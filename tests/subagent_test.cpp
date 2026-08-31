@@ -527,7 +527,11 @@ TEST_CASE("an over-limit spawn is an error result, not a queue", "[subagent][lim
     CHECK(fixture.sessions->ChildCount(parent->info().session_id) == 1);
 
     // The two results, found by content rather than position: whether the live
-    // child's completion injection landed during this turn shifts rows.
+    // child's completion injection landed during this turn shifts rows. Under
+    // parallel dispatch WHICH call wins the admission ticket is genuinely
+    // nondeterministic (sibling spawns execute concurrently, and the pool does
+    // not order concurrent starts), so the assertion is "exactly one refused",
+    // never "the second one".
     const auto page = fixture.db->GetMessagesPage(parent->info().session_id, std::nullopt, 50);
     bool saw_results = false;
     for (const auto& stored : page.messages) {
@@ -539,9 +543,14 @@ TEST_CASE("an over-limit spawn is an error result, not a queue", "[subagent][lim
         if (first == nullptr || second == nullptr) continue;
         if (first->tool_use_id != "sp1" || second->tool_use_id != "sp2") continue;
         saw_results = true;
-        CHECK_FALSE(first->is_error);
-        CHECK(second->is_error);
-        CHECK(TextOf(*second).find("limit") != std::string::npos);
+        const bool first_refused = first->is_error;
+        const bool second_refused = second->is_error;
+        // Exactly one admission, exactly one refusal naming the limit.
+        CHECK((first_refused ^ second_refused));
+        const auto& refused = first_refused ? *first : *second;
+        const auto& admitted = first_refused ? *second : *first;
+        CHECK(TextOf(refused).find("limit") != std::string::npos);
+        CHECK_FALSE(admitted.is_error);
     }
     CHECK(saw_results);
 }
