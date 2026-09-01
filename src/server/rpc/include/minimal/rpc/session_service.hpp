@@ -134,6 +134,13 @@ private:
     // unable to ever notice it had zero clients.
     void ReleaseAttachment(agent::Session& session);
 
+    // The one decrement of attached_, shared by every exit -- the successful
+    // detach, the attach-refused exits (which counted themselves first, see
+    // OpenSession), and the unwinding exits. Firing the last-client callback
+    // is part of the decrement, not something callers may do selectively: a
+    // zero the callback never observed is exactly the leak this split once was.
+    void ReleaseClientSlot();
+
     // Runs read-only commands off the reader thread. Its destructor joins the
     // pool, and a task may borrow `sessions_`/`commands_` -- both outlive this
     // service (main declares them first), so a task can never dangle.

@@ -189,13 +189,6 @@ grpc::Status SessionServiceImpl::CreateSession(grpc::ServerContext* context,
     std::shared_ptr<agent::Session> session;
     try {
         session = sessions_.Create(std::move(params));
-    } catch (const agent::SessionAlreadyOpen& e) {
-        // The registry refused an id that is open or mid-construction. Not a
-        // configuration error: the client (or a racing duplicate) asked for a
-        // session that already exists.
-        db_.DeleteSession(row.session_id);
-        logger_.warn("CreateSession failed: {}", e.what());
-        return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, e.what());
     } catch (const std::exception& e) {
         // Preset and provider problems are configuration errors the operator has
         // to see and fix, so they come back with their reason attached rather
@@ -294,14 +287,6 @@ grpc::Status SessionServiceImpl::ResumeSession(const v1::CreateSessionRequest* r
         // Loads the stored transcript, repairs a torn tool-call tail if there
         // is one, and starts the session.
         (void)sessions_.Create(std::move(params));
-    } catch (const agent::SessionAlreadyOpen& e) {
-        // The registry's reservation refused this id: the session is open, or
-        // a concurrent resume of it is mid-construction. The service-layer
-        // Find() above catches the already-open case; the reservation catches
-        // the racing one, BEFORE the loser loads the transcript or appends a
-        // torn-tail repair row. The same answer either way.
-        logger_.warn("resume of session {} failed: {}", stored->session_id, e.what());
-        return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, e.what());
     } catch (const std::exception& e) {
         // NO ROLLBACK here, unlike fresh creation: the row is the user's
         // existing session, not one this call just minted. A failure (the
@@ -490,11 +475,21 @@ grpc::Status SessionServiceImpl::OpenSession(
                             "unknown session_id '" + first.session_id() + "'");
     }
 
+    // THE COUNT LEADS THE CLAIM. attached_ used to be incremented only AFTER
+    // TryAttach succeeded, which opened a window between the two: this stream
+    // was provably attached but not yet counted, so another stream's
+    // ReleaseAttachment could fetch_sub from 1 to 0 -- firing
+    // on_last_client_detached_, i.e. requesting process shutdown, while a
+    // client was attached. Counting first (and releasing on every refused
+    // path below) closes it: the count is accurate from the moment the stream
+    // is committed to serving this session.
+    attached_.fetch_add(1, std::memory_order_acq_rel);
     if (!session->TryAttach()) {
         // One stream per session. Attaching anyway would silently split the
         // event stream between two writers draining one queue, and the first to
         // close would terminate the session under the other -- both of which
         // look like flaky output rather than a protocol error.
+        ReleaseClientSlot();
         return grpc::Status(grpc::StatusCode::ALREADY_EXISTS,
                             "session '" + first.session_id() + "' already has a client attached");
     }
@@ -503,15 +498,22 @@ grpc::Status SessionServiceImpl::OpenSession(
     // immediately-empty stream with no error explaining why.
     if (session->terminated()) {
         session->Detach();
+        ReleaseClientSlot();
         return grpc::Status(grpc::StatusCode::NOT_FOUND,
                             "session '" + first.session_id() + "' is already terminated");
     }
-    attached_.fetch_add(1, std::memory_order_acq_rel);
 
     // The one and only Write() caller for this stream. It drains the SESSION's
     // queue, not a stream-owned one, so anything produced before this moment is
     // still here and goes out first.
     std::thread writer;
+    auto fail = [this, &session, &writer](const std::string& reason) {
+        sessions_.Terminate(session->info().session_id);
+        session->queue().Close();
+        if (writer.joinable()) writer.join();
+        ReleaseAttachment(*session);
+        return grpc::Status(grpc::StatusCode::INTERNAL, reason);
+    };
     try {
         writer = std::thread([stream, session] {
             while (auto event = session->queue().Pop()) {
@@ -531,11 +533,14 @@ grpc::Status SessionServiceImpl::OpenSession(
         // Dispatch branches are non-throwing by contract; this guard exists so
         // that contract can be violated without bricking shutdown.
         logger_.warn("session {}: OpenSession failed: {}", first.session_id(), e.what());
-        sessions_.Terminate(session->info().session_id);
-        session->queue().Close();
-        if (writer.joinable()) writer.join();
-        ReleaseAttachment(*session);
-        return grpc::Status(grpc::StatusCode::INTERNAL, e.what());
+        return fail(e.what());
+    } catch (...) {
+        // The SAME containment for an exception of an unknown flavor: the
+        // contract above was guarded only against std::exception, so anything
+        // else would have unwound past the refcount restore and bricked
+        // shutdown outright.
+        logger_.warn("session {}: OpenSession failed (unknown exception)", first.session_id());
+        return fail("unknown exception");
     }
 
     // Stream close TERMINATES the session -- there is no detached state in v1,
@@ -563,6 +568,10 @@ void SessionServiceImpl::ReleaseAttachment(agent::Session& session) {
     // carry the consequence of reaching zero. Splitting that decision across two
     // call sites is what let them drift, so there is now only one.
     session.Detach();
+    ReleaseClientSlot();
+}
+
+void SessionServiceImpl::ReleaseClientSlot() {
     if (attached_.fetch_sub(1, std::memory_order_acq_rel) == 1 && on_last_client_detached_) {
         on_last_client_detached_();
     }
