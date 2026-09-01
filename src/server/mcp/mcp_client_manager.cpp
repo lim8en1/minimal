@@ -36,13 +36,36 @@ struct McpClientManager::ServerHandle {
 // the call degrades to a clean error instead of crashing.
 class McpClientManager::HandleInvoker final : public McpInvoker {
 public:
-    explicit HandleInvoker(std::weak_ptr<ServerHandle> handle) : handle_(std::move(handle)) {}
+    // `manager` is a raw back-pointer, safe because HandleInvoker is owned
+    // (transitively, through ServerHandle) by manager->handles_ -- it cannot
+    // outlive the manager that constructed it.
+    HandleInvoker(std::weak_ptr<ServerHandle> handle, McpClientManager* manager)
+        : handle_(std::move(handle)), manager_(manager) {}
 
     McpCallOutcome CallTool(std::string_view tool_name, const nlohmann::json& arguments,
                             const tools::CancelTokenPtr& cancel) override {
         std::shared_ptr<ServerHandle> handle = handle_.lock();
         if (handle == nullptr) {
             return {false, "MCP server is no longer configured", nlohmann::json()};
+        }
+        bool need_restart;
+        {
+            std::lock_guard<std::mutex> lock(handle->mu);
+            need_restart = !handle->alive || !handle->connection;
+        }
+        // A server that died mid-session used to error "not connected" until
+        // the NEXT session start or /agent switch re-checked it -- the
+        // respawn the header comment already claimed happened here. It does
+        // now: EnsureAlive is the same per-server-gated (start_mu) path a
+        // session's own liveness check uses, so a storm of calls against a
+        // down server is still serialized to one restart attempt, and (once
+        // cooldown lands) rate-limited across restarts too.
+        if (need_restart) {
+            std::string error;
+            if (!manager_->EnsureAlive(handle->entry.name, error)) {
+                return {false, "MCP server '" + handle->entry.name + "' is not connected: " + error,
+                        nlohmann::json()};
+            }
         }
         std::shared_ptr<McpConnection> connection;
         {
@@ -53,11 +76,24 @@ public:
                         nlohmann::json()};
             }
         }
-        return connection->CallTool(tool_name, arguments, cancel);
+        McpCallOutcome outcome = connection->CallTool(tool_name, arguments, cancel);
+        if (!outcome.ok) {
+            // !ok is the transport/protocol layer failing (dead process,
+            // timeout, malformed response) -- never a tool-level error, which
+            // comes back ok=true with an isError result. Marking the handle
+            // not-alive here is what makes "the next tool call respawns it"
+            // true rather than aspirational: this exact call does not retry
+            // (a stuck cancel token or a hung caller must not be doubled),
+            // but the NEXT one takes the need_restart branch above.
+            std::lock_guard<std::mutex> lock(handle->mu);
+            handle->alive = false;
+        }
+        return outcome;
     }
 
 private:
     std::weak_ptr<ServerHandle> handle_;
+    McpClientManager* manager_;
 };
 
 McpClientManager::McpClientManager(config::McpsConfig config, tools::ToolRegistry& registry,
@@ -70,7 +106,7 @@ McpClientManager::McpClientManager(config::McpsConfig config, tools::ToolRegistr
         if (!entry.enabled) continue;  // deliberate opt-out, silent
         auto handle = std::make_shared<ServerHandle>();
         handle->entry = entry;
-        handle->invoker = std::make_shared<HandleInvoker>(handle);
+        handle->invoker = std::make_shared<HandleInvoker>(handle, this);
         handles_.emplace(entry.name, std::move(handle));
     }
     reaper_ = std::thread([this] { ReaperMain(); });

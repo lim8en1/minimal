@@ -145,6 +145,33 @@ TEST_CASE("McpClientManager: a restart does not stall behind the old connection'
     CHECK(elapsed < std::chrono::seconds(3));
 }
 
+TEST_CASE("McpClientManager: a tool call respawns a server that died mid-session",
+          "[mcp_manager]") {
+    // No EnsureAlive between the death and the calls below -- handle.alive
+    // stays stale-true until something actually notices, which is the point:
+    // the FIRST call after the death is the one that discovers it (fails,
+    // transport-level) and the NEXT one is what used to require a new session
+    // or an /agent switch to get, per the (until now false) header comment.
+    Fixture fixture(nlohmann::json::array({StdioEntry("fake", "die_after_ms:2000")}));
+    std::string error;
+    REQUIRE(fixture.manager->EnsureAlive("fake", error));
+    const auto before = fixture.manager->StatusOf("fake");
+
+    std::this_thread::sleep_for(std::chrono::seconds(3));  // outlive the scripted death
+
+    auto echo_tool = fixture.registry.Find("mcp__fake__echo");
+    REQUIRE(echo_tool != nullptr);
+    minimal::tools::ToolContext ctx(minimal::common::DefaultLogger());
+
+    const auto first = echo_tool->execute(nlohmann::json{{"text", "hi"}}, ctx);
+    CHECK(first.is_error);  // the dead-server call itself still fails
+
+    const auto second = echo_tool->execute(nlohmann::json{{"text", "hi"}}, ctx);
+    CHECK_FALSE(second.is_error);  // respawned by the call above, this one works
+    CHECK(second.content_text == "hi");
+    CHECK(fixture.manager->StatusOf("fake").generation == before.generation + 1);
+}
+
 TEST_CASE("McpClientManager: a server that cannot start is a surfaced error", "[mcp_manager]") {
     // Garbage protocol output: the handshake never completes.
     Fixture fixture(nlohmann::json::array({StdioEntry("broken", "garbage")}),
