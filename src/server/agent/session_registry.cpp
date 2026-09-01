@@ -1,6 +1,7 @@
 #include "minimal/agent/session_registry.hpp"
 
-#include <cstdio>\n#include <stdexcept>
+#include <cstdio>
+#include <stdexcept>
 #include <utility>
 
 #include "minimal/agent/compaction_boundary.hpp"
