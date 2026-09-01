@@ -728,6 +728,32 @@ system prompt alone; a half-open stream cannot block shutdown past the grace; E2
 
 ### W9 — MCP client
 
+**Status: landed.** Full suite green (1214 test cases; 8 new). All six items landed as
+specified, with three records:
+
+- **Item 1's graveyard is a dedicated reaper thread**, not a drain-on-next-`StartHandle`
+  design: `StartHandle` moves the old connection out under `handle.mu` (a pointer move,
+  not a destructor call) into a `graveyard_mu_`-guarded vector, and a reaper thread
+  (modeled on `SessionRegistry::ReaperMain`) drains and destroys it off any session
+  worker. Proven with a new "stubborn" fake-server mode (ignores SIGTERM, forcing the
+  full multi-second SIGKILL escalation) that a restart triggered while the old
+  connection is wedged returns in a small fraction of that time.
+- **Item 2's two halves shipped as separate commits.** 2a (`HandleInvoker::CallTool`
+  calling `EnsureAlive` on a not-alive handle, and marking a handle not-alive when a
+  call fails at the transport level — the previous code never updated `alive` on a
+  live-connection failure, so nothing would have noticed a mid-session death) landed
+  before 2b (the `restart_cooldown_ms` gate + `RefreshMcpServers` reappraising every
+  server fresh) specifically because 2a makes the restart path far hotter, and the
+  ordering matters for exercising item 1's fix under realistic load.
+- **`disabled_mcp_servers_` was removed, not cleared.** Once `RefreshMcpServers` no
+  longer skips previously-failed servers, nothing read the list anymore (it was
+  write-only) — kept as the plan's text literally said ("clears... `disabled_mcp_servers_`"),
+  it would have been exactly the class of dead state item 38 in this same document
+  flags. `ARCHITECTURE.md`'s MCP client section was corrected in the same change.
+  Item 3 landed as reject-at-config-parse (`mcps.json` env/header values) plus
+  drop-entirely (not strip-and-keep) at the `mcp-session-id` echo, per the risk
+  asymmetry between user config and server-controlled input.
+
 **Evidence note (from W3's TSan runs):** under parallel TSan load, the teardown path
 `~McpConnection → ~StdioTransport → ~McpStdioShim → cpp-mcp ~stdio_client →
 stop_server_process()` races the connection's worker thread inside a blocking cpp-mcp
