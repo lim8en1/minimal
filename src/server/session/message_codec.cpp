@@ -98,7 +98,15 @@ llm::ContentBlock BlockFromJson(const nlohmann::json& j, const std::string& ctx)
             }
             b.is_error = j.at("is_error").get<bool>();
         }
-        if (j.contains("content") && j.at("content").is_array()) {
+        if (j.contains("content")) {
+            // Present-but-not-array USED to be silently dropped (empty content,
+            // no error) -- a false sibling of the is_error check just above,
+            // which throws. The strict-decode contract wins: a tool result
+            // whose content is the wrong shape is corruption or a writer bug,
+            // and an empty result presented as success hides it.
+            if (!j.at("content").is_array()) {
+                throw std::runtime_error(ctx + ": tool_result block 'content' must be an array");
+            }
             int i = 0;
             for (const auto& inner : j.at("content")) {
                 const llm::ContentBlock block =
@@ -115,7 +123,16 @@ llm::ContentBlock BlockFromJson(const nlohmann::json& j, const std::string& ctx)
         return b;
     }
 
-    throw std::runtime_error(ctx + ": unknown block type '" + type + "'");
+    // Unknown block TYPE -- the one deliberate non-throw. A stored transcript
+    // from a newer binary would otherwise brick scrollback AND resume on every
+    // older binary that touches it: one unrecognized block made every row it
+    // was in unreadable, which for a public release with mixed versions is an
+    // upgrade hazard, not a safety property. Degrade with a marker instead:
+    // the text IS the warning, visible to the client and to the model, and the
+    // row survives. Wrong-typed fields above keep throwing -- those are
+    // corruption or writer bugs, not novelty, and silently surviving them
+    // hides real damage.
+    return llm::TextBlock{"[unknown block type \"" + type + "\" — written by a newer version]"};
 }
 
 }  // namespace

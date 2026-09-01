@@ -225,10 +225,71 @@ TEST_CASE("codec round-trips an empty-content message", "[session][codec]") {
     CHECK(MessagesEqual(RoundTrip(message), message));
 }
 
-TEST_CASE("codec refuses unknown block types on decode", "[session][codec]") {
+TEST_CASE("codec degrades an unknown block type to a readable placeholder",
+          "[session][codec][invariant]") {
+    // The upgrade-hazard decision: one unknown block type in a stored
+    // transcript used to make every row it was in unreadable -- bricking
+    // scrollback AND resume for an older binary. The placeholder is the
+    // warning, visible to client and model.
     nlohmann::json doc = {{"role", "user"},
                           {"content", {{{"type", "warp_drive"}, {"text", "hi"}}}}};
-    CHECK_THROWS_AS(JsonToMessage(doc), std::runtime_error);
+    const auto message = JsonToMessage(doc);
+    REQUIRE(message.content.size() == 1);
+    const auto* text = std::get_if<llm::TextBlock>(&message.content[0]);
+    REQUIRE(text != nullptr);
+    CHECK(text->text.find("unknown block type \"warp_drive\"") != std::string::npos);
+    CHECK(text->text.find("newer version") != std::string::npos);
+}
+
+TEST_CASE("a transcript with a block from a newer version scrolls and resumes",
+          "[session][codec][invariant]") {
+    // The E2E half of the placeholder decision: a stored row containing a
+    // block type this binary does not know must not brick scrollback or
+    // resume. Written here the way a newer binary would have written it
+    // (raw sqlite, unknown type), read the way an older binary reads.
+    TempDir dir;
+    const auto path = dir.path() / "forward.db";
+    std::string id;
+    {
+        SessionDatabase db(path);
+        id = db.CreateSession("", std::nullopt, "/p", "build").session_id;
+        db.AppendMessage(id, UserMsg("older text"));
+    }
+    {
+        sqlite3* raw = RawOpen(path);
+        sqlite3_stmt* stmt = nullptr;
+        REQUIRE(sqlite3_prepare_v2(raw,
+                                   "INSERT INTO messages (session_id, seq, role,"
+                                   " content_json, token_count, created_at)"
+                                   " VALUES (?1, 1, 'user', ?2, 0, 0);",
+                                   -1, &stmt, nullptr) == SQLITE_OK);
+        sqlite3_bind_text(stmt, 1, id.c_str(), -1, SQLITE_TRANSIENT);
+        const std::string json =
+            R"({"role":"user","content":[)"
+            R"({"type":"hologram","data":{"x":1}},{"type":"text","text":"tail"}]})";
+        sqlite3_bind_text(stmt, 2, json.c_str(), -1, SQLITE_TRANSIENT);
+        REQUIRE(sqlite3_step(stmt) == SQLITE_DONE);
+        sqlite3_finalize(stmt);
+        sqlite3_close(raw);
+    }
+
+    SessionDatabase older(path);
+
+    // Scrollback: pages fine, the unknown block is the placeholder, the
+    // sibling text block survives verbatim.
+    const auto page = older.GetMessagesPage(id, std::nullopt, 10);
+    REQUIRE(page.messages.size() == 2);
+    const auto& newer_row = page.messages[0].message.content;  // seq 1, descending
+    REQUIRE(newer_row.size() == 2);
+    const auto* placeholder = std::get_if<llm::TextBlock>(&newer_row[0]);
+    REQUIRE(placeholder != nullptr);
+    CHECK(placeholder->text.find("unknown block type \"hologram\"") != std::string::npos);
+    CHECK(std::get<llm::TextBlock>(newer_row[1]).text == "tail");
+
+    // Resume: the full load is equally unaffected.
+    const auto all = SessionReader(older).LoadAll(id);
+    REQUIRE(all.size() == 2);
+    CHECK(all[1].message.content.size() == 2);
 }
 
 TEST_CASE("codec refuses malformed blocks on decode", "[session][codec]") {
@@ -252,6 +313,15 @@ TEST_CASE("codec refuses malformed blocks on decode", "[session][codec]") {
                                 {"content", {{{"type", "tool_use"}, {"id", "x"},
                                               {"name", "y"}, {"input", nlohmann::json::object()}}}}}}}};
     CHECK_THROWS_AS(JsonToMessage(nested), std::runtime_error);
+    // Tool result content present but NOT an array -- this used to be
+    // silently dropped (empty content, no error), the exact failure the
+    // strict contract exists to prevent.
+    nlohmann::json non_array = {{"role", "user"},
+                                {"content",
+                                 {{{"type", "tool_result"},
+                                   {"tool_use_id", "t"},
+                                   {"content", "plain text"}}}}};
+    CHECK_THROWS_AS(JsonToMessage(non_array), std::runtime_error);
 }
 
 // --- Database path resolution --------------------------------------------------
