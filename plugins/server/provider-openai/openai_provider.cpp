@@ -36,9 +36,12 @@ llm::HttpRequest OpenAiProvider::BuildHttpRequest(std::string body, bool streami
 }
 
 llm::ChatResponse OpenAiProvider::Complete(const llm::ChatRequest& request) {
-    llm::ChatRequest normalized = request;
-    normalized.stream = false;
-    llm::HttpRequest http_request = BuildHttpRequest(BuildRequestBody(normalized), /*streaming=*/false);
+    // No deep copy: `stream` rides BuildRequestBody as a parameter. The copy
+    // this replaces duplicated the tools vector (every schema DOM), the
+    // parameters object and the system string per call -- and, worse, per
+    // RETRY ATTEMPT, since the loop calls this method once per attempt.
+    llm::HttpRequest http_request = BuildHttpRequest(BuildRequestBody(request, /*stream=*/false),
+                                                     /*streaming=*/false);
 
     llm::HttpResponse http_response;
     try {
@@ -62,9 +65,8 @@ llm::ChatResponse OpenAiProvider::Complete(const llm::ChatRequest& request) {
 }
 
 llm::ChatResponse OpenAiProvider::StreamComplete(const llm::ChatRequest& request, const llm::StreamEventSink& sink) {
-    llm::ChatRequest normalized = request;
-    normalized.stream = true;
-    llm::HttpRequest http_request = BuildHttpRequest(BuildRequestBody(normalized), /*streaming=*/true);
+    llm::HttpRequest http_request = BuildHttpRequest(BuildRequestBody(request, /*stream=*/true),
+                                                     /*streaming=*/true);
 
     OpenAiStreamReassembler reassembler;
     llm::SseParser sse_parser;
@@ -73,6 +75,7 @@ llm::ChatResponse OpenAiProvider::StreamComplete(const llm::ChatRequest& request
     std::string error_body;
     bool is_error_status = false;
     bool cancelled_by_sink = false;
+    bool error_body_capped = false;
     std::exception_ptr pending_error;
 
     auto on_headers = [&](int status, const std::vector<llm::HttpHeader>& headers) {
@@ -86,16 +89,33 @@ llm::ChatResponse OpenAiProvider::StreamComplete(const llm::ChatRequest& request
     auto on_chunk = [&](std::string_view chunk) -> bool {
         if (is_error_status) {
             // For classification and the error message only -- never parsed as
-            // a completion. A proxy streaming an endless "error" body would
-            // otherwise grow this string for as long as the connection held.
+            // a completion. The cap is a CLASSIFICATION BUDGET, not a reading
+            // commitment: 64 KiB is far more than any error message needs, and
+            // a drip-feeding proxy would otherwise hold the transfer open
+            // forever (the body cap used to stop accumulating but keep
+            // reading). Aborting lands in the catch below, which classifies by
+            // the STATUS -- the one fact that matters -- with the body we
+            // already hold.
             constexpr std::size_t kMaxErrorBody = 64 * 1024;
             if (error_body.size() < kMaxErrorBody) {
                 error_body.append(chunk.substr(0, kMaxErrorBody - error_body.size()));
+                return true;
             }
-            return true;
+            error_body_capped = true;
+            return false;
         }
         try {
             for (const auto& frame : sse_parser.Feed(chunk)) {
+                // OpenAI-shaped gateways deliver mid-stream failures as an
+                // `event: error` frame; the parser always produced the event
+                // name and the reassembler silently ignored it -- the error
+                // vanished and the turn came back empty, presented as
+                // success. Classify here, where the status machinery lives;
+                // the thrown LlmError rides pending_error out of libcurl's
+                // stack and is rethrown unchanged below.
+                if (frame.event == "error") {
+                    throw ClassifyErrorEventData(frame.data);
+                }
                 if (!reassembler.FeedFrame(frame.data, sink)) {
                     cancelled_by_sink = true;
                     return false;
@@ -137,6 +157,15 @@ llm::ChatResponse OpenAiProvider::StreamComplete(const llm::ChatRequest& request
         http_.StreamPost(http_request, on_headers, on_chunk);
     } catch (const llm::HttpError& error) {
         rethrow_pending_if_any();
+        // The reader aborted the error body at its classification cap (the
+        // on_chunk error branch returned false). Classify by the STATUS we
+        // already hold -- a 429 whose body we stopped reading must not become
+        // a retryable Transport loss of its Retry-After, and the abort itself
+        // surfaces as HttpError(Cancelled) because the sink contract has only
+        // one false shape.
+        if (error_body_capped && response_status != 0) {
+            throw ClassifyHttpFailure(response_status, error_body, response_headers);
+        }
         if (cancelled_by_sink || error.kind() == llm::HttpErrorKind::Cancelled) {
             try {
                 // Blocks announced but never closed: the client's view has to be
@@ -154,6 +183,12 @@ llm::ChatResponse OpenAiProvider::StreamComplete(const llm::ChatRequest& request
                 RethrowParseErrorAsLlmError(parse_error);
             }
         }
+        // A transport failure DURING an error response: the status is the
+        // classification that matters (a 401 behind a stalling proxy must not
+        // become a retryable Transport and hammer the backend with retries).
+        if (is_error_status && response_status != 0) {
+            throw ClassifyHttpFailure(response_status, error_body, response_headers);
+        }
         throw ClassifyTransportFailure(error);
     }
 
@@ -161,6 +196,18 @@ llm::ChatResponse OpenAiProvider::StreamComplete(const llm::ChatRequest& request
 
     if (is_error_status) {
         throw ClassifyHttpFailure(response_status, error_body, response_headers);
+    }
+
+    // A stream that ended CLEANLY but without a completion -- no finish_reason,
+    // no [DONE] -- used to finalize as StopReason::Unknown and be ACCEPTED as a
+    // complete turn: a proxy truncating mid-generation with a tidy FIN produced
+    // a partial assistant message persisted as ordinary history. That is a
+    // transport failure, classified as one (retryable), the same posture as the
+    // idle timeout -- the only difference is who closed the connection.
+    if (!reassembler.completed()) {
+        reassembler.CloseOpenBlocks(sink);
+        throw llm::LlmError(llm::LlmErrorCategory::Transport,
+                            "stream ended without a completion (no finish_reason, no [DONE])");
     }
 
     try {

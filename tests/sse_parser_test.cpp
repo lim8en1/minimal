@@ -86,3 +86,55 @@ TEST_CASE("SseParser handles CRLF line endings", "[sse]") {
     CHECK(frames[0].event == "ping");
     CHECK(frames[0].data == "hi");
 }
+
+TEST_CASE("a leading UTF-8 BOM is stripped once per stream", "[sse][invariant]") {
+    // Without this, the first data line's field name became "\xEF\xBB\xBFdata"
+    // -- unknown field, silently ignored -- and the first OpenAI chunk (id,
+    // model, role) was dropped from every BOM-prefixed stream.
+    SseParser parser;
+    std::string bommed = "\xEF\xBB\xBF";
+    bommed += "data: {\"first\":true}\n\n";
+    bommed += "data: {\"second\":true}\n\n";
+    const auto frames = parser.Feed(bommed);
+    REQUIRE(frames.size() == 2);
+    CHECK(frames[0].data == "{\"first\":true}");
+    CHECK(frames[1].data == "{\"second\":true}");
+}
+
+TEST_CASE("a bare CR terminates lines, and a CRLF split across chunks does not flush early",
+          "[sse][invariant]") {
+    // Only '\n' was recognized: a CR-terminated stream never framed at all and
+    // died at the 1 MiB cap. And a '\r' that is the LAST byte held must not
+    // terminate -- it may be the first half of a CRLF arriving in the next
+    // chunk, and treating it as a terminator would let that '\n' flush a
+    // partial frame as if it were complete.
+    SseParser parser;
+    auto frames = parser.Feed("data: {\"a\":true}\r\ndata: {\"b\":true}\r\n\r\n");
+    REQUIRE(frames.size() == 1);  // the blank CRLF line ends the frame
+    CHECK(frames[0].data == "{\"a\":true}\n{\"b\":true}");
+
+    SseParser split;
+    CHECK(split.Feed("data: {\"a\":true}\r").empty());   // '\r' held: may be CRLF's first half
+    frames = split.Feed("\ndata: {\"b\":true}\r\n\r\n");
+    REQUIRE(frames.size() == 1);
+    CHECK(frames[0].data == "{\"a\":true}\n{\"b\":true}");
+
+    SseParser cr_only;
+    // A stream TERMINATING on a held '\r' flushes when more data (or the
+    // framing the rest of the stream uses) arrives -- the hold exists for the
+    // CRLF split, and a mid-stream blank CR line flushes exactly like an LF
+    // one.
+    frames = cr_only.Feed("event: error\rdata: boom\r\rdata: next\n\n");
+    REQUIRE(frames.size() == 2);  // the CR blank line flushes; the tail frames normally
+    CHECK(frames[0].event == "error");
+    CHECK(frames[0].data == "boom");
+    CHECK(frames[1].data == "next");
+}
+
+TEST_CASE("an empty event value is the spec's message, and event names reach the frame",
+          "[sse]") {
+    SseParser parser;
+    auto frames = parser.Feed("event:\ndata: x\n\n");
+    REQUIRE(frames.size() == 1);
+    CHECK(frames[0].event == "message");
+}

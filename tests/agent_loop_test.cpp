@@ -1543,3 +1543,32 @@ TEST_CASE("pre_compact and post_compact hook points fire on both the auto trigge
     CHECK(lines[2] == "core.pre_compact");
     CHECK(lines[3] == "core.post_compact");
 }
+
+TEST_CASE("the retry wait honors the server's Retry-After hint", "[agent_loop][retry]") {
+    // The hint was parsed, carried, and tested end to end -- and then ignored
+    // by the only consumer there ever was: retrying a 429 sooner than its
+    // Retry-After converts one rate-limit event into max_retries more. With a
+    // computed backoff far below the hint, the wait is the hint's floor (the
+    // equal-jitter floor pattern: the assertion needs a lower bound that
+    // exists, so the hint, not the jitter, sets it).
+    Harness h;
+    agent::LoopConfig config;
+    config.max_retries = 1;
+    config.retry_base_delay = std::chrono::milliseconds{50};
+    config.retry_max_delay = std::chrono::milliseconds{100};
+    h.Build({}, config);
+
+    h.provider.PushError(llm::LlmError(llm::LlmErrorCategory::RateLimit, "429", 429,
+                                       std::chrono::milliseconds{400}));
+    h.provider.PushResponse(TextResponse("recovered"));
+
+    const auto started = std::chrono::steady_clock::now();
+    const auto result = h.loop->RunTurn(UserText("go"));
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::steady_clock::now() - started)
+                             .count();
+    CHECK(result.stop_reason == llm::StopReason::EndTurn);
+    INFO("retry waited " << elapsed << " ms; the hint alone is 400");
+    CHECK(elapsed >= 380);  // the hint, minus a small scheduling allowance
+    CHECK(elapsed < 5000);  // and not the ceiling of a misapplied hint
+}

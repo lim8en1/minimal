@@ -21,6 +21,18 @@ constexpr std::size_t kMaxPendingBytes = 1ull << 20;
 }  // namespace
 
 std::vector<SseFrame> SseParser::Feed(std::string_view chunk) {
+    // The spec strips one leading UTF-8 BOM from the stream. Without this, the
+    // first data line's field name became "\xEF\xBB\xBFdata" -- unknown field,
+    // silently ignored -- and the first OpenAI chunk (id/model/role) was
+    // dropped from every BOM-prefixed stream.
+    if (!bom_checked_) {
+        bom_checked_ = true;
+        if (chunk.size() >= 3 && static_cast<unsigned char>(chunk[0]) == 0xEF &&
+            static_cast<unsigned char>(chunk[1]) == 0xBB &&
+            static_cast<unsigned char>(chunk[2]) == 0xBF) {
+            chunk.remove_prefix(3);
+        }
+    }
     if (line_buffer_.size() + chunk.size() > kMaxPendingBytes) {
         throw std::runtime_error("SSE line exceeded 1 MiB without a newline");
     }
@@ -29,10 +41,29 @@ std::vector<SseFrame> SseParser::Feed(std::string_view chunk) {
     std::vector<SseFrame> frames;
     std::size_t start = 0;
     while (true) {
+        // The spec allows LF, CRLF, and a lone CR as line terminators. Only
+        // '\n' was recognized: a CR-terminated stream never framed at all and
+        // died at the 1 MiB cap. A '\r' that is the LAST byte held is not a
+        // terminator yet -- it may be the first half of a CRLF split across
+        // chunks, and terminating there would let the next chunk's '\n' flush
+        // a partial frame as if it were complete.
         const std::size_t nl = line_buffer_.find('\n', start);
-        if (nl == std::string::npos) break;
-        const std::string_view line = strip_cr(std::string_view(line_buffer_).substr(start, nl - start));
-        start = nl + 1;
+        const std::size_t cr = line_buffer_.find('\r', start);
+        std::size_t eol;
+        std::size_t advance;
+        if (nl != std::string::npos && (cr == std::string::npos || nl < cr)) {
+            eol = nl;
+            advance = 1;
+        } else if (cr != std::string::npos) {
+            if (cr + 1 == line_buffer_.size()) break;  // wait for the byte after '\r'
+            eol = cr;
+            advance = line_buffer_[cr + 1] == '\n' ? 2 : 1;
+        } else {
+            break;
+        }
+        const std::string_view line =
+            strip_cr(std::string_view(line_buffer_).substr(start, eol - start));
+        start = eol + advance;
 
         if (line.empty()) {
             if (pending_has_data_) {
@@ -62,7 +93,8 @@ std::vector<SseFrame> SseParser::Feed(std::string_view chunk) {
         }
 
         if (field == "event") {
-            pending_event_.assign(value);
+            // An empty event value is the spec's "message", not a name.
+            pending_event_.assign(value.empty() ? "message" : value);
         } else if (field == "data") {
             if (pending_data_.size() + value.size() > kMaxPendingBytes) {
                 throw std::runtime_error(

@@ -484,6 +484,36 @@ destroyed underneath → predicate returns true, no UAF.
 
 ### W5 — Provider/transport robustness + CPU
 
+**Status: landed.** Full suite, `asan` and `tsan` presets green (1058 tests each; 16
+new). All items landed as specified, with three records:
+
+- **5.7's body-reuse half was NOT done, deliberately.** Killing the per-attempt
+  `ChatRequest` deep copy landed (`stream` is now a `BuildRequestBody` parameter) —
+  but the body is still serialized once per RETRY ATTEMPT, because the retry loop
+  lives in the agent loop and the provider's no-mutable-state-across-calls contract
+  (ARCHITECTURE.md, load-bearing for shared instances) forbids the provider caching a
+  body across calls. Reusing a byte-identical body across attempts would need either
+  an interface change on the frozen two-method `LlmProvider` or a caller-carried body
+  buffer; recorded rather than done, so the next reader does not re-derive it as an
+  oversight. The copy itself was the pure waste; the per-attempt serialization is the
+  same order as the POST the attempt makes anyway.
+- **Item 15 (verify-first) resolved: no defect.** `ChatRequest::messages` is a
+  borrowing `std::span`; `BuildChatRequest`'s assignment is O(1) span construction.
+  The review's copy claim was a misread of the span assignment; §8's optimization is
+  intact.
+- **The error-body cap changed meaning, on purpose.** It used to stop accumulating
+  but keep reading (a drip-feeding proxy held the transfer open forever); now the
+  reader aborts at the cap and the catch classifies by the STATUS it already holds.
+  The same catch now also classifies by status when a transport failure lands DURING
+  an error response — a 401 behind a stalling proxy no longer becomes retryable
+  Transport (§12's noted minor). The abort rides the sink's one `false` shape, which
+  the provider distinguishes with its own `error_body_capped` flag.
+
+Also verified-while-landing: the curl progress callback fires with upload progress
+advancing against a paced receive window, which is what made the new transport test
+deterministic (a loopback kernel buffer absorbs a small body instantly — the test
+shrinks `SO_RCVBUF` so the drain actually paces the upload).
+
 | # | Fix | Files |
 |---|---|---|
 | 5.1 | Idle callback tracks **upload** progress (`ulnow` change resets `last_progress`) | `http_client.cpp:135-146` |

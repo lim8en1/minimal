@@ -40,6 +40,13 @@ public:
 
     llm::ChatResponse Finalize(bool tolerate_malformed_tool_calls = false) const;
 
+    // The stream PROPERLY completed: a finish_reason was processed, or [DONE]
+    // arrived. A clean connection close without either is a truncated
+    // generation -- the provider turns a false here into a classified
+    // transport failure instead of accepting StopReason::Unknown as a
+    // complete turn.
+    bool completed() const { return completed_; }
+
 private:
     struct Block {
         enum class Kind { Text, ToolCall } kind;
@@ -49,11 +56,13 @@ private:
     };
 
     bool message_started_ = false;
-    bool finished_ = false;  // finish_reason already processed -- blocks closed, MessageDeltaEvent sent
+    bool finished_ = false;   // finish_reason already processed -- blocks closed, MessageDeltaEvent sent
+    bool completed_ = false;  // finish_reason OR [DONE]: the stream owes nothing
     std::string id_, model_;
     std::vector<Block> blocks_;                    // insertion order == first-seen order
     std::optional<std::size_t> text_block_index_;
     std::map<int, std::size_t> tool_call_indices_;  // OpenAI tool_calls[].index -> blocks_ index
+    std::size_t accumulated_bytes_ = 0;  // text + arguments content, capped -- see kMaxAccumulatedBytes
     llm::StopReason stop_reason_ = llm::StopReason::Unknown;
     llm::Usage usage_;
 };

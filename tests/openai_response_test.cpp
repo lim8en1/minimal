@@ -75,3 +75,52 @@ TEST_CASE("ParseNonStreamingResponse: unparsable tool-call arguments throws Open
     })");
     CHECK_THROWS_AS(ParseNonStreamingResponse(body), OpenAiParseError);
 }
+
+TEST_CASE("finish_reason: refusal maps to StopReason::Refusal, not Unknown",
+          "[openai_response][invariant]") {
+    // The enum value existed, had a wire mapping and a hook name -- and was
+    // produced by nothing: refusals degraded to Unknown and surfaced as a
+    // generic truncation.
+    const auto body = nlohmann::json::parse(
+        R"({"id":"c","model":"m","choices":[{"index":0,"message":{"role":"assistant","content":null},"finish_reason":"refusal"}]})");
+    const llm::ChatResponse response = ParseNonStreamingResponse(body);
+    CHECK(response.stop_reason == llm::StopReason::Refusal);
+}
+
+TEST_CASE("non-streaming parse: present-but-null fields degrade, never throw",
+          "[openai_response][invariant]") {
+    // value(key, default) only defaults on ABSENCE: `"usage": null` threw a
+    // type_error that became a non-retryable ParseError, killing the whole
+    // turn. The streaming path guarded these exact fields -- the asymmetry was
+    // the proof it was known.
+    const auto null_usage = nlohmann::json::parse(
+        R"({"id":"c","model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":null})");
+    llm::ChatResponse response;
+    REQUIRE_NOTHROW(response = ParseNonStreamingResponse(null_usage));
+    CHECK(response.usage.input_tokens == 0);
+    CHECK(response.usage.output_tokens == 0);
+
+    const auto null_finish = nlohmann::json::parse(
+        R"({"id":"c","model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":null}]})");
+    REQUIRE_NOTHROW(response = ParseNonStreamingResponse(null_finish));
+    CHECK(response.stop_reason == llm::StopReason::Unknown);
+
+    const auto null_ids = nlohmann::json::parse(
+        R"({"id":null,"model":null,"choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}]})");
+    REQUIRE_NOTHROW(response = ParseNonStreamingResponse(null_ids));
+    CHECK(response.id.empty());
+}
+
+TEST_CASE("ParseUsage: negative, fractional and absurd token counts are refused, not truncated",
+          "[openai_response]") {
+    const auto negative = nlohmann::json{{"prompt_tokens", -5}, {"completion_tokens", 10}};
+    const llm::Usage negative_usage = ParseUsage(negative);
+    CHECK(negative_usage.input_tokens == 0);  // not -5 poisoning the occupancy
+    CHECK(negative_usage.output_tokens == 10);
+
+    const auto fractional = nlohmann::json{{"prompt_tokens", 4096.7}};
+    CHECK(ParseUsage(fractional).input_tokens == 0);  // the InheritNumber bug class
+
+    const auto huge = nlohmann::json{{"completion_tokens", 9999999999999LL}};
+    CHECK(ParseUsage(huge).output_tokens == std::numeric_limits<int>::max());
+}

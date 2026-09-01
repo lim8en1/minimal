@@ -78,10 +78,23 @@ struct TransferState {
     bool cancelled_by_sink = false;
     bool body_exceeded_cap = false;
 
-    // Idle-timeout bookkeeping -- StreamPost() only.
+    // Idle-timeout bookkeeping -- StreamPost() only. BOTH directions count as
+    // progress: the callback used to look at downloads only, so the entire
+    // upload phase of a streaming POST ran with dlnow == 0 and a multi-MB
+    // request body on a modest uplink was killed at the idle timeout as
+    // "stalled" -- classified retryable, failed identically until the retries
+    // ran out.
     std::chrono::milliseconds idle_timeout{0};
     std::chrono::steady_clock::time_point last_progress = std::chrono::steady_clock::now();
     curl_off_t last_dlnow = 0;
+    curl_off_t last_ulnow = 0;
+
+    // Response-header bookkeeping -- the same bound-in-bytes story the body
+    // caps tell. A header firehose advances no dlnow, so the idle timeout was
+    // its only bound: up to a full idle window of line-rate header data in
+    // RAM from a misbehaving proxy.
+    std::size_t header_bytes = 0;
+    bool headers_exceeded_cap = false;
 };
 
 // Called lazily on the first body byte rather than by detecting the blank
@@ -97,9 +110,18 @@ void MaybeFireHeadersReady(TransferState& state) {
     state.headers_ready_fired = true;
 }
 
+// 64 KiB of response headers is orders above any legitimate completion
+// response (status, content-type, request ids, rate-limit buckets).
+constexpr std::size_t kMaxHeaderBytes = 64ull << 10;
+
 std::size_t HeaderCallback(char* buffer, std::size_t size, std::size_t nitems, void* userdata) {
     auto& state = *static_cast<TransferState*>(userdata);
     std::size_t total = size * nitems;
+    state.header_bytes += total;
+    if (state.header_bytes > kMaxHeaderBytes) {
+        state.headers_exceeded_cap = true;
+        return 0;  // short count -> CURLE_WRITE_ERROR, named below
+    }
     HttpHeader header;
     if (ParseHeaderLine(std::string_view(buffer, total), header)) {
         state.response.headers.push_back(std::move(header));
@@ -133,11 +155,19 @@ std::size_t WriteCallback(char* ptr, std::size_t size, std::size_t nmemb, void* 
 }
 
 int XferInfoCallback(void* clientp, curl_off_t /*dltotal*/, curl_off_t dlnow, curl_off_t /*ultotal*/,
-                      curl_off_t /*ulnow*/) {
+                      curl_off_t ulnow) {
     auto& state = *static_cast<TransferState*>(clientp);
     auto now = std::chrono::steady_clock::now();
-    if (dlnow != state.last_dlnow) {
+    // EITHER direction moving counts as progress. Upload progress was
+    // commented out here, which made the entire upload phase of a streaming
+    // POST look idle: dlnow stays 0 until the first response byte, so a
+    // multi-MB serialized request -- exactly the 512k-1M-token shape this
+    // harness exists for -- on an uplink slower than body/idle_timeout was
+    // aborted mid-upload, classified Transport (retryable), and failed
+    // identically until the retries ran out.
+    if (dlnow != state.last_dlnow || ulnow != state.last_ulnow) {
         state.last_dlnow = dlnow;
+        state.last_ulnow = ulnow;
         state.last_progress = now;
         return 0;
     }
@@ -146,6 +176,10 @@ int XferInfoCallback(void* clientp, curl_off_t /*dltotal*/, curl_off_t dlnow, cu
 }
 
 [[noreturn]] void ThrowForCurlCode(CURLcode code, const TransferState& state) {
+    if (code == CURLE_WRITE_ERROR && state.headers_exceeded_cap) {
+        throw HttpError(HttpErrorKind::Other,
+                        "response headers exceeded 64 KiB; refusing to buffer them");
+    }
     if (code == CURLE_WRITE_ERROR && state.body_exceeded_cap) {
         // Name the cap: "failed sending data" would send the reader debugging
         // their own request body instead of a server that never stopped.
@@ -222,7 +256,15 @@ HttpResponse ConfigureAndPerform(CURL* handle, const HttpRequest& request, Mode 
 
     SListGuard headers_guard;
     for (const auto& header : request.headers) {
-        headers_guard.list = curl_slist_append(headers_guard.list, (header.name + ": " + header.value).c_str());
+        // curl_slist_append returns NULL on allocation failure; assigning it
+        // into the guard would free nothing (the old list leaks) and the
+        // transfer would run header-less. Named failure instead.
+        auto* appended = curl_slist_append(headers_guard.list,
+                                           (header.name + ": " + header.value).c_str());
+        if (appended == nullptr) {
+            throw HttpError(HttpErrorKind::Other, "out of memory building request headers");
+        }
+        headers_guard.list = appended;
     }
     if (headers_guard.list) curl_easy_setopt(handle, CURLOPT_HTTPHEADER, headers_guard.list);
 

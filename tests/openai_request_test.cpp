@@ -41,7 +41,7 @@ Fixture BaseRequest() {
 // The builder returns the serialized body (that is the point of it -- no DOM of
 // the history); tests parse it to make structural assertions.
 nlohmann::json ParseBody(const llm::ChatRequest& request) {
-    return nlohmann::json::parse(BuildRequestBody(request));
+    return nlohmann::json::parse(BuildRequestBody(request, /*stream=*/false));
 }
 
 }  // namespace
@@ -76,7 +76,7 @@ TEST_CASE("BuildRequestBody: colliding parameter keys are dropped, never emitted
                           {"stream_options", "bogus"},
                           {"temperature", 0.7}};
 
-    const std::string text = BuildRequestBody(request);
+    const std::string text = BuildRequestBody(request, /*stream=*/false);
 
     // No duplicate keys: every structural name appears AT MOST once in the
     // serialized body (absence rules themselves are covered by the dedicated
@@ -215,15 +215,14 @@ TEST_CASE("BuildRequestBody: tool order is preserved, never re-sorted", "[openai
 }
 
 TEST_CASE("BuildRequestBody: stream_options.include_usage set iff streaming", "[openai_request]") {
-    Fixture streaming_fixture = BaseRequest();
-    auto& streaming = streaming_fixture.request;
-    streaming.stream = true;
-    CHECK(ParseBody(streaming)["stream_options"]["include_usage"] == true);
-
-    Fixture non_streaming_fixture = BaseRequest();
-    auto& non_streaming = non_streaming_fixture.request;
-    non_streaming.stream = false;
-    CHECK_FALSE(ParseBody(non_streaming).contains("stream_options"));
+    // The stream flag is a BuildRequestBody PARAMETER now -- request.stream is
+    // ignored -- so this drives the parameter directly on one fixture.
+    Fixture fixture = BaseRequest();
+    CHECK(nlohmann::json::parse(BuildRequestBody(fixture.request, /*stream=*/true))
+              ["stream_options"]["include_usage"] == true);
+    CHECK_FALSE(
+        nlohmann::json::parse(BuildRequestBody(fixture.request, /*stream=*/false))
+            .contains("stream_options"));
 }
 
 TEST_CASE("BuildRequestBody: max_tokens presence and precedence over parameters", "[openai_request]") {

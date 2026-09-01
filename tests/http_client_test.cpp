@@ -9,6 +9,7 @@
 #include <unistd.h>
 
 #include <csignal>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <thread>
@@ -177,4 +178,123 @@ TEST_CASE("a buffered response past the size cap aborts with an error", "[http_c
         CHECK(error.kind() == HttpErrorKind::Other);
         CHECK(std::string(error.what()).find("response body exceeds limit") != std::string::npos);
     }
+}
+
+namespace {
+
+// A loopback server that consumes the request body SLOWLY but STEADILY -- the
+// wire shape of a modest uplink. It reads 32 KiB per 30 ms slice, so a 2 MiB
+// upload takes ~2 s of continuously-advancing upload progress with zero
+// response bytes until the end.
+class SlowReadServer {
+public:
+    SlowReadServer() {
+        listen_fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
+        REQUIRE(listen_fd_ >= 0);
+        sockaddr_in address{};
+        address.sin_family = AF_INET;
+        address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        address.sin_port = 0;
+        REQUIRE(::bind(listen_fd_, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0);
+        REQUIRE(::listen(listen_fd_, 1) == 0);
+        // On loopback the kernel buffers absorb a small body instantly, which
+        // would make curl finish "uploading" before the drain even starts --
+        // and the post-upload silence would then be a LEGITIMATE idle abort. A
+        // tiny receive window keeps curl actively writing for the whole drain,
+        // which is what "slow uplink" actually looks like.
+        int rcvbuf = 16 * 1024;
+        (void)::setsockopt(listen_fd_, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
+        socklen_t length = sizeof(address);
+        REQUIRE(::getsockname(listen_fd_, reinterpret_cast<sockaddr*>(&address), &length) == 0);
+        port_ = ntohs(address.sin_port);
+        thread_ = std::thread([this] { Serve(); });
+    }
+    ~SlowReadServer() {
+        if (listen_fd_ >= 0) ::close(listen_fd_);
+        if (thread_.joinable()) thread_.join();
+    }
+    int port() const { return port_; }
+    std::string url() const { return "http://127.0.0.1:" + std::to_string(port_) + "/v1/chat"; }
+
+private:
+    void Serve() {
+        timeval tv{10, 0};
+        (void)::setsockopt(listen_fd_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        int fd = ::accept(listen_fd_, nullptr, nullptr);
+        if (fd < 0) return;
+        std::string request;
+        char buffer[32 * 1024];
+        // Headers first; Content-Length is how the server knows when the body
+        // is done (the client then waits for the response, so a server that
+        // kept recv-ing would deadlock the shape this test exists to prove).
+        std::size_t content_length = 0;
+        while (request.find("\r\n\r\n") == std::string::npos) {
+            ssize_t n = ::recv(fd, buffer, sizeof(buffer), 0);
+            if (n <= 0) {
+                ::close(fd);
+                return;
+            }
+            request.append(buffer, static_cast<std::size_t>(n));
+        }
+        if (const auto marker = request.find("Content-Length: "); marker != std::string::npos) {
+            content_length = std::strtoull(request.c_str() + marker + 15, nullptr, 10);
+        }
+        const auto body_start = request.find("\r\n\r\n") + 4;
+        std::size_t received = request.size() - body_start;
+        // The body, in slices -- each slice is upload progress the transfer
+        // callback must count, even though dlnow stays 0 the whole time.
+        while (received < content_length) {
+            ssize_t n = ::recv(fd, buffer, sizeof(buffer), 0);
+            if (n <= 0) break;
+            received += static_cast<std::size_t>(n);
+            std::this_thread::sleep_for(std::chrono::milliseconds(30));
+        }
+        const std::string response = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
+        (void)!::send(fd, response.data(), response.size(), 0);
+        ::close(fd);
+    }
+
+    int listen_fd_ = -1;
+    int port_ = 0;
+    std::thread thread_;
+};
+
+}  // namespace
+
+TEST_CASE("upload progress counts toward the streaming idle timeout", "[http_client][invariant]") {
+    // The idle callback used to watch DOWNLOADS only. During the entire upload
+    // phase of a streaming POST, dlnow == 0 -- so a multi-MB serialized request
+    // (the 512k-1M-token shape) on a modest uplink was killed at the idle
+    // timeout as "stalled", classified retryable, and failed identically until
+    // the retries ran out. The server here drains the upload steadily for ~4 s
+    // against a 2 s idle timeout: comfortably under the drain for the OLD code
+    // (which aborts at its first callback past the timeout -- upload progress
+    // never moved anything), comfortably above any scheduler stall a loaded
+    // run inflicts on the new one.
+    SlowReadServer server;
+    HttpClient http;
+    HttpRequest request;
+    request.url = server.url();
+    request.body = std::string(2ull << 20, 'x');  // 2 MiB: ~64 read slices
+    request.connect_timeout = std::chrono::milliseconds(2000);
+    request.request_timeout = std::chrono::milliseconds(0);  // streaming shape: idle-only
+    request.idle_timeout = std::chrono::milliseconds(2000);
+
+    // Streaming mode hands the body to the sink -- response.body stays empty.
+    std::string body;
+    HttpResponse response;
+    std::string failure;
+    try {
+        response = http.StreamPost(request, [](int, const std::vector<HttpHeader>&) {},
+                                   [&body](std::string_view chunk) {
+                                       body.append(chunk);
+                                       return true;
+                                   });
+    } catch (const HttpError& error) {
+        failure = error.what();
+    }
+    INFO("transfer failed: " << failure);
+    CHECK(failure.empty());
+    CHECK(response.status == 200);
+    CHECK(body == "ok");
 }

@@ -343,8 +343,12 @@ private:
     void RunTurnLoop(TurnResult& result, bool flush_first);
     bool Cancelled() const;
     // Waits before retry `attempt`, polling cancellation. False means "give up"
-    // -- cancelled during the wait -- so the caller stops retrying.
-    bool SleepForBackoff(int attempt);
+    // -- cancelled during the wait -- so the caller stops retrying. The
+    // server's own hint (a parsed Retry-After) outranks the computed backoff:
+    // retrying a 429 sooner than it permitted converts one rate-limit event
+    // into max_retries more.
+    bool SleepForBackoff(int attempt,
+                         std::optional<std::chrono::milliseconds> retry_after = std::nullopt);
 
     // Rebindable for /model across providers, hence the wrapper rather than a
     // plain reference member.

@@ -1,21 +1,47 @@
 #include "openai_response.hpp"
 
+#include <algorithm>
+#include <cstdint>
+#include <limits>
+
 namespace minimal::provider_openai {
+namespace {
+
+// value(key, default) only defaults on ABSENCE -- present-but-null throws
+// type_error. The streaming path guarded nulls (finish_reason, usage, ids);
+// these helpers sweep the same discipline over the non-streaming parser and
+// ParseUsage. is_number_integer also refuses floats: a fractional token count
+// silently truncating into a valid-looking limit is the InheritNumber bug
+// class (s12.27).
+int SafeTokenCount(const nlohmann::json& json, const char* key) {
+    if (!json.contains(key) || !json.at(key).is_number_integer()) return 0;
+    const std::int64_t value = json.at(key).get<std::int64_t>();
+    if (value <= 0) return 0;  // negative or zero: report nothing rather than poison the occupancy
+    return static_cast<int>(std::min<std::int64_t>(value, std::numeric_limits<int>::max()));
+}
+
+}  // namespace
 
 llm::StopReason MapFinishReason(const std::string& finish_reason) {
     if (finish_reason == "stop") return llm::StopReason::EndTurn;
     if (finish_reason == "length") return llm::StopReason::MaxTokens;
     if (finish_reason == "tool_calls" || finish_reason == "function_call") return llm::StopReason::ToolUse;
     if (finish_reason == "content_filter") return llm::StopReason::ContentFilter;
+    if (finish_reason == "refusal") {
+        // OpenAI's safety refusal on o-series/gpt-4o. The enum value existed,
+        // had a wire mapping and a hook name -- and was produced by nothing:
+        // refusals degraded to Unknown and surfaced as a generic truncation.
+        return llm::StopReason::Refusal;
+    }
     return llm::StopReason::Unknown;
 }
 
 llm::Usage ParseUsage(const nlohmann::json& usage_json) {
     llm::Usage usage;
-    usage.input_tokens = usage_json.value("prompt_tokens", 0);
-    usage.output_tokens = usage_json.value("completion_tokens", 0);
+    usage.input_tokens = SafeTokenCount(usage_json, "prompt_tokens");
+    usage.output_tokens = SafeTokenCount(usage_json, "completion_tokens");
     if (usage_json.contains("prompt_tokens_details") && usage_json["prompt_tokens_details"].contains("cached_tokens")) {
-        usage.cache_read_input_tokens = usage_json["prompt_tokens_details"]["cached_tokens"].get<int>();
+        usage.cache_read_input_tokens = SafeTokenCount(usage_json["prompt_tokens_details"], "cached_tokens");
     }
     // cache_creation_input_tokens has no OpenAI equivalent -- stays 0.
     return usage;
@@ -24,8 +50,14 @@ llm::Usage ParseUsage(const nlohmann::json& usage_json) {
 llm::ChatResponse ParseNonStreamingResponse(const nlohmann::json& body) {
     try {
         llm::ChatResponse response;
-        response.id = body.value("id", "");
-        response.model = body.value("model", "");
+        // Same present-but-null discipline as everywhere else: `"id": null`
+        // must degrade to empty, not kill the turn as a type_error.
+        response.id = body.contains("id") && !body.at("id").is_null()
+                          ? body.at("id").get<std::string>()
+                          : "";
+        response.model = body.contains("model") && !body.at("model").is_null()
+                             ? body.at("model").get<std::string>()
+                             : "";
 
         const auto& choices = body.at("choices");
         if (choices.empty()) throw OpenAiParseError("OpenAI response has no choices");
@@ -48,8 +80,13 @@ llm::ChatResponse ParseNonStreamingResponse(const nlohmann::json& body) {
             }
         }
 
-        response.stop_reason = MapFinishReason(choice.value("finish_reason", ""));
-        if (body.contains("usage")) response.usage = ParseUsage(body.at("usage"));
+        response.stop_reason =
+            choice.contains("finish_reason") && !choice.at("finish_reason").is_null()
+                ? MapFinishReason(choice.at("finish_reason").get<std::string>())
+                : llm::StopReason::Unknown;
+        if (body.contains("usage") && !body.at("usage").is_null()) {
+            response.usage = ParseUsage(body.at("usage"));
+        }
 
         return response;
     } catch (const OpenAiParseError&) {

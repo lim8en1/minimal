@@ -24,7 +24,12 @@ namespace minimal::provider_openai {
 // relying on how any given parser resolves duplicate JSON keys.
 // `max_tokens` is structural for the same reason even though it is a typed
 // ChatRequest member rather than a `parameters` knob.
-std::string BuildRequestBody(const llm::ChatRequest& request);
+// `stream` is a parameter, not a read off the request: the provider used to
+// deep-copy the whole ChatRequest (tools vector with every schema DOM, the
+// parameters object, the system string) per call AND PER RETRY ATTEMPT just
+// to flip that one bool. The body is byte-identical across the attempts of
+// one tool round; the flag is all that ever differed.
+std::string BuildRequestBody(const llm::ChatRequest& request, bool stream);
 
 // Tool definitions and tool_choice are small and structured; nlohmann is the
 // right tool for them, and they are exposed individually so each translation

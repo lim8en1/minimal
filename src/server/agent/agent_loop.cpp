@@ -76,8 +76,9 @@ AgentLoop::AgentLoop(llm::LlmProvider& provider, tools::ToolExecutor& executor,
 
 bool AgentLoop::Cancelled() const { return is_cancelled_ && is_cancelled_(); }
 
-bool AgentLoop::SleepForBackoff(int attempt) {
-    if (config_.retry_base_delay.count() <= 0) return !Cancelled();
+bool AgentLoop::SleepForBackoff(int attempt,
+                                std::optional<std::chrono::milliseconds> retry_after) {
+    if (config_.retry_base_delay.count() <= 0 && !retry_after) return !Cancelled();
 
     // Exponential with EQUAL jitter: half the ceiling fixed, half random.
     // Jitter matters even for one local user -- several sessions that failed
@@ -88,7 +89,13 @@ bool AgentLoop::SleepForBackoff(int attempt) {
     const auto ceiling = std::min(config_.retry_base_delay * (1 << attempt), config_.retry_max_delay);
     const std::int64_t half = ceiling.count() / 2;
     std::uniform_int_distribution<std::int64_t> pick(0, ceiling.count() - half);
-    const std::chrono::milliseconds delay{half + pick(jitter_)};
+    std::chrono::milliseconds delay{half + pick(jitter_)};
+
+    // The server's own hint outranks the computed backoff: retrying a 429
+    // sooner than its Retry-After converts one rate-limit event into
+    // max_retries more. The hint was parsed, carried and tested end to end --
+    // and then ignored here, the only consumer there ever was.
+    if (retry_after && *retry_after > delay) delay = *retry_after;
 
     // Slept in slices, polling cancellation. Sleeping the whole delay would
     // make CancelTurn wait out a backoff the user just asked to abandon --
@@ -600,7 +607,7 @@ void AgentLoop::RunTurnLoop(TurnResult& result, bool flush_first) {
                 // Backoff, not a bare retry. Without it the four attempts land
                 // inside a few milliseconds, which turns a 429 into four 429s
                 // and is worse for the backend than not retrying at all.
-                if (!SleepForBackoff(attempt)) {
+                if (!SleepForBackoff(attempt, error.retry_after())) {
                     // CancelTurn landed inside the backoff sleep. That is a
                     // cancellation, not a mysterious failure: report it as the
                     // Cancelled it is rather than letting the turn fall out with

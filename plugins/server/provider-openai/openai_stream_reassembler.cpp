@@ -5,9 +5,37 @@
 #include "openai_response.hpp"
 
 namespace minimal::provider_openai {
+namespace {
+
+// The total content one stream may accumulate -- text plus tool-call argument
+// fragments. The SSE parser's 1 MiB caps bound individual LINES; nothing used
+// to bound the TOTAL, so a server dripping one small frame just under every
+// idle timeout grew these strings at its drip rate forever while the session
+// worker hung. 64 MiB is ~16x a legitimate 1M-token text response.
+constexpr std::size_t kMaxAccumulatedBytes = 64ull << 20;
+
+void Accumulate(std::size_t& total, std::size_t bytes) {
+    total += bytes;
+    if (total > kMaxAccumulatedBytes) {
+        throw OpenAiParseError("stream content exceeded 64 MiB; refusing to accumulate more");
+    }
+}
+
+std::string_view TrimTrailing(std::string_view s) {
+    while (!s.empty() && (s.back() == ' ' || s.back() == '\t' || s.back() == '\r' ||
+                          s.back() == '\n')) {
+        s.remove_suffix(1);
+    }
+    return s;
+}
+
+}  // namespace
 
 bool OpenAiStreamReassembler::FeedFrame(std::string_view data, const llm::StreamEventSink& sink) {
-    if (data == "[DONE]") {
+    // Trailing whitespace survives the parser's single-leading-space strip, and
+    // "[DONE] " then died the whole stream as a parse error at the final frame.
+    if (TrimTrailing(data) == "[DONE]") {
+        completed_ = true;
         return !sink || sink(llm::MessageStopEvent{});
     }
 
@@ -19,8 +47,18 @@ bool OpenAiStreamReassembler::FeedFrame(std::string_view data, const llm::Stream
     }
 
     if (!message_started_) {
-        id_ = chunk.value("id", "");
-        model_ = chunk.value("model", "");
+        // value() on a key that is present-but-null throws type_error -- only
+        // absence takes the default. A proxy sending `"id": null` killed the
+        // turn as a ParseError; the streaming path guards (here and at
+        // finish_reason/usage), the non-streaming one did not -- until the
+        // guards were swept to both.
+        const auto string_or = [](const nlohmann::json& json,
+                                  const char* key) -> std::string {
+            if (!json.contains(key) || json.at(key).is_null()) return {};
+            return json.at(key).get<std::string>();
+        };
+        id_ = string_or(chunk, "id");
+        model_ = string_or(chunk, "model");
         message_started_ = true;
         if (sink && !sink(llm::MessageStartEvent{id_, model_})) return false;
     }
@@ -31,10 +69,16 @@ bool OpenAiStreamReassembler::FeedFrame(std::string_view data, const llm::Stream
 
         if (delta.contains("content") && !delta.at("content").is_null()) {
             std::string text = delta.at("content").get<std::string>();
-            if (!text_block_index_) {
+            // Text arriving AFTER tool calls started opens a NEW text block
+            // instead of appending to the first: the single text_block_index_
+            // reordered content on backends that narrate between calls, and
+            // re-emitted a TextDelta for a block the client had already seen
+            // closed. The unified model carries multi-block content natively.
+            if (!text_block_index_ || blocks_.back().kind != Block::Kind::Text) {
                 text_block_index_ = blocks_.size();
                 blocks_.push_back(Block{Block::Kind::Text, {}, {}, {}, {}, false});
             }
+            Accumulate(accumulated_bytes_, text.size());
             blocks_[*text_block_index_].text += text;
             if (sink && !sink(llm::TextDeltaEvent{static_cast<int>(*text_block_index_), text})) return false;
         }
@@ -57,6 +101,7 @@ bool OpenAiStreamReassembler::FeedFrame(std::string_view data, const llm::Stream
                     if (function.contains("name")) block.name = function.at("name").get<std::string>();
                     if (function.contains("arguments")) {
                         arguments_fragment = function.at("arguments").get<std::string>();
+                        Accumulate(accumulated_bytes_, arguments_fragment.size());
                         block.arguments_json += arguments_fragment;
                     }
                 }
@@ -76,6 +121,7 @@ bool OpenAiStreamReassembler::FeedFrame(std::string_view data, const llm::Stream
 
         if (!finished_ && choice.contains("finish_reason") && !choice.at("finish_reason").is_null()) {
             finished_ = true;
+            completed_ = true;
             for (std::size_t i = 0; i < blocks_.size(); ++i) {
                 if (blocks_[i].kind == Block::Kind::Text || blocks_[i].started) {
                     if (sink && !sink(llm::ContentBlockStopEvent{static_cast<int>(i)})) return false;

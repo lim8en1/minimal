@@ -1,6 +1,7 @@
 #include "openai_request.hpp"
 
 #include <set>
+#include <stdexcept>
 #include <string_view>
 #include <variant>
 
@@ -63,12 +64,19 @@ nlohmann::json ToOpenAiToolChoice(const llm::ToolChoiceSpec& choice) {
         case llm::ToolChoiceKind::Required:
             return "required";
         case llm::ToolChoiceKind::Specific:
+            // "set iff kind == Specific" is the struct's contract; an unchecked
+            // dereference here was UB on the one violation path, from public,
+            // individually-tested plugin API.
+            if (!choice.tool_name) {
+                throw std::invalid_argument(
+                    "ToolChoiceKind::Specific requires tool_name to be set");
+            }
             return {{"type", "function"}, {"function", {{"name", *choice.tool_name}}}};
     }
     return "auto";
 }
 
-std::string BuildRequestBody(const llm::ChatRequest& request) {
+std::string BuildRequestBody(const llm::ChatRequest& request, bool stream) {
     // THE WHOLE BODY IS SERIALIZED INCREMENTALLY. The previous version built a
     // nlohmann DOM of the entire history and then dump()ed it -- two
     // materializations of every message per provider call, against a stated
@@ -192,7 +200,7 @@ std::string BuildRequestBody(const llm::ChatRequest& request) {
     out += ']';
 
     out += R"(,"stream":)";
-    out += request.stream ? "true" : "false";
+    out += stream ? "true" : "false";
 
     if (!request.tools.empty()) {
         out += R"(,"tools":)";
@@ -205,7 +213,7 @@ std::string BuildRequestBody(const llm::ChatRequest& request) {
         out += R"(,"max_tokens":)" + std::to_string(*request.max_tokens);
     }
 
-    if (request.stream) {
+    if (stream) {
         // Needed to get a usage-bearing chunk at the end of the SSE stream.
         out += R"(,"stream_options":{"include_usage":true})";
     }

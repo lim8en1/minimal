@@ -253,3 +253,97 @@ TEST_CASE("cancellation tolerance: a tool call cut mid-arguments is dropped, not
     // Strict mode -- a non-cancel exit -- still refuses the malformed call.
     CHECK_THROWS_AS(reassembler.Finalize(), OpenAiParseError);
 }
+
+TEST_CASE("completed(): finish_reason and [DONE] mark completion; a bare cut does not",
+          "[openai_stream][invariant]") {
+    // The provider turns a false here into a classified transport failure
+    // instead of accepting StopReason::Unknown as a complete turn -- a proxy
+    // truncating mid-generation with a tidy FIN used to produce a partial
+    // assistant message persisted as ordinary history.
+    OpenAiStreamReassembler reassembler;
+    std::vector<llm::StreamEvent> events;
+    auto sink = CollectInto(events);
+    CHECK_FALSE(reassembler.completed());
+    REQUIRE(reassembler.FeedFrame(
+        R"({"id":"c1","model":"m","choices":[{"delta":{"content":"partial"},"finish_reason":null}]})",
+        sink));
+    CHECK_FALSE(reassembler.completed());
+    REQUIRE(reassembler.FeedFrame(
+        R"({"id":"c1","model":"m","choices":[{"delta":{},"finish_reason":"stop"}]})", sink));
+    CHECK(reassembler.completed());
+
+    OpenAiStreamReassembler done_terminated;
+    std::vector<llm::StreamEvent> done_events;
+    auto sink2 = CollectInto(done_events);
+    REQUIRE(done_terminated.FeedFrame(
+        R"({"id":"c2","model":"m","choices":[{"delta":{"content":"x"},"finish_reason":null}]})",
+        sink2));
+    REQUIRE(done_terminated.FeedFrame("[DONE]", sink2));
+    CHECK(done_terminated.completed());
+}
+
+TEST_CASE("[DONE] with trailing whitespace completes instead of dying as a parse error",
+          "[openai_stream]") {
+    OpenAiStreamReassembler reassembler;
+    std::vector<llm::StreamEvent> events;
+    auto sink = CollectInto(events);
+    REQUIRE(reassembler.FeedFrame(
+        R"({"id":"c1","model":"m","choices":[{"delta":{"content":"x"},"finish_reason":null}]})",
+        sink));
+    REQUIRE_NOTHROW(reassembler.FeedFrame("[DONE] ", sink));
+    CHECK(reassembler.completed());
+}
+
+TEST_CASE("text arriving after tool calls opens a new text block, never reorders",
+          "[openai_stream][invariant]") {
+    // The single text_block_index_ appended every content delta to the FIRST
+    // text block: on backends that narrate between tool calls, later text was
+    // re-emitted as a delta for a block the client had already seen closed,
+    // and Finalize placed all text before all tool calls regardless of wire
+    // order. Content order is now preserved, block for block.
+    OpenAiStreamReassembler reassembler;
+    std::vector<llm::StreamEvent> events;
+    auto sink = CollectInto(events);
+
+    REQUIRE(reassembler.FeedFrame(
+        R"({"id":"c1","model":"m","choices":[{"delta":{"content":"step one: "}}]})", sink));
+    REQUIRE(reassembler.FeedFrame(
+        R"({"id":"c1","model":"m","choices":[{"delta":{"tool_calls":[{"index":0,"id":"t1","function":{"name":"bash","arguments":"{}"}}]}}]})",
+        sink));
+    REQUIRE(reassembler.FeedFrame(
+        R"({"id":"c1","model":"m","choices":[{"delta":{"content":"step two: "}}]})", sink));
+    REQUIRE(reassembler.FeedFrame(
+        R"({"id":"c1","model":"m","choices":[{"delta":{},"finish_reason":"tool_calls"}]})", sink));
+
+    const llm::ChatResponse response = reassembler.Finalize();
+    REQUIRE(response.content.size() == 3);
+    CHECK(std::get<llm::TextBlock>(response.content[0]).text == "step one: ");
+    CHECK(std::get<llm::ToolUseBlock>(response.content[1]).id == "t1");
+    CHECK(std::get<llm::TextBlock>(response.content[2]).text == "step two: ");
+}
+
+TEST_CASE("accumulated stream content is capped, however slowly it drips",
+          "[openai_stream][invariant]") {
+    // The 1 MiB SSE caps bound individual LINES; nothing bounded the TOTAL.
+    // A server dripping one small frame just under every idle timeout grew the
+    // reassembly strings at its drip rate forever while the worker hung. 64
+    // MiB is ~16x a legitimate 1M-token response.
+    OpenAiStreamReassembler reassembler;
+    std::vector<llm::StreamEvent> drip_events;
+    auto sink = CollectInto(drip_events);
+    const std::string payload(1ull << 20, 'a');  // 1 MiB per frame
+    std::string frame_data = R"({"id":"c1","model":"m","choices":[{"delta":{"content":")";
+    // Escape-free padding: 'a' needs no JSON escaping.
+    std::string frame_tail = R"("}}]})";
+
+    bool threw = false;
+    try {
+        for (int i = 0; i < 80; ++i) {  // 80 MiB attempted: double the cap
+            reassembler.FeedFrame(frame_data + payload + frame_tail, sink);
+        }
+    } catch (const OpenAiParseError& error) {
+        threw = true;
+        CHECK(std::string(error.what()).find("64 MiB") != std::string::npos);
+    }
+    CHECK(threw);
+}
