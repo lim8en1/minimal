@@ -388,6 +388,37 @@ TEST_CASE("a window past the end of a file is empty, not an overflow",
     CHECK_FALSE(window.truncated);
 }
 
+TEST_CASE("a NUL past the binary sniff truncates its line with a visible marker",
+          "[tools_fs][read][invariant]") {
+    // A file that is text in the first 8 KiB but carries a NUL deeper in:
+    // strlen stopped at it, so the model was handed a line ending mid-content
+    // with nothing saying so -- a corrupted view indistinguishable from a real
+    // short line. The marker matches the overlong-line footer's voice.
+    Fixture f;
+    const auto path = f.dir.path() / "mostly-text.log";
+    {
+        std::ofstream out(path, std::ios::binary);
+        out << "entry before\n";
+        for (int i = 0; i < 3000; ++i) out << "pad\n";  // push past the 8 KiB sniff window
+        out << "short line" << '\0' << "hidden tail\n";
+        out << "entry last\n";
+    }
+
+    const auto window = tools::read_window(path, 1, 0 /* no limit */, 2000);
+    REQUIRE(window.ok);
+    REQUIRE(window.lines.size() == 3003);
+    // The NUL line carries the marker; the bytes past the NUL are not rendered
+    // as if they were a normal continuation.
+    const std::string& nul_line = window.lines[3001];
+    CHECK(nul_line.find("NUL byte") != std::string::npos);
+    CHECK(nul_line.find("hidden tail") == std::string::npos);
+    CHECK(nul_line.substr(0, 10) == "short line");
+    // Real lines carry no marker.
+    CHECK(window.lines[0] == "entry before");
+    CHECK(window.lines[1] == "pad");
+    CHECK(window.lines[3002] == "entry last");
+}
+
 TEST_CASE("read windows are clamped to the configured ceiling; the clamp is disclosed",
           "[tools_fs][invariant]") {
     // "Memory proportional to `limit`, not file size" was hollow when `limit`

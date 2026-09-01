@@ -9,6 +9,8 @@ namespace {
 
 constexpr std::size_t kBinarySniffBytes = 8192;
 constexpr const char* kTruncationMarker = "... [line truncated]";
+constexpr const char* kNulMarker =
+    "... [line truncated at a NUL byte; file may be binary past the first 8 KiB]";
 
 // The ceiling when no max_line_length is configured. There has to be one: the
 // promise this function makes is that memory tracks `limit`, and "no configured
@@ -98,12 +100,28 @@ FileWindow read_window(const std::filesystem::path& confined_abs_path, int offse
         }
 
         line.assign(buffer.data());
+        // A NUL the 8 KiB binary sniff did not see (it sits deeper in the
+        // file) ends the C-string here: strlen stops at it, so the model was
+        // handed a line that ended mid-content with nothing saying so -- a
+        // corrupted view indistinguishable from a real short line.
+        //
+        // Detected by length, not by scanning for '\0' (getline always writes
+        // its own terminator, which a scan cannot distinguish from content):
+        // a NUL-free line's visible length is exactly `gcount()` when the
+        // delimiter was not consumed (EOF-terminated or buffer-full line) or
+        // one less when it was. Anything shorter means a NUL cut the string.
+        const std::size_t visible = line.size();
+        const std::size_t extracted_count = static_cast<std::size_t>(extracted);
+        const bool has_nul = visible != extracted_count && visible + 1 != extracted_count;
         // A trailing "\r" survives getline on CRLF files and would otherwise be
         // rendered into the model's context as a stray control character.
         if (!line.empty() && line.back() == '\r') line.pop_back();
         if (overlong || (max_line_length > 0 && static_cast<int>(line.size()) > max_line_length)) {
             if (max_line_length > 0) line.resize(static_cast<std::size_t>(max_line_length));
             line += kTruncationMarker;
+        }
+        if (has_nul) {
+            line += kNulMarker;  // last, so the overlong resize cannot cut it
         }
         window.lines.push_back(std::move(line));
         line.clear();

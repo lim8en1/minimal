@@ -31,7 +31,10 @@ struct FileWindow {
 //
 // Binary files are refused rather than dumped into the model's context as
 // mojibake: detection is a NUL byte within the first 8 KiB, which is what
-// separates real text from anything with an encoded payload in practice.
+// separates real text from anything with an encoded payload in practice. A NUL
+// deeper in the file cannot trigger that sniff; it truncates the line it sits
+// in at the C-string boundary, so that line carries a visible marker instead
+// of looking like a real short line.
 //
 // Lines longer than max_line_length are truncated with a visible marker rather
 // than silently, so the model can tell the difference between a short line and
