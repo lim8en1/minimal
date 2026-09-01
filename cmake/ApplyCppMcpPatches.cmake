@@ -1,14 +1,17 @@
 # Applies the vendored cpp-mcp patches, idempotently.
 #
-# cpp-mcp is pinned (no releases), fetched by FetchContent, and carries two
-# vendored patches:
-#   - patches/cpp-mcp-child-pid.patch: an atomic process_id_ plus a
-#     child_pid() accessor, so the harness can kill a wedged stdio child on
-#     teardown -- see McpConnection::Teardown.
-#   - patches/cpp-mcp-read-thread-eof.patch: the read thread fails every
-#     pending request when the pipe closes, so a child that dies mid-request
-#     unblocks its caller immediately instead of wedging it for the internal
-#     60 s future timeout.
+# cpp-mcp is pinned (no releases), fetched by FetchContent, and carries these
+# vendored patches (see patches/*.patch for the full rationale of each):
+#   - cpp-mcp-child-pid.patch: an atomic process_id_ plus a child_pid()
+#     accessor, so the harness can kill a wedged stdio child on teardown --
+#     see McpConnection::Teardown.
+#   - cpp-mcp-read-thread-eof.patch: the read thread fails every pending
+#     request when the pipe closes, so a child that dies mid-request unblocks
+#     its caller immediately instead of wedging it for the internal 60 s
+#     future timeout.
+#   - cpp-mcp-stop-server-race.patch, cpp-mcp-logger-leaky.patch,
+#     cpp-mcp-generate-id-race.patch: TSan-found races/leaks in the vendored
+#     stop path, logger singleton, and request-id counter.
 #
 # Runs AFTER FetchContent_MakeAvailable, so ${cpp_mcp_SOURCE_DIR} is defined.
 # Idempotent because `git apply --check` fails on an already-patched tree
@@ -43,13 +46,19 @@ foreach(patch IN LISTS cpp_mcp_patches)
         message(STATUS "cpp-mcp: applied ${patch}")
     else()
         # Already applied (or the pinned SHA changed under us). Each patch's
-        # marker proves it: if no marker is present, the tree diverged and the
-        # patch needs a rebase -- fail loudly, never build silently.
+        # marker proves it: if no marker is present in ANY file a patch could
+        # have touched, the tree diverged and the patch needs a rebase --
+        # fail loudly, never build silently.
         file(STRINGS "${cpp_mcp_SOURCE_DIR}/include/mcp_stdio_client.h" marker_header
              REGEX "minimal-mcp patch")
         file(STRINGS "${cpp_mcp_SOURCE_DIR}/src/mcp_stdio_client.cpp" marker_source
              REGEX "minimal-mcp patch")
-        if(marker_header STREQUAL "" AND marker_source STREQUAL "")
+        file(STRINGS "${cpp_mcp_SOURCE_DIR}/include/mcp_logger.h" marker_logger
+             REGEX "minimal-mcp patch")
+        file(STRINGS "${cpp_mcp_SOURCE_DIR}/include/mcp_message.h" marker_message
+             REGEX "minimal-mcp patch")
+        if(marker_header STREQUAL "" AND marker_source STREQUAL "" AND
+           marker_logger STREQUAL "" AND marker_message STREQUAL "")
             message(FATAL_ERROR
                     "cpp-mcp patch does not apply and its marker is missing: ${patch}. "
                     "Delete the build/_deps/cpp_mcp-src directory to re-fetch, "
