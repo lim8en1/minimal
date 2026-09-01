@@ -6,6 +6,8 @@
 // Modes (argv[1]):
 //   normal          -- tools: echo{text}, slow{ms}, fail{} (tool error)
 //   hang            -- same tools plus hang{} which sleeps 10 minutes
+//   stubborn        -- like hang, but ignores SIGTERM: teardown must escalate
+//                      all the way to SIGKILL to reap it
 //   die_after_ms:N  -- normal, but the process _exit()s N ms after start
 //                      (dies right after a successful initialize)
 //   garbage         -- emits non-JSON junk on stdout forever (protocol corrupt)
@@ -15,6 +17,7 @@
 #include <mcp_server.h>
 #include <mcp_tool.h>
 
+#include <csignal>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -134,6 +137,9 @@ int main(int argc, char** argv) {
             std::_Exit(0);  // _exit: no atexit chatter on the JSON-RPC pipe
         }).detach();
     } else if (mode == "hang") {
+        RegisterStandardTools(server, true);
+    } else if (mode == "stubborn") {
+        std::signal(SIGTERM, SIG_IGN);
         RegisterStandardTools(server, true);
     } else {
         RegisterStandardTools(server, false);

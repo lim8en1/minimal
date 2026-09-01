@@ -12,6 +12,7 @@
 
 #include "minimal/common/logger.hpp"
 #include "minimal/mcp/mcp_client_manager.hpp"
+#include "minimal/tools/tool.hpp"
 #include "minimal/tools/tool_registry.hpp"
 #include "support/deadline.hpp"
 #include "support/fake_http_mcp_server.hpp"
@@ -105,6 +106,43 @@ TEST_CASE("McpClientManager: a restarted server respawns and re-discovers", "[mc
 
     const auto tools = fixture.registry.DefinitionsForMcpServers({"fake"});
     CHECK(tools.size() == 4);  // re-registered, not duplicated
+}
+
+TEST_CASE("McpClientManager: a restart does not stall behind the old connection's teardown",
+          "[mcp_manager]") {
+    // "stubborn" ignores SIGTERM: tearing its connection down inline would
+    // need the full ~5 s SIGTERM-grace-then-SIGKILL reap (mcp_stdio_shim.cpp).
+    // A short request timeout means the liveness ping queued behind the
+    // in-flight "hang" call times out quickly, giving EnsureAlive a
+    // deterministic reason to restart without waiting on the hang call itself.
+    Fixture fixture(nlohmann::json::array({StdioEntry("fake", "stubborn")}),
+                    {std::chrono::seconds(5), std::chrono::milliseconds(500)});
+    std::string error;
+    REQUIRE(fixture.manager->EnsureAlive("fake", error));
+
+    auto hang_tool = fixture.registry.Find("mcp__fake__hang");
+    REQUIRE(hang_tool != nullptr);
+    minimal::tools::ToolContext ctx(minimal::common::DefaultLogger());
+    // Occupies the connection's one worker thread for effectively ever (the
+    // fake server's hang tool sleeps 10 minutes); this call itself returns in
+    // ~500 ms once ITS OWN request times out, leaving the worker still stuck.
+    std::thread occupy_worker(
+        [hang_tool, ctx]() mutable { (void)hang_tool->execute(nlohmann::json::object(), ctx); });
+    occupy_worker.detach();
+
+    // Past kVerifiedTtl (2 s, mcp_client_manager.cpp) plus enough slack for
+    // the hang call above to have actually started running on the worker.
+    std::this_thread::sleep_for(std::chrono::milliseconds(2500));
+
+    const auto started = std::chrono::steady_clock::now();
+    REQUIRE(fixture.manager->EnsureAlive("fake", error));  // ping times out -> restart
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+    CHECK(fixture.manager->StatusOf("fake").generation == 2);
+
+    // Bounded by the ping timeout (500 ms) plus a fresh spawn+handshake --
+    // nowhere near the old (stubborn, wedged) connection's multi-second
+    // teardown, which the graveyard reaper now pays instead of this call.
+    CHECK(elapsed < std::chrono::seconds(3));
 }
 
 TEST_CASE("McpClientManager: a server that cannot start is a surfaced error", "[mcp_manager]") {

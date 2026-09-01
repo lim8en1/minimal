@@ -1,8 +1,11 @@
 #pragma once
 
+#include <atomic>
+#include <condition_variable>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -33,6 +36,12 @@ public:
     // tools from it (sessions borrow the manager via the registry's tools).
     McpClientManager(config::McpsConfig config, tools::ToolRegistry& registry,
                      const McpLimits& limits, common::Logger& logger);
+
+    // Stops and joins the graveyard reaper. Any connection still live in
+    // `handles_` at this point destructs normally, on this thread -- process
+    // shutdown paying a bounded teardown cost once is not the bug; a session
+    // worker paying it on every restart was.
+    ~McpClientManager();
 
     struct Status {
         bool configured = false;  // present and enabled in mcps.json
@@ -74,6 +83,22 @@ private:
 
     mutable std::mutex mu_;  // session workers call EnsureAlive concurrently
     std::unordered_map<std::string, std::shared_ptr<ServerHandle>> handles_;
+
+    // A restarted server's OLD connection lands here instead of being
+    // destroyed inline by StartHandle: ~McpConnection's teardown blocks for up
+    // to ~250 ms (worker join) plus up to another 5 s (SIGTERM grace before
+    // SIGKILL) -- unacceptable held under `ServerHandle::mu`, which
+    // HandleInvoker::CallTool also takes just to read the live connection
+    // pointer. The reaper thread drains this vector and lets the teardown run
+    // off any session worker. Modeled on SessionRegistry's reaper
+    // (session_registry.cpp).
+    std::mutex graveyard_mu_;
+    std::condition_variable graveyard_cv_;
+    std::vector<std::shared_ptr<McpConnection>> graveyard_;
+    std::atomic<bool> stop_reaper_{false};
+    std::thread reaper_;
+
+    void ReaperMain();
 };
 
 }  // namespace minimal::mcp

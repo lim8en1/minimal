@@ -73,6 +73,34 @@ McpClientManager::McpClientManager(config::McpsConfig config, tools::ToolRegistr
         handle->invoker = std::make_shared<HandleInvoker>(handle);
         handles_.emplace(entry.name, std::move(handle));
     }
+    reaper_ = std::thread([this] { ReaperMain(); });
+}
+
+McpClientManager::~McpClientManager() {
+    stop_reaper_.store(true, std::memory_order_release);
+    graveyard_cv_.notify_one();
+    if (reaper_.joinable()) reaper_.join();
+}
+
+void McpClientManager::ReaperMain() {
+    while (!stop_reaper_.load(std::memory_order_acquire)) {
+        std::vector<std::shared_ptr<McpConnection>> doomed;
+        {
+            std::unique_lock<std::mutex> lock(graveyard_mu_);
+            // The periodic timeout is a belt-and-suspenders wakeup in case a
+            // notify races the wait (a push between the stop check above and
+            // the wait below); nothing here depends on it firing promptly.
+            graveyard_cv_.wait_for(lock, std::chrono::milliseconds(500), [this] {
+                return stop_reaper_.load(std::memory_order_acquire) || !graveyard_.empty();
+            });
+            doomed.swap(graveyard_);
+        }
+        // Destructors run here, off the lock, off any session worker: this is
+        // the whole point -- ~McpConnection's blocking teardown (worker join,
+        // then SIGTERM-grace-then-SIGKILL reap) costs whatever it costs, but
+        // pays it on the reaper thread, not a caller's.
+        doomed.clear();
+    }
 }
 
 namespace {
@@ -156,11 +184,22 @@ bool McpClientManager::StartHandle(const config::McpServerEntry& entry, ServerHa
     // Caller holds handle.start_mu. Close any previous connection first: a
     // dead child must not linger, and the swap must be atomic from the
     // invoker's point of view (a concurrent CallTool holds the old
-    // connection alive through its shared_ptr copy).
-    if (handle.connection) {
+    // connection alive through its shared_ptr copy). The old connection is
+    // MOVED OUT under handle.mu, not destroyed under it -- ~McpConnection's
+    // teardown blocks (worker join, then a SIGTERM-grace-then-SIGKILL reap),
+    // and handle.mu is the same lock CallTool takes just to read the live
+    // connection pointer. Handing it to the graveyard lets the reaper thread
+    // pay that cost instead of every concurrent tool call stalling behind it.
+    std::shared_ptr<McpConnection> old_connection;
+    {
         std::lock_guard<std::mutex> lock(handle.mu);
-        handle.connection.reset();
+        old_connection = std::move(handle.connection);
         handle.alive = false;
+    }
+    if (old_connection) {
+        std::lock_guard<std::mutex> lock(graveyard_mu_);
+        graveyard_.push_back(std::move(old_connection));
+        graveyard_cv_.notify_one();
     }
 
     const auto resolved = ResolveEndpoint(entry, error, logger_);
