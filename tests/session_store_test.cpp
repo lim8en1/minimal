@@ -1048,6 +1048,71 @@ TEST_CASE("name_source records where a name came from", "[session][naming]") {
     CHECK_FALSE(db.IsExplicitlyNamed(default_id));
 }
 
+TEST_CASE("deleting a large transcript leaves nothing behind", "[session][delete]") {
+    // The chunked-delete rewrite changed the stall shape (chunks interleave
+    // with other sessions' work), not the result: every message, child,
+    // and checkpoint is gone, seq accounting included, and a second delete
+    // reports false.
+    TempDir dir;
+    SessionDatabase db(dir.path() / "big.db");
+    const auto parent = db.CreateSession("", std::nullopt, "/p", "build").session_id;
+    const auto child = db.CreateSession("", parent, "/p", "build").session_id;
+    for (int i = 0; i < 3000; ++i) {  // > 6 chunks of 500
+        db.AppendMessage(parent, UserMsg(std::string(32, 'x') + std::to_string(i)));
+    }
+    db.AppendMessage(child, UserMsg("child row"));
+    db.SaveCompactionCheckpoint(parent, 10, llm::Message{llm::Role::User, {llm::TextBlock{"s"}}});
+
+    REQUIRE(db.DeleteSession(parent));
+    CHECK(db.ListSessions({.include_subagents = true}).empty());
+    CHECK(db.LoadMessages(parent).empty());
+    CHECK(db.LoadMessages(child).empty());
+    CHECK_FALSE(db.LoadCompactionCheckpoint(parent).has_value());
+    CHECK_FALSE(db.DeleteSession(parent));  // already gone, reported honestly
+}
+
+TEST_CASE("the startup orphan sweep removes rows whose session is gone",
+          "[session][delete][invariant]") {
+    // This binary deletes messages before the session row, so its own crash
+    // mid-delete cannot create orphans -- the sweep exists for databases
+    // written by paths without that promise (foreign_keys off, legacy tools).
+    // Written by such a path here: raw sqlite, foreign keys off.
+    TempDir dir;
+    const auto path = dir.path() / "orphans.db";
+    std::string id;
+    {
+        SessionDatabase db(path);
+        id = db.CreateSession("", std::nullopt, "/p", "build").session_id;
+        db.AppendMessage(id, UserMsg("real"));
+    }
+    {
+        sqlite3* raw = RawOpen(path);
+        char* err = nullptr;
+        REQUIRE(sqlite3_exec(raw,
+                             "INSERT INTO messages (session_id, seq, role, content_json,"
+                             " token_count, created_at) VALUES ('ghost-session', 0, 'user',"
+                             " '{\"role\":\"user\",\"content\":[]}', 0, 0);",
+                             nullptr, nullptr, &err) == SQLITE_OK);
+        REQUIRE(sqlite3_exec(raw,
+                             "INSERT INTO compactions (session_id, boundary_seq,"
+                             " summary_content_json, created_at) VALUES ('ghost-session', 0,"
+                             " '{}', 0);",
+                             nullptr, nullptr, &err) == SQLITE_OK);
+        sqlite3_close(raw);
+    }
+
+    SessionDatabase reopened(path);  // the sweep runs at open
+
+    // The orphans are gone; the real rows are untouched.
+    CHECK(RawScalar(path, "SELECT COUNT(*) FROM messages WHERE session_id = 'ghost-session';") ==
+          "0");
+    CHECK(RawScalar(path,
+                    "SELECT COUNT(*) FROM compactions WHERE session_id = 'ghost-session';") ==
+          "0");
+    REQUIRE(reopened.LoadMessages(id).size() == 1);
+    CHECK_FALSE(reopened.LoadCompactionCheckpoint(id).has_value());
+}
+
 // --- Crash safety ---------------------------------------------------------------------
 
 TEST_CASE("a second open of the same database is refused, holder pid named",

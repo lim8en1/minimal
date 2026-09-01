@@ -179,7 +179,14 @@ public:
     // old, and a titler only ever fires for a fresh session's first turn in
     // the process that created it.
     bool IsExplicitlyNamed(const std::string& session_id) const;
-    bool DeleteSession(const std::string& session_id);  // cascades to messages and children
+    // Deletes the session, every descendant, their messages, and their
+    // compaction checkpoints. Messages go in CHUNKED sub-transactions (the
+    // whole-transcript cascade used to hold mu_ for the entire delete);
+    // returns true when the session existed. Deliberate tradeoff: a crash
+    // mid-delete leaves the session row with a partial transcript rather than
+    // all-or-nothing -- delete again to finish; the constructor's orphan sweep
+    // cleans what a crash can orphan.
+    bool DeleteSession(const std::string& session_id);
 
     // Checkpointing discipline. wal_autocheckpoint is DISABLED at open: the
     // default (checkpoint after every ~1000 WAL pages) made a committing append

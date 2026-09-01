@@ -364,6 +364,38 @@ SessionDatabase::SessionDatabase(const std::filesystem::path& db_path, const Ope
 
     const auto& migrations = options.migrations ? *options.migrations : DefaultMigrations();
     ApplyMigrations(db_, kSchemaVersion, migrations);
+
+    // Orphan sweep: message or checkpoint rows whose session is gone. This
+    // binary deletes messages BEFORE the session row (see DeleteSession), so a
+    // crash mid-delete leaves a session with a partial transcript, not
+    // orphans -- the sweep exists for databases written by paths that cannot
+    // make that promise (a legacy database, or one written while
+    // foreign_keys was off). One indexed pass at open: NOT EXISTS probes
+    // sessions through the (session_id, ...) index prefix per row rather than
+    // scanning the sessions table per message.
+    //
+    // Best-effort by design: a failure (a corrupt page in the messages table,
+    // a busy disk) is rolled back and swallowed, because the sweep is hygiene
+    // rather than correctness -- refusing to open over it would make a
+    // corrupt-but-servable database unstartable, and the corruption surfaces
+    // at read time anyway.
+    try {
+        ExecChecked(db_, "BEGIN IMMEDIATE;", "failed to begin orphan sweep");
+        ExecChecked(db_,
+                    "DELETE FROM messages WHERE NOT EXISTS"
+                    " (SELECT 1 FROM sessions s WHERE s.id = messages.session_id);",
+                    "failed to sweep orphaned messages");
+        ExecChecked(db_,
+                    "DELETE FROM compactions WHERE NOT EXISTS"
+                    " (SELECT 1 FROM sessions s WHERE s.id = compactions.session_id);",
+                    "failed to sweep orphaned compactions");
+        ExecChecked(db_, "COMMIT;", "failed to commit orphan sweep");
+    } catch (...) {
+        char* err = nullptr;
+        if (sqlite3_exec(db_, "ROLLBACK;", nullptr, nullptr, &err) != SQLITE_OK && err) {
+            sqlite3_free(err);
+        }
+    }
 }
 
 SessionDatabase::~SessionDatabase() {
@@ -651,12 +683,83 @@ bool SessionDatabase::IsExplicitlyNamed(const std::string& session_id) const {
 
 bool SessionDatabase::DeleteSession(const std::string& session_id) {
     std::lock_guard lock(mu_);
-    Stmt delete_stmt(db_, "DELETE FROM sessions WHERE id = ?;", "failed to delete session");
-    sqlite3_bind_text(delete_stmt.stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
-    if (sqlite3_step(delete_stmt.stmt) != SQLITE_DONE) {
-        ThrowSqliteError(db_, "failed to delete session");
+
+    // The doomed set: the session and every descendant (the self-FK cascade
+    // used to reach children implicitly; the explicit set must, too).
+    std::vector<std::string> doomed;
+    {
+        Stmt collect(db_,
+                     "WITH RECURSIVE doomed(id) AS ("
+                     "  SELECT id FROM sessions WHERE id = ?1"
+                     "  UNION ALL"
+                     "  SELECT s.id FROM sessions s JOIN doomed d ON s.parent_session_id = d.id"
+                     ") SELECT id FROM doomed;",
+                     "failed to collect doomed sessions");
+        sqlite3_bind_text(collect.stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
+        int rc = SQLITE_OK;
+        while ((rc = sqlite3_step(collect.stmt)) == SQLITE_ROW) {
+            const auto* id = reinterpret_cast<const char*>(sqlite3_column_text(collect.stmt, 0));
+            doomed.emplace_back(id);
+        }
+        CheckRowLoopEnd(db_, rc, "failed to collect doomed sessions");
     }
-    return sqlite3_changes(db_) == 1;
+    if (doomed.empty()) return false;
+
+    // Chunked deletes, one sub-transaction per chunk -- NOT one transaction
+    // around the whole delete. The old single-statement cascade held mu_ while
+    // it walked and removed the ENTIRE transcript: for a 100k-message session
+    // that is every other session's appends and reads stalled behind one
+    // DELETE, minutes on slow storage. Chunks cost the same total work but
+    // interleave, so the stall per other-session operation drops from
+    // whole-transcript to one chunk. The tradeoff, deliberate: a crash
+    // mid-delete leaves the session row (and a PARTIAL transcript) behind
+    // rather than all-or-nothing -- the operator deletes again, and the
+    // startup orphan sweep cleans what a crash can orphan.
+    constexpr int kChunk = 500;
+    {
+        Stmt chunk(db_, "DELETE FROM messages WHERE id IN"
+                        " (SELECT id FROM messages WHERE session_id = ?1 LIMIT ?2);",
+                   "failed to delete message chunk");
+        for (const auto& id : doomed) {
+            std::size_t removed = 0;
+            do {
+                ExecChecked(db_, "BEGIN IMMEDIATE;", "failed to begin delete chunk");
+                sqlite3_reset(chunk.stmt);
+                sqlite3_clear_bindings(chunk.stmt);
+                sqlite3_bind_text(chunk.stmt, 1, id.c_str(), -1, SQLITE_TRANSIENT);
+                sqlite3_bind_int(chunk.stmt, 2, kChunk);
+                if (sqlite3_step(chunk.stmt) != SQLITE_DONE) {
+                    ExecChecked(db_, "ROLLBACK;", "failed to roll back delete chunk");
+                    ThrowSqliteError(db_, "failed to delete message chunk");
+                }
+                removed = static_cast<std::size_t>(sqlite3_changes(db_));
+                ExecChecked(db_, "COMMIT;", "failed to commit delete chunk");
+            } while (removed == static_cast<std::size_t>(kChunk));
+        }
+    }
+
+    // The rows themselves: compaction checkpoints ride the FK cascade, and the
+    // (now message-less) session rows go in one statement -- a full-transcript
+    // cascade no longer happens inside it, because there is nothing left to
+    // cascade but the rows.
+    ExecChecked(db_, "BEGIN IMMEDIATE;", "failed to begin session delete");
+    try {
+        for (const auto& id : doomed) {
+            Stmt del(db_, "DELETE FROM sessions WHERE id = ?;", "failed to delete session");
+            sqlite3_bind_text(del.stmt, 1, id.c_str(), -1, SQLITE_TRANSIENT);
+            if (sqlite3_step(del.stmt) != SQLITE_DONE) {
+                ThrowSqliteError(db_, "failed to delete session");
+            }
+        }
+        ExecChecked(db_, "COMMIT;", "failed to commit session delete");
+    } catch (...) {
+        char* err = nullptr;
+        if (sqlite3_exec(db_, "ROLLBACK;", nullptr, nullptr, &err) != SQLITE_OK && err) {
+            sqlite3_free(err);
+        }
+        throw;
+    }
+    return true;
 }
 
 std::optional<SessionSummary> SessionDatabase::GetSession(const std::string& session_id) const {
