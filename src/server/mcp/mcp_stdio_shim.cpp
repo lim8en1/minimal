@@ -135,6 +135,13 @@ void McpStdioShim::ReapChild(int pid) {
         if (result == -1) return;  // unexpected errno: nothing more to do
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
+    // Recheck immediately before escalating, same as AbortChild's guard before
+    // SIGTERM: the last poll above and this instant are separated by whatever
+    // the loop's own overhead costs, which is enough window for the child to
+    // exit, get reaped elsewhere, and have its pid recycled by the OS.
+    // Escalating on a stale pid would SIGKILL an unrelated process.
+    int status = 0;
+    if (waitpid(pid, &status, WNOHANG) != 0) return;  // no longer ours
     kill(pid, SIGKILL);
     waitpid(pid, nullptr, 0);  // reap the SIGKILLed child
 }
@@ -149,6 +156,11 @@ void McpStdioShim::WatchChildDetached(int pid) {
             if (result == pid || (result == -1 && errno == ECHILD)) return;  // gone
             if (result == -1) return;  // unexpected errno: nothing more to do
         }
+        // Same recheck as ReapChild: close the window between the last poll
+        // above and the escalation below before signaling a possibly-recycled
+        // pid.
+        int status = 0;
+        if (waitpid(pid, &status, WNOHANG) != 0) return;  // no longer ours
         kill(pid, SIGKILL);
         waitpid(pid, nullptr, 0);  // reap the SIGKILLed child
     }).detach();
