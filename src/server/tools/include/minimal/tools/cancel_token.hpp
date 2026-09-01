@@ -80,15 +80,20 @@ public:
     // Cancels every token minted and still alive. Exactly the semantics
     // CancelTurn wants: the running turn's tools wake, and any straggler from
     // an already-dead turn is a no-op (nobody waits on it).
+    //
+    // Cancellation happens UNDER mu_, not on a snapshot taken under it. The
+    // snapshot shape had a window: a token Mint()ed by the worker between the
+    // snapshot and the cancel loop was never cancelled, so a turn that popped
+    // in that window ran on unwakeable -- tools parked on its cv slept through
+    // the cancel. Mint() takes the same mutex, so holding it through the
+    // cancel closes the window. Lock order is one-directional (source.mu_ ->
+    // each token's mu_, via Cancel); no path holds a token's mu_ and then
+    // takes source.mu_, so no cycle exists.
     void CancelAll() {
-        std::vector<CancelTokenPtr> live;
-        {
-            std::lock_guard<std::mutex> lock(mu_);
-            for (const auto& weak : tokens_) {
-                if (auto token = weak.lock()) live.push_back(std::move(token));
-            }
+        std::lock_guard<std::mutex> lock(mu_);
+        for (const auto& weak : tokens_) {
+            if (auto token = weak.lock()) token->Cancel();
         }
-        for (const auto& token : live) token->Cancel();
     }
 
 private:
