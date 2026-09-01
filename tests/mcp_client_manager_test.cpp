@@ -145,6 +145,26 @@ TEST_CASE("McpClientManager: a restart does not stall behind the old connection'
     CHECK(elapsed < std::chrono::seconds(3));
 }
 
+TEST_CASE("McpClientManager: a failed restart is rate-limited by the cooldown", "[mcp_manager]") {
+    // "garbage" never completes the handshake: every restart attempt against
+    // it fails, at the cost of a full connect-timeout wait. Without a
+    // cooldown, a subagent spawn loop against a down server pays that cost
+    // once per spawn, at spawn rate.
+    Fixture fixture(nlohmann::json::array({StdioEntry("broken", "garbage")}),
+                    {std::chrono::seconds(2), std::chrono::seconds(2)});
+    std::string error;
+    CHECK_FALSE(fixture.manager->EnsureAlive("broken", error));
+    CHECK(error.find("cooldown") == std::string::npos);  // the real failure, not yet rate-limited
+
+    // Immediately retrying must not pay another full attempt: the default
+    // restart_cooldown_ms (30 s) refuses it fast with a distinct reason.
+    const auto started = std::chrono::steady_clock::now();
+    CHECK_FALSE(fixture.manager->EnsureAlive("broken", error));
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+    CHECK(error.find("cooldown") != std::string::npos);
+    CHECK(elapsed < std::chrono::milliseconds(500));  // nowhere near a real connect attempt
+}
+
 TEST_CASE("McpClientManager: a tool call respawns a server that died mid-session",
           "[mcp_manager]") {
     // No EnsureAlive between the death and the calls below -- handle.alive

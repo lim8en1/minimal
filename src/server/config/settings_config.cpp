@@ -90,6 +90,12 @@ ToolsSettings ParseTools(const nlohmann::json& doc) {
             throw std::runtime_error(
                 "settings.json: tools.mcp.max_list_pages must be at least 1");
         }
+        result.mcp.restart_cooldown_ms =
+            mcp.value("restart_cooldown_ms", result.mcp.restart_cooldown_ms);
+        if (result.mcp.restart_cooldown_ms < 0) {
+            throw std::runtime_error(
+                "settings.json: tools.mcp.restart_cooldown_ms must not be negative");
+        }
     }
     result.max_parallel_tool_calls =
         tools.value("max_parallel_tool_calls", result.max_parallel_tool_calls);

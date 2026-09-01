@@ -465,6 +465,7 @@ int main(int argc, char** argv) {
     mcp_limits.connect = std::chrono::milliseconds(settings.tools.mcp.connect_timeout_ms);
     mcp_limits.request = std::chrono::milliseconds(settings.tools.mcp.request_timeout_ms);
     mcp_limits.max_list_pages = settings.tools.mcp.max_list_pages;
+    mcp_limits.restart_cooldown = std::chrono::milliseconds(settings.tools.mcp.restart_cooldown_ms);
     auto mcp_manager = std::make_unique<minimal::mcp::McpClientManager>(
         minimal::config::LoadMcpsConfig(config_dir / "mcps.json"), tools, mcp_limits,
         minimal::common::DefaultLogger());

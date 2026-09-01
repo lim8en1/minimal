@@ -28,7 +28,8 @@ struct McpClientManager::ServerHandle {
     bool alive = false;
     uint64_t generation = 0;
     std::string error;
-    std::chrono::steady_clock::time_point verified{};  // epoch = never
+    std::chrono::steady_clock::time_point verified{};      // epoch = never
+    std::chrono::steady_clock::time_point last_failure{};  // epoch = never failed
 };
 
 // The McpInvoker implementation McpTool carries. Weak to the handle: if the
@@ -342,11 +343,28 @@ bool McpClientManager::EnsureAlive(const std::string& server_name, std::string& 
                      ping_error.message);
     }
 
+    // A restart ATTEMPT is what's rate-limited, not a liveness check itself:
+    // a healthy, reused connection never reaches this line at all (the TTL
+    // and ping branches above return first). Without this, a subagent spawn
+    // loop against a down server pays a full spawn+initialize+discovery
+    // attempt per spawn, at spawn rate -- exactly the storm CallTool's new
+    // respawn-on-call path (W9.2a) would otherwise invite.
+    {
+        std::lock_guard<std::mutex> lock(handle->mu);
+        const auto since_failure = std::chrono::steady_clock::now() - handle->last_failure;
+        if (handle->last_failure != std::chrono::steady_clock::time_point{} &&
+            since_failure < limits_.restart_cooldown) {
+            error = "MCP server '" + server_name + "' is in restart cooldown after a recent failure";
+            return false;
+        }
+    }
+
     if (StartHandle(handle->entry, *handle, error)) return true;
     {
         std::lock_guard<std::mutex> lock(handle->mu);
         handle->alive = false;
         handle->error = error;
+        handle->last_failure = std::chrono::steady_clock::now();
     }
     logger_.error("MCP server '{}' unavailable: {}", server_name, error);
     return false;

@@ -49,6 +49,11 @@ struct McpSettings {
     // worker thread (each page is individually within request_timeout). The
     // stdio transport answers from a single request and needs no cap.
     std::int64_t max_list_pages = 100;
+    // Floor between restart ATTEMPTS for one server after a failed one (not a
+    // cap on liveness checks -- a reused, healthy connection is unaffected).
+    // Without it, a subagent spawn loop against a down server pays a full
+    // spawn+initialize+discovery attempt per spawn, at spawn rate.
+    std::int64_t restart_cooldown_ms = 30000;
 };
 
 struct ToolsSettings {

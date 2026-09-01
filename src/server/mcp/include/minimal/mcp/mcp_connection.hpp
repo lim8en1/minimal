@@ -39,6 +39,11 @@ struct McpLimits {
     // tools/list pagination cap (http transport). 0 is never legal: the
     // settings loader rejects it; the default matches settings_config.hpp.
     std::int64_t max_list_pages{100};
+    // McpClientManager-only (not read by McpConnection/the transports below):
+    // the floor between restart ATTEMPTS for one server after a failure.
+    // Carried here rather than as its own constructor parameter because
+    // McpLimits is already the one settings-derived bundle the manager holds.
+    std::chrono::milliseconds restart_cooldown{30000};
 };
 
 // One live MCP server connection -- either a spawned stdio subprocess (cpp-mcp)

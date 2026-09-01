@@ -6,6 +6,7 @@
 #include <memory>
 #include <nlohmann/json.hpp>
 #include <string>
+#include <thread>
 
 #include "minimal/agent/session.hpp"
 #include "minimal/agent/session_registry.hpp"
@@ -163,8 +164,17 @@ TEST_CASE("a server that fails its liveness check is disabled with a surfaced er
     }
     CHECK(saw_live);
 
-    // The dead server stays disabled across an /agent-style re-resolve: the
-    // preset is re-applied, the failing check is not re-run.
+    // The dead server is RE-CHECKED across an /agent-style re-resolve, not
+    // permanently written off: a server that failed once used to stay
+    // disabled for the session's life, and an /agent switch was the only way
+    // back (and never took the chance). It is still "broken" (garbage mode
+    // never recovers), so the retry itself still fails -- but the retry
+    // attempt reaching EnsureAlive is exactly what a genuinely-recovered
+    // server would also reach, and the error is still surfaced either way:
+    // with the default restart_cooldown_ms, this second attempt lands inside
+    // the cooldown window and answers with THAT error instead of the
+    // original connect failure, which is itself proof the check re-ran
+    // rather than being skipped by a sticky per-session blocklist.
     fixture.session->ApplyPreset(fixture.preset);
     surfaced = false;
     for (const auto& event : fixture.DrainQueue()) {
@@ -172,7 +182,48 @@ TEST_CASE("a server that fails its liveness check is disabled with a surfaced er
             surfaced = true;
         }
     }
-    CHECK_FALSE(surfaced);
+    CHECK(surfaced);
+}
+
+TEST_CASE("a recovered server's tools return on an /agent-style re-resolve", "[session_mcp]") {
+    // Unlike the "broken" (garbage-mode, permanently failing) case above,
+    // this proves an actual RECOVERY: a server that dies after a healthy
+    // start comes back once RefreshMcpServers re-attempts it, because
+    // nothing marks it permanently disabled anymore.
+    Fixture fixture(nlohmann::json::array({StdioEntry("fake", "die_after_ms:1500")}), {"fake"});
+    fixture.limits.restart_cooldown = std::chrono::milliseconds(1);  // don't gate the retry below
+    fixture.Script(TextResponse("done"));
+    fixture.Script(TextResponse("done"));
+    fixture.Start();
+
+    REQUIRE(fixture.session->SubmitTurn("go"));
+    REQUIRE(fixture.session->WaitForIdleForTesting(5s));
+    {
+        const auto& requests = fixture.provider->requests();
+        REQUIRE_FALSE(requests.empty());
+        bool saw_echo = false;
+        for (const auto& def : requests.back().tools) {
+            if (def.name == "mcp__fake__echo") saw_echo = true;
+        }
+        CHECK(saw_echo);
+    }
+
+    std::this_thread::sleep_for(3s);  // outlive the scripted death
+
+    // Not a fresh session, not a fresh Session::Start -- the same session,
+    // re-resolving its MCP servers the way /agent does. The server is dead
+    // right now; this must not be the permanent verdict.
+    fixture.session->ApplyPreset(fixture.preset);
+    REQUIRE(fixture.session->SubmitTurn("go again"));
+    REQUIRE(fixture.session->WaitForIdleForTesting(5s));
+
+    const auto& requests = fixture.provider->requests();
+    REQUIRE(requests.size() >= 2);
+    bool saw_echo_again = false;
+    for (const auto& def : requests.back().tools) {
+        if (def.name == "mcp__fake__echo") saw_echo_again = true;
+    }
+    CHECK(saw_echo_again);
 }
 
 TEST_CASE("de-scoping a server on /agent removes its tools without killing the process", "[session_mcp]") {

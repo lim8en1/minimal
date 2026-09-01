@@ -506,10 +506,6 @@ private:
     const llm::ProviderFactoryRegistry* provider_factories_ = nullptr;
     ProviderInstanceCache* provider_instance_cache_ = nullptr;
     mcp::McpClientManager* mcp_manager_ = nullptr;
-    // Servers that failed a liveness check in THIS session. Disabled for the
-    // session's life: the session proceeds without them (ARCHITECTURE.md, MCP
-    // client), and later /agent switches do not re-test them.
-    std::vector<std::string> disabled_mcp_servers_;
     // The user's explicit model choice. Outranks the preset's, and survives
     // /agent re-resolving it.
     std::optional<common::ModelRef> model_override_;

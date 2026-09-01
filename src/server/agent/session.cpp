@@ -240,22 +240,20 @@ Session::Session(SessionParams params, AgentPreset preset,
 }
 
 void Session::RefreshMcpServers() {
+    // A fresh reappraisal every call, not a sticky per-session blocklist: a
+    // server that failed once used to stay disabled for the rest of the
+    // session's life, and an /agent switch was the only way back -- it never
+    // took the chance. EnsureAlive's own cooldown (tools.mcp.restart_cooldown_ms)
+    // is what now keeps a genuinely-still-down server from being re-attempted
+    // on every call here, without permanently hiding one that came back.
     std::vector<std::string> live;
     live.reserve(preset_.allowed_mcp_servers.size());
     for (const auto& server : preset_.allowed_mcp_servers) {
-        // Once failed, disabled for this session's life: re-testing on every
-        // /agent switch would make an operator's typo a per-switch stall, and
-        // the surfaced error already told the client what happened.
-        if (std::find(disabled_mcp_servers_.begin(), disabled_mcp_servers_.end(), server) !=
-            disabled_mcp_servers_.end()) {
-            continue;
-        }
         std::string error;
         if (mcp_manager_->EnsureAlive(server, error)) {
             live.push_back(server);
             continue;
         }
-        disabled_mcp_servers_.push_back(server);
         // Surfaced, not swallowed: an ErrorEvent on the outbound queue is the
         // same channel a failed turn uses, so the client sees WHY the
         // server's tools never appeared.
