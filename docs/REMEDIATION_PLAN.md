@@ -573,6 +573,43 @@ without stack death; `limit: 0` on a large file returns the clamped window + foo
 
 ### W7 — Persistence layer
 
+**Status: landed.** Full suite, `asan` and `tsan` presets green (1078 test cases, ~46.5k
+assertions each; 13 new). The `tsan` runs intermittently re-surface the known W9 MCP
+teardown race (recorded there as its evidence since W3) — never in isolation, and no W7
+file appears in any race graph. Notes the work recorded:
+
+- **W7.1's RunRedo half needed no new code**: `RunOneRewind` already caught store throws
+  and emitted the error event — the defect was entirely that `LastMessageSeq` lied with
+  −1 instead of throwing. `ResumeSession` maps the store's throws to INTERNAL (an
+  exception leaving an RPC handler is UB) and guards the re-read deref.
+- **W7.3's "passive checkpoint" needed a measured correction**: a PASSIVE checkpoint
+  backfills frames but never resets the log, so with autocheckpoint disabled the WAL
+  would grow without bound (verified: 1043 frames backfilled, a fresh reader still saw
+  all 1043). The reaper runs a RESTART checkpoint; its blocking is only against
+  out-of-process readers, bounded by busy_timeout, amortized once per 200 appends.
+  Benchmark ([.bench]): 2000 appends × 256 KiB, worst append 4476 µs with SQLite's
+  default autocheckpoint on the write path vs 1254 µs on the reaper's tick.
+- **W7.4's cursor is a mixed-direction pair** (`updated_at DESC, id ASC`), so a single
+  COALESCE like the messages fix cannot express it: the seek is carried by an
+  `updated_at <= COALESCE(?3, INT64_MAX)` ceiling the planner constrains on, with the
+  old tie-disambiguation kept verbatim as a filter (`?4 IS NOT NULL` preserves the
+  malformed-cursor semantics that `COALESCE(?4, '')` would have silently changed). Both
+  paging statements are exported constants now, and the EXPLAIN tests run against them —
+  the old messages test had already drifted from the statement it guarded (it omitted
+  `discarded = 0`), the exact lookalike failure the extraction closes.
+- **W7.5 needed an in-process registry alongside the fcntl lock**: fcntl locks do not
+  conflict with themselves across fds, so the filesystem half alone would let a second
+  store on the same path open silently inside one process. One consequence fell out: a
+  checklist test had been simulating "server restart" by double-opening `plugins.db`
+  in-process — it now closes the holder first, the way a real restart happens.
+- **W7.6's orphan sweep is deliberately best-effort**: the corruption robustness tests
+  caught the first version refusing startup on a scribbled database — a hygiene pass
+  must not make a corrupt-but-servable database unstartable, and the corruption
+  surfaces at read time anyway.
+- **W7.9 detects the NUL by length, not by scanning for '\0'**: getline always writes
+  its own terminator, which a scan cannot distinguish from content; the visible length
+  is compared against `gcount()` instead.
+
 1. **Error-discipline sweep** (the class §12 fixed once and never swept):
    `GetSession` and `LastMessageSeq` distinguish step failure from missing (throw or
    error out-param, the `SessionExists` pattern); the `*fresh` deref guarded
