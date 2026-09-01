@@ -1,3 +1,4 @@
+#include <atomic>
 #include <chrono>
 #include <filesystem>
 #include <memory>
@@ -11,6 +12,8 @@
 #include "fakes.hpp"
 #include "minimal/agent/session.hpp"
 #include "minimal/common/logger.hpp"
+#include "minimal/rpc/wire_permission_checker.hpp"
+#include "minimal/tools/permission_advisor.hpp"
 #include "temp_dir.hpp"
 
 #include "bash_session_state.hpp"
@@ -55,6 +58,7 @@ struct SessionFixture {
         params.name = "test session";
         params.agent_preset = "test";
         params.project_root = project_root;
+        params.channels = params_channels;
         params.permission_checker = std::move(injected_checker);
         params.advisor_cancel_source = injected_cancel_source;
         params.seed_grants = seed_grants;
@@ -74,9 +78,13 @@ struct SessionFixture {
     // Injected through SessionParams::permission_checker -- the seam an advised
     // (or test) checker crosses. Null keeps the wire default.
     std::unique_ptr<tools::PermissionChecker> injected_checker;
-    // Set alongside an injected AdvisedPermissionChecker: the Session installs
-    // its cancel predicate into this shared holder in its constructor body.
+    // Set alongside an injected AdvisedPermissionChecker: the Session keeps
+    // this holder's flag and fires it in Cancel()/Terminate().
     std::shared_ptr<tools::AdvisorCancelSource> injected_cancel_source;
+    // Channels the test created to compose a checker over (the producer
+    // shape); forwarded to SessionParams::channels at Start(). Null keeps the
+    // Session-created default.
+    std::shared_ptr<agent::SessionChannels> params_channels;
 
     // Drains everything currently queued. The writer thread's job, done inline.
     std::vector<v1::ServerEvent> DrainQueue() {
@@ -346,6 +354,74 @@ TEST_CASE("a cancelled turn does not deny-lock the next one", "[session]") {
 
     REQUIRE(fixture->session->WaitForIdleForTesting(5s));
     CHECK(tool_ptr->calls.size() == 1);
+}
+
+TEST_CASE("an advise thread abandoned at the budget polls a flag that outlives the session",
+          "[session][advisor][invariant]") {
+    // THE lifetime hazard AdvisorCancelSource's shared flag exists for: at
+    // budget expiry the advise thread is DETACHED and keeps polling
+    // is_cancelled() -- here, potentially past the point where this test
+    // terminates and destroys the Session. An earlier draft installed the
+    // predicate as `[this] { return IsCancelled(); }` on the Session: the
+    // shared_ptr kept the HOLDER alive, not the Session it pointed at, so
+    // every post-teardown poll was a use-after-free (the ASan preset fails
+    // the run; a plain build reads garbage). The wait below joins the
+    // abandoned thread's final poll by observation -- it must have read the
+    // flag Terminate set, from memory nothing else owns any more.
+    using namespace std::chrono_literals;
+
+    struct PollsLate : tools::PermissionAdvisor {
+        std::optional<tools::PermissionResponse> Advise(
+            const tools::PermissionRequest&, const tools::AdvisorContext& ctx) override {
+            std::this_thread::sleep_for(500ms);  // the budget (100ms) expires first
+            observed.store(ctx.is_cancelled(), std::memory_order_release);
+            polls.fetch_add(1, std::memory_order_release);
+            return std::nullopt;  // moot: the answer was abandoned at the budget
+        }
+        std::atomic<bool> observed{false};
+        std::atomic<int> polls{0};
+    };
+
+    SessionFixture fixture;
+    fixture.preset.permission_mode.execute = tools::PermissionMode::Ask;
+    fixture.tools_registry.Register(
+        std::make_unique<testing::FakeTool>("slow", tools::ToolCategory::Execute));
+    auto advisor = std::make_shared<PollsLate>();
+    auto cancel_source = std::make_shared<tools::AdvisorCancelSource>();
+    // The producer composition (ApplyAdvisor's shape): the inner checker is
+    // the REAL wire checker over shared channels, so the budget's fall-through
+    // is the human path and the prompt actually round-trips.
+    fixture.injected_cancel_source = cancel_source;
+    fixture.params_channels = agent::MakeSessionChannels();
+    fixture.injected_checker = std::make_unique<tools::AdvisedPermissionChecker>(
+        advisor,
+        std::make_unique<rpc::WirePermissionChecker>("sess-advise", fixture.params_channels->queue,
+                                                     fixture.params_channels->pending),
+        cancel_source, std::chrono::milliseconds{100});
+    fixture.Script(testing::ToolUseResponse("tu1", "slow"));
+    fixture.Script(testing::TextResponse("unreached"));
+    fixture.Start("sess-advise");
+    REQUIRE(fixture.session->SubmitTurn("go"));
+    const auto request_id = WaitForPermissionRequest(fixture);
+    REQUIRE(request_id.has_value());  // the budget expired; the human decides
+    v1::PermissionResponse answer;
+    answer.set_request_id(*request_id);
+    answer.set_decision(v1::PERMISSION_DECISION_ALLOW);
+    REQUIRE(fixture.session->pending().Resolve(
+        *request_id, rpc::PermissionAnswer{answer.SerializeAsString()}));
+    REQUIRE(fixture.session->WaitForIdleForTesting(5s));
+
+    // Terminate fires the flag; destroying the session drops every owner but
+    // the detached thread's own copies. The advisor may still be asleep.
+    fixture.session->Terminate();
+    fixture.session.reset();
+
+    const auto deadline = std::chrono::steady_clock::now() + 5s;
+    while (advisor->polls.load() == 0 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(5ms);
+    }
+    CHECK(advisor->polls.load() == 1);
+    CHECK(advisor->observed.load());
 }
 
 TEST_CASE("terminating with a turn in flight joins cleanly", "[session]") {

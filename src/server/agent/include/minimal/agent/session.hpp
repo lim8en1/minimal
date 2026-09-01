@@ -513,6 +513,11 @@ private:
     // Cancel/Terminate fire every live one, so a tool blocked on a condition
     // variable wakes immediately instead of polling. See tools/cancel_token.hpp.
     tools::CancelSource cancel_source_;
+    // The advisor cancel holder's flag, when an advisor is composed for this
+    // session: shared_ptr, so Cancel/Terminate can fire it and the DETACHED
+    // advise thread can still be polling the same atomic after this Session is
+    // destroyed. Null without an advisor. See AdvisorCancelSource.
+    std::shared_ptr<std::atomic<bool>> advisor_cancel_flag_;
     std::atomic<bool> terminated_{false};
     // A subagent's life is one seeded turn; once its completion hook has fired,
     // a stray client-submitted turn would fire it a second time, so SubmitTurn

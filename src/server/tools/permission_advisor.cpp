@@ -23,9 +23,14 @@ AdvisedPermissionChecker::AdvisedPermissionChecker(std::shared_ptr<PermissionAdv
                                                    std::chrono::milliseconds timeout)
     : advisor_(std::move(advisor)),
       inner_(std::move(inner)),
-      cancel_source_(std::make_shared<AdvisorCancelSource>(
-          AdvisorCancelSource{std::move(is_cancelled)})),
-      timeout_(timeout) {}
+      cancel_source_(std::make_shared<AdvisorCancelSource>()),
+      timeout_(timeout) {
+    // A caller-supplied predicate REPLACES the holder's flag-reading default.
+    // This shape is for callers that own the cancel semantics themselves
+    // (checker-level tests); a Session wired through params shares the holder
+    // via the other constructor and fires the flag in Cancel/Terminate.
+    if (is_cancelled) cancel_source_->is_cancelled = std::move(is_cancelled);
+}
 
 AdvisedPermissionChecker::AdvisedPermissionChecker(std::shared_ptr<PermissionAdvisor> advisor,
                                                    std::unique_ptr<PermissionChecker> inner,

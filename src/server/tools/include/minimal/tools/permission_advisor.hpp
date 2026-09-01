@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <chrono>
 #include <functional>
 #include <memory>
@@ -27,12 +28,27 @@ struct AdvisorContext {
 // the checker and the owner of the cancel predicate are different objects: the
 // params producer composes the advised checker BEFORE the Session exists, but
 // only the Session knows when its turn is cancelled or it is terminating. The
-// producer creates the source (defaulting to "never cancelled") and hands the
-// same shared_ptr to the checker and to SessionParams; the Session installs its
-// own predicate in its constructor body -- before the worker starts, so there
-// is no window in which an advisor could observe a stale predicate.
+// producer creates the source and hands the same shared_ptr to the checker and
+// to SessionParams; the Session sets the flag in Cancel()/Terminate().
+//
+// The flag is also the LIFETIME story. When the budget expires or a cancel
+// abandons the wait, the advise thread is DETACHED and keeps running -- it may
+// call is_cancelled() long after the Session, the checker and the channels are
+// destroyed. The predicate therefore reads this shared atomic and captures
+// nothing else: the shared_ptr in the abandoned thread's task lambda keeps the
+// flag alive for exactly as long as any poller exists, and "session is gone"
+// degrades to whatever the flag last said (Cancel/Terminate set it true; a
+// session destroyed without either leaves it false, which is the harmless
+// direction -- the poll then costs the advisor nothing but its own contract).
+// An earlier draft installed `[this] { return IsCancelled(); }` here: the
+// shared_ptr kept the HOLDER alive, not the Session it pointed at, so every
+// poll after teardown was a use-after-free.
 struct AdvisorCancelSource {
-    std::function<bool()> is_cancelled = [] { return false; };
+    std::shared_ptr<std::atomic<bool>> cancelled =
+        std::make_shared<std::atomic<bool>>(false);
+    std::function<bool()> is_cancelled = [flag = cancelled] {
+        return flag->load(std::memory_order_acquire);
+    };
 };
 
 // Answers an Ask automatically, or abstains. nullopt falls through to the
@@ -66,7 +82,7 @@ public:
                              std::unique_ptr<PermissionChecker> inner,
                              std::function<bool()> is_cancelled,
                              std::chrono::milliseconds timeout = kDefaultTimeout);
-    // Shares the holder with the Session, which installs its own predicate.
+    // Shares the holder with the Session, whose Cancel/Terminate set the flag.
     AdvisedPermissionChecker(std::shared_ptr<PermissionAdvisor> advisor,
                              std::unique_ptr<PermissionChecker> inner,
                              std::shared_ptr<AdvisorCancelSource> cancel_source,

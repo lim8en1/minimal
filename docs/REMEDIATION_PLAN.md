@@ -457,6 +457,23 @@ TSan bar can be called unconditionally clean for MCP-bearing configurations.
 
 ### W4 — Advisor lifetime (ship-blocker 3)
 
+**Status: landed.** Full suite, `asan` and `tsan` presets green (1042 tests each; one
+new). One refinement on the planned shape: rather than adding cancel state to
+`SessionChannels`, the flag lives inside `AdvisorCancelSource` itself — the holder is
+already the shared block the producer hands to both the checker and the params, the
+detached thread's task lambda already holds it, and the default predicate now reads
+the flag (so the Session never installs a predicate at all; it only stores the flag
+and fires it in `Cancel`/`Terminate`). The raw-`this` capture is gone entirely, not
+merely made safe. The flag is TURN-SCOPED like the cancel generation — reset at turn
+pop under the same lock — so a cancel that landed during a previous turn cannot make
+every later Advise abstain forever; the pop-to-clear window the generation mechanism
+closes cannot bite here because a stale reader is an already-abandoned thread whose
+poll result is discarded either way. The checker-level constructor taking a bare
+predicate keeps working (it replaces the flag-reading default; the Session path uses
+the shared holder). The invariant test drives a real Session through the producer
+composition (wire checker over shared channels), terminates and destroys the session
+while the advise thread is still asleep, and joins its final poll by observation.
+
 Bind the cancel predicate through `SessionChannels` — the `shared_ptr` block built for
 exactly this class of handle: channels gains a shared cancel state (terminated flag /
 cancel generation) that `Terminate` sets; `session.cpp:72-73` captures the channels

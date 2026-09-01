@@ -65,12 +65,19 @@ Session::Session(SessionParams params, AgentPreset preset,
       executor_(registry, *checker_, preset_.permission_mode, preset_.mcp_permissions,
                 params_.run_mode_override.value_or(preset_.run_mode), params_.policy_ceiling,
                 params_.mcp_policy_ceiling, params_.seed_grants, params_.hooks) {
-    // An advised checker was composed before this Session existed, so only its
-    // shared cancel holder could not yet be bound to a session: install the
-    // predicate now. The worker starts at the end of this constructor, so there
-    // is no window in which an advisor sees the default "never cancelled".
+    // An advised checker was composed before this Session existed. The
+    // producer shares the cancel HOLDER between the checker and these params;
+    // the Session's only job is to keep the flag and fire it on Cancel/
+    // Terminate. The predicate the advisor polls is the holder's own -- it
+    // reads the shared atomic and captures nothing owned by this object --
+    // because the advise thread is DETACHED on budget expiry and keeps
+    // polling after this Session is destroyed. An earlier draft installed
+    // `[this] { return IsCancelled(); }`: the shared_ptr kept the holder
+    // alive, not the Session, so every post-teardown poll was a
+    // use-after-free. The worker starts at the end of this constructor, so
+    // there is no window in which an advisor sees a pre-Session flag.
     if (params_.advisor_cancel_source) {
-        params_.advisor_cancel_source->is_cancelled = [this] { return IsCancelled(); };
+        advisor_cancel_flag_ = params_.advisor_cancel_source->cancelled;
     }
 
     // Seeded from what the client asked for. THE REGISTRY already applied it to
@@ -680,6 +687,12 @@ bool Session::QueueInjectedMessage(llm::Message message) {
 }
 
 void Session::Cancel() {
+    // The advisor's abandoned thread: a slow Advise polling past this cancel
+    // observes it and returns per its contract, instead of polling a stale
+    // "never cancelled" forever.
+    if (advisor_cancel_flag_) {
+        advisor_cancel_flag_->store(true, std::memory_order_release);
+    }
     // Bump the generation: every turn popped BEFORE this point observes a
     // cancelled() that is now true; a turn popped after records the new
     // generation as its base and runs uncancelled. One mechanism, no
@@ -701,6 +714,13 @@ void Session::Cancel() {
 }
 
 void Session::Terminate() {
+    // Same fire the advisor's Cancel gets: an Advise still running at teardown
+    // must see the session is going away, and a DETACHED advise thread polling
+    // after this function returns must read a live flag, not a destroyed
+    // Session.
+    if (advisor_cancel_flag_) {
+        advisor_cancel_flag_->store(true, std::memory_order_release);
+    }
     if (terminated_.exchange(true, std::memory_order_acq_rel)) {
         // Already terminating. Still join, so that a second caller does not
         // return while the worker is alive -- the destructor relies on it.
@@ -794,6 +814,16 @@ void Session::WorkerMain() {
             // member comment for why the generation exists at all.
             turn_cancel_base_.store(cancel_gen_.load(std::memory_order_acquire),
                                     std::memory_order_relaxed);
+            // The advisor flag is TURN-SCOPED like the generation above: a
+            // cancel that landed during a previous turn must not make every
+            // later Advise abstain forever. Reset at pop -- the same
+            // pop-to-clear window the generation mechanism exists to close
+            // cannot bite here, because a stale reader is an ALREADY-ABANDONED
+            // advise thread whose poll result is discarded either way, and it
+            // polls a live shared atomic regardless.
+            if (advisor_cancel_flag_) {
+                advisor_cancel_flag_->store(false, std::memory_order_release);
+            }
             // The turn's cancellation token: the loop hands it to every
             // ToolContext, so a tool blocked on a condition variable (MCP)
             // wakes the moment Cancel or Terminate fires. Minted AFTER the
