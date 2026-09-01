@@ -105,6 +105,8 @@ std::vector<ChatRow> ChatRowsFromMessages(const std::vector<v1::StoredMessage>& 
 
     for (auto it = descending.rbegin(); it != descending.rend(); ++it) {
         const auto& message = it->message();
+        const int64_t message_seq = it->seq();
+        const std::size_t first_row_of_message = rows.size();
         if (message.role() == v1::ROLE_ASSISTANT) {
             for (const auto& block : message.content()) {
                 if (block.has_text()) {
@@ -181,6 +183,12 @@ std::vector<ChatRow> ChatRowsFromMessages(const std::vector<v1::StoredMessage>& 
                 }
                 rows.push_back(std::move(row));
             }
+        }
+        // Stamp every row this message produced with its transcript seq --
+        // the chat view's per-row render cache is keyed by it (track R3).
+        for (auto r = rows.begin() + static_cast<std::ptrdiff_t>(first_row_of_message);
+             r != rows.end(); ++r) {
+            r->seq = message_seq;
         }
     }
     return rows;

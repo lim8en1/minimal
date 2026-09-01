@@ -25,21 +25,22 @@ std::string TailLines(const std::string& text, int max_lines) {
 
 }  // namespace
 
-ftxui::Element RenderToolsPanel(
-    const std::vector<AppState::TabSnapshot>& tabs,
-    const std::map<std::string, SessionState::Snapshot>& details, int stdout_buffer_lines,
-    const Theme& theme) {
+ftxui::Element RenderToolsPanel(const std::vector<AppState::TabSnapshot>& tabs,
+                                int stdout_buffer_lines, const Theme& theme) {
     using namespace ftxui;
 
+    // Track R (focused-tab pump redesign): the panel reads the LIGHT
+    // TabSnapshot.tools -- it needs every session's tool rows (cross-session
+    // is what distinguishes it from chat), never other tabs' scrollback or
+    // streaming text, so the frame no longer deep-copies every tab's full
+    // snapshot to feed it.
     Elements rows;
     rows.push_back(hbox({text(" running tools ") | bgcolor(theme.ColorFor("status_bar_bg")),
                          text(" (live tail only; the transcript is authoritative)") | dim}));
 
     bool any = false;
     for (const auto& tab : tabs) {
-        const auto it = details.find(tab.session_id);
-        if (it == details.end()) continue;
-        for (const auto& tool : it->second.tools) {
+        for (const auto& tool : tab.tools) {
             any = true;
             Elements line;
             const std::string name = tool.tool_name.empty() ? std::string("tool") : tool.tool_name;

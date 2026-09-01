@@ -43,7 +43,20 @@ public:
 
 private:
     std::string name_;
-    std::unordered_map<std::string, ftxui::Color> colors_;
+    // Transparent hash + equality: ColorFor(string_view) looks up WITHOUT
+    // constructing a std::string key per call (called per frame by the bars
+    // and per highlight span stream).
+    struct TransparentHash {
+        using is_transparent = void;
+        std::size_t operator()(std::string_view v) const {
+            return std::hash<std::string_view>{}(v);
+        }
+    };
+    struct TransparentEqual {
+        using is_transparent = void;
+        bool operator()(std::string_view a, std::string_view b) const { return a == b; }
+    };
+    std::unordered_map<std::string, ftxui::Color, TransparentHash, TransparentEqual> colors_;
 };
 
 }  // namespace minimal::client

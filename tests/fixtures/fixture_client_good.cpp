@@ -16,12 +16,25 @@ namespace plugins = minimal::client::plugins;
 
 class FixtureSegment final : public plugins::StatusSegment {
 public:
-    explicit FixtureSegment(std::string echo) : echo_(std::move(echo)) {}
+    FixtureSegment(std::string echo, plugins::AttentionSink* attention, std::string raise_tab)
+        : echo_(std::move(echo)), attention_(attention), raise_tab_(std::move(raise_tab)) {}
     std::string_view id() const override { return "fixture_seg"; }
-    std::string Render() const override { return echo_; }
+    std::string Render() const override {
+        // POST-LOAD seam use: the sink pointer was captured from the
+        // registration context; Render is where a real plugin would use it
+        // (attention raises happen while the TUI runs, long after LoadAll).
+        // If the host frees the sink at the end of its loader-constructor
+        // expression, this call is a use-after-free (ASan) and the raise
+        // never lands. Opt-in via the "raise_tab" config key so the loader
+        // tests using a default config stay unaffected.
+        if (attention_ != nullptr && !raise_tab_.empty()) attention_->RaiseTab(raise_tab_);
+        return echo_;
+    }
 
 private:
     std::string echo_;
+    plugins::AttentionSink* attention_;
+    std::string raise_tab_;
 };
 
 class FixtureToolRenderer final : public plugins::ToolResultRenderer {
@@ -89,13 +102,18 @@ void minimal_client_plugin_register_status_segments(
     plugins::StatusSegmentRegistry& registry,
     const plugins::ClientPluginRegistrationContext& context) {
     std::string echo = "fixture-seg-default";
+    std::string raise_tab;
     if (context.config.is_object()) {
         if (auto it = context.config.find("echo_value");
             it != context.config.end() && it->is_string()) {
             echo = it->get<std::string>();
         }
+        if (auto it = context.config.find("raise_tab");
+            it != context.config.end() && it->is_string()) {
+            raise_tab = it->get<std::string>();
+        }
     }
-    registry.Register(std::make_unique<FixtureSegment>(echo));
+    registry.Register(std::make_unique<FixtureSegment>(echo, context.attention, raise_tab));
 }
 
 void minimal_client_plugin_register_renderers(

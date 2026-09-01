@@ -17,6 +17,9 @@
 
 #include <ftxui/dom/elements.hpp>
 
+#include <map>
+#include <utility>
+
 #include "minimal/client/chat_model.hpp"
 #include "minimal/client/plugins/registries.hpp"
 #include "minimal/client/render/theme.hpp"
@@ -26,7 +29,7 @@ namespace minimal::client {
 
 class ChatView {
 public:
-    ChatView(const Theme& theme, const plugins::MarkdownEngine& engine,
+    ChatView(const Theme& theme,
              const plugins::MessageRendererRegistry& message_renderers,
              const plugins::ToolResultRendererRegistry& tool_renderers);
 
@@ -38,12 +41,17 @@ private:
     void RebuildRows(const SessionState::Snapshot& snapshot);
 
     const Theme& theme_;
-    const plugins::MarkdownEngine& engine_;
     const plugins::MessageRendererRegistry& message_renderers_;
     const plugins::ToolResultRendererRegistry& tool_renderers_;
     uint64_t rendered_version_ = 0;   // transcript_version these rows came from
-    std::vector<ChatRow> rows_;
-    std::vector<ftxui::Elements> rendered_rows_;  // per-row element cache
+    std::string rendered_session_id_; // which tab they came from (see Render)
+    // Aligned with the rows of the current snapshot (oldest first).
+    std::vector<ftxui::Elements> rendered_rows_;
+    // Per-row render cache keyed by (transcript seq, occurrence within that
+    // seq). A scrollback page bump (a version change) re-renders ONLY the rows
+    // the page added -- pre-R3 every page load re-markdown-rendered the whole
+    // window, including every code block. Evicted rows drop out of the map.
+    std::map<std::pair<int64_t, int>, ftxui::Elements> row_cache_;
 };
 
 }  // namespace minimal::client

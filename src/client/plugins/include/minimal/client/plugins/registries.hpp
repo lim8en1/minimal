@@ -17,6 +17,12 @@
 //     (SetAttribution / ClearAttribution / attributions) so a collision can
 //     name both culprits and a PluginRecord can say what one plugin registered.
 //
+// CONTRACT: registration-time-only. The registries handed to a plugin's
+// register_* hook are single-threaded, unsealed objects; a plugin that stashes
+// the reference and registers AFTER startup bypasses the collision rule, the
+// attribution windows, and (for exclusive slots) the core default entirely.
+// No synchronization exists because nothing concurrent ever registers.
+//
 // Render-time inputs travel with the call -- including `const Theme&`. Plugins
 // load BEFORE the theme does (theme `sections` need to know which plugins are
 // loaded), so nothing renderable can capture a theme at registration.
@@ -30,6 +36,8 @@
 #include <vector>
 
 #include <ftxui/component/component.hpp>
+
+#include "minimal/client/subscribe_outcome.hpp"
 #include <ftxui/dom/elements.hpp>
 #include <nlohmann/json.hpp>
 #include <tree_sitter/api.h>
@@ -278,10 +286,13 @@ public:
 
     // Streams the subscription to `on_payload` on the CALLING thread (blocking
     // until the server closes the stream or the callback returns false).
-    // False return: the subscription was refused.
-    virtual bool PluginSubscribe(const std::string& plugin_name, const std::string& method,
-                                 const std::string& json_payload,
-                                 const std::function<bool(const std::string&)>& on_payload) = 0;
+    // Tri-state outcome: kCancelled = the subscriber stopped; kEnded = the
+    // server closed a live subscription; kError = refused or transport death
+    // (the host logs the status).
+    virtual SubscribeOutcome PluginSubscribe(
+        const std::string& plugin_name, const std::string& method,
+        const std::string& json_payload,
+        const std::function<bool(const std::string&)>& on_payload) = 0;
 };
 
 // --- Registries -------------------------------------------------------------

@@ -35,6 +35,18 @@ UiConfig LoadUiConfig(const std::filesystem::path& config_dir) {
     } else if (it != parsed.end()) {
         common::DefaultLogger().warn("ui.json: \"status_format\" must be a string -- ignored");
     }
+    const auto positive_int = [&parsed](const char* key, int& out) {
+        if (auto it = parsed.find(key); it != parsed.end()) {
+            if (it->is_number_integer() && it->get<int>() > 0) {
+                out = it->get<int>();
+            } else {
+                common::DefaultLogger().warn(
+                    "ui.json: \"{}\" must be a positive integer -- ignored", key);
+            }
+        }
+    };
+    positive_int("scrollback_window_max_messages", config.scrollback_window_max_messages);
+    positive_int("tool_output_buffer_bytes", config.tool_output_buffer_bytes);
     return config;
 }
 

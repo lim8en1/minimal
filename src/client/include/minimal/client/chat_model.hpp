@@ -40,6 +40,9 @@ enum class ChatRowKind {
 std::string_view ToString(ChatRowKind kind);
 
 struct ChatRow {
+    // The transcript row this view row came from (first member: designated
+    // initializers elsewhere stay declaration-ordered). -1 = synthetic.
+    int64_t seq = -1;
     ChatRowKind kind;
     // UserText/AgentMarkdown/Thinking: the text itself. UserAttachment: the
     // framed block (the view extracts the path for the header). ToolActivity:

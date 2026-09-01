@@ -119,7 +119,7 @@ Theme Theme::Load(const std::filesystem::path& themes_dir, const std::string& na
 }
 
 ftxui::Color Theme::ColorFor(std::string_view role) const {
-    const auto it = colors_.find(std::string(role));
+    const auto it = colors_.find(role);
     return it != colors_.end() ? it->second : ftxui::Color::Default;
 }
 

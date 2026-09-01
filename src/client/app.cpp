@@ -62,6 +62,7 @@
 #include "minimal/common/abi_tag.hpp"
 #include "minimal/common/bundled_assets.hpp"
 #include "minimal/common/config_paths.hpp"
+#include "minimal/common/logger.hpp"
 #include "minimal/plugins/name_registry.hpp"
 
 namespace {
@@ -529,6 +530,14 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     const auto ui = minimal::client::LoadUiConfig(config_dir);
 
     plugins::AttentionState attention_state;
+    // The seam objects must OUTLIVE plugin registration: a plugin captures the
+    // raw pointer from its context at registration and may call it for the
+    // process lifetime (lazy Find, attention raises). Binding the factories
+    // inline into the loader call destroyed the temporaries at the end of that
+    // full expression -- every seam call was a virtual dispatch through freed
+    // memory.
+    const auto attention_sink = plugins::MakeHostAttentionSink(&attention_state);
+    const auto host_client_api = plugins::MakeHostClientApi(client.get());
     plugins::ViewRegistry view_registry;
     plugins::ToolResultRendererRegistry renderer_registry;
     plugins::MessageRendererRegistry message_registry;
@@ -551,18 +560,47 @@ int RunTui(const minimal::client::ParsedArgs& args) {
             const std::string contents((std::istreambuf_iterator<char>(in)),
                                        std::istreambuf_iterator<char>());
             plugin_config = plugins::ParseClientPluginConfig(contents);
+            // ParseClientPluginConfig degrades a malformed file to an empty
+            // config; silently rewriting the user's bytes over that default
+            // would destroy their enablement decisions and per-plugin config
+            // (a trailing comma would disable every user plugin on next
+            // boot). On a malformed parse: warn and DO NOT rewrite.
+            if (plugin_config.malformed) {
+                plugin_config.preserved = contents;
+                std::fprintf(stderr,
+                             "minimal: warning: %s is malformed -- it was NOT rewritten; "
+                             "fix or remove it to enable plugin config management\n",
+                             std::filesystem::path(config_path).c_str());
+            }
         }
         const auto candidates = plugins::DiscoverClientPlugins(
             minimal::common::BundledClientPluginDir(), config_dir / "client-plugins",
             plugin_config);
-        std::ofstream out(config_path);
-        out << plugins::SerializeClientPluginConfig(plugin_config);
+        if (!plugin_config.malformed) {
+            // Same discipline as the server's WriteConfigIfChanged: create the
+            // parent dir, skip the write when nothing changed, report errors.
+            std::filesystem::create_directories(config_dir, ec);
+            const auto serialized = plugins::SerializeClientPluginConfig(plugin_config);
+            std::string existing;
+            if (std::filesystem::exists(config_path, ec)) {
+                std::ifstream in(config_path);
+                existing = std::string((std::istreambuf_iterator<char>(in)),
+                                       std::istreambuf_iterator<char>());
+            }
+            if (existing != serialized) {
+                std::ofstream out(config_path);
+                out << serialized;
+                if (!out) {
+                    std::fprintf(stderr, "minimal: warning: could not write %s\n",
+                                 std::filesystem::path(config_path).c_str());
+                }
+            }
+        }
 
         plugins::ClientPluginLoader loader(view_registry, renderer_registry, message_registry,
                                            status_registry, grammar_registry, surface_registry,
-                                           engine_registry,
-                                           plugins::MakeHostAttentionSink(&attention_state).get(),
-                                           plugins::MakeHostClientApi(client.get()).get());
+                                           engine_registry, attention_sink.get(),
+                                           host_client_api.get());
         const auto records = loader.LoadAll(candidates);
 
         // Provenance-keyed severity, mirrored from the server's sanity check:
@@ -603,11 +641,56 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         feed(minimal::plugins::NameKind::ViewId, view_registry.attributions());
         feed(minimal::plugins::NameKind::ToolResultRenderer, renderer_registry.attributions());
         for (const auto& [kind, attribution] : message_registry.claims()) {
-            names.Register(minimal::plugins::NameKind::ToolResultRenderer,
-                           attribution.plugin_name, "message:" + attribution.original_name);
+            names.Register(minimal::plugins::NameKind::MessageRenderer,
+                           attribution.plugin_name, attribution.original_name);
         }
         feed(minimal::plugins::NameKind::StatusSegment, status_registry.attributions());
         feed(minimal::plugins::NameKind::SyntaxGrammar, grammar_registry.attributions());
+        // Client aliases resolve collisions (the ARCHITECTURE.md rule: a
+        // duplicate view id / tool name is "fatal and alias-resolvable"). They
+        // were parsed, serialized and documented while never reaching the
+        // NameRegistry -- so the alias key did nothing and the dangling-alias
+        // diagnostic below was unreachable. Like the server's resolver: the
+        // alias lands on the ONE kind whose stable identity it names (so a
+        // resolved alias renames that entry's surface and dedupes the
+        // collision), and an identity no kind claims is dangling on a single
+        // kind -- reported once, not four times. Addressing stays CANONICAL
+        // (keybindings.json addresses ids, never aliases).
+        const auto alias_on_kind = [&](const std::string& key, const std::string& target) {
+            const auto matches = [](const std::vector<plugins::Attribution>& attributions,
+                                    const std::string& qualified) {
+                for (const auto& a : attributions) {
+                    if (a.plugin_name + "." + a.original_name == qualified) return true;
+                }
+                return false;
+            };
+            if (matches(view_registry.attributions(), key)) {
+                names.SetAlias(minimal::plugins::NameKind::ViewId, key, target);
+            } else if (matches(renderer_registry.attributions(), key)) {
+                names.SetAlias(minimal::plugins::NameKind::ToolResultRenderer, key, target);
+            } else {
+                bool matched_message = false;
+                for (const auto& [kind, attribution] : message_registry.claims()) {
+                    (void)kind;
+                    if (attribution.plugin_name + "." + attribution.original_name == key) {
+                        names.SetAlias(minimal::plugins::NameKind::MessageRenderer, key, target);
+                        matched_message = true;
+                    }
+                }
+                if (!matched_message) {
+                    if (matches(status_registry.attributions(), key)) {
+                        names.SetAlias(minimal::plugins::NameKind::StatusSegment, key, target);
+                    } else if (matches(grammar_registry.attributions(), key)) {
+                        names.SetAlias(minimal::plugins::NameKind::SyntaxGrammar, key, target);
+                    } else {
+                        names.SetAlias(minimal::plugins::NameKind::ViewId, key, target);   // dangling
+                    }
+                }
+            }
+        };
+        for (const auto& [alias_key, alias_target] : plugin_config.aliases) {
+            alias_on_kind(alias_key, alias_target);
+        }
         const auto resolved = names.Resolve();
         for (const auto& collision : resolved.fatal_collisions) {
             std::fprintf(stderr, "minimal: FATAL: client plugin name collision: %s\n",
@@ -688,16 +771,6 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         }
     }
 
-    // Core defaults fill every slot no plugin claimed. The engine first (the
-    // agent-markdown default renders through it), then the kind defaults.
-    minimal::client::MarkdownRenderer renderer(&theme, nullptr);
-    plugins::RegisterDefaultMarkdownEngine(engine_registry, renderer);
-    // Non-null by construction: RegisterDefaultMarkdownEngine registers the
-    // md4c adapter when no plugin claimed the slot.
-    plugins::MarkdownEngine& engine = *engine_registry.engine;
-    plugins::RegisterCoreMessageRenderers(message_registry);
-    plugins::RegisterCoreAgentMarkdownRenderer(message_registry, engine);
-
     // The highlighter consults the assembled grammar table (vendored defaults
     // plus plugin additions), so a plugin's language highlights like a vendored
     // one. The renderer owns it; the engine routes fenced code through it.
@@ -710,17 +783,49 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         return out;
     }();
     minimal::client::SyntaxHighlighter highlighter(theme, languages);
-    renderer = minimal::client::MarkdownRenderer(&theme, &highlighter);
+
+    // Core defaults fill every slot no plugin claimed. The engine first (the
+    // agent-markdown default renders through it), then the kind defaults.
+    // ONE construction of the renderer, AFTER the highlighter exists: the
+    // engine binds a reference to this variable, and the first draft reassigned
+    // the variable in place after registering the engine (second constructor
+    // call) -- correct only by coincidence of identity, and a refactor that
+    // introduced a second variable would dangle the engine silently.
+    minimal::client::MarkdownRenderer renderer(&theme, &highlighter);
+    plugins::RegisterDefaultMarkdownEngine(engine_registry, renderer);
+    // Non-null by construction: RegisterDefaultMarkdownEngine registers the
+    // md4c adapter when no plugin claimed the slot.
+    plugins::MarkdownEngine& engine = *engine_registry.engine;
+    plugins::RegisterCoreMessageRenderers(message_registry);
+    plugins::RegisterCoreAgentMarkdownRenderer(message_registry, engine);
 
     // The exclusive chat surface, when a plugin claimed it.
     plugins::ChatSurface* chat_surface = surface_registry.surface.get();
     if (chat_surface != nullptr) {
-        chat_surface->OnTheme(theme);
+        // A throwing surface is disabled, not fatal (catch + disable, track
+        // R2): OnTheme runs before any event flows, so a throw here is the
+        // plugin's first chance to kill the process unguarded.
+        try {
+            chat_surface->OnTheme(theme);
+        } catch (const std::exception& error) {
+            std::fprintf(stderr, "minimal: chat surface plugin threw on theme (%s) -- "
+                                 "disabled; the core chat view takes over\n",
+                         error.what());
+            chat_surface = nullptr;
+        } catch (...) {
+            std::fprintf(stderr, "minimal: chat surface plugin threw on theme (non-standard "
+                                 "exception) -- disabled; the core chat view takes over\n");
+            chat_surface = nullptr;
+        }
     }
 
     auto app = std::make_shared<AppState>(client);
     app->SetPluginAttention(&attention_state);
     app->SetChatSurface(chat_surface);
+    // Memory bounds (track R2): ui.json's values, or the built-in defaults
+    // (SetUiBounds treats 0 as "keep the default"). Applied before any tab can
+    // open, so every SessionState starts bounded.
+    app->SetUiBounds(ui.scrollback_window_max_messages, ui.tool_output_buffer_bytes);
     auto screen = ftxui::ScreenInteractive::TerminalOutput();
     auto quit = screen.ExitLoopClosure();
 
@@ -744,10 +849,21 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         std::unique_ptr<GrantToggles> grants;   // per outstanding request
         std::string grants_for_request;
         ftxui::Component surface_body;          // the chat surface's tab body (when slotted)
+        plugins::ChatSurface* surface_for = nullptr;   // which surface instance built it
+        // Per-tab ChatView: its row cache is keyed by transcript_version, a
+        // PER-SESSION counter starting at 0 -- one shared instance served tab
+        // A's cached rows as tab B's transcript whenever the two versions
+        // collided. One view per tab makes the invariant true by construction.
+        std::unique_ptr<minimal::client::ChatView> chat;
+        // VIEW-display notice side-effects fire ONCE per notice, keyed on the
+        // notice's sequence number (see handle_notice below).
+        uint64_t handled_notice_seq = 0;
+        // Streaming bookkeeping (see maintain): turn_seq keys recreation,
+        // finalized_for_turn fires the engine's one authoritative reparse.
+        uint64_t streaming_turn = 0;
+        bool finalized_for_turn = false;
     };
     std::map<std::string, TabUi> tab_ui;
-
-    minimal::client::ChatView chat_view(theme, engine, message_registry, renderer_registry);
 
     std::string focused;   // active session id, refreshed every frame
 
@@ -758,32 +874,44 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     // (Skipped entirely when the chat surface owns the tab body: the surface
     // keeps its own buffers and fetches its own pages.)
     auto maintain = [&](const std::string& session_id) {
-        if (chat_surface != nullptr) return;
-        const auto details = app->GetAllDetails();
-        const auto it = details.find(session_id);
-        if (it == details.end()) return;
-        const auto& snap = it->second;
+        if (chat_surface != nullptr || app->EffectiveChatSurface() != nullptr) return;
+        // The DEEP snapshot for THIS tab only (track R's focused-tab redesign).
+        const auto snap = app->GetDetails(session_id);
+        if (snap.session_id.empty() && session_id != snap.session_id) return;
         TabUi& ui = tab_ui[session_id];
 
         const auto make_stream = [&] { return engine.MakeStream(); };
-        if (ui.streaming == nullptr) ui.streaming = make_stream();
 
-        if (snap.streaming_text.size() > ui.streaming_seen) {
+        // Stream recreation keys on turn_seq (SessionState's counter, bumped
+        // when a new streaming turn begins), NOT on the old buffer-size
+        // heuristic: turn A ending and turn B streaming past A's byte count
+        // between two frames spliced B's middle onto A's cached tail,
+        // silently.
+        if (ui.streaming == nullptr || ui.streaming_turn != snap.turn_seq) {
+            ui.streaming = make_stream();
+            ui.streaming_seen = 0;
+            ui.streaming_turn = snap.turn_seq;
+            ui.finalized_for_turn = false;
+        } else if (snap.streaming_text.size() > ui.streaming_seen) {
             ui.streaming->AppendDelta(
                 std::string_view(snap.streaming_text).substr(ui.streaming_seen));
-        } else if (snap.streaming_text.size() < ui.streaming_seen) {
-            ui.streaming = make_stream();   // a new turn; the old stream is gone
+            ui.streaming_seen = snap.streaming_text.size();
         }
-        ui.streaming_seen = snap.streaming_text.size();
+
+        // The turn's authoritative reparse (the engine contract: Finalize
+        // replaces artifacts from mid-stream unclosed spans). Without this
+        // wiring the contract was dead code -- the last tokens of a stream
+        // rendered only when the debounce's next tick happened to fire.
+        if (snap.is_streaming_finalized && !ui.finalized_for_turn && ui.streaming) {
+            ui.streaming->Finalize();
+            ui.finalized_for_turn = true;
+        }
 
         if (ui.rendered_version != snap.transcript_version) {
             if (snap.streaming_text.empty()) {
                 app->RefreshScrollback(session_id, /*newest=*/true);
-                const auto fresh = app->GetAllDetails();
-                const auto fit = fresh.find(session_id);
-                ui.rendered_version =
-                    fit != fresh.end() ? std::optional(fit->second.transcript_version)
-                                       : std::optional(snap.transcript_version);
+                const auto fresh = app->GetDetails(session_id);
+                ui.rendered_version = std::optional(fresh.transcript_version);
             } else {
                 ui.rendered_version = snap.transcript_version;
             }
@@ -819,6 +947,15 @@ int RunTui(const minimal::client::ParsedArgs& args) {
                                                         : false;
         });
 
+    // Tab close, for every caller (keybinding, quit confirmation, quit): the
+    // per-tab UI caches must die WITH the tab -- tab_ui entries were never
+    // erased, leaking each closed tab's streaming buffer, grants and surface
+    // body for the process lifetime.
+    auto close_tab = [&](const std::string& id) {
+        app->CloseTab(id);
+        tab_ui.erase(id);
+    };
+
     // --- quit / close confirmation --------------------------------------------
     PendingConfirmation confirm_request;
     confirm_request.kind = "app_quit";
@@ -833,7 +970,7 @@ int RunTui(const minimal::client::ParsedArgs& args) {
                 return;
             }
             // Children first, root last (pending_close was staged that way).
-            for (const auto& id : pending_close.session_ids) app->CloseTab(id);
+            for (const auto& id : pending_close.session_ids) close_tab(id);
             if (pending_close.quit) quit();
             show_quit_confirm = false;
             pending_close = PendingClose{};
@@ -888,12 +1025,56 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     // itself enforces (see the modal stack below).
     auto plugin_modal_child = std::make_shared<Component>();
     auto plugin_modal_host = Renderer([=] {
-        return *plugin_modal_child ? (*plugin_modal_child)->Render() : emptyElement();
+        if (!*plugin_modal_child) return emptyElement();
+        // A throwing plugin modal hides itself for the frame (never fatal).
+        try {
+            return (*plugin_modal_child)->Render();
+        } catch (const std::exception& error) {
+            minimal::common::DefaultLogger().error("plugin modal threw: {}", error.what());
+        } catch (...) {
+            minimal::common::DefaultLogger().error("plugin modal threw a non-standard exception");
+        }
+        return emptyElement();
     });
     auto plugin_modal_host_interactive = CatchEvent(plugin_modal_host, [&](const Event& event) {
         if (!show_plugin_modal || !*plugin_modal_child) return false;
         return (*plugin_modal_child)->OnEvent(event);
     });
+
+    // VIEW-display notices: the side-effect (open the picker, show a plugin
+    // modal) fires ONCE per notice here in the maintenance pass, keyed on the
+    // notice's sequence number -- never from Render(). The first draft routed
+    // this inside the renderer: the notice is never cleared (status text
+    // persists until the next result replaces it), so a View notice re-ran
+    // open_picker's ListSessions RPC and re-staged the modal at frame rate,
+    // making it unclosable. Status/Silent notices keep rendering in the frame
+    // below; only their SIDE-EFFECTS are guarded.
+    auto handle_notice = [&] {
+        if (focused.empty()) return;
+        const auto snap = app->GetDetails(focused);   // focused tab only
+        if (!snap.latest_notice.has_value()) return;
+        TabUi& ui = tab_ui[focused];
+        if (ui.handled_notice_seq == snap.notice_seq) return;   // already handled
+        ui.handled_notice_seq = snap.notice_seq;
+
+        const auto& notice = *snap.latest_notice;
+        if (notice.display != minimal::v1::COMMAND_DISPLAY_VIEW || notice.view_hint.empty()) {
+            return;
+        }
+        if (notice.view_hint == "sessions") {
+            open_picker();   // core mapping: the picker modal
+        } else if (auto* view = view_registry.Find(notice.view_hint)) {
+            for (auto& entry : plugin_views) {
+                if (entry.view == view) entry.visible = true;
+            }
+            if (view->spec().placement == plugins::ViewPlacement::Modal) {
+                *plugin_modal_child = view->component();
+                show_plugin_modal = true;
+            }
+        }
+        // A hint naming no view falls through: the unknown-view-id rule, like
+        // the unknown segment id's.
+    };
 
     // --- session picker delete confirmation ------------------------------------
     // Built once, like the quit confirmation; `delete_request` is mutated when
@@ -919,20 +1100,22 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     int panel_height = 12;
     auto any_work_in_flight = [&](const std::vector<AppState::TabSnapshot>& tabs,
                                   const std::vector<std::string>& ids) {
-        const auto details = app->GetAllDetails();
+        // The caller's tab snapshots carry the state already — re-snapshotting
+        // every tab (a full deep copy) per keypress was pure waste.
         for (const auto& id : ids) {
-            const auto it = details.find(id);
-            if (it == details.end()) continue;
-            switch (it->second.state) {
-                case SessionStateKind::Thinking:
-                case SessionStateKind::Working:
-                case SessionStateKind::Waiting:
-                    return true;
-                default:
-                    break;
+            for (const auto& tab : tabs) {
+                if (tab.session_id != id) continue;
+                switch (tab.state) {
+                    case SessionStateKind::Thinking:
+                    case SessionStateKind::Working:
+                    case SessionStateKind::Waiting:
+                        return true;
+                    default:
+                        break;
+                }
+                break;
             }
         }
-        (void)tabs;
         return false;
     };
 
@@ -944,53 +1127,64 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         for (const auto& tab : tabs) {
             if (tab.is_focused) focused = tab.session_id;
         }
-        if (!focused.empty()) maintain(focused);
+        if (!focused.empty()) {
+            maintain(focused);
+            handle_notice();   // once-per-notice VIEW side-effects (never in Render)
+        }
 
         Elements rows;
         rows.push_back(minimal::client::RenderTabBar(tabs, theme));
 
-        const auto details = app->GetAllDetails();
-        const auto dit = details.find(focused);
-        if (dit != details.end()) {
-            const auto& snap = dit->second;
+        // The frame's DEEP copy: the FOCUSED tab only. (The tools panel reads
+        // the light TabSnapshot.tools; nothing renders other tabs' heavy data.)
+        const auto focused_details = app->GetDetails(focused);
+        if (!focused_details.session_id.empty() || !focused.empty()) {
+            const auto& snap = focused_details;
             TabUi& ui = tab_ui[focused];
 
             // The tab body: the exclusive chat surface when a plugin claimed
             // the slot, the core chat view otherwise. The surface's component
             // is fetched once per tab and cached; the surface's own OnEvent
-            // push carries its data (see DispatchToTab).
-            if (chat_surface != nullptr) {
-                if (!ui.surface_body) ui.surface_body = chat_surface->component();
-                rows.push_back(ui.surface_body->Render() | yframe | vscroll_indicator | flex);
+            // push carries its data (see DispatchToTab). EffectiveChatSurface
+            // returns null once a surface has thrown -- the core view takes
+            // over and the stale surface_body cache is dropped.
+            plugins::ChatSurface* effective_surface = app->EffectiveChatSurface();
+            if (effective_surface != nullptr) {
+                if (!ui.surface_body || ui.surface_for != effective_surface) {
+                    ui.surface_body = effective_surface->component();
+                    ui.surface_for = effective_surface;
+                }
+                try {
+                    rows.push_back(ui.surface_body->Render() | yframe | vscroll_indicator | flex);
+                } catch (const std::exception& error) {
+                    app->DisableChatSurface(error.what());
+                    rows.push_back(text(" chat surface plugin threw -- the core chat view "
+                                        "takes over") | color(theme.ColorFor("error")));
+                } catch (...) {
+                    app->DisableChatSurface(nullptr);
+                    rows.push_back(text(" chat surface plugin threw -- the core chat view "
+                                        "takes over") | color(theme.ColorFor("error")));
+                }
             } else {
-                rows.push_back(chat_view.Render(snap, *ui.streaming) | yframe |
+                if (!ui.chat) {
+                    ui.chat = std::make_unique<minimal::client::ChatView>(
+                        theme, message_registry, renderer_registry);
+                }
+                rows.push_back(ui.chat->Render(snap, *ui.streaming) | yframe |
                                vscroll_indicator | flex);
             }
 
             // The transient notice line: the focused tab's latest /-command
             // outcome, routed by its CommandDisplay mode (EXTENSIBILITY §4.4).
             // NEVER a chat row -- that is a type-level property of
-            // CommandNotice. VIEW opens/refreshes the view named by the hint;
-            // SILENT is status-bar-only; STATUS (and every error, the
-            // dispatcher having downgraded them) renders here.
+            // CommandNotice. VIEW side-effects ran in handle_notice() above,
+            // once per notice; here a View notice renders nothing (the view
+            // it opened is the surface), and STATUS/errors render as the
+            // persistent line until the next result replaces them.
             if (snap.latest_notice.has_value()) {
                 const auto& notice = *snap.latest_notice;
-                if (notice.display == minimal::v1::COMMAND_DISPLAY_VIEW &&
-                    !notice.view_hint.empty()) {
-                    if (notice.view_hint == "sessions") {
-                        open_picker();   // core mapping: the picker modal
-                    } else if (auto* view = view_registry.Find(notice.view_hint)) {
-                        for (auto& entry : plugin_views) {
-                            if (entry.view == view) entry.visible = true;
-                        }
-                        if (view->spec().placement == plugins::ViewPlacement::Modal) {
-                            *plugin_modal_child = view->component();
-                            show_plugin_modal = true;
-                        }
-                    }
-                    // A hint naming no view falls through to nothing rendered:
-                    // the unknown-view-id rule, like the unknown segment id's.
-                } else if (notice.display != minimal::v1::COMMAND_DISPLAY_SILENT) {
+                if (notice.display != minimal::v1::COMMAND_DISPLAY_VIEW &&
+                    notice.display != minimal::v1::COMMAND_DISPLAY_SILENT) {
                     rows.push_back(text(" " + notice.message) |
                                    bgcolor(theme.ColorFor("status_bar_bg")) |
                                    color(notice.is_error ? theme.ColorFor("error")
@@ -1034,7 +1228,7 @@ int RunTui(const minimal::client::ParsedArgs& args) {
 
         if (show_panel) {
             rows.push_back(minimal::client::RenderToolsPanel(
-                               tabs, details, /*stdout_buffer_lines=*/100, theme) |
+                               tabs, /*stdout_buffer_lines=*/100, theme) |
                            size(HEIGHT, LESS_THAN, panel_height) | yframe);
         }
 
@@ -1045,40 +1239,64 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         // string's unknown-or-unfilled rule.
         std::map<std::string, std::string> values;
         values["version"] = std::string(minimal::common::Version());
-        if (dit != details.end()) {
-            values["session"] = dit->second.display_name;
+        // The focused tab's DEEP snapshot (see focused_details above) drives
+        // the status bar's values.
+        if (!focused_details.session_id.empty()) {
+            values["session"] = focused_details.display_name;
             // {tokens} is used/max now that the metadata emission carries the
             // window (E5a); max unknown (0) renders used-only, the E4 behavior.
-            const int64_t used = dit->second.input_tokens + dit->second.output_tokens;
+            const int64_t used =
+                focused_details.input_tokens + focused_details.output_tokens;
             if (used > 0) {
-                values["tokens"] = dit->second.context_window_tokens > 0
+                values["tokens"] = focused_details.context_window_tokens > 0
                                        ? std::to_string(used) + "/" +
-                                             std::to_string(dit->second.context_window_tokens) +
+                                             std::to_string(focused_details.context_window_tokens) +
                                              " tok"
                                        : std::to_string(used) + " tok";
             }
             // The metadata segments: empty = unknown = render nothing, the
             // format string's unknown-or-unfilled rule.
-            if (!dit->second.model.empty()) values["model"] = dit->second.model;
-            if (!dit->second.agent_preset.empty()) values["agent"] = dit->second.agent_preset;
-            if (!dit->second.permission_mode.empty()) {
-                values["permission_mode"] = dit->second.permission_mode;
+            if (!focused_details.model.empty()) values["model"] = focused_details.model;
+            if (!focused_details.agent_preset.empty()) values["agent"] = focused_details.agent_preset;
+            if (!focused_details.permission_mode.empty()) {
+                values["permission_mode"] = focused_details.permission_mode;
             }
         }
         // Registered segment providers fill their own ids. Render runs on the
         // render thread at ~20 Hz -- the provider contract (cheap, never
-        // blocking) is stated on the interface.
+        // blocking) is stated on the interface; a THROW is contained (that
+        // segment renders nothing for this frame), never fatal.
         for (const auto& segment : status_registry.segments()) {
-            values[std::string(segment->id())] = segment->Render();
+            try {
+                values[std::string(segment->id())] = segment->Render();
+            } catch (const std::exception& error) {
+                minimal::common::DefaultLogger().error("status segment '{}' threw: {}",
+                                              std::string(segment->id()), error.what());
+            } catch (...) {
+                minimal::common::DefaultLogger().error("status segment '{}' threw a non-standard "
+                                                       "exception", std::string(segment->id()));
+            }
         }
         rows.push_back(minimal::client::RenderStatusBar(status_format, values, theme));
 
         // Plugin PANEL views, beside the tools panel. Events reach the visible
-        // ones through the frame's CatchEvent (see with_keys).
+        // ones through the frame's CatchEvent (see with_keys). A throwing
+        // view is hidden for the frame that threw (never fatal), like the
+        // status segments.
         for (auto& entry : plugin_views) {
             if (entry.view->spec().placement == plugins::ViewPlacement::Panel && entry.visible) {
-                rows.push_back(entry.component->Render() |
-                               size(HEIGHT, LESS_THAN, panel_height) | yframe);
+                try {
+                    rows.push_back(entry.component->Render() |
+                                   size(HEIGHT, LESS_THAN, panel_height) | yframe);
+                } catch (const std::exception& error) {
+                    minimal::common::DefaultLogger().error("plugin view '{}' threw: {}",
+                                                           std::string(entry.view->spec().id),
+                                                           error.what());
+                } catch (...) {
+                    minimal::common::DefaultLogger().error(
+                        "plugin view '{}' threw a non-standard exception",
+                        std::string(entry.view->spec().id));
+                }
             }
         }
 
@@ -1164,7 +1382,7 @@ int RunTui(const minimal::client::ParsedArgs& args) {
                     pending_close = std::move(staged);   // ONE confirmation for the group
                     show_quit_confirm = true;
                 } else {
-                    for (const auto& id : staged.session_ids) app->CloseTab(id);
+                    for (const auto& id : staged.session_ids) close_tab(id);
                 }
             }
             return true;
@@ -1226,12 +1444,22 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     Component final_tree = with_permission;
 
     // THE PUMP: reader threads wake nothing by themselves; this loop redraws
-    // at 20 Hz from snapshots. Bounded join (one tick) at shutdown.
+    // at up to 20 Hz from snapshots. Redraws are gated on the app's UI
+    // revision -- an idle TUI used to repaint the full frame 20x per second
+    // no matter what. A 5 Hz floor remains so the editor's @-mention debounce
+    // gate (which fires FROM a render pass) is serviced while the user types.
     std::atomic<bool> running{true};
     std::thread pump([&] {
+        uint64_t last_version = app->UiVersion();
+        int tick = 0;
         while (running.load(std::memory_order_acquire)) {
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
-            screen.PostEvent(Event::Custom);
+            ++tick;
+            const uint64_t version = app->UiVersion();
+            if (version != last_version || tick % 4 == 0) {
+                last_version = version;
+                screen.PostEvent(Event::Custom);
+            }
         }
     });
 

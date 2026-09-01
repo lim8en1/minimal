@@ -34,6 +34,10 @@ struct ClientPluginConfig {
     std::vector<Entry> plugins;
     std::map<std::string, std::string> aliases;
     nlohmann::json preserved = nlohmann::json::object();
+
+    // Set when the file parsed as non-object/discarded JSON: the host warns
+    // and leaves the user's bytes untouched (no rewrite over a parse loss).
+    bool malformed = false;
 };
 
 ClientPluginConfig ParseClientPluginConfig(const std::string& json_text);

@@ -57,11 +57,18 @@ struct CommandCatalogEntry {
     bool submits_prompt = false;  // PromptShorthand: the one kind that submits a turn
 };
 
+// The @-mention query seam. The shipped implementation is a synchronous
+// SuggestPaths call with a 250 ms deadline (kSuggestPathsDeadline) -- bounded,
+// but it still pauses the frame for up to that long. An async implementation
+// (query off-loop, results applied on a later frame) is a drop-in replacement
+// behind this same signature; the editor never changes.
+using MentionSuggestor = std::function<std::vector<std::string>(const std::string& prefix)>;
+
 ftxui::Component MakePromptEditor(
     const Theme& theme, PromptEditorState& state,
     std::function<void(const std::string&)> on_text,
     std::function<void(const std::string&)> on_command,
-    std::function<std::vector<std::string>(const std::string& prefix)> suggest,
+    const MentionSuggestor& suggest,
     std::function<std::vector<CommandCatalogEntry>()> command_catalog = nullptr);
 
 }  // namespace minimal::client

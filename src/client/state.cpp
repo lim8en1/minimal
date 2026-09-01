@@ -8,6 +8,7 @@
 #include <utility>
 
 #include "minimal/client/cli_args.hpp"
+#include "minimal/common/logger.hpp"
 
 namespace minimal::client {
 
@@ -19,6 +20,31 @@ namespace minimal::client {
 
 SessionState::SessionState(std::string session_id, std::string name)
     : session_id_(std::move(session_id)), display_name_(std::move(name)) {}
+
+SessionState::Snapshot SessionState::TakeLightSnapshot() {
+    std::lock_guard lk(mtx_);
+    Snapshot s;
+    s.session_id = session_id_;
+    s.display_name = display_name_;
+    s.state = state_;
+    s.tools = tools_;   // bounded (R2); the tools panel renders these
+    s.input_tokens = input_tokens_;
+    s.output_tokens = output_tokens_;
+    s.model = model_;
+    s.agent_preset = agent_preset_;
+    s.permission_mode = permission_mode_;
+    s.context_window_tokens = context_window_tokens_;
+    // Deliberately NOT copied (heavy, and only the focused tab renders them):
+    // scrollback_page, streaming_text, pending_permission/confirmation,
+    // latest_notice.
+    return s;
+}
+
+void SessionState::SetBounds(int scrollback_max_messages, int tool_output_buffer_bytes) {
+    std::lock_guard lk(mtx_);
+    scrollback_max_messages_ = scrollback_max_messages;
+    tool_output_buffer_bytes_ = tool_output_buffer_bytes;
+}
 
 SessionState::Snapshot SessionState::TakeSnapshot() {
     std::lock_guard lk(mtx_);
@@ -41,7 +67,10 @@ SessionState::Snapshot SessionState::TakeSnapshot() {
     s.input_tokens = input_tokens_;
     s.output_tokens = output_tokens_;
     s.transcript_version = transcript_version_;
+    s.scrollback_trimmed = scrollback_trimmed_;
+    s.turn_seq = turn_seq_;
     s.latest_notice = latest_notice_;
+    s.notice_seq = notice_seq_;
     s.model = model_;
     s.agent_preset = agent_preset_;
     s.permission_mode = permission_mode_;
@@ -73,8 +102,17 @@ void SessionState::OnSessionMetadata(const v1::SessionMetadataEvent& metadata) {
 
 void SessionState::AppendStreamingText(std::string_view text) {
     std::lock_guard lk(mtx_);
+    // A NEW TURN begins only after the previous one ENDED (TurnCompleted/Error)
+    // -- message stops fire between tool cycles WITHIN one turn, so arming on
+    // is_streaming_ alone would re-key the stream mid-turn. (See turn_seq in
+    // the Snapshot.)
+    if (turn_ended_) {
+        ++turn_seq_;
+        turn_ended_ = false;
+    }
     streaming_accumulated_.append(text);
     is_streaming_ = true;
+
     // A fresh assistant turn supersedes any unanswered prompt (including Waiting
     // -- the prompt below is cleared by this same call, so the state must move
     // with it rather than being stranded in Waiting with nothing pending).
@@ -106,6 +144,7 @@ void SessionState::MaybeGoIdleLocked() {
 void SessionState::OnTurnCompleted(const v1::TurnCompletedEvent& evt) {
     std::lock_guard lk(mtx_);
     is_streaming_ = false;
+    turn_ended_ = true;
     input_tokens_ = evt.usage().input_tokens();
     output_tokens_ = evt.usage().output_tokens();
     // Turn completion is bookkeeping, not a state transition: `Done` means the
@@ -121,10 +160,11 @@ void SessionState::OnTurnCompleted(const v1::TurnCompletedEvent& evt) {
 
 void SessionState::OnCommandResult(const v1::CommandResult& evt) {
     std::lock_guard lk(mtx_);
-    CommandNotice notice;
-    notice.message = evt.message();
-    notice.is_error = evt.status() == v1::COMMAND_STATUS_ERROR;
-    latest_notice_ = std::move(notice);
+    // The FULL mapper, not a hand-copied subset: dropping display/view_hint
+    // here silently downgraded every View-display result (e.g. /sessions) to a
+    // status line, dead on arrival.
+    latest_notice_ = NoticeFromCommandResult(evt);
+    ++notice_seq_;
 }
 
 void SessionState::ClearStreaming() {
@@ -136,6 +176,7 @@ void SessionState::ClearStreaming() {
 void SessionState::OnError(const std::string&) {
     std::lock_guard lk(mtx_);
     is_streaming_ = false;
+    turn_ended_ = true;   // the errored turn is over; the next stream is a new one
     pending_permission_.reset();
     pending_confirmation_.reset();
     state_ = SessionStateKind::Error;
@@ -208,6 +249,20 @@ void SessionState::OnToolOutputDelta(const std::string& tool_use_id, const std::
     for (auto it = tools_.rbegin(); it != tools_.rend(); ++it) {
         if (it->tool_use_id == tool_use_id && it->started) {   // the active execution, if any
             it->buffered_output.append(chunk);
+            // Cap AT APPEND (track R2): the "ring buffer" the header promised.
+            // Render-time truncation alone let a chatty tool (a build, a
+            // `tail -f`) grow client memory for the whole turn. Head ¼ +
+            // marker + tail ¾, mirroring the server's persisted-result cap.
+            if (static_cast<int>(it->buffered_output.size()) > tool_output_buffer_bytes_) {
+                static const std::string kMarker =
+                    "\n··· live output trimmed -- the full result is in the transcript ···\n";
+                const std::size_t head_bytes = static_cast<std::size_t>(tool_output_buffer_bytes_) / 4;
+                const std::size_t tail_budget =
+                    static_cast<std::size_t>(tool_output_buffer_bytes_) - head_bytes - kMarker.size();
+                it->buffered_output =
+                    it->buffered_output.substr(0, head_bytes) + kMarker +
+                    it->buffered_output.substr(it->buffered_output.size() - tail_budget);
+            }
             return;
         }
     }
@@ -240,9 +295,20 @@ void SessionState::ApplyScrollbackPage(const v1::GetMessagesResponse& resp) {
         // window, not at its front.
         scrollback_page_.insert(scrollback_page_.end(), resp.messages().begin(),
                                 resp.messages().end());
+        // Sliding window (track R2): the wire has only desc-order paging
+        // (before_seq), so there is no way to reload NEWER pages on demand --
+        // eviction from the newest end is therefore flagged
+        // (scrollback_trimmed_) and the view renders a boundary marker, never
+        // a silent gap. The newest-slice refresh at turn end (below, and in
+        // RefreshScrollback(newest=true)) resets the flag and the window.
+        while (static_cast<int>(scrollback_page_.size()) > scrollback_max_messages_) {
+            scrollback_page_.erase(scrollback_page_.begin());
+            scrollback_trimmed_ = true;
+        }
     } else {
         // Newer than what we hold — keep only the contiguous newest slice (bounded memory).
         scrollback_page_.assign(resp.messages().begin(), resp.messages().end());
+        scrollback_trimmed_ = false;
     }
 
     last_loaded_seq_ = scrollback_page_.empty() ? -1 : scrollback_page_.back().seq();
@@ -261,7 +327,45 @@ bool SessionState::CanLoadMore() const {
 // is consistent; per-tab SessionState owns its own mutex.
 // ===========================================================================
 
+namespace {
+
+// Which non-OK stream statuses mean "the server is unreachable" versus "the
+// server deliberately ended this RPC". The first probe run settled it: a
+// server-side session termination surfaces as NOT_FOUND ("unknown session_id")
+// -- an application response from a live server, which must reach Done, not a
+// "connection lost" error. A crashed server fails the call with UNAVAILABLE /
+// INTERNAL / DEADLINE_EXCEEDED.
+bool IsTransportDeath(const grpc::Status& status) {
+    switch (status.error_code()) {
+        case grpc::StatusCode::UNAVAILABLE:
+        case grpc::StatusCode::INTERNAL:
+        case grpc::StatusCode::DEADLINE_EXCEEDED:
+            return true;
+        default:
+            return false;
+    }
+}
+
+}  // namespace
+
 AppState::AppState(std::shared_ptr<SessionClient> client) : client_(std::move(client)) {}
+
+void AppState::SetUiBounds(int scrollback_max_messages, int tool_output_buffer_bytes) {
+    if (scrollback_max_messages > 0) scrollback_max_messages_ = scrollback_max_messages;
+    if (tool_output_buffer_bytes > 0) tool_output_buffer_bytes_ = tool_output_buffer_bytes;
+}
+
+void AppState::DisableChatSurface(const char* reason) {
+    chat_surface_broken_ = true;
+    if (reason != nullptr) {
+        common::DefaultLogger().error(
+            "chat surface plugin threw ({}) -- disabled; the core chat view takes over", reason);
+    } else {
+        common::DefaultLogger().error(
+            "chat surface plugin threw a non-standard exception -- disabled; the core chat "
+            "view takes over");
+    }
+}
 
 // Open a brand-new session as a tab. Two-phase: create the stream + session id under no
 // app lock (session creation is blocking), register the entry, THEN Resume() the reader so
@@ -280,6 +384,11 @@ std::string AppState::OpenTab(const SessionClient::CreateOptions& opts) {
         TabEntry entry;
         entry.stream = stream;
         entry.info.state = std::make_shared<SessionState>(*sid);
+        entry.info.state->SetBounds(
+            scrollback_max_messages_ > 0 ? scrollback_max_messages_
+                                         : SessionState::kDefaultScrollbackWindowMaxMessages,
+            tool_output_buffer_bytes_ > 0 ? tool_output_buffer_bytes_
+                                          : SessionState::kDefaultToolOutputBufferBytes);
         entry.info.session_id = *sid;
         entry.info.parent_session_id = std::nullopt;   // root tab (a child gets its parent set)
         entry.info.root_ordinal = ++next_root_ordinal_;   // a fresh group id
@@ -288,9 +397,22 @@ std::string AppState::OpenTab(const SessionClient::CreateOptions& opts) {
         if (focused_id_.empty()) focused_id_ = *sid;   // focus an empty app on its first tab
         tabs_.push_back(std::move(entry));
     }   // lock released here, before the reader thread can dispatch back into us
+    BumpUiVersion();
 
-    stream->SetOnClosed([this, sid = *sid] {
-        if (auto* state = GetState(sid)) state->OnSessionEnded();
+    stream->SetOnClosed([this, sid = *sid](const grpc::Status& status) {
+        if (auto state = GetState(sid)) {
+            // The reader's Finish() status distinguishes transport death from a
+            // clean server-side close: a crashed server used to render as a
+            // happy "Done ✓" tab that silently swallowed typed input. The
+            // status RIDES IN on the callback -- reaching back into the stream
+            // from here could make this callback the stream's last owner while
+            // the reader thread is inside it (see Stream::SetOnClosed).
+            if (IsTransportDeath(status)) {
+                state->OnError("connection lost: " + status.error_message());
+            } else {
+                state->OnSessionEnded();
+            }
+        }
     });
     stream->Resume();   // start threads AFTER unlock — a dispatched event must find this entry
     return *sid;
@@ -299,6 +421,15 @@ std::string AppState::OpenTab(const SessionClient::CreateOptions& opts) {
 // Attach an existing server-side session as a tab. Same two-phase pattern: name+register,
 // then Resume() so its child's events find this entry rather than racing it.
 std::string AppState::AttachTab(const std::string& session_id, int64_t parent_ordinal) {
+    // Duplicate refusal BEFORE any wire traffic: attaching an already-open
+    // session would create a second TabEntry whose events all route to the
+    // first (FindTab returns the first match), leaving a permanently dead
+    // tab. Picker resumes of an open session are the realistic path.
+    {
+        std::lock_guard lk(mtx_);
+        if (FindTab(session_id) != nullptr) return "";
+    }
+
     auto stream = client_->MakeStream(
         [this](const v1::ServerEvent& e) { DispatchToTab(e.session_id(), e); });
 
@@ -307,9 +438,24 @@ std::string AppState::AttachTab(const std::string& session_id, int64_t parent_or
 
     {   // register under a lock, then drop it before starting the reader thread
         std::lock_guard lk(mtx_);
+        if (FindTab(session_id) != nullptr) {
+            // A duplicate slipped through the race window (two concurrent
+            // AttachTab calls -- requires the server to double-emit a
+            // SubagentStartedEvent). Cancel the underlying call and drop it:
+            // its naming event was never sent, so the server never attached
+            // it and cancelling cannot terminate the real session the way
+            // Finish()-without-cancel could wedge or a close could destroy.
+            stream->Cancel();
+            return "";
+        }
         TabEntry entry;
         entry.stream = stream;
         entry.info.state = std::make_shared<SessionState>(session_id);
+        entry.info.state->SetBounds(
+            scrollback_max_messages_ > 0 ? scrollback_max_messages_
+                                         : SessionState::kDefaultScrollbackWindowMaxMessages,
+            tool_output_buffer_bytes_ > 0 ? tool_output_buffer_bytes_
+                                          : SessionState::kDefaultToolOutputBufferBytes);
         entry.info.session_id = session_id;
 
         // Parent-of-group: locate the leader (root) of this group so subagents inherit its ordinal.
@@ -328,11 +474,21 @@ std::string AppState::AttachTab(const std::string& session_id, int64_t parent_or
         }
 
         entry.info.spawn_seq = next_spawn_seq_++;
+        // Focus an empty app on its first tab (OpenTab's rule): a picker
+        // resume into a fresh session-less TUI must show the session, not the
+        // welcome placeholder.
+        if (focused_id_.empty()) focused_id_ = session_id;
         tabs_.push_back(std::move(entry));
     }   // lock released here, before the reader thread can dispatch back into us
 
-    stream->SetOnClosed([this, session_id] {
-        if (auto* state = GetState(session_id)) state->OnSessionEnded();
+    stream->SetOnClosed([this, session_id](const grpc::Status& status) {
+        if (auto state = GetState(session_id)) {
+            if (IsTransportDeath(status)) {
+                state->OnError("connection lost: " + status.error_message());
+            } else {
+                state->OnSessionEnded();
+            }
+        }
     });
     stream->Resume();   // start threads AFTER unlock — same guard as OpenTab
     return session_id;
@@ -349,17 +505,37 @@ bool AppState::HasTab(const std::string& session_id) const {
 // Reader-thread callback: route a ServerEvent to its owned tab. Defers subagent creation
 // until the app lock is released, so opening a child stream never happens while held.
 void AppState::DispatchToTab(const std::string& session_id, const v1::ServerEvent& event) {
+    BumpUiVersion();   // every wire event can change what the frame renders
     // The exclusive chat surface sees EVERY event for the session, before
     // core's handling (docs/EXTENSIBILITY.md 4.2: the host pushes, the surface
     // owns its presentation; core's data plane runs regardless). Reader
     // thread -- OnEvent must not block; that is the surface's contract.
-    if (chat_surface_ != nullptr) chat_surface_->OnEvent(event);
-
-    SessionState* target = nullptr;
-    {   // brief lock — grab only the pointer, release before touching per-tab state
-        std::lock_guard lk(mtx_);
-        if (TabEntry* e = FindTab(session_id)) target = e->info.state.get();
+    // Throwing is contained: the surface is disabled for the process (the
+    // core chat view takes over). An UNguarded throw here propagated out of
+    // the reader thread function and std::terminate'd the whole TUI -- and a
+    // blocking surface wedges the data plane AND the CloseAllTabs join; the
+    // block contract is documented, the throw is enforced.
+    if (chat_surface_ != nullptr && !chat_surface_broken_) {
+        try {
+            chat_surface_->OnEvent(event);
+        } catch (const std::exception& error) {
+            chat_surface_broken_ = true;
+            common::DefaultLogger().error(
+                "chat surface plugin threw ({}) -- disabled; the core chat view takes over",
+                error.what());
+        } catch (...) {
+            chat_surface_broken_ = true;
+            common::DefaultLogger().error(
+                "chat surface plugin threw a non-standard exception -- disabled; the core "
+                "chat view takes over");
+        }
     }
+
+    // Owning copy out of the lookup: CloseTab can erase the TabEntry (dropping
+    // the last shared_ptr) while this reader-thread dispatch is in flight — a
+    // raw pointer here was a use-after-free on every tab close with a live
+    // stream.
+    const auto target = GetState(session_id);
     if (!target) return;   // orphaned / unknown id (e.g. pre-attach race) — ignore
 
     // Use has_* predicates (not the oneof case enum) so this stays correct across protobuf
@@ -445,6 +621,7 @@ void AppState::OnSubagentSpawned(std::string_view parent_id, const v1::SubagentS
 }
 
 void AppState::CloseTab(const std::string& session_id) {
+    BumpUiVersion();
     std::shared_ptr<SessionClient::Stream> to_close;
     bool was_focused = false;
     {
@@ -463,6 +640,7 @@ void AppState::CloseTab(const std::string& session_id) {
 }
 
 void AppState::SetFocusedTab(const std::string& session_id) {
+    BumpUiVersion();
     std::lock_guard lk(mtx_);
     // FindTab, not HasTab: HasTab locks mtx_ itself, and this mutex is not
     // recursive -- calling it here would deadlock every caller, including
@@ -501,12 +679,20 @@ void AppState::SendChatTurn(const std::string& session_id, const std::string& te
     v1::ClientEvent ev;
     ev.set_session_id(session_id);
     ev.mutable_chat_turn()->set_text(text);
-    stream->Send(ev);
+    // A refused send is surfaced, not swallowed: the send queue is bounded
+    // (the server stopped reading) or the stream is dead -- either way, typed
+    // input silently vanishing reads as "the model ignored me".
+    if (!stream->Send(ev)) {
+        if (auto state = GetState(session_id)) {
+            state->OnError("cannot send: the stream is closing or stalled");
+        }
+    }
 }
 
 void AppState::AnswerPermission(const std::string& session_id, const std::string& request_id,
                                 v1::PermissionDecision decision,
                                 std::vector<std::string> granted_keys) {
+    BumpUiVersion();
     // Mirror the wire guarantee (see ARCHITECTURE.md consent scoping): only keys actually
     // offered by the PermissionRequest may be answered. The server filters extras too, but
     // answering is a local no-op here so the round-trip stays cheap.
@@ -526,6 +712,7 @@ void AppState::AnswerPermission(const std::string& session_id, const std::string
 
 void AppState::AnswerConfirmation(const std::string& session_id, const std::string& request_id,
                                   const std::string& chosen_option) {
+    BumpUiVersion();
     auto stream = GetStream(session_id);
     if (!stream) return;
 
@@ -570,8 +757,11 @@ void AppState::SendCancel(const std::string& session_id) {
 }
 
 void AppState::RefreshScrollback(const std::string& session_id, bool newest) {
-    SessionState* state = GetState(session_id);
-    if (state == nullptr) return;
+    BumpUiVersion();
+    // Owning copy: this runs on the loop thread and can outlive a CloseTab
+    // that races it (picker delete / tab close mid-refresh).
+    const auto state = GetState(session_id);
+    if (!state) return;
 
     std::optional<int64_t> cursor;
     if (!newest) {
@@ -606,7 +796,8 @@ std::vector<AppState::TabSnapshot> AppState::GetAllTabs() const {
     out.reserve(tabs_.size());
     for (const auto& tab : tabs_) {
         TabSnapshot snap;
-        const SessionState::Snapshot ss = tab.info.state->TakeSnapshot();   // each State locks internally
+        const SessionState::Snapshot ss = tab.info.state->TakeLightSnapshot();   // LIGHT: no scrollback/streaming copies
+        snap.tools = ss.tools;
         snap.session_id = tab.info.session_id;
         snap.display_name = ss.display_name.empty() ? tab.info.session_id : ss.display_name;
         snap.state = ss.state;
@@ -635,6 +826,18 @@ std::map<std::string, SessionState::Snapshot> AppState::GetAllDetails() const {
         out.emplace(tab.info.session_id, tab.info.state->TakeSnapshot());
     }
     return out;
+}
+
+SessionState::Snapshot AppState::GetDetails(const std::string& session_id) const {
+    // The DEEP snapshot for ONE tab (track R's focused-tab pump redesign): the
+    // frame renders the focused tab only, so deep-copying every tab per frame
+    // -- under each tab's lock -- was pure waste. GetAllDetails stays for
+    // callers that genuinely need every tab.
+    std::lock_guard lk(mtx_);
+    for (const auto& tab : tabs_) {
+        if (tab.info.session_id == session_id) return tab.info.state->TakeSnapshot();
+    }
+    return SessionState::Snapshot{};
 }
 
 std::string AppState::FocusedSessionId() const {
@@ -669,10 +872,12 @@ std::shared_ptr<SessionClient::Stream> AppState::GetStream(const std::string& se
     return nullptr;
 }
 
-SessionState* AppState::GetState(const std::string& session_id) {
+std::shared_ptr<SessionState> AppState::GetState(const std::string& session_id) const {
     std::lock_guard lk(mtx_);
     for (const auto& tab : tabs_) {
-        if (tab.info.session_id == session_id) return tab.info.state.get();
+        if (tab.info.session_id == session_id) {
+            return tab.info.state;   // owning copy: survives CloseTab erasing the entry
+        }
     }
     return nullptr;
 }

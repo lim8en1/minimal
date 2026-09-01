@@ -853,6 +853,7 @@ Three policies complete the surface:
 - **Plugin modals never preempt the permission modal.** Permission/confirmation prompts are always topmost in the modal stack; a plugin modal cannot mask one or steal its input. Invariant, tested.
 - **Client plugins own their data path.** A plugin view wanting live data subscribes itself through the generic `PluginCall`/`PluginSubscribe` channel; core transports and never interprets plugin payloads. A plugin *pair* binding a server command to a client view works the same way: the client side observes its own `CommandResult` — whose `view_hint` names the view — and opens or refreshes it.
 - **Attention is raiseable.** Plugins receive an `AttentionSink` at registration and may raise or clear tab/global attention; core event derivation (§ *Tab states and attention*) remains the default source, and the `!` glyph stays the only color-independent signal.
+- **`PluginSubscribe` is tri-state** (`SubscribeOutcome`: cancelled / ended / error) -- a single bool conflated the subscriber's own cancellation, a clean server close, and a refusal or transport death. Live subscriptions are cancelled at client teardown; the sink and data-path pointers a plugin captures at registration are host-owned for the process lifetime (the temporaries that once dangled them are the exact bug class the R harness tests now pin).
 
 **Consequence:** `keybindings.json` and the status-bar format string become **load-bearing plugin infrastructure**, not just user conveniences — they are how plugin-registered views and segments are addressed, so their schemas must accommodate names that don't exist at compile time.
 
@@ -866,9 +867,10 @@ Three policies complete the surface:
 // src/client/render/markdown_renderer.hpp
 class MarkdownRenderer {
 public:
-    // md_parse() with MD_DIALECT_GITHUB (tables, strikethrough, tasklists, plus the
-    // permissive autolinks -- chat text contains bare URLs constantly, and models
-    // emit them without <> wrapping).
+    // md_parse() with MD_DIALECT_GITHUB plus MD_FLAG_LATEXMATHSPANS (tables,
+    // strikethrough, tasklists, permissive autolinks -- chat text contains bare
+    // URLs constantly -- and dim-styled $...$ math, which math-heavy models emit
+    // without ever being renderable in a terminal).
     // enter_block/leave_block/enter_span/leave_span/text callbacks build ftxui::Elements.
     ftxui::Element Render(std::string_view markdown_text) const;
 };
@@ -972,7 +974,9 @@ Frame: `tab bar / active session view / optional panel / status bar`, plus a mod
 
 **Client state model:**
 
-- `SessionState` per tab: virtualized scrollback window (against `GetMessages`), `StreamingMarkdownView` for the in-flight message, derived tab state, pending prompt, per-session tool rows.
+- `SessionState` per tab: **bounded sliding** scrollback window (against `GetMessages`; paging older beyond `ui.json`'s `scrollback_window_max_messages` evicts pages from the window's NEWEST end and flags the trim, which the view renders as a boundary marker -- the wire only pages descending, so newer pages return with the next turn refresh, never a silent gap), `StreamingMarkdownView` for the in-flight message (stream recreation keyed on `turn_seq`, not a buffer-size heuristic; `Finalize()` runs once per turn), derived tab state, pending prompt, per-session tool rows (output capped at append, head ¼ + marker + tail ¾).
+- The frame renders the FOCUSED tab from a deep snapshot (`GetDetails`); the tab list and the tools panel read light snapshots (`TakeLightSnapshot`) -- a frame deep-copies one tab, not every tab. The 20 Hz pump posts only when `UiVersion()` moved, plus a 5 Hz floor for the editor's debounce gate.
+- A chat-surface plugin's `OnEvent`/`Render` and status-segment `Render` are guarded: a THROW disables the surface (the core chat view takes over) or blanks the segment for the frame -- never process death. BLOCKING is a documented contract, not enforced (no dispatcher thread).
 - `AppState`: ordered `SessionState` list, focused index, panel visibility, modal stack.
 - `SessionClient`: one gRPC stream per session, demultiplexing `ServerEvent`s into the right `SessionState` by `session_id`.
 

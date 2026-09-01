@@ -252,7 +252,11 @@ TEST_CASE("a wedged advisor does not outlive cancellation", "[permission_advisor
     // Blocked while nobody cancels -- but not forever once we do.
     CHECK_FALSE(call.WaitFor(50ms));
     cancelled.store(true);
-    CHECK(call.WaitFor(minimal::testing::kDefaultDeadline));
+    // 10 s, not kDefaultDeadline's 2 s: the advisor's poll thread can be
+    // starved past 2 s under an 8-way parallel ASan/TSan ctest on a loaded
+    // machine -- the invariant under test is "returns once cancelled", not
+    // "returns within 2 s". (Observed flaking exactly there.)
+    CHECK(call.WaitFor(10s));
     CHECK(saw_cancel->load());
     // The abstention fell through to the inner checker rather than losing the turn.
     CHECK(call.Ready());

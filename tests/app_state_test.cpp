@@ -342,3 +342,29 @@ TEST_CASE("a session terminated server-side (not via CloseTab) reaches Done",
     }));
     CHECK(app.HasTab(sid));   // the tab itself is never removed automatically
 }
+
+// Track R1b-4 (see .opencode/plans/track-r-remediation.md): DispatchToTab used
+// to grab a RAW SessionState* under the lock and use it after releasing it.
+// CloseTab erases the TabEntry -- dropping the map's shared_ptr -- and only
+// then joins the reader thread, so a dispatch in flight at that moment was a
+// use-after-free on every tab closed during a live turn. The owning shared_ptr
+// copy makes this structurally safe; with the raw pointer restored, this test
+// is an ASan finding (run under the asan preset -- the window is real, not
+// theoretical: the turn's stream events are arriving while the erase lands).
+TEST_CASE("INVARIANT: closing a tab while its turn streams cannot use-after-free "
+          "the dispatched state",
+          "[app_state][invariant]") {
+    ClientFixture fixture;
+    fixture.Script("hi");
+    fixture.Start();
+
+    AppState app(fixture.client);
+    for (int i = 0; i < 8; ++i) {
+        const auto sid = app.OpenTab(fixture.Options("close-race-" + std::to_string(i)));
+        REQUIRE_FALSE(sid.empty());
+        app.SendChatTurn(sid, "hi");   // stream events flowing on the reader thread
+        app.CloseTab(sid);             // erase + join while dispatch is in flight
+        REQUIRE_FALSE(app.HasTab(sid));
+    }
+    CHECK(app.GetAllTabs().empty());
+}

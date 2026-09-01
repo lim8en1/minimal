@@ -4,6 +4,59 @@ Companion to `ARCHITECTURE.md`, which remains the single source of truth for *de
 
 **Status: Milestones A, B, C, D, F, G and H are complete, and a post-merge review of A+B+H has been actioned (§8). Of the TUI (track E), the render layer (E1), the client transport + state core (E2), server-side @-mentions (E3), the frame & views (E4), and the extension seams (E5) are done. Clean build, zero warnings.** Track **J (permission advisor) is complete** — including the SessionChannels extraction, the E2E over a real socket through the real plugin loader, and the three §6 invariant proofs. Tracks **K (per-plugin config)**, **L (cross-plugin services)** and **M (tool history access)** are also complete. Track **N (model auto-discovery) is complete** — lazy discovery through a `ModelCatalogRegistry` keyed by the provider kind string, `/providers refresh`, network-free structural sanity checks. A post-N review hardened the transport (the loopback + live-backend tests), the concurrency (per-provider fetch gates — no config lock is ever held across the network call), and the resolve contract (`Resolve` returns a snapshot; refresh replaces entries without pulling them out from under a holder).
 
+**Track R (TUI remediation) is complete** — a post-E5 review of the client
+(`.opencode/plans/track-r-remediation.md`) found six use-after-free/UB bugs, two
+unbounded-UI-freeze paths, and three unbounded-memory paths in the TUI. R1
+harnessed the gap: a headless FTXUI test tier (`tests/support/ftxui_harness.hpp`)
+that constructs, event-drives and string-renders every view factory, and which
+caught beyond the reviewed items that the permission modal had **never rendered
+a single session grant** (the grant checkboxes were moved into their container
+before the copy the renderer captures, so an `!empty()` guard hid them all), and
+that `OnCommandResult`'s hand-copied notice dropped `display`/`view_hint` — every
+View-display command result (`/sessions`) arrived as a dead status line. R1 fixed
+the six P0s (plugin seam temporaries, the picker's frozen selection + dangling
+menu state, the modals bound to freed per-frame snapshots, the reader-thread
+`SessionState*` escaping `DispatchToTab`'s lock, VIEW-notice side-effects firing
+inside `Render()` at frame rate, the cross-tab `ChatView` cache collision) plus
+`AttachTab`'s missing focus and duplicate attach. R2 bounded everything the wire
+could push: `SuggestPaths` deadline behind the swappable `MentionSuggestor` seam,
+`Close()` cancels before joining (a wedged stream froze the UI thread on
+close/quit), a 256-event `send_queue_` cap with refused sends surfaced, the
+reader owns `Finish()` and hands the status to `on_closed` (`IsTransportDeath`
+separates a crashed server from a deliberate close — the first draft's
+reach-back made the reader join itself: std::terminate, six aborted tests), a
+sliding scrollback window (2000 msgs, `ui.json`, trim flagged in-view), a tool-
+output cap at append (head ¼ + marker + tail ¾), `tab_ui` erased on close, the
+chat surface catch-and-disable, turn-swap keyed on `turn_seq` (the size
+heuristic could splice two turns), and `Finalize()` finally wired. R3 cached the
+tree-sitter parser per language (the streaming path had allocated one per code
+block per 120 ms tick), hashed the rule tables, resolved theme colors without
+per-call string keys, and gave `ChatView` a per-row render cache — a page bump
+renders only new rows. R4 gave the client the server's `GuardedRegistration`
+three-lambda shape, real write discipline for `client-plugins.json` (malformed
+parse → no rewrite; atomic, skip-if-unchanged), wired client aliases into the
+`NameRegistry` (they were parsed, serialized, documented and dead), added
+`NameKind::MessageRenderer`, and made `PluginSubscribe` tri-state with teardown
+cancellation. R5 spliced @-mention completions into the token (whole-line
+replacement both destroyed prose and manufactured `/`-commands), cleared the
+stale suggestion list on re-arm, added Escape to confirmation modals, fixed the
+nested-span override (deeper now wins — `ApplySpanOverrides`), GFM table
+alignment, LaTeX dim styling, operator categories for the vendored grammars
+(Function deliberately deferred — needs tree-sitter queries), and the small
+traps. The pump now redraws gated on a UI revision with a 5 Hz floor, and the
+frame deep-copies the FOCUSED tab only (`GetDetails`) with a light tab list for
+the bar and panel. Each invariant proven load-bearing by revert-and-watch-fail
+(§6). Final gates over the finished tree: **ASan 946/946 with zero findings;
+TSan 946/946 with zero race reports.** The TSan gate caught two vendored
+cpp-mcp bugs — a data race where the POSIX stop path closed `stdout_pipe_[0]`
+while the read thread was inside `read()` on it, and a Meyers-singleton logger
+whose destroyed mutex a detached worker locked during process exit (both
+`EINVAL` aborts under high parallelism) — fixed by
+`patches/cpp-mcp-stop-server-race.patch` and `patches/cpp-mcp-logger-leaky.patch`
+through the existing idempotent patch mechanism. The suite also gained a
+headless FTXUI harness tier, and three load-flaky tests were found passing in
+isolation (parallel-load starvation, not product bugs).
+
 `minimal -p` holds real conversations against a local model using `read`, `bash`, and `skill`; a permission prompt round-trips over the wire in both directions; a session grant silences the second prompt; the server exits when the last client detaches. Transcripts persist to SQLite, survive the server process, and are **resumable**: `CreateSession` with a `session_id` reopens a stored session, loads its transcript as the loop's working history without re-appending it, and the next turn continues the conversation (`minimal -p --resume <id> PROMPT`). **Subagents work** (§5 D): a model can spawn blocking and non-blocking children over the `spawn_subagent` tool, permission inheritance is enforced as ceilings, and the headless client honours its attach obligation over a real socket. `cmake --install` produces a config dir the server actually starts against (§8), and the startup sanity check reports every problem with it at once (§4 F).
 
 ---

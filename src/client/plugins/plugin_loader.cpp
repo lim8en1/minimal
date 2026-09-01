@@ -46,19 +46,28 @@ Fn Lookup(void* handle, const char* symbol) {
 // loader, which learned it the hard way: a throw out of a bare callback died
 // in main() with no diagnostic and left the attribution window open. Every
 // registration below runs inside this guard.
-template <typename Body>
-bool GuardedRegistration(PluginRecord& record, const char* what, Body&& body) {
+// The server loader's three-lambda shape (track R4): the attribution window's
+// CLOSE runs on both exit paths. The first client draft closed it inside the
+// body lambda -- on a throwing plugin the window stayed open, and every later
+// registration was mis-attributed to the plugin that had already failed.
+template <typename Open, typename Body, typename Close>
+bool GuardedRegistration(PluginRecord& record, const char* what, Open&& open, Body&& body,
+                          Close&& close) {
+    open();
     try {
         body();
     } catch (const std::exception& error) {
+        close();
         record.status = LoadStatus::RegistrationThrew;
         record.error = std::string(what) + " threw: " + error.what();
         return false;
     } catch (...) {
+        close();
         record.status = LoadStatus::RegistrationThrew;
         record.error = std::string(what) + " threw a non-standard exception";
         return false;
     }
+    close();
     return true;
 }
 
@@ -130,9 +139,11 @@ PluginRecord ClientPluginLoader::LoadOne(const PluginCandidate& candidate) {
         return record;
     }
 
-    record.abi_tag = abi_tag_fn();
-    record.name = name_fn();
-    record.version = version_fn();
+    // A corrupt .so can return null here; a null char* into std::string is UB
+    // before the ABI check ever runs.
+    if (const char* tag = abi_tag_fn(); tag != nullptr) record.abi_tag = tag;
+    if (const char* name = name_fn(); name != nullptr) record.name = name;
+    if (const char* version = version_fn(); version != nullptr) record.version = version;
 
     // Checked before any registration callback runs: a plugin built against a
     // different toolchain must never get to execute against our types.
@@ -153,11 +164,10 @@ PluginRecord ClientPluginLoader::LoadOne(const PluginCandidate& candidate) {
 
     if (auto register_views = Lookup<RegisterViewsFn>(handle, "minimal_client_plugin_register_views")) {
         const std::size_t before = views_.attributions().size();
-        if (!GuardedRegistration(record, "minimal_client_plugin_register_views", [&] {
-                views_.SetAttribution(record.name);
-                register_views(views_, context);
-                views_.ClearAttribution();
-            })) {
+        if (!GuardedRegistration(record, "minimal_client_plugin_register_views",
+                [&] { views_.SetAttribution(record.name); },
+                [&] { register_views(views_, context); },
+                [&] { views_.ClearAttribution(); })) {
             return record;
         }
         for (std::size_t i = before; i < views_.attributions().size(); ++i) {
@@ -168,11 +178,10 @@ PluginRecord ClientPluginLoader::LoadOne(const PluginCandidate& candidate) {
     if (auto register_renderers =
             Lookup<RegisterRenderersFn>(handle, "minimal_client_plugin_register_renderers")) {
         const std::size_t before = renderers_.attributions().size();
-        if (!GuardedRegistration(record, "minimal_client_plugin_register_renderers", [&] {
-                renderers_.SetAttribution(record.name);
-                register_renderers(renderers_, context);
-                renderers_.ClearAttribution();
-            })) {
+        if (!GuardedRegistration(record, "minimal_client_plugin_register_renderers",
+                [&] { renderers_.SetAttribution(record.name); },
+                [&] { register_renderers(renderers_, context); },
+                [&] { renderers_.ClearAttribution(); })) {
             return record;
         }
         for (std::size_t i = before; i < renderers_.attributions().size(); ++i) {
@@ -183,11 +192,10 @@ PluginRecord ClientPluginLoader::LoadOne(const PluginCandidate& candidate) {
     if (auto register_message_renderers = Lookup<RegisterMessageRenderersFn>(
             handle, "minimal_client_plugin_register_message_renderers")) {
         const std::size_t before = message_renderers_.claims().size();
-        if (!GuardedRegistration(record, "minimal_client_plugin_register_message_renderers", [&] {
-                message_renderers_.SetAttribution(record.name);
-                register_message_renderers(message_renderers_, context);
-                message_renderers_.ClearAttribution();
-            })) {
+        if (!GuardedRegistration(record, "minimal_client_plugin_register_message_renderers",
+                [&] { message_renderers_.SetAttribution(record.name); },
+                [&] { register_message_renderers(message_renderers_, context); },
+                [&] { message_renderers_.ClearAttribution(); })) {
             return record;
         }
         for (std::size_t i = before; i < message_renderers_.claims().size(); ++i) {
@@ -198,11 +206,10 @@ PluginRecord ClientPluginLoader::LoadOne(const PluginCandidate& candidate) {
     if (auto register_status_segments = Lookup<RegisterStatusSegmentsFn>(
             handle, "minimal_client_plugin_register_status_segments")) {
         const std::size_t before = status_segments_.attributions().size();
-        if (!GuardedRegistration(record, "minimal_client_plugin_register_status_segments", [&] {
-                status_segments_.SetAttribution(record.name);
-                register_status_segments(status_segments_, context);
-                status_segments_.ClearAttribution();
-            })) {
+        if (!GuardedRegistration(record, "minimal_client_plugin_register_status_segments",
+                [&] { status_segments_.SetAttribution(record.name); },
+                [&] { register_status_segments(status_segments_, context); },
+                [&] { status_segments_.ClearAttribution(); })) {
             return record;
         }
         for (std::size_t i = before; i < status_segments_.attributions().size(); ++i) {
@@ -214,11 +221,10 @@ PluginRecord ClientPluginLoader::LoadOne(const PluginCandidate& candidate) {
     if (auto register_grammars = Lookup<RegisterSyntaxGrammarsFn>(
             handle, "minimal_client_plugin_register_syntax_grammars")) {
         const std::size_t before = grammars_.attributions().size();
-        if (!GuardedRegistration(record, "minimal_client_plugin_register_syntax_grammars", [&] {
-                grammars_.SetAttribution(record.name);
-                register_grammars(grammars_, context);
-                grammars_.ClearAttribution();
-            })) {
+        if (!GuardedRegistration(record, "minimal_client_plugin_register_syntax_grammars",
+                [&] { grammars_.SetAttribution(record.name); },
+                [&] { register_grammars(grammars_, context); },
+                [&] { grammars_.ClearAttribution(); })) {
             return record;
         }
         for (std::size_t i = before; i < grammars_.attributions().size(); ++i) {
@@ -228,11 +234,10 @@ PluginRecord ClientPluginLoader::LoadOne(const PluginCandidate& candidate) {
 
     if (auto register_chat_surface = Lookup<RegisterChatSurfaceFn>(
             handle, "minimal_client_plugin_register_chat_surface")) {
-        if (!GuardedRegistration(record, "minimal_client_plugin_register_chat_surface", [&] {
-                chat_surface_.SetAttribution(record.name);
-                register_chat_surface(chat_surface_, context);
-                chat_surface_.ClearAttribution();
-            })) {
+        if (!GuardedRegistration(record, "minimal_client_plugin_register_chat_surface",
+                [&] { chat_surface_.SetAttribution(record.name); },
+                [&] { register_chat_surface(chat_surface_, context); },
+                [&] { chat_surface_.ClearAttribution(); })) {
             return record;
         }
         record.registered_chat_surface = chat_surface_.record.registered &&
@@ -241,11 +246,10 @@ PluginRecord ClientPluginLoader::LoadOne(const PluginCandidate& candidate) {
 
     if (auto register_markdown_engine = Lookup<RegisterMarkdownEngineFn>(
             handle, "minimal_client_plugin_register_markdown_engine")) {
-        if (!GuardedRegistration(record, "minimal_client_plugin_register_markdown_engine", [&] {
-                markdown_engine_.SetAttribution(record.name);
-                register_markdown_engine(markdown_engine_, context);
-                markdown_engine_.ClearAttribution();
-            })) {
+        if (!GuardedRegistration(record, "minimal_client_plugin_register_markdown_engine",
+                [&] { markdown_engine_.SetAttribution(record.name); },
+                [&] { register_markdown_engine(markdown_engine_, context); },
+                [&] { markdown_engine_.ClearAttribution(); })) {
             return record;
         }
         record.registered_markdown_engine = markdown_engine_.record.registered &&

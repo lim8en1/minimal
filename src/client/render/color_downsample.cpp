@@ -18,19 +18,22 @@ int Distance2(int r1, int g1, int b1, int r2, int g2, int b2) {
 
 // The 6x6x6 color cube occupies indices 16..231 with channel levels
 // 0, 95, 135, 175, 215, 255.
+// One definition for both consumers (CubeLevel and Downsample256's distance
+// check): two copies were one refactor away from disagreeing.
+constexpr int kCubeLevels[6] = {0, 95, 135, 175, 215, 255};
+
 int CubeLevel(int channel) {
-    static constexpr int kLevels[6] = {0, 95, 135, 175, 215, 255};
     int best = 0;
     for (int i = 1; i < 6; ++i) {
-        if (std::abs(kLevels[i] - channel) < std::abs(kLevels[best] - channel)) best = i;
+        if (std::abs(kCubeLevels[i] - channel) < std::abs(kCubeLevels[best] - channel)) best = i;
     }
     return best;
 }
 
 ftxui::Color Downsample256(uint8_t r, uint8_t g, uint8_t b) {
     const int ri = CubeLevel(r), gi = CubeLevel(g), bi = CubeLevel(b);
-    static constexpr int kLevels[6] = {0, 95, 135, 175, 215, 255};
-    const int cube_distance = Distance2(r, g, b, kLevels[ri], kLevels[gi], kLevels[bi]);
+    const int cube_distance =
+        Distance2(r, g, b, kCubeLevels[ri], kCubeLevels[gi], kCubeLevels[bi]);
     const int cube_index = 16 + 36 * ri + 6 * gi + bi;
 
     // The gray ramp (232..255, shades 8 + 10*i) serves near-gray colors better

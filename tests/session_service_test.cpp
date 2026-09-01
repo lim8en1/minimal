@@ -1269,20 +1269,25 @@ TEST_CASE("the generic plugin channel streams PluginSubscribe payloads",
     // returning false cancels the call (TryCancel) -- here after the first
     // three payloads.
     std::vector<std::string> seen;
-    const bool ok = client.PluginSubscribe(
+    const auto outcome = client.PluginSubscribe(
         "fixture-endpoint", "ticks", "99",
         [&](const std::string& payload) {
             seen.push_back(payload);
             return seen.size() < 3;
         });
-    CHECK(ok);
+    CHECK(outcome == minimal::client::SubscribeOutcome::kCancelled);
     REQUIRE(seen.size() == 3);
     CHECK(seen[0] == "tick-0");
     CHECK(seen[1] == "tick-1");
     CHECK(seen[2] == "tick-2");
 
-    // An unknown method is refused before any payload.
-    CHECK_FALSE(client.PluginSubscribe("fixture-endpoint", "no-such-method", "", {}));
+    // An unknown method is refused before any payload: kError, not a silent
+    // false that a subscriber could misread as its own cancellation.
+    grpc::Status refused_status;
+    CHECK(client.PluginSubscribe("fixture-endpoint", "no-such-method", "", {},
+                                 &refused_status) ==
+          minimal::client::SubscribeOutcome::kError);
+    CHECK_FALSE(refused_status.ok());
 }
 
 TEST_CASE("a second client on the same session is refused, not silently served",

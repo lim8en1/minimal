@@ -2,6 +2,8 @@
 
 #include <utility>
 
+#include "minimal/common/logger.hpp"
+
 namespace minimal::client {
 
 StreamingMarkdownView::StreamingMarkdownView(
@@ -10,6 +12,16 @@ StreamingMarkdownView::StreamingMarkdownView(
     : render_(std::move(render)), clock_(std::move(clock)) {}
 
 void StreamingMarkdownView::AppendDelta(std::string_view text) {
+    // Text after Finalize() can never render: Render() returns the frozen
+    // cached element unconditionally once finalized. Log rather than silently
+    // swallow -- a host calling Append after Finalize is miswired.
+    if (finalized_) {
+        if (!text.empty()) {
+            common::DefaultLogger().warn(
+                "streaming view: AppendDelta after Finalize ({} bytes ignored)", text.size());
+        }
+        return;
+    }
     accumulated_text_.append(text);
     // Deliberately no reparse here: deltas arrive per token and parsing is
     // O(buffer), so reparse timing belongs to Render() alone.

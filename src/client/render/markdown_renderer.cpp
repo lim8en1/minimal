@@ -1,5 +1,6 @@
 #include "minimal/client/render/markdown_renderer.hpp"
 
+#include <limits>
 #include <stack>
 #include <string>
 #include <utility>
@@ -24,6 +25,7 @@ struct InlineStyle {
     bool strikethrough = false;
     bool underline = false;
     bool code = false;
+    bool dim = false;
 };
 
 // A block being accumulated. Inline-bearing blocks (paragraph, heading, table
@@ -62,6 +64,7 @@ Element ApplyStyle(Element element, const InlineStyle& style, const Theme* theme
     if (style.italic) element = element | ftxui::italic;
     if (style.strikethrough) element = element | ftxui::strikethrough;
     if (style.underline) element = element | ftxui::underlined;
+    if (style.dim) element = element | ftxui::dim;
     return element;
 }
 
@@ -124,7 +127,7 @@ public:
         return 0;
     }
 
-    int LeaveBlock(MD_BLOCKTYPE type, void*) {
+    int LeaveBlock(MD_BLOCKTYPE type, void* detail) {
         Block block = std::move(stack_.top());
         stack_.pop();
 
@@ -177,11 +180,22 @@ public:
                                ? ftxui::text("")
                                : ftxui::gridbox(std::move(block.table_rows));
                 break;
-            case MD_BLOCK_TH:
-            case MD_BLOCK_TD:
+            case MD_BLOCK_TD: {
+                // GFM cell alignment (':' colons in the delimiter row): md4c
+                // reports it per cell; the first draft ignored it, so every
+                // numeric column LLMs love to right-align rendered left.
+                const auto* d = static_cast<const MD_BLOCK_TD_DETAIL*>(detail);
                 rendered = RenderInlineBlock(block);
                 if (type == MD_BLOCK_TH) rendered = rendered | ftxui::bold;
+                switch (d->align) {
+                    case MD_ALIGN_CENTER: rendered = rendered | ftxui::hcenter; break;
+                    case MD_ALIGN_RIGHT: rendered = rendered | ftxui::align_right; break;
+                    case MD_ALIGN_LEFT:
+                    case MD_ALIGN_DEFAULT:
+                        break;
+                }
                 break;
+            }
             case MD_BLOCK_HTML:
                 // Raw HTML passes through dimmed; interpreting it is a browser's
                 // job, not a terminal's.
@@ -231,6 +245,11 @@ public:
             }
             case MD_SPAN_LATEXMATH:
             case MD_SPAN_LATEXMATH_DISPLAY:
+                // Math-heavy models emit $...$ constantly; a terminal cannot
+                // typeset it, but dimming separates live math from the prose
+                // around it instead of letting it read as ordinary text.
+                style.dim = true;
+                break;
             case MD_SPAN_WIKILINK:
                 break;
         }
@@ -293,8 +312,14 @@ public:
             case MD_TEXT_NORMAL:
             case MD_TEXT_NULLCHAR:  // md4c maps NUL to U+FFFD; render as-is
             case MD_TEXT_LATEXMATH:
-                if (top.type == MD_BLOCK_CODE || top.type == MD_BLOCK_HTML) {
+                if (top.type == MD_BLOCK_CODE) {
                     top.code_text.append(value);
+                } else if (top.type == MD_BLOCK_HTML) {
+                    // Raw HTML renders dimmed (see MD_BLOCK_HTML) -- accumulating
+                    // into code_text here was a dead write: HTML blocks render
+                    // via RenderInlineBlock, which never reads code_text.
+                    PushStyledText(top, std::string(value), InlineStyle{});
+                    DimLast(top);
                 } else {
                     PushStyledText(top, std::string(value), CurrentStyle());
                 }
@@ -437,7 +462,10 @@ ftxui::Element MarkdownRenderer::Render(std::string_view markdown_text) const {
     Renderer renderer(theme_, highlighter_);
     const MD_PARSER parser = {
         0,  // abi_version
-        MD_DIALECT_GITHUB,
+        // GITHUB plus LATEXMATHSPANS: $...$ from math-heavy models gets a dim
+        // style rather than reading as ordinary text. Divergence from the
+        // dialect presets is recorded in ARCHITECTURE.md ("TUI rendering").
+        MD_DIALECT_GITHUB | MD_FLAG_LATEXMATHSPANS,
         EnterBlockCb,
         LeaveBlockCb,
         EnterSpanCb,
@@ -448,6 +476,11 @@ ftxui::Element MarkdownRenderer::Render(std::string_view markdown_text) const {
     };
     // md_parse reports allocation failure only; malformed markdown still parses
     // (it is plain text at worst), so there is no error path to surface.
+    if (markdown_text.size() > static_cast<std::size_t>(std::numeric_limits<MD_SIZE>::max())) {
+        // MD_SIZE is 32-bit: a message beyond 4 GiB cannot reach md_parse in
+        // one piece (theoretical for a TUI, but the truncation would be silent).
+        return ftxui::text("message too large to render");
+    }
     md_parse(markdown_text.data(), static_cast<MD_SIZE>(markdown_text.size()), &parser,
              &renderer);
     return renderer.Finish();

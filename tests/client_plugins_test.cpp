@@ -59,12 +59,23 @@ struct LoadedFixtures {
     AttentionState attention;
     std::vector<PluginRecord> records;
 
+    // NAMED locals, not inline temporaries: a plugin captures the sink/api
+    // pointers from its registration context and uses them AFTER LoadAll --
+    // a temporary destroyed at the end of the loader-constructor expression
+    // left every post-load seam call a use-after-free (the same bug RunTui
+    // had; see the attention-seam test below, which exercises post-load use).
+    // Null client: the api's documented no-offer behavior.
+    std::unique_ptr<AttentionSink> attention_sink;
+    std::unique_ptr<ClientApi> client_api;
+
     // `candidates` loaded against fresh registries.
     static LoadedFixtures Load(const std::vector<PluginCandidate>& candidates) {
         LoadedFixtures f;
+        f.attention_sink = MakeHostAttentionSink(&f.attention);
+        f.client_api = MakeHostClientApi(nullptr);
         ClientPluginLoader loader(f.views, f.renderers, f.message_renderers, f.status_segments,
                                   f.grammars, f.chat_surface, f.markdown_engine,
-                                  MakeHostAttentionSink(&f.attention), nullptr);
+                                  f.attention_sink.get(), f.client_api.get());
         f.records = loader.LoadAll(candidates);
         return f;
     }
@@ -358,4 +369,26 @@ TEST_CASE("command notices carry the display mode and are type-disjoint from cha
     const auto error_notice = NoticeFromCommandResult(failed);
     CHECK(error_notice.is_error);
     CHECK(error_notice.display == v1::COMMAND_DISPLAY_STATUS);
+}
+
+// Track R1b-1's load-bearing test: the host's seam objects (AttentionSink,
+// ClientApi) were bound INLINE into the loader constructor -- unique_ptr
+// temporaries destroyed at the end of that full expression, while every
+// plugin's registration context kept the raw pointers for post-load use.
+// The fixture's status segment raises tab attention from Render(), which is
+// post-load seam use exactly like a real plugin's; with the temporaries
+// restored this test is an ASan finding and the raise never lands.
+TEST_CASE("host seams survive the load: a plugin raises attention AFTER LoadAll",
+          "[client_plugins][seams]") {
+    const auto fixtures = LoadedFixtures::Load({Candidate(
+        "fixture-client.so", {{"echo_value", "seam-check"}, {"raise_tab", "seam-session"}})});
+    REQUIRE(fixtures.records.size() == 1);
+    REQUIRE(fixtures.records[0].ok());
+
+    const auto* segment = fixtures.status_segments.Find("fixture_seg");
+    REQUIRE(segment != nullptr);
+
+    // Post-load use: the load is long over; the sink must still be alive.
+    CHECK(segment->Render() == "seam-check");
+    CHECK(fixtures.attention.TabRaised("seam-session"));
 }

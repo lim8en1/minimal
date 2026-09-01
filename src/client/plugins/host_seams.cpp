@@ -4,6 +4,8 @@
 
 #include <grpcpp/client_context.h>
 
+#include "minimal/common/logger.hpp"
+
 namespace minimal::client::plugins {
 namespace {
 
@@ -69,13 +71,20 @@ public:
         return result.json_payload;
     }
 
-    bool PluginSubscribe(const std::string& plugin_name, const std::string& method,
-                         const std::string& json_payload,
-                         const std::function<bool(const std::string&)>& on_payload) override {
-        if (client_ == nullptr) return false;
+    SubscribeOutcome PluginSubscribe(const std::string& plugin_name, const std::string& method,
+                                     const std::string& json_payload,
+                                     const std::function<bool(const std::string&)>& on_payload) override {
+        if (client_ == nullptr) return SubscribeOutcome::kError;
         // Blocking on the CALLING thread -- a plugin subscribing is blocking
         // its own thread by choice; the host never subscribes for it.
-        return client_->PluginSubscribe(plugin_name, method, json_payload, on_payload);
+        grpc::Status status;
+        const auto outcome = client_->PluginSubscribe(plugin_name, method, json_payload,
+                                                      on_payload, &status);
+        if (!status.ok()) {
+            minimal::common::DefaultLogger().warn("plugin subscription {}/{} ended in error: {}",
+                                         plugin_name, method, status.error_message());
+        }
+        return outcome;
     }
 
 private:

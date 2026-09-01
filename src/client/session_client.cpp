@@ -11,6 +11,10 @@ namespace {
 // How long the writer waits for a new event before re-checking closing_. Bounds how
 // long Close() takes once triggered.
 inline constexpr std::chrono::milliseconds kWriterWakeup = std::chrono::milliseconds(50);
+// @-mention suggestions run on the frame loop while the user types -- a wedged
+// server must cost the editor a bounded pause, not the UI (this was the one
+// unary call with no deadline; every other caller bounds its fetches).
+inline constexpr std::chrono::milliseconds kSuggestPathsDeadline = std::chrono::milliseconds(250);
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -22,7 +26,12 @@ SessionClient::SessionClient(std::string server_address)
       channel_(grpc::CreateChannel(server_address_, grpc::InsecureChannelCredentials())),
       stub_(v1::SessionService::NewStub(channel_)) {}
 
-SessionClient::~SessionClient() = default;
+SessionClient::~SessionClient() {
+    // Cancel any live PluginSubscribe readers so their Read()s return instead
+    // of racing this destruction.
+    std::lock_guard lk(subscribe_mtx_);
+    for (auto* context : active_subscribes_) context->TryCancel();
+}
 
 bool SessionClient::WaitForConnected(std::chrono::milliseconds timeout) {
     return channel_->WaitForConnected(std::chrono::system_clock::now() + timeout);
@@ -125,12 +134,20 @@ SessionClient::PluginCallResult SessionClient::PluginCall(const std::string& plu
     return result;
 }
 
-bool SessionClient::PluginSubscribe(
+SubscribeOutcome SessionClient::PluginSubscribe(
     const std::string& plugin_name, const std::string& method, const std::string& json_payload,
-    const std::function<bool(const std::string& json_payload)>& on_payload) {
+    const std::function<bool(const std::string& json_payload)>& on_payload,
+    grpc::Status* status) {
     grpc::ClientContext context;
     // No deadline: a subscription lives as long as the subscriber does. The
     // escape hatch is on_payload returning false, which cancels the call.
+    // Registered for teardown: a subscriber still blocked in Read() at client
+    // destruction is unblocked by ~SessionClient's cancel sweep instead of
+    // racing destruction.
+    {
+        std::lock_guard lk(subscribe_mtx_);
+        active_subscribes_.insert(&context);
+    }
     v1::PluginCallRequest request;
     request.set_plugin_name(plugin_name);
     request.set_method(method);
@@ -140,16 +157,27 @@ bool SessionClient::PluginSubscribe(
     while (reader->Read(&response)) {
         if (on_payload && !on_payload(response.json_payload())) {
             context.TryCancel();
-            return true;
+            {
+                std::lock_guard lk(subscribe_mtx_);
+                active_subscribes_.erase(&context);
+            }
+            return SubscribeOutcome::kCancelled;
         }
     }
-    return reader->Finish().ok();
+    const grpc::Status final_status = reader->Finish();
+    {
+        std::lock_guard lk(subscribe_mtx_);
+        active_subscribes_.erase(&context);
+    }
+    if (status != nullptr) *status = final_status;
+    return final_status.ok() ? SubscribeOutcome::kEnded : SubscribeOutcome::kError;
 }
 
 SessionClient::SuggestPathsResult SessionClient::SuggestPaths(const std::string& session_id,
                                                               const std::string& prefix,
                                                               int32_t limit) {
     grpc::ClientContext context;
+    context.set_deadline(std::chrono::system_clock::now() + kSuggestPathsDeadline);
     v1::SuggestPathsRequest request;
     request.set_session_id(session_id);
     request.set_prefix(prefix);
@@ -218,7 +246,13 @@ grpc::Status SessionClient::RunTurn(
             done = !on_event(event) || event.has_turn_completed();
         }
         if (done && !half_closed) {
-            stream->WritesDone();
+            {
+                // Same mutex as TurnHandle::Cancel's Write: gRPC's sync stream
+                // allows one write-side operation at a time, and a Cancel that
+                // lands exactly here raced the bare WritesDone.
+                std::lock_guard<std::mutex> lock(control->mu);
+                stream->WritesDone();
+            }
             half_closed = true;
             // Keep reading. Half-closing says we are done SENDING; it does not
             // entitle us to stop receiving, and abandoning the read side would
@@ -226,10 +260,12 @@ grpc::Status SessionClient::RunTurn(
         }
     }
     {
+        // stream is nulled under the same lock, so a late Cancel no-ops and
+        // this final WritesDone cannot overlap one.
         std::lock_guard<std::mutex> lock(control->mu);
+        if (!half_closed) stream->WritesDone();
         control->stream = nullptr;
     }
-    if (!half_closed) stream->WritesDone();
     return stream->Finish();
 }
 
@@ -284,9 +320,9 @@ grpc::Status SessionClient::RunCommand(
         if (done && !half_closed) {
             stream->WritesDone();
             half_closed = true;
-            // Keep reading, for the same reason RunTurn does: half-closing says
-            // we are done SENDING, and abandoning the read side wedges the
-            // server's writer mid-Write().
+            // Keep reading, for the same reason RunTurn does: half-closing
+            // says we are done SENDING, and abandoning the read side would
+            // wedge the server's writer mid-Write().
         }
     }
     if (!half_closed) stream->WritesDone();
@@ -349,8 +385,8 @@ std::optional<std::string> SessionClient::Stream::Open(const CreateOptions& opts
     request.set_run_mode(opts.run_mode);
 
     v1::CreateSessionResponse response;
-    status_ = stub_->CreateSession(&context, request, &response);
-    if (!status_.ok()) {
+    SetStatus(stub_->CreateSession(&context, request, &response));
+    if (!status().ok()) {
         return std::nullopt;
     }
     session_id_ = response.session().session_id();
@@ -359,22 +395,14 @@ std::optional<std::string> SessionClient::Stream::Open(const CreateOptions& opts
     // bidi to this session without firing a turn/command. Sent FIRST (FIFO queue) before
     // any user turn, so attach is complete even if the app queues its first payload fast.
     EnqueueNamingEvent();
-    const grpc::Status open_status = OpenBidi();   // create the bidi; threads start later
-    if (!open_status.ok()) {
-        status_ = open_status;
-        return std::nullopt;
-    }
+    OpenBidi();   // create the bidi (lazy); threads start later
     return session_id_;
 }
 
 std::optional<std::string> SessionClient::Stream::Attach(const std::string& sid) {
     session_id_ = sid;
     EnqueueNamingEvent();   // same side-effect-free naming for attach/resume
-    const grpc::Status open_status = OpenBidi();
-    if (!open_status.ok()) {
-        status_ = open_status;
-        return std::nullopt;
-    }
+    OpenBidi();
     return session_id_;
 }
 
@@ -384,30 +412,66 @@ void SessionClient::Stream::Resume() {
     LaunchWriterThread();
 }
 
-void SessionClient::Stream::SetOnClosed(std::function<void()> cb) {
+void SessionClient::Stream::SetOnClosed(std::function<void(const grpc::Status&)> cb) {
     on_closed_ = std::move(cb);   // set before Resume(); the reader thread reads it once
 }
 
-void SessionClient::Stream::Send(const v1::ClientEvent& event) {
-    if (closing_.load()) return;   // drop silently once we are shutting down
-    std::unique_lock lk(qmtx_);
-    send_queue_.push_back(event);
-    lk.unlock();
+bool SessionClient::Stream::Send(const v1::ClientEvent& event) {
+    // closing_ is re-checked UNDER qmtx_: Close() sets it under the same lock,
+    // so an event can no longer slip into the queue after the writer has
+    // already observed an empty queue and exited (the lost-event race).
+    {
+        std::lock_guard lk(qmtx_);
+        if (closing_.load()) return false;
+        if (send_queue_.size() >= kSendQueueCap) return false;   // stalled stream: refuse
+        send_queue_.push_back(event);
+    }
     send_cv_.notify_one();
+    return true;
 }
 
 void SessionClient::Stream::Close() {
     if (closed_.exchange(true)) return;     // idempotent latch: only first caller proceeds
-    closing_ = true;
-    send_cv_.notify_all();                  // wake writer so it can half-close and exit
+    {
+        std::lock_guard lk(qmtx_);
+        closing_ = true;                    // under qmtx_: see Send()
+    }
+    send_cv_.notify_all();                  // wake writer so it can exit
 
-    if (writer_.joinable()) writer_.join();   // writer has done WritesDone() on its way out
-    // Reader keeps reading until the server finishes (it will, once our half-close arrives),
-    // so no outbound events are lost. Read-to-EOF first — the -p client's hard-won lesson:
-    // Finish() before the reader drains deadlocks both sides.
-    if (reader_.joinable()) reader_.join();
+    // Cancel BEFORE the joins. A writer blocked in Write() (server stopped
+    // reading) or a reader blocked in Read() (wedged connection) would hang
+    // these joins forever -- and Close() runs on the UI thread from
+    // CloseTab/quit. Cancel costs queued-but-unsent events, which is
+    // consistent with Close's destructiveness: the session is being torn down
+    // regardless.
+    context_.TryCancel();
 
-    if (bidi_) status_ = bidi_->Finish();
+    if (writer_.joinable()) writer_.join();
+    // Reader keeps reading until the server finishes (it will, once our
+    // half-close or the cancel arrives). Read-to-EOF first -- the -p client's
+    // hard-won lesson: Finish() before the reader drains deadlocks both sides.
+    // The reader thread itself Finish()es the call when Read() returns false.
+    if (reader_.joinable()) {
+        reader_.join();
+    } else if (bidi_) {
+        // Threads never started (Open/Attach failed, or an abandoned
+        // duplicate): nothing can race us; reap the call directly.
+        SetStatus(bidi_->Finish());
+    }
+}
+
+void SessionClient::Stream::Cancel() {
+    context_.TryCancel();
+}
+
+grpc::Status SessionClient::Stream::status() const {
+    std::lock_guard lk(status_mtx_);
+    return status_;
+}
+
+void SessionClient::Stream::SetStatus(const grpc::Status& status) {
+    std::lock_guard lk(status_mtx_);
+    status_ = status;
 }
 
 void SessionClient::Stream::EnqueueNamingEvent() {
@@ -417,12 +481,17 @@ void SessionClient::Stream::EnqueueNamingEvent() {
     send_queue_.push_back(ev);
 }
 
-grpc::Status SessionClient::Stream::OpenBidi() {
+void SessionClient::Stream::OpenBidi() {
     // context_ is a member (not a local): gRPC requires it to outlive the call,
     // and this call outlives OpenBidi() by design -- Read()/Write() happen from
     // the reader/writer threads long after this function returns.
+    //
+    // Returns void, deliberately: OpenSession() only constructs the call
+    // (gRPC connects lazily), so there is no status to check here -- a
+    // connection failure surfaces later, as the reader's Finish() status, not
+    // as a false "open succeeded". The first draft returned an unconditional
+    // OK and the callers' !ok() checks were dead.
     bidi_ = stub_->OpenSession(&context_);   // concrete type: grpc::ClientReaderWriter<Client,Server>
-    return grpc::Status::OK;
 }
 
 void SessionClient::Stream::LaunchReaderThread() {
@@ -431,10 +500,19 @@ void SessionClient::Stream::LaunchReaderThread() {
         while (bidi_ && bidi_->Read(&event)) {
             if (event_cb_) event_cb_(event);   // delivers to AppState; may itself Send()
         }
-        // Read() returned false: the server closed its send side, whether because
-        // the session terminated or because our own half-close (via Close()) led
-        // the server to finish and close in turn. Either way this stream is done.
-        if (on_closed_) on_closed_();
+        // Read() returned false: the server closed its send side -- because the
+        // session terminated, because our own half-close or Close()'s cancel
+        // led it to finish, or because the TRANSPORT FAILED (server died).
+        // This thread drained the call, so it owns Finish() -- whose status is
+        // the only way a transport death is distinguishable from a clean close.
+        if (bidi_) SetStatus(bidi_->Finish());
+        // The status is captured BEFORE the callback: the callback's last
+        // act can release the last shared_ptr holding this Stream, and ~Stream
+        // (running right here on the reader thread) must not race it.
+        if (on_closed_) {
+            const grpc::Status final_status = status();
+            on_closed_(final_status);
+        }
     });
 }
 

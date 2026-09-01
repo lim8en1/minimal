@@ -21,6 +21,7 @@ enum class NameKind {
     Command,
     ViewId,
     ToolResultRenderer,
+    MessageRenderer,   // client: keyed by ChatRowKind (its own namespace, not ToolResultRenderer's)
     Service,
     StatusSegment,
     SyntaxGrammar

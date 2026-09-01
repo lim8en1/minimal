@@ -4,6 +4,7 @@
 #include <array>
 #include <cctype>
 #include <cstring>
+#include <unordered_map>
 
 #include <tree_sitter/api.h>
 
@@ -88,6 +89,21 @@ Language CppLanguage() {
                 {"number_literal", HighlightCategory::Number},
                 {"preproc_directive", HighlightCategory::Keyword},
                 {"preproc_arg", HighlightCategory::String},
+
+                {"+", HighlightCategory::Operator},   {"-", HighlightCategory::Operator},
+                {"*", HighlightCategory::Operator},   {"/", HighlightCategory::Operator},
+                {"%", HighlightCategory::Operator},   {"=", HighlightCategory::Operator},
+                {"==", HighlightCategory::Operator},  {"!=", HighlightCategory::Operator},
+                {"<", HighlightCategory::Operator},   {">", HighlightCategory::Operator},
+                {"<=", HighlightCategory::Operator},  {">=", HighlightCategory::Operator},
+                {"&&", HighlightCategory::Operator},  {"||", HighlightCategory::Operator},
+                {"!", HighlightCategory::Operator},   {"&", HighlightCategory::Operator},
+                {"|", HighlightCategory::Operator},   {"^", HighlightCategory::Operator},
+                {"~", HighlightCategory::Operator},   {"<<", HighlightCategory::Operator},
+                {">>", HighlightCategory::Operator},  {"->", HighlightCategory::Operator},
+                {"++", HighlightCategory::Operator},  {"--", HighlightCategory::Operator},
+                {"?", HighlightCategory::Operator},   {":", HighlightCategory::Operator},
+                {".", HighlightCategory::Operator},   {"::", HighlightCategory::Operator},
             }};
 }
 
@@ -138,6 +154,16 @@ Language PythonLanguage() {
                 {"comment", HighlightCategory::Comment},
                 {"integer", HighlightCategory::Number},
                 {"float", HighlightCategory::Number},
+
+                {"+", HighlightCategory::Operator},   {"-", HighlightCategory::Operator},
+                {"*", HighlightCategory::Operator},   {"/", HighlightCategory::Operator},
+                {"%", HighlightCategory::Operator},   {"=", HighlightCategory::Operator},
+                {"==", HighlightCategory::Operator},  {"!=", HighlightCategory::Operator},
+                {"<", HighlightCategory::Operator},   {">", HighlightCategory::Operator},
+                {"<=", HighlightCategory::Operator},  {">=", HighlightCategory::Operator},
+                {"and", HighlightCategory::Operator}, {"or", HighlightCategory::Operator},
+                {"not", HighlightCategory::Operator}, {"in", HighlightCategory::Operator},
+                {"is", HighlightCategory::Operator},
             }};
 }
 
@@ -194,6 +220,18 @@ Language JavascriptLanguage() {
                 {"comment", HighlightCategory::Comment},
                 {"html_comment", HighlightCategory::Comment},
                 {"number", HighlightCategory::Number},
+
+                {"+", HighlightCategory::Operator},   {"-", HighlightCategory::Operator},
+                {"*", HighlightCategory::Operator},   {"/", HighlightCategory::Operator},
+                {"%", HighlightCategory::Operator},   {"=", HighlightCategory::Operator},
+                {"==", HighlightCategory::Operator},  {"===", HighlightCategory::Operator},
+                {"!=", HighlightCategory::Operator},  {"!==", HighlightCategory::Operator},
+                {"<", HighlightCategory::Operator},   {">", HighlightCategory::Operator},
+                {"<=", HighlightCategory::Operator},  {">=", HighlightCategory::Operator},
+                {"&&", HighlightCategory::Operator},  {"||", HighlightCategory::Operator},
+                {"!", HighlightCategory::Operator},   {"?", HighlightCategory::Operator},
+                {":", HighlightCategory::Operator},   {".", HighlightCategory::Operator},
+                {"=>", HighlightCategory::Operator},
             }};
 }
 
@@ -236,6 +274,25 @@ Language BashLanguage() {
                 {"heredoc_body", HighlightCategory::String},
                 {"comment", HighlightCategory::Comment},
                 {"number", HighlightCategory::Number},
+
+                {"+", HighlightCategory::Operator},   {"-", HighlightCategory::Operator},
+                {"*", HighlightCategory::Operator},   {"/", HighlightCategory::Operator},
+                {"%", HighlightCategory::Operator},   {"=", HighlightCategory::Operator},
+                {"==", HighlightCategory::Operator},  {"===", HighlightCategory::Operator},
+                {"!=", HighlightCategory::Operator},  {"!==", HighlightCategory::Operator},
+                {"<", HighlightCategory::Operator},   {">", HighlightCategory::Operator},
+                {"<=", HighlightCategory::Operator},  {">=", HighlightCategory::Operator},
+                {"&&", HighlightCategory::Operator},  {"||", HighlightCategory::Operator},
+                {"!", HighlightCategory::Operator},   {"?", HighlightCategory::Operator},
+                {":", HighlightCategory::Operator},   {".", HighlightCategory::Operator},
+                {"=>", HighlightCategory::Operator},
+
+                {"=", HighlightCategory::Operator},
+                {"==", HighlightCategory::Operator},  {"!=", HighlightCategory::Operator},
+                {"&&", HighlightCategory::Operator},  {"||", HighlightCategory::Operator},
+                {"|", HighlightCategory::Operator},   {"&", HighlightCategory::Operator},
+                {">", HighlightCategory::Operator},   {"<", HighlightCategory::Operator},
+                {">>", HighlightCategory::Operator},  {"<<", HighlightCategory::Operator},
             }};
 }
 
@@ -323,6 +380,19 @@ Language RustLanguage() {
                 {"float_literal", HighlightCategory::Number},
                 {"primitive_type", HighlightCategory::Type},
                 {"type_identifier", HighlightCategory::Type},
+
+                {"+", HighlightCategory::Operator},   {"-", HighlightCategory::Operator},
+                {"*", HighlightCategory::Operator},   {"/", HighlightCategory::Operator},
+                {"%", HighlightCategory::Operator},   {"=", HighlightCategory::Operator},
+                {"==", HighlightCategory::Operator},  {"!=", HighlightCategory::Operator},
+                {"<", HighlightCategory::Operator},   {">", HighlightCategory::Operator},
+                {"<=", HighlightCategory::Operator},  {">=", HighlightCategory::Operator},
+                {"&&", HighlightCategory::Operator},  {"||", HighlightCategory::Operator},
+                {"!", HighlightCategory::Operator},   {"&", HighlightCategory::Operator},
+                {"|", HighlightCategory::Operator},   {"^", HighlightCategory::Operator},
+                {"->", HighlightCategory::Operator},  {"=>", HighlightCategory::Operator},
+                {"::", HighlightCategory::Operator},  {".", HighlightCategory::Operator},
+                {"?", HighlightCategory::Operator},
             }};
 }
 
@@ -366,6 +436,18 @@ Language GoLanguage() {
                 {"float_literal", HighlightCategory::Number},
                 {"imaginary_literal", HighlightCategory::Number},
                 {"type_identifier", HighlightCategory::Type},
+
+                {"+", HighlightCategory::Operator},   {"-", HighlightCategory::Operator},
+                {"*", HighlightCategory::Operator},   {"/", HighlightCategory::Operator},
+                {"%", HighlightCategory::Operator},   {"=", HighlightCategory::Operator},
+                {"==", HighlightCategory::Operator},  {"!=", HighlightCategory::Operator},
+                {"<", HighlightCategory::Operator},   {">", HighlightCategory::Operator},
+                {"<=", HighlightCategory::Operator},  {">=", HighlightCategory::Operator},
+                {"&&", HighlightCategory::Operator},  {"||", HighlightCategory::Operator},
+                {"!", HighlightCategory::Operator},   {"&", HighlightCategory::Operator},
+                {"|", HighlightCategory::Operator},   {"^", HighlightCategory::Operator},
+                {"<-", HighlightCategory::Operator},  {":=", HighlightCategory::Operator},
+                {".", HighlightCategory::Operator},
             }};
 }
 
@@ -415,8 +497,8 @@ const char* ThemeRoleFor(HighlightCategory category) {
     return "syntax_plain";
 }
 
-// Plain unless split by a later (deeper) node's category: traversal is
-// preorder, so a parent claims its whole range first and children re-split it.
+// Spans come out in preorder; ApplySpanOverrides flattens them so a DEEPER
+// node wins over its ancestors (see it above Highlight).
 // Keywords in tree-sitter grammars are usually ANONYMOUS nodes ("return", "if")
 // -- string literals in the grammar -- so anonymous nodes are checked against
 // the rule table too; only those that match (or named nodes generally) append
@@ -455,7 +537,10 @@ std::string CanonicalLanguage(std::string_view language,
         {"rs", "rust"},
         {"golang", "go"},
     };
-    std::string lower(language);
+    // Reused buffer: this runs per code block per render; the first draft
+    // allocated a fresh std::string every call.
+    thread_local std::string lower;
+    lower.assign(language);
     std::transform(lower.begin(), lower.end(), lower.begin(),
                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     for (const Alias& alias : kAliases) {
@@ -478,21 +563,87 @@ bool SyntaxHighlighter::Supports(std::string_view language) const {
 }
 
 SyntaxHighlighter::SyntaxHighlighter(const Theme& theme)
-    : theme_(theme), languages_(nullptr) {}
+    : theme_(theme), languages_(nullptr), parser_cache_(std::make_unique<ParserCache>()) {}
 
 SyntaxHighlighter::SyntaxHighlighter(const Theme& theme,
                                      const std::vector<LanguageDefinition>& languages)
-    : theme_(theme), languages_(&languages) {}
+    : theme_(theme), languages_(&languages), parser_cache_(std::make_unique<ParserCache>()) {}
+
+SyntaxHighlighter::~SyntaxHighlighter() = default;
+
+// One TSParser per language, kept alive for the highlighter's lifetime (track
+// R3): the first draft ran ts_parser_new/set_language/delete PER HIGHLIGHT
+// CALL, which the streaming path pays every 120 ms tick for every code block.
+// A nullptr value negative-caches a language whose parser failed to load.
+class SyntaxHighlighter::ParserCache {
+public:
+    ~ParserCache() {
+        for (auto& [name, parser] : parsers_) {
+            if (parser != nullptr) ts_parser_delete(parser);
+        }
+    }
+
+    TSParser* Get(const std::string& canonical, LanguageFnPtr language_fn, bool& ok) {
+        const auto it = parsers_.find(canonical);
+        if (it != parsers_.end()) {
+            ok = it->second != nullptr;
+            return it->second;
+        }
+        TSParser* parser = ts_parser_new();
+        if (!ts_parser_set_language(parser, language_fn())) {
+            ts_parser_delete(parser);
+            parser = nullptr;
+        }
+        parsers_.emplace(canonical, parser);
+        ok = parser != nullptr;
+        return parser;
+    }
+
+    // Node-type -> category, hashed once per language (the first draft walked
+    // every rule per node with content-comparing string_view equality). Keys
+    // are views into stable storage: tree-sitter's static type strings and the
+    // rule tables' static/span-backed names.
+    using RuleTable = std::unordered_map<std::string_view, HighlightCategory>;
+
+    const RuleTable& TableFor(const std::string& canonical, LanguageFnPtr language_fn,
+                              const Language* vendored, const LanguageDefinition* injected) {
+        const auto it = tables_.find(canonical);
+        if (it != tables_.end()) return it->second;
+        RuleTable table;
+        if (injected != nullptr) {
+            for (const SyntaxRule& rule : injected->rules) {
+                table.emplace(rule.node_type, rule.category);
+            }
+        } else {
+            for (const SyntaxRule& rule : vendored->rules) {
+                table.emplace(rule.node_type, rule.category);
+            }
+        }
+        (void)language_fn;
+        return tables_.emplace(canonical, std::move(table)).first->second;
+    }
+
+private:
+    std::map<std::string, TSParser*> parsers_;
+    std::unordered_map<std::string, RuleTable> tables_;
+};
 
 std::vector<HighlightSpan> SyntaxHighlighter::HighlightCode(std::string_view code,
                                                             std::string_view language) const {
+    return Collect(code, language, /*include_plain=*/true);
+}
+
+std::vector<HighlightSpan> SyntaxHighlighter::Collect(std::string_view code,
+                                                      std::string_view language,
+                                                      bool include_plain) const {
     // Two lookup paths, one traversal: the vendored table (default) and the
     // injected table the host assembles from the grammar registry. The
     // categorizer differs; everything else is shared.
     const Language* vendored = nullptr;
     const LanguageDefinition* injected = nullptr;
+    std::string canonical;
     if (languages_ != nullptr) {
-        const std::string canonical = CanonicalLanguage(language, languages_);
+        canonical = CanonicalLanguage(language, languages_);
         for (const LanguageDefinition& entry : *languages_) {
             if (canonical == entry.name) {
                 injected = &entry;
@@ -503,31 +654,29 @@ std::vector<HighlightSpan> SyntaxHighlighter::HighlightCode(std::string_view cod
             return {{HighlightCategory::Plain, 0, static_cast<uint32_t>(code.size())}};
         }
     } else {
-        vendored = &FindLanguage(CanonicalLanguage(language));
+        canonical = CanonicalLanguage(language);
+        vendored = &FindLanguage(canonical);
         if (vendored->language_fn == nullptr) {
             return {{HighlightCategory::Plain, 0, static_cast<uint32_t>(code.size())}};
         }
     }
     const TSLanguage* (*language_fn)(void) =
         injected != nullptr ? injected->language_fn : vendored->language_fn;
-    const auto categorize = [&](const char* node_type) -> HighlightCategory {
-        if (injected != nullptr) {
-            for (const SyntaxRule& rule : injected->rules) {
-                if (node_type == rule.node_type) return rule.category;
-            }
-            return HighlightCategory::Plain;
-        }
-        return Categorize(*vendored, node_type);
-    };
 
-    TSParser* parser = ts_parser_new();
-    if (!ts_parser_set_language(parser, language_fn())) {
-        ts_parser_delete(parser);
+    bool parser_ok = false;
+    TSParser* parser = parser_cache_->Get(canonical, language_fn, parser_ok);
+    if (!parser_ok || parser == nullptr) {
         return {{HighlightCategory::Plain, 0, static_cast<uint32_t>(code.size())}};
     }
+    const auto& rule_table =
+        parser_cache_->TableFor(canonical, language_fn, vendored, injected);
+    const auto categorize = [&rule_table](const char* node_type) -> HighlightCategory {
+        const auto it = rule_table.find(node_type);
+        return it != rule_table.end() ? it->second : HighlightCategory::Plain;
+    };
+
     TSTree* tree = ts_parser_parse_string(parser, nullptr, code.data(),
                                           static_cast<uint32_t>(code.size()));
-    ts_parser_delete(parser);
     if (tree == nullptr) {
         return {{HighlightCategory::Plain, 0, static_cast<uint32_t>(code.size())}};
     }
@@ -539,7 +688,11 @@ std::vector<HighlightSpan> SyntaxHighlighter::HighlightCode(std::string_view cod
         if (descend) {
             const TSNode node = ts_tree_cursor_current_node(&cursor);
             const HighlightCategory category = categorize(ts_node_type(node));
-            if (ts_node_is_named(node) || category != HighlightCategory::Plain) {
+            // include_plain=false (the render path) skips the informational
+            // Plain spans entirely -- Highlight() discarded them anyway; the
+            // public HighlightCode keeps them for the span-level tests.
+            if ((ts_node_is_named(node) && include_plain) ||
+                category != HighlightCategory::Plain) {
                 AppendSpan(spans, category, ts_node_start_byte(node), ts_node_end_byte(node));
             }
         }
@@ -565,13 +718,61 @@ std::vector<HighlightSpan> SyntaxHighlighter::HighlightCode(std::string_view cod
     return spans;
 }
 
+std::vector<HighlightSpan> ApplySpanOverrides(std::string_view code,
+                                              const std::vector<HighlightSpan>& spans) {
+    const uint32_t total = static_cast<uint32_t>(code.size());
+    // Per-byte category: -1 = unclaimed. Spans arrive in preorder (ancestors
+    // before descendants), so painting in REVERSE lets each descendant claim
+    // its bytes first and the ancestor fill only what is left -- deeper wins.
+    // The first draft painted forward, which made the ANCESTOR swallow every
+    // categorized child (a JS template literal rendered as one String block).
+    std::vector<int> claimed(total, -1);
+    for (auto it = spans.rbegin(); it != spans.rend(); ++it) {
+        if (it->category == HighlightCategory::Plain) continue;
+        const uint32_t begin = std::min(it->start_byte, total);
+        const uint32_t end = std::min(it->end_byte, total);
+        for (uint32_t i = begin; i < end; ++i) {
+            if (claimed[i] == -1) claimed[i] = static_cast<int>(it->category);
+        }
+    }
+    std::vector<HighlightSpan> runs;
+    uint32_t i = 0;
+    while (i < total) {
+        const HighlightCategory category =
+            claimed[i] >= 0 ? static_cast<HighlightCategory>(claimed[i])
+                            : HighlightCategory::Plain;
+        uint32_t j = i;
+        while (j < total && claimed[j] == claimed[i]) ++j;
+        runs.push_back({category, i, j});
+        i = j;
+    }
+    return runs;
+}
+
 ftxui::Elements SyntaxHighlighter::Highlight(std::string_view code,
                                              std::string_view language) const {
-    const std::vector<HighlightSpan> spans = HighlightCode(code, language);
+    const std::vector<HighlightSpan> spans =
+        ApplySpanOverrides(code, Collect(code, language, /*include_plain=*/false));
 
     ftxui::Elements lines;
     ftxui::Elements current_line;
     uint32_t pos = 0;
+
+    // The seven category colors resolved ONCE per call: emit_text used to call
+    // Theme::ColorFor per span, allocating a std::string key every time.
+    const std::array<ftxui::Color, 8> category_colors = {
+        theme_.ColorFor(ThemeRoleFor(HighlightCategory::Keyword)),
+        theme_.ColorFor(ThemeRoleFor(HighlightCategory::String)),
+        theme_.ColorFor(ThemeRoleFor(HighlightCategory::Comment)),
+        theme_.ColorFor(ThemeRoleFor(HighlightCategory::Number)),
+        theme_.ColorFor(ThemeRoleFor(HighlightCategory::Function)),
+        theme_.ColorFor(ThemeRoleFor(HighlightCategory::Type)),
+        theme_.ColorFor(ThemeRoleFor(HighlightCategory::Operator)),
+        theme_.ColorFor(ThemeRoleFor(HighlightCategory::Plain)),
+    };
+    const auto color_of = [&](HighlightCategory category) {
+        return category_colors[static_cast<std::size_t>(category)];
+    };
 
     const auto flush_line = [&]() {
         lines.push_back(current_line.empty() ? ftxui::text("") : ftxui::hbox(current_line));
@@ -579,7 +780,7 @@ ftxui::Elements SyntaxHighlighter::Highlight(std::string_view code,
     };
     const auto emit_text = [&](std::string_view text, HighlightCategory category) {
         ftxui::Element element = ftxui::text(std::string(text));
-        const ftxui::Color c = theme_.ColorFor(ThemeRoleFor(category));
+        const ftxui::Color c = color_of(category);
         if (category != HighlightCategory::Plain && c != ftxui::Color::Default) {
             element = element | ftxui::color(c);
         }
@@ -604,14 +805,11 @@ ftxui::Elements SyntaxHighlighter::Highlight(std::string_view code,
     };
 
     for (const HighlightSpan& span : spans) {
-        // Plain spans are informational defaults, not claims: a Plain parent
-        // (translation_unit, ...) covers the whole input, and treating it as a
-        // claim would clip every categorized child inside it. Gaps are already
-        // rendered Plain, so skipping Plain spans loses nothing.
-        if (span.category == HighlightCategory::Plain) continue;
-        const uint32_t begin = std::max(span.start_byte, pos);
-        emit_range(pos, begin, HighlightCategory::Plain);
-        emit_range(begin, span.end_byte, span.category);
+        // ApplySpanOverrides already produced ordered, non-overlapping runs
+        // covering the input: Plain RUNS here are real unclaimed text (not the
+        // informational spans the traversal emitted), so they render as plain
+        // text -- skipping them would drop bytes.
+        emit_range(span.start_byte, span.end_byte, span.category);
         pos = std::max(pos, span.end_byte);
     }
     // Trailing text after the last span.

@@ -29,7 +29,10 @@ ClientPluginConfig ParseClientPluginConfig(const std::string& json_text) {
     if (json_text.empty()) return config;
 
     const auto parsed = nlohmann::json::parse(json_text, nullptr, /*allow_exceptions=*/false);
-    if (parsed.is_discarded() || !parsed.is_object()) return config;
+    if (parsed.is_discarded() || !parsed.is_object()) {
+        config.malformed = true;   // the host warns and skips the rewrite
+        return config;
+    }
 
     if (auto it = parsed.find("plugins"); it != parsed.end() && it->is_array()) {
         for (const auto& item : *it) {

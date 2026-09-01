@@ -39,7 +39,7 @@ ftxui::Component MakePromptEditor(
     const Theme& theme, PromptEditorState& state,
     std::function<void(const std::string&)> on_text,
     std::function<void(const std::string&)> on_command,
-    std::function<std::vector<std::string>(const std::string& prefix)> suggest,
+    const MentionSuggestor& suggest,
     std::function<std::vector<CommandCatalogEntry>()> command_catalog) {
     using namespace ftxui;
 
@@ -90,7 +90,23 @@ ftxui::Component MakePromptEditor(
             // differ from the displayed text (a command completes to its name
             // plus a space, not to the annotation line).
             if (state.suggestion_selected < static_cast<int>(state.completions.size())) {
-                state.content = state.completions[state.suggestion_selected];
+                const std::string& completion = state.completions[state.suggestion_selected];
+                if (!CommandPrefixOf(state.content).empty()) {
+                    // A command line IS its prefix: whole-line replacement.
+                    state.content = completion;
+                } else {
+                    // A mention SPLICES the path over the @token: whole-line
+                    // replacement destroyed the user's prose AND manufactured
+                    // a '/'-leading line the dispatcher would route as a
+                    // command. The '@' stays -- the server's expansion scans
+                    // for '@' + non-space tokens.
+                    const std::size_t at = state.content.rfind('@');
+                    if (at != std::string::npos) {
+                        state.content = state.content.substr(0, at) + "@" + completion;
+                    } else {
+                        state.content += "@" + completion;
+                    }
+                }
             }
             state.list_open = false;
             state.suggestions.clear();
@@ -126,10 +142,12 @@ ftxui::Component MakePromptEditor(
             state.query_at = std::chrono::steady_clock::now() + kSuggestDebounce;
             state.list_open = state.query_pending;
             state.suggestion_selected = 0;
-            if (!state.list_open) {
-                state.suggestions.clear();
-                state.completions.clear();
-            }
+            // The OLD list must not survive the re-arm: it matches a prefix
+            // the user has already typed past, and Tab within the debounce
+            // window completed the STALE entry. The list re-opens when the
+            // fresh answer lands.
+            state.suggestions.clear();
+            state.completions.clear();
         }
         return false;   // everything else goes to the Input
     });

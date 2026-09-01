@@ -301,3 +301,113 @@ TEST_CASE("INVARIANT: paging backward twice must grow the window, not reset it",
     REQUIRE(snap.scrollback_page.front().seq() == 20);
     REQUIRE(snap.scrollback_page.back().seq() == 14);
 }
+
+// Track R1b-5: the notice used to be built by a hand-copied subset of the
+// mapper, silently dropping display/view_hint -- every View-display result
+// (e.g. /sessions) arrived as a STATUS line and its view never opened. The
+// sequence number is what lets the frame's maintain pass perform a View
+// notice's side-effects exactly once; without it the guard cannot exist.
+TEST_CASE("command notice maps display/view_hint and advances the notice sequence",
+          "[session_state][notice]") {
+    SessionState state("s-1");
+
+    v1::CommandResult evt;
+    evt.set_message("6 sessions");
+    evt.set_status(v1::COMMAND_STATUS_OK);
+    evt.set_display(v1::COMMAND_DISPLAY_VIEW);
+    evt.set_view_hint("sessions");
+    state.OnCommandResult(evt);
+
+    auto snap = state.TakeSnapshot();
+    REQUIRE(snap.latest_notice.has_value());
+    CHECK(snap.latest_notice->message == "6 sessions");
+    CHECK(snap.latest_notice->display == v1::COMMAND_DISPLAY_VIEW);
+    CHECK(snap.latest_notice->view_hint == "sessions");
+    CHECK(snap.notice_seq == 1);
+
+    // A second result is a NEW notice: the seq must move, or a maintain pass
+    // that already handled the first one would never handle the replacement.
+    v1::CommandResult second;
+    second.set_message("not a session");
+    second.set_status(v1::COMMAND_STATUS_ERROR);
+    second.set_display(v1::COMMAND_DISPLAY_STATUS);
+    state.OnCommandResult(second);
+
+    snap = state.TakeSnapshot();
+    REQUIRE(snap.latest_notice.has_value());
+    CHECK(snap.latest_notice->is_error);
+    CHECK(snap.latest_notice->view_hint.empty());
+    CHECK(snap.notice_seq == 2);
+}
+
+// Track R2-4: the scrollback window is a bounded SLIDING window. Loading older
+// pages beyond the cap evicts from the window's NEWEST end and flags it -- the
+// pre-R2 append grew client memory without bound (a long PageUp on a 1M-token
+// history materialized the whole transcript). The flag exists so the view can
+// mark the boundary instead of showing a silent gap; a newest-slice refresh
+// resets both.
+TEST_CASE("INVARIANT: paging older beyond the cap evicts newest pages and flags the trim",
+          "[session_state][scrollback][invariant]") {
+    SessionState state("s-1");
+    state.SetBounds(/*scrollback_max_messages=*/5, /*tool_output_buffer_bytes=*/64 * 1024);
+
+    state.ApplyScrollbackPage(PageOf({99, 98, 97, 96, 95}, /*has_more=*/true));
+    REQUIRE(state.TakeSnapshot().scrollback_page.size() == 5);
+    REQUIRE_FALSE(state.TakeSnapshot().scrollback_trimmed);
+
+    // Each older page appends 3 rows; the window must stay at 5, evicting from
+    // the newest end.
+    state.ApplyScrollbackPage(PageOf({94, 93, 92}, /*has_more=*/true));
+    auto snap = state.TakeSnapshot();
+    REQUIRE(snap.scrollback_page.size() == 5);
+    REQUIRE(snap.scrollback_trimmed);
+    CHECK(snap.scrollback_page.front().seq() == 96);   // 99, 98, 97 evicted (8 rows -> 5)
+    CHECK(snap.scrollback_page.back().seq() == 92);
+
+    // A newest-slice refresh resets the trim flag and the window.
+    state.ApplyScrollbackPage(PageOf({99, 98, 97}, /*has_more=*/false));
+    snap = state.TakeSnapshot();
+    CHECK_FALSE(snap.scrollback_trimmed);
+    CHECK(snap.scrollback_page.size() == 3);
+}
+
+// Track R2-5: the tool-output "ring buffer" caps AT APPEND (head 1/4 + marker +
+// tail 3/4), mirroring the server's persisted-result cap. The pre-R2 code
+// appended without bound and truncated only at RENDER time, so a chatty tool
+// grew client memory for the whole turn.
+TEST_CASE("INVARIANT: tool output deltas stay bounded, with marker and tail preserved",
+          "[session_state][tools][invariant]") {
+    SessionState state("s-1");
+    state.SetBounds(2000, /*tool_output_buffer_bytes=*/4096);
+
+    state.OnToolStarted(StartTool("t1"));
+    const std::string chunk(1024, 'x');
+    for (int i = 0; i < 16; ++i) {
+        state.OnToolOutputDelta("t1", chunk);   // 16 KB total vs a 4 KB cap
+    }
+    auto snap = state.TakeSnapshot();
+    REQUIRE(snap.tools.size() == 1);
+    const auto& out = snap.tools[0].buffered_output;
+    CHECK(out.size() <= 4096 + 256);   // bounded (small slack for the marker)
+    CHECK(out.find("live output trimmed") != std::string::npos);   // marker present
+    CHECK(out.find("xxx") != std::string::npos);   // head AND tail content preserved
+}
+
+// Track R2-8: stream recreation keys on turn_seq, not a buffer-size heuristic.
+// The seq must advance once per streaming turn (a new stream after the previous
+// one ended), and must NOT advance on intra-turn boundaries.
+TEST_CASE("turn_seq advances once per streaming turn", "[session_state]") {
+    SessionState state("s-1");
+
+    state.AppendStreamingText("hel");
+    state.AppendStreamingText("lo");
+    CHECK(state.TakeSnapshot().turn_seq == 1);
+
+    state.FinalizeStreamingText();   // message boundary WITHIN a turn: no bump
+    state.AppendStreamingText("more");
+    CHECK(state.TakeSnapshot().turn_seq == 1);
+
+    state.OnTurnCompleted(v1::TurnCompletedEvent{});   // ends the turn
+    state.AppendStreamingText("next turn");
+    CHECK(state.TakeSnapshot().turn_seq == 2);
+}

@@ -6,6 +6,8 @@
 
 #include <nlohmann/json.hpp>
 
+#include "minimal/common/logger.hpp"
+
 namespace minimal::client {
 
 namespace {
@@ -42,15 +44,27 @@ Keybindings Keybindings::Parse(std::string_view json) {
     }
 
     Keybindings out;
+    std::map<std::string, std::string> key_to_action;   // duplicate-key detection
     for (auto it = doc.begin(); it != doc.end(); ++it) {
         if (!it.value().is_string()) {
             throw std::runtime_error("keybindings.json: value for '" + it.key() +
                                      "' must be a string");
         }
+        const std::string key = it.value().get<std::string>();
+        // Two actions on one key are silently ordered by source iteration today
+        // -- warn, so a rebinding that shadows another is visible at startup.
+        const auto collision = key_to_action.find(key);
+        if (collision != key_to_action.end()) {
+            common::DefaultLogger().warn(
+                "keybindings.json: '{}' is bound to both '{}' and '{}' -- the first wins",
+                key, collision->second, it.key());
+        } else {
+            key_to_action.emplace(key, it.key());
+        }
         // Unknown action names are KEPT: a client plugin (E5) registers views
         // addressable from here by runtime-chosen ids, and this file may predate
         // or postdate any given build. See the header comment.
-        out.bindings_[it.key()] = it.value().get<std::string>();
+        out.bindings_[it.key()] = key;
     }
     return out;
 }

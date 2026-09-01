@@ -81,6 +81,7 @@ add_executable(minimal_tests
     syntax_highlighter_test.cpp
     session_state_test.cpp
     app_state_test.cpp
+    view_factory_test.cpp
     keybindings_test.cpp
     chat_model_test.cpp
     mention_resolver_test.cpp

@@ -56,7 +56,7 @@ bool ExclusiveRecord::Claim(std::string_view claimant) {
         common::DefaultLogger().warn(
             "client plugin '{}': {} slot already claimed by '{}' -- registration ignored "
             "(the exclusive-slot rule: first registration wins)",
-            claimant, plugin_name.empty() ? "an exclusive" : "an exclusive", plugin_name);
+            claimant, plugin_name.empty() ? "the core default" : "the exclusive", plugin_name);
         return false;
     }
     registered = true;

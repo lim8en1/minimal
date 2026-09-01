@@ -20,8 +20,8 @@
 
 namespace minimal::client {
 
+// Reads the LIGHT TabSnapshot.tools (track R): no full per-tab snapshots.
 ftxui::Element RenderToolsPanel(const std::vector<AppState::TabSnapshot>& tabs,
-                                const std::map<std::string, SessionState::Snapshot>& details,
                                 int stdout_buffer_lines, const Theme& theme);
 
 }  // namespace minimal::client

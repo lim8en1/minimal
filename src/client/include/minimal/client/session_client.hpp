@@ -6,16 +6,16 @@
 #include <deque>
 #include <functional>
 #include <mutex>
+#include <unordered_set>
 #include <vector>
-#include <atomic>
 #include <memory>
 #include <optional>
-#include <cstdint>
 #include <string>
 #include <thread>
 
 #include <grpcpp/grpcpp.h>
 
+#include "minimal/client/subscribe_outcome.hpp"
 #include "minimal/v1/session_service.grpc.pb.h"
 
 namespace minimal::client {
@@ -75,19 +75,41 @@ public:
         // which the stream stays open across. Set BEFORE Resume(), same two-phase
         // discipline as the event callback: the owning tab must be registered
         // first so this can never be dispatched to something that doesn't exist.
-        void SetOnClosed(std::function<void()> cb);
+        //
+        // The reader's Finish() status is handed TO the callback: the callback
+        // must never reach back into this Stream (a GetStream copy made here can
+        // be the last owner while ~Stream is running, and the reader would then
+        // join itself -- std::terminate).
+        void SetOnClosed(std::function<void(const grpc::Status&)> cb);
 
         // Thread-safe enqueue of any ClientEvent (turn input, command invocation,
         // permission/confirmation answer, cancel). Non-blocking: queued and drained by the
-        // writer thread. Dropped silently if closing/closed.
-        void Send(const v1::ClientEvent& event);
+        // writer thread. Returns FALSE when the event was dropped: the stream is
+        // closing/closed, or the bounded send queue is full (the server stopped
+        // reading) -- the caller should surface that rather than retry blindly.
+        bool Send(const v1::ClientEvent& event);
 
         // Half-close our send side, drain remaining server output, then Finish(). Safe from
         // any thread (idempotent via closed_ latch). Closing the last stream of a session
         // terminates it server-side; closing one tab leaves others running.
+        //
+        // The bidi context is CANCELLED before the joins: a writer blocked in
+        // Write() (server stopped reading) or a reader blocked in Read() (wedged
+        // connection) would otherwise hang Close() -- which runs on the UI
+        // thread from CloseTab/quit -- forever. Cancel costs queued-but-unsent
+        // events, which is consistent with Close's documented destructiveness:
+        // the session is being torn down regardless.
         void Close();
 
-        grpc::Status status() const { return status_; }
+        // Unblocks the underlying call without the full Close() discipline
+        // (joins, Finish). For streams being discarded without ever having
+        // been resumed -- a duplicate AttachTab that must not terminate the
+        // session the way closing its second bidi would.
+        void Cancel();
+
+        // Thread-safe snapshot of the RPC outcome: Finish()'s status after
+        // Close(), or the reader's error when the server died mid-stream.
+        grpc::Status status() const;
         const std::string& session_id() const { return session_id_; }
         bool resumed() const { return resumed_.load(); }
 
@@ -95,18 +117,17 @@ public:
         friend class SessionClient;
         Stream(std::shared_ptr<grpc::Channel> ch, EventCallback cb);
 
-        void LaunchReaderThread();
-        void LaunchWriterThread();
-        grpc::Status OpenBidi();   // opens the gRPC bidi once; threads start in Resume()
-        void EnqueueNamingEvent();   // queue an empty ClientEvent that names the stream
+    void LaunchReaderThread();
+    void LaunchWriterThread();
+    void OpenBidi();             // constructs the gRPC bidi once (lazy); threads start in Resume()
+    void EnqueueNamingEvent();   // queue an empty ClientEvent that names the stream
 
         std::shared_ptr<grpc::Channel> channel_;
         std::unique_ptr<v1::SessionService::Stub> stub_;
 
         EventCallback event_cb_;
-        std::function<void()> on_closed_;
+        std::function<void(const grpc::Status&)> on_closed_;
         std::string session_id_;
-        grpc::Status status_;
 
         // Must outlive the bidi below -- gRPC requires the ClientContext used to
         // create a call to stay alive for the call's whole lifetime, not just the
@@ -121,6 +142,19 @@ public:
         std::deque<v1::ClientEvent> send_queue_;
         std::atomic<bool> closing_{false};
 
+        // Bounded like the server's outbound EventQueue (65k) -- a stream whose
+        // server side stopped reading must not grow client memory without
+        // limit. 256 events ≈ an entire turn's control traffic several times
+        // over; beyond that the stream is stalled and Send() refuses.
+        static constexpr std::size_t kSendQueueCap = 256;
+
+        // Guards status_: written by Open/Attach (constructor thread), the
+        // reader thread (its own Finish), and Close(); read via status() from
+        // any thread.
+        mutable std::mutex status_mtx_;
+        grpc::Status status_;
+        void SetStatus(const grpc::Status& status);
+
         std::thread writer_;
         std::thread reader_;
         std::atomic<bool> resumed_{false};   // threads started at most once
@@ -129,6 +163,11 @@ public:
 
     explicit SessionClient(std::string server_address);
     ~SessionClient();
+
+    // Cancels live PluginSubscribe calls at teardown: a subscriber still
+    // blocked in Read() when the client dies would otherwise race destruction.
+    std::mutex subscribe_mtx_;
+    std::unordered_set<grpc::ClientContext*> active_subscribes_;
 
     SessionClient(const SessionClient&) = delete;
     SessionClient& operator=(const SessionClient&) = delete;
@@ -214,13 +253,10 @@ public:
     PluginCallResult PluginCall(const std::string& plugin_name, const std::string& method,
                                 const std::string& json_payload);
 
-    // Streams the subscription's payloads to `on_payload` on the CALLING
-    // thread (blocking until the server closes the stream or `on_payload`
-    // returns false -- which cancels the call). False return: the
-    // subscription was refused (unknown plugin or method).
-    bool PluginSubscribe(const std::string& plugin_name, const std::string& method,
-                         const std::string& json_payload,
-                         const std::function<bool(const std::string& json_payload)>& on_payload);
+    SubscribeOutcome PluginSubscribe(const std::string& plugin_name, const std::string& method,
+                                     const std::string& json_payload,
+                                     const std::function<bool(const std::string& json_payload)>& on_payload,
+                                     grpc::Status* status = nullptr);
 
     // Opens the bidi stream, sends one user turn, and pumps ServerEvents to
     // `on_event` until the stream ends or `on_event` returns false.

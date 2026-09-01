@@ -3,6 +3,7 @@
 #include <chrono>
 #include <map>
 #include <memory>
+#include <atomic>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -90,6 +91,12 @@ class SessionState {
 public:
     explicit SessionState(std::string session_id, std::string name = "");
 
+    // Memory bounds (track R2). Defaults; AppState applies ui.json's values
+    // right after construction, before any event can arrive.
+    static constexpr int kDefaultScrollbackWindowMaxMessages = 2000;
+    static constexpr int kDefaultToolOutputBufferBytes = 64 * 1024;
+    void SetBounds(int scrollback_max_messages, int tool_output_buffer_bytes);
+
     // Renderable copy taken under a short lock held minimally (no blocking I/O).
     struct Snapshot {
         std::string session_id;
@@ -121,11 +128,29 @@ public:
         // The view compares its cached value to decide a refresh; no timer.
         uint64_t transcript_version = 0;
 
+        // True when older-page loads evicted pages from the window's NEWEST
+        // end to hold the cap: the top of the window is no longer the live
+        // newest message, so the view renders a boundary marker instead of a
+        // silent gap. Cleared by the newest-slice refresh at turn end.
+        bool scrollback_trimmed = false;
+
+        // Increments once per streaming turn (new stream start). The frame's
+        // maintain pass keys stream recreation on this instead of the old
+        // buffer-size heuristic, which could splice two rapid turns.
+        uint64_t turn_seq = 0;
+
         // The latest /-command outcome, for the transient notice line. NEVER a
         // chat row (EXTENSIBILITY §4.4) — that is a type-level property of
         // CommandNotice, not a rendering choice made here. The display/view_hint
         // fields carry the E5 CommandDisplay refinement.
         std::optional<CommandNotice> latest_notice;
+
+        // Monotonic per-session id for latest_notice: the VIEW side-effects
+        // (open the picker, show a plugin modal) are performed ONCE per notice
+        // by the frame's maintain pass, keyed on this — never from Render(),
+        // which runs every frame and must stay side-effect-free for view
+        // routing.
+        uint64_t notice_seq = 0;
 
         // --- Session metadata (the E5 emission, one per attach + on change) ---
         // The wire source for the status bar's {model} {agent}
@@ -138,6 +163,13 @@ public:
     };
 
     Snapshot TakeSnapshot();
+
+    // LIGHT variant for the per-frame tab list (track R: the focused-tab pump
+    // redesign): everything the tab bar and the CROSS-SESSION tools panel
+    // render, WITHOUT the heavy copies -- no scrollback page, no streaming
+    // text, no pending-modal data. GetAllTabs() calls this per tab per frame;
+    // the deep TakeSnapshot() runs for the FOCUSED tab only.
+    Snapshot TakeLightSnapshot();
 
     // --- Session lifecycle ---
     void OnSessionCreated(std::string name);
@@ -187,14 +219,23 @@ private:
     std::string display_name_;   // tab/picker label; refreshed from server metadata
     SessionStateKind state_ = SessionStateKind::Idle;
 
-    // Scrollback window
+    // Scrollback window (descending by seq: front = newest). BOUNDED: loading
+    // older pages beyond scrollback_max_messages_ evicts from the newest end
+    // and sets scrollback_trimmed_ -- an unbounded append let a long PageUp
+    // materialize a 1M-token transcript in client memory.
     std::vector<v1::StoredMessage> scrollback_page_;
     int64_t last_loaded_seq_ = -1;      // oldest seq loaded so far (descending)
     bool has_earlier_ = false;
     uint64_t transcript_version_ = 0;
+    bool scrollback_trimmed_ = false;
+    int scrollback_max_messages_ = kDefaultScrollbackWindowMaxMessages;
+    int tool_output_buffer_bytes_ = kDefaultToolOutputBufferBytes;
 
     // Latest /-command outcome (transient notice line; never a chat row).
+    // notice_seq_ advances on every OnCommandResult so consumers can tell a
+    // fresh notice from a re-snapshot of the same one.
     std::optional<CommandNotice> latest_notice_;
+    uint64_t notice_seq_ = 0;
 
     // Session metadata (see Snapshot).
     std::string model_;
@@ -205,6 +246,8 @@ private:
     // Streaming assistant text
     std::string streaming_accumulated_;
     bool is_streaming_ = false;
+    uint64_t turn_seq_ = 0;    // increments when a NEW TURN's stream starts
+    bool turn_ended_ = true;   // armed by OnTurnCompleted/OnError; disarmed by the next delta
 
     // Pending modals
     std::optional<PendingPermission> pending_permission_;
@@ -245,6 +288,11 @@ public:
         // UI-derived
         char attention_glyph = '\0';     // '!' when Waiting or plugin-raised, else nothing
         bool is_focused = false;
+
+        // The tab's tool rows (bounded buffers, R2) -- what the cross-session
+        // running-tools panel renders. Filled by the LIGHT snapshot; before it
+        // existed the panel forced a full deep Snapshot of EVERY tab per frame.
+        std::vector<ToolExecutionState> tools;
     };
 
     // --- Tab management (all thread-safe) ---
@@ -328,6 +376,36 @@ public:
     // its data plane regardless.
     void SetChatSurface(plugins::ChatSurface* surface) { chat_surface_ = surface; }
 
+    // The exclusive chat surface, unless a plugin threw out of it (catch +
+    // disable): null means the core chat view renders the tab body.
+    plugins::ChatSurface* EffectiveChatSurface() const {
+        return chat_surface_broken_ ? nullptr : chat_surface_;
+    }
+
+    // Disables a surface that threw mid-render (loop thread). `reason` may be
+    // null for a non-standard exception.
+    void DisableChatSurface(const char* reason);
+
+    // Memory bounds for every SessionState created AFTER this call
+    // (OpenTab/AttachTab). 0 leaves that bound at its built-in default.
+    // RunTui applies ui.json's values right after construction, before any
+    // tab can open.
+    void SetUiBounds(int scrollback_max_messages, int tool_output_buffer_bytes);
+
+    // DEEP snapshot of ONE tab -- the focused tab, for the frame. The pre-R
+    // frame called GetAllDetails() (a deep copy of EVERY tab, under each tab's
+    // lock) two to three times per frame; with the light tab list (GetAllTabs
+    // -> TakeLightSnapshot) and this, a frame copies the focused tab once.
+    SessionState::Snapshot GetDetails(const std::string& session_id) const;
+
+    // Monotonic UI revision, bumped by every mutating entry point. The 20 Hz
+    // pump posts a redraw ONLY when this moved (plus a low-rate floor for the
+    // editor's debounce gate) -- an idle TUI previously repainted the full
+    // frame 20 times per second no matter what.
+    uint64_t UiVersion() const {
+        return ui_version_.load(std::memory_order_acquire);
+    }
+
 private:
     struct TabEntry {
         TabInfo info;
@@ -345,6 +423,13 @@ private:
     int64_t next_root_ordinal_ = 0;
     uint32_t next_spawn_seq_ = 0;
     std::string focused_id_;     // active tab ("" => none)
+
+    // ui.json bounds (0 = built-in default), applied to every new SessionState.
+    int scrollback_max_messages_ = 0;
+    int tool_output_buffer_bytes_ = 0;
+
+    std::atomic<uint64_t> ui_version_{0};
+    void BumpUiVersion() { ui_version_.fetch_add(1, std::memory_order_acq_rel); }
     std::vector<std::pair<std::string, v1::SubagentStartedEvent>> pending_subagents_;   // deferred
 
     std::shared_ptr<SessionClient> client_;
@@ -352,11 +437,18 @@ private:
     // E5 seams (see the setters above).
     plugins::AttentionState* plugin_attention_ = nullptr;
     plugins::ChatSurface* chat_surface_ = nullptr;
+    // A plugin surface that THREW is disabled for the process (catch +
+    // disable): the core chat view takes over, the process survives. Third
+    // thrown events downgrade to a logged error, not a dead tab.
+    bool chat_surface_broken_ = false;
 
     void FocusWithWrap(bool forward);       // shared logic for the two cycle methods
     TabEntry* FindTab(const std::string& session_id);  // unlocked, mutex held by caller
     std::shared_ptr<SessionClient::Stream> GetStream(const std::string& session_id);
-    SessionState* GetState(const std::string& session_id);
+    // OWNING copy: a raw pointer here escaped the lock and could be destroyed
+    // by CloseTab (which erases the TabEntry and drops the shared_ptr) while
+    // the reader thread was still between the lookup and the call.
+    std::shared_ptr<SessionState> GetState(const std::string& session_id) const;
 };
 
 }  // namespace minimal::client
