@@ -5,6 +5,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -15,6 +16,38 @@ struct sqlite3;      // opaque handle; <sqlite3.h> stays private to the .cpp
 struct sqlite3_stmt;
 
 namespace minimal::session {
+
+// The two keyset-paging statements, exported VERBATIM. The EXPLAIN invariant
+// tests assert the planner's plan for the statements that actually run --
+// transcribing the SQL into a test produces a lookalike that drifts silently
+// the moment the statement changes, which is how a reverted predicate passed
+// its own guard.
+inline constexpr std::string_view kMessagesPageSql =
+    "SELECT seq, content_json, token_count, created_at FROM messages"
+    " WHERE session_id = ?1 AND discarded = 0 AND seq < COALESCE(?2, 9223372036854775807)"
+    " ORDER BY seq DESC LIMIT ?3;";
+
+// The session picker's page. The cursor is a PAIR because the sort key is:
+// updated_at is not unique, and ordering is (updated_at DESC, id ASC). The
+// SEEK is carried by the `updated_at <= COALESCE(?3, INT64_MAX)` ceiling --
+// with no cursor it folds to `<= INT64_MAX`, with one it bounds the range --
+// while the OR below only disambiguates the tie at the cursor, exactly like
+// the old `(updated_at = ?3 AND s.id > ?4)` term. The previous
+// `?3 IS NULL OR ...` prefix defeated the planner: every page request
+// re-scanned the whole index from the top past every newer session, so paging
+// the picker was O(n) per page and O(n^2) total. `?4 IS NOT NULL` preserves
+// the old semantics of a cursor missing its id half (the tie tier is
+// excluded), and `COALESCE(?4, '')` was rejected because it would silently
+// include that tier instead.
+inline constexpr std::string_view kSessionsPageSql =
+    "SELECT s.id, s.parent_session_id, s.name, s.name_source, s.project_root,"
+    " s.agent_preset, s.created_at, s.updated_at, s.message_count"
+    " FROM sessions s"
+    " WHERE (?1 IS NULL OR s.project_root = ?1) AND (?2 OR s.parent_session_id IS NULL)"
+    " AND s.updated_at <= COALESCE(?3, 9223372036854775807)"
+    " AND (s.updated_at < COALESCE(?3, 9223372036854775807)"
+    "      OR (?4 IS NOT NULL AND s.updated_at = ?3 AND s.id > ?4))"
+    " ORDER BY s.updated_at DESC, s.id ASC LIMIT ?5;";
 
 // One schema change: the user_version it establishes plus the statements that
 // establish it. Applied in order; all pending migrations run in a single

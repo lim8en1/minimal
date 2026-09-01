@@ -656,22 +656,12 @@ bool SessionDatabase::SessionExists(const std::string& session_id) const {
 
 std::vector<SessionSummary> SessionDatabase::ListSessions(const ListSessionsFilter& filter) const {
     std::lock_guard lock(mu_);
-    // The cursor is a PAIR, because the sort key is. updated_at alone is not
-    // unique -- two sessions can share a millisecond -- so a cursor on it would
-    // either skip or repeat rows at a page boundary. The row comparison
-    // (updated_at, id) < (?, ?) in lexicographic form is what makes the page
-    // boundary exact, and it matches ORDER BY updated_at DESC, id ASC.
+    // kSessionsPageSql (in the header) carries the full story of the cursor:
+    // a PAIR, because the sort key is, and a `<= COALESCE` ceiling the planner
+    // constrains on rather than a `? IS NULL OR` prefix it plans as a scan.
     // message_count is the maintained column (see GetSession), not a correlated
     // COUNT(*) that would make the page cost O(total messages).
-    CachedStmt query(db_, prepared_,
-                     "SELECT s.id, s.parent_session_id, s.name, s.name_source, s.project_root,"
-                     " s.agent_preset, s.created_at, s.updated_at, s.message_count"
-                     " FROM sessions s"
-                     " WHERE (?1 IS NULL OR s.project_root = ?1) AND (?2 OR s.parent_session_id IS NULL)"
-                     " AND (?3 IS NULL OR s.updated_at < ?3 OR (s.updated_at = ?3 AND s.id > ?4))"
-                     " ORDER BY s.updated_at DESC, s.id ASC"
-                     " LIMIT ?5;",
-                     "failed to list sessions");
+    CachedStmt query(db_, prepared_, kSessionsPageSql.data(), "failed to list sessions");
     if (filter.project_root) {
         sqlite3_bind_text(query.stmt, 1, filter.project_root->c_str(), -1, SQLITE_TRANSIENT);
     } else {
@@ -733,12 +723,7 @@ MessagePage SessionDatabase::GetMessagesPage(const std::string& session_id,
     // total. COALESCE folds the "no cursor" case into the same comparison, the
     // planner constrains on seq, and any real cursor is an exact seek. The
     // sentinel cannot collide with a row: seq values here are row indices.
-    CachedStmt query(
-        db_, prepared_,
-        "SELECT seq, content_json, token_count, created_at FROM messages"
-        " WHERE session_id = ?1 AND discarded = 0 AND seq < COALESCE(?2, 9223372036854775807)"
-        " ORDER BY seq DESC LIMIT ?3;",
-        "failed to page messages");
+    CachedStmt query(db_, prepared_, kMessagesPageSql.data(), "failed to page messages");
     sqlite3_bind_text(query.stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
     if (before_seq) {
         sqlite3_bind_int64(query.stmt, 2, *before_seq);

@@ -509,8 +509,10 @@ TEST_CASE("paging constrains on seq -- the planner seeks, it does not walk",
     // the seq range constraint. The previous `?2 IS NULL OR seq < ?2` shape
     // planned as equality on session_id plus a plain index walk from MAX(seq)
     // -- O(n) per page, O(n^2) to page a whole transcript. This is EXPLAIN'd
-    // against the real schema with a bound cursor; the reverted shape drops the
-    // constraint under the same EXPLAIN, which is what made the fix necessary.
+    // against the PRODUCTION STATEMENT (kMessagesPageSql, not a test-local
+    // transcription -- a lookalike drifts silently when the statement
+    // changes) with a bound cursor; the reverted shape drops the constraint
+    // under the same EXPLAIN, which is what made the fix necessary.
     TempDir dir;
     SessionDatabase db(dir.path() / "s.db");
     const auto id = db.CreateSession("s", std::nullopt, "/p", "build").session_id;
@@ -519,12 +521,9 @@ TEST_CASE("paging constrains on seq -- the planner seeks, it does not walk",
 
     sqlite3* raw = RawOpen(dir.path() / "s.db");
     sqlite3_stmt* stmt = nullptr;
-    REQUIRE(sqlite3_prepare_v2(
-                raw,
-                "EXPLAIN QUERY PLAN SELECT seq, content_json FROM messages"
-                " WHERE session_id = ?1 AND seq < COALESCE(?2, 9223372036854775807)"
-                " ORDER BY seq DESC LIMIT 10;",
-                -1, &stmt, nullptr) == SQLITE_OK);
+    REQUIRE(sqlite3_prepare_v2(raw,
+                               ("EXPLAIN QUERY PLAN " + std::string(kMessagesPageSql)).c_str(),
+                               -1, &stmt, nullptr) == SQLITE_OK);
     sqlite3_bind_text(stmt, 1, "s", -1, SQLITE_TRANSIENT);
     sqlite3_bind_int64(stmt, 2, 5);
 
@@ -539,6 +538,88 @@ TEST_CASE("paging constrains on seq -- the planner seeks, it does not walk",
     // The plan must constrain on seq -- a cursor page must be a seek, not a
     // walk from MAX(seq) past every newer row.
     CHECK(plan.find("seq<?") != std::string::npos);
+}
+
+TEST_CASE("the session picker seeks on its cursor -- the planner constrains, it does not scan",
+          "[session][listing][invariant]") {
+    // The un-swept sibling of the messages fix above: ListSessions kept the
+    // `?3 IS NULL OR ...` prefix, which planned as SCAN over
+    // idx_sessions_activity -- every page request re-walked the index from the
+    // top past every newer session, O(n) per page and O(n^2) to page the
+    // picker. The ceiling is now `updated_at <= COALESCE(?3, INT64_MAX)`,
+    // which the planner constrains on. EXPLAIN against the PRODUCTION
+    // statement (kSessionsPageSql), mirroring the messages invariant.
+    TempDir dir;
+    SessionDatabase db(dir.path() / "s.db");
+    std::string cursor_id;
+    std::int64_t cursor_updated_at = 0;
+    for (int i = 0; i < 10; ++i) {
+        const auto created = db.CreateSession("", std::nullopt, "/p", "build");
+        if (i == 4) {
+            cursor_id = created.session_id;
+            cursor_updated_at = created.updated_at_unix_ms;
+        }
+    }
+
+    sqlite3* raw = RawOpen(dir.path() / "s.db");
+    sqlite3_stmt* stmt = nullptr;
+    REQUIRE(sqlite3_prepare_v2(raw, ("EXPLAIN QUERY PLAN " + std::string(kSessionsPageSql)).c_str(),
+                               -1, &stmt, nullptr) == SQLITE_OK);
+    sqlite3_bind_null(stmt, 1);              // all project roots
+    sqlite3_bind_int(stmt, 2, 0);            // hide subagents
+    sqlite3_bind_int64(stmt, 3, cursor_updated_at);
+    sqlite3_bind_text(stmt, 4, cursor_id.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 5, 5);
+
+    std::string plan;
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        plan += reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
+        plan += "; ";
+    }
+    sqlite3_finalize(stmt);
+    sqlite3_close(raw);
+
+    // A SEARCH constrained on updated_at -- not a SCAN from the top of the
+    // index past every newer session.
+    CHECK(plan.find("SEARCH") != std::string::npos);
+    CHECK(plan.find("updated_at<?") != std::string::npos);
+}
+
+TEST_CASE("paging the picker over a thousand sessions is exact", "[session][listing]") {
+    // The functional half of the cursor fix: page size must be the ONLY cost
+    // driver, and the pages must tile the session list exactly -- every
+    // session exactly once, in (updated_at DESC, id ASC) order, with the
+    // boundary between pages exact. The EXPLAIN invariant above proves the
+    // seek; this proves the seek did not change what is returned.
+    TempDir dir;
+    SessionDatabase db(dir.path() / "many.db");
+    for (int i = 0; i < 1000; ++i) {
+        (void)db.CreateSession("", std::nullopt, "/p", "build");
+    }
+
+    std::vector<SessionSummary> seen;
+    std::optional<std::int64_t> before_updated_at;
+    std::optional<std::string> before_id;
+    while (true) {
+        const auto page = db.ListSessions(
+            {std::nullopt, false, 100, before_updated_at, before_id});
+        REQUIRE(page.size() <= 100);
+        if (page.empty()) break;
+        REQUIRE((seen.empty() || seen.back().updated_at_unix_ms >= page.front().updated_at_unix_ms));        for (const auto& session : page) seen.push_back(session);
+        before_updated_at = page.back().updated_at_unix_ms;
+        before_id = page.back().session_id;
+    }
+
+    REQUIRE(seen.size() == 1000);
+    for (std::size_t i = 1; i < seen.size(); ++i) {
+        CHECK(seen[i - 1].updated_at_unix_ms >= seen[i].updated_at_unix_ms);
+        if (seen[i - 1].updated_at_unix_ms == seen[i].updated_at_unix_ms) {
+            CHECK(seen[i - 1].session_id < seen[i].session_id);  // ties: id ASC
+        }
+    }
+    std::unordered_set<std::string> unique;
+    for (const auto& session : seen) unique.insert(session.session_id);
+    CHECK(unique.size() == 1000);  // no session repeated or skipped
 }
 
 // --- Write path -------------------------------------------------------------------
