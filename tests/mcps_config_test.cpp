@@ -131,6 +131,23 @@ TEST_CASE("ParseMcpsConfig: duplicate name is a per-entry error", "[mcps_config]
     CHECK(config.errors[0].find("duplicate") != std::string::npos);
 }
 
+TEST_CASE("ParseMcpsConfig: a CR/LF in an env or header value is a per-entry error",
+          "[mcps_config]") {
+    auto injected_env = StdioEntry();
+    injected_env["name"] = "injected-env";
+    injected_env["env"] = {{"LOG_LEVEL", "info\r\nX-Injected: evil"}};
+
+    auto injected_header = HttpEntry();
+    injected_header["name"] = "injected-header";
+    injected_header["headers"] = {{"Authorization", "Bearer x\r\nX-Injected: evil"}};
+
+    auto config = ParseMcpsConfig(nlohmann::json::array({injected_env, injected_header}));
+    CHECK(config.entries.empty());
+    REQUIRE(config.errors.size() == 2);
+    CHECK(config.errors[0].find("injected-env") != std::string::npos);
+    CHECK(config.errors[1].find("injected-header") != std::string::npos);
+}
+
 TEST_CASE("ParseMcpsConfig: non-array top level throws", "[mcps_config]") {
     CHECK_THROWS_AS(ParseMcpsConfig(nlohmann::json{{"name", "github"}}), std::runtime_error);
 }

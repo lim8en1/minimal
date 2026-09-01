@@ -28,7 +28,16 @@ std::unordered_map<std::string, std::string> ParseStringMap(const nlohmann::json
         if (!value.is_string()) {
             throw std::runtime_error(std::string(field) + " value for '" + key + "' must be a string");
         }
-        out.emplace(key, value.get<std::string>());
+        std::string parsed = value.get<std::string>();
+        // Both fields land in an outbound HTTP header or a child's environment;
+        // a CR/LF in the value is either a header-injection payload (a second
+        // header smuggled into the request) or nonsense no MCP server expects.
+        // Config is the user's own file: reject rather than silently mangle it.
+        if (parsed.find('\r') != std::string::npos || parsed.find('\n') != std::string::npos) {
+            throw std::runtime_error(std::string(field) + " value for '" + key +
+                                     "' contains a CR or LF, which is not allowed");
+        }
+        out.emplace(key, std::move(parsed));
     }
     return out;
 }

@@ -352,7 +352,20 @@ private:
                         if (equals_ci(header.name, "Content-Type")) {
                             *is_sse = header.value.find("text/event-stream") != std::string::npos;
                         }
-                        if (equals_ci(header.name, "mcp-session-id")) *session_id = header.value;
+                        // A CR/LF in a value libcurl handed back verbatim would
+                        // be re-sent as-is on every later request (BuildRequest
+                        // below) -- header injection into our OWN outbound
+                        // requests, from a server we do not otherwise trust.
+                        // Dropped, not stripped-and-kept: the code already
+                        // treats an empty session id as "none offered" (both
+                        // here and at BuildRequest), so this degrades to that
+                        // existing, well-defined path rather than forwarding a
+                        // sanitized-but-still-adversarial value.
+                        if (equals_ci(header.name, "mcp-session-id") &&
+                            header.value.find('\r') == std::string::npos &&
+                            header.value.find('\n') == std::string::npos) {
+                            *session_id = header.value;
+                        }
                     }
                 },
                 [slot, status, is_sse, session_id, buffer, parser,
