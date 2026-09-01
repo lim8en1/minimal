@@ -556,6 +556,71 @@ TEST_CASE("compaction fires past the threshold and never touches the store",
     CHECK(h.store.messages.size() > store_after_first);
 }
 
+TEST_CASE("compaction re-seeds the occupancy estimate", "[agent_loop][compaction][invariant]") {
+    // The fold halves the working set, but the accumulator still described the
+    // pre-fold context -- so the next MaybeCompact, the same turn's next tool
+    // cycle, fired on a number that no longer existed: a manual /compact was
+    // guaranteed one spurious second summarization on the turn after it.
+    // Reseeding in Compact() makes the post-fold estimate what arms the
+    // trigger; removing the reseed makes this count 2.
+    Harness h;
+    h.AddTool("read");
+    int compactions = 0;
+    auto compactor = [&compactions](std::span<const llm::Message>, llm::LlmProvider&,
+                                    const agent::CompactionRequest&) {
+        ++compactions;
+        return agent::CompactionResult{UserText("[summary]"), 0};
+    };
+    // The seed stays under the trigger; the pre-fold occupancy comes from the
+    // response's reported usage (105), which the stale estimate would keep
+    // applying after the fold.
+    std::vector<llm::Message> seeded = {UserText(std::string(20, 'o')),
+                                        llm::Message{llm::Role::Assistant,
+                                                     {llm::TextBlock{std::string(20, 'a')}}}};
+    auto big_usage_tool_use = testing::ToolUseResponse("call-1", "read");
+    big_usage_tool_use.usage.input_tokens = 100;
+    h.provider.PushResponse(big_usage_tool_use);       // occupancy 105: compacts
+    h.provider.PushResponse(TextResponse("done"));     // occupancy 15: below the trigger
+    h.Build({}, agent::LoopConfig{.auto_compact = true, .compaction_trigger = FixedTrigger(40)},
+            compactor, std::move(seeded));
+
+    h.loop->RunTurn(UserText("go"));
+
+    CHECK(compactions == 1);
+    CHECK(h.provider.call_count() == 2);
+}
+
+TEST_CASE("the occupancy estimate covers the system prompt and the tools array",
+          "[agent_loop][compaction][invariant]") {
+    // Backend ground truth counts the system prompt and every tool schema; the
+    // history-only seed excluded both, so a session whose context was mostly
+    // instructions under-triggered compaction -- contradicting what the
+    // seeding comment claimed. A large system prompt alone now crosses the
+    // trigger before the first provider call; removing it from the estimate
+    // makes this compaction never happen.
+    Harness h;
+    h.AddTool("read");
+    int compactions = 0;
+    auto compactor = [&compactions](std::span<const llm::Message>, llm::LlmProvider&,
+                                    const agent::CompactionRequest&) {
+        ++compactions;
+        return agent::CompactionResult{UserText("[summary]"), 0};
+    };
+    // ~2 tokens of history: the trigger is crossed by the context, not the
+    // transcript.
+    std::vector<llm::Message> seeded = {UserText("x"), UserText("y")};
+    agent::AgentPreset preset;
+    preset.system_prompt = std::string(2000, 's');
+    h.provider.PushResponse(TextResponse("done"));
+    h.Build(preset, agent::LoopConfig{.auto_compact = true,
+                                      .compaction_trigger = FixedTrigger(10)},
+            compactor, std::move(seeded));
+
+    h.loop->RunTurn(UserText("go"));
+
+    CHECK(compactions == 1);
+}
+
 TEST_CASE("a successful compaction persists a checkpoint with a correct boundary",
           "[agent_loop][compaction][checkpoint]") {
     Harness h;

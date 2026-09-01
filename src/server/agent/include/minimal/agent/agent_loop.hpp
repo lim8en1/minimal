@@ -238,6 +238,17 @@ public:
     const std::vector<llm::Message>& history() const { return history_; }
     llm::ChatRequest BuildChatRequest() const;
 
+    // Occupancy estimate covering what a request will actually carry: the
+    // working history PLUS the system prompt (preset body + project context)
+    // and the tools array. estimate_tokens(history_) alone under-counted by
+    // exactly what backend ground truth counts and a seed built from it
+    // excluded -- so a resumed or compacted session under-triggered
+    // compaction, contradicting what the seeding comments claimed. Worker
+    // thread only (BuildChatRequest is); seed sites are rare, so building the
+    // request's tool definitions here is the honest way to keep the estimate
+    // and the request from drifting apart.
+    std::int64_t EstimateContextTokens() const;
+
     // --- /-command seams. WORKER THREAD ONLY -------------------------------
     //
     // Safe without a lock because a command that touches session state is not

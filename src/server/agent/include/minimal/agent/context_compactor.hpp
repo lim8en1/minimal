@@ -94,4 +94,11 @@ std::optional<CompactionResult> compact_messages(
 // the compaction trigger with a loaded transcript and no backend count either.
 std::int64_t estimate_tokens(std::span<const llm::Message> messages);
 
+// Serialized size of a JSON value, without serializing it. Structural
+// characters are counted the way dump() would emit them; the point is a stable
+// approximation, not byte equality with a string nobody keeps. Exposed because
+// the occupancy estimate has the same shape as the compactor's fallback --
+// sized, not serialized -- over the tools array's input schemas.
+std::int64_t JsonSizeEstimate(const nlohmann::json& value);
+
 }  // namespace minimal::agent

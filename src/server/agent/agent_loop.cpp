@@ -69,8 +69,12 @@ AgentLoop::AgentLoop(llm::LlmProvider& provider, tools::ToolExecutor& executor,
         // compaction trigger an estimate to work with. Deliberately the same
         // bytes/4 roughness the compactor's fallback uses -- there is no
         // tokenizer in this codebase, and the first real response replaces the
-        // estimate with ground truth anyway.
-        tokens_.SeedOccupancy(estimate_tokens(history_));
+        // estimate with ground truth anyway. Covers the whole request context
+        // (system prompt, project context, tools array), not just the history:
+        // those ride every request and backend ground truth counts them, so
+        // excluding them under-triggered compaction on exactly the sessions
+        // this seed exists for.
+        tokens_.SeedOccupancy(EstimateContextTokens());
     }
 }
 
@@ -209,6 +213,23 @@ llm::ChatRequest AgentLoop::BuildChatRequest() const {
     return request;
 }
 
+// The estimate is built FROM the request -- system prompt, project context and
+// tools array included -- rather than alongside it, so the two cannot drift:
+// a /agent switch, a project-context load or an allowed-tools change all flow
+// through BuildChatRequest into both. The bytes/4 roughness matches
+// estimate_tokens, which is deliberate: the first real response replaces the
+// estimate with the backend's ground truth anyway.
+std::int64_t AgentLoop::EstimateContextTokens() const {
+    const llm::ChatRequest request = BuildChatRequest();
+    std::int64_t bytes =
+        request.system ? static_cast<std::int64_t>(request.system->size()) : 0;
+    for (const auto& def : request.tools) {
+        bytes += static_cast<std::int64_t>(def.name.size() + def.description.size());
+        bytes += JsonSizeEstimate(def.input_schema);
+    }
+    return bytes / 4 + estimate_tokens(history_);
+}
+
 void AgentLoop::MaybeCompact() {
     if (!config_.auto_compact) return;
 
@@ -333,7 +354,7 @@ void AgentLoop::TruncateAfter(std::int64_t target_seq) {
     // Same reset the constructor and /clear apply: the estimate described the
     // discarded tail too.
     tokens_ = llm::TokenAccumulator{};
-    if (!history_.empty()) tokens_.SeedOccupancy(estimate_tokens(history_));
+    if (!history_.empty()) tokens_.SeedOccupancy(EstimateContextTokens());
 
     // Same queue ClearHistory clears (its own mutex, so no lock needed here):
     // a background subagent's worker can be queueing a completion while the
@@ -351,7 +372,7 @@ void AgentLoop::ReseedFromStore(std::vector<llm::Message> rows, std::int64_t fir
                                             : std::optional<std::int64_t>(first_seq);
     head_is_summary_ = false;
     tokens_ = llm::TokenAccumulator{};
-    if (!history_.empty()) tokens_.SeedOccupancy(estimate_tokens(history_));
+    if (!history_.empty()) tokens_.SeedOccupancy(EstimateContextTokens());
     // Same obligation TruncateAfter carries: the discarded tail owned any
     // completions queued against it.
     injections_->Clear();
@@ -372,7 +393,7 @@ void AgentLoop::RestorePersisted(std::vector<llm::Message> rows, std::int64_t fi
     history_.insert(history_.end(), std::make_move_iterator(rows.begin()),
                     std::make_move_iterator(rows.end()));
     tokens_ = llm::TokenAccumulator{};
-    tokens_.SeedOccupancy(estimate_tokens(history_));
+    tokens_.SeedOccupancy(EstimateContextTokens());
     session_.logger.info("session {}: redo restored {} messages from seq {}",
                          session_.session_id, history_.size(), first_seq);
 }
@@ -501,6 +522,16 @@ std::optional<std::size_t> AgentLoop::Compact(std::string_view trigger) {
     std::move(history_.begin() + static_cast<long>(cut), history_.end(),
               std::back_inserter(rebuilt));
     history_.swap(rebuilt);
+
+    // RE-SEED the occupancy estimate: the one site that never did. The fold
+    // just halved the working set, but the accumulator still described the
+    // pre-fold context -- so the next MaybeCompact (the same turn's next tool
+    // cycle, or the next turn before any response reported usage) fired on a
+    // number that no longer existed. A manual /compact was guaranteed one
+    // spurious second summarization; an auto one could chain. SeedOccupancy
+    // touches only the last-turn estimate, so the backend-reported counts the
+    // accumulator carries stay intact.
+    tokens_.SeedOccupancy(EstimateContextTokens());
 
     // The numbers that make a compaction legible after the fact. There is no
     // wire event for this -- nothing in the protocol specifies one and no client
