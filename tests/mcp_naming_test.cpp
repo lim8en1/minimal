@@ -3,6 +3,8 @@
 #include <map>
 #include <optional>
 #include <string>
+#include <string_view>
+#include <vector>
 
 #include "minimal/mcp/env_interpolation.hpp"
 #include "minimal/mcp/naming.hpp"
@@ -68,4 +70,46 @@ TEST_CASE("InterpolateEnv fails closed on unresolvable markers", "[mcp_naming]")
     CHECK(InterpolateEnv("Bearer ${MISSING}", lookup) == std::nullopt);
     CHECK(InterpolateEnv("${}", lookup) == std::nullopt);
     CHECK(InterpolateEnv("Bearer ${TOKEN", lookup) == std::nullopt);
+}
+
+TEST_CASE("InterpolateEnv supports ${NAME:-default}", "[mcp_naming]") {
+    const std::map<std::string, std::string> vars = {{"SET", "value"}};
+    const auto lookup = MapLookup(vars);
+
+    // Unset -> the fallback text, not a failure naming the whole "NAME:-default"
+    // string as a bogus variable.
+    CHECK(InterpolateEnv("${MISSING:-fallback}", lookup) == std::optional<std::string>("fallback"));
+    // Set -> the real value; the fallback is never consulted.
+    CHECK(InterpolateEnv("${SET:-fallback}", lookup) == std::optional<std::string>("value"));
+    // An empty default is a valid default, not a typo.
+    CHECK(InterpolateEnv("${MISSING:-}", lookup) == std::optional<std::string>(""));
+    // A ":-" inside the default itself is not re-split.
+    CHECK(InterpolateEnv("${MISSING:-a:-b}", lookup) == std::optional<std::string>("a:-b"));
+}
+
+TEST_CASE("InterpolateEnv warns on a bare $VAR without changing its passthrough value",
+          "[mcp_naming]") {
+    const std::map<std::string, std::string> vars = {{"TOKEN", "s3cret"}};
+    const auto lookup = MapLookup(vars);
+
+    std::vector<std::string> warnings;
+    auto on_bare_var = [&warnings](std::string_view name) { warnings.emplace_back(name); };
+
+    // The passthrough value is unchanged by the warning -- only a diagnostic
+    // is added, never a behavior change.
+    CHECK(InterpolateEnv("$HOME", lookup, nullptr, on_bare_var) ==
+          std::optional<std::string>("$HOME"));
+    REQUIRE(warnings.size() == 1);
+    CHECK(warnings[0] == "HOME");
+
+    // A braced marker is not a "bare" reference and must not also warn.
+    warnings.clear();
+    CHECK(InterpolateEnv("${TOKEN}", lookup, nullptr, on_bare_var) ==
+          std::optional<std::string>("s3cret"));
+    CHECK(warnings.empty());
+
+    // An incidental '$' not shaped like an identifier (e.g. a price) never warns.
+    warnings.clear();
+    CHECK(InterpolateEnv("$5.00", lookup, nullptr, on_bare_var) == std::optional<std::string>("$5.00"));
+    CHECK(warnings.empty());
 }

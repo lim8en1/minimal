@@ -89,7 +89,8 @@ namespace {
 constexpr auto kVerifiedTtl = std::chrono::seconds(2);
 
 std::optional<config::McpServerEntry> ResolveEndpoint(const config::McpServerEntry& entry,
-                                                      std::string& error) {
+                                                      std::string& error,
+                                                      common::Logger& logger) {
     // ${ENV_VAR} interpolation happens at connect time, never logged, per
     // mcps_config.hpp. An unresolvable marker is a connect failure naming the
     // ENTRY -- never the value.
@@ -99,9 +100,18 @@ std::optional<config::McpServerEntry> ResolveEndpoint(const config::McpServerEnt
         if (value == nullptr) return std::nullopt;
         return std::string(value);
     };
+    // A bare `$NAME` is not interpolated (only `${NAME}` is) -- documented,
+    // intentional passthrough. It is also indistinguishable at a glance from a
+    // forgotten pair of braces, so a plausible-looking one gets a warning
+    // (never a value, per the no-secrets-logged rule above).
+    auto warn_bare = [&logger, &entry](std::string_view name) {
+        logger.warn("MCP server '{}': a bare '${}' is not interpolated (only "
+                    "the braced form is); passed through literally",
+                    entry.name, name);
+    };
     for (auto& [key, value] : resolved.env) {
         std::string marker;
-        if (auto interpolated = InterpolateEnv(value, lookup, &marker)) {
+        if (auto interpolated = InterpolateEnv(value, lookup, &marker, warn_bare)) {
             value = *std::move(interpolated);
         } else {
             error = "MCP server '" + entry.name + "': env '" + key +
@@ -111,7 +121,7 @@ std::optional<config::McpServerEntry> ResolveEndpoint(const config::McpServerEnt
     }
     for (auto& [key, value] : resolved.headers) {
         std::string marker;
-        if (auto interpolated = InterpolateEnv(value, lookup, &marker)) {
+        if (auto interpolated = InterpolateEnv(value, lookup, &marker, warn_bare)) {
             value = *std::move(interpolated);
         } else {
             error = "MCP server '" + entry.name + "': header '" + key +
@@ -153,7 +163,7 @@ bool McpClientManager::StartHandle(const config::McpServerEntry& entry, ServerHa
         handle.alive = false;
     }
 
-    const auto resolved = ResolveEndpoint(entry, error);
+    const auto resolved = ResolveEndpoint(entry, error, logger_);
     if (!resolved) return false;
 
     McpConnection::Failure failure;
