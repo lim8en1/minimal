@@ -1377,6 +1377,53 @@ TEST_CASE("a failed resume leaves the stored session intact", "[session_service]
     CHECK(list.sessions(0).session_id() == session_id);
 }
 
+TEST_CASE("a store fault on resume is never reported as a missing session",
+          "[session_service][resume][robustness]") {
+    // GetSession used to answer nullopt for SQLITE_BUSY/IOERR/CORRUPT exactly
+    // as for an absent row, so a transient store fault told the client "no such
+    // session" -- the one answer it cannot recover from -- and the handler's
+    // unchecked re-read dereference was UB. The store now throws on failure and
+    // the handler maps it to INTERNAL. Corruption meeting the query or not is
+    // nondeterministic (same harness as the store-level tests); the invariant
+    // is one-directional and deterministic: a session that EXISTS is never
+    // answered NOT_FOUND, and the handler never crashes.
+    ServiceFixture fixture;
+    fixture.Script(testing::TextResponse("first answer"));
+    fixture.Start();
+
+    const std::string session_id = fixture.CreateSession();
+    {
+        grpc::ClientContext context;
+        auto stream = fixture.stub->OpenSession(&context);
+        REQUIRE(stream->Write(ChatTurn(session_id, "hello")));
+        REQUIRE(WaitForTurnCompleted(*stream));
+        (void)DrainAndFinish(stream);
+    }
+    WaitForTerminated(*fixture.sessions, session_id);
+
+    // Scribble the database files the service's connection has open. In WAL
+    // mode the freshly-committed rows live in the -wal file until a checkpoint,
+    // so both are scribbled: whichever read meets the damage fails loudly
+    // (SQLITE_CORRUPT/IOERR) and must surface as INTERNAL -- never as
+    // NOT_FOUND for a session that exists.
+    for (const auto* suffix : {"", "-wal"}) {
+        std::error_code ec;
+        const auto db_path =
+            std::filesystem::path(fixture.dir / "sessions.db").string() + suffix;
+        const auto size = std::filesystem::file_size(db_path, ec);
+        if (ec || size < 2048) continue;
+        std::fstream file(db_path, std::ios::in | std::ios::out | std::ios::binary);
+        REQUIRE(file);
+        file.seekp(static_cast<std::streamoff>(size) / 2);
+        const std::string garbage(static_cast<std::size_t>(size) / 4, '\xa5');
+        file.write(garbage.data(), static_cast<std::streamsize>(garbage.size()));
+    }
+
+    v1::CreateSessionResponse resumed;
+    const auto status = ResumeOverWire(*fixture.stub, session_id, &resumed);
+    CHECK(status.error_code() != grpc::StatusCode::NOT_FOUND);
+}
+
 TEST_CASE("the model flag applies on resume, and a malformed one is refused there too",
           "[session_service][resume][invariant]") {
     // CROSS-FEATURE: resume builds its own SessionParams, so it silently dropped

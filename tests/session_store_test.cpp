@@ -1239,3 +1239,73 @@ TEST_CASE("a read that fails mid-scan raises instead of returning a short result
     CHECK((threw || loaded.size() == 400));
     CHECK_FALSE((!threw && loaded.size() < 400));  // never short AND silent
 }
+
+TEST_CASE("GetSession and LastMessageSeq refuse to lie about a corrupted database",
+          "[session][robustness]") {
+    // The un-swept siblings of the SessionExists and mid-scan fixes above:
+    // GetSession returned nullopt for SQLITE_BUSY/IOERR/CORRUPT exactly as for
+    // an absent row -- a transient fault told the resume handler "no such
+    // session" about a session that is on disk -- and LastMessageSeq returned
+    // -1 for the same failures, which RunRedo read as "empty transcript" and
+    // fed to LoadAfter(-1): the entire transcript loaded as new, duplicated
+    // history. nullopt and -1 are the EMPTY answers; a FAILED read must never
+    // produce them.
+    TempDir dir;
+    const auto path = dir.path() / "sessions.db";
+    std::string session_id;
+    {
+        SessionDatabase db(path);
+        session_id = db.CreateSession("s", std::nullopt, "/p", "main").session_id;
+        for (int i = 0; i < 400; ++i) {
+            db.AppendMessage(session_id,
+                             llm::Message{llm::Role::User,
+                                          {llm::TextBlock{std::string(200, 'x') +
+                                                          std::to_string(i)}}},
+                             0);
+        }
+    }
+
+    // Corrupt every page after the first. The first page carries the file
+    // header and the schema root -- it must survive, or the reopen itself
+    // would refuse before either query runs. Zeroing the start of each
+    // following page destroys its b-tree page type, which SQLite detects
+    // deterministically: page 2 is the sessions table's root, and the
+    // (session_id, discarded, seq) index the MAX(seq) seek walks is among the
+    // rest -- the mid-scan test above only reaches the content pages, and a
+    // corruption that spares the sessions table fails neither query.
+    {
+        std::fstream file(path, std::ios::in | std::ios::out | std::ios::binary);
+        REQUIRE(file);
+        file.seekp(0, std::ios::end);
+        const auto size = static_cast<std::streamoff>(file.tellp());
+        REQUIRE(size > 2 * 4096);
+        for (std::streamoff page = 1; page * 4096 < size; ++page) {
+            file.seekp(page * 4096);
+            file.write("\0\0\0\0\0\0\0\0", 8);
+        }
+    }
+
+    SessionDatabase reopened(path);
+
+    bool session_threw = false;
+    std::optional<SessionSummary> summary;
+    try {
+        summary = reopened.GetSession(session_id);
+    } catch (const std::exception&) {
+        session_threw = true;
+    }
+    // This session EXISTS. Either the read succeeds and reports it, or the
+    // read fails loudly -- never "missing".
+    CHECK((session_threw || summary.has_value()));
+
+    bool seq_threw = false;
+    std::int64_t last_seq = 0;
+    try {
+        last_seq = reopened.LastMessageSeq(session_id);
+    } catch (const std::exception&) {
+        seq_threw = true;
+    }
+    // -1 means "empty transcript"; this one holds 400 rows. A failed read
+    // throws rather than producing the empty answer.
+    CHECK((seq_threw || last_seq == 399));
+}

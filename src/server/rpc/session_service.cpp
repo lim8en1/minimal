@@ -237,7 +237,15 @@ grpc::Status SessionServiceImpl::ResumeSession(const v1::CreateSessionRequest* r
                             "keeps its name, agent_preset, and project_root");
     }
 
-    const auto stored = db_.GetSession(request->session_id());
+    // GetSession throws on a store failure (locked database, I/O error,
+    // corruption) rather than answering "no such session" -- and an exception
+    // leaving an RPC handler is UB, so the store's throws are mapped here.
+    std::optional<session::SessionSummary> stored;
+    try {
+        stored = db_.GetSession(request->session_id());
+    } catch (const std::exception& e) {
+        return grpc::Status(grpc::StatusCode::INTERNAL, e.what());
+    }
     if (!stored) {
         return grpc::Status(grpc::StatusCode::NOT_FOUND,
                             "no such session: " + request->session_id());
@@ -290,7 +298,21 @@ grpc::Status SessionServiceImpl::ResumeSession(const v1::CreateSessionRequest* r
 
     // Re-read rather than reuse `stored`: resume may have appended a repair
     // message, and the response should carry the current message_count.
-    const auto fresh = db_.GetSession(stored->session_id);
+    // Guarded and failure-mapped: a nullopt here would previously have been
+    // dereferenced unchecked -- UB in the handler.
+    std::optional<session::SessionSummary> fresh;
+    try {
+        fresh = db_.GetSession(stored->session_id);
+    } catch (const std::exception& e) {
+        return grpc::Status(grpc::StatusCode::INTERNAL, e.what());
+    }
+    if (!fresh) {
+        // Unreachable while this process is the sole writer and just finished
+        // constructing the session -- which is exactly why it must be a named
+        // INTERNAL rather than a dereference of an empty optional.
+        return grpc::Status(grpc::StatusCode::INTERNAL,
+                            "session row vanished during resume: " + stored->session_id);
+    }
     *response->mutable_session() = ToProto(*fresh);
     return grpc::Status::OK;
 }

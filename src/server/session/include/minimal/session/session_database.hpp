@@ -135,6 +135,11 @@ public:
     // the process that created it.
     bool IsExplicitlyNamed(const std::string& session_id) const;
     bool DeleteSession(const std::string& session_id);  // cascades to messages and children
+
+    // nullopt when the session does not exist. A STORE FAILURE (locked database,
+    // I/O error, corruption) throws -- same ruling as SessionExists: answering
+    // "no such session" for a session that is on disk is the one answer the
+    // resume path cannot recover from.
     std::optional<SessionSummary> GetSession(const std::string& session_id) const;
 
     // Existence only. GetSession carries a COUNT(*) subquery over the whole
@@ -172,7 +177,9 @@ public:
 
     // MAX(seq) over the ACTIVE transcript, -1 when there are none. Discarded
     // rows are excluded so a resumed session's HistoryStore seeds its seq
-    // accounting from the transcript the user actually sees.
+    // accounting from the transcript the user actually sees. -1 means EMPTY,
+    // never failed: a step failure throws, because -1 fed to LoadAfter(-1)
+    // loads the entire transcript as "new" -- duplicated history.
     std::int64_t LastMessageSeq(const std::string& session_id) const;
 
     // --- Session traversal (rewind) ------------------------------------------

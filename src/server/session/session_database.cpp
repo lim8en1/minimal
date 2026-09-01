@@ -608,7 +608,17 @@ std::optional<SessionSummary> SessionDatabase::GetSession(const std::string& ses
                      " FROM sessions s WHERE s.id = ?;",
                      "failed to load session");
     sqlite3_bind_text(query.stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
-    if (sqlite3_step(query.stmt) != SQLITE_ROW) return std::nullopt;
+    // The SessionExists ruling, swept here: a step failure is a STORE FAULT,
+    // not a missing row. Returning nullopt for SQLITE_BUSY/SQLITE_IOERR/SQLITE_CORRUPT
+    // made the resume handler answer "no such session" -- the one answer the
+    // client cannot recover from -- for a session that was very much still on
+    // disk, and the caller's unchecked dereference of the re-read below was UB
+    // in the RPC handler. id is the PRIMARY KEY, so the first step decides:
+    // ROW means present, DONE means genuinely absent, anything else throws.
+    if (const int rc = sqlite3_step(query.stmt); rc != SQLITE_ROW) {
+        CheckRowLoopEnd(db_, rc, "failed to load session");
+        return std::nullopt;  // SQLITE_DONE: the row is not there
+    }
 
     SessionSummary summary;
     summary.session_id = reinterpret_cast<const char*>(sqlite3_column_text(query.stmt, 0));
@@ -830,7 +840,15 @@ std::int64_t SessionDatabase::LastMessageSeq(const std::string& session_id) cons
                      "SELECT MAX(seq) FROM messages WHERE session_id = ? AND discarded = 0;",
                      "failed to read last message seq");
     sqlite3_bind_text(query.stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
-    if (sqlite3_step(query.stmt) != SQLITE_ROW || sqlite3_column_type(query.stmt, 0) == SQLITE_NULL) {
+    // MAX() over any set returns EXACTLY ONE row -- NULL when the set is empty.
+    // So `step() != SQLITE_ROW` here is never "no messages": it is a step
+    // failure (BUSY/IOERR/CORRUPT) masquerading as -1, which the redo path then
+    // read as "empty transcript" and LoadAfter(-1) turned into a FULL transcript
+    // load -- duplicated history appended live. A failed read throws.
+    if (const int rc = sqlite3_step(query.stmt); rc != SQLITE_ROW) {
+        CheckRowLoopEnd(db_, rc, "failed to read last message seq");
+    }
+    if (sqlite3_column_type(query.stmt, 0) == SQLITE_NULL) {
         // MAX() over an empty set is NULL, not 0 -- and 0 is a real seq.
         return -1;
     }
