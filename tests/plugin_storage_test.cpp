@@ -1,6 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <sqlite3.h>
+#include <unistd.h>
 
 #include <string>
 #include <thread>
@@ -128,6 +129,26 @@ TEST_CASE("a database written by a newer binary refuses to open", "[plugin_stora
         CHECK(std::string(e.what()).find("newer than this binary understands") !=
               std::string::npos);
     }
+}
+
+TEST_CASE("a second open of the same storage is refused, holder pid named",
+          "[plugin_storage]") {
+    // Same single-writer guarantee as the session store, same mechanism: the
+    // lock file names the holder so the operator can find it, and the lock
+    // dies with the process so a crash leaves no staleness.
+    Fixture f;
+    auto storage = f.Make();
+
+    bool threw = false;
+    std::string message;
+    try {
+        auto second = f.Make();
+    } catch (const std::exception& e) {
+        threw = true;
+        message = e.what();
+    }
+    CHECK(threw);
+    CHECK(message.find(std::to_string(getpid())) != std::string::npos);
 }
 
 TEST_CASE("concurrent plugins share one connection safely", "[plugin_storage]") {

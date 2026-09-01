@@ -4,10 +4,13 @@
 
 #include <chrono>
 #include <cstddef>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <system_error>
 #include <utility>
+
+#include "minimal/common/file_lock.hpp"
 
 namespace minimal::plugins {
 namespace {
@@ -129,6 +132,10 @@ void ApplyMigrations(sqlite3* db, int target_version) {
 }  // namespace
 
 PluginStorage::PluginStorage(const std::filesystem::path& db_path) : path_(db_path) {
+    // Same single-writer guarantee as the session store, the same way: a
+    // second process on plugins.db is refused at open (see ExclusiveFileLock).
+    lock_ = std::make_unique<common::ExclusiveFileLock>(db_path);
+
     std::error_code ec;
     if (path_.has_parent_path()) {
         std::filesystem::create_directories(path_.parent_path(), ec);

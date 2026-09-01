@@ -180,11 +180,21 @@ TEST_CASE("update validates id, fields, and existence", "[checklist][tool]") {
 // --- persistence and degradation -----------------------------------------------
 
 TEST_CASE("state survives a server restart (close and reopen the store)", "[checklist]") {
-    Fixture f;
-    auto ctx = f.Context();
-    (void)f.tool->execute(Fixture::SetInput({{{"text", "survives"}}, {{"text", "restart"}}}), ctx);
+    // The store is single-writer by construction now (ExclusiveFileLock), so
+    // the "restart" is simulated the way a real restart happens: the holder
+    // closes first, then the reopened store reads what was persisted.
+    TempDir dir;
+    {
+        plugins::PluginStorage storage(dir.path() / "plugins.db");
+        auto store = std::make_shared<checklist::ChecklistStore>(&storage);
+        auto tool = checklist::MakeChecklistTool(store);
+        tools::ToolContext ctx{common::DefaultLogger()};
+        ctx.session_id = "s1";
+        (void)tool->execute(Fixture::SetInput({{{"text", "survives"}}, {{"text", "restart"}}}),
+                            ctx);
+    }
 
-    plugins::PluginStorage reopened(f.dir.path() / "plugins.db");
+    plugins::PluginStorage reopened(dir.path() / "plugins.db");
     checklist::ChecklistStore fresh_store(&reopened);
     const auto items = fresh_store.Load("s1");
     REQUIRE(items.size() == 2);

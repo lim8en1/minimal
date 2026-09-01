@@ -2,6 +2,7 @@ add_library(minimal_common STATIC
     abi_tag.cpp
     bundled_assets.cpp
     config_paths.cpp
+    file_lock.cpp
     model_ref.cpp
     logger.cpp
     logging_setup.cpp)

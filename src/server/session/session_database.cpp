@@ -12,6 +12,7 @@
 #include <variant>
 
 #include "minimal/common/config_paths.hpp"
+#include "minimal/common/file_lock.hpp"
 #include "minimal/session/message_codec.hpp"
 #include "minimal/session/ulid.hpp"
 
@@ -327,6 +328,13 @@ const std::vector<Migration>& DefaultMigrations() { return DefaultMigrationsImpl
 
 SessionDatabase::SessionDatabase(const std::filesystem::path& db_path, const OpenOptions& options)
     : path_(db_path) {
+    // The single-writer assumption this class is built on, made structural: a
+    // second server (or CLI) on the same database is refused at open instead
+    // of silently interleaving appends with divergent working sets. Held for
+    // the process lifetime; the member order below releases it before the
+    // SQLite connection closes.
+    lock_ = std::make_unique<common::ExclusiveFileLock>(db_path);
+
     std::error_code ec;
     if (path_.has_parent_path()) {
         std::filesystem::create_directories(path_.parent_path(), ec);

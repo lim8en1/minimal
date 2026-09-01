@@ -1050,6 +1050,90 @@ TEST_CASE("name_source records where a name came from", "[session][naming]") {
 
 // --- Crash safety ---------------------------------------------------------------------
 
+TEST_CASE("a second open of the same database is refused, holder pid named",
+          "[session][store][invariant]") {
+    // The single-writer assumption the store is built on, made structural: two
+    // live servers on one transcript would interleave appends with divergent
+    // in-memory working sets -- worse than a crash. The refusal names the
+    // holder (in-process or cross-process) so the operator can find it.
+    TempDir dir;
+    const auto path = dir.path() / "s.db";
+
+    SECTION("in-process: the registry refuses before fcntl is even consulted") {
+        SessionDatabase db(path);
+        bool threw = false;
+        std::string message;
+        try {
+            SessionDatabase second(path);
+        } catch (const std::exception& e) {
+            threw = true;
+            message = e.what();
+        }
+        CHECK(threw);
+        CHECK(message.find(std::to_string(getpid())) != std::string::npos);
+        // The loser did not disturb the winner.
+        CHECK(db.SessionExists("no-session") == false);
+    }
+
+    SECTION("cross-process: the fcntl lock refuses, the lock file names the pid") {
+        // The child holds its own connection open and parks; the parent must
+        // be refused and see the child's pid, and the child's exit must
+        // release the lock (fcntl locks die with the process -- no staleness).
+        const pid_t child = fork();
+        REQUIRE(child >= 0);
+        if (child == 0) {
+            try {
+                SessionDatabase db(path);
+            } catch (...) {
+                _exit(43);  // could not take the lock it was supposed to hold
+            }
+            _exit(42);  // unreachable while it parks... it does not park
+        }
+        // The child exits immediately; wait for it, then verify the lock is
+        // FREE again (the destructor/clean-exit half of the contract).
+        int status = 0;
+        REQUIRE(waitpid(child, &status, 0) == child);
+        REQUIRE(WEXITSTATUS(status) == 42);
+
+        // Cross-process while HELD: spawn a child that parks holding the lock,
+        // then refuse the parent's open, then verify release on SIGKILL.
+        const pid_t holder = fork();
+        REQUIRE(holder >= 0);
+        if (holder == 0) {
+            try {
+                SessionDatabase db(path);
+                const auto id = db.CreateSession("", std::nullopt, "/p", "build").session_id;
+                (void)id;
+                pause();  // hold the lock until killed
+            } catch (...) {
+                _exit(44);
+            }
+            _exit(45);
+        }
+        usleep(300 * 1000);  // let the holder open and create its session
+        bool threw = false;
+        std::string message;
+        try {
+            SessionDatabase second(path);
+        } catch (const std::exception& e) {
+            threw = true;
+            message = e.what();
+        }
+        REQUIRE(threw);
+        CHECK(message.find(std::to_string(holder)) != std::string::npos);
+
+        // SIGKILL the holder: fcntl locks die with the process, so the parent
+        // can open again with no staleness to clean up.
+        REQUIRE(kill(holder, SIGKILL) == 0);
+        int holder_status = 0;
+        REQUIRE(waitpid(holder, &holder_status, 0) == holder);
+        REQUIRE(WIFSIGNALED(holder_status));
+
+        SessionDatabase reopened(path);
+        REQUIRE(reopened.ListSessions({}).size() == 1);
+    }
+}
+
 TEST_CASE("a SIGKILL mid-append leaves an exact committed prefix", "[session][crash]") {
     TempDir dir;
     const auto path = dir.path() / "crash.db";
