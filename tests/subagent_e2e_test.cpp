@@ -151,6 +151,30 @@ struct ChildObservations {
     std::string session_id;
     std::string text;
     bool turn_completed = false;
+    bool session_ended = false;
+};
+
+// A tool that runs until cancelled -- the child parks here, so the test's
+// cancel is what ends it, exactly like a real long-running subagent task.
+class SlowTool : public tools::Tool {
+public:
+    SlowTool() {
+        spec_.name = "slow";
+        spec_.category = tools::ToolCategory::ReadOnly;
+        spec_.definition.name = spec_.name;
+        spec_.definition.description = "runs until cancelled";
+        spec_.definition.input_schema = nlohmann::json::object();
+    }
+    const tools::ToolSpec& spec() const override { return spec_; }
+    tools::ToolResult execute(const nlohmann::json&, tools::ToolContext& ctx) override {
+        while (!(ctx.is_cancelled && ctx.is_cancelled())) {
+            std::this_thread::sleep_for(10ms);
+        }
+        return tools::ToolResult{true, "[cancelled]"};
+    }
+
+private:
+    tools::ToolSpec spec_;
 };
 
 std::string TextOf(const llm::ToolResultBlock& block) {
@@ -328,4 +352,102 @@ TEST_CASE("a client attaches to a non-blocking subagent whose work outlives the 
     const auto child_row = fixture.db->GetSession(started_child_id);
     REQUIRE(child_row.has_value());
     CHECK(child_row->parent_session_id == created.session_id);
+}
+
+TEST_CASE("a cancelled blocking subagent delivers SessionEnded to its attached client",
+          "[subagent][e2e][invariant]") {
+    // THE TERMINAL EVENT: a session terminated server-side while a client was
+    // attached -- here, a blocking child killed by a cancelled spawn -- used to
+    // go silent. The attach thread pumped a stream that would never produce
+    // again and could not distinguish "killed" from "finished quietly".
+    // Terminate now emits SessionEndedEvent before closing the queue, so the
+    // writer drains it and the attach loop ends.
+    SubagentE2EFixture fixture;
+    fixture.tools.Register(std::make_unique<SlowTool>());
+    fixture.Start();
+    auto* parent_script = fixture.scripts["parent-script"].get();
+    auto* child_script = fixture.scripts["child-script"].get();
+
+    parent_script->Push(testing::ToolUseResponse(
+        "call-spawn", "spawn_subagent", {{"task", "work for a while"}, {"agent_preset", "child"}}));
+    parent_script->Push(testing::TextResponse("parent out"),
+                        TextStream("parent out", llm::StopReason::EndTurn));
+    // The child streams one event (proof its attach stream is live), then parks
+    // in the slow tool until the cancel lands.
+    child_script->Push(testing::ToolUseResponse("r1", "slow"),
+                       TextStream("child running", llm::StopReason::ToolUse));
+
+    client::SessionClient::CreateOptions options;
+    options.project_root = (fixture.dir / "work").string();
+    options.agent_preset = "main";
+    options.run_mode = v1::PERMISSION_RUN_MODE_ALLOW_ONLY;
+    const auto created = fixture.client->CreateSession(options);
+    REQUIRE(created.status.ok());
+
+    auto observations = std::make_shared<ChildObservations>();
+    auto child_stream_live = std::make_shared<std::atomic<bool>>(false);
+    std::shared_ptr<client::SessionClient::TurnHandle> turn_handle;
+
+    const auto status = fixture.client->RunTurn(
+        created.session_id, "go",
+        [&](const v1::ServerEvent& event) {
+            if (event.has_subagent_started()) {
+                const std::string child_id = event.subagent_started().child_session_id();
+                fixture.attach_threads.emplace_back(
+                    [&client = *fixture.client, observations, child_stream_live, child_id] {
+                        client.Attach(child_id,
+                                      [observations, child_stream_live](const v1::ServerEvent&
+                                                                            child_event) {
+                                          {
+                                              std::lock_guard<std::mutex> lock(observations->mu);
+                                              observations->session_id = child_event.session_id();
+                                              if (child_event.has_stream_event() &&
+                                                  child_event.stream_event().has_text_delta()) {
+                                                  // An event delivered through the writer
+                                                  // proves the stream is attached.
+                                                  child_stream_live->store(true);
+                                              }
+                                              if (child_event.has_turn_completed()) {
+                                                  observations->turn_completed = true;
+                                              }
+                                              if (child_event.has_session_ended()) {
+                                                  observations->session_ended = true;
+                                              }
+                                          }
+                                          return !(child_event.has_turn_completed() ||
+                                                   child_event.has_session_ended());
+                                      });
+                    });
+                // Rendezvous ON THIS THREAD (the RunTurn read loop): wait until
+                // the child's attach stream has actually delivered an event,
+                // then cancel the parent -- which propagates into the child as
+                // a terminate. Cancelling from the main thread after RunTurn
+                // returned would never run: RunTurn returns only when the turn
+                // has ended, and this turn ends only by being cancelled.
+                const auto attached = std::chrono::steady_clock::now() + 5s;
+                while (!child_stream_live->load() &&
+                       std::chrono::steady_clock::now() < attached) {
+                    std::this_thread::sleep_for(5ms);
+                }
+                REQUIRE(child_stream_live->load());
+                REQUIRE(turn_handle != nullptr);
+                turn_handle->Cancel();
+            }
+            return true;
+        },
+        [&turn_handle](const std::shared_ptr<client::SessionClient::TurnHandle>& handle) {
+            turn_handle = handle;
+        });
+
+    REQUIRE(status.ok());
+    for (auto& thread : fixture.attach_threads) {
+        if (thread.joinable()) thread.join();
+    }
+    fixture.attach_threads.clear();
+
+    {
+        std::lock_guard<std::mutex> lock(observations->mu);
+        CHECK(observations->session_ended);  // the kill is on the wire, not silence
+        CHECK_FALSE(observations->turn_completed);  // the child never finished its turn
+    }
 }

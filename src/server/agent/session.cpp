@@ -1,6 +1,7 @@
 #include "minimal/agent/session.hpp"
 
 #include <algorithm>
+#include <cstdio>
 
 #include "minimal/mcp/mcp_client_manager.hpp"
 
@@ -761,6 +762,22 @@ void Session::Terminate() {
     // injections by design.
     channels_->injections.Close();
     turn_cv_.notify_all();
+
+    // THE TERMINAL WIRE EVENT, emitted before Close so the writer drains it.
+    // A session terminated under an attached stream -- a child whose blocking
+    // spawn was cancelled, a reaper eviction -- used to go silent: the
+    // attached handler looped on a queue that would never produce again and
+    // the client could not distinguish "killed" from "finished quietly".
+    // TryPush, never Push: a full queue here means a stalled client, and
+    // Terminate must not block on it -- the queue is about to close anyway.
+    {
+        v1::ServerEvent event = MakeEvent(params_.session_id);
+        (void)event.mutable_session_ended();
+        if (!channels_->queue.TryPush(std::move(event))) {
+            logger_.warn("session {}: SessionEnded dropped (queue full or closed)",
+                         params_.session_id);
+        }
+    }
 
     // Close BEFORE the join, and the order is the whole point. Push() blocks at
     // the queue's cap and is woken only by Close() or Pop(), so a worker parked

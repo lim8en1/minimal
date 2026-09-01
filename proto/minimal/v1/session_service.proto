@@ -231,6 +231,19 @@ message SessionRewoundEvent {
   int64 active_last_seq = 2;
 }
 
+// The session was TERMINATED server-side. Additive on purpose: a session can be
+// killed while a client is attached to it -- a child whose blocking spawn was
+// cancelled, a reaper eviction, server shutdown -- and before this event the
+// attached stream simply went silent, so the client could not distinguish
+// "killed" from "finished quietly". Presence of the event IS the signal; there
+// is no reason taxonomy yet because every terminate path means the same thing
+// to a client: this session will produce nothing further.
+//
+// Emitted on EVERY terminate path, before the queue closes, so the writer
+// drains it. It does not replace TurnCompletedEvent: a session that finished
+// its turn normally still ends with turn_completed, then ends (stream close).
+message SessionEndedEvent {}
+
 message ServerEvent {
   // Which session this event belongs to. Required because one client multiplexes
   // several sessions (tabs), including subagent children of the focused session.
@@ -248,6 +261,7 @@ message ServerEvent {
     TurnCompletedEvent turn_completed = 11;
     BackgroundTaskEvent background_task = 12;
     SessionRewoundEvent session_rewound = 13;
+    SessionEndedEvent session_ended = 14;
   }
 }
 

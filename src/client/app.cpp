@@ -157,8 +157,12 @@ int RunHeadless(const HeadlessOptions& options) {
         return kUnavailable;
     }
 
-    int exit_code = kOk;
+            int exit_code = kOk;
     bool saw_error = false;
+    // Set when the server kills the session under us (SessionEndedEvent): the
+    // turn never completed, so the run reports as unavailable rather than
+    // hanging or claiming success.
+    bool session_ended = false;
     // One attach stream per spawned child. Attaching is a PROTOCOL OBLIGATION:
     // a subagent no client attaches to is terminated by the server's
     // initial-attach guard. Each thread pumps the child's events until the
@@ -282,6 +286,8 @@ int RunHeadless(const HeadlessOptions& options) {
                     // the top-level one -- it arrived as {"type":"event"}.
                     line["type"] = "turn_completed";
                     line["hit_max_turns"] = event.turn_completed().hit_max_turns();
+                } else if (event.has_session_ended()) {
+                    line["type"] = "session_ended";
                 } else {
                     line["type"] = "event";
                 }
@@ -311,6 +317,14 @@ int RunHeadless(const HeadlessOptions& options) {
                 if (event.turn_completed().hit_max_turns()) exit_code = kTruncated;
             }
             if (event.has_error()) saw_error = true;
+            // The server-side kill: stop reading and report the run as
+            // unavailable. RunTurn's read loop treats this event as terminal
+            // exactly like turn_completed, so returning false here just makes
+            // the stop explicit from the consumer side too.
+            if (event.has_session_ended()) {
+                session_ended = true;
+                return false;
+            }
 
             // Attaching to a child session is a CLIENT PROTOCOL OBLIGATION, not
             // a TUI behaviour: an unattached subagent is killed by the server's
@@ -340,15 +354,21 @@ int RunHeadless(const HeadlessOptions& options) {
                                 line["message"] = child_event.error().message();
                             } else if (child_event.has_turn_completed()) {
                                 line["type"] = "turn_completed";
+                            } else if (child_event.has_session_ended()) {
+                                line["type"] = "session_ended";
                             } else {
                                 line["type"] = "event";
                             }
                             PrintJsonLine(line);
                         }
-                        // The child's one turn ends at turn_completed; nothing
-                        // follows, and staying attached would hold the session
-                        // open. Closing the stream terminates it.
-                        return !child_event.has_turn_completed();
+                        // The child's one turn ends at turn_completed -- or the
+                        // child is killed server-side (a cancelled blocking
+                        // spawn), which now arrives as session_ended instead of
+                        // silence. Nothing follows either signal, and staying
+                        // attached would hold the session open. Closing the
+                        // stream terminates it.
+                        return !(child_event.has_turn_completed() ||
+                                 child_event.has_session_ended());
                     });
                 });
             }
@@ -378,6 +398,10 @@ int RunHeadless(const HeadlessOptions& options) {
 
     if (!status.ok()) {
         std::fprintf(stderr, "stream ended with an error: %s\n", status.error_message().c_str());
+        return kUnavailable;
+    }
+    if (session_ended) {
+        std::fprintf(stderr, "the session was terminated by the server\n");
         return kUnavailable;
     }
     if (saw_error) return kModelError;

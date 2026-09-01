@@ -210,7 +210,16 @@ TEST_CASE("tools from a stdio MCP server appear as mcp__server__tool and execute
             break;  // TurnCompleted is the end-of-turn signal; the stream stays open
         }
     }
+    // Half-close, then READ TO END before finishing. The server writes a
+    // terminal SessionEndedEvent at stream teardown, after the turn's
+    // TurnCompletedEvent -- a sync client that stops reading and calls Finish
+    // with a server message still in flight wedges on the trailing status
+    // (the same rule session_service_test's DrainAndFinish documents). The
+    // events after turn_completed are exactly how the client is supposed to
+    // learn the session ended.
     stream->WritesDone();
+    while (stream->Read(&event)) {
+    }
     CHECK(stream->Finish().ok());
 
     CHECK(saw_started);
@@ -251,7 +260,16 @@ TEST_CASE("per-server MCP permission policy round-trips over the wire", "[mcp_e2
             break;
         }
     }
+    // Half-close, then READ TO END before finishing. The server writes a
+    // terminal SessionEndedEvent at stream teardown, after the turn's
+    // TurnCompletedEvent -- a sync client that stops reading and calls Finish
+    // with a server message still in flight wedges on the trailing status
+    // (the same rule session_service_test's DrainAndFinish documents). The
+    // events after turn_completed are exactly how the client is supposed to
+    // learn the session ended.
     stream->WritesDone();
+    while (stream->Read(&event)) {
+    }
     CHECK(stream->Finish().ok());
 
     CHECK(answered);
@@ -287,7 +305,16 @@ TEST_CASE("a denied MCP call is an error result, not a hang", "[mcp_e2e]") {
             break;
         }
     }
+    // Half-close, then READ TO END before finishing. The server writes a
+    // terminal SessionEndedEvent at stream teardown, after the turn's
+    // TurnCompletedEvent -- a sync client that stops reading and calls Finish
+    // with a server message still in flight wedges on the trailing status
+    // (the same rule session_service_test's DrainAndFinish documents). The
+    // events after turn_completed are exactly how the client is supposed to
+    // learn the session ended.
     stream->WritesDone();
+    while (stream->Read(&event)) {
+    }
     CHECK(stream->Finish().ok());
 
     CHECK(saw_finished_error);
@@ -323,7 +350,16 @@ TEST_CASE("a hanging MCP tool degrades to a bounded error over the wire", "[mcp_
             break;  // end-of-turn signal; the stream stays open across it
         }
     }
+    // Half-close, then READ TO END before finishing. The server writes a
+    // terminal SessionEndedEvent at stream teardown, after the turn's
+    // TurnCompletedEvent -- a sync client that stops reading and calls Finish
+    // with a server message still in flight wedges on the trailing status
+    // (the same rule session_service_test's DrainAndFinish documents). The
+    // events after turn_completed are exactly how the client is supposed to
+    // learn the session ended.
     stream->WritesDone();
+    while (stream->Read(&event)) {
+    }
     CHECK(stream->Finish().ok());
 
     CHECK(saw_finished_error);

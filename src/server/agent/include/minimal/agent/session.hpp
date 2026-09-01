@@ -280,7 +280,10 @@ public:
     void Cancel();
 
     // Stops the worker and closes the outbound queue. Idempotent, and safe to
-    // call with a turn in flight -- that is its main use.
+    // call with a turn in flight -- that is its main use. Every terminate path
+    // runs through here, which is what makes the terminal wire event
+    // (`SessionEndedEvent`, queued just before the close) fire exactly once on
+    // every way a session can die.
     void Terminate();
 
     // Drained by the writer thread; the sole Write() source.

@@ -94,7 +94,9 @@ grpc::Status SessionClient::RunTurn(
             // TurnCompletedEvent is the ONLY reliable end-of-turn signal. A
             // tool-using turn emits several message_deltas before it is actually
             // finished, so stop_reason alone would half-close mid-turn.
-            done = !on_event(event) || event.has_turn_completed();
+            // SessionEndedEvent is the OTHER terminal: the session was killed
+            // server-side, so no turn_completed will ever follow.
+            done = !on_event(event) || event.has_turn_completed() || event.has_session_ended();
         }
         if (done && !half_closed) {
             stream->WritesDone();
@@ -158,7 +160,9 @@ grpc::Status SessionClient::RunCommand(
             // CommandResult is the terminator here, the way TurnCompletedEvent
             // is for a turn: a confirming command emits at least one other event
             // before it, so anything less specific would half-close too early.
-            done = !on_event(event) || event.has_command_result();
+            // SessionEndedEvent terminals this stream too -- a killed session
+            // will never produce the CommandResult.
+            done = !on_event(event) || event.has_command_result() || event.has_session_ended();
         }
         if (done && !half_closed) {
             stream->WritesDone();
