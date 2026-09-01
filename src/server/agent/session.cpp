@@ -1,7 +1,6 @@
 #include "minimal/agent/session.hpp"
 
 #include <algorithm>
-#include <cstdio>
 
 #include "minimal/mcp/mcp_client_manager.hpp"
 
@@ -927,6 +926,15 @@ void Session::RunOneTurn(std::optional<std::string> text) {
     // child is forbidden to produce. A seedless wake turn (nullopt) is not a
     // user prompt either -- its content is injected messages the model itself
     // asked for, so it passes unvetted the same way.
+    //
+    // A veto sets the flag and FALLS THROUGH to the bottom block; it does not
+    // return early. The bottom block is the every-exit-path obligation (wire
+    // TurnCompleted, observer notification, the subagent completion hook) --
+    // an early return skipped all of it once, leaking per-turn observer state
+    // on every vetoed prompt. `result` stays default-constructed, so the
+    // shared exit reports exactly what the old hand-rolled veto emit did:
+    // StopReason::Unknown, empty usage, hit_max_turns false.
+    bool vetoed = false;
     if (params_.hooks != nullptr && params_.parent_session_id.empty() && text) {
         nlohmann::json payload{{"session_id", params_.session_id},
                                {"project_root", params_.project_root.string()},
@@ -941,57 +949,54 @@ void Session::RunOneTurn(std::optional<std::string> text) {
             error->set_message("prompt rejected by hook: " + *blocked);
             error->set_is_retryable(false);
             channels_->queue.Push(std::move(event));
-            // The end-of-turn signal anyway: a headless client reads until
-            // TurnCompletedEvent, and a refusal is an exit path like any
-            // other. saw_error is what maps it onto the model-error exit code.
-            EmitTurnCompleted(llm::StopReason::Unknown, llm::Usage{}, false);
-            return;
+            vetoed = true;
         }
     }
 
     TurnResult result;
     std::int64_t first_seq = 0;
-    try {
-        first_seq = store_->last_appended_seq() + 1;
-        if (text) {
-            result =
-                loop_->RunTurn(llm::Message{llm::Role::User, {llm::TextBlock{std::move(*text)}}});
-        } else {
-            // The wake path: no seed. The turn's user content is whatever the
-            // loop flushes at turn start -- the injected messages themselves.
-            result = loop_->RunTurn();
+    if (!vetoed) {
+        try {
+            first_seq = store_->last_appended_seq() + 1;
+            if (text) {
+                result = loop_->RunTurn(
+                    llm::Message{llm::Role::User, {llm::TextBlock{std::move(*text)}}});
+            } else {
+                // The wake path: no seed. The turn's user content is whatever the
+                // loop flushes at turn start -- the injected messages themselves.
+                result = loop_->RunTurn();
+            }
+        } catch (const llm::LlmError& error) {
+            // The loop rethrows once retries are exhausted. The session survives:
+            // one failed turn is not a reason to tear down a conversation the user
+            // can retry.
+            v1::ServerEvent event = MakeEvent(params_.session_id);
+            *event.mutable_error() = rpc::ToProto(error);
+            channels_->queue.Push(std::move(event));
+            logger_.warn("session {}: turn failed: {}", params_.session_id, error.what());
+        } catch (const std::exception& e) {
+            v1::ServerEvent event = MakeEvent(params_.session_id);
+            auto* error = event.mutable_error();
+            error->set_category(v1::LLM_ERROR_CATEGORY_UNSPECIFIED);
+            error->set_message(e.what());
+            error->set_is_retryable(false);
+            channels_->queue.Push(std::move(event));
+            logger_.warn("session {}: turn threw: {}", params_.session_id, e.what());
+        } catch (...) {
+            // Neither an LlmError nor a std::exception. The catches above existed to
+            // keep one failed turn from taking down the worker -- and with it the
+            // process -- but anything else escaping here would still have reached
+            // std::terminate through WorkerMain. Same treatment: one degraded turn,
+            // a live session.
+            v1::ServerEvent event = MakeEvent(params_.session_id);
+            auto* error = event.mutable_error();
+            error->set_category(v1::LLM_ERROR_CATEGORY_UNSPECIFIED);
+            error->set_message("the turn threw an unrecognized exception");
+            error->set_is_retryable(false);
+            channels_->queue.Push(std::move(event));
+            logger_.warn("session {}: turn threw a non-standard exception", params_.session_id);
         }
-    } catch (const llm::LlmError& error) {
-        // The loop rethrows once retries are exhausted. The session survives:
-        // one failed turn is not a reason to tear down a conversation the user
-        // can retry.
-        v1::ServerEvent event = MakeEvent(params_.session_id);
-        *event.mutable_error() = rpc::ToProto(error);
-        channels_->queue.Push(std::move(event));
-        logger_.warn("session {}: turn failed: {}", params_.session_id, error.what());
-    } catch (const std::exception& e) {
-        v1::ServerEvent event = MakeEvent(params_.session_id);
-        auto* error = event.mutable_error();
-        error->set_category(v1::LLM_ERROR_CATEGORY_UNSPECIFIED);
-        error->set_message(e.what());
-        error->set_is_retryable(false);
-        channels_->queue.Push(std::move(event));
-        logger_.warn("session {}: turn threw: {}", params_.session_id, e.what());
-    } catch (...) {
-        // Neither an LlmError nor a std::exception. The catches above existed to
-        // keep one failed turn from taking down the worker -- and with it the
-        // process -- but anything else escaping here would still have reached
-        // std::terminate through WorkerMain. Same treatment: one degraded turn,
-        // a live session.
-        v1::ServerEvent event = MakeEvent(params_.session_id);
-        auto* error = event.mutable_error();
-        error->set_category(v1::LLM_ERROR_CATEGORY_UNSPECIFIED);
-        error->set_message("the turn threw an unrecognized exception");
-        error->set_is_retryable(false);
-        channels_->queue.Push(std::move(event));
-        logger_.warn("session {}: turn threw a non-standard exception", params_.session_id);
     }
-
     // BOTH endings run through here, and that is the point. A failed turn leaves
     // `result` default-constructed -- StopReason::Unknown, zero usage -- which is
     // exactly what a failure should report.

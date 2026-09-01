@@ -1,5 +1,6 @@
 #include <sys/stat.h>
 
+#include <atomic>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -126,16 +127,30 @@ TEST_CASE("a user_prompt_submit hook refusal refuses the turn, answers the clien
     // Start(), so both scripts are queued before the session exists. The
     // blocked first prompt consumes none of them.
     f.Script(testing::TextResponse("here we go again"));
+    // The veto path must reach the SAME bottom block every other exit runs:
+    // an early return once skipped the observer notification there, leaking
+    // per-turn observer state on every vetoed prompt.
+    struct VetoRecorder : agent::SessionObserver {
+        std::atomic<int> completed{0};
+        void OnTurnCompleted(const agent::SessionInfo&, const agent::TurnSummary&) override {
+            completed.fetch_add(1);
+        }
+    };
+    auto recorder = std::make_shared<VetoRecorder>();
+    f.observers.Register(recorder);
     f.Start();
 
     CHECK(f.session->SubmitTurn("do the thing"));
     CHECK(f.session->WaitForIdleForTesting(5s));
+    f.observers.WaitForIdleForTesting();
 
     const auto events = f.DrainQueue();
     CHECK(HasErrorEvent(events, "prompt rejected by hook: prompt not allowed"));
     // The end-of-turn signal anyway: a headless client reads until
     // TurnCompletedEvent, and a refusal is an exit path.
     CHECK(HasTurnCompleted(events));
+    // The observer was told the turn ended, veto or not.
+    CHECK(recorder->completed.load() == 1);
     // Nothing was appended to the transcript.
     CHECK(f.store->messages.empty());
     // The provider was never called.
@@ -146,7 +161,10 @@ TEST_CASE("a user_prompt_submit hook refusal refuses the turn, answers the clien
     CHECK_FALSE(f.session->terminated());
     CHECK(f.session->SubmitTurn("still here"));
     CHECK(f.session->WaitForIdleForTesting(5s));
+    f.observers.WaitForIdleForTesting();
     CHECK(f.provider->call_count() == 0);
+    // ...and the second veto was reported to the observer too.
+    CHECK(recorder->completed.load() == 2);
 
     std::filesystem::remove_all(dir);
 }
