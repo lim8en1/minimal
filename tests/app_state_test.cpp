@@ -20,10 +20,12 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include "../plugins/server/commands-core/core_commands.hpp"
 #include "deadline.hpp"
 #include "fakes.hpp"
 #include "minimal/client/session_client.hpp"
 #include "minimal/client/state.hpp"
+#include "minimal/commands/command_registry.hpp"
 #include "minimal/config/settings_config.hpp"
 #include "minimal/rpc/server.hpp"
 #include "minimal/rpc/session_service.hpp"
@@ -84,17 +86,32 @@ struct ClientFixture {
         });
     }
 
+    // Multi-turn scripts: each session gets a FRESH provider replaying the
+    // steps in order (the fixture's factory runs per session create).
+    void ScriptSteps(const std::vector<llm::ChatResponse>& steps) {
+        providers.Register("fake", [steps](const llm::ProviderConfig&) {
+            auto provider = std::make_unique<testing::FakeLlmProvider>();
+            for (const auto& step : steps) {
+                provider->PushResponse(step);
+            }
+            return provider;
+        });
+    }
+
     void Start() {
         presets = std::make_unique<agent::AgentPresetRegistry>(
             dir, skills, config::LoadSettingsConfig(dir / "settings.json"));
         observers = std::make_unique<agent::SessionObserverRegistry>(common::DefaultLogger());
         db = std::make_unique<session::SessionDatabase>(dir / "sessions.db");
+        for (auto& command : commands_core::MakeCoreCommands()) commands.Register(std::move(command));
         sessions = std::make_unique<agent::SessionRegistry>(
             *presets, tools, providers, *observers, *db, agent::LoopConfig{},
             common::DefaultLogger(), attach_guard);
+        sessions->set_commands(&commands);
         service = std::make_unique<rpc::SessionServiceImpl>(
             *sessions, *db, config::SettingsConfig{}, config::PermissionsConfig{},
             common::DefaultLogger());
+        service->set_commands(&commands);
 
         socket = dir / "test.sock";
         server = std::make_unique<rpc::Server>(*service, socket);
@@ -124,6 +141,7 @@ struct ClientFixture {
     std::filesystem::path dir, socket;
     config::SkillRegistry skills;
     tools::ToolRegistry tools;
+    commands::CommandRegistry commands;
     llm::ProviderFactoryRegistry providers;
     std::unique_ptr<agent::AgentPresetRegistry> presets;
     std::unique_ptr<agent::SessionObserverRegistry> observers;
@@ -367,4 +385,98 @@ TEST_CASE("INVARIANT: closing a tab while its turn streams cannot use-after-free
         REQUIRE_FALSE(app.HasTab(sid));
     }
     CHECK(app.GetAllTabs().empty());
+}
+
+// ---------------------------------------------------------------------------
+// The interactive verbs: interrupt (SendCancel) and the wire confirmation
+// answer. Both round-trip over a real socket through the real dispatch path
+// the TUI uses -- the client-side half of session_service_test's coverage.
+// ---------------------------------------------------------------------------
+
+// Polls a tab's DEEP snapshot until `pred` is true or the deadline trips (the
+// pending-modal data rides GetDetails, not the light tab list).
+template <typename Pred>
+bool WaitForDetails(AppState& app, const std::string& session_id, Pred pred,
+                    std::chrono::milliseconds timeout = 5s) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (pred(app.GetDetails(session_id))) return true;
+        std::this_thread::sleep_for(5ms);
+    }
+    return false;
+}
+
+TEST_CASE("SendCancel ends a busy turn and the session stays usable", "[app_state][cancel]") {
+    // An Ask-gated tool parks the turn at a deterministic point (the same
+    // rendezvous session_service_test uses); the cancel instead of an answer.
+    ClientFixture fixture;
+    fixture.tools.Register(
+        std::make_unique<testing::FakeTool>("bash", tools::ToolCategory::Execute, "ran it"));
+    fixture.ScriptSteps({testing::ToolUseResponse("call-1", "bash", {{"command", "make"}}),
+                         testing::TextResponse("second turn finished")});
+    fixture.Write("permissions.json", nlohmann::json{{"fallback", {{"execute", "ask"}}}}.dump());
+    fixture.Start();
+
+    AppState app(fixture.client);
+    const auto sid = app.OpenTab(fixture.Options("cancel-me"));
+    REQUIRE_FALSE(sid.empty());
+
+    app.SendChatTurn(sid, "build it");
+    REQUIRE(WaitForDetails(app, sid,
+                           [](const SessionState::Snapshot& s) {
+                               return s.pending_permission.has_value();
+                           }));
+    CHECK(app.GetDetails(sid).state == SessionStateKind::Waiting);
+
+    // THE VERB: the server ends the turn with STOP_REASON_CANCELLED and
+    // answers the parked prompt with a denial (pending.CancelAll). Before
+    // this was wired the TUI had no interrupt at all.
+    app.SendCancel(sid);
+    CHECK(WaitFor(app, sid, [](const AppState::TabSnapshot& t) {
+        return t.state == SessionStateKind::Idle;
+    }));
+    CHECK_FALSE(app.GetDetails(sid).cancel_requested);   // retired by the turn end
+    CHECK_FALSE(app.GetDetails(sid).pending_permission.has_value());
+
+    // A cancel must not poison the session: turn 2 runs to completion.
+    app.SendChatTurn(sid, "try again");
+    CHECK(WaitFor(app, sid, [](const AppState::TabSnapshot& t) {
+        return t.state == SessionStateKind::Idle;
+    }));
+}
+
+TEST_CASE("a wire confirmation is answered and unwedges the tab", "[app_state][confirmation]") {
+    // /clear asks through the ConfirmationBroker, which BLOCKS the session
+    // worker until answered. The TUI's AnswerConfirmation existed and was
+    // dead code: nothing rendered the request, so the tab sat in Waiting
+    // forever -- a correctness bug, not a missing nicety.
+    ClientFixture fixture;
+    fixture.Script("hi");
+    fixture.Start();
+
+    AppState app(fixture.client);
+    const auto sid = app.OpenTab(fixture.Options("confirm-me"));
+    REQUIRE_FALSE(sid.empty());
+
+    app.SendCommand(sid, "/clear");
+    REQUIRE(WaitFor(app, sid, [](const AppState::TabSnapshot& t) {
+        return t.state == SessionStateKind::Waiting;
+    }));
+
+    const auto pending = app.GetDetails(sid).pending_confirmation;
+    REQUIRE(pending.has_value());
+    REQUIRE(pending->options.size() == 2);   // the dispatcher's {"Yes", "No"}
+
+    app.AnswerConfirmation(sid, pending->request_id, "Yes");
+
+    // THE WEDGE FIX: no tool events or message stops follow a command
+    // confirmation, so the state must re-derive at the answer -- not sit in
+    // Waiting until some unrelated event happens to arrive.
+    CHECK(WaitFor(app, sid, [](const AppState::TabSnapshot& t) {
+        return t.state == SessionStateKind::Idle;
+    }));
+    // The command actually ran: its result comes back as the notice.
+    CHECK(WaitForDetails(app, sid, [](const SessionState::Snapshot& s) {
+        return s.latest_notice.has_value();
+    }));
 }

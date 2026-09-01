@@ -105,19 +105,26 @@ ftxui::Component MakeConfirmationModal(const PendingConfirmation& request, const
     // per-frame snapshot members), the callback captured by value.
     const auto request_state = std::make_shared<PendingConfirmation>(request);
 
+    // The wire confirmations (/clear, /permission-mode) offer "Yes"/"No" with
+    // no cancel option -- Escape is not an answer there (below), so the footer
+    // must not advertise one.
+    const bool has_cancel =
+        std::find(request_state->options.begin(), request_state->options.end(),
+                  "cancel") != request_state->options.end();
+
     Components option_components;
     for (const auto& option : request.options) {
         option_components.push_back(Button(option, [option, on_answer] { on_answer(option); }));
     }
     auto buttons = ftxui::Container::Horizontal(std::move(option_components));
     const auto buttons_val = buttons;   // outlives the factory: by value
-    auto body = Renderer(buttons, [buttons_val, request_state, &theme] {
+    auto body = Renderer(buttons, [buttons_val, request_state, has_cancel, &theme] {
         const PendingConfirmation& request = *request_state;
         Elements rows;
         rows.push_back(text(request.title) | bold | color(theme.ColorFor("attention")));
         rows.push_back(paragraph(request.detail));
         rows.push_back(buttons_val->Render() | hcenter);
-        rows.push_back(text("esc: cancel") | dim);
+        if (has_cancel) rows.push_back(text("esc: cancel") | dim);
         return window(text(" confirm "), vbox(std::move(rows)) | size(WIDTH, LESS_THAN, 70)) |
                color(theme.ColorFor("attention"));
     });
@@ -126,9 +133,6 @@ ftxui::Component MakeConfirmationModal(const PendingConfirmation& request, const
     // Escape -- the inconsistency made the most destructive dialogs the only
     // ones without a keyboard out.
     const std::string cancel_option = "cancel";
-    const bool has_cancel =
-        std::find(request_state->options.begin(), request_state->options.end(),
-                  cancel_option) != request_state->options.end();
     return CatchEvent(body, [on_answer, has_cancel, cancel_option](const Event& event) {
         if (event == Event::Escape) {
             if (has_cancel) {

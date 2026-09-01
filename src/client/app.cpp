@@ -488,6 +488,8 @@ std::vector<ftxui::Event> KeyToEvents(const std::string& key) {
     if (key == "ctrl+w") return {Event::CtrlW};
     if (key == "ctrl+q") return {Event::CtrlQ};
     if (key == "pageup") return {Event::PageUp};
+    if (key == "escape") return {Event::Escape};
+    if (key == "ctrl+c") return {Event::CtrlC};
     return {};
 }
 
@@ -859,6 +861,7 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     bool show_picker = false;
     bool show_quit_confirm = false;
     bool show_permission = false;
+    bool show_confirmation = false;
     bool show_delete_confirm = false;
     bool show_plugin_modal = false;
     std::string staged_delete_id;   // the picker delete confirmation's subject
@@ -872,6 +875,9 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         std::optional<uint64_t> rendered_version;
         std::unique_ptr<GrantToggles> grants;   // per outstanding request
         std::string grants_for_request;
+        // The wire confirmation modal's rebuild key, like grants_for_request:
+        // the inner modal is rebuilt only when a NEW request_id arrives.
+        std::string confirmation_for_request;
         ftxui::Component surface_body;          // the chat surface's tab body (when slotted)
         plugins::ChatSurface* surface_for = nullptr;   // which surface instance built it
         // Per-tab ChatView: its row cache is keyed by transcript_version, a
@@ -950,9 +956,25 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         if (!result.status.ok()) return {};
         return {result.response.paths().begin(), result.response.paths().end()};
     };
+    // Typing on an empty app STARTS A SESSION (ARCHITECTURE.md "Session
+    // picker": with no prior sessions the client creates one directly). The
+    // welcome placeholder has always promised this -- but OpenTab was never
+    // wired to any UI path, so the promise was dead and a fresh TUI could not
+    // hold a conversation at all. OpenTab blocks on the create RPC: the same
+    // bounded-pause trade RefreshScrollback already documents for loop-thread
+    // work.
+    auto submit_chat = [app](const std::string& text) {
+        std::string sid = app->FocusedSessionId();
+        if (sid.empty()) {
+            minimal::client::SessionClient::CreateOptions opts;
+            opts.project_root = std::filesystem::current_path().string();
+            sid = app->OpenTab(opts);
+        }
+        if (!sid.empty()) app->SendChatTurn(sid, text);
+    };
     auto editor = minimal::client::MakePromptEditor(
         theme, prompt_state,
-        [app](const std::string& text) { app->SendChatTurn(app->FocusedSessionId(), text); },
+        submit_chat,
         [app](const std::string& line) { app->SendCommand(app->FocusedSessionId(), line); },
         suggest,
         [&command_catalog] { return command_catalog; });
@@ -969,6 +991,26 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         permission_host, [=](const Event& event) {
             return show_permission && *permission_child ? (*permission_child)->OnEvent(event)
                                                         : false;
+        });
+
+    // The server confirmation modal (/clear and /permission-mode ask through
+    // the ConfirmationBroker, which BLOCKS the session worker until answered):
+    // same host pattern as the permission prompt -- a STABLE component whose
+    // inner modal is rebuilt when a new request_id arrives. The answer path
+    // (AnswerConfirmation) existed and was dead code; nothing rendered the
+    // request, so the tab wedged in Waiting until some unrelated event
+    // arrived. Security-adjacent: it nests directly below the permission
+    // prompt in the stack (see the modal stack below -- the two are mutually
+    // exclusive in SessionState, so they never compete for the layer).
+    auto confirmation_child = std::make_shared<Component>();
+    auto confirmation_host = Renderer([=] {
+        return *confirmation_child ? (*confirmation_child)->Render() : emptyElement();
+    });
+    auto confirmation_host_interactive = CatchEvent(
+        confirmation_host, [=](const Event& event) {
+            return show_confirmation && *confirmation_child
+                       ? (*confirmation_child)->OnEvent(event)
+                       : false;
         });
 
     // Tab close, for every caller (keybinding, quit confirmation, quit): the
@@ -1120,6 +1162,31 @@ int RunTui(const minimal::client::ParsedArgs& args) {
             show_delete_confirm = false;
         });
 
+    // --- first run --------------------------------------------------------------
+    // ARCHITECTURE.md "Session picker": the picker opens at startup when prior
+    // sessions exist for the cwd; OTHERWISE A SESSION IS CREATED DIRECTLY.
+    // Neither half was wired: a cold start with no history sat on a
+    // placeholder whose "typing starts a session" promise was dead (OpenTab
+    // had no caller). With no history there is nothing to pick, so the client
+    // makes the session itself -- one blocking create RPC on the pre-loop
+    // thread, the same trade RefreshScrollback documents.
+    {
+        const auto prior = client->ListSessions(std::filesystem::current_path().string(),
+                                                /*include_all_dirs=*/false, 1);
+        if (prior.status.ok() && prior.response.sessions_size() > 0) {
+            open_picker();
+        } else {
+            minimal::client::SessionClient::CreateOptions opts;
+            opts.project_root = std::filesystem::current_path().string();
+            if (app->OpenTab(opts).empty()) {
+                std::fprintf(stderr, "minimal: warning: could not create a session (%s); "
+                                     "ctrl+o opens the session picker\n",
+                             prior.status.ok() ? "server refused"
+                                               : prior.status.error_message().c_str());
+            }
+        }
+    }
+
     // --- frame -----------------------------------------------------------------
     int panel_height = 12;
     auto any_work_in_flight = [&](const std::vector<AppState::TabSnapshot>& tabs,
@@ -1141,6 +1208,24 @@ int RunTui(const minimal::client::ParsedArgs& args) {
             }
         }
         return false;
+    };
+
+    // Quit = close every tab, with ONE confirmation if any work is in flight
+    // (ARCHITECTURE.md "Session lifetime"). Shared by ctrl+q, tab-close's
+    // sibling, and ctrl+c-when-idle (raw mode means ctrl+c reaches the loop
+    // as a key event, not as SIGINT -- without this it was simply dead).
+    auto request_quit = [&] {
+        const auto tabs = app->GetAllTabs();
+        std::vector<std::string> ids;
+        for (const auto& tab : tabs) ids.push_back(tab.session_id);
+        if (!any_work_in_flight(tabs, ids)) {
+            quit();
+        } else {
+            pending_close = PendingClose{};
+            pending_close.quit = true;
+            pending_close.session_ids = std::move(ids);
+            show_quit_confirm = true;
+        }
     };
 
     auto session_view = Renderer(editor, [&] {
@@ -1242,8 +1327,30 @@ int RunTui(const minimal::client::ParsedArgs& args) {
             } else {
                 show_permission = false;
             }
+
+            // The wire confirmation modal: same rebuild-on-new-request-id rule
+            // as the permission modal above. Both are never set at once (each
+            // Set clears the other in SessionState).
+            if (snap.pending_confirmation.has_value()) {
+                const auto& request = *snap.pending_confirmation;
+                TabUi& ui = tab_ui[focused];
+                if (ui.confirmation_for_request != request.request_id) {
+                    ui.confirmation_for_request = request.request_id;
+                    const auto session_id = focused;
+                    const auto request_copy = request;
+                    *confirmation_child = minimal::client::MakeConfirmationModal(
+                        request_copy, theme,
+                        [app, session_id, request_copy](const std::string& chosen) {
+                            app->AnswerConfirmation(session_id, request_copy.request_id, chosen);
+                        });
+                }
+                show_confirmation = true;
+            } else {
+                show_confirmation = false;
+            }
         } else {
             show_permission = false;
+            show_confirmation = false;
             rows.push_back(vbox({text("minimal") | bold,
                                  text("ctrl+o opens the session picker; typing starts a session") |
                                      dim}) |
@@ -1267,6 +1374,12 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         // the status bar's values.
         if (!focused_details.session_id.empty()) {
             values["session"] = focused_details.display_name;
+            // The interrupt press is never silent: from SendCancel until the
+            // turn actually ends, the focused session says so (status bar =
+            // the home of focused-session detail, per ARCHITECTURE.md).
+            if (focused_details.cancel_requested) {
+                values["session"] += "  ·  cancelling…";
+            }
             // {tokens} is used/max now that the metadata emission carries the
             // window (E5a); max unknown (0) renders used-only, the E4 behavior.
             const int64_t used =
@@ -1370,6 +1483,47 @@ int RunTui(const minimal::client::ParsedArgs& args) {
             }
             return true;
         }
+        // INTERRUPT -- the interactive loop's missing verb. Escape and ctrl+c
+        // on a busy tab send CancelTurn; the server ends the turn with
+        // STOP_REASON_CANCELLED and answers any prompt it was parked on with
+        // a denial (pending.CancelAll), so a wedged prompt is interruptible
+        // too. Waiting counts as busy. Modals sit OUTERMOST in the stack, so
+        // while one is up it consumes these keys first (permission:
+        // esc = deny; confirmation: esc = a cancel option when offered) --
+        // this branch only fires with no modal shown. The busy probe runs
+        // only when one of the two keys actually arrived, never per keystroke.
+        const bool cancel_pressed =
+            event == Event::CtrlC ||
+            MatchesAny(event, KeyToEvents(keys.KeyFor("turn.cancel")));
+        if (cancel_pressed) {
+            bool busy = false;
+            if (!sid.empty()) {
+                for (const auto& tab : app->GetAllTabs()) {
+                    if (tab.session_id != sid) continue;
+                    switch (tab.state) {
+                        case SessionStateKind::Thinking:
+                        case SessionStateKind::Working:
+                        case SessionStateKind::Waiting:
+                            busy = true;
+                            break;
+                        default:
+                            break;
+                    }
+                    break;
+                }
+            }
+            if (busy) {
+                app->SendCancel(sid);
+                return true;
+            }
+            // Idle ctrl+c means quit: the universal exit reflex, otherwise
+            // DEAD (raw mode -- no SIGINT ever reaches this process). Idle
+            // Escape falls through to the editor, which has no use for it.
+            if (event == Event::CtrlC) {
+                request_quit();
+                return true;
+            }
+        }
         if (MatchesAny(event, KeyToEvents(keys.KeyFor("session.picker")))) {
             show_picker = !show_picker;
             if (show_picker) open_picker();
@@ -1412,19 +1566,7 @@ int RunTui(const minimal::client::ParsedArgs& args) {
             return true;
         }
         if (MatchesAny(event, KeyToEvents(keys.KeyFor("app.quit")))) {
-            // Quit = close every tab, with ONE confirmation if any work is in
-            // flight (ARCHITECTURE.md "Session lifetime").
-            const auto tabs = app->GetAllTabs();
-            std::vector<std::string> ids;
-            for (const auto& tab : tabs) ids.push_back(tab.session_id);
-            if (!any_work_in_flight(tabs, ids)) {
-                quit();
-            } else {
-                pending_close = PendingClose{};
-                pending_close.quit = true;
-                pending_close.session_ids = std::move(ids);
-                show_quit_confirm = true;
-            }
+            request_quit();
             return true;
         }
 
@@ -1453,18 +1595,27 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     });
 
     // Modal stack, OUTERMOST = TOPMOST: the security UI (permission prompt)
-    // above the quit confirmation above the picker above the delete
-    // confirmation above the plugin modals above the frame. E4's nesting had
-    // the picker outermost; E5 reorders so the never-preempted invariant is
-    // actually structural end to end -- no modal layer sits above the
-    // permission prompt, and plugin modals sit below everything (E5's own
-    // invariant, tested against the fixture plugin).
-    Component tree = session_view;
+    // above the wire confirmation above the quit confirmation above the picker
+    // above the delete confirmation above the plugin modals above the frame
+    // (with its global keybindings). E4's nesting had the picker outermost;
+    // E5 reorders so the never-preempted invariant is actually structural end
+    // to end -- no modal layer sits above the permission prompt, and plugin
+    // modals sit below everything (E5's own invariant, tested against the
+    // fixture plugin).
+    //
+    // The frame is keyed through with_keys, NOT raw session_view: E5's
+    // refactor re-rooted the stack at session_view, silently dropping the
+    // CatchEvent wrapper -- every global keybinding (tab cycling, the picker,
+    // quit, close, load-older, interrupt) was dead code from E5 until this
+    // line was restored to E4's composition.
+    Component tree = with_keys;
     tree = Modal(tree, plugin_modal_host_interactive, &show_plugin_modal);
     tree = Modal(tree, delete_modal, &show_delete_confirm);
     tree = Modal(tree, picker_host_interactive, &show_picker);
     auto with_quit_confirm = Modal(tree, confirm_modal, &show_quit_confirm);
-    auto with_permission = Modal(with_quit_confirm, permission_host_interactive, &show_permission);
+    auto with_confirmation = Modal(with_quit_confirm, confirmation_host_interactive,
+                                   &show_confirmation);
+    auto with_permission = Modal(with_confirmation, permission_host_interactive, &show_permission);
     Component final_tree = with_permission;
 
     // THE PUMP: reader threads wake nothing by themselves; this loop redraws

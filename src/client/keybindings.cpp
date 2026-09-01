@@ -25,6 +25,7 @@ const std::unordered_map<std::string, std::string>& DefaultBindings() {
         {"panel.toggle", "ctrl+t"},
         {"tab.close", "ctrl+w"},
         {"chat.load_older", "pageup"},
+        {"turn.cancel", "escape"},
         {"app.quit", "ctrl+q"},
     };
     return kDefaults;

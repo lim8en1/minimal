@@ -30,6 +30,7 @@ SessionState::Snapshot SessionState::TakeLightSnapshot() {
     s.tools = tools_;   // bounded (R2); the tools panel renders these
     s.input_tokens = input_tokens_;
     s.output_tokens = output_tokens_;
+    s.cancel_requested = cancel_requested_;
     s.model = model_;
     s.agent_preset = agent_preset_;
     s.permission_mode = permission_mode_;
@@ -66,6 +67,7 @@ SessionState::Snapshot SessionState::TakeSnapshot() {
     s.tools = tools_;
     s.input_tokens = input_tokens_;
     s.output_tokens = output_tokens_;
+    s.cancel_requested = cancel_requested_;
     s.transcript_version = transcript_version_;
     s.scrollback_trimmed = scrollback_trimmed_;
     s.turn_seq = turn_seq_;
@@ -145,6 +147,7 @@ void SessionState::OnTurnCompleted(const v1::TurnCompletedEvent& evt) {
     std::lock_guard lk(mtx_);
     is_streaming_ = false;
     turn_ended_ = true;
+    cancel_requested_ = false;   // the interrupted turn ended -- whatever the stop reason
     input_tokens_ = evt.usage().input_tokens();
     output_tokens_ = evt.usage().output_tokens();
     // Turn completion is bookkeeping, not a state transition: `Done` means the
@@ -152,6 +155,18 @@ void SessionState::OnTurnCompleted(const v1::TurnCompletedEvent& evt) {
     // preceding message_stop already resolved state_ (normally to Idle). An
     // in-flight Error is left alone rather than silently cleared here.
     tools_.clear();   // the panel resets when a new turn begins
+    // A CANCELLED turn (or one that died at a prompt) ends WITHOUT a message
+    // stop: the server denied the parked prompt on our behalf
+    // (Session::Cancel's pending.CancelAll), so the answer never traveled
+    // through AnswerPermission/AnswerConfirmation and the client-side pending
+    // request would outlive its turn -- stranding the tab in Waiting with
+    // nothing left to answer. A turn cannot complete while its OWN prompt is
+    // genuinely outstanding (the worker is blocked on it), so anything pending
+    // here is stale. MaybeGoIdleLocked resolves the Waiting the missing
+    // message stop would have; it leaves an in-flight Error alone.
+    pending_permission_.reset();
+    pending_confirmation_.reset();
+    MaybeGoIdleLocked();
     // The completed turn's messages are persisted now but NOT yet in the
     // scrollback window; bumping the version is what makes the chat view
     // re-fetch and swap its streaming block for the real rows.
@@ -167,6 +182,19 @@ void SessionState::OnCommandResult(const v1::CommandResult& evt) {
     ++notice_seq_;
 }
 
+void SessionState::RequestCancel() {
+    std::lock_guard lk(mtx_);
+    switch (state_) {
+        case SessionStateKind::Thinking:
+        case SessionStateKind::Working:
+        case SessionStateKind::Waiting:
+            cancel_requested_ = true;   // held until the turn actually ends
+            break;
+        default:
+            break;   // nothing in flight to interrupt
+    }
+}
+
 void SessionState::ClearStreaming() {
     std::lock_guard lk(mtx_);
     streaming_accumulated_.clear();
@@ -177,6 +205,7 @@ void SessionState::OnError(const std::string&) {
     std::lock_guard lk(mtx_);
     is_streaming_ = false;
     turn_ended_ = true;   // the errored turn is over; the next stream is a new one
+    cancel_requested_ = false;   // a cancel can BE the error path (dead stream)
     pending_permission_.reset();
     pending_confirmation_.reset();
     state_ = SessionStateKind::Error;
@@ -188,6 +217,7 @@ void SessionState::OnError(const std::string&) {
 void SessionState::OnSessionEnded() {
     std::lock_guard lk(mtx_);
     is_streaming_ = false;
+    cancel_requested_ = false;
     pending_permission_.reset();
     pending_confirmation_.reset();
     state_ = SessionStateKind::Done;
@@ -221,6 +251,13 @@ void SessionState::ClearPendingFor(std::string_view request_id) {
     if (pending_confirmation_ && pending_confirmation_->request_id == request_id) {
         pending_confirmation_.reset();
     }
+}
+
+void SessionState::OnPendingResolved() {
+    std::lock_guard lk(mtx_);
+    // The worker was parked on the prompt this just answered, so nothing else
+    // is in flight and MaybeGoIdleLocked's guards all hold.
+    MaybeGoIdleLocked();
 }
 
 // Tools ---------------------------------------------------------------------
@@ -723,7 +760,13 @@ void AppState::AnswerConfirmation(const std::string& session_id, const std::stri
     cr->set_chosen_option(chosen_option);
     stream->Send(ev);
 
-    if (auto state = GetState(session_id)) state->ClearPendingFor(request_id);
+    if (auto state = GetState(session_id)) {
+        state->ClearPendingFor(request_id);
+        // No tool events or message stops follow a command confirmation: the
+        // worker was parked on THIS answer, so the tab must re-derive its
+        // state here or it stays stranded in Waiting forever.
+        state->OnPendingResolved();
+    }
 }
 
 void AppState::SendCommand(const std::string& session_id, const std::string& line) {
@@ -747,8 +790,13 @@ void AppState::SendCommand(const std::string& session_id, const std::string& lin
 }
 
 void AppState::SendCancel(const std::string& session_id) {
+    BumpUiVersion();   // the "cancelling…" hint renders this frame, not the next event's
     auto stream = GetStream(session_id);
     if (!stream) return;
+    // The hint stands until the turn ends (TurnCompleted / Error / session
+    // end clear it) -- queuing the send alone would leave the press silent
+    // while the server winds down.
+    if (auto state = GetState(session_id)) state->RequestCancel();
 
     v1::ClientEvent ev;
     ev.set_session_id(session_id);
@@ -804,6 +852,7 @@ std::vector<AppState::TabSnapshot> AppState::GetAllTabs() const {
         snap.is_subagent = tab.info.parent_session_id.has_value();
         snap.root_ordinal = tab.info.root_ordinal;
         snap.spawn_seq = tab.info.spawn_seq;
+        snap.cancel_requested = ss.cancel_requested;
         // The glyph merge (docs/EXTENSIBILITY.md 4.2, "Attention sink"): core
         // event derivation is the default source; a plugin raise wins until
         // cleared. '!' stays the only color-independent signal whatever raised

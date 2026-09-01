@@ -382,6 +382,10 @@ SessionClient::Stream::~Stream() { Close(); }
 
 std::optional<std::string> SessionClient::Stream::Open(const CreateOptions& opts) {
     grpc::ClientContext context;
+    // Bounded like every other unary call here: the TUI calls Open on the loop
+    // thread (first-run create, typing on an empty app), and a hung server
+    // must not hang the frame loop past this.
+    context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(5));
     v1::CreateSessionRequest request;
     request.set_project_root(opts.project_root);
     request.set_agent_preset(opts.agent_preset);

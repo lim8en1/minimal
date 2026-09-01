@@ -152,6 +152,12 @@ public:
         // routing.
         uint64_t notice_seq = 0;
 
+        // The user asked to interrupt the in-flight turn and the turn has not
+        // ended yet (TurnCompleted / Error / session end all clear it). The
+        // status bar renders the focused session as "cancelling…" while this
+        // stands, so the press is never silent.
+        bool cancel_requested = false;
+
         // --- Session metadata (the E5 emission, one per attach + on change) ---
         // The wire source for the status bar's {model} {agent}
         // {permission_mode} segments and the `max` half of {tokens}. Empty/0 =
@@ -187,6 +193,12 @@ public:
     // never enters the chat rows.
     void OnCommandResult(const v1::CommandResult& evt);
 
+    // The user asked to interrupt the in-flight turn. A no-op unless the tab
+    // is actually mid-turn (Thinking / Working / Waiting -- Waiting counts:
+    // the server's Cancel answers a parked permission/confirmation prompt
+    // with a denial, so a wedged prompt is interruptible too).
+    void RequestCancel();
+
     // Drops the accumulated streaming text. The chat view calls this after a
     // post-turn scrollback refresh, when the streamed message has become a
     // persisted row -- otherwise the same content would render twice.
@@ -200,6 +212,13 @@ public:
     void SetPermissionRequest(std::unique_ptr<PendingPermission> req);
     void SetConfirmationRequest(std::unique_ptr<PendingConfirmation> req);
     void ClearPendingFor(std::string_view request_id);
+
+    // A pending prompt was just answered. The server worker was BLOCKED on
+    // this answer, so no further event is guaranteed to re-derive the tab
+    // state: a command confirmation (/clear, /permission-mode) produces no
+    // tool events or message stops afterwards, and without this call the tab
+    // stays stranded in Waiting with the '!' glyph and nothing pending.
+    void OnPendingResolved();
 
     // --- Tool execution (stream order, keyed by tool_use_id) ---
     void OnToolStarted(const v1::ToolExecutionEvent& evt);
@@ -236,6 +255,9 @@ private:
     // fresh notice from a re-snapshot of the same one.
     std::optional<CommandNotice> latest_notice_;
     uint64_t notice_seq_ = 0;
+
+    // Set by RequestCancel, cleared when the turn actually ends.
+    bool cancel_requested_ = false;
 
     // Session metadata (see Snapshot).
     std::string model_;
@@ -293,6 +315,9 @@ public:
         // running-tools panel renders. Filled by the LIGHT snapshot; before it
         // existed the panel forced a full deep Snapshot of EVERY tab per frame.
         std::vector<ToolExecutionState> tools;
+
+        // The focused tab's interrupt request still awaiting its turn end.
+        bool cancel_requested = false;
     };
 
     // --- Tab management (all thread-safe) ---

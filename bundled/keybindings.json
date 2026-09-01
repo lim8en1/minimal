@@ -8,5 +8,6 @@
   "panel.toggle": "ctrl+t",
   "tab.close": "ctrl+w",
   "chat.load_older": "pageup",
+  "turn.cancel": "escape",
   "app.quit": "ctrl+q"
 }

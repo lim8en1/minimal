@@ -411,3 +411,70 @@ TEST_CASE("turn_seq advances once per streaming turn", "[session_state]") {
     state.AppendStreamingText("next turn");
     CHECK(state.TakeSnapshot().turn_seq == 2);
 }
+
+// ---------------------------------------------------------------------------
+// Interrupt (the TUI's cancel verb) and the confirmation-answer state fix.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("RequestCancel flags a busy tab; the turn end clears it", "[session_state]") {
+    SessionState state("s-1");
+
+    // Nothing in flight: a cancel press is a no-op, not a stuck flag.
+    state.RequestCancel();
+    CHECK_FALSE(state.TakeSnapshot().cancel_requested);
+
+    state.AppendStreamingText("working");
+    REQUIRE(state.TakeSnapshot().state == SessionStateKind::Thinking);
+    state.RequestCancel();
+    REQUIRE(state.TakeSnapshot().cancel_requested);
+
+    // The turn actually ending -- cancelled or not -- is what retires the flag.
+    // (The message stop precedes turn completion and resolves Thinking -> Idle.)
+    state.FinalizeStreamingText();
+    state.OnTurnCompleted(v1::TurnCompletedEvent{});
+    CHECK_FALSE(state.TakeSnapshot().cancel_requested);
+
+    // Waiting counts as busy too: the server's cancel answers a parked prompt
+    // with a denial, so a wedged prompt is interruptible.
+    auto pp = std::make_unique<PendingPermission>();
+    pp->request_id = "perm-1";
+    state.SetPermissionRequest(std::move(pp));
+    REQUIRE(state.TakeSnapshot().state == SessionStateKind::Waiting);
+    state.RequestCancel();
+    CHECK(state.TakeSnapshot().cancel_requested);
+    state.OnError("connection lost");
+    CHECK_FALSE(state.TakeSnapshot().cancel_requested);
+}
+
+TEST_CASE("answering a command confirmation leaves Waiting -- the wedge fix",
+          "[session_state]") {
+    // A command confirmation (/clear, /permission-mode) is answered with no
+    // tool events or message stops following: the server worker was BLOCKED
+    // on the answer, so nothing else re-derives the tab state. Without
+    // OnPendingResolved the tab stayed stranded in Waiting with the '!' glyph
+    // and nothing pending -- the exact wedge the confirmation-modal wiring
+    // exists to kill.
+    SessionState state("s-1");
+
+    auto cp = std::make_unique<PendingConfirmation>();
+    cp->request_id = "confirm-1";
+    cp->options = {"Yes", "No"};
+    state.SetConfirmationRequest(std::move(cp));
+    REQUIRE(state.TakeSnapshot().state == SessionStateKind::Waiting);
+
+    // AnswerConfirmation = ClearPendingFor + OnPendingResolved (state.cpp).
+    state.ClearPendingFor("confirm-1");
+    state.OnPendingResolved();
+    auto snap = state.TakeSnapshot();
+    CHECK(snap.state == SessionStateKind::Idle);
+    CHECK_FALSE(snap.pending_confirmation.has_value());
+}
+
+TEST_CASE("OnPendingResolved does not clobber an active tool", "[session_state]") {
+    SessionState state("s-1");
+    state.OnToolStarted(StartTool("t-1"));
+    REQUIRE(state.TakeSnapshot().state == SessionStateKind::Working);
+
+    state.OnPendingResolved();   // nothing pending: the guard keeps Working
+    CHECK(state.TakeSnapshot().state == SessionStateKind::Working);
+}
