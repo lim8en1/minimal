@@ -237,3 +237,65 @@ TEST_CASE("TryPush returns false on a closed queue, so refusal logging fires",
     queue.Close();
     CHECK_FALSE(queue.TryPush(1));
 }
+
+TEST_CASE("AbortWaitingProducers wakes a parked Push, which drops its event",
+          "[event_queue][invariant]") {
+    // THE INVARIANT: Cancel's unwedge. A worker parked on a full queue -- a
+    // stalled-but-connected client -- was exactly the state a cancel could
+    // not reach: the parked push blocked the very turn the user asked to
+    // stop. The abort must wake it to DROP, not leave it parked.
+    auto queue = std::make_shared<EventQueue<Sized>>(16, 100, PayloadBytes);
+    REQUIRE(queue->TryPush(Sized{std::string(90, 'x')}));
+    auto producer = RunInBackground([queue] { return queue->Push(Sized{std::string(90, 'y')}); });
+    std::this_thread::sleep_for(50ms);
+    CHECK_FALSE(producer.Ready());
+
+    queue->AbortWaitingProducers();
+    REQUIRE(producer.WaitFor(2s));
+    CHECK_FALSE(producer.Get());   // refused, and...
+    CHECK(queue->size() == 1);     // ...dropped, not queued
+}
+
+TEST_CASE("drop-mode self-heals at the next drain", "[event_queue][invariant]") {
+    // Latched rather than one-shot so a producer parking a moment AFTER the
+    // abort gets the same way out -- but the latch must not be permanent, or
+    // one cancel would degrade the queue for its whole life.
+    EventQueue<int> queue(2);  // count cap 2
+    queue.Push(1);
+    queue.Push(2);
+    queue.AbortWaitingProducers();
+    // While latched, an over-bounds push refuses immediately instead of parking.
+    CHECK_FALSE(queue.Push(3));
+    CHECK(queue.size() == 2);
+    // The drain clears the latch: the same push is accepted now.
+    CHECK(queue.Pop().value() == 1);
+    CHECK(queue.Push(3));
+    // ...and ordinary backpressure is back: a push at the cap parks.
+    auto producer = RunInBackground([&queue] { return queue.Push(4); });
+    std::this_thread::sleep_for(50ms);
+    CHECK_FALSE(producer.Ready());
+    CHECK(queue.Pop().value() == 2);
+    REQUIRE(producer.WaitFor(2s));
+    CHECK(producer.Get());
+    CHECK(queue.Pop().value() == 3);
+    CHECK(queue.Pop().value() == 4);
+}
+
+TEST_CASE("PushTerminal opts out of drop-mode, not out of backpressure", "[event_queue]") {
+    // A cancel that unwedges a worker on a full queue must not also swallow
+    // the turn's exit signal: TurnCompleted is how a headless client detects
+    // the end of a turn at all. It still waits for room like any other worker
+    // push -- only the drop-mode refusal is opted out of.
+    EventQueue<int> queue(2);
+    queue.Push(1);
+    queue.Push(2);
+    queue.AbortWaitingProducers();
+    CHECK_FALSE(queue.Push(3));
+
+    auto terminal = RunInBackground([&queue] { return queue.PushTerminal(3); });
+    std::this_thread::sleep_for(50ms);
+    CHECK_FALSE(terminal.Ready());  // still blocked -- for room, not by drop-mode
+    CHECK(queue.Pop().value() == 1);
+    REQUIRE(terminal.WaitFor(2s));
+    CHECK(terminal.Get());
+}

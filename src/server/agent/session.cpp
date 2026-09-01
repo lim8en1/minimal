@@ -200,12 +200,16 @@ Session::Session(SessionParams params, AgentPreset preset,
     // Returning false aborts the provider request. This is the cancellation path
     // that termination reuses -- there is no second mechanism, and adding one is
     // how a session ends up with two half-working ways to stop.
+    //
+    // Push's false is an abort too: refused means closed, or Cancel's
+    // AbortWaitingProducers latched drop-mode while this push was parked on a
+    // full queue -- the one state (stalled-but-connected client) a cancel
+    // previously could not reach. Either way the request must stop.
     llm::StreamEventSink event_sink = [this, queue, session_id](const llm::StreamEvent& stream) {
         if (IsCancelled()) return false;
         v1::ServerEvent event = MakeEvent(session_id);
         *event.mutable_stream_event() = rpc::ToProto(stream);
-        queue->Push(std::move(event));
-        return true;
+        return queue->Push(std::move(event));
     };
 
     // The real summarizer. Passed as the plain function rather than wrapped,
@@ -702,6 +706,13 @@ void Session::Cancel() {
     // not on its next poll slice. Everything a live token's waiters do from
     // here is the same path a deadline takes -- a cancelled tool call.
     cancel_source_.CancelAll();
+    // THE UNWEDGE. A worker parked in EventQueue::Push on a full queue -- a
+    // stalled-but-connected client, the one state backpressure exists for --
+    // was the one state a cancel could not reach: the parked push blocked the
+    // very turn the user asked to stop, and only stream close helped. The
+    // latch wakes that producer, which drops its event and unwinds; the
+    // stream sink's bool contract turns the refusal into the loop abort.
+    channels_->queue.AbortWaitingProducers();
     // Wakes a worker parked on a permission prompt. Without this, cancelling
     // during an Ask would set a flag nobody is in a position to read.
     //
@@ -736,6 +747,11 @@ void Session::Terminate() {
     // WirePermissionChecker::check on a question the client will never answer
     // (the other half of the two-file dependency documented at that Push).
     cancel_source_.CancelAll();
+    // Same unwedge Cancel gets: a worker parked on a full queue must not delay
+    // this teardown. Close() below would wake it anyway, but the worker has to
+    // unwind through a provider abort first, and the sink sees the refusal
+    // sooner this way.
+    channels_->queue.AbortWaitingProducers();
     channels_->pending.Shutdown();
     // Refuses future out-of-band pushes: a background task finishing mid-
     // teardown learns "session gone" from its schedule_injection returning
@@ -1027,7 +1043,13 @@ void Session::EmitTurnCompleted(llm::StopReason stop_reason, const llm::Usage& u
     completed->set_stop_reason(rpc::ToProto(stop_reason));
     *completed->mutable_usage() = rpc::ToProto(usage);
     completed->set_hit_max_turns(hit_max_turns);
-    channels_->queue.Push(std::move(event));
+    // PushTerminal, not Push: this is the turn's exit signal, and a headless
+    // client detects the end of a turn by it alone. When a cancel has latched
+    // drop-mode on a full queue, every ordinary event of the unwinding turn
+    // may drop -- but dropping THIS one would convert the unwedge into a
+    // silent hang on the client. It still waits for room like any other
+    // worker push; only the drop-mode refusal is opted out of.
+    channels_->queue.PushTerminal(std::move(event));
 }
 
 bool Session::idle() const {

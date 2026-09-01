@@ -2,6 +2,7 @@
 #include <chrono>
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -481,6 +482,106 @@ TEST_CASE("terminating a worker parked on a full queue returns instead of deadlo
     });
     REQUIRE(terminated.WaitFor(5s));
     CHECK(fixture.session->terminated());
+}
+
+// Emits exactly one output chunk -- the push that parks when the outbound
+// queue is full -- and records its own progress, so the test can observe the
+// park and the unwedge from outside.
+class EmittingTool : public tools::Tool {
+public:
+    EmittingTool(std::string name, std::atomic<bool>& started, std::atomic<bool>& finished)
+        : started_(started), finished_(finished) {
+        spec_.name = std::move(name);
+        spec_.category = tools::ToolCategory::ReadOnly;
+        spec_.definition.name = spec_.name;
+        spec_.definition.description = "emits one output chunk";
+        spec_.definition.input_schema = nlohmann::json::object();
+    }
+
+    const tools::ToolSpec& spec() const override { return spec_; }
+
+    tools::ToolResult execute(const nlohmann::json&, tools::ToolContext& ctx) override {
+        started_.store(true, std::memory_order_release);
+        if (ctx.emit_output) ctx.emit_output("chunk");
+        finished_.store(true, std::memory_order_release);
+        return {false, "done"};
+    }
+
+private:
+    tools::ToolSpec spec_;
+    std::atomic<bool>& started_;
+    std::atomic<bool>& finished_;
+};
+
+TEST_CASE("cancel unwedges a worker parked on a full queue", "[session][invariant]") {
+    // THE INVARIANT: Cancel must reach the one state backpressure creates --
+    // a worker parked in EventQueue::Push on a full queue behind a
+    // stalled-but-connected client. AbortWaitingProducers latches drop-mode;
+    // the parked push refuses instead of blocking, the tool returns, and the
+    // turn unwinds with Cancelled. Remove the abort and the emit_output push
+    // below parks forever: the turn the user cancelled cannot end, and the
+    // finished latch never sets.
+    SessionFixture fixture;
+    std::atomic<bool> started{false};
+    std::atomic<bool> finished{false};
+    fixture.tools_registry.Register(std::make_unique<EmittingTool>("spew", started, finished));
+    // No stream events: the provider call itself never pushes, so the ONLY
+    // park is the tool's emit_output -- which cannot be raced, because the
+    // queue is already full when the turn starts.
+    fixture.Script(testing::ToolUseResponse("call-1", "spew"));
+    fixture.Start();
+
+    // Fill the queue to ONE slot short of its cap; nothing will drain it (the
+    // writer is the test's problem here). The single remaining slot is taken
+    // by the tool's started lifecycle event, so the tool's own emit_output
+    // push is GUARANTEED to park -- which is what makes the cancel rendezvous
+    // below race-free.
+    const std::size_t cap = fixture.session->queue().max_size();
+    while (fixture.session->queue().size() < cap - 1) {
+        v1::ServerEvent filler;
+        filler.set_session_id("sess-1");
+        REQUIRE(fixture.session->queue().TryPush(std::move(filler)));
+    }
+
+    fixture.session->SubmitTurn("go");
+    const auto started_deadline = std::chrono::steady_clock::now() + 5s;
+    while (!started.load(std::memory_order_acquire) &&
+           std::chrono::steady_clock::now() < started_deadline) {
+        std::this_thread::sleep_for(1ms);
+    }
+    REQUIRE(started.load(std::memory_order_acquire));  // the tool ran; its chunk push parked
+
+    fixture.session->Cancel();
+
+    // The parked push must refuse promptly. Waiting for the TOOL's own
+    // finish -- not for TurnCompleted, whose delivery legitimately waits for
+    // room -- is what makes this assert the unwedge itself rather than
+    // accidental draining.
+    const auto finished_deadline = std::chrono::steady_clock::now() + 5s;
+    while (!finished.load(std::memory_order_acquire) &&
+           std::chrono::steady_clock::now() < finished_deadline) {
+        std::this_thread::sleep_for(1ms);
+    }
+    CHECK(finished.load(std::memory_order_acquire));
+
+    // Now drain: the fillers come out first, then the turn's TurnCompleted --
+    // a PushTerminal, so the unwedge could not swallow it -- carrying
+    // Cancelled, because the loop re-checked cancellation after the tool
+    // returned.
+    std::optional<v1::StopReason> observed;
+    auto drainer = testing::RunInBackground([&fixture, &observed] {
+        while (auto event = fixture.session->queue().Pop()) {
+            if (event->has_turn_completed()) {
+                observed = event->turn_completed().stop_reason();
+                return true;
+            }
+        }
+        return false;
+    });
+    REQUIRE(drainer.WaitFor(5s));
+    REQUIRE(observed.has_value());
+    CHECK(*observed == v1::STOP_REASON_CANCELLED);
+    CHECK_FALSE(fixture.session->terminated());  // cancel ends the turn, not the session
 }
 
 TEST_CASE("a subagent terminated before its turn ran still fires the completion hook",

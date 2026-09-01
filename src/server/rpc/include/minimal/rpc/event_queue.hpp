@@ -31,7 +31,10 @@
 //
 // The two push flavours match the thread contract exactly (see session.hpp):
 // Push blocks when full and is for the WORKER, which is allowed to block;
-// TryPush never blocks and is for the READER, which must not.
+// TryPush never blocks and is for the READER, which must not. Push's one
+// non-blocking exit is drop-mode below: a cancel must be able to unwedge a
+// worker parked on a full queue, and the event it was trying to deliver at
+// that moment is the correct thing to lose.
 
 #include <condition_variable>
 #include <cstddef>
@@ -69,18 +72,49 @@ public:
     // only to be discarded: a producer racing teardown should not have to
     // check first, and silently dropping is correct once there is provably no
     // one left to deliver to.
-    void Push(T event) {
+    //
+    // Returns whether the event was queued. False means the queue is closed,
+    // or drop-mode (below) latched and the queue is over its bounds -- the
+    // caller decides what a refusal means. The stream sink's refusal is the
+    // loop abort; sinks without a bool contract simply lose the event.
+    bool Push(T event) {
+        bool accepted = false;
         {
             std::unique_lock<std::mutex> lock(mutex_);
             // Closed wakes it too, or a worker would park forever on a queue
-            // whose consumer has already gone.
+            // whose consumer has already gone. Drop-mode wakes it to DROP,
+            // not to block again -- that is the whole point of Cancel's
+            // unwedge.
             space_cv_.wait(lock, [this, &event] {
-                return closed_ || Fits(event);
+                return closed_ || drops_ || Fits(event);
             });
-            if (closed_) return;
+            if (closed_) return false;
+            if (!Fits(event)) return false;  // drop-mode latched: see below
             Accept(std::move(event));
+            accepted = true;
         }
         cv_.notify_one();
+        return accepted;
+    }
+
+    // The TurnCompleted-shaped push: drop-mode never applies. A cancel that
+    // unwedges a worker on a full queue must not also swallow the turn's exit
+    // signal -- a headless client detects the end of a turn by TurnCompleted
+    // alone, and dropping it converts the unwedge back into a silent hang.
+    // Still blocks for ROOM (the ordinary backpressure a full queue exerts,
+    // released by the next drain or by Close at teardown); it only opts out
+    // of the drop-mode refusal.
+    bool PushTerminal(T event) {
+        bool accepted = false;
+        {
+            std::unique_lock<std::mutex> lock(mutex_);
+            space_cv_.wait(lock, [this, &event] { return closed_ || Fits(event); });
+            if (closed_) return false;
+            Accept(std::move(event));
+            accepted = true;
+        }
+        cv_.notify_one();
+        return accepted;
     }
 
     // READER-THREAD push. Never blocks; false means the queue refused the
@@ -115,6 +149,9 @@ public:
         T event = std::move(events_.front().event);
         bytes_total_ -= events_.front().bytes;
         events_.pop_front();
+        // A successful drain ends drop-mode: room exists again, so ordinary
+        // backpressure -- block, never drop -- is the right policy from here.
+        drops_ = false;
         space_cv_.notify_one();
         return event;
     }
@@ -126,6 +163,7 @@ public:
         T event = std::move(events_.front().event);
         bytes_total_ -= events_.front().bytes;
         events_.pop_front();
+        drops_ = false;  // same self-heal as Pop
         space_cv_.notify_one();
         return event;
     }
@@ -138,6 +176,28 @@ public:
             closed_ = true;
         }
         cv_.notify_all();
+        space_cv_.notify_all();
+    }
+
+    // Latches drop-mode: until the consumer next drains (Pop/TryPop), Push
+    // REFUSES over-bounds events instead of blocking on them. Cancel's
+    // unwedge: a worker parked on a full queue -- a stalled-but-connected
+    // client, the one state backpressure exists for -- was exactly the state
+    // a cancel could not reach: the parked push blocked the very turn the
+    // user asked to stop, and only stream close helped.
+    //
+    // Latched rather than one-shot so a producer parking a moment AFTER the
+    // cancel gets the same way out, and so the self-heal is visible: the
+    // latch clears at the next successful drain, when ordinary backpressure
+    // resumes. NOT Close(): cancel ends a turn, not the session -- the queued
+    // backlog stays deliverable, the queue stays open, and PushTerminal
+    // events still wait for room.
+    void AbortWaitingProducers() {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (closed_) return;
+            drops_ = true;
+        }
         space_cv_.notify_all();
     }
 
@@ -200,6 +260,10 @@ private:
     std::size_t bytes_total_ = 0;
     SizeOf size_of_;
     bool closed_ = false;
+    // Drop-mode, latched by AbortWaitingProducers, cleared by the next
+    // successful drain: while set, Push refuses over-bounds events instead of
+    // blocking the worker on them.
+    bool drops_ = false;
 };
 
 }  // namespace minimal::rpc
