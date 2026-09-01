@@ -371,6 +371,22 @@ TEST_CASE("a fresh database opens at the current schema version in WAL mode",
     CHECK(tables.count("messages") == 1);
 }
 
+TEST_CASE("the default migration list ends at kSchemaVersion", "[session][migrations][invariant]") {
+    // The guard: kSchemaVersion is the TARGET the version arithmetic stamps,
+    // so it must name the last migration's version. A migration added without
+    // the bump (or a bump without its migration) would otherwise advance
+    // user_version past statements that never ran -- re-applied or skipped
+    // forever, silently. The guard in DefaultMigrations makes that a loud
+    // startup failure; this asserts the property directly.
+    const auto& migrations = DefaultMigrations();
+    REQUIRE(!migrations.empty());
+    CHECK(migrations.back().version == SessionDatabase::kSchemaVersion);
+    int expected_version = 1;
+    for (const auto& migration : migrations) {
+        CHECK(migration.version == expected_version++);
+    }
+}
+
 TEST_CASE("a database newer than the binary is refused with a clear error", "[session][migrations]") {
     TempDir dir;
     const auto path = dir.path() / "new.db";

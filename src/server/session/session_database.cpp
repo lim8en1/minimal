@@ -127,6 +127,19 @@ const std::vector<Migration>& DefaultMigrationsImpl() {
              "ALTER TABLE sessions ADD COLUMN name_source TEXT NOT NULL DEFAULT '';",
          }},
     }};
+    // The invariant the version arithmetic depends on, checked where the list
+    // is built: kSchemaVersion is the TARGET of ApplyMigrations, so it must
+    // name the LAST migration's version. A migration added without the bump
+    // (or a bump without its migration) would otherwise set user_version past
+    // statements that never ran -- re-applied or skipped forever, silently.
+    // Custom lists injected through OpenOptions (the test seam) are exempt:
+    // they exist to exercise partial histories against a chosen target.
+    if (migrations.empty() || migrations.back().version != SessionDatabase::kSchemaVersion) {
+        throw std::runtime_error(
+            "DefaultMigrations does not end at kSchemaVersion (" +
+            std::to_string(SessionDatabase::kSchemaVersion) + ") -- a migration was added "
+            "without the schema-version bump, or the bump landed without its migration");
+    }
     return migrations;
 }
 
