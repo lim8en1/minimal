@@ -645,28 +645,86 @@ file appears in any race graph. Notes the work recorded:
 
 ### W8 — Session/registry concurrency + protocol
 
-1. **`attached_` race:** increment before `TryAttach`, decrement + release on attach
-   failure; `catch(...)` alongside `catch(std::exception)` in `OpenSession`.
-2. **Concurrent resume:** a registry reservation — the `session_id` is claimed under
-   the registry mutex before construction (guard releases on failure); duplicate
-   construction, double torn-tail repair, and phantom observer events become
-   impossible. *Test:* two concurrent resumes → one `ALREADY_EXISTS` before any side
-   effect.
-3. **`SessionEnded` event (decision):** additive proto oneof case; `Terminate` emits
-   it before `Close` so the writer drains it; the headless client handles it (stop
-   reading, exit cleanly); the silent no-op handler loop ends. *E2E:* a cancelled
-   blocking subagent → the client receives `SessionEnded` for the child.
-4. **Cancel-unwedge:** `EventQueue::AbortWaitingProducers()` called from `Cancel` and
-   `Terminate`; a parked `Push` wakes and returns false; the sinks' existing
-   bool-return contract turns that into a loop abort. *Test:* full queue + stalled
-   writer + `CancelTurn` → the worker joins promptly.
-5. `Server::Wait` shutdown gets a deadline (30 s) then hard shutdown, logged.
-6. The veto path emits `NotifyTurnCompleted` — restructured so the bottom block cannot
-   be returned past (scope guard), the same every-exit-path shape as the catch blocks.
-7. `Compact()` re-seeds occupancy; the estimate is extended to include the system
-   prompt and tools array (`EstimateContext` helper used at every seed site).
-8. `CancelSource::CancelAll` holds the collection lock through cancellation — `Mint`
-   cannot land in the snapshot window.
+**Status: landed.** Full suite, `asan` and `tsan` presets green. All eight items landed as
+specified, with the records the work produced:
+
+- **The queue unwedge is a LATCH, not a one-shot wake.** The planned
+  `AbortWaitingProducers` "parked `Push` wakes and returns false" has a race as a
+  one-shot notify: a producer that parks a moment *after* the cancel is in the same
+  wedge and is missed by it. So the abort latches **drop-mode** — `Push` refuses
+  over-bounds events instead of blocking, until the next successful `Pop` — which
+  covers both the parked producer and the one arriving late, and self-heals at the
+  next drain so one cancel cannot degrade the queue for its life. The latch then
+  threatened a NEW silence: `EmitTurnCompleted` would drop on a full queue, and a
+  headless client detects the end of a turn by `TurnCompletedEvent` alone — so the
+  queue gained `PushTerminal` (drop-mode never applies; ordinary backpressure
+  still does), used for the turn exit signal. The stream sink's `Push` return now
+  feeds its existing `bool` contract directly, and the tool-lifecycle sink is
+  unchanged: the latch, not a sink-side guard, is what keeps the unwind from
+  re-parking.
+- **W8.2's reservation replaced the backstop.** `CreateResolved` claims
+  `session_id` under the registry mutex before ANY construction work (a new
+  `reserved_` set beside `sessions_`; insert and release happen in one critical
+  section), throwing the new `SessionAlreadyOpen` — which the service maps to
+  `ALREADY_EXISTS` on both the create and resume paths. The old end-of-construction
+  backstop is gone; the test proves the loser's refusal lands while the winner is
+  provably parked mid-construction (a blocking provider factory) and that a torn
+  tail is repaired exactly once.
+- **W8.1's count leads the claim.** `attached_` is incremented before `TryAttach`
+  and released on every refused path through a single `ReleaseClientSlot` (which
+  owns the last-client callback, so a zero can never go unobserved);
+  `OpenSession`'s failure cleanup collapsed into one local `fail` helper shared by
+  the `std::exception` and new `catch(...)` guards.
+- **W8.5's grace is a constructor parameter** (30 s default) so the half-open-stream
+  test passes a short one instead of sleeping 30 s: an attached stream that never
+  closes, shutdown requested → `Wait()` returns within the deadline, RPCs cancelled.
+- **W8.7's estimate is built from `BuildChatRequest`**, not alongside it — system
+  prompt, project context and tool schemas all flow through the one composition, so
+  the estimate and the request cannot drift. `JsonSizeEstimate` moved from the
+  compactor's anonymous namespace into the header (the tool schemas need it).
+  `Compact()` re-seeds via `SeedOccupancy` only — cumulative backend-reported
+  totals stay intact, unlike the rewind paths' full reset.
+- **W8.3's event is field-less on purpose**: every terminate path means the same
+  thing to a client, so presence is the signal; the headless client treats it as
+  terminal on all three streams (turn, command, child attach) and exits
+  `kUnavailable` with a named message. One consequence the E2E work surfaced: the
+  raw-stub clients in the MCP tests half-closed and called `Finish()` right at
+  `turn_completed`, and the terminal event now lands AFTER that — a sync-API client
+  that stops reading with a server message still in flight wedges on the trailing
+  status (the constraint `DrainAndFinish` in `session_service_test.cpp` has always
+  documented). The real client already reads to end, so only the four tests needed
+  the drain. Any client that abandons reads mid-stream was always exposed to this
+  (titler metadata, background task events); the terminal event merely made it
+  deterministic.
+- **Pre-existing third-party TSan race, recorded as evidence (not W8's):** under
+  parallel TSan load, `a stored session resumes headlessly` intermittently aborts
+  on a data race INSIDE SQLite's parser (`sqlite3ParserTrace`/`yyTraceShift`
+  globals) between two DIFFERENT connections — `SessionDatabase::GetSession`
+  (sessions.db, RPC thread) vs `PluginStorage::Set` (plugins.db, the cost-tracker
+  observer's dispatch thread, since edd4c43). Reproduced 10/25 sequential runs on
+  the CLEAN tree; no first-party code appears in the race graph. The vcpkg sqlite3
+  build evidently compiles the debug parser trace, whose globals are unsynchronized
+  across connections. Candidate fixes for a future pass: build sqlite without
+  `SQLITE_DEBUG`, or a TSan suppression file.
+
+| # | Fix | Files |
+|---|---|---|
+| 8.1 | Refcount leads the attach claim; one decrement+callback function; `catch(...)` beside `catch(std::exception)` | `session_service.cpp:472-596`, `session_service.hpp` |
+| 8.2 | Registry reservation before construction (`SessionAlreadyOpen` → `ALREADY_EXISTS`); backstop removed | `session_registry.{hpp,cpp}`, `session_service.cpp` |
+| 8.3 | `SessionEndedEvent` (additive oneof case 14); emitted by `Terminate` before `Close`; headless client terminal on turn/command/attach streams | `session_service.proto`, `session.cpp`, `session_client.cpp`, `app.cpp` |
+| 8.4 | `EventQueue::AbortWaitingProducers` (drop-mode latch, cleared on drain) + `PushTerminal`; called from `Cancel` and `Terminate`; stream sink propagates the refusal | `event_queue.hpp`, `session.cpp` |
+| 8.5 | `Server::Wait` shutdown deadline (grace param, 30 s default), forced cancellation logged | `server.{hpp,cpp}` |
+| 8.6 | Veto path falls through to the every-exit-path bottom block (flag, not early return) | `session.cpp` (`RunOneTurn`) |
+| 8.7 | `Compact()` re-seeds occupancy; `EstimateContextTokens` (system + project context + tools + history) at every seed site | `agent_loop.{hpp,cpp}`, `context_compactor.hpp` |
+| 8.8 | `CancelSource::CancelAll` holds the registry lock through cancellation (source.mu_ → token.mu_, one-directional) | `cancel_token.hpp` |
+
+*Tests:* two concurrent resumes → the loser refuses `ALREADY_EXISTS` before the
+torn-tail repair (blocking-factory rendezvous); a parked `Push` drops on abort and
+drop-mode self-heals at the next drain; full-queue + `Cancel` → the tool finishes
+promptly and `TurnCompleted(Cancelled)` is delivered on drain; a vetoed prompt
+notifies the observer twice; the seeded occupancy crosses the trigger from the
+system prompt alone; a half-open stream cannot block shutdown past the grace; E2E
+— a cancelled blocking subagent's client receives `SessionEnded` and not silence.
 
 ### W9 — MCP client
 
