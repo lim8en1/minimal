@@ -141,9 +141,13 @@ llm::ChatResponse OpenAiProvider::StreamComplete(const llm::ChatRequest& request
             try {
                 // Blocks announced but never closed: the client's view has to be
                 // consistent even when the stream was cut. The sink is passed
-                // because these are wire events, not response content.
+                // because these are wire events, not response content. Tolerance
+                // mode: a call whose arguments were cut mid-JSON is dropped, so
+                // a user cancel surfaces as Cancelled -- the exit code derives
+                // from the stop reason -- instead of a parse failure.
                 reassembler.CloseOpenBlocks(sink);
-                llm::ChatResponse response = reassembler.Finalize();
+                llm::ChatResponse response =
+                    reassembler.Finalize(/*tolerate_malformed_tool_calls=*/true);
                 response.stop_reason = llm::StopReason::Cancelled;
                 return response;
             } catch (const OpenAiParseError& parse_error) {

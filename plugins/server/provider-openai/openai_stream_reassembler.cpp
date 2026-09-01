@@ -113,7 +113,7 @@ void OpenAiStreamReassembler::CloseOpenBlocks(const llm::StreamEventSink& sink) 
     }
 }
 
-llm::ChatResponse OpenAiStreamReassembler::Finalize() const {
+llm::ChatResponse OpenAiStreamReassembler::Finalize(bool tolerate_malformed_tool_calls) const {
     llm::ChatResponse response;
     response.id = id_;
     response.model = model_;
@@ -139,6 +139,13 @@ llm::ChatResponse OpenAiStreamReassembler::Finalize() const {
                 tool_use.input =
                     block.arguments_json.empty() ? nlohmann::json::object() : nlohmann::json::parse(block.arguments_json);
             } catch (const nlohmann::json::exception& error) {
+                // Cancellation tolerance: a stream the SINK cut (the user hit
+                // cancel while tool-call arguments were mid-JSON) must report
+                // Cancelled, not a parse failure -- the §11.4 exit-code fix is
+                // defeated otherwise, and the truncated call carries no
+                // decision the transcript needed. Same posture as the empty-id
+                // drop above: not there is more honest than half-there.
+                if (tolerate_malformed_tool_calls) continue;
                 throw OpenAiParseError(std::string("malformed tool-call arguments: ") + error.what());
             }
             response.content.push_back(std::move(tool_use));

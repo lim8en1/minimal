@@ -28,13 +28,17 @@ public:
     // Callable at any point (after "[DONE]", after frames run out, or after
     // FeedFrame returned false) to get the response assembled so far. Throws
     // OpenAiParseError if an accumulated tool-call `arguments` string isn't
-    // valid JSON.
+    // valid JSON -- unless tolerate_malformed_tool_calls, the CANCELLATION
+    // mode: a user cancel landing mid-arguments is reported as Cancelled, not
+    // as a parse error, and the truncated call is dropped the way a call whose
+    // id never arrived is (there is no tool_use in history to answer, so
+    // nothing is orphaned; complete calls are kept).
     // Emits ContentBlockStop for every block still open, for a stream that
     // ended without a finish_reason (idle timeout, dropped connection, cancelled
     // sink). Idempotent with the finish_reason path.
     void CloseOpenBlocks(const llm::StreamEventSink& sink);
 
-    llm::ChatResponse Finalize() const;
+    llm::ChatResponse Finalize(bool tolerate_malformed_tool_calls = false) const;
 
 private:
     struct Block {

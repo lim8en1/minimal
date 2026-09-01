@@ -426,6 +426,18 @@ child's turn has ended; it holds no slot).
 
 ### W3 — Orphaned tool_use + reassembly hardening (ship-blocker 2)
 
+**Status: landed.** Full suite, `asan` and `tsan` presets green (1041 tests each; four
+new). Items 1–3 landed as specified, with one implementation note: the repair helper
+already lived in shared domain code (`compaction_boundary.cpp`), so the live loop calls
+it rather than a new extraction. The TSan runs additionally surfaced — intermittently,
+under parallel load, never in isolation — a **pre-existing race in the MCP teardown
+path**: `cpp-mcp`'s `stdio_client::stop_server_process()` (via
+`~McpStdioShim` → `~StdioTransport` → `~McpConnection`) racing the connection's own
+worker thread inside a blocking cpp-mcp call. None of W3's files appear in the race
+graph; this is W9 item 1's exact territory and is recorded there as its evidence —
+which is also why the W9 destructor-under-lock and graveyard work lands before the
+TSan bar can be called unconditionally clean for MCP-bearing configurations.
+
 1. **Live repair:** on every break path at `agent_loop.cpp:609/614` with non-empty
    `tool_uses`, synthesize error `ToolResultBlock`s and append+persist as one results
    message. Extract `synthesize_missing_tool_results` from `session_registry.cpp:206`
@@ -551,6 +563,11 @@ without stack death; `limit: 0` on a large file returns the clamped window + foo
    cannot land in the snapshot window.
 
 ### W9 — MCP client
+
+**Evidence note (from W3's TSan runs):** under parallel TSan load, the teardown path
+`~McpConnection → ~StdioTransport → ~McpStdioShim → cpp-mcp ~stdio_client →
+stop_server_process()` races the connection's worker thread inside a blocking cpp-mcp
+call — intermittent, never in isolation, and the concrete proof behind items 1–3 below.
 
 1. `StartHandle`: the old connection is moved out under `handle.mu` and destroyed
    **after** releasing; a timed-out caller hands its last `shared_ptr` to a

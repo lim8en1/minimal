@@ -116,6 +116,25 @@ bool AgentLoop::QueueInjectedMessage(llm::Message message) {
     return injections_->Push(std::move(message));
 }
 
+void AgentLoop::RepairOrphanedToolUses(
+    const std::vector<const llm::ToolUseBlock*>& tool_uses) {
+    if (tool_uses.empty()) return;
+    // The assistant message was appended (and persisted) BEFORE the
+    // stop-reason checks, so a turn that ends here -- a cancel landing after
+    // the model finished streaming tool calls (the most natural cancel
+    // moment), a MaxTokens cut with complete tool_calls, a refusal -- leaves
+    // history ending in unanswered tool_use: a hard 400 on both wire formats,
+    // on EVERY later turn. The live repair is the resume path's
+    // (synthesize_missing_tool_results): one error ToolResultBlock per
+    // unanswered call, appended and persisted as one real message. Cancellation
+    // is ordinary, not exceptional -- the same every-exit-path rule that makes
+    // a THROWING tool survivable (§12.2) and fires the completion hook on
+    // teardown applies to the transcript itself.
+    if (auto repair = synthesize_missing_tool_results(history_)) {
+        AppendAndPersist(std::move(*repair));
+    }
+}
+
 void AgentLoop::FlushInjectedMessages() {
     // DrainAll runs the sink outside the queue's mutex; AppendAndPersist
     // touches the store and must not hold it.
@@ -296,8 +315,12 @@ void AgentLoop::TruncateAfter(std::int64_t target_seq) {
     history_.erase(history_.begin() + static_cast<long>(idx), history_.end());
     if (history_.empty()) {
         // Mirrors ClearHistory: an empty working set has no persisted portion
-        // to be contiguous with, and the next append establishes it.
+        // to be contiguous with, and the next append establishes it. The
+        // summary flag goes with it: an empty set has no synthetic head, and
+        // leaving it set would make the next Compact() subtract a phantom
+        // summary in persisted_removed.
         first_persisted_seq_.reset();
+        head_is_summary_ = false;
     }
 
     // Same reset the constructor and /clear apply: the estimate described the
@@ -454,8 +477,13 @@ std::optional<std::size_t> AgentLoop::Compact(std::string_view trigger) {
                                  session_.session_id, error.what());
         }
         first_persisted_seq_ = boundary_seq + 1;
-        head_is_summary_ = true;
     }
+    // The summary is now the head WHATEVER the persisted bookkeeping did:
+    // a loop constructed without a first-persisted seq (the direct-API case;
+    // every Session seeding path sets one) still folds the summary into
+    // history_[0], and leaving head_is_summary_ false would make every later
+    // seq mapping -- and CheckpointBoundary() -- mis-count the synthetic head.
+    head_is_summary_ = true;
 
     // Rebuilt with moves, not copies: the kept tail is shifted once (moving
     // strings, which is pointer swaps) rather than duplicated. The summary
@@ -606,12 +634,18 @@ void AgentLoop::RunTurnLoop(TurnResult& result, bool flush_first) {
         // The only per-message token count that exists: this response's output.
         AppendAndPersist(std::move(assistant), response.usage.output_tokens);
 
-        if (response.stop_reason == llm::StopReason::Cancelled) break;
+        if (response.stop_reason == llm::StopReason::Cancelled) {
+            RepairOrphanedToolUses(tool_uses);
+            break;
+        }
 
         // Anything other than ToolUse ends the turn. MaxTokens in particular is
         // reported as itself rather than collapsed into EndTurn -- otherwise
         // output is truncated mid-sentence and the turn looks successful.
-        if (response.stop_reason != llm::StopReason::ToolUse) break;
+        if (response.stop_reason != llm::StopReason::ToolUse) {
+            RepairOrphanedToolUses(tool_uses);
+            break;
+        }
 
         if (tool_uses.empty()) break;  // ToolUse with no blocks: nothing to do
 
@@ -690,6 +724,18 @@ void AgentLoop::RunTurnLoop(TurnResult& result, bool flush_first) {
         // stable prompt-cache prefix.
         std::vector<llm::ContentBlock> results;
         results.resize(tool_uses.size());
+        // Wire-event failure must never take the tool result down: the sinks
+        // end in the session's EventQueue, the transcript is the authoritative
+        // record, and a throw here would otherwise unwind through a pool task.
+        auto emit_lifecycle = [this](const ToolLifecycleEvent& event) {
+            try {
+                if (session_.tool_lifecycle_sink) session_.tool_lifecycle_sink(event);
+            } catch (const std::exception& error) {
+                session_.logger.warn("tool lifecycle event dropped: {}", error.what());
+            } catch (...) {
+                session_.logger.warn("tool lifecycle event dropped (unknown exception)");
+            }
+        };
         auto execute_one = [&](PendingCall& call) {
             const auto* use = tool_uses[call.index];
             ToolLifecycleEvent lifecycle;
@@ -701,10 +747,29 @@ void AgentLoop::RunTurnLoop(TurnResult& result, bool flush_first) {
                 std::chrono::duration_cast<std::chrono::milliseconds>(
                     std::chrono::system_clock::now().time_since_epoch())
                     .count();
-            if (session_.tool_lifecycle_sink) session_.tool_lifecycle_sink(lifecycle);
+            emit_lifecycle(lifecycle);
 
             const auto tool_started = std::chrono::steady_clock::now();
-            llm::ToolResultBlock tool_result = executor_.Execute(call.prepared, call.ctx);
+            llm::ToolResultBlock tool_result;
+            try {
+                tool_result = executor_.Execute(call.prepared, call.ctx);
+            } catch (const std::exception& error) {
+                // Execute never throws by contract (tool_executor.hpp) -- but
+                // this is the one seam whose failure mode is std::terminate
+                // THROUGH a pool worker, and an unwind here would also race
+                // the round's other submitted tasks against this stack frame.
+                // An error result keeps every guarantee instead: the transcript
+                // stays paired, the round appends, the model adapts.
+                session_.logger.warn("tool {} threw past its executor guard: {}", use->name,
+                                     error.what());
+                tool_result = llm::ToolResultBlock{
+                    use->id, {llm::TextBlock{"tool execution failed unexpectedly"}}, true};
+            } catch (...) {
+                session_.logger.warn("tool {} threw past its executor guard (unknown exception)",
+                                     use->name);
+                tool_result = llm::ToolResultBlock{
+                    use->id, {llm::TextBlock{"tool execution failed unexpectedly"}}, true};
+            }
 
             // Emitted even when Execute() reports an error, and before the
             // result is appended: a client that showed a tool as started must
@@ -714,7 +779,7 @@ void AgentLoop::RunTurnLoop(TurnResult& result, bool flush_first) {
             lifecycle.is_error = tool_result.is_error;
             lifecycle.duration = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - tool_started);
-            if (session_.tool_lifecycle_sink) session_.tool_lifecycle_sink(lifecycle);
+            emit_lifecycle(lifecycle);
 
             results[call.index] = std::move(tool_result);
         };

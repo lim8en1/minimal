@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <unordered_set>
@@ -71,7 +72,7 @@ class ProbeTool : public tools::Tool {
 public:
     ProbeTool(std::string name, std::shared_ptr<ConcurrencyCounter> counter,
               std::function<void()> hold)
-        : counter_(std::move(counter)), hold_(std::move(hold)), name_(std::move(name)) {
+        : hold_(std::move(hold)), counter_(std::move(counter)), name_(std::move(name)) {
         spec_.name = name_;
         spec_.category = ToolCategory::ReadOnly;
         spec_.definition.name = name_;
@@ -133,6 +134,10 @@ struct Harness {
     AlwaysAllowPermissionChecker checker;
     // When set, the executor is built over this checker instead of `checker`.
     std::unique_ptr<tools::PermissionChecker> checker_override;
+    // When set, the tool lifecycle sink throws: the containment guard around
+    // execute_one's wire events is what keeps that from killing the tool call
+    // (and, on a pool worker, the process).
+    bool throwing_lifecycle_sink = false;
     // The policy the executor resolves with; AllowAll unless a test asks for
     // prompts.
     tools::PermissionPolicy executor_policy = AllowAllPolicy();
@@ -192,6 +197,11 @@ struct Harness {
         agent::SessionContext session{common::DefaultLogger()};
         session.session_id = "s1";
         session.project_root = ".";
+        if (throwing_lifecycle_sink) {
+            session.tool_lifecycle_sink = [](const agent::ToolLifecycleEvent&) {
+                throw std::runtime_error("simulated sink failure");
+            };
+        }
 
         loop = std::make_unique<agent::AgentLoop>(
             provider, *executor, registry, store, std::move(preset), config, std::move(session),
@@ -1301,6 +1311,135 @@ TEST_CASE("a cancel mid-round still answers every tool_use and reports Cancelled
     CHECK(ResultOf(results_message, 0).tool_use_id == "t1");
     CHECK(ResultOf(results_message, 1).tool_use_id == "t2");
     CHECK(ResultOf(results_message, 2).tool_use_id == "t3");
+}
+
+// Every assistant message carrying a tool_use block is answered by a following
+// user message with a matching ToolResultBlock -- the property both wire
+// formats hard-400 without. Run against any request's recorded messages.
+void AssertAllToolUsesAnswered(std::span<const llm::Message> messages,
+                               const std::string& context) {
+    for (std::size_t i = 0; i < messages.size(); ++i) {
+        if (messages[i].role != llm::Role::Assistant) continue;
+        for (const auto& block : messages[i].content) {
+            const auto* use = std::get_if<llm::ToolUseBlock>(&block);
+            if (use == nullptr) continue;
+            bool answered = false;
+            for (std::size_t j = i + 1; j < messages.size() && !answered; ++j) {
+                if (messages[j].role != llm::Role::User) continue;
+                for (const auto& result_block : messages[j].content) {
+                    if (const auto* result = std::get_if<llm::ToolResultBlock>(&result_block)) {
+                        if (result->tool_use_id == use->id) answered = true;
+                    }
+                }
+            }
+            INFO(context << ": tool_use " << use->id << " (message " << i << ")");
+            CHECK(answered);
+        }
+    }
+}
+
+TEST_CASE("a cancel landing after tool blocks streamed still yields a provider-valid "
+          "transcript",
+          "[agent_loop][invariant][cancel]") {
+    // The assistant message is appended and persisted BEFORE the stop-reason
+    // checks. A response that carries COMPLETE tool_use blocks but stops on
+    // Cancelled -- the sink aborting after the model finished streaming its
+    // calls, the most natural cancel moment -- used to break without answering
+    // them: an orphaned tool_use, a hard 400 on EVERY later turn, with the
+    // repair existing only on the resume path. The live loop repairs the same
+    // way now.
+    Harness h;
+    h.AddTool("probe");
+    h.Build();
+
+    h.provider.PushResponse(MultiToolUseResponse({{"u1", "probe"}}));
+    llm::ChatResponse cancelled_with_tools;
+    cancelled_with_tools.content.push_back(
+        llm::ToolUseBlock{"u2", "probe", nlohmann::json::object()});
+    cancelled_with_tools.stop_reason = llm::StopReason::Cancelled;
+    cancelled_with_tools.usage.input_tokens = 10;
+    cancelled_with_tools.usage.output_tokens = 5;
+    h.provider.PushResponse(std::move(cancelled_with_tools));
+    h.provider.PushResponse(TextResponse("after the cancel"));
+
+    const auto first = h.loop->RunTurn(UserText("go"));
+    CHECK(first.stop_reason == llm::StopReason::Cancelled);
+
+    // THE 400 REGRESSION: the next turn's request must serialize. Every
+    // tool_use -- including u2 from the cancelled round -- is answered.
+    const auto second = h.loop->RunTurn(UserText("continue"));
+    CHECK(second.stop_reason == llm::StopReason::EndTurn);
+    REQUIRE(h.provider.requests().size() == 3);
+    AssertAllToolUsesAnswered(h.provider.requests()[2].messages, "post-cancel request");
+
+    // The repair is a real appended message the model can adapt to: error
+    // blocks naming the interruption, keyed to the orphaned calls.
+    bool saw_repair = false;
+    for (const auto& message : h.store.messages) {
+        if (message.role != llm::Role::User) continue;
+        for (const auto& block : message.content) {
+            const auto* result = std::get_if<llm::ToolResultBlock>(&block);
+            if (result == nullptr || result->tool_use_id != "u2") continue;
+            saw_repair = true;
+            CHECK(result->is_error);
+            const auto* text = std::get_if<llm::TextBlock>(&result->content.front());
+            REQUIRE(text != nullptr);
+            CHECK(text->text.find("interrupted") != std::string::npos);
+        }
+    }
+    CHECK(saw_repair);
+}
+
+TEST_CASE("a max_tokens cut with complete tool calls repairs the same way",
+          "[agent_loop][invariant]") {
+    // The other break path: MaxTokens is reported as itself and ends the turn,
+    // and a cut that arrived after complete tool_calls used to orphan them
+    // exactly as a cancel did.
+    Harness h;
+    h.AddTool("probe");
+    h.Build();
+
+    h.provider.PushResponse(MultiToolUseResponse({{"u1", "probe"}}));
+    llm::ChatResponse truncated_with_tools;
+    truncated_with_tools.content.push_back(
+        llm::ToolUseBlock{"u2", "probe", nlohmann::json::object()});
+    truncated_with_tools.stop_reason = llm::StopReason::MaxTokens;
+    truncated_with_tools.usage.input_tokens = 10;
+    truncated_with_tools.usage.output_tokens = 5;
+    h.provider.PushResponse(std::move(truncated_with_tools));
+    h.provider.PushResponse(TextResponse("after the cut"));
+
+    const auto first = h.loop->RunTurn(UserText("go"));
+    CHECK(first.stop_reason == llm::StopReason::MaxTokens);
+
+    const auto second = h.loop->RunTurn(UserText("continue"));
+    CHECK(second.stop_reason == llm::StopReason::EndTurn);
+    REQUIRE(h.provider.requests().size() == 3);
+    AssertAllToolUsesAnswered(h.provider.requests()[2].messages, "post-max-tokens request");
+}
+
+TEST_CASE("a throwing lifecycle sink costs the event, never the tool result",
+          "[agent_loop][invariant]") {
+    // execute_one's sink calls are the one seam on the §12.2 path that ran
+    // unguarded -- and on a pool thread an escape is std::terminate for the
+    // whole process, while an unwind on the worker would race the round's
+    // other submitted tasks against this stack frame. The sinks are contained;
+    // the transcript is the authoritative record.
+    Harness h;
+    h.AddTool("probe");
+    h.throwing_lifecycle_sink = true;
+    h.Build();
+
+    h.provider.PushResponse(ToolUseResponse("tu1", "probe"));
+    h.provider.PushResponse(TextResponse("done"));
+
+    const auto result = h.loop->RunTurn(UserText("go"));
+    CHECK(result.stop_reason == llm::StopReason::EndTurn);
+    // Four rows: seed, assistant(tool_use), results, and the turn's own
+    // continuation -- the round ended, the loop called again, "done" ended it.
+    REQUIRE(h.store.messages.size() == 4);
+    REQUIRE(h.store.messages[2].content.size() == 1);
+    CHECK_FALSE(ResultOf(h.store.messages[2], 0).is_error);
 }
 
 TEST_CASE("max_parallel_tool_calls = 1 reproduces sequential dispatch",

@@ -218,3 +218,38 @@ TEST_CASE("a tool call cut before its id and name arrive is dropped, not half-em
     const auto response = reassembler.Finalize();
     CHECK(response.content.empty());
 }
+
+TEST_CASE("cancellation tolerance: a tool call cut mid-arguments is dropped, not a parse error",
+          "[openai_stream][invariant]") {
+    // A user cancel landing while tool-call arguments were mid-JSON used to
+    // surface as OpenAiParseError -> ParseError -- a non-retryable model error
+    // and the wrong exit code, defeating the cancel-reporting fix for exactly
+    // this subpath. In tolerance mode (the provider's cancel branch) the
+    // truncated call is dropped the way a call whose id never arrived is:
+    // there is no tool_use in history to answer, so nothing is orphaned, and
+    // complete calls in the same stream survive.
+    OpenAiStreamReassembler reassembler;
+    std::vector<llm::StreamEvent> events;
+    auto sink = CollectInto(events);
+
+    // A COMPLETE call first -- it must survive the tolerant finalize.
+    REQUIRE(reassembler.FeedFrame(
+        R"({"id":"c1","model":"m","choices":[{"delta":{"tool_calls":[{"index":0,"id":"call1","function":{"name":"bash","arguments":"{\"cmd\":\"ls\"}"}}]},"finish_reason":null}]})",
+        sink));
+    // A second call whose arguments were cut mid-JSON (the arguments STRING is
+    // invalid; the chunk carrying it stays parseable), then the stream stops.
+    REQUIRE(reassembler.FeedFrame(
+        R"({"id":"c1","model":"m","choices":[{"delta":{"tool_calls":[{"index":1,"id":"call2","function":{"name":"write","arguments":"{\"path\":\"a.cpp\""}}]},"finish_reason":null}]})",
+        sink));
+    reassembler.CloseOpenBlocks(sink);
+
+    llm::ChatResponse response;
+    REQUIRE_NOTHROW(response = reassembler.Finalize(/*tolerate_malformed_tool_calls=*/true));
+    REQUIRE(response.content.size() == 1);
+    const auto& kept = std::get<llm::ToolUseBlock>(response.content.front());
+    CHECK(kept.id == "call1");
+    CHECK(kept.input == nlohmann::json{{"cmd", "ls"}});
+
+    // Strict mode -- a non-cancel exit -- still refuses the malformed call.
+    CHECK_THROWS_AS(reassembler.Finalize(), OpenAiParseError);
+}

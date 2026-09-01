@@ -26,7 +26,17 @@ void ToolPool::WorkerMain() {
             tasks_.pop_front();
             ++running_;
         }
-        task();
+        try {
+            task();
+        } catch (...) {
+            // Unreachable by contract: every task is AgentLoop::execute_one,
+            // which is total -- an executor-guard escape becomes an error
+            // result, not a throw. The catch exists so a future task builder's
+            // mistake degrades to a lost task (the round's default-constructed
+            // result slot appends) instead of std::terminate taking every
+            // session in the process down. It wraps ONLY the call: the
+            // running_ bookkeeping below must run whatever happened.
+        }
         {
             std::lock_guard<std::mutex> lock(mutex_);
             --running_;
