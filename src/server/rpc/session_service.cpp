@@ -189,6 +189,13 @@ grpc::Status SessionServiceImpl::CreateSession(grpc::ServerContext* context,
     std::shared_ptr<agent::Session> session;
     try {
         session = sessions_.Create(std::move(params));
+    } catch (const agent::SessionAlreadyOpen& e) {
+        // The registry refused an id that is open or mid-construction. Not a
+        // configuration error: the client (or a racing duplicate) asked for a
+        // session that already exists.
+        db_.DeleteSession(row.session_id);
+        logger_.warn("CreateSession failed: {}", e.what());
+        return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, e.what());
     } catch (const std::exception& e) {
         // Preset and provider problems are configuration errors the operator has
         // to see and fix, so they come back with their reason attached rather
@@ -287,6 +294,14 @@ grpc::Status SessionServiceImpl::ResumeSession(const v1::CreateSessionRequest* r
         // Loads the stored transcript, repairs a torn tool-call tail if there
         // is one, and starts the session.
         (void)sessions_.Create(std::move(params));
+    } catch (const agent::SessionAlreadyOpen& e) {
+        // The registry's reservation refused this id: the session is open, or
+        // a concurrent resume of it is mid-construction. The service-layer
+        // Find() above catches the already-open case; the reservation catches
+        // the racing one, BEFORE the loser loads the transcript or appends a
+        // torn-tail repair row. The same answer either way.
+        logger_.warn("resume of session {} failed: {}", stored->session_id, e.what());
+        return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, e.what());
     } catch (const std::exception& e) {
         // NO ROLLBACK here, unlike fresh creation: the row is the user's
         // existing session, not one this call just minted. A failure (the

@@ -1,6 +1,6 @@
 #include "minimal/agent/session_registry.hpp"
 
-#include <stdexcept>
+#include <cstdio>\n#include <stdexcept>
 #include <utility>
 
 #include "minimal/agent/compaction_boundary.hpp"
@@ -77,8 +77,34 @@ std::shared_ptr<Session> SessionRegistry::Create(SessionParams params) {
 }
 
 std::shared_ptr<Session> SessionRegistry::CreateResolved(SessionParams params,
-                                                          AgentPreset preset,
-                                                          std::optional<int> max_turns_override) {
+                                                           AgentPreset preset,
+                                                           std::optional<int> max_turns_override) {
+    // THE RESERVATION, before anything else. The session_id is claimed under
+    // the registry mutex (against live sessions AND other in-flight
+    // constructions), and released either when the built session is inserted
+    // or by the guard below when construction throws. Every path into this
+    // funnel -- fresh creation, resume, subagent spawn -- pays the same
+    // ordering, so a concurrent duplicate of any of them is refused before
+    // the transcript load, the torn-tail repair append, or the worker start.
+    const std::string session_id = params.session_id;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (sessions_.count(session_id) || reserved_.count(session_id)) {
+            throw SessionAlreadyOpen("session '" + session_id + "' is already open");
+        }
+        reserved_.insert(session_id);
+    }
+    struct ReleaseReservation {
+        SessionRegistry& registry;
+        const std::string& id;
+        bool committed = false;
+        ~ReleaseReservation() {
+            if (committed) return;
+            std::lock_guard<std::mutex> lock(registry.mutex_);
+            registry.reserved_.erase(id);
+        }
+    } guard{*this, session_id};
+
     // Read before params is moved from.
     const std::string params_parent = params.parent_session_id;
     const std::filesystem::path project_root = params.project_root;
@@ -128,6 +154,7 @@ std::shared_ptr<Session> SessionRegistry::CreateResolved(SessionParams params,
                                  "' needs provider kind '" + preset.provider_kind +
                                  "', which no loaded plugin registered");
     }
+
     // SHARED, not per-session: providers are stateless by contract, so two
     // sessions on one providers.json entry share one instance instead of each
     // paying construction. The entry NAME is the key (immutable at runtime);
@@ -139,8 +166,6 @@ std::shared_ptr<Session> SessionRegistry::CreateResolved(SessionParams params,
         throw std::runtime_error("provider kind '" + preset.provider_kind +
                                  "' failed to construct");
     }
-
-    const std::string session_id = params.session_id;
 
     // Track M (docs/EXTENSIBILITY.md §2.1): the read side of the transcript.
     // Set here because this is the one funnel every session passes through --
@@ -240,17 +265,14 @@ std::shared_ptr<Session> SessionRegistry::CreateResolved(SessionParams params,
 
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        // Backstop, checked under the lock: the service layer refuses an
-        // already-open session via Find() before reaching here, but two
-        // concurrent resumes of the same id could both pass that check. A
-        // silent overwrite would leave two live Sessions appending to one
-        // transcript. For a fresh session the database-minted ULID makes a
-        // collision implausible, so this only matters for resume.
-        if (sessions_.count(session_id)) {
-            throw std::runtime_error("session '" + session_id + "' is already open");
-        }
+        // The RESERVATION made at the top of this function is what guarantees
+        // exclusivity -- no other construction can be in flight for this id,
+        // and no live session carries it. Inserting and releasing the claim in
+        // the same critical section leaves no window between the two states.
         sessions_[session_id] = session;
+        reserved_.erase(session_id);
     }
+    guard.committed = true;
     reaper_cv_.notify_all();
     return session;
 }

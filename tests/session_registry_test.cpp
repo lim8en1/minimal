@@ -2,6 +2,7 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <memory>
 #include <string>
 #include <thread>
@@ -401,8 +402,60 @@ TEST_CASE("resume of an already-open session is refused", "[session_registry][re
     REQUIRE(fixture.registry->Create(std::move(params)) != nullptr);
     auto dup = Params(row.session_id);
     dup.resume = true;
-    CHECK_THROWS_AS(fixture.registry->Create(std::move(dup)), std::runtime_error);
+    CHECK_THROWS_AS(fixture.registry->Create(std::move(dup)), agent::SessionAlreadyOpen);
     CHECK(fixture.registry->size() == 1);
+}
+
+TEST_CASE("a concurrent duplicate construction is refused before any side effect",
+          "[session_registry][resume][invariant]") {
+    // THE RESERVATION: the id is claimed under the registry mutex before any
+    // construction work runs. The old guard checked at the END of
+    // construction, so two concurrent resumes both loaded the transcript and
+    // both appended a torn-tail repair row before the loser was refused.
+    // Here the winner parks INSIDE CreateResolved -- after the reservation,
+    // before the transcript load -- making the loser's refusal observable
+    // while the winner is provably mid-construction.
+    RegistryFixture fixture;
+    fixture.config.WriteDefaults();
+
+    std::promise<void> factory_entered;
+    std::promise<void> factory_release;
+    fixture.providers.Register("fake", [&, entered = false](const llm::ProviderConfig&) mutable {
+        if (!entered) {
+            entered = true;
+            factory_entered.set_value();
+            factory_release.get_future().wait();
+        }
+        return std::make_unique<testing::FakeLlmProvider>();
+    });
+    fixture.Build(/*register_provider_kind=*/false);
+
+    // A TORN tail: if the loser got past the reservation it would append a
+    // synthesized repair row, and the count below would expose it.
+    const auto row = fixture.db->CreateSession("raced", std::nullopt, "/proj", "build");
+    fixture.db->AppendMessage(row.session_id,
+                              llm::Message{llm::Role::User, {llm::TextBlock{"run it"}}});
+    llm::Message tool_use{llm::Role::Assistant, {}};
+    tool_use.content.push_back(llm::ToolUseBlock{"call-1", "bash", {{"command", "make"}}});
+    fixture.db->AppendMessage(row.session_id, tool_use);
+
+    auto winner_params = Params(row.session_id);
+    winner_params.resume = true;
+    std::thread winner([&] { (void)fixture.registry->Create(std::move(winner_params)); });
+    factory_entered.get_future().wait();
+
+    auto loser_params = Params(row.session_id);
+    loser_params.resume = true;
+    CHECK_THROWS_AS(fixture.registry->Create(std::move(loser_params)),
+                    agent::SessionAlreadyOpen);
+    // The loser never touched the transcript: no repair row, no duplicate.
+    CHECK(fixture.db->LoadMessages(row.session_id).size() == 2);
+
+    factory_release.set_value();
+    winner.join();
+    CHECK(fixture.registry->Find(row.session_id) != nullptr);
+    // The winner's own resume repair landed exactly once.
+    CHECK(fixture.db->LoadMessages(row.session_id).size() == 3);
 }
 
 // --- Subagents -------------------------------------------------------------

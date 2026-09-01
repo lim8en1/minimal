@@ -16,9 +16,11 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "minimal/agent/agent_preset_registry.hpp"
@@ -33,6 +35,18 @@
 #include "minimal/tools/tool_registry.hpp"
 
 namespace minimal::agent {
+
+// Thrown by Create/CreateResolved when params.session_id names a session that
+// is already open -- or is being constructed RIGHT NOW by a concurrent call.
+// The registry reserves the id under its mutex before any construction work
+// runs, so the loser fails BEFORE the transcript load, the torn-tail repair
+// append, or any other side effect. The RPC layer maps this to ALREADY_EXISTS
+// (a duplicate resume is the client's doing) rather than FAILED_PRECONDITION
+// (which it reserves for configuration errors).
+class SessionAlreadyOpen : public std::runtime_error {
+public:
+    using std::runtime_error::runtime_error;
+};
 
 class SessionRegistry {
 public:
@@ -142,6 +156,13 @@ private:
     mutable std::mutex mutex_;
     std::condition_variable reaper_cv_;
     std::unordered_map<std::string, std::shared_ptr<Session>> sessions_;
+    // Ids claimed by an in-flight Create/CreateResolved, before any
+    // construction work has run. The old guard was a check at the END of
+    // construction -- after the resume transcript load, the torn-tail repair
+    // append, and the worker start -- so two concurrent resumes both did the
+    // full work before the loser was refused. A reservation under the same
+    // mutex makes the refusal the FIRST thing that happens.
+    std::unordered_set<std::string> reserved_;
     bool stopping_ = false;
     std::thread reaper_;
 };
