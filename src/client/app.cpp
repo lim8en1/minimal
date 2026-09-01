@@ -12,6 +12,8 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -21,11 +23,47 @@
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
+#include <atomic>
+#include <map>
+#include <memory>
+#include <optional>
+
+#include <ftxui/component/component.hpp>
+#include <ftxui/component/event.hpp>
+#include <ftxui/component/screen_interactive.hpp>
+#include <ftxui/dom/elements.hpp>
+
+#include "minimal/client/chat_model.hpp"
 #include "minimal/client/cli_args.hpp"
+#include "minimal/client/keybindings.hpp"
 #include "minimal/client/session_client.hpp"
+#include "minimal/client/status_format.hpp"
+#include "minimal/client/ui_config.hpp"
 #include "minimal/client/utf8.hpp"
+#include "minimal/client/plugins/client_plugin_abi.h"
+#include "minimal/client/plugins/client_plugin_loader.hpp"
+#include "minimal/client/plugins/core_registrations.hpp"
+#include "minimal/client/plugins/host_seams.hpp"
+#include "minimal/client/plugins/plugin_discovery.hpp"
+#include "minimal/client/plugins/registries.hpp"
+#include "minimal/client/view/chat_view.hpp"
+#include "minimal/client/view/prompt_editor.hpp"
+#include "minimal/client/view/prompt_modal.hpp"
+#include "minimal/client/view/session_picker.hpp"
+#include "minimal/client/view/status_bar.hpp"
+#include "minimal/client/view/tab_bar.hpp"
+#include "minimal/client/view/tools_panel.hpp"
+#include "minimal/client/render/color_downsample.hpp"
+#include "minimal/client/render/markdown_renderer.hpp"
+#include "minimal/client/render/syntax_highlighter.hpp"
+#include "minimal/client/render/streaming_markdown_view.hpp"
+#include "minimal/client/render/theme.hpp"
 #include "minimal/common/abi_tag.hpp"
+#include "minimal/common/bundled_assets.hpp"
 #include "minimal/common/config_paths.hpp"
+#include "minimal/common/logger.hpp"
+#include "minimal/plugins/name_registry.hpp"
 
 namespace {
 
@@ -408,17 +446,1058 @@ int RunHeadless(const HeadlessOptions& options) {
     return exit_code;
 }
 
-int RunTui(int argc, char** argv) {
-    (void)argc;
-    (void)argv;
-    // TODO: FTXUI frame -- tab bar / session view / optional panel / status bar,
-    // plus a modal layer. See ARCHITECTURE.md -- TUI layout.
-    std::puts("minimal: TUI not yet implemented");
-    return 0;
+// --- TUI --------------------------------------------------------------------
+//
+// Frame assembly (ARCHITECTURE.md "TUI layout"): tab bar / session view /
+// optional running-tools panel / status bar, plus a modal layer.
+//
+// THE BRIDGE: gRPC reader threads never touch FTXUI objects. They mutate
+// SessionState/AppState (plain, mutex-guarded state), and a 20 Hz pump posts a
+// custom event into the screen loop so it redraws from a snapshot. Every
+// component below READS state; nothing on the loop thread waits on the reader,
+// and nothing on the reader waits on the loop. The one exception is
+// RefreshScrollback -- a bounded (2 s deadline) unary call made ON the loop
+// thread at a fetch moment, chosen over detached threads whose lifetime would
+// race the screen's teardown (see AppState::RefreshScrollback).
+//
+// Keybindings: every action is dispatched through keybindings.json (the file
+// is the config); the table below only maps a key NAME to the byte sequences a
+// terminal may send for it. A name the terminal cannot encode matches nothing,
+// which is exactly what remapping exists for -- and what the startup warning
+// names.
+
+using minimal::client::AppState;
+using minimal::client::GrantToggles;
+using minimal::client::Keybindings;
+using minimal::client::PendingConfirmation;
+using minimal::client::PendingPermission;
+using minimal::client::PromptEditorState;
+using minimal::client::SessionState;
+using minimal::client::SessionStateKind;
+using minimal::client::Theme;
+
+std::vector<ftxui::Event> KeyToEvents(const std::string& key) {
+    using namespace ftxui;
+    if (key == "ctrl+tab") return {Event::Character("\x1b[27;5;9~")};
+    if (key == "ctrl+shift+tab") return {Event::Character("\x1b[27;6;9~")};
+    if (key == "alt+left") return {Event::Character("\x1b[1;3D"), Event::Character("\x1b\x1b[D")};
+    if (key == "alt+right") return {Event::Character("\x1b[1;3C"), Event::Character("\x1b\x1b[C")};
+    if (key == "alt+a") return {Event::AltA};
+    if (key == "ctrl+o") return {Event::CtrlO};
+    if (key == "ctrl+t") return {Event::CtrlT};
+    if (key == "ctrl+w") return {Event::CtrlW};
+    if (key == "ctrl+q") return {Event::CtrlQ};
+    if (key == "pageup") return {Event::PageUp};
+    return {};
+}
+
+bool MatchesAny(const ftxui::Event& event, const std::vector<ftxui::Event>& candidates) {
+    for (const auto& candidate : candidates) {
+        if (event == candidate) return true;
+    }
+    return false;
+}
+
+constexpr const char* kDefaultStatusFormat =
+    "{version} | {session} | {tokens} | {model} | {agent} | {permission_mode}";
+
+// What a quit / tab-close confirmation will destroy, when confirmed.
+struct PendingClose {
+    bool quit = false;
+    std::vector<std::string> session_ids;   // ordered children-first
+    bool any = false;
+};
+
+int RunTui(const minimal::client::ParsedArgs& args) {
+    using namespace ftxui;
+    namespace plugins = minimal::client::plugins;
+
+    const std::string target = args.headless.server.empty()
+                                   ? minimal::client::DefaultServerTarget()
+                                   : args.headless.server;
+    auto client = std::make_shared<minimal::client::SessionClient>(target);
+    if (!client->WaitForConnected(std::chrono::seconds(2))) {
+        std::fprintf(stderr, "cannot reach a minimal-server at %s\n", target.c_str());
+        std::fprintf(stderr, "start one with: minimal-server --listen %s\n",
+                     target.rfind("unix://", 0) == 0 ? target.c_str() + 7 : "<socket path>");
+        return kUnavailable;
+    }
+
+    // The /-command catalog, fetched ONCE at connect (plugins load at startup
+    // and config is read once, so the list cannot change mid-connection -- no
+    // invalidation machinery). Feeds the prompt editor's /-autocomplete.
+    std::vector<minimal::client::CommandCatalogEntry> command_catalog;
+    {
+        const auto listed = client->ListCommands();
+        if (listed.status.ok()) {
+            for (const auto& info : listed.response.commands()) {
+                command_catalog.push_back(
+                    {info.name(), info.summary(), info.read_only(),
+                     info.kind() == minimal::v1::COMMAND_KIND_PROMPT_SHORTHAND});
+            }
+        }
+    }
+
+    // --- config + client plugins --------------------------------------------
+    //
+    // ORDER MATTERS, and each step is load-bearing for a later one:
+    //   1. ui.json (status format -- it selects plugin segments by id)
+    //   2. vendored grammars registered as the additive registry's defaults
+    //   3. PLUGIN LOAD (contexts carry the attention sink and the data path;
+    //      registries record what each plugin claimed)
+    //   4. NameRegistry resolve: collisions fatal, dangling aliases warned
+    //   5. THEME (sections may reference loaded plugin names)
+    //   6. keybindings (+ plugin view defaults, only where nothing binds)
+    //   7. core defaults fill every unclaimed slot, then the frame is assembled
+    const auto config_dir = minimal::common::ConfigDir();
+    const auto depth = minimal::client::DetectColorDepth();
+    const auto ui = minimal::client::LoadUiConfig(config_dir);
+
+    plugins::AttentionState attention_state;
+    // The seam objects must OUTLIVE plugin registration: a plugin captures the
+    // raw pointer from its context at registration and may call it for the
+    // process lifetime (lazy Find, attention raises). Binding the factories
+    // inline into the loader call destroyed the temporaries at the end of that
+    // full expression -- every seam call was a virtual dispatch through freed
+    // memory.
+    const auto attention_sink = plugins::MakeHostAttentionSink(&attention_state);
+    const auto host_client_api = plugins::MakeHostClientApi(client.get());
+    plugins::ViewRegistry view_registry;
+    plugins::ToolResultRendererRegistry renderer_registry;
+    plugins::MessageRendererRegistry message_registry;
+    plugins::StatusSegmentRegistry status_registry;
+    plugins::SyntaxGrammarRegistry grammar_registry;
+    plugins::ChatSurfaceRegistry surface_registry;
+    plugins::MarkdownEngineRegistry engine_registry;
+
+    plugins::RegisterCoreSyntaxGrammars(grammar_registry);
+
+    // Discovery + load. The config file is the client's own (client-plugins.json);
+    // the server owns plugins.json, so neither writer can stomp the other's
+    // entries. Written back after discovery, like the server's.
+    plugins::ClientPluginConfig plugin_config;
+    {
+        const auto config_path = config_dir / "client-plugins.json";
+        std::error_code ec;
+        if (std::filesystem::exists(config_path, ec)) {
+            std::ifstream in(config_path);
+            const std::string contents((std::istreambuf_iterator<char>(in)),
+                                       std::istreambuf_iterator<char>());
+            plugin_config = plugins::ParseClientPluginConfig(contents);
+            // ParseClientPluginConfig degrades a malformed file to an empty
+            // config; silently rewriting the user's bytes over that default
+            // would destroy their enablement decisions and per-plugin config
+            // (a trailing comma would disable every user plugin on next
+            // boot). On a malformed parse: warn and DO NOT rewrite.
+            if (plugin_config.malformed) {
+                plugin_config.preserved = contents;
+                std::fprintf(stderr,
+                             "minimal: warning: %s is malformed -- it was NOT rewritten; "
+                             "fix or remove it to enable plugin config management\n",
+                             std::filesystem::path(config_path).c_str());
+            }
+        }
+        const auto candidates = plugins::DiscoverClientPlugins(
+            minimal::common::BundledClientPluginDir(), config_dir / "client-plugins",
+            plugin_config);
+        if (!plugin_config.malformed) {
+            // Same discipline as the server's WriteConfigIfChanged: create the
+            // parent dir, skip the write when nothing changed, report errors.
+            std::filesystem::create_directories(config_dir, ec);
+            const auto serialized = plugins::SerializeClientPluginConfig(plugin_config);
+            std::string existing;
+            if (std::filesystem::exists(config_path, ec)) {
+                std::ifstream in(config_path);
+                existing = std::string((std::istreambuf_iterator<char>(in)),
+                                       std::istreambuf_iterator<char>());
+            }
+            if (existing != serialized) {
+                std::ofstream out(config_path);
+                out << serialized;
+                if (!out) {
+                    std::fprintf(stderr, "minimal: warning: could not write %s\n",
+                                 std::filesystem::path(config_path).c_str());
+                }
+            }
+        }
+
+        plugins::ClientPluginLoader loader(view_registry, renderer_registry, message_registry,
+                                           status_registry, grammar_registry, surface_registry,
+                                           engine_registry, attention_sink.get(),
+                                           host_client_api.get());
+        const auto records = loader.LoadAll(candidates);
+
+        // Provenance-keyed severity, mirrored from the server's sanity check:
+        // a failed BUNDLED plugin is fatal (a silently missing renderer reads
+        // as a bug), a failed user plugin is a warning.
+        bool fatal = false;
+        for (const auto& record : records) {
+            if (record.ok() || record.status == plugins::LoadStatus::Disabled) {
+                if (record.status == plugins::LoadStatus::Disabled) continue;
+                std::fprintf(stderr, "minimal: client plugin '%s' loaded (%s)\n",
+                             record.name.c_str(), record.version.c_str());
+                continue;
+            }
+            if (record.provenance == plugins::Provenance::Bundled) {
+                std::fprintf(stderr, "minimal: FATAL: bundled client plugin '%s': %s (%s)\n",
+                             record.file.string().c_str(), plugins::ToString(record.status).data(),
+                             record.error.c_str());
+                fatal = true;
+            } else {
+                std::fprintf(stderr, "minimal: warning: client plugin '%s': %s (%s)\n",
+                             record.file.string().c_str(), plugins::ToString(record.status).data(),
+                             record.error.c_str());
+            }
+        }
+        if (fatal) return kUnavailable;
+
+        // Name collisions: the SAME rule as the server, through the shared
+        // NameRegistry (moved to common so both loaders run one mechanism).
+        // Registration keys are original names; a duplicate surface key is
+        // fatal and names both claimants.
+        minimal::plugins::NameRegistry names;
+        const auto feed = [&names](minimal::plugins::NameKind kind,
+                                   const std::vector<plugins::Attribution>& attributions) {
+            for (const auto& attribution : attributions) {
+                names.Register(kind, attribution.plugin_name, attribution.original_name);
+            }
+        };
+        feed(minimal::plugins::NameKind::ViewId, view_registry.attributions());
+        feed(minimal::plugins::NameKind::ToolResultRenderer, renderer_registry.attributions());
+        for (const auto& [kind, attribution] : message_registry.claims()) {
+            names.Register(minimal::plugins::NameKind::MessageRenderer,
+                           attribution.plugin_name, attribution.original_name);
+        }
+        feed(minimal::plugins::NameKind::StatusSegment, status_registry.attributions());
+        feed(minimal::plugins::NameKind::SyntaxGrammar, grammar_registry.attributions());
+        // Client aliases resolve collisions (the ARCHITECTURE.md rule: a
+        // duplicate view id / tool name is "fatal and alias-resolvable"). They
+        // were parsed, serialized and documented while never reaching the
+        // NameRegistry -- so the alias key did nothing and the dangling-alias
+        // diagnostic below was unreachable. Like the server's resolver: the
+        // alias lands on the ONE kind whose stable identity it names (so a
+        // resolved alias renames that entry's surface and dedupes the
+        // collision), and an identity no kind claims is dangling on a single
+        // kind -- reported once, not four times. Addressing stays CANONICAL
+        // (keybindings.json addresses ids, never aliases).
+        const auto alias_on_kind = [&](const std::string& key, const std::string& target) {
+            const auto matches = [](const std::vector<plugins::Attribution>& attributions,
+                                    const std::string& qualified) {
+                for (const auto& a : attributions) {
+                    if (a.plugin_name + "." + a.original_name == qualified) return true;
+                }
+                return false;
+            };
+            if (matches(view_registry.attributions(), key)) {
+                names.SetAlias(minimal::plugins::NameKind::ViewId, key, target);
+            } else if (matches(renderer_registry.attributions(), key)) {
+                names.SetAlias(minimal::plugins::NameKind::ToolResultRenderer, key, target);
+            } else {
+                bool matched_message = false;
+                for (const auto& [kind, attribution] : message_registry.claims()) {
+                    (void)kind;
+                    if (attribution.plugin_name + "." + attribution.original_name == key) {
+                        names.SetAlias(minimal::plugins::NameKind::MessageRenderer, key, target);
+                        matched_message = true;
+                    }
+                }
+                if (!matched_message) {
+                    if (matches(status_registry.attributions(), key)) {
+                        names.SetAlias(minimal::plugins::NameKind::StatusSegment, key, target);
+                    } else if (matches(grammar_registry.attributions(), key)) {
+                        names.SetAlias(minimal::plugins::NameKind::SyntaxGrammar, key, target);
+                    } else {
+                        names.SetAlias(minimal::plugins::NameKind::ViewId, key, target);   // dangling
+                    }
+                }
+            }
+        };
+        for (const auto& [alias_key, alias_target] : plugin_config.aliases) {
+            alias_on_kind(alias_key, alias_target);
+        }
+        const auto resolved = names.Resolve();
+        for (const auto& collision : resolved.fatal_collisions) {
+            std::fprintf(stderr, "minimal: FATAL: client plugin name collision: %s\n",
+                         collision.c_str());
+            fatal = true;
+        }
+        for (const auto& dangling : resolved.dangling_aliases) {
+            std::fprintf(stderr, "minimal: warning: client plugin alias names nothing: %s\n",
+                         dangling.c_str());
+        }
+        if (fatal) return kUnavailable;
+    }
+
+    // Loaded plugin names feed the theme's section check.
+    std::vector<std::string> loaded_plugins;
+    for (const auto& attribution : view_registry.attributions()) {
+        if (!attribution.plugin_name.empty()) loaded_plugins.push_back(attribution.plugin_name);
+    }
+    for (const auto& attribution : renderer_registry.attributions()) {
+        if (!attribution.plugin_name.empty()) loaded_plugins.push_back(attribution.plugin_name);
+    }
+    for (const auto& attribution : status_registry.attributions()) {
+        if (!attribution.plugin_name.empty()) loaded_plugins.push_back(attribution.plugin_name);
+    }
+    for (const auto& attribution : grammar_registry.attributions()) {
+        if (!attribution.plugin_name.empty()) loaded_plugins.push_back(attribution.plugin_name);
+    }
+
+    Theme theme = [&] {
+        try {
+            return Theme::Load(config_dir / "themes", "dark", depth, &loaded_plugins);
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "minimal: %s; using terminal defaults\n", e.what());
+            // An empty-but-valid document: "no colors set" is the fallback,
+            // and ColorFor's Default fallback covers every role. ("{}" is NOT
+            // valid here -- Parse requires a "colors" object, so a missing
+            // themes dir used to throw out of the fallback itself.)
+            return Theme::Parse(R"({"name":"default","colors":{}})", depth);
+        }
+    }();    Keybindings keys = [&] {
+        try {
+            return Keybindings::Load(config_dir);
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "minimal: %s; using default keybindings\n", e.what());
+            return Keybindings::Parse("{}");
+        }
+    }();
+
+    // Plugin views: register each id's suggested default keybinding only where
+    // nothing binds it yet (the user's file wins), and remember the runtime
+    // dispatch entries.
+    struct PluginViewEntry {
+        const plugins::View* view;
+        ftxui::Component component;
+        bool visible = false;
+    };
+    std::vector<PluginViewEntry> plugin_views;
+    for (const auto& view : view_registry.views()) {
+        keys.EnsureDefault(view->spec().id, view->spec().default_keybinding);
+        plugin_views.push_back(PluginViewEntry{view.get(), view->component(), false});
+    }
+    for (const auto& [action, key] : keys.all()) {
+        if (KeyToEvents(key).empty()) {
+            std::fprintf(stderr, "minimal: no key mapping for '%s' -> '%s'\n", action.c_str(),
+                         key.c_str());
+        }
+    }
+
+    // The status format: ui.json's value, or the built-in default. Unknown ids
+    // warn UNLESS a registered segment answers to them -- the registry is part
+    // of the known-id set now.
+    const std::string status_format_string =
+        !ui.status_format.empty() ? ui.status_format : std::string(kDefaultStatusFormat);
+    const auto status_format = minimal::client::ParseStatusFormat(status_format_string);
+    for (const auto& id : minimal::client::UnknownStatusSegments(status_format_string)) {
+        if (status_registry.Find(id) == nullptr) {
+            std::fprintf(stderr, "minimal: unknown status segment '{%s}'\n", id.c_str());
+        }
+    }
+
+    // The highlighter consults the assembled grammar table (vendored defaults
+    // plus plugin additions), so a plugin's language highlights like a vendored
+    // one. The renderer owns it; the engine routes fenced code through it.
+    const std::vector<minimal::client::LanguageDefinition> languages = [&] {
+        std::vector<minimal::client::LanguageDefinition> out;
+        for (const auto& grammar : grammar_registry.grammars()) {
+            out.push_back(minimal::client::LanguageDefinition{
+                grammar->Language(), grammar->LanguageFn(), grammar->Rules()});
+        }
+        return out;
+    }();
+    minimal::client::SyntaxHighlighter highlighter(theme, languages);
+
+    // Core defaults fill every slot no plugin claimed. The engine first (the
+    // agent-markdown default renders through it), then the kind defaults.
+    // ONE construction of the renderer, AFTER the highlighter exists: the
+    // engine binds a reference to this variable, and the first draft reassigned
+    // the variable in place after registering the engine (second constructor
+    // call) -- correct only by coincidence of identity, and a refactor that
+    // introduced a second variable would dangle the engine silently.
+    minimal::client::MarkdownRenderer renderer(&theme, &highlighter);
+    plugins::RegisterDefaultMarkdownEngine(engine_registry, renderer);
+    // Non-null by construction: RegisterDefaultMarkdownEngine registers the
+    // md4c adapter when no plugin claimed the slot.
+    plugins::MarkdownEngine& engine = *engine_registry.engine;
+    plugins::RegisterCoreMessageRenderers(message_registry);
+    plugins::RegisterCoreAgentMarkdownRenderer(message_registry, engine);
+
+    // The exclusive chat surface, when a plugin claimed it.
+    plugins::ChatSurface* chat_surface = surface_registry.surface.get();
+    if (chat_surface != nullptr) {
+        // A throwing surface is disabled, not fatal (catch + disable, track
+        // R2): OnTheme runs before any event flows, so a throw here is the
+        // plugin's first chance to kill the process unguarded.
+        try {
+            chat_surface->OnTheme(theme);
+        } catch (const std::exception& error) {
+            std::fprintf(stderr, "minimal: chat surface plugin threw on theme (%s) -- "
+                                 "disabled; the core chat view takes over\n",
+                         error.what());
+            chat_surface = nullptr;
+        } catch (...) {
+            std::fprintf(stderr, "minimal: chat surface plugin threw on theme (non-standard "
+                                 "exception) -- disabled; the core chat view takes over\n");
+            chat_surface = nullptr;
+        }
+    }
+
+    auto app = std::make_shared<AppState>(client);
+    app->SetPluginAttention(&attention_state);
+    app->SetChatSurface(chat_surface);
+    // Memory bounds (track R2): ui.json's values, or the built-in defaults
+    // (SetUiBounds treats 0 as "keep the default"). Applied before any tab can
+    // open, so every SessionState starts bounded.
+    app->SetUiBounds(ui.scrollback_window_max_messages, ui.tool_output_buffer_bytes);
+    auto screen = ftxui::ScreenInteractive::TerminalOutput();
+    auto quit = screen.ExitLoopClosure();
+
+    // --- frame state (loop thread only) --------------------------------------
+    PromptEditorState prompt_state;
+    bool show_panel = false;
+    bool show_picker = false;
+    bool show_quit_confirm = false;
+    bool show_permission = false;
+    bool show_delete_confirm = false;
+    bool show_plugin_modal = false;
+    std::string staged_delete_id;   // the picker delete confirmation's subject
+    std::vector<minimal::v1::SessionSummary> picker_sessions;
+    PendingClose pending_close;
+
+    // Per-tab UI caches, keyed by session id.
+    struct TabUi {
+        std::unique_ptr<plugins::MarkdownEngine::Stream> streaming;
+        std::size_t streaming_seen = 0;
+        std::optional<uint64_t> rendered_version;
+        std::unique_ptr<GrantToggles> grants;   // per outstanding request
+        std::string grants_for_request;
+        ftxui::Component surface_body;          // the chat surface's tab body (when slotted)
+        plugins::ChatSurface* surface_for = nullptr;   // which surface instance built it
+        // Per-tab ChatView: its row cache is keyed by transcript_version, a
+        // PER-SESSION counter starting at 0 -- one shared instance served tab
+        // A's cached rows as tab B's transcript whenever the two versions
+        // collided. One view per tab makes the invariant true by construction.
+        std::unique_ptr<minimal::client::ChatView> chat;
+        // VIEW-display notice side-effects fire ONCE per notice, keyed on the
+        // notice's sequence number (see handle_notice below).
+        uint64_t handled_notice_seq = 0;
+        // Streaming bookkeeping (see maintain): turn_seq keys recreation,
+        // finalized_for_turn fires the engine's one authoritative reparse.
+        uint64_t streaming_turn = 0;
+        bool finalized_for_turn = false;
+    };
+    std::map<std::string, TabUi> tab_ui;
+
+    std::string focused;   // active session id, refreshed every frame
+
+    // Per-frame maintenance for the focused tab: feed streaming deltas to the
+    // debounced view, and trigger the post-turn scrollback refresh. A turn in
+    // flight is NOT fetched around -- the streaming block is the live content
+    // until the turn ends and the refresh swaps it for the persisted rows.
+    // (Skipped entirely when the chat surface owns the tab body: the surface
+    // keeps its own buffers and fetches its own pages.)
+    auto maintain = [&](const std::string& session_id) {
+        if (chat_surface != nullptr || app->EffectiveChatSurface() != nullptr) return;
+        // The DEEP snapshot for THIS tab only (track R's focused-tab redesign).
+        const auto snap = app->GetDetails(session_id);
+        if (snap.session_id.empty() && session_id != snap.session_id) return;
+        TabUi& ui = tab_ui[session_id];
+
+        const auto make_stream = [&] { return engine.MakeStream(); };
+
+        // Stream recreation keys on turn_seq (SessionState's counter, bumped
+        // when a new streaming turn begins), NOT on the old buffer-size
+        // heuristic: turn A ending and turn B streaming past A's byte count
+        // between two frames spliced B's middle onto A's cached tail,
+        // silently.
+        if (ui.streaming == nullptr || ui.streaming_turn != snap.turn_seq) {
+            ui.streaming = make_stream();
+            ui.streaming_seen = 0;
+            ui.streaming_turn = snap.turn_seq;
+            ui.finalized_for_turn = false;
+        } else if (snap.streaming_text.size() > ui.streaming_seen) {
+            ui.streaming->AppendDelta(
+                std::string_view(snap.streaming_text).substr(ui.streaming_seen));
+            ui.streaming_seen = snap.streaming_text.size();
+        }
+
+        // The turn's authoritative reparse (the engine contract: Finalize
+        // replaces artifacts from mid-stream unclosed spans). Without this
+        // wiring the contract was dead code -- the last tokens of a stream
+        // rendered only when the debounce's next tick happened to fire.
+        if (snap.is_streaming_finalized && !ui.finalized_for_turn && ui.streaming) {
+            ui.streaming->Finalize();
+            ui.finalized_for_turn = true;
+        }
+
+        if (ui.rendered_version != snap.transcript_version) {
+            if (snap.streaming_text.empty()) {
+                app->RefreshScrollback(session_id, /*newest=*/true);
+                const auto fresh = app->GetDetails(session_id);
+                ui.rendered_version = std::optional(fresh.transcript_version);
+            } else {
+                ui.rendered_version = snap.transcript_version;
+            }
+        }
+    };
+
+    // --- editor ---------------------------------------------------------------
+    auto suggest = [app, client](const std::string& prefix) -> std::vector<std::string> {
+        const std::string sid = app->FocusedSessionId();
+        if (prefix.empty() || sid.empty()) return {};
+        const auto result = client->SuggestPaths(sid, prefix, 20);
+        if (!result.status.ok()) return {};
+        return {result.response.paths().begin(), result.response.paths().end()};
+    };
+    auto editor = minimal::client::MakePromptEditor(
+        theme, prompt_state,
+        [app](const std::string& text) { app->SendChatTurn(app->FocusedSessionId(), text); },
+        [app](const std::string& line) { app->SendCommand(app->FocusedSessionId(), line); },
+        suggest,
+        [&command_catalog] { return command_catalog; });
+
+    // --- permission modal (inner swapped per outstanding request) -------------
+    // The host is a STABLE component in the tree; its inner component is
+    // rebuilt when a new request_id arrives. Checkbox state lives in
+    // GrantToggles (keyed by request in tab_ui), so it survives the rebuild.
+    auto permission_child = std::make_shared<Component>();
+    auto permission_host = Renderer([=] {
+        return *permission_child ? (*permission_child)->Render() : emptyElement();
+    });
+    auto permission_host_interactive = CatchEvent(
+        permission_host, [=](const Event& event) {
+            return show_permission && *permission_child ? (*permission_child)->OnEvent(event)
+                                                        : false;
+        });
+
+    // Tab close, for every caller (keybinding, quit confirmation, quit): the
+    // per-tab UI caches must die WITH the tab -- tab_ui entries were never
+    // erased, leaking each closed tab's streaming buffer, grants and surface
+    // body for the process lifetime.
+    auto close_tab = [&](const std::string& id) {
+        app->CloseTab(id);
+        tab_ui.erase(id);
+    };
+
+    // --- quit / close confirmation --------------------------------------------
+    PendingConfirmation confirm_request;
+    confirm_request.kind = "app_quit";
+    confirm_request.title = "destroy running work?";
+    confirm_request.detail = "a session still has work in flight; closing destroys it";
+    confirm_request.options = {"close anyway", "cancel"};
+    auto confirm_modal = minimal::client::MakeConfirmationModal(
+        confirm_request, theme, [&](const std::string& chosen) {
+            if (chosen != "close anyway") {
+                show_quit_confirm = false;
+                pending_close = PendingClose{};
+                return;
+            }
+            // Children first, root last (pending_close was staged that way).
+            for (const auto& id : pending_close.session_ids) close_tab(id);
+            if (pending_close.quit) quit();
+            show_quit_confirm = false;
+            pending_close = PendingClose{};
+        });
+
+    // --- session picker (inner rebuilt on each open) ---------------------------
+    auto picker_child = std::make_shared<Component>();
+    auto picker_host = Renderer([=] {
+        return *picker_child ? (*picker_child)->Render() : emptyElement();
+    });
+    auto picker_host_interactive = CatchEvent(picker_host, [=](const Event& event) {
+        return show_picker && *picker_child ? (*picker_child)->OnEvent(event) : false;
+    });
+
+    // The picker-open flow, shared by the keybinding and by the /sessions
+    // view_hint (a View-displaying CommandResult opens the view named by its
+    // hint; the core mapping for "sessions" is this modal).
+    auto open_picker = [&] {
+        show_picker = true;
+        picker_sessions.clear();
+        const auto result =
+            client->ListSessions(std::filesystem::current_path().string(), false, 200);
+        if (result.status.ok()) {
+            picker_sessions.assign(result.response.sessions().begin(),
+                                   result.response.sessions().end());
+        }
+        *picker_child = minimal::client::MakeSessionPicker(
+            picker_sessions, theme,
+            {.on_resume =
+                 [&](const std::string& session_id) {
+                     // A PAST session resumes into its own root group; it is
+                     // not a child of whatever is focused.
+                     app->AttachTab(session_id);
+                     show_picker = false;
+                 },
+             .on_delete =
+                 [&](const std::string& session_id) {
+                     // Deletion is destructive and permanent, so it asks --
+                     // its own confirmation layer, styled like the quit one.
+                     staged_delete_id = session_id;
+                     show_delete_confirm = true;
+                     show_picker = false;
+                 },
+             .on_close = [&] { show_picker = false; }});
+    };
+
+    // --- plugin views (panel region + modal layer) -----------------------------
+    // Panels: rendered in the frame beside the tools panel; one shared
+    // CatchEvent (over the frame) routes events to visible ones. Modals: one
+    // host in the modal stack BELOW the quit confirmation -- a plugin modal
+    // can never preempt the security UI, which is the invariant the nesting
+    // itself enforces (see the modal stack below).
+    auto plugin_modal_child = std::make_shared<Component>();
+    auto plugin_modal_host = Renderer([=] {
+        if (!*plugin_modal_child) return emptyElement();
+        // A throwing plugin modal hides itself for the frame (never fatal).
+        try {
+            return (*plugin_modal_child)->Render();
+        } catch (const std::exception& error) {
+            minimal::common::DefaultLogger().error("plugin modal threw: {}", error.what());
+        } catch (...) {
+            minimal::common::DefaultLogger().error("plugin modal threw a non-standard exception");
+        }
+        return emptyElement();
+    });
+    auto plugin_modal_host_interactive = CatchEvent(plugin_modal_host, [&](const Event& event) {
+        if (!show_plugin_modal || !*plugin_modal_child) return false;
+        return (*plugin_modal_child)->OnEvent(event);
+    });
+
+    // VIEW-display notices: the side-effect (open the picker, show a plugin
+    // modal) fires ONCE per notice here in the maintenance pass, keyed on the
+    // notice's sequence number -- never from Render(). The first draft routed
+    // this inside the renderer: the notice is never cleared (status text
+    // persists until the next result replaces it), so a View notice re-ran
+    // open_picker's ListSessions RPC and re-staged the modal at frame rate,
+    // making it unclosable. Status/Silent notices keep rendering in the frame
+    // below; only their SIDE-EFFECTS are guarded.
+    auto handle_notice = [&] {
+        if (focused.empty()) return;
+        const auto snap = app->GetDetails(focused);   // focused tab only
+        if (!snap.latest_notice.has_value()) return;
+        TabUi& ui = tab_ui[focused];
+        if (ui.handled_notice_seq == snap.notice_seq) return;   // already handled
+        ui.handled_notice_seq = snap.notice_seq;
+
+        const auto& notice = *snap.latest_notice;
+        if (notice.display != minimal::v1::COMMAND_DISPLAY_VIEW || notice.view_hint.empty()) {
+            return;
+        }
+        if (notice.view_hint == "sessions") {
+            open_picker();   // core mapping: the picker modal
+        } else if (auto* view = view_registry.Find(notice.view_hint)) {
+            for (auto& entry : plugin_views) {
+                if (entry.view == view) entry.visible = true;
+            }
+            if (view->spec().placement == plugins::ViewPlacement::Modal) {
+                *plugin_modal_child = view->component();
+                show_plugin_modal = true;
+            }
+        }
+        // A hint naming no view falls through: the unknown-view-id rule, like
+        // the unknown segment id's.
+    };
+
+    // --- session picker delete confirmation ------------------------------------
+    // Built once, like the quit confirmation; `delete_request` is mutated when
+    // a delete is staged (single-threaded loop, so the write is safe).
+    PendingConfirmation delete_request;
+    delete_request.kind = "session_delete";
+    delete_request.title = "delete session?";
+    delete_request.detail = "the transcript and its subagent sessions are removed permanently";
+    delete_request.options = {"delete", "cancel"};
+    auto delete_modal = minimal::client::MakeConfirmationModal(
+        delete_request, theme, [&](const std::string& chosen) {
+            if (chosen == "delete" && !staged_delete_id.empty()) {
+                if (const auto status = client->DeleteSession(staged_delete_id); !status.ok()) {
+                    std::fprintf(stderr, "minimal: delete failed: %s\n",
+                                 status.error_message().c_str());
+                }
+            }
+            staged_delete_id.clear();
+            show_delete_confirm = false;
+        });
+
+    // --- frame -----------------------------------------------------------------
+    int panel_height = 12;
+    auto any_work_in_flight = [&](const std::vector<AppState::TabSnapshot>& tabs,
+                                  const std::vector<std::string>& ids) {
+        // The caller's tab snapshots carry the state already — re-snapshotting
+        // every tab (a full deep copy) per keypress was pure waste.
+        for (const auto& id : ids) {
+            for (const auto& tab : tabs) {
+                if (tab.session_id != id) continue;
+                switch (tab.state) {
+                    case SessionStateKind::Thinking:
+                    case SessionStateKind::Working:
+                    case SessionStateKind::Waiting:
+                        return true;
+                    default:
+                        break;
+                }
+                break;
+            }
+        }
+        return false;
+    };
+
+    auto session_view = Renderer(editor, [&] {
+        using namespace ftxui;
+
+        const auto tabs = app->GetAllTabs();
+        focused.clear();
+        for (const auto& tab : tabs) {
+            if (tab.is_focused) focused = tab.session_id;
+        }
+        if (!focused.empty()) {
+            maintain(focused);
+            handle_notice();   // once-per-notice VIEW side-effects (never in Render)
+        }
+
+        Elements rows;
+        rows.push_back(minimal::client::RenderTabBar(tabs, theme));
+
+        // The frame's DEEP copy: the FOCUSED tab only. (The tools panel reads
+        // the light TabSnapshot.tools; nothing renders other tabs' heavy data.)
+        const auto focused_details = app->GetDetails(focused);
+        if (!focused_details.session_id.empty() || !focused.empty()) {
+            const auto& snap = focused_details;
+            TabUi& ui = tab_ui[focused];
+
+            // The tab body: the exclusive chat surface when a plugin claimed
+            // the slot, the core chat view otherwise. The surface's component
+            // is fetched once per tab and cached; the surface's own OnEvent
+            // push carries its data (see DispatchToTab). EffectiveChatSurface
+            // returns null once a surface has thrown -- the core view takes
+            // over and the stale surface_body cache is dropped.
+            plugins::ChatSurface* effective_surface = app->EffectiveChatSurface();
+            if (effective_surface != nullptr) {
+                if (!ui.surface_body || ui.surface_for != effective_surface) {
+                    ui.surface_body = effective_surface->component();
+                    ui.surface_for = effective_surface;
+                }
+                try {
+                    rows.push_back(ui.surface_body->Render() | yframe | vscroll_indicator | flex);
+                } catch (const std::exception& error) {
+                    app->DisableChatSurface(error.what());
+                    rows.push_back(text(" chat surface plugin threw -- the core chat view "
+                                        "takes over") | color(theme.ColorFor("error")));
+                } catch (...) {
+                    app->DisableChatSurface(nullptr);
+                    rows.push_back(text(" chat surface plugin threw -- the core chat view "
+                                        "takes over") | color(theme.ColorFor("error")));
+                }
+            } else {
+                if (!ui.chat) {
+                    ui.chat = std::make_unique<minimal::client::ChatView>(
+                        theme, message_registry, renderer_registry);
+                }
+                rows.push_back(ui.chat->Render(snap, *ui.streaming) | yframe |
+                               vscroll_indicator | flex);
+            }
+
+            // The transient notice line: the focused tab's latest /-command
+            // outcome, routed by its CommandDisplay mode (EXTENSIBILITY §4.4).
+            // NEVER a chat row -- that is a type-level property of
+            // CommandNotice. VIEW side-effects ran in handle_notice() above,
+            // once per notice; here a View notice renders nothing (the view
+            // it opened is the surface), and STATUS/errors render as the
+            // persistent line until the next result replaces them.
+            if (snap.latest_notice.has_value()) {
+                const auto& notice = *snap.latest_notice;
+                if (notice.display != minimal::v1::COMMAND_DISPLAY_VIEW &&
+                    notice.display != minimal::v1::COMMAND_DISPLAY_SILENT) {
+                    rows.push_back(text(" " + notice.message) |
+                                   bgcolor(theme.ColorFor("status_bar_bg")) |
+                                   color(notice.is_error ? theme.ColorFor("error")
+                                                         : theme.ColorFor("system_message")));
+                }
+            }
+
+            // The permission modal for the focused tab: rebuilt when the
+            // outstanding request changes, shown while it is unanswered.
+            if (snap.pending_permission.has_value()) {
+                const auto& request = *snap.pending_permission;
+                TabUi& ui = tab_ui[focused];
+                if (ui.grants_for_request != request.request_id) {
+                    ui.grants = std::make_unique<GrantToggles>();
+                    ui.grants_for_request = request.request_id;
+                    const auto session_id = focused;
+                    GrantToggles& toggles = *ui.grants;
+                    *permission_child = minimal::client::MakePermissionModal(
+                        request, toggles, theme,
+                        [app, session_id, request, &toggles](bool allow) {
+                            // granted_keys FILTERED to what this request offered
+                            // (GrantToggles reads the request's own offers).
+                            app->AnswerPermission(session_id, request.request_id,
+                                                  allow ? minimal::v1::PERMISSION_DECISION_ALLOW
+                                                        : minimal::v1::PERMISSION_DECISION_DENY,
+                                                  allow ? toggles.GrantedKeys(request)
+                                                        : std::vector<std::string>{});
+                        });
+                }
+                show_permission = true;
+            } else {
+                show_permission = false;
+            }
+        } else {
+            show_permission = false;
+            rows.push_back(vbox({text("minimal") | bold,
+                                 text("ctrl+o opens the session picker; typing starts a session") |
+                                     dim}) |
+                            center | flex);
+        }
+
+        if (show_panel) {
+            rows.push_back(minimal::client::RenderToolsPanel(
+                               tabs, /*stdout_buffer_lines=*/100, theme) |
+                           size(HEIGHT, LESS_THAN, panel_height) | yframe);
+        }
+
+        rows.push_back(editor->Render() | flex);
+
+        // Status bar. model/agent/permission_mode have no live wire source yet
+        // (the metadata emission is E5) and render as nothing -- the format
+        // string's unknown-or-unfilled rule.
+        std::map<std::string, std::string> values;
+        values["version"] = std::string(minimal::common::Version());
+        // The focused tab's DEEP snapshot (see focused_details above) drives
+        // the status bar's values.
+        if (!focused_details.session_id.empty()) {
+            values["session"] = focused_details.display_name;
+            // {tokens} is used/max now that the metadata emission carries the
+            // window (E5a); max unknown (0) renders used-only, the E4 behavior.
+            const int64_t used =
+                focused_details.input_tokens + focused_details.output_tokens;
+            if (used > 0) {
+                values["tokens"] = focused_details.context_window_tokens > 0
+                                       ? std::to_string(used) + "/" +
+                                             std::to_string(focused_details.context_window_tokens) +
+                                             " tok"
+                                       : std::to_string(used) + " tok";
+            }
+            // The metadata segments: empty = unknown = render nothing, the
+            // format string's unknown-or-unfilled rule.
+            if (!focused_details.model.empty()) values["model"] = focused_details.model;
+            if (!focused_details.agent_preset.empty()) values["agent"] = focused_details.agent_preset;
+            if (!focused_details.permission_mode.empty()) {
+                values["permission_mode"] = focused_details.permission_mode;
+            }
+        }
+        // Registered segment providers fill their own ids. Render runs on the
+        // render thread at ~20 Hz -- the provider contract (cheap, never
+        // blocking) is stated on the interface; a THROW is contained (that
+        // segment renders nothing for this frame), never fatal.
+        for (const auto& segment : status_registry.segments()) {
+            try {
+                values[std::string(segment->id())] = segment->Render();
+            } catch (const std::exception& error) {
+                minimal::common::DefaultLogger().error("status segment '{}' threw: {}",
+                                              std::string(segment->id()), error.what());
+            } catch (...) {
+                minimal::common::DefaultLogger().error("status segment '{}' threw a non-standard "
+                                                       "exception", std::string(segment->id()));
+            }
+        }
+        rows.push_back(minimal::client::RenderStatusBar(status_format, values, theme));
+
+        // Plugin PANEL views, beside the tools panel. Events reach the visible
+        // ones through the frame's CatchEvent (see with_keys). A throwing
+        // view is hidden for the frame that threw (never fatal), like the
+        // status segments.
+        for (auto& entry : plugin_views) {
+            if (entry.view->spec().placement == plugins::ViewPlacement::Panel && entry.visible) {
+                try {
+                    rows.push_back(entry.component->Render() |
+                                   size(HEIGHT, LESS_THAN, panel_height) | yframe);
+                } catch (const std::exception& error) {
+                    minimal::common::DefaultLogger().error("plugin view '{}' threw: {}",
+                                                           std::string(entry.view->spec().id),
+                                                           error.what());
+                } catch (...) {
+                    minimal::common::DefaultLogger().error(
+                        "plugin view '{}' threw a non-standard exception",
+                        std::string(entry.view->spec().id));
+                }
+            }
+        }
+
+        return vbox(std::move(rows));
+    });
+
+    // --- global keybindings -----------------------------------------------------
+    auto with_keys = CatchEvent(session_view, [&](const Event& event) {
+        const std::string sid = focused;
+
+        if (MatchesAny(event, KeyToEvents(keys.KeyFor("tab.next")))) {
+            app->CycleFocusForward();
+            return true;
+        }
+        if (MatchesAny(event, KeyToEvents(keys.KeyFor("tab.previous")))) {
+            app->CycleFocusBackward();
+            return true;
+        }
+        const bool group_next = MatchesAny(event, KeyToEvents(keys.KeyFor("group.next")));
+        const bool group_prev = MatchesAny(event, KeyToEvents(keys.KeyFor("group.previous")));
+        if (group_next || group_prev) {
+            // Between root groups: focus the next (or previous) ROOT tab.
+            const auto tabs = app->GetAllTabs();
+            std::vector<std::string> roots;
+            for (const auto& tab : tabs) {
+                if (!tab.is_subagent) roots.push_back(tab.session_id);
+            }
+            if (!roots.empty()) {
+                std::size_t idx = 0;
+                for (std::size_t i = 0; i < roots.size(); ++i) {
+                    if (roots[i] == sid) idx = i;
+                }
+                app->SetFocusedTab(roots[(idx + (group_next ? 1 : roots.size() - 1)) %
+                                         roots.size()]);
+            }
+            return true;
+        }
+        if (MatchesAny(event, KeyToEvents(keys.KeyFor("jump.attention")))) {
+            // Crosses groups; wraps. Only Waiting tabs qualify (the ! glyph).
+            const auto tabs = app->GetAllTabs();
+            for (std::size_t i = 0; i < tabs.size(); ++i) {
+                const std::size_t idx = (tabs.size() + 1 + i) % tabs.size();   // +1: skip current
+                if (tabs[idx].attention_glyph == '!') {
+                    app->SetFocusedTab(tabs[idx].session_id);
+                    return true;
+                }
+            }
+            return true;
+        }
+        if (MatchesAny(event, KeyToEvents(keys.KeyFor("session.picker")))) {
+            show_picker = !show_picker;
+            if (show_picker) open_picker();
+            return true;
+        }
+        if (MatchesAny(event, KeyToEvents(keys.KeyFor("panel.toggle")))) {
+            show_panel = !show_panel;
+            return true;
+        }
+        if (MatchesAny(event, KeyToEvents(keys.KeyFor("chat.load_older")))) {
+            if (!sid.empty()) app->RefreshScrollback(sid, /*newest=*/false);
+            return true;
+        }
+        if (MatchesAny(event, KeyToEvents(keys.KeyFor("tab.close")))) {
+            if (!sid.empty()) {
+                // Closing a ROOT tab terminates its group: stage children first,
+                // the root last. ONE confirmation if any of it is in flight.
+                const auto tabs = app->GetAllTabs();
+                std::optional<int64_t> group;
+                bool is_root = false;
+                for (const auto& tab : tabs) {
+                    if (tab.session_id == sid) {
+                        group = tab.root_ordinal;
+                        is_root = !tab.is_subagent;
+                    }
+                }
+                PendingClose staged;
+                for (const auto& tab : tabs) {
+                    if (!is_root && tab.session_id != sid) continue;
+                    if (is_root && group.has_value() && tab.root_ordinal != *group) continue;
+                    staged.session_ids.push_back(tab.session_id);
+                }
+                if (any_work_in_flight(tabs, staged.session_ids)) {
+                    pending_close = std::move(staged);   // ONE confirmation for the group
+                    show_quit_confirm = true;
+                } else {
+                    for (const auto& id : staged.session_ids) close_tab(id);
+                }
+            }
+            return true;
+        }
+        if (MatchesAny(event, KeyToEvents(keys.KeyFor("app.quit")))) {
+            // Quit = close every tab, with ONE confirmation if any work is in
+            // flight (ARCHITECTURE.md "Session lifetime").
+            const auto tabs = app->GetAllTabs();
+            std::vector<std::string> ids;
+            for (const auto& tab : tabs) ids.push_back(tab.session_id);
+            if (!any_work_in_flight(tabs, ids)) {
+                quit();
+            } else {
+                pending_close = PendingClose{};
+                pending_close.quit = true;
+                pending_close.session_ids = std::move(ids);
+                show_quit_confirm = true;
+            }
+            return true;
+        }
+
+        // Plugin views, after every core action: a visible PANEL gets the
+        // event first (its component consumes what it wants); any view id
+        // bound in keybindings.json toggles its visibility. The ids were
+        // registered as runtime defaults (EnsureDefault), so a user's file
+        // that already names them wins.
+        for (auto& entry : plugin_views) {
+            if (entry.view->spec().placement == plugins::ViewPlacement::Panel && entry.visible &&
+                entry.component->OnEvent(event)) {
+                return true;
+            }
+        }
+        for (auto& entry : plugin_views) {
+            if (MatchesAny(event, KeyToEvents(keys.KeyFor(entry.view->spec().id)))) {
+                entry.visible = !entry.visible;
+                if (entry.view->spec().placement == plugins::ViewPlacement::Modal) {
+                    *plugin_modal_child = entry.component;
+                    show_plugin_modal = entry.visible;
+                }
+                return true;
+            }
+        }
+        return false;
+    });
+
+    // Modal stack, OUTERMOST = TOPMOST: the security UI (permission prompt)
+    // above the quit confirmation above the picker above the delete
+    // confirmation above the plugin modals above the frame. E4's nesting had
+    // the picker outermost; E5 reorders so the never-preempted invariant is
+    // actually structural end to end -- no modal layer sits above the
+    // permission prompt, and plugin modals sit below everything (E5's own
+    // invariant, tested against the fixture plugin).
+    Component tree = session_view;
+    tree = Modal(tree, plugin_modal_host_interactive, &show_plugin_modal);
+    tree = Modal(tree, delete_modal, &show_delete_confirm);
+    tree = Modal(tree, picker_host_interactive, &show_picker);
+    auto with_quit_confirm = Modal(tree, confirm_modal, &show_quit_confirm);
+    auto with_permission = Modal(with_quit_confirm, permission_host_interactive, &show_permission);
+    Component final_tree = with_permission;
+
+    // THE PUMP: reader threads wake nothing by themselves; this loop redraws
+    // at up to 20 Hz from snapshots. Redraws are gated on the app's UI
+    // revision -- an idle TUI used to repaint the full frame 20x per second
+    // no matter what. A 5 Hz floor remains so the editor's @-mention debounce
+    // gate (which fires FROM a render pass) is serviced while the user types.
+    std::atomic<bool> running{true};
+    std::thread pump([&] {
+        uint64_t last_version = app->UiVersion();
+        int tick = 0;
+        while (running.load(std::memory_order_acquire)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            ++tick;
+            const uint64_t version = app->UiVersion();
+            if (version != last_version || tick % 4 == 0) {
+                last_version = version;
+                screen.PostEvent(Event::Custom);
+            }
+        }
+    });
+
+    screen.Loop(final_tree);
+    running.store(false, std::memory_order_release);
+    pump.join();
+
+    // Closing the TUI closes every tab: terminate all attached sessions
+    // (ARCHITECTURE.md "Session lifetime" -- nothing outlives its client).
+    app->CloseAllTabs();
+    return kOk;
 }
 
 }  // namespace
-
 int main(int argc, char** argv) {
     // Matches the server's process-wide disposition: the client writes to
     // gRPC sockets and to stdout -- which a piped script may close early --
@@ -444,5 +1523,5 @@ int main(int argc, char** argv) {
         case minimal::client::ParsedArgs::Action::Tui:
             break;
     }
-    return RunTui(argc, argv);
+    return RunTui(parsed);
 }

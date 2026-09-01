@@ -1,10 +1,10 @@
 #pragma once
 
 // The gRPC surface. Implements CreateSession, OpenSession, GetMessages,
-// ListSessions and PluginCall; the rest answer UNIMPLEMENTED until the
-// subsystem behind them exists (SuggestPaths needs the TUI's resolver,
-// PluginSubscribe needs live push demand). Answering explicitly matters: a
-// client that calls one gets a clear status instead of a hang.
+// ListSessions, SuggestPaths, ListCommands, DeleteSession and the generic
+// plugin channel (PluginCall/PluginSubscribe dispatch through the sealed
+// ServiceRegistry). Answering explicitly matters: a client that calls
+// anything gets a clear status instead of a hang.
 //
 // The two read RPCs go to the DATABASE, not to a live Session, and that is the
 // point: the picker lists sessions the server has no Session object for, and
@@ -30,6 +30,7 @@
 
 #include <grpcpp/grpcpp.h>
 
+#include "minimal/agent/mention_resolver.hpp"
 #include "minimal/agent/session_registry.hpp"
 #include "minimal/commands/command_registry.hpp"
 #include "minimal/common/logger.hpp"
@@ -46,7 +47,7 @@ class McpClientManager;
 }  // namespace minimal::mcp
 
 namespace minimal::plugins {
-class ServiceRegistry;
+class ServiceRegistry;  // the generic plugin channel's dispatch target (E5)
 }  // namespace minimal::plugins
 
 namespace minimal::rpc {
@@ -72,6 +73,10 @@ public:
                               v1::ListSessionsResponse*) override;
     grpc::Status SuggestPaths(grpc::ServerContext*, const v1::SuggestPathsRequest*,
                               v1::SuggestPathsResponse*) override;
+    grpc::Status ListCommands(grpc::ServerContext*, const v1::ListCommandsRequest*,
+                              v1::ListCommandsResponse*) override;
+    grpc::Status DeleteSession(grpc::ServerContext*, const v1::DeleteSessionRequest*,
+                               v1::DeleteSessionResponse*) override;
     grpc::Status PluginCall(grpc::ServerContext*, const v1::PluginCallRequest*,
                             v1::PluginCallResponse*) override;
     grpc::Status PluginSubscribe(grpc::ServerContext*, const v1::PluginCallRequest*,
@@ -94,10 +99,18 @@ public:
         auth_providers_ = registry;
     }
 
-    // The PluginCall dispatch target: the ServiceRegistry plugins provided
-    // their "<plugin_name>.rpc" handlers into at load, sealed before serving
-    // (which is what makes unguarded Find from these handler threads safe).
-    // Borrowed and optional; null means PluginCall answers UNIMPLEMENTED.
+    // Optional: unset, SuggestPaths uses the core-default PrefixMentionResolver;
+    // set (main.cpp after plugin load), a plugin's override takes precedence.
+    void set_mention_resolvers(const agent::MentionResolverRegistry* resolvers) {
+        mention_resolvers_ = resolvers;
+    }
+
+    // The PluginCall/PluginSubscribe dispatch target: the sealed ServiceRegistry
+    // plugins provided their "<plugin_name>.rpc" handlers (or a PluginEndpoint,
+    // see docs/EXTENSIBILITY.md 2.5) into at load, sealed before serving (which
+    // is what makes unguarded Find from these handler threads safe). Borrowed
+    // and optional; null means both RPCs answer UNAVAILABLE rather than
+    // silently empty.
     void set_services(const plugins::ServiceRegistry* services) { services_ = services; }
 
     std::size_t attached_clients() const;
@@ -141,6 +154,14 @@ private:
     // zero the callback never observed is exactly the leak this split once was.
     void ReleaseClientSlot();
 
+    // The metadata event a freshly attached stream opens with: name,
+    // agent_preset, model, permission_mode and the resolved context window --
+    // the wire source for the status bar's {model}/{agent}/{permission_mode}
+    // and {tokens} used/max. One emission per attach, before the client's
+    // first event is dispatched, so a tab has everything it renders from the
+    // first frame.
+    void EmitSessionMetadata(agent::Session& session);
+
     // Runs read-only commands off the reader thread. Its destructor joins the
     // pool, and a task may borrow `sessions_`/`commands_` -- both outlive this
     // service (main declares them first), so a task can never dangle.
@@ -153,7 +174,9 @@ private:
     mcp::McpClientManager* mcp_manager_ = nullptr;
     // Borrowed and optional: absent = pass-through (see auth_provider.hpp).
     const AuthProviderRegistry* auth_providers_ = nullptr;
-    // Borrowed and optional: absent = PluginCall answers UNIMPLEMENTED.
+    // Borrowed and optional: null falls back to the core default resolver.
+    const agent::MentionResolverRegistry* mention_resolvers_ = nullptr;
+    // Borrowed and optional: null = the generic plugin channel is not offered.
     const plugins::ServiceRegistry* services_ = nullptr;
     session::SessionDatabase& db_;
     session::SessionReader reader_;

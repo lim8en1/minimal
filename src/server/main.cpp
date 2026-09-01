@@ -189,6 +189,7 @@ int main(int argc, char** argv) {
     // registry is the pass-through default -- no authentication, matching the
     // local-only single-user topology.
     minimal::rpc::AuthProviderRegistry auth_providers;
+    minimal::agent::MentionResolverRegistry mention_resolvers(minimal::common::DefaultLogger());
     // Additive across plugins: each may contribute one advisor keyed by its
     // name; permissions.json's "advisor" selects one. An empty registry is the
     // default -- every Ask reaches the human.
@@ -246,7 +247,7 @@ int main(int argc, char** argv) {
     minimal::plugins::PluginLoader loader(tools, providers, tools_settings, &observers, &commands,
                                           &auth_providers, &permission_advisors, &model_catalogs,
                                           &services, plugin_storage.get(), plugin_data_root,
-                                          &hook_dispatcher);
+                                          &hook_dispatcher, &mention_resolvers);
     const auto records = loader.LoadAll(candidates);
     // The load thread is the only writer; from here the map is read-only, which
     // is what makes unguarded Find from session workers and the command pool
@@ -279,6 +280,9 @@ int main(int argc, char** argv) {
         }
         if (record.registered_auth_provider) {
             std::printf("      auth provider registered\n");
+        }
+        if (record.registered_mention_resolver) {
+            std::printf("      mention resolver\n");
         }
         if (record.registered_permission_advisor) {
             std::printf("      advisor  permission prompts\n");
@@ -499,11 +503,12 @@ int main(int argc, char** argv) {
                                              &permission_advisors);
     service.set_commands(&commands);
     service.set_auth_providers(&auth_providers);
-    service.set_mcp_manager(&mcp);
+    service.set_mention_resolvers(&mention_resolvers);
     // The PluginCall dispatch target: the same sealed registry plugins
     // registered their services into. Borrowed; `services` outlives the
     // service (declared at stage 2).
     service.set_services(&services);
+    service.set_mcp_manager(&mcp);
     // Every long-lived descriptor this process will ever own is open by now
     // (logging, the session database, gRPC's sockets, plugin storage): mark
     // them all close-on-exec so a bash command, MCP stdio server or hook

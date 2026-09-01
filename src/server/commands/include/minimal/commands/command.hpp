@@ -34,17 +34,34 @@ struct CommandArgs {
     std::string raw;
 };
 
+// Where a CommandResult surfaces -- never the chat (docs/EXTENSIBILITY.md 4.4:
+// a result is appended to no history and reaches no provider; feeding `git
+// tree` or a session list to an LLM makes no sense).
+enum class CommandDisplay {
+    kStatus,  // ephemeral notice line; errors too, styled as errors
+    kView,    // open/refresh the client view named by ViewHint()
+    kSilent,  // status bar only; no transient line
+};
+
 struct CommandResult {
     enum class Status { kOk, kError };
 
     Status status = Status::kOk;
     std::string message;
+    CommandDisplay display = CommandDisplay::kStatus;
+    std::string view_hint;
 
     static CommandResult Ok(std::string message = {}) {
-        return CommandResult{Status::kOk, std::move(message)};
+        CommandResult result;
+        result.status = Status::kOk;
+        result.message = std::move(message);
+        return result;
     }
     static CommandResult Error(std::string message) {
-        return CommandResult{Status::kError, std::move(message)};
+        CommandResult result;
+        result.status = Status::kError;
+        result.message = std::move(message);
+        return result;
     }
 };
 
@@ -71,6 +88,16 @@ public:
     // Defaults to false: the conservative answer is the one you get for free.
     virtual bool ReadOnly() const { return false; }
 
+    // Where this command's result surfaces on the client (the wire carries both
+    // fields on CommandResult). The default is the ephemeral status line -- the
+    // safe answer, and what every existing command keeps getting for free. A
+    // View-displaying command pairs this with ViewHint(); the client falls back
+    // to the status line when the hint names no view it knows.
+    virtual CommandDisplay Display() const { return CommandDisplay::kStatus; }
+
+    // The client view id Display() == kView opens/refreshes. Empty otherwise.
+    virtual std::string_view ViewHint() const { return {}; }
+
     virtual CommandResult Execute(CommandContext& context, const CommandArgs& args) = 0;
 };
 
@@ -85,5 +112,18 @@ class LLMCommand : public Command {
 public:
     bool ReadOnly() const final { return false; }
 };
+
+// Submits an interpolated prompt AS THE USER TURN -- its own Execute enqueues
+// the turn and answers with an empty kOk; the model's reply arrives as ordinary
+// turn output, not as a CommandResult. The ONLY command kind whose content
+// reaches the model, which is exactly why it is its own type: a prompt macro is
+// an honest thing to register, not a HarnessCommand that smuggles a turn.
+// (docs/EXTENSIBILITY.md 4.4.)
+//
+// The base contributes the contract, not the template: the kind is derivable by
+// dynamic_cast for ListCommands, and SessionControl::SubmitTurn is the one
+// submission path. A shorthand that produced its prompt some other way would
+// break the invariant tests, not just the taxonomy.
+class PromptShorthandCommand : public Command {};
 
 }  // namespace minimal::commands

@@ -37,6 +37,11 @@ public:
     std::int64_t SetDiscardedAfter(std::int64_t target_seq) override;
     std::int64_t UnmarkDiscarded() override;
 
+    // The row's current name. The default-naming rule inside AppendMessage may
+    // have set it after this Session was built; the read is only made while the
+    // session is still unnamed, so it costs one query per session lifetime.
+    std::optional<std::string> StoredName() const override;
+
 private:
     SessionDatabase& db_;
     std::string session_id_;

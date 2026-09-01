@@ -1,0 +1,21 @@
+{
+  "name": "dark",
+  "colors": {
+    "user_message": "#7dd3fc",
+    "assistant_message": "#e5e7eb",
+    "thinking": "#6b7280",
+    "system_message": "#a1a1aa",
+    "error": "#f87171",
+    "attention": "#fbbf24",
+    "border_focused": "#7dd3fc",
+    "border_unfocused": "#3f3f46",
+    "status_bar_bg": "#18181b",
+    "syntax_keyword": "#c084fc",
+    "syntax_string": "#86efac",
+    "syntax_comment": "#71717a",
+    "syntax_number": "#fbbf24",
+    "syntax_function": "#7dd3fc",
+    "syntax_type": "#fde047",
+    "syntax_operator": "#e5e7eb"
+  }
+}

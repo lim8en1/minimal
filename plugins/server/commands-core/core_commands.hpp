@@ -8,9 +8,11 @@
 // BashSessionStateService tools-bash provides (docs/EXTENSIBILITY.md §2.2);
 // that makes the state reachable, not the command relocatable.
 //
-// /new, /attach and /sessions are absent too, for a different reason: they drive
-// a tab model that arrives with the TUI (track E), and a command that creates a
-// session no client can attach to would be surface built ahead of its consumer.
+// /new and /attach are absent for a different reason: they drive a tab model,
+// and a command that creates a session no client can attach to would be surface
+// built ahead of its consumer. /sessions IS here now -- the TUI exists, and its
+// whole job is to hand the result to the client as a view request rather than
+// act on the session itself.
 
 #include <memory>
 #include <vector>

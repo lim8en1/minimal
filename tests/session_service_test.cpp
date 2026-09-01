@@ -12,6 +12,7 @@
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <optional>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -27,6 +28,7 @@
 #include "deadline.hpp"
 #include "fakes.hpp"
 #include "temp_dir.hpp"
+#include "minimal/client/session_client.hpp"
 #include "minimal/plugins/plugin_loader.hpp"
 #include "minimal/rpc/server.hpp"
 #include "minimal/rpc/session_service.hpp"
@@ -108,6 +110,23 @@ struct ServiceFixture {
         REQUIRE(records.front().registered_permission_advisor);
     }
 
+    // Loads the generic-channel endpoint fixture through the REAL loader, so
+    // PluginCall/PluginSubscribe dispatch runs against a dlopen'd PluginEndpoint.
+    void LoadEndpointPlugin() {
+        plugins::PluginCandidate candidate;
+        candidate.file = std::filesystem::path(MINIMAL_FIXTURE_DIR) / "fixture-endpoint.so";
+        candidate.provenance = plugins::Provenance::User;
+        candidate.enabled = true;
+        // services is the 9th ctor param; the endpoint lands under the
+        // plugin's own name, which is what the RPC dispatches by.
+        plugins::PluginLoader loader(tools, providers, nlohmann::json::object(), nullptr, nullptr,
+                                     nullptr, nullptr, nullptr, &services);
+        const auto records = loader.LoadAll({candidate});
+        REQUIRE(records.size() == 1);
+        REQUIRE(records.front().ok());
+        REQUIRE(records.front().registered_services.size() == 1);
+    }
+
     // Built after the script and any tools, so a session sees the finished setup.
     void Start() {
         presets = std::make_unique<agent::AgentPresetRegistry>(
@@ -125,8 +144,10 @@ struct ServiceFixture {
         service = std::make_unique<rpc::SessionServiceImpl>(
             *sessions, *db, config::SettingsConfig{}, service_permissions,
             common::DefaultLogger(), &permission_advisors);
+        service->set_services(&services);
         sessions->set_commands(&commands);
         service->set_commands(&commands);
+        service->set_mention_resolvers(&mention_resolvers);
         service->set_on_last_client_detached([this] { last_detach.store(true); });
 
         socket = dir / "test.sock";
@@ -158,6 +179,8 @@ struct ServiceFixture {
 
     commands::CommandRegistry commands;
     const commands::CommandRegistry* sessions_commands = nullptr;
+    agent::MentionResolverRegistry mention_resolvers{common::DefaultLogger()};
+    plugins::ServiceRegistry services;
     testing::TempDir tempdir;
     std::filesystem::path dir, socket;
     config::SkillRegistry skills;
@@ -213,6 +236,105 @@ bool WaitForTurnCompleted(Stream& stream) {
         if (event.has_error()) return false;
     }
     return false;
+}
+
+// --- E5a test commands: one of each display mode, one of each kind ---------
+//
+// These live here rather than in fakes.hpp because their whole purpose is the
+// Display()/ViewHint()/kind surface the wire tests below assert on.
+
+class OpenViewCommand : public commands::HarnessCommand {
+public:
+    std::string_view Name() const override { return "openview"; }
+    std::string_view Summary() const override { return "opens a view"; }
+    std::string_view Usage() const override { return "/openview"; }
+    bool ReadOnly() const override { return true; }
+    commands::CommandDisplay Display() const override {
+        return commands::CommandDisplay::kView;
+    }
+    std::string_view ViewHint() const override { return "sessions"; }
+    commands::CommandResult Execute(commands::CommandContext&,
+                                    const commands::CommandArgs&) override {
+        return commands::CommandResult::Ok("session list requested");
+    }
+};
+
+class SilentOkCommand : public commands::HarnessCommand {
+public:
+    std::string_view Name() const override { return "quietok"; }
+    std::string_view Summary() const override { return "succeeds silently"; }
+    std::string_view Usage() const override { return "/quietok"; }
+    bool ReadOnly() const override { return true; }
+    commands::CommandDisplay Display() const override {
+        return commands::CommandDisplay::kSilent;
+    }
+    commands::CommandResult Execute(commands::CommandContext&,
+                                    const commands::CommandArgs&) override {
+        return commands::CommandResult::Ok("did a thing");
+    }
+};
+
+// A View-displaying command that FAILS: the dispatcher must downgrade the
+// result to the status line -- a failed view request has nothing to show.
+class FailingViewCommand : public commands::HarnessCommand {
+public:
+    std::string_view Name() const override { return "brokenview"; }
+    std::string_view Summary() const override { return "fails with a view display"; }
+    std::string_view Usage() const override { return "/brokenview"; }
+    bool ReadOnly() const override { return true; }
+    commands::CommandDisplay Display() const override {
+        return commands::CommandDisplay::kView;
+    }
+    std::string_view ViewHint() const override { return "sessions"; }
+    commands::CommandResult Execute(commands::CommandContext&,
+                                    const commands::CommandArgs&) override {
+        return commands::CommandResult::Error("nope");
+    }
+};
+
+// The prompt-shorthand contract, exactly as a real one would behave: Execute
+// submits the interpolated prompt as the user turn and answers with an empty
+// kOk. The reply arrives as ordinary turn output, never as a CommandResult.
+class InterpolatingShorthand : public commands::PromptShorthandCommand {
+public:
+    std::string_view Name() const override { return "review"; }
+    std::string_view Summary() const override { return "asks for a review"; }
+    std::string_view Usage() const override { return "/review <topic>"; }
+    commands::CommandResult Execute(commands::CommandContext& context,
+                                    const commands::CommandArgs& args) override {
+        std::string prompt = "review note:";
+        for (const auto& word : args.positional) prompt += " " + word;
+        if (!context.session().SubmitTurn(prompt)) {
+            return commands::CommandResult::Error("the turn was refused");
+        }
+        return commands::CommandResult::Ok("submitted for review");
+    }
+};
+
+// Dispatches one command invocation on an open stream and returns the matching
+// CommandResult. Reads to end of stream afterwards via DrainAndFinish semantics
+// at the call site.
+template <typename Stream>
+std::optional<v1::CommandResult> RunCommand(Stream& stream, const std::string& session_id,
+                                            const std::string& name,
+                                            const std::vector<std::string>& positional = {}) {
+    v1::ClientEvent invocation;
+    invocation.set_session_id(session_id);
+    auto* command = invocation.mutable_command();
+    command->set_request_id("cmd-1");
+    command->set_name(name);
+    for (const auto& word : positional) {
+        command->mutable_args()->add_positional(word);
+    }
+    REQUIRE(stream->Write(invocation));
+
+    v1::ServerEvent event;
+    while (stream->Read(&event)) {
+        if (event.has_command_result() && event.command_result().request_id() == "cmd-1") {
+            return event.command_result();
+        }
+    }
+    return std::nullopt;
 }
 
 }  // namespace
@@ -604,22 +726,20 @@ TEST_CASE("two sessions on one channel do not cross-talk", "[session_service]") 
 TEST_CASE("a deferred RPC answers UNIMPLEMENTED rather than hanging", "[session_service]") {
     // A client calling one of these gets a clear status. Silence would look
     // exactly like a server that is merely slow.
+    // (SuggestPaths used to be in this test; it is implemented now -- see the
+    // [mention] cases below. PluginCall is implemented too -- E5's generic
+    // channel; with nothing registered under the requested name it answers
+    // NOT_FOUND, and with no registry at all UNAVAILABLE.)
     ServiceFixture fixture;
     fixture.Start();
 
     {
         grpc::ClientContext context;
-        v1::SuggestPathsRequest request;
-        v1::SuggestPathsResponse response;
-        CHECK(fixture.stub->SuggestPaths(&context, request, &response).error_code() ==
-              grpc::StatusCode::UNIMPLEMENTED);
-    }
-    {
-        grpc::ClientContext context;
         v1::PluginCallRequest request;
+        request.set_plugin_name("no-such-plugin");
         v1::PluginCallResponse response;
         CHECK(fixture.stub->PluginCall(&context, request, &response).error_code() ==
-              grpc::StatusCode::UNIMPLEMENTED);
+              grpc::StatusCode::NOT_FOUND);
     }
 }
 
@@ -695,6 +815,93 @@ TEST_CASE("scrollback for an unknown session is NOT_FOUND, not an empty page",
     v1::GetMessagesResponse response;
     CHECK(fixture.stub->GetMessages(&context, request, &response).error_code() ==
           grpc::StatusCode::NOT_FOUND);
+}
+
+TEST_CASE("SuggestPaths answers for the session's project root, relative paths only",
+          "[session_service][mention]") {
+    ServiceFixture fixture;
+    fixture.Start();
+
+    const std::string session_id = fixture.CreateSession();
+    std::filesystem::create_directories(fixture.dir / "work" / "src");
+    { std::ofstream out(fixture.dir / "work" / "src" / "main.cpp"); out << "x"; }
+    { std::ofstream out(fixture.dir / "work" / "README.md"); out << "y"; }
+
+    grpc::ClientContext context;
+    v1::SuggestPathsRequest request;
+    request.set_session_id(session_id);
+    request.set_prefix("");
+    request.set_limit(50);
+    v1::SuggestPathsResponse response;
+    REQUIRE(fixture.stub->SuggestPaths(&context, request, &response).ok());
+
+    // Sorted, relative to project_root, directories carrying the descending '/'.
+    REQUIRE(response.paths_size() == 2);
+    CHECK(response.paths(0) == "README.md");
+    CHECK(response.paths(1) == "src/");
+}
+
+TEST_CASE("SuggestPaths falls back to the stored row for a terminated session",
+          "[session_service][mention]") {
+    // Same rule as GetMessages: a terminated session still answers. A tab may
+    // outlive the session object that backed it mid-keystroke.
+    ServiceFixture fixture;
+    fixture.Start();
+
+    const std::string session_id = fixture.CreateSession();
+    fixture.sessions->Terminate(session_id);  // session object gone; row remains
+
+    grpc::ClientContext context;
+    v1::SuggestPathsRequest request;
+    request.set_session_id(session_id);
+    v1::SuggestPathsResponse response;
+    REQUIRE(fixture.stub->SuggestPaths(&context, request, &response).ok());
+    CHECK(response.paths_size() == 0);  // the (empty) work dir, not an error
+}
+
+TEST_CASE("SuggestPaths for an unknown session is NOT_FOUND, not an empty page",
+          "[session_service][mention]") {
+    ServiceFixture fixture;
+    fixture.Start();
+
+    grpc::ClientContext context;
+    v1::SuggestPathsRequest request;
+    request.set_session_id("01ARZ3NDEKTSV4RRFFQ69G5FAV");
+    v1::SuggestPathsResponse response;
+    CHECK(fixture.stub->SuggestPaths(&context, request, &response).error_code() ==
+          grpc::StatusCode::NOT_FOUND);
+}
+
+TEST_CASE("a turn with @-mentions persists the verbatim text plus framed blocks",
+          "[session_service][mention]") {
+    ServiceFixture fixture;
+    fixture.Script(testing::TextResponse("looked"));
+    fixture.Start();
+
+    const std::string session_id = fixture.CreateSession();
+    { std::ofstream out(fixture.dir / "work" / "notes.md"); out << "file body"; }
+
+    grpc::ClientContext open_context;
+    auto stream = fixture.stub->OpenSession(&open_context);
+    REQUIRE(stream->Write(ChatTurn(session_id, "see @notes.md")));
+    REQUIRE(WaitForTurnCompleted(*stream));
+    (void)DrainAndFinish(stream);
+
+    // The persisted user message IS the expanded one -- the transcript records
+    // what the model saw. Blocks, not a rewritten single text: the original
+    // sentence survives verbatim as its own block.
+    grpc::ClientContext context;
+    v1::GetMessagesRequest request;
+    request.set_session_id(session_id);
+    v1::GetMessagesResponse response;
+    REQUIRE(fixture.stub->GetMessages(&context, request, &response).ok());
+    REQUIRE(response.messages_size() == 2);
+    const auto& user = response.messages(1);
+    REQUIRE(user.message().role() == v1::ROLE_USER);
+    REQUIRE(user.message().content_size() == 2);
+    CHECK(user.message().content(0).text().text() == "see @notes.md");
+    CHECK(user.message().content(1).text().text() ==
+          "<file path=\"notes.md\">\nfile body\n</file>");
 }
 
 TEST_CASE("ListSessions without a project_root is refused rather than answered empty",
@@ -807,6 +1014,322 @@ TEST_CASE("a command invocation is answered while the subsystem is missing",
     }
     (void)DrainAndFinish(stream);
     CHECK(answered);
+}
+
+TEST_CASE("ListCommands carries name, summary, usage, kind, display and read_only",
+          "[session_service][e5]") {
+    // The enumeration RPC EXTENSIBILITY.md 4.3 ruled into existence: without it
+    // plugin commands are invisible to /-autocomplete. Kind is derived from the
+    // command's TYPE, not a flag -- the same rule the busy-check runs on.
+    ServiceFixture fixture;
+    fixture.commands.Register(std::make_unique<OpenViewCommand>());
+    fixture.commands.Register(std::make_unique<SilentOkCommand>());
+    fixture.commands.Register(std::make_unique<InterpolatingShorthand>());
+    fixture.Script(testing::TextResponse("hi"));
+    fixture.Start();
+
+    grpc::ClientContext context;
+    v1::ListCommandsResponse response;
+    REQUIRE(fixture.stub->ListCommands(&context, v1::ListCommandsRequest{}, &response).ok());
+
+    std::map<std::string, const v1::CommandInfo*> by_name;
+    for (const auto& info : response.commands()) by_name[info.name()] = &info;
+    REQUIRE(by_name.count("openview") == 1);
+    REQUIRE(by_name.count("quietok") == 1);
+    REQUIRE(by_name.count("review") == 1);
+
+    CHECK(by_name["openview"]->kind() == v1::COMMAND_KIND_HARNESS);
+    CHECK(by_name["openview"]->display() == v1::COMMAND_DISPLAY_VIEW);
+    CHECK(by_name["openview"]->read_only());
+
+    CHECK(by_name["quietok"]->display() == v1::COMMAND_DISPLAY_SILENT);
+
+    CHECK(by_name["review"]->kind() == v1::COMMAND_KIND_PROMPT_SHORTHAND);
+    CHECK(by_name["review"]->display() == v1::COMMAND_DISPLAY_STATUS);
+    CHECK_FALSE(by_name["review"]->read_only());
+
+    CHECK(by_name["openview"]->usage() == "/openview");
+    CHECK(by_name["openview"]->summary() == "opens a view");
+}
+
+TEST_CASE("a CommandResult carries its display mode, and an error degrades to the status line",
+          "[session_service][e5]") {
+    ServiceFixture fixture;
+    fixture.commands.Register(std::make_unique<OpenViewCommand>());
+    fixture.commands.Register(std::make_unique<FailingViewCommand>());
+    fixture.commands.Register(std::make_unique<SilentOkCommand>());
+    fixture.Script(testing::TextResponse("hi"));
+    fixture.Start();
+
+    const std::string session_id = fixture.CreateSession();
+    grpc::ClientContext context;
+    auto stream = fixture.stub->OpenSession(&context);
+
+    const auto view = RunCommand(stream, session_id, "openview");
+    REQUIRE(view.has_value());
+    CHECK(view->status() == v1::COMMAND_STATUS_OK);
+    CHECK(view->display() == v1::COMMAND_DISPLAY_VIEW);
+    CHECK(view->view_hint() == "sessions");
+
+    const auto silent = RunCommand(stream, session_id, "quietok");
+    REQUIRE(silent.has_value());
+    CHECK(silent->display() == v1::COMMAND_DISPLAY_SILENT);
+    CHECK(silent->view_hint().empty());
+
+    const auto failed = RunCommand(stream, session_id, "brokenview");
+    REQUIRE(failed.has_value());
+    CHECK(failed->status() == v1::COMMAND_STATUS_ERROR);
+    // Downgraded: errors belong on the notice line even when the command that
+    // failed normally opens a view (dispatcher rule, EXTENSIBILITY 4.4).
+    CHECK(failed->display() == v1::COMMAND_DISPLAY_STATUS);
+    CHECK(failed->view_hint().empty());
+
+    stream->WritesDone();
+    v1::ServerEvent discarded;
+    while (stream->Read(&discarded)) {
+    }
+    (void)stream->Finish();
+}
+
+TEST_CASE("a prompt shorthand submits exactly the interpolated turn, and a command result "
+          "never lands in the store",
+          "[session_service][e5][invariant]") {
+    // The invariant that makes the taxonomy honest (EXTENSIBILITY 4.4): the
+    // ONLY way a command's content reaches the model is a shorthand's submitted
+    // turn. Nothing any command answers is appended to history, so a transcript
+    // after /review holds exactly two rows -- the interpolated user turn and
+    // the model's reply to it.
+    ServiceFixture fixture;
+    fixture.commands.Register(std::make_unique<OpenViewCommand>());
+    fixture.commands.Register(std::make_unique<InterpolatingShorthand>());
+    fixture.Script(testing::TextResponse("the review, as a real turn reply"));
+    fixture.Start();
+
+    const std::string session_id = fixture.CreateSession();
+    grpc::ClientContext context;
+    auto stream = fixture.stub->OpenSession(&context);
+
+    const auto view = RunCommand(stream, session_id, "openview");
+    REQUIRE(view.has_value());
+    CHECK(view->status() == v1::COMMAND_STATUS_OK);
+
+    const auto review = RunCommand(stream, session_id, "review", {"the", "login", "flow"});
+    REQUIRE(review.has_value());
+    CHECK(review->status() == v1::COMMAND_STATUS_OK);
+
+    // The submitted turn runs after the command; wait for it to finish before
+    // reading the transcript.
+    REQUIRE(WaitForTurnCompleted(*stream));
+    stream->WritesDone();
+    v1::ServerEvent discarded;
+    while (stream->Read(&discarded)) {
+    }
+    (void)stream->Finish();
+
+    const auto page = fixture.db->GetMessagesPage(session_id, std::nullopt, 50);
+    REQUIRE(page.messages.size() == 2);
+    // Descending by seq: [1] is the model's reply, [0] the submitted turn.
+    CHECK(page.messages[1].message.role == llm::Role::User);
+    CHECK(page.messages[1].message.content.size() == 1);
+    CHECK(std::get<llm::TextBlock>(page.messages[1].message.content[0]).text ==
+          "review note: the login flow");
+    CHECK(page.messages[0].message.role == llm::Role::Assistant);
+}
+
+TEST_CASE("DeleteSession is refused while the session is open, works after close",
+          "[session_service][e5]") {
+    ServiceFixture fixture;
+    fixture.Script(testing::TextResponse("hi"));
+    fixture.Start();
+
+    const std::string session_id = fixture.CreateSession();
+
+    grpc::ClientContext context;
+    auto stream = fixture.stub->OpenSession(&context);
+    v1::ClientEvent naming;
+    naming.set_session_id(session_id);
+    naming.mutable_attach();  // attach only: the deletion guard is about the stream
+    REQUIRE(stream->Write(naming));
+    v1::ServerEvent attached;
+    REQUIRE(stream->Read(&attached));  // the attach-time SessionMetadataEvent
+
+    v1::DeleteSessionRequest del;
+    del.set_session_id(session_id);
+    {
+        grpc::ClientContext ctx;
+        v1::DeleteSessionResponse response;
+        const auto status = fixture.stub->DeleteSession(&ctx, del, &response);
+        CHECK(status.error_code() == grpc::StatusCode::FAILED_PRECONDITION);
+    }
+
+    // Empty and unknown ids answer INVALID_ARGUMENT / NOT_FOUND, not OK.
+    {
+        grpc::ClientContext ctx;
+        v1::DeleteSessionResponse response;
+        v1::DeleteSessionRequest empty;
+        CHECK(fixture.stub->DeleteSession(&ctx, empty, &response).error_code() ==
+              grpc::StatusCode::INVALID_ARGUMENT);
+    }
+    {
+        grpc::ClientContext ctx;
+        v1::DeleteSessionResponse response;
+        v1::DeleteSessionRequest ghost;
+        ghost.set_session_id("no-such-session");
+        CHECK(fixture.stub->DeleteSession(&ctx, ghost, &response).error_code() ==
+              grpc::StatusCode::NOT_FOUND);
+    }
+
+    // Close the stream, which terminates the session; the row is now deletable,
+    // and the delete cascades to messages (the store-level guarantee the
+    // session_store tests cover -- here we assert the RPC wiring only).
+    (void)DrainAndFinish(stream);
+    {
+        grpc::ClientContext ctx;
+        v1::DeleteSessionResponse response;
+        REQUIRE(fixture.stub->DeleteSession(&ctx, del, &response).ok());
+
+        grpc::ClientContext again;
+        v1::DeleteSessionResponse response2;
+        CHECK(fixture.stub->DeleteSession(&again, del, &response2).error_code() ==
+              grpc::StatusCode::NOT_FOUND);
+    }
+}
+
+TEST_CASE("a fresh stream opens with a SessionMetadataEvent carrying the status-bar fields",
+          "[session_service][e5]") {
+    ServiceFixture fixture;
+    // A real window on the model: the `max` half of the status bar's {tokens}
+    // resolves from the same place compaction's strategies do.
+    fixture.Write(
+        "providers.json",
+        nlohmann::json{{"providers",
+                        {{"main",
+                          {{"backend", "fake"},
+                           {"url", "http://localhost/v1"},
+                           {"models",
+                            {{"test-model", {{"context_window_tokens", 48000}}}}}}}}}}
+            .dump());
+    fixture.Script(testing::TextResponse("hi"));
+    fixture.Start();
+
+    const std::string session_id = fixture.CreateSession();
+
+    grpc::ClientContext context;
+    auto stream = fixture.stub->OpenSession(&context);
+    v1::ClientEvent naming;
+    naming.set_session_id(session_id);
+    naming.mutable_attach();
+    REQUIRE(stream->Write(naming));
+
+    v1::ServerEvent event;
+    REQUIRE(stream->Read(&event));
+    REQUIRE(event.has_session_metadata());
+    const auto& metadata = event.session_metadata();
+    CHECK(metadata.session_id() == session_id);
+    CHECK(metadata.agent_preset() == "main");
+    CHECK(metadata.model() == "main/test-model");
+    CHECK(metadata.permission_mode() == "normal");
+    CHECK(metadata.context_window_tokens() == 48000);
+    // A NEW session is unnamed here: the free default name is minted by the
+    // store's append transaction, not by creation. The name arrives as its own
+    // metadata event after the first turn (tested below).
+
+    // One emission per attach: attaching again is refused anyway, but the
+    // second event would double the label refresh work. Assert the count is
+    // exactly one by sending a turn and reading the terminator.
+    REQUIRE(stream->Write(ChatTurn(session_id, "name me")));
+    bool saw_turn_completed = false;
+    std::optional<v1::SessionMetadataEvent> name_event;
+    v1::ServerEvent next;
+    while (stream->Read(&next)) {
+        if (next.has_session_metadata()) {
+            // A metadata event carrying the free default name. It must ride
+            // BEFORE the turn terminator: TurnCompletedEvent is the
+            // end-of-turn signal and a client may half-close on it -- anything
+            // pushed after it wedges the client's drain-before-Finish.
+            name_event = next.session_metadata();
+            CHECK_FALSE(saw_turn_completed);
+        }
+        if (next.has_turn_completed()) {
+            saw_turn_completed = true;
+            break;
+        }
+    }
+    REQUIRE(saw_turn_completed);
+    REQUIRE(name_event.has_value());
+    CHECK(name_event->name() == "name me");
+
+    stream->WritesDone();
+    v1::ServerEvent rest;
+    while (stream->Read(&rest)) {
+    }
+    (void)stream->Finish();
+}
+
+TEST_CASE("the generic plugin channel dispatches PluginCall to the named endpoint",
+          "[session_service][e5]") {
+    ServiceFixture fixture;
+    fixture.LoadEndpointPlugin();
+    fixture.Start();
+
+    // The client half: SessionClient's PluginCall wrapper, driven through a
+    // real channel -- the exact call a client plugin's ClientApi makes.
+    minimal::client::SessionClient client(rpc::SocketTarget(fixture.socket));
+
+    const auto ping = client.PluginCall("fixture-endpoint", "ping", "1");
+    REQUIRE(ping.status.ok());
+    CHECK(ping.json_payload == "{\"pong\":1}");
+
+    // Payloads are plugin-owned JSON; core transports, never interprets.
+    const auto echo = client.PluginCall("fixture-endpoint", "echo.hello", "x");
+    REQUIRE(echo.status.ok());
+    CHECK(echo.json_payload == "x/hello");
+
+    // An unknown pair is NOT_FOUND, not an empty answer.
+    const auto ghost = client.PluginCall("no-such-plugin", "ping", "1");
+    CHECK(ghost.status.error_code() == grpc::StatusCode::NOT_FOUND);
+
+    // An endpoint THROW is contained: INTERNAL naming the failure, and the
+    // service lives on (the next call answers normally).
+    const auto boom = client.PluginCall("fixture-endpoint", "boom", "");
+    CHECK(boom.status.error_code() == grpc::StatusCode::INTERNAL);
+    const auto after = client.PluginCall("fixture-endpoint", "ping", "2");
+    REQUIRE(after.status.ok());
+    CHECK(after.json_payload == "{\"pong\":2}");
+}
+
+TEST_CASE("the generic plugin channel streams PluginSubscribe payloads",
+          "[session_service][e5]") {
+    ServiceFixture fixture;
+    fixture.LoadEndpointPlugin();
+    fixture.Start();
+
+    minimal::client::SessionClient client(rpc::SocketTarget(fixture.socket));
+
+    // The endpoint pushes ticks from its own thread; the wrapper delivers
+    // them in order on the calling thread. The SUBSCRIBER owns the lifetime:
+    // returning false cancels the call (TryCancel) -- here after the first
+    // three payloads.
+    std::vector<std::string> seen;
+    const auto outcome = client.PluginSubscribe(
+        "fixture-endpoint", "ticks", "99",
+        [&](const std::string& payload) {
+            seen.push_back(payload);
+            return seen.size() < 3;
+        });
+    CHECK(outcome == minimal::client::SubscribeOutcome::kCancelled);
+    REQUIRE(seen.size() == 3);
+    CHECK(seen[0] == "tick-0");
+    CHECK(seen[1] == "tick-1");
+    CHECK(seen[2] == "tick-2");
+
+    // An unknown method is refused before any payload: kError, not a silent
+    // false that a subscriber could misread as its own cancellation.
+    grpc::Status refused_status;
+    CHECK(client.PluginSubscribe("fixture-endpoint", "no-such-method", "", {},
+                                 &refused_status) ==
+          minimal::client::SubscribeOutcome::kError);
+    CHECK_FALSE(refused_status.ok());
 }
 
 TEST_CASE("a second client on the same session is refused, not silently served",

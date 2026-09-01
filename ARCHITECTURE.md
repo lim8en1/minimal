@@ -361,7 +361,7 @@ private:
 
 **Token accounting — two distinct quantities, never conflated:**
 
-- **Context occupancy** (status-bar `used/max`, compaction trigger) = `last_turn.input_tokens + last_turn.output_tokens`. Each turn's `input_tokens` already contains the whole history, so *summing* across turns double-counts quadratically and would fire compaction far too early.
+- **Context occupancy** (status-bar `used/max`, compaction trigger) = `last_turn.input_tokens + last_turn.output_tokens`. Each turn's `input_tokens` already contains the whole history, so *summing* across turns double-counts quadratically and would fire compaction far too early. `context_window_tokens` now has a wire surface — the extension-seams track's `SessionMetadataEvent` carries it, which is what the TUI's status bar renders the `max` half from.
 - **Cumulative totals** (genuinely additive) = running sum of `output_tokens`, plus summed `input_tokens` if cost display is added later. **The cost-tracker plugin is that later addition**: its `SessionObserver` accumulates per-session totals from `TurnSummary` (which carries `model` precisely so a per-model rate is resolvable), prices them from user config > a fetched LiteLLM snapshot > a seeded fallback table, and serves `/cost`, a § Cross-plugin services interface, and a `cost-tracker.rpc` PluginCall target the UI consumes. Models with no rate anywhere, and the zero-usage proxy gap below, render as *unknown*, never as `$0.00` — a missing price is not a price of zero.
 
 Counts come from the backend's own reported usage; there is no separate tokenizer. Some OpenAI-compatible proxies report `0` — no fallback estimate is designed for that, flagged as a known gap.
@@ -939,26 +939,37 @@ public:
                                    std::string_view result_text, bool is_error) const = 0;
 };
 
-// src/client/plugins/client_plugin_abi.h
+// src/client/plugins/include/minimal/client/plugins/client_plugin_abi.h -- SHIPPED (track E5).
+// Every hook takes (Registry&, const ClientPluginRegistrationContext&) from the
+// first symbol: the context carries the per-plugin `config` slice, an
+// `AttentionSink*`, and the `ClientApi*` data path (GetMessages paging plus the
+// PluginCall/PluginSubscribe channel) -- the struct-argument rule the server's
+// `PluginRegistrationContext` taught, applied from day one so no hook ever
+// needs a second signature sweep.
 extern "C" {
   const char* minimal_client_plugin_abi_tag();
-  void minimal_client_plugin_register_views(ViewRegistry&);
-  void minimal_client_plugin_register_renderers(ToolResultRendererRegistry&);
-  void minimal_client_plugin_register_message_renderers(MessageRendererRegistry&);
-  void minimal_client_plugin_register_status_segments(StatusSegmentRegistry&);
-  void minimal_client_plugin_register_chat_surface(ChatSurfaceRegistry&);        // exclusive
-  void minimal_client_plugin_register_markdown_engine(MarkdownEngineRegistry&);  // exclusive
-  void minimal_client_plugin_register_syntax_grammars(SyntaxGrammarRegistry&);
+  const char* minimal_client_plugin_name();
+  const char* minimal_client_plugin_version();
+  void minimal_client_plugin_register_views(ViewRegistry&, const ClientPluginRegistrationContext&);
+  void minimal_client_plugin_register_renderers(ToolResultRendererRegistry&, const ClientPluginRegistrationContext&);
+  void minimal_client_plugin_register_message_renderers(MessageRendererRegistry&, const ClientPluginRegistrationContext&);
+  void minimal_client_plugin_register_status_segments(StatusSegmentRegistry&, const ClientPluginRegistrationContext&);
+  void minimal_client_plugin_register_chat_surface(ChatSurfaceRegistry&, const ClientPluginRegistrationContext&);        // exclusive
+  void minimal_client_plugin_register_markdown_engine(MarkdownEngineRegistry&, const ClientPluginRegistrationContext&);  // exclusive
+  void minimal_client_plugin_register_syntax_grammars(SyntaxGrammarRegistry&, const ClientPluginRegistrationContext&);
 }
 ```
 
 Both registries follow the server's collision rules: duplicate `ViewSpec::id` or `tool_name()` is fatal and alias-resolvable, and `keybindings.json` addresses views by their canonical id, never an alias. A renderer registered for a tool whose plugin is disabled falls back to default rendering rather than erroring.
+
+**Shipped shape (track E5).** The host lives in `src/client/plugins/` (loader = the server loader's twin; `NameRegistry` moved to `src/common` so both loaders run one collision rule). Client plugins link the SHARED `minimal::client_core` -- the same one-copy-in-memory argument as the server core -- and are discovered from `client-plugins.json` (client-owned and rewritten, bundled dir `plugins/client/`, user dir `config_dir/client-plugins/`; a separate file from the server's `plugins.json` precisely so neither writer can stomp the other's entries). Two user-facing config files become plugin infrastructure here: `keybindings.json` (view ids) and the new seeded `ui.json`, whose `status_format` string is how status-bar segments are addressed. Render-time inputs travel with the call, `const Theme&` included: plugins load before the theme does (theme `sections` reference loaded plugin names), so nothing renderable can capture a theme at registration.
 
 Three policies complete the surface:
 
 - **Plugin modals never preempt the permission modal.** Permission/confirmation prompts are always topmost in the modal stack; a plugin modal cannot mask one or steal its input. Invariant, tested.
 - **Client plugins own their data path.** A plugin view wanting live data subscribes itself through the generic `PluginCall`/`PluginSubscribe` channel; core transports and never interprets plugin payloads. A plugin *pair* binding a server command to a client view works the same way: the client side observes its own `CommandResult` — whose `view_hint` names the view — and opens or refreshes it.
 - **Attention is raiseable.** Plugins receive an `AttentionSink` at registration and may raise or clear tab/global attention; core event derivation (§ *Tab states and attention*) remains the default source, and the `!` glyph stays the only color-independent signal.
+- **`PluginSubscribe` is tri-state** (`SubscribeOutcome`: cancelled / ended / error) -- a single bool conflated the subscriber's own cancellation, a clean server close, and a refusal or transport death. Live subscriptions are cancelled at client teardown; the sink and data-path pointers a plugin captures at registration are host-owned for the process lifetime (the temporaries that once dangled them are the exact bug class the R harness tests now pin).
 
 **Consequence:** `keybindings.json` and the status-bar format string become **load-bearing plugin infrastructure**, not just user conveniences — they are how plugin-registered views and segments are addressed, so their schemas must accommodate names that don't exist at compile time.
 
@@ -972,7 +983,10 @@ Three policies complete the surface:
 // src/client/render/markdown_renderer.hpp
 class MarkdownRenderer {
 public:
-    // md_parse() with MD_FLAG_TABLES | MD_FLAG_STRIKETHROUGH | MD_FLAG_TASKLISTS.
+    // md_parse() with MD_DIALECT_GITHUB plus MD_FLAG_LATEXMATHSPANS (tables,
+    // strikethrough, tasklists, permissive autolinks -- chat text contains bare
+    // URLs constantly -- and dim-styled $...$ math, which math-heavy models emit
+    // without ever being renderable in a terminal).
     // enter_block/leave_block/enter_span/leave_span/text callbacks build ftxui::Elements.
     ftxui::Element Render(std::string_view markdown_text) const;
 };
@@ -993,8 +1007,9 @@ private:
     std::chrono::steady_clock::time_point last_reparse_;
     bool finalized_ = false;
     static constexpr auto kReparseDebounce = std::chrono::milliseconds(120);
-    // Re-parses only if !finalized_ && elapsed >= debounce; Finalize() always does one
-    // authoritative reparse, replacing artifacts from mid-stream unclosed spans.
+    // Re-parses only if !finalized_ && text changed && elapsed >= debounce;
+    // Finalize() always does one authoritative reparse, replacing artifacts from
+    // mid-stream unclosed spans.
 };
 ```
 
@@ -1009,8 +1024,17 @@ class SyntaxHighlighter {
 public:
     // Returns plain text if `language` isn't in the curated set.
     ftxui::Elements Highlight(std::string_view code, std::string_view language) const;
+
+    // The tested seam beneath Highlight: byte-range spans with categories, no
+    // FTXUI. FTXUI render output is not unit-tested (visual, low yield), so the
+    // node-type -> category mapping is asserted here instead. Plain spans are
+    // informational defaults, not claims (a Plain parent covers the whole
+    // input); "later wins" applies only among categorized spans.
+    std::vector<HighlightSpan> HighlightCode(std::string_view code, std::string_view language) const;
 };
 ```
+
+The grammars are pinned and compiled by `cmake/TreeSitterGrammars.cmake` (FetchContent, tag-pinned with the resolved commit recorded; each grammar is just its generated `parser.c` plus an optional external scanner, so the grammar repos' own CMake is deliberately not run). Note that keywords are *anonymous* nodes in tree-sitter grammars (`"return"`, `"if"` — string literals in the grammar), so the rule tables apply to anonymous node types as well; named-node-only matching would color no keyword at all.
 
 The highlighter never hardcodes a color; the theme supplies one per `HighlightCategory`, keeping highlighting and theming separate.
 
@@ -1032,7 +1056,7 @@ The highlighter never hardcodes a color; the theme supplies one per `HighlightCa
 }
 ```
 
-`src/client/render/color_downsample.{hpp,cpp}` maps truecolor to the nearest 256-/16-color entry, checked once at startup against `COLORTERM`/`TERM` — themes are authored once and degrade automatically. Bundled-theme contrast is validated against both light- and dark-background terminals: a color picked against one silently breaks on the other.
+`src/client/render/color_downsample.{hpp,cpp}` maps truecolor to the nearest 256-/16-color entry, checked once at startup against `COLORTERM`/`TERM` — themes are authored once and degrade automatically. Bundled-theme contrast is validated per family: each bundled theme's text roles must hold WCAG 3.0 against the terminal background the theme is named for (dark against black, light against white). Requiring every color to work against *both* backgrounds would forbid exactly what a theme family exists to express — near-white assistant text in the dark theme, near-black in the light one.
 
 ## TUI layout — `src/client/`
 
@@ -1048,7 +1072,7 @@ The highlighter never hardcodes a color; the theme supplies one per `HighlightCa
 | Running-tools view | **Panel** (`ResizableSplit`) | A *monitor* — wanted visible *while* working |
 | Command results (`/help`, `/providers`, config changes) | view, status line, or transient error — **never a chat row** (§ `/-command system`) | `CommandResult.display` decides |
 
-Frame: `tab bar / active session view / optional panel / status bar`, plus a modal layer. There is no separate "agent view" — that *is* the tab.
+Frame: `tab bar / active session view / optional panel / status bar`, plus a modal layer. There is no separate "agent view" — that *is* the tab. The panel is a capped region in v1; a `ResizableSplit` drag handle is polish that lands with the panel-column slots. The client redraws from state snapshots at a fixed cadence: gRPC reader threads mutate client state only and never touch components, so the bridge is a snapshot pump rather than per-event posts.
 
 ```
 +----------------------------------------------------+
@@ -1066,7 +1090,9 @@ Frame: `tab bar / active session view / optional panel / status bar`, plus a mod
 
 **Client state model:**
 
-- `SessionState` per tab: virtualized scrollback window (against `GetMessages`), `StreamingMarkdownView` for the in-flight message, derived tab state, pending prompt, per-session tool rows.
+- `SessionState` per tab: **bounded sliding** scrollback window (against `GetMessages`; paging older beyond `ui.json`'s `scrollback_window_max_messages` evicts pages from the window's NEWEST end and flags the trim, which the view renders as a boundary marker -- the wire only pages descending, so newer pages return with the next turn refresh, never a silent gap), `StreamingMarkdownView` for the in-flight message (stream recreation keyed on `turn_seq`, not a buffer-size heuristic; `Finalize()` runs once per turn), derived tab state, pending prompt, per-session tool rows (output capped at append, head ¼ + marker + tail ¾).
+- The frame renders the FOCUSED tab from a deep snapshot (`GetDetails`); the tab list and the tools panel read light snapshots (`TakeLightSnapshot`) -- a frame deep-copies one tab, not every tab. The 20 Hz pump posts only when `UiVersion()` moved, plus a 5 Hz floor for the editor's debounce gate.
+- A chat-surface plugin's `OnEvent`/`Render` and status-segment `Render` are guarded: a THROW disables the surface (the core chat view takes over) or blanks the segment for the frame -- never process death. BLOCKING is a documented contract, not enforced (no dispatcher thread).
 - `AppState`: ordered `SessionState` list, focused index, panel visibility, modal stack.
 - `SessionClient`: one gRPC stream per session, demultiplexing `ServerEvent`s into the right `SessionState` by `session_id`.
 
@@ -1136,8 +1162,10 @@ Three tiers:
 
 Typing `@` triggers path autocomplete; selecting inserts `@<relative-path>`.
 
-- **Suggestion** goes through the `SuggestPaths` RPC (debounced ~100–150 ms), resolved by the server's `MentionResolver` so the strategy is pluggable and every frontend inherits it.
-- **Expansion is server-side**: on receiving a `UserChatTurn`, the server scans for `@<path>` tokens before wrapping it into a `Message`, resolving each via `path_confinement::confine` + `file_access::read_window` — reused from the Read tool, not reimplemented. A file mention inlines windowed content; a directory mention inlines only the file tree/names, keeping it bounded. **Not** `PermissionChecker`-gated: the human explicitly asked for that content, exactly as if they had pasted it.
+- **Suggestion** goes through the `SuggestPaths` RPC (debounced ~100–150 ms), resolved by the server's `MentionResolver` so the strategy is pluggable and every frontend inherits it. `PrefixMentionResolver` is the core default: case-sensitive prefix match listing exactly one directory, directories suffixed `/`, dotfiles invisible unless the typed fragment starts with `.`. Suggestions answer from the live session's `project_root`, or from the stored row when the session has terminated — the same rule `GetMessages` follows — and an unknown session is `NOT_FOUND`, never an empty list that reads like "no matches here".
+- **Expansion is server-side and produces blocks, not a rewritten message.** On receiving a `UserChatTurn` for a top-level session (a subagent's task is model-generated prose — expanding `@` in it would misfire on emails), the server scans for `@<path>` tokens — `@` at the start of the text or after whitespace, running to the next whitespace; a bare `@` is not a token — and returns one `User` message whose first `TextBlock` is the original text **verbatim** plus one framed block per resolved mention: `<file path="...">…</file>`, or `<file-tree path="...">…</file-tree>` for a directory. **Blocks in one message, not one message per file** — a multi-block `User` message is native on both wire formats (the OpenAI provider concatenates them into one content string, which is harmless because the framing is self-delimiting), whereas consecutive `User` messages would be refused by the Anthropic Messages API's role alternation. Resolution reuses `path_confinement::confine` + `file_access::read_window` from the Read tool.
+- **Capping is per file, never a split.** A file mention inlines the first window (1000 lines, 2000 chars/line) with a visible truncation note pointing at the read tool; directory listings are depth- and entry-bounded. Splitting one file across blocks would hand the model fragments it cannot reassemble; the window plus `read` is the whole contract. No dedup — a mention means "read this now", so re-mentioning picks up edits.
+- **Not** `PermissionChecker`-gated: the human explicitly asked for that content, exactly as if they had pasted it — so mentions reaching outside `project_root` are allowed too; only paths the filesystem cannot safely resolve fail. An unresolvable mention (typo, binary, non-regular file) produces no block and its token stays verbatim: the model sees the reference and can say it does not exist. There is no error channel and no partial failure.
 - **Client-side**: a hand-rolled inline suggestion list in the prompt editor. `Dropdown` exists but is a click-to-open selector; type-ahead completion reads better inline.
 
 ## Non-interactive client (`minimal -p`)

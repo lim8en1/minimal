@@ -266,6 +266,28 @@ public:
     }
 };
 
+// The result is the interface: display=View with view_hint="sessions" tells the
+// client to open its session picker, which fetches its own list over
+// ListSessions -- the command itself carries no data to show. ReadOnly because
+// it touches nothing, so it answers beside a live turn. The message exists for
+// a client with no picker (headless): display only governs WHERE a result
+// surfaces, never whether it is answered.
+class SessionsCommand : public HarnessCommand {
+public:
+    std::string_view Name() const override { return "sessions"; }
+    std::string_view Summary() const override { return "Open the session picker"; }
+    std::string_view Usage() const override { return "/sessions"; }
+    bool ReadOnly() const override { return true; }
+    minimal::commands::CommandDisplay Display() const override {
+        return minimal::commands::CommandDisplay::kView;
+    }
+    std::string_view ViewHint() const override { return "sessions"; }
+
+    CommandResult Execute(CommandContext&, const CommandArgs&) override {
+        return CommandResult::Ok("session list requested");
+    }
+};
+
 }  // namespace
 
 std::vector<std::unique_ptr<Command>> MakeCoreCommands() {
@@ -279,6 +301,7 @@ std::vector<std::unique_ptr<Command>> MakeCoreCommands() {
     out.push_back(std::make_unique<AgentCommand>());
     out.push_back(std::make_unique<ModelCommand>());
     out.push_back(std::make_unique<PermissionModeCommand>());
+    out.push_back(std::make_unique<SessionsCommand>());
     return out;
 }
 

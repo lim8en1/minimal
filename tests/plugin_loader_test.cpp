@@ -85,6 +85,40 @@ TEST_CASE("a well-formed plugin loads and contributes its registrations", "[plug
     CHECK(listed[0].id == "fixture-model");
 }
 
+TEST_CASE("the loader dlsyms the mention-resolver seam into a real registry",
+          "[plugin_loader][mention]") {
+    tools::ToolRegistry tool_registry;
+    llm::ProviderFactoryRegistry provider_registry;
+    agent::MentionResolverRegistry resolvers(common::DefaultLogger());
+    plugins::PluginLoader loader(tool_registry, provider_registry, nlohmann::json::object(),
+                                 /*observers=*/nullptr, /*commands=*/nullptr,
+                                 /*auth_providers=*/nullptr, /*permission_advisors=*/nullptr,
+                                 /*model_catalogs=*/nullptr, /*services=*/nullptr,
+                                 /*storage=*/nullptr, /*plugin_data_root=*/{},
+                                 /*hook_points=*/nullptr, /*mention_resolvers=*/&resolvers);
+    const auto records = loader.LoadAll({Enabled("fixture-good")});
+
+    REQUIRE(records.size() == 1);
+    CHECK(records.front().registered_mention_resolver);
+    CHECK(resolvers.has_override());
+
+    // The override reached Active(), not just the record: a plugin-registered
+    // strategy must actually serve SuggestPaths, which is the entire reason the
+    // seam is exclusive rather than additive.
+    CHECK(resolvers.Active().Suggest("", {}, 50) == std::vector<std::string>{"fixture-resolved"});
+}
+
+TEST_CASE("a loader without the registry leaves the seam unoffered", "[plugin_loader][mention]") {
+    Harness h;  // default-constructed: no mention-resolver registry attached
+    const auto records = h.loader.LoadAll({Enabled("fixture-good")});
+
+    REQUIRE(records.size() == 1);
+    CHECK(records.front().status == LoadStatus::Loaded);
+    // Null registry means the symbol is simply not offered; the plugin treats
+    // every registration hook as optional, so the load still succeeds.
+    CHECK_FALSE(records.front().registered_mention_resolver);
+}
+
 TEST_CASE("an ABI-mismatched plugin is skipped without running its code",
           "[plugin_loader][abi]") {
     Harness h;

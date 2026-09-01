@@ -27,4 +27,8 @@ std::filesystem::path ExecutablePath();
 // directory as "no bundled plugins".
 std::filesystem::path BundledPluginDir();
 
+// The client twin: .../plugins/client in both layouts (MINIMAL_CLIENT_PLUGIN_DIR
+// is the same value CMake installs to). Same probe, same missing-directory rule.
+std::filesystem::path BundledClientPluginDir();
+
 }  // namespace minimal::common

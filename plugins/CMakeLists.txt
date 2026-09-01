@@ -45,8 +45,30 @@ function(minimal_add_plugin name)
     install(TARGETS ${name} LIBRARY DESTINATION "${MINIMAL_PLUGIN_INSTALL_DIR}")
 endfunction()
 
+# The client twin: MODULE, links the SHARED minimal::client_core (one copy in
+# memory, ordinary symbol resolution -- see the linkage history above), installs
+# one directory deeper still, into the client plugin tree.
+function(minimal_add_client_plugin name)
+    add_library(${name} MODULE ${ARGN})
+    target_link_libraries(${name} PRIVATE minimal::client_core)
+    target_compile_options(${name} PRIVATE ${MINIMAL_WARNING_FLAGS})
+    set_target_properties(${name} PROPERTIES PREFIX "" OUTPUT_NAME "${name}")
+
+    if(APPLE)
+        set_target_properties(${name} PROPERTIES
+            INSTALL_RPATH "@loader_path/../../../../${CMAKE_INSTALL_LIBDIR}")
+    else()
+        set_target_properties(${name} PROPERTIES
+            INSTALL_RPATH "$ORIGIN/../../../../${CMAKE_INSTALL_LIBDIR}")
+    endif()
+
+    install(TARGETS ${name} LIBRARY DESTINATION "${MINIMAL_CLIENT_PLUGIN_INSTALL_DIR}")
+endfunction()
+
 add_subdirectory(server)
 
-# plugins/client/ -- none bundled yet. Client plugins are loaded by a different
-# loader, export different ABI symbols, and install to a different directory, so
-# they get their own subtree and their own add-function when the first one lands.
+# plugins/client/ -- none bundled yet (E5 proves the host with test fixtures;
+# the external todo plugin is the intended first real consumer). The subtree
+# exists so a bundled client plugin lands here the same way a server plugin
+# lands in plugins/server/.
+add_subdirectory(client)

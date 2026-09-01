@@ -31,6 +31,14 @@ public:
     }
 };
 
+class FixtureResolver : public minimal::agent::MentionResolver {
+public:
+    std::vector<std::string> Suggest(std::string_view, const std::filesystem::path&,
+                                     int) const override {
+        return {"fixture-resolved"};
+    }
+};
+
 // Track N: the plugin also registers a model catalog under the SAME kind
 // string, so the loader tests can observe the seam through a real dlopen.
 class FixtureCatalog : public minimal::llm::ModelCatalog {
@@ -69,6 +77,11 @@ void minimal_plugin_register_provider_factories(
     registry.Register("fixture", [](const minimal::llm::ProviderConfig&) {
         return std::make_unique<FixtureProvider>();
     });
+}
+void minimal_plugin_register_mention_resolver(
+    minimal::agent::MentionResolverRegistry& registry,
+    const minimal::plugins::PluginRegistrationContext&) {
+    registry.Register(std::make_shared<FixtureResolver>());
 }
 void minimal_plugin_register_model_catalogs(
     minimal::llm::ModelCatalogRegistry& registry,

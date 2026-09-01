@@ -4,11 +4,14 @@
 
 #include <unistd.h>
 
+#include <atomic>
 #include <chrono>
 #include <filesystem>
 #include <thread>
 #include <utility>
 
+#include "minimal/agent/mention_resolver.hpp"
+#include "minimal/plugins/plugin_abi.h"
 #include "minimal/rpc/proto_convert.hpp"
 
 #include "minimal/plugins/plugin_rpc.hpp"
@@ -39,9 +42,22 @@ int ClampPageSize(int requested, int fallback) {
     return std::min(requested, kMaxPageSize);
 }
 
-grpc::Status NotYet(const char* what) {
-    return grpc::Status(grpc::StatusCode::UNIMPLEMENTED,
-                        std::string(what) + " is not implemented yet");
+// The status bar renders text; a string over the wire keeps a new run mode from
+// needing a wire release to be renderable. Same spellings /permission-mode takes.
+std::string RunModeString(tools::PermissionRunMode mode) {
+    switch (mode) {
+        case tools::PermissionRunMode::AllowOnly: return "allow-only";
+        case tools::PermissionRunMode::Bypass: return "bypass";
+        case tools::PermissionRunMode::Normal: return "normal";
+    }
+    return "normal";
+}
+
+// The fallback when no registry was wired (tests, or a service built before
+// plugin load completes). Stateless and const, so one shared instance is safe.
+const agent::MentionResolver& DefaultMentionResolver() {
+    static const agent::PrefixMentionResolver resolver;
+    return resolver;
 }
 
 }  // namespace
@@ -503,6 +519,13 @@ grpc::Status SessionServiceImpl::OpenSession(
                             "session '" + first.session_id() + "' is already terminated");
     }
 
+    // First on the stream, before anything the client's first event produces:
+    // a freshly attached tab has everything its status bar renders from frame
+    // one. TryPush -- this is the RPC thread, which never blocks on a full
+    // queue; losing one metadata event degrades to "segments render nothing",
+    // the same treatment an unknown segment id gets.
+    EmitSessionMetadata(*session);
+
     // The one and only Write() caller for this stream. It drains the SESSION's
     // queue, not a stream-owned one, so anything produced before this moment is
     // still here and goes out first.
@@ -657,9 +680,30 @@ grpc::Status SessionServiceImpl::ListSessions(grpc::ServerContext* context,
     return grpc::Status::OK;
 }
 
-grpc::Status SessionServiceImpl::SuggestPaths(grpc::ServerContext*, const v1::SuggestPathsRequest*,
-                                              v1::SuggestPathsResponse*) {
-    return NotYet("SuggestPaths");
+grpc::Status SessionServiceImpl::SuggestPaths(grpc::ServerContext*,
+                                              const v1::SuggestPathsRequest* request,
+                                              v1::SuggestPathsResponse* response) {
+    // The project root of the session named in the request. A LIVE session wins;
+    // a terminated one still answers from its database row, matching GetMessages,
+    // which reads the same way whether or not a tab happens to be open. An id
+    // that is neither is NOT_FOUND, not an empty result that reads like "no
+    // matches here".
+    std::filesystem::path project_root;
+    if (const auto session = sessions_.Find(request->session_id())) {
+        project_root = session->info().project_root;
+    } else if (const auto row = db_.GetSession(request->session_id())) {
+        project_root = row->project_root;
+    } else {
+        return grpc::Status(grpc::StatusCode::NOT_FOUND,
+                            "unknown session: " + request->session_id());
+    }
+
+    const agent::MentionResolver& resolver =
+        mention_resolvers_ != nullptr ? mention_resolvers_->Active() : DefaultMentionResolver();
+    for (auto& path : resolver.Suggest(request->prefix(), project_root, request->limit())) {
+        response->add_paths(std::move(path));
+    }
+    return grpc::Status::OK;
 }
 
 grpc::Status SessionServiceImpl::PluginCall(grpc::ServerContext* context,
@@ -668,7 +712,42 @@ grpc::Status SessionServiceImpl::PluginCall(grpc::ServerContext* context,
     if (const auto auth = EnsureAuthenticated(auth_providers_, context); !auth.ok()) return auth;
 
     if (services_ == nullptr) {
-        return NotYet("PluginCall");
+        return grpc::Status(grpc::StatusCode::UNAVAILABLE, "the plugin channel is not offered");
+    }
+
+    // Two dispatch conventions share this one generic RPC, and they cannot
+    // collide: the E5 client-channel convention (PluginEndpoint) is Provided
+    // under the plugin's plain name, while the RPC-handler convention
+    // (PluginRpcHandler, e.g. checklist) is Provided under
+    // PluginRpcServiceName(name) -- "<plugin_name>.rpc". Try the plain name
+    // first; a hit there is by construction never a PluginRpcHandler.
+    if (void* service = services_->Find(request->plugin_name()); service != nullptr) {
+        auto* endpoint = static_cast<plugins::PluginEndpoint*>(service);
+        try {
+            response->set_json_payload(endpoint->Call(request->method(), request->json_payload()));
+            return grpc::Status::OK;
+        } catch (const std::exception& e) {
+            logger_.warn("plugin '{}' Call('{}') threw: {}", request->plugin_name(),
+                        request->method(), e.what());
+            return grpc::Status(grpc::StatusCode::INTERNAL,
+                                "plugin endpoint threw: " + std::string(e.what()));
+        } catch (...) {
+            logger_.warn("plugin '{}' Call('{}') threw a non-standard exception",
+                        request->plugin_name(), request->method());
+            return grpc::Status(grpc::StatusCode::INTERNAL,
+                                "plugin endpoint threw a non-standard exception");
+        }
+    }
+
+    // Nothing registered under either convention: NOT_FOUND regardless of what
+    // else is wrong with the request. Checked here, before delegating, because
+    // DispatchPluginCall validates plugin_name/method emptiness BEFORE lookup
+    // (its own documented contract for direct callers) -- which would answer
+    // INVALID_ARGUMENT for a method-less call to a plugin that does not exist
+    // under either name, when NOT_FOUND is the more useful (and tested) answer.
+    if (services_->Find(plugins::PluginRpcServiceName(request->plugin_name())) == nullptr) {
+        return grpc::Status(grpc::StatusCode::NOT_FOUND,
+                            "no plugin provides a service under '" + request->plugin_name() + "'");
     }
 
     // The dispatch itself (validation, resolution, handler invocation,
@@ -691,10 +770,159 @@ grpc::Status SessionServiceImpl::PluginCall(grpc::ServerContext* context,
     return grpc::Status(grpc::StatusCode::INTERNAL, "unreachable outcome");
 }
 
-grpc::Status SessionServiceImpl::PluginSubscribe(grpc::ServerContext*,
-                                                 const v1::PluginCallRequest*,
-                                                 grpc::ServerWriter<v1::PluginCallResponse>*) {
-    return NotYet("PluginSubscribe");
+grpc::Status SessionServiceImpl::ListCommands(grpc::ServerContext* context,
+                                              const v1::ListCommandsRequest*,
+                                              v1::ListCommandsResponse* response) {
+    if (const auto auth = EnsureAuthenticated(auth_providers_, context); !auth.ok()) return auth;
+
+    // No registry wired: an empty list is the honest answer ("nothing to
+    // autocomplete"), not an error -- the same session still answers an
+    // invocation with "the /-command subsystem is not available".
+    if (commands_ == nullptr) return grpc::Status::OK;
+
+    // Fetched once at connect and never again: plugins load at startup and
+    // config is read once, so the list cannot change mid-connection -- which is
+    // why there is no invalidation machinery, not merely none yet.
+    for (const commands::Command* command : commands_->All()) {
+        v1::CommandInfo* info = response->add_commands();
+        info->set_name(std::string(command->Name()));
+        info->set_summary(std::string(command->Summary()));
+        info->set_usage(std::string(command->Usage()));
+        info->set_read_only(command->ReadOnly());
+
+        // The taxonomy IS the type (the same rule the busy-check runs on), so
+        // the kind is derived from it rather than carried as a flag a command
+        // could forget to keep in step with its own base class.
+        if (dynamic_cast<const commands::PromptShorthandCommand*>(command) != nullptr) {
+            info->set_kind(v1::COMMAND_KIND_PROMPT_SHORTHAND);
+        } else if (dynamic_cast<const commands::LLMCommand*>(command) != nullptr) {
+            info->set_kind(v1::COMMAND_KIND_LLM);
+        } else {
+            info->set_kind(v1::COMMAND_KIND_HARNESS);
+        }
+
+        switch (command->Display()) {
+            case commands::CommandDisplay::kView:
+                info->set_display(v1::COMMAND_DISPLAY_VIEW);
+                break;
+            case commands::CommandDisplay::kSilent:
+                info->set_display(v1::COMMAND_DISPLAY_SILENT);
+                break;
+            case commands::CommandDisplay::kStatus:
+                info->set_display(v1::COMMAND_DISPLAY_STATUS);
+                break;
+        }
+    }
+    return grpc::Status::OK;
+}
+
+grpc::Status SessionServiceImpl::DeleteSession(grpc::ServerContext* context,
+                                               const v1::DeleteSessionRequest* request,
+                                               v1::DeleteSessionResponse*) {
+    if (const auto auth = EnsureAuthenticated(auth_providers_, context); !auth.ok()) return auth;
+
+    if (request->session_id().empty()) {
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "session_id is required");
+    }
+    // A live session is a stream's subject: deleting the row under a Session
+    // that appends to it would turn every later write into a foreign-key error.
+    // The client closes the tab (which terminates the session) before deleting.
+    if (sessions_.Find(request->session_id()) != nullptr) {
+        return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION,
+                            "session '" + request->session_id() +
+                                "' is open; close it before deleting");
+    }
+    if (!db_.DeleteSession(request->session_id())) {
+        return grpc::Status(grpc::StatusCode::NOT_FOUND,
+                            "no such session: " + request->session_id());
+    }
+    return grpc::Status::OK;
+}
+
+void SessionServiceImpl::EmitSessionMetadata(agent::Session& session) {
+    // preset_snapshot(), never preset(): this runs on the RPC thread. The copy
+    // carries the resolved model reference and the window the compactor's
+    // strategies resolve against -- the `max` half of the status bar's {tokens}.
+    const auto preset = session.preset_snapshot();
+    v1::ServerEvent event;
+    event.set_session_id(session.info().session_id);
+    auto* metadata = event.mutable_session_metadata();
+    // Redundant with the envelope on purpose, like the message's own field
+    // comment says: events are self-describing on their own.
+    metadata->set_session_id(session.info().session_id);
+    metadata->set_name(session.info().name);
+    metadata->set_agent_preset(session.info().agent_preset);
+    metadata->set_model(preset.model_ref.str());
+    metadata->set_permission_mode(RunModeString(session.run_mode()));
+    metadata->set_context_window_tokens(preset.context_window_tokens.value_or(0));
+    if (!session.queue().TryPush(std::move(event))) {
+        logger_.warn("session {}: queue is full; SessionMetadataEvent dropped",
+                     session.info().session_id);
+    }
+}
+
+grpc::Status SessionServiceImpl::PluginSubscribe(grpc::ServerContext* context,
+                                                 const v1::PluginCallRequest* request,
+                                                 grpc::ServerWriter<v1::PluginCallResponse>* writer) {
+    if (const auto auth = EnsureAuthenticated(auth_providers_, context); !auth.ok()) return auth;
+
+    if (services_ == nullptr) {
+        return grpc::Status(grpc::StatusCode::UNAVAILABLE, "the plugin channel is not offered");
+    }
+    void* service = services_->Find(request->plugin_name());
+    if (service == nullptr) {
+        return grpc::Status(grpc::StatusCode::NOT_FOUND,
+                            "no plugin provides a service under '" + request->plugin_name() + "'");
+    }
+    auto* endpoint = static_cast<plugins::PluginEndpoint*>(service);
+
+    // The sink serializes pushes (gRPC permits one concurrent Write) and
+    // translates "client went away" into Push() == false, which is the
+    // endpoint's signal to stop and drop its reference. Shared ownership: the
+    // endpoint may hold the sink past this call's lifetime, and every Push
+    // after close just fails -- no dangling writer.
+    class WriterSink final : public plugins::PluginSubscriptionSink {
+    public:
+        explicit WriterSink(grpc::ServerWriter<v1::PluginCallResponse>* writer)
+            : writer_(writer) {}
+
+        bool Push(std::string json_payload) override {
+            std::lock_guard<std::mutex> lock(mtx_);
+            if (closed_.load(std::memory_order_acquire)) return false;
+            v1::PluginCallResponse response;
+            response.set_json_payload(std::move(json_payload));
+            if (!writer_->Write(response)) {
+                closed_.store(true, std::memory_order_release);
+            }
+            return !closed_.load(std::memory_order_acquire);
+        }
+
+        void Close() { closed_.store(true, std::memory_order_release); }
+        bool closed() const { return closed_.load(std::memory_order_acquire); }
+
+    private:
+        grpc::ServerWriter<v1::PluginCallResponse>* writer_;
+        std::mutex mtx_;
+        std::atomic<bool> closed_{false};
+    };
+
+    auto sink = std::make_shared<WriterSink>(writer);
+    if (!endpoint->Subscribe(request->method(), request->json_payload(), sink)) {
+        return grpc::Status(grpc::StatusCode::NOT_FOUND,
+                            "plugin '" + request->plugin_name() + "' refused subscription to '" +
+                                request->method() + "'");
+    }
+
+    // The call stays open while the subscriber lives. The endpoint pushes from
+    // its own threads; this thread waits and notices the end through either
+    // the sink closing (a failed Write) or the client cancelling. A bounded
+    // poll, not a blocking wait: IsCancelled is the only disconnect signal the
+    // sync API offers the handler.
+    while (!sink->closed() && !context->IsCancelled()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    sink->Close();
+    return grpc::Status::OK;
 }
 
 }  // namespace minimal::rpc

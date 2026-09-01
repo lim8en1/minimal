@@ -85,6 +85,17 @@ add_executable(minimal_tests
     plugin_storage_test.cpp
     plugin_rpc_test.cpp
     checklist_test.cpp
+    color_downsample_test.cpp
+    theme_test.cpp
+    streaming_markdown_view_test.cpp
+    syntax_highlighter_test.cpp
+    session_state_test.cpp
+    app_state_test.cpp
+    view_factory_test.cpp
+    keybindings_test.cpp
+    chat_model_test.cpp
+    mention_resolver_test.cpp
+    mention_expansion_test.cpp
     # provider-openai's pure translation logic, compiled directly into the test
     # binary rather than via the plugin .so -- these files have no ABI/plugin
     # dependency, only core headers, so this is real linkage, not dlopen.
@@ -169,7 +180,8 @@ add_dependencies(minimal_tests
     fixture-good fixture-collision fixture-bad-abi fixture-minimal fixture-not-a-plugin
     fixture-throws fixture-advisor fixture-service fixture-service-b fixture-hook)
 target_compile_definitions(minimal_tests PRIVATE
-    MINIMAL_FIXTURE_DIR="${CMAKE_CURRENT_BINARY_DIR}/fixtures")
+    MINIMAL_FIXTURE_DIR="${CMAKE_CURRENT_BINARY_DIR}/fixtures"
+    MINIMAL_BUNDLED_DIR="${CMAKE_SOURCE_DIR}/bundled")
 
 # The headless client is exercised as a real client here, so the test binary
 # links it -- the E2E tier is the whole point of building -p first.

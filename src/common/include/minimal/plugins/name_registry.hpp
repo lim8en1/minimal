@@ -15,7 +15,20 @@ namespace minimal::plugins {
 // the model or the user, so command_aliases has nothing to rename).
 // Hook points follow the same shape (addressed by hooks.json `on` and by code,
 // never aliased), and live in their own namespace for the same reason.
-enum class NameKind { Tool, Command, ViewId, ToolResultRenderer, Service, HookPoint };
+//
+// ViewId/ToolResultRenderer/StatusSegment/SyntaxGrammar are the CLIENT host's
+// kinds (track E5): shared machinery, one collision rule, two loaders.
+enum class NameKind {
+    Tool,
+    Command,
+    ViewId,
+    ToolResultRenderer,
+    MessageRenderer,   // client: keyed by ChatRowKind (its own namespace, not ToolResultRenderer's)
+    Service,
+    StatusSegment,
+    SyntaxGrammar,
+    HookPoint
+};
 
 // Models the three-naming-levels rule independent of the actual
 // ToolRegistry/CommandRegistry/plugin loader: stable identity never changes,

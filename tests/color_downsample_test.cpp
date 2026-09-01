@@ -1,0 +1,48 @@
+#include "minimal/client/render/color_downsample.hpp"
+
+#include <catch2/catch_test_macros.hpp>
+
+namespace minimal::client {
+
+TEST_CASE("ColorDepthFromEnv detects terminal capability") {
+    CHECK(ColorDepthFromEnv("truecolor", "xterm") == ColorDepth::Truecolor);
+    CHECK(ColorDepthFromEnv("24bit", nullptr) == ColorDepth::Truecolor);
+    CHECK(ColorDepthFromEnv(nullptr, "xterm-256color") == ColorDepth::Palette256);
+    CHECK(ColorDepthFromEnv("", "screen-256color") == ColorDepth::Palette256);
+    CHECK(ColorDepthFromEnv(nullptr, "xterm") == ColorDepth::Palette16);
+    CHECK(ColorDepthFromEnv(nullptr, nullptr) == ColorDepth::Palette16);
+    // COLORTERM wins over TERM when both are present.
+    CHECK(ColorDepthFromEnv("truecolor", "xterm") == ColorDepth::Truecolor);
+    // An unrecognized COLORTERM does not block the TERM check.
+    CHECK(ColorDepthFromEnv("other", "xterm-256color") == ColorDepth::Palette256);
+}
+
+TEST_CASE("Downsample is identity at truecolor") {
+    CHECK(Downsample(125, 200, 55, ColorDepth::Truecolor) == ftxui::Color(125, 200, 55));
+}
+
+TEST_CASE("Downsample to 256 colors picks the nearest palette entry") {
+    // Pure primaries land exactly on cube corners.
+    CHECK(Downsample(255, 0, 0, ColorDepth::Palette256) ==
+          ftxui::Color(ftxui::Color::Palette256(196)));
+    CHECK(Downsample(255, 255, 255, ColorDepth::Palette256) ==
+          ftxui::Color(ftxui::Color::Palette256(231)));
+    CHECK(Downsample(0, 0, 0, ColorDepth::Palette256) ==
+          ftxui::Color(ftxui::Color::Palette256(16)));
+    // A mid gray is closer to the gray ramp than to the cube's diagonal.
+    // Mean 128 -> ramp level 128 (8 + 10*12) -> index 232 + 12.
+    CHECK(Downsample(128, 128, 128, ColorDepth::Palette256) ==
+          ftxui::Color(ftxui::Color::Palette256(244)));
+}
+
+TEST_CASE("Downsample to 16 colors picks the nearest palette entry") {
+    CHECK(Downsample(255, 0, 0, ColorDepth::Palette16) ==
+          ftxui::Color(ftxui::Color::Red));  // (170,0,0) beats (255,85,85)
+    CHECK(Downsample(255, 255, 255, ColorDepth::Palette16) ==
+          ftxui::Color(ftxui::Color::White));
+    CHECK(Downsample(0, 0, 0, ColorDepth::Palette16) == ftxui::Color(ftxui::Color::Black));
+    CHECK(Downsample(0, 0, 255, ColorDepth::Palette16) ==
+          ftxui::Color(ftxui::Color::Blue));  // (0,0,170) beats (85,85,255)
+}
+
+}  // namespace minimal::client

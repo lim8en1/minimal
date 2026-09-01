@@ -240,7 +240,12 @@ public:
     // work queue is full -- and an error event answering the refusal has been
     // pushed onto the outbound queue, so a client is never left waiting on a
     // turn that was silently dropped.
-    bool SubmitTurn(std::string text);
+    //
+    // Also commands::SessionControl::SubmitTurn -- the one sanctioned path for
+    // a prompt-shorthand command's content to reach the model (EXTENSIBILITY
+    // 4.4). A shorthand runs on the worker, so its SubmitTurn queues behind
+    // itself and runs at the next loop iteration.
+    bool SubmitTurn(std::string text) override;
 
     // Reader thread. Queues a MUTATING command for the worker, which runs it at
     // a turn boundary -- never between a tool_use and its tool_result, because
@@ -452,6 +457,13 @@ private:
     // every error.
     void EmitTurnCompleted(llm::StopReason stop_reason, const llm::Usage& usage,
                            bool hit_max_turns);
+    // A brand-new session is unnamed until its first user message lands: the
+    // free default name is set inside the store's append transaction, which the
+    // Session never sees. Once, after a turn, an unnamed session asks the store
+    // what the row now carries; a name updates info_ and goes out as a
+    // SessionMetadataEvent -- the wire source the TUI's tab label refreshes
+    // from. Worker thread only.
+    void MaybeEmitNameFromStore();
     bool IsCancelled() const;
     // The worker's wait predicate extension: should an out-of-band message
     // wake this parked worker and drive a seedless turn? Called under mutex_.

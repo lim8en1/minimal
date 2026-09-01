@@ -26,6 +26,8 @@ using RegisterCommandsFn =
     void (*)(commands::CommandRegistry&, const PluginRegistrationContext&);
 using RegisterAuthProviderFn =
     void (*)(rpc::AuthProviderRegistry&, const PluginRegistrationContext&);
+using RegisterMentionResolverFn =
+    void (*)(agent::MentionResolverRegistry&, const PluginRegistrationContext&);
 using RegisterPermissionAdvisorFn =
     void (*)(tools::PermissionAdvisorRegistry&, const PluginRegistrationContext&);
 using RegisterModelCatalogsFn =
@@ -101,7 +103,8 @@ PluginLoader::PluginLoader(tools::ToolRegistry& tools, llm::ProviderFactoryRegis
                            llm::ModelCatalogRegistry* model_catalogs,
                            ServiceRegistry* services, PluginStorage* storage,
                            std::filesystem::path plugin_data_root,
-                           hooks::HookDispatcher* hook_points)
+                           hooks::HookDispatcher* hook_points,
+                           agent::MentionResolverRegistry* mention_resolvers)
     : tools_(tools),
       providers_(providers),
       tools_settings_(std::move(tools_settings)),
@@ -109,6 +112,7 @@ PluginLoader::PluginLoader(tools::ToolRegistry& tools, llm::ProviderFactoryRegis
       model_catalogs_(model_catalogs),
       commands_(commands),
       auth_providers_(auth_providers),
+      mention_resolvers_(mention_resolvers),
       permission_advisors_(permission_advisors),
       services_(services),
       storage_(storage),
@@ -282,6 +286,18 @@ PluginRecord PluginLoader::LoadOne(const PluginCandidate& candidate) {
                 return record;
             }
             record.registered_auth_provider = true;
+        }
+    }
+
+    if (mention_resolvers_ != nullptr) {
+        if (auto register_resolver = Lookup<RegisterMentionResolverFn>(
+                handle, "minimal_plugin_register_mention_resolver")) {
+            if (!GuardedRegistration(record, "minimal_plugin_register_mention_resolver",
+                                      [] {}, [&] { register_resolver(*mention_resolvers_, context); },
+                                      [] {})) {
+                return record;
+            }
+            record.registered_mention_resolver = true;
         }
     }
 

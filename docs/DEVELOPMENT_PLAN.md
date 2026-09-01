@@ -2,7 +2,60 @@
 
 Companion to `ARCHITECTURE.md`, which remains the single source of truth for *design*. This document covers only *sequencing*: what is built, what blocks what, and what "done" means for each remaining piece. Every milestone cites the `ARCHITECTURE.md` section that specifies it; where this plan and that document disagree, that document wins and this one is stale.
 
-**Status: Milestones A, B, C, D, F, G and H are complete, and a post-merge review of A+B+H has been actioned (§8). Only E (the TUI) remains. Clean build, zero warnings.** Track **J (permission advisor) is complete** — including the SessionChannels extraction, the E2E over a real socket through the real plugin loader, and the three §6 invariant proofs. Tracks **K (per-plugin config)**, **L (cross-plugin services)** and **M (tool history access)** are also complete. Track **N (model auto-discovery) is complete** — lazy discovery through a `ModelCatalogRegistry` keyed by the provider kind string, `/providers refresh`, network-free structural sanity checks. A post-N review hardened the transport (the loopback + live-backend tests), the concurrency (per-provider fetch gates — no config lock is ever held across the network call), and the resolve contract (`Resolve` returns a snapshot; refresh replaces entries without pulling them out from under a holder). Track **O (hooks) is complete** — the no-compile extensibility tier: `hooks.json` actions on named hook points, eleven core points (two veto-capable), and the `tools-bash.before_command` worked example (see §4 O). Track **O (search tools) is complete** — the bundled `tools-search` plugin registers `grep` and `glob`: RE2-backed, `.gitignore`-aware, bounded on every axis the session worker cares about (§4 O).
+**Status: Milestones A, B, C, D, F, G and H are complete, and a post-merge review of A+B+H has been actioned (§8). Of the TUI (track E), the render layer (E1), the client transport + state core (E2), server-side @-mentions (E3), the frame & views (E4), and the extension seams (E5) are done. Clean build, zero warnings.** Track **J (permission advisor) is complete** — including the SessionChannels extraction, the E2E over a real socket through the real plugin loader, and the three §6 invariant proofs. Tracks **K (per-plugin config)**, **L (cross-plugin services)** and **M (tool history access)** are also complete. Track **N (model auto-discovery) is complete** — lazy discovery through a `ModelCatalogRegistry` keyed by the provider kind string, `/providers refresh`, network-free structural sanity checks. A post-N review hardened the transport (the loopback + live-backend tests), the concurrency (per-provider fetch gates — no config lock is ever held across the network call), and the resolve contract (`Resolve` returns a snapshot; refresh replaces entries without pulling them out from under a holder). Track **O (hooks) is complete** — the no-compile extensibility tier: `hooks.json` actions on named hook points, eleven core points (two veto-capable), and the `tools-bash.before_command` worked example (see §4 O). Track **O (search tools) is complete** — the bundled `tools-search` plugin registers `grep` and `glob`: RE2-backed, `.gitignore`-aware, bounded on every axis the session worker cares about (§4 O).
+
+**Track R (TUI remediation) is complete** — a post-E5 review of the client
+(`.opencode/plans/track-r-remediation.md`) found six use-after-free/UB bugs, two
+unbounded-UI-freeze paths, and three unbounded-memory paths in the TUI. R1
+harnessed the gap: a headless FTXUI test tier (`tests/support/ftxui_harness.hpp`)
+that constructs, event-drives and string-renders every view factory, and which
+caught beyond the reviewed items that the permission modal had **never rendered
+a single session grant** (the grant checkboxes were moved into their container
+before the copy the renderer captures, so an `!empty()` guard hid them all), and
+that `OnCommandResult`'s hand-copied notice dropped `display`/`view_hint` — every
+View-display command result (`/sessions`) arrived as a dead status line. R1 fixed
+the six P0s (plugin seam temporaries, the picker's frozen selection + dangling
+menu state, the modals bound to freed per-frame snapshots, the reader-thread
+`SessionState*` escaping `DispatchToTab`'s lock, VIEW-notice side-effects firing
+inside `Render()` at frame rate, the cross-tab `ChatView` cache collision) plus
+`AttachTab`'s missing focus and duplicate attach. R2 bounded everything the wire
+could push: `SuggestPaths` deadline behind the swappable `MentionSuggestor` seam,
+`Close()` cancels before joining (a wedged stream froze the UI thread on
+close/quit), a 256-event `send_queue_` cap with refused sends surfaced, the
+reader owns `Finish()` and hands the status to `on_closed` (`IsTransportDeath`
+separates a crashed server from a deliberate close — the first draft's
+reach-back made the reader join itself: std::terminate, six aborted tests), a
+sliding scrollback window (2000 msgs, `ui.json`, trim flagged in-view), a tool-
+output cap at append (head ¼ + marker + tail ¾), `tab_ui` erased on close, the
+chat surface catch-and-disable, turn-swap keyed on `turn_seq` (the size
+heuristic could splice two turns), and `Finalize()` finally wired. R3 cached the
+tree-sitter parser per language (the streaming path had allocated one per code
+block per 120 ms tick), hashed the rule tables, resolved theme colors without
+per-call string keys, and gave `ChatView` a per-row render cache — a page bump
+renders only new rows. R4 gave the client the server's `GuardedRegistration`
+three-lambda shape, real write discipline for `client-plugins.json` (malformed
+parse → no rewrite; atomic, skip-if-unchanged), wired client aliases into the
+`NameRegistry` (they were parsed, serialized, documented and dead), added
+`NameKind::MessageRenderer`, and made `PluginSubscribe` tri-state with teardown
+cancellation. R5 spliced @-mention completions into the token (whole-line
+replacement both destroyed prose and manufactured `/`-commands), cleared the
+stale suggestion list on re-arm, added Escape to confirmation modals, fixed the
+nested-span override (deeper now wins — `ApplySpanOverrides`), GFM table
+alignment, LaTeX dim styling, operator categories for the vendored grammars
+(Function deliberately deferred — needs tree-sitter queries), and the small
+traps. The pump now redraws gated on a UI revision with a 5 Hz floor, and the
+frame deep-copies the FOCUSED tab only (`GetDetails`) with a light tab list for
+the bar and panel. Each invariant proven load-bearing by revert-and-watch-fail
+(§6). Final gates over the finished tree: **ASan 946/946 with zero findings;
+TSan 946/946 with zero race reports.** The TSan gate caught two vendored
+cpp-mcp bugs — a data race where the POSIX stop path closed `stdout_pipe_[0]`
+while the read thread was inside `read()` on it, and a Meyers-singleton logger
+whose destroyed mutex a detached worker locked during process exit (both
+`EINVAL` aborts under high parallelism) — fixed by
+`patches/cpp-mcp-stop-server-race.patch` and `patches/cpp-mcp-logger-leaky.patch`
+through the existing idempotent patch mechanism. The suite also gained a
+headless FTXUI harness tier, and three load-flaky tests were found passing in
+isolation (parallel-load starvation, not product bugs).
 
 `minimal -p` holds real conversations against a local model using `read`, `bash`, and `skill`; a permission prompt round-trips over the wire in both directions; a session grant silences the second prompt; the server exits when the last client detaches. Transcripts persist to SQLite, survive the server process, and are **resumable**: `CreateSession` with a `session_id` reopens a stored session, loads its transcript as the loop's working history without re-appending it, and the next turn continues the conversation (`minimal -p --resume <id> PROMPT`). **Subagents work** (§5 D): a model can spawn blocking and non-blocking children over the `spawn_subagent` tool, permission inheritance is enforced as ceilings, and the headless client honours its attach obligation over a real socket. `cmake --install` produces a config dir the server actually starts against (§8), and the startup sanity check reports every problem with it at once (§4 F).
 
@@ -733,39 +786,104 @@ Fills the empty `commands-core` plugin and unblocks `/restart-shell` in `tools-b
 4. **A completion is an error, not an empty success, when the child stopped with nothing to say** (cancelled, failed, or `max_turns`-capped mid-loop). The parent model adapting to a named reason is the design intent of every spawn error; an empty block reading like success is the failure the bundled `subagent.md` itself warns against.
 5. **Testing infrastructure, again.** Parallel `ctest` runs discovered cases against the same binary sharing fixed temp arenas — one case's constructor `remove_all()` wiping another's socket mid-test. Every multi-case fixture arena is now unique per process and per fixture (`pid` + counter). Also: ASan over the in-process tiers found a pre-existing one-byte out-of-bounds read in `file_access_test.cpp` (a 14-byte `std::string` built from a 13-byte literal); fixed.
 
+### E3 — Server-side @-mention support — done
+
+> § *@-mention file references*. Split out of the TUI track (the plan lives in
+> `.opencode/plans/track-e-tui.md`) because the work is server-side: every
+> frontend inherits it, not just the TUI.
+
+**Status: built, wired, and exercised over a real socket.** `src/server/agent/mention_resolver.{hpp,cpp}`
+(interface, `PrefixMentionResolver` core default, exclusive `MentionResolverRegistry`),
+`mention_expansion.{hpp,cpp}` (the scan+inline), expansion hooked in
+`Session::RunOneTurn` — top-level sessions only, because a subagent's task is
+model-generated prose and expanding `@` in it would misfire on emails — the
+resolver seam wired through `plugin_abi.h`/`PluginLoader`/`main.cpp`, `SuggestPaths`
+implemented, and a `SessionClient::SuggestPaths` wrapper so the RPC is proven on
+the wire before the prompt editor (E4) consumes it.
+
+Decisions the implementation locked (recorded in `ARCHITECTURE.md` § *@-mention*):
+
+- Expansion produces **blocks in one message** — the verbatim text as the first
+  `TextBlock`, then one framed `<file path>`/`<file-tree path>` block per
+  resolved mention. Never one message per file (the Anthropic Messages API
+  refuses consecutive same-role messages) and never a rewritten single text
+  (the user's sentence survives verbatim, and scrollback can render attachments
+  separately because `message_codec` persists the block array).
+- **Capping is per file, never a split** — 1000 lines with a visible truncation
+  note pointing at the read tool; directory trees depth- and entry-bounded.
+- **Outside-`project_root` mentions are allowed** (as-if-pasted trust; only
+  paths that cannot be safely resolved fail), and an unresolvable mention stays
+  verbatim with no error channel — the model sees the token and can say so.
+- Regular-files-only guard: a FIFO or device mention is treated as unresolvable
+  rather than letting `read_window` block the session worker on `open()`.
+
+**What writing the tests found.** The first draft of the whitespace-boundary
+test was not discriminating: it used `a@b.com`, and a mid-word `@b.com` stays
+verbatim either way (unresolvable tokens produce no block), so deleting the
+boundary rule did not fail it. The rule is only observable when the mid-word
+path *would resolve* — the test now uses a mid-word `@b.txt` next to a real one.
+All three invariants (descent-only-on-`/`, the boundary, the no-mention
+byte-identity passthrough) were then proven by delete-and-watch-fail (§6).
+
+- [x] Resolver listing rules: prefix match, descent on `/`, dotfile rule, sorted,
+      limit clamp, nonexistent dir → empty not error; registry exclusive,
+      first-wins, core-default fallback.
+- [x] Expansion: multiple mentions, same file twice (no dedup — a mention means
+      "read this now"), truncation, binary/FIFO/symlink-loop → verbatim,
+      outside-root allowed, bare/mid-word `@` untouched.
+- [x] Wire: suggestions over a real socket (live session, terminated-session
+      fallback via the stored row, unknown → `NOT_FOUND`); a turn with `@file`
+      persists the verbatim block plus the framed block, asserted through
+      `GetMessages`; the loader dlsyms the seam and a fixture plugin's override
+      reaches `Active()`.
+- [x] Codec + provider: the multi-block message round-trips `message_codec`, and
+      the OpenAI serializer's block concatenation is re-proven safe for exactly
+      this shape.
+
 ### E. TUI client
 
 > § *TUI rendering*, § *TUI layout*, § *Tab states and attention*, § *Message-kind rendering*, § *@-mention file references*.
 
-Largest remaining surface: FTXUI layout, md4c markdown rendering, tree-sitter highlighting, themes, session picker, running-tools panel, permission modal, @-mentions (`SuggestPaths`). Depends on A3 for every RPC it uses and on B for scrollback.
+Largest remaining surface: FTXUI layout, md4c markdown rendering, tree-sitter highlighting, themes, session picker, running-tools panel, permission modal, the prompt editor's inline @-mention suggestions (the server-side half is E3, done). Depends on A3 for every RPC it uses and on B for scrollback.
 
 The permission modal is where consent scoping becomes real UI — and where the **wording obligations** in § *Consent scoping* must be honoured: a grant is blanket permission for a binary, and disclosure is a lower bound.
 
-- [ ] Permission modal renders `PermissionDisclosure` including per-binary session grants.
-- [ ] Streaming tokens render without full-buffer reflow at 512k–1M context.
-- [ ] Tab bar: colour + single `!` attention glyph only (no metadata clutter).
-- [ ] Scrollback pages via `GetMessages` without competing with live turn traffic.
+E4 (frame & views) is built and exercised by execution: frame assembled
+(tab bar / chat / capped tools panel / status bar + modal layer, permission
+prompt topmost), 20 Hz snapshot pump as the reader→screen bridge, keybindings
+shipped and seeded, `/`-commands sent and rendered as a transient notice (never
+a chat row), scrollback paging on the keyset cursor, streaming through the
+debounced view. Full record and divergences in `.opencode/plans/track-e-tui.md`
+§ E4: status-bar `max` and `/`-autocomplete await E5's server-side additions
+(metadata emission, `ListCommands`), picker deletion awaits a `DeleteSession`
+RPC, and the tools panel is capped rather than `ResizableSplit` until E5's
+panel slots.
+
+- [x] Permission modal renders `PermissionDisclosure` including per-binary session grants (wording obligations honoured; grant keys filtered to what was offered).
+- [x] Streaming tokens render without full-buffer reflow at 512k–1M context (bounded window; rows rebuilt only on transcript-version change; streaming through the debounced view).
+- [x] Tab bar: colour + single `!` attention glyph only (no metadata clutter).
+- [x] Scrollback pages via `GetMessages` without competing with live turn traffic (separate unary RPC, keyset cursor, 2 s deadline; load-older bound to a key).
 
 #### E additions — extension seams (added post-hoc; sequenced after the original E definition-of-done)
 
-> Specified by `docs/EXTENSIBILITY.md` §4 (TUI core vs. pluggable) and §4.4 (command results never enter the chat). Appended without rewriting E's original scope, which is in flight: the frame lands first, then these.
+> Specified by `docs/EXTENSIBILITY.md` §4 (TUI core vs. pluggable) and §4.4 (command results never enter the chat). **DONE (E5a → E5b → E5c, 2026-08-31).** Delivered as one track in three milestones: E5a (server wire surface), E5b (client host + slot registries + wiring), E5c (PluginCall/PluginSubscribe dispatch + pair proof). The prompt-shorthand example is a TEST FIXTURE ONLY (`tests/fixtures`, never bundled — per planning decision), and the external todo plugin is the intended first real consumer of the seams.
 
-- [ ] Client plugin host — loader, ABI tag, and the registries, mirroring the server-side pattern (`src/client/plugins/`; nothing exists there today).
-- [ ] `ListCommands` RPC — unary; name, summary, usage, kind, display, read-only. Fetched once at connect (plugins load at startup and config is read once, so the list cannot change mid-connection — no invalidation machinery). Prompt-editor `/`-autocomplete consumes it and annotates prompt shorthands.
-- [ ] `CommandResult` display modes — one additive proto field + dispatcher pass-through (the server half is small); results surface as status line, view, or transient error, never as chat rows. Headless `-p` prints regardless.
-- [ ] **Invariant tests:** no command path appends a message to the store except a prompt shorthand's interpolated turn; no `CommandResult` is rendered or persisted as a chat message; subagent completion injections stay messages.
-- [ ] Prompt-shorthand commands land as a plugin example (`review`-style) — the only command kind whose content reaches the model, and only as the submitted turn.
-- [ ] Tool-result renderer slot — `ToolResultRendererRegistry`; a renderer for a disabled tool's name falls back to default rendering.
-- [ ] Status-bar segment registry — the format string orders and selects by id; an unknown id renders nothing with a startup warning.
-- [ ] Message-kind presentation slots — agent/thinking/tool-activity/system keyed renderers; core supplies the defaults.
-- [ ] Theme sections — `plugin.role` namespacing, merged after core roles (no shadowing), sanity-checked.
-- [ ] Attention sink — plugins may raise/clear tab or global attention; the `!` glyph stays the only color-independent signal.
-- [ ] Modal-stack invariant — permission/confirmation modals are always topmost; plugin modals cannot preempt or mask them.
+- [x] Client plugin host — loader, ABI tag, and the registries, mirroring the server-side pattern (`src/client/plugins/`). `minimal_client_core` went STATIC → SHARED (and `minimal_proto` with it — a static proto lib baked two copies of gRPC/abseil into every process that linked both cores, deadlocking `grpc_init` in the test tier) so client MODULE plugins link the shared core exactly as server plugins do. Discovery reads/writes `client-plugins.json` (separate from the server's `plugins.json`; bundled dir `plugins/client/`, user dir `config_dir/client-plugins/`). `NameRegistry` moved to `src/common` — one collision rule, two loaders.
+- [x] `ListCommands` RPC — unary; name, summary, usage, kind (derived from the command's TYPE by dynamic_cast, the same rule the busy-check runs on), display, read-only. Fetched once at connect. Prompt-editor `/`-autocomplete consumes it and annotates prompt shorthands.
+- [x] `CommandResult` display modes — `CommandDisplay` enum + `view_hint` on the wire; the dispatcher downgrades an error to Status (a failed view has nothing to show); `/sessions` (core, ReadOnly, View→`"sessions"`) ships as the zero-plugin consumer. Headless `-p` prints regardless.
+- [x] **Invariant tests:** no command path appends to the store except a prompt shorthand's interpolated turn (wire test asserts exactly two rows after `/review`); `CommandResult` never rendered or persisted as a chat message (`CommandNotice` is type-disjoint from `ChatRow`, display fields tested); subagent completion injections stay messages. Also: theme sections never shadow core roles (delete-and-watch-fail proven by construction — emplace after core, first-wins).
+- [x] Prompt-shorthand commands — `class PromptShorthandCommand : public Command` (the taxonomy IS the type); `SessionControl::SubmitTurn` is the ONE sanctioned submission path. The `review`-style example lives as a test fixture, not a bundled plugin.
+- [x] Tool-result renderer slot — `ToolResultRendererRegistry` keyed by tool name, renderer takes tool INPUT JSON + result + is_error (chat rows now carry the input); lookup miss falls back to the default collapsible row.
+- [x] Status-bar segment registry — `StatusSegment` providers; the format string (now user-editable in the new `ui.json`, seeded like keybindings.json) orders and selects by id; an unknown id renders nothing with a startup warning — unless a registered provider answers to it, which is the registry joining the known-id set.
+- [x] Message-kind presentation slots — `MessageRendererRegistry` keyed by `ChatRowKind`; plugins register first, core fills unclaimed kinds (core FILLS, never claims — a fill warning would be noise); `ChatView` dispatches every row through the registry.
+- [x] Theme sections — `sections: {plugin: {role: color}}`, merged after core roles via emplace (first-wins, so shadowing is structurally impossible), section names checked against loaded plugin names (naming_model pattern).
+- [x] Attention sink — `AttentionSink` in the registration context over a shared `AttentionState` block; `AppState::GetAllTabs` ORs a plugin raise over core derivation; the glyph stays `!`.
+- [x] Modal-stack invariant — structural: the modal stack nests (outermost = topmost) permission → quit-confirm → picker → delete-confirm → plugin modals → frame. E4 had the picker outermost, which violated the invariant whenever picker and permission were both active; E5 reordered so no modal sits above the security UI.
 
 **E2 follow-on** (nothing else blocks on these; the big-interface items):
 
-- [ ] `ChatSurface` exclusive slot — one plugin may replace the whole chat view; second registration warns and is ignored.
-- [ ] Markdown engine exclusive slot + language-keyed grammar registration.
+- [x] `ChatSurface` exclusive slot — one plugin may replace the whole chat view; second registration warns and is ignored (proven by loading the same exclusive fixture twice). The host pushes EVERY ServerEvent to the surface (reader thread; must not block) and exposes `ClientApi` (GetMessages paging + PluginCall/PluginSubscribe) — a surface never opens its own connection.
+- [x] Markdown engine exclusive slot + language-keyed grammar registration — the md4c adapter is the default registrant (carrying the streaming contract itself via `MarkdownEngine::Stream`: AppendDelta/Finalize/debounce is the implementer's obligation); the nine vendored grammars register as the additive registry's defaults and the highlighter consults the assembled table, so a plugin's language highlights like a vendored one; two plugins claiming one language is fatal.
 
 ### G. MCP client — done
 
@@ -839,7 +957,7 @@ Not scheduled, recorded so they are decisions rather than oversights.
 - **`mcps.json` `args[]` entries containing spaces cannot reach the child** — cpp-mcp splits the stdio command line on whitespace; the shim inherits the limitation. Recorded in ARCHITECTURE.md.
 - ~~**`tree-sitter-bash` for command disclosure**~~ — **landed** (§12.40). The original deferral reason recorded here was wrong and had to be corrected first: it said the hand-rolled scanner's "failure mode is safe (fewer grants offered)". It was not safe: shell reserved words were recorded as programs, which consumed the command slot and demoted the real program to an argument, so `ls; if true; then rm -rf /; fi` disclosed only `{ls}` and reported itself *complete* — more authorised than the operator saw, not less (§12.1). That hole was closed first (§12.1 again), and the grammar now replaces the walker: `command_name` nodes at every command position, ERROR/MISSING nodes mapped onto `complete = false` — the error signal being the point, since it is the one thing a hand-rolled walker cannot produce. The `FetchContent` grammar-vendoring path this built (tree-sitter-bash has no vcpkg port) is the same plumbing track E needs for highlighting grammars. Every §12.1 scanner test passes unchanged; the grammar version adds fail-closed-on-error, heredoc-bodies-are-data, and no-junk-words guarantees the walker could not make.
 - ~~**Unknown `allowed_skills` entries are silently dropped**~~ — still true of resolution (correct for lookup), but now *reported* at startup by F (`naming_model` check).
-- **`themes/*.json` and `keybindings.json` are specified but unread** — nothing outside a comment in `config_paths.hpp` refers to them, so they are deliberately not seeded either. They arrive with the TUI (track E), which is the first thing that would read one.
+- ~~**`themes/*.json` and `keybindings.json` are specified but unread**~~ — shipped, seeded, and read as of E1/E4 (E4 closed the keybindings half with its loader and defaults).
 - **The compaction trigger now follows the model's window** (`{"percent": 80}` by default), so the
   "0 means never, and nothing says so" gap is closed: a window-relative strategy against a model with
   no declared `context_window_tokens` logs once and disables itself rather than staying silent.

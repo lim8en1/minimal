@@ -34,7 +34,8 @@ add_library(minimal_server_core SHARED
     agent/agent_preset_frontmatter.cpp
     agent/permission_resolution.cpp
     agent/agent_preset_registry.cpp
-    plugins/name_registry.cpp
+    agent/mention_resolver.cpp
+    agent/mention_expansion.cpp
     plugins/name_resolution.cpp
     agent/compaction_boundary.cpp
     agent/compaction_trigger.cpp

@@ -140,6 +140,27 @@ TEST_CASE("BuildRequestBody: assistant message with multiple tool calls stays on
     CHECK(messages[0]["tool_calls"][1]["id"] == "call_2");
 }
 
+TEST_CASE("BuildRequestBody: multi-block user message concatenates into one content string",
+          "[openai_request][mention]") {
+    // The shape @-mention expansion produces (verbatim text + framed attachment
+    // blocks). OpenAI chat-completions content is a plain string, so the blocks
+    // concatenate -- harmless because the <file> framing is self-delimiting.
+    // This is the re-proof that the flattening at openai_request.cpp's text join
+    // is safe for exactly this message shape.
+    Fixture fixture({llm::Message{
+        llm::Role::User,
+        {llm::TextBlock{"see @a.md and @b.md"},
+         llm::TextBlock{"<file path=\"a.md\">\nA\n</file>"},
+         llm::TextBlock{"<file path=\"b.md\">\nB\n</file>"}}}});
+
+    const nlohmann::json messages = ParseBody(fixture.request)["messages"];
+
+    REQUIRE(messages.size() == 1);
+    CHECK(messages[0]["role"] == "user");
+    CHECK(messages[0]["content"] ==
+          "see @a.md and @b.md<file path=\"a.md\">\nA\n</file><file path=\"b.md\">\nB\n</file>");
+}
+
 TEST_CASE("BuildRequestBody: N tool results explode into N tool messages", "[openai_request]") {
     llm::ToolResultBlock result1{"call_1", {llm::TextBlock{"result one"}}, false};
     llm::ToolResultBlock result2{"call_2", {llm::TextBlock{"result two"}}, false};

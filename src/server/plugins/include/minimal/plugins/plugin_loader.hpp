@@ -6,6 +6,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "minimal/agent/mention_resolver.hpp"
 #include "minimal/agent/session_observer_registry.hpp"
 #include "minimal/commands/command_registry.hpp"
 #include "minimal/hooks/hook_dispatcher.hpp"
@@ -67,6 +68,7 @@ struct PluginRecord {
     std::vector<std::string> registered_commands;  // surface names, after aliasing
     bool registered_session_observer = false;
     bool registered_auth_provider = false;
+    bool registered_mention_resolver = false;
     // True when the plugin registered an advisor that actually landed (a
     // duplicate from the same plugin is refused and does not count twice).
     bool registered_permission_advisor = false;
@@ -113,7 +115,8 @@ public:
                  ServiceRegistry* services = nullptr,
                  PluginStorage* storage = nullptr,
                  std::filesystem::path plugin_data_root = {},
-                 hooks::HookDispatcher* hook_points = nullptr);
+                 hooks::HookDispatcher* hook_points = nullptr,
+                 agent::MentionResolverRegistry* mention_resolvers = nullptr);
     ~PluginLoader();
 
     PluginLoader(const PluginLoader&) = delete;
@@ -141,6 +144,10 @@ private:
     // Optional like the others; null means plugins cannot register an auth
     // provider. Exclusive registry: the first plugin to register wins.
     rpc::AuthProviderRegistry* auth_providers_ = nullptr;
+    // Optional for the same reason again: the seam is exclusive (first plugin
+    // wins) and the registry itself carries the core default, so null just
+    // means plugins cannot override the resolver.
+    agent::MentionResolverRegistry* mention_resolvers_ = nullptr;
     // Optional like the others; null means plugins cannot register a permission
     // advisor. Additive across plugins; permissions.json selects one by name.
     tools::PermissionAdvisorRegistry* permission_advisors_ = nullptr;
