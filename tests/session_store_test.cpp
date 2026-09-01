@@ -286,6 +286,11 @@ TEST_CASE("a fresh database opens at the current schema version in WAL mode",
     {
         SessionDatabase db(path);
         REQUIRE(db.ListSessions({}).empty());
+        // Per-connection, hence an accessor rather than a RawScalar: a fresh
+        // connection reports SQLite's default, not this one's setting. 0 is
+        // the invariant -- the write path never self-checkpoints (the reaper
+        // owns it).
+        CHECK(db.wal_autocheckpoint() == 0);
     }
 
     CHECK(RawScalar(path, "PRAGMA user_version;") ==
@@ -790,6 +795,103 @@ TEST_CASE("deleting a session cascades to its compaction checkpoint", "[session]
 
     REQUIRE(db.DeleteSession(id));
     CHECK_FALSE(db.LoadCompactionCheckpoint(id).has_value());
+}
+
+TEST_CASE("the checkpoint runs on the reaper's threshold, not the append's",
+          "[session][checkpoint]") {
+    // wal_autocheckpoint=0 moved checkpoint I/O off the committing append (it
+    // used to run under mu_, on the tool-result path). The reaper's tick pays
+    // it instead, gated by an append threshold: below it, a tick is a no-op;
+    // at it, one RESTART checkpoint moves the accumulated frames into the main
+    // database AND resets the log (PASSIVE would leave the WAL growing without
+    // bound once autocheckpoint is disabled). The pragma invariant above
+    // proves the write path never self-checkpoints; this proves the reaper's
+    // counter does.
+    TempDir dir;
+    const auto path = dir.path() / "ckpt.db";
+    SessionDatabase db(path);
+    const auto id = db.CreateSession("", std::nullopt, "/p", "build").session_id;
+
+    for (int i = 0; i < SessionDatabase::kCheckpointAppends - 1; ++i) {
+        db.AppendMessage(id, UserMsg(std::string(64, 'x')), 0);
+    }
+    CHECK_FALSE(db.MaybeRunPassiveCheckpoint());  // below the threshold: no-op
+
+    db.AppendMessage(id, UserMsg("threshold"), 0);
+    CHECK(db.MaybeRunPassiveCheckpoint());  // at the threshold: runs
+
+    // The log reset RESTART sets up takes effect on the NEXT writer
+    // transaction: the WAL restarts from its head, so a fresh reader finds
+    // only that append's frames, not the ~kCheckpointAppends the threshold
+    // produced. (Before the next write, the WAL file still physically holds
+    // the backfilled frames -- resetting is about where the writer goes, not
+    // about erasing bytes.)
+    db.AppendMessage(id, UserMsg("after the checkpoint"), 0);
+    sqlite3* raw = RawOpen(path);
+    sqlite3_stmt* stmt = nullptr;
+    REQUIRE(sqlite3_prepare_v2(raw, "PRAGMA wal_checkpoint(PASSIVE);", -1, &stmt,
+                               nullptr) == SQLITE_OK);
+    REQUIRE(sqlite3_step(stmt) == SQLITE_ROW);
+    const int frames_left = sqlite3_column_int(stmt, 1);
+    sqlite3_finalize(stmt);
+    sqlite3_close(raw);
+    CHECK(frames_left < 20);  // one append's footprint; the backlog is ~1000 frames
+}
+
+TEST_CASE("append latency: the checkpoint on the write path vs the reaper's tick",
+          "[.bench]") {
+    // Documents the wal_autocheckpoint=0 change by execution, the "verify by
+    // execution" bar for a performance claim. The OLD shape is SQLite's
+    // default (checkpoint every ~1000 WAL pages): a committing append crosses
+    // the threshold and synchronously absorbs the checkpoint -- visible as a
+    // spike in per-append time. The NEW shape pays it on the reaper's tick
+    // instead. Run explicitly: minimal_tests "[.bench]".
+    using clock = std::chrono::steady_clock;
+    const std::string body(256 * 1024, 'x');  // a real tool result's size class
+    constexpr int kAppends = 2000;
+
+    auto run = [&](int autocheckpoint) {
+        TempDir dir;
+        const auto path = dir.path() / "bench.db";
+        sqlite3* db = nullptr;
+        REQUIRE(sqlite3_open(path.c_str(), &db) == SQLITE_OK);
+        char* err = nullptr;
+        const std::string pragma =
+            "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA wal_autocheckpoint=" +
+            std::to_string(autocheckpoint) + ";";
+        REQUIRE(sqlite3_exec(db, pragma.c_str(), nullptr, nullptr, &err) == SQLITE_OK);
+        REQUIRE(sqlite3_exec(db, "CREATE TABLE m (id INTEGER PRIMARY KEY, body TEXT);", nullptr,
+                             nullptr, &err) == SQLITE_OK);
+
+        long long total_us = 0;
+        long long max_us = 0;
+        for (int i = 0; i < kAppends; ++i) {
+            sqlite3_stmt* stmt = nullptr;
+            const auto start = clock::now();
+            REQUIRE(sqlite3_exec(db, "BEGIN IMMEDIATE;", nullptr, nullptr, &err) == SQLITE_OK);
+            REQUIRE(sqlite3_prepare_v2(db, "INSERT INTO m (body) VALUES (?);", -1, &stmt,
+                                       nullptr) == SQLITE_OK);
+            sqlite3_bind_text(stmt, 1, body.data(), static_cast<int>(body.size()),
+                              SQLITE_TRANSIENT);
+            REQUIRE(sqlite3_step(stmt) == SQLITE_DONE);
+            sqlite3_finalize(stmt);
+            REQUIRE(sqlite3_exec(db, "COMMIT;", nullptr, nullptr, &err) == SQLITE_OK);
+            const auto us =
+                std::chrono::duration_cast<std::chrono::microseconds>(clock::now() - start)
+                    .count();
+            total_us += us;
+            max_us = std::max(max_us, us);
+        }
+        sqlite3_close(db);
+        return std::pair<long long, long long>{total_us, max_us};
+    };
+
+    const auto on_append = run(1000);  // the old shape: SQLite's default
+    const auto on_reaper = run(0);     // the new shape: reaper-gated
+    WARN("append latency " << kAppends << " x 256KiB -- checkpoint-on-append: total "
+                           << on_append.first << "us, worst append " << on_append.second
+                           << "us | checkpoint-on-reaper: total " << on_reaper.first
+                           << "us, worst append " << on_reaper.second << "us");
 }
 
 TEST_CASE("LastMessageSeq reports the highest seq, and -1 when there are none",

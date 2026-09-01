@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <filesystem>
 #include <mutex>
@@ -175,6 +176,25 @@ public:
     bool IsExplicitlyNamed(const std::string& session_id) const;
     bool DeleteSession(const std::string& session_id);  // cascades to messages and children
 
+    // Checkpointing discipline. wal_autocheckpoint is DISABLED at open: the
+    // default (checkpoint after every ~1000 WAL pages) made a committing append
+    // synchronously absorb a checkpoint under mu_ -- tens of ms typical,
+    // seconds on slow storage -- precisely on the tool-result path where the
+    // payload is largest. Instead the session registry's reaper thread calls
+    // MaybeRunPassiveCheckpoint() on the tick it already runs; a RESTART
+    // checkpoint (PASSIVE never resets the log, which would grow without
+    // bound) executes only once kCheckpointAppends appends have accumulated,
+    // and a busy checkpoint loses nothing -- the frames stay; the next attempt
+    // picks them up. Returns whether a checkpoint actually ran.
+    static constexpr int kCheckpointAppends = 200;
+    bool MaybeRunPassiveCheckpoint();
+
+    // The wal_autocheckpoint value this connection runs with (0 = the write
+    // path never self-checkpoints; the reaper owns it, see above). The pragma
+    // is PER-CONNECTION, not persisted -- a fresh connection reports SQLite's
+    // default, which is why the invariant test cannot RawScalar the file.
+    int wal_autocheckpoint() const;
+
     // nullopt when the session does not exist. A STORE FAILURE (locked database,
     // I/O error, corruption) throws -- same ruling as SessionExists: answering
     // "no such session" for a session that is on disk is the one answer the
@@ -278,6 +298,10 @@ private:
     mutable std::mutex mu_;
     std::filesystem::path path_;
     std::int64_t last_ts_ = 0;  // guarded by mu_
+    // Appends committed since the last checkpoint attempt (or open). Written
+    // by AppendMessage's callers, read by the reaper; the counter alone must
+    // not need mu_.
+    std::atomic<int> appends_since_checkpoint_{0};
     // Cached prepared statements for the hot paths (appends, paging). Every
     // public method holds mu_, so the cache needs no lock of its own, and it is
     // mutable because the read paths (GetMessagesPage, GetSession) prepare on

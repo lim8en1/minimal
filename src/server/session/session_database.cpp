@@ -344,8 +344,13 @@ SessionDatabase::SessionDatabase(const std::filesystem::path& db_path, const Ope
     // cascade deletes depend on it. synchronous=NORMAL is WAL's recommended
     // setting (durability under process crash, not power loss). busy_timeout
     // covers out-of-process readers rather than failing them instantly.
+    // wal_autocheckpoint=0: the default (checkpoint every ~1000 WAL pages)
+    // landed checkpoint I/O inside a committing append -- under mu_, on the
+    // tool-result path -- instead of on the reaper's tick (see
+    // MaybeRunPassiveCheckpoint).
     for (const char* pragma : {"PRAGMA journal_mode=WAL;", "PRAGMA foreign_keys=ON;",
-                               "PRAGMA synchronous=NORMAL;", "PRAGMA busy_timeout=5000;"}) {
+                               "PRAGMA synchronous=NORMAL;", "PRAGMA busy_timeout=5000;",
+                               "PRAGMA wal_autocheckpoint=0;"}) {
         ExecChecked(db_, pragma, std::string("failed to set ") + pragma);
     }
 
@@ -565,7 +570,47 @@ std::int64_t SessionDatabase::AppendMessage(const std::string& session_id,
         }
         throw;
     }
+    // The reaper's threshold, not the transaction's: a committed append counts
+    // even though the counter is checked without mu_ (see the member comment).
+    appends_since_checkpoint_.fetch_add(1, std::memory_order_release);
     return assigned_seq;
+}
+
+bool SessionDatabase::MaybeRunPassiveCheckpoint() {
+    if (appends_since_checkpoint_.load(std::memory_order_acquire) < kCheckpointAppends) {
+        return false;
+    }
+    // Claim the accumulated appends BEFORE deciding the checkpoint is due, so
+    // appends landing during the checkpoint are counted toward the next one.
+    appends_since_checkpoint_.store(0, std::memory_order_relaxed);
+    std::lock_guard lock(mu_);
+    // RESTART, not PASSIVE -- a measured correction to the plan's wording.
+    // PASSIVE backfills frames into the main database but NEVER resets the
+    // log, so with autocheckpoint disabled the WAL would grow without bound
+    // (verified: 1043 frames backfilled, a fresh reader still saw all 1043).
+    // RESTART backfills the same frames and then ensures the next writer
+    // restarts from the head of the log. The blocking RESTART accepts is only
+    // against out-of-process readers -- in-process there is exactly one
+    // connection and the reaper already holds mu_ -- and it is bounded by
+    // busy_timeout (5 s), rare (the startup sanity check, a future CLI), and
+    // amortized: once per kCheckpointAppends appends instead of inside every
+    // committing append. A busy result loses nothing; the frames remain and
+    // the next attempt picks them up. Failures are deliberately not thrown:
+    // the reaper is the caller, and a failed best-effort optimization must not
+    // take the tick down.
+    (void)sqlite3_wal_checkpoint_v2(db_, nullptr, SQLITE_CHECKPOINT_RESTART, nullptr, nullptr);
+    return true;
+}
+
+int SessionDatabase::wal_autocheckpoint() const {
+    std::lock_guard lock(mu_);
+    // There is no C getter (sqlite3_wal_autocheckpoint is setter-only), so the
+    // pragma reports the connection's own current value.
+    Stmt query(db_, "PRAGMA wal_autocheckpoint;", "failed to read wal_autocheckpoint");
+    if (sqlite3_step(query.stmt) != SQLITE_ROW) {
+        ThrowSqliteError(db_, "failed to read wal_autocheckpoint");
+    }
+    return sqlite3_column_int(query.stmt, 0);
 }
 
 bool SessionDatabase::UpdateSessionName(const std::string& session_id, const std::string& name) {

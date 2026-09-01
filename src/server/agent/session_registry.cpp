@@ -331,6 +331,13 @@ void SessionRegistry::ReaperMain() {
             }
         }
         for (auto& session : doomed) session->Terminate();
+
+        // The tick this thread already runs is the WAL checkpoint's home
+        // (SessionDatabase::MaybeRunPassiveCheckpoint): wal_autocheckpoint=0
+        // moved checkpoint I/O off the append path, and the reaper is the
+        // process's periodic thread that is allowed to take it. Best-effort;
+        // the boolean is only whether a threshold was reached.
+        (void)db_.MaybeRunPassiveCheckpoint();
     }
 }
 
