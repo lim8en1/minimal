@@ -50,16 +50,19 @@ public:
         std::string error;        // last failure, when !alive
     };
 
-    // Liveness check at session start / /agent switch. Ensures the shared
-    // connection exists and pings it; on failure the server is marked dead and
-    // the error is surfaced (value, not exception) so the session can proceed
-    // without it. A dead server is RESPAWNED here -- re-discovery is exactly
-    // what a server process restart means.
+    // Liveness check at session start / /agent switch, and (via HandleInvoker)
+    // on any tool call against a handle not currently marked alive. Ensures
+    // the shared connection exists and pings it; on failure the server is
+    // marked dead and the error is surfaced (value, not exception) so the
+    // caller can proceed without it. A dead server is RESPAWNED here --
+    // re-discovery is exactly what a server process restart means -- unless a
+    // restart attempt failed within the last restart_cooldown_ms, in which
+    // case this returns false immediately naming the cooldown.
     //
     // Blocking shape: the manager-wide lock covers only the handle lookup;
     // the ping/restart I/O runs under a per-server mutex, so slow servers
-    // stall only their own callers. A verdict younger than ~10 s is reused
-    // without a wire round trip.
+    // stall only their own callers. A verdict younger than kVerifiedTtl (see
+    // the .cpp) is reused without a wire round trip.
     bool EnsureAlive(const std::string& server_name, std::string& error);
 
     Status StatusOf(const std::string& server_name) const;

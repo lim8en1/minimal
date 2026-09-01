@@ -336,6 +336,14 @@ PluginRecord PluginLoader::LoadOne(const PluginCandidate& candidate) {
                             kinds_before.end(), std::back_inserter(record.registered_model_catalog_kinds));
     }
 
+    // Marked Loaded HERE, before the services_ block below, not after it: a
+    // plugin whose minimal_plugin_register_services throws still returns with
+    // status == Loaded (GuardedRegistration's early `return record` below
+    // does not touch it). "Loaded" is therefore NOT a guarantee that every
+    // registration hook ran to completion -- only that everything up to this
+    // line did. docs/REMEDIATION_PLAN.md W10.2 plans a PartiallyLoaded status
+    // to close this; until then, a caller that cares must check
+    // registered_services rather than trust status alone.
     record.status = LoadStatus::Loaded;
 
     if (services_ != nullptr) {
