@@ -1,6 +1,8 @@
 #include "bash_session_state.hpp"
 
+#include <algorithm>
 #include <cstring>
+#include <iterator>
 #include <unistd.h>
 
 // POSIX declares it in <unistd.h> only under feature-test macros that C++ mode
@@ -12,13 +14,38 @@ namespace {
 
 // The server process's environment, as a sorted map. `environ` is a POSIX
 // global; reading it here (at seed time, under our lock) is the only access.
-std::map<std::string, std::string> ProcessEnvironment() {
+// The server's environment carries every credential the process holds --
+// provider API keys resolved from api_key_env, operator exports -- and the
+// default seed USED to be all of it: a model-authored `env` then persisted
+// credentials into the transcript, where any later network-capable command
+// could read them. The allowlist is the intersection of "the model expects
+// $HOME & co" and "the model has no business reading secrets"; `inherit_env:
+// "all"` in the plugin config restores the full seed as an explicit choice.
+constexpr const char* kEnvAllowlist[] = {
+    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TERM", "TERM_PROGRAM",
+    "LANG", "TMPDIR",
+};
+constexpr const char* kEnvAllowlistPrefixes[] = {"LC_"};
+
+std::map<std::string, std::string> ProcessEnvironment(bool inherit_all) {
     std::map<std::string, std::string> env;
     if (environ == nullptr) return env;
     for (char** entry = environ; *entry != nullptr; ++entry) {
         const char* equals = std::strchr(*entry, '=');
         if (equals == nullptr || equals == *entry) continue;  // malformed / empty key
-        env.emplace(std::string(*entry, equals - *entry), equals + 1);
+        const std::string key(*entry, equals - *entry);
+        if (!inherit_all) {
+            const bool allowed =
+                std::any_of(std::begin(kEnvAllowlist), std::end(kEnvAllowlist),
+                            [&](const char* name) { return key == name; }) ||
+                std::any_of(std::begin(kEnvAllowlistPrefixes),
+                            std::end(kEnvAllowlistPrefixes),
+                            [&](const char* prefix) {
+                                return key.rfind(prefix, 0) == 0;
+                            });
+            if (!allowed) continue;
+        }
+        env.emplace(key, equals + 1);
     }
     return env;
 }
@@ -33,7 +60,7 @@ SessionShellState BashSessionStateStore::Seed(const std::filesystem::path& proje
     std::error_code ec;
     const auto canonical = std::filesystem::canonical(project_root, ec);
     state.cwd = ec ? project_root : canonical;
-    state.env = ProcessEnvironment();
+    state.env = ProcessEnvironment(inherit_env_ == "all");
     return state;
 }
 

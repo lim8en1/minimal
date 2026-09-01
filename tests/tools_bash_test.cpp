@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -827,4 +828,39 @@ TEST_CASE("a flooded fd-9 payload is discarded wholesale, not truncated into ado
     CHECK(f.Cwd() == before);  // no state adopted from the flood
     // Previous state survived whole -- not merged away, not partially replaced.
     CHECK(f.store.Snapshot("s1", f.dir.path()).env.count("KEEP_ME") == 1);
+}
+
+TEST_CASE("the seeded shell environment is allowlisted; 'all' is an explicit choice",
+          "[tools_bash][env][invariant]") {
+    // The server process's environment carries every credential the process
+    // holds -- provider API keys resolved from api_key_env -- and the seed
+    // USED to be all of it: a model-authored `env` persisted those into the
+    // transcript, where any later network-capable command could read them.
+    // The allowlist is the invariant; "all" is the operator's opt-out.
+    ::setenv("MINIMAL_SECRET_CANARY", "hunter2", 1);
+    struct Restore {
+        ~Restore() { ::unsetenv("MINIMAL_SECRET_CANARY"); }
+    } restore;
+
+    BashSessionStateStore filtered;
+    const auto seed = filtered.Snapshot("s-env", std::filesystem::temp_directory_path());
+    CHECK(seed.env.count("MINIMAL_SECRET_CANARY") == 0);
+    CHECK(seed.env.count("PATH") == 1);   // what the model legitimately needs
+    CHECK(seed.env.count("HOME") == 1);
+
+    BashSessionStateStore all("all");
+    const auto full = all.Snapshot("s-env-all", std::filesystem::temp_directory_path());
+    CHECK(full.env.count("MINIMAL_SECRET_CANARY") == 1);
+}
+
+TEST_CASE("a typo'd inherit_env is a named parse error, not a silent default",
+          "[tools_bash][env]") {
+    // The two choices are named; "alowlist" silently meaning "allowlist" --
+    // or worse, "all" -- is the config lie this plugin's parse ladder exists
+    // to refuse.
+    CHECK_THROWS_AS(tools_bash::ParseBashSettings(
+                        nlohmann::json{{"inherit_env", "alowlist"}}),
+                    std::runtime_error);
+    CHECK_NOTHROW(tools_bash::ParseBashSettings(nlohmann::json{{"inherit_env", "all"}}));
+    CHECK_NOTHROW(tools_bash::ParseBashSettings(nlohmann::json{{"inherit_env", "allowlist"}}));
 }

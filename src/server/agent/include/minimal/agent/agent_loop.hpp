@@ -50,6 +50,11 @@ struct LoopConfig {
     // tools.max_parallel_tool_calls.
     int max_parallel_tool_calls = 4;
 
+    // The global tool-input ceiling (settings.json tools.max_input_bytes).
+    // Checked at the gate, before Prepare: no hook payload, no permission
+    // request, no execution -- one error result the model adapts to.
+    std::int64_t max_tool_input_bytes = 10 * 1024 * 1024;
+
     // Exponential-with-EQUAL-jitter backoff between retries: half the ceiling
     // is a fixed floor, the other half random. Full jitter can legally draw
     // zero, which leaves a real 429 unbackoffed and makes the wait

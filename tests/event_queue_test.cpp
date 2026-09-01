@@ -155,3 +155,85 @@ TEST_CASE("a move-only payload is not copied through the queue", "[event_queue]"
     REQUIRE(*event != nullptr);
     CHECK(**event == 5);
 }
+
+namespace {
+
+// A sized test type: the byte accounting needs a cost per event, the way the
+// session queue passes the protobuf size.
+struct Sized {
+    std::string payload;
+};
+
+std::size_t PayloadBytes(const Sized& event) { return event.payload.size(); }
+
+}  // namespace
+
+TEST_CASE("the byte bound refuses events past the cap, on both push flavours",
+          "[event_queue][invariant]") {
+    // A count-only bound does not bound RAM when one event can carry
+    // megabytes: bash streams 8 KiB output chunks, so the 65,536-event cap was
+    // ~540 MB per stalled client -- and the queue exists precisely for the
+    // stalled client. Removing the byte accounting fails this test.
+    EventQueue<Sized> queue(16, /*max_bytes=*/100, PayloadBytes);
+
+    CHECK(queue.TryPush(Sized{std::string(60, 'x')}));
+    CHECK(queue.buffered_bytes() == 60);
+    CHECK_FALSE(queue.TryPush(Sized{std::string(60, 'y')}));  // would exceed 100
+    CHECK(queue.TryPush(Sized{std::string(40, 'z')}));        // exactly at the cap
+    CHECK(queue.buffered_bytes() == 100);
+    CHECK_FALSE(queue.TryPush(Sized{"a"}));
+
+    // Pop frees bytes, not just slots.
+    (void)queue.Pop();
+    CHECK(queue.buffered_bytes() == 40);
+    CHECK(queue.TryPush(Sized{std::string(60, 'w')}));
+}
+
+TEST_CASE("a lone event larger than the byte cap is delivered, never deadlocked",
+          "[event_queue]") {
+    // A producer whose ONE event can never fit must not block forever:
+    // delivering one oversized event is strictly better than a deadlock. It is
+    // accepted onto an empty queue and refused while anything is buffered.
+    EventQueue<Sized> queue(16, /*max_bytes=*/10, PayloadBytes);
+    CHECK(queue.TryPush(Sized{std::string(100, 'x')}));
+    CHECK(queue.buffered_bytes() == 100);
+    CHECK_FALSE(queue.TryPush(Sized{"tiny"}));
+    (void)queue.Pop();
+    CHECK(queue.TryPush(Sized{"tiny"}));
+}
+
+TEST_CASE("Push blocks on the byte bound and wakes on Pop and Close", "[event_queue]") {
+    auto queue_ptr = std::make_shared<EventQueue<Sized>>(16, 100, PayloadBytes);
+    queue_ptr->TryPush(Sized{std::string(90, 'x')});
+
+    // A push that does not fit parks; Pop frees room and it lands.
+    auto producer = minimal::testing::RunInBackground([queue_ptr] {
+        queue_ptr->Push(Sized{std::string(90, 'y')});
+        return true;
+    });
+    std::this_thread::sleep_for(50ms);
+    CHECK_FALSE(producer.Ready());
+    (void)queue_ptr->Pop();
+    CHECK(producer.WaitFor(2s));
+    CHECK(queue_ptr->buffered_bytes() == 90);
+
+    // A push parked at the cap wakes on Close -- the Terminate ordering's
+    // wake-up, now also reachable through the byte bound.
+    auto stalled = minimal::testing::RunInBackground([queue_ptr] {
+        queue_ptr->Push(Sized{std::string(90, 'z')});
+        return true;
+    });
+    std::this_thread::sleep_for(50ms);
+    queue_ptr->Close();
+    CHECK(stalled.WaitFor(2s));
+}
+
+TEST_CASE("TryPush returns false on a closed queue, so refusal logging fires",
+          "[event_queue][invariant]") {
+    // It used to return TRUE on a closed queue as "dropped on purpose", which
+    // made every refusal path's drop-logging dead exactly at Terminate -- the
+    // logging contract the call sites promise was false on the shutdown path.
+    EventQueue<int> queue;
+    queue.Close();
+    CHECK_FALSE(queue.TryPush(1));
+}

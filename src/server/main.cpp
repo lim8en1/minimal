@@ -415,6 +415,7 @@ int main(int argc, char** argv) {
     loop_config.compaction_trigger = settings.memory.context_compaction_trigger;
     loop_config.compaction_keep_recent_tokens = settings.memory.compaction_keep_recent_tokens;
     loop_config.max_parallel_tool_calls = settings.tools.max_parallel_tool_calls;
+    loop_config.max_tool_input_bytes = settings.tools.max_input_bytes;
     loop_config.hooks = &hook_dispatcher;
 
     // Configure hooks (track O) now that every point -- core's and plugins' --

@@ -40,6 +40,12 @@ struct BashSettings {
     // Operator-swappable, like everything else here: a different POSIX shell, or
     // a wrapper that enters a container, needs no code change.
     std::string shell = "/bin/sh";
+    // "allowlist" (default): the session's shell environment seeds from a
+    // filtered set ($HOME, $PATH, $TMPDIR, ... -- see bash_session_state.cpp).
+    // The server process's environment carries provider API keys; seeding ALL
+    // of it let a model-authored `env` persist credentials into the
+    // transcript. "all" restores the full seed as an explicit operator choice.
+    std::string inherit_env = "allowlist";
 };
 
 // Every field optional; missing values keep the struct's defaults, so an absent

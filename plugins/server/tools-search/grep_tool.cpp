@@ -255,8 +255,17 @@ public:
             return Error("head_limit must be an integer");
         }
         const int head_limit_raw = input.value("head_limit", settings_.grep_default_head_limit);
-        const int head_limit =
-            head_limit_raw > 0 ? head_limit_raw : settings_.grep_default_head_limit;
+        // The model's head_limit is a REQUEST, not the ceiling: grep_max_results
+        // is the configured absolute bound ("the absolute ceiling on collected
+        // results", search_settings.hpp). It was parsed, tested -- and read by
+        // nothing, so `head_limit: 2000000000` in content mode accumulated
+        // unboundedly, bounded only by the walk timeout.
+        int head_limit = head_limit_raw > 0 ? head_limit_raw : settings_.grep_default_head_limit;
+        bool clamped = false;
+        if (head_limit > settings_.grep_max_results) {
+            head_limit = settings_.grep_max_results;
+            clamped = true;
+        }
 
         if (input.contains("offset") && !input.at("offset").is_number_integer()) {
             return Error("offset must be an integer");
@@ -320,8 +329,8 @@ public:
         // Disclosures (skips, early stops) are emitted even when nothing
         // matched -- "no matches" presented without the reason it saw only
         // part of the tree would be a false negative.
-        if (run.out.empty() && stats.skipped_oversize == 0 && !stats.timed_out &&
-            !stats.cancelled) {
+        if (run.out.empty() && stats.skipped_oversize == 0 && stats.skipped_entries == 0 &&
+            stats.skipped_deep == 0 && !stats.timed_out && !stats.cancelled) {
             return ToolResult{false, "No matches found"};
         }
 
@@ -348,6 +357,18 @@ public:
             run.Append("(" + std::to_string(stats.skipped_oversize) +
                        " file(s) skipped: larger than " +
                        std::to_string(settings_.grep_max_file_bytes) + " bytes)\n");
+        }
+        if (clamped) {
+            run.Append("(head_limit clipped to the configured grep_max_results=" +
+                       std::to_string(settings_.grep_max_results) + ")\n");
+        }
+        if (stats.skipped_entries > 0) {
+            run.Append("(" + std::to_string(stats.skipped_entries) +
+                       " director(y entries) skipped: over the per-directory cap)\n");
+        }
+        if (stats.skipped_deep > 0) {
+            run.Append("(" + std::to_string(stats.skipped_deep) +
+                       " director(ies) skipped: deeper than the walk depth cap)\n");
         }
         return ToolResult{false, std::move(run.out)};
     }

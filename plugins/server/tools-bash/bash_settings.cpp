@@ -1,5 +1,7 @@
 #include "bash_settings.hpp"
 
+#include <stdexcept>
+
 namespace minimal::tools_bash {
 namespace {
 
@@ -31,6 +33,17 @@ BashSettings ParseBashSettings(const nlohmann::json& config) {
     auto shell_it = config.find("shell");
     if (shell_it != config.end() && shell_it->is_string()) {
         settings.shell = shell_it->get<std::string>();
+    }
+
+    auto env_it = config.find("inherit_env");
+    if (env_it != config.end() && env_it->is_string()) {
+        settings.inherit_env = env_it->get<std::string>();
+        // A typo'd mode must not silently mean "allowlist" (or worse, "all"):
+        // the two choices are named, everything else is a named parse error.
+        if (settings.inherit_env != "allowlist" && settings.inherit_env != "all") {
+            throw std::runtime_error(
+                "tools-bash config: inherit_env must be \"allowlist\" or \"all\"");
+        }
     }
 
     // A non-positive timeout would kill every command instantly; a non-positive

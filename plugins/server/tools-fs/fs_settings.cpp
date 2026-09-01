@@ -22,6 +22,8 @@ FsSettings ParseFsSettings(const nlohmann::json& config) {
         ValueOr(config, "read", "default_limit_lines", settings.read_default_limit_lines);
     settings.read_max_line_length =
         ValueOr(config, "read", "max_line_length", settings.read_max_line_length);
+    settings.read_max_lines =
+        ValueOr(config, "read", "max_lines", settings.read_max_lines);
     settings.edit_max_editable_file_bytes = ValueOr(
         config, "edit", "max_editable_file_bytes", settings.edit_max_editable_file_bytes);
 
@@ -29,6 +31,7 @@ FsSettings ParseFsSettings(const nlohmann::json& config) {
     // meant to configure; fall back rather than silently returning empty windows.
     if (settings.read_default_limit_lines <= 0) settings.read_default_limit_lines = 2000;
     if (settings.read_max_line_length <= 0) settings.read_max_line_length = 2000;
+    if (settings.read_max_lines <= 0) settings.read_max_lines = 2000;
     if (settings.edit_max_editable_file_bytes <= 0) {
         settings.edit_max_editable_file_bytes = 5 * 1024 * 1024;
     }

@@ -31,8 +31,17 @@ struct SessionShellState {
 // interface's, which is what keeps the service narrow.
 class BashSessionStateStore : public BashSessionStateService {
 public:
+    // inherit_env: "allowlist" (default) seeds a filtered environment -- the
+    // server process's environment carries provider API keys and anything else
+    // the operator exported, and a seed of ALL of it let a model-authored
+    // `env` dump credentials into the transcript and the persisted store. The
+    // allowlist is what the model legitimately needs ($HOME, $PATH, $TMPDIR);
+    // "all" restores the old behavior as an explicit operator choice.
+    explicit BashSessionStateStore(std::string inherit_env = "allowlist")
+        : inherit_env_(std::move(inherit_env)) {}
+
     // Existing state, or a fresh one seeded from `project_root` (bash's initial
-    // cwd) and the server process's environment (the model expects $HOME & co).
+    // cwd) and the (filtered, by default) process environment.
     SessionShellState Snapshot(const std::string& session_id, const std::filesystem::path& project_root);
 
     // Applied wholesale from what the shell reported on its state channel after a
@@ -56,6 +65,7 @@ public:
 private:
     SessionShellState Seed(const std::filesystem::path& project_root);
 
+    std::string inherit_env_;
     mutable std::mutex mutex_;
     std::unordered_map<std::string, SessionShellState> states_;
 };

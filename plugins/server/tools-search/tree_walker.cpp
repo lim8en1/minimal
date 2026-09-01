@@ -15,10 +15,17 @@ bool DeadlineExceeded(const WalkOptions& options,
     return std::chrono::steady_clock::now() - start >= options.timeout;
 }
 
+// The walk's allocation ceilings (disclosed via WalkStats, never silent):
+constexpr int kMaxWalkDepth = 1024;
+constexpr int kMaxDirEntries = 10000;
+
 // The walk state. Three conditions stop a walk -- cancellation, timeout, and
 // the callback's own "I have enough" -- and they are kept apart only so the
 // stats can report WHICH one fired; every one of them means "stop and unwind
-// now", so one flag drives the recursion.
+// now", so one flag drives the ITERATION. The traversal is an explicit-stack
+// DFS: the recursive WalkDir put one C++ frame per directory level with no
+// depth bound -- a loop of mkdir+cd through the bash tool builds trees deeper
+// than any worker stack, and the overflow is a SIGSEGV no guard catches.
 struct State {
     const WalkOptions& options;
     const std::function<bool(const WalkEntry&)>& cb;
@@ -45,34 +52,93 @@ struct State {
         return false;
     }
 
-    void WalkDir(const std::filesystem::path& abs, const std::string& rel) {
-        if (stopping()) return;
-
-        // directory_iterator's order is unspecified, so the per-directory
-        // entries are name-sorted: two walks over the same tree produce the
-        // same output, which a model diffing results across calls relies on.
+    // One stack frame: a directory whose children are listed up-front, with
+    // its own .gitignore already pushed.
+    struct Frame {
+        std::filesystem::path abs;
+        std::string rel;
+        bool pushed = false;  // our .gitignore sits on the stack; pop when done
         std::vector<std::filesystem::path> children;
-        {
-            std::error_code iter_ec;
-            std::filesystem::directory_iterator it(abs, iter_ec), end;
-            if (iter_ec) {
-                // Unreadable directory: counted, not fatal.
-                stats_.skipped_errors += 1;
-                return;
-            }
-            for (; it != end; it.increment(iter_ec)) {
-                if (iter_ec) {
-                    // Stopped being readable mid-listing; keep what we have.
-                    stats_.skipped_errors += 1;
-                    break;
-                }
-                children.push_back(it->path());
+        std::size_t next = 0;
+    };
+
+    // Lists `abs` into the frame: name-sorted (deterministic output -- a model
+    // diffing two calls relies on it), cancellable and deadline-checked INSIDE
+    // the listing (a million-entry directory used to materialize and sort
+    // uninterruptibly), and capped at kMaxDirEntries -- the withheld remainder
+    // is counted and disclosed, never silently dropped.
+    Frame MakeFrame(const std::filesystem::path& abs, const std::string& rel) {
+        Frame frame;
+        frame.abs = abs;
+        frame.rel = rel;
+
+        // This directory's .gitignore is pushed BEFORE anything under it is
+        // reported or listed against, exactly as the recursive shape ordered
+        // it: a directory's rules govern its own report too.
+        std::error_code gi_ec;
+        const auto gitignore = abs / ".gitignore";
+        if (std::filesystem::is_regular_file(gitignore, gi_ec) && !gi_ec) {
+            std::ifstream in(gitignore, std::ios::binary);
+            if (in) {
+                std::string content((std::istreambuf_iterator<char>(in)),
+                                    std::istreambuf_iterator<char>());
+                const auto depth =
+                    static_cast<int>(std::count(rel.begin(), rel.end(), '/')) + 1;
+                ignore_stack.Push(depth, GitignoreSet::Parse(content));
+                frame.pushed = true;
             }
         }
-        std::sort(children.begin(), children.end());
 
-        for (const auto& path : children) {
+        std::error_code iter_ec;
+        std::filesystem::directory_iterator it(abs, iter_ec), end;
+        if (iter_ec) {
+            // Unreadable directory: counted, not fatal.
+            stats_.skipped_errors += 1;
+            return frame;
+        }
+        for (; it != end; it.increment(iter_ec)) {
+            if (iter_ec) {
+                // Stopped being readable mid-listing; keep what we have.
+                stats_.skipped_errors += 1;
+                break;
+            }
+            if (options.is_cancelled && options.is_cancelled()) {
+                stop = Stop::kCancelled;
+                return frame;
+            }
+            if (DeadlineExceeded(options, start)) {
+                stop = Stop::kTimedOut;
+                return frame;
+            }
+            if (static_cast<int>(frame.children.size()) >= kMaxDirEntries) {
+                // Count the withheld remainder cheaply -- names only, no stat.
+                int withheld = 1;
+                for (++it; it != end; it.increment(iter_ec)) {
+                    if (iter_ec) break;
+                    withheld += 1;
+                }
+                stats_.skipped_entries += withheld;
+                break;
+            }
+            frame.children.push_back(it->path());
+        }
+        std::sort(frame.children.begin(), frame.children.end());
+        return frame;
+    }
+
+    void Walk(const std::filesystem::path& root_abs, const std::string& root_rel) {
+        std::vector<Frame> stack;
+        stack.push_back(MakeFrame(root_abs, root_rel));
+        if (stopping()) return;
+
+        while (!stack.empty()) {
             if (stopping()) return;
+            Frame& frame = stack.back();
+            if (frame.next >= frame.children.size()) {
+                if (frame.pushed) ignore_stack.Pop();
+                stack.pop_back();
+                continue;
+            }
             if (options.is_cancelled && options.is_cancelled()) {
                 stop = Stop::kCancelled;
                 return;
@@ -82,6 +148,7 @@ struct State {
                 return;
             }
 
+            const auto path = frame.children[frame.next++];
             std::error_code ec;
             const auto link_status = std::filesystem::symlink_status(path, ec);
             if (ec) {
@@ -101,8 +168,9 @@ struct State {
             const auto filename = path.filename();
             if (is_dir && (filename == ".git" || filename == ".hg")) continue;
 
-            const std::string child_rel = rel.empty() ? filename.generic_string()
-                                                      : rel + "/" + filename.generic_string();
+            const std::string child_rel =
+                frame.rel.empty() ? filename.generic_string()
+                                  : frame.rel + "/" + filename.generic_string();
 
             // Directory prune: a directory the rules ignore is skipped
             // wholesale -- nothing below it is ever considered, which is also
@@ -111,32 +179,18 @@ struct State {
             if (ignore_stack.IsIgnored(child_rel, is_dir)) continue;
 
             if (is_dir) {
-                // Push before reporting or descending, so the directory's own
-                // .gitignore governs everything below it, including the
-                // directory's report itself.
-                bool pushed = false;
-                std::error_code gi_ec;
-                const auto gitignore = path / ".gitignore";
-                if (std::filesystem::is_regular_file(gitignore, gi_ec) && !gi_ec) {
-                    std::ifstream in(gitignore, std::ios::binary);
-                    if (in) {
-                        std::string content((std::istreambuf_iterator<char>(in)),
-                                            std::istreambuf_iterator<char>());
-                        const auto depth =
-                            static_cast<int>(std::count(child_rel.begin(), child_rel.end(), '/')) + 1;
-                        ignore_stack.Push(depth, GitignoreSet::Parse(content));
-                        pushed = true;
-                    }
+                if (!Report(WalkEntry{path, child_rel, true, 0})) return;
+                stats_.dirs_seen += 1;
+                if (static_cast<int>(stack.size()) >= kMaxWalkDepth) {
+                    stats_.skipped_deep += 1;
+                    continue;
                 }
-
-                if (!Report(WalkEntry{path, child_rel, true, 0})) {
-                    if (pushed) ignore_stack.Pop();
+                Frame child = MakeFrame(path, child_rel);
+                if (stopping()) {
+                    if (child.pushed) ignore_stack.Pop();
                     return;
                 }
-                stats_.dirs_seen += 1;
-
-                WalkDir(path, child_rel);
-                if (pushed) ignore_stack.Pop();
+                stack.push_back(std::move(child));
                 continue;
             }
 
@@ -187,7 +241,7 @@ WalkStats WalkTree(const std::filesystem::path& root, const WalkOptions& options
                 state.ignore_stack.Push(0, GitignoreSet::Parse(content));
             }
         }
-        state.WalkDir(root, "");
+        state.Walk(root, "");
     } else if (status.type() == std::filesystem::file_type::regular) {
         // The root is itself a file: report it and nothing else.
         const auto size = std::filesystem::file_size(root, ec);

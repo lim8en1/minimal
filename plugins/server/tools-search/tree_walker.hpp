@@ -49,8 +49,16 @@ struct WalkEntry {
 struct WalkStats {
     int files_seen = 0;
     int dirs_seen = 0;
-    int skipped_errors = 0;  // unreadable entries (permission, racy delete)
+    int skipped_errors = 0;    // unreadable entries (permission, racy delete)
     int skipped_oversize = 0;
+    // The walk's own allocation ceilings: a directory deeper than the walk
+    // depth cap (the walker recursed one frame per level, and a loop of
+    // mkdir+cd through the bash tool builds arbitrarily deep trees), and the
+    // entries of one directory past the per-directory listing cap (a
+    // million-entry directory was materialized and sorted uninterruptibly).
+    // Both are disclosed by the tools, never silently dropped.
+    int skipped_deep = 0;
+    int skipped_entries = 0;
     bool timed_out = false;
     bool cancelled = false;      // is_cancelled() returned true
     bool limit_stopped = false;  // the callback returned false

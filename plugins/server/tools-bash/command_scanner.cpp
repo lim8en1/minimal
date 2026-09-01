@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <memory>
+#include <vector>
 #include <string>
 #include <utility>
 
@@ -71,8 +72,13 @@ bool IsLiteralKind(std::string_view type) {
 
 // True iff `node`'s subtree is entirely literal kinds; the dequoted text of
 // the program it spells is appended to `out_text` either way (ignored by the
-// caller when this returns false).
-bool CollectLiteral(TSNode node, std::string_view src, std::string& out_text) {
+// caller when this returns false). Depth-capped: a literal is bounded by the
+// nesting inside ONE command_name (concatenation/string structure), which is
+// small; the cap turns a pathological input into "computed, not named" --
+// complete = false -- instead of unbounded recursion.
+bool CollectLiteral(TSNode node, std::string_view src, std::string& out_text, int depth = 0) {
+    constexpr int kMaxLiteralDepth = 64;
+    if (depth > kMaxLiteralDepth) return false;
     const std::string type = ts_node_type(node);
     if (!IsLiteralKind(type)) return false;
 
@@ -91,7 +97,9 @@ bool CollectLiteral(TSNode node, std::string_view src, std::string& out_text) {
         return true;
     }
     for (std::uint32_t i = 0; i < n; ++i) {
-        if (!CollectLiteral(ts_node_named_child(node, i), src, out_text)) return false;
+        if (!CollectLiteral(ts_node_named_child(node, i), src, out_text, depth + 1)) {
+            return false;
+        }
     }
     return true;
 }
@@ -100,18 +108,42 @@ class Walker {
 public:
     Walker(std::string_view src, ScanResult& out) : src_(src), out_(out) {}
 
-    void Run(TSNode node) {
-        const std::string type = ts_node_type(node);
-        if (type == "command_name") {
-            HandleCommandName(node);
-            return;
+    // An explicit-stack traversal, not recursion. tree-sitter-bash builds
+    // LEFT-DEEP trees for operator chains (`a && b && c && ...`): depth is
+    // linear in the term count, so a long command string -- one tool call, the
+    // model's to write -- overflowed the session worker's stack. The overflow
+    // is a SIGSEGV, uncatchable by the executor's Run guard; iteration makes
+    // the failure mode unreachable rather than bounded (the RE2 lesson).
+    void Run(TSNode root) {
+        std::vector<TSNode> stack{root};
+        while (!stack.empty()) {
+            const TSNode node = stack.back();
+            stack.pop_back();
+            const std::string type = ts_node_type(node);
+            const std::uint32_t n = ts_node_named_child_count(node);
+            if (type == "command_name") {
+                if (HandleCommandName(node)) continue;
+                // The program is computed, not named ($X args, foo$(nproc)
+                // bar) -- nothing meaningful to grant. The subtree may still
+                // contain command_substitutions whose commands ARE literal,
+                // so keep walking: `echo `id`` names id even where the
+                // program slot is dynamic. The descent shares THIS stack --
+                // calling Run recursively here would put one C++ frame back
+                // per substitution-nesting level, the same overflow the
+                // iterative walk exists to make unreachable.
+                out_.complete = false;
+            }
+            // Pushed in reverse so children are VISITED in order: disclosure
+            // order is the command's order, and tests assert on it.
+            for (std::uint32_t i = n; i-- > 0;) stack.push_back(ts_node_named_child(node, i));
         }
-        const std::uint32_t n = ts_node_named_child_count(node);
-        for (std::uint32_t i = 0; i < n; ++i) Run(ts_node_named_child(node, i));
     }
 
 private:
-    void HandleCommandName(TSNode node) {
+    // Returns true when the name was handled as a literal (recorded, or
+    // reserved-word arguments recorded); false means "computed, not named" and
+    // the CALLER descends into the children on the shared stack.
+    bool HandleCommandName(TSNode node) {
         std::string text;
         bool literal = true;
         const std::uint32_t n = ts_node_named_child_count(node);
@@ -121,16 +153,9 @@ private:
                 break;
             }
         }
-        if (literal) {
-            HandleLiteralName(node, std::move(text));
-            return;
-        }
-        // The program is computed, not named ($X args, foo$(nproc) bar) --
-        // nothing meaningful to grant. The subtree may still contain
-        // command_substitutions whose commands ARE literal, so keep walking:
-        // `echo `id`` names id even where the program slot is dynamic.
-        out_.complete = false;
-        for (std::uint32_t i = 0; i < n; ++i) Run(ts_node_named_child(node, i));
+        if (!literal) return false;
+        HandleLiteralName(node, std::move(text));
+        return true;
     }
 
     void HandleLiteralName(TSNode node, std::string text) {

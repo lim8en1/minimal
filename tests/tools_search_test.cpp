@@ -575,3 +575,23 @@ TEST_CASE("search tools declare their paths so the executor classifies them",
     CHECK(grep->spec().category == tools::ToolCategory::ReadOnly);
     CHECK(glob->spec().category == tools::ToolCategory::ReadOnly);
 }
+
+TEST_CASE("brace expansion is translation-capped, however deeply the model nests",
+          "[tools_search][invariant]") {
+    // Nested `{a,b}` alternation used to DOUBLE the translated output per
+    // level: a ~320-byte pattern reached a 2^40-byte string before RE2 ever
+    // saw it, defeating the linear-time guarantee the dependency was added
+    // for -- the blowup was in the TRANSLATOR, which the walk timeout does
+    // not cover. Depth 16 and a 64 KiB translation make the refusal
+    // unreachable-from-legitimate use and bounded everywhere else.
+    std::string pattern;
+    for (int i = 0; i < 40; ++i) pattern += "{{a,b},";
+    pattern += "x";
+    for (int i = 0; i < 40; ++i) pattern += "}";
+
+    const auto started = std::chrono::steady_clock::now();
+    const auto translated = GlobToRegex(pattern, GlobFlags::kBraceAlternation);
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+    CHECK_FALSE(translated.has_value());
+    CHECK(elapsed < std::chrono::seconds(2));
+}

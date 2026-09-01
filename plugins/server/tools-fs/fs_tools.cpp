@@ -1,5 +1,7 @@
 #include "fs_tools.hpp"
 
+#include <cstdint>
+#include <limits>
 #include <sstream>
 #include <utility>
 
@@ -40,6 +42,35 @@ ConfineResult ResolveForUse(const ToolContext& ctx, const nlohmann::json& input,
 std::optional<std::string> ExtractPathField(const nlohmann::json& input) {
     if (!input.contains("path") || !input.at("path").is_string()) return std::nullopt;
     return input.at("path").get<std::string>();
+}
+
+// THE MODEL-INPUT ALLOCATION CEILING for read windows, shared by read and
+// edit's view. "Memory proportional to `limit`, not file size" is hollow when
+// `limit` is model-controlled: `{"limit": 0}` meant the WHOLE FILE, and a
+// 10 GB log was an OOM on the session worker. Everything the model sends is
+// range-checked in int64 (an out-of-range value is the model's mistake to see,
+// not a silent wrap), then clamped to `read.max_lines` -- `limit: 0` included,
+// whose "whole file" reading was exactly the unbounded case. *clamped tells
+// the caller to disclose it; the model must know its window was clipped.
+bool ClampReadWindow(std::int64_t raw_offset, std::int64_t raw_limit, const FsSettings& settings,
+                     int* offset_out, int* limit_out, bool* clamped_out, std::string& error) {
+    if (raw_offset < 1 || raw_offset > std::numeric_limits<int>::max()) {
+        error = "offset must be a line number between 1 and " +
+                std::to_string(std::numeric_limits<int>::max());
+        return false;
+    }
+    if (raw_limit < 0 || raw_limit > std::numeric_limits<int>::max()) {
+        error = "limit is out of range";
+        return false;
+    }
+    *offset_out = static_cast<int>(raw_offset);
+    *limit_out = static_cast<int>(raw_limit);
+    *clamped_out = false;
+    if (*limit_out == 0 || *limit_out > settings.read_max_lines) {
+        *limit_out = settings.read_max_lines;
+        *clamped_out = true;
+    }
+    return true;
 }
 
 // --- read -------------------------------------------------------------------
@@ -83,13 +114,25 @@ public:
         if (input.contains("limit") && !input.at("limit").is_number_integer()) {
             return Error("limit must be an integer");
         }
-        const int offset = input.value("offset", 1);
-        const int limit = input.value("limit", settings_.read_default_limit_lines);
+        int offset = 1;
+        int limit = settings_.read_default_limit_lines;
+        bool clamped = false;
+        if (!ClampReadWindow(input.value("offset", static_cast<std::int64_t>(1)),
+                             input.value("limit",
+                                         static_cast<std::int64_t>(settings_.read_default_limit_lines)),
+                             settings_, &offset, &limit, &clamped, error)) {
+            return Error(error);
+        }
 
         const auto window = tools::read_window(resolved.absolute_path, offset, limit,
                                                 settings_.read_max_line_length);
         if (!window.ok) return Error(window.error);
-        return ToolResult{false, RenderWindow(window)};
+        std::string text = RenderWindow(window);
+        if (clamped) {
+            text += "\n[The requested window was clipped to the configured read ceiling (" +
+                    std::to_string(settings_.read_max_lines) + " lines).]";
+        }
+        return ToolResult{false, std::move(text)};
     }
 
 private:
@@ -224,24 +267,38 @@ private:
     }
 
     ToolResult View(const nlohmann::json& input, const std::filesystem::path& path) {
-        int offset = 1;
-        int limit = settings_.read_default_limit_lines;
+        std::int64_t raw_offset = 1;
+        std::int64_t raw_limit = settings_.read_default_limit_lines;
         if (auto it = input.find("view_range");
             it != input.end() && it->is_array() && it->size() == 2) {
             // The shape is checked but the ELEMENTS were not, so
             // `view_range: ["a", "b"]` threw type_error straight out of the
             // tool. Reported instead: a malformed range is the model's mistake
-            // to see and correct.
+            // to see and correct. The arithmetic is int64: `end - offset + 1`
+            // in int was signed-overflow UB for far-apart values, and the
+            // wrapped negative landed in read_window as "unlimited".
             if (!(*it)[0].is_number_integer() || !(*it)[1].is_number_integer()) {
                 return Error("view_range must be two integers");
             }
-            offset = (*it)[0].get<int>();
-            const int end = (*it)[1].get<int>();
-            limit = (end < offset) ? 0 : end - offset + 1;
+            raw_offset = (*it)[0].get<std::int64_t>();
+            const std::int64_t end = (*it)[1].get<std::int64_t>();
+            raw_limit = (end < raw_offset) ? 0 : end - raw_offset + 1;
+        }
+        int offset = 1;
+        int limit = settings_.read_default_limit_lines;
+        bool clamped = false;
+        std::string error;
+        if (!ClampReadWindow(raw_offset, raw_limit, settings_, &offset, &limit, &clamped, error)) {
+            return Error(error);
         }
         const auto window = tools::read_window(path, offset, limit, settings_.read_max_line_length);
         if (!window.ok) return Error(window.error);
-        return ToolResult{false, RenderWindow(window)};
+        std::string text = RenderWindow(window);
+        if (clamped) {
+            text += "\n[The requested window was clipped to the configured read ceiling (" +
+                    std::to_string(settings_.read_max_lines) + " lines).]";
+        }
+        return ToolResult{false, std::move(text)};
     }
 
     ToolResult Create(const nlohmann::json& input, const std::filesystem::path& path) {

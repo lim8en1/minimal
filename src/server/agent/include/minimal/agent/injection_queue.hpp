@@ -32,13 +32,25 @@ namespace minimal::agent {
 
 class InjectionQueue {
 public:
-    // False means the owning session has terminated (Close ran) and the
-    // message was NOT staged -- the caller logs the loss, the same contract
-    // Session::QueueInjectedMessage has always had.
+    // The staging bound. The work queue (32) and the outbound event queue are
+    // both documented bounded; this third queue silently was not -- producers
+    // are non-blocking subagent completions and background task results (up to
+    // 1 MB each) landing on an IDLE parent with wake_on_injection off, which
+    // flushes only at the next turn. Over the limit is a REFUSAL, never a
+    // queue: the caller logs the loss, the same contract Close has. Bounded by
+    // message count; each producer is itself rate-limited (max_concurrent_
+    // subagents, max_background_tasks), so 64 is far above any legitimate
+    // backlog.
+    static constexpr std::size_t kMaxPending = 64;
+
+    // False means the message was NOT staged -- the owning session has
+    // terminated (Close ran) or the staging bound is hit. The caller logs the
+    // loss, the same contract Session::QueueInjectedMessage has always had.
     bool Push(llm::Message message) {
         {
             std::lock_guard<std::mutex> lock(mutex_);
             if (closed_) return false;
+            if (pending_.size() >= kMaxPending) return false;
             pending_.push_back(std::move(message));
         }
         return true;

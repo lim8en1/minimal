@@ -170,6 +170,14 @@ public:
         // as complete is the one failure mode worse than a truncation.
         if (stats.timed_out) out += "(stopped early: timeout)\n";
         if (stats.cancelled) out += "(stopped early: cancelled)\n";
+        if (stats.skipped_entries > 0) {
+            out += "(" + std::to_string(stats.skipped_entries) +
+                   " director(y entries) skipped: over the per-directory cap)\n";
+        }
+        if (stats.skipped_deep > 0) {
+            out += "(" + std::to_string(stats.skipped_deep) +
+                   " director(ies) skipped: deeper than the walk depth cap)\n";
+        }
         return ToolResult{false, out};
     }
 

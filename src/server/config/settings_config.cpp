@@ -97,6 +97,11 @@ ToolsSettings ParseTools(const nlohmann::json& doc) {
         throw std::runtime_error(
             "settings.json: tools.max_parallel_tool_calls must be at least 1");
     }
+    result.max_input_bytes = tools.value("max_input_bytes", result.max_input_bytes);
+    if (result.max_input_bytes < 0) {
+        throw std::runtime_error(
+            "settings.json: tools.max_input_bytes must not be negative");
+    }
     return result;
 }
 

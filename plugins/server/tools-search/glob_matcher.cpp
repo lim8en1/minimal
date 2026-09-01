@@ -111,19 +111,33 @@ std::size_t MatchingBrace(std::string_view glob, std::size_t open) {
 
 }  // namespace
 
-std::optional<std::string> GlobToRegex(std::string_view glob, GlobFlags flags) {
-    std::string out;
+namespace {
+
+// The translator's caps. RE2's linear-time guarantee -- the reason the
+// dependency exists -- is moot if the TRANSLATION blows up first: nested brace
+// alternation duplicated each level into the output (`{{a,b},{a,b}}` doubles),
+// so a ~320-byte model-authored pattern reached a 2^40-byte string before RE2
+// ever saw it, and the recursion depth was stack-bound. Depth 16 and a 64 KiB
+// translation are far above every legitimate glob; past either the pattern is
+// refused (nullopt -> the tool's error result), not matched.
+constexpr int kMaxBraceDepth = 16;
+constexpr std::size_t kMaxTranslatedBytes = 64ull << 10;
+
+bool GlobToRegexImpl(std::string_view glob, GlobFlags flags, int depth, std::string& out) {
+    if (depth > kMaxBraceDepth) return false;
     const std::size_t n = glob.size();
     std::size_t i = 0;
     while (i < n) {
         if (glob[i] == '{' && HasFlag(flags, GlobFlags::kBraceAlternation)) {
             const std::size_t close = MatchingBrace(glob, i);
-            if (close == std::string_view::npos) return std::nullopt;
+            if (close == std::string_view::npos) return false;
             // Split top-level commas of the brace body, translating each
-            // alternative recursively (nested braces are allowed).
+            // alternative recursively (nested braces are allowed) INTO `out`
+            // -- the old shape translated each alternative to its OWN string
+            // and appended, which is where the doubling hid.
             const std::string_view body = glob.substr(i + 1, close - i - 1);
             out += "(?:";
-            int depth = 0;
+            int brace_depth = 0;
             std::size_t start = 0;
             bool first_alternative = true;
             for (std::size_t j = 0; j <= body.size(); ++j) {
@@ -133,15 +147,15 @@ std::optional<std::string> GlobToRegex(std::string_view glob, GlobFlags flags) {
                         j += 1;  // keep escapes inside one alternative
                         continue;
                     }
-                    if (body[j] == '{') depth += 1;
-                    if (body[j] == '}') depth -= 1;
-                    if (body[j] != ',' || depth > 0) continue;
+                    if (body[j] == '{') brace_depth += 1;
+                    if (body[j] == '}') brace_depth -= 1;
+                    if (body[j] != ',' || brace_depth > 0) continue;
                 }
-                const auto alternative = GlobToRegex(body.substr(start, j - start), flags);
-                if (!alternative) return std::nullopt;
                 if (!first_alternative) out += '|';
                 first_alternative = false;
-                out += *alternative;
+                if (!GlobToRegexImpl(body.substr(start, j - start), flags, depth + 1, out)) {
+                    return false;
+                }
                 start = j + 1;
             }
             out += ')';
@@ -149,12 +163,12 @@ std::optional<std::string> GlobToRegex(std::string_view glob, GlobFlags flags) {
             continue;
         }
         if (glob[i] == '}' && HasFlag(flags, GlobFlags::kBraceAlternation)) {
-            return std::nullopt;  // an unmatched `}` inside brace mode is a
-                                  // typo, not a literal -- fail the pattern
+            return false;  // an unmatched `}` inside brace mode is a
+                           // typo, not a literal -- fail the pattern
         }
         if (glob[i] == '\\') {
             // Backslash escape: take the next character literally.
-            if (i + 1 >= n) return std::nullopt;
+            if (i + 1 >= n) return false;
             EmitEscaped(out, glob[i + 1]);
             i += 2;
             continue;
@@ -169,8 +183,18 @@ std::optional<std::string> GlobToRegex(std::string_view glob, GlobFlags flags) {
             i += 1;
             continue;
         }
-        if (!TranslateBody(glob.substr(seg_start, i - seg_start), out)) return std::nullopt;
+        if (!TranslateBody(glob.substr(seg_start, i - seg_start), out)) return false;
+        if (out.size() > kMaxTranslatedBytes) return false;
     }
+    return out.size() <= kMaxTranslatedBytes;
+}
+
+}  // namespace
+
+std::optional<std::string> GlobToRegex(std::string_view glob, GlobFlags flags) {
+    std::string out;
+    out.reserve(glob.size() * 2);
+    if (!GlobToRegexImpl(glob, flags, 0, out)) return std::nullopt;
     return out;
 }
 

@@ -36,6 +36,7 @@
 #include <condition_variable>
 #include <cstddef>
 #include <deque>
+#include <functional>
 #include <mutex>
 #include <optional>
 #include <utility>
@@ -45,34 +46,56 @@ namespace minimal::rpc {
 template <typename T>
 class EventQueue {
 public:
-    explicit EventQueue(std::size_t max_size = kDefaultMaxSize) : max_size_(max_size) {}
+    // Per-event byte cost. Null (the default) disables byte accounting -- the
+    // tests drive the ordering/concurrency properties on trivial types. The
+    // session's queue passes the protobuf cost: a COUNT-ONLY bound does not
+    // bound RAM when one event can carry megabytes (an 8 KiB output chunk per
+    // ToolOutputDelta at the 65,536-event cap is over half a gigabyte per
+    // stalled client, and the queue exists precisely for the stalled client).
+    using SizeOf = std::function<std::size_t(const T&)>;
 
-    // WORKER-THREAD push. Blocks while the queue is full, which is safe only
-    // because the worker is the thread permitted to block -- never call this
-    // from the gRPC reader. Accepted after Close() only to be discarded: a
-    // producer racing teardown should not have to check first, and silently
-    // dropping is correct once there is provably no one left to deliver to.
+    // max_bytes == 0 means no byte bound. The default 64 MiB is per session:
+    // ~16x a legitimate 1M-token text response in flight, and the count cap
+    // still applies beside it.
+    static constexpr std::size_t kDefaultMaxBytes = 64ull << 20;
+
+    explicit EventQueue(std::size_t max_size = kDefaultMaxSize,
+                        std::size_t max_bytes = 0, SizeOf size_of = {})
+        : max_size_(max_size), max_bytes_(max_bytes), size_of_(std::move(size_of)) {}
+
+    // WORKER-THREAD push. Blocks while the queue is full (by count OR by
+    // bytes), which is safe only because the worker is the thread permitted to
+    // block -- never call this from the gRPC reader. Accepted after Close()
+    // only to be discarded: a producer racing teardown should not have to
+    // check first, and silently dropping is correct once there is provably no
+    // one left to deliver to.
     void Push(T event) {
         {
             std::unique_lock<std::mutex> lock(mutex_);
             // Closed wakes it too, or a worker would park forever on a queue
             // whose consumer has already gone.
-            space_cv_.wait(lock, [this] { return closed_ || events_.size() < max_size_; });
+            space_cv_.wait(lock, [this, &event] {
+                return closed_ || Fits(event);
+            });
             if (closed_) return;
-            events_.push_back(std::move(event));
+            Accept(std::move(event));
         }
         cv_.notify_one();
     }
 
-    // READER-THREAD push. Never blocks; false means the queue is full and the
-    // caller must decide what to do rather than stalling the read loop -- which
-    // would be the deadlock the three-thread topology exists to prevent.
+    // READER-THREAD push. Never blocks; false means the queue refused the
+    // event -- full by count or bytes, or closed -- and the caller must decide
+    // what to do rather than stalling the read loop, which would be the
+    // deadlock the three-thread topology exists to prevent. (It used to return
+    // TRUE on a closed queue as "dropped on purpose": the refusal paths'
+    // drop-logging then never fired after Terminate, and the logging contract
+    // the call sites promise was false on exactly the shutdown path.)
     bool TryPush(T event) {
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            if (closed_) return true;  // dropped on purpose, as above
-            if (events_.size() >= max_size_) return false;
-            events_.push_back(std::move(event));
+            if (closed_) return false;
+            if (!Fits(event)) return false;
+            Accept(std::move(event));
         }
         cv_.notify_one();
         return true;
@@ -89,7 +112,8 @@ public:
         std::unique_lock<std::mutex> lock(mutex_);
         cv_.wait(lock, [this] { return !events_.empty() || closed_; });
         if (events_.empty()) return std::nullopt;
-        T event = std::move(events_.front());
+        T event = std::move(events_.front().event);
+        bytes_total_ -= events_.front().bytes;
         events_.pop_front();
         space_cv_.notify_one();
         return event;
@@ -99,7 +123,8 @@ public:
     std::optional<T> TryPop() {
         std::lock_guard<std::mutex> lock(mutex_);
         if (events_.empty()) return std::nullopt;
-        T event = std::move(events_.front());
+        T event = std::move(events_.front().event);
+        bytes_total_ -= events_.front().bytes;
         events_.pop_front();
         space_cv_.notify_one();
         return event;
@@ -128,6 +153,12 @@ public:
 
     std::size_t max_size() const { return max_size_; }
 
+    // Bytes currently buffered; 0 forever when no size function was provided.
+    std::size_t buffered_bytes() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return bytes_total_;
+    }
+
 private:
     // Generous on purpose: this is a ceiling that catches a runaway producer,
     // not a tuning knob. A normal turn queues a few thousand deltas at most, so
@@ -135,11 +166,39 @@ private:
     // worth bounding.
     static constexpr std::size_t kDefaultMaxSize = 65536;
 
+    // Would accepting `event` leave the queue within both bounds? A single
+    // event LARGER than the byte cap is accepted onto an EMPTY queue -- a
+    // producer that could never fit its one event would block forever, and
+    // delivering one oversized event is strictly better than a deadlock.
+    bool Fits(const T& event) const {
+        if (events_.size() >= max_size_) return false;
+        if (max_bytes_ == 0) return true;
+        const std::size_t bytes = size_of_ ? size_of_(event) : 0;
+        return events_.empty() || bytes_total_ + bytes <= max_bytes_;
+    }
+
+    void Accept(T&& event) {
+        std::size_t bytes = 0;
+        if (size_of_) {
+            bytes = size_of_(event);
+            bytes_total_ += bytes;
+        }
+        events_.push_back(Item{std::move(event), bytes});
+    }
+
+    struct Item {
+        T event;
+        std::size_t bytes = 0;
+    };
+
     mutable std::mutex mutex_;
     std::condition_variable cv_;        // consumer waits here for events
     std::condition_variable space_cv_;  // producers wait here for room
-    std::deque<T> events_;
+    std::deque<Item> events_;
     std::size_t max_size_;
+    std::size_t max_bytes_ = 0;
+    std::size_t bytes_total_ = 0;
+    SizeOf size_of_;
     bool closed_ = false;
 };
 

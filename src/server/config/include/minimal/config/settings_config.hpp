@@ -61,6 +61,12 @@ struct ToolsSettings {
     // the sequential behavior exactly. This is a WIDTH, not a thread-pool size:
     // the per-session pool is built from it, so 1 allocates no extra threads.
     int max_parallel_tool_calls = 4;
+    // THE global ceiling on one tool call's serialized input. Every other
+    // model-authored allocation has a bound; the input itself -- copied into
+    // lifecycle events, permission requests and hook payloads -- was bounded
+    // only by the model's output budget. Over the cap is an error result the
+    // model adapts to, like every other refusal. 0 disables.
+    std::int64_t max_input_bytes = 10 * 1024 * 1024;
 };
 
 struct ToolsViewSettings {

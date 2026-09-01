@@ -75,7 +75,14 @@ class ProviderInstanceCache;  // borrowed via set_provider_instance_cache
 // Session owns the block through a shared_ptr; the queue and pending maps are
 // exactly the members Session used to hold, unchanged in behavior.
 struct SessionChannels {
-    rpc::EventQueue<v1::ServerEvent> queue;
+    // BYTE-BOUNDED as well as count-bounded: a count-only bound does not bound
+    // RAM when one event can carry megabytes -- bash streams 8 KiB output
+    // chunks per ToolOutputDelta, so the 65,536-event cap was ~540 MB per
+    // stalled client, and the queue exists precisely for the stalled client.
+    // The size function is the protobuf cost, computed once per Push.
+    rpc::EventQueue<v1::ServerEvent> queue{
+        65536, rpc::EventQueue<v1::ServerEvent>::kDefaultMaxBytes,
+        [](const v1::ServerEvent& event) { return event.ByteSizeLong(); }};
     rpc::PendingRequests pending;
     // Cross-thread staging for out-of-band messages (non-blocking subagent
     // completions, background task results), drained at turn boundaries. Lives

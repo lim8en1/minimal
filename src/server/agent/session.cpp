@@ -301,7 +301,7 @@ bool Session::SubmitTurn(std::string text) {
         error->set_message("session backlog is full; turn refused");
         error->set_is_retryable(false);
         if (!channels_->queue.TryPush(std::move(event))) {
-            logger_.warn("session {}: turn refused and the queue is full; client will not see it",
+            logger_.warn("session {}: turn refused and the queue refused the error too; client will not see it",
                          params_.session_id);
         }
         return false;
@@ -461,7 +461,7 @@ void Session::EmitCommandResult(v1::ServerEvent event, const QueuedCommand& comm
     // queue means the client is stalled or gone; losing one command answer is
     // the correct degradation there, logged so it is not silent.
     if (!channels_->queue.TryPush(std::move(event))) {
-        logger_.warn("session {}: queue is full; CommandResult for '{}' dropped",
+        logger_.warn("session {}: queue refused the result (full or closed); CommandResult for '{}' dropped",
                      params_.session_id, command.name);
     }
 }

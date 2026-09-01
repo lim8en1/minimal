@@ -533,6 +533,28 @@ counting echo server. Resolve the item-15 span question here.
 
 ### W6 — RAM ceilings: the model-input allocation audit (decision: ceilings + knobs)
 
+**Status: landed.** Full suite, `asan` and `tsan` presets green (1067 tests each; 9
+new). All items landed as specified. Notes the work recorded:
+
+- **6.6's gate check builds the denial itself** rather than round-tripping through
+  `Prepare`: the `PreparedInvocation.denial` channel already exists, so the oversized
+  call skips the hook payload, the permission request and the execution while still
+  emitting lifecycle events (a client panel shows WHAT was refused) and appending one
+  error result in block order. Refused calls run on the serial path — denials return
+  instantly, so the old "denials went to the pool" behavior bought nothing.
+- **6.8's knob lands at first store touch**: `BashSessionStateStore` takes the mode at
+  construction and the tool registration — the first `BashStore()` call — passes the
+  parsed config through. A typo'd mode is a named parse error ("allowlist"/"all" are
+  the two choices; `inherit_env: "alowlist"` silently meaning "allowlist" is the
+  config lie this plugin's parse ladder refuses).
+- **The EventQueue byte bound has an oversized-single-event carve-out**: one event
+  larger than the cap is accepted onto an EMPTY queue — a producer whose single event
+  can never fit would block forever otherwise, and delivering one oversized event is
+  strictly better than a deadlock. It is refused while anything is buffered.
+- The command scanner's descent for computed programs (`echo `id``) shares the
+  iterative stack — calling `Run` recursively there would have put one C++ frame back
+  per substitution-nesting level, the same overflow the rewrite exists to remove.
+
 | # | Fix | Knob (default) |
 |---|---|---|
 | 6.1 | **EventQueue byte bound**: `ByteSizeLong()` computed once at `Push`, running byte total, cap alongside the count cap, same blocking/refusal semantics; `TryPush` returns false on a closed queue (drop-logging fires); lifecycle events carry `input` on **started only** | 64 MiB (constant) |

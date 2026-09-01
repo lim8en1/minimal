@@ -58,8 +58,15 @@ namespace {
 // SessionObserver all operate on this same map -- three callers, one owner,
 // which is what "a plugin owns the commands that touch its own state" buys.
 // Process-lifetime (plugins are never unloaded), matching the registries it feeds.
-minimal::tools_bash::BashSessionStateStore& BashStore() {
-    static minimal::tools_bash::BashSessionStateStore store;
+// `inherit_env` lands on first call: the tool registration is the first
+// BashStore() touch (hook points need no store, and /restart-shell resolves
+// through the service only at command time), so the parsed config is what
+// seeds the process-lifetime store.
+minimal::tools_bash::BashSessionStateStore& BashStore(
+    const std::string* inherit_env = nullptr) {
+    // Direct-initialization: the constructor is explicit.
+    static minimal::tools_bash::BashSessionStateStore store(
+        inherit_env != nullptr ? *inherit_env : std::string("allowlist"));
     return store;
 }
 
@@ -109,8 +116,8 @@ void minimal_plugin_register_tools(
     // core imposes no schema, this plugin owns the shape of its own slice.
     const auto settings = minimal::tools_bash::ParseBashSettings(context.config);
     registry.Register(
-        minimal::tools_bash::MakeBashTool(settings, BashStore(), BackgroundTasks(),
-                                          BeforeCommandPoint()));
+        minimal::tools_bash::MakeBashTool(settings, BashStore(&settings.inherit_env),
+                                          BackgroundTasks(), BeforeCommandPoint()));
 }
 
 // The worked example for plugin-declared hook points (docs/EXTENSIBILITY.md):

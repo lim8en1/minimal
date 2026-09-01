@@ -1142,3 +1142,23 @@ TEST_CASE("an injection on an idle session does NOT wake the worker by default",
           "tu-bg");
     CHECK(std::get<llm::TextBlock>(request.messages[1].content.front()).text == "what happened?");
 }
+
+TEST_CASE("the injection queue is bounded; over the limit is a refusal, not a queue",
+          "[session][background][invariant]") {
+    // The work queue (32) and the outbound event queue are documented bounded;
+    // this third queue silently was not -- producers are non-blocking subagent
+    // completions and background task results (up to 1 MB each) landing on an
+    // IDLE parent with wake_on_injection off, which flushes only at the next
+    // turn. Over the limit is a refusal the caller logs, the same contract
+    // Close has.
+    agent::InjectionQueue queue;
+    for (std::size_t i = 0; i < agent::InjectionQueue::kMaxPending; ++i) {
+        REQUIRE(queue.Push(llm::Message{llm::Role::User, {llm::TextBlock{"m"}}}));
+    }
+    CHECK_FALSE(queue.Push(llm::Message{llm::Role::User, {llm::TextBlock{"overflow"}}}));
+    // Drain frees slots.
+    std::size_t drained = 0;
+    queue.DrainAll([&](llm::Message&&) { ++drained; });
+    CHECK(drained == agent::InjectionQueue::kMaxPending);
+    CHECK(queue.Push(llm::Message{llm::Role::User, {llm::TextBlock{"after drain"}}}));
+}

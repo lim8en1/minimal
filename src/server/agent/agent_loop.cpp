@@ -715,10 +715,35 @@ void AgentLoop::RunTurnLoop(TurnResult& result, bool flush_first) {
             // the order executions happen to finish in.
             result.tool_names_invoked.push_back(use->name);
 
-            call.prepared = executor_.Prepare(use->id, use->name, use->input, call.ctx);
+            // THE GLOBAL TOOL-INPUT CEILING, checked before anything else
+            // consumes the input: no hook payload, no permission request, no
+            // execution -- one error result the model adapts to, the same
+            // shape as every other refusal. (The lifecycle events still fire
+            // with the input, so a client panel shows WHAT was refused.)
+            tools::PreparedInvocation prepared;
+            prepared.tool_use_id = use->id;
+            prepared.tool_name = use->name;
+            bool denied_for_input = false;
+            if (config_.max_tool_input_bytes > 0) {
+                const std::size_t input_bytes = use->input.dump().size();
+                if (input_bytes > static_cast<std::size_t>(config_.max_tool_input_bytes)) {
+                    prepared.denial = llm::ToolResultBlock{
+                        use->id,
+                        {llm::TextBlock{"tool input exceeds the configured max_input_bytes (" +
+                                        std::to_string(config_.max_tool_input_bytes) +
+                                        " bytes); send a smaller input"}},
+                        true};
+                    denied_for_input = true;
+                }
+            }
+            if (!denied_for_input) {
+                prepared = executor_.Prepare(use->id, use->name, use->input, call.ctx);
+            }
             // Unknown tools arrive here with no resolved tool; they execute as
             // their denial result and have no exclusivity to protect.
-            call.to_pool = !call.prepared.tool || call.prepared.tool->parallel_safe();
+            call.to_pool = !denied_for_input && prepared.tool &&
+                           prepared.tool->parallel_safe();
+            call.prepared = std::move(prepared);
             calls.push_back(std::move(call));
         }
 
@@ -781,8 +806,13 @@ void AgentLoop::RunTurnLoop(TurnResult& result, bool flush_first) {
             // Emitted even when Execute() reports an error, and before the
             // result is appended: a client that showed a tool as started must
             // always see it finish, or its running-tools panel accumulates
-            // entries that never clear.
+            // entries that never clear. The input rode the STARTED event; the
+            // finish event carries the outcome, not another full copy of the
+            // input -- for a Write with a 1 MB payload that was a second
+            // megabyte into the (now byte-bounded) outbound queue per call,
+            // for data every consumer already had.
             lifecycle.started = false;
+            lifecycle.input = {};
             lifecycle.is_error = tool_result.is_error;
             lifecycle.duration = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - tool_started);

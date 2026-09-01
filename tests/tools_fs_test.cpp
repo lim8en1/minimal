@@ -387,3 +387,37 @@ TEST_CASE("a window past the end of a file is empty, not an overflow",
     CHECK(window.lines.size() == 3);
     CHECK_FALSE(window.truncated);
 }
+
+TEST_CASE("read windows are clamped to the configured ceiling; the clamp is disclosed",
+          "[tools_fs][invariant]") {
+    // "Memory proportional to `limit`, not file size" was hollow when `limit`
+    // was model-controlled: `{"limit": 0}` meant the WHOLE FILE and a 10 GB
+    // log was an OOM on the session worker. Everything the model sends is
+    // clamped to `read.max_lines`, `limit: 0` included -- and the clamp is
+    // disclosed in the footer, because a clipped window presented as the
+    // whole file is the false-negative failure shape.
+    tools_fs::FsSettings settings;  // default ceiling: 2000
+    settings.read_max_lines = 5;
+    TempDir dir;
+    std::ofstream(dir.path() / "big.txt") << "one\ntwo\nthree\nfour\nfive\nsix\nseven\n";
+
+    auto tool = tools_fs::MakeReadTool(settings);
+    tools::ToolContext ctx{common::DefaultLogger()};
+    ctx.session_id = "s1";
+    ctx.project_root = dir.path();
+
+    // limit: 0 -- the old "whole file" -- is the ceiling now.
+    auto result = tool->execute({{"path", "big.txt"}, {"limit", 0}}, ctx);
+    CHECK_FALSE(result.is_error);
+    CHECK(result.content_text.find("[The requested window was clipped") != std::string::npos);
+    CHECK(result.content_text.find("six") == std::string::npos);  // clipped at 5 lines
+
+    // A model-authored huge limit is clamped the same way.
+    result = tool->execute({{"path", "big.txt"}, {"limit", 2000000000}}, ctx);
+    CHECK_FALSE(result.is_error);
+    CHECK(result.content_text.find("[The requested window was clipped") != std::string::npos);
+
+    // Out-of-range input is the model's mistake to see, not a silent wrap.
+    result = tool->execute({{"path", "big.txt"}, {"offset", 3000000000}}, ctx);
+    CHECK(result.is_error);
+}

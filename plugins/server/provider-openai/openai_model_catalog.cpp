@@ -72,7 +72,10 @@ std::vector<llm::DiscoveredModel> ParseModelList(const std::string& body) {
         model.context_window_tokens = ContextWindow(entry);
         // Everything the backend said about the model minus the id: pricing,
         // quantization, ... -- opaque to core, free for a future consumer.
-        json metadata = entry;
+        // MOVED, not copied: OpenRouter entries carry multi-KB descriptions
+        // and pricing, and a 1000-model list under the 8 MiB body cap made
+        // this a second full DOM of the catalog per discovery fetch.
+        json metadata = std::move(entry);
         metadata.erase("id");
         model.metadata = std::move(metadata);
         out.push_back(std::move(model));
