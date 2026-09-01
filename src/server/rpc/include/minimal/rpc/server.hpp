@@ -11,6 +11,7 @@
 // the half it will depend on -- a client that spawns a server must be able to
 // rely on it going away again.
 
+#include <chrono>
 #include <condition_variable>
 #include <filesystem>
 #include <memory>
@@ -31,8 +32,12 @@ std::string SocketTarget(const std::filesystem::path& socket_path);
 class Server {
 public:
     // `socket_path` is a filesystem path, not a gRPC target string; the "unix://"
-    // prefix is this class's business.
-    Server(SessionServiceImpl& service, std::filesystem::path socket_path);
+    // prefix is this class's business. `shutdown_grace` is how long in-flight
+    // RPCs get to finish once shutdown is requested before they are cancelled
+    // (30 s in production; a test passes something short so a half-open stream
+    // cannot wedge process exit for half a minute).
+    explicit Server(SessionServiceImpl& service, std::filesystem::path socket_path,
+                    std::chrono::milliseconds shutdown_grace = std::chrono::seconds(30));
     ~Server();
 
     Server(const Server&) = delete;
@@ -63,9 +68,11 @@ public:
 private:
     std::filesystem::path socket_path_;
     std::unique_ptr<grpc::Server> server_;
+    std::chrono::milliseconds shutdown_grace_;
     std::mutex mutex_;
     std::condition_variable shutdown_cv_;
     bool shutdown_requested_ = false;
+    bool server_stopped_ = false;
 };
 
 }  // namespace minimal::rpc

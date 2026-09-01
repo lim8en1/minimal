@@ -737,6 +737,48 @@ TEST_CASE("a failed CreateSession leaves no session row behind",
     CHECK(response.sessions_size() == 0);
 }
 
+TEST_CASE("a half-open stream cannot block shutdown past the grace deadline",
+          "[session_service][invariant]") {
+    // THE DEADLINE on shutdown: an unbounded graceful shutdown let a half-open
+    // stream -- a client whose process died without closing its socket --
+    // block Server::Wait() and therefore process exit indefinitely. In-flight
+    // RPCs get the grace window; past it they are cancelled. The fixture's
+    // server uses the production 30 s grace, so this test swaps in its own
+    // with a deadline short enough to assert on.
+    ServiceFixture fixture;
+    fixture.Script(testing::TextResponse("hi"));
+    fixture.Start();
+    const std::string session_id = fixture.CreateSession();
+
+    fixture.server->Shutdown();
+    const auto grace_socket = fixture.dir / "grace.sock";
+    auto server =
+        std::make_unique<rpc::Server>(*fixture.service, grace_socket, std::chrono::seconds{1});
+    REQUIRE(server->listening());
+
+    auto channel = grpc::CreateChannel(rpc::SocketTarget(grace_socket),
+                                       grpc::InsecureChannelCredentials());
+    auto stub = v1::SessionService::NewStub(channel);
+    grpc::ClientContext context;
+    auto stream = stub->OpenSession(&context);
+    v1::ClientEvent naming;
+    naming.set_session_id(session_id);
+    naming.mutable_attach();
+    REQUIRE(stream->Write(naming));  // attached; the handler parks in Read() forever
+
+    auto waited = testing::RunInBackground([&server] {
+        server->Wait();
+        return true;
+    });
+    std::this_thread::sleep_for(100ms);
+    CHECK_FALSE(waited.Ready());  // still serving
+
+    server->RequestShutdown();
+    // Graceful alone would wait for the open stream; the deadline cancels it.
+    REQUIRE(waited.WaitFor(10s));
+    (void)DrainAndFinish(stream);
+}
+
 TEST_CASE("a command invocation is answered while the subsystem is missing",
           "[session_service]") {
     ServiceFixture fixture;

@@ -11,6 +11,7 @@
 #include <grpcpp/server_builder.h>
 
 #include "minimal/common/config_paths.hpp"
+#include "minimal/common/logger.hpp"
 
 namespace minimal::rpc {
 namespace {
@@ -47,8 +48,9 @@ std::string SocketTarget(const std::filesystem::path& socket_path) {
     return "unix://" + socket_path.string();
 }
 
-Server::Server(SessionServiceImpl& service, std::filesystem::path socket_path)
-    : socket_path_(std::move(socket_path)) {
+Server::Server(SessionServiceImpl& service, std::filesystem::path socket_path,
+               std::chrono::milliseconds shutdown_grace)
+    : socket_path_(std::move(socket_path)), shutdown_grace_(shutdown_grace) {
     std::error_code ec;
     std::filesystem::create_directories(socket_path_.parent_path(), ec);
 
@@ -77,17 +79,47 @@ Server::~Server() {
 void Server::Wait() {
     if (server_ == nullptr) return;
 
+    // How long in-flight RPCs get to finish once shutdown is requested, before
+    // they are cancelled. grpc::Server::Shutdown(deadline) does exactly that:
+    // graceful until the deadline, forced cancellation at it.
+    const auto grace = shutdown_grace_;
+
     // The blocking Shutdown() runs here, on a thread that is not serving an RPC,
     // so a handler can ask for shutdown without waiting on its own completion.
-    std::thread shutdown_watcher([this] {
+    std::thread shutdown_watcher([this, grace] {
         std::unique_lock<std::mutex> lock(mutex_);
         shutdown_cv_.wait(lock, [this] { return shutdown_requested_; });
+        // THE DEADLINE. An unbounded graceful shutdown let a half-open stream --
+        // a client whose process died without closing its socket -- block
+        // Wait() and therefore process exit indefinitely: the stream errors
+        // only when something is left to error it. In-flight work gets the
+        // grace window; past it, the RPCs (and their sessions) are cancelled
+        // and the process exits.
+        const auto deadline = std::chrono::system_clock::now() + grace;
+        // Released while Shutdown blocks, for the same reason the blocking
+        // work lives on this thread at all: RequestShutdown() takes this
+        // mutex, and a concurrent caller of it must not wait out the drain.
         lock.unlock();
-        server_->Shutdown();
+        server_->Shutdown(deadline);
+        lock.lock();
+        // This wait ends at roughly the same moment grpc's deadline cancel
+        // fires, so the log lands when the hard shutdown engages -- skipped
+        // entirely when everything drained inside the grace.
+        if (shutdown_cv_.wait_for(lock, grace, [this] { return server_stopped_; })) {
+            return;
+        }
+        common::DefaultLogger().warn(
+            "shutdown grace ({} ms) expired with RPCs still in flight; cancelling them",
+            grace.count());
     });
 
     server_->Wait();
     RequestShutdown();  // in case Wait() returned for some other reason
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        server_stopped_ = true;
+    }
+    shutdown_cv_.notify_all();
     shutdown_watcher.join();
 }
 
