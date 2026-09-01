@@ -728,9 +728,22 @@ system prompt alone; a half-open stream cannot block shutdown past the grace; E2
 
 ### W9 — MCP client
 
-**Status: landed.** Full suite green (1214 test cases; 8 new). All six items landed as
-specified, with three records:
+**Status: landed.** Full suite green (1214 test cases; 8 new), `asan` preset green
+(1219 test cases, zero findings), `tsan` preset back down to only the pre-existing
+SQLite-parser flake below (never in first-party code). All six items landed as
+specified, with four records:
 
+- **The `tsan` preset itself caught a fifth vendored cpp-mcp bug**, on the item 1
+  invariant test: `mcp::request::generate_id()`'s `next_id` counter (`mcp_message.h`)
+  is a function-local static shared by every `mcp::stdio_client` in the process, not
+  scoped to one connection — a restart's old (still-live, wedged) connection and its
+  replacement building requests concurrently raced on the plain, non-atomic `int`
+  post-increment. Fixed with a new idempotent vendored patch
+  (`patches/cpp-mcp-generate-id-race.patch`, applied by `cmake/ApplyCppMcpPatches.cmake`
+  alongside the four pre-existing cpp-mcp patches) making the counter atomic. This bug
+  predates W9 and is not specific to the graveyard design — any two concurrently-live
+  MCP connections in one process (a multi-server config, not just a restart) could hit
+  it; the graveyard fix just made the window common enough for `tsan` to find it.
 - **Item 1's graveyard is a dedicated reaper thread**, not a drain-on-next-`StartHandle`
   design: `StartHandle` moves the old connection out under `handle.mu` (a pointer move,
   not a destructor call) into a `graveyard_mu_`-guarded vector, and a reaper thread
