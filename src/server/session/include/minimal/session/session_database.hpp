@@ -120,9 +120,15 @@ struct OpenOptions {
 // SQLite would otherwise raise. WAL plus busy_timeout still protect
 // out-of-process readers (the startup sanity check, any future CLI).
 //
-// Each AppendMessage is one transaction: the insert, the default-name set, and
-// the updated_at touch commit together or not at all. A crash or a failed write
-// therefore leaves an exact prefix of the transcript -- never a torn row.
+// Expensive pure computation over caller data runs OUTSIDE the lock; only the
+// transaction and the timestamp allocation serialize. The JSON encode of an
+// append (and of a compaction summary) happens before the lock is taken, and
+// the JSON decode of a read happens after it is released -- holding mu_ through
+// a multi-hundred-KB tool result's encode stalled every other session for the
+// whole conversion. Each AppendMessage is one transaction: the insert, the
+// default-name set, and the updated_at touch commit together or not at all. A
+// crash or a failed write therefore leaves an exact prefix of the transcript --
+// never a torn row.
 class SessionDatabase {
 public:
     static constexpr int kSchemaVersion = 6;

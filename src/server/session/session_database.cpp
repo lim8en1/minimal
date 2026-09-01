@@ -422,8 +422,14 @@ SessionSummary SessionDatabase::CreateSession(std::string name,
 
 std::int64_t SessionDatabase::AppendMessage(const std::string& session_id,
                                             const llm::Message& message, int token_count) {
-    std::lock_guard lock(mu_);
-    const std::int64_t now = NextTimestamp();
+    // Encode OUTSIDE the mutex. mu_ is the one lock every session's appends and
+    // reads serialize on, and the JSON encode -- the DOM plus the dump -- is the
+    // expensive half of an append. Holding the lock through it stalled every
+    // other session behind one session's tool result for the whole encode.
+    // The transaction itself (and NextTimestamp, which mutates last_ts_) still
+    // runs under the lock; only pure computation over the caller's message is
+    // hoisted.
+    //
     // REPLACE, not the default strict handler. dump() throws type_error.316 on
     // invalid UTF-8, and nothing between a child process's raw stdout and this
     // line validates encoding -- one `cat` of a binary file, or a tool printing
@@ -450,6 +456,9 @@ std::int64_t SessionDatabase::AppendMessage(const std::string& session_id,
             }
         }
     }
+
+    std::lock_guard lock(mu_);
+    const std::int64_t now = NextTimestamp();
 
     std::int64_t assigned_seq = 0;
     ExecChecked(db_, "BEGIN IMMEDIATE;", "failed to begin append");
@@ -710,7 +719,6 @@ MessagePage SessionDatabase::GetMessagesPage(const std::string& session_id,
     if (limit <= 0) {
         throw std::runtime_error("GetMessagesPage: limit must be > 0");
     }
-    std::lock_guard lock(mu_);
     // Keyset pagination: the predicate is an index seek, so a page of a 1M-token
     // history costs the same as a page of a short one. Fetch one probe row past
     // the page to compute has_more without a second COUNT query.
@@ -723,44 +731,72 @@ MessagePage SessionDatabase::GetMessagesPage(const std::string& session_id,
     // total. COALESCE folds the "no cursor" case into the same comparison, the
     // planner constrains on seq, and any real cursor is an exact seek. The
     // sentinel cannot collide with a row: seq values here are row indices.
-    CachedStmt query(db_, prepared_, kMessagesPageSql.data(), "failed to page messages");
-    sqlite3_bind_text(query.stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
-    if (before_seq) {
-        sqlite3_bind_int64(query.stmt, 2, *before_seq);
-    } else {
-        sqlite3_bind_null(query.stmt, 2);
-    }
-    // int64, not `limit + 1` as int: a limit at INT_MAX would overflow the
-    // increment and bind a negative LIMIT, which SQLite reads as "no limit" --
-    // a full-transcript materialization instead of a page.
-    sqlite3_bind_int64(query.stmt, 3, static_cast<std::int64_t>(limit) + 1);
-
-    MessagePage page;
-    int rc = SQLITE_OK;
-    while ((rc = sqlite3_step(query.stmt)) == SQLITE_ROW) {
-        if (static_cast<int>(page.messages.size()) == limit) {
-            page.has_more = true;
-            // Deliberately leaves rc == SQLITE_ROW: this loop ends early ON
-            // PURPOSE when the probe row appears, which is not an error and must
-            // not be checked as one.
-            return page;
+    struct RawRow {
+        std::int64_t seq;
+        std::string json;
+        int token_count;
+        std::int64_t created_at;
+    };
+    std::vector<RawRow> rows;
+    bool has_more = false;
+    {
+        std::lock_guard lock(mu_);
+        CachedStmt query(db_, prepared_, kMessagesPageSql.data(), "failed to page messages");
+        sqlite3_bind_text(query.stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
+        if (before_seq) {
+            sqlite3_bind_int64(query.stmt, 2, *before_seq);
+        } else {
+            sqlite3_bind_null(query.stmt, 2);
         }
+        // int64, not `limit + 1` as int: a limit at INT_MAX would overflow the
+        // increment and bind a negative LIMIT, which SQLite reads as "no limit" --
+        // a full-transcript materialization instead of a page.
+        sqlite3_bind_int64(query.stmt, 3, static_cast<std::int64_t>(limit) + 1);
+
+        // Collect raw rows under the lock; decode after. This is the hottest
+        // read path (every scrollback page, every HistoryWindow read), and the
+        // JSON parse under mu_ stalled every other session's appends and reads
+        // for the whole page -- the LoadMessages fix, swept here rather than
+        // rediscovered per call site.
+        int rc = SQLITE_OK;
+        while ((rc = sqlite3_step(query.stmt)) == SQLITE_ROW) {
+            if (static_cast<int>(rows.size()) == limit) {
+                has_more = true;
+                // Deliberately leaves rc == SQLITE_ROW: this loop ends early ON
+                // PURPOSE when the probe row appears, which is not an error and
+                // must not be checked as one.
+                break;
+            }
+            RawRow row;
+            row.seq = sqlite3_column_int64(query.stmt, 0);
+            row.json = reinterpret_cast<const char*>(sqlite3_column_text(query.stmt, 1));
+            row.token_count = sqlite3_column_int(query.stmt, 2);
+            row.created_at = sqlite3_column_int64(query.stmt, 3);
+            rows.push_back(std::move(row));
+        }
+        // Reached only when the scan ran out of rows, so anything but DONE is a
+        // real failure. Returning short here reported has_more = false, which
+        // renders a truncated page as the top of the transcript.
+        if (!has_more) {
+            CheckRowLoopEnd(db_, rc, "failed to read message page");
+        }
+    }
+
+    // Strict decode OUTSIDE the lock: a row that cannot be parsed is surfaced
+    // here, at read time, rather than smuggled to the client as garbage. The
+    // decoded message is trusted wholesale; the role column exists for
+    // SQL-level filtering, not as a second source of truth.
+    MessagePage page;
+    page.has_more = has_more;
+    page.messages.reserve(rows.size());
+    for (auto& row : rows) {
         StoredMessage stored;
-        stored.seq = sqlite3_column_int64(query.stmt, 0);
-        const char* json_text = reinterpret_cast<const char*>(sqlite3_column_text(query.stmt, 1));
-        // Strict decode: a row that cannot be parsed is surfaced here, at read
-        // time, rather than smuggled to the client as garbage. The decoded
-        // message is trusted wholesale; the role column exists for SQL-level
-        // filtering, not as a second source of truth.
-        stored.message = JsonToMessage(nlohmann::json::parse(json_text));
-        stored.token_count = sqlite3_column_int(query.stmt, 2);
-        stored.created_at_unix_ms = sqlite3_column_int64(query.stmt, 3);
+        stored.seq = row.seq;
+        stored.message = JsonToMessage(nlohmann::json::parse(std::move(row.json)));
+        stored.token_count = row.token_count;
+        stored.created_at_unix_ms = row.created_at;
         page.messages.push_back(std::move(stored));
     }
-    // Reached only when the scan ran out of rows, so anything but DONE is a real
-    // failure. Returning short here reported has_more = false, which renders a
-    // truncated page as the top of the transcript.
-    CheckRowLoopEnd(db_, rc, "failed to read message page");
     return page;
 }
 
@@ -807,7 +843,7 @@ std::vector<StoredMessage> SessionDatabase::LoadMessages(const std::string& sess
     for (auto& row : rows) {
         StoredMessage stored;
         stored.seq = row.seq;
-        stored.message = JsonToMessage(nlohmann::json::parse(row.json));
+        stored.message = JsonToMessage(nlohmann::json::parse(std::move(row.json)));
         stored.token_count = row.token_count;
         stored.created_at_unix_ms = row.created_at;
         out.push_back(std::move(stored));
@@ -843,11 +879,13 @@ std::int64_t SessionDatabase::LastMessageSeq(const std::string& session_id) cons
 void SessionDatabase::SaveCompactionCheckpoint(const std::string& session_id,
                                                std::int64_t boundary_seq,
                                                const llm::Message& summary) {
-    std::lock_guard lock(mu_);
-    // REPLACE, exactly like the append path's error handler: the summary is
-    // model output and dump() throws type_error.316 on invalid UTF-8.
+    // Encode outside the mutex, same ruling as AppendMessage: the summary is
+    // model output and dump() throws type_error.316 on invalid UTF-8, so the
+    // replace handler is required -- but the DOM plus dump need not run while
+    // every other session waits on mu_.
     const std::string content_json =
         MessageToJson(summary).dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
+    std::lock_guard lock(mu_);
 
     // Upsert, not INSERT: each successful compaction REPLACES the previous
     // checkpoint -- its covered range is a strict superset (the new summary
@@ -948,7 +986,7 @@ std::vector<StoredMessage> SessionDatabase::LoadMessagesFrom(const std::string& 
     for (auto& row : rows) {
         StoredMessage stored;
         stored.seq = row.seq;
-        stored.message = JsonToMessage(nlohmann::json::parse(row.json));
+        stored.message = JsonToMessage(nlohmann::json::parse(std::move(row.json)));
         stored.token_count = row.token_count;
         stored.created_at_unix_ms = row.created_at;
         out.push_back(std::move(stored));
