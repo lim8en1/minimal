@@ -1136,7 +1136,9 @@ With parallel tool dispatch (width 4 by default) the multi-row case is the commo
 
 ### Session picker
 
-Since attached sessions are all visible as tabs, the picker is primarily a browser of **past (terminated)** sessions: filtered to the current `project_root` by default (`include_all_dirs` to widen), excluding `parent_session_id IS NOT NULL`, sorted by last activity, showing name / message count / last-activity. Deletion happens here, confirmed. Opened at startup when prior sessions exist for the cwd — otherwise a session is created directly — and via `/sessions`.
+Since attached sessions are all visible as tabs, the picker is primarily a browser of **past (terminated)** sessions: filtered to the current `project_root` by default (`ctrl+a` to widen to `include_all_dirs`), excluding `parent_session_id IS NOT NULL`, showing name / message count / last-activity. A type-to-filter box matches name, session id, or `project_root`; `tab` toggles the sort between most-recently-updated and name; arrowing past the last loaded row (unfiltered) pages in more via the wire's keyset cursor (`before_updated_at`/`before_id`). Deletion is `ctrl+d`, confirmed — plain characters type into the filter instead. The first row is always a synthetic "+ new session" entry, `Enter`'s way of reaching `OpenTab` from inside the modal.
+
+Startup always creates a session directly, whether or not prior sessions exist for the cwd — the picker is opened on demand (`ctrl+o` or `/sessions`), not automatically: the common case is "start working," and paying a modal (plus a round trip just to check whether one is needed) on every cold start regardless was pure friction.
 
 ### Message-kind rendering
 

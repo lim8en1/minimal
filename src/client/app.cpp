@@ -13,6 +13,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iterator>
 #include <mutex>
 #include <string>
@@ -868,7 +869,19 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     bool show_delete_confirm = false;
     bool show_plugin_modal = false;
     std::string staged_delete_id;   // the picker delete confirmation's subject
-    std::vector<minimal::v1::SessionSummary> picker_sessions;
+
+    // T8: the picker's raw accumulated list, in server delivery order
+    // (updated_at DESC, id ASC per session_service.proto). Filter/sort are
+    // pure DISPLAY transforms applied fresh by MakeSessionPicker
+    // (picker_model.hpp) -- this stays in fetch order so "load more"'s
+    // cursor is always derived from the last element the SERVER actually
+    // sent, never from whatever the current sort happens to show last.
+    struct PickerData {
+        std::vector<minimal::v1::SessionSummary> sessions;
+        bool include_all_dirs = false;
+        bool has_more = false;   // the last fetch returned a full page
+    };
+    PickerData picker_data;
     PendingClose pending_close;
 
     // Per-tab UI caches, keyed by session id.
@@ -1156,20 +1169,63 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         return show_picker && *picker_child ? (*picker_child)->OnEvent(event) : false;
     });
 
-    // The picker-open flow, shared by the keybinding and by the /sessions
-    // view_hint (a View-displaying CommandResult opens the view named by its
-    // hint; the core mapping for "sessions" is this modal).
-    auto open_picker = [&] {
-        show_picker = true;
-        picker_sessions.clear();
-        const auto result =
-            client->ListSessions(std::filesystem::current_path().string(), false, 200);
-        if (result.status.ok()) {
-            picker_sessions.assign(result.response.sessions().begin(),
-                                   result.response.sessions().end());
+    // T8: typing on an empty app already starts a session directly
+    // (submit_chat, above); the picker's "+ new session" row is the same
+    // action reached from inside the modal, with no text to send yet.
+    auto open_new_session = [&] {
+        show_picker = false;
+        app->RunOnRpcQueue([app] {
+            minimal::client::SessionClient::CreateOptions opts;
+            opts.project_root = std::filesystem::current_path().string();
+            app->OpenTab(opts);
+        });
+    };
+
+    // One page of the picker's list, kept synchronous like DeleteSession
+    // below: unlike T2's targets (a per-frame Renderer call, a per-keystroke
+    // debounce), this runs once per explicit user action (open, toggle
+    // all-dirs, load more) -- the same bounded-pause trade the rest of the
+    // one-off calls in this file already make, and mutating picker_data /
+    // *picker_child from a worker thread would race the loop thread that
+    // owns both.
+    //
+    // Requests one row beyond the page size to detect a further page: the
+    // wire has no dedicated has_more field on ListSessionsResponse.
+    static constexpr int32_t kPickerPageSize = 100;
+    auto fetch_picker_page = [&](bool reset) {
+        if (reset) {
+            picker_data.sessions.clear();
+            picker_data.has_more = false;
         }
+        minimal::client::SessionClient::ListSessionsOptions opts;
+        opts.project_root = std::filesystem::current_path().string();
+        opts.include_all_dirs = picker_data.include_all_dirs;
+        opts.limit = kPickerPageSize + 1;
+        if (!reset && !picker_data.sessions.empty()) {
+            const auto& last = picker_data.sessions.back();
+            opts.before_updated_at = last.updated_at_unix_ms();
+            opts.before_id = last.session_id();
+        }
+        const auto result = client->ListSessions(opts);
+        if (!result.status.ok()) return;
+        const auto& page = result.response.sessions();
+        const int64_t fetched = page.size();
+        picker_data.has_more = fetched > kPickerPageSize;
+        const int64_t take = picker_data.has_more ? kPickerPageSize : fetched;
+        picker_data.sessions.insert(picker_data.sessions.end(), page.begin(),
+                                    page.begin() + take);
+    };
+
+    // Rebuilds the picker component from picker_data's CURRENT contents --
+    // every mutating action (resume/delete/new leave the modal; toggling
+    // all-dirs or loading more re-fetches and rebuilds in place, same as
+    // the rest of this file's "modal over data it does not own" pattern).
+    // std::function, not auto: the body below calls itself (on_toggle_all_dirs
+    // / on_load_more), which an auto-deduced lambda type cannot reference
+    // inside its own initializer.
+    std::function<void()> rebuild_picker_component = [&] {
         *picker_child = minimal::client::MakeSessionPicker(
-            picker_sessions, theme,
+            picker_data.sessions, picker_data.include_all_dirs, picker_data.has_more, theme,
             {.on_resume =
                  [&](const std::string& session_id) {
                      // A PAST session resumes into its own root group; it is
@@ -1185,7 +1241,32 @@ int RunTui(const minimal::client::ParsedArgs& args) {
                      show_delete_confirm = true;
                      show_picker = false;
                  },
-             .on_close = [&] { show_picker = false; }});
+             .on_new = open_new_session,
+             .on_close = [&] { show_picker = false; },
+             .on_toggle_all_dirs =
+                 [&] {
+                     picker_data.include_all_dirs = !picker_data.include_all_dirs;
+                     fetch_picker_page(/*reset=*/true);
+                     rebuild_picker_component();
+                 },
+             .on_load_more =
+                 [&] {
+                     fetch_picker_page(/*reset=*/false);
+                     rebuild_picker_component();
+                 }});
+    };
+
+    // The picker-open flow, shared by the keybinding and by the /sessions
+    // view_hint (a View-displaying CommandResult opens the view named by its
+    // hint; the core mapping for "sessions" is this modal). T8: always a
+    // fresh first page in the project's own directory -- the "start in the
+    // last-used all-dirs state" refinement is not worth the surprise of a
+    // picker that sometimes silently shows other projects' sessions.
+    auto open_picker = [&] {
+        show_picker = true;
+        picker_data.include_all_dirs = false;
+        fetch_picker_page(/*reset=*/true);
+        rebuild_picker_component();
     };
 
     // --- plugin views (panel region + modal layer) -----------------------------
@@ -1267,27 +1348,20 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         });
 
     // --- first run --------------------------------------------------------------
-    // ARCHITECTURE.md "Session picker": the picker opens at startup when prior
-    // sessions exist for the cwd; OTHERWISE A SESSION IS CREATED DIRECTLY.
-    // Neither half was wired: a cold start with no history sat on a
-    // placeholder whose "typing starts a session" promise was dead (OpenTab
-    // had no caller). With no history there is nothing to pick, so the client
-    // makes the session itself -- one blocking create RPC on the pre-loop
-    // thread, the same trade RefreshScrollback documents.
+    // T8: startup ALWAYS creates a session directly, whether or not prior
+    // sessions exist for the cwd -- the common case is "start working", and
+    // the old rule (open the picker whenever any prior session exists)
+    // meant that case always paid a modal first, plus TWO ListSessions round
+    // trips (a limit=1 probe here, then the picker's own limit=200 fetch).
+    // ctrl+o (or the /sessions command) opens the picker on demand, now with
+    // its own "+ new session" row for the moment this WAS covering: reaching
+    // history from a session already open.
     {
-        const auto prior = client->ListSessions(std::filesystem::current_path().string(),
-                                                /*include_all_dirs=*/false, 1);
-        if (prior.status.ok() && prior.response.sessions_size() > 0) {
-            open_picker();
-        } else {
-            minimal::client::SessionClient::CreateOptions opts;
-            opts.project_root = std::filesystem::current_path().string();
-            if (app->OpenTab(opts).empty()) {
-                std::fprintf(stderr, "minimal: warning: could not create a session (%s); "
-                                     "ctrl+o opens the session picker\n",
-                             prior.status.ok() ? "server refused"
-                                               : prior.status.error_message().c_str());
-            }
+        minimal::client::SessionClient::CreateOptions opts;
+        opts.project_root = std::filesystem::current_path().string();
+        if (app->OpenTab(opts).empty()) {
+            std::fprintf(stderr, "minimal: warning: could not create a session; "
+                                 "ctrl+o opens the session picker\n");
         }
     }
 

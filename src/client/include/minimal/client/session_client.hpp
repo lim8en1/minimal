@@ -207,12 +207,23 @@ public:
                              v1::GetMessagesResponse* response);
 
     // The session picker's list. project_root empty requires include_all_dirs.
+    struct ListSessionsOptions {
+        std::string project_root;
+        bool include_all_dirs = false;
+        int32_t limit = 100;
+        // Keyset cursor (exclusive upper bound on updated_at, tie-broken by
+        // id), mirroring ListSessionsRequest's before_updated_at/before_id --
+        // both empty/nullopt means "first page". The picker's "load more"
+        // (T8) is the first caller; before that, this was on the wire and
+        // reachable from no client call site at all.
+        std::optional<int64_t> before_updated_at;
+        std::optional<std::string> before_id;
+    };
     struct ListSessionsResult {
         v1::ListSessionsResponse response;
         grpc::Status status;
     };
-    ListSessionsResult ListSessions(const std::string& project_root, bool include_all_dirs,
-                                    int32_t limit);
+    ListSessionsResult ListSessions(const ListSessionsOptions& options);
 
     // @-mention suggestions, resolved by the server's MentionResolver so the
     // strategy is pluggable server-side and every frontend inherits it. Paths

@@ -86,15 +86,15 @@ grpc::Status SessionClient::GetMessages(grpc::ClientContext* context,
     return stub_->GetMessages(context, request, response);
 }
 
-SessionClient::ListSessionsResult SessionClient::ListSessions(const std::string& project_root,
-                                                              bool include_all_dirs,
-                                                              int32_t limit) {
+SessionClient::ListSessionsResult SessionClient::ListSessions(const ListSessionsOptions& options) {
     grpc::ClientContext context;
     context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(2));
     v1::ListSessionsRequest request;
-    request.set_project_root(project_root);
-    request.set_include_all_dirs(include_all_dirs);
-    request.set_limit(limit);
+    request.set_project_root(options.project_root);
+    request.set_include_all_dirs(options.include_all_dirs);
+    request.set_limit(options.limit);
+    if (options.before_updated_at.has_value()) request.set_before_updated_at(*options.before_updated_at);
+    if (options.before_id.has_value()) request.set_before_id(*options.before_id);
 
     ListSessionsResult result;
     result.status = stub_->ListSessions(&context, request, &result.response);

@@ -92,36 +92,79 @@ SessionState::Snapshot SnapshotWithText(const std::string& session_id, uint64_t 
 // Session picker (R1b-2)
 // ---------------------------------------------------------------------------
 
+namespace {
+
+SessionPickerCallbacks MakePickerCallbacks(std::vector<std::string>& resumed,
+                                           std::vector<std::string>& deleted, int& closes,
+                                           int& new_sessions, int& all_dirs_toggles,
+                                           int& load_mores) {
+    SessionPickerCallbacks callbacks;
+    callbacks.on_resume = [&](const std::string& id) { resumed.push_back(id); };
+    callbacks.on_delete = [&](const std::string& id) { deleted.push_back(id); };
+    callbacks.on_new = [&] { ++new_sessions; };
+    callbacks.on_close = [&] { ++closes; };
+    callbacks.on_toggle_all_dirs = [&] { ++all_dirs_toggles; };
+    callbacks.on_load_more = [&] { ++load_mores; };
+    return callbacks;
+}
+
+}  // namespace
+
+TEST_CASE("session picker: Enter with no navigation opens a NEW session, not the first stored "
+         "one",
+         "[session_picker][regression]") {
+    // Generalizes the picker's original resume-row regression: row 0 is now
+    // the synthetic "+ new session" row (T8), so the failure mode this
+    // guards is Enter silently resuming whatever the FIRST stored session
+    // happens to be instead of doing what the highlighted row says.
+    const auto theme = TestTheme();
+    const std::vector<v1::SessionSummary> sessions = {MakeSummary("s0", "alpha", 1)};
+    std::vector<std::string> resumed, deleted;
+    int closes = 0, new_sessions = 0, all_dirs_toggles = 0, load_mores = 0;
+    auto picker = MakeSessionPicker(
+        sessions, /*include_all_dirs=*/false, /*has_more=*/false, theme,
+        MakePickerCallbacks(resumed, deleted, closes, new_sessions, all_dirs_toggles,
+                            load_mores));
+
+    const auto frame = RenderFrame(picker);
+    CHECK(frame.find("+ new session") != std::string::npos);
+    CHECK(frame.find("alpha") != std::string::npos);
+
+    REQUIRE(SendEvent(picker, ftx::Event::Return));
+    CHECK(new_sessions == 1);
+    CHECK(resumed.empty());
+}
+
 TEST_CASE("session picker: Enter resumes the HIGHLIGHTED row, not row 0") {
     const auto theme = TestTheme();
     const std::vector<v1::SessionSummary> sessions = {
         MakeSummary("s0", "alpha", 1), MakeSummary("s1", "beta", 2),
         MakeSummary("s2", "gamma", 3)};
 
-    std::vector<std::string> resumed;
-    std::vector<std::string> deleted;
-    int closes = 0;
-    SessionPickerCallbacks callbacks;
-    callbacks.on_resume = [&](const std::string& id) { resumed.push_back(id); };
-    callbacks.on_delete = [&](const std::string& id) { deleted.push_back(id); };
-    callbacks.on_close = [&] { ++closes; };
-
-    auto picker = MakeSessionPicker(sessions, theme, callbacks);
+    std::vector<std::string> resumed, deleted;
+    int closes = 0, new_sessions = 0, all_dirs_toggles = 0, load_mores = 0;
+    auto picker = MakeSessionPicker(
+        sessions, /*include_all_dirs=*/false, /*has_more=*/false, theme,
+        MakePickerCallbacks(resumed, deleted, closes, new_sessions, all_dirs_toggles,
+                            load_mores));
 
     const auto frame = RenderFrame(picker);
     CHECK(frame.find("alpha") != std::string::npos);
     CHECK(frame.find("gamma") != std::string::npos);
 
-    // Down once -> row 1; Enter must resume THAT row. The pre-fix code froze
-    // the CatchEvent's copy of `selected` at 0.
+    // Row 0 is "+ new session" (T8); down twice reaches "s1" (row index 2).
+    // Enter must resume THAT row. The pre-fix code froze the CatchEvent's
+    // copy of `selected` at 0.
+    REQUIRE(SendEvent(picker, ftx::Event::ArrowDown));
     REQUIRE(SendEvent(picker, ftx::Event::ArrowDown));
     REQUIRE(SendEvent(picker, ftx::Event::Return));
     REQUIRE(resumed.size() == 1);
     CHECK(resumed[0] == "s1");
 
-    // The picker is still alive and stateful after resuming: delete nominates
-    // the highlighted row too (the confirmation modal is RunTui's).
-    REQUIRE(SendEvent(picker, ftx::Event::Character("d")));
+    // The picker is still alive and stateful after resuming: ctrl+d nominates
+    // the highlighted row too (the confirmation modal is RunTui's). Plain 'd'
+    // no longer deletes (T8: it types into the filter instead).
+    REQUIRE(SendEvent(picker, ftx::Event::CtrlD));
     REQUIRE(deleted.size() == 1);
     CHECK(deleted[0] == "s1");
 
@@ -129,19 +172,90 @@ TEST_CASE("session picker: Enter resumes the HIGHLIGHTED row, not row 0") {
     CHECK(closes == 1);
 }
 
-TEST_CASE("session picker: empty list consumes Enter and Escape without nominating") {
+TEST_CASE("session picker: a bare 'd' types into the filter instead of deleting",
+         "[session_picker][regression]") {
     const auto theme = TestTheme();
-    int nominations = 0;
-    SessionPickerCallbacks callbacks;
-    callbacks.on_resume = [&](const std::string&) { ++nominations; };
-    callbacks.on_delete = [&](const std::string&) { ++nominations; };
-    callbacks.on_close = [] {};
+    const std::vector<v1::SessionSummary> sessions = {MakeSummary("s0", "delta", 1)};
+    std::vector<std::string> resumed, deleted;
+    int closes = 0, new_sessions = 0, all_dirs_toggles = 0, load_mores = 0;
+    auto picker = MakeSessionPicker(
+        sessions, /*include_all_dirs=*/false, /*has_more=*/false, theme,
+        MakePickerCallbacks(resumed, deleted, closes, new_sessions, all_dirs_toggles,
+                            load_mores));
 
-    auto picker = MakeSessionPicker({}, theme, callbacks);
-    CHECK(RenderFrame(picker).find("no stored sessions") != std::string::npos);
+    REQUIRE(SendEvent(picker, ftx::Event::Character("d")));
+    CHECK(deleted.empty());
+    const auto frame = RenderFrame(picker);
+    CHECK(frame.find("filter: d") != std::string::npos);
+    // "delta" still matches the filter "d"; the row survives.
+    CHECK(frame.find("delta") != std::string::npos);
+
+    // Backspace clears it back out.
+    REQUIRE(SendEvent(picker, ftx::Event::Backspace));
+    CHECK(RenderFrame(picker).find("filter: (none)") != std::string::npos);
+}
+
+TEST_CASE("session picker: an empty list still offers the new-session row, and consumes "
+         "Escape without closing twice") {
+    const auto theme = TestTheme();
+    std::vector<std::string> resumed, deleted;
+    int closes = 0, new_sessions = 0, all_dirs_toggles = 0, load_mores = 0;
+    auto picker = MakeSessionPicker(
+        {}, /*include_all_dirs=*/false, /*has_more=*/false, theme,
+        MakePickerCallbacks(resumed, deleted, closes, new_sessions, all_dirs_toggles,
+                            load_mores));
+    CHECK(RenderFrame(picker).find("no other stored sessions") != std::string::npos);
     REQUIRE(SendEvent(picker, ftx::Event::Return));
-    REQUIRE(SendEvent(picker, ftx::Event::Delete));
-    CHECK(nominations == 0);
+    CHECK(new_sessions == 1);   // the only row IS the new-session row
+    CHECK(resumed.empty());
+    REQUIRE(SendEvent(picker, ftx::Event::Escape));
+    CHECK(closes == 1);
+}
+
+TEST_CASE("session picker: tab toggles sort; ctrl+a asks the host to toggle all-dirs") {
+    const auto theme = TestTheme();
+    const std::vector<v1::SessionSummary> sessions = {MakeSummary("s0", "alpha", 1)};
+    std::vector<std::string> resumed, deleted;
+    int closes = 0, new_sessions = 0, all_dirs_toggles = 0, load_mores = 0;
+    auto picker = MakeSessionPicker(
+        sessions, /*include_all_dirs=*/false, /*has_more=*/false, theme,
+        MakePickerCallbacks(resumed, deleted, closes, new_sessions, all_dirs_toggles,
+                            load_mores));
+
+    CHECK(RenderFrame(picker).find("sort: recent") != std::string::npos);
+    REQUIRE(SendEvent(picker, ftx::Event::Tab));
+    CHECK(RenderFrame(picker).find("sort: name") != std::string::npos);
+
+    REQUIRE(SendEvent(picker, ftx::Event::CtrlA));
+    CHECK(all_dirs_toggles == 1);
+}
+
+TEST_CASE("session picker: arrowing down past the last loaded row asks for more, only when "
+         "unfiltered") {
+    const auto theme = TestTheme();
+    const std::vector<v1::SessionSummary> sessions = {MakeSummary("s0", "alpha", 1)};
+    std::vector<std::string> resumed, deleted;
+    int closes = 0, new_sessions = 0, all_dirs_toggles = 0, load_mores = 0;
+    auto picker = MakeSessionPicker(
+        sessions, /*include_all_dirs=*/false, /*has_more=*/true, theme,
+        MakePickerCallbacks(resumed, deleted, closes, new_sessions, all_dirs_toggles,
+                            load_mores));
+
+    // Rows: [new-session, s0]. One ArrowDown reaches the last row; a SECOND
+    // ArrowDown (already there) is what should trigger "load more".
+    REQUIRE(SendEvent(picker, ftx::Event::ArrowDown));
+    CHECK(load_mores == 0);
+    REQUIRE(SendEvent(picker, ftx::Event::ArrowDown));
+    CHECK(load_mores == 1);
+
+    // Typing a filter suppresses it: a local filter hiding rows is not the
+    // server having more pages. (Not REQUIRE'd on this ArrowDown's own
+    // return value: with the filter narrowing the list to one row, Menu has
+    // nowhere to move and may report the event as unconsumed -- the
+    // assertion that matters is that load_mores did not fire again.)
+    REQUIRE(SendEvent(picker, ftx::Event::Character("z")));
+    SendEvent(picker, ftx::Event::ArrowDown);
+    CHECK(load_mores == 1);
 }
 
 // ---------------------------------------------------------------------------
