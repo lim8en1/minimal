@@ -827,9 +827,11 @@ grpc::Status SessionServiceImpl::ListAgentPresets(grpc::ServerContext*,
     return grpc::Status::OK;
 }
 
-grpc::Status SessionServiceImpl::SuggestPaths(grpc::ServerContext*,
+grpc::Status SessionServiceImpl::SuggestPaths(grpc::ServerContext* context,
                                               const v1::SuggestPathsRequest* request,
                                               v1::SuggestPathsResponse* response) {
+    if (const auto auth = EnsureAuthenticated(auth_providers_, context); !auth.ok()) return auth;
+
     // The project root of the session named in the request. A LIVE session wins;
     // a terminated one still answers from its database row, matching GetMessages,
     // which reads the same way whether or not a tab happens to be open. An id

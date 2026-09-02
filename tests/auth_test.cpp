@@ -158,3 +158,47 @@ TEST_CASE("the guard runs on the wire: a denying provider rejects OpenSession",
     const auto status = stream->Finish();
     CHECK(status.error_code() == grpc::StatusCode::UNAUTHENTICATED);
 }
+
+TEST_CASE("the guard runs on the wire: a denying provider rejects SuggestPaths",
+          "[auth][e2e]") {
+    // SuggestPaths was the one RPC missing the guard -- a plain unary call, so
+    // this is simpler than the OpenSession stream case above.
+    testing::TempDir dir;
+    const auto root = dir.path();
+
+    { std::ofstream(root / "providers.json") << "{\"providers\":{}}"; }
+    { std::ofstream(root / "settings.json") << "{}"; }
+    { std::ofstream(root / "permissions.json") << "{}"; }
+    std::filesystem::create_directories(root / "agents");
+    config::SkillRegistry skills = config::SkillRegistry::Load(root);
+    auto presets = std::make_unique<agent::AgentPresetRegistry>(
+        root, skills, config::LoadSettingsConfig(root / "settings.json"));
+    tools::ToolRegistry tools;
+    llm::ProviderFactoryRegistry providers;
+    agent::SessionObserverRegistry observers(common::DefaultLogger());
+    session::SessionDatabase db(root / "sessions.db");
+    agent::SessionRegistry sessions(*presets, tools, providers, observers, db,
+                                    agent::LoopConfig{}, common::DefaultLogger());
+    rpc::SessionServiceImpl service(sessions, db, config::SettingsConfig{},
+                                    config::PermissionsConfig{}, common::DefaultLogger());
+
+    rpc::AuthProviderRegistry auth;
+    auth.Register(std::make_shared<DenyingProvider>());
+    service.set_auth_providers(&auth);
+
+    const auto socket = root / "auth_suggest.sock";
+    rpc::Server server(service, socket);
+    REQUIRE(server.listening());
+    auto channel = grpc::CreateChannel(rpc::SocketTarget(socket),
+                                       grpc::InsecureChannelCredentials());
+    auto stub = v1::SessionService::NewStub(channel);
+
+    grpc::ClientContext context;
+    v1::SuggestPathsRequest request;
+    request.set_session_id("anything");
+    request.set_prefix("");
+    request.set_limit(10);
+    v1::SuggestPathsResponse response;
+    const auto status = stub->SuggestPaths(&context, request, &response);
+    CHECK(status.error_code() == grpc::StatusCode::UNAUTHENTICATED);
+}
