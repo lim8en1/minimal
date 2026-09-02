@@ -1,7 +1,8 @@
 // A well-formed CLIENT plugin: registers one of every additive slot -- a
 // status segment, a tool-result renderer, a message-kind renderer, a syntax
-// grammar, and two views (panel + modal). The exclusive slots are left alone
-// so the core defaults stand (fixture_client_exclusive covers those).
+// grammar, a start view, and two views (panel + modal). The exclusive slots
+// are left alone so the core defaults stand (fixture_client_exclusive covers
+// those).
 //
 // The status segment echoes this plugin's own config ("echo_value") through
 // Render(), so loader tests can observe per-plugin config delivery through a
@@ -65,6 +66,19 @@ private:
     std::vector<plugins::SyntaxRule> rules_{
         {"shout", minimal::client::HighlightCategory::Keyword},
     };
+};
+
+class FixtureStartView final : public plugins::StartView {
+public:
+    const plugins::ViewSpec& spec() const override { return spec_; }
+    // Echoes the session id INTO the art so the loader test can observe the
+    // per-render context delivery (empty = app-level empty state).
+    ftxui::Element Render(const std::string& session_id, const Theme&) const override {
+        return ftxui::text("fixture start:" + session_id);
+    }
+
+private:
+    plugins::ViewSpec spec_{"fixture.start", "Fixture Start"};
 };
 
 class FixturePanelView final : public plugins::View {
@@ -132,6 +146,11 @@ void minimal_client_plugin_register_message_renderers(
 void minimal_client_plugin_register_syntax_grammars(
     plugins::SyntaxGrammarRegistry& registry, const plugins::ClientPluginRegistrationContext&) {
     registry.Register(std::make_unique<FixtureGrammar>());
+}
+
+void minimal_client_plugin_register_start_views(
+    plugins::StartViewRegistry& registry, const plugins::ClientPluginRegistrationContext&) {
+    registry.Register(std::make_unique<FixtureStartView>());
 }
 
 void minimal_client_plugin_register_views(plugins::ViewRegistry& registry,

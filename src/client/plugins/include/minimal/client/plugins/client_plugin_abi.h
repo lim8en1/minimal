@@ -67,6 +67,14 @@ void minimal_client_plugin_register_views(
     minimal::client::plugins::ViewRegistry&,
     const minimal::client::plugins::ClientPluginRegistrationContext&);
 
+// OPTIONAL, additive: the initial view (the empty state and a fresh session
+// before its first message). Many plugins may contribute; all render, stacked
+// in registration order. A duplicate id is fatal through the NameRegistry,
+// like every other view id.
+void minimal_client_plugin_register_start_views(
+    minimal::client::plugins::StartViewRegistry&,
+    const minimal::client::plugins::ClientPluginRegistrationContext&);
+
 // OPTIONAL, additive: renderers for one tool's result, keyed by tool name. A
 // renderer for a CORE tool (a diff view for `edit`) is as legitimate as one
 // for a plugin tool; a renderer for a tool whose plugin is disabled falls back

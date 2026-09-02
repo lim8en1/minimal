@@ -48,6 +48,7 @@ struct PluginRecord {
     // ORIGINAL keys, as the plugin declared them -- collision detection and
     // diagnostics are computed from "who provided what".
     std::vector<std::string> registered_views;
+    std::vector<std::string> registered_start_views;
     std::vector<std::string> registered_renderers;    // tool names
     std::vector<std::string> registered_status_segments;
     std::vector<std::string> registered_grammars;     // language keys
@@ -80,7 +81,8 @@ public:
                        MessageRendererRegistry& message_renderers,
                        StatusSegmentRegistry& status_segments,
                        SyntaxGrammarRegistry& grammars, ChatSurfaceRegistry& chat_surface,
-                       MarkdownEngineRegistry& markdown_engine, AttentionSink* attention,
+                       MarkdownEngineRegistry& markdown_engine,
+                       StartViewRegistry& start_views, AttentionSink* attention,
                        ClientApi* client_api);
     ~ClientPluginLoader();
 
@@ -101,6 +103,7 @@ private:
     SyntaxGrammarRegistry& grammars_;
     ChatSurfaceRegistry& chat_surface_;
     MarkdownEngineRegistry& markdown_engine_;
+    StartViewRegistry& start_views_;
     AttentionSink* attention_ = nullptr;
     ClientApi* client_api_ = nullptr;
     std::vector<void*> handles_;  // never closed; see LIFETIME above

@@ -78,6 +78,18 @@ View* ViewRegistry::Find(std::string_view id) const {
     return nullptr;
 }
 
+void StartViewRegistry::Register(std::unique_ptr<StartView> view) {
+    attributions_.push_back({attribution_, view->spec().id});
+    views_.push_back(std::move(view));
+}
+
+StartView* StartViewRegistry::Find(std::string_view id) const {
+    for (const auto& view : views_) {
+        if (view->spec().id == id) return view.get();
+    }
+    return nullptr;
+}
+
 void ToolResultRendererRegistry::Register(std::unique_ptr<ToolResultRenderer> renderer) {
     attributions_.push_back({attribution_, std::string(renderer->tool_name())});
     renderers_.push_back(std::move(renderer));

@@ -67,8 +67,9 @@ endfunction()
 
 add_subdirectory(server)
 
-# plugins/client/ -- none bundled yet (E5 proves the host with test fixtures;
-# the external todo plugin is the intended first real consumer). The subtree
-# exists so a bundled client plugin lands here the same way a server plugin
-# lands in plugins/server/.
+# plugins/client/ -- the logo plugin is the first bundled client plugin (the
+# ASCII-banner start view; deliberately the thinnest possible real plugin).
+# E5 proved the host with test fixtures (tests/fixtures/client-*), which use
+# minimal_add_client_fixture_plugin. The subtree exists so a bundled client
+# plugin lands here the same way a server plugin lands in plugins/server/.
 add_subdirectory(client)

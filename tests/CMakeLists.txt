@@ -20,6 +20,7 @@ add_executable(minimal_tests
     bundled_assets_test.cpp
     chat_request_bench.cpp
     client_args_test.cpp
+    client_plugins_test.cpp
     commands_test.cpp
     "${CMAKE_SOURCE_DIR}/plugins/server/commands-core/core_commands.cpp"
     token_accounting_test.cpp
@@ -99,6 +100,10 @@ add_executable(minimal_tests
     rpc_queue_test.cpp
     picker_model_test.cpp
     chat_model_test.cpp
+    # The logo plugin's generator: pure std, no ABI, so compiled in directly
+    # like the server plugins' logic (logo_plugin.cpp itself stays out).
+    "${CMAKE_SOURCE_DIR}/plugins/client/logo/logo_generator.cpp"
+    logo_generator_test.cpp
     mention_resolver_test.cpp
     mention_expansion_test.cpp
     # provider-openai's pure translation logic, compiled directly into the test
@@ -197,7 +202,8 @@ target_include_directories(minimal_tests PRIVATE
     "${CMAKE_SOURCE_DIR}/plugins/server/cost-tracker")
 
 target_include_directories(minimal_tests PRIVATE
-    "${CMAKE_SOURCE_DIR}/plugins/server/tools-web")
+    "${CMAKE_SOURCE_DIR}/plugins/server/tools-web"
+    "${CMAKE_SOURCE_DIR}/plugins/client/logo")
 
 # minimal::test_support is the test-dependency bundle: it carries server_core,
 # which carries common publicly. Listing those again here is redundant and makes
@@ -206,10 +212,12 @@ target_include_directories(minimal_tests PRIVATE
 add_subdirectory(fixtures)
 add_dependencies(minimal_tests
     fixture-good fixture-collision fixture-bad-abi fixture-minimal fixture-not-a-plugin
-    fixture-throws fixture-advisor fixture-service fixture-service-b fixture-hook)
+    fixture-throws fixture-advisor fixture-service fixture-service-b fixture-hook
+    fixture-client fixture-client-exclusive)
 target_compile_definitions(minimal_tests PRIVATE
     MINIMAL_FIXTURE_DIR="${CMAKE_CURRENT_BINARY_DIR}/fixtures"
-    MINIMAL_BUNDLED_DIR="${CMAKE_SOURCE_DIR}/bundled")
+    MINIMAL_BUNDLED_DIR="${CMAKE_SOURCE_DIR}/bundled"
+    MINIMAL_LOGO_PLUGIN="$<TARGET_FILE:minimal_logo>")
 
 # The headless client is exercised as a real client here, so the test binary
 # links it -- the E2E tier is the whole point of building -p first.

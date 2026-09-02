@@ -18,10 +18,12 @@
 #include "minimal/client/keybindings.hpp"
 #include "minimal/client/plugins/client_plugin_loader.hpp"
 #include "minimal/client/plugins/core_registrations.hpp"
+#include "minimal/client/plugins/host_seams.hpp"
 #include "minimal/client/plugins/plugin_discovery.hpp"
 #include "minimal/client/plugins/registries.hpp"
 #include "minimal/client/render/markdown_renderer.hpp"
 #include "minimal/client/ui_config.hpp"
+#include "minimal/common/abi_tag.hpp"
 #include "minimal/client/chat_model.hpp"
 #include "temp_dir.hpp"
 
@@ -32,6 +34,7 @@
 using namespace minimal;
 using namespace minimal::client;
 using namespace minimal::client::plugins;
+using minimal::testing::TempDir;
 
 namespace {
 
@@ -41,7 +44,13 @@ namespace {
 std::string ToText(const ftxui::Element& element) {
     ftxui::Screen screen(80, 20);
     ftxui::Render(screen, element);
-    return screen.ToString();
+    std::string out = screen.ToString();
+    // Screen::ToString separates rows with \r\n, so both halves get trimmed.
+    while (!out.empty() &&
+           (out.back() == '\n' || out.back() == '\r' || out.back() == ' ')) {
+        out.pop_back();
+    }
+    return out;
 }
 
 std::string FixturePath(const std::string& name) {
@@ -50,6 +59,7 @@ std::string FixturePath(const std::string& name) {
 
 struct LoadedFixtures {
     ViewRegistry views;
+    StartViewRegistry start_views;
     ToolResultRendererRegistry renderers;
     MessageRendererRegistry message_renderers;
     StatusSegmentRegistry status_segments;
@@ -68,15 +78,18 @@ struct LoadedFixtures {
     std::unique_ptr<AttentionSink> attention_sink;
     std::unique_ptr<ClientApi> client_api;
 
-    // `candidates` loaded against fresh registries.
-    static LoadedFixtures Load(const std::vector<PluginCandidate>& candidates) {
-        LoadedFixtures f;
-        f.attention_sink = MakeHostAttentionSink(&f.attention);
-        f.client_api = MakeHostClientApi(nullptr);
-        ClientPluginLoader loader(f.views, f.renderers, f.message_renderers, f.status_segments,
-                                  f.grammars, f.chat_surface, f.markdown_engine,
-                                  f.attention_sink.get(), f.client_api.get());
-        f.records = loader.LoadAll(candidates);
+    // `candidates` loaded against fresh registries. unique_ptr, not a value:
+    // AttentionState holds a mutex, so the struct cannot move, and NRVO still
+    // requires a movable return type.
+    static std::unique_ptr<LoadedFixtures> Load(const std::vector<PluginCandidate>& candidates) {
+        auto f = std::make_unique<LoadedFixtures>();
+        f->attention_sink = MakeHostAttentionSink(&f->attention);
+        f->client_api = MakeHostClientApi(nullptr);
+        ClientPluginLoader loader(f->views, f->renderers, f->message_renderers,
+                                  f->status_segments, f->grammars, f->chat_surface,
+                                  f->markdown_engine, f->start_views, f->attention_sink.get(),
+                                  f->client_api.get());
+        f->records = loader.LoadAll(candidates);
         return f;
     }
 };
@@ -115,6 +128,20 @@ public:
     std::unique_ptr<Stream> MakeStream() const override { return nullptr; }
 };
 
+class StubStartView final : public StartView {
+public:
+    explicit StubStartView(std::string id) : id_(std::move(id)) {}
+    const ViewSpec& spec() const override { return spec_; }
+    ftxui::Element Render(const std::string& session_id, const Theme&) const override {
+        return ftxui::text("stub start:" +
+                           (session_id.empty() ? std::string("(empty)") : session_id));
+    }
+
+private:
+    std::string id_;
+    ViewSpec spec_{id_, "Stub Start"};
+};
+
 }  // namespace
 
 TEST_CASE("registries: first claimant wins, duplicates are recorded not applied",
@@ -133,6 +160,33 @@ TEST_CASE("registries: first claimant wins, duplicates are recorded not applied"
     CHECK(registry.Find(ChatRowKind::Thinking) != nullptr);
 }
 
+TEST_CASE("start view registry: additive, attributed, id-addressable", "[client_plugins]") {
+    StartViewRegistry registry;
+    registry.SetAttribution("plugin-a");
+    registry.Register(std::make_unique<StubStartView>("stub.start"));
+    registry.SetAttribution("plugin-b");
+    registry.Register(std::make_unique<StubStartView>("stub.start.two"));
+
+    // Additive: BOTH render (registration order), unlike the exclusive slots.
+    REQUIRE(registry.views().size() == 2);
+    REQUIRE(registry.attributions().size() == 2);
+    CHECK(registry.attributions()[0].plugin_name == "plugin-a");
+    CHECK(registry.attributions()[0].original_name == "stub.start");
+    CHECK(registry.attributions()[1].plugin_name == "plugin-b");
+    CHECK(registry.attributions()[1].original_name == "stub.start.two");
+    CHECK(registry.Find("stub.start") != nullptr);
+    CHECK(registry.Find("stub.start.two") != nullptr);
+    CHECK(registry.Find("nothing") == nullptr);
+
+    // The per-render session context travels with the call -- the mechanism a
+    // per-session random banner keys on.
+    const auto rendered = ToText(registry.Find("stub.start")->Render("sess-9",
+                                                                    Theme::Parse(R"({"name":"t","colors":{}})", ColorDepth::Truecolor)));
+    CHECK(rendered.find("sess-9") != std::string::npos);
+    CHECK(ToText(registry.Find("stub.start")->Render("", Theme::Parse(R"({"name":"t","colors":{}})", ColorDepth::Truecolor))) ==
+          "stub start:(empty)");
+}
+
 TEST_CASE("exclusive registries: second registration warns and is ignored",
           "[client_plugins]") {
     ChatSurfaceRegistry surfaces;
@@ -148,7 +202,7 @@ TEST_CASE("exclusive registries: second registration warns and is ignored",
     engines.Register(std::make_unique<StubEngine>());
     CHECK(engines.record.plugin_name == "first");
     // The FIRST engine is still the active one (the second was discarded).
-    CHECK(ToText(engines.engine->Render("x", Theme::Parse("{}", 8))) == "stub engine");
+    CHECK(ToText(engines.engine->Render("x", Theme::Parse(R"({"name":"t","colors":{}})", ColorDepth::Truecolor))) == "stub engine");
 }
 
 TEST_CASE("attention state: plugin raise wins until cleared", "[client_plugins]") {
@@ -174,36 +228,46 @@ TEST_CASE("the client loader loads a real plugin through a real dlopen",
     const auto fixtures =
         LoadedFixtures::Load({Candidate("fixture-client.so", {{"echo_value", "hello"}})});
 
-    REQUIRE(fixtures.records.size() == 1);
-    const auto& record = fixtures.records.front();
+    REQUIRE(fixtures->records.size() == 1);
+    const auto& record = fixtures->records.front();
     REQUIRE(record.ok());
     CHECK(record.name == "fixture-client");
-    CHECK(record.abi_tag == std::string(common::AbiTag()));
+    CHECK(record.abi_tag == std::string(minimal::common::AbiTag()));
 
     // Every additive slot the fixture registered is visible, attributed.
-    REQUIRE(fixtures.status_segments.segments().size() == 1);
+    REQUIRE(fixtures->status_segments.segments().size() == 1);
     // Config echo: the segment renders THIS plugin's own config slice, through
     // a real dlopen.
-    CHECK(fixtures.status_segments.segments().front()->Render() == "hello");
-    CHECK(fixtures.status_segments.Find("fixture_seg") != nullptr);
+    CHECK(fixtures->status_segments.segments().front()->Render() == "hello");
+    CHECK(fixtures->status_segments.Find("fixture_seg") != nullptr);
 
-    REQUIRE(fixtures.renderers.Find("fixture_tool") != nullptr);
+    REQUIRE(fixtures->renderers.Find("fixture_tool") != nullptr);
 
     bool has_minilang = false;
-    for (const auto& grammar : fixtures.grammars.grammars()) {
+    for (const auto& grammar : fixtures->grammars.grammars()) {
         if (grammar->Language() == "minilang") has_minilang = true;
     }
     CHECK(has_minilang);
 
-    REQUIRE(fixtures.views.Find("fixture.panel") != nullptr);
-    REQUIRE(fixtures.views.Find("fixture.modal") != nullptr);
+    REQUIRE(fixtures->views.Find("fixture.panel") != nullptr);
+    REQUIRE(fixtures->views.Find("fixture.modal") != nullptr);
     // The views are live components (panel render is assertable text).
-    CHECK(ToText(fixtures.views.Find("fixture.panel")->component()->Render()) ==
+    CHECK(ToText(fixtures->views.Find("fixture.panel")->component()->Render()) ==
           "fixture panel");
+
+    // The start view landed through a real dlopen too, and the per-render
+    // session context reaches it (empty string = the app-level empty state).
+    REQUIRE(fixtures->records.front().registered_start_views.size() == 1);
+    REQUIRE(fixtures->start_views.Find("fixture.start") != nullptr);
+    CHECK(ToText(fixtures->start_views.Find("fixture.start")->Render("", Theme::Parse(R"({"name":"t","colors":{}})", ColorDepth::Truecolor))) ==
+          "fixture start:");
+    CHECK(ToText(fixtures->start_views.Find("fixture.start")->Render("sess-1",
+                                                                    Theme::Parse(R"({"name":"t","colors":{}})", ColorDepth::Truecolor))) ==
+          "fixture start:sess-1");
 
     // Message-kind claim recorded (first-claimant semantics tested above).
     bool claimed_thinking = false;
-    for (const auto& [kind, attribution] : fixtures.message_renderers.claims()) {
+    for (const auto& [kind, attribution] : fixtures->message_renderers.claims()) {
         if (kind == ChatRowKind::Thinking && attribution.plugin_name == "fixture-client") {
             claimed_thinking = true;
         }
@@ -212,8 +276,8 @@ TEST_CASE("the client loader loads a real plugin through a real dlopen",
 
     // The exclusive slots were NOT touched by this fixture: the core defaults
     // still stand.
-    CHECK_FALSE(fixtures.chat_surface.record.registered);
-    CHECK_FALSE(fixtures.markdown_engine.record.registered);
+    CHECK_FALSE(fixtures->chat_surface.record.registered);
+    CHECK_FALSE(fixtures->markdown_engine.record.registered);
 }
 
 TEST_CASE("the exclusive slots ignore a second registration and keep the first",
@@ -223,15 +287,17 @@ TEST_CASE("the exclusive slots ignore a second registration and keep the first",
     const auto fixtures = LoadedFixtures::Load(
         {Candidate("fixture-client-exclusive.so"), Candidate("fixture-client-exclusive.so")});
 
-    REQUIRE(fixtures.records.size() == 2);
-    CHECK(fixtures.records[0].ok());
-    CHECK(fixtures.records[1].ok());
-    CHECK(fixtures.records[0].registered_chat_surface);
-    CHECK_FALSE(fixtures.records[1].registered_chat_surface);
-    CHECK(fixtures.records[0].registered_markdown_engine);
-    CHECK_FALSE(fixtures.records[1].registered_markdown_engine);
-    CHECK(fixtures.chat_surface.record.plugin_name == "fixture-client-exclusive");
-    REQUIRE(fixtures.chat_surface.surface != nullptr);
+    REQUIRE(fixtures->records.size() == 2);
+    CHECK(fixtures->records[0].ok());
+    CHECK(fixtures->records[1].ok());
+    // The same .so twice is the same plugin NAME, so the per-plugin records
+    // cannot say who holds the slot; the registry's rule is the observable:
+    // one claimant, the first, the second warned and ignored.
+    CHECK(fixtures->chat_surface.record.registered);
+    CHECK(fixtures->chat_surface.record.plugin_name == "fixture-client-exclusive");
+    CHECK(fixtures->markdown_engine.record.registered);
+    CHECK(fixtures->markdown_engine.record.plugin_name == "fixture-client-exclusive");
+    REQUIRE(fixtures->chat_surface.surface != nullptr);
 
     // The surface receives what the host pushes (the OnEvent contract): a
     // push must be accepted without blocking or crashing; per-surface state
@@ -239,11 +305,11 @@ TEST_CASE("the exclusive slots ignore a second registration and keep the first",
     v1::ServerEvent event;
     event.set_session_id("s-1");
     event.mutable_session_metadata()->set_session_id("s-1");
-    fixtures.chat_surface.surface->OnEvent(event);
+    fixtures->chat_surface.surface->OnEvent(event);
 }
 
 TEST_CASE("the md4c default engine carries the streaming contract", "[client_plugins]") {
-    Theme theme = Theme::Parse("{}", 8);
+    Theme theme = Theme::Parse(R"({"name":"t","colors":{}})", ColorDepth::Truecolor);
     MarkdownRenderer renderer(&theme, nullptr);
     MarkdownEngineRegistry engines;
     RegisterDefaultMarkdownEngine(engines, renderer);
@@ -318,7 +384,7 @@ TEST_CASE("theme sections merge after core roles and never shadow them",
         "colors": {"user_message": "#ff0000"},
         "sections": {"todo_plugin": {"card": "#00ff00", "user_message": "#0000ff"}}
     })";
-    const Theme theme = Theme::Parse(doc, 8);
+    const Theme theme = Theme::Parse(doc, ColorDepth::Truecolor);
     CHECK(theme.ColorFor("todo_plugin.card") == ftxui::Color(0, 255, 0));
     // Core wins on the collision attempt:
     CHECK(theme.ColorFor("user_message") == ftxui::Color(255, 0, 0));
@@ -366,6 +432,10 @@ TEST_CASE("command notices carry the display mode and are type-disjoint from cha
     // An error result rides the STATUS display (dispatcher downgrade).
     v1::CommandResult failed;
     failed.set_status(v1::COMMAND_STATUS_ERROR);
+    // The STATUS downgrade of an error result happens server-side (the
+    // dispatcher), so the client-side contract is: display survives the trip
+    // as set -- UNSPECIFIED is not rewritten here.
+    failed.set_display(v1::COMMAND_DISPLAY_STATUS);
     const auto error_notice = NoticeFromCommandResult(failed);
     CHECK(error_notice.is_error);
     CHECK(error_notice.display == v1::COMMAND_DISPLAY_STATUS);
@@ -382,13 +452,48 @@ TEST_CASE("host seams survive the load: a plugin raises attention AFTER LoadAll"
           "[client_plugins][seams]") {
     const auto fixtures = LoadedFixtures::Load({Candidate(
         "fixture-client.so", {{"echo_value", "seam-check"}, {"raise_tab", "seam-session"}})});
-    REQUIRE(fixtures.records.size() == 1);
-    REQUIRE(fixtures.records[0].ok());
+    REQUIRE(fixtures->records.size() == 1);
+    REQUIRE(fixtures->records[0].ok());
 
-    const auto* segment = fixtures.status_segments.Find("fixture_seg");
+    const auto* segment = fixtures->status_segments.Find("fixture_seg");
     REQUIRE(segment != nullptr);
 
     // Post-load use: the load is long over; the sink must still be alive.
     CHECK(segment->Render() == "seam-check");
-    CHECK(fixtures.attention.TabRaised("seam-session"));
+    CHECK(fixtures->attention.TabRaised("seam-session"));
+}
+
+#ifndef MINIMAL_LOGO_PLUGIN
+#error "MINIMAL_LOGO_PLUGIN must name the built logo plugin"
+#endif
+
+// The FIRST bundled client plugin, loaded as a real artifact: proves the
+// start-view seam end to end through dlopen, and pins the contract the TUI
+// relies on (a start view renders for BOTH the app-level empty state and a
+// session, and -- regenerate_per_session being the default -- two sessions do
+// not share one banner).
+TEST_CASE("the bundled logo plugin loads through the real loader and renders art",
+          "[client_plugins][logo]") {
+    const auto fixtures = LoadedFixtures::Load({PluginCandidate{
+        MINIMAL_LOGO_PLUGIN, Provenance::Bundled, /*enabled=*/true, {}}});
+    REQUIRE(fixtures->records.size() == 1);
+    const auto& record = fixtures->records.front();
+    REQUIRE(record.ok());
+    CHECK(record.name == "logo");
+    REQUIRE(record.registered_start_views.size() == 1);
+
+    const auto* view = fixtures->start_views.Find("logo.banner");
+    REQUIRE(view != nullptr);
+    const Theme theme = Theme::Parse(R"({"name":"t","colors":{}})", ColorDepth::Truecolor);
+
+    const auto app_art = ToText(view->Render("", theme));
+    CHECK(!app_art.empty());
+    const auto first = ToText(view->Render("session-1", theme));
+    const auto second = ToText(view->Render("session-2", theme));
+    CHECK(!first.empty());
+    CHECK(!second.empty());
+    // The per-session seed: each new session keys its own generation. A
+    // collision needs identical style AND fill across ~100 cells -- about
+    // 2^-29 per draw pair, not a live flake source.
+    CHECK(first != second);
 }
