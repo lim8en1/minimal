@@ -28,6 +28,16 @@ v1::ToolExecutionEvent FinishTool(bool is_error = false) {
     return evt;
 }
 
+v1::BackgroundTaskEvent BackgroundEvent(const std::string& tool_use_id,
+                                        v1::BackgroundTaskEvent::State state,
+                                        const std::string& command = "make -j8") {
+    v1::BackgroundTaskEvent evt;
+    evt.set_tool_use_id(tool_use_id);
+    evt.set_state(state);
+    evt.set_command(command);
+    return evt;
+}
+
 }  // namespace
 
 TEST_CASE("a fresh SessionState is Idle", "[session_state]") {
@@ -57,6 +67,35 @@ TEST_CASE("message_stop with an active tool stays Working, not Idle", "[session_
     REQUIRE(state.TakeSnapshot().state == SessionStateKind::Working);
     state.FinalizeStreamingText();   // a tool-using turn's message_stop between rounds
     REQUIRE(state.TakeSnapshot().state == SessionStateKind::Working);
+}
+
+// Regression: MaybeGoIdleLocked used to check only tools_.back().started --
+// the LAST-STARTED tool, not "any tool still running". ARCHITECTURE.md "Tool
+// dispatch is parallel" makes several tools of one round run at once (width
+// 4 by default) and finish in COMPLETION order, not gate order, so the
+// last-started tool finishing first is the common case, not an edge case.
+// The old check flipped the tab to Idle -- spinner gone, "Working" lost --
+// with earlier calls of the same round still executing on the pool.
+TEST_CASE("message_stop stays Working while ANY parallel tool is still running, "
+          "even the last-started one finishing first",
+          "[session_state][regression]") {
+    SessionState state("s-1");
+    state.OnToolStarted(StartTool("t-1"));
+    state.OnToolStarted(StartTool("t-2"));
+    state.OnToolStarted(StartTool("t-3"));   // last-started -> tools_.back()
+    REQUIRE(state.TakeSnapshot().state == SessionStateKind::Working);
+
+    // t-3 (the last-started, formerly the only one MaybeGoIdleLocked looked
+    // at) finishes FIRST -- t-1 and t-2 are still running on the pool.
+    state.OnToolFinished("t-3", FinishTool());
+    state.FinalizeStreamingText();   // a tool-using turn's message_stop between rounds
+    auto snap = state.TakeSnapshot();
+    REQUIRE(snap.state == SessionStateKind::Working);   // NOT Idle: two tools still active
+
+    state.OnToolFinished("t-1", FinishTool());
+    state.OnToolFinished("t-2", FinishTool());
+    state.FinalizeStreamingText();
+    REQUIRE(state.TakeSnapshot().state == SessionStateKind::Idle);   // now nothing is active
 }
 
 TEST_CASE("message_stop with a pending permission stays Waiting", "[session_state]") {
@@ -163,6 +202,78 @@ TEST_CASE("tool tracking: start -> deltas -> finish, keyed by tool_use_id", "[se
     // longer the active execution.
     state.OnToolOutputDelta("t-1", "late, must not append");
     REQUIRE(state.TakeSnapshot().tools[0].buffered_output == "line one\nline two\n");
+}
+
+// --- background bash rows (ARCHITECTURE.md "Background bash rows") --------
+
+TEST_CASE("a background task promotes its ToolExecutionEvent row rather than duplicating it",
+          "[session_state][background]") {
+    SessionState state("s-1");
+    state.OnToolStarted(StartTool("t-1"));           // the gating ack
+    state.OnBackgroundTask(
+        BackgroundEvent("t-1", v1::BackgroundTaskEvent::STARTED, "make -j8"));
+    // The synchronous call ack: the launching tool call returns quickly even
+    // though the detached process keeps running.
+    state.OnToolFinished("t-1", FinishTool());
+
+    auto snap = state.TakeSnapshot();
+    REQUIRE(snap.tools.size() == 1);   // promoted, not a second row
+    CHECK(snap.tools[0].is_background);
+    CHECK(snap.tools[0].started);      // the background task is still live
+    CHECK(snap.tools[0].summary == "make -j8");
+}
+
+TEST_CASE("OnTurnCompleted keeps a LIVE background row but sweeps a finished one",
+          "[session_state][background]") {
+    SessionState state("s-1");
+    state.OnToolStarted(StartTool("t-1"));
+    state.OnBackgroundTask(BackgroundEvent("t-1", v1::BackgroundTaskEvent::STARTED));
+    state.OnToolFinished("t-1", FinishTool());   // ack; the task itself keeps running
+
+    // The turn that launched it ends while the background task is still
+    // running -- its row must survive the panel reset, unlike a foreground
+    // tool row.
+    state.OnToolStarted(StartTool("t-2"));       // an ordinary foreground tool, same turn
+    state.OnToolFinished("t-2", FinishTool());
+    state.OnTurnCompleted(v1::TurnCompletedEvent{});
+
+    auto snap = state.TakeSnapshot();
+    REQUIRE(snap.tools.size() == 1);
+    CHECK(snap.tools[0].tool_use_id == "t-1");   // t-2 (foreground) was swept
+    CHECK(snap.tools[0].is_background);
+    CHECK(snap.tools[0].started);
+
+    // The background task finishes, possibly turns later. Its terminal event
+    // closes the row that has been sitting live since before.
+    state.OnBackgroundTask(BackgroundEvent("t-1", v1::BackgroundTaskEvent::COMPLETED));
+    auto after_terminal = state.TakeSnapshot();
+    REQUIRE(after_terminal.tools.size() == 1);
+    CHECK_FALSE(after_terminal.tools[0].started);
+    CHECK_FALSE(after_terminal.tools[0].is_error);
+
+    // The NEXT turn boundary sweeps the now-finished background row, same as
+    // any other finished row.
+    state.OnTurnCompleted(v1::TurnCompletedEvent{});
+    CHECK(state.TakeSnapshot().tools.empty());
+}
+
+TEST_CASE("a background task's terminal event REOPENS a row the panel already swept",
+          "[session_state][background]") {
+    // The doc's own words: "a client keyed by tool_use_id alone must
+    // tolerate a row reopening after its finish event." Simulates the STARTED
+    // notice never having reached this client (or the row already having
+    // been sitting quiescent past a turn boundary) -- the terminal event is
+    // the first this client hears of the task, and must still surface it.
+    SessionState state("s-1");
+    state.OnBackgroundTask(
+        BackgroundEvent("t-9", v1::BackgroundTaskEvent::FAILED, "flaky-build.sh"));
+
+    auto snap = state.TakeSnapshot();
+    REQUIRE(snap.tools.size() == 1);
+    CHECK(snap.tools[0].is_background);
+    CHECK_FALSE(snap.tools[0].started);
+    CHECK(snap.tools[0].is_error);
+    CHECK(snap.tools[0].summary == "flaky-build.sh");
 }
 
 TEST_CASE("OnTurnCompleted records occupancy and clears tools, but does not set Done",

@@ -378,6 +378,84 @@ TEST_CASE("prompt editor: Enter submits text, / lines go to the command path") {
     CHECK(texts.size() == 1);   // a command never double-fires as text
 }
 
+// Regression: MakePromptEditor's event handler used to capture `[&]`, which
+// binds references to the FACTORY'S OWN PARAMETERS (on_text, on_command,
+// command_catalog -- by-value std::functions living in MakePromptEditor's
+// stack frame). Every call in this file already exercises the callback
+// lifetime implicitly (the editor Component is always used well after
+// MakePromptEditor returns, the same as the TUI's real usage), so this is the
+// harness that would have caught the dangling-reference bug had it been run
+// under ASan's detect_stack_use_after_return -- this test names that
+// property explicitly rather than leaving it merely incidental to every test
+// above.
+TEST_CASE("prompt editor: callbacks fire correctly well after MakePromptEditor returns") {
+    const auto theme = TestTheme();
+    PromptEditorState state;
+    std::vector<std::string> texts;
+    // MakePromptEditor itself is entered and exited here; `editor` is the
+    // only thing that survives into the test body.
+    auto editor = MakePromptEditor(
+        theme, state, [&](const std::string& t) { texts.push_back(t); }, [](const std::string&) {},
+        [](const std::string&) { return std::vector<std::string>{}; });
+
+    // Several turns through the loop, well past the factory call's own stack
+    // frame -- each one exercises on_text through the captured closure.
+    for (int i = 0; i < 3; ++i) {
+        state.content = "turn " + std::to_string(i);
+        REQUIRE(SendEvent(editor, ftx::Event::Return));
+    }
+    REQUIRE(texts.size() == 3);
+    CHECK(texts[0] == "turn 0");
+    CHECK(texts[2] == "turn 2");
+}
+
+TEST_CASE("prompt editor: Alt+Enter inserts a newline AT THE CURSOR, not appended to the end") {
+    const auto theme = TestTheme();
+    PromptEditorState state;
+    auto editor = MakePromptEditor(
+        theme, state, [](const std::string&) {}, [](const std::string&) {},
+        [](const std::string&) { return std::vector<std::string>{}; });
+
+    state.content = "before after";
+    state.cursor_position = 6;   // between "before" and " after"
+    REQUIRE(SendEvent(editor, ftx::Event::Character("\x1b\r")));   // Alt+Enter (ESC CR)
+
+    CHECK(state.content == "before\n after");   // split where the cursor was, not appended
+    CHECK(state.cursor_position == 7);           // advanced past the inserted newline
+}
+
+TEST_CASE("prompt editor: history recall places the cursor at the end of the recalled line") {
+    const auto theme = TestTheme();
+    PromptEditorState state;
+    auto editor = MakePromptEditor(
+        theme, state, [](const std::string&) {}, [](const std::string&) {},
+        [](const std::string&) { return std::vector<std::string>{}; });
+
+    // Submit a long line, then a short one, so recall moves the cursor
+    // BACKWARD relative to wherever it was left after typing the short one --
+    // FTXUI's Input only clamps cursor_position into content's new bounds
+    // after an external splice, it never moves it, so a stale mid-word
+    // position from editing "hi" would otherwise land mid-word in the
+    // recalled "a much longer line" instead of at its end.
+    for (const auto* line : {"a much longer line", "hi"}) {
+        state.content = line;
+        REQUIRE(SendEvent(editor, ftx::Event::Return));
+    }
+    state.cursor_position = 1;   // simulate wherever "hi"'s own edits left it
+
+    REQUIRE(SendEvent(editor, ftx::Event::ArrowUp));    // recall "hi"
+    CHECK(state.content == "hi");
+    CHECK(state.cursor_position == 2);
+
+    REQUIRE(SendEvent(editor, ftx::Event::ArrowUp));    // recall "a much longer line"
+    CHECK(state.content == "a much longer line");
+    CHECK(state.cursor_position == static_cast<int>(state.content.size()));
+
+    REQUIRE(SendEvent(editor, ftx::Event::ArrowDown));  // back to "hi"
+    CHECK(state.content == "hi");
+    CHECK(state.cursor_position == 2);
+}
+
 // ---------------------------------------------------------------------------
 // Chat view cache key (R1b-6's unit-testable half)
 // ---------------------------------------------------------------------------

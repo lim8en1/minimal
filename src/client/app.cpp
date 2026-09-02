@@ -37,7 +37,6 @@
 
 #include "minimal/client/chat_model.hpp"
 #include "minimal/client/cli_args.hpp"
-#include "minimal/client/key_event_parser.hpp"
 #include "minimal/client/keybinding_dispatch.hpp"
 #include "minimal/client/keybindings.hpp"
 #include "minimal/client/session_client.hpp"
@@ -484,24 +483,10 @@ using minimal::client::Keybindings;
 using minimal::client::PendingConfirmation;
 using minimal::client::PendingPermission;
 using minimal::client::PromptEditorState;
+using minimal::client::ResolvedKeymap;
 using minimal::client::SessionState;
 using minimal::client::SessionStateKind;
 using minimal::client::Theme;
-
-// A real modifier+key parser (src/client/key_event_parser.{hpp,cpp}) now
-// backs this -- it used to be a closed if-ladder over twelve literal key
-// names, so any other keybindings.json binding (ctrl+p, f2, alt+j) matched
-// nothing despite the startup warning naming the gap rather than closing it.
-std::vector<ftxui::Event> KeyToEvents(const std::string& key) {
-    return minimal::client::ParseKeySpec(key);
-}
-
-bool MatchesAny(const ftxui::Event& event, const std::vector<ftxui::Event>& candidates) {
-    for (const auto& candidate : candidates) {
-        if (event == candidate) return true;
-    }
-    return false;
-}
 
 constexpr const char* kDefaultStatusFormat =
     "{version} | {session} | {tokens} | {model} | {agent} | {permission_mode}";
@@ -791,11 +776,17 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         keys.EnsureDefault(view->spec().id, view->spec().default_keybinding);
         plugin_views.push_back(PluginViewEntry{view.get(), view->component(), false});
     }
-    for (const auto& [action, key] : keys.all()) {
-        if (KeyToEvents(key).empty()) {
-            std::fprintf(stderr, "minimal: no key mapping for '%s' -> '%s'\n", action.c_str(),
-                         key.c_str());
-        }
+    // Parsed ONCE, after keys.all() has settled (core defaults + the user's
+    // file + every plugin view's EnsureDefault default, just folded in
+    // above): with_keys below used to re-derive this per EVENT --
+    // MatchesAny(event, KeyToEvents(keys.KeyFor(action))) allocates a string
+    // in KeyFor and a string+vector+Events in ParseKeySpec, for a table that
+    // never changes again after startup. keymap.Unmapped() subsumes the
+    // per-action warning loop this replaces.
+    const auto keymap = ResolvedKeymap::Build(keys);
+    for (const auto& [action, key] : keymap.Unmapped()) {
+        std::fprintf(stderr, "minimal: no key mapping for '%s' -> '%s'\n", action.c_str(),
+                     key.c_str());
     }
 
     // The status format: ui.json's value, or the built-in default. Unknown ids
@@ -1424,9 +1415,15 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     auto delete_modal = minimal::client::MakeConfirmationModal(
         delete_request, theme, [&](const std::string& chosen) {
             if (chosen == "delete" && !staged_delete_id.empty()) {
+                // NOT stderr: the alternate screen is live (see
+                // ScreenInteractive::FullscreenAlternateScreen() below), and
+                // this callback fires from inside the event loop -- any
+                // out-of-band stdout/stderr write desyncs the repaint the
+                // same way a resize does, and the message was invisible
+                // behind the fullscreen buffer regardless.
                 if (const auto status = client->DeleteSession(staged_delete_id); !status.ok()) {
-                    std::fprintf(stderr, "minimal: delete failed: %s\n",
-                                 status.error_message().c_str());
+                    minimal::common::DefaultLogger().error("delete failed: {}",
+                                                           status.error_message());
                 }
             }
             staged_delete_id.clear();
@@ -1557,6 +1554,16 @@ int RunTui(const minimal::client::ParsedArgs& args) {
                         ui.chat = std::make_unique<minimal::client::ChatView>(
                             theme, message_registry, renderer_registry);
                     }
+                    // ui.streaming is normally built by maintain()'s stream
+                    // recreation (above), but maintain() returns EARLY --
+                    // skipping that -- whenever GetDetails raced a tab that
+                    // just closed (snap.session_id empty) or a chat-surface
+                    // plugin currently owns the tab; a frame landing here
+                    // with no start view registered (so `start` stayed
+                    // empty) then found ui.streaming still null on its very
+                    // first render. Lazily built here too, so *ui.streaming
+                    // is never a null deref regardless of which path built it.
+                    if (!ui.streaming) ui.streaming = engine.MakeStream();
                     rows.push_back(ui.chat->Render(snap, *ui.streaming) | yframe |
                                    vscroll_indicator | flex);
                 }
@@ -1729,16 +1736,16 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     auto with_keys = CatchEvent(session_view, [&](const Event& event) {
         const std::string sid = focused;
 
-        if (MatchesAny(event, KeyToEvents(keys.KeyFor("tab.next")))) {
+        if (keymap.Matches("tab.next", event)) {
             app->CycleFocusForward();
             return true;
         }
-        if (MatchesAny(event, KeyToEvents(keys.KeyFor("tab.previous")))) {
+        if (keymap.Matches("tab.previous", event)) {
             app->CycleFocusBackward();
             return true;
         }
-        const bool group_next = MatchesAny(event, KeyToEvents(keys.KeyFor("group.next")));
-        const bool group_prev = MatchesAny(event, KeyToEvents(keys.KeyFor("group.previous")));
+        const bool group_next = keymap.Matches("group.next", event);
+        const bool group_prev = keymap.Matches("group.previous", event);
         if (group_next || group_prev) {
             // Between root groups: focus the next (or previous) ROOT tab.
             // The index math is pulled out to keybinding_dispatch.hpp and
@@ -1749,7 +1756,7 @@ int RunTui(const minimal::client::ParsedArgs& args) {
             if (!target.empty()) app->SetFocusedTab(target);
             return true;
         }
-        if (MatchesAny(event, KeyToEvents(keys.KeyFor("jump.attention")))) {
+        if (keymap.Matches("jump.attention", event)) {
             // Crosses groups; wraps. Only Waiting tabs qualify (the ! glyph).
             // Scans starting just AFTER the focused tab -- not a fixed index,
             // which ignored which tab was actually focused and could "jump"
@@ -1771,8 +1778,7 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         // this branch only fires with no modal shown. The busy probe runs
         // only when one of the two keys actually arrived, never per keystroke.
         const bool cancel_pressed =
-            event == Event::CtrlC ||
-            MatchesAny(event, KeyToEvents(keys.KeyFor("turn.cancel")));
+            event == Event::CtrlC || keymap.Matches("turn.cancel", event);
         if (cancel_pressed) {
             bool busy = false;
             if (!sid.empty()) {
@@ -1802,21 +1808,21 @@ int RunTui(const minimal::client::ParsedArgs& args) {
                 return true;
             }
         }
-        if (MatchesAny(event, KeyToEvents(keys.KeyFor("session.picker")))) {
+        if (keymap.Matches("session.picker", event)) {
             show_picker = !show_picker;
             if (show_picker) open_picker();
             return true;
         }
-        if (MatchesAny(event, KeyToEvents(keys.KeyFor("agent.picker")))) {
+        if (keymap.Matches("agent.picker", event)) {
             show_agent_picker = !show_agent_picker;
             if (show_agent_picker) open_agent_picker();
             return true;
         }
-        if (MatchesAny(event, KeyToEvents(keys.KeyFor("panel.toggle")))) {
+        if (keymap.Matches("panel.toggle", event)) {
             show_panel = !show_panel;
             return true;
         }
-        if (MatchesAny(event, KeyToEvents(keys.KeyFor("chat.load_older")))) {
+        if (keymap.Matches("chat.load_older", event)) {
             if (!sid.empty()) app->RequestScrollback(sid, /*newest=*/false);
             return true;
         }
@@ -1841,7 +1847,7 @@ int RunTui(const minimal::client::ParsedArgs& args) {
                 return true;
             }
         }
-        if (MatchesAny(event, KeyToEvents(keys.KeyFor("chat.scroll_up")))) {
+        if (keymap.Matches("chat.scroll_up", event)) {
             if (!sid.empty()) {
                 if (auto it = tab_ui.find(sid); it != tab_ui.end() && it->second.chat) {
                     it->second.chat->ScrollBy(1);   // toward older
@@ -1849,7 +1855,7 @@ int RunTui(const minimal::client::ParsedArgs& args) {
             }
             return true;
         }
-        if (MatchesAny(event, KeyToEvents(keys.KeyFor("chat.scroll_down")))) {
+        if (keymap.Matches("chat.scroll_down", event)) {
             if (!sid.empty()) {
                 if (auto it = tab_ui.find(sid); it != tab_ui.end() && it->second.chat) {
                     it->second.chat->ScrollBy(-1);   // toward newest
@@ -1857,7 +1863,7 @@ int RunTui(const minimal::client::ParsedArgs& args) {
             }
             return true;
         }
-        if (MatchesAny(event, KeyToEvents(keys.KeyFor("tab.close")))) {
+        if (keymap.Matches("tab.close", event)) {
             if (!sid.empty()) {
                 // Closing a ROOT tab terminates its group: stage children
                 // first, the root last (TabsToClose, keybinding_dispatch.hpp).
@@ -1874,7 +1880,7 @@ int RunTui(const minimal::client::ParsedArgs& args) {
             }
             return true;
         }
-        if (MatchesAny(event, KeyToEvents(keys.KeyFor("app.quit")))) {
+        if (keymap.Matches("app.quit", event)) {
             request_quit();
             return true;
         }
@@ -1882,8 +1888,9 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         // Plugin views, after every core action: a visible PANEL gets the
         // event first (its component consumes what it wants); any view id
         // bound in keybindings.json toggles its visibility. The ids were
-        // registered as runtime defaults (EnsureDefault), so a user's file
-        // that already names them wins.
+        // registered as runtime defaults (EnsureDefault) BEFORE keymap was
+        // built, so keymap already knows them -- a user's file that already
+        // names them still wins (EnsureDefault only fills what's unbound).
         for (auto& entry : plugin_views) {
             if (entry.view->spec().placement == plugins::ViewPlacement::Panel && entry.visible &&
                 entry.component->OnEvent(event)) {
@@ -1891,7 +1898,7 @@ int RunTui(const minimal::client::ParsedArgs& args) {
             }
         }
         for (auto& entry : plugin_views) {
-            if (MatchesAny(event, KeyToEvents(keys.KeyFor(entry.view->spec().id)))) {
+            if (keymap.Matches(entry.view->spec().id, event)) {
                 entry.visible = !entry.visible;
                 if (entry.view->spec().placement == plugins::ViewPlacement::Modal) {
                     *plugin_modal_child = entry.component;

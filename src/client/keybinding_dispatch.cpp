@@ -1,5 +1,7 @@
 #include "minimal/client/keybinding_dispatch.hpp"
 
+#include "minimal/client/key_event_parser.hpp"
+
 namespace minimal::client {
 
 std::string NextRootGroup(const std::vector<AppState::TabSnapshot>& tabs,
@@ -48,6 +50,28 @@ bool AnyWorkInFlight(const std::vector<AppState::TabSnapshot>& tabs,
             }
             break;
         }
+    }
+    return false;
+}
+
+ResolvedKeymap ResolvedKeymap::Build(const Keybindings& keys) {
+    ResolvedKeymap out;
+    for (const auto& [action, key] : keys.all()) {
+        auto events = ParseKeySpec(key);
+        if (events.empty()) {
+            out.unmapped_.emplace_back(action, key);
+            continue;
+        }
+        out.table_.emplace(action, std::move(events));
+    }
+    return out;
+}
+
+bool ResolvedKeymap::Matches(std::string_view action, const ftxui::Event& event) const {
+    const auto it = table_.find(std::string(action));
+    if (it == table_.end()) return false;   // never bound, or bound to an unparseable key
+    for (const auto& candidate : it->second) {
+        if (event == candidate) return true;
     }
     return false;
 }

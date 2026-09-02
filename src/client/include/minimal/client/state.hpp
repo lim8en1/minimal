@@ -28,9 +28,11 @@ namespace minimal::client {
 // ============================================================================
 // Tool execution tracking (for the running-tools panel)
 //   Server emits: ToolExecutionEvent{started=true} -> ToolOutputDeltaEvents ->
-//   ToolExecutionEvent{started=false, is_error}. We mirror this sequence.
-// v1 runs tools sequentially, so there is at most one active tool per turn; each
-// delta/finish event carries the tool_use_id matching its start — we key on that.
+//   ToolExecutionEvent{started=false, is_error}, per tool_use_id. Tool dispatch
+// is parallel (ARCHITECTURE.md "Tool dispatch is parallel", width 4 by
+// default), so SEVERAL tools can be active at once and resolve in completion
+// order, not gate order; every delta/finish event carries the tool_use_id
+// matching its start — we key on that, never on position.
 // ============================================================================
 
 struct ToolExecutionState {
@@ -45,6 +47,15 @@ struct ToolExecutionState {
 
     bool started = false;      // true once we've seen a start event for this tool
     bool is_error = false;     // set by the finished ToolExecutionEvent (is_error)
+
+    // True for a row opened by BackgroundTaskEvent{STARTED} rather than
+    // ToolExecutionEvent{started:true} -- ARCHITECTURE.md "Background bash
+    // rows": the task can outlive the ToolExecutionEvent{finished} that
+    // acked the original (synchronous) call, possibly by several turns, so
+    // OnTurnCompleted's per-turn tools_.clear() must leave these rows alone
+    // (a live background row reopens under the same tool_use_id after its
+    // ack, and closes only on ITS OWN terminal BackgroundTaskEvent).
+    bool is_background = false;
 };
 
 // ============================================================================
@@ -118,7 +129,9 @@ public:
         std::optional<PendingPermission> pending_permission;
         std::optional<PendingConfirmation> pending_confirmation;
 
-        // Active tools in order emitted (server runs them sequentially in v1)
+        // Active tools in gate order (the order the model asked for them);
+        // several may be RUNNING at once (parallel dispatch, width 4 by
+        // default) and finish in completion order, not this order.
         std::vector<ToolExecutionState> tools;
 
         // Status-bar occupancy from the LAST turn only (NOT cumulative — see ARCH).
@@ -262,6 +275,15 @@ public:
     void OnToolOutputDelta(const std::string& tool_use_id, const std::string& chunk);
     void OnToolFinished(const std::string& tool_use_id, const v1::ToolExecutionEvent& final_evt);
 
+    // ARCHITECTURE.md "Background bash rows": a BackgroundTaskEvent rides the
+    // same tool_use_id as the ToolExecutionEvent that acked the original
+    // (synchronous) call, so STARTED opens or REOPENS a row -- a row closed
+    // by its ack legitimately reopens when the detached task later reports a
+    // terminal state, possibly many turns afterward. OnToolOutputDelta
+    // already keys by tool_use_id + started, so background output deltas are
+    // routed correctly with no change there.
+    void OnBackgroundTask(const v1::BackgroundTaskEvent& evt);
+
     // --- Scrollback paging (keyset by seq) ---
     void ApplyScrollbackPage(const v1::GetMessagesResponse& resp);
     bool CanLoadMore() const;
@@ -321,7 +343,7 @@ private:
     std::optional<PendingPermission> pending_permission_;
     std::optional<PendingConfirmation> pending_confirmation_;
 
-    // Tool executions (sequential, v1 runs one at a time)
+    // Tool executions (parallel dispatch; keyed by tool_use_id, not position)
     std::vector<ToolExecutionState> tools_;
 
     int64_t input_tokens_ = 0;   // last turn occupancy
@@ -451,10 +473,6 @@ public:
     // --- Rendering ---
     std::vector<TabSnapshot> GetAllTabs() const;   // in render order
 
-    // Per-tab full snapshots (tools, streaming text, notices) for the views
-    // that show cross-session detail. One lock pass, no per-tab fetches.
-    std::map<std::string, SessionState::Snapshot> GetAllDetails() const;
-
     // The focused tab's session id ("" when no tabs). The prompt editor and
     // status bar target it.
     std::string FocusedSessionId() const;
@@ -489,7 +507,7 @@ public:
     // The exclusive chat surface, unless a plugin threw out of it (catch +
     // disable): null means the core chat view renders the tab body.
     plugins::ChatSurface* EffectiveChatSurface() const {
-        return chat_surface_broken_ ? nullptr : chat_surface_;
+        return chat_surface_broken_.load(std::memory_order_acquire) ? nullptr : chat_surface_;
     }
 
     // Disables a surface that threw mid-render (loop thread). `reason` may be
@@ -503,9 +521,9 @@ public:
     void SetUiBounds(int scrollback_max_messages, int tool_output_buffer_bytes);
 
     // DEEP snapshot of ONE tab -- the focused tab, for the frame. The pre-R
-    // frame called GetAllDetails() (a deep copy of EVERY tab, under each tab's
-    // lock) two to three times per frame; with the light tab list (GetAllTabs
-    // -> TakeLightSnapshot) and this, a frame copies the focused tab once.
+    // frame deep-copied EVERY tab (under each tab's lock) two to three times
+    // per frame; with the light tab list (GetAllTabs -> TakeLightSnapshot)
+    // and this, a frame copies the focused tab once.
     SessionState::Snapshot GetDetails(const std::string& session_id) const;
 
     // Monotonic UI revision, bumped by every mutating entry point. The 20 Hz
@@ -576,8 +594,12 @@ private:
     plugins::ChatSurface* chat_surface_ = nullptr;
     // A plugin surface that THREW is disabled for the process (catch +
     // disable): the core chat view takes over, the process survives. Third
-    // thrown events downgrade to a logged error, not a dead tab.
-    bool chat_surface_broken_ = false;
+    // thrown events downgrade to a logged error, not a dead tab. Atomic: every
+    // reader thread writes it via DispatchToTab (see .cpp), the loop thread
+    // writes it via DisableChatSurface, and both read it back through
+    // EffectiveChatSurface -- a plain bool here was an unsynchronized
+    // read/write race across threads (TSan-visible).
+    std::atomic<bool> chat_surface_broken_{false};
 
     void FocusWithWrap(bool forward);       // shared logic for the two cycle methods
     TabEntry* FindTab(const std::string& session_id);  // unlocked, mutex held by caller

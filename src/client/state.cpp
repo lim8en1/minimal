@@ -140,7 +140,18 @@ void SessionState::FinalizeStreamingText() {
 // tab really is briefly idle there.
 void SessionState::MaybeGoIdleLocked() {
     if (state_ == SessionStateKind::Error || state_ == SessionStateKind::Done) return;
-    const bool tool_active = !tools_.empty() && tools_.back().started;
+    // ANY tool still running, not just the LAST-started one: ARCHITECTURE.md
+    // "Tool dispatch is parallel" makes several tools in flight at once the
+    // COMMON case (width 4 by default), and results arrive in COMPLETION
+    // order, not gate order -- tools_.back() is the last one the model asked
+    // for, not the last one still running. `tools_.back().started` alone
+    // flipped the tab to Idle (spinner gone, "Working" lost) the moment the
+    // last-STARTED tool finished, even with earlier calls of the same round
+    // still executing on the pool.
+    const bool tool_active =
+        std::any_of(tools_.begin(), tools_.end(), [](const ToolExecutionState& t) {
+            return t.started;
+        });
     if (!tool_active && !pending_permission_ && !pending_confirmation_) {
         state_ = SessionStateKind::Idle;
     }
@@ -157,7 +168,21 @@ void SessionState::OnTurnCompleted(const v1::TurnCompletedEvent& evt) {
     // SESSION ended (see OnSessionEnded), not that a turn finished -- the
     // preceding message_stop already resolved state_ (normally to Idle). An
     // in-flight Error is left alone rather than silently cleared here.
-    tools_.clear();   // the panel resets when a new turn begins
+    //
+    // The panel resets when a new turn begins -- EXCEPT a still-running
+    // background task's row (ARCHITECTURE.md "Background bash rows"): its
+    // ToolExecutionEvent{finished} already acked the launching call, so it is
+    // no longer a live FOREGROUND tool by the time any turn completes, but
+    // the detached process keeps running and its terminal BackgroundTaskEvent
+    // can arrive many turns later. A blanket clear here silently dropped that
+    // row out from under the still-running task. A finished background row
+    // (its own terminal event already closed it) is swept here exactly like
+    // any other finished row -- only a LIVE one survives.
+    tools_.erase(std::remove_if(tools_.begin(), tools_.end(),
+                                [](const ToolExecutionState& t) {
+                                    return !(t.is_background && t.started);
+                                }),
+                tools_.end());
     // A CANCELLED turn (or one that died at a prompt) ends WITHOUT a message
     // stop: the server denied the parked prompt on our behalf
     // (Session::Cancel's pending.CancelAll), so the answer never traveled
@@ -278,8 +303,12 @@ void SessionState::OnPendingResolved() {
 }
 
 // Tools ---------------------------------------------------------------------
-// v1 runs tools sequentially and streams them start -> output deltas -> finish, keyed by
-// the tool_use_id that echoes on every delta. We match on that id rather than a positional.
+// Tool dispatch is parallel (ARCHITECTURE.md "Tool dispatch is parallel",
+// width 4 by default): several tools of one assistant round can be RUNNING
+// at once, and their start/delta/finish events interleave and resolve in
+// COMPLETION order, not gate order. Every handler here keys on tool_use_id
+// (never on position) for exactly that reason -- multi-row is the common
+// case, not just subagents and long bash commands.
 
 void SessionState::OnToolStarted(const v1::ToolExecutionEvent& evt) {
     std::lock_guard lk(mtx_);
@@ -290,7 +319,7 @@ void SessionState::OnToolStarted(const v1::ToolExecutionEvent& evt) {
     tool.started_at_unix_ms = std::chrono::milliseconds(evt.started_at_unix_ms());
     tools_.push_back(std::move(tool));
 
-    auto& live = tools_.back();   // v1 sequential => the just-started tool is last
+    auto& live = tools_.back();   // the row just pushed, regardless of how many precede it
     live.started = true;
     if (state_ == SessionStateKind::Idle || state_ == SessionStateKind::Done) {
         state_ = SessionStateKind::Working;
@@ -327,10 +356,54 @@ void SessionState::OnToolFinished(const std::string& tool_use_id, const v1::Tool
     for (auto it = tools_.rbegin(); it != tools_.rend(); ++it) {
         if (it->tool_use_id == tool_use_id && it->started) {   // finish the matching active tool
             it->is_error = final_evt.has_is_error() ? final_evt.is_error() : false;
-            it->started = false;   // no longer current — deltas after this won't match
+            // A BACKGROUND row's launching call finishing does NOT mean the
+            // task itself is done -- it means the SYNCHRONOUS half (the gate
+            // + the call that kicked the detached process off) returned; the
+            // process keeps running (ARCHITECTURE.md "Background bash
+            // rows"). Only OnBackgroundTask's own terminal event ends its
+            // liveness -- flipping `started` here would drop live deltas
+            // (OnToolOutputDelta requires `started`) and read the row as
+            // done while the task is still running.
+            if (!it->is_background) it->started = false;   // no longer current
             return;
         }
     }
+}
+
+// ARCHITECTURE.md "Background bash rows". `tool_use_id` rides the SAME id as
+// the ToolExecutionEvent that acked the launching (synchronous) call, so
+// STARTED here typically finds a row OnToolStarted already opened -- it is
+// promoted to a live background row rather than a second one being pushed.
+// A row that OnToolFinished already closed, or a turn boundary already swept
+// (before this event existed, or in the odd case the STARTED notice never
+// arrived), REOPENS: "a client keyed by tool_use_id alone must tolerate a
+// row reopening after its finish event" is the doc's own words for this.
+void SessionState::OnBackgroundTask(const v1::BackgroundTaskEvent& evt) {
+    std::lock_guard lk(mtx_);
+    const bool is_terminal = evt.state() != v1::BackgroundTaskEvent::STARTED;
+    const bool is_error = evt.state() == v1::BackgroundTaskEvent::FAILED ||
+                          evt.state() == v1::BackgroundTaskEvent::TIMED_OUT ||
+                          evt.state() == v1::BackgroundTaskEvent::KILLED;
+
+    for (auto& tool : tools_) {
+        if (tool.tool_use_id != evt.tool_use_id()) continue;
+        tool.is_background = true;
+        tool.started = !is_terminal;
+        if (is_terminal) tool.is_error = is_error;
+        if (!evt.command().empty()) tool.summary = evt.command();
+        return;
+    }
+
+    // Reopen: no existing row (already finished-and-swept, or STARTED never
+    // reached us before this terminal event did).
+    ToolExecutionState tool;
+    tool.tool_use_id = evt.tool_use_id();
+    tool.tool_name = "bash";   // background tasks are bash's own extension
+    tool.summary = evt.command();
+    tool.is_background = true;
+    tool.started = !is_terminal;
+    tool.is_error = is_terminal && is_error;
+    tools_.push_back(std::move(tool));
 }
 
 // Scrollback -----------------------------------------------------------------
@@ -419,7 +492,7 @@ void AppState::SetUiBounds(int scrollback_max_messages, int tool_output_buffer_b
 }
 
 void AppState::DisableChatSurface(const char* reason) {
-    chat_surface_broken_ = true;
+    chat_surface_broken_.store(true, std::memory_order_release);
     if (reason != nullptr) {
         common::DefaultLogger().error(
             "chat surface plugin threw ({}) -- disabled; the core chat view takes over", reason);
@@ -578,16 +651,16 @@ void AppState::DispatchToTab(const std::string& session_id, const v1::ServerEven
     // the reader thread function and std::terminate'd the whole TUI -- and a
     // blocking surface wedges the data plane AND the CloseAllTabs join; the
     // block contract is documented, the throw is enforced.
-    if (chat_surface_ != nullptr && !chat_surface_broken_) {
+    if (chat_surface_ != nullptr && !chat_surface_broken_.load(std::memory_order_acquire)) {
         try {
             chat_surface_->OnEvent(event);
         } catch (const std::exception& error) {
-            chat_surface_broken_ = true;
+            chat_surface_broken_.store(true, std::memory_order_release);
             common::DefaultLogger().error(
                 "chat surface plugin threw ({}) -- disabled; the core chat view takes over",
                 error.what());
         } catch (...) {
-            chat_surface_broken_ = true;
+            chat_surface_broken_.store(true, std::memory_order_release);
             common::DefaultLogger().error(
                 "chat surface plugin threw a non-standard exception -- disabled; the core "
                 "chat view takes over");
@@ -655,6 +728,8 @@ void AppState::DispatchToTab(const std::string& session_id, const v1::ServerEven
     } else if (event.has_tool_output_delta()) {
         target->OnToolOutputDelta(event.tool_output_delta().tool_use_id(),
                                    event.tool_output_delta().chunk());
+    } else if (event.has_background_task()) {
+        target->OnBackgroundTask(event.background_task());
     } else if (event.has_command_result()) {
         target->OnCommandResult(event.command_result());
     } else if (event.has_subagent_started()) {
@@ -726,13 +801,20 @@ void AppState::CycleFocusBackward() { FocusWithWrap(false); }
 
 void AppState::FocusWithWrap(bool forward) {
     std::vector<std::string> order;
+    // focused_id_ copied under the SAME lock as order: a reader thread can
+    // write it via OnSubagentSpawned -> SetFocusedTab (the blocking-subagent
+    // auto-focus path) at any time, so reading it after the lock was
+    // released -- as this used to -- was an unlocked read racing that write
+    // (TSan-visible; no crash, just an occasionally stale `current`).
+    std::string focused;
     {
         std::lock_guard lk(mtx_);
         for (const auto& tab : tabs_) order.push_back(tab.info.session_id);
+        focused = focused_id_;
     }
     if (order.empty()) return;
 
-    const auto current = std::find(order.begin(), order.end(), focused_id_);
+    const auto current = std::find(order.begin(), order.end(), focused);
     if (current == order.end()) {     // nothing focused yet — focus first in render order
         SetFocusedTab(order.front());
         return;
@@ -852,7 +934,15 @@ void AppState::SendCommand(const std::string& session_id, const std::string& lin
         command->mutable_args()->add_positional(value);
     }
     command->mutable_args()->set_raw(invocation.raw);
-    stream->Send(ev);
+    // A refused send is surfaced, not swallowed -- same rule as SendChatTurn/
+    // AnswerPermission/AnswerConfirmation: a `/`-command silently vanishing
+    // reads as "the harness ignored me", indistinguishable from it having
+    // been accepted and simply producing no visible result.
+    if (!stream->Send(ev)) {
+        if (auto state = GetState(session_id)) {
+            state->OnError("cannot send: the stream is closing or stalled");
+        }
+    }
 }
 
 void AppState::SendCancel(const std::string& session_id) {
@@ -885,7 +975,13 @@ void AppState::SendRewind(const std::string& session_id, std::optional<int64_t> 
     } else {
         return;   // neither a target nor redo: nothing to send
     }
-    stream->Send(ev);
+    // Same refusal rule as SendCommand/SendChatTurn: a rewind/redo the user
+    // explicitly asked for must not vanish silently on a stalled stream.
+    if (!stream->Send(ev)) {
+        if (auto state = GetState(session_id)) {
+            state->OnError("cannot send: the stream is closing or stalled");
+        }
+    }
 }
 
 std::optional<int64_t> AppState::FindRewindTargetSeq(const std::string& session_id, int n) {
@@ -990,20 +1086,10 @@ std::vector<AppState::TabSnapshot> AppState::GetAllTabs() const {
     return out;
 }
 
-std::map<std::string, SessionState::Snapshot> AppState::GetAllDetails() const {
-    std::lock_guard lk(mtx_);
-    std::map<std::string, SessionState::Snapshot> out;
-    for (const auto& tab : tabs_) {
-        out.emplace(tab.info.session_id, tab.info.state->TakeSnapshot());
-    }
-    return out;
-}
-
 SessionState::Snapshot AppState::GetDetails(const std::string& session_id) const {
     // The DEEP snapshot for ONE tab (track R's focused-tab pump redesign): the
     // frame renders the focused tab only, so deep-copying every tab per frame
-    // -- under each tab's lock -- was pure waste. GetAllDetails stays for
-    // callers that genuinely need every tab.
+    // -- under each tab's lock -- was pure waste.
     std::lock_guard lk(mtx_);
     for (const auto& tab : tabs_) {
         if (tab.info.session_id == session_id) return tab.info.state->TakeSnapshot();

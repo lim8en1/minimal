@@ -14,9 +14,10 @@ using minimal::client::ChatRowKind;
 
 namespace {
 
-v1::StoredMessage MakeMessage(v1::Role role, std::vector<v1::ContentBlock> blocks) {
+v1::StoredMessage MakeMessage(v1::Role role, std::vector<v1::ContentBlock> blocks,
+                              int64_t seq = 0) {
     v1::StoredMessage stored;
-    stored.set_seq(0);
+    stored.set_seq(seq);
     stored.mutable_message()->set_role(role);
     for (auto& block : blocks) {
         *stored.mutable_message()->add_content() = std::move(block);
@@ -154,6 +155,47 @@ TEST_CASE("thinking blocks become thinking rows", "[chat_model]") {
 
 TEST_CASE("an empty page yields no rows", "[chat_model]") {
     CHECK(client::ChatRowsFromMessages({}).empty());
+}
+
+// Regression: every branch of the per-message dispatch used to `continue`
+// past the seq-stamping loop at the bottom, so only the plain-text-user
+// branch (the sole case with no early exit) ever stamped its rows -- every
+// assistant, tool-result and harness-injection row kept the -1 "synthetic"
+// sentinel. ChatView's render cache is keyed on (seq, occurrence-within-seq)
+// (view/chat_view.cpp), so those rows all collapsed into one bucket keyed by
+// POSITION instead of by message identity: paging in an older page shifts
+// every position, and the cache then serves a stale render under the wrong
+// message. One page exercising every branch: assistant text, a tool use +
+// its result, and a spawn-subagent completion injection.
+TEST_CASE("every row carries its source message's seq, whatever branch produced it",
+          "[chat_model][regression]") {
+    std::vector<v1::StoredMessage> page;
+    // Descending by seq, as GetMessages returns.
+    page.push_back(MakeMessage(v1::ROLE_USER, {ToolResult("spawn1", "child text", false)},
+                               /*seq=*/40));
+    page.push_back(
+        MakeMessage(v1::ROLE_ASSISTANT, {ToolUse("spawn1", "spawn_subagent")}, /*seq=*/30));
+    page.push_back(MakeMessage(v1::ROLE_USER, {ToolResult("t1", "stdout tail", false)},
+                               /*seq=*/20));
+    page.push_back(MakeMessage(v1::ROLE_ASSISTANT, {ToolUse("t1", "bash")}, /*seq=*/10));
+    page.push_back(MakeMessage(v1::ROLE_ASSISTANT, {TextBlock("hello")}, /*seq=*/0));
+
+    const auto rows = client::ChatRowsFromMessages(page);
+
+    REQUIRE(rows.size() == 5);
+    // Display order (oldest first): text(0), bash use(10), bash result(20),
+    // spawn use(30), spawn result(40).
+    CHECK(rows[0].kind == ChatRowKind::AgentMarkdown);
+    CHECK(rows[0].seq == 0);
+    CHECK(rows[1].kind == ChatRowKind::ToolActivity);
+    CHECK(rows[1].seq == 10);
+    CHECK(rows[2].kind == ChatRowKind::ToolActivity);
+    CHECK(rows[2].seq == 20);
+    CHECK(rows[3].kind == ChatRowKind::ToolActivity);
+    CHECK(rows[3].seq == 30);
+    CHECK(rows[4].kind == ChatRowKind::System);
+    CHECK(rows[4].seq == 40);
+    for (const auto& row : rows) CHECK(row.seq >= 0);   // none left at the -1 sentinel
 }
 
 // --- command results: never chat -------------------------------------------

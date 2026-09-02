@@ -1,5 +1,7 @@
 #include "minimal/client/view/prompt_editor.hpp"
 
+#include <algorithm>
+
 #include <ftxui/component/event.hpp>
 
 namespace minimal::client {
@@ -89,20 +91,36 @@ ftxui::Component MakePromptEditor(
         state.completions.clear();
     };
 
-    // accept_suggestion captured BY VALUE (copy), not by reference: it is a
-    // local closure object in THIS function's stack frame, unlike `state`
-    // (a reference parameter binding to an object that outlives this
-    // factory). A `[&]` capture here would store a reference to a stack
-    // variable that dies the moment MakePromptEditor returns -- exactly the
-    // "closures outlive the factory" trap session_picker.cpp documents.
-    // Copying is cheap: accept_suggestion's own captures (state, etc.) are
-    // themselves references to externally-owned objects.
-    auto with_events = CatchEvent(input, [&, accept_suggestion](const Event& event) {
+    // accept_suggestion, on_text, on_command and command_catalog captured BY
+    // VALUE (copies), not by reference: `[&]` here would bind references to
+    // this factory's OWN PARAMETERS -- on_text/on_command/command_catalog are
+    // by-value std::functions living in this stack frame, not the caller's --
+    // and every one of those references dangles the moment MakePromptEditor
+    // returns, exactly the "closures outlive the factory" trap
+    // session_picker.cpp documents (accept_suggestion is the same trap one
+    // level up: a local closure object, not a reference to caller state).
+    // `state` stays by reference deliberately: it is a reference parameter
+    // binding to an object the caller (RunTui) owns for the app's lifetime,
+    // which outlives this component.
+    auto with_events = CatchEvent(
+        input, [&state, accept_suggestion, on_text, on_command,
+                command_catalog](const Event& event) {
         // Alt+Enter (ESC CR) inserts a newline -- the portable multi-line key.
         static const Event kAltEnterCr = Event::Character("\x1b\r");
         static const Event kAltEnterLf = Event::Character("\x1b\n");
         if (event == kAltEnterCr || event == kAltEnterLf) {
-            state.content += "\n";
+            // AT THE CURSOR, not appended to the end: appending always broke
+            // a newline inserted while editing mid-line (the common case --
+            // Alt+Enter is how a multi-line prompt gets built up one line at
+            // a time) into a line dropped at the tail instead. cursor_position
+            // is clamped defensively -- FTXUI only clamps it INTO content's
+            // bounds after an external splice, it never derives it, so a
+            // stale value from before some other edit must not be trusted
+            // past content's own length.
+            const auto pos = std::clamp<std::size_t>(
+                static_cast<std::size_t>(state.cursor_position), 0, state.content.size());
+            state.content.insert(pos, "\n");
+            state.cursor_position = static_cast<int>(pos) + 1;
             return true;   // consumed
         }
         // Enter accepts the highlighted suggestion when the list is open,
@@ -170,6 +188,13 @@ ftxui::Component MakePromptEditor(
                 --*state.history_cursor;
             }
             state.content = state.history[*state.history_cursor];
+            // FTXUI's Input only CLAMPS cursor_position into content's new
+            // bounds after an external splice -- it never MOVES it -- so
+            // without this the caret stayed wherever it was in the PREVIOUS
+            // line's text, landing mid-word (or past the end, silently
+            // clamped) in the recalled one instead of at the end the way a
+            // shell's history recall behaves.
+            state.cursor_position = static_cast<int>(state.content.size());
             return true;
         }
         if (!state.list_open && event == Event::ArrowDown && state.history_cursor.has_value()) {
@@ -180,6 +205,7 @@ ftxui::Component MakePromptEditor(
                 state.history_cursor.reset();
                 state.content = state.history_draft;
             }
+            state.cursor_position = static_cast<int>(state.content.size());
             return true;
         }
 

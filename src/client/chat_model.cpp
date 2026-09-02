@@ -107,85 +107,106 @@ std::vector<ChatRow> ChatRowsFromMessages(const std::vector<v1::StoredMessage>& 
         const auto& message = it->message();
         const int64_t message_seq = it->seq();
         const std::size_t first_row_of_message = rows.size();
-        if (message.role() == v1::ROLE_ASSISTANT) {
-            for (const auto& block : message.content()) {
-                if (block.has_text()) {
-                    rows.push_back(ChatRow{.kind = ChatRowKind::AgentMarkdown,
-                                           .text = block.text().text()});
-                } else if (block.has_thinking()) {
-                    rows.push_back(ChatRow{.kind = ChatRowKind::Thinking,
-                                           .text = block.thinking().text()});
-                } else if (block.has_tool_use()) {
-                    tool_calls.push_back(
-                        {block.tool_use().id(),
-                         ToolCall{block.tool_use().name(), StructToJson(block.tool_use().input())}});
-                    rows.push_back(ChatRow{.kind = ChatRowKind::ToolActivity,
-                                           .tool_name = block.tool_use().name(),
-                                           .tool_input = StructToJson(block.tool_use().input())});
-                }
-            }
-            continue;
-        }
 
-        // ROLE_USER. The harness invariant (openai_request.cpp): a User message
-        // is ALL text blocks or ALL tool-result blocks, never mixed.
-        bool all_results = !message.content().empty();
-        for (const auto& block : message.content()) {
-            if (!block.has_tool_result()) all_results = false;
-        }
-
-        if (all_results) {
-            bool all_spawn = true;
-            for (const auto& block : message.content()) {
-                if (!is_spawn_id(block.tool_result().tool_use_id())) all_spawn = false;
-            }
-            if (all_spawn) {
-                // One harness row per injection, text joined.
-                std::string joined;
+        // One message's worth of row-pushing, as an IIFE rather than inline
+        // loop body: every early exit below used to be a `continue` that
+        // skipped the seq-stamping loop that then sat at the bottom of the
+        // outer loop, so only the plain-text-user branch (the one case with
+        // no early exit) ever got its rows stamped -- every assistant,
+        // tool-result and harness-injection row kept seq==-1, the "synthetic"
+        // sentinel. ChatView's render cache is keyed on (seq, occurrence),
+        // so those rows all collapsed into one bucket keyed by POSITION
+        // instead: loading an older page shifts every position, and the
+        // cache then serves a stale render under the wrong message. A `return`
+        // here ends the lambda, not the outer loop, so the stamp below always
+        // runs regardless of which branch produced the rows.
+        [&] {
+            if (message.role() == v1::ROLE_ASSISTANT) {
                 for (const auto& block : message.content()) {
-                    if (!joined.empty()) joined += "\n";
-                    joined += JoinResultText(block.tool_result());
-                }
-                rows.push_back(ChatRow{.kind = ChatRowKind::System, .text = std::move(joined)});
-                continue;
-            }
-            for (const auto& block : message.content()) {
-                const ToolCall* call = tool_call_of(block.tool_result().tool_use_id());
-                ChatRow row{.kind = ChatRowKind::ToolActivity,
-                            .text = JoinResultText(block.tool_result()),
-                            .tool_name = call != nullptr ? call->name : std::string{},
-                            .tool_input = call != nullptr ? call->input : nlohmann::json::object(),
-                            .tool_is_error = block.tool_result().is_error()};
-                rows.push_back(std::move(row));
-            }
-            continue;
-        }
-
-        // Text user message: block 0 is what the human typed (verbatim);
-        // later text blocks are @-mention attachments (E3's expansion shape).
-        for (int i = 0; i < message.content_size(); ++i) {
-            const auto& block = message.content(i);
-            if (!block.has_text()) continue;
-            if (i == 0) {
-                rows.push_back(
-                    ChatRow{.kind = ChatRowKind::UserText, .text = block.text().text()});
-            } else {
-                ChatRow row{.kind = ChatRowKind::UserAttachment, .text = block.text().text()};
-                // The E3 frame: <file path="..."> / <file-tree path="...">.
-                const std::string& framed = block.text().text();
-                const auto open = framed.find("<file");
-                const auto path_key = framed.find("path=\"", open);
-                if (path_key != std::string::npos) {
-                    const auto end = framed.find('"', path_key + 6);
-                    if (end != std::string::npos) {
-                        row.attachment_path = framed.substr(path_key + 6, end - (path_key + 6));
+                    if (block.has_text()) {
+                        rows.push_back(ChatRow{.kind = ChatRowKind::AgentMarkdown,
+                                               .text = block.text().text()});
+                    } else if (block.has_thinking()) {
+                        rows.push_back(ChatRow{.kind = ChatRowKind::Thinking,
+                                               .text = block.thinking().text()});
+                    } else if (block.has_tool_use()) {
+                        tool_calls.push_back(
+                            {block.tool_use().id(),
+                             ToolCall{block.tool_use().name(),
+                                      StructToJson(block.tool_use().input())}});
+                        rows.push_back(ChatRow{.kind = ChatRowKind::ToolActivity,
+                                               .tool_name = block.tool_use().name(),
+                                               .tool_input = tool_calls.back().second.input});
                     }
                 }
-                rows.push_back(std::move(row));
+                return;
             }
-        }
+
+            // ROLE_USER. The harness invariant (openai_request.cpp): a User
+            // message is ALL text blocks or ALL tool-result blocks, never
+            // mixed.
+            bool all_results = !message.content().empty();
+            for (const auto& block : message.content()) {
+                if (!block.has_tool_result()) all_results = false;
+            }
+
+            if (all_results) {
+                bool all_spawn = true;
+                for (const auto& block : message.content()) {
+                    if (!is_spawn_id(block.tool_result().tool_use_id())) all_spawn = false;
+                }
+                if (all_spawn) {
+                    // One harness row per injection, text joined.
+                    std::string joined;
+                    for (const auto& block : message.content()) {
+                        if (!joined.empty()) joined += "\n";
+                        joined += JoinResultText(block.tool_result());
+                    }
+                    rows.push_back(ChatRow{.kind = ChatRowKind::System, .text = std::move(joined)});
+                    return;
+                }
+                for (const auto& block : message.content()) {
+                    const ToolCall* call = tool_call_of(block.tool_result().tool_use_id());
+                    ChatRow row{.kind = ChatRowKind::ToolActivity,
+                                .text = JoinResultText(block.tool_result()),
+                                .tool_name = call != nullptr ? call->name : std::string{},
+                                .tool_input = call != nullptr ? call->input : nlohmann::json::object(),
+                                .tool_is_error = block.tool_result().is_error()};
+                    rows.push_back(std::move(row));
+                }
+                return;
+            }
+
+            // Text user message: block 0 is what the human typed (verbatim);
+            // later text blocks are @-mention attachments (E3's expansion shape).
+            for (int i = 0; i < message.content_size(); ++i) {
+                const auto& block = message.content(i);
+                if (!block.has_text()) continue;
+                if (i == 0) {
+                    rows.push_back(
+                        ChatRow{.kind = ChatRowKind::UserText, .text = block.text().text()});
+                } else {
+                    ChatRow row{.kind = ChatRowKind::UserAttachment, .text = block.text().text()};
+                    // The E3 frame: <file path="..."> / <file-tree path="...">.
+                    const std::string& framed = block.text().text();
+                    const auto open = framed.find("<file");
+                    const auto path_key = framed.find("path=\"", open);
+                    if (path_key != std::string::npos) {
+                        const auto end = framed.find('"', path_key + 6);
+                        if (end != std::string::npos) {
+                            row.attachment_path =
+                                framed.substr(path_key + 6, end - (path_key + 6));
+                        }
+                    }
+                    rows.push_back(std::move(row));
+                }
+            }
+        }();
+
         // Stamp every row this message produced with its transcript seq --
         // the chat view's per-row render cache is keyed by it (track R3).
+        // Runs unconditionally now: every branch above returns out of the
+        // IIFE rather than `continue`-ing past this.
         for (auto r = rows.begin() + static_cast<std::ptrdiff_t>(first_row_of_message);
              r != rows.end(); ++r) {
             r->seq = message_seq;
