@@ -908,11 +908,19 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     // until the turn ends and the refresh swaps it for the persisted rows.
     // (Skipped entirely when the chat surface owns the tab body: the surface
     // keeps its own buffers and fetches its own pages.)
-    auto maintain = [&](const std::string& session_id) {
-        if (chat_surface != nullptr || app->EffectiveChatSurface() != nullptr) return;
-        // The DEEP snapshot for THIS tab only (track R's focused-tab redesign).
-        const auto snap = app->GetDetails(session_id);
-        if (snap.session_id.empty() && session_id != snap.session_id) return;
+    //
+    // Returns the snapshot the frame should render from: the caller-supplied
+    // one, unless a scrollback refresh fired here (which mutates SessionState
+    // out from under it), in which case a fresh one is taken. This is what a
+    // frame's SINGLE deep snapshot of the focused tab -- a full protobuf copy
+    // of up to scrollback_window_max_messages rows -- looks like end to end:
+    // one fetch at the top of session_view, threaded through here and into
+    // handle_notice and the renderer, instead of each independently calling
+    // GetDetails and paying the copy again.
+    auto maintain = [&](const std::string& session_id,
+                        SessionState::Snapshot snap) -> SessionState::Snapshot {
+        if (chat_surface != nullptr || app->EffectiveChatSurface() != nullptr) return snap;
+        if (snap.session_id.empty() && session_id != snap.session_id) return snap;
         TabUi& ui = tab_ui[session_id];
 
         const auto make_stream = [&] { return engine.MakeStream(); };
@@ -945,12 +953,18 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         if (ui.rendered_version != snap.transcript_version) {
             if (snap.streaming_text.empty()) {
                 app->RefreshScrollback(session_id, /*newest=*/true);
-                const auto fresh = app->GetDetails(session_id);
-                ui.rendered_version = std::optional(fresh.transcript_version);
+                // RefreshScrollback mutated SessionState out from under the
+                // snapshot this call was handed -- the rest of THIS frame
+                // (handle_notice, the renderer) must see the refreshed rows,
+                // not the pre-refresh copy, so this is the one re-fetch that
+                // stays: it observes a mutation this same function caused.
+                snap = app->GetDetails(session_id);
+                ui.rendered_version = std::optional(snap.transcript_version);
             } else {
                 ui.rendered_version = snap.transcript_version;
             }
         }
+        return snap;
     };
 
     // --- editor ---------------------------------------------------------------
@@ -1120,9 +1134,8 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     // open_picker's ListSessions RPC and re-staged the modal at frame rate,
     // making it unclosable. Status/Silent notices keep rendering in the frame
     // below; only their SIDE-EFFECTS are guarded.
-    auto handle_notice = [&] {
+    auto handle_notice = [&](const SessionState::Snapshot& snap) {
         if (focused.empty()) return;
-        const auto snap = app->GetDetails(focused);   // focused tab only
         if (!snap.latest_notice.has_value()) return;
         TabUi& ui = tab_ui[focused];
         if (ui.handled_notice_seq == snap.notice_seq) return;   // already handled
@@ -1241,9 +1254,20 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         for (const auto& tab : tabs) {
             if (tab.is_focused) focused = tab.session_id;
         }
+
+        // ONE deep snapshot of the focused tab per frame: GetDetails is a full
+        // protobuf copy of the scrollback window (up to
+        // scrollback_window_max_messages rows), and this used to be paid up
+        // to three times per frame -- once here, again inside maintain, again
+        // inside handle_notice. maintain() may replace it with a fresher one
+        // if a scrollback refresh fires (it must -- the refresh mutates
+        // SessionState out from under the copy this call started with);
+        // handle_notice and the renderer below both read whatever maintain
+        // settled on.
+        auto focused_details = app->GetDetails(focused);
         if (!focused.empty()) {
-            maintain(focused);
-            handle_notice();   // once-per-notice VIEW side-effects (never in Render)
+            focused_details = maintain(focused, std::move(focused_details));
+            handle_notice(focused_details);   // once-per-notice VIEW side-effects (never in Render)
         }
 
         Elements rows;
@@ -1251,7 +1275,6 @@ int RunTui(const minimal::client::ParsedArgs& args) {
 
         // The frame's DEEP copy: the FOCUSED tab only. (The tools panel reads
         // the light TabSnapshot.tools; nothing renders other tabs' heavy data.)
-        const auto focused_details = app->GetDetails(focused);
         if (!focused_details.session_id.empty() || !focused.empty()) {
             const auto& snap = focused_details;
             TabUi& ui = tab_ui[focused];
