@@ -94,6 +94,7 @@ std::vector<CheckResult> StartupSanityCheck::RunAll() {
     append(check_providers());
     append(check_presets());
     append(check_mcp_servers());
+    append(check_channels());
     append(check_directories());
     append(check_session_db());
     append(check_plugins());
@@ -163,6 +164,18 @@ std::vector<CheckResult> StartupSanityCheck::check_config_files() {
     }
     for (const auto& error : mcps_.errors) {
         results.push_back(Warning("mcp_servers", error));
+    }
+
+    // Same degrade-not-die shape as mcps.json: signals are an optional feature
+    // the core serving path does not depend on.
+    try {
+        channels_ = LoadChannelsConfig(dir / "channels.json");
+    } catch (const std::exception& e) {
+        results.push_back(Warning("config_parse", std::string("channels.json: ") + e.what() +
+                                                    "; no signal channels will be configured"));
+    }
+    for (const auto& error : channels_.errors) {
+        results.push_back(Warning("channels", error));
     }
 
     return results;
@@ -438,6 +451,35 @@ std::vector<CheckResult> StartupSanityCheck::check_mcp_servers() {
         } else if (!UrlLooksWellFormed(entry.url)) {
             results.push_back(Warning("mcp_servers", "entry '" + entry.name + "': url '" + entry.url +
                                  "' is not a well-formed http(s) url"));
+        }
+    }
+    return results;
+}
+
+std::vector<CheckResult> StartupSanityCheck::check_channels() {
+    std::vector<CheckResult> results;
+    for (const auto& entry : channels_.entries) {
+        if (!entry.enabled) continue;  // a disabled entry is not going to spawn
+        if (!CommandResolves(entry.command)) {
+            results.push_back(Warning("channels", "channel '" + entry.name + "': command '" +
+                                      entry.command + "' does not resolve on PATH"));
+        }
+        // The internal source is not addressable as a config channel: a
+        // channels.json entry with this name would be unreachable from
+        // subscriptions AND would collide with cross-session routing in the
+        // manager, which skips it. Named here so the user is not left
+        // guessing why their channel never fires.
+        if (entry.name == kReservedInternalChannelName) {
+            results.push_back(Warning(
+                "channels", "channel '" + entry.name +
+                                "' is reserved for internal cross-session signals; the channel "
+                                "will not be configured"));
+        }
+        if (mcps_.Find(entry.name) != nullptr) {
+            results.push_back(Warning(
+                "channels", "channel '" + entry.name +
+                                "' is also an mcps.json server name; the channel is skipped and "
+                                "the MCP server keeps the name"));
         }
     }
     return results;

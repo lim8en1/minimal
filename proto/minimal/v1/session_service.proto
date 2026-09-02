@@ -447,6 +447,16 @@ message CreateSessionRequest {
   // The server loads the stored transcript as the loop's working history
   // WITHOUT re-appending it -- the next append continues at MAX(seq) + 1.
   string session_id = 6;
+  // Signal subscriptions, in effect for this session's lifetime: selectors
+  // "channel" or "channel/signal" (e.g. "ci/build.completed"), plus the
+  // builtin "sessions" source for cross-session messages. Validated against
+  // channels.json at start -- an unknown channel or signal is
+  // INVALID_ARGUMENT, not silence. Non-empty also turns on wake-on-injection
+  // for this session: a subscribed session exists to react to signals, so an
+  // idle one runs a turn when one arrives (dropped-subscriber semantics only
+  // apply to sessions that never subscribed). Re-supplied on resume;
+  // subscriptions never persist across a stream.
+  repeated string signals = 7;
 }
 
 message CreateSessionResponse {

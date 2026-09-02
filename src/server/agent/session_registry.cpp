@@ -125,6 +125,19 @@ std::shared_ptr<Session> SessionRegistry::CreateResolved(SessionParams params,
     } else if (!error.empty()) {
         logger_.warn("session {}: {}", params.session_id, error);
     }
+    // Signal-channel instructions ride AFTER the project context in the same
+    // system section: both are operator-authored framing of the environment,
+    // and both are constant within the session (subscriptions are fixed at
+    // start). Appending here, in the funnel, keeps AgentLoop unaware of
+    // signals -- it renders one context string.
+    if (!params.signal_context.empty()) {
+        if (params.project_context.empty()) {
+            params.project_context = std::move(params.signal_context);
+        } else {
+            params.project_context += "\n\n" + params.signal_context;
+        }
+        params.signal_context.clear();
+    }
     // The user's model outranks the preset's. Applied here rather than inside
     // the preset registry because it is a property of this SESSION, not of the
     // preset -- two sessions on one preset can be running different models. In

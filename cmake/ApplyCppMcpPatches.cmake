@@ -12,6 +12,11 @@
 #   - cpp-mcp-stop-server-race.patch, cpp-mcp-logger-leaky.patch,
 #     cpp-mcp-generate-id-race.patch: TSan-found races/leaks in the vendored
 #     stop path, logger singleton, and request-id counter.
+#   - cpp-mcp-notification-callback.patch: a set_notification_callback() hook
+#     the read thread invokes with server-originated NOTIFICATIONS (it
+#     otherwise logs and drops them), plus get_instructions() to retain the
+#     initialize result's instructions string. The seam signal channels need
+#     to hear from MCP channel servers -- see mcp_stdio_shim.hpp.
 #
 # Runs AFTER FetchContent_MakeAvailable, so ${cpp_mcp_SOURCE_DIR} is defined.
 # Idempotent because `git apply --check` fails on an already-patched tree

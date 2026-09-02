@@ -41,6 +41,14 @@ McpStdioShim::McpStdioShim(const std::string& command_line,
                            const std::map<std::string, std::string>& env)
     : command_line_(command_line), env_(env) {}
 
+void McpStdioShim::SetNotificationSink(std::function<void(const std::string&)> sink) {
+    // Pre-initialize only: the client object does not exist yet, so the sink
+    // is parked here and attached in Initialize() before the child spawns.
+    // (A sink handed over after Initialize would be unusable anyway -- the
+    // patched read thread reads the callback without a lock.)
+    notification_sink_ = std::move(sink);
+}
+
 McpStdioShim::~McpStdioShim() {
     delete static_cast<::mcp::stdio_client*>(client_.load(std::memory_order_acquire));
 }
@@ -51,8 +59,15 @@ bool McpStdioShim::Initialize(const std::string& client_name,
         DisableSigpipe();
         ::mcp::json env_json = ::mcp::json::object();
         for (const auto& [key, value] : env_) env_json[key] = value;
-        client_.store(new ::mcp::stdio_client(command_line_, env_json),
-                      std::memory_order_release);
+        auto* client = new ::mcp::stdio_client(command_line_, env_json);
+        if (notification_sink_) {
+            // Bridge into the patched callback: the lambda runs on cpp-mcp's
+            // read thread, the sink's contract (mcp_stdio_shim.hpp) already
+            // says it must not block.
+            client->set_notification_callback(
+                [sink = notification_sink_](const std::string& raw) { sink(raw); });
+        }
+        client_.store(client, std::memory_order_release);
     }
     try {
         return static_cast<::mcp::stdio_client*>(client_.load(std::memory_order_acquire))
@@ -91,6 +106,28 @@ std::vector<McpStdioShim::ShimTool> McpStdioShim::ListTools() {
     } catch (const std::exception&) {
     }
     return out;
+}
+
+std::string McpStdioShim::ServerCapabilitiesJson() {
+    try {
+        auto* client = static_cast<::mcp::stdio_client*>(
+            client_.load(std::memory_order_acquire));
+        if (client == nullptr) return "{}";
+        return client->get_server_capabilities().dump();
+    } catch (const ::mcp::mcp_exception&) {
+        return "{}";
+    } catch (const std::exception&) {
+        return "{}";
+    }
+}
+
+std::string McpStdioShim::Instructions() {
+    auto* client =
+        static_cast<::mcp::stdio_client*>(client_.load(std::memory_order_acquire));
+    if (client == nullptr) return {};
+    // Written once by initialize() before it returns and read after, so no
+    // lock on either side (patched client's contract).
+    return client->get_instructions();
 }
 
 bool McpStdioShim::CallTool(const std::string& name, const std::string& arguments_json,

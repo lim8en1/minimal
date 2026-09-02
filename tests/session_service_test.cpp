@@ -28,6 +28,7 @@
 #include "deadline.hpp"
 #include "fakes.hpp"
 #include "temp_dir.hpp"
+#include "minimal/agent/signal_router.hpp"
 #include "minimal/client/session_client.hpp"
 #include "minimal/plugins/plugin_loader.hpp"
 #include "minimal/rpc/server.hpp"
@@ -148,6 +149,7 @@ struct ServiceFixture {
         sessions->set_commands(&commands);
         service->set_commands(&commands);
         service->set_mention_resolvers(&mention_resolvers);
+        service->set_signal_router(&signal_router);
         service->set_on_last_client_detached([this] { last_detach.store(true); });
 
         socket = dir / "test.sock";
@@ -166,11 +168,14 @@ struct ServiceFixture {
         if (sessions) sessions->TerminateAll();
     }
 
-    std::string CreateSession() {
+    std::string CreateSession() { return CreateSessionWithSignals({}); }
+
+    std::string CreateSessionWithSignals(const std::vector<std::string>& selectors) {
         grpc::ClientContext context;
         v1::CreateSessionRequest request;
         request.set_project_root((dir / "work").string());
         request.set_agent_preset("main");
+        for (const auto& selector : selectors) request.add_signals(selector);
         v1::CreateSessionResponse response;
         const auto status = stub->CreateSession(&context, request, &response);
         REQUIRE(status.ok());
@@ -197,6 +202,8 @@ struct ServiceFixture {
     std::unique_ptr<v1::SessionService::Stub> stub;
     std::chrono::milliseconds attach_guard = std::chrono::seconds(10);
     std::atomic<bool> last_detach{false};
+    // Signal subscriptions: tests register channels on it before Start().
+    agent::SignalRouter signal_router;
     // Set by tests before Start(): what the service resolves sessions with.
     config::PermissionsConfig service_permissions;
     tools::PermissionAdvisorRegistry permission_advisors;
@@ -2474,4 +2481,129 @@ TEST_CASE("an invalid rewind target is refused on the wire",
     REQUIRE(WaitForTurnCompleted(*stream));
     (void)DrainAndFinish(stream);
     CHECK(fixture.db->GetMessagesPage(session_id, std::nullopt, 50).messages.size() == 4);
+}
+
+// --- Signals (channels + cross-session) over the wire -----------------------
+
+TEST_CASE("signals: an unknown selector refuses the session start",
+          "[session_service][signals]") {
+    ServiceFixture fixture;
+    config::ChannelEntry ci;
+    ci.name = "ci";
+    ci.signals = {"build.completed"};
+    ci.command = "true";
+    fixture.signal_router.RegisterChannel(ci);
+    fixture.Start();
+
+    auto create = [&](const std::string& selector) {
+        grpc::ClientContext context;
+        v1::CreateSessionRequest request;
+        request.set_project_root((fixture.dir / "work").string());
+        request.set_agent_preset("main");
+        request.add_signals(selector);
+        v1::CreateSessionResponse response;
+        const auto status = fixture.stub->CreateSession(&context, request, &response);
+        return status.error_code();
+    };
+
+    // Unknown channel.
+    CHECK(create("nowhere/x") == grpc::StatusCode::INVALID_ARGUMENT);
+    // Declared channel, undeclared signal: fail-loud config drift, at start.
+    CHECK(create("ci/build.unknown") == grpc::StatusCode::INVALID_ARGUMENT);
+    // Restricted channels subscribe per signal.
+    CHECK(create("ci") == grpc::StatusCode::INVALID_ARGUMENT);
+    // Declared, restricted, exact: fine.
+    CHECK(create("ci/build.completed") == grpc::StatusCode::OK);
+}
+
+TEST_CASE("signals: a subscribed session wakes and receives the message",
+          "[session_service][signals]") {
+    ServiceFixture fixture;
+    fixture.Start();
+
+    const std::string session_id = fixture.CreateSessionWithSignals({"sessions"});
+
+    // Attach obligation: name the stream before any signal can arrive.
+    grpc::ClientContext open_context;
+    auto stream = fixture.stub->OpenSession(&open_context);
+    v1::ClientEvent attach;
+    attach.set_session_id(session_id);
+    attach.mutable_attach();
+    REQUIRE(stream->Write(attach));
+
+    // An in-process producer sends to this session; the session is idle and
+    // must WAKE (subscriptions force wake_on_injection) and run a turn whose
+    // user content is the provenance-wrapped signal.
+    fixture.Script(testing::TextResponse("on it"));
+    CHECK(fixture.signal_router.DeliverInternal("peer-session", session_id,
+                                                "deploy finished, please verify") ==
+          agent::SignalDelivery::kDelivered);
+    REQUIRE(WaitForTurnCompleted(*stream));
+    (void)DrainAndFinish(stream);
+
+    const auto page = fixture.db->GetMessagesPage(session_id, std::nullopt, 50);
+    bool saw_signal = false;
+    for (const auto& stored : page.messages) {
+        for (const auto& block : stored.message.content) {
+            if (auto* text = std::get_if<llm::TextBlock>(&block)) {
+                if (text->text.find("deploy finished, please verify") != std::string::npos &&
+                    text->text.find("<signal source=\"sessions\" from=\"peer-session\">") !=
+                        std::string::npos) {
+                    saw_signal = true;
+                }
+            }
+        }
+    }
+    CHECK(saw_signal);
+}
+
+TEST_CASE("signals: no subscriber, no delivery -- and an extended channel passes every signal",
+          "[session_service][signals]") {
+    ServiceFixture fixture;
+    config::ChannelEntry reminder;
+    reminder.name = "reminder";
+    reminder.extended = true;
+    reminder.command = "true";
+    fixture.signal_router.RegisterChannel(reminder);
+    fixture.Start();
+
+    // A session with NO subscriptions: nothing is delivered to it, even though
+    // it is running.
+    const std::string unsubscriber = fixture.CreateSession();
+    fixture.Script(testing::TextResponse("ack"));
+
+    // Channel-level subscription to an extended channel.
+    const std::string subscriber = fixture.CreateSessionWithSignals({"reminder"});
+
+    grpc::ClientContext open_context;
+    auto stream = fixture.stub->OpenSession(&open_context);
+    v1::ClientEvent attach;
+    attach.set_session_id(subscriber);
+    attach.mutable_attach();
+    REQUIRE(stream->Write(attach));
+
+    fixture.Script(testing::TextResponse("noted"));
+    CHECK(fixture.signal_router.DeliverInternal("someone", unsubscriber,
+                                                "you did not subscribe") ==
+          agent::SignalDelivery::kNoSubscriber);
+    // The EXTERNAL producer path, through the same raw-notification seam the
+    // MCP manager feeds: an extended channel delivers any signal name.
+    fixture.signal_router.OnMcpNotification(
+        "reminder",
+        nlohmann::json{{"method", "notifications/minimal/signal"},
+                       {"params", {{"signal", "any.thing"}, {"content", "extended passes"}}}}
+            .dump());
+    REQUIRE(WaitForTurnCompleted(*stream));
+    (void)DrainAndFinish(stream);
+
+    const auto page = fixture.db->GetMessagesPage(subscriber, std::nullopt, 50);
+    bool saw_extended = false;
+    for (const auto& stored : page.messages) {
+        for (const auto& block : stored.message.content) {
+            if (auto* text = std::get_if<llm::TextBlock>(&block)) {
+                if (text->text.find("extended passes") != std::string::npos) saw_extended = true;
+            }
+        }
+    }
+    CHECK(saw_extended);
 }

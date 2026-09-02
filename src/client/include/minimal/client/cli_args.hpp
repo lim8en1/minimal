@@ -42,6 +42,10 @@ struct HeadlessOptions {
     // Non-empty means resume this stored session instead of creating a new one.
     // Mutually exclusive with agent_preset: the stored session keeps its preset.
     std::string resume_session_id;
+    // Signal subscriptions for the session, comma-separated selectors
+    // ("ci/build.completed", "reminder", "sessions"). Validated server-side at
+    // session start; works on resume too (subscriptions never persist).
+    std::vector<std::string> signals;
     bool jsonl = false;
     bool bypass = false;
 };

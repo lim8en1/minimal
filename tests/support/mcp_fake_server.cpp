@@ -12,6 +12,14 @@
 //                      (dies right after a successful initialize)
 //   garbage         -- emits non-JSON junk on stdout forever (protocol corrupt)
 //
+// NOTE: there is deliberately no SIGNAL-CHANNEL mode here. cpp-mcp's server
+// cannot push a server->client notification over stdio (start_stdio never
+// registers a session dispatcher, so broadcast finds no target), and a
+// timing-based stdout write from a detached thread could interleave with
+// response writes. The dedicated fixture is tests/support/
+// fake_signal_channel.cpp: hand-rolled, single-threaded, emits at a
+// deterministic point in the request loop.
+//
 // Everything it logs goes to stderr: stdout is the JSON-RPC pipe.
 #include <mcp_message.h>
 #include <mcp_server.h>

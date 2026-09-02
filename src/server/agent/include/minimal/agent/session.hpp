@@ -133,6 +133,12 @@ struct SessionParams {
     // loop appends it after the preset's system prompt on every request. Empty
     // when nothing was found (the normal state) or the feature is disabled.
     std::string project_context;
+    // Pre-rendered signal-channel context (each subscribed channel's
+    // instructions), composed by the session service from the router and
+    // APPENDED to project_context by the registry's create funnel. Empty for
+    // sessions with no subscriptions -- which is every subagent, since
+    // subagents cannot subscribe.
+    std::string signal_context;
     // True when this Session reopens a STORED session: the registry loads the
     // stored transcript as the loop's seeded history (without re-appending it)
     // before construction. The session row must already exist either way --

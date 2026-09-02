@@ -189,6 +189,7 @@ int RunHeadless(const HeadlessOptions& options) {
     // can answer -- this mode exists for exactly this client.
     create.run_mode = options.bypass ? minimal::v1::PERMISSION_RUN_MODE_BYPASS
                                      : minimal::v1::PERMISSION_RUN_MODE_ALLOW_ONLY;
+    create.signals = options.signals;
 
     const auto created = client.CreateSession(create);
     if (!created.status.ok()) {
