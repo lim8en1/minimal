@@ -51,6 +51,7 @@
 #include "minimal/client/plugins/plugin_discovery.hpp"
 #include "minimal/client/plugins/registries.hpp"
 #include "minimal/client/view/chat_view.hpp"
+#include "minimal/client/view/modal_host.hpp"
 #include "minimal/client/view/prompt_editor.hpp"
 #include "minimal/client/view/prompt_modal.hpp"
 #include "minimal/client/view/session_picker.hpp"
@@ -921,6 +922,7 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     std::map<std::string, TabUi> tab_ui;
 
     std::string focused;   // active session id, refreshed every frame
+    SessionState::Snapshot focused_details;   // what run_maintenance settled on
 
     // Per-frame maintenance for the focused tab: feed streaming deltas to the
     // debounced view, and trigger the post-turn scrollback refresh. A turn in
@@ -1101,15 +1103,13 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     // The host is a STABLE component in the tree; its inner component is
     // rebuilt when a new request_id arrives. Checkbox state lives in
     // GrantToggles (keyed by request in tab_ui), so it survives the rebuild.
+    // MakeModalHost binds show_permission by reference -- a by-value capture
+    // latched `false` forever here once: the prompt rendered but no key ever
+    // reached it (the "frozen UI" class). Same for the confirmation and
+    // picker hosts below.
     auto permission_child = std::make_shared<Component>();
-    auto permission_host = Renderer([=] {
-        return *permission_child ? (*permission_child)->Render() : emptyElement();
-    });
-    auto permission_host_interactive = CatchEvent(
-        permission_host, [=](const Event& event) {
-            return show_permission && *permission_child ? (*permission_child)->OnEvent(event)
-                                                        : false;
-        });
+    auto permission_host_interactive =
+        minimal::client::MakeModalHost(permission_child, show_permission);
 
     // The server confirmation modal (/clear and /permission-mode ask through
     // the ConfirmationBroker, which BLOCKS the session worker until answered):
@@ -1121,15 +1121,8 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     // prompt in the stack (see the modal stack below -- the two are mutually
     // exclusive in SessionState, so they never compete for the layer).
     auto confirmation_child = std::make_shared<Component>();
-    auto confirmation_host = Renderer([=] {
-        return *confirmation_child ? (*confirmation_child)->Render() : emptyElement();
-    });
-    auto confirmation_host_interactive = CatchEvent(
-        confirmation_host, [=](const Event& event) {
-            return show_confirmation && *confirmation_child
-                       ? (*confirmation_child)->OnEvent(event)
-                       : false;
-        });
+    auto confirmation_host_interactive =
+        minimal::client::MakeModalHost(confirmation_child, show_confirmation);
 
     // Tab close, for every caller (keybinding, quit confirmation, quit): the
     // per-tab UI caches must die WITH the tab -- tab_ui entries were never
@@ -1162,12 +1155,7 @@ int RunTui(const minimal::client::ParsedArgs& args) {
 
     // --- session picker (inner rebuilt on each open) ---------------------------
     auto picker_child = std::make_shared<Component>();
-    auto picker_host = Renderer([=] {
-        return *picker_child ? (*picker_child)->Render() : emptyElement();
-    });
-    auto picker_host_interactive = CatchEvent(picker_host, [=](const Event& event) {
-        return show_picker && *picker_child ? (*picker_child)->OnEvent(event) : false;
-    });
+    auto picker_host_interactive = minimal::client::MakeModalHost(picker_child, show_picker);
 
     // T8: typing on an empty app already starts a session directly
     // (submit_chat, above); the picker's "+ new session" row is the same
@@ -1276,9 +1264,10 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     // can never preempt the security UI, which is the invariant the nesting
     // itself enforces (see the modal stack below).
     auto plugin_modal_child = std::make_shared<Component>();
+    // NOT MakeModalHost: a throwing PLUGIN modal must hide itself for the
+    // frame (never fatal), so the render side keeps its own containment.
     auto plugin_modal_host = Renderer([=] {
         if (!*plugin_modal_child) return emptyElement();
-        // A throwing plugin modal hides itself for the frame (never fatal).
         try {
             return (*plugin_modal_child)->Render();
         } catch (const std::exception& error) {
@@ -1325,6 +1314,34 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         }
         // A hint naming no view falls through: the unknown-view-id rule, like
         // the unknown segment id's.
+    };
+
+    // THE MAINTENANCE PASS: everything the frame needs but must not do from
+    // Render -- a fresh focused-tab snapshot, the maintain() bookkeeping, and
+    // the once-per-notice VIEW side-effects (handle_notice may stage modals
+    // and run a bounded ListSessions RPC; doing that inside the renderer made
+    // the frame stall and the staged modal unclosable). Runs on the loop
+    // thread from the event path (see the root CatchEvent below), never from
+    // a renderer.
+    auto run_maintenance = [&] {
+        const auto tabs = app->GetAllTabs();
+        focused.clear();
+        for (const auto& tab : tabs) {
+            if (tab.is_focused) focused = tab.session_id;
+        }
+        if (focused.empty()) {
+            focused_details = SessionState::Snapshot{};
+            return;
+        }
+        // ONE deep snapshot per pass: GetDetails is a full protobuf copy of
+        // the scrollback window (up to scrollback_window_max_messages rows),
+        // and this used to be paid up to three times per frame. maintain()
+        // may replace it with a fresher one if a scrollback refresh fires
+        // (it must -- the refresh mutates SessionState out from under the
+        // copy this call started with); handle_notice and the renderer both
+        // read whatever maintain settled on.
+        focused_details = maintain(focused, app->GetDetails(focused));
+        handle_notice(focused_details);
     };
 
     // --- session picker delete confirmation ------------------------------------
@@ -1393,25 +1410,11 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         using namespace ftxui;
 
         const auto tabs = app->GetAllTabs();
-        focused.clear();
-        for (const auto& tab : tabs) {
-            if (tab.is_focused) focused = tab.session_id;
-        }
 
-        // ONE deep snapshot of the focused tab per frame: GetDetails is a full
-        // protobuf copy of the scrollback window (up to
-        // scrollback_window_max_messages rows), and this used to be paid up
-        // to three times per frame -- once here, again inside maintain, again
-        // inside handle_notice. maintain() may replace it with a fresher one
-        // if a scrollback refresh fires (it must -- the refresh mutates
-        // SessionState out from under the copy this call started with);
-        // handle_notice and the renderer below both read whatever maintain
-        // settled on.
-        auto focused_details = app->GetDetails(focused);
-        if (!focused.empty()) {
-            focused_details = maintain(focused, std::move(focused_details));
-            handle_notice(focused_details);   // once-per-notice VIEW side-effects (never in Render)
-        }
+        // The snapshot (and everything derived from it) was taken by
+        // run_maintenance() on this loop iteration's event, BEFORE Render --
+        // never here: this lambda must stay side-effect-free and non-blocking.
+        // focused_details below is run_maintenance's cached output.
 
         Elements rows;
         rows.push_back(minimal::client::RenderTabBar(tabs, theme));
@@ -1769,7 +1772,17 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     auto with_confirmation = Modal(with_quit_confirm, confirmation_host_interactive,
                                    &show_confirmation);
     auto with_permission = Modal(with_confirmation, permission_host_interactive, &show_permission);
-    Component final_tree = with_permission;
+
+    // The maintenance pass rides the event path ABOVE the whole stack: this
+    // handler sees every event the loop processes (including the pump's
+    // Event::Custom, even while a modal would consume ordinary keys), runs
+    // run_maintenance, and consumes NOTHING -- a pure pre-render observation
+    // point. This is what keeps side-effects out of Render().
+    Component final_tree = CatchEvent(with_permission, [&](const Event&) {
+        run_maintenance();
+        return false;
+    });
+    run_maintenance();   // the first frame must not render an empty snapshot
 
     // THE PUMP: reader threads wake nothing by themselves; this loop redraws
     // at up to 20 Hz from snapshots. Redraws are gated on the app's UI

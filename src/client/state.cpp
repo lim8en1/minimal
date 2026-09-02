@@ -764,7 +764,16 @@ void AppState::AnswerPermission(const std::string& session_id, const std::string
     pr->set_request_id(request_id);
     pr->set_decision(decision);
     for (auto& k : granted_keys) pr->add_granted_keys(k);
-    stream->Send(ev);
+    // A refused send must NOT close the prompt: the server worker is parked
+    // on this request, and clearing the pending entry locally would strand it
+    // there forever with the answer undelivered (the "blocked UI" failure).
+    // Surface the refusal and leave the modal up so the user can retry.
+    if (!stream->Send(ev)) {
+        if (auto state = GetState(session_id)) {
+            state->OnError("cannot answer: the stream is closing or stalled");
+        }
+        return;
+    }
 
     if (auto state = GetState(session_id)) state->ClearPendingFor(request_id);
 }
@@ -780,7 +789,14 @@ void AppState::AnswerConfirmation(const std::string& session_id, const std::stri
     auto* cr = ev.mutable_confirmation_response();
     cr->set_request_id(request_id);
     cr->set_chosen_option(chosen_option);
-    stream->Send(ev);
+    // Same refusal rule as AnswerPermission: keep the modal up on a stalled
+    // stream rather than pretending the answer went out.
+    if (!stream->Send(ev)) {
+        if (auto state = GetState(session_id)) {
+            state->OnError("cannot answer: the stream is closing or stalled");
+        }
+        return;
+    }
 
     if (auto state = GetState(session_id)) {
         state->ClearPendingFor(request_id);
