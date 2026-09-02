@@ -6,6 +6,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "minimal/agent/compaction_strategy.hpp"
 #include "minimal/agent/mention_resolver.hpp"
 #include "minimal/agent/session_observer_registry.hpp"
 #include "minimal/commands/command_registry.hpp"
@@ -79,6 +80,9 @@ struct PluginRecord {
     // a providers.json `backend` names). Feeds the sanity check's discover-entry
     // warnings and its duplicate-catalog report.
     std::vector<std::string> registered_model_catalog_kinds;
+    // Compaction strategy kinds, keyed like registered_provider_kinds. Feeds
+    // the sanity check's memory.compaction_strategy resolution warning.
+    std::vector<std::string> registered_compaction_strategy_kinds;
     // FULL hook point names, as the plugin declared them. Points live in their
     // own namespace -- no aliasing, no permission keys -- and a duplicate is
     // fatal at startup via the NameRegistry (NameKind::HookPoint).
@@ -116,7 +120,8 @@ public:
                  PluginStorage* storage = nullptr,
                  std::filesystem::path plugin_data_root = {},
                  hooks::HookDispatcher* hook_points = nullptr,
-                 agent::MentionResolverRegistry* mention_resolvers = nullptr);
+                 agent::MentionResolverRegistry* mention_resolvers = nullptr,
+                 agent::CompactionStrategyRegistry* compaction_strategies = nullptr);
     ~PluginLoader();
 
     PluginLoader(const PluginLoader&) = delete;
@@ -171,6 +176,12 @@ private:
     // surface the plugin's HookPoint handles emit through, which is why it is
     // one registry-and-dispatcher rather than two.
     hooks::HookDispatcher* hook_points_ = nullptr;
+    // Optional like the others; null means plugins cannot register a
+    // compaction strategy. Additive across plugins, keyed by name;
+    // memory.compaction_strategy in settings.json selects one. Core's own
+    // built-in "summarize" strategy is registered directly in main.cpp
+    // before plugin load, not through this hook.
+    agent::CompactionStrategyRegistry* compaction_strategies_ = nullptr;
     std::vector<void*> handles_;  // never closed; see LIFETIME above
 };
 

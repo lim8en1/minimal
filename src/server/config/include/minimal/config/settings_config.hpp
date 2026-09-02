@@ -32,6 +32,12 @@ struct MemorySettings {
     CompactionTriggerSettings context_compaction_trigger;
     std::int64_t compaction_keep_recent_tokens = 0;
     std::int64_t scrollback_page_size = 0;
+    // S4: selects a CompactionStrategyRegistry entry by name. "summarize" is
+    // core's own built-in (registered in main.cpp, not a plugin, so this
+    // never resolves to nothing on a bundled-only install). A name naming no
+    // registered strategy is a startup sanity-check warning, not a crash --
+    // the session falls back to the built-in.
+    std::string compaction_strategy = "summarize";
 };
 
 // Kept as raw pass-through JSON: each plugin owns the schema of its own slice

@@ -68,6 +68,43 @@ void CapToolResult(llm::ToolResultBlock& block, std::int64_t max_bytes) {
     block.content.push_back(llm::TextBlock{std::move(kept)});
 }
 
+// S4's no-boundary fallback: when snap_compaction_boundary finds no safe cut
+// anywhere (every candidate lands inside an open tool-call cycle), context
+// would otherwise grow forever -- but the actual harm that trips the trigger
+// is usually SIZE, not message count, and a single oversized tool result is
+// the common cause. Eliding one IN PLACE, reusing CapToolResult's own
+// truncation shape, shrinks the context without removing any message, so it
+// can never disturb tool_use/tool_result pairing -- the very thing that made
+// a structural cut impossible in the first place. Returns false when nothing
+// large enough to be worth eliding remains (every result is already small),
+// which is the caller's signal to fall back to the genuine last resort.
+constexpr std::int64_t kElisionMinSizeToBother = 1000;  // below this, eliding buys nothing
+constexpr std::int64_t kElisionTargetBytes = 500;
+
+bool ElideLargestToolResult(std::vector<llm::Message>& history) {
+    llm::ToolResultBlock* largest = nullptr;
+    std::size_t largest_size = 0;
+    for (auto& message : history) {
+        for (auto& block : message.content) {
+            auto* result = std::get_if<llm::ToolResultBlock>(&block);
+            if (result == nullptr) continue;
+            std::size_t size = 0;
+            for (const auto& item : result->content) {
+                if (const auto* text = std::get_if<llm::TextBlock>(&item)) size += text->text.size();
+            }
+            if (size > largest_size) {
+                largest_size = size;
+                largest = result;
+            }
+        }
+    }
+    if (largest == nullptr || static_cast<std::int64_t>(largest_size) <= kElisionMinSizeToBother) {
+        return false;
+    }
+    CapToolResult(*largest, kElisionTargetBytes);
+    return true;
+}
+
 }  // namespace
 
 AgentLoop::AgentLoop(llm::LlmProvider& provider, tools::ToolExecutor& executor,
@@ -437,21 +474,54 @@ std::optional<std::size_t> AgentLoop::Compact(std::string_view trigger) {
     if (history_.size() < 2) return std::nullopt;
     if (compaction_failed_this_turn_) return std::nullopt;
 
-    // Keep the tail verbatim; summarize everything older. The candidate cut is
-    // chosen by count here -- the boundary snap is what makes it safe.
-    std::size_t candidate = history_.size() / 2;
+    // Keep the tail verbatim; summarize everything older. The candidate cut
+    // comes from the configured strategy's cut selector (S4) when one is
+    // set -- honoring memory.compaction_keep_recent_tokens (W11) via a
+    // token-budget walk from the tail, instead of the legacy plain halving
+    // -- else the boundary snap below is what makes ANY candidate safe.
+    std::size_t candidate = config_.cut_selector
+                                ? config_.cut_selector(history_, config_.compaction_keep_recent_tokens)
+                                : history_.size() / 2;
 
     // Snapping backward to a complete tool-call cycle is mandatory: cutting
     // between an assistant ToolUseBlock and its ToolResultBlock orphans the call,
     // which is a hard 400 on both OpenAI and Anthropic rather than a soft
-    // degradation.
+    // degradation. This runs UNCONDITIONALLY regardless of where `candidate`
+    // came from -- a strategy's proposed cut is a starting point, never a
+    // guarantee, and that invariant is therefore not a contract a strategy
+    // author has to remember or can get wrong.
     const std::size_t cut = snap_compaction_boundary(history_, candidate);
     if (cut == 0 || cut >= history_.size()) {
-        // Not a no-op worth staying quiet about. A history whose every candidate
-        // boundary lands inside a tool-call cycle can never be compacted, so
-        // context grows until the provider rejects the request on length -- and
-        // a 400 from the backend is the only other symptom. Cooled down so this
-        // says it once per turn rather than once per tool cycle.
+        // No safe structural cut. Rather than accept unbounded growth, try to
+        // shrink the context directly: elide the largest tool result in
+        // place (see ElideLargestToolResult) -- this never disturbs message
+        // boundaries, so it cannot make the pairing problem worse, and it
+        // addresses the actual harm (context SIZE) even though it does not
+        // fold any messages together.
+        if (ElideLargestToolResult(history_)) {
+            tokens_.SeedOccupancy(EstimateContextTokens());
+            session_.logger.warn(
+                "session {}: no safe compaction boundary in {} messages; elided the largest "
+                "tool result instead",
+                session_.session_id, history_.size());
+            compaction_failed_this_turn_ = true;   // still don't retry every tool cycle
+            if (config_.hooks != nullptr) {
+                config_.hooks->EmitAsync(
+                    hooks::kPostCompact,
+                    nlohmann::json{{"session_id", session_.session_id},
+                                  {"project_root", session_.project_root.string()},
+                                  {"trigger", trigger},
+                                  {"error", "no safe compaction boundary; elided largest tool result"}});
+            }
+            return std::nullopt;
+        }
+
+        // The genuine last resort: no safe boundary AND nothing left worth
+        // eliding (every tool result is already small). Not a no-op worth
+        // staying quiet about -- context grows until the provider rejects the
+        // request on length, and a 400 from the backend is the only other
+        // symptom. Cooled down so this says it once per turn rather than once
+        // per tool cycle.
         session_.logger.warn(
             "session {}: cannot compact -- no safe boundary in {} messages; context will keep "
             "growing",

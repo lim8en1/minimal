@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "minimal/agent/agent_preset_frontmatter.hpp"
+#include "minimal/agent/compaction_strategy.hpp"
 #include "minimal/config/hooks_config.hpp"
 #include "minimal/config/mcps_config.hpp"
 #include "minimal/config/permissions_config.hpp"
@@ -64,6 +65,10 @@ struct SanityCheckInputs {
     // never a live List()): discovery is fetched lazily at first resolve,
     // never at startup.
     const llm::ModelCatalogRegistry* model_catalogs = nullptr;
+    // Optional: absent means memory.compaction_strategy can only be checked
+    // against core's own built-in name ("summarize"), not against whatever
+    // plugins additionally registered. Borrowed -- it outlives the check.
+    const agent::CompactionStrategyRegistry* compaction_strategies = nullptr;
     // Optional: absent means hooks.json actions can only be validated
     // structurally, not against the registered points. Borrowed -- it outlives
     // the check. Points are registered at load (before this stage), so the
@@ -107,6 +112,7 @@ private:
     std::vector<CheckResult> check_advisor();
     std::vector<CheckResult> check_subagent_limit();
     std::vector<CheckResult> check_hooks();
+    std::vector<CheckResult> check_compaction_strategy();
 
     SanityCheckInputs inputs_;
 

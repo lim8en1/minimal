@@ -1722,3 +1722,145 @@ TEST_CASE("the retry wait honors the server's Retry-After hint", "[agent_loop][r
     CHECK(elapsed >= 380);  // the hint, minus a small scheduling allowance
     CHECK(elapsed < 5000);  // and not the ceiling of a misapplied hint
 }
+
+// ---------------------------------------------------------------------------
+// S4: the compaction strategy seam
+// ---------------------------------------------------------------------------
+
+TEST_CASE("LoopConfig.cut_selector is consulted instead of the legacy history.size()/2 "
+         "halving",
+         "[agent_loop][compaction]") {
+    Harness h;
+    std::size_t seen_size = 0;
+    auto compactor = [&seen_size](std::span<const llm::Message> messages_to_compact,
+                                  llm::LlmProvider&,
+                                  const agent::CompactionRequest&) -> std::optional<agent::CompactionResult> {
+        seen_size = messages_to_compact.size();
+        return agent::CompactionResult{UserText("[summary]"), 0};
+    };
+
+    agent::LoopConfig config;
+    // A cut_selector that always proposes 1, regardless of history size --
+    // the opposite of history.size()/2, so the test fails if Compact() ever
+    // falls back to the legacy default while a selector is set.
+    config.cut_selector = [](const std::vector<llm::Message>&, std::int64_t) {
+        return std::size_t{1};
+    };
+    h.Build({}, config, compactor,
+            {UserText("a"), UserText("b"), UserText("c"), UserText("d")});
+
+    const auto cut = h.loop->CompactNow();
+    REQUIRE(cut.has_value());
+    CHECK(*cut == 1);
+    CHECK(seen_size == 1);  // the summarizer received exactly the proposed (already-safe) range
+}
+
+TEST_CASE("a proposed cut is still snapped to a safe tool-call boundary, never trusted "
+         "verbatim",
+         "[agent_loop][compaction]") {
+    // The seam's core invariant: a strategy's cut is a starting point, never
+    // a guarantee. A selector proposing 1 here would put ONLY message[0]'s
+    // tool_use in the compacted region, excluding message[1] -- its own
+    // result -- from it: an orphaned call. snap_compaction_boundary must
+    // pull the boundary back to 0, which agent_loop then treats as "no safe
+    // boundary" (elision has nothing worth shrinking here -- the result is
+    // two bytes -- so it falls through to the genuine last-resort warning).
+    Harness h;
+    bool summarizer_called = false;
+    auto compactor = [&summarizer_called](std::span<const llm::Message>, llm::LlmProvider&,
+                                          const agent::CompactionRequest&)
+        -> std::optional<agent::CompactionResult> {
+        summarizer_called = true;
+        return agent::CompactionResult{UserText("[summary]"), 0};
+    };
+
+    llm::ToolUseBlock use;
+    use.id = "call_1";
+    use.name = "read";
+    use.input = nlohmann::json::object();
+    llm::ToolResultBlock result;
+    result.tool_use_id = "call_1";
+    result.content = {llm::TextBlock{"ok"}};
+
+    agent::LoopConfig config;
+    config.cut_selector = [](const std::vector<llm::Message>&, std::int64_t) {
+        return std::size_t{1};  // between the tool_use and its own result -- unsafe
+    };
+    h.Build({}, config, compactor,
+            {llm::Message{llm::Role::Assistant, {use}}, llm::Message{llm::Role::User, {result}},
+             UserText("c"), UserText("d")});
+
+    const auto cut = h.loop->CompactNow();
+    CHECK_FALSE(cut.has_value());
+    CHECK_FALSE(summarizer_called);
+}
+
+TEST_CASE("no safe compaction boundary elides the largest tool result instead of accepting "
+         "unbounded growth",
+         "[agent_loop][compaction]") {
+    // A 2-message history where message[0]'s tool_use has NO matching result
+    // anywhere in the history -- every candidate cut lands inside it, so
+    // snap_compaction_boundary always returns 0 (compaction_boundary.cpp).
+    Harness h;
+    bool summarizer_called = false;
+    auto compactor = [&summarizer_called](std::span<const llm::Message>, llm::LlmProvider&,
+                                          const agent::CompactionRequest&)
+        -> std::optional<agent::CompactionResult> {
+        summarizer_called = true;
+        return agent::CompactionResult{UserText("[summary]"), 0};
+    };
+
+    llm::ToolUseBlock use;
+    use.id = "call_1";
+    use.name = "read";
+    use.input = nlohmann::json::object();
+
+    llm::ToolResultBlock huge;
+    huge.tool_use_id = "unrelated";  // orphans call_1 regardless -- never answers it
+    huge.content = {llm::TextBlock{std::string(5000, 'x')}};
+
+    h.Build({}, {}, compactor,
+            {llm::Message{llm::Role::Assistant, {use}}, llm::Message{llm::Role::User, {huge}}});
+
+    const auto cut = h.loop->CompactNow();
+    CHECK_FALSE(cut.has_value());     // nothing was folded into a summary
+    CHECK_FALSE(summarizer_called);   // the elision path never reaches the summarizer
+
+    REQUIRE(h.loop->history().size() == 2);
+    const auto& shrunk = std::get<llm::ToolResultBlock>(h.loop->history()[1].content.at(0));
+    const auto& text = std::get<llm::TextBlock>(shrunk.content.at(0)).text;
+    CHECK(text.size() < 5000);
+    CHECK(text.find("omitted") != std::string::npos);
+}
+
+TEST_CASE("no safe boundary AND nothing worth eliding falls back to the genuine last resort",
+         "[agent_loop][compaction]") {
+    // Same orphaned-tool_use shape, but every tool result is already small --
+    // ElideLargestToolResult must decline (nothing large enough to bother
+    // with), leaving history untouched.
+    Harness h;
+    llm::ToolUseBlock use;
+    use.id = "call_1";
+    use.name = "read";
+    use.input = nlohmann::json::object();
+    llm::ToolResultBlock small;
+    small.tool_use_id = "unrelated";
+    small.content = {llm::TextBlock{"tiny"}};
+
+    bool summarizer_called = false;
+    auto compactor = [&summarizer_called](std::span<const llm::Message>, llm::LlmProvider&,
+                                          const agent::CompactionRequest&)
+        -> std::optional<agent::CompactionResult> {
+        summarizer_called = true;
+        return agent::CompactionResult{UserText("[summary]"), 0};
+    };
+    h.Build({}, {}, compactor,
+            {llm::Message{llm::Role::Assistant, {use}}, llm::Message{llm::Role::User, {small}}});
+
+    const auto cut = h.loop->CompactNow();
+    CHECK_FALSE(cut.has_value());
+    CHECK_FALSE(summarizer_called);
+    REQUIRE(h.loop->history().size() == 2);
+    const auto& unchanged = std::get<llm::ToolResultBlock>(h.loop->history()[1].content.at(0));
+    CHECK(std::get<llm::TextBlock>(unchanged.content.at(0)).text == "tiny");
+}

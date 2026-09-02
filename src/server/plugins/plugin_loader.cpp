@@ -32,6 +32,8 @@ using RegisterPermissionAdvisorFn =
     void (*)(tools::PermissionAdvisorRegistry&, const PluginRegistrationContext&);
 using RegisterModelCatalogsFn =
     void (*)(llm::ModelCatalogRegistry&, const PluginRegistrationContext&);
+using RegisterCompactionStrategiesFn =
+    void (*)(agent::CompactionStrategyRegistry&, const PluginRegistrationContext&);
 using RegisterServicesFn =
     void (*)(ServiceRegistry&, const PluginRegistrationContext&);
 using RegisterHookPointsFn =
@@ -104,7 +106,8 @@ PluginLoader::PluginLoader(tools::ToolRegistry& tools, llm::ProviderFactoryRegis
                            ServiceRegistry* services, PluginStorage* storage,
                            std::filesystem::path plugin_data_root,
                            hooks::HookDispatcher* hook_points,
-                           agent::MentionResolverRegistry* mention_resolvers)
+                           agent::MentionResolverRegistry* mention_resolvers,
+                           agent::CompactionStrategyRegistry* compaction_strategies)
     : tools_(tools),
       providers_(providers),
       tools_settings_(std::move(tools_settings)),
@@ -117,7 +120,8 @@ PluginLoader::PluginLoader(tools::ToolRegistry& tools, llm::ProviderFactoryRegis
       services_(services),
       storage_(storage),
       plugin_data_root_(std::move(plugin_data_root)),
-      hook_points_(hook_points) {}
+      hook_points_(hook_points),
+      compaction_strategies_(compaction_strategies) {}
 
 // Handles are intentionally leaked -- see LIFETIME in the header.
 PluginLoader::~PluginLoader() = default;
@@ -334,6 +338,27 @@ PluginRecord PluginLoader::LoadOne(const PluginCandidate& candidate) {
         const auto kinds_after = model_catalogs_->kinds();
         std::set_difference(kinds_after.begin(), kinds_after.end(), kinds_before.begin(),
                             kinds_before.end(), std::back_inserter(record.registered_model_catalog_kinds));
+    }
+
+    if (compaction_strategies_ != nullptr) {
+        // Same attribution-free, kinds-diff shape as model_catalogs_ above:
+        // CompactionStrategyRegistry has no per-kind attribution tracking
+        // (Register's bool return is enough -- a collision here means the
+        // plugin's OWN registration silently no-op'd, diagnosed the same way
+        // ModelCatalogRegistry's is, by kind-set diffing before/after).
+        const auto kinds_before = compaction_strategies_->kinds();
+        if (auto register_strategies = Lookup<RegisterCompactionStrategiesFn>(
+                handle, "minimal_plugin_register_compaction_strategies")) {
+            if (!GuardedRegistration(record, "minimal_plugin_register_compaction_strategies", [] {},
+                                      [&] { register_strategies(*compaction_strategies_, context); },
+                                      [] {})) {
+                return record;
+            }
+        }
+        const auto kinds_after = compaction_strategies_->kinds();
+        std::set_difference(kinds_after.begin(), kinds_after.end(), kinds_before.begin(),
+                            kinds_before.end(),
+                            std::back_inserter(record.registered_compaction_strategy_kinds));
     }
 
     // Marked Loaded HERE, before the services_ block below, not after it: a

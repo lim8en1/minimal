@@ -102,6 +102,7 @@ std::vector<CheckResult> StartupSanityCheck::RunAll() {
     append(check_hooks());
     append(check_advisor());
     append(check_subagent_limit());
+    append(check_compaction_strategy());
     return results;
 }
 
@@ -714,6 +715,27 @@ std::vector<CheckResult> StartupSanityCheck::check_advisor() {
         results.push_back(Warning(
             "advisor", "permissions.json sets advisor_inherit but names no advisor; "
                        "the flag is inert"));
+    }
+    return results;
+}
+
+std::vector<CheckResult> StartupSanityCheck::check_compaction_strategy() {
+    std::vector<CheckResult> results;
+    if (!settings_loaded_) return results;  // already Fatal under config_parse
+
+    const std::string& name = settings_.memory.compaction_strategy;
+    // "summarize" is core's own built-in, registered directly in main.cpp
+    // before plugin load -- it resolves even when inputs_.compaction_strategies
+    // is null (a test harness that never wires the registry).
+    const bool resolved =
+        name == "summarize" ||
+        (inputs_.compaction_strategies != nullptr && inputs_.compaction_strategies->Has(name));
+    if (!resolved) {
+        results.push_back(Warning(
+            "compaction_strategy", "settings.json memory.compaction_strategy names '" + name +
+                                       "' but no loaded plugin registered it (typo, or the "
+                                       "providing plugin is disabled); compaction falls back to "
+                                       "the built-in 'summarize' strategy"));
     }
     return results;
 }

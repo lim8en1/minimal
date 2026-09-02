@@ -88,6 +88,7 @@ struct Fixture {
     tools::ToolRegistry tool_registry;
     llm::ProviderFactoryRegistry provider_factories;
     llm::ModelCatalogRegistry model_catalogs;
+    agent::CompactionStrategyRegistry compaction_strategies;
     config::SkillRegistry skills;
     plugins::ServiceRegistry service_registry;
     hooks::HookDispatcher hook_dispatcher{common::DefaultLogger()};
@@ -136,7 +137,7 @@ struct Fixture {
                                          provider_factories, skills,  plugin_config,
                                          resolution,         command_registry, advisors,
                                          services,           &model_catalogs,
-                                         &hook_dispatcher};
+                                         &compaction_strategies, &hook_dispatcher};
     }
 };
 
@@ -912,6 +913,64 @@ TEST_CASE("advisor_inherit without an advisor is inert and warned", "[sanity_che
     REQUIRE(advisor.size() == 1);
     CHECK(advisor.front()->severity == CheckSeverity::Warning);
     CHECK(advisor.front()->message.find("advisor_inherit") != std::string::npos);
+}
+
+// --- Compaction strategy (S4) -----------------------------------------------------
+
+TEST_CASE("the default compaction strategy resolves with no compaction_strategies "
+         "registry offered at all",
+         "[sanity_check][compaction_strategy]") {
+    // "summarize" is core's own built-in and resolves even when the registry
+    // pointer itself is null (a caller that never wires the seam) -- settings
+    // .json's own default names it, so a cold start with no memory.
+    // compaction_strategy override must never warn.
+    Fixture f;
+    WriteGoodConfig(f.config_dir);
+    ScopedEnv data("XDG_DATA_HOME", f.xdg_data.string().c_str());
+    f.RegisterTool("tools-bash", "bash");
+
+    const auto results = RunChecks(f);
+    CHECK(ByCheck(results, "compaction_strategy").empty());
+}
+
+TEST_CASE("a compaction_strategy naming no registered strategy warns",
+         "[sanity_check][compaction_strategy]") {
+    Fixture f;
+    WriteGoodConfig(f.config_dir);
+    ScopedEnv data("XDG_DATA_HOME", f.xdg_data.string().c_str());
+    f.RegisterTool("tools-bash", "bash");
+    f.Write("settings.json",
+            R"({"default_agent_preset":"build","memory":{"compaction_strategy":"drop-oldest"}})");
+
+    const auto results = RunChecks(f);
+
+    const auto strategy = ByCheck(results, "compaction_strategy");
+    REQUIRE(strategy.size() == 1);
+    CHECK(strategy.front()->severity == CheckSeverity::Warning);
+    CHECK(strategy.front()->message.find("drop-oldest") != std::string::npos);
+}
+
+TEST_CASE("a compaction_strategy a plugin registered produces no finding",
+         "[sanity_check][compaction_strategy]") {
+    Fixture f;
+    WriteGoodConfig(f.config_dir);
+    ScopedEnv data("XDG_DATA_HOME", f.xdg_data.string().c_str());
+    f.RegisterTool("tools-bash", "bash");
+    f.Write("settings.json",
+            R"({"default_agent_preset":"build","memory":{"compaction_strategy":"drop-oldest"}})");
+
+    agent::CompactionStrategy strategy;
+    strategy.cut_selector = [](const std::vector<llm::Message>& h, std::int64_t) {
+        return h.size();
+    };
+    strategy.summarize = [](std::span<const llm::Message>, llm::LlmProvider&,
+                            const agent::CompactionRequest&) -> std::optional<agent::CompactionResult> {
+        return std::nullopt;
+    };
+    f.compaction_strategies.Register("drop-oldest", std::move(strategy));
+
+    const auto results = RunChecks(f);
+    CHECK(ByCheck(results, "compaction_strategy").empty());
 }
 
 // --- Hooks (track O) -------------------------------------------------------------

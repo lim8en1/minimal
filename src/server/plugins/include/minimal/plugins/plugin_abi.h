@@ -34,6 +34,7 @@
 #include "minimal/common/config_paths.hpp"
 
 // --- Half 2: utilities plugins consume -------------------------------------
+#include "minimal/agent/compaction_strategy.hpp"
 #include "minimal/agent/mention_resolver.hpp"
 #include "minimal/agent/session_observer.hpp"
 #include "minimal/agent/session_observer_registry.hpp"
@@ -240,6 +241,19 @@ void minimal_plugin_register_permission_advisor(
 // entry's static models.
 void minimal_plugin_register_model_catalogs(minimal::llm::ModelCatalogRegistry&,
                                              const minimal::plugins::PluginRegistrationContext&);
+
+// OPTIONAL, additive: contributes a compaction strategy (S4), keyed by name --
+// memory.compaction_strategy in settings.json selects one. Core registers its
+// own built-in "summarize" strategy directly in main.cpp (not through this
+// hook), so the default path is never plugin-dependent; a plugin adds a kind
+// core has never heard of (drop-oldest, tool-result-elide, the deferred
+// llamacpp-kv's external-KV strategy). See compaction_strategy.hpp: a
+// strategy proposes a candidate cut, but core ALWAYS snaps it to a safe
+// tool-call boundary before using it -- that invariant is not a contract a
+// strategy author can get wrong.
+void minimal_plugin_register_compaction_strategies(
+    minimal::agent::CompactionStrategyRegistry&,
+    const minimal::plugins::PluginRegistrationContext&);
 
 // OPTIONAL, additive: contributes HOOK POINTS -- named, typed events this
 // plugin emits from its own code, which hooks.json actions can answer. Core

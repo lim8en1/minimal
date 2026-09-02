@@ -218,16 +218,21 @@ Session::Session(SessionParams params, AgentPreset preset,
     // an argument the loop supplies per call. That is what keeps a mid-session
     // /agent switch from compacting with the previous preset's prompt.
     //
+    // loop_config.compaction_summarizer (S4) is the configured strategy's
+    // summarize half, resolved once in main.cpp from
+    // memory.compaction_strategy; unset (every test that builds a LoopConfig
+    // by hand) falls back to compact_messages, today's only behavior.
+    //
     // seeded_history is non-empty only on resume: the stored transcript becomes
     // the loop's working history WITHOUT being re-appended to the store it was
     // loaded from. The seq/head companions carry where that seed's persisted
     // portion begins, which is what compaction checkpoints are written against.
-    loop_ = std::make_unique<AgentLoop>(*provider_, executor_, registry, *store_, preset_,
-                                         loop_config, std::move(context),
-                                         [this] { return IsCancelled(); }, std::move(event_sink),
-                                         compact_messages, std::move(seeded_history),
-                                         seed_first_persisted_seq, seed_head_is_summary,
-                                         std::move(params_.project_context));
+    loop_ = std::make_unique<AgentLoop>(
+        *provider_, executor_, registry, *store_, preset_, loop_config, std::move(context),
+        [this] { return IsCancelled(); }, std::move(event_sink),
+        loop_config.compaction_summarizer ? loop_config.compaction_summarizer : Compactor(compact_messages),
+        std::move(seeded_history), seed_first_persisted_seq, seed_head_is_summary,
+        std::move(params_.project_context));
 
     // MCP liveness at session start, BEFORE the worker exists: this thread is
     // allowed to block (the RPC reader is a different one), and the loop must

@@ -77,6 +77,20 @@ struct LoopConfig {
     // EmitAsync calls and become no-ops. Owned by main, shared by every
     // session, read-only after Configure.
     const hooks::HookDispatcher* hooks = nullptr;
+
+    // S4: the compaction strategy's two halves, resolved ONCE in main.cpp by
+    // name (memory.compaction_strategy) via CompactionStrategyRegistry and
+    // copied into every session's LoopConfig -- cheap, two std::functions.
+    // Both null (every LoopConfig a test builds by hand, and any AgentLoop
+    // built directly with its own `compactor` constructor argument) falls
+    // back to today's production behavior exactly: cut_selector unset means
+    // AgentLoop::Compact() keeps the legacy history.size()/2 halving;
+    // compaction_summarizer unset means Session passes compact_messages the
+    // way it always has. Neither ever bypasses snap_compaction_boundary,
+    // which AgentLoop::Compact() applies unconditionally regardless of where
+    // the candidate cut came from.
+    CutSelector cut_selector;
+    Compactor compaction_summarizer;
 };
 
 // Brackets one tool invocation, surfaced to the client as ToolExecutionEvent.
@@ -176,17 +190,6 @@ struct TurnResult {
     // response still reports what it would have billed.
     std::string model;
 };
-
-// Summarizes a message range into one synthetic message. Injected so the
-// compaction path is testable without a live summarizer; production supplies
-// compact_messages, which calls the provider with the preset's compression prompt.
-// nullopt means "no compaction this cycle" -- failure degrades to no compaction,
-// never to a lost transcript. Everything that varies is in CompactionRequest,
-// supplied per call rather than bound at construction, because /agent can switch
-// presets mid-session and binding would compact with the previous one's settings.
-using Compactor = std::function<std::optional<CompactionResult>(
-    std::span<const llm::Message> messages_to_compact, llm::LlmProvider& provider,
-    const CompactionRequest& request)>;
 
 // Runs on the session worker thread. Blocks freely -- permission waits, provider
 // calls, tool subprocesses -- which is safe only because the gRPC reader thread

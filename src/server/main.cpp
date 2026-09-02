@@ -198,6 +198,14 @@ int main(int argc, char** argv) {
     // be asked to LIST its models ("discover": true in providers.json), fetched
     // lazily at first resolve and never written back to the file.
     minimal::llm::ModelCatalogRegistry model_catalogs;
+    // S4: additive across plugins, keyed by name -- memory.compaction_strategy
+    // selects one. Core's own "summarize" strategy (today's only production
+    // behavior) is registered directly here, BEFORE plugin load, so the
+    // default path is never plugin-dependent -- a plugin adds a kind core has
+    // never heard of (drop-oldest, tool-result-elide, the deferred
+    // llamacpp-kv's external-KV strategy), it does not replace this one.
+    minimal::agent::CompactionStrategyRegistry compaction_strategies;
+    compaction_strategies.Register("summarize", minimal::agent::MakeSummarizeCompactionStrategy());
     // The sanctioned cross-plugin channel (pull; SessionObserver is push).
     // Additive: many plugins may each provide services, and a duplicate name is
     // fatal at startup via the name resolution below. Also handed to every
@@ -247,7 +255,8 @@ int main(int argc, char** argv) {
     minimal::plugins::PluginLoader loader(tools, providers, tools_settings, &observers, &commands,
                                           &auth_providers, &permission_advisors, &model_catalogs,
                                           &services, plugin_storage.get(), plugin_data_root,
-                                          &hook_dispatcher, &mention_resolvers);
+                                          &hook_dispatcher, &mention_resolvers,
+                                          &compaction_strategies);
     const auto records = loader.LoadAll(candidates);
     // The load thread is the only writer; from here the map is read-only, which
     // is what makes unguarded Find from session workers and the command pool
@@ -348,6 +357,7 @@ int main(int argc, char** argv) {
         &permission_advisors,
         &services,
         &model_catalogs,
+        &compaction_strategies,
         &hook_dispatcher,
     });
     const auto check_results = sanity.RunAll();
@@ -422,6 +432,17 @@ int main(int argc, char** argv) {
     loop_config.max_tool_input_bytes = settings.tools.max_input_bytes;
     loop_config.max_tool_result_bytes = settings.tools.max_result_bytes;
     loop_config.hooks = &hook_dispatcher;
+
+    // S4: resolve memory.compaction_strategy ONCE here and copy its two
+    // halves into every session's LoopConfig. An unresolved name (typo, or
+    // the providing plugin is disabled -- the sanity check already warned)
+    // leaves both fields unset, which AgentLoop/Session treat as "use the
+    // built-in behavior" -- exactly what "summarize" itself does, so this
+    // degrades to the same place it would have resolved to anyway.
+    if (const auto* strategy = compaction_strategies.Find(settings.memory.compaction_strategy)) {
+        loop_config.cut_selector = strategy->cut_selector;
+        loop_config.compaction_summarizer = strategy->summarize;
+    }
 
     // Configure hooks (track O) now that every point -- core's and plugins' --
     // is registered: hooks.json actions resolve onto points, filter fields are

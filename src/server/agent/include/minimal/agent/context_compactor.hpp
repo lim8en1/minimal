@@ -101,4 +101,30 @@ std::int64_t estimate_tokens(std::span<const llm::Message> messages);
 // sized, not serialized -- over the tools array's input schemas.
 std::int64_t JsonSizeEstimate(const nlohmann::json& value);
 
+// Summarizes a message range into one synthetic message. Injected so the
+// compaction path is testable without a live summarizer; production supplies
+// compact_messages, which calls the provider with the preset's compression prompt.
+// nullopt means "no compaction this cycle" -- failure degrades to no compaction,
+// never to a lost transcript. Everything that varies is in CompactionRequest,
+// supplied per call rather than bound at construction, because /agent can switch
+// presets mid-session and binding would compact with the previous one's settings.
+using Compactor = std::function<std::optional<CompactionResult>(
+    std::span<const llm::Message> messages_to_compact, llm::LlmProvider& provider,
+    const CompactionRequest& request)>;
+
+// Proposes a candidate cut index into `history` (messages before it would be
+// summarized; messages at/after it stay verbatim) -- the OTHER half of the
+// compaction seam (S4), independent of Compactor above. `keep_recent_tokens`
+// is settings.json's memory.compaction_keep_recent_tokens, handed through so a
+// strategy can honor it (W11: walk from the tail accumulating per-message
+// estimates until the budget is met) without needing its own config plumbing.
+//
+// Core ALWAYS snaps whatever this returns backward to the nearest safe
+// tool-call boundary (agent::snap_compaction_boundary) before using it -- a
+// proposed cut is a starting point, never a guarantee, and that invariant is
+// therefore not a contract a strategy author has to remember or can get wrong.
+using CutSelector =
+    std::function<std::size_t(const std::vector<llm::Message>& history,
+                              std::int64_t keep_recent_tokens)>;
+
 }  // namespace minimal::agent
