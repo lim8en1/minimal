@@ -34,6 +34,21 @@ TEST_CASE("out-of-workdir folds in rather than substituting", "[permission]") {
     CHECK(outside == PermissionMode::AlwaysDeny);  // never more permissive than inside
 }
 
+TEST_CASE("network folds in rather than substituting", "[permission]") {
+    // Same class of bug as out-of-workdir: an operator who sets execute=allow
+    // for a sandboxed bash must not thereby also allow a network-capable
+    // tool (S3's web_fetch) to reach arbitrary URLs.
+    PermissionPolicy policy;
+    policy.execute = PermissionMode::AlwaysAllow;
+    policy.network = PermissionMode::AlwaysDeny;
+
+    const auto base = policy.mode_for("bash", ToolCategory::Execute);
+    const auto networked = most_restrictive(base, policy.network);
+
+    CHECK(base == PermissionMode::AlwaysAllow);
+    CHECK(networked == PermissionMode::AlwaysDeny);  // never more permissive than the category
+}
+
 TEST_CASE("apply_run_mode", "[permission]") {
     SECTION("Bypass allows everything, ignoring the base") {
         CHECK(apply_run_mode(PermissionMode::AlwaysDeny, PermissionRunMode::Bypass) == PermissionMode::AlwaysAllow);

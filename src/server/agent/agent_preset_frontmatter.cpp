@@ -44,6 +44,7 @@ tools::PermissionOverrideLayer DecodePermissionModeBlock(const YAML::Node& node)
     if (block["execute"]) layer.execute = config::ParsePermissionMode(block["execute"].as<std::string>());
     if (block["out_of_workdir"])
         layer.out_of_workdir = config::ParsePermissionMode(block["out_of_workdir"].as<std::string>());
+    if (block["network"]) layer.network = config::ParsePermissionMode(block["network"].as<std::string>());
 
     const YAML::Node overrides = block["overrides"];
     if (overrides && overrides.IsMap()) {

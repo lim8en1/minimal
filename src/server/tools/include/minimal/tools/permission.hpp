@@ -77,6 +77,15 @@ struct PermissionPolicy {
     // `out_of_workdir: allow` would permit /etc/foo while denying ./foo.cpp.
     PermissionMode out_of_workdir = PermissionMode::Ask;
 
+    // A third, independent dimension for the same reason out_of_workdir is one:
+    // a tool that reaches the network (S3's web_fetch/web_search) is a
+    // different risk from "runs a subprocess" or "writes a file", and an
+    // operator who sets `execute: allow` for a sandboxed bash should not
+    // thereby also allow fetching arbitrary URLs. Folded in via
+    // most_restrictive() only for tools that declare
+    // Tool::network_access_required().
+    PermissionMode network = PermissionMode::Ask;
+
     std::unordered_map<std::string, PermissionMode> per_tool_overrides;
 
     PermissionMode mode_for(std::string_view tool_name, ToolCategory category) const;
@@ -95,7 +104,7 @@ struct McpPermissionPolicy {
 // Unlike PermissionPolicy (whose fields are always concrete), a layer may leave
 // any field unset, meaning "fall through to the next layer".
 struct PermissionOverrideLayer {
-    std::optional<PermissionMode> read_only, file_write, execute, out_of_workdir;
+    std::optional<PermissionMode> read_only, file_write, execute, out_of_workdir, network;
     std::unordered_map<std::string, PermissionMode> per_tool_overrides;
 };
 
@@ -110,6 +119,11 @@ PermissionMode resolve_permission_chain(const std::string& tool_name, ToolCatego
 // preset.out_of_workdir -> global.out_of_workdir -> hard-coded default (Ask).
 PermissionMode resolve_out_of_workdir_chain(const PermissionOverrideLayer& preset,
                                              const PermissionOverrideLayer& global);
+
+// Same two-layer shape as resolve_out_of_workdir_chain, for the `network`
+// dimension. preset.network -> global.network -> hard-coded default (Ask).
+PermissionMode resolve_network_chain(const PermissionOverrideLayer& preset,
+                                      const PermissionOverrideLayer& global);
 
 // preset mcp_permissions[server] -> permissions.json mcp_default_mode -> Ask.
 PermissionMode resolve_mcp_chain(const std::optional<PermissionMode>& preset_per_server,

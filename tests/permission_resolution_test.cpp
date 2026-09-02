@@ -61,6 +61,13 @@ TEST_CASE("BuildPermissionPolicy: out_of_workdir is wired through", "[permission
     CHECK(policy.out_of_workdir == PermissionMode::AlwaysDeny);
 }
 
+TEST_CASE("BuildPermissionPolicy: network is wired through", "[permission_resolution]") {
+    PermissionOverrideLayer preset;
+    preset.network = PermissionMode::AlwaysDeny;
+    auto policy = BuildPermissionPolicy(preset, {});
+    CHECK(policy.network == PermissionMode::AlwaysDeny);
+}
+
 TEST_CASE("BuildMcpPermissionPolicy: preset per-server wins", "[permission_resolution]") {
     auto policy = BuildMcpPermissionPolicy({{"search", PermissionMode::AlwaysAllow}}, PermissionMode::AlwaysDeny);
     CHECK(policy.mode_for("search") == PermissionMode::AlwaysAllow);

@@ -19,6 +19,7 @@ tools::PermissionPolicy BuildPermissionPolicy(const tools::PermissionOverrideLay
     policy.execute =
         tools::resolve_permission_chain(kCategoryProbeToolName, tools::ToolCategory::Execute, preset, global);
     policy.out_of_workdir = tools::resolve_out_of_workdir_chain(preset, global);
+    policy.network = tools::resolve_network_chain(preset, global);
 
     policy.per_tool_overrides = global.per_tool_overrides;  // union...
     for (const auto& [name, mode] : preset.per_tool_overrides) {

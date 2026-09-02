@@ -88,6 +88,21 @@ TEST_CASE("ParseAgentPresetFrontmatter: each permission_mode field is independen
     CHECK_FALSE(preset.permission_mode.read_only.has_value());
     CHECK_FALSE(preset.permission_mode.execute.has_value());
     CHECK_FALSE(preset.permission_mode.out_of_workdir.has_value());
+    CHECK_FALSE(preset.permission_mode.network.has_value());
+}
+
+TEST_CASE("ParseAgentPresetFrontmatter: permission_mode.network decodes",
+          "[agent_preset_frontmatter]") {
+    auto preset = Parse(
+        "---\n"
+        "name: build\n"
+        "permission_mode:\n"
+        "  network: deny\n"
+        "---\n"
+        "body\n");
+
+    REQUIRE(preset.permission_mode.network.has_value());
+    CHECK(*preset.permission_mode.network == PermissionMode::AlwaysDeny);
 }
 
 TEST_CASE("ParseAgentPresetFrontmatter: permission_mode.overrides decodes into per_tool_overrides",

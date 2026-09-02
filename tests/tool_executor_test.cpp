@@ -170,6 +170,68 @@ TEST_CASE("out-of-workdir tightens an otherwise-allowed tool", "[tool_executor][
     CHECK(f.tool->calls.empty());
 }
 
+TEST_CASE("network folds in and cannot loosen the tool's own mode",
+          "[tool_executor][network]") {
+    // Same class of regression as out-of-workdir: if network REPLACED the
+    // category rather than folding in, then execute=deny + network=allow
+    // would permit a network-capable tool while denying the category it
+    // belongs to -- inverted.
+    Fixture f;
+    auto& tool = f.AddTool("web_fetch", ToolCategory::Execute);
+    tool.set_network_access_required(true);
+    UnreachablePermissionChecker checker;
+
+    tools::PermissionPolicy policy;
+    policy.execute = PermissionMode::AlwaysDeny;
+    policy.network = PermissionMode::AlwaysAllow;
+
+    tools::ToolExecutor executor(f.registry, checker, policy, {}, PermissionRunMode::Normal);
+    auto ctx = f.Context();
+
+    const auto result = executor.Run("tu1", "web_fetch", nlohmann::json::object(), ctx);
+    CHECK(result.is_error);
+    CHECK(f.tool->calls.empty());
+}
+
+TEST_CASE("network tightens an otherwise-allowed tool", "[tool_executor][network]") {
+    Fixture f;
+    auto& tool = f.AddTool("web_fetch", ToolCategory::Execute);
+    tool.set_network_access_required(true);
+    UnreachablePermissionChecker checker;
+
+    tools::PermissionPolicy policy;
+    policy.execute = PermissionMode::AlwaysAllow;
+    policy.network = PermissionMode::AlwaysDeny;
+
+    tools::ToolExecutor executor(f.registry, checker, policy, {}, PermissionRunMode::Normal);
+    auto ctx = f.Context();
+
+    const auto result = executor.Run("tu1", "web_fetch", nlohmann::json::object(), ctx);
+    CHECK(result.is_error);
+    CHECK(f.tool->calls.empty());
+}
+
+TEST_CASE("network is never consulted for a tool that does not declare "
+         "network_access_required",
+         "[tool_executor][network]") {
+    // A denied network dimension must not leak into unrelated tools -- the
+    // fold only applies to tools that opt in.
+    Fixture f;
+    f.AddTool("bash", ToolCategory::Execute);   // network_access_required() defaults false
+    UnreachablePermissionChecker checker;
+
+    tools::PermissionPolicy policy;
+    policy.execute = PermissionMode::AlwaysAllow;
+    policy.network = PermissionMode::AlwaysDeny;
+
+    tools::ToolExecutor executor(f.registry, checker, policy, {}, PermissionRunMode::Normal);
+    auto ctx = f.Context();
+
+    const auto result = executor.Run("tu1", "bash", nlohmann::json::object(), ctx);
+    CHECK_FALSE(result.is_error);
+    CHECK(f.tool->calls.size() == 1);
+}
+
 TEST_CASE("MCP tools resolve per-server, not per-tool", "[tool_executor][mcp]") {
     Fixture f;
     f.AddTool("mcp__search__query", ToolCategory::Execute);

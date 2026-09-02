@@ -20,6 +20,8 @@ void ParseFallback(const nlohmann::json& doc, tools::PermissionOverrideLayer& la
         layer.execute = ParsePermissionMode(fallback.at("execute").get<std::string>());
     if (fallback.contains("out_of_workdir"))
         layer.out_of_workdir = ParsePermissionMode(fallback.at("out_of_workdir").get<std::string>());
+    if (fallback.contains("network"))
+        layer.network = ParsePermissionMode(fallback.at("network").get<std::string>());
 }
 
 void ParsePerToolOverrides(const nlohmann::json& doc, tools::PermissionOverrideLayer& layer) {

@@ -62,6 +62,17 @@ TEST_CASE("out-of-workdir chain", "[permission][chain]") {
     CHECK(resolve_out_of_workdir_chain(preset, global) == PermissionMode::AlwaysDeny);
 }
 
+TEST_CASE("network chain", "[permission][chain]") {
+    PermissionOverrideLayer preset, global;
+    CHECK(resolve_network_chain(preset, global) == PermissionMode::Ask);
+
+    global.network = PermissionMode::AlwaysAllow;
+    CHECK(resolve_network_chain(preset, global) == PermissionMode::AlwaysAllow);
+
+    preset.network = PermissionMode::AlwaysDeny;
+    CHECK(resolve_network_chain(preset, global) == PermissionMode::AlwaysDeny);
+}
+
 TEST_CASE("mcp permission chain", "[permission][chain][mcp]") {
     CHECK(resolve_mcp_chain(std::nullopt, PermissionMode::Ask) == PermissionMode::Ask);
     CHECK(resolve_mcp_chain(std::nullopt, PermissionMode::AlwaysAllow) == PermissionMode::AlwaysAllow);

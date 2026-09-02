@@ -259,6 +259,8 @@ public:
         return input.at(*path_key_).get<std::string>();
     }
 
+    bool network_access_required() const override { return network_access_required_; }
+
     tools::PermissionDisclosure Disclose(const nlohmann::json& input,
                                          const tools::ToolContext& ctx) const override {
         if (!disclosure_) return tools::Tool::Disclose(input, ctx);
@@ -266,6 +268,7 @@ public:
     }
 
     void set_path_key(std::string key) { path_key_ = std::move(key); }
+    void set_network_access_required(bool value) { network_access_required_ = value; }
     void set_is_error(bool value) { is_error_ = value; }
     void set_disclosure(tools::PermissionDisclosure disclosure) {
         disclosure_ = std::move(disclosure);
@@ -278,6 +281,7 @@ private:
     std::string result_text_;
     std::optional<std::string> path_key_;
     std::optional<tools::PermissionDisclosure> disclosure_;
+    bool network_access_required_ = false;
     bool is_error_ = false;
     // Guards `calls` against concurrent executes (parallel dispatch).
     std::mutex mu_;
@@ -371,13 +375,15 @@ private:
 
 inline tools::PermissionPolicy AllowAllPolicy() {
     tools::PermissionPolicy p;
-    p.read_only = p.file_write = p.execute = p.out_of_workdir = tools::PermissionMode::AlwaysAllow;
+    p.read_only = p.file_write = p.execute = p.out_of_workdir = p.network =
+        tools::PermissionMode::AlwaysAllow;
     return p;
 }
 
 inline tools::PermissionPolicy DenyAllPolicy() {
     tools::PermissionPolicy p;
-    p.read_only = p.file_write = p.execute = p.out_of_workdir = tools::PermissionMode::AlwaysDeny;
+    p.read_only = p.file_write = p.execute = p.out_of_workdir = p.network =
+        tools::PermissionMode::AlwaysDeny;
     return p;
 }
 

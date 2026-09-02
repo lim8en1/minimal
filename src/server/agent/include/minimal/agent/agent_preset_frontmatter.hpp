@@ -24,7 +24,7 @@ struct AgentPresetFrontmatter {
     std::vector<std::string> allowed_tools;         // default empty (fail closed; "*" must be explicit)
     std::vector<std::string> allowed_skills;        // default empty
     std::vector<std::string> allowed_mcp_servers;   // default empty
-    tools::PermissionOverrideLayer permission_mode;  // read_only/file_write/execute/out_of_workdir + overrides -> per_tool_overrides
+    tools::PermissionOverrideLayer permission_mode;  // read_only/file_write/execute/out_of_workdir/network + overrides -> per_tool_overrides
     std::unordered_map<std::string, tools::PermissionMode> mcp_permissions;  // server -> mode
     std::string compression_prompt;                 // filename under prompts/, "" = use default
     std::string body;                               // system prompt text, unresolved (no subagent.md prefix)

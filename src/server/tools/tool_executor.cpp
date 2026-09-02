@@ -90,6 +90,12 @@ PermissionMode ToolExecutor::ResolveMode(const Tool& tool, const nlohmann::json&
         }
     }
 
+    // 2a. Same fold, same reason, for the network dimension: only if still
+    //     permitted, and only for tools that declare network_access_required().
+    if (mode != PermissionMode::AlwaysDeny && tool.network_access_required()) {
+        mode = most_restrictive(mode, policy_.network);
+    }
+
     // 2b. Subagent ceiling, when one was handed down: a child is never more
     //     permissive than its parent. Folds like out_of_workdir -- it can only
     //     tighten -- and sits before run mode so the clamped run mode still

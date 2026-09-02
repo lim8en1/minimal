@@ -146,6 +146,14 @@ public:
         return std::nullopt;
     }
 
+    // Declarative opt-in, same shape as path_confinement_supported(): a tool
+    // that reaches the network (S3's web_fetch/web_search) sets this true so
+    // ToolExecutor folds in PermissionPolicy::network via most_restrictive.
+    // Default false: most tools (bash, the fs tools, search) never leave the
+    // local machine, and tagging them would fold in a dimension that has
+    // nothing to do with what they actually do.
+    virtual bool network_access_required() const { return false; }
+
     // Declarative opt-OUT from parallel dispatch (see ARCHITECTURE.md "Tool
     // dispatch"): a tool whose execute() cannot safely overlap another
     // execution of the same tool in this session sets this false. The agent

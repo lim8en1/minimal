@@ -58,6 +58,13 @@ PermissionMode resolve_out_of_workdir_chain(const PermissionOverrideLayer& prese
     return PermissionMode::Ask;
 }
 
+PermissionMode resolve_network_chain(const PermissionOverrideLayer& preset,
+                                      const PermissionOverrideLayer& global) {
+    if (preset.network) return *preset.network;
+    if (global.network) return *global.network;
+    return PermissionMode::Ask;
+}
+
 PermissionMode resolve_mcp_chain(const std::optional<PermissionMode>& preset_per_server,
                                   PermissionMode global_default_mode) {
     if (preset_per_server) return *preset_per_server;

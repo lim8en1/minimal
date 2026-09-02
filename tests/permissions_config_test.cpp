@@ -18,6 +18,7 @@ TEST_CASE("ParsePermissionsConfig: empty doc yields documented defaults", "[perm
     CHECK_FALSE(config.global_layer.file_write.has_value());
     CHECK_FALSE(config.global_layer.execute.has_value());
     CHECK_FALSE(config.global_layer.out_of_workdir.has_value());
+    CHECK_FALSE(config.global_layer.network.has_value());
     CHECK(config.global_layer.per_tool_overrides.empty());
 }
 
@@ -26,7 +27,8 @@ TEST_CASE("ParsePermissionsConfig: fallback.* lands in global_layer", "[permissi
                             {{"read_only", "allow"},
                              {"file_write", "deny"},
                              {"execute", "ask"},
-                             {"out_of_workdir", "deny"}}}};
+                             {"out_of_workdir", "deny"},
+                             {"network", "deny"}}}};
 
     auto config = ParsePermissionsConfig(doc);
     REQUIRE(config.global_layer.read_only.has_value());
@@ -34,6 +36,7 @@ TEST_CASE("ParsePermissionsConfig: fallback.* lands in global_layer", "[permissi
     CHECK(*config.global_layer.file_write == PermissionMode::AlwaysDeny);
     CHECK(*config.global_layer.execute == PermissionMode::Ask);
     CHECK(*config.global_layer.out_of_workdir == PermissionMode::AlwaysDeny);
+    CHECK(*config.global_layer.network == PermissionMode::AlwaysDeny);
 }
 
 TEST_CASE("ParsePermissionsConfig: top-level per_tool_overrides lands in global_layer", "[permissions_config]") {

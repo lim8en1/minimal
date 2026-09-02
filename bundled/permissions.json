@@ -5,7 +5,8 @@
     "read_only": "allow",
     "file_write": "ask",
     "execute": "ask",
-    "out_of_workdir": "ask"
+    "out_of_workdir": "ask",
+    "network": "ask"
   },
 
   "per_tool_overrides": {},
