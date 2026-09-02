@@ -125,17 +125,17 @@ public:
 private:
     const std::vector<std::string>& ArtFor(const std::string& session_id) const {
         std::lock_guard<std::mutex> lock(mtx_);
-        auto cached = cache_.find(session_id);
-        if (cached != cache_.end()) return cached->second;
-
         // A random seed per key: process start for the app-level banner (the
         // empty session id), and one per session when regenerating. With
-        // regenerate_per_session=false one art serves every key.
+        // regenerate_per_session=false every key resolves to the shared key,
+        // so one art serves every key regardless of query order.
+        const std::string& cache_key =
+            config_.regenerate_per_session ? session_id : kSharedKey;
+        auto cached = cache_.find(cache_key);
+        if (cached != cache_.end()) return cached->second;
+
         const auto seed = rng_();
-        const auto& active = cache_.contains(kSharedKey) && !config_.regenerate_per_session
-                                 ? cache_.at(kSharedKey)
-                                 : Generate(seed);
-        return cache_.emplace(session_id, active).first->second;
+        return cache_.emplace(cache_key, Generate(seed)).first->second;
     }
 
     std::vector<std::string> Generate(std::uint32_t seed) const {

@@ -497,3 +497,26 @@ TEST_CASE("the bundled logo plugin loads through the real loader and renders art
     // 2^-29 per draw pair, not a live flake source.
     CHECK(first != second);
 }
+
+// regenerate_per_session=false must share one banner across every session
+// EVEN WHEN the app-level empty state (session id "") is never rendered --
+// that used to be the only path that populated the shared cache slot, so a
+// caller that jumps straight to a session (e.g. resuming on startup) got a
+// fresh banner per session despite the flag.
+TEST_CASE("the bundled logo plugin shares one banner when regenerate_per_session is false",
+          "[client_plugins][logo]") {
+    const auto fixtures = LoadedFixtures::Load({PluginCandidate{
+        MINIMAL_LOGO_PLUGIN, Provenance::Bundled, /*enabled=*/true,
+        {{"regenerate_per_session", false}}}});
+    REQUIRE(fixtures->records.size() == 1);
+    REQUIRE(fixtures->records.front().ok());
+
+    const auto* view = fixtures->start_views.Find("logo.banner");
+    REQUIRE(view != nullptr);
+    const Theme theme = Theme::Parse(R"({"name":"t","colors":{}})", ColorDepth::Truecolor);
+
+    const auto first = ToText(view->Render("session-1", theme));
+    const auto second = ToText(view->Render("session-2", theme));
+    CHECK(!first.empty());
+    CHECK(first == second);
+}
