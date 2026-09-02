@@ -371,3 +371,109 @@ TEST_CASE("prompt editor: the stale suggestion list is not completable mid-debou
     CHECK(state.completions.empty());
     CHECK(state.list_open);   // a fresh answer will re-open it
 }
+
+// ---------------------------------------------------------------------------
+// Prompt history (up/down arrow recall)
+// ---------------------------------------------------------------------------
+
+namespace {
+void Type(const ftxui::Component& editor, std::string_view text) {
+    for (const char c : text) {
+        REQUIRE(SendEvent(editor, ftx::Event::Character(std::string{c})));
+    }
+}
+}  // namespace
+
+TEST_CASE("prompt editor: up-arrow recalls the last submitted line, down-arrow "
+         "restores the draft",
+         "[prompt_editor]") {
+    const auto theme = TestTheme();
+    PromptEditorState state;
+    std::vector<std::string> texts;
+    auto editor = MakePromptEditor(
+        theme, state, [&](const std::string& t) { texts.push_back(t); },
+        [](const std::string&) {}, [](const std::string&) { return std::vector<std::string>{}; });
+
+    Type(editor, "first message");
+    REQUIRE(SendEvent(editor, ftx::Event::Return));
+    REQUIRE(texts.size() == 1);
+    CHECK(state.content.empty());
+
+    // Start a second, unsubmitted line -- this is the "draft" down-arrow
+    // must restore.
+    Type(editor, "unsent draft");
+
+    REQUIRE(SendEvent(editor, ftx::Event::ArrowUp));
+    CHECK(state.content == "first message");
+
+    REQUIRE(SendEvent(editor, ftx::Event::ArrowDown));
+    CHECK(state.content == "unsent draft");   // the draft survives the round trip
+    CHECK_FALSE(state.history_cursor.has_value());
+}
+
+TEST_CASE("prompt editor: up-arrow walks further back through older entries, "
+         "stopping at the oldest",
+         "[prompt_editor]") {
+    const auto theme = TestTheme();
+    PromptEditorState state;
+    auto editor = MakePromptEditor(
+        theme, state, [](const std::string&) {}, [](const std::string&) {},
+        [](const std::string&) { return std::vector<std::string>{}; });
+
+    Type(editor, "one");
+    REQUIRE(SendEvent(editor, ftx::Event::Return));
+    Type(editor, "two");
+    REQUIRE(SendEvent(editor, ftx::Event::Return));
+    Type(editor, "three");
+    REQUIRE(SendEvent(editor, ftx::Event::Return));
+
+    REQUIRE(SendEvent(editor, ftx::Event::ArrowUp));
+    CHECK(state.content == "three");
+    REQUIRE(SendEvent(editor, ftx::Event::ArrowUp));
+    CHECK(state.content == "two");
+    REQUIRE(SendEvent(editor, ftx::Event::ArrowUp));
+    CHECK(state.content == "one");
+    // Already at the oldest: another up-arrow stays put, not out of bounds.
+    REQUIRE(SendEvent(editor, ftx::Event::ArrowUp));
+    CHECK(state.content == "one");
+
+    REQUIRE(SendEvent(editor, ftx::Event::ArrowDown));
+    CHECK(state.content == "two");
+    REQUIRE(SendEvent(editor, ftx::Event::ArrowDown));
+    CHECK(state.content == "three");
+    REQUIRE(SendEvent(editor, ftx::Event::ArrowDown));
+    CHECK(state.content.empty());   // past the newest: back to the (empty) draft
+}
+
+TEST_CASE("prompt editor: a consecutive duplicate submission does not grow history",
+         "[prompt_editor]") {
+    const auto theme = TestTheme();
+    PromptEditorState state;
+    auto editor = MakePromptEditor(
+        theme, state, [](const std::string&) {}, [](const std::string&) {},
+        [](const std::string&) { return std::vector<std::string>{}; });
+
+    Type(editor, "same line");
+    REQUIRE(SendEvent(editor, ftx::Event::Return));
+    Type(editor, "same line");
+    REQUIRE(SendEvent(editor, ftx::Event::Return));
+    CHECK(state.history.size() == 1);
+}
+
+TEST_CASE("prompt editor: typing while browsing history exits browse mode",
+         "[prompt_editor]") {
+    const auto theme = TestTheme();
+    PromptEditorState state;
+    auto editor = MakePromptEditor(
+        theme, state, [](const std::string&) {}, [](const std::string&) {},
+        [](const std::string&) { return std::vector<std::string>{}; });
+
+    Type(editor, "old entry");
+    REQUIRE(SendEvent(editor, ftx::Event::Return));
+    REQUIRE(SendEvent(editor, ftx::Event::ArrowUp));
+    REQUIRE(state.history_cursor.has_value());
+
+    REQUIRE(SendEvent(editor, ftx::Event::Character("!")));
+    CHECK_FALSE(state.history_cursor.has_value());
+    CHECK(state.content == "old entry!");   // the edit itself is preserved
+}

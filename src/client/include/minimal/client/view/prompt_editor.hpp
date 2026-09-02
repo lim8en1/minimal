@@ -24,7 +24,9 @@
 // (docs/EXTENSIBILITY.md 4.4), so a macro never surprises anyone.
 
 #include <chrono>
+#include <cstddef>
 #include <functional>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -46,6 +48,18 @@ struct PromptEditorState {
     std::string pending_prefix;
     std::chrono::steady_clock::time_point query_at{};
     bool query_pending = false;
+
+    // Submitted-line recall (up/down arrow, readline-like), scoped to the
+    // whole app rather than per-tab -- one editor Component is shared across
+    // tabs, so one history is the simplest model that matches "what did I
+    // just type", regardless of which tab it went to.
+    std::vector<std::string> history;
+    // nullopt = editing fresh content, not browsing. An index into `history`
+    // while browsing.
+    std::optional<std::size_t> history_cursor;
+    // The content that was live when browsing started, restored on arrowing
+    // DOWN past the newest history entry.
+    std::string history_draft;
 };
 
 // One /-command the editor may offer. From ListCommands, fetched once at

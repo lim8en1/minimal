@@ -110,6 +110,14 @@ ftxui::Component MakePromptEditor(
                 line.pop_back();
             }
             if (line.empty()) return true;
+            // Recall history (no arrow-up-to-recall was one of the editor's
+            // named gaps): skip a consecutive duplicate of the last entry --
+            // repeatedly submitting the same line, or repeating what recall
+            // just brought back, should not grow the list every time.
+            if (state.history.empty() || state.history.back() != line) {
+                state.history.push_back(line);
+            }
+            state.history_cursor.reset();
             if (line.front() == '/') {
                 on_command(line);
             } else {
@@ -137,12 +145,41 @@ ftxui::Component MakePromptEditor(
             accept_suggestion();
             return true;   // consumed
         }
+        // Submitted-line recall (readline-like), only when the suggestion
+        // list isn't already claiming these keys. ArrowUp walks toward
+        // older entries; ArrowDown walks back toward newer ones and, past
+        // the newest, restores whatever was being typed before recall
+        // started.
+        if (!state.list_open && event == Event::ArrowUp && !state.history.empty()) {
+            if (!state.history_cursor.has_value()) {
+                state.history_draft = state.content;
+                state.history_cursor = state.history.size() - 1;
+            } else if (*state.history_cursor > 0) {
+                --*state.history_cursor;
+            }
+            state.content = state.history[*state.history_cursor];
+            return true;
+        }
+        if (!state.list_open && event == Event::ArrowDown && state.history_cursor.has_value()) {
+            if (*state.history_cursor + 1 < state.history.size()) {
+                ++*state.history_cursor;
+                state.content = state.history[*state.history_cursor];
+            } else {
+                state.history_cursor.reset();
+                state.content = state.history_draft;
+            }
+            return true;
+        }
 
         // After every character edit: either the @-mention debounce re-arms
         // (the query itself fires from the render gate below -- no timers, no
         // threads; frame timing carries it) or, for a '/'+name prefix, the
         // LOCAL command catalog filters immediately.
         if (event.is_character()) {
+            // Editing a recalled line exits browsing -- it is no longer the
+            // same text as history[cursor], so further up/down should not
+            // silently discard what was just typed.
+            state.history_cursor.reset();
             const std::string command_prefix = CommandPrefixOf(state.content);
             if (!command_prefix.empty() && command_catalog != nullptr) {
                 state.suggestions.clear();
