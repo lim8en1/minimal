@@ -63,6 +63,7 @@ struct SubagentFixture {
                                                  {{"spawn_subagent", "allow"}}}})
         : skills(config::SkillRegistry::Load(dir.path())) {
         std::filesystem::create_directories(dir.path() / "agents");
+        std::filesystem::create_directories(dir.path() / "prompts");
         std::filesystem::create_directories(workdir);
 
         Write("providers.json",
@@ -93,7 +94,7 @@ struct SubagentFixture {
         Write("agents/child-allow.md",
               "---\nname: child-allow\nmodel: childmain/child-script\nallowed_tools: "
               "[\"*\"]\npermission_mode:\n  execute: allow\n---\nYou are the child agent.\n");
-        Write("agents/subagent.md", std::string(kSubagentPrefix) + "\n");
+        Write("prompts/subagent.md", std::string(kSubagentPrefix) + "\n");
 
         // Both scripts exist before any provider is constructed: the map is
         // never mutated after this, so concurrent factory calls only read it.

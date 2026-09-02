@@ -108,7 +108,7 @@ AgentPresetRegistry::AgentPresetRegistry(std::filesystem::path config_dir,
       skills_(skills) {
     // Both optional at this phase -- a real deployment's absence is the
     // startup sanity check's job to flag, not this constructor's.
-    subagent_prefix_ = ReadFileOrEmpty(config_dir_ / "agents" / "subagent.md");
+    subagent_prefix_ = ReadFileOrEmpty(config_dir_ / "prompts" / "subagent.md");
     default_compression_prompt_ =
         config::parse_frontmatter_markdown(ReadFileOrEmpty(config_dir_ / "prompts" / "compression.md")).body;
 }

@@ -462,7 +462,7 @@ TEST_CASE("a concurrent duplicate construction is refused before any side effect
 
 TEST_CASE("CreateResolved uses the preset it is handed", "[session_registry][subagent]") {
     // The subagent spawner adapts a resolved preset before the session exists
-    // (is_subagent, subagent.md prefix, intersected allowed lists); no name-based
+    // (is_subagent, prompts/subagent.md prefix, intersected allowed lists); no name-based
     // lookup can express that. The registry must take the preset as given --
     // here proven by handing it a system prompt no file on disk contains.
     RegistryFixture fixture;

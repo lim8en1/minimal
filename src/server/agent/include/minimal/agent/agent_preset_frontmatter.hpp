@@ -27,7 +27,7 @@ struct AgentPresetFrontmatter {
     tools::PermissionOverrideLayer permission_mode;  // read_only/file_write/execute/out_of_workdir/network + overrides -> per_tool_overrides
     std::unordered_map<std::string, tools::PermissionMode> mcp_permissions;  // server -> mode
     std::string compression_prompt;                 // filename under prompts/, "" = use default
-    std::string body;                               // system prompt text, unresolved (no subagent.md prefix)
+    std::string body;                               // system prompt text, unresolved (no prompts/subagent.md prefix)
 };
 
 // Pure. Throws std::runtime_error on a missing `name`, a `model` that is not

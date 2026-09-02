@@ -331,9 +331,6 @@ std::vector<CheckResult> StartupSanityCheck::check_presets() {
         const auto& entry = *it;
             if (!entry.is_regular_file(ec) || entry.path().extension() != ".md") continue;
             const auto preset_name = entry.path().stem().string();
-            // subagent.md is plain Markdown without frontmatter -- a session-level
-            // prefix, not a preset (ARCHITECTURE.md, "Config").
-            if (preset_name == "subagent") continue;
             try {
                 presets_[preset_name] = agent::LoadAgentPresetFrontmatter(entry.path());
             } catch (const std::exception& e) {

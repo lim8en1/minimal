@@ -94,7 +94,7 @@ public:
     // Same as Create(), but the caller supplies the ALREADY RESOLVED preset
     // instead of having it looked up by params.agent_preset. Subagent spawning
     // is the consumer: the spawner adapts the resolved preset first (is_subagent
-    // set, subagent.md prefixed onto the system prompt, allowed lists
+    // set, prompts/subagent.md prefixed onto the system prompt, allowed lists
     // intersected with the parent's), and no name-based lookup could express
     // that. params.agent_preset still names the preset for the database row and
     // for SessionInfo.

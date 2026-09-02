@@ -417,7 +417,7 @@ TEST_CASE("AgentPresetRegistry: an explicitly-named missing compression prompt t
     CHECK_THROWS_AS(registry.Resolve("build"), std::runtime_error);
 }
 
-TEST_CASE("AgentPresetRegistry: missing agents/subagent.md yields an empty SubagentPrefix", "[agent_preset_registry]") {
+TEST_CASE("AgentPresetRegistry: missing prompts/subagent.md yields an empty SubagentPrefix", "[agent_preset_registry]") {
     TempConfigDir config;
     config.WriteDefaults();
     config::SkillRegistry skills = config::SkillRegistry::Load(config.dir);
@@ -427,10 +427,10 @@ TEST_CASE("AgentPresetRegistry: missing agents/subagent.md yields an empty Subag
     CHECK(registry.SubagentPrefix().empty());
 }
 
-TEST_CASE("AgentPresetRegistry: present agents/subagent.md is read verbatim", "[agent_preset_registry]") {
+TEST_CASE("AgentPresetRegistry: present prompts/subagent.md is read verbatim", "[agent_preset_registry]") {
     TempConfigDir config;
     config.WriteDefaults();
-    config.Write("agents/subagent.md", "You are in subagent mode.\n");
+    config.Write("prompts/subagent.md", "You are in subagent mode.\n");
     config::SkillRegistry skills = config::SkillRegistry::Load(config.dir);
     AgentPresetRegistry registry(config.dir, skills,
                                   config::LoadSettingsConfig(config.dir / "settings.json"));

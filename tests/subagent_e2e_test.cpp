@@ -45,6 +45,7 @@ struct SubagentE2EFixture {
         std::error_code ec;
         std::filesystem::remove_all(dir, ec);
         std::filesystem::create_directories(dir / "agents");
+        std::filesystem::create_directories(dir / "prompts");
         std::filesystem::create_directories(dir / "work");
 
         Write("providers.json",
@@ -70,7 +71,7 @@ struct SubagentE2EFixture {
         Write("agents/child.md",
               "---\nname: child\nmodel: childmain/child-script\nallowed_tools: "
               "[\"*\"]\n---\nYou are the child agent.\n");
-        Write("agents/subagent.md", "You are running as a subagent.\n");
+        Write("prompts/subagent.md", "You are running as a subagent.\n");
 
         scripts["parent-script"] = std::make_shared<testing::ScriptedProviderScript>();
         scripts["child-script"] = std::make_shared<testing::ScriptedProviderScript>();

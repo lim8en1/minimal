@@ -23,7 +23,7 @@ public:
     // via the constructor. agents/*.md files are
     // NOT scanned eagerly: each is loaded lazily on first Resolve() for that
     // name and cached, matching "computed once at load/switch time, never
-    // re-resolved per tool call". agents/subagent.md and prompts/compression.md
+    // re-resolved per tool call". prompts/subagent.md and prompts/compression.md
     // are read once here but treated as OPTIONAL at this phase (empty string if
     // absent) -- a future sanity_check is what makes their absence loud in a
     // real deployment.
@@ -44,7 +44,7 @@ public:
     // Throws if agents/<preset_name>.md doesn't exist, or its `provider`
     // doesn't resolve (a providers.json entry, or "default" with no
     // settings.json default_provider). The returned preset always has
-    // is_subagent == false and an unprefixed system_prompt -- subagent.md
+    // is_subagent == false and an unprefixed system_prompt -- the prompts/subagent.md
     // prefixing and is_subagent=true are session-level facts layered on by a
     // future session/spawn-time caller, using SubagentPrefix() below.
     // BY VALUE, and the cache below is why. Returning a reference into a

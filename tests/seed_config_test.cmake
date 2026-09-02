@@ -43,7 +43,7 @@ endfunction()
 # stage 4 and the user fixed one filename per run to find the next.
 seed()
 foreach(_needed settings.json permissions.json providers.json providers.example.json
-                prompts/compression.md agents/build.md agents/plan.md agents/subagent.md)
+                prompts/compression.md prompts/subagent.md agents/build.md agents/plan.md)
     if(NOT EXISTS "${_config}/${_needed}")
         message(FATAL_ERROR "cold seed did not produce ${_needed}")
     endif()

@@ -20,7 +20,7 @@ namespace minimal::agent {
 struct AgentPreset {
     std::string name;
     std::string description;
-    std::string system_prompt;  // subagent.md prefix (if any) already concatenated
+    std::string system_prompt;  // prompts/subagent.md prefix (if any) already concatenated
     llm::ProviderConfig provider;  // model_name already reflects preset-override-wins-else-entry
     // The providers.json `provider` field -- the kind string that selects a
     // factory from ProviderFactoryRegistry. Carried here because ProviderConfig

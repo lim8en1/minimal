@@ -32,8 +32,8 @@ minimal/
                                   #   (shipped disabled -- see naming), cost-tracker
     client/                       # (none bundled yet)
   bundled/                    # non-code assets that ship WITH the binary
-    prompts/compression.md        # all of it copied into the config dir by
-    agents/{plan,build,subagent}.md   #   `cmake --install` -- never read from here
+    prompts/{compression,subagent}.md  # all of it copied into the config dir by
+    agents/{plan,build}.md         #   `cmake --install` -- never read from here
     settings.json  permissions.json   #   at runtime, never compiled into the binary
     providers.json  providers.example.json
     cost-rates.json                   # cost-tracker's fallback price table
@@ -1251,7 +1251,7 @@ There are three flush points and one loop: turn start (before the seed), after e
 
 `BuildChatRequest` is rebuilt **every turn**, because MCP server liveness and `/agent` can both change the set mid-session:
 
-- **system** = `agents/subagent.md` (if the session has a parent) + the preset body + the allowed-skill registry listing + the session's project-context section (below).
+- **system** = `prompts/subagent.md` (if the session has a parent) + the preset body + the allowed-skill registry listing + the session's project-context section (below).
 - **messages** = the compacted view, never the raw persisted history.
 - **tools** = registered tools ∩ `allowed_tools`, + live MCP tools for `allowed_mcp_servers`, + `SkillTool` if any skills are allowed, + `SpawnSubagentTool` **iff `parent_session_id` is null**.
 
@@ -1404,7 +1404,7 @@ variable the install rule uses, so overriding one moves both.
 **File format**: agents, skills, and prompts are Markdown with YAML frontmatter — the same convention Claude Code and opencode use: frontmatter for structured metadata, Markdown body for prompt text, loaded verbatim. `src/server/config/frontmatter.{hpp,cpp}` provides `parse_frontmatter_markdown(contents) -> {YAML::Node frontmatter, std::string body}` (split on `---` delimiters, frontmatter to **yaml-cpp**, remainder as body). The `.json` files stay plain JSON — harness config, not prompt content, with no body to split.
 
 - **`agents/*.md`** — presets: frontmatter `name, description, model, allowed_tools, allowed_skills, allowed_mcp_servers, permission_mode: {read_only, file_write, execute, out_of_workdir, network, overrides}, mcp_permissions: {<server>: allow|ask|deny}, compression_prompt?`; **body is the system prompt directly**. `model` is a `<provider>/<model>` reference, or absent to take `settings.default_model`. `plan.md` and `build.md` ship in `bundled/agents/` and are seeded like everything else there.
-- **`agents/subagent.md`** — plain Markdown, no frontmatter. Prepended to the resolved preset's body whenever `parent_session_id` is non-null. Also seeded.
+- **`prompts/subagent.md`** — plain Markdown, no frontmatter. Prepended to the resolved preset's body whenever `parent_session_id` is non-null. Also seeded.
 - **`prompts/compression.md`** — default compaction prompt; a preset's `compression_prompt` overrides it, resolved relative to this directory. **Seeded from `bundled/prompts/` by `cmake --install` and never overwritten after** — see *Bundled assets* below.
 - **`skills/<name>/SKILL.md`** (+ supporting files) — lazy-loaded: frontmatter (`name`, `description`) resident in the registry; body loads only on invocation.
 - **`themes/*.json`** — role/category → truecolor RGB.
@@ -1454,7 +1454,7 @@ Both permission chains are then subject to `apply_run_mode()`.
 
 ```cpp
 struct AgentPreset {
-    std::string name, description, system_prompt;  // subagent.md (if any) + body
+    std::string name, description, system_prompt;  // prompts/subagent.md (if any) + body
     ProviderConfig provider;
     std::vector<std::string> allowed_tools, allowed_skills, allowed_mcp_servers;
     PermissionPolicy permission_mode;
@@ -1594,7 +1594,7 @@ A subagent is **the same `Session` entity as a top-level conversation** — same
 **"Stopped" is uniform**: a session is stopped when its agent loop produces an assistant turn with `stop_reason == end_turn` and no pending `tool_use` — the same condition that means "waiting for the next user message" at top level. For a session with a parent, that moment is also completion, and the final assistant message's text is the result.
 
 - **Spawning**: core `SpawnSubagentTool` (category `Execute`, permission-gated) takes `{task, agent_preset?, blocking? (default true), max_turns?}`. It creates a child session with `parent_session_id` set, seeds `messages[0] = Message{role: User, content: [TextBlock{task}]}` (the parent model's own task formulation), emits `SubagentStartedEvent{child_session_id, task, blocking}` on the parent's queue, and starts the loop.
-- **System prompt stacking**: for any session with a parent, the system prompt is `agents/subagent.md` (the harness convention: "you are in subagent mode; you'll be given a task; when done or the task is impossible, summarize for the parent") followed by the resolved preset's body. Concatenation, not a new mechanism.
+- **System prompt stacking**: for any session with a parent, the system prompt is `prompts/subagent.md` (the harness convention: "you are in subagent mode; you'll be given a task; when done or the task is impossible, summarize for the parent") followed by the resolved preset's body. Concatenation, not a new mechanism.
 - **No recursion is a hard rule, not preset config**: if `parent_session_id` is non-null, `SpawnSubagentTool` is unconditionally excluded from that session's tool set regardless of `allowed_tools`. A misconfigured preset cannot reopen recursion. Flat, one level.
 - **Permission inheritance — a child can never be more permissive than its parent**: effective `PermissionPolicy` is `most_restrictive(parent, child_preset)` per category; `allowed_tools`/`allowed_skills`/`allowed_mcp_servers` are **intersected** with the parent's; `PermissionRunMode` is clamped (`AllowOnly < Normal < Bypass`). Without this, a parent at `file_write: ask` could spawn a child preset at `file_write: allow`.
 - **Concurrency limit**: `max_concurrent_subagents` per parent session, default 4. Over-limit spawns return an **error `ToolResultBlock`** ("subagent limit reached") rather than blocking, so the model adapts instead of hanging. The check is an admission ticket under a mutex — parallel dispatch means sibling spawns of one round execute concurrently, and a child is not yet countable in the registry when its spawn is still constructing it, so each concurrent checker must see either the ticket or the child, never neither. Which sibling wins the ticket (and which is refused) is genuinely nondeterministic; only the COUNT is guaranteed. The sanity check *warns* above 8 — past that the task has outgrown the harness — but does not block, matching the build-it-yourself philosophy.
