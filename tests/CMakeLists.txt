@@ -162,6 +162,14 @@ add_executable(minimal_tests
     "${CMAKE_SOURCE_DIR}/plugins/server/tools-search/tree_walker.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/tools-search/glob_tool.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/tools-search/grep_tool.cpp"
+    # Same pattern for tools-web: pure logic plus a real loopback HTTP server
+    # in the test itself (no fake to paper over the transport layer).
+    "${CMAKE_SOURCE_DIR}/plugins/server/tools-web/web_settings.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/tools-web/url_policy.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/tools-web/html_text.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/tools-web/fetch_tool.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/tools-web/search_tool.cpp"
+    tools_web_test.cpp
     cost_tracker_test.cpp
     hooks_config_test.cpp
     hook_dispatcher_test.cpp
@@ -186,6 +194,9 @@ target_include_directories(minimal_tests PRIVATE
     "${CMAKE_SOURCE_DIR}/plugins/server/tools-search"
     "${CMAKE_SOURCE_DIR}/plugins/server/session-titler"
     "${CMAKE_SOURCE_DIR}/plugins/server/cost-tracker")
+
+target_include_directories(minimal_tests PRIVATE
+    "${CMAKE_SOURCE_DIR}/plugins/server/tools-web")
 
 # minimal::test_support is the test-dependency bundle: it carries server_core,
 # which carries common publicly. Listing those again here is redundant and makes

@@ -3,6 +3,7 @@
 add_subdirectory(tools-fs)
 add_subdirectory(tools-search)
 add_subdirectory(tools-bash)
+add_subdirectory(tools-web)
 add_subdirectory(provider-openai)
 add_subdirectory(provider-anthropic)
 add_subdirectory(commands-core)
