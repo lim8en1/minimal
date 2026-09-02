@@ -755,6 +755,12 @@ void Session::Cancel() {
     channels_->pending.CancelAll();
 }
 
+void Session::JoinWorkerOnce() {
+    std::call_once(join_once_, [this] {
+        if (worker_.joinable()) worker_.join();
+    });
+}
+
 void Session::Terminate() {
     // Same fire the advisor's Cancel gets: an Advise still running at teardown
     // must see the session is going away, and a DETACHED advise thread polling
@@ -766,7 +772,7 @@ void Session::Terminate() {
     if (terminated_.exchange(true, std::memory_order_acq_rel)) {
         // Already terminating. Still join, so that a second caller does not
         // return while the worker is alive -- the destructor relies on it.
-        if (worker_.joinable() && worker_.get_id() != std::this_thread::get_id()) worker_.join();
+        if (worker_.get_id() != std::this_thread::get_id()) JoinWorkerOnce();
         return;
     }
 
@@ -810,7 +816,7 @@ void Session::Terminate() {
     // deadlock the way the old blocking-Push design feared.
     channels_->queue.CloseAll();
 
-    if (worker_.joinable() && worker_.get_id() != std::this_thread::get_id()) worker_.join();
+    if (worker_.get_id() != std::this_thread::get_id()) JoinWorkerOnce();
 
     // The subagent completion hook fires on EVERY exit path -- including a
     // terminate that lands before the seeded turn ever ran (the initial-attach

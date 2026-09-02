@@ -523,6 +523,14 @@ private:
     // The worker's wait predicate extension: should an out-of-band message
     // wake this parked worker and drive a seedless turn? Called under mutex_.
     bool ShouldWakeForInjections() const;
+    // The only call to worker_.join(), reached from both branches of
+    // Terminate(). std::call_once makes a second, concurrent caller BLOCK
+    // here rather than also calling join() -- concurrent join() on one
+    // std::thread is UB. The self-join check stays at each call site (not
+    // folded in here): a self-terminating worker must still be able to run
+    // this without blocking on itself, and only an external caller's call
+    // should ever perform or wait on the real join.
+    void JoinWorkerOnce();
 
     SessionParams params_;
     SessionInfo info_;
@@ -613,6 +621,7 @@ private:
     static constexpr std::size_t kMaxWorkItems = 32;
 
     std::thread worker_;
+    std::once_flag join_once_;
 };
 
 }  // namespace minimal::agent

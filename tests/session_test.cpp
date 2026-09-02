@@ -764,6 +764,31 @@ TEST_CASE("terminate is idempotent", "[session]") {
     CHECK(fixture.session->terminated());
 }
 
+TEST_CASE("concurrent Terminate calls do not double-join the worker", "[session][invariant]") {
+    // The defect this guards is UB (two threads calling worker_.join() on the
+    // same std::thread concurrently), not a wrong return value -- a plain run
+    // can pass by luck. This test's job is to give tsan something to look at.
+    SessionFixture fixture;
+    fixture.Script(testing::TextResponse("hi"));
+    fixture.Start();
+
+    constexpr int kCallers = 8;
+    std::atomic<int> ready{0};
+    std::vector<std::thread> threads;
+    threads.reserve(kCallers);
+    for (int i = 0; i < kCallers; ++i) {
+        threads.emplace_back([&] {
+            ready.fetch_add(1);
+            while (ready.load() < kCallers) {
+            }
+            fixture.session->Terminate();
+        });
+    }
+    for (auto& t : threads) t.join();
+
+    CHECK(fixture.session->terminated());
+}
+
 TEST_CASE("the queue closes on termination so a writer can finish", "[session]") {
     SessionFixture fixture;
     fixture.Script(testing::TextResponse("hi"));
