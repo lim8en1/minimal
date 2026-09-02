@@ -10,6 +10,7 @@ add_library(minimal_client_core SHARED
     state.cpp
     keybindings.cpp
     keybinding_dispatch.cpp
+    key_event_parser.cpp
     status_format.cpp
     ui_config.cpp
     chat_model.cpp

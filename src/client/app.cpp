@@ -36,6 +36,7 @@
 
 #include "minimal/client/chat_model.hpp"
 #include "minimal/client/cli_args.hpp"
+#include "minimal/client/key_event_parser.hpp"
 #include "minimal/client/keybinding_dispatch.hpp"
 #include "minimal/client/keybindings.hpp"
 #include "minimal/client/session_client.hpp"
@@ -477,21 +478,12 @@ using minimal::client::SessionState;
 using minimal::client::SessionStateKind;
 using minimal::client::Theme;
 
+// A real modifier+key parser (src/client/key_event_parser.{hpp,cpp}) now
+// backs this -- it used to be a closed if-ladder over twelve literal key
+// names, so any other keybindings.json binding (ctrl+p, f2, alt+j) matched
+// nothing despite the startup warning naming the gap rather than closing it.
 std::vector<ftxui::Event> KeyToEvents(const std::string& key) {
-    using namespace ftxui;
-    if (key == "ctrl+tab") return {Event::Character("\x1b[27;5;9~")};
-    if (key == "ctrl+shift+tab") return {Event::Character("\x1b[27;6;9~")};
-    if (key == "alt+left") return {Event::Character("\x1b[1;3D"), Event::Character("\x1b\x1b[D")};
-    if (key == "alt+right") return {Event::Character("\x1b[1;3C"), Event::Character("\x1b\x1b[C")};
-    if (key == "alt+a") return {Event::AltA};
-    if (key == "ctrl+o") return {Event::CtrlO};
-    if (key == "ctrl+t") return {Event::CtrlT};
-    if (key == "ctrl+w") return {Event::CtrlW};
-    if (key == "ctrl+q") return {Event::CtrlQ};
-    if (key == "pageup") return {Event::PageUp};
-    if (key == "escape") return {Event::Escape};
-    if (key == "ctrl+c") return {Event::CtrlC};
-    return {};
+    return minimal::client::ParseKeySpec(key);
 }
 
 bool MatchesAny(const ftxui::Event& event, const std::vector<ftxui::Event>& candidates) {
