@@ -37,8 +37,15 @@ public:
     // First registration wins; later ones are recorded and refused.
     void Register(std::shared_ptr<AuthProvider> provider);
 
-    // Null when no provider registered -- the pass-through default.
-    const AuthProvider* provider() const { return provider_.get(); }
+    // Null when no provider registered -- the pass-through default. Locked
+    // against Register()'s write; note this only serializes the pointer read
+    // itself, not the pointee's lifetime past the lock -- safe because
+    // Register() is first-registration-wins and expected to run once, at
+    // startup.
+    const AuthProvider* provider() const {
+        std::lock_guard<std::mutex> lock(mu_);
+        return provider_.get();
+    }
 
 private:
     std::shared_ptr<AuthProvider> provider_;

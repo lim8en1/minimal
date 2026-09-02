@@ -8,11 +8,13 @@
 #include <grpcpp/server_builder.h>
 #include <grpcpp/server_context.h>
 
+#include <atomic>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <memory>
 #include <string>
+#include <thread>
 
 #include "deadline.hpp"
 #include "minimal/config/settings_config.hpp"
@@ -76,6 +78,29 @@ TEST_CASE("an allowing provider passes, a denying one is UNAUTHENTICATED", "[aut
     const auto status = rpc::EnsureAuthenticated(&deny, &context);
     CHECK(status.error_code() == grpc::StatusCode::UNAUTHENTICATED);
     CHECK_FALSE(status.error_message().empty());
+}
+
+TEST_CASE("provider() is safe to read while Register() writes concurrently", "[auth]") {
+    // Register() writes provider_ under mu_; provider() used to read it with
+    // no lock at all. A thread spinning on provider() while another thread
+    // calls Register() is exactly the race tsan needs to see.
+    rpc::AuthProviderRegistry registry;
+    std::atomic<bool> ready{false};
+    std::atomic<bool> stop{false};
+
+    std::thread reader([&] {
+        ready.store(true, std::memory_order_release);
+        while (!stop.load(std::memory_order_acquire)) {
+            (void)registry.provider();
+        }
+    });
+    while (!ready.load(std::memory_order_acquire)) {
+    }
+    registry.Register(std::make_shared<AllowingProvider>());
+    stop.store(true, std::memory_order_release);
+    reader.join();
+
+    CHECK(registry.provider() != nullptr);
 }
 
 TEST_CASE("the guard runs on the wire: a denying provider rejects OpenSession",
