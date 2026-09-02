@@ -69,6 +69,7 @@ SessionState::Snapshot SessionState::TakeSnapshot() {
     s.output_tokens = output_tokens_;
     s.cancel_requested = cancel_requested_;
     s.transcript_version = transcript_version_;
+    s.turn_ended = turn_ended_;
     s.scrollback_trimmed = scrollback_trimmed_;
     s.turn_seq = turn_seq_;
     s.latest_notice = latest_notice_;
@@ -78,6 +79,7 @@ SessionState::Snapshot SessionState::TakeSnapshot() {
     s.permission_mode = permission_mode_;
     s.context_window_tokens = context_window_tokens_;
     s.refresh_seq = refresh_seq_;
+    s.refresh_succeeded = refresh_succeeded_;
     return s;
 }
 
@@ -218,6 +220,7 @@ void SessionState::OnError(const std::string&) {
 void SessionState::OnSessionEnded() {
     std::lock_guard lk(mtx_);
     is_streaming_ = false;
+    turn_ended_ = true;   // terminal: a final newest-fetch may still swap the partial stream
     cancel_requested_ = false;
     pending_permission_.reset();
     pending_confirmation_.reset();
@@ -334,6 +337,7 @@ void SessionState::OnToolFinished(const std::string& tool_use_id, const v1::Tool
 
 void SessionState::ApplyScrollbackPage(const v1::GetMessagesResponse& resp) {
     std::lock_guard lk(mtx_);
+    refresh_succeeded_ = true;   // resolved OK, even when the page is empty
     if (resp.messages().empty()) {
         has_earlier_ = resp.has_more();   // no rows, but the server may still have older pages
         ++refresh_seq_;   // a resolved attempt (successful RPC, empty page) -- see NoteRefreshFailed
@@ -376,6 +380,7 @@ bool SessionState::CanLoadMore() const {
 
 void SessionState::NoteRefreshFailed() {
     std::lock_guard lk(mtx_);
+    refresh_succeeded_ = false;   // resolved with a failure -- see Snapshot::refresh_succeeded
     ++refresh_seq_;   // resolved (no content change) -- lets a mismatch retry next frame
 }
 
@@ -925,7 +930,12 @@ std::vector<AppState::TabSnapshot> AppState::GetAllTabs() const {
         const SessionState::Snapshot ss = tab.info.state->TakeLightSnapshot();   // LIGHT: no scrollback/streaming copies
         snap.tools = ss.tools;
         snap.session_id = tab.info.session_id;
-        snap.display_name = ss.display_name.empty() ? tab.info.session_id : ss.display_name;
+        // A session with no name yet (before the first turn's default naming
+        // event lands) rendered its RAW session id as the tab label -- a
+        // 16-char ULID fragment that resize repaints then left behind as
+        // junk lines. A stable placeholder reads as "not named yet", which
+        // is what it is.
+        snap.display_name = ss.display_name.empty() ? std::string("new session") : ss.display_name;
         snap.state = ss.state;
         snap.is_subagent = tab.info.parent_session_id.has_value();
         snap.root_ordinal = tab.info.root_ordinal;

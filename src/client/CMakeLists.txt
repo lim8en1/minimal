@@ -16,6 +16,7 @@ add_library(minimal_client_core SHARED
     status_format.cpp
     ui_config.cpp
     chat_model.cpp
+    scrollback_refresh.cpp
     plugins/registries.cpp
     plugins/plugin_discovery.cpp
     plugins/plugin_loader.cpp

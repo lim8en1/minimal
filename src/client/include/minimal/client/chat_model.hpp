@@ -88,4 +88,9 @@ CommandNotice NoticeFromCommandResult(const v1::CommandResult& result);
 // opinion about the keyset contract.
 std::optional<int64_t> NextScrollbackCursor(int64_t last_loaded_seq, bool has_earlier);
 
+// The frame pass's newest-slice refresh decision (the state machine over
+// SessionState::Snapshot) lives in scrollback_refresh.hpp -- it needs
+// SessionState's definition, which includes THIS header, so it cannot live
+// here without a cycle.
+
 }  // namespace minimal::client

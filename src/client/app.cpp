@@ -41,10 +41,10 @@
 #include "minimal/client/keybinding_dispatch.hpp"
 #include "minimal/client/keybindings.hpp"
 #include "minimal/client/session_client.hpp"
+#include "minimal/client/scrollback_refresh.hpp"
 #include "minimal/client/status_format.hpp"
 #include "minimal/client/ui_config.hpp"
-#include "minimal/client/utf8.hpp"
-#include "minimal/client/plugins/client_plugin_abi.h"
+#include "minimal/client/utf8.hpp"#include "minimal/client/plugins/client_plugin_abi.h"
 #include "minimal/client/plugins/client_plugin_loader.hpp"
 #include "minimal/client/plugins/core_registrations.hpp"
 #include "minimal/client/plugins/host_seams.hpp"
@@ -863,7 +863,13 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     // (SetUiBounds treats 0 as "keep the default"). Applied before any tab can
     // open, so every SessionState starts bounded.
     app->SetUiBounds(ui.scrollback_window_max_messages, ui.tool_output_buffer_bytes);
-    auto screen = ftxui::ScreenInteractive::TerminalOutput();
+    // FULLSCREEN ALTERNATE SCREEN, not TerminalOutput: the alternate buffer is
+    // repaint-safe on terminal resize. TerminalOutput repaints the PRIMARY
+    // screen by cursor arithmetic over the previous frame, and a resize reflows
+    // the text ftxui still thinks it owns -- every repaint then re-stamps stale
+    // frame fragments (old tab-bar lines, typed text) as "junk" above the live
+    // frame. Any out-of-band stdout/stderr write would desync it the same way.
+    auto screen = ftxui::ScreenInteractive::FullscreenAlternateScreen();
     auto quit = screen.ExitLoopClosure();
 
     // --- frame state (loop thread only) --------------------------------------
@@ -915,15 +921,13 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         // finalized_for_turn fires the engine's one authoritative reparse.
         uint64_t streaming_turn = 0;
         bool finalized_for_turn = false;
-        // T2: an async RequestScrollback(newest=true) is outstanding for this
-        // tab. refresh_seq_seen/refresh_from_version are the pre-submit
-        // values (SessionState::Snapshot fields) needed to tell, once
-        // SessionState::refresh_seq moves, whether the attempt actually
-        // applied a page (transcript_version moved past refresh_from_version)
-        // or failed (it didn't) -- see maintain() below.
-        bool refresh_pending = false;
-        uint64_t refresh_seq_seen = 0;
-        uint64_t refresh_from_version = 0;
+        // The newest-slice refresh state machine (T2, reworked): submitted
+        // on a version mismatch, resolved via Snapshot::refresh_seq, with
+        // the submit/latch/mark-current decision in
+        // AdvanceScrollbackRefresh (chat_model.hpp) -- the pure seam where
+        // the "user prompt seen only on the first message" bug is now
+        // unit-tested.
+        minimal::client::ScrollbackRefreshState refresh;
     };
     std::map<std::string, TabUi> tab_ui;
 
@@ -976,37 +980,16 @@ int RunTui(const minimal::client::ParsedArgs& args) {
             ui.finalized_for_turn = true;
         }
 
-        // Resolve any outstanding refresh BEFORE deciding whether to submit a
-        // new one: refresh_seq (bumped by SessionState on every RESOLVED
-        // attempt -- success or failure) is a different counter from
-        // transcript_version specifically so a failed fetch still tells this
-        // frame "stop waiting", without looking identical to "still in
-        // flight". This is the fix for the retry bug the old code's own
-        // comment named but did not implement ("the next trigger retries" --
-        // it did not, because rendered_version was latched before the RPC's
-        // outcome was known).
-        if (ui.refresh_pending && snap.refresh_seq != ui.refresh_seq_seen) {
-            ui.refresh_pending = false;
-            if (snap.transcript_version != ui.refresh_from_version) {
-                // A page applied: this snapshot was taken after the worker's
-                // BumpUiVersion woke the pump, so it already reflects it.
-                ui.rendered_version = snap.transcript_version;
-            }
-            // Else the fetch failed (or the applied page happened to leave
-            // transcript_version where it was, e.g. an empty response with
-            // nothing new): rendered_version stays behind on purpose, so the
-            // mismatch check below retries on this very frame.
-        }
-
-        if (!ui.refresh_pending && ui.rendered_version != snap.transcript_version) {
-            if (snap.streaming_text.empty()) {
-                ui.refresh_pending = true;
-                ui.refresh_seq_seen = snap.refresh_seq;
-                ui.refresh_from_version = snap.transcript_version;
-                app->RequestScrollback(session_id, /*newest=*/true);
-            } else {
-                ui.rendered_version = snap.transcript_version;
-            }
+        // Resolve any outstanding refresh and act on the version mismatch --
+        // the whole decision (submit / latch / mark-current, success vs
+        // failure, streaming vs turn boundary) is AdvanceScrollbackRefresh,
+        // unit-tested in chat_model_test.cpp. This call either submits the
+        // newest-slice fetch or leaves the bookkeeping current; the fetch
+        // itself is async and its application wakes the pump for a later
+        // frame.
+        if (minimal::client::AdvanceScrollbackRefresh(ui.refresh, snap) ==
+            minimal::client::ScrollbackRefreshAction::kSubmit) {
+            app->RequestScrollback(session_id, /*newest=*/true);
         }
         return snap;
     };

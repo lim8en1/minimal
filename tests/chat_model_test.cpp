@@ -7,6 +7,7 @@
 #include <type_traits>
 
 #include "minimal/client/chat_model.hpp"
+#include "minimal/client/scrollback_refresh.hpp"
 
 using namespace minimal;
 using minimal::client::ChatRowKind;
@@ -194,4 +195,117 @@ TEST_CASE("history remains: the cursor is the oldest seq loaded", "[chat_model][
 
 TEST_CASE("history exhausted: no next page", "[chat_model][scrollback]") {
     CHECK_FALSE(client::NextScrollbackCursor(41, /*has_earlier=*/false).has_value());
+}
+
+// --- newest-slice refresh decision (AdvanceScrollbackRefresh) ----------------
+
+namespace {
+
+using client::ScrollbackRefreshAction;
+using client::ScrollbackRefreshState;
+using Snapshot = client::SessionState::Snapshot;
+
+Snapshot SnapAt(uint64_t version, uint64_t refresh_seq) {
+    Snapshot snap;
+    snap.transcript_version = version;
+    snap.refresh_seq = refresh_seq;
+    snap.refresh_succeeded = true;
+    return snap;
+}
+
+}  // namespace
+
+TEST_CASE("a fresh tab fetches the newest slice on its first frame",
+          "[chat_model][refresh]") {
+    ScrollbackRefreshState state;   // rendered_version: nullopt
+    const auto snap = SnapAt(0, 0);
+    CHECK(AdvanceScrollbackRefresh(state, snap) == ScrollbackRefreshAction::kSubmit);
+    CHECK(state.refresh_pending);
+    CHECK(state.refresh_seq_seen == 0);
+    CHECK(state.refresh_from_version == 0);
+}
+
+TEST_CASE("an in-flight refresh is not resubmitted", "[chat_model][refresh]") {
+    ScrollbackRefreshState state;
+    (void)AdvanceScrollbackRefresh(state, SnapAt(0, 0));
+    // Same frame later (refresh_seq unmoved): nothing to do.
+    CHECK(AdvanceScrollbackRefresh(state, SnapAt(0, 0)) == ScrollbackRefreshAction::kNone);
+    CHECK(state.refresh_pending);
+}
+
+TEST_CASE("a resolved SUCCESSFUL empty page marks current instead of retrying forever",
+          "[chat_model][refresh]") {
+    // THE 20 Hz LOOP: a fresh tab's initial fetch resolves with no rows (the
+    // transcript is empty), moving no version. Marking current on success --
+    // not only on a version change -- is what stops the every-frame
+    // GetMessages retry.
+    ScrollbackRefreshState state;
+    (void)AdvanceScrollbackRefresh(state, SnapAt(0, 0));
+    // No new content, but the request resolved successfully.
+    CHECK(AdvanceScrollbackRefresh(state, SnapAt(0, 1)) == ScrollbackRefreshAction::kNone);
+    CHECK_FALSE(state.refresh_pending);
+    REQUIRE(state.rendered_version.has_value());
+    CHECK(*state.rendered_version == 0);
+    // And a settled tab stays settled.
+    CHECK(AdvanceScrollbackRefresh(state, SnapAt(0, 1)) == ScrollbackRefreshAction::kNone);
+}
+
+TEST_CASE("a resolved FAILED fetch leaves the mismatch so the same frame retries",
+          "[chat_model][refresh]") {
+    ScrollbackRefreshState state;
+    (void)AdvanceScrollbackRefresh(state, SnapAt(0, 0));
+    auto failed = SnapAt(0, 1);
+    failed.refresh_succeeded = false;
+    CHECK(AdvanceScrollbackRefresh(state, failed) == ScrollbackRefreshAction::kSubmit);
+    CHECK(state.refresh_pending);   // resubmitted immediately
+    CHECK(!state.rendered_version.has_value());
+}
+
+TEST_CASE("a turn-end version bump fetches even though streaming text is still held",
+          "[chat_model][refresh]") {
+    // THE MISSING-PROMPT BUG: the accumulated streaming text is cleared only
+    // BY the applying refresh, so gating the turn-end fetch on "text empty"
+    // consumed the version bump with a latch and no fetch ever fired. The
+    // turn boundary -- Snapshot::turn_ended -- is what unlocks it.
+    ScrollbackRefreshState state;
+    state.rendered_version = 4;
+    auto snap = SnapAt(5, 0);
+    snap.streaming_text = "the model's full reply, not yet swapped for rows";
+    snap.turn_ended = true;
+    CHECK(AdvanceScrollbackRefresh(state, snap) == ScrollbackRefreshAction::kSubmit);
+    CHECK(state.refresh_from_version == 5);
+}
+
+TEST_CASE("a version bump mid-turn with live streaming text latches instead of fetching",
+          "[chat_model][refresh]") {
+    ScrollbackRefreshState state;
+    state.rendered_version = 4;
+    auto snap = SnapAt(5, 0);
+    snap.streaming_text = "still streaming";
+    snap.turn_ended = false;
+    CHECK(AdvanceScrollbackRefresh(state, snap) == ScrollbackRefreshAction::kNone);
+    REQUIRE(state.rendered_version.has_value());
+    CHECK(*state.rendered_version == 5);   // latched: no fetch around the live block
+    CHECK_FALSE(state.refresh_pending);
+}
+
+TEST_CASE("empty streaming text fetches regardless of the turn flag",
+          "[chat_model][refresh]") {
+    // The idle path (resync also clears the accumulation mid-turn): nothing
+    // live on screen, a version mismatch must reach a fetch.
+    ScrollbackRefreshState state;
+    state.rendered_version = 4;
+    auto snap = SnapAt(5, 0);
+    snap.turn_ended = false;
+    CHECK(AdvanceScrollbackRefresh(state, snap) == ScrollbackRefreshAction::kSubmit);
+}
+
+TEST_CASE("a page that applied during a successful refresh marks the applied version",
+          "[chat_model][refresh]") {
+    ScrollbackRefreshState state;
+    (void)AdvanceScrollbackRefresh(state, SnapAt(4, 0));
+    // The worker applied a page (version moved 4 -> 5) and resolved.
+    CHECK(AdvanceScrollbackRefresh(state, SnapAt(5, 1)) == ScrollbackRefreshAction::kNone);
+    REQUIRE(state.rendered_version.has_value());
+    CHECK(*state.rendered_version == 5);
 }

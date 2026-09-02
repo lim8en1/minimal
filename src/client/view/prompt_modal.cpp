@@ -1,6 +1,8 @@
 #include "minimal/client/view/prompt_modal.hpp"
 
 #include <ftxui/component/event.hpp>
+#include <ftxui/dom/elements.hpp>
+#include <ftxui/screen/terminal.hpp>
 
 namespace minimal::client {
 
@@ -12,6 +14,28 @@ std::vector<std::string> GrantToggles::GrantedKeys(const PendingPermission& requ
     }
     return keys;
 }
+
+namespace {
+
+using ftxui::Element;
+using ftxui::Elements;
+
+// The modal body's height budget: what the content may take before the pinned
+// hint line and the window borders stop fitting on screen. Without a cap the
+// modal simply ran past the terminal's bottom edge -- and the KEYBOARD HINTS,
+// being the last row, were exactly what got clipped ("permission prompt lacks
+// button hints"). The hints are pinned OUTSIDE the scrollable region and the
+// content scrolls inside it, so they render no matter how long the summary or
+// the grants list is.
+int ModalBodyHeightBudget() {
+    const int dimy = ftxui::Terminal::Size().dimy;
+    // window borders (2) + hint line (1) + slack for the tab bar/editor the
+    // modal overlays; a tiny or unknown terminal degrades to a small fixed
+    // budget rather than an uncapped modal.
+    return dimy > 8 ? dimy - 6 : 10;
+}
+
+}  // namespace
 
 ftxui::Component MakePermissionModal(const PendingPermission& request, GrantToggles& toggles,
                                      const Theme& theme,
@@ -51,8 +75,14 @@ ftxui::Component MakePermissionModal(const PendingPermission& request, GrantTogg
     // per-frame temporary instead. Copy, don't trust the caller's lifetime.)
     const auto grant_container_val = grant_container;   // outlives the factory: by value
     const auto grant_boxes_val = std::move(boxes_copy);
+    // Set on the first event the modal sees: before that, the scroll anchor
+    // is the top of the content (the title/summary a human must read first);
+    // after it, the frame follows the ACTIVE grant checkbox, so tab/arrow
+    // navigation scrolls the list the user is moving through.
+    const auto interacted = std::make_shared<bool>(false);
     auto body = Renderer(grant_container,
-                         [grant_boxes_val, grant_container_val, request_state, &theme] {
+                         [grant_boxes_val, grant_container_val, request_state, &theme,
+                          interacted] {
         const PendingPermission& request = *request_state;
         Elements rows;
         rows.push_back(text("permission required") | bold | color(theme.ColorFor("attention")));
@@ -66,25 +96,53 @@ ftxui::Component MakePermissionModal(const PendingPermission& request, GrantTogg
                           "Allowing grants this tool, not this text.") |
                 color(theme.ColorFor("error")));
         }
-        if (!grant_boxes_val.empty()) {
-            rows.push_back(text("session grants:") | dim);
-            for (std::size_t i = 0; i < request.grants.size(); ++i) {
-                rows.push_back(hbox({grant_container_val->ChildAt(static_cast<int>(i))->Render(),
-                                     text(" allow " + request.grants[i].label() +
-                                          " -- any arguments, this session") |
-                                         color(theme.ColorFor("attention"))}));
+        // Which checkbox is active right now: the container's ActiveChild
+        // compared against the boxes we hold copies of. DOM-level `focus`
+        // only (like ChatView's scroll anchor) -- it steers the enclosing
+        // yframe, it never steals keyboard focus.
+        int active_grant = -1;
+        for (int i = 0; i < static_cast<int>(grant_boxes_val.size()); ++i) {
+            if (grant_container_val->ActiveChild() == grant_boxes_val[i]) {
+                active_grant = i;
+                break;
             }
         }
-        rows.push_back(text("enter: allow   ·   esc: deny   ·   tab/arrow: toggle grants") | dim);
-        return window(text(" permission "), vbox(std::move(rows)) | size(WIDTH, LESS_THAN, 80)) |
-               color(theme.ColorFor("attention"));
-    });
+        if (!request.grants.empty()) {
+            rows.push_back(text("session grants:") | dim);
+            for (std::size_t i = 0; i < request.grants.size(); ++i) {
+                auto row = hbox({grant_container_val->ChildAt(static_cast<int>(i))->Render(),
+                                 text(" allow " + request.grants[i].label() +
+                                      " -- any arguments, this session") |
+                                     color(theme.ColorFor("attention"))});
+                if (static_cast<int>(i) == active_grant) row |= focus;
+                rows.push_back(std::move(row));
+            }
+        }
 
+        // The scroll anchor: the summary until the user touches a key, then
+        // the active grant row (already marked above). One anchor at a time
+        // -- two `focus` markers would fight over the frame's viewport.
+        if (!(*interacted) || request.grants.empty()) {
+            rows[2] |= focus;   // the summary
+        }
+
+        // Content scrolls; the keyboard hints stay pinned below it -- visible
+        // no matter how much content there is (the clipped-footer bug).
+        return window(text(" permission "),
+                      vbox({
+                          vbox(std::move(rows)) | yframe | vscroll_indicator |
+                              size(HEIGHT, LESS_THAN, ModalBodyHeightBudget()),
+                          text("enter: allow   ·   esc: deny   ·   tab/arrow: toggle grants") |
+                              dim,
+                      })) |
+               size(WIDTH, LESS_THAN, 80) | color(theme.ColorFor("attention"));
+    });
     // RunTui's on_answer reads toggles.GrantedKeys(request) -- the filtered
     // keys ride along from state it owns, so the modal never mints a key.
     // `on_answer` is captured BY VALUE: the CatchEvent outlives the factory
     // and a by-reference capture of the parameter was a dangling call.
-    return CatchEvent(body, [on_answer](const Event& event) {
+    return CatchEvent(body, [on_answer, interacted](const Event& event) {
+        *interacted = true;
         if (event == Event::Return) {
             on_answer(true);
             return true;
@@ -118,22 +176,33 @@ ftxui::Component MakeConfirmationModal(const PendingConfirmation& request, const
     }
     auto buttons = ftxui::Container::Horizontal(std::move(option_components));
     const auto buttons_val = buttons;   // outlives the factory: by value
-    auto body = Renderer(buttons, [buttons_val, request_state, has_cancel, &theme] {
+    const auto interacted = std::make_shared<bool>(false);
+    auto body = Renderer(buttons, [buttons_val, request_state, has_cancel, &theme, interacted] {
         const PendingConfirmation& request = *request_state;
         Elements rows;
         rows.push_back(text(request.title) | bold | color(theme.ColorFor("attention")));
         rows.push_back(paragraph(request.detail));
-        rows.push_back(buttons_val->Render() | hcenter);
-        if (has_cancel) rows.push_back(text("esc: cancel") | dim);
-        return window(text(" confirm "), vbox(std::move(rows)) | size(WIDTH, LESS_THAN, 70)) |
-               color(theme.ColorFor("attention"));
+        auto button_row = buttons_val->Render() | hcenter;
+        if (*interacted) button_row |= focus;   // frame follows the buttons once touched
+        rows.push_back(std::move(button_row));
+        // Content scrolls; the esc hint stays pinned below it. (No esc hint
+        // at all when the wire request offers no cancel option -- see the
+        // CatchEvent below.)
+        return window(text(" confirm "),
+                      vbox({
+                          vbox(std::move(rows)) | yframe | vscroll_indicator |
+                              size(HEIGHT, LESS_THAN, ModalBodyHeightBudget()),
+                          has_cancel ? text("esc: cancel") | dim : emptyElement(),
+                      })) |
+               size(WIDTH, LESS_THAN, 70) | color(theme.ColorFor("attention"));
     });
     // Escape picks the "cancel" option when the modal offers one: both
     // destructive confirms do, and the picker/permission modals already honor
     // Escape -- the inconsistency made the most destructive dialogs the only
     // ones without a keyboard out.
     const std::string cancel_option = "cancel";
-    return CatchEvent(body, [on_answer, has_cancel, cancel_option](const Event& event) {
+    return CatchEvent(body, [on_answer, has_cancel, cancel_option, interacted](const Event& event) {
+        *interacted = true;
         if (event == Event::Escape) {
             if (has_cancel) {
                 on_answer(cancel_option);

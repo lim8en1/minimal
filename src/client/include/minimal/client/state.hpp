@@ -169,6 +169,14 @@ public:
         std::string permission_mode;
         int64_t context_window_tokens = 0;
 
+        // True when the LAST turn ended (TurnCompleted / Error) and no new
+        // turn has begun. The frame's maintain pass fetches the newest
+        // scrollback slice only on a turn boundary: streaming_text stays
+        // non-empty until the refresh itself swaps it for persisted rows,
+        // so "text empty" cannot tell "turn over" from "mid-turn" -- this
+        // flag can.
+        bool turn_ended = false;
+
         // Bumped by every RESOLVED async scrollback-refresh attempt (success
         // OR failure) -- see AppState::RequestScrollback / rpc_queue.hpp. A
         // successful apply also bumps transcript_version, but a FAILED fetch
@@ -179,6 +187,14 @@ public:
         // failure forever (the bug this counter exists to fix: T2's "the
         // next trigger retries" comment used to be false).
         uint64_t refresh_seq = 0;
+
+        // The outcome of the refresh attempt that bumped refresh_seq: a
+        // resolved SUCCESSFUL fetch means what is rendered can be marked
+        // current even when the page applied no new rows (an empty page
+        // moves no version -- retrying it every frame was a 20 Hz GetMessages
+        // loop). A resolved FAILED attempt leaves the version mismatch in
+        // place so the next frame retries.
+        bool refresh_succeeded = false;
     };
 
     Snapshot TakeSnapshot();
@@ -275,6 +291,7 @@ private:
     bool has_earlier_ = false;
     uint64_t transcript_version_ = 0;
     uint64_t refresh_seq_ = 0;   // see Snapshot::refresh_seq
+    bool refresh_succeeded_ = false;   // outcome of the attempt that bumped refresh_seq_
     bool scrollback_trimmed_ = false;
     int scrollback_max_messages_ = kDefaultScrollbackWindowMaxMessages;
     int tool_output_buffer_bytes_ = kDefaultToolOutputBufferBytes;
