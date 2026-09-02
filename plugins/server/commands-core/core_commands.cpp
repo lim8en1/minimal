@@ -163,18 +163,28 @@ public:
     }
 };
 
+// Bare `/agent` opens the picker (display=View, view_hint="agents"), same
+// shape as SessionsCommand below: the command itself carries no data, the
+// client fetches the preset list itself over ListAgentPresets. With a name it
+// switches, exactly as before. ReadOnly() stays false (the default) even
+// though the no-arg branch touches nothing: ReadOnly() describes the command
+// as a whole, and the by-name branch still mutates session state via
+// ApplyPreset -- a command that can mutate must queue at a turn boundary
+// every time, not just on the branches that happen to need it, or a listing
+// call could run concurrently with a same-named switch mid-turn.
 class AgentCommand : public HarnessCommand {
 public:
     std::string_view Name() const override { return "agent"; }
-    std::string_view Summary() const override { return "Switch agent preset"; }
-    std::string_view Usage() const override { return "/agent <name>"; }
+    std::string_view Summary() const override { return "Switch agent preset, or open the picker"; }
+    std::string_view Usage() const override { return "/agent [name]"; }
+    minimal::commands::CommandDisplay Display() const override {
+        return minimal::commands::CommandDisplay::kView;
+    }
+    std::string_view ViewHint() const override { return "agents"; }
 
     CommandResult Execute(CommandContext& context, const CommandArgs& args) override {
         if (args.positional.empty()) {
-            // The searchable picker belongs to the TUI, which can draw one. Until
-            // then the shorthand is the whole interface, and saying so is better
-            // than a list nobody asked for.
-            return CommandResult::Error("usage: /agent <name>");
+            return CommandResult::Ok("agent list requested");
         }
         const std::string& wanted = args.positional.front();
 

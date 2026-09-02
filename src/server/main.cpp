@@ -580,6 +580,7 @@ int main(int argc, char** argv) {
     // service (declared at stage 2).
     service.set_services(&services);
     service.set_mcp_manager(&mcp);
+    service.set_presets(presets.get());
     service.set_signal_router(&signal_router);
     // Every long-lived descriptor this process will ever own is open by now
     // (logging, the session database, gRPC's sockets, plugin storage): mark

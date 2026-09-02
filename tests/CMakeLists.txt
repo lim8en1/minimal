@@ -106,6 +106,7 @@ add_executable(minimal_tests
     key_event_parser_test.cpp
     rpc_queue_test.cpp
     picker_model_test.cpp
+    agent_picker_model_test.cpp
     chat_model_test.cpp
     # The logo plugin's generator: pure std, no ABI, so compiled in directly
     # like the server plugins' logic (logo_plugin.cpp itself stays out).

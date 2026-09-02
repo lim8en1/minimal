@@ -613,6 +613,70 @@ TEST_CASE("AgentPresetRegistry: a skill that failed to load is excluded from the
     CHECK(registry.Resolve("build").system_prompt == "You are a build agent.\n");
 }
 
+TEST_CASE("AgentPresetRegistry: ListAvailable lists every agents/*.md by name, sorted",
+          "[agent_preset_registry][list]") {
+    TempConfigDir config;
+    config.WriteDefaults();  // agents/build.md, name "build"
+    config.Write("agents/plan.md",
+                 "---\nname: plan\ndescription: Plans work.\nmodel: openai-main/gpt-4o-mini\n---\nbody\n");
+    config::SkillRegistry skills = config::SkillRegistry::Load(config.dir);
+    AgentPresetRegistry registry(config.dir, skills,
+                                  config::LoadSettingsConfig(config.dir / "settings.json"));
+
+    const auto summaries = registry.ListAvailable();
+    REQUIRE(summaries.size() == 2);
+    CHECK(summaries[0].name == "build");
+    CHECK(summaries[1].name == "plan");
+    CHECK(summaries[1].description == "Plans work.");
+}
+
+TEST_CASE("AgentPresetRegistry: ListAvailable does not resolve a model, so a bad provider "
+          "does not break the listing",
+          "[agent_preset_registry][list]") {
+    TempConfigDir config;
+    config.WriteDefaults();
+    config.Write("agents/broken.md",
+                 "---\nname: broken\nmodel: nonexistent/model\n---\nbody\n");
+
+    config::SkillRegistry skills = config::SkillRegistry::Load(config.dir);
+    AgentPresetRegistry registry(config.dir, skills,
+                                  config::LoadSettingsConfig(config.dir / "settings.json"));
+
+    const auto summaries = registry.ListAvailable();
+    REQUIRE(summaries.size() == 2);
+    CHECK(summaries[0].name == "broken");
+    CHECK(summaries[1].name == "build");
+}
+
+TEST_CASE("AgentPresetRegistry: ListAvailable skips a file with no parseable frontmatter",
+          "[agent_preset_registry][list]") {
+    TempConfigDir config;
+    config.WriteDefaults();
+    config.Write("agents/malformed.md", "not frontmatter at all\n");
+
+    config::SkillRegistry skills = config::SkillRegistry::Load(config.dir);
+    AgentPresetRegistry registry(config.dir, skills,
+                                  config::LoadSettingsConfig(config.dir / "settings.json"));
+
+    const auto summaries = registry.ListAvailable();
+    REQUIRE(summaries.size() == 1);
+    CHECK(summaries[0].name == "build");
+}
+
+TEST_CASE("AgentPresetRegistry: ListAvailable on an empty agents/ dir returns empty",
+          "[agent_preset_registry][list]") {
+    TempConfigDir config;
+    config.WriteJson("providers.json", TempConfigDir::DefaultProviders());
+    config.WriteJson("settings.json", nlohmann::json::object());
+    config.WriteJson("permissions.json", nlohmann::json::object());
+
+    config::SkillRegistry skills = config::SkillRegistry::Load(config.dir);
+    AgentPresetRegistry registry(config.dir, skills,
+                                  config::LoadSettingsConfig(config.dir / "settings.json"));
+
+    CHECK(registry.ListAvailable().empty());
+}
+
 TEST_CASE("AgentPresetRegistry: allowed_skills ['*'] lists every loaded skill",
           "[agent_preset_registry][skills]") {
     TempConfigDir config;

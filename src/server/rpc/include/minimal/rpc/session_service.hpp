@@ -30,6 +30,7 @@
 
 #include <grpcpp/grpcpp.h>
 
+#include "minimal/agent/agent_preset_registry.hpp"
 #include "minimal/agent/mention_resolver.hpp"
 #include "minimal/agent/session_registry.hpp"
 #include "minimal/commands/command_registry.hpp"
@@ -76,6 +77,8 @@ public:
                              v1::GetMessagesResponse*) override;
     grpc::Status ListSessions(grpc::ServerContext*, const v1::ListSessionsRequest*,
                               v1::ListSessionsResponse*) override;
+    grpc::Status ListAgentPresets(grpc::ServerContext*, const v1::ListAgentPresetsRequest*,
+                                  v1::ListAgentPresetsResponse*) override;
     grpc::Status SuggestPaths(grpc::ServerContext*, const v1::SuggestPathsRequest*,
                               v1::SuggestPathsResponse*) override;
     grpc::Status ListCommands(grpc::ServerContext*, const v1::ListCommandsRequest*,
@@ -97,6 +100,11 @@ public:
     // available" rather than dropping it. Set before serving.
     void set_commands(const commands::CommandRegistry* commands) { commands_ = commands; }
     void set_mcp_manager(mcp::McpClientManager* manager) { mcp_manager_ = manager; }
+
+    // Optional: null means ListAgentPresets answers with an empty list rather
+    // than dropping the RPC -- a picker that gets nothing back reads as "no
+    // presets configured", which is at least honest, versus a hang.
+    void set_presets(const agent::AgentPresetRegistry* presets) { presets_ = presets; }
 
     // Optional: null means signals are not offered -- a CreateSessionRequest
     // naming any signal answers INVALID_ARGUMENT rather than silently
@@ -199,6 +207,8 @@ private:
     // invocation with "not available" rather than dropping it.
     const commands::CommandRegistry* commands_ = nullptr;
     mcp::McpClientManager* mcp_manager_ = nullptr;
+    // Borrowed and optional: null = ListAgentPresets answers empty (see setter).
+    const agent::AgentPresetRegistry* presets_ = nullptr;
     // Borrowed and optional: absent = pass-through (see auth_provider.hpp).
     const AuthProviderRegistry* auth_providers_ = nullptr;
     // Borrowed and optional: null falls back to the core default resolver.

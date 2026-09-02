@@ -815,6 +815,18 @@ grpc::Status SessionServiceImpl::ListSessions(grpc::ServerContext* context,
     return grpc::Status::OK;
 }
 
+grpc::Status SessionServiceImpl::ListAgentPresets(grpc::ServerContext*,
+                                                  const v1::ListAgentPresetsRequest*,
+                                                  v1::ListAgentPresetsResponse* response) {
+    if (presets_ == nullptr) return grpc::Status::OK;  // empty list; see set_presets
+    for (const auto& summary : presets_->ListAvailable()) {
+        auto* proto_summary = response->add_presets();
+        proto_summary->set_name(summary.name);
+        proto_summary->set_description(summary.description);
+    }
+    return grpc::Status::OK;
+}
+
 grpc::Status SessionServiceImpl::SuggestPaths(grpc::ServerContext*,
                                               const v1::SuggestPathsRequest* request,
                                               v1::SuggestPathsResponse* response) {

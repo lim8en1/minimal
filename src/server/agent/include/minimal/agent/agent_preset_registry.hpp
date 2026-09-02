@@ -13,6 +13,12 @@
 
 namespace minimal::agent {
 
+// Name + description only, for a picker to list -- see ListAvailable() below.
+struct AgentPresetSummary {
+    std::string name;
+    std::string description;
+};
+
 // Loads providers.json/permissions.json/agents/*.md into fully resolved
 // AgentPresets, plus the settings.json handed to it. Config is read once at
 // startup -- there is no hot-reload (see ARCHITECTURE.md's Config section).
@@ -53,6 +59,13 @@ public:
     // result anyway, because a preset is per-session state a session then
     // mutates (--model, /agent).
     AgentPreset Resolve(const std::string& preset_name) const;
+
+    // Lists every agents/*.md file's name + description WITHOUT resolving its
+    // model/provider -- for a picker to show, not for the loop to run. A picker
+    // listing one bad preset must not fail to show the rest, so a file that
+    // fails to parse is logged and skipped rather than thrown. Sorted by name
+    // for a deterministic picker order.
+    std::vector<AgentPresetSummary> ListAvailable() const;
 
     const std::string& SubagentPrefix() const { return subagent_prefix_; }
 

@@ -461,6 +461,20 @@ message ListSessionsResponse {
   repeated SessionSummary sessions = 1;
 }
 
+// --- Agent preset picker (name + description only; no model/provider
+// resolution -- see AgentPresetRegistry::ListAvailable) ---
+
+message AgentPresetSummary {
+  string name = 1;
+  string description = 2;
+}
+
+message ListAgentPresetsRequest {}
+
+message ListAgentPresetsResponse {
+  repeated AgentPresetSummary presets = 1;
+}
+
 // Deletes a stored session that no stream has open. The database delete
 // cascades to messages and subagent children (session_database.hpp). Refused
 // for a session whose stream is open -- the client closes the tab first.
@@ -542,6 +556,7 @@ service SessionService {
 
   rpc GetMessages(GetMessagesRequest) returns (GetMessagesResponse);
   rpc ListSessions(ListSessionsRequest) returns (ListSessionsResponse);
+  rpc ListAgentPresets(ListAgentPresetsRequest) returns (ListAgentPresetsResponse);
   rpc CreateSession(CreateSessionRequest) returns (CreateSessionResponse);
   rpc SuggestPaths(SuggestPathsRequest) returns (SuggestPathsResponse);
   // Unary, fetched once at connect: plugins load at startup and config is read

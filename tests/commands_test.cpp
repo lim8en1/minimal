@@ -82,6 +82,18 @@ TEST_CASE("agent without an override adopts the preset's model", "[commands]") {
     CHECK(fixture.preset().name == "other");
 }
 
+TEST_CASE("bare /agent opens the picker view rather than switching or erroring",
+          "[commands]") {
+    // Mirrors /sessions' view_hint mapping: the command carries no data, the
+    // client fetches the preset list itself over ListAgentPresets.
+    CommandFixture fixture;
+    const auto result = fixture.Run("agent");
+    CHECK(result.status == Status::kOk);
+    CHECK(result.display == commands::CommandDisplay::kView);
+    CHECK(result.view_hint == "agents");
+    CHECK(fixture.preset().name == "build");  // unchanged
+}
+
 TEST_CASE("agent reports an unknown preset rather than throwing", "[commands]") {
     CommandFixture fixture;
     const auto result = fixture.Run("agent", {"nonexistent"});

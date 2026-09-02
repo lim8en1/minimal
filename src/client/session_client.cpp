@@ -112,6 +112,14 @@ SessionClient::ListCommandsResult SessionClient::ListCommands() {
     return result;
 }
 
+SessionClient::ListAgentPresetsResult SessionClient::ListAgentPresets() {
+    grpc::ClientContext context;
+    context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(2));
+    ListAgentPresetsResult result;
+    result.status = stub_->ListAgentPresets(&context, v1::ListAgentPresetsRequest{}, &result.response);
+    return result;
+}
+
 grpc::Status SessionClient::DeleteSession(const std::string& session_id) {
     grpc::ClientContext context;
     context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(2));

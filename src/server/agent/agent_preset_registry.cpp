@@ -7,6 +7,7 @@
 
 #include "minimal/agent/agent_preset_frontmatter.hpp"
 #include "minimal/agent/permission_resolution.hpp"
+#include "minimal/common/logger.hpp"
 #include "minimal/config/frontmatter.hpp"
 
 namespace minimal::agent {
@@ -130,6 +131,29 @@ AgentPreset AgentPresetRegistry::Resolve(const std::string& preset_name) const {
 
     std::lock_guard<std::mutex> lock(cache_mu_);
     return cache_.emplace(preset_name, std::move(resolved)).first->second;
+}
+
+std::vector<AgentPresetSummary> AgentPresetRegistry::ListAvailable() const {
+    std::vector<AgentPresetSummary> out;
+    const std::filesystem::path agents_dir = config_dir_ / "agents";
+    std::error_code ec;
+    if (!std::filesystem::exists(agents_dir, ec)) return out;
+
+    for (const auto& entry : std::filesystem::directory_iterator(agents_dir, ec)) {
+        if (ec) break;
+        if (!entry.is_regular_file() || entry.path().extension() != ".md") continue;
+        try {
+            const AgentPresetFrontmatter raw = LoadAgentPresetFrontmatter(entry.path());
+            out.push_back(AgentPresetSummary{raw.name, raw.description});
+        } catch (const std::exception& error) {
+            // One malformed preset must not hide the rest from a picker.
+            common::DefaultLogger().warn("agent preset '{}' skipped in listing: {}",
+                                         entry.path().string(), error.what());
+        }
+    }
+    std::sort(out.begin(), out.end(),
+             [](const AgentPresetSummary& a, const AgentPresetSummary& b) { return a.name < b.name; });
+    return out;
 }
 
 void ApplyModel(AgentPreset& preset, const config::ResolvedModel& model) {

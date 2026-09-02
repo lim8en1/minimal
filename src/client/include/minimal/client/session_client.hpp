@@ -262,6 +262,16 @@ public:
     };
     ListCommandsResult ListCommands();
 
+    // The agent picker's list: every agents/*.md preset's name + description,
+    // fetched fresh on each open (unlike ListCommands, config can gain a new
+    // preset file between opens and there is no invalidation machinery to
+    // notice that, so this simply asks every time -- the list is small).
+    struct ListAgentPresetsResult {
+        v1::ListAgentPresetsResponse response;
+        grpc::Status status;
+    };
+    ListAgentPresetsResult ListAgentPresets();
+
     // Deletes a stored session that has no stream open. The picker's delete
     // action closes the tab first; the server refuses an open session.
     grpc::Status DeleteSession(const std::string& session_id);

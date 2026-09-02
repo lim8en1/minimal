@@ -44,7 +44,8 @@
 #include "minimal/client/scrollback_refresh.hpp"
 #include "minimal/client/status_format.hpp"
 #include "minimal/client/ui_config.hpp"
-#include "minimal/client/utf8.hpp"#include "minimal/client/plugins/client_plugin_abi.h"
+#include "minimal/client/utf8.hpp"
+#include "minimal/client/plugins/client_plugin_abi.h"
 #include "minimal/client/plugins/client_plugin_loader.hpp"
 #include "minimal/client/plugins/core_registrations.hpp"
 #include "minimal/client/plugins/host_seams.hpp"
@@ -54,6 +55,7 @@
 #include "minimal/client/view/modal_host.hpp"
 #include "minimal/client/view/prompt_editor.hpp"
 #include "minimal/client/view/prompt_modal.hpp"
+#include "minimal/client/view/agent_picker.hpp"
 #include "minimal/client/view/session_picker.hpp"
 #include "minimal/client/view/status_bar.hpp"
 #include "minimal/client/view/tab_bar.hpp"
@@ -876,6 +878,7 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     PromptEditorState prompt_state;
     bool show_panel = false;
     bool show_picker = false;
+    bool show_agent_picker = false;
     bool show_quit_confirm = false;
     bool show_permission = false;
     bool show_confirmation = false;
@@ -895,6 +898,9 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         bool has_more = false;   // the last fetch returned a full page
     };
     PickerData picker_data;
+    // The agent picker's list: fetched whole on each open (no pagination, no
+    // sort -- agents/*.md is small and has no "recent" axis).
+    std::vector<minimal::v1::AgentPresetSummary> agent_picker_presets;
     PendingClose pending_close;
 
     // Per-tab UI caches, keyed by session id.
@@ -1280,6 +1286,44 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         rebuild_picker_component();
     };
 
+    // --- agent preset picker ---------------------------------------------------
+    auto agent_picker_child = std::make_shared<Component>();
+    auto agent_picker_host_interactive =
+        minimal::client::MakeModalHost(agent_picker_child, show_agent_picker);
+
+    // Rebuilds the agent picker component from agent_picker_presets' current
+    // contents -- mirrors rebuild_picker_component, minus everything that
+    // doesn't apply to a small, unpaginated, unsorted list.
+    auto rebuild_agent_picker_component = [&] {
+        *agent_picker_child = minimal::client::MakeAgentPresetPicker(
+            agent_picker_presets, theme,
+            {.on_select =
+                 [&](const std::string& name) {
+                     // Re-sends "/agent <name>" over the exact same path a
+                     // typed command would take (AppState::SendCommand) --
+                     // AgentCommand::Execute's by-name branch, precedence
+                     // rules and all, runs unchanged. No new mutation code.
+                     app->SendCommand(app->FocusedSessionId(), "agent " + name);
+                     show_agent_picker = false;
+                 },
+             .on_close = [&] { show_agent_picker = false; }});
+    };
+
+    // The agent-picker-open flow, shared by the keybinding and by the bare
+    // `/agent` view_hint (see handle_notice below) -- one fresh fetch each
+    // time, like open_picker: the preset list is small, so there is no
+    // pagination state to preserve across opens.
+    auto open_agent_picker = [&] {
+        show_agent_picker = true;
+        agent_picker_presets.clear();
+        const auto result = client->ListAgentPresets();
+        if (result.status.ok()) {
+            const auto& presets = result.response.presets();
+            agent_picker_presets.assign(presets.begin(), presets.end());
+        }
+        rebuild_agent_picker_component();
+    };
+
     // --- plugin views (panel region + modal layer) -----------------------------
     // Panels: rendered in the frame beside the tools panel; one shared
     // CatchEvent (over the frame) routes events to visible ones. Modals: one
@@ -1326,6 +1370,8 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         }
         if (notice.view_hint == "sessions") {
             open_picker();   // core mapping: the picker modal
+        } else if (notice.view_hint == "agents") {
+            open_agent_picker();   // core mapping: bare `/agent`
         } else if (auto* view = view_registry.Find(notice.view_hint)) {
             for (auto& entry : plugin_views) {
                 if (entry.view == view) entry.visible = true;
@@ -1761,6 +1807,11 @@ int RunTui(const minimal::client::ParsedArgs& args) {
             if (show_picker) open_picker();
             return true;
         }
+        if (MatchesAny(event, KeyToEvents(keys.KeyFor("agent.picker")))) {
+            show_agent_picker = !show_agent_picker;
+            if (show_agent_picker) open_agent_picker();
+            return true;
+        }
         if (MatchesAny(event, KeyToEvents(keys.KeyFor("panel.toggle")))) {
             show_panel = !show_panel;
             return true;
@@ -1870,6 +1921,7 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     tree = Modal(tree, plugin_modal_host_interactive, &show_plugin_modal);
     tree = Modal(tree, delete_modal, &show_delete_confirm);
     tree = Modal(tree, picker_host_interactive, &show_picker);
+    tree = Modal(tree, agent_picker_host_interactive, &show_agent_picker);
     auto with_quit_confirm = Modal(tree, confirm_modal, &show_quit_confirm);
     auto with_confirmation = Modal(with_quit_confirm, confirmation_host_interactive,
                                    &show_confirmation);
