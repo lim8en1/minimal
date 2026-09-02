@@ -47,6 +47,26 @@
       "backend": "openai",
       "url": "http://localhost:8000/v1",
       "discover": true
+    },
+
+    "anthropic": {
+      "//": "The Anthropic Messages API. url is WITHOUT a /v1 suffix -- unlike the openai backend's convention, provider-anthropic appends /v1/messages itself. max_tokens is REQUIRED (not optional the way OpenAI treats it): set it here or per-model below, or every request fails.",
+      "backend": "anthropic",
+      "url": "https://api.anthropic.com",
+      "api_key_env": "ANTHROPIC_API_KEY",
+      "max_tokens": 16000,
+
+      "//2": "cache_ttl is \"5m\" (the default; omit it) or \"1h\" -- see ARCHITECTURE.md's prompt-caching notes on when the 1h write premium pays for itself.",
+      "parameters": {
+        "cache_ttl": "5m"
+      },
+
+      "models": {
+        "claude-opus-5": {
+          "//": "The model KEY is sent on the wire verbatim as the request's \"model\" field -- unlike the provider name, it is NOT yours to choose; it must be the backend's real model id.",
+          "context_window_tokens": 1000000
+        }
+      }
     }
   },
 

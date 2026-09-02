@@ -247,7 +247,9 @@ What this gives up: "close the terminal, the agent keeps working, come back late
 
 ## LLM provider adapter — `src/server/llm/`
 
-Provider-agnostic interface. v1 ships one implementation (OpenAI chat-completions shape) **as a bundled plugin** (`provider-openai`). The Anthropic Messages shape is deferred; the unified model was checked against it and needs only additive changes.
+Provider-agnostic interface, string-keyed by `backend` in `providers.json` (`ProviderFactoryRegistry`; no closed enum, so a plugin can add a kind core has never heard of). v1 ships two bundled plugins: `provider-openai` (chat-completions shape) and `provider-anthropic` (Messages API shape).
+
+**`provider-anthropic` needed zero core changes** — the prediction in an earlier draft of this document ("the unified model needs additive changes: `cache_control` fields and a widened `system`") turned out to be wrong once checked against the actual API. `system` becomes a block array as a serialization choice the provider makes locally from `ChatRequest::system` (a plain `optional<string>`); prompt caching is one explicit `cache_control` breakpoint on that block (tools render before system on the wire, so the one marker caches both) plus the request body's own top-level `cache_control`, which the API auto-places on the growing message tail. Neither needs a field on the unified model. The provider also merges consecutive same-role `llm::Message`s into one wire message, which OpenAI's shape never required — Anthropic enforces strict user/assistant alternation. Thinking blocks are dropped on replay (cut 1's known limitation): `ThinkingBlock::signature` is declared but never populated end to end, and sending an unsigned or resynthesized one back is either rejected outright or, on preserved-thinking backends, silently wrong.
 
 **Unified content model** — block-array content for every message, no `System`/`Tool` roles (Anthropic can't express either; OpenAI's are derived views the provider explodes/folds on serialize):
 
@@ -1584,7 +1586,6 @@ Two checks specifically for the naming model: warn when a `per_tool_overrides` /
 
 ## Deferred / open items
 
-- Anthropic Messages-shape provider (the unified model needs only additive changes: `cache_control` fields and a widened `system`).
 - **Windows support generally — out of scope until 2.x**; WSL is the interim answer. This is broader than plugin loading (`LoadLibrary` vs `dlopen`): the bash tool is fork + `execve` + `setrlimit` + `killpg`, POSIX by construction rather than by porting accident, so a Windows target needs a genuinely different execution backend, not a shim.
 - `llamacpp-kv` plugin (`/save-session`, `/restore-session`, `/erase-session`) — designed, deliberately not shipped in v1.
 - **Branch-tree traversal**: rewind/redo ships as a per-session cursor (§ *Session traversal*); returning to an abandoned branch AFTER the fork needs parent pointers and would make every linear-transcript invariant a tree walk. Additive, not foreclosed.

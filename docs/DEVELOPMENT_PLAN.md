@@ -967,7 +967,8 @@ Not scheduled, recorded so they are decisions rather than oversights.
 - **Terminate latency can hit `stream_idle_timeout`** — a backend that stalls silently is observed as cancelled only at event boundaries and the 25 ms backoff poll, so `Terminate`'s join can block for up to the 60 s idle timeout before the sink abort propagates. Bounded, and local llama.cpp does not stall this way; recorded rather than tuned.
 - **The shared-token auth plugin is deferred** — the `AuthProvider` registry, the pass-through default, and the wire guard are built (§11); the example plugin that registers one is not.
 - ~~**`tree-sitter` grammars**~~ — the dead vcpkg entry is real now: `tree-sitter` core moved to base dependencies and `tree-sitter-bash` is vendored via `FetchContent` (the command scanner, §12.40). The rest of the curated set arrives with track E, which now only needs to declare targets on plumbing that already exists.
-- Everything under § *Deferred / open items*: Anthropic provider, Windows, `llamacpp-kv`, parallel tool dispatch, session detach, tab-bar overflow.
+- ~~Anthropic provider~~ — **landed** (`provider-anthropic`), and needed zero core changes: the "additive changes" this gap once predicted (`cache_control` fields, a widened `system`) turned out to be decisions the provider makes locally from the existing unified model, not fields on it. See ARCHITECTURE.md's LLM provider adapter section.
+- Everything else under § *Deferred / open items*: Windows, `llamacpp-kv`, parallel tool dispatch, session detach, tab-bar overflow.
 
 ---
 
