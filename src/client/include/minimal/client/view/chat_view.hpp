@@ -37,6 +37,13 @@ public:
     ftxui::Element Render(const SessionState::Snapshot& snapshot,
                           plugins::MarkdownEngine::Stream& streaming);
 
+    // Moves the scroll position by `delta_rows` rows, counted from the
+    // bottom: positive scrolls toward older messages (further back from the
+    // newest row), negative toward the newest. Clamped to the row count on
+    // the next Render(), so this is safe to call with an out-of-range value.
+    // 0 (the default) reproduces the legacy pin-to-newest behavior.
+    void ScrollBy(int delta_rows);
+
 private:
     void RebuildRows(const SessionState::Snapshot& snapshot);
 
@@ -52,6 +59,10 @@ private:
     // the page added -- pre-R3 every page load re-markdown-rendered the whole
     // window, including every code block. Evicted rows drop out of the map.
     std::map<std::pair<int64_t, int>, ftxui::Elements> row_cache_;
+    // Rows back from the bottom to focus on the next Render(); clamped there
+    // against the current row count (a scroll issued while few rows exist,
+    // then more arrive, should not leave the offset stuck out of range).
+    int scroll_from_bottom_ = 0;
 };
 
 }  // namespace minimal::client

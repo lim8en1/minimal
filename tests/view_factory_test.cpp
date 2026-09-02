@@ -86,6 +86,24 @@ SessionState::Snapshot SnapshotWithText(const std::string& session_id, uint64_t 
     return snap;
 }
 
+// `count` distinct rows. scrollback_page is DESCENDING by seq (newest at
+// index 0 -- see ApplyScrollbackPage/state.cpp, and ChatRowsFromMessages's
+// own `descending` parameter name), so the newest row ("row-<count-1>") goes
+// in FIRST here to match what a real snapshot looks like; ChatRowsFromMessages
+// reverses it back to ascending (oldest first, top-to-bottom chat order) for
+// rendering. Enough rows that a small viewport cannot show all at once, so a
+// pin-to-bottom vs. scrolled comparison is meaningful.
+SessionState::Snapshot SnapshotWithRows(const std::string& session_id, uint64_t version,
+                                        int count) {
+    SessionState::Snapshot snap;
+    snap.session_id = session_id;
+    snap.transcript_version = version;
+    for (int i = count - 1; i >= 0; --i) {
+        snap.scrollback_page.push_back(StoredUserText(i + 1, "row-" + std::to_string(i)));
+    }
+    return snap;
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -390,6 +408,50 @@ TEST_CASE("chat view: a session switch at an EQUAL transcript version re-renders
     CHECK(frame_b.find("alpha") == std::string::npos);
 }
 
+TEST_CASE("chat view: ScrollBy moves the viewport off the pinned-to-newest default") {
+    // Pre-fix, Render() always focus()ed the LAST row unconditionally, so no
+    // key or mouse event could ever change what's visible -- this is the
+    // regression test for that (arrow/mouse scrolling did nothing).
+    const auto theme = TestTheme();
+    minimal::client::MarkdownRenderer renderer(&theme, nullptr);
+    plugins::MarkdownEngineRegistry engine_registry;
+    plugins::RegisterDefaultMarkdownEngine(engine_registry, renderer);
+    auto& engine = *engine_registry.engine;
+    plugins::MessageRendererRegistry messages;
+    plugins::ToolResultRendererRegistry tool_renderers;
+    plugins::RegisterCoreMessageRenderers(messages);
+    plugins::RegisterCoreAgentMarkdownRenderer(messages, engine);
+
+    ChatView view(theme, messages, tool_renderers);
+    auto stream = engine.MakeStream();
+    const auto snapshot = SnapshotWithRows("session-scroll", 1, 40);
+
+    // A viewport far shorter than 40 rows: yframe can only show a slice, so
+    // which slice is visible reflects where Render() put the focus marker
+    // (ftxui's Frame::SetBox centers the focused row in the viewport, so
+    // this doesn't assert an exact edge -- just that the visible slice
+    // actually changes). Default (no ScrollBy call): pinned to the newest row.
+    const auto pinned =
+        RenderElement(view.Render(snapshot, *stream) | ftx::yframe, /*width=*/40, /*height=*/8);
+    CHECK(pinned.find("row-39") != std::string::npos);
+
+    // Scroll toward older messages (positive == toward older), far enough
+    // (30 of 40 rows) that an 8-line viewport cannot possibly show the same
+    // slice: proves ScrollBy actually moves the anchor rather than a no-op.
+    view.ScrollBy(30);
+    const auto scrolled =
+        RenderElement(view.Render(snapshot, *stream) | ftx::yframe, /*width=*/40, /*height=*/8);
+    CHECK(scrolled != pinned);
+    CHECK(scrolled.find("row-39") == std::string::npos);
+
+    // Scrolling back down by the same amount re-pins to the newest row,
+    // reproducing the original (pre-scroll) view exactly.
+    view.ScrollBy(-30);
+    const auto repinned =
+        RenderElement(view.Render(snapshot, *stream) | ftx::yframe, /*width=*/40, /*height=*/8);
+    CHECK(repinned == pinned);
+}
+
 // ---------------------------------------------------------------------------
 // @-mention completion (R5)
 // ---------------------------------------------------------------------------
@@ -418,6 +480,10 @@ TEST_CASE("prompt editor: Tab splices the mention token, preserving the prose") 
     // gone AND the '/'-less content was a misroutable fragment. The '@' must
     // survive (the server's expansion scans for '@' + non-space tokens).
     CHECK(state.content == "please review @src/main.cpp");
+    // Pre-fix, the cursor never moved off its pre-completion index (right
+    // after "@src/ma"), landing mid-word instead of at the end of the
+    // spliced completion.
+    CHECK(state.cursor_position == static_cast<int>(state.content.size()));
 }
 
 TEST_CASE("prompt editor: Enter accepts the highlighted suggestion instead of submitting",
@@ -451,6 +517,7 @@ TEST_CASE("prompt editor: Enter accepts the highlighted suggestion instead of su
     CHECK(commands.empty());   // never submitted the raw prefix
     CHECK(texts.empty());
     CHECK(state.content == "/compact ");   // accepted the completion instead
+    CHECK(state.cursor_position == static_cast<int>(state.content.size()));
     CHECK_FALSE(state.list_open);
 
     // The list is now closed: a second Enter submits normally, unchanged.

@@ -44,9 +44,16 @@ ftxui::Component MakePromptEditor(
     using namespace ftxui;
 
     // Multiline ON: Return-as-newline is the Input's default, so the submit
-    // decision is ours -- CatchEvent sees every event first.
-    auto input = Input(&state.content,
-                       "type here; @ for files, / for commands, alt+enter for newline");
+    // decision is ours -- CatchEvent sees every event first. cursor_position
+    // is bound explicitly (not the 2-arg factory) so accept_suggestion below
+    // can move the caret after splicing in a completion -- FTXUI's own
+    // InputOption otherwise owns that position privately, unreachable from
+    // here, and only clamps it into range rather than moving it.
+    InputOption input_option;
+    input_option.content = &state.content;
+    input_option.placeholder = "type here; @ for files, / for commands, alt+enter for newline";
+    input_option.cursor_position = &state.cursor_position;
+    auto input = Input(input_option);
 
     // Accept the highlighted suggestion in place. Shared by Tab and (when the
     // list is open) Enter -- see below for why Enter needed this at all.
@@ -58,6 +65,7 @@ ftxui::Component MakePromptEditor(
             if (!CommandPrefixOf(state.content).empty()) {
                 // A command line IS its prefix: whole-line replacement.
                 state.content = completion;
+                state.cursor_position = static_cast<int>(state.content.size());
             } else {
                 // A mention SPLICES the path over the @token: whole-line
                 // replacement destroyed the user's prose AND manufactured
@@ -70,6 +78,10 @@ ftxui::Component MakePromptEditor(
                 } else {
                     state.content += "@" + completion;
                 }
+                // MentionPrefixAt only offers a mention when the '@' token
+                // runs to the end of content with no trailing whitespace, so
+                // the splice above always lands the completion at the end.
+                state.cursor_position = static_cast<int>(state.content.size());
             }
         }
         state.list_open = false;

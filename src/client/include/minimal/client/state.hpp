@@ -394,6 +394,21 @@ public:
     // Ctrl-style interrupt of the tab's in-flight turn, if any.
     void SendCancel(const std::string& session_id);
 
+    // Rewind is a client-native wire event (a oneof sibling of cancel/attach),
+    // not a routed command -- sent directly like SendCancel, never through
+    // SendCommand. Exactly one of target_seq/redo is meaningful: pass a seq
+    // to rewind to it (see RewindRequest in session_service.proto for the
+    // "discard from target_seq onward" semantics), or std::nullopt with
+    // redo=true to restore the most recently discarded tail.
+    void SendRewind(const std::string& session_id, std::optional<int64_t> target_seq, bool redo);
+
+    // The client has no other way to let a user target a rewind -- raw
+    // transcript seq numbers are never surfaced in the UI. Scans the tab's
+    // current scrollback window backward for the n-th (1 = most recent)
+    // ROLE_USER message and returns its seq, or nullopt if fewer than n
+    // user turns are present in the loaded window.
+    std::optional<int64_t> FindRewindTargetSeq(const std::string& session_id, int n);
+
     // Asynchronously re-fetches the scrollback window for a tab and applies
     // it (T2: this used to run the GetMessages RPC synchronously on the
     // FTXUI loop thread, including from inside a Renderer lambda -- a merely

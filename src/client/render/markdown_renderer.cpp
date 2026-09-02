@@ -72,7 +72,12 @@ Element ApplyStyle(Element element, const InlineStyle& style, const Theme* theme
 Element RunsToElement(Elements runs) {
     if (runs.empty()) return ftxui::text("");
     if (runs.size() == 1) return runs.front();
-    return ftxui::hbox(std::move(runs));
+    // flexbox wraps its children to the available width by default, unlike
+    // hbox -- this is what lets a source line with no explicit break still
+    // reflow instead of clipping at the terminal edge. It lays out pre-built
+    // Elements, so each run's own style (bold/italic/code/link/etc, already
+    // applied in PushStyledText) survives untouched.
+    return ftxui::flexbox(std::move(runs));
 }
 
 // The inline content of a block: lines stacked vertically.
@@ -336,8 +341,23 @@ private:
 
     void PushStyledText(Block& block, std::string text, InlineStyle style) {
         if (!block.link_href.empty()) block.link_text += text;
-        block.current_runs.push_back(
-            ApplyStyle(ftxui::text(std::move(text)), style, theme_));
+        if (text.empty()) {
+            block.current_runs.push_back(ApplyStyle(ftxui::text(""), style, theme_));
+            return;
+        }
+        // One run per word (space kept attached to the PRECEDING word, not
+        // pushed as its own run, so flexbox's inter-run gap doesn't double
+        // it up): RunsToElement's flexbox only wraps between runs, so a
+        // whole phrase pushed as a single run -- the old behavior -- could
+        // never break mid-phrase and just clipped at the terminal edge.
+        std::size_t start = 0;
+        while (start < text.size()) {
+            const std::size_t space = text.find(' ', start);
+            const std::size_t end = (space == std::string::npos) ? text.size() : space + 1;
+            block.current_runs.push_back(
+                ApplyStyle(ftxui::text(text.substr(start, end - start)), style, theme_));
+            start = end;
+        }
     }
 
     void DimLast(Block& block) {

@@ -228,6 +228,88 @@ TEST_CASE("AttachTab resumes a session created out-of-band", "[app_state]") {
     REQUIRE(app.HasTab(created.session_id));
 }
 
+TEST_CASE("AttachTab does not itself steal focus; callers must SetFocusedTab", "[app_state]") {
+    // AttachSubagent relies on AttachTab NOT auto-focusing (it only steals
+    // focus for BLOCKING subagents, via its own explicit SetFocusedTab), so
+    // AttachTab's `if (focused_id_.empty())` guard is intentional -- but that
+    // means a picker resume while a tab is already focused registers the new
+    // tab invisibly unless ITS caller focuses it explicitly. Regression test
+    // for that "resume does nothing" bug: with something already focused,
+    // AttachTab alone must not move focus, and SetFocusedTab must.
+    ClientFixture fixture;
+    fixture.Script("hi");
+    fixture.Start();
+
+    AppState app(fixture.client);
+    const auto first = app.OpenTab(fixture.Options("first"));
+    REQUIRE_FALSE(first.empty());
+
+    const auto created = fixture.client->CreateSession(fixture.Options("resumed"));
+    REQUIRE(created.status.ok());
+
+    const auto sid = app.AttachTab(created.session_id);
+    REQUIRE(sid == created.session_id);
+    REQUIRE(app.HasTab(created.session_id));
+
+    bool resumed_focused = false;
+    for (const auto& tab : app.GetAllTabs()) {
+        if (tab.session_id == sid) resumed_focused = tab.is_focused;
+    }
+    CHECK_FALSE(resumed_focused);   // AttachTab alone leaves the original tab focused
+
+    app.SetFocusedTab(sid);
+    resumed_focused = false;
+    for (const auto& tab : app.GetAllTabs()) {
+        if (tab.session_id == sid) resumed_focused = tab.is_focused;
+    }
+    CHECK(resumed_focused);
+}
+
+TEST_CASE("FindRewindTargetSeq resolves the Nth user turn back", "[app_state][rewind]") {
+    // Rewind has no other way to let a user target it -- raw transcript seq
+    // numbers are never surfaced in the UI, so /rewind <n> resolves "n user
+    // turns back" to a seq via this scan. Two turns give two ROLE_USER rows
+    // to count back through; a third request (past the loaded window) must
+    // come back empty rather than a stale or out-of-range seq.
+    ClientFixture fixture;
+    fixture.ScriptSteps({testing::TextResponse("first reply"), testing::TextResponse("second reply")});
+    fixture.Start();
+
+    AppState app(fixture.client);
+    const auto sid = app.OpenTab(fixture.Options("rewind-target"));
+    REQUIRE_FALSE(sid.empty());
+
+    app.SendChatTurn(sid, "first message");
+    REQUIRE(WaitFor(app, sid, [](const AppState::TabSnapshot& t) {
+        return t.state == SessionStateKind::Idle;
+    }));
+    app.SendChatTurn(sid, "second message");
+    REQUIRE(WaitFor(app, sid, [](const AppState::TabSnapshot& t) {
+        return t.state == SessionStateKind::Idle;
+    }));
+
+    // RequestScrollback is async and fetches a snapshot at whatever point the
+    // worker gets to it -- a single call raced against the two turns above
+    // landing server-side can legitimately fetch an empty page (WaitFor only
+    // proves the tab observed Idle, not that persistence finished). Re-issue
+    // it each retry so the eventual fetch sees the settled transcript.
+    std::optional<int64_t> newest_user_seq;
+    const auto deadline = std::chrono::steady_clock::now() + 5s;
+    while (std::chrono::steady_clock::now() < deadline) {
+        app.RequestScrollback(sid, /*newest=*/true);
+        std::this_thread::sleep_for(50ms);
+        newest_user_seq = app.FindRewindTargetSeq(sid, 1);
+        if (newest_user_seq.has_value()) break;
+    }
+    REQUIRE(newest_user_seq.has_value());
+
+    const auto older_user_seq = app.FindRewindTargetSeq(sid, 2);
+    REQUIRE(older_user_seq.has_value());
+    CHECK(*older_user_seq < *newest_user_seq);
+
+    CHECK_FALSE(app.FindRewindTargetSeq(sid, 3).has_value());   // only two user turns exist
+}
+
 TEST_CASE("subagent grouping and focus via OnSubagentSpawned", "[app_state]") {
     ClientFixture fixture;
     fixture.Script("hi");

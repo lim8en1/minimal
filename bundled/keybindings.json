@@ -1,6 +1,6 @@
 {
-  "tab.next": "ctrl+tab",
-  "tab.previous": "ctrl+shift+tab",
+  "tab.next": "alt+down",
+  "tab.previous": "alt+up",
   "group.previous": "alt+left",
   "group.next": "alt+right",
   "jump.attention": "alt+a",
@@ -8,6 +8,8 @@
   "panel.toggle": "ctrl+t",
   "tab.close": "ctrl+w",
   "chat.load_older": "pageup",
+  "chat.scroll_up": "ctrl+up",
+  "chat.scroll_down": "ctrl+down",
   "turn.cancel": "escape",
   "app.quit": "ctrl+q"
 }

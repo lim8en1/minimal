@@ -16,8 +16,8 @@ namespace {
 // name here is a core action; the file may add any others.
 const std::unordered_map<std::string, std::string>& DefaultBindings() {
     static const std::unordered_map<std::string, std::string> kDefaults{
-        {"tab.next", "ctrl+tab"},
-        {"tab.previous", "ctrl+shift+tab"},
+        {"tab.next", "alt+down"},
+        {"tab.previous", "alt+up"},
         {"group.previous", "alt+left"},
         {"group.next", "alt+right"},
         {"jump.attention", "alt+a"},
@@ -25,6 +25,8 @@ const std::unordered_map<std::string, std::string>& DefaultBindings() {
         {"panel.toggle", "ctrl+t"},
         {"tab.close", "ctrl+w"},
         {"chat.load_older", "pageup"},
+        {"chat.scroll_up", "ctrl+up"},
+        {"chat.scroll_down", "ctrl+down"},
         {"turn.cancel", "escape"},
         {"app.quit", "ctrl+q"},
     };

@@ -114,7 +114,10 @@ ftxui::Component MakePermissionModal(const PendingPermission& request, GrantTogg
                                  text(" allow " + request.grants[i].label() +
                                       " -- any arguments, this session") |
                                      color(theme.ColorFor("attention"))});
-                if (static_cast<int>(i) == active_grant) row |= focus;
+                if (static_cast<int>(i) == active_grant) {
+                    row |= focus;
+                    row |= bgcolor(theme.ColorFor("status_bar_bg"));
+                }
                 rows.push_back(std::move(row));
             }
         }
@@ -132,7 +135,7 @@ ftxui::Component MakePermissionModal(const PendingPermission& request, GrantTogg
                       vbox({
                           vbox(std::move(rows)) | yframe | vscroll_indicator |
                               size(HEIGHT, LESS_THAN, ModalBodyHeightBudget()),
-                          text("enter: allow   ·   esc: deny   ·   tab/arrow: toggle grants") |
+                          text("enter: allow   ·   esc: deny   ·   tab/arrow: move   ·   space: toggle grants") |
                               dim,
                       })) |
                size(WIDTH, LESS_THAN, 80) | color(theme.ColorFor("attention"));

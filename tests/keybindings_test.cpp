@@ -47,7 +47,7 @@ TEST_CASE("Load on a fresh config dir yields the defaults", "[keybindings]") {
 
     // The core actions all carry defaults; a first run is usable, not a blank
     // slate the user has to author before anything works.
-    CHECK(kb.KeyFor("tab.next") == "ctrl+tab");
+    CHECK(kb.KeyFor("tab.next") == "alt+down");
     CHECK(kb.KeyFor("app.quit") == "ctrl+q");
     CHECK(kb.KeyFor("nonexistent.action", "x") == "x");
 }

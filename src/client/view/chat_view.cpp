@@ -1,5 +1,7 @@
 #include "minimal/client/view/chat_view.hpp"
 
+#include <algorithm>
+
 namespace minimal::client {
 
 ChatView::ChatView(const Theme& theme,
@@ -113,8 +115,20 @@ ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
     // marker only (Requirement::focused, not an FTXUI Component), so it
     // cannot steal keyboard focus from the prompt editor, a sibling in the
     // outer frame; it only tells THIS frame where to scroll.
-    if (!column.empty()) column.back() = focus(std::move(column.back()));
+    //
+    // scroll_from_bottom_ picks WHICH row gets that marker: 0 (the default)
+    // is column.back(), reproducing the old pin-to-newest behavior exactly.
+    // Clamped here rather than in ScrollBy() -- the row count this frame is
+    // the only bound that matters, and it can shrink/grow between calls.
+    if (!column.empty()) {
+        scroll_from_bottom_ = std::clamp(scroll_from_bottom_, 0,
+                                          static_cast<int>(column.size()) - 1);
+        const auto index = column.size() - 1 - static_cast<std::size_t>(scroll_from_bottom_);
+        column[index] = focus(std::move(column[index]));
+    }
     return vbox(std::move(column));
 }
+
+void ChatView::ScrollBy(int delta_rows) { scroll_from_bottom_ += delta_rows; }
 
 }  // namespace minimal::client

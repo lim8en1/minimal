@@ -1081,10 +1081,43 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         }
         app->SendChatTurn(sid, text);
     };
+    // /rewind and /redo are intercepted here rather than routed through
+    // SendCommand: the wire treats rewind as a client-native ClientEvent
+    // (a oneof sibling of cancel/attach), not a server-side Command, so
+    // there is no CommandInvocation for the server to run. Local, since the
+    // client also has to resolve "N user turns back" to a seq itself -- the
+    // server never told it one.
+    auto submit_command = [app](const std::string& line) {
+        const std::string sid = app->FocusedSessionId();
+        if (line == "/redo") {
+            app->SendRewind(sid, std::nullopt, /*redo=*/true);
+            return;
+        }
+        if (line == "/rewind" || line.rfind("/rewind ", 0) == 0) {
+            int n = 1;   // default: undo the most recent user turn
+            if (line.size() > 8) {
+                try {
+                    n = std::stoi(line.substr(8));
+                } catch (const std::exception&) {
+                    n = 1;
+                }
+            }
+            // Silently no-ops when fewer than n user turns exist in the
+            // loaded window: FindRewindTargetSeq is the client's only way to
+            // resolve a target, and GetState (which OnError needs) is
+            // AppState-private -- not worth widening its access for a rare
+            // out-of-range /rewind arg.
+            if (const auto seq = app->FindRewindTargetSeq(sid, n)) {
+                app->SendRewind(sid, *seq, /*redo=*/false);
+            }
+            return;
+        }
+        app->SendCommand(sid, line);
+    };
     auto editor = minimal::client::MakePromptEditor(
         theme, prompt_state,
         submit_chat,
-        [app](const std::string& line) { app->SendCommand(app->FocusedSessionId(), line); },
+        submit_command,
         suggest,
         [&command_catalog] { return command_catalog; });
 
@@ -1154,7 +1187,7 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         app->RunOnRpcQueue([app] {
             minimal::client::SessionClient::CreateOptions opts;
             opts.project_root = std::filesystem::current_path().string();
-            app->OpenTab(opts);
+            if (const auto sid = app->OpenTab(opts); !sid.empty()) app->SetFocusedTab(sid);
         });
     };
 
@@ -1208,6 +1241,7 @@ int RunTui(const minimal::client::ParsedArgs& args) {
                      // A PAST session resumes into its own root group; it is
                      // not a child of whatever is focused.
                      app->AttachTab(session_id);
+                     app->SetFocusedTab(session_id);
                      show_picker = false;
                  },
              .on_delete =
@@ -1733,6 +1767,43 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         }
         if (MatchesAny(event, KeyToEvents(keys.KeyFor("chat.load_older")))) {
             if (!sid.empty()) app->RequestScrollback(sid, /*newest=*/false);
+            return true;
+        }
+        // In-view scrollback: moves which already-rendered row is focused
+        // (see ChatView::ScrollBy), distinct from chat.load_older above,
+        // which fetches an OLDER PAGE from the server. ui.chat is built
+        // lazily inside session_view's own render lambda, so it may not
+        // exist yet on the very first frame of a freshly opened tab.
+        if (event.is_mouse()) {
+            // Event::mouse() isn't const-qualified upstream, unlike is_mouse();
+            // a local mutable copy is cheap and this handler never mutates it.
+            Event mouse_event = event;
+            const auto& mouse = mouse_event.mouse();
+            if (mouse.button == Mouse::WheelUp || mouse.button == Mouse::WheelDown) {
+                if (!sid.empty()) {
+                    if (auto it = tab_ui.find(sid); it != tab_ui.end() && it->second.chat) {
+                        // WheelUp = scroll toward older (positive), matching
+                        // conventional scroll-up-reveals-earlier-content.
+                        it->second.chat->ScrollBy(mouse.button == Mouse::WheelUp ? 3 : -3);
+                    }
+                }
+                return true;
+            }
+        }
+        if (MatchesAny(event, KeyToEvents(keys.KeyFor("chat.scroll_up")))) {
+            if (!sid.empty()) {
+                if (auto it = tab_ui.find(sid); it != tab_ui.end() && it->second.chat) {
+                    it->second.chat->ScrollBy(1);   // toward older
+                }
+            }
+            return true;
+        }
+        if (MatchesAny(event, KeyToEvents(keys.KeyFor("chat.scroll_down")))) {
+            if (!sid.empty()) {
+                if (auto it = tab_ui.find(sid); it != tab_ui.end() && it->second.chat) {
+                    it->second.chat->ScrollBy(-1);   // toward newest
+                }
+            }
             return true;
         }
         if (MatchesAny(event, KeyToEvents(keys.KeyFor("tab.close")))) {

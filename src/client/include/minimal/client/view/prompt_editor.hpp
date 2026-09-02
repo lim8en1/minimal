@@ -40,6 +40,12 @@ namespace minimal::client {
 // Owned by RunTui (one per app; the editor targets the FOCUSED tab).
 struct PromptEditorState {
     std::string content;                    // the input's text (InputOption::content)
+    // Bound to the Input's InputOption::cursor_position. Only written
+    // explicitly by accept_suggestion (prompt_editor.cpp) today -- FTXUI
+    // itself only CLAMPS this into content's bounds after an external splice,
+    // it never moves it, so a completion that changes content's length
+    // without touching this field leaves the cursor mid-word.
+    int cursor_position = 0;
     std::vector<std::string> suggestions;   // live suggestion list (display text)
     std::vector<std::string> completions;   // what Tab inserts (differs from display for commands)
     int suggestion_selected = 0;

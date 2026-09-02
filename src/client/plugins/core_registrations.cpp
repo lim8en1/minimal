@@ -136,7 +136,17 @@ class CoreAgentMarkdownRenderer final : public MessageRenderer {
 public:
     explicit CoreAgentMarkdownRenderer(const MarkdownEngine& engine) : engine_(engine) {}
     Element Render(const ChatRow& row, const Theme& theme) const override {
-        return RenderAgentMarkdown(row, theme, engine_);
+        using namespace ftxui;
+        // A persisted row loses the streaming block's transient "assistant"
+        // label the moment the turn finalizes (chat_view.cpp only shows that
+        // label while streaming_text is non-empty) -- without this, a
+        // finished assistant message is the only row kind with no role
+        // marker at all. Same theme key as the streaming label, for visual
+        // continuity between "in flight" and "settled".
+        return vbox({
+            text("assistant") | color(theme.ColorFor("assistant_message")) | bold,
+            RenderAgentMarkdown(row, theme, engine_),
+        });
     }
 
 private:

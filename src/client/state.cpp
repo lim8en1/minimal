@@ -870,6 +870,40 @@ void AppState::SendCancel(const std::string& session_id) {
     stream->Send(ev);
 }
 
+void AppState::SendRewind(const std::string& session_id, std::optional<int64_t> target_seq,
+                          bool redo) {
+    auto stream = GetStream(session_id);
+    if (!stream) return;
+
+    v1::ClientEvent ev;
+    ev.set_session_id(session_id);
+    auto* rewind = ev.mutable_rewind();
+    if (redo) {
+        rewind->set_redo(true);
+    } else if (target_seq.has_value()) {
+        rewind->set_target_seq(*target_seq);
+    } else {
+        return;   // neither a target nor redo: nothing to send
+    }
+    stream->Send(ev);
+}
+
+std::optional<int64_t> AppState::FindRewindTargetSeq(const std::string& session_id, int n) {
+    const auto state = GetState(session_id);
+    if (!state || n <= 0) return std::nullopt;
+
+    // scrollback_page is DESCENDING by seq (newest at index 0, matching what
+    // GetMessages returns -- see ApplyScrollbackPage), so a forward scan
+    // already walks from the newest message backward.
+    const auto snapshot = state->TakeSnapshot();
+    int remaining = n;
+    for (const auto& stored : snapshot.scrollback_page) {
+        if (stored.message().role() != v1::ROLE_USER) continue;
+        if (--remaining == 0) return stored.seq();
+    }
+    return std::nullopt;
+}
+
 void AppState::RequestScrollback(const std::string& session_id, bool newest) {
     // Owning copy up front, captured by value into the job: the fetch now
     // runs on the RPC worker thread, well after this call returns, and can
