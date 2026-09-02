@@ -100,7 +100,7 @@ ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
     // The in-flight block: streamed deltas via the engine's debounced view.
     // Rendered while the streaming text exists; a post-turn refresh swaps it
     // for the persisted rows (SessionState::ClearStreaming after
-    // RefreshScrollback).
+    // RequestScrollback's async apply).
     if (!snapshot.streaming_text.empty()) {
         column.push_back(text("assistant") | color(theme_.ColorFor("assistant_message")) | bold);
         column.push_back(streaming.Render(theme_));

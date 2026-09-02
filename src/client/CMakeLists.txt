@@ -7,6 +7,7 @@
 add_library(minimal_client_core SHARED
     cli_args.cpp
     session_client.cpp
+    rpc_queue.cpp
     state.cpp
     keybindings.cpp
     keybinding_dispatch.cpp

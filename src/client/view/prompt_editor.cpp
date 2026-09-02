@@ -217,12 +217,21 @@ ftxui::Component MakePromptEditor(
         using namespace ftxui;
 
         // The debounce gate: once the delay has passed and the prefix is
-        // unchanged, ask the server. A failed/empty answer closes the list.
+        // unchanged, ask the server. suggest() returning nullopt means the
+        // async fetch is still in flight (T2) -- keep polling on later
+        // frames rather than treating "not yet" as "empty"; a fresh
+        // character re-arms pending_prefix/query_at above and this check
+        // naturally moves on to the newer prefix, which is what makes a
+        // stale answer harmless once it eventually arrives (see
+        // AppState::RequestSuggestPaths / the `suggest` lambda in app.cpp).
+        // A resolved-but-empty answer closes the list, same as before.
         if (state.query_pending && std::chrono::steady_clock::now() >= state.query_at) {
-            state.suggestions = suggest(state.pending_prefix);
-            state.completions = state.suggestions;
-            state.query_pending = false;
-            state.list_open = !state.suggestions.empty();
+            if (auto result = suggest(state.pending_prefix)) {
+                state.suggestions = std::move(*result);
+                state.completions = state.suggestions;
+                state.query_pending = false;
+                state.list_open = !state.suggestions.empty();
+            }
         }
 
         Elements lines;

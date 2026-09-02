@@ -95,6 +95,7 @@ add_executable(minimal_tests
     keybindings_test.cpp
     keybinding_dispatch_test.cpp
     key_event_parser_test.cpp
+    rpc_queue_test.cpp
     chat_model_test.cpp
     mention_resolver_test.cpp
     mention_expansion_test.cpp

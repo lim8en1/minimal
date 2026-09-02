@@ -77,6 +77,7 @@ SessionState::Snapshot SessionState::TakeSnapshot() {
     s.agent_preset = agent_preset_;
     s.permission_mode = permission_mode_;
     s.context_window_tokens = context_window_tokens_;
+    s.refresh_seq = refresh_seq_;
     return s;
 }
 
@@ -322,6 +323,7 @@ void SessionState::ApplyScrollbackPage(const v1::GetMessagesResponse& resp) {
     std::lock_guard lk(mtx_);
     if (resp.messages().empty()) {
         has_earlier_ = resp.has_more();   // no rows, but the server may still have older pages
+        ++refresh_seq_;   // a resolved attempt (successful RPC, empty page) -- see NoteRefreshFailed
         return;
     }
 
@@ -337,7 +339,7 @@ void SessionState::ApplyScrollbackPage(const v1::GetMessagesResponse& resp) {
         // eviction from the newest end is therefore flagged
         // (scrollback_trimmed_) and the view renders a boundary marker, never
         // a silent gap. The newest-slice refresh at turn end (below, and in
-        // RefreshScrollback(newest=true)) resets the flag and the window.
+        // RequestScrollback(newest=true)) resets the flag and the window.
         while (static_cast<int>(scrollback_page_.size()) > scrollback_max_messages_) {
             scrollback_page_.erase(scrollback_page_.begin());
             scrollback_trimmed_ = true;
@@ -351,11 +353,17 @@ void SessionState::ApplyScrollbackPage(const v1::GetMessagesResponse& resp) {
     last_loaded_seq_ = scrollback_page_.empty() ? -1 : scrollback_page_.back().seq();
     has_earlier_ = resp.has_more();
     ++transcript_version_;
+    ++refresh_seq_;
 }
 
 bool SessionState::CanLoadMore() const {
     std::lock_guard lk(mtx_);
     return has_earlier_;
+}
+
+void SessionState::NoteRefreshFailed() {
+    std::lock_guard lk(mtx_);
+    ++refresh_seq_;   // resolved (no content change) -- lets a mismatch retry next frame
 }
 
 // ===========================================================================
@@ -726,6 +734,20 @@ void AppState::SendChatTurn(const std::string& session_id, const std::string& te
     }
 }
 
+void AppState::RequestSuggestPaths(const std::string& session_id, const std::string& prefix,
+                                   int32_t limit,
+                                   std::function<void(std::vector<std::string>)> on_result) {
+    rpc_queue_.Submit([this, session_id, prefix, limit, on_result = std::move(on_result)] {
+        const auto result = client_->SuggestPaths(session_id, prefix, limit);
+        std::vector<std::string> paths;
+        if (result.status.ok()) {
+            paths.assign(result.response.paths().begin(), result.response.paths().end());
+        }
+        if (on_result) on_result(std::move(paths));
+        BumpUiVersion();   // wake the pump so the editor's next poll sees it
+    });
+}
+
 void AppState::AnswerPermission(const std::string& session_id, const std::string& request_id,
                                 v1::PermissionDecision decision,
                                 std::vector<std::string> granted_keys) {
@@ -804,10 +826,12 @@ void AppState::SendCancel(const std::string& session_id) {
     stream->Send(ev);
 }
 
-void AppState::RefreshScrollback(const std::string& session_id, bool newest) {
-    BumpUiVersion();
-    // Owning copy: this runs on the loop thread and can outlive a CloseTab
-    // that races it (picker delete / tab close mid-refresh).
+void AppState::RequestScrollback(const std::string& session_id, bool newest) {
+    // Owning copy up front, captured by value into the job: the fetch now
+    // runs on the RPC worker thread, well after this call returns, and can
+    // outlive a CloseTab that races it (picker delete / tab close mid-fetch)
+    // -- the same reasoning the old synchronous body already relied on, just
+    // extended across the thread hop.
     const auto state = GetState(session_id);
     if (!state) return;
 
@@ -818,11 +842,17 @@ void AppState::RefreshScrollback(const std::string& session_id, bool newest) {
         if (!cursor.has_value()) return;   // history exhausted; nothing to ask
     }
 
-    v1::GetMessagesResponse resp;
-    {
+    // `this` is captured because BumpUiVersion() is AppState's own private
+    // method -- SessionState has no back-reference to bump it, so the
+    // original synchronous body called it directly instead. Safe: RunTui
+    // joins the worker (StopRpcQueue) before AppState can be destroyed, so
+    // no queued job outlives its `this`.
+    rpc_queue_.Submit([this, state, session_id, newest, cursor] {
+        v1::GetMessagesResponse resp;
         grpc::ClientContext context;
-        // Bounded: a fetch pauses the UI thread for at most this long, and a
-        // wedged server must not wedge the frame loop past that.
+        // Bounded: the fetch runs off the loop thread now, but a wedged
+        // server must not wedge the worker (and therefore every OTHER
+        // queued request) indefinitely.
         context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(2));
         v1::GetMessagesRequest request;
         request.set_session_id(session_id);
@@ -830,12 +860,21 @@ void AppState::RefreshScrollback(const std::string& session_id, bool newest) {
         request.set_limit(100);
         if (const grpc::Status status = client_->GetMessages(&context, request, &resp);
             !status.ok()) {
-            return;   // keep the window we have; the next trigger retries
+            // Resolve the attempt without applying anything: the fetch that
+            // opened the mismatch is still open, so the next frame's
+            // maintain() sees transcript_version != rendered_version again
+            // and retries -- this used to be a dead comment ("the next
+            // trigger retries") because the loop-thread caller had already
+            // latched rendered_version to the pre-refresh version before
+            // this failure was known.
+            state->NoteRefreshFailed();
+            BumpUiVersion();
+            return;
         }
-    }
-
-    state->ApplyScrollbackPage(resp);
-    if (newest) state->ClearStreaming();
+        state->ApplyScrollbackPage(resp);   // bumps transcript_version + refresh_seq
+        if (newest) state->ClearStreaming();
+        BumpUiVersion();
+    });
 }
 
 std::vector<AppState::TabSnapshot> AppState::GetAllTabs() const {

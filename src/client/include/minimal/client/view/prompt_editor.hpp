@@ -71,12 +71,15 @@ struct CommandCatalogEntry {
     bool submits_prompt = false;  // PromptShorthand: the one kind that submits a turn
 };
 
-// The @-mention query seam. The shipped implementation is a synchronous
-// SuggestPaths call with a 250 ms deadline (kSuggestPathsDeadline) -- bounded,
-// but it still pauses the frame for up to that long. An async implementation
-// (query off-loop, results applied on a later frame) is a drop-in replacement
-// behind this same signature; the editor never changes.
-using MentionSuggestor = std::function<std::vector<std::string>(const std::string& prefix)>;
+// The @-mention query seam (T2: async). `nullopt` means "still waiting --
+// call again next frame"; a present (possibly empty) vector is the resolved
+// answer. The shipped implementation (RunTui's `suggest` lambda) submits
+// SuggestPaths onto AppState's async RPC worker on the FIRST call for a
+// given prefix and returns nullopt immediately, then returns the answer once
+// the worker publishes it -- so a slow server no longer pauses the frame the
+// way a synchronous 250 ms-deadlined call would.
+using MentionSuggestor =
+    std::function<std::optional<std::vector<std::string>>(const std::string& prefix)>;
 
 ftxui::Component MakePromptEditor(
     const Theme& theme, PromptEditorState& state,

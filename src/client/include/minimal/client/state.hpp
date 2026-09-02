@@ -1,6 +1,7 @@
 #pragma once
 
 #include <chrono>
+#include <functional>
 #include <map>
 #include <memory>
 #include <atomic>
@@ -14,6 +15,7 @@
 #include "minimal/v1/common.pb.h"
 #include "minimal/v1/session_service.pb.h"
 #include "minimal/client/chat_model.hpp"
+#include "minimal/client/rpc_queue.hpp"
 #include "minimal/client/session_client.hpp"
 
 namespace minimal::client::plugins {
@@ -166,6 +168,17 @@ public:
         std::string agent_preset;
         std::string permission_mode;
         int64_t context_window_tokens = 0;
+
+        // Bumped by every RESOLVED async scrollback-refresh attempt (success
+        // OR failure) -- see AppState::RequestScrollback / rpc_queue.hpp. A
+        // successful apply also bumps transcript_version, but a FAILED fetch
+        // does not touch it at all -- so a frame that only watched
+        // transcript_version to learn "my outstanding request resolved"
+        // could never distinguish "still waiting" from "it failed, stop
+        // waiting and let the next mismatch retry", and would latch on a
+        // failure forever (the bug this counter exists to fix: T2's "the
+        // next trigger retries" comment used to be false).
+        uint64_t refresh_seq = 0;
     };
 
     Snapshot TakeSnapshot();
@@ -229,6 +242,13 @@ public:
     void ApplyScrollbackPage(const v1::GetMessagesResponse& resp);
     bool CanLoadMore() const;
 
+    // Resolves an outstanding async refresh that came back EMPTY or failed:
+    // bumps refresh_seq without touching any content, so the frame that
+    // requested it can tell "resolved, nothing changed" from "still
+    // waiting" and is free to retry on the next mismatch. ApplyScrollbackPage
+    // bumps refresh_seq itself on the success path.
+    void NoteRefreshFailed();
+
 private:
     void MaybeGoIdleLocked();   // mtx_ held by caller
 
@@ -246,6 +266,7 @@ private:
     int64_t last_loaded_seq_ = -1;      // oldest seq loaded so far (descending)
     bool has_earlier_ = false;
     uint64_t transcript_version_ = 0;
+    uint64_t refresh_seq_ = 0;   // see Snapshot::refresh_seq
     bool scrollback_trimmed_ = false;
     int scrollback_max_messages_ = kDefaultScrollbackWindowMaxMessages;
     int tool_output_buffer_bytes_ = kDefaultToolOutputBufferBytes;
@@ -348,14 +369,31 @@ public:
     // Ctrl-style interrupt of the tab's in-flight turn, if any.
     void SendCancel(const std::string& session_id);
 
-    // Synchronously re-fetches the scrollback window for a tab and applies it.
+    // Asynchronously re-fetches the scrollback window for a tab and applies
+    // it (T2: this used to run the GetMessages RPC synchronously on the
+    // FTXUI loop thread, including from inside a Renderer lambda -- a merely
+    // slow server stalled the whole UI for up to the RPC's 2s deadline on
+    // every frame that changed transcript_version).
     //   newest=true: replace the window with the freshest page (post-turn).
     //   newest=false: page OLDER via the keyset cursor (scroll-up "load more").
-    // Blocking on the calling thread by design -- the caller runs it as a
-    // posted task inside the FTXUI loop, with a short RPC deadline; the
-    // bounded pause at a fetch moment beats detached threads whose lifetime
-    // would race the screen's teardown.
-    void RefreshScrollback(const std::string& session_id, bool newest);
+    // Returns immediately; enqueues the fetch on the async RPC worker
+    // (rpc_queue.hpp). The result publishes into SessionState under its own
+    // mutex and bumps refresh_seq (Snapshot) so the caller can tell a
+    // resolved attempt from one still in flight, and BumpUiVersion() so the
+    // pump's next tick redraws from it.
+    void RequestScrollback(const std::string& session_id, bool newest);
+
+    // Asynchronously resolves @-mention path suggestions (T2: this used to
+    // run SuggestPaths synchronously on the loop thread, inside the prompt
+    // editor's own Renderer lambda, on the keystroke after every '@' -- a
+    // merely slow server stalled typing for up to the RPC's 250 ms deadline).
+    // `on_result` runs on the RPC worker thread with the resolved list
+    // (empty on any failure -- the same "closes the list" behaviour the
+    // synchronous call had) and must not block; it is the caller's job to
+    // recognize a stale answer (the `suggest` lambda in app.cpp keys its
+    // in-flight tracking on session id + prefix).
+    void RequestSuggestPaths(const std::string& session_id, const std::string& prefix,
+                             int32_t limit, std::function<void(std::vector<std::string>)> on_result);
 
     // --- User answers to pending prompts (UI calls these; routes ClientEvents back) ---
 
@@ -431,6 +469,26 @@ public:
         return ui_version_.load(std::memory_order_acquire);
     }
 
+    // Joins the async RPC worker (rpc_queue.hpp; RequestScrollback and
+    // friends). Call once, after the render pump stops posting frames and
+    // BEFORE CloseAllTabs() -- a queued job's completion callback touches
+    // SessionState/AppState the same way a reader thread's dispatch does,
+    // and CloseAllTabs() tears down the very tabs a straggling job would
+    // publish into.
+    void StopRpcQueue() { rpc_queue_.Stop(); }
+
+    // Escape hatch: runs an arbitrary job on the same async RPC worker,
+    // off the loop thread. For a call site that needs a synchronous
+    // AppState method itself (OpenTab, whose CreateSession RPC carries a 5s
+    // deadline) run off-thread, without widening that method's own contract
+    // -- every AppState method's locking is already safe from any thread,
+    // so this relocates WHERE it runs rather than changing what it does or
+    // returns, which matters here because OpenTab's synchronous
+    // session-id-on-return contract is load-bearing for the existing E2E
+    // test suite (app_state_test.cpp) and for callers that legitimately
+    // need it immediately (headless mode, tests).
+    void RunOnRpcQueue(std::function<void()> job) { rpc_queue_.Submit(std::move(job)); }
+
 private:
     struct TabEntry {
         TabInfo info;
@@ -455,6 +513,13 @@ private:
 
     std::atomic<uint64_t> ui_version_{0};
     void BumpUiVersion() { ui_version_.fetch_add(1, std::memory_order_acq_rel); }
+
+    // T2: the async unary RPC worker backing RequestScrollback (and, over
+    // time, the other calls app.cpp used to make on the loop thread). One
+    // queue for the whole app, not per tab -- a single worker gives FIFO
+    // ordering for free, so e.g. a queued delete can never race ahead of a
+    // list queued after it.
+    RpcQueue rpc_queue_;
     std::vector<std::pair<std::string, v1::SubagentStartedEvent>> pending_subagents_;   // deferred
 
     std::shared_ptr<SessionClient> client_;

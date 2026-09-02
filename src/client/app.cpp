@@ -456,11 +456,16 @@ int RunHeadless(const HeadlessOptions& options) {
 // THE BRIDGE: gRPC reader threads never touch FTXUI objects. They mutate
 // SessionState/AppState (plain, mutex-guarded state), and a 20 Hz pump posts a
 // custom event into the screen loop so it redraws from a snapshot. Every
-// component below READS state; nothing on the loop thread waits on the reader,
-// and nothing on the reader waits on the loop. The one exception is
-// RefreshScrollback -- a bounded (2 s deadline) unary call made ON the loop
-// thread at a fetch moment, chosen over detached threads whose lifetime would
-// race the screen's teardown (see AppState::RefreshScrollback).
+// component below READS state; nothing on the loop thread waits on the
+// reader, and nothing on the reader waits on the loop. Unary RPCs that used
+// to run ON the loop thread (RequestScrollback -- née RefreshScrollback,
+// SuggestPaths) instead go through AppState's async RPC worker
+// (rpc_queue.hpp): Submit() returns immediately, the job runs off-thread and
+// publishes into SessionState/AppState the same way a reader thread does.
+// That worker is joined explicitly (app->StopRpcQueue(), below, right after
+// the pump) rather than left detached, for the same teardown-ordering reason
+// the reader/writer threads are joined rather than detached: a job's
+// completion touches state that CloseAllTabs() is about to tear down.
 //
 // Keybindings: every action is dispatched through keybindings.json (the file
 // is the config); the table below only maps a key NAME to the byte sequences a
@@ -890,6 +895,15 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         // finalized_for_turn fires the engine's one authoritative reparse.
         uint64_t streaming_turn = 0;
         bool finalized_for_turn = false;
+        // T2: an async RequestScrollback(newest=true) is outstanding for this
+        // tab. refresh_seq_seen/refresh_from_version are the pre-submit
+        // values (SessionState::Snapshot fields) needed to tell, once
+        // SessionState::refresh_seq moves, whether the attempt actually
+        // applied a page (transcript_version moved past refresh_from_version)
+        // or failed (it didn't) -- see maintain() below.
+        bool refresh_pending = false;
+        uint64_t refresh_seq_seen = 0;
+        uint64_t refresh_from_version = 0;
     };
     std::map<std::string, TabUi> tab_ui;
 
@@ -902,14 +916,12 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     // (Skipped entirely when the chat surface owns the tab body: the surface
     // keeps its own buffers and fetches its own pages.)
     //
-    // Returns the snapshot the frame should render from: the caller-supplied
-    // one, unless a scrollback refresh fired here (which mutates SessionState
-    // out from under it), in which case a fresh one is taken. This is what a
-    // frame's SINGLE deep snapshot of the focused tab -- a full protobuf copy
-    // of up to scrollback_window_max_messages rows -- looks like end to end:
-    // one fetch at the top of session_view, threaded through here and into
-    // handle_notice and the renderer, instead of each independently calling
-    // GetDetails and paying the copy again.
+    // T2: the refresh itself is now async (AppState::RequestScrollback
+    // enqueues it and returns immediately), so this function can no longer
+    // re-fetch and observe the result within the same call the way the old
+    // synchronous body did -- it returns the snapshot UNCHANGED, and the
+    // worker's completion (BumpUiVersion) wakes the pump for a frame that
+    // will see the applied page in a freshly-taken snapshot.
     auto maintain = [&](const std::string& session_id,
                         SessionState::Snapshot snap) -> SessionState::Snapshot {
         if (chat_surface != nullptr || app->EffectiveChatSurface() != nullptr) return snap;
@@ -943,16 +955,34 @@ int RunTui(const minimal::client::ParsedArgs& args) {
             ui.finalized_for_turn = true;
         }
 
-        if (ui.rendered_version != snap.transcript_version) {
+        // Resolve any outstanding refresh BEFORE deciding whether to submit a
+        // new one: refresh_seq (bumped by SessionState on every RESOLVED
+        // attempt -- success or failure) is a different counter from
+        // transcript_version specifically so a failed fetch still tells this
+        // frame "stop waiting", without looking identical to "still in
+        // flight". This is the fix for the retry bug the old code's own
+        // comment named but did not implement ("the next trigger retries" --
+        // it did not, because rendered_version was latched before the RPC's
+        // outcome was known).
+        if (ui.refresh_pending && snap.refresh_seq != ui.refresh_seq_seen) {
+            ui.refresh_pending = false;
+            if (snap.transcript_version != ui.refresh_from_version) {
+                // A page applied: this snapshot was taken after the worker's
+                // BumpUiVersion woke the pump, so it already reflects it.
+                ui.rendered_version = snap.transcript_version;
+            }
+            // Else the fetch failed (or the applied page happened to leave
+            // transcript_version where it was, e.g. an empty response with
+            // nothing new): rendered_version stays behind on purpose, so the
+            // mismatch check below retries on this very frame.
+        }
+
+        if (!ui.refresh_pending && ui.rendered_version != snap.transcript_version) {
             if (snap.streaming_text.empty()) {
-                app->RefreshScrollback(session_id, /*newest=*/true);
-                // RefreshScrollback mutated SessionState out from under the
-                // snapshot this call was handed -- the rest of THIS frame
-                // (handle_notice, the renderer) must see the refreshed rows,
-                // not the pre-refresh copy, so this is the one re-fetch that
-                // stays: it observes a mutation this same function caused.
-                snap = app->GetDetails(session_id);
-                ui.rendered_version = std::optional(snap.transcript_version);
+                ui.refresh_pending = true;
+                ui.refresh_seq_seen = snap.refresh_seq;
+                ui.refresh_from_version = snap.transcript_version;
+                app->RequestScrollback(session_id, /*newest=*/true);
             } else {
                 ui.rendered_version = snap.transcript_version;
             }
@@ -961,28 +991,91 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     };
 
     // --- editor ---------------------------------------------------------------
-    auto suggest = [app, client](const std::string& prefix) -> std::vector<std::string> {
+    //
+    // T2: @-mention suggestions used to run SuggestPaths synchronously here,
+    // on the loop thread, from inside the prompt editor's own Renderer --
+    // a merely slow server stalled every keystroke after '@' for up to the
+    // RPC's 250 ms deadline. This lambda's contract (prompt_editor.hpp's
+    // MentionSuggestor) is now "nullopt = still waiting, poll again next
+    // frame": the FIRST call for a given (session, prefix) submits the
+    // request onto AppState's async RPC worker and returns nullopt; later
+    // calls for the SAME (session, prefix) keep returning nullopt until the
+    // worker's completion callback (below) records the answer, at which
+    // point this call consumes and returns it. A prefix change supersedes
+    // whatever was in flight -- the completion for the OLD request still
+    // arrives eventually, but by then `query` no longer names it, so it is
+    // dropped rather than clobbering the newer one (see the guard inside the
+    // callback).
+    struct MentionQuery {
+        std::mutex mtx;
+        std::string session_id;
+        std::string prefix;
+        bool in_flight = false;
+        bool ready = false;
+        std::vector<std::string> result;
+    };
+    auto mention_query = std::make_shared<MentionQuery>();
+    auto suggest = [app, mention_query](
+                       const std::string& prefix) -> std::optional<std::vector<std::string>> {
         const std::string sid = app->FocusedSessionId();
-        if (prefix.empty() || sid.empty()) return {};
-        const auto result = client->SuggestPaths(sid, prefix, 20);
-        if (!result.status.ok()) return {};
-        return {result.response.paths().begin(), result.response.paths().end()};
+        if (prefix.empty() || sid.empty()) return std::vector<std::string>{};
+
+        std::lock_guard lk(mention_query->mtx);
+        if (mention_query->session_id == sid && mention_query->prefix == prefix) {
+            if (mention_query->ready) {
+                mention_query->in_flight = false;
+                mention_query->ready = false;
+                return std::move(mention_query->result);
+            }
+            if (mention_query->in_flight) return std::nullopt;   // still waiting
+        }
+
+        // A new (session, prefix) pair: submit it, superseding whatever this
+        // slot previously tracked (its completion, if it arrives late, will
+        // no longer match session_id/prefix and will be dropped -- see
+        // RequestSuggestPaths's callback below).
+        mention_query->session_id = sid;
+        mention_query->prefix = prefix;
+        mention_query->in_flight = true;
+        mention_query->ready = false;
+        app->RequestSuggestPaths(sid, prefix, 20, [mention_query, sid, prefix](
+                                                       std::vector<std::string> paths) {
+            std::lock_guard cb_lk(mention_query->mtx);
+            if (mention_query->session_id != sid || mention_query->prefix != prefix) {
+                return;   // superseded by a newer request; drop the stale answer
+            }
+            mention_query->result = std::move(paths);
+            mention_query->ready = true;
+        });
+        return std::nullopt;
     };
     // Typing on an empty app STARTS A SESSION (ARCHITECTURE.md "Session
     // picker": with no prior sessions the client creates one directly). The
     // welcome placeholder has always promised this -- but OpenTab was never
     // wired to any UI path, so the promise was dead and a fresh TUI could not
-    // hold a conversation at all. OpenTab blocks on the create RPC: the same
-    // bounded-pause trade RefreshScrollback already documents for loop-thread
-    // work.
+    // hold a conversation at all. OpenTab makes a blocking CreateSession RPC
+    // (5s deadline); T2 moves that off the loop thread via AppState's async
+    // RPC worker (RunOnRpcQueue) rather than widening OpenTab's own
+    // synchronous contract, which the E2E test suite and headless mode both
+    // depend on. OpenTab's own locking (and its auto-focus-on-first-tab rule)
+    // is safe from any thread, so this is a relocation of WHERE it runs, not
+    // a behavior change -- the frame just stays responsive while it runs.
     auto submit_chat = [app](const std::string& text) {
-        std::string sid = app->FocusedSessionId();
+        const std::string sid = app->FocusedSessionId();
         if (sid.empty()) {
-            minimal::client::SessionClient::CreateOptions opts;
-            opts.project_root = std::filesystem::current_path().string();
-            sid = app->OpenTab(opts);
+            app->RunOnRpcQueue([app, text] {
+                minimal::client::SessionClient::CreateOptions opts;
+                opts.project_root = std::filesystem::current_path().string();
+                if (const auto new_sid = app->OpenTab(opts); !new_sid.empty()) {
+                    app->SendChatTurn(new_sid, text);
+                }
+                // A failed create leaves the app empty; the user sees no new
+                // tab and can retry, same visible outcome the synchronous
+                // call had on failure.
+            });
+            return;
         }
-        if (!sid.empty()) app->SendChatTurn(sid, text);
+        app->SendChatTurn(sid, text);
     };
     auto editor = minimal::client::MakePromptEditor(
         theme, prompt_state,
@@ -1531,7 +1624,7 @@ int RunTui(const minimal::client::ParsedArgs& args) {
             return true;
         }
         if (MatchesAny(event, KeyToEvents(keys.KeyFor("chat.load_older")))) {
-            if (!sid.empty()) app->RefreshScrollback(sid, /*newest=*/false);
+            if (!sid.empty()) app->RequestScrollback(sid, /*newest=*/false);
             return true;
         }
         if (MatchesAny(event, KeyToEvents(keys.KeyFor("tab.close")))) {
@@ -1627,6 +1720,12 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     screen.Loop(final_tree);
     running.store(false, std::memory_order_release);
     pump.join();
+
+    // Join the async RPC worker BEFORE tearing down tabs: a job's completion
+    // (RequestScrollback et al.) publishes into SessionState/AppState the
+    // same way a reader thread's dispatch does, and CloseAllTabs() below
+    // destroys the very tabs a straggling job would publish into.
+    app->StopRpcQueue();
 
     // Closing the TUI closes every tab: terminate all attached sessions
     // (ARCHITECTURE.md "Session lifetime" -- nothing outlives its client).
