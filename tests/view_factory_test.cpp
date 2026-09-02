@@ -306,6 +306,45 @@ TEST_CASE("prompt editor: Tab splices the mention token, preserving the prose") 
     CHECK(state.content == "please review @src/main.cpp");
 }
 
+TEST_CASE("prompt editor: Enter accepts the highlighted suggestion instead of submitting",
+         "[prompt_editor][regression]") {
+    // Before this fix, Enter always submitted state.content verbatim even
+    // with the suggestion list open -- typing "/comp" toward "/compact",
+    // seeing the list open, and pressing Enter (the natural "I've chosen
+    // this" key) submitted the literal text "/comp" as a command, which is
+    // not a real command name. Tab was the only accept key.
+    const auto theme = TestTheme();
+    PromptEditorState state;
+    std::vector<std::string> texts;
+    std::vector<std::string> commands;
+    auto editor = MakePromptEditor(
+        theme, state, [&](const std::string& t) { texts.push_back(t); },
+        [&](const std::string& c) { commands.push_back(c); },
+        [](const std::string&) { return std::vector<std::string>{}; },
+        [] {
+            return std::vector<CommandCatalogEntry>{{"compact", "compact the history", false,
+                                                      false}};
+        });
+
+    for (const char c : std::string_view("/comp")) {
+        REQUIRE(SendEvent(editor, ftx::Event::Character(std::string{c})));
+    }
+    REQUIRE(state.list_open);
+    REQUIRE_FALSE(state.suggestions.empty());
+
+    REQUIRE(SendEvent(editor, ftx::Event::Return));
+
+    CHECK(commands.empty());   // never submitted the raw prefix
+    CHECK(texts.empty());
+    CHECK(state.content == "/compact ");   // accepted the completion instead
+    CHECK_FALSE(state.list_open);
+
+    // The list is now closed: a second Enter submits normally, unchanged.
+    REQUIRE(SendEvent(editor, ftx::Event::Return));
+    REQUIRE(commands.size() == 1);
+    CHECK(commands[0] == "/compact");
+}
+
 TEST_CASE("prompt editor: the stale suggestion list is not completable mid-debounce") {
     const auto theme = TestTheme();
     PromptEditorState state;

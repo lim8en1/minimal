@@ -48,13 +48,61 @@ ftxui::Component MakePromptEditor(
     auto input = Input(&state.content,
                        "type here; @ for files, / for commands, alt+enter for newline");
 
-    auto with_events = CatchEvent(input, [&](const Event& event) {
+    // Accept the highlighted suggestion in place. Shared by Tab and (when the
+    // list is open) Enter -- see below for why Enter needed this at all.
+    // Completions may differ from the displayed text (a command completes to
+    // its name plus a space, not to the annotation line).
+    const auto accept_suggestion = [&] {
+        if (state.suggestion_selected < static_cast<int>(state.completions.size())) {
+            const std::string& completion = state.completions[state.suggestion_selected];
+            if (!CommandPrefixOf(state.content).empty()) {
+                // A command line IS its prefix: whole-line replacement.
+                state.content = completion;
+            } else {
+                // A mention SPLICES the path over the @token: whole-line
+                // replacement destroyed the user's prose AND manufactured
+                // a '/'-leading line the dispatcher would route as a
+                // command. The '@' stays -- the server's expansion scans
+                // for '@' + non-space tokens.
+                const std::size_t at = state.content.rfind('@');
+                if (at != std::string::npos) {
+                    state.content = state.content.substr(0, at) + "@" + completion;
+                } else {
+                    state.content += "@" + completion;
+                }
+            }
+        }
+        state.list_open = false;
+        state.suggestions.clear();
+        state.completions.clear();
+    };
+
+    // accept_suggestion captured BY VALUE (copy), not by reference: it is a
+    // local closure object in THIS function's stack frame, unlike `state`
+    // (a reference parameter binding to an object that outlives this
+    // factory). A `[&]` capture here would store a reference to a stack
+    // variable that dies the moment MakePromptEditor returns -- exactly the
+    // "closures outlive the factory" trap session_picker.cpp documents.
+    // Copying is cheap: accept_suggestion's own captures (state, etc.) are
+    // themselves references to externally-owned objects.
+    auto with_events = CatchEvent(input, [&, accept_suggestion](const Event& event) {
         // Alt+Enter (ESC CR) inserts a newline -- the portable multi-line key.
         static const Event kAltEnterCr = Event::Character("\x1b\r");
         static const Event kAltEnterLf = Event::Character("\x1b\n");
         if (event == kAltEnterCr || event == kAltEnterLf) {
             state.content += "\n";
             return true;   // consumed
+        }
+        // Enter accepts the highlighted suggestion when the list is open,
+        // the same as Tab, rather than submitting the raw (incomplete)
+        // prefix as a turn/command -- Enter is the more natural "I've chosen
+        // this" key, and submitting `/comp` (not a real command) when the
+        // user was reaching for `/compact` from the open list was a silent
+        // trap. Only when the list is CLOSED does Enter fall through to
+        // submit, unchanged from before.
+        if (state.list_open && !state.suggestions.empty() && event == Event::Return) {
+            accept_suggestion();
+            return true;
         }
         if (event == Event::Return) {
             std::string line = state.content;
@@ -86,31 +134,7 @@ ftxui::Component MakePromptEditor(
             return true;
         }
         if (state.list_open && event == Event::Tab && !state.suggestions.empty()) {
-            // Complete the highlighted suggestion in place. Completions may
-            // differ from the displayed text (a command completes to its name
-            // plus a space, not to the annotation line).
-            if (state.suggestion_selected < static_cast<int>(state.completions.size())) {
-                const std::string& completion = state.completions[state.suggestion_selected];
-                if (!CommandPrefixOf(state.content).empty()) {
-                    // A command line IS its prefix: whole-line replacement.
-                    state.content = completion;
-                } else {
-                    // A mention SPLICES the path over the @token: whole-line
-                    // replacement destroyed the user's prose AND manufactured
-                    // a '/'-leading line the dispatcher would route as a
-                    // command. The '@' stays -- the server's expansion scans
-                    // for '@' + non-space tokens.
-                    const std::size_t at = state.content.rfind('@');
-                    if (at != std::string::npos) {
-                        state.content = state.content.substr(0, at) + "@" + completion;
-                    } else {
-                        state.content += "@" + completion;
-                    }
-                }
-            }
-            state.list_open = false;
-            state.suggestions.clear();
-            state.completions.clear();
+            accept_suggestion();
             return true;   // consumed
         }
 
