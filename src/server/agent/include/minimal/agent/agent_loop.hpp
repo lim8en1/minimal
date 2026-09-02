@@ -55,6 +55,14 @@ struct LoopConfig {
     // request, no execution -- one error result the model adapts to.
     std::int64_t max_tool_input_bytes = 10 * 1024 * 1024;
 
+    // The global tool-RESULT ceiling (settings.json tools.max_result_bytes).
+    // Mirrors max_tool_input_bytes on the output side: a core tool like bash
+    // caps its own output, but that cap lives in the plugin, not the harness
+    // -- an MCP tool or a third-party plugin tool has no ceiling at all
+    // short of this one. Checked once, right after Execute() returns, so it
+    // applies uniformly to every tool regardless of who wrote it. 0 disables.
+    std::int64_t max_tool_result_bytes = 10 * 1024 * 1024;
+
     // Exponential-with-EQUAL-jitter backoff between retries: half the ceiling
     // is a fixed floor, the other half random. Full jitter can legally draw
     // zero, which leaves a real 429 unbackoffed and makes the wait

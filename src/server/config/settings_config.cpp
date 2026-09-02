@@ -108,6 +108,11 @@ ToolsSettings ParseTools(const nlohmann::json& doc) {
         throw std::runtime_error(
             "settings.json: tools.max_input_bytes must not be negative");
     }
+    result.max_result_bytes = tools.value("max_result_bytes", result.max_result_bytes);
+    if (result.max_result_bytes < 0) {
+        throw std::runtime_error(
+            "settings.json: tools.max_result_bytes must not be negative");
+    }
     return result;
 }
 

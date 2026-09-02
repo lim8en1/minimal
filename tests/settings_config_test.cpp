@@ -192,6 +192,25 @@ TEST_CASE("ParseSettingsConfig: max_parallel_tool_calls defaults to 4, must be p
                     std::runtime_error);
 }
 
+TEST_CASE("ParseSettingsConfig: max_result_bytes defaults to 10 MiB, must not be negative",
+         "[settings_config]") {
+    auto config = ParseSettingsConfig(nlohmann::json::object());
+    CHECK(config.tools.max_result_bytes == 10 * 1024 * 1024);
+
+    auto overridden =
+        ParseSettingsConfig(nlohmann::json{{"tools", {{"max_result_bytes", 4096}}}});
+    CHECK(overridden.tools.max_result_bytes == 4096);
+
+    // 0 is a legal "disabled" value, unlike max_parallel_tool_calls.
+    auto disabled =
+        ParseSettingsConfig(nlohmann::json{{"tools", {{"max_result_bytes", 0}}}});
+    CHECK(disabled.tools.max_result_bytes == 0);
+
+    CHECK_THROWS_AS(ParseSettingsConfig(
+                        nlohmann::json{{"tools", {{"max_result_bytes", -1}}}}),
+                    std::runtime_error);
+}
+
 TEST_CASE("ParseSettingsConfig: tools_view and logging overridable", "[settings_config]") {
     nlohmann::json doc = {{"tools_view", {{"stdout_buffer_lines", 250}}},
                            {"logging", {{"level", "debug"}, {"path", "/var/log/minimal.log"},

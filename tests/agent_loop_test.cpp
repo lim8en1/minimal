@@ -271,6 +271,91 @@ TEST_CASE("tool results are persisted before the next provider call", "[agent_lo
     CHECK(found);
 }
 
+TEST_CASE("a result over max_tool_result_bytes is truncated with a visible marker",
+         "[agent_loop][invariant]") {
+    // The output-side mirror of the input ceiling: applied uniformly at the
+    // one call site every tool's result passes through (Execute()), so it
+    // covers MCP tools and third-party plugin tools too, not just core's own
+    // bash/read caps.
+    Harness h;
+    auto owned = std::make_unique<FakeTool>("big", ToolCategory::ReadOnly, std::string(500, 'x'));
+    FakeTool* tool = owned.get();
+    h.registry.Register(std::move(owned));
+    h.provider.PushResponse(ToolUseResponse("tu1", "big"));
+    h.provider.PushResponse(TextResponse("done"));
+
+    agent::LoopConfig config;
+    config.max_tool_result_bytes = 100;
+    h.Build({}, config);
+
+    h.loop->RunTurn(UserText("go"));
+    CHECK(tool->calls.size() == 1);
+
+    const llm::ToolResultBlock* result = nullptr;
+    for (const auto& message : h.store.messages) {
+        for (const auto& block : message.content) {
+            if (const auto* r = std::get_if<llm::ToolResultBlock>(&block)) result = r;
+        }
+    }
+    REQUIRE(result != nullptr);
+    REQUIRE(result->content.size() == 1);
+    const auto& text = std::get<llm::TextBlock>(result->content.front()).text;
+    CHECK(text.size() < 500);
+    CHECK(text.rfind("xxx", 0) == 0);   // the kept prefix
+    CHECK(text.find("bytes omitted") != std::string::npos);
+    CHECK_FALSE(result->is_error);   // truncation is not a refusal
+}
+
+TEST_CASE("a result at or under max_tool_result_bytes is untouched",
+         "[agent_loop][invariant]") {
+    Harness h;
+    auto owned = std::make_unique<FakeTool>("small", ToolCategory::ReadOnly, std::string(50, 'x'));
+    h.registry.Register(std::move(owned));
+    h.provider.PushResponse(ToolUseResponse("tu1", "small"));
+    h.provider.PushResponse(TextResponse("done"));
+
+    agent::LoopConfig config;
+    config.max_tool_result_bytes = 100;
+    h.Build({}, config);
+
+    h.loop->RunTurn(UserText("go"));
+
+    const llm::ToolResultBlock* result = nullptr;
+    for (const auto& message : h.store.messages) {
+        for (const auto& block : message.content) {
+            if (const auto* r = std::get_if<llm::ToolResultBlock>(&block)) result = r;
+        }
+    }
+    REQUIRE(result != nullptr);
+    REQUIRE(result->content.size() == 1);
+    CHECK(std::get<llm::TextBlock>(result->content.front()).text == std::string(50, 'x'));
+}
+
+TEST_CASE("max_tool_result_bytes == 0 disables the ceiling", "[agent_loop][invariant]") {
+    Harness h;
+    auto owned =
+        std::make_unique<FakeTool>("big", ToolCategory::ReadOnly, std::string(5000, 'x'));
+    h.registry.Register(std::move(owned));
+    h.provider.PushResponse(ToolUseResponse("tu1", "big"));
+    h.provider.PushResponse(TextResponse("done"));
+
+    agent::LoopConfig config;
+    config.max_tool_result_bytes = 0;
+    h.Build({}, config);
+
+    h.loop->RunTurn(UserText("go"));
+
+    const llm::ToolResultBlock* result = nullptr;
+    for (const auto& message : h.store.messages) {
+        for (const auto& block : message.content) {
+            if (const auto* r = std::get_if<llm::ToolResultBlock>(&block)) result = r;
+        }
+    }
+    REQUIRE(result != nullptr);
+    REQUIRE(result->content.size() == 1);
+    CHECK(std::get<llm::TextBlock>(result->content.front()).text.size() == 5000);
+}
+
 TEST_CASE("retryable errors retry, non-retryable propagate", "[agent_loop][retry]") {
     SECTION("retryable then success") {
         Harness h;

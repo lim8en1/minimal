@@ -72,6 +72,16 @@ struct ToolsSettings {
     // only by the model's output budget. Over the cap is an error result the
     // model adapts to, like every other refusal. 0 disables.
     std::int64_t max_input_bytes = 10 * 1024 * 1024;
+    // THE global ceiling on one tool call's RESULT, checked once after
+    // execution regardless of which tool produced it. A core tool like bash
+    // caps its own output (bash.max_output_bytes), but that cap is the
+    // plugin's own choice, not a harness guarantee -- an MCP tool or a
+    // third-party plugin tool has no ceiling at all short of this one, so an
+    // oversized response would otherwise ride straight into the model
+    // request, into SQLite, and into every later turn's prefix until
+    // compaction. Truncated over the cap, with a visible marker, never an
+    // error result -- a large result is not a refusal. 0 disables.
+    std::int64_t max_result_bytes = 10 * 1024 * 1024;
 };
 
 struct ToolsViewSettings {

@@ -34,6 +34,40 @@ std::vector<const llm::ToolUseBlock*> ToolUsesOf(const llm::Message& message) {
     return out;
 }
 
+// THE global tool-RESULT ceiling (settings.json tools.max_result_bytes), the
+// output-side mirror of the input ceiling checked before Prepare. Applied
+// here, once, after Execute() returns, so it covers every tool uniformly --
+// a core tool's own cap (bash.max_output_bytes) is the plugin's choice, not
+// a harness guarantee, and an MCP tool or third-party plugin tool has no cap
+// at all short of this one. Truncation, not an error: a large result is not
+// a refusal the model needs to adapt its call to, just content it should
+// know was cut.
+void CapToolResult(llm::ToolResultBlock& block, std::int64_t max_bytes) {
+    if (max_bytes <= 0) return;
+    const auto cap = static_cast<std::size_t>(max_bytes);
+
+    std::size_t total = 0;
+    for (const auto& item : block.content) {
+        if (const auto* text = std::get_if<llm::TextBlock>(&item)) total += text->text.size();
+    }
+    if (total <= cap) return;
+
+    std::string kept;
+    kept.reserve(cap);
+    for (auto& item : block.content) {
+        if (kept.size() >= cap) break;
+        if (auto* text = std::get_if<llm::TextBlock>(&item)) {
+            const auto take = std::min(cap - kept.size(), text->text.size());
+            kept.append(text->text, 0, take);
+        }
+    }
+    kept += "\n... [" + std::to_string(total - cap) +
+            " bytes omitted; result exceeds the configured max_result_bytes (" +
+            std::to_string(cap) + ")]";
+    block.content.clear();
+    block.content.push_back(llm::TextBlock{std::move(kept)});
+}
+
 }  // namespace
 
 AgentLoop::AgentLoop(llm::LlmProvider& provider, tools::ToolExecutor& executor,
@@ -833,6 +867,11 @@ void AgentLoop::RunTurnLoop(TurnResult& result, bool flush_first) {
                 tool_result = llm::ToolResultBlock{
                     use->id, {llm::TextBlock{"tool execution failed unexpectedly"}}, true};
             }
+
+            // THE GLOBAL TOOL-RESULT CEILING (see CapToolResult): applies
+            // regardless of which tool produced this, including MCP tools and
+            // any third-party plugin tool that caps nothing on its own.
+            CapToolResult(tool_result, config_.max_tool_result_bytes);
 
             // Emitted even when Execute() reports an error, and before the
             // result is appended: a client that showed a tool as started must
