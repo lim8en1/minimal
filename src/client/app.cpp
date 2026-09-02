@@ -55,6 +55,7 @@
 #include "minimal/client/view/session_picker.hpp"
 #include "minimal/client/view/status_bar.hpp"
 #include "minimal/client/view/tab_bar.hpp"
+#include "minimal/client/view/tab_ui.hpp"
 #include "minimal/client/view/tools_panel.hpp"
 #include "minimal/client/render/color_downsample.hpp"
 #include "minimal/client/render/streaming_markdown_view.hpp"
@@ -477,6 +478,7 @@ using minimal::client::PendingPermission;
 using minimal::client::PromptEditorState;
 using minimal::client::ResolvedKeymap;
 using minimal::client::SessionState;
+using minimal::client::TabUi;
 using minimal::client::SessionStateKind;
 using minimal::client::Theme;
 
@@ -575,110 +577,17 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     std::string staged_delete_id;   // the picker delete confirmation's subject
     PendingClose pending_close;
 
-    // Per-tab UI caches, keyed by session id.
-    struct TabUi {
-        std::unique_ptr<plugins::MarkdownEngine::Stream> streaming;
-        std::size_t streaming_seen = 0;
-        std::optional<uint64_t> rendered_version;
-        std::unique_ptr<GrantToggles> grants;   // per outstanding request
-        std::string grants_for_request;
-        // The wire confirmation modal's rebuild key, like grants_for_request:
-        // the inner modal is rebuilt only when a NEW request_id arrives.
-        std::string confirmation_for_request;
-        ftxui::Component surface_body;          // the chat surface's tab body (when slotted)
-        plugins::ChatSurface* surface_for = nullptr;   // which surface instance built it
-        // Per-tab ChatView: its row cache is keyed by transcript_version, a
-        // PER-SESSION counter starting at 0 -- one shared instance served tab
-        // A's cached rows as tab B's transcript whenever the two versions
-        // collided. One view per tab makes the invariant true by construction.
-        std::unique_ptr<minimal::client::ChatView> chat;
-        // VIEW-display notice side-effects fire ONCE per notice, keyed on the
-        // notice's sequence number (see handle_notice below).
-        uint64_t handled_notice_seq = 0;
-        // Streaming bookkeeping (see maintain): turn_seq keys recreation,
-        // finalized_for_turn fires the engine's one authoritative reparse.
-        uint64_t streaming_turn = 0;
-        bool finalized_for_turn = false;
-        // The newest-slice refresh state machine (T2, reworked): submitted
-        // on a version mismatch, resolved via Snapshot::refresh_seq, with
-        // the submit/latch/mark-current decision in
-        // AdvanceScrollbackRefresh (chat_model.hpp) -- the pure seam where
-        // the "user prompt seen only on the first message" bug is now
-        // unit-tested.
-        minimal::client::ScrollbackRefreshState refresh;
-    };
-    std::map<std::string, TabUi> tab_ui;
+    // Per-tab UI caches, keyed by session id. TabUi's type and the
+    // maintenance logic that reads/writes it both live in
+    // view/tab_ui.{hpp,cpp}; the MAP stays a plain RunTui local (not owned
+    // by TabMaintenance) because close_tab (below) erases from it directly,
+    // and close_tab is defined before TabMaintenance can be constructed --
+    // it needs open_picker/plugin_modal_child, built later.
+    std::map<std::string, minimal::client::TabUi> tab_ui;
 
-    std::string focused;   // active session id, refreshed every frame
-    SessionState::Snapshot focused_details;   // what run_maintenance settled on
-    // Gates run_maintenance's own work (below): every AppState mutation --
-    // wire events via DispatchToTab, SetFocusedTab, RequestScrollback's async
-    // completion, everything -- bumps UiVersion at its own entry point, so
-    // "unchanged since the last pass" is a sound proxy for "nothing
-    // maintain()/handle_notice() would read has changed either". Sentinel,
-    // not 0: forces the first call (before the loop starts) to run regardless
-    // of whatever OpenTab's own bumps left UiVersion at.
-    uint64_t last_maintenance_ui_version = static_cast<uint64_t>(-1);
-
-    // Per-frame maintenance for the focused tab: feed streaming deltas to the
-    // debounced view, and trigger the post-turn scrollback refresh. A turn in
-    // flight is NOT fetched around -- the streaming block is the live content
-    // until the turn ends and the refresh swaps it for the persisted rows.
-    // (Skipped entirely when the chat surface owns the tab body: the surface
-    // keeps its own buffers and fetches its own pages.)
-    //
-    // T2: the refresh itself is now async (AppState::RequestScrollback
-    // enqueues it and returns immediately), so this function can no longer
-    // re-fetch and observe the result within the same call the way the old
-    // synchronous body did -- it returns the snapshot UNCHANGED, and the
-    // worker's completion (BumpUiVersion) wakes the pump for a frame that
-    // will see the applied page in a freshly-taken snapshot.
-    auto maintain = [&](const std::string& session_id,
-                        SessionState::Snapshot snap) -> SessionState::Snapshot {
-        if (chat_surface != nullptr || app->EffectiveChatSurface() != nullptr) return snap;
-        if (snap.session_id.empty() && session_id != snap.session_id) return snap;
-        TabUi& ui = tab_ui[session_id];
-
-        const auto make_stream = [&] { return engine.MakeStream(); };
-
-        // Stream recreation keys on turn_seq (SessionState's counter, bumped
-        // when a new streaming turn begins), NOT on the old buffer-size
-        // heuristic: turn A ending and turn B streaming past A's byte count
-        // between two frames spliced B's middle onto A's cached tail,
-        // silently.
-        if (ui.streaming == nullptr || ui.streaming_turn != snap.turn_seq) {
-            ui.streaming = make_stream();
-            ui.streaming_seen = 0;
-            ui.streaming_turn = snap.turn_seq;
-            ui.finalized_for_turn = false;
-        } else if (snap.streaming_text.size() > ui.streaming_seen) {
-            ui.streaming->AppendDelta(
-                std::string_view(snap.streaming_text).substr(ui.streaming_seen));
-            ui.streaming_seen = snap.streaming_text.size();
-        }
-
-        // The turn's authoritative reparse (the engine contract: Finalize
-        // replaces artifacts from mid-stream unclosed spans). Without this
-        // wiring the contract was dead code -- the last tokens of a stream
-        // rendered only when the debounce's next tick happened to fire.
-        if (snap.is_streaming_finalized && !ui.finalized_for_turn && ui.streaming) {
-            ui.streaming->Finalize();
-            ui.finalized_for_turn = true;
-        }
-
-        // Resolve any outstanding refresh and act on the version mismatch --
-        // the whole decision (submit / latch / mark-current, success vs
-        // failure, streaming vs turn boundary) is AdvanceScrollbackRefresh,
-        // unit-tested in chat_model_test.cpp. This call either submits the
-        // newest-slice fetch or leaves the bookkeeping current; the fetch
-        // itself is async and its application wakes the pump for a later
-        // frame.
-        if (minimal::client::AdvanceScrollbackRefresh(ui.refresh, snap) ==
-            minimal::client::ScrollbackRefreshAction::kSubmit) {
-            app->RequestScrollback(session_id, /*newest=*/true);
-        }
-        return snap;
-    };
+    // `focused`/`focused_details` become aliases into TabMaintenance once it
+    // exists (below, after open_picker/plugin_modal_child) -- see the
+    // TabMaintenance construction for why it cannot be built here yet.
 
     // --- editor ---------------------------------------------------------------
     //
@@ -926,82 +835,24 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         return (*plugin_modal_child)->OnEvent(event);
     });
 
-    // VIEW-display notices: the side-effect (open the picker, show a plugin
-    // modal) fires ONCE per notice here in the maintenance pass, keyed on the
-    // notice's sequence number -- never from Render(). The first draft routed
-    // this inside the renderer: the notice is never cleared (status text
-    // persists until the next result replaces it), so a View notice re-ran
-    // open_picker's ListSessions RPC and re-staged the modal at frame rate,
-    // making it unclosable. Status/Silent notices keep rendering in the frame
-    // below; only their SIDE-EFFECTS are guarded.
-    auto handle_notice = [&](const SessionState::Snapshot& snap) {
-        if (focused.empty()) return;
-        if (!snap.latest_notice.has_value()) return;
-        TabUi& ui = tab_ui[focused];
-        if (ui.handled_notice_seq == snap.notice_seq) return;   // already handled
-        ui.handled_notice_seq = snap.notice_seq;
-
-        const auto& notice = *snap.latest_notice;
-        if (notice.display != minimal::v1::COMMAND_DISPLAY_VIEW || notice.view_hint.empty()) {
-            return;
-        }
-        if (notice.view_hint == "sessions") {
-            open_picker();   // core mapping: the picker modal
-        } else if (notice.view_hint == "agents") {
-            open_agent_picker();   // core mapping: bare `/agent`
-        } else if (auto* view = view_registry.Find(notice.view_hint)) {
-            for (auto& entry : plugin_views) {
-                if (entry.view == view) entry.visible = true;
-            }
-            if (view->spec().placement == plugins::ViewPlacement::Modal) {
-                *plugin_modal_child = view->component();
-                show_plugin_modal = true;
-            }
-        }
-        // A hint naming no view falls through: the unknown-view-id rule, like
-        // the unknown segment id's.
-    };
-
     // THE MAINTENANCE PASS: everything the frame needs but must not do from
-    // Render -- a fresh focused-tab snapshot, the maintain() bookkeeping, and
-    // the once-per-notice VIEW side-effects (handle_notice may stage modals
-    // and run a bounded ListSessions RPC; doing that inside the renderer made
-    // the frame stall and the staged modal unclosable). Runs on the loop
-    // thread from the event path (see the root CatchEvent below), never from
-    // a renderer.
-    //
-    // Gated on UiVersion (see last_maintenance_ui_version above): this used
-    // to run its full body -- a light GetAllTabs() PLUS a full deep
-    // GetDetails() protobuf copy of the focused tab's scrollback window (up
-    // to scrollback_window_max_messages rows, 2000 by default) -- on EVERY
-    // event unconditionally, including every keystroke while typing and
-    // every mouse move, none of which touch AppState at all. Skipping when
-    // nothing changed leaves `focused`/`focused_details` exactly as the last
-    // real pass left them, which is correct BECAUSE nothing changed.
-    auto run_maintenance = [&] {
-        const uint64_t version = app->UiVersion();
-        if (version == last_maintenance_ui_version) return;
-        last_maintenance_ui_version = version;
-
-        const auto tabs = app->GetAllTabs();
-        focused.clear();
-        for (const auto& tab : tabs) {
-            if (tab.is_focused) focused = tab.session_id;
-        }
-        if (focused.empty()) {
-            focused_details = SessionState::Snapshot{};
-            return;
-        }
-        // ONE deep snapshot per pass: GetDetails is a full protobuf copy of
-        // the scrollback window (up to scrollback_window_max_messages rows),
-        // and this used to be paid up to three times per frame. maintain()
-        // may replace it with a fresher one if a scrollback refresh fires
-        // (it must -- the refresh mutates SessionState out from under the
-        // copy this call started with); handle_notice and the renderer both
-        // read whatever maintain settled on.
-        focused_details = maintain(focused, app->GetDetails(focused));
-        handle_notice(focused_details);
-    };
+    // Render -- a fresh focused-tab snapshot, the per-tab streaming/refresh
+    // bookkeeping, and the once-per-notice VIEW side-effects (a View-display
+    // notice may stage a modal and run a bounded ListSessions RPC; doing
+    // that inside the renderer made the frame stall and the staged modal
+    // unclosable). Constructed here, not earlier: it needs open_picker/
+    // open_agent_picker (PickerController, above) and plugin_modal_child/
+    // show_plugin_modal (above). `tab_maintenance` itself must never be
+    // moved/copied for the rest of RunTui's lifetime -- Focused()/
+    // FocusedDetails() return references into its own members.
+    minimal::client::TabMaintenance tab_maintenance(minimal::client::TabMaintenance::Dependencies{
+        *app, engine, chat_surface, view_registry, plugin_views, plugin_modal_child,
+        show_plugin_modal, open_picker, open_agent_picker, tab_ui});
+    // Same names the inline code declared directly -- every lambda below
+    // this point (with_keys' KeyContext, the still-inline render body)
+    // captures `[&]`, i.e. by ordinary lexical scoping.
+    const std::string& focused = tab_maintenance.Focused();
+    const SessionState::Snapshot& focused_details = tab_maintenance.FocusedDetails();
 
     // --- session picker delete confirmation ------------------------------------
     // Built once, like the quit confirmation; `delete_request` is mutated when
@@ -1394,13 +1245,13 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     // The maintenance pass rides the event path ABOVE the whole stack: this
     // handler sees every event the loop processes (including the pump's
     // Event::Custom, even while a modal would consume ordinary keys), runs
-    // run_maintenance, and consumes NOTHING -- a pure pre-render observation
-    // point. This is what keeps side-effects out of Render().
+    // the maintenance pass, and consumes NOTHING -- a pure pre-render
+    // observation point. This is what keeps side-effects out of Render().
     Component final_tree = CatchEvent(with_permission, [&](const Event&) {
-        run_maintenance();
+        tab_maintenance.Run();
         return false;
     });
-    run_maintenance();   // the first frame must not render an empty snapshot
+    tab_maintenance.Run();   // the first frame must not render an empty snapshot
 
     // THE PUMP: reader threads wake nothing by themselves; this loop redraws
     // at up to 20 Hz from snapshots. Redraws are gated on the app's UI
