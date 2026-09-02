@@ -250,6 +250,53 @@ TEST_CASE("an attached session outlives the guard", "[session_registry]") {
     CHECK_FALSE(session->terminated());
 }
 
+TEST_CASE("two detached quiescent sessions are both reaped by the idle TTL, on schedule",
+          "[session_registry]") {
+    // The bug: erasing session A from sessions_ advances `it` to session B (the
+    // only other live entry), and the old code then erased B's quiescent_since_
+    // entry instead of A's. B's clock resets to "now", so B is NOT reaped on
+    // schedule -- it needs a second full detached_idle_ttl before it is finally
+    // reaped. The 1.6s deadline below cleanly separates "both reaped within
+    // ~1.1s" (fixed) from "one needs a second full TTL, ~2s" (buggy).
+    RegistryFixture fixture(200ms);
+    fixture.config.WriteDefaults();
+    fixture.Build();
+
+    agent::SessionRegistry::ReaperConfig config;
+    config.initial_attach_guard = 200ms;
+    config.detached_idle_ttl = std::chrono::seconds(1);
+    config.idle_shutdown = std::chrono::seconds(0);
+    fixture.registry->set_reaper_config(config);
+
+    auto first = fixture.registry->Create(Params("s1"));
+    auto second = fixture.registry->Create(Params("s2"));
+
+    // Attach then detach both -- ever_attached() latches true, has_subscribers()
+    // drops back to false: exactly the detached-quiescent state the reaper
+    // reaps.
+    {
+        const auto first_sub = first->Subscribe();
+        first->Unsubscribe(first_sub);
+        const auto second_sub = second->Subscribe();
+        second->Unsubscribe(second_sub);
+    }
+    CHECK(fixture.registry->size() == 2);
+
+    // size() drops to 0 as soon as a doomed session is erased from the
+    // registry's map, but Terminate() (which sets terminated()) runs
+    // afterward, outside the registry lock -- so the deadline loop must wait
+    // on terminated() too, not just size(), or this races against Terminate()
+    // completing (visible under asan/tsan's slower execution).
+    const auto deadline = std::chrono::steady_clock::now() + 1600ms;
+    while ((fixture.registry->size() > 0 || !first->terminated() || !second->terminated()) &&
+           std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(20ms);
+    }
+    CHECK(fixture.registry->size() == 0);
+    CHECK(first->terminated());
+    CHECK(second->terminated());
+}
+
 TEST_CASE("TerminateAll stops every live session", "[session_registry]") {
     RegistryFixture fixture;
     fixture.config.WriteDefaults();

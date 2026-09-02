@@ -446,7 +446,7 @@ void SessionRegistry::ReaperMain() {
                                  it->first, reaper_config_.detached_idle_ttl.count());
                     doomed.push_back(session);
                     it = sessions_.erase(it);
-                    quiescent_since_.erase(it->first);
+                    quiescent_since_.erase(doomed.back()->info().session_id);
                 } else {
                     ++it;
                 }
