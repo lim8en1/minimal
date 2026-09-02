@@ -18,15 +18,19 @@
 // (tabs, ...) -> result, driven entirely by the value snapshot app.cpp
 // already takes every frame.
 
+#include <functional>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <unordered_map>
 #include <utility>
 #include <vector>
 
+#include <ftxui/component/component.hpp>
 #include <ftxui/component/event.hpp>
 
 #include "minimal/client/keybindings.hpp"
+#include "minimal/client/plugins/registries.hpp"
 #include "minimal/client/state.hpp"
 
 namespace minimal::client {
@@ -97,5 +101,50 @@ private:
     std::unordered_map<std::string, std::vector<ftxui::Event>> table_;
     std::vector<std::pair<std::string, std::string>> unmapped_;
 };
+
+// Everything app.cpp's with_keys handler used to close over by `[&]`,
+// bundled so the dispatch body itself can live here. Every reference/pointer
+// field aliases an object RunTui owns for the whole frame loop's lifetime;
+// KeyContext is never stored past one HandleGlobalKey call (constructed
+// fresh -- or once and reused -- immediately before it, passed by
+// reference), so none of TuiEnvironment's address-stability concerns apply
+// here. The few actions that need app.cpp-only state (TabUi's per-tab chat
+// scroll, PendingClose's confirmation staging) go through callbacks instead
+// of exposing those types here -- keybinding_dispatch stays ignorant of
+// both, the same way it already was of AppState's internals.
+struct KeyContext {
+    AppState& app;
+    const ResolvedKeymap& keymap;
+    const std::string& focused;   // the currently focused session id, this frame
+
+    bool& show_picker;
+    bool& show_agent_picker;
+    bool& show_panel;
+    bool& show_plugin_modal;
+
+    std::vector<plugins::PluginViewEntry>& plugin_views;
+    // The modal layer's plugin-modal slot: `*plugin_modal_child_slot =
+    // entry.component()` stages a modal view's component the same way
+    // app.cpp's own picker/permission modals reassign their host's slot.
+    std::shared_ptr<ftxui::Component>& plugin_modal_child_slot;
+
+    std::function<void()> open_picker;
+    std::function<void()> open_agent_picker;
+    std::function<void()> request_quit;         // ctrl+q / idle ctrl+c: app.cpp owns the confirm-if-busy logic
+    std::function<void(const std::string&)> close_tab;
+    std::function<void(const std::string& session_id, int delta_rows)> scroll_chat;   // ChatView::ScrollBy, if that tab has one
+    // tab.close, when AnyWorkInFlight over `ids`: app.cpp stages its
+    // PendingClose and opens the confirmation modal. Not called when nothing
+    // is in flight -- HandleGlobalKey closes those tabs directly via close_tab.
+    std::function<void(std::vector<std::string> ids)> confirm_close;
+};
+
+// The global-keybinding CatchEvent body (app.cpp's with_keys), as a function
+// over KeyContext rather than closed-over locals: RunTui itself has no test
+// surface, so this is what makes the dispatch logic reachable from a test
+// (mouse wheel handling, the plugin-view panel/toggle precedence, the
+// busy-vs-idle branch on ctrl+c/turn.cancel) without driving the real FTXUI
+// loop. Returns whether the event was consumed, same as any CatchEvent.
+bool HandleGlobalKey(KeyContext& ctx, const ftxui::Event& event);
 
 }  // namespace minimal::client

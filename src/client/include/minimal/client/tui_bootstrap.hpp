@@ -49,18 +49,12 @@
 
 namespace minimal::client {
 
-// A plugin-registered view's runtime dispatch entry: the view's own spec,
-// its (already-constructed) component, and whether it is currently visible
-// (panels toggle; modals stage into the modal layer on open). `view` is a
-// non-owning pointer into TuiEnvironment::view_registry's heap-owned Views --
-// safe regardless of TuiEnvironment's own address (see the contract above),
-// since a registry only ever relocates its OWN vector of unique_ptrs, never
-// the pointees.
-struct PluginViewEntry {
-    const plugins::View* view;
-    ftxui::Component component;
-    bool visible = false;
-};
+// plugins::PluginViewEntry (registries.hpp) is the runtime dispatch entry
+// type; it lives there rather than here so keybinding_dispatch.hpp -- which
+// dispatches global keys to visible plugin views -- can share it without
+// including this header (which itself includes keybinding_dispatch.hpp for
+// ResolvedKeymap; a cycle either way round).
+using plugins::PluginViewEntry;
 
 struct TuiEnvironment {
     std::filesystem::path config_dir;

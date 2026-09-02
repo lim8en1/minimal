@@ -250,6 +250,21 @@ public:
     virtual ftxui::Component component() = 0;
 };
 
+// A registered view's runtime dispatch entry: the view's own spec, its
+// (already-constructed) component, and whether it is currently visible
+// (panels toggle; modals stage into the host's modal layer on open). `view`
+// is a non-owning pointer into a ViewRegistry's heap-owned Views -- safe
+// regardless of the registry's own address, since a registry only ever
+// relocates its OWN vector of unique_ptrs, never the pointees. Lives here
+// (not in the client's bootstrap/dispatch code) so both the startup sequence
+// that builds the list and the global-keybinding dispatch that reads it can
+// share one definition without one including the other.
+struct PluginViewEntry {
+    const View* view;
+    ftxui::Component component;
+    bool visible = false;
+};
+
 // --- Start views (additive: the initial view on start) ----------------------
 
 // The initial view rendered while there is no conversation content yet: the

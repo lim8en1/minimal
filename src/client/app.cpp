@@ -1461,181 +1461,36 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     });
 
     // --- global keybindings -----------------------------------------------------
-    auto with_keys = CatchEvent(session_view, [&](const Event& event) {
-        const std::string sid = focused;
-
-        if (keymap.Matches("tab.next", event)) {
-            app->CycleFocusForward();
-            return true;
-        }
-        if (keymap.Matches("tab.previous", event)) {
-            app->CycleFocusBackward();
-            return true;
-        }
-        const bool group_next = keymap.Matches("group.next", event);
-        const bool group_prev = keymap.Matches("group.previous", event);
-        if (group_next || group_prev) {
-            // Between root groups: focus the next (or previous) ROOT tab.
-            // The index math is pulled out to keybinding_dispatch.hpp and
-            // unit-tested there -- this is the same shape of "find my index
-            // among a filtered subset" bug that jump.attention had (below).
-            const auto tabs = app->GetAllTabs();
-            const auto target = NextRootGroup(tabs, sid, group_next);
-            if (!target.empty()) app->SetFocusedTab(target);
-            return true;
-        }
-        if (keymap.Matches("jump.attention", event)) {
-            // Crosses groups; wraps. Only Waiting tabs qualify (the ! glyph).
-            // Scans starting just AFTER the focused tab -- not a fixed index,
-            // which ignored which tab was actually focused and could "jump"
-            // to the focused tab itself, a visible no-op exactly when
-            // Waiting is the reason someone pressed the key. See
-            // keybinding_dispatch.hpp/NextAttentionTab, which this bug is
-            // now a unit test of.
-            const auto target = NextAttentionTab(app->GetAllTabs(), sid);
-            if (!target.empty()) app->SetFocusedTab(target);
-            return true;
-        }
-        // INTERRUPT -- the interactive loop's missing verb. Escape and ctrl+c
-        // on a busy tab send CancelTurn; the server ends the turn with
-        // STOP_REASON_CANCELLED and answers any prompt it was parked on with
-        // a denial (pending.CancelAll), so a wedged prompt is interruptible
-        // too. Waiting counts as busy. Modals sit OUTERMOST in the stack, so
-        // while one is up it consumes these keys first (permission:
-        // esc = deny; confirmation: esc = a cancel option when offered) --
-        // this branch only fires with no modal shown. The busy probe runs
-        // only when one of the two keys actually arrived, never per keystroke.
-        const bool cancel_pressed =
-            event == Event::CtrlC || keymap.Matches("turn.cancel", event);
-        if (cancel_pressed) {
-            bool busy = false;
-            if (!sid.empty()) {
-                for (const auto& tab : app->GetAllTabs()) {
-                    if (tab.session_id != sid) continue;
-                    switch (tab.state) {
-                        case SessionStateKind::Thinking:
-                        case SessionStateKind::Working:
-                        case SessionStateKind::Waiting:
-                            busy = true;
-                            break;
-                        default:
-                            break;
-                    }
-                    break;
-                }
-            }
-            if (busy) {
-                app->SendCancel(sid);
-                return true;
-            }
-            // Idle ctrl+c means quit: the universal exit reflex, otherwise
-            // DEAD (raw mode -- no SIGINT ever reaches this process). Idle
-            // Escape falls through to the editor, which has no use for it.
-            if (event == Event::CtrlC) {
-                request_quit();
-                return true;
-            }
-        }
-        if (keymap.Matches("session.picker", event)) {
-            show_picker = !show_picker;
-            if (show_picker) open_picker();
-            return true;
-        }
-        if (keymap.Matches("agent.picker", event)) {
-            show_agent_picker = !show_agent_picker;
-            if (show_agent_picker) open_agent_picker();
-            return true;
-        }
-        if (keymap.Matches("panel.toggle", event)) {
-            show_panel = !show_panel;
-            return true;
-        }
-        if (keymap.Matches("chat.load_older", event)) {
-            if (!sid.empty()) app->RequestScrollback(sid, /*newest=*/false);
-            return true;
-        }
-        // In-view scrollback: moves which already-rendered row is focused
-        // (see ChatView::ScrollBy), distinct from chat.load_older above,
-        // which fetches an OLDER PAGE from the server. ui.chat is built
+    // The dispatch body itself lives in keybinding_dispatch.cpp
+    // (HandleGlobalKey) -- constructed ONCE, not per-event: every field is
+    // either a reference into a RunTui local that lives for the whole frame
+    // loop (so re-deriving it per event would be pure waste, the same
+    // argument keymap's own extraction already made) or a std::function
+    // capturing those same locals by reference, cheap to build once and
+    // reuse. `key_ctx` itself is captured by reference into the CatchEvent
+    // lambda below, never copied.
+    minimal::client::KeyContext key_ctx{
+        *app, keymap, focused,
+        show_picker, show_agent_picker, show_panel, show_plugin_modal,
+        plugin_views, plugin_modal_child,
+        open_picker, open_agent_picker, request_quit, close_tab,
+        // ChatView::ScrollBy, if the tab has one yet (ui.chat is built
         // lazily inside session_view's own render lambda, so it may not
-        // exist yet on the very first frame of a freshly opened tab.
-        if (event.is_mouse()) {
-            // Event::mouse() isn't const-qualified upstream, unlike is_mouse();
-            // a local mutable copy is cheap and this handler never mutates it.
-            Event mouse_event = event;
-            const auto& mouse = mouse_event.mouse();
-            if (mouse.button == Mouse::WheelUp || mouse.button == Mouse::WheelDown) {
-                if (!sid.empty()) {
-                    if (auto it = tab_ui.find(sid); it != tab_ui.end() && it->second.chat) {
-                        // WheelUp = scroll toward older (positive), matching
-                        // conventional scroll-up-reveals-earlier-content.
-                        it->second.chat->ScrollBy(mouse.button == Mouse::WheelUp ? 3 : -3);
-                    }
-                }
-                return true;
+        // exist on the very first frame of a freshly opened tab).
+        [&](const std::string& session_id, int delta_rows) {
+            if (auto it = tab_ui.find(session_id); it != tab_ui.end() && it->second.chat) {
+                it->second.chat->ScrollBy(delta_rows);
             }
-        }
-        if (keymap.Matches("chat.scroll_up", event)) {
-            if (!sid.empty()) {
-                if (auto it = tab_ui.find(sid); it != tab_ui.end() && it->second.chat) {
-                    it->second.chat->ScrollBy(1);   // toward older
-                }
-            }
-            return true;
-        }
-        if (keymap.Matches("chat.scroll_down", event)) {
-            if (!sid.empty()) {
-                if (auto it = tab_ui.find(sid); it != tab_ui.end() && it->second.chat) {
-                    it->second.chat->ScrollBy(-1);   // toward newest
-                }
-            }
-            return true;
-        }
-        if (keymap.Matches("tab.close", event)) {
-            if (!sid.empty()) {
-                // Closing a ROOT tab terminates its group: stage children
-                // first, the root last (TabsToClose, keybinding_dispatch.hpp).
-                // ONE confirmation if any of it is in flight.
-                const auto tabs = app->GetAllTabs();
-                PendingClose staged;
-                staged.session_ids = TabsToClose(tabs, sid);
-                if (AnyWorkInFlight(tabs, staged.session_ids)) {
-                    pending_close = std::move(staged);   // ONE confirmation for the group
-                    show_quit_confirm = true;
-                } else {
-                    for (const auto& id : staged.session_ids) close_tab(id);
-                }
-            }
-            return true;
-        }
-        if (keymap.Matches("app.quit", event)) {
-            request_quit();
-            return true;
-        }
-
-        // Plugin views, after every core action: a visible PANEL gets the
-        // event first (its component consumes what it wants); any view id
-        // bound in keybindings.json toggles its visibility. The ids were
-        // registered as runtime defaults (EnsureDefault) BEFORE keymap was
-        // built, so keymap already knows them -- a user's file that already
-        // names them still wins (EnsureDefault only fills what's unbound).
-        for (auto& entry : plugin_views) {
-            if (entry.view->spec().placement == plugins::ViewPlacement::Panel && entry.visible &&
-                entry.component->OnEvent(event)) {
-                return true;
-            }
-        }
-        for (auto& entry : plugin_views) {
-            if (keymap.Matches(entry.view->spec().id, event)) {
-                entry.visible = !entry.visible;
-                if (entry.view->spec().placement == plugins::ViewPlacement::Modal) {
-                    *plugin_modal_child = entry.component;
-                    show_plugin_modal = entry.visible;
-                }
-                return true;
-            }
-        }
-        return false;
+        },
+        // tab.close with work in flight: stage ONE confirmation for the
+        // whole closing group, same as request_quit's own busy branch.
+        [&](std::vector<std::string> ids) {
+            pending_close = PendingClose{};
+            pending_close.session_ids = std::move(ids);
+            show_quit_confirm = true;
+        }};
+    auto with_keys = CatchEvent(session_view, [&](const Event& event) {
+        return minimal::client::HandleGlobalKey(key_ctx, event);
     });
 
     // Modal stack, OUTERMOST = TOPMOST: the security UI (permission prompt)
