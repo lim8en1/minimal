@@ -47,6 +47,10 @@ namespace minimal::mcp {
 class McpClientManager;
 }  // namespace minimal::mcp
 
+namespace minimal::agent {
+class SignalRouter;  // signal subscriptions + delivery (borrowed via setter)
+}  // namespace minimal::agent
+
 namespace minimal::plugins {
 class ServiceRegistry;  // the generic plugin channel's dispatch target (E5)
 }  // namespace minimal::plugins
@@ -93,6 +97,12 @@ public:
     // available" rather than dropping it. Set before serving.
     void set_commands(const commands::CommandRegistry* commands) { commands_ = commands; }
     void set_mcp_manager(mcp::McpClientManager* manager) { mcp_manager_ = manager; }
+
+    // Optional: null means signals are not offered -- a CreateSessionRequest
+    // naming any signal answers INVALID_ARGUMENT rather than silently
+    // subscribing to nothing. Set before serving (main.cpp, after the router
+    // exists). The router is also how signal channels reach their sessions.
+    void set_signal_router(agent::SignalRouter* router) { signal_router_ = router; }
 
     // Optional; absent means the pass-through default (no authentication), which
     // matches the local-only topology. Set before serving.
@@ -147,6 +157,21 @@ private:
     grpc::Status ApplyModelOverride(const v1::CreateSessionRequest& request,
                                     agent::SessionParams& params) const;
 
+    // Validates CreateSessionRequest.signals against the router and stages the
+    // session-side consequences onto params: the wake flag (a subscribed
+    // session exists to react, so it wakes for injections), the
+    // channel-instruction context, and the router pointer + selector list
+    // themselves. Actual subscription registration happens later, inside
+    // SessionRegistry::CreateResolved -- atomically with the session becoming
+    // findable, not from this RPC layer -- so this function only STAGES the
+    // decision, it never calls Subscribe. Shared by fresh creation and resume
+    // -- subscriptions never persist across a stream, so a resumed session
+    // gets whatever THIS request declares. No router, or an empty request:
+    // OK, no subscriptions, no wake change.
+    grpc::Status ApplySignals(const v1::CreateSessionRequest& request,
+                              agent::SessionParams& params) const;
+
+
     // The one decrement of attached_, shared by every exit -- the successful
     // detach, the attach-refused exits (which counted themselves first, see
     // OpenSession), and the unwinding exits. Firing the last-client callback
@@ -180,6 +205,8 @@ private:
     const agent::MentionResolverRegistry* mention_resolvers_ = nullptr;
     // Borrowed and optional: null = the generic plugin channel is not offered.
     const plugins::ServiceRegistry* services_ = nullptr;
+    // Borrowed and optional: null = signals are not offered (see setter).
+    agent::SignalRouter* signal_router_ = nullptr;
     session::SessionDatabase& db_;
     session::SessionReader reader_;
     config::SettingsConfig settings_;

@@ -60,6 +60,9 @@ SessionClient::CreateResult SessionClient::CreateSession(const CreateOptions& op
     // Sent either way -- see CreateOptions::model.
     request.set_model(options.model);
     request.set_run_mode(options.run_mode);
+    for (const auto& selector : options.signals) {
+        request.add_signals(selector);
+    }
 
     v1::CreateSessionResponse response;
     const grpc::Status status = stub_->CreateSession(&context, request, &response);

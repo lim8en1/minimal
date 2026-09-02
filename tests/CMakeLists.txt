@@ -23,6 +23,7 @@ add_executable(minimal_tests
     client_plugins_test.cpp
     commands_test.cpp
     "${CMAKE_SOURCE_DIR}/plugins/server/commands-core/core_commands.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/signals-message/message_tool.cpp"
     token_accounting_test.cpp
     cancel_token_test.cpp
     config_paths_test.cpp
@@ -43,10 +44,14 @@ add_executable(minimal_tests
     permission_codec_test.cpp
     providers_config_test.cpp
     mcps_config_test.cpp
+    channels_config_test.cpp
+    signals_message_test.cpp
     mcp_naming_test.cpp
     mcp_tool_test.cpp
     mcp_connection_test.cpp
     mcp_client_manager_test.cpp
+    mcp_signal_channel_test.cpp
+    signal_router_test.cpp
     session_mcp_test.cpp
     mcp_e2e_test.cpp
     sanity_check_test.cpp
@@ -199,6 +204,7 @@ target_include_directories(minimal_tests PRIVATE
 
 target_include_directories(minimal_tests PRIVATE
     "${CMAKE_SOURCE_DIR}/plugins/server/checklist"
+    "${CMAKE_SOURCE_DIR}/plugins/server/signals-message"
     "${CMAKE_SOURCE_DIR}/plugins/server/tools-search"
     "${CMAKE_SOURCE_DIR}/plugins/server/session-titler"
     "${CMAKE_SOURCE_DIR}/plugins/server/cost-tracker")
@@ -254,6 +260,15 @@ target_compile_options(minimal_mcp_fake_server PRIVATE ${MINIMAL_WARNING_FLAGS})
 add_dependencies(minimal_tests minimal_mcp_fake_server)
 target_compile_definitions(minimal_tests PRIVATE
     MINIMAL_MCP_FAKE_SERVER="$<TARGET_FILE:minimal_mcp_fake_server>")
+
+# Scripted stdio SIGNAL-CHANNEL server, hand-rolled (no cpp-mcp: its server
+# cannot push a notification over stdio -- see fake_signal_channel.cpp and the
+# note in mcp_fake_server.cpp). Deterministic single-threaded emission.
+add_executable(minimal_signal_channel_server support/fake_signal_channel.cpp)
+target_compile_options(minimal_signal_channel_server PRIVATE ${MINIMAL_WARNING_FLAGS})
+add_dependencies(minimal_tests minimal_signal_channel_server)
+target_compile_definitions(minimal_tests PRIVATE
+    MINIMAL_SIGNAL_CHANNEL_SERVER="$<TARGET_FILE:minimal_signal_channel_server>")
 
 # The http-side tests use cpp-mcp's bundled (header-only) httplib as an
 # in-process streamable-http server fixture. SYSTEM: third-party header.

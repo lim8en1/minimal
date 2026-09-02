@@ -11,6 +11,9 @@
 #include <utility>
 
 #include "minimal/agent/mention_resolver.hpp"
+#include "minimal/agent/signal_router.hpp"
+#include "minimal/mcp/mcp_client_manager.hpp"
+#include "minimal/mcp/signal_protocol.hpp"
 #include "minimal/plugins/plugin_abi.h"
 #include "minimal/rpc/proto_convert.hpp"
 
@@ -202,6 +205,19 @@ grpc::Status SessionServiceImpl::CreateSession(grpc::ServerContext* context,
     // the session_id, so the advisor cannot be applied earlier.
     ApplyAdvisor(permissions_, permission_advisors_, params);
 
+    // Signals next: every selector is validated and every named channel
+    // warmed BEFORE the session exists, so a bad or unreachable one refuses
+    // the start (and rolls the just-minted row back below) instead of
+    // delivering a session that silently never hears its channel.
+    if (const auto status = ApplySignals(*request, params); !status.ok()) {
+        try {
+            db_.DeleteSession(row.session_id);
+        } catch (const std::exception& e) {
+            logger_.warn("CreateSession: rollback after signal refusal failed: {}", e.what());
+        }
+        return status;
+    }
+
     std::shared_ptr<agent::Session> session;
     try {
         session = sessions_.Create(std::move(params));
@@ -223,8 +239,7 @@ grpc::Status SessionServiceImpl::CreateSession(grpc::ServerContext* context,
 }
 
 grpc::Status SessionServiceImpl::ApplyModelOverride(const v1::CreateSessionRequest& request,
-                                                    agent::SessionParams& params) const {
-    // Shape-checked here so a malformed reference is INVALID_ARGUMENT rather
+                                                    agent::SessionParams& params) const {    // Shape-checked here so a malformed reference is INVALID_ARGUMENT rather
     // than FAILED_PRECONDITION from deep inside session construction -- the
     // client sent something wrong, which is a different thing from the server
     // not being able to honour something well-formed.
@@ -235,6 +250,65 @@ grpc::Status SessionServiceImpl::ApplyModelOverride(const v1::CreateSessionReque
                             "model '" + request.model() +
                                 "' must be <provider>/<model>, e.g. local/qwen4");
     }
+    return grpc::Status::OK;
+}
+
+grpc::Status SessionServiceImpl::ApplySignals(const v1::CreateSessionRequest& request,
+                                              agent::SessionParams& params) const {
+    if (request.signals().empty()) return grpc::Status::OK;
+    if (signal_router_ == nullptr) {
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
+                            "signals requested but this server does not offer them");
+    }
+
+    // Validate every selector BEFORE anything exists to roll back: a typo in
+    // one of five selectors must refuse the session start, not quietly deliver
+    // four of five signals. The channel halves are collected for the
+    // connection warm-up below.
+    std::vector<std::string> channels;
+    for (const auto& selector : request.signals()) {
+        std::string error;
+        std::string channel;
+        if (!signal_router_->CheckSelector(selector, error, &channel)) {
+            return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, error);
+        }
+        // The internal source has no connection to warm; every real channel
+        // does. This is the lazy first start of a channel server -- the same
+        // trigger an MCP tool server gets from a session whose preset names
+        // it -- and a channel that fails to come up fails the session start:
+        // subscribing to a channel that cannot connect would otherwise look
+        // exactly like "connected but no signals ever arrive". A null manager
+        // is a deliberately supported degraded mode (a host that wires the
+        // router without a live MCP manager, e.g. a test harness): liveness
+        // simply cannot be checked, so validation stays structural-only,
+        // exactly like an internal-source selector.
+        if (channel != mcp::kInternalSignalSource && mcp_manager_ != nullptr) {
+            std::string connect_error;
+            if (!mcp_manager_->EnsureAlive(channel, connect_error)) {
+                return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION,
+                                    "signal channel '" + channel + "' is not available: " +
+                                        connect_error);
+            }
+        }
+        if (std::find(channels.begin(), channels.end(), channel) == channels.end()) {
+            channels.push_back(channel);
+        }
+    }
+
+    // A subscribed session exists to react to signals: it wakes on injection.
+    // The background_wake setting governs subagent completions and task
+    // results; a subscription is the user's explicit, per-session request for
+    // the same behavior from signals.
+    params.wake_on_injection = true;
+    params.signal_context = signal_router_->SignalContextFor(
+        std::vector<std::string>(request.signals().begin(), request.signals().end()));
+    // Staged for CreateResolved, not acted on here: subscription registration
+    // happens INSIDE the registry's create funnel, atomically with the
+    // session becoming findable, so no internal signal can ever observe this
+    // session_id before its declared subscriptions exist. See
+    // SessionRegistry::CreateResolved.
+    params.signal_router = signal_router_;
+    params.signal_selectors.assign(request.signals().begin(), request.signals().end());
     return grpc::Status::OK;
 }
 
@@ -298,11 +372,15 @@ grpc::Status SessionServiceImpl::ResumeSession(const v1::CreateSessionRequest* r
     // obvious thing to want. Silently dropping it would be exactly the failure
     // the field checks above refuse to make for name/preset/project_root.
     if (const auto status = ApplyModelOverride(*request, params); !status.ok()) return status;
+    // Signals on resume, same rules as fresh creation: validated and warmed
+    // before the session starts, never persisted from the previous stream.
+    if (const auto status = ApplySignals(*request, params); !status.ok()) return status;
 
+    std::shared_ptr<agent::Session> resumed;
     try {
         // Loads the stored transcript, repairs a torn tool-call tail if there
         // is one, and starts the session.
-        (void)sessions_.Create(std::move(params));
+        resumed = sessions_.Create(std::move(params));
     } catch (const std::exception& e) {
         // NO ROLLBACK here, unlike fresh creation: the row is the user's
         // existing session, not one this call just minted. A failure (the

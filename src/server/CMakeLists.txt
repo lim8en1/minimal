@@ -24,6 +24,7 @@ add_library(minimal_server_core SHARED
     config/permissions_config.cpp
     config/hooks_config.cpp
     config/mcps_config.cpp
+    config/channels_config.cpp
     config/skill_registry.cpp
     config/project_context.cpp
     config/fd_hygiene.cpp
@@ -78,6 +79,7 @@ add_library(minimal_server_core SHARED
     agent/session.cpp
     agent/session_registry.cpp
     agent/session_support.cpp
+    agent/signal_router.cpp
     session/ulid.cpp
     session/message_codec.cpp
     session/session_database.cpp

@@ -8,6 +8,7 @@
 
 #include "minimal/agent/agent_preset_frontmatter.hpp"
 #include "minimal/agent/compaction_strategy.hpp"
+#include "minimal/config/channels_config.hpp"
 #include "minimal/config/hooks_config.hpp"
 #include "minimal/config/mcps_config.hpp"
 #include "minimal/config/permissions_config.hpp"
@@ -94,6 +95,7 @@ public:
     const PermissionsConfig& permissions() const { return permissions_; }
     const ProvidersConfig& providers() const { return providers_; }
     const McpsConfig& mcps() const { return mcps_; }
+    const ChannelsConfig& channels() const { return channels_; }
     // Valid after RunAll() even when the load failed -- the value is then the
     // default (no hooks), and the config_parse Fatal is what names the problem.
     const HooksConfig& hooks() const { return hooks_; }
@@ -104,6 +106,7 @@ private:
     std::vector<CheckResult> check_providers();
     std::vector<CheckResult> check_presets();
     std::vector<CheckResult> check_mcp_servers();
+    std::vector<CheckResult> check_channels();
     std::vector<CheckResult> check_directories();
     std::vector<CheckResult> check_session_db();
     std::vector<CheckResult> check_plugins();
@@ -121,6 +124,7 @@ private:
     PermissionsConfig permissions_;
     ProvidersConfig providers_;
     McpsConfig mcps_;
+    ChannelsConfig channels_;
     HooksConfig hooks_;
     std::unique_ptr<session::SessionDatabase> session_db_;
     bool settings_loaded_ = false;

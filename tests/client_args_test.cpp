@@ -247,3 +247,29 @@ TEST_CASE("the resume and agent flags cannot be combined", "[client_args][resume
 TEST_CASE("the usage text documents --resume", "[client_args][resume]") {
     CHECK(UsageText().find("--resume") != std::string::npos);
 }
+
+TEST_CASE("the --signals flag parses a comma-separated list and refuses empties", "[client_args][signals]") {
+    const auto parsed = Parse({"-p", "watch the builds", "--signals", "ci/build.completed, reminder, sessions"});
+    REQUIRE(parsed.action == ParsedArgs::Action::Headless);
+    const auto& signals = parsed.headless.signals;
+    REQUIRE(signals.size() == 3);
+    CHECK(signals[0] == "ci/build.completed");
+    CHECK(signals[1] == "reminder");
+    CHECK(signals[2] == "sessions");
+
+    // Trailing comma: an empty selector, refused rather than skipped.
+    const auto trailing = Parse({"-p", "x", "--signals", "ci/build.completed,"});
+    CHECK(trailing.action == ParsedArgs::Action::Error);
+    CHECK(trailing.error.find("empty selector") != std::string::npos);
+
+    // Inline form works, like every value-taking flag.
+    const auto inline_form = Parse({"-p", "x", "--signals=sessions"});
+    REQUIRE(inline_form.action == ParsedArgs::Action::Headless);
+    CHECK(inline_form.headless.signals == std::vector<std::string>{"sessions"});
+}
+
+TEST_CASE("the --signals flag without -p is an error, like --resume", "[client_args][signals]") {
+    const auto parsed = Parse({"--signals", "sessions"});
+    REQUIRE(parsed.action == ParsedArgs::Action::Error);
+    CHECK(parsed.error.find("--signals needs -p") != std::string::npos);
+}

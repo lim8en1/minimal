@@ -1,0 +1,137 @@
+diff --git a/include/mcp_stdio_client.h b/include/mcp_stdio_client.h
+index 048dab4..8e72333 100644
+--- a/include/mcp_stdio_client.h
++++ b/include/mcp_stdio_client.h
+@@ -162,6 +162,37 @@ public:
+      */
+     bool is_running() const override;
+ 
++    /**
++     * @brief Register a callback for server-originated NOTIFICATIONS
++     * (minimal-mcp patch).
++     *
++     * The read thread invokes the callback with the raw JSON-RPC notification
++     * line -- a complete JSON object, no trailing newline -- for every message
++     * that carries a method but NO id. Server-originated requests (which carry
++     * an id and demand a response) are still ignored: this client does not
++     * model a response path for them.
++     *
++     * The callback runs ON THE READ THREAD and must not block: a slow callback
++     * stalls response matching for every in-flight request. Must be called
++     * before initialize(): the read thread starts inside
++     * start_server_process() and reads the callback without a lock.
++     *
++     * @param callback The function to invoke, or nullptr to clear
++     */
++    void set_notification_callback(std::function<void(const std::string&)> callback) {
++        notification_callback_ = std::move(callback);
++    }
++
++    /**
++     * @brief The instructions string from the initialize result
++     * (minimal-mcp patch).
++     *
++     * Empty when the server sent none. Written once by initialize() before it
++     * returns; the caller reads it after initialize() returns, so no lock is
++     * needed on either side.
++     */
++    const std::string& get_instructions() const { return server_instructions_; }
++
+     /**
+      * @brief The spawned server child's process id (minimal-mcp patch).
+      *
+@@ -219,6 +250,15 @@ private:
+     
+     // Server capabilities
+     json server_capabilities_;
++
++    // Instructions string from the initialize result (minimal-mcp patch:
++    // notification-callback). Empty when the server sent none.
++    std::string server_instructions_;
++
++    // Callback for server-originated notifications (minimal-mcp patch:
++    // notification-callback). Set before initialize(); invoked on the read
++    // thread with the raw JSON-RPC notification line.
++    std::function<void(const std::string&)> notification_callback_;
+     
+     // Mutex
+     mutable std::mutex mutex_;
+diff --git a/src/mcp_stdio_client.cpp b/src/mcp_stdio_client.cpp
+index 9303757..2df79f5 100644
+--- a/src/mcp_stdio_client.cpp
++++ b/src/mcp_stdio_client.cpp
+@@ -59,6 +59,14 @@ bool stdio_client::initialize(const std::string& client_name, const std::string&
+         json result = send_jsonrpc(req);
+         
+         server_capabilities_ = result["capabilities"];
++        // (minimal-mcp patch) Retain the optional instructions string: some
++        // servers describe what their events mean and how a client should act
++        // on them. Missing key and explicit null both degrade to empty.
++        if (result.contains("instructions") && result["instructions"].is_string()) {
++            server_instructions_ = result["instructions"].get<std::string>();
++        } else {
++            server_instructions_.clear();
++        }
+         
+         request notification = request::create_notification("initialized");
+         send_jsonrpc(notification);
+@@ -646,9 +654,26 @@ void stdio_client::read_thread_func() {
+                                     LOG_WARNING("Received response for unknown request ID: ", id);
+                                 }
+                             } else if (message.contains("method")) {
+-                                // This is a request or notification
+-                                LOG_INFO("Received request/notification: ", message["method"]);
+-                                // Currently not handling requests from the server
++                                if (message.contains("id") && !message["id"].is_null()) {
++                                    // This is a server-originated REQUEST: it
++                                    // demands a response this client does not
++                                    // model, so it is still ignored.
++                                    LOG_INFO("Received request from the server: ", message["method"]);
++                                } else if (notification_callback_) {
++                                    // (minimal-mcp patch) A server-originated
++                                    // NOTIFICATION. Raw line to the callback,
++                                    // which runs on THIS read thread and must
++                                    // not block -- a slow callback would stall
++                                    // response matching for every in-flight
++                                    // request.
++                                    try {
++                                        notification_callback_(message.dump());
++                                    } catch (const std::exception& e) {
++                                        LOG_ERROR("Notification callback threw: ", e.what());
++                                    }
++                                } else {
++                                    LOG_INFO("Received notification: ", message["method"]);
++                                }
+                             }
+                         }
+                     } catch (const json::exception& e) {
+@@ -756,9 +781,26 @@ void stdio_client::read_thread_func() {
+                                     LOG_WARNING("Received response for unknown request ID: ", id);
+                                 }
+                             } else if (message.contains("method")) {
+-                                // This is a request or notification
+-                                LOG_INFO("Received request/notification: ", message["method"]);
+-                                // Currently not handling requests from the server
++                                if (message.contains("id") && !message["id"].is_null()) {
++                                    // This is a server-originated REQUEST: it
++                                    // demands a response this client does not
++                                    // model, so it is still ignored.
++                                    LOG_INFO("Received request from the server: ", message["method"]);
++                                } else if (notification_callback_) {
++                                    // (minimal-mcp patch) A server-originated
++                                    // NOTIFICATION. Raw line to the callback,
++                                    // which runs on THIS read thread and must
++                                    // not block -- a slow callback would stall
++                                    // response matching for every in-flight
++                                    // request.
++                                    try {
++                                        notification_callback_(message.dump());
++                                    } catch (const std::exception& e) {
++                                        LOG_ERROR("Notification callback threw: ", e.what());
++                                    }
++                                } else {
++                                    LOG_INFO("Received notification: ", message["method"]);
++                                }
+                             }
+                         }
+                     } catch (const json::exception& e) {

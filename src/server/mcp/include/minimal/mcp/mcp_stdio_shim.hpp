@@ -10,6 +10,7 @@
 // as plain strings, bools and ints. Text is the one lossless bridge.
 
 #include <atomic>
+#include <functional>
 #include <map>
 #include <string>
 #include <vector>
@@ -30,6 +31,17 @@ public:
         std::string schema_json;  // serialized JSON, harness side re-parses
     };
 
+    // The server-originated NOTIFICATION seam, for signal channels
+    // (channels.json entries; see mcp_client_manager.hpp). The sink receives
+    // the raw JSON-RPC notification -- one complete JSON object, serialized to
+    // text so it crosses the shim's string boundary. The underlying callback
+    // runs on cpp-mcp's read thread and the sink MUST NOT BLOCK: a slow sink
+    // stalls response matching for every in-flight request on this connection.
+    // Must be called before Initialize() (the read thread starts there and
+    // reads the callback without a lock); a later call is silently ignored --
+    // connection startup is single-threaded, so a race cannot hide here.
+    void SetNotificationSink(std::function<void(const std::string&)> sink);
+
     // Spawns the child and runs the handshake. May block indefinitely if the
     // child dies during startup (cpp-mcp has no deadline here) -- callers own
     // the deadline. On false, *error (when non-null) carries the exception
@@ -39,6 +51,16 @@ public:
                     std::string* error = nullptr);
     bool Ping();
     std::vector<ShimTool> ListTools();
+
+    // The initialize result's `capabilities` object, serialized. The harness
+    // parses it to detect the `minimal/signal` capability that marks a
+    // connection as a signal channel. Empty object when the server sent none
+    // or the connection is not initialized.
+    std::string ServerCapabilitiesJson();
+
+    // The initialize result's `instructions` string -- how a channel server
+    // describes what its signals mean. Empty when the server sent none.
+    std::string Instructions();
 
     // arguments_json is the serialized arguments object; on success
     // result_json holds the serialized tools/call result. A protocol-level
@@ -77,6 +99,9 @@ public:
 private:
     std::string command_line_;
     std::map<std::string, std::string> env_;
+    // Parked pre-initialize notification sink (SetNotificationSink), attached
+    // to the client in Initialize() before the child spawns.
+    std::function<void(const std::string&)> notification_sink_;
     // Atomic: AbortChild reads it from the destroying thread while the worker
     // may still be inside Initialize() assigning it -- a plain pointer there
     // is a data race (TSan, the merge's own review). Store happens after the

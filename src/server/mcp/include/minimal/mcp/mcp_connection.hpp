@@ -46,6 +46,14 @@ struct McpLimits {
     std::chrono::milliseconds restart_cooldown{30000};
 };
 
+// The server-originated-notification seam (signal channels). The sink
+// receives the raw JSON-RPC notification line from the connection's read
+// thread and MUST NOT BLOCK -- a slow sink stalls response matching for every
+// in-flight request on the connection. Nullopt/empty means no sink: the
+// connection behaves exactly as before (notifications are logged and
+// dropped).
+using NotificationSink = std::function<void(const std::string&)>;
+
 // One live MCP server connection -- either a spawned stdio subprocess (cpp-mcp)
 // or a Streamable-HTTP endpoint (hand-rolled over llm::HttpClient + SseParser;
 // cpp-mcp's bundled sse_client speaks the legacy SSE protocol and cannot talk
@@ -85,16 +93,29 @@ public:
     // Spawns/connects and completes the MCP initialize handshake. nullptr with
     // `error` set on failure -- always a bounded wait, never a hang, even if
     // the subprocess dies during startup (cpp-mcp's initialize can block
-    // indefinitely there; the deadline lives here).
+    // indefinitely there; the deadline lives here). `sink` (stdio only)
+    // receives server-originated notifications; it must be handed over HERE,
+    // before the handshake starts -- the read thread that invokes it is
+    // spawned during initialize and reads the callback without a lock.
     static std::unique_ptr<McpConnection> Open(const McpEndpoint& endpoint,
                                                const McpLimits& limits,
                                                const std::string& client_name,
                                                const std::string& client_version,
-                                               Failure& error);
+                                               Failure& error,
+                                               const NotificationSink& sink = nullptr);
 
     ~McpConnection() override;
     McpConnection(const McpConnection&) = delete;
     McpConnection& operator=(const McpConnection&) = delete;
+
+    // The initialize result, as far as a channel cares: the server's
+    // `capabilities` object (serialized JSON; the manager greps it for the
+    // minimal/signal capability) and its `instructions` string. Read AFTER
+    // Open() returns -- initialize wrote them on the worker and the Open
+    // slot-wait gives the happens-before, so the reads need no lock. Not
+    // transport I/O: plain member reads, never a round trip.
+    std::string ServerCapabilitiesJson() const;
+    std::string Instructions() const;
 
     // Liveness probe for session start and /agent switches. Value, not
     // exception: a dead server is an expected state, not a crash.

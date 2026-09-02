@@ -7,6 +7,7 @@
 #include "minimal/common/logger.hpp"
 #include "minimal/mcp/env_interpolation.hpp"
 #include "minimal/mcp/naming.hpp"
+#include "minimal/mcp/signal_protocol.hpp"
 
 namespace minimal::mcp {
 
@@ -17,6 +18,12 @@ namespace minimal::mcp {
 // shared_ptr copy.
 struct McpClientManager::ServerHandle {
     config::McpServerEntry entry;
+    // Set when the handle came from channels.json: the entry carries the
+    // channel's connection fields, and `channel` its signal contract. The
+    // notification sink is built per-connection in StartHandle (it must be
+    // handed over before the handshake), not stored here.
+    bool is_channel = false;
+    config::ChannelEntry channel;
     std::shared_ptr<HandleInvoker> invoker;
     mutable std::mutex mu;  // guards connection/alive/generation/verified swaps
     // Serializes ping + (re)start for THIS server. All network I/O for the
@@ -98,8 +105,9 @@ private:
 };
 
 McpClientManager::McpClientManager(config::McpsConfig config, tools::ToolRegistry& registry,
-                                   const McpLimits& limits, common::Logger& logger)
-    : registry_(registry), limits_(limits), logger_(logger) {
+                                   const McpLimits& limits, common::Logger& logger,
+                                   ChannelWiring channels)
+    : registry_(registry), limits_(limits), logger_(logger), channels_(std::move(channels)) {
     // The config is consumed here: handles carry their own entry copies, and
     // a second copy of the whole mcps.json is dead weight for the process
     // lifetime.
@@ -109,6 +117,40 @@ McpClientManager::McpClientManager(config::McpsConfig config, tools::ToolRegistr
         handle->entry = entry;
         handle->invoker = std::make_shared<HandleInvoker>(handle, this);
         handles_.emplace(entry.name, std::move(handle));
+    }
+    // Channel handles join the same map and lifecycle. A name that collides
+    // with an MCP server keeps the mcps.json side: the channel is skipped
+    // loudly here, and the startup sanity check reports the collision from
+    // the config side -- two lines naming the same problem once each.
+    for (const auto& entry : channels_.config.entries) {
+        if (!entry.enabled) continue;  // deliberate opt-out, silent
+        // The internal source is not addressable by config: a channel with
+        // this name would be unreachable from subscriptions and would collide
+        // with cross-session routing. The sanity check names it too; this is
+        // the enforcement.
+        if (entry.name == config::kReservedInternalChannelName) {
+            logger_.error("signal channel '{}': the name is reserved for internal "
+                          "cross-session signals; NOT configured",
+                          entry.name);
+            continue;
+        }
+        auto handle = std::make_shared<ServerHandle>();
+        handle->is_channel = true;
+        handle->channel = entry;
+        // The channel's CONNECTION fields ride the same McpServerEntry view
+        // the stdio path already understands (v1 is stdio-only, so the
+        // conversion is command/args/env and nothing else).
+        handle->entry.name = entry.name;
+        handle->entry.transport = config::McpTransport::Stdio;
+        handle->entry.command = entry.command;
+        handle->entry.args = entry.args;
+        handle->entry.env = entry.env;
+        handle->invoker = std::make_shared<HandleInvoker>(handle, this);
+        if (!handles_.emplace(entry.name, std::move(handle)).second) {
+            logger_.error("signal channel '{}': name collides with an MCP server in mcps.json; "
+                          "the channel is NOT configured",
+                          entry.name);
+        }
     }
     reaper_ = std::thread([this] { ReaperMain(); });
 }
@@ -242,12 +284,49 @@ bool McpClientManager::StartHandle(const config::McpServerEntry& entry, ServerHa
     const auto resolved = ResolveEndpoint(entry, error, logger_);
     if (!resolved) return false;
 
+    // The notification sink must exist BEFORE the handshake: the read thread
+    // that invokes it starts during initialize. Built fresh per connection
+    // (each connection carries its own copy); it captures only the channel
+    // name and the wiring callbacks, never the handle -- a graveyarded old
+    // connection whose read thread fires one last frame must not touch a
+    // handle that may already be restarted or destroyed.
+    NotificationSink sink;
+    if (handle.is_channel) {
+        auto on_notification = channels_.on_notification;
+        const std::string channel_name = entry.name;
+        if (on_notification) {
+            sink = [on_notification, channel_name](const std::string& raw) {
+                on_notification(channel_name, raw);
+            };
+        }
+    }
+
     McpConnection::Failure failure;
-    auto connection =
-        McpConnection::Open(ToEndpoint(*resolved), limits_, "minimal-server", "0.1.0", failure);
+    auto connection = McpConnection::Open(ToEndpoint(*resolved), limits_, "minimal-server",
+                                          "0.1.0", failure, sink);
     if (!connection) {
         error = "MCP server '" + entry.name + "' failed to connect: " + failure.message;
         return false;
+    }
+
+    // A channels.json entry whose server does not declare the capability is a
+    // failed connect, not a quietly tool-only server: the operator configured
+    // a channel, and silence about a missing capability would look exactly
+    // like "connected but no signals ever arrive".
+    if (handle.is_channel) {
+        const nlohmann::json capabilities =
+            nlohmann::json::parse(connection->ServerCapabilitiesJson(), nullptr,
+                                  /*allow_exceptions=*/false);
+        const bool declares = capabilities.is_object() &&
+                              capabilities.contains("experimental") &&
+                              capabilities.at("experimental").is_object() &&
+                              capabilities.at("experimental").contains(mcp::kSignalCapability);
+        if (!declares) {
+            error = "signal channel '" + entry.name +
+                    "' does not declare the experimental '" + mcp::kSignalCapability +
+                    "' capability; not usable as a channel";
+            return false;
+        }
     }
 
     McpConnection::Failure tools_error;
@@ -289,6 +368,14 @@ bool McpClientManager::StartHandle(const config::McpServerEntry& entry, ServerHa
     }
     registry_.ReplaceMcpTools(entry.name, std::move(tools));
 
+    // Captured BEFORE the connection is moved into the handle: the
+    // instructions live on it, and the move nulls the local unique_ptr.
+    // Reported after the handle is marked alive, under start_mu, per the
+    // wiring contract -- ordering-independent of the alive flag either way
+    // (the sink is already live).
+    const std::string channel_instructions =
+        handle.is_channel ? connection->Instructions() : std::string();
+
     {
         std::lock_guard<std::mutex> lock(handle.mu);
         handle.connection = std::move(connection);
@@ -298,6 +385,10 @@ bool McpClientManager::StartHandle(const config::McpServerEntry& entry, ServerHa
         handle.verified = std::chrono::steady_clock::now();
     }
     logger_.info("MCP server '{}': connected, {} tools registered", entry.name, registered);
+
+    if (handle.is_channel && channels_.on_connected) {
+        channels_.on_connected(entry.name, channel_instructions);
+    }
     return true;
 }
 

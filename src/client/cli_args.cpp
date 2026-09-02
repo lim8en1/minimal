@@ -94,6 +94,9 @@ std::string UsageText() {
            "      --agent PRESET        agent preset (default: settings.json)\n"
            "      --model P/M           provider/model, overriding the preset's\n"
            "      --output-format FMT   text (default) or jsonl\n"
+           "      --signals LIST        comma-separated signal subscriptions for this\n"
+           "                              session: 'channel/signal', 'channel' (extended\n"
+           "                              channels), or 'sessions' (agent-to-agent)\n"
            "      --dangerously-bypass  skip every permission check\n"
            "      --version\n"
            "\n"
@@ -213,6 +216,32 @@ ParsedArgs ParseArgs(int argc, const char* const* argv) {
                                "' (want text or jsonl)";
                 return parsed;
             }
+        } else if (name == "--signals") {
+            const auto value = take_value(name);
+            if (!value) return parsed;
+            // Comma-separated, whitespace-trimmed; an empty item (trailing
+            // comma, "a,,b") is refused rather than skipped -- same rule the
+            // server applies, applied early so the typo fails before a
+            // connection.
+            std::string_view rest = *value;
+            // Process every comma-separated segment, INCLUDING the empty one
+            // a trailing comma leaves behind: "a," refuses, not skips.
+            for (;;) {
+                const auto comma = rest.find(',');
+                const auto item = rest.substr(0, comma == std::string_view::npos
+                                                    ? rest.size() : comma);
+                std::size_t begin = 0, end = item.size();
+                while (begin < end && std::isspace(static_cast<unsigned char>(item[begin]))) ++begin;
+                while (end > begin && std::isspace(static_cast<unsigned char>(item[end - 1]))) --end;
+                if (begin == end) {
+                    parsed.action = ParsedArgs::Action::Error;
+                    parsed.error = "--signals has an empty selector: '" + std::string(*value) + "'";
+                    return parsed;
+                }
+                parsed.headless.signals.emplace_back(item.substr(begin, end - begin));
+                if (comma == std::string_view::npos) break;
+                rest = rest.substr(comma + 1);
+            }
         } else if (name == "--dangerously-bypass") {
             parsed.headless.bypass = true;
         } else {
@@ -237,6 +266,12 @@ ParsedArgs ParseArgs(int argc, const char* const* argv) {
     if (!headless && !parsed.headless.resume_session_id.empty()) {
         parsed.action = ParsedArgs::Action::Error;
         parsed.error = "--resume needs -p: resuming runs one headless turn";
+        return parsed;
+    }
+    if (!headless && !parsed.headless.signals.empty()) {
+        parsed.action = ParsedArgs::Action::Error;
+        parsed.error = "--signals needs -p: a headless turn is the only client that declares "
+                       "subscriptions today";
         return parsed;
     }
     if (!parsed.headless.resume_session_id.empty() && !parsed.headless.agent_preset.empty()) {

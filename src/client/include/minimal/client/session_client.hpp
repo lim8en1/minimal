@@ -43,6 +43,11 @@ public:
         // one. The stored row's name/preset/project_root govern, so the three
         // fields above are not sent with it; only run_mode still applies.
         std::string resume_session_id;
+        // Signal subscriptions ("ci/build.completed", "sessions", ...). Sent
+        // either way -- like run_mode, a property of this invocation, never of
+        // the stored row. Validated server-side; an unknown selector fails the
+        // create.
+        std::vector<std::string> signals;
     };
 
     // One persistent session stream: a single gRPC bidi with its own reader thread

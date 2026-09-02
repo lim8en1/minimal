@@ -121,6 +121,13 @@ struct McpConnection::Transport {
     virtual void ListTools(Slot<std::vector<ToolListing>>& slot) = 0;
     virtual void CallTool(const std::string& tool_name, const nlohmann::json& arguments,
                           Slot<nlohmann::json>& slot) = 0;
+    // The initialize result's capabilities/instructions, for channel
+    // detection. Defaults fit a transport with no initialize-result capture
+    // (http): no capabilities, no instructions. Not worker-thread work -- the
+    // base contract holds that these are plain reads of state initialize
+    // already wrote, and Open's slot-wait orders them.
+    virtual std::string ServerCapabilitiesJson() const { return "{}"; }
+    virtual std::string Instructions() const { return {}; }
     // Teardown support, called from the DESTROYING thread while the worker may
     // be wedged inside a blocking call above: unblock the underlying I/O the
     // only way it can be unblocked (kill the stdio child; the blocking read
@@ -137,11 +144,15 @@ namespace {
 class StdioTransport final : public McpConnection::Transport {
 public:
     StdioTransport(const McpEndpoint& endpoint, const std::string& client_name,
-                   const std::string& client_version)
+                   const std::string& client_version, const NotificationSink& sink)
         : client_name_(client_name), client_version_(client_version) {
         // Env arrives pre-interpolated (secrets included) and is never logged.
         for (const auto& [key, value] : endpoint.env) env_[key] = value;
         shim_ = std::make_unique<McpStdioShim>(endpoint.command_line, env_);
+        // Pre-initialize: the read thread that would invoke the sink starts
+        // inside Initialize(), and the shim's sink capture is parked until
+        // then. No sink = the pre-channels behavior, unchanged.
+        if (sink) shim_->SetNotificationSink(sink);
     }
 
     void Initialize(Slot<bool>& slot) override {
@@ -161,6 +172,12 @@ public:
     // for up to cpp-mcp's internal 60 s per request -- and an orphaned child
     // forever if the server process exits first.
     int Abort() override { return shim_->AbortChild(); }
+
+    // Plain reads of initialize-result state, ordered by Open's slot-wait.
+    std::string ServerCapabilitiesJson() const override {
+        return shim_->ServerCapabilitiesJson();
+    }
+    std::string Instructions() const override { return shim_->Instructions(); }
 
     void Ping(Slot<bool>& slot) override { slot.Complete(std::optional<bool>(shim_->Ping()), {}); }
 
@@ -584,14 +601,15 @@ std::unique_ptr<McpConnection> McpConnection::Open(const McpEndpoint& endpoint,
                                                    const McpLimits& limits,
                                                    const std::string& client_name,
                                                    const std::string& client_version,
-                                                   Failure& error) {
+                                                   Failure& error,
+                                                   const NotificationSink& sink) {
     std::shared_ptr<Transport> transport;
     if (endpoint.transport == McpTransport::Stdio) {
         if (endpoint.command_line.empty()) {
             error.message = "MCP stdio endpoint has no command";
             return nullptr;
         }
-        transport = std::make_shared<StdioTransport>(endpoint, client_name, client_version);
+        transport = std::make_shared<StdioTransport>(endpoint, client_name, client_version, sink);
     } else {
         if (endpoint.url.empty()) {
             error.message = "MCP http endpoint has no url";
@@ -625,6 +643,12 @@ std::unique_ptr<McpConnection> McpConnection::Open(const McpEndpoint& endpoint,
     }
     return connection;
 }
+
+std::string McpConnection::ServerCapabilitiesJson() const {
+    return transport_->ServerCapabilitiesJson();
+}
+
+std::string McpConnection::Instructions() const { return transport_->Instructions(); }
 
 bool McpConnection::Ping(const tools::CancelTokenPtr& cancel, Failure& error) {
     auto slot = std::make_shared<Slot<bool>>();
