@@ -87,11 +87,18 @@ struct CommandCatalogEntry {
 using MentionSuggestor =
     std::function<std::optional<std::vector<std::string>>(const std::string& prefix)>;
 
+// Returns a REFERENCE, not a copy: the catalog is fetched once at connect and
+// held for the app's lifetime (see RunTui), and this is invoked on every
+// character typed while a line still reads like a `/`-command name -- copying
+// the whole catalog vector per keystroke was pure waste for data that never
+// changes after startup.
+using CommandCatalogSource = std::function<const std::vector<CommandCatalogEntry>&()>;
+
 ftxui::Component MakePromptEditor(
     const Theme& theme, PromptEditorState& state,
     std::function<void(const std::string&)> on_text,
     std::function<void(const std::string&)> on_command,
     const MentionSuggestor& suggest,
-    std::function<std::vector<CommandCatalogEntry>()> command_catalog = nullptr);
+    CommandCatalogSource command_catalog = nullptr);
 
 }  // namespace minimal::client

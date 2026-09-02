@@ -42,7 +42,7 @@ ftxui::Component MakePromptEditor(
     std::function<void(const std::string&)> on_text,
     std::function<void(const std::string&)> on_command,
     const MentionSuggestor& suggest,
-    std::function<std::vector<CommandCatalogEntry>()> command_catalog) {
+    CommandCatalogSource command_catalog) {
     using namespace ftxui;
 
     // Multiline ON: Return-as-newline is the Input's default, so the submit

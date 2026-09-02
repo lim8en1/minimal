@@ -1,26 +1,31 @@
 #include "minimal/client/view/tools_panel.hpp"
 
-#include <sstream>
+#include <string_view>
 
 namespace minimal::client {
 
 namespace {
 
-std::string TailLines(const std::string& text, int max_lines) {
-    if (max_lines <= 0) return {};
-    // Count from the back; keep the LAST max_lines lines.
+// The starting BYTE OFFSET of the last `max_lines` lines of `text` -- an
+// offset into the ORIGINAL string, not a copy of the tail. This function ran
+// over every tool's WHOLE buffered_output (up to tool_output_buffer_bytes_,
+// 64 KiB default) on every render regardless of whether the panel was even
+// showing new output, first via this backward scan and then via a
+// text.substr() COPY of everything past it, which the caller then fed to an
+// istringstream to split into rows -- three passes and at least two
+// allocations of the tail's own size for content that render only ever reads
+// once. Returning an offset lets the caller walk the original buffer with a
+// string_view instead.
+std::size_t TailStart(const std::string& text, int max_lines) {
+    if (max_lines <= 0) return text.size();
     int newlines = 0;
-    std::size_t start = 0;
     for (std::size_t i = text.size(); i > 0; --i) {
         if (text[i - 1] == '\n') {
             ++newlines;
-            if (newlines > max_lines) {
-                start = i;
-                break;
-            }
+            if (newlines > max_lines) return i;
         }
     }
-    return text.substr(start);
+    return 0;
 }
 
 }  // namespace
@@ -57,14 +62,30 @@ ftxui::Element RenderToolsPanel(const std::vector<AppState::TabSnapshot>& tabs,
                 line.push_back(text(" | " + *tool.summary) | dim);
             }
             rows.push_back(hbox(std::move(line)));
-            const std::string tail = TailLines(tool.buffered_output, stdout_buffer_lines);
-            if (!tail.empty()) {
-                // Indent the live stdout under its row.
-                std::istringstream stream(tail);
-                std::string out_line;
-                while (std::getline(stream, out_line)) {
-                    rows.push_back(text("   " + out_line) | color(theme.ColorFor("system_message")) |
-                                   dim);
+            const std::size_t tail_start = TailStart(tool.buffered_output, stdout_buffer_lines);
+            if (tail_start < tool.buffered_output.size()) {
+                // Indent the live stdout under its row. A view over the
+                // ORIGINAL buffer (see TailStart) -- no substr copy of the
+                // tail, no istringstream; one std::string allocation per
+                // OUTPUT row, which is unavoidable (ftxui::text() needs one),
+                // not per byte of the buffer scanned to find them.
+                std::string_view tail(tool.buffered_output);
+                tail.remove_prefix(tail_start);
+                // `pos < tail.size()`, NOT `<=`: matching std::getline's own
+                // behavior (which the istringstream version this replaces
+                // relied on) is what this loop bound buys -- a trailing '\n'
+                // ends the last line, it does not open a new EMPTY one.
+                // `<=` would push one spurious blank row every time the live
+                // buffer happened to end right after a newline, which is the
+                // common case (most tool output is line-buffered).
+                std::size_t pos = 0;
+                while (pos < tail.size()) {
+                    const std::size_t newline = tail.find('\n', pos);
+                    const std::size_t end = newline == std::string_view::npos ? tail.size() : newline;
+                    rows.push_back(text("   " + std::string(tail.substr(pos, end - pos))) |
+                                   color(theme.ColorFor("system_message")) | dim);
+                    if (newline == std::string_view::npos) break;
+                    pos = newline + 1;
                 }
             }
         }

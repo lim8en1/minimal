@@ -217,7 +217,17 @@ public:
     // render, WITHOUT the heavy copies -- no scrollback page, no streaming
     // text, no pending-modal data. GetAllTabs() calls this per tab per frame;
     // the deep TakeSnapshot() runs for the FOCUSED tab only.
-    Snapshot TakeLightSnapshot();
+    //
+    // `include_tool_output`: each ToolExecutionState::buffered_output can hold
+    // up to tool_output_buffer_bytes_ (64 KiB default) of live stdout, and
+    // GetAllTabs() is called on nearly every event (the tab bar needs the
+    // list every render; the maintenance pass needs it every event just to
+    // find which tab is focused) -- copying every tool's full buffer on every
+    // one of those calls was pure waste when the caller only needed
+    // name/state/summary, which is the common case. false (the default)
+    // leaves buffered_output empty; only a caller that is actually about to
+    // render the running-tools panel's live tail passes true.
+    Snapshot TakeLightSnapshot(bool include_tool_output = false);
 
     // --- Session lifecycle ---
     void OnSessionCreated(std::string name);
@@ -471,7 +481,9 @@ public:
     void SetFocusedTab(const std::string& session_id);
 
     // --- Rendering ---
-    std::vector<TabSnapshot> GetAllTabs() const;   // in render order
+    // in render order. `include_tool_output`: see TakeLightSnapshot -- pass
+    // true only when about to render the running-tools panel.
+    std::vector<TabSnapshot> GetAllTabs(bool include_tool_output = false) const;
 
     // The focused tab's session id ("" when no tabs). The prompt editor and
     // status bar target it.
@@ -586,6 +598,16 @@ private:
     // list queued after it.
     RpcQueue rpc_queue_;
     std::vector<std::pair<std::string, v1::SubagentStartedEvent>> pending_subagents_;   // deferred
+    // Fast-path skip for DispatchToTab's drain step (see .cpp): true only
+    // while pending_subagents_ actually holds something. Every call to
+    // DispatchToTab -- one per wire event, on every tab's own reader thread
+    // -- used to take mtx_ a SECOND time just to swap out an
+    // almost-always-empty vector; subagent spawns are rare relative to
+    // stream/tool events. Release-store paired with an acquire-load makes
+    // the flag alone sufficient to skip the lock: a thread that observes
+    // `false` here is guaranteed (release-acquire) to also see an empty
+    // pending_subagents_ if it looked, without needing the mutex to say so.
+    std::atomic<bool> has_pending_subagents_{false};
 
     std::shared_ptr<SessionClient> client_;
 

@@ -21,13 +21,32 @@ namespace minimal::client {
 SessionState::SessionState(std::string session_id, std::string name)
     : session_id_(std::move(session_id)), display_name_(std::move(name)) {}
 
-SessionState::Snapshot SessionState::TakeLightSnapshot() {
+SessionState::Snapshot SessionState::TakeLightSnapshot(bool include_tool_output) {
     std::lock_guard lk(mtx_);
     Snapshot s;
     s.session_id = session_id_;
     s.display_name = display_name_;
     s.state = state_;
-    s.tools = tools_;   // bounded (R2); the tools panel renders these
+    if (include_tool_output) {
+        s.tools = tools_;   // bounded (R2); the tools panel renders these
+    } else {
+        // Field-by-field, NOT `tool; tool.buffered_output.clear()` -- that
+        // would copy the (up to 64 KiB) buffer first and clear it after,
+        // paying exactly the cost this branch exists to avoid. Every other
+        // field is cheap (small strings, a timestamp, two bools).
+        s.tools.reserve(tools_.size());
+        for (const auto& tool : tools_) {
+            ToolExecutionState light;
+            light.tool_use_id = tool.tool_use_id;
+            light.tool_name = tool.tool_name;
+            light.summary = tool.summary;
+            light.started_at_unix_ms = tool.started_at_unix_ms;
+            light.started = tool.started;
+            light.is_error = tool.is_error;
+            light.is_background = tool.is_background;
+            s.tools.push_back(std::move(light));
+        }
+    }
     s.input_tokens = input_tokens_;
     s.output_tokens = output_tokens_;
     s.cancel_requested = cancel_requested_;
@@ -735,19 +754,29 @@ void AppState::DispatchToTab(const std::string& session_id, const v1::ServerEven
     } else if (event.has_subagent_started()) {
         std::lock_guard lk(mtx_);   // append only; deferred spawn happens after unlock below
         pending_subagents_.emplace_back(session_id, event.subagent_started());
+        has_pending_subagents_.store(true, std::memory_order_release);
     }
     // command_result is stored as the tab's transient notice above (routed by
     // its display mode in RunTui); PluginCall data is a plugin's own path.
 
     // The app lock is released now. Spawn any deferred subagent tabs so child streams attach
     // on their own reader threads without ever holding mtx_ while opening (which could deadlock).
-    std::vector<std::pair<std::string, v1::SubagentStartedEvent>> spawned;
-    {
-        std::lock_guard lk(mtx_);
-        std::swap(pending_subagents_, spawned);   // drain under a fresh lock
-    }
-    for (auto& [parent_id, subevt] : spawned) {
-        OnSubagentSpawned(parent_id, subevt);
+    // Gated on the atomic (see its declaration): subagent spawns are rare
+    // relative to the stream/tool events that call DispatchToTab, and taking
+    // mtx_ a second time on every one of them just to swap out an empty
+    // vector was pure waste. A thread that reads `false` here needs no lock
+    // to know pending_subagents_ is empty -- that is exactly what the
+    // release/acquire pairing on the flag guarantees.
+    if (has_pending_subagents_.load(std::memory_order_acquire)) {
+        std::vector<std::pair<std::string, v1::SubagentStartedEvent>> spawned;
+        {
+            std::lock_guard lk(mtx_);
+            std::swap(pending_subagents_, spawned);   // drain under a fresh lock
+            has_pending_subagents_.store(false, std::memory_order_release);
+        }
+        for (auto& [parent_id, subevt] : spawned) {
+            OnSubagentSpawned(parent_id, subevt);
+        }
     }
 }
 
@@ -1051,13 +1080,14 @@ void AppState::RequestScrollback(const std::string& session_id, bool newest) {
     });
 }
 
-std::vector<AppState::TabSnapshot> AppState::GetAllTabs() const {
+std::vector<AppState::TabSnapshot> AppState::GetAllTabs(bool include_tool_output) const {
     std::lock_guard lk(mtx_);
     std::vector<TabSnapshot> out;
     out.reserve(tabs_.size());
     for (const auto& tab : tabs_) {
         TabSnapshot snap;
-        const SessionState::Snapshot ss = tab.info.state->TakeLightSnapshot();   // LIGHT: no scrollback/streaming copies
+        // LIGHT: no scrollback/streaming copies; tool output only when asked.
+        const SessionState::Snapshot ss = tab.info.state->TakeLightSnapshot(include_tool_output);
         snap.tools = ss.tools;
         snap.session_id = tab.info.session_id;
         // A session with no name yet (before the first turn's default naming

@@ -1,5 +1,9 @@
 #include "minimal/client/chat_model.hpp"
 
+#include <unordered_map>
+#include <unordered_set>
+#include <utility>
+
 namespace minimal::client {
 
 namespace {
@@ -72,35 +76,34 @@ std::string_view ToString(ChatRowKind kind) {
 std::vector<ChatRow> ChatRowsFromMessages(const std::vector<v1::StoredMessage>& descending) {
     // Identify the spawn_subagent tool_use ids first: the completion
     // injections are distinguishable ONLY by echoing one of these.
-    std::vector<std::string> spawn_ids;
+    // unordered_set, not a linear-scanned vector: a scrollback window can
+    // hold up to scrollback_window_max_messages (2000 default) messages, and
+    // ChatRowsFromMessages runs on every transcript_version bump -- an O(n)
+    // membership test per tool-result block made the whole pass O(n^2).
+    std::unordered_set<std::string> spawn_ids;
     for (const auto& stored : descending) {
         for (const auto& block : stored.message().content()) {
             if (block.has_tool_use() && block.tool_use().name() == kSpawnSubagentToolName) {
-                spawn_ids.push_back(block.tool_use().id());
+                spawn_ids.insert(block.tool_use().id());
             }
         }
     }
-    const auto is_spawn_id = [&](const std::string& id) {
-        for (const auto& spawn_id : spawn_ids) {
-            if (id == spawn_id) return true;
-        }
-        return false;
-    };
+    const auto is_spawn_id = [&](const std::string& id) { return spawn_ids.count(id) != 0; };
 
     // Walk ascending (reverse of the input), remembering tool names and inputs
     // by id so a result row can carry the name of -- and the input JSON behind
-    // -- the call that produced it.
+    // -- the call that produced it. unordered_map for the same O(n^2)->O(n)
+    // reason as spawn_ids above; emplace (not operator[]) preserves the
+    // original vector scan's "first match wins" semantics for a duplicate id.
     std::vector<ChatRow> rows;
     struct ToolCall {
         std::string name;
         nlohmann::json input = nlohmann::json::object();
     };
-    std::vector<std::pair<std::string, ToolCall>> tool_calls;  // (id, call)
+    std::unordered_map<std::string, ToolCall> tool_calls;  // id -> call
     const auto tool_call_of = [&](const std::string& id) -> const ToolCall* {
-        for (const auto& [tool_id, call] : tool_calls) {
-            if (tool_id == id) return &call;
-        }
-        return nullptr;
+        const auto it = tool_calls.find(id);
+        return it != tool_calls.end() ? &it->second : nullptr;
     };
 
     for (auto it = descending.rbegin(); it != descending.rend(); ++it) {
@@ -130,13 +133,18 @@ std::vector<ChatRow> ChatRowsFromMessages(const std::vector<v1::StoredMessage>& 
                         rows.push_back(ChatRow{.kind = ChatRowKind::Thinking,
                                                .text = block.thinking().text()});
                     } else if (block.has_tool_use()) {
-                        tool_calls.push_back(
-                            {block.tool_use().id(),
-                             ToolCall{block.tool_use().name(),
-                                      StructToJson(block.tool_use().input())}});
+                        // Computed ONCE, not once for the map entry and again
+                        // for the row (the pre-unordered_map shape relied on
+                        // vector::back() to share it; insert_or_assign here
+                        // keeps that single computation without depending on
+                        // "the last pushed entry" being expressible for a map).
+                        nlohmann::json input = StructToJson(block.tool_use().input());
+                        tool_calls.insert_or_assign(
+                            block.tool_use().id(),
+                            ToolCall{block.tool_use().name(), input});
                         rows.push_back(ChatRow{.kind = ChatRowKind::ToolActivity,
                                                .tool_name = block.tool_use().name(),
-                                               .tool_input = tool_calls.back().second.input});
+                                               .tool_input = std::move(input)});
                     }
                 }
                 return;

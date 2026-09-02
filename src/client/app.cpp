@@ -930,6 +930,14 @@ int RunTui(const minimal::client::ParsedArgs& args) {
 
     std::string focused;   // active session id, refreshed every frame
     SessionState::Snapshot focused_details;   // what run_maintenance settled on
+    // Gates run_maintenance's own work (below): every AppState mutation --
+    // wire events via DispatchToTab, SetFocusedTab, RequestScrollback's async
+    // completion, everything -- bumps UiVersion at its own entry point, so
+    // "unchanged since the last pass" is a sound proxy for "nothing
+    // maintain()/handle_notice() would read has changed either". Sentinel,
+    // not 0: forces the first call (before the loop starts) to run regardless
+    // of whatever OpenTab's own bumps left UiVersion at.
+    uint64_t last_maintenance_ui_version = static_cast<uint64_t>(-1);
 
     // Per-frame maintenance for the focused tab: feed streaming deltas to the
     // debounced view, and trigger the post-turn scrollback refresh. A turn in
@@ -1116,7 +1124,15 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         submit_chat,
         submit_command,
         suggest,
-        [&command_catalog] { return command_catalog; });
+        // Explicit trailing return type: a bare `{ return command_catalog; }`
+        // deduces BY VALUE (auto return-type deduction never deduces a
+        // reference), silently copying the whole catalog on every call --
+        // exactly the per-keystroke cost CommandCatalogSource's contract
+        // exists to avoid. command_catalog is a RunTui local that outlives
+        // `editor`'s use, same lifetime argument as `state`/`theme` above.
+        [&command_catalog]() -> const std::vector<minimal::client::CommandCatalogEntry>& {
+            return command_catalog;
+        });
 
     // --- permission modal (inner swapped per outstanding request) -------------
     // The host is a STABLE component in the tree; its inner component is
@@ -1383,7 +1399,20 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     // the frame stall and the staged modal unclosable). Runs on the loop
     // thread from the event path (see the root CatchEvent below), never from
     // a renderer.
+    //
+    // Gated on UiVersion (see last_maintenance_ui_version above): this used
+    // to run its full body -- a light GetAllTabs() PLUS a full deep
+    // GetDetails() protobuf copy of the focused tab's scrollback window (up
+    // to scrollback_window_max_messages rows, 2000 by default) -- on EVERY
+    // event unconditionally, including every keystroke while typing and
+    // every mouse move, none of which touch AppState at all. Skipping when
+    // nothing changed leaves `focused`/`focused_details` exactly as the last
+    // real pass left them, which is correct BECAUSE nothing changed.
     auto run_maintenance = [&] {
+        const uint64_t version = app->UiVersion();
+        if (version == last_maintenance_ui_version) return;
+        last_maintenance_ui_version = version;
+
         const auto tabs = app->GetAllTabs();
         focused.clear();
         for (const auto& tab : tabs) {
@@ -1498,7 +1527,10 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     auto session_view = Renderer(editor, [&] {
         using namespace ftxui;
 
-        const auto tabs = app->GetAllTabs();
+        // Tool output (the panel's live tail) only when the panel is
+        // actually about to render -- the tab bar below needs name/state
+        // only, and this call already happens every render.
+        const auto tabs = app->GetAllTabs(/*include_tool_output=*/show_panel);
 
         // The snapshot (and everything derived from it) was taken by
         // run_maintenance() on this loop iteration's event, BEFORE Render --

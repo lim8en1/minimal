@@ -575,14 +575,20 @@ TEST_CASE("prompt editor: Enter accepts the highlighted suggestion instead of su
     PromptEditorState state;
     std::vector<std::string> texts;
     std::vector<std::string> commands;
+    // CommandCatalogSource returns a REFERENCE (see its header comment): a
+    // lambda returning a vector BY VALUE still compiles against that
+    // signature (a prvalue converts to a const-ref parameter), but the
+    // reference std::function's invoker hands back then dangles -- the
+    // temporary is destroyed at the end of the wrapped call, before
+    // command_catalog()'s caller ever reads it. The catalog needs its own
+    // named storage, outliving `editor`'s use the same way `state` does.
+    const std::vector<CommandCatalogEntry> catalog = {
+        {"compact", "compact the history", false, false}};
     auto editor = MakePromptEditor(
         theme, state, [&](const std::string& t) { texts.push_back(t); },
         [&](const std::string& c) { commands.push_back(c); },
         [](const std::string&) { return std::vector<std::string>{}; },
-        [] {
-            return std::vector<CommandCatalogEntry>{{"compact", "compact the history", false,
-                                                      false}};
-        });
+        [&catalog]() -> const std::vector<CommandCatalogEntry>& { return catalog; });
 
     for (const char c : std::string_view("/comp")) {
         REQUIRE(SendEvent(editor, ftx::Event::Character(std::string{c})));
