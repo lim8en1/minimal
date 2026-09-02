@@ -74,7 +74,13 @@ std::filesystem::path BundledClientPluginDir() {
     const auto installed = bin_dir.parent_path() / MINIMAL_CLIENT_PLUGIN_DIR;
     if (std::filesystem::is_directory(installed, ec)) return installed;
 
-    const auto staged = bin_dir.parent_path().parent_path().parent_path() / "plugins/client";
+    // Build tree: the client binary sits at <build>/src/client, so TWO hops
+    // reach <build>/plugins/client -- the same shape the server probe uses
+    // (its binary sits at <build>/src/server). Three hops used to reach the
+    // repository ROOT's plugins/client -- the source directory, never the
+    // built artifacts -- which nothing noticed until the first bundled client
+    // plugin existed, because the fixtures load .so paths directly.
+    const auto staged = bin_dir.parent_path().parent_path() / "plugins/client";
     if (std::filesystem::is_directory(staged, ec)) return staged;
 
     return installed;

@@ -10,6 +10,8 @@
     "border_focused": "#0369a1",
     "border_unfocused": "#d4d4d8",
     "status_bar_bg": "#e4e4e7",
+    "banner_art": "#0369a1",
+    "banner_hint": "#71717a",
     "syntax_keyword": "#7e22ce",
     "syntax_string": "#15803d",
     "syntax_comment": "#71717a",

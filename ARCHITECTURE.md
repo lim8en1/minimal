@@ -30,7 +30,7 @@ minimal/
     server/                       # tools-fs, tools-search, tools-bash, provider-openai,
                                   #   commands-core, checklist, session-titler
                                   #   (shipped disabled -- see naming), cost-tracker
-    client/                       # (none bundled yet)
+    client/                       # logo (the ASCII-banner start view)
   bundled/                    # non-code assets that ship WITH the binary
     prompts/{compression,subagent}.md  # all of it copied into the config dir by
     agents/{plan,build}.md         #   `cmake --install` -- never read from here

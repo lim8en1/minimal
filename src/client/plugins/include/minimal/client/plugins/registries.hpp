@@ -250,6 +250,29 @@ public:
     virtual ftxui::Component component() = 0;
 };
 
+// --- Start views (additive: the initial view on start) ----------------------
+
+// The initial view rendered while there is no conversation content yet: the
+// app-level empty state (no tab open) and a freshly opened session before its
+// first message arrives. Additive -- every registered start view renders,
+// stacked in registration order; a duplicate id is fatal through the shared
+// NameRegistry like every other view id.
+//
+// Element, not Component: a start view is non-interactive decoration, which
+// keeps the 20 Hz render contract trivially cheap. The per-render session id
+// is what lets a plugin vary its art per session (a generator keyed by
+// session_id -- regenerating inside Render() with no key would re-randomize
+// every frame at 20 Hz).
+class StartView {
+public:
+    virtual ~StartView() = default;
+    virtual const ViewSpec& spec() const = 0;
+    // `session_id` empty = the app-level empty state (no tab open). Colors
+    // come from theme roles, never hardcoded (the same contract as every
+    // other render seam); missing roles fall back to Color::Default.
+    virtual ftxui::Element Render(const std::string& session_id, const Theme& theme) const = 0;
+};
+
 // --- The sanctioned data path ------------------------------------------------
 
 // Implemented by the host over SessionClient. Declared here so the ABI names
@@ -320,6 +343,22 @@ public:
 
 private:
     std::vector<std::unique_ptr<View>> views_;
+    std::string attribution_;
+    std::vector<Attribution> attributions_;
+};
+
+class StartViewRegistry {
+public:
+    void Register(std::unique_ptr<StartView> view);
+    const std::vector<std::unique_ptr<StartView>>& views() const { return views_; }
+    StartView* Find(std::string_view id) const;
+
+    void SetAttribution(std::string plugin_name) { attribution_ = std::move(plugin_name); }
+    void ClearAttribution() { attribution_.clear(); }
+    const std::vector<Attribution>& attributions() const { return attributions_; }
+
+private:
+    std::vector<std::unique_ptr<StartView>> views_;
     std::string attribution_;
     std::vector<Attribution> attributions_;
 };

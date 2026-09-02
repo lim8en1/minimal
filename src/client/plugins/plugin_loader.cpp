@@ -17,6 +17,8 @@ using NameFn = const char* (*)();
 using VersionFn = const char* (*)();
 using RegisterViewsFn =
     void (*)(ViewRegistry&, const ClientPluginRegistrationContext&);
+using RegisterStartViewsFn =
+    void (*)(StartViewRegistry&, const ClientPluginRegistrationContext&);
 using RegisterRenderersFn =
     void (*)(ToolResultRendererRegistry&, const ClientPluginRegistrationContext&);
 using RegisterMessageRenderersFn =
@@ -92,7 +94,8 @@ ClientPluginLoader::ClientPluginLoader(ViewRegistry& views,
                                        SyntaxGrammarRegistry& grammars,
                                        ChatSurfaceRegistry& chat_surface,
                                        MarkdownEngineRegistry& markdown_engine,
-                                       AttentionSink* attention, ClientApi* client_api)
+                                       StartViewRegistry& start_views, AttentionSink* attention,
+                                       ClientApi* client_api)
     : views_(views),
       renderers_(renderers),
       message_renderers_(message_renderers),
@@ -100,6 +103,7 @@ ClientPluginLoader::ClientPluginLoader(ViewRegistry& views,
       grammars_(grammars),
       chat_surface_(chat_surface),
       markdown_engine_(markdown_engine),
+      start_views_(start_views),
       attention_(attention),
       client_api_(client_api) {}
 
@@ -172,6 +176,21 @@ PluginRecord ClientPluginLoader::LoadOne(const PluginCandidate& candidate) {
         }
         for (std::size_t i = before; i < views_.attributions().size(); ++i) {
             record.registered_views.push_back(views_.attributions()[i].original_name);
+        }
+    }
+
+    if (auto register_start_views = Lookup<RegisterStartViewsFn>(
+            handle, "minimal_client_plugin_register_start_views")) {
+        const std::size_t before = start_views_.attributions().size();
+        if (!GuardedRegistration(record, "minimal_client_plugin_register_start_views",
+                [&] { start_views_.SetAttribution(record.name); },
+                [&] { register_start_views(start_views_, context); },
+                [&] { start_views_.ClearAttribution(); })) {
+            return record;
+        }
+        for (std::size_t i = before; i < start_views_.attributions().size(); ++i) {
+            record.registered_start_views.push_back(
+                start_views_.attributions()[i].original_name);
         }
     }
 

@@ -564,6 +564,7 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     const auto attention_sink = plugins::MakeHostAttentionSink(&attention_state);
     const auto host_client_api = plugins::MakeHostClientApi(client.get());
     plugins::ViewRegistry view_registry;
+    plugins::StartViewRegistry start_view_registry;
     plugins::ToolResultRendererRegistry renderer_registry;
     plugins::MessageRendererRegistry message_registry;
     plugins::StatusSegmentRegistry status_registry;
@@ -624,8 +625,8 @@ int RunTui(const minimal::client::ParsedArgs& args) {
 
         plugins::ClientPluginLoader loader(view_registry, renderer_registry, message_registry,
                                            status_registry, grammar_registry, surface_registry,
-                                           engine_registry, attention_sink.get(),
-                                           host_client_api.get());
+                                           engine_registry, start_view_registry,
+                                           attention_sink.get(), host_client_api.get());
         const auto records = loader.LoadAll(candidates);
 
         // Provenance-keyed severity, mirrored from the server's sanity check:
@@ -664,6 +665,7 @@ int RunTui(const minimal::client::ParsedArgs& args) {
             }
         };
         feed(minimal::plugins::NameKind::ViewId, view_registry.attributions());
+        feed(minimal::plugins::NameKind::ViewId, start_view_registry.attributions());
         feed(minimal::plugins::NameKind::ToolResultRenderer, renderer_registry.attributions());
         for (const auto& [kind, attribution] : message_registry.claims()) {
             names.Register(minimal::plugins::NameKind::MessageRenderer,
@@ -732,6 +734,9 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     // Loaded plugin names feed the theme's section check.
     std::vector<std::string> loaded_plugins;
     for (const auto& attribution : view_registry.attributions()) {
+        if (!attribution.plugin_name.empty()) loaded_plugins.push_back(attribution.plugin_name);
+    }
+    for (const auto& attribution : start_view_registry.attributions()) {
         if (!attribution.plugin_name.empty()) loaded_plugins.push_back(attribution.plugin_name);
     }
     for (const auto& attribution : renderer_registry.attributions()) {
@@ -1389,6 +1394,29 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         }
     };
 
+    // Start views: what renders while a session (or the app itself) has no
+    // content yet -- the plugin-owned banner slot. All registered views render,
+    // stacked in registration order; a THROWING view renders nothing for this
+    // frame (the same containment as panel views), never fatal. An empty
+    // session_id is the app-level empty state (no tab open).
+    auto render_start_views = [&](const std::string& session_id) -> Elements {
+        Elements out;
+        for (const auto& view : start_view_registry.views()) {
+            try {
+                out.push_back(view->Render(session_id, theme) | center);
+            } catch (const std::exception& error) {
+                minimal::common::DefaultLogger().error("start view '{}' threw: {}",
+                                                       std::string(view->spec().id),
+                                                       error.what());
+            } catch (...) {
+                minimal::common::DefaultLogger().error(
+                    "start view '{}' threw a non-standard exception",
+                    std::string(view->spec().id));
+            }
+        }
+        return out;
+    };
+
     auto session_view = Renderer(editor, [&] {
         using namespace ftxui;
 
@@ -1446,12 +1474,25 @@ int RunTui(const minimal::client::ParsedArgs& args) {
                                         "takes over") | color(theme.ColorFor("error")));
                 }
             } else {
-                if (!ui.chat) {
-                    ui.chat = std::make_unique<minimal::client::ChatView>(
-                        theme, message_registry, renderer_registry);
+                // A FRESH session -- nothing persisted, nothing streaming, no
+                // earlier pages -- renders the start-view banner in the tab
+                // body instead of an empty transcript. has_earlier_messages
+                // keeps a resumed session from flashing the banner during the
+                // async scrollback window before its first page applies.
+                const bool fresh_session = snap.scrollback_page.empty() &&
+                                           snap.streaming_text.empty() &&
+                                           !snap.has_earlier_messages;
+                Elements start = fresh_session ? render_start_views(focused) : Elements{};
+                if (!start.empty()) {
+                    for (auto& element : start) rows.push_back(std::move(element) | flex);
+                } else {
+                    if (!ui.chat) {
+                        ui.chat = std::make_unique<minimal::client::ChatView>(
+                            theme, message_registry, renderer_registry);
+                    }
+                    rows.push_back(ui.chat->Render(snap, *ui.streaming) | yframe |
+                                   vscroll_indicator | flex);
                 }
-                rows.push_back(ui.chat->Render(snap, *ui.streaming) | yframe |
-                               vscroll_indicator | flex);
             }
 
             // The transient notice line: the focused tab's latest /-command
@@ -1522,10 +1563,16 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         } else {
             show_permission = false;
             show_confirmation = false;
-            rows.push_back(vbox({text("minimal") | bold,
-                                 text("ctrl+o opens the session picker; typing starts a session") |
-                                     dim}) |
-                            center | flex);
+            Elements start = render_start_views("");
+            if (start.empty()) {
+                rows.push_back(vbox({text("minimal") | bold,
+                                     text("ctrl+o opens the session picker; typing starts a "
+                                          "session") |
+                                         dim}) |
+                               center | flex);
+            } else {
+                for (auto& element : start) rows.push_back(std::move(element) | flex);
+            }
         }
 
         if (show_panel) {
