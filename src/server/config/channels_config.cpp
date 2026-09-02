@@ -108,7 +108,17 @@ ChannelEntry ParseEntry(const std::string& name, const nlohmann::json& entry) {
             if (!value.is_string()) {
                 throw std::runtime_error("env value for '" + key + "' must be a string");
             }
-            result.env.emplace(key, value.get<std::string>());
+            std::string parsed = value.get<std::string>();
+            // The value lands in a spawned child's environment; a CR/LF is
+            // either nonsense no channel process expects or an injection
+            // payload. Config is the user's own file: reject rather than
+            // silently mangle it. Mirrors mcps_config.cpp's ParseStringMap,
+            // which applies the same rule to the same use.
+            if (parsed.find('\r') != std::string::npos || parsed.find('\n') != std::string::npos) {
+                throw std::runtime_error("env value for '" + key +
+                                         "' contains a CR or LF, which is not allowed");
+            }
+            result.env.emplace(key, std::move(parsed));
         }
     }
 

@@ -497,6 +497,16 @@ int main(int argc, char** argv) {
     // into this router (declared here first, so it outlives the manager's
     // wiring).
     for (const auto& entry : sanity.channels().entries) {
+        // Mirror McpClientManager's own skip rules exactly, or the router
+        // would validate a subscription to a channel the manager never built
+        // a handle for -- CheckSelector would pass, EnsureAlive would then
+        // fail (or, worse, silently resolve to an unrelated mcps.json server
+        // handle of the same name), producing "subscribed but no signal ever
+        // arrives" with no error anywhere. The sanity check already warns
+        // about both cases from the config side; this is the enforcement.
+        if (!entry.enabled) continue;  // deliberate opt-out, silent
+        if (entry.name == minimal::config::kReservedInternalChannelName) continue;  // reserved
+        if (sanity.mcps().Find(entry.name) != nullptr) continue;  // name collision: mcps.json wins
         signal_router.RegisterChannel(entry);
     }
 

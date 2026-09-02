@@ -153,21 +153,17 @@ private:
 
     // Validates CreateSessionRequest.signals against the router and stages the
     // session-side consequences onto params: the wake flag (a subscribed
-    // session exists to react, so it wakes for injections) and the
-    // channel-instruction context. Shared by fresh creation and resume --
-    // subscriptions never persist across a stream, so a resumed session gets
-    // whatever THIS request declares. No router, or an empty request: OK, no
-    // subscriptions, no wake change.
+    // session exists to react, so it wakes for injections), the
+    // channel-instruction context, and the router pointer + selector list
+    // themselves. Actual subscription registration happens later, inside
+    // SessionRegistry::CreateResolved -- atomically with the session becoming
+    // findable, not from this RPC layer -- so this function only STAGES the
+    // decision, it never calls Subscribe. Shared by fresh creation and resume
+    // -- subscriptions never persist across a stream, so a resumed session
+    // gets whatever THIS request declares. No router, or an empty request:
+    // OK, no subscriptions, no wake change.
     grpc::Status ApplySignals(const v1::CreateSessionRequest& request,
                               agent::SessionParams& params) const;
-
-    // Registers the session with the router under its declared selectors.
-    // Runs AFTER the session exists (subscriptions hold a weak_ptr to it);
-    // the caller then hands the same session to the stream. Validated already
-    // by ApplySignals, so a failure here is logged, not surfaced: the session
-    // exists either way.
-    void SubscribeSignals(std::shared_ptr<agent::Session> session,
-                          const v1::CreateSessionRequest& request) const;
 
     // Detach and drop this stream's reference, firing on_last_client_detached_
     // if it was the last. BOTH exits of OpenSession go through here: the catch

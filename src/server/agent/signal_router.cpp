@@ -1,6 +1,8 @@
 #include "minimal/agent/signal_router.hpp"
 
 #include <algorithm>
+#include <array>
+#include <string_view>
 #include <utility>
 
 #include <nlohmann/json.hpp>
@@ -14,16 +16,50 @@ namespace minimal::agent {
 
 namespace {
 
+// Attribute names WrapSignal itself always emits (source, signal) or that
+// DeliverInternal's own call adds (from). A channel's meta map must never be
+// able to supply one of these: SanitizeMeta runs only on EXTERNAL meta (the
+// internal path builds its `from` attribute directly, bypassing this
+// function), so blocking all three here costs the internal path nothing and
+// closes off a channel duplicating/overriding its own provenance attributes.
+constexpr std::array<std::string_view, 3> kReservedAttributeKeys = {"source", "signal", "from"};
+
+bool IsReservedAttributeKey(const std::string& key) {
+    return std::find(kReservedAttributeKeys.begin(), kReservedAttributeKeys.end(), key) !=
+           kReservedAttributeKeys.end();
+}
+
 // Attribute keys are the same charset as signal names (config::
 // IsValidSignalName): a key outside it is silently dropped rather than
 // rejected -- a meta entry is decoration, and one odd key must not cost the
-// whole notification. Mirrors the wire rule for params.meta.
+// whole notification. Mirrors the wire rule for params.meta. A key colliding
+// with a reserved provenance attribute is dropped the same way: decoration
+// must not be able to masquerade as the frame's own source/signal/from.
 std::map<std::string, std::string> SanitizeMeta(const nlohmann::json& meta) {
     std::map<std::string, std::string> out;
     if (!meta.is_object()) return out;
     for (const auto& [key, value] : meta.items()) {
         if (!config::IsValidSignalName(key) || !value.is_string()) continue;
+        if (IsReservedAttributeKey(key)) continue;
         out.emplace(key, value.get<std::string>());
+    }
+    return out;
+}
+
+// The content BODY is untrusted text placed between the wrapper's open and
+// close tags. Attribute values are escaped so one meta entry cannot break out
+// of its quoted attribute (see EscapeAttrValue) -- but the body sat verbatim,
+// so content containing a literal "</signal>" followed by a forged
+// "<signal source=\"...\">" produced a second, well-formed frame the model
+// could not distinguish from a real one. Escaping every '<' removes the
+// ability to open ANY tag from within the body, which is the same guarantee
+// the attribute escaping gives attributes.
+std::string EscapeContent(const std::string& content) {
+    std::string out;
+    out.reserve(content.size());
+    for (const char c : content) {
+        if (c == '<') out += "&lt;";
+        else out += c;
     }
     return out;
 }
@@ -61,7 +97,7 @@ std::string WrapSignal(const std::string& source, const std::string& signal,
     }
     tag += ">";
     if (content.empty()) return tag + "</signal>";
-    return tag + "\n" + content + "\n</signal>";
+    return tag + "\n" + EscapeContent(content) + "\n</signal>";
 }
 
 void SignalRouter::RegisterChannel(const config::ChannelEntry& entry) {
@@ -138,7 +174,14 @@ void SignalRouter::OnMcpNotification(const std::string& channel, const std::stri
     const std::map<std::string, std::string> meta =
         meta_it == params->end() ? std::map<std::string, std::string>{} : SanitizeMeta(*meta_it);
     const std::string wrapped = WrapSignal(channel, signal, meta, content);
-    Deliver(channel, signal, wrapped);
+    if (Deliver(channel, signal, wrapped) == Delivery::kNoSubscriber) {
+        // Every other drop path above logs a line; a well-formed, allowlisted
+        // signal with no live subscriber must too, or this specific (likely
+        // common) case is invisible to an operator debugging "why didn't my
+        // signal fire".
+        minimal::common::DefaultLogger().warn(
+            "signal channel '{}': signal '{}' has no subscriber; dropped", channel, signal);
+    }
 }
 
 SignalDelivery SignalRouter::DeliverInternal(const std::string& from_session,

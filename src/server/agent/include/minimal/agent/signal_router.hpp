@@ -135,10 +135,13 @@ private:
 // The <signal> wrapper around delivered content -- the provenance frame that
 // tells the model where a message came from and that its text is UNTRUSTED
 // (external signal content is attacker-adjacent in every mode: the allowlist
-// gates shape, never content). Attribute keys outside [a-z0-9._-] are
-// silently dropped and values are escaped (backslash, quote, control chars),
-// so one meta entry cannot break out of its attribute; values are otherwise
-// verbatim. Exposed for the router's tests and the service facade.
+// gates shape, never content). Attribute keys outside [a-z0-9._-] or
+// colliding with a reserved provenance name (source/signal/from) are silently
+// dropped and values are escaped (backslash, quote, control chars), so one
+// meta entry cannot break out of its attribute or masquerade as the frame's
+// own provenance; values are otherwise verbatim. The body is escaped too
+// ('<' -> "&lt;"), so content cannot close the tag early and forge a nested
+// <signal> frame. Exposed for the router's tests and the service facade.
 std::string WrapSignal(const std::string& source, const std::string& signal,
                        const std::map<std::string, std::string>& attributes,
                        const std::string& content);

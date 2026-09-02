@@ -5,6 +5,7 @@
 #include <utility>
 
 #include "minimal/agent/compaction_boundary.hpp"
+#include "minimal/agent/signal_router.hpp"
 #include "minimal/config/project_context.hpp"
 #include "minimal/session/session_reader.hpp"
 #include "minimal/session/sqlite_history_store.hpp"
@@ -109,6 +110,9 @@ std::shared_ptr<Session> SessionRegistry::CreateResolved(SessionParams params,
     // Read before params is moved from.
     const std::string params_parent = params.parent_session_id;
     const std::filesystem::path project_root = params.project_root;
+    SignalRouter* const signal_router = params.signal_router;
+    const std::vector<std::string> signal_selectors = std::move(params.signal_selectors);
+    const bool signal_resume = params.resume;
 
     // PROJECT CONTEXT (AGENTS.md/CLAUDE.md), loaded HERE -- in the funnel every
     // session passes through: top-level creation, resume, and SubagentManager
@@ -261,7 +265,10 @@ std::shared_ptr<Session> SessionRegistry::CreateResolved(SessionParams params,
                                              std::move(seeded_history), seed_first_persisted_seq,
                                              seed_head_is_summary);
     // Wired before the session is findable, so the first command a client sends
-    // cannot arrive at a session that has no registry yet.
+    // cannot arrive at a session that has no registry yet. Signal subscription
+    // (below, inside the locked block) is part of the same "findable" bar --
+    // an internal signal addressed to this session_id must never be able to
+    // observe it before its declared subscriptions exist.
     session->set_presets(&presets_);
     // A SUBAGENT GETS NO COMMAND SURFACE. Commands are a user control channel,
     // and a child has no user: its client attaches to observe, and the spawn was
@@ -279,6 +286,25 @@ std::shared_ptr<Session> SessionRegistry::CreateResolved(SessionParams params,
 
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        // Signal subscriptions register HERE, inside the same critical section
+        // that makes the session findable in sessions_ -- not afterward from
+        // the RPC layer. ApplySignals already validated every selector before
+        // the DB row/Session existed, so Subscribe here cannot fail for a
+        // reason a client could have avoided; a failure is logged, not
+        // surfaced, exactly like the RPC-layer code this replaces. This closes
+        // the TOCTOU window where an internal signal addressed to session_id,
+        // sent the instant after CreateSession's response, found no subscriber
+        // even though the request that minted the id had already declared one.
+        if (signal_router != nullptr && !signal_selectors.empty()) {
+            if (signal_resume) signal_router->Unsubscribe(session_id);
+            for (const auto& selector : signal_selectors) {
+                std::string error;
+                if (!signal_router->Subscribe(session, selector, error)) {
+                    logger_.warn("session {}: subscribing '{}' failed: {}", session_id, selector,
+                                error);
+                }
+            }
+        }
         // The RESERVATION made at the top of this function is what guarantees
         // exclusivity -- no other construction can be in flight for this id,
         // and no live session carries it. Inserting and releasing the claim in

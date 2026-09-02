@@ -233,7 +233,6 @@ grpc::Status SessionServiceImpl::CreateSession(grpc::ServerContext* context,
         logger_.warn("CreateSession failed: {}", e.what());
         return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, e.what());
     }
-    SubscribeSignals(session, *request);
 
     *response->mutable_session() = ToProto(row);
     return grpc::Status::OK;
@@ -278,7 +277,11 @@ grpc::Status SessionServiceImpl::ApplySignals(const v1::CreateSessionRequest& re
         // trigger an MCP tool server gets from a session whose preset names
         // it -- and a channel that fails to come up fails the session start:
         // subscribing to a channel that cannot connect would otherwise look
-        // exactly like "connected but no signals ever arrive".
+        // exactly like "connected but no signals ever arrive". A null manager
+        // is a deliberately supported degraded mode (a host that wires the
+        // router without a live MCP manager, e.g. a test harness): liveness
+        // simply cannot be checked, so validation stays structural-only,
+        // exactly like an internal-source selector.
         if (channel != mcp::kInternalSignalSource && mcp_manager_ != nullptr) {
             std::string connect_error;
             if (!mcp_manager_->EnsureAlive(channel, connect_error)) {
@@ -299,24 +302,14 @@ grpc::Status SessionServiceImpl::ApplySignals(const v1::CreateSessionRequest& re
     params.wake_on_injection = true;
     params.signal_context = signal_router_->SignalContextFor(
         std::vector<std::string>(request.signals().begin(), request.signals().end()));
+    // Staged for CreateResolved, not acted on here: subscription registration
+    // happens INSIDE the registry's create funnel, atomically with the
+    // session becoming findable, so no internal signal can ever observe this
+    // session_id before its declared subscriptions exist. See
+    // SessionRegistry::CreateResolved.
+    params.signal_router = signal_router_;
+    params.signal_selectors.assign(request.signals().begin(), request.signals().end());
     return grpc::Status::OK;
-}
-
-void SessionServiceImpl::SubscribeSignals(std::shared_ptr<agent::Session> session,
-                                          const v1::CreateSessionRequest& request) const {
-    if (signal_router_ == nullptr || request.signals().empty() || session == nullptr) return;
-    // A resume re-declares: last stream's word wins, so the session's
-    // subscriptions are replaced wholesale rather than accumulated.
-    signal_router_->Unsubscribe(session->session_id());
-    for (const auto& selector : request.signals()) {
-        std::string error;
-        if (!signal_router_->Subscribe(session, selector, error)) {
-            // Unreachable after ApplySignals validated the same selectors --
-            // logged, never surfaced: the session exists either way.
-            logger_.warn("session {}: subscribing '{}' failed: {}", session->session_id(),
-                         selector, error);
-        }
-    }
 }
 
 grpc::Status SessionServiceImpl::ResumeSession(const v1::CreateSessionRequest* request,
@@ -396,7 +389,6 @@ grpc::Status SessionServiceImpl::ResumeSession(const v1::CreateSessionRequest* r
         logger_.warn("resume of session {} failed: {}", stored->session_id, e.what());
         return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, e.what());
     }
-    SubscribeSignals(resumed, *request);
 
     // Re-read rather than reuse `stored`: resume may have appended a repair
     // message, and the response should carry the current message_count.

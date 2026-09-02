@@ -67,6 +67,7 @@ class McpClientManager;       // borrowed via SessionParams::mcp_manager
 namespace minimal::agent {
 
 class ProviderInstanceCache;  // borrowed via set_provider_instance_cache
+class SignalRouter;           // borrowed via SessionParams::signal_router
 
 // The session's two transport-side primitives, extracted from Session into a
 // shareable block: the params PRODUCER creates them so it can also build a
@@ -137,8 +138,25 @@ struct SessionParams {
     // instructions), composed by the session service from the router and
     // APPENDED to project_context by the registry's create funnel. Empty for
     // sessions with no subscriptions -- which is every subagent, since
-    // subagents cannot subscribe.
+    // subagents cannot subscribe. Travels alongside signal_router and
+    // signal_selectors below as one group: all three are populated together
+    // by ApplySignals and consumed together by CreateResolved.
     std::string signal_context;
+    // Borrowed, like mcp_manager. Set by ApplySignals only when the request
+    // declared selectors and a router is configured; null otherwise --
+    // including every subagent, since subagents cannot subscribe.
+    // CreateResolved uses this to register the session's subscriptions
+    // atomically with making it findable (inside the same registry-mutex
+    // critical section as the sessions_ insertion), closing the window
+    // where an internal signal addressed to this session_id would find no
+    // subscriber even though the CreateSessionRequest that created it had
+    // already declared one.
+    SignalRouter* signal_router = nullptr;
+    // The raw selector strings from CreateSessionRequest.signals, already
+    // validated by ApplySignals/CheckSelector. Consumed by CreateResolved
+    // to call SignalRouter::Subscribe once per selector; empty whenever
+    // signal_router is null.
+    std::vector<std::string> signal_selectors;
     // True when this Session reopens a STORED session: the registry loads the
     // stored transcript as the loop's seeded history (without re-appending it)
     // before construction. The session row must already exist either way --
