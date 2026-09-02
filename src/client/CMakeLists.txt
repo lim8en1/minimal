@@ -28,6 +28,7 @@ add_library(minimal_client_core SHARED
     view/tools_panel.cpp
     view/session_picker.cpp
     view/prompt_modal.cpp
+    view/modal_host.cpp
     render/color_downsample.cpp
     render/theme.cpp
     render/syntax_highlighter.cpp

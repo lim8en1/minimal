@@ -95,6 +95,7 @@ add_executable(minimal_tests
     session_state_test.cpp
     app_state_test.cpp
     view_factory_test.cpp
+    modal_host_test.cpp
     keybindings_test.cpp
     keybinding_dispatch_test.cpp
     key_event_parser_test.cpp
@@ -214,7 +215,7 @@ add_subdirectory(fixtures)
 add_dependencies(minimal_tests
     fixture-good fixture-collision fixture-bad-abi fixture-minimal fixture-not-a-plugin
     fixture-throws fixture-advisor fixture-service fixture-service-b fixture-hook
-    fixture-client fixture-client-exclusive)
+    fixture-client fixture-client-exclusive fixture-endpoint)
 target_compile_definitions(minimal_tests PRIVATE
     MINIMAL_FIXTURE_DIR="${CMAKE_CURRENT_BINARY_DIR}/fixtures"
     MINIMAL_BUNDLED_DIR="${CMAKE_SOURCE_DIR}/bundled"
