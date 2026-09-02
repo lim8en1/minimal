@@ -46,10 +46,6 @@ using minimal::logo::GenerateOptions;
 
 struct LogoConfig {
     std::string text = "minimal";
-    // The title block's byline. The version half is NOT configured: it comes
-    // from the binary itself (minimal::common::Version()), so the banner can
-    // never disagree with what is actually running.
-    std::string author = "lim8en1";
     std::vector<std::string> styles;   // empty = every built-in style
     std::string charset;               // empty = each style's own pool
     bool regenerate_per_session = true;
@@ -60,9 +56,6 @@ LogoConfig ParseConfig(const nlohmann::json& config) {
     if (!config.is_object()) return out;
     if (auto it = config.find("text"); it != config.end() && it->is_string()) {
         out.text = it->get<std::string>();
-    }
-    if (auto it = config.find("author"); it != config.end() && it->is_string()) {
-        out.author = it->get<std::string>();
     }
     if (auto it = config.find("charset"); it != config.end() && it->is_string()) {
         out.charset = it->get<std::string>();
@@ -174,12 +167,13 @@ private:
     }
 
     // The title block above the art -- the word in caps plus the version the
-    // RUNNING binary reports, never one hardcoded into the plugin.
+    // RUNNING binary reports, never one hardcoded into the plugin. The
+    // byline is fixed: like the version, it is NOT configurable.
     ftxui::Element Title(const Theme& theme) const {
         return ftxui::vbox(
             {ftxui::text("MINIMAL v" + std::string(minimal::common::Version())) | ftxui::bold |
                  ftxui::color(theme.ColorFor("banner_art")),
-             ftxui::text("   by " + config_.author) | ftxui::color(theme.ColorFor("banner_hint"))});
+             ftxui::text(std::string("   by ") + kAuthor) | ftxui::color(theme.ColorFor("banner_hint"))});
     }
 
     ftxui::Element Hint(const Theme& theme) const {
@@ -194,6 +188,7 @@ private:
     mutable std::mt19937 rng_;  // Render is loop-thread only; the mutex covers it anyway
 
     static constexpr const char* kSharedKey = "";
+    static constexpr const char* kAuthor = "lim8en1";
 };
 
 }  // namespace
