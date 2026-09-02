@@ -42,13 +42,9 @@
 #include "minimal/client/session_client.hpp"
 #include "minimal/client/scrollback_refresh.hpp"
 #include "minimal/client/status_format.hpp"
+#include "minimal/client/tui_bootstrap.hpp"
 #include "minimal/client/ui_config.hpp"
 #include "minimal/client/utf8.hpp"
-#include "minimal/client/plugins/client_plugin_abi.h"
-#include "minimal/client/plugins/client_plugin_loader.hpp"
-#include "minimal/client/plugins/core_registrations.hpp"
-#include "minimal/client/plugins/host_seams.hpp"
-#include "minimal/client/plugins/plugin_discovery.hpp"
 #include "minimal/client/plugins/registries.hpp"
 #include "minimal/client/view/chat_view.hpp"
 #include "minimal/client/view/modal_host.hpp"
@@ -60,15 +56,10 @@
 #include "minimal/client/view/tab_bar.hpp"
 #include "minimal/client/view/tools_panel.hpp"
 #include "minimal/client/render/color_downsample.hpp"
-#include "minimal/client/render/markdown_renderer.hpp"
-#include "minimal/client/render/syntax_highlighter.hpp"
 #include "minimal/client/render/streaming_markdown_view.hpp"
 #include "minimal/client/render/theme.hpp"
 #include "minimal/common/abi_tag.hpp"
-#include "minimal/common/bundled_assets.hpp"
-#include "minimal/common/config_paths.hpp"
 #include "minimal/common/logger.hpp"
-#include "minimal/plugins/name_registry.hpp"
 
 namespace {
 
@@ -488,9 +479,6 @@ using minimal::client::SessionState;
 using minimal::client::SessionStateKind;
 using minimal::client::Theme;
 
-constexpr const char* kDefaultStatusFormat =
-    "{version} | {session} | {tokens} | {model} | {agent} | {permission_mode}";
-
 // What a quit / tab-close confirmation will destroy, when confirmed.
 struct PendingClose {
     bool quit = false;
@@ -529,333 +517,41 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     }
 
     // --- config + client plugins --------------------------------------------
-    //
-    // ORDER MATTERS, and each step is load-bearing for a later one:
-    //   1. ui.json (status format -- it selects plugin segments by id)
-    //   2. vendored grammars registered as the additive registry's defaults
-    //   3. PLUGIN LOAD (contexts carry the attention sink and the data path;
-    //      registries record what each plugin claimed)
-    //   4. NameRegistry resolve: collisions fatal, dangling aliases warned
-    //   5. THEME (sections may reference loaded plugin names)
-    //   6. keybindings (+ plugin view defaults, only where nothing binds)
-    //   7. core defaults fill every unclaimed slot, then the frame is assembled
-    const auto config_dir = minimal::common::ConfigDir();
-    const auto depth = minimal::client::DetectColorDepth();
-    const auto ui = minimal::client::LoadUiConfig(config_dir);
+    // ORDER MATTERS -- see tui_bootstrap.hpp/.cpp for the full sequence
+    // (ui.json -> grammars -> plugin load -> collisions -> theme ->
+    // keybindings -> status format -> highlighter/renderer/engine -> chat
+    // surface). `env` MUST be a plain local, never moved/copied/returned:
+    // several of its fields hold pointers into ITS OWN other fields (the
+    // header's address-stability contract), so BuildTuiEnvironment fills it
+    // in place rather than returning one by value.
+    minimal::client::TuiEnvironment env;
+    if (!minimal::client::BuildTuiEnvironment(*client, env)) return kUnavailable;
 
-    plugins::AttentionState attention_state;
-    // The seam objects must OUTLIVE plugin registration: a plugin captures the
-    // raw pointer from its context at registration and may call it for the
-    // process lifetime (lazy Find, attention raises). Binding the factories
-    // inline into the loader call destroyed the temporaries at the end of that
-    // full expression -- every seam call was a virtual dispatch through freed
-    // memory.
-    const auto attention_sink = plugins::MakeHostAttentionSink(&attention_state);
-    const auto host_client_api = plugins::MakeHostClientApi(client.get());
-    plugins::ViewRegistry view_registry;
-    plugins::StartViewRegistry start_view_registry;
-    plugins::ToolResultRendererRegistry renderer_registry;
-    plugins::MessageRendererRegistry message_registry;
-    plugins::StatusSegmentRegistry status_registry;
-    plugins::SyntaxGrammarRegistry grammar_registry;
-    plugins::ChatSurfaceRegistry surface_registry;
-    plugins::MarkdownEngineRegistry engine_registry;
-
-    plugins::RegisterCoreSyntaxGrammars(grammar_registry);
-
-    // Discovery + load. The config file is the client's own (client-plugins.json);
-    // the server owns plugins.json, so neither writer can stomp the other's
-    // entries. Written back after discovery, like the server's.
-    plugins::ClientPluginConfig plugin_config;
-    {
-        const auto config_path = config_dir / "client-plugins.json";
-        std::error_code ec;
-        if (std::filesystem::exists(config_path, ec)) {
-            std::ifstream in(config_path);
-            const std::string contents((std::istreambuf_iterator<char>(in)),
-                                       std::istreambuf_iterator<char>());
-            plugin_config = plugins::ParseClientPluginConfig(contents);
-            // ParseClientPluginConfig degrades a malformed file to an empty
-            // config; silently rewriting the user's bytes over that default
-            // would destroy their enablement decisions and per-plugin config
-            // (a trailing comma would disable every user plugin on next
-            // boot). On a malformed parse: warn and DO NOT rewrite.
-            if (plugin_config.malformed) {
-                plugin_config.preserved = contents;
-                std::fprintf(stderr,
-                             "minimal: warning: %s is malformed -- it was NOT rewritten; "
-                             "fix or remove it to enable plugin config management\n",
-                             std::filesystem::path(config_path).c_str());
-            }
-        }
-        const auto candidates = plugins::DiscoverClientPlugins(
-            minimal::common::BundledClientPluginDir(), config_dir / "client-plugins",
-            plugin_config);
-        if (!plugin_config.malformed) {
-            // Same discipline as the server's WriteConfigIfChanged: create the
-            // parent dir, skip the write when nothing changed, report errors.
-            std::filesystem::create_directories(config_dir, ec);
-            const auto serialized = plugins::SerializeClientPluginConfig(plugin_config);
-            std::string existing;
-            if (std::filesystem::exists(config_path, ec)) {
-                std::ifstream in(config_path);
-                existing = std::string((std::istreambuf_iterator<char>(in)),
-                                       std::istreambuf_iterator<char>());
-            }
-            if (existing != serialized) {
-                std::ofstream out(config_path);
-                out << serialized;
-                if (!out) {
-                    std::fprintf(stderr, "minimal: warning: could not write %s\n",
-                                 std::filesystem::path(config_path).c_str());
-                }
-            }
-        }
-
-        plugins::ClientPluginLoader loader(view_registry, renderer_registry, message_registry,
-                                           status_registry, grammar_registry, surface_registry,
-                                           engine_registry, start_view_registry,
-                                           attention_sink.get(), host_client_api.get());
-        const auto records = loader.LoadAll(candidates);
-
-        // Provenance-keyed severity, mirrored from the server's sanity check:
-        // a failed BUNDLED plugin is fatal (a silently missing renderer reads
-        // as a bug), a failed user plugin is a warning.
-        bool fatal = false;
-        for (const auto& record : records) {
-            if (record.ok() || record.status == plugins::LoadStatus::Disabled) {
-                if (record.status == plugins::LoadStatus::Disabled) continue;
-                std::fprintf(stderr, "minimal: client plugin '%s' loaded (%s)\n",
-                             record.name.c_str(), record.version.c_str());
-                continue;
-            }
-            if (record.provenance == plugins::Provenance::Bundled) {
-                std::fprintf(stderr, "minimal: FATAL: bundled client plugin '%s': %s (%s)\n",
-                             record.file.string().c_str(), plugins::ToString(record.status).data(),
-                             record.error.c_str());
-                fatal = true;
-            } else {
-                std::fprintf(stderr, "minimal: warning: client plugin '%s': %s (%s)\n",
-                             record.file.string().c_str(), plugins::ToString(record.status).data(),
-                             record.error.c_str());
-            }
-        }
-        if (fatal) return kUnavailable;
-
-        // Name collisions: the SAME rule as the server, through the shared
-        // NameRegistry (moved to common so both loaders run one mechanism).
-        // Registration keys are original names; a duplicate surface key is
-        // fatal and names both claimants.
-        minimal::plugins::NameRegistry names;
-        const auto feed = [&names](minimal::plugins::NameKind kind,
-                                   const std::vector<plugins::Attribution>& attributions) {
-            for (const auto& attribution : attributions) {
-                names.Register(kind, attribution.plugin_name, attribution.original_name);
-            }
-        };
-        feed(minimal::plugins::NameKind::ViewId, view_registry.attributions());
-        feed(minimal::plugins::NameKind::ViewId, start_view_registry.attributions());
-        feed(minimal::plugins::NameKind::ToolResultRenderer, renderer_registry.attributions());
-        for (const auto& [kind, attribution] : message_registry.claims()) {
-            names.Register(minimal::plugins::NameKind::MessageRenderer,
-                           attribution.plugin_name, attribution.original_name);
-        }
-        feed(minimal::plugins::NameKind::StatusSegment, status_registry.attributions());
-        feed(minimal::plugins::NameKind::SyntaxGrammar, grammar_registry.attributions());
-        // Client aliases resolve collisions (the ARCHITECTURE.md rule: a
-        // duplicate view id / tool name is "fatal and alias-resolvable"). They
-        // were parsed, serialized and documented while never reaching the
-        // NameRegistry -- so the alias key did nothing and the dangling-alias
-        // diagnostic below was unreachable. Like the server's resolver: the
-        // alias lands on the ONE kind whose stable identity it names (so a
-        // resolved alias renames that entry's surface and dedupes the
-        // collision), and an identity no kind claims is dangling on a single
-        // kind -- reported once, not four times. Addressing stays CANONICAL
-        // (keybindings.json addresses ids, never aliases).
-        const auto alias_on_kind = [&](const std::string& key, const std::string& target) {
-            const auto matches = [](const std::vector<plugins::Attribution>& attributions,
-                                    const std::string& qualified) {
-                for (const auto& a : attributions) {
-                    if (a.plugin_name + "." + a.original_name == qualified) return true;
-                }
-                return false;
-            };
-            if (matches(view_registry.attributions(), key)) {
-                names.SetAlias(minimal::plugins::NameKind::ViewId, key, target);
-            } else if (matches(renderer_registry.attributions(), key)) {
-                names.SetAlias(minimal::plugins::NameKind::ToolResultRenderer, key, target);
-            } else {
-                bool matched_message = false;
-                for (const auto& [kind, attribution] : message_registry.claims()) {
-                    (void)kind;
-                    if (attribution.plugin_name + "." + attribution.original_name == key) {
-                        names.SetAlias(minimal::plugins::NameKind::MessageRenderer, key, target);
-                        matched_message = true;
-                    }
-                }
-                if (!matched_message) {
-                    if (matches(status_registry.attributions(), key)) {
-                        names.SetAlias(minimal::plugins::NameKind::StatusSegment, key, target);
-                    } else if (matches(grammar_registry.attributions(), key)) {
-                        names.SetAlias(minimal::plugins::NameKind::SyntaxGrammar, key, target);
-                    } else {
-                        names.SetAlias(minimal::plugins::NameKind::ViewId, key, target);   // dangling
-                    }
-                }
-            }
-        };
-        for (const auto& [alias_key, alias_target] : plugin_config.aliases) {
-            alias_on_kind(alias_key, alias_target);
-        }
-        const auto resolved = names.Resolve();
-        for (const auto& collision : resolved.fatal_collisions) {
-            std::fprintf(stderr, "minimal: FATAL: client plugin name collision: %s\n",
-                         collision.c_str());
-            fatal = true;
-        }
-        for (const auto& dangling : resolved.dangling_aliases) {
-            std::fprintf(stderr, "minimal: warning: client plugin alias names nothing: %s\n",
-                         dangling.c_str());
-        }
-        if (fatal) return kUnavailable;
-    }
-
-    // Loaded plugin names feed the theme's section check.
-    std::vector<std::string> loaded_plugins;
-    for (const auto& attribution : view_registry.attributions()) {
-        if (!attribution.plugin_name.empty()) loaded_plugins.push_back(attribution.plugin_name);
-    }
-    for (const auto& attribution : start_view_registry.attributions()) {
-        if (!attribution.plugin_name.empty()) loaded_plugins.push_back(attribution.plugin_name);
-    }
-    for (const auto& attribution : renderer_registry.attributions()) {
-        if (!attribution.plugin_name.empty()) loaded_plugins.push_back(attribution.plugin_name);
-    }
-    for (const auto& attribution : status_registry.attributions()) {
-        if (!attribution.plugin_name.empty()) loaded_plugins.push_back(attribution.plugin_name);
-    }
-    for (const auto& attribution : grammar_registry.attributions()) {
-        if (!attribution.plugin_name.empty()) loaded_plugins.push_back(attribution.plugin_name);
-    }
-
-    // ui.json's "theme" selects the file (themes/<name>.json); empty means
-    // the built-in default. Previously hardcoded to "dark" regardless of
-    // config, which made the bundled light.json -- and any user theme --
-    // unreachable from the TUI.
-    const std::string theme_name = !ui.theme.empty() ? ui.theme : std::string("dark");
-    Theme theme = [&] {
-        try {
-            return Theme::Load(config_dir / "themes", theme_name, depth, &loaded_plugins);
-        } catch (const std::exception& e) {
-            std::fprintf(stderr, "minimal: %s; using terminal defaults\n", e.what());
-            // An empty-but-valid document: "no colors set" is the fallback,
-            // and ColorFor's Default fallback covers every role. ("{}" is NOT
-            // valid here -- Parse requires a "colors" object, so a missing
-            // themes dir used to throw out of the fallback itself.)
-            return Theme::Parse(R"({"name":"default","colors":{}})", depth);
-        }
-    }();    Keybindings keys = [&] {
-        try {
-            return Keybindings::Load(config_dir);
-        } catch (const std::exception& e) {
-            std::fprintf(stderr, "minimal: %s; using default keybindings\n", e.what());
-            return Keybindings::Parse("{}");
-        }
-    }();
-
-    // Plugin views: register each id's suggested default keybinding only where
-    // nothing binds it yet (the user's file wins), and remember the runtime
-    // dispatch entries.
-    struct PluginViewEntry {
-        const plugins::View* view;
-        ftxui::Component component;
-        bool visible = false;
-    };
-    std::vector<PluginViewEntry> plugin_views;
-    for (const auto& view : view_registry.views()) {
-        keys.EnsureDefault(view->spec().id, view->spec().default_keybinding);
-        plugin_views.push_back(PluginViewEntry{view.get(), view->component(), false});
-    }
-    // Parsed ONCE, after keys.all() has settled (core defaults + the user's
-    // file + every plugin view's EnsureDefault default, just folded in
-    // above): with_keys below used to re-derive this per EVENT --
-    // MatchesAny(event, KeyToEvents(keys.KeyFor(action))) allocates a string
-    // in KeyFor and a string+vector+Events in ParseKeySpec, for a table that
-    // never changes again after startup. keymap.Unmapped() subsumes the
-    // per-action warning loop this replaces.
-    const auto keymap = ResolvedKeymap::Build(keys);
-    for (const auto& [action, key] : keymap.Unmapped()) {
-        std::fprintf(stderr, "minimal: no key mapping for '%s' -> '%s'\n", action.c_str(),
-                     key.c_str());
-    }
-
-    // The status format: ui.json's value, or the built-in default. Unknown ids
-    // warn UNLESS a registered segment answers to them -- the registry is part
-    // of the known-id set now.
-    const std::string status_format_string =
-        !ui.status_format.empty() ? ui.status_format : std::string(kDefaultStatusFormat);
-    const auto status_format = minimal::client::ParseStatusFormat(status_format_string);
-    for (const auto& id : minimal::client::UnknownStatusSegments(status_format_string)) {
-        if (status_registry.Find(id) == nullptr) {
-            std::fprintf(stderr, "minimal: unknown status segment '{%s}'\n", id.c_str());
-        }
-    }
-
-    // The highlighter consults the assembled grammar table (vendored defaults
-    // plus plugin additions), so a plugin's language highlights like a vendored
-    // one. The renderer owns it; the engine routes fenced code through it.
-    const std::vector<minimal::client::LanguageDefinition> languages = [&] {
-        std::vector<minimal::client::LanguageDefinition> out;
-        for (const auto& grammar : grammar_registry.grammars()) {
-            out.push_back(minimal::client::LanguageDefinition{
-                grammar->Language(), grammar->LanguageFn(), grammar->Rules()});
-        }
-        return out;
-    }();
-    minimal::client::SyntaxHighlighter highlighter(theme, languages);
-
-    // Core defaults fill every slot no plugin claimed. The engine first (the
-    // agent-markdown default renders through it), then the kind defaults.
-    // ONE construction of the renderer, AFTER the highlighter exists: the
-    // engine binds a reference to this variable, and the first draft reassigned
-    // the variable in place after registering the engine (second constructor
-    // call) -- correct only by coincidence of identity, and a refactor that
-    // introduced a second variable would dangle the engine silently.
-    minimal::client::MarkdownRenderer renderer(&theme, &highlighter);
-    plugins::RegisterDefaultMarkdownEngine(engine_registry, renderer);
-    // Non-null by construction: RegisterDefaultMarkdownEngine registers the
-    // md4c adapter when no plugin claimed the slot.
-    plugins::MarkdownEngine& engine = *engine_registry.engine;
-    plugins::RegisterCoreMessageRenderers(message_registry);
-    plugins::RegisterCoreAgentMarkdownRenderer(message_registry, engine);
-
-    // The exclusive chat surface, when a plugin claimed it.
-    plugins::ChatSurface* chat_surface = surface_registry.surface.get();
-    if (chat_surface != nullptr) {
-        // A throwing surface is disabled, not fatal (catch + disable, track
-        // R2): OnTheme runs before any event flows, so a throw here is the
-        // plugin's first chance to kill the process unguarded.
-        try {
-            chat_surface->OnTheme(theme);
-        } catch (const std::exception& error) {
-            std::fprintf(stderr, "minimal: chat surface plugin threw on theme (%s) -- "
-                                 "disabled; the core chat view takes over\n",
-                         error.what());
-            chat_surface = nullptr;
-        } catch (...) {
-            std::fprintf(stderr, "minimal: chat surface plugin threw on theme (non-standard "
-                                 "exception) -- disabled; the core chat view takes over\n");
-            chat_surface = nullptr;
-        }
-    }
+    // Local aliases, same names the inline code used to declare directly:
+    // every lambda below this point captures `[&]`, i.e. by ordinary lexical
+    // scoping, so introducing these here (rather than rewriting every
+    // capture site to say `env.theme` etc.) is what keeps the rest of this
+    // function's text unchanged. `theme`/`engine` deref an optional/pointer
+    // that BuildTuiEnvironment guarantees non-null on success.
+    Theme& theme = *env.theme;
+    plugins::MarkdownEngine& engine = *env.engine;
+    plugins::ChatSurface* chat_surface = env.chat_surface;
+    auto& view_registry = env.view_registry;
+    auto& start_view_registry = env.start_view_registry;
+    auto& renderer_registry = env.renderer_registry;
+    auto& message_registry = env.message_registry;
+    auto& status_registry = env.status_registry;
+    const auto& status_format = env.status_format;
+    const auto& keymap = env.keymap;
+    auto& plugin_views = env.plugin_views;
 
     auto app = std::make_shared<AppState>(client);
-    app->SetPluginAttention(&attention_state);
+    app->SetPluginAttention(&env.attention_state);
     app->SetChatSurface(chat_surface);
     // Memory bounds (track R2): ui.json's values, or the built-in defaults
     // (SetUiBounds treats 0 as "keep the default"). Applied before any tab can
     // open, so every SessionState starts bounded.
-    app->SetUiBounds(ui.scrollback_window_max_messages, ui.tool_output_buffer_bytes);
+    app->SetUiBounds(env.ui.scrollback_window_max_messages, env.ui.tool_output_buffer_bytes);
     // FULLSCREEN ALTERNATE SCREEN, not TerminalOutput: the alternate buffer is
     // repaint-safe on terminal resize. TerminalOutput repaints the PRIMARY
     // screen by cursor arithmetic over the previous frame, and a resize reflows

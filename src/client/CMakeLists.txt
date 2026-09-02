@@ -18,6 +18,7 @@ add_library(minimal_client_core SHARED
     ui_config.cpp
     chat_model.cpp
     scrollback_refresh.cpp
+    tui_bootstrap.cpp
     plugins/registries.cpp
     plugins/plugin_discovery.cpp
     plugins/plugin_loader.cpp

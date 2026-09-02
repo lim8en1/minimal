@@ -1,0 +1,112 @@
+#pragma once
+
+// The TUI's startup sequence, factored out of RunTui (app.cpp): ui.json load
+// -> vendored grammar registration -> client plugin discovery/load/collision
+// resolution -> theme load -> keybindings load/keymap parse -> status format
+// parse -> syntax highlighter/markdown renderer/engine wiring -> chat
+// surface wiring. ARCHITECTURE.md's "config + client plugins" ORDER MATTERS
+// comment (app.cpp) states the exact dependency chain; this file performs it
+// verbatim, just no longer inline in a 1000+ line function.
+//
+// *** ADDRESS-STABILITY CONTRACT -- READ BEFORE TOUCHING THIS FILE ***
+// Several fields below hold a pointer or reference into ANOTHER field of the
+// SAME TuiEnvironment: `attention_sink` captures `&attention_state`,
+// `highlighter` captures `theme` by reference (SyntaxHighlighter stores
+// `const Theme&`), `renderer` captures `&*theme` and `&*highlighter`
+// (MarkdownRenderer stores raw pointers), and `engine` is a reference into
+// `engine_registry`'s own heap-owned MarkdownEngine. None of this is safe
+// under a MOVE: if the whole struct were ever returned by value or otherwise
+// relocated, every one of those captured addresses would go stale -- the
+// exact "closures/pointers outlive the object they point into" bug class
+// documented throughout app.cpp (see e.g. MarkdownRenderer's own
+// construction comment). BuildTuiEnvironment therefore takes `out` BY
+// REFERENCE and fills it IN PLACE rather than returning a TuiEnvironment by
+// value: the caller must declare `TuiEnvironment env;` as a plain local and
+// never move, copy, or return it. `theme`/`highlighter`/`renderer` are
+// std::optional specifically because SyntaxHighlighter/MarkdownRenderer are
+// not default-constructible (reference/pointer members) -- emplace()
+// constructs them IN the optional's own inline storage, which lives at a
+// fixed offset within `out` for as long as `out` itself is never relocated.
+
+#include <cstdint>
+#include <filesystem>
+#include <memory>
+#include <optional>
+#include <string>
+#include <vector>
+
+#include <ftxui/component/component.hpp>
+
+#include "minimal/client/keybinding_dispatch.hpp"
+#include "minimal/client/keybindings.hpp"
+#include "minimal/client/plugins/registries.hpp"
+#include "minimal/client/render/markdown_renderer.hpp"
+#include "minimal/client/render/syntax_highlighter.hpp"
+#include "minimal/client/render/theme.hpp"
+#include "minimal/client/session_client.hpp"
+#include "minimal/client/status_format.hpp"
+#include "minimal/client/ui_config.hpp"
+
+namespace minimal::client {
+
+// A plugin-registered view's runtime dispatch entry: the view's own spec,
+// its (already-constructed) component, and whether it is currently visible
+// (panels toggle; modals stage into the modal layer on open). `view` is a
+// non-owning pointer into TuiEnvironment::view_registry's heap-owned Views --
+// safe regardless of TuiEnvironment's own address (see the contract above),
+// since a registry only ever relocates its OWN vector of unique_ptrs, never
+// the pointees.
+struct PluginViewEntry {
+    const plugins::View* view;
+    ftxui::Component component;
+    bool visible = false;
+};
+
+struct TuiEnvironment {
+    std::filesystem::path config_dir;
+    ColorDepth depth = ColorDepth::Truecolor;
+    UiConfig ui;
+
+    plugins::AttentionState attention_state;
+    std::unique_ptr<plugins::AttentionSink> attention_sink;
+    std::unique_ptr<plugins::ClientApi> host_client_api;
+
+    plugins::ViewRegistry view_registry;
+    plugins::StartViewRegistry start_view_registry;
+    plugins::ToolResultRendererRegistry renderer_registry;
+    plugins::MessageRendererRegistry message_registry;
+    plugins::StatusSegmentRegistry status_registry;
+    plugins::SyntaxGrammarRegistry grammar_registry;
+    plugins::ChatSurfaceRegistry surface_registry;
+    plugins::MarkdownEngineRegistry engine_registry;
+
+    ResolvedKeymap keymap;
+    std::vector<StatusSegment> status_format;
+
+    // See the address-stability contract above: constructed via emplace(),
+    // never reassigned wholesale.
+    std::optional<Theme> theme;
+    std::optional<SyntaxHighlighter> highlighter;
+    std::optional<MarkdownRenderer> renderer;
+
+    // Non-owning: `engine` points at engine_registry's own heap-owned
+    // default/plugin engine; `chat_surface` at surface_registry's exclusive
+    // surface (null if none claimed the slot, or if one threw on OnTheme).
+    plugins::MarkdownEngine* engine = nullptr;
+    plugins::ChatSurface* chat_surface = nullptr;
+
+    std::vector<PluginViewEntry> plugin_views;
+};
+
+// Runs the whole startup sequence into `out`, which the caller must have
+// declared as a plain local (see the address-stability contract above) --
+// never a temporary, never later moved or returned by value. Diagnostics
+// (plugin load warnings, unknown status segments, unmapped keybindings, a
+// malformed config file) print to stderr exactly as RunTui did inline.
+// Returns false on a FATAL condition (a bundled plugin failed to load, or a
+// name collision among client plugins) -- the caller's contract is to treat
+// that as minimal's kUnavailable exit code, same as the inline code's
+// `return kUnavailable` did at each of these points.
+bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out);
+
+}  // namespace minimal::client
