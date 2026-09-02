@@ -36,6 +36,7 @@
 
 #include "minimal/client/chat_model.hpp"
 #include "minimal/client/cli_args.hpp"
+#include "minimal/client/keybinding_dispatch.hpp"
 #include "minimal/client/keybindings.hpp"
 #include "minimal/client/session_client.hpp"
 #include "minimal/client/status_format.hpp"
@@ -1207,26 +1208,9 @@ int RunTui(const minimal::client::ParsedArgs& args) {
 
     // --- frame -----------------------------------------------------------------
     int panel_height = 12;
-    auto any_work_in_flight = [&](const std::vector<AppState::TabSnapshot>& tabs,
-                                  const std::vector<std::string>& ids) {
-        // The caller's tab snapshots carry the state already — re-snapshotting
-        // every tab (a full deep copy) per keypress was pure waste.
-        for (const auto& id : ids) {
-            for (const auto& tab : tabs) {
-                if (tab.session_id != id) continue;
-                switch (tab.state) {
-                    case SessionStateKind::Thinking:
-                    case SessionStateKind::Working:
-                    case SessionStateKind::Waiting:
-                        return true;
-                    default:
-                        break;
-                }
-                break;
-            }
-        }
-        return false;
-    };
+    // AnyWorkInFlight (keybinding_dispatch.hpp): the caller's tab snapshots
+    // carry the state already -- re-snapshotting every tab (a full deep copy)
+    // per keypress was pure waste.
 
     // Quit = close every tab, with ONE confirmation if any work is in flight
     // (ARCHITECTURE.md "Session lifetime"). Shared by ctrl+q, tab-close's
@@ -1236,7 +1220,7 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         const auto tabs = app->GetAllTabs();
         std::vector<std::string> ids;
         for (const auto& tab : tabs) ids.push_back(tab.session_id);
-        if (!any_work_in_flight(tabs, ids)) {
+        if (!AnyWorkInFlight(tabs, ids)) {
             quit();
         } else {
             pending_close = PendingClose{};
@@ -1484,42 +1468,24 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         const bool group_prev = MatchesAny(event, KeyToEvents(keys.KeyFor("group.previous")));
         if (group_next || group_prev) {
             // Between root groups: focus the next (or previous) ROOT tab.
+            // The index math is pulled out to keybinding_dispatch.hpp and
+            // unit-tested there -- this is the same shape of "find my index
+            // among a filtered subset" bug that jump.attention had (below).
             const auto tabs = app->GetAllTabs();
-            std::vector<std::string> roots;
-            for (const auto& tab : tabs) {
-                if (!tab.is_subagent) roots.push_back(tab.session_id);
-            }
-            if (!roots.empty()) {
-                std::size_t idx = 0;
-                for (std::size_t i = 0; i < roots.size(); ++i) {
-                    if (roots[i] == sid) idx = i;
-                }
-                app->SetFocusedTab(roots[(idx + (group_next ? 1 : roots.size() - 1)) %
-                                         roots.size()]);
-            }
+            const auto target = NextRootGroup(tabs, sid, group_next);
+            if (!target.empty()) app->SetFocusedTab(target);
             return true;
         }
         if (MatchesAny(event, KeyToEvents(keys.KeyFor("jump.attention")))) {
             // Crosses groups; wraps. Only Waiting tabs qualify (the ! glyph).
-            // Scans starting just AFTER the focused tab -- not a fixed index 1,
-            // which ignored which tab was actually focused and could "jump" to
-            // the focused tab itself, a visible no-op exactly when Waiting is
-            // the reason someone pressed the key.
-            const auto tabs = app->GetAllTabs();
-            std::size_t start = 0;
-            for (std::size_t i = 0; i < tabs.size(); ++i) {
-                if (tabs[i].session_id == sid) {
-                    start = i;
-                    break;
-                }
-            }
-            for (std::size_t i = 0; i < tabs.size(); ++i) {
-                const std::size_t idx = (start + 1 + i) % tabs.size();   // +1: skip current
-                if (tabs[idx].attention_glyph == '!') {
-                    app->SetFocusedTab(tabs[idx].session_id);
-                    return true;
-                }
-            }
+            // Scans starting just AFTER the focused tab -- not a fixed index,
+            // which ignored which tab was actually focused and could "jump"
+            // to the focused tab itself, a visible no-op exactly when
+            // Waiting is the reason someone pressed the key. See
+            // keybinding_dispatch.hpp/NextAttentionTab, which this bug is
+            // now a unit test of.
+            const auto target = NextAttentionTab(app->GetAllTabs(), sid);
+            if (!target.empty()) app->SetFocusedTab(target);
             return true;
         }
         // INTERRUPT -- the interactive loop's missing verb. Escape and ctrl+c
@@ -1578,24 +1544,13 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         }
         if (MatchesAny(event, KeyToEvents(keys.KeyFor("tab.close")))) {
             if (!sid.empty()) {
-                // Closing a ROOT tab terminates its group: stage children first,
-                // the root last. ONE confirmation if any of it is in flight.
+                // Closing a ROOT tab terminates its group: stage children
+                // first, the root last (TabsToClose, keybinding_dispatch.hpp).
+                // ONE confirmation if any of it is in flight.
                 const auto tabs = app->GetAllTabs();
-                std::optional<int64_t> group;
-                bool is_root = false;
-                for (const auto& tab : tabs) {
-                    if (tab.session_id == sid) {
-                        group = tab.root_ordinal;
-                        is_root = !tab.is_subagent;
-                    }
-                }
                 PendingClose staged;
-                for (const auto& tab : tabs) {
-                    if (!is_root && tab.session_id != sid) continue;
-                    if (is_root && group.has_value() && tab.root_ordinal != *group) continue;
-                    staged.session_ids.push_back(tab.session_id);
-                }
-                if (any_work_in_flight(tabs, staged.session_ids)) {
+                staged.session_ids = TabsToClose(tabs, sid);
+                if (AnyWorkInFlight(tabs, staged.session_ids)) {
                     pending_close = std::move(staged);   // ONE confirmation for the group
                     show_quit_confirm = true;
                 } else {

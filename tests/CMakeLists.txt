@@ -93,6 +93,7 @@ add_executable(minimal_tests
     app_state_test.cpp
     view_factory_test.cpp
     keybindings_test.cpp
+    keybinding_dispatch_test.cpp
     chat_model_test.cpp
     mention_resolver_test.cpp
     mention_expansion_test.cpp

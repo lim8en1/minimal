@@ -9,6 +9,7 @@ add_library(minimal_client_core SHARED
     session_client.cpp
     state.cpp
     keybindings.cpp
+    keybinding_dispatch.cpp
     status_format.cpp
     ui_config.cpp
     chat_model.cpp
