@@ -61,6 +61,10 @@ public:
 
         bool& show_panel;
         int panel_height;   // constant for now; a resize handle is future polish (ARCHITECTURE.md)
+        // ui.json's tools_panel_stdout_buffer_lines, or the built-in default
+        // (100) -- already resolved by the caller (RunTui), same "0 means
+        // default" convention AppState::SetUiBounds uses.
+        int tools_panel_stdout_buffer_lines;
         ftxui::Component editor;   // shared_ptr: cheap to copy, same ComponentBase as RunTui's own
 
         const std::vector<StatusSegment>& status_format;

@@ -220,8 +220,8 @@ TEST_CASE("ResolvedKeymap: every core default binds to something", "[keybinding_
     for (const auto& action : {"tab.next", "tab.previous", "group.previous", "group.next",
                                "jump.attention", "session.picker", "agent.picker",
                                "panel.toggle", "tab.close", "chat.load_older",
-                               "chat.scroll_up", "chat.scroll_down", "turn.cancel",
-                               "app.quit"}) {
+                               "chat.scroll_up", "chat.scroll_down", "chat.scroll_bottom",
+                               "turn.cancel", "app.quit"}) {
         keys.EnsureDefault(action, keys.KeyFor(action, "unbound-in-test"));
     }
     // EnsureDefault only fills what's unbound, and Parse("{}") binds nothing
@@ -237,6 +237,7 @@ TEST_CASE("ResolvedKeymap: every core default binds to something", "[keybinding_
         "agent.picker": "alt+g", "panel.toggle": "ctrl+t",
         "tab.close": "ctrl+w", "chat.load_older": "pageup",
         "chat.scroll_up": "ctrl+up", "chat.scroll_down": "ctrl+down",
+        "chat.scroll_bottom": "end",
         "turn.cancel": "escape", "app.quit": "ctrl+q"
     })")).Unmapped().empty());
 }

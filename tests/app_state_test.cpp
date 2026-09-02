@@ -391,6 +391,67 @@ TEST_CASE("CloseTab removes the tab and reassigns focus", "[app_state]") {
     CHECK(tabs[0].is_focused);   // closing the focused tab reassigns focus
 }
 
+// Regression: CloseTab used to jump focus to tabs_.back() unconditionally,
+// regardless of which tab actually closed -- closing tab 2 of 4 landed
+// focus on tab 4, not on either of tab 2's real neighbors. Four tabs so
+// "the tab that shifted into the closed slot" (b's neighbor, c) and
+// "tabs_.back()" (d) are DIFFERENT tabs -- with only 3 tabs the two rules
+// coincide and this could not have caught the bug.
+TEST_CASE("CloseTab on a MIDDLE tab focuses its neighbor, not tabs_.back()",
+         "[app_state][regression]") {
+    ClientFixture fixture;
+    fixture.Script("hi");
+    fixture.Start();
+
+    AppState app(fixture.client);
+    const auto sid_a = app.OpenTab(fixture.Options("a"));
+    const auto sid_b = app.OpenTab(fixture.Options("b"));
+    const auto sid_c = app.OpenTab(fixture.Options("c"));
+    const auto sid_d = app.OpenTab(fixture.Options("d"));
+    REQUIRE_FALSE(sid_a.empty());
+    REQUIRE_FALSE(sid_b.empty());
+    REQUIRE_FALSE(sid_c.empty());
+    REQUIRE_FALSE(sid_d.empty());
+    app.SetFocusedTab(sid_b);
+
+    app.CloseTab(sid_b);   // the middle tab, focused
+    REQUIRE_FALSE(app.HasTab(sid_b));
+    auto tabs = app.GetAllTabs();
+    REQUIRE(tabs.size() == 3);
+    CHECK(tabs[0].session_id == sid_a);
+    CHECK(tabs[1].session_id == sid_c);
+    CHECK(tabs[2].session_id == sid_d);
+    CHECK(tabs[1].is_focused);      // c: the tab that shifted into b's slot
+    CHECK_FALSE(tabs[2].is_focused);   // NOT d (tabs_.back()) -- the pre-fix bug
+}
+
+// The other half of the fix: closing the LAST tab has no "next" neighbor
+// (erase() returns end()), so focus must fall back to the new last tab --
+// the PREVIOUS one -- rather than leaving focused_id_ dangling on the
+// just-closed id.
+TEST_CASE("CloseTab on the LAST tab falls back to the new last tab",
+         "[app_state][regression]") {
+    ClientFixture fixture;
+    fixture.Script("hi");
+    fixture.Start();
+
+    AppState app(fixture.client);
+    const auto sid_a = app.OpenTab(fixture.Options("a"));
+    const auto sid_b = app.OpenTab(fixture.Options("b"));
+    const auto sid_c = app.OpenTab(fixture.Options("c"));
+    REQUIRE_FALSE(sid_a.empty());
+    REQUIRE_FALSE(sid_b.empty());
+    REQUIRE_FALSE(sid_c.empty());
+    app.SetFocusedTab(sid_c);
+
+    app.CloseTab(sid_c);   // the last tab, focused -- erase() returns end()
+    REQUIRE_FALSE(app.HasTab(sid_c));
+    auto tabs = app.GetAllTabs();
+    REQUIRE(tabs.size() == 2);
+    CHECK(tabs[1].session_id == sid_b);
+    CHECK(tabs[1].is_focused);
+}
+
 TEST_CASE("SessionClient::GetMessages feeds ApplyScrollbackPage with real wire data",
           "[app_state][scrollback]") {
     // Proves the client's GetMessages wrapper and SessionState::ApplyScrollbackPage

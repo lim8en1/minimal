@@ -194,15 +194,15 @@ ftxui::Element FrameRenderer::Render() {
     }
 
     if (deps_.show_panel) {
-        rows.push_back(RenderToolsPanel(tabs, /*stdout_buffer_lines=*/100, deps_.theme) |
+        rows.push_back(RenderToolsPanel(tabs, deps_.tools_panel_stdout_buffer_lines, deps_.theme) |
                        size(HEIGHT, LESS_THAN, deps_.panel_height) | yframe);
     }
 
     rows.push_back(deps_.editor->Render() | flex);
 
-    // Status bar. model/agent/permission_mode have no live wire source yet
-    // (the metadata emission is E5) and render as nothing -- the format
-    // string's unknown-or-unfilled rule.
+    // Status bar. model/agent/permission_mode render from focused_details
+    // below (the E5 metadata emission); empty/unknown renders as nothing,
+    // per the format string's unknown-or-unfilled rule.
     std::map<std::string, std::string> values;
     values["version"] = std::string(common::Version());
     // The focused tab's DEEP snapshot (see focused_details above) drives

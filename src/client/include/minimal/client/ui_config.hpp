@@ -19,6 +19,15 @@
 //   tool_output_buffer_bytes -- the per-tool live-stdout ring buffer's byte
 //     cap, applied at append time (head + marker + tail), mirroring the
 //     server's persisted-result cap.
+//   tools_panel_stdout_buffer_lines -- how many trailing lines of a tool's
+//     live output the running-tools panel renders (ARCHITECTURE.md
+//     "Running-tools panel": "the client keeps a ring buffer of ...
+//     stdout_buffer_lines"). Independent of the SERVER's own
+//     settings.json tools_view.stdout_buffer_lines, which bounds what the
+//     server coalesces onto the wire -- same default, same name in the
+//     doc's prose, but two separate knobs in two separate config files on
+//     two separate processes; there is no wire field carrying the server's
+//     value for this one to mirror.
 //   theme -- the name of a themes/<name>.json file (without extension), e.g.
 //     "dark" or "light". A name Theme::Load cannot find falls back to the
 //     terminal-default theme with a startup warning, the same degrade rule
@@ -38,6 +47,7 @@ struct UiConfig {
     // defaulted.
     int scrollback_window_max_messages = 0;
     int tool_output_buffer_bytes = 0;
+    int tools_panel_stdout_buffer_lines = 0;
 
     // Empty = "dark" (the built-in default).
     std::string theme;

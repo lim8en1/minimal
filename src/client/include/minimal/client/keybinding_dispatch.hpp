@@ -117,8 +117,6 @@ struct KeyContext {
     const ResolvedKeymap& keymap;
     const std::string& focused;   // the currently focused session id, this frame
 
-    bool& show_picker;
-    bool& show_agent_picker;
     bool& show_panel;
     bool& show_plugin_modal;
 
@@ -128,11 +126,24 @@ struct KeyContext {
     // app.cpp's own picker/permission modals reassign their host's slot.
     std::shared_ptr<ftxui::Component>& plugin_modal_child_slot;
 
+    // session.picker/agent.picker OPEN, never toggle-close: while the
+    // picker modal is shown, ftxui::Modal() gives it exclusive input --
+    // HandleGlobalKey never sees the key again until the modal closes some
+    // other way (Escape, resume, delete), so a `show_x = !show_x` toggle
+    // here was dead on the close half; only Escape ever actually closed it.
+    // PickerController::OpenSessionPicker/OpenAgentPicker already set their
+    // own show_x = true, so this needs nothing back from them.
     std::function<void()> open_picker;
     std::function<void()> open_agent_picker;
     std::function<void()> request_quit;         // ctrl+q / idle ctrl+c: app.cpp owns the confirm-if-busy logic
     std::function<void(const std::string&)> close_tab;
     std::function<void(const std::string& session_id, int delta_rows)> scroll_chat;   // ChatView::ScrollBy, if that tab has one
+    // chat.scroll_bottom (End): ChatView::ScrollToBottom, if that tab has
+    // one. Resets the scroll anchor scrolling up leaves behind -- there was
+    // previously no way back to the newest row except scrolling all the way
+    // down one row at a time, or losing the scroll position on the next
+    // turn.
+    std::function<void(const std::string& session_id)> scroll_chat_to_bottom;
     // tab.close, when AnyWorkInFlight over `ids`: app.cpp stages its
     // PendingClose and opens the confirmation modal. Not called when nothing
     // is in flight -- HandleGlobalKey closes those tabs directly via close_tab.

@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <iterator>
 #include <utility>
 
 #include "minimal/client/cli_args.hpp"
@@ -807,11 +808,23 @@ void AppState::CloseTab(const std::string& session_id) {
             if (it->info.session_id == session_id) {
                 to_close = it->stream;
                 was_focused = (focused_id_ == session_id);
-                tabs_.erase(it);
+                // erase() returns an iterator to whatever tab shifted into
+                // the closed one's position -- the NEXT tab in render
+                // order, if any. Focusing that (falling back to the new
+                // last tab when the closed one WAS the last, i.e. `next`
+                // came back as end()) keeps focus on a NEIGHBOR of the tab
+                // that closed. Unconditionally jumping to tabs_.back()
+                // instead sent focus to the far end of the tab bar
+                // regardless of which tab closed -- closing tab 2 of 10
+                // landed on tab 10.
+                const auto next = tabs_.erase(it);
+                if (was_focused && !tabs_.empty()) {
+                    focused_id_ = (next != tabs_.end() ? next : std::prev(tabs_.end()))
+                                      ->info.session_id;
+                }
                 break;
             }
         }
-        if (was_focused && !tabs_.empty()) focused_id_ = tabs_.back().info.session_id;
     }
     if (to_close) to_close->Close();   // drains + joins; terminates the session when last open
 }

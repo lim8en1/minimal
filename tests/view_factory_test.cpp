@@ -530,6 +530,40 @@ TEST_CASE("chat view: ScrollBy moves the viewport off the pinned-to-newest defau
     CHECK(repinned == pinned);
 }
 
+TEST_CASE("chat view: ScrollToBottom resets the anchor directly, not just relatively") {
+    // The scroll-position-drift UX fix: previously the only way back to the
+    // newest row after scrolling up was walking down one row at a time (or
+    // knowing exactly how far up you'd gone). ScrollToBottom() is bound to
+    // chat.scroll_bottom (End) and also called on every chat turn submit.
+    const auto theme = TestTheme();
+    minimal::client::MarkdownRenderer renderer(&theme, nullptr);
+    plugins::MarkdownEngineRegistry engine_registry;
+    plugins::RegisterDefaultMarkdownEngine(engine_registry, renderer);
+    auto& engine = *engine_registry.engine;
+    plugins::MessageRendererRegistry messages;
+    plugins::ToolResultRendererRegistry tool_renderers;
+    plugins::RegisterCoreMessageRenderers(messages);
+    plugins::RegisterCoreAgentMarkdownRenderer(messages, engine);
+
+    ChatView view(theme, messages, tool_renderers);
+    auto stream = engine.MakeStream();
+    const auto snapshot = SnapshotWithRows("session-scroll-bottom", 1, 40);
+
+    const auto pinned =
+        RenderElement(view.Render(snapshot, *stream) | ftx::yframe, /*width=*/40, /*height=*/8);
+
+    view.ScrollBy(30);   // scroll far up, same as the ScrollBy test above
+    const auto scrolled =
+        RenderElement(view.Render(snapshot, *stream) | ftx::yframe, /*width=*/40, /*height=*/8);
+    CHECK(scrolled != pinned);
+
+    view.ScrollToBottom();   // one call, not "however far up ScrollBy went"
+    const auto back =
+        RenderElement(view.Render(snapshot, *stream) | ftx::yframe, /*width=*/40, /*height=*/8);
+    CHECK(back == pinned);
+    CHECK(back.find("row-39") != std::string::npos);
+}
+
 // ---------------------------------------------------------------------------
 // @-mention completion (R5)
 // ---------------------------------------------------------------------------

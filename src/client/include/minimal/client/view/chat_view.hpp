@@ -44,6 +44,12 @@ public:
     // 0 (the default) reproduces the legacy pin-to-newest behavior.
     void ScrollBy(int delta_rows);
 
+    // Resets the scroll anchor to the newest row -- the default state.
+    // Bound to chat.scroll_bottom (End) and called on every chat turn
+    // submit, so sending a message while scrolled up returns to the live
+    // content instead of leaving it scrolled away from what just arrived.
+    void ScrollToBottom() { scroll_from_bottom_ = 0; }
+
 private:
     void RebuildRows(const SessionState::Snapshot& snapshot);
 

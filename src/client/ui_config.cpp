@@ -52,6 +52,7 @@ UiConfig LoadUiConfig(const std::filesystem::path& config_dir) {
     };
     positive_int("scrollback_window_max_messages", config.scrollback_window_max_messages);
     positive_int("tool_output_buffer_bytes", config.tool_output_buffer_bytes);
+    positive_int("tools_panel_stdout_buffer_lines", config.tools_panel_stdout_buffer_lines);
     return config;
 }
 

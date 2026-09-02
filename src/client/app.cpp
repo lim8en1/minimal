@@ -660,7 +660,7 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     // depend on. OpenTab's own locking (and its auto-focus-on-first-tab rule)
     // is safe from any thread, so this is a relocation of WHERE it runs, not
     // a behavior change -- the frame just stays responsive while it runs.
-    auto submit_chat = [app](const std::string& text) {
+    auto submit_chat = [app, &tab_ui](const std::string& text) {
         const std::string sid = app->FocusedSessionId();
         if (sid.empty()) {
             app->RunOnRpcQueue([app, text] {
@@ -674,6 +674,13 @@ int RunTui(const minimal::client::ParsedArgs& args) {
                 // call had on failure.
             });
             return;
+        }
+        // Sending a turn returns the view to the newest row: scrolled-up
+        // content would otherwise sit frozen while the reply streams in
+        // somewhere below the visible viewport, reading as if nothing
+        // happened.
+        if (auto it = tab_ui.find(sid); it != tab_ui.end() && it->second.chat) {
+            it->second.chat->ScrollToBottom();
         }
         app->SendChatTurn(sid, text);
     };
@@ -932,8 +939,9 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     minimal::client::FrameRenderer frame_renderer(minimal::client::FrameRenderer::Dependencies{
         *app, theme, focused, focused_details, tab_ui, start_view_registry, message_registry,
         renderer_registry, status_registry, engine, permission_child, show_permission,
-        confirmation_child, show_confirmation, show_panel, panel_height, editor, status_format,
-        plugin_views});
+        confirmation_child, show_confirmation, show_panel, panel_height,
+        env.ui.tools_panel_stdout_buffer_lines > 0 ? env.ui.tools_panel_stdout_buffer_lines : 100,
+        editor, status_format, plugin_views});
     auto session_view = Renderer(editor, [&] { return frame_renderer.Render(); });
 
     // --- global keybindings -----------------------------------------------------
@@ -947,7 +955,7 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     // lambda below, never copied.
     minimal::client::KeyContext key_ctx{
         *app, keymap, focused,
-        show_picker, show_agent_picker, show_panel, show_plugin_modal,
+        show_panel, show_plugin_modal,
         plugin_views, plugin_modal_child,
         open_picker, open_agent_picker, request_quit, close_tab,
         // ChatView::ScrollBy, if the tab has one yet (ui.chat is built
@@ -956,6 +964,11 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         [&](const std::string& session_id, int delta_rows) {
             if (auto it = tab_ui.find(session_id); it != tab_ui.end() && it->second.chat) {
                 it->second.chat->ScrollBy(delta_rows);
+            }
+        },
+        [&](const std::string& session_id) {
+            if (auto it = tab_ui.find(session_id); it != tab_ui.end() && it->second.chat) {
+                it->second.chat->ScrollToBottom();
             }
         },
         // tab.close with work in flight: stage ONE confirmation for the

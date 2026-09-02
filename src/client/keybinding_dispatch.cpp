@@ -172,13 +172,15 @@ bool HandleGlobalKey(KeyContext& ctx, const ftxui::Event& event) {
         }
     }
     if (ctx.keymap.Matches("session.picker", event)) {
-        ctx.show_picker = !ctx.show_picker;
-        if (ctx.show_picker) ctx.open_picker();
+        // Always OPENS, never toggles closed -- see the KeyContext field
+        // comment: the modal has exclusive input while shown, so this key
+        // is unreachable again until it closes some other way, and the old
+        // `show_picker = !show_picker` toggle's close half was dead code.
+        ctx.open_picker();
         return true;
     }
     if (ctx.keymap.Matches("agent.picker", event)) {
-        ctx.show_agent_picker = !ctx.show_agent_picker;
-        if (ctx.show_agent_picker) ctx.open_agent_picker();
+        ctx.open_agent_picker();
         return true;
     }
     if (ctx.keymap.Matches("panel.toggle", event)) {
@@ -214,6 +216,10 @@ bool HandleGlobalKey(KeyContext& ctx, const ftxui::Event& event) {
     }
     if (ctx.keymap.Matches("chat.scroll_down", event)) {
         if (!sid.empty()) ctx.scroll_chat(sid, -1);   // toward newest
+        return true;
+    }
+    if (ctx.keymap.Matches("chat.scroll_bottom", event)) {
+        if (!sid.empty()) ctx.scroll_chat_to_bottom(sid);
         return true;
     }
     if (ctx.keymap.Matches("tab.close", event)) {

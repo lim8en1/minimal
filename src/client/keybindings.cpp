@@ -28,6 +28,7 @@ const std::unordered_map<std::string, std::string>& DefaultBindings() {
         {"chat.load_older", "pageup"},
         {"chat.scroll_up", "ctrl+up"},
         {"chat.scroll_down", "ctrl+down"},
+        {"chat.scroll_bottom", "end"},
         {"turn.cancel", "escape"},
         {"app.quit", "ctrl+q"},
     };
