@@ -31,6 +31,7 @@ add_library(minimal_client_core SHARED
     view/tools_panel.cpp
     view/session_picker.cpp
     view/agent_picker.cpp
+    view/picker_controller.cpp
     view/prompt_modal.cpp
     view/modal_host.cpp
     render/color_downsample.cpp

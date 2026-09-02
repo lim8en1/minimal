@@ -51,6 +51,7 @@
 #include "minimal/client/view/prompt_editor.hpp"
 #include "minimal/client/view/prompt_modal.hpp"
 #include "minimal/client/view/agent_picker.hpp"
+#include "minimal/client/view/picker_controller.hpp"
 #include "minimal/client/view/session_picker.hpp"
 #include "minimal/client/view/status_bar.hpp"
 #include "minimal/client/view/tab_bar.hpp"
@@ -572,22 +573,6 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     bool show_delete_confirm = false;
     bool show_plugin_modal = false;
     std::string staged_delete_id;   // the picker delete confirmation's subject
-
-    // T8: the picker's raw accumulated list, in server delivery order
-    // (updated_at DESC, id ASC per session_service.proto). Filter/sort are
-    // pure DISPLAY transforms applied fresh by MakeSessionPicker
-    // (picker_model.hpp) -- this stays in fetch order so "load more"'s
-    // cursor is always derived from the last element the SERVER actually
-    // sent, never from whatever the current sort happens to show last.
-    struct PickerData {
-        std::vector<minimal::v1::SessionSummary> sessions;
-        bool include_all_dirs = false;
-        bool has_more = false;   // the last fetch returned a full page
-    };
-    PickerData picker_data;
-    // The agent picker's list: fetched whole on each open (no pagination, no
-    // sort -- agents/*.md is small and has no "recent" axis).
-    std::vector<minimal::v1::AgentPresetSummary> agent_picker_presets;
     PendingClose pending_close;
 
     // Per-tab UI caches, keyed by session id.
@@ -888,6 +873,11 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     auto picker_child = std::make_shared<Component>();
     auto picker_host_interactive = minimal::client::MakeModalHost(picker_child, show_picker);
 
+    // --- agent preset picker ---------------------------------------------------
+    auto agent_picker_child = std::make_shared<Component>();
+    auto agent_picker_host_interactive =
+        minimal::client::MakeModalHost(agent_picker_child, show_agent_picker);
+
     // T8: typing on an empty app already starts a session directly
     // (submit_chat, above); the picker's "+ new session" row is the same
     // action reached from inside the modal, with no text to send yet.
@@ -900,132 +890,16 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         });
     };
 
-    // One page of the picker's list, kept synchronous like DeleteSession
-    // below: unlike T2's targets (a per-frame Renderer call, a per-keystroke
-    // debounce), this runs once per explicit user action (open, toggle
-    // all-dirs, load more) -- the same bounded-pause trade the rest of the
-    // one-off calls in this file already make, and mutating picker_data /
-    // *picker_child from a worker thread would race the loop thread that
-    // owns both.
-    //
-    // Requests one row beyond the page size to detect a further page: the
-    // wire has no dedicated has_more field on ListSessionsResponse.
-    static constexpr int32_t kPickerPageSize = 100;
-    auto fetch_picker_page = [&](bool reset) {
-        if (reset) {
-            picker_data.sessions.clear();
-            picker_data.has_more = false;
-        }
-        minimal::client::SessionClient::ListSessionsOptions opts;
-        opts.project_root = std::filesystem::current_path().string();
-        opts.include_all_dirs = picker_data.include_all_dirs;
-        opts.limit = kPickerPageSize + 1;
-        if (!reset && !picker_data.sessions.empty()) {
-            const auto& last = picker_data.sessions.back();
-            opts.before_updated_at = last.updated_at_unix_ms();
-            opts.before_id = last.session_id();
-        }
-        const auto result = client->ListSessions(opts);
-        if (!result.status.ok()) return;
-        const auto& page = result.response.sessions();
-        const int64_t fetched = page.size();
-        picker_data.has_more = fetched > kPickerPageSize;
-        const int64_t take = picker_data.has_more ? kPickerPageSize : fetched;
-        picker_data.sessions.insert(picker_data.sessions.end(), page.begin(),
-                                    page.begin() + take);
-    };
-
-    // Rebuilds the picker component from picker_data's CURRENT contents --
-    // every mutating action (resume/delete/new leave the modal; toggling
-    // all-dirs or loading more re-fetches and rebuilds in place, same as
-    // the rest of this file's "modal over data it does not own" pattern).
-    // std::function, not auto: the body below calls itself (on_toggle_all_dirs
-    // / on_load_more), which an auto-deduced lambda type cannot reference
-    // inside its own initializer.
-    std::function<void()> rebuild_picker_component = [&] {
-        *picker_child = minimal::client::MakeSessionPicker(
-            picker_data.sessions, picker_data.include_all_dirs, picker_data.has_more, theme,
-            {.on_resume =
-                 [&](const std::string& session_id) {
-                     // A PAST session resumes into its own root group; it is
-                     // not a child of whatever is focused.
-                     app->AttachTab(session_id);
-                     app->SetFocusedTab(session_id);
-                     show_picker = false;
-                 },
-             .on_delete =
-                 [&](const std::string& session_id) {
-                     // Deletion is destructive and permanent, so it asks --
-                     // its own confirmation layer, styled like the quit one.
-                     staged_delete_id = session_id;
-                     show_delete_confirm = true;
-                     show_picker = false;
-                 },
-             .on_new = open_new_session,
-             .on_close = [&] { show_picker = false; },
-             .on_toggle_all_dirs =
-                 [&] {
-                     picker_data.include_all_dirs = !picker_data.include_all_dirs;
-                     fetch_picker_page(/*reset=*/true);
-                     rebuild_picker_component();
-                 },
-             .on_load_more =
-                 [&] {
-                     fetch_picker_page(/*reset=*/false);
-                     rebuild_picker_component();
-                 }});
-    };
-
-    // The picker-open flow, shared by the keybinding and by the /sessions
-    // view_hint (a View-displaying CommandResult opens the view named by its
-    // hint; the core mapping for "sessions" is this modal). T8: always a
-    // fresh first page in the project's own directory -- the "start in the
-    // last-used all-dirs state" refinement is not worth the surprise of a
-    // picker that sometimes silently shows other projects' sessions.
-    auto open_picker = [&] {
-        show_picker = true;
-        picker_data.include_all_dirs = false;
-        fetch_picker_page(/*reset=*/true);
-        rebuild_picker_component();
-    };
-
-    // --- agent preset picker ---------------------------------------------------
-    auto agent_picker_child = std::make_shared<Component>();
-    auto agent_picker_host_interactive =
-        minimal::client::MakeModalHost(agent_picker_child, show_agent_picker);
-
-    // Rebuilds the agent picker component from agent_picker_presets' current
-    // contents -- mirrors rebuild_picker_component, minus everything that
-    // doesn't apply to a small, unpaginated, unsorted list.
-    auto rebuild_agent_picker_component = [&] {
-        *agent_picker_child = minimal::client::MakeAgentPresetPicker(
-            agent_picker_presets, theme,
-            {.on_select =
-                 [&](const std::string& name) {
-                     // Re-sends "/agent <name>" over the exact same path a
-                     // typed command would take (AppState::SendCommand) --
-                     // AgentCommand::Execute's by-name branch, precedence
-                     // rules and all, runs unchanged. No new mutation code.
-                     app->SendCommand(app->FocusedSessionId(), "agent " + name);
-                     show_agent_picker = false;
-                 },
-             .on_close = [&] { show_agent_picker = false; }});
-    };
-
-    // The agent-picker-open flow, shared by the keybinding and by the bare
-    // `/agent` view_hint (see handle_notice below) -- one fresh fetch each
-    // time, like open_picker: the preset list is small, so there is no
-    // pagination state to preserve across opens.
-    auto open_agent_picker = [&] {
-        show_agent_picker = true;
-        agent_picker_presets.clear();
-        const auto result = client->ListAgentPresets();
-        if (result.status.ok()) {
-            const auto& presets = result.response.presets();
-            agent_picker_presets.assign(presets.begin(), presets.end());
-        }
-        rebuild_agent_picker_component();
-    };
+    // Owns picker_data/agent_picker_presets and the fetch/rebuild/open
+    // flows privately; writes rebuilt components into picker_child/
+    // agent_picker_child (declared above -- the modal slots RunTui's own
+    // frame assembly and MakeModalHost calls read from, unchanged).
+    minimal::client::PickerController picker_controller(
+        minimal::client::PickerController::Dependencies{
+            *client, *app, theme, picker_child, agent_picker_child, show_picker,
+            show_agent_picker, staged_delete_id, show_delete_confirm, open_new_session});
+    auto open_picker = [&] { picker_controller.OpenSessionPicker(); };
+    auto open_agent_picker = [&] { picker_controller.OpenAgentPicker(); };
 
     // --- plugin views (panel region + modal layer) -----------------------------
     // Panels: rendered in the frame beside the tools panel; one shared
