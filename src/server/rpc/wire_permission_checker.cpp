@@ -7,9 +7,13 @@
 namespace minimal::rpc {
 
 WirePermissionChecker::WirePermissionChecker(std::string session_id,
-                                             EventQueue<v1::ServerEvent>& queue,
-                                             PendingRequests& pending)
-    : session_id_(std::move(session_id)), queue_(queue), pending_(pending) {}
+                                             EventBroadcaster& queue,
+                                             PendingRequests& pending,
+                                             std::chrono::milliseconds unattended_timeout)
+    : session_id_(std::move(session_id)),
+      queue_(queue),
+      pending_(pending),
+      unattended_timeout_(unattended_timeout) {}
 
 std::string WirePermissionChecker::NextRequestId() {
     // Unique within the session, which is all correlation needs: request_id is
@@ -32,21 +36,23 @@ tools::PermissionResponse WirePermissionChecker::check(const tools::PermissionRe
     auto* permission = event.mutable_permission_request();
     *permission = ToProto(request);
     permission->set_request_id(request_id);
-    // BLOCKING Push, and its safety is a two-file dependency: a worker parked
-    // here on a full queue is woken only by EventQueue::Close() -- which
-    // Session::Terminate deliberately calls BEFORE joining the worker, and
-    // only after PendingRequests::Shutdown() has already unblocked the
-    // AwaitResponse below (see Session::Terminate in agent/session.cpp).
-    // Swap those two lines in Terminate and this call deadlocks the worker on
-    // a question nobody will ever answer.
-    queue_.Push(std::move(event));
+    // Publish never blocks (event_broadcaster.hpp): a full subscriber drops
+    // its own oldest, so this call cannot be wedged by a stalled client any
+    // more -- the old two-file dependency on Terminate's Close ordering is
+    // gone. Every attached subscriber gets the prompt; first answer wins.
+    queue_.Publish(std::move(event));
 
-    const std::optional<PendingAnswer> registration_answer = registration.AwaitResponse();
+    const std::optional<PendingAnswer> registration_answer = registration.AwaitResponse(
+        unattended_timeout_ > std::chrono::milliseconds::zero()
+            ? std::optional(unattended_timeout_)
+            : std::nullopt);
     if (!registration_answer) {
-        // Cancelled: the session is terminating. Deny is the correct outcome --
-        // the work is being torn down, so the tool must not run -- but it is a
+        // Cancelled, terminating, or (if sessions.unattended_prompt_timeout_
+        // seconds is set) timed out with nobody attached to answer. Deny is
+        // the correct outcome in every one of those cases -- the work is
+        // being torn down or nobody is there to grant it -- but it is a
         // decision made HERE, not inside the synchronisation primitive, which
-        // deliberately reports only "no answer".
+        // deliberately reports only "no answer" for all three.
         return tools::PermissionResponse{tools::PermissionDecision::Deny, {}};
     }
 

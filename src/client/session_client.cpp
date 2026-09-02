@@ -468,6 +468,34 @@ void SessionClient::Stream::Close() {
     }
 }
 
+void SessionClient::Stream::Detach() {
+    if (closed_.exchange(true)) return;     // idempotent latch, shared with Close()
+
+    v1::ClientEvent end_session;
+    end_session.set_session_id(session_id_);
+    end_session.mutable_end_session()->set_mode(v1::EndSession::DETACH);
+    {
+        std::lock_guard lk(qmtx_);
+        // Queued before closing_ flips, under the same lock Send() checks --
+        // so this is never refused the way a Send() after Close() would be,
+        // and the writer sees (and flushes) it before it observes closing_.
+        send_queue_.push_back(std::move(end_session));
+        closing_ = true;
+    }
+    send_cv_.notify_all();
+
+    // No TryCancel: see the header. The writer flushes DETACH (and anything
+    // queued ahead of it) and calls WritesDone() on its own; the server reads
+    // DETACH, unsubscribes this stream, and returns -- ending the RPC without
+    // needing to be cancelled.
+    if (writer_.joinable()) writer_.join();
+    if (reader_.joinable()) {
+        reader_.join();
+    } else if (bidi_) {
+        SetStatus(bidi_->Finish());
+    }
+}
+
 void SessionClient::Stream::Cancel() {
     context_.TryCancel();
 }

@@ -177,6 +177,43 @@ LoggingSettings ParseLogging(const nlohmann::json& doc) {
     return result;
 }
 
+// Session lifetime policy. Negative values are the one misconfiguration the
+// parser refuses: 0 is meaningful ("never") everywhere, so a negative is a
+// typo nobody meant, and silently clamping it to 0 would invert the policy.
+SessionSettings ParseSessions(const nlohmann::json& doc) {
+    SessionSettings result;
+    if (!doc.contains("sessions")) return result;
+    const auto& sessions = doc.at("sessions");
+    result.detached_idle_ttl_seconds =
+        sessions.value("detached_idle_ttl_seconds", result.detached_idle_ttl_seconds);
+    result.unattended_prompt_timeout_seconds = sessions.value(
+        "unattended_prompt_timeout_seconds", result.unattended_prompt_timeout_seconds);
+    result.initial_attach_guard_seconds =
+        sessions.value("initial_attach_guard_seconds", result.initial_attach_guard_seconds);
+    for (const auto* key :
+         {"detached_idle_ttl_seconds", "unattended_prompt_timeout_seconds",
+          "initial_attach_guard_seconds"}) {
+        if (sessions.value(key, std::int64_t{0}) < 0) {
+            throw std::runtime_error(
+                std::string("settings.json: sessions.") + key + " must not be negative (0 = never)");
+        }
+    }
+    return result;
+}
+
+ServerSettings ParseServer(const nlohmann::json& doc) {
+    ServerSettings result;
+    if (!doc.contains("server")) return result;
+    const auto& server = doc.at("server");
+    result.idle_shutdown_seconds =
+        server.value("idle_shutdown_seconds", result.idle_shutdown_seconds);
+    if (result.idle_shutdown_seconds < 0) {
+        throw std::runtime_error(
+            "settings.json: server.idle_shutdown_seconds must not be negative (0 = never)");
+    }
+    return result;
+}
+
 }  // namespace
 
 SettingsConfig ParseSettingsConfig(const nlohmann::json& doc) {
@@ -191,6 +228,8 @@ SettingsConfig ParseSettingsConfig(const nlohmann::json& doc) {
         config.tools = ParseTools(doc);
         config.tools_view = ParseToolsView(doc);
         config.project_context = ParseProjectContext(doc);
+        config.sessions = ParseSessions(doc);
+        config.server = ParseServer(doc);
         config.session_db_path = doc.value("session_db_path", config.session_db_path);
         config.logging = ParseLogging(doc);
     } catch (const nlohmann::json::exception& error) {

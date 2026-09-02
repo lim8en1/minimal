@@ -32,6 +32,7 @@
 #include "minimal/tools/permission_advisor.hpp"
 #include "../plugins/server/commands-core/core_commands.hpp"
 #include "fakes.hpp"
+#include "session_events.hpp"
 #include "minimal/commands/command_registry.hpp"
 #include "minimal/agent/session.hpp"
 #include "minimal/agent/session_registry.hpp"
@@ -160,20 +161,34 @@ struct SubagentFixture {
         params.project_root = workdir;
         params.run_mode_override = run_mode;
         auto session = sessions->Create(std::move(params));
-        session->TryAttach();  // a client is present in every designed flow
+        // A client is present in every designed flow: the persistent stream
+        // DrainQueue() opens on first use is that client.
         return session;
     }
 
-    std::vector<v1::ServerEvent> DrainQueue(agent::Session& session) {
-        std::vector<v1::ServerEvent> out;
-        while (auto event = session.queue().TryPop()) out.push_back(std::move(*event));
-        return out;
+    std::vector<v1::ServerEvent> DrainQueue(const std::shared_ptr<agent::Session>& session) {
+        // ONE PERSISTENT subscriber per session, kept across drains: events
+        // are per-subscriber now, so a one-shot subscription would miss
+        // everything an earlier subscriber already took (it would see a
+        // resync notice and an empty backlog instead). The stream's first
+        // subscribe also marks the session ever_attached for the reaper.
+        auto& entry = streams_[session->info().session_id];
+        if (entry.second == nullptr) entry = {session, std::make_unique<testing::SessionStream>(*session)};
+        return entry.second->Drain();
     }
+
+    // The stream OWNS its session's shared_ptr: a child the test terminates
+    // (and the registry erases) must stay alive until the stream unsubscribes,
+    // or the stream's destructor would Unsubscribe through a dangling Session&.
+    std::map<std::string, std::pair<std::shared_ptr<agent::Session>,
+                                    std::unique_ptr<testing::SessionStream>>>
+        streams_;
 
     // Drains until SubagentStartedEvent shows up, returning the child id. The
     // event is pushed before the child produces anything, so this is also the
     // attach-obligation starting gun.
-    std::optional<std::string> WaitForSubagentStarted(agent::Session& parent,
+    std::optional<std::string> WaitForSubagentStarted(
+        const std::shared_ptr<agent::Session>& parent,
                                                       bool* blocking_out = nullptr) {
         const auto deadline = std::chrono::steady_clock::now() + 5s;
         while (std::chrono::steady_clock::now() < deadline) {
@@ -192,7 +207,8 @@ struct SubagentFixture {
 
     // Answers the next permission request on a session's queue, optionally
     // taking grants. Parks the caller until the prompt is visible.
-    std::optional<std::string> WaitForPermissionRequest(agent::Session& session) {
+    std::optional<std::string> WaitForPermissionRequest(
+        const std::shared_ptr<agent::Session>& session) {
         const auto deadline = std::chrono::steady_clock::now() + 5s;
         while (std::chrono::steady_clock::now() < deadline) {
             for (const auto& event : DrainQueue(session)) {
@@ -356,7 +372,7 @@ TEST_CASE("a blocking subagent returns its final text as the parent's tool resul
 
     // The child row exists, points at its parent, and was named from the task.
     bool blocking_flag = false;
-    const auto child_id = fixture.WaitForSubagentStarted(*parent, &blocking_flag);
+    const auto child_id = fixture.WaitForSubagentStarted(parent, &blocking_flag);
     REQUIRE(child_id.has_value());
     CHECK(blocking_flag);
     const auto child_row = fixture.db->GetSession(*child_id);
@@ -426,7 +442,7 @@ TEST_CASE("a non-blocking subagent's completion is injected at a turn boundary",
     REQUIRE(parent->WaitForIdleForTesting(10s));
 
     bool blocking_flag = true;
-    const auto child_id = fixture.WaitForSubagentStarted(*parent, &blocking_flag);
+    const auto child_id = fixture.WaitForSubagentStarted(parent, &blocking_flag);
     REQUIRE(child_id.has_value());
     CHECK_FALSE(blocking_flag);
 
@@ -784,13 +800,13 @@ TEST_CASE("the parent's policy is the child's ceiling even against the child pre
     child_script->Push(testing::TextResponse("child result"));
 
     parent->SubmitTurn("go");
-    const auto child_id = fixture.WaitForSubagentStarted(*parent);
+    const auto child_id = fixture.WaitForSubagentStarted(parent);
     REQUIRE(child_id.has_value());
     auto child = fixture.sessions->Find(*child_id);
     REQUIRE(child != nullptr);
 
     // The child parks on the prompt the ceiling forced.
-    const auto request_id = fixture.WaitForPermissionRequest(*child);
+    const auto request_id = fixture.WaitForPermissionRequest(child);
     REQUIRE(request_id.has_value());
     CHECK(bash_ptr->calls.empty());
 
@@ -842,7 +858,7 @@ TEST_CASE("a child inherits the grants its parent already held", "[subagent][gra
     parent->SubmitTurn("go");
 
     // The parent's own prompt: answered, and the grant taken.
-    const auto request_id = fixture.WaitForPermissionRequest(*parent);
+    const auto request_id = fixture.WaitForPermissionRequest(parent);
     REQUIRE(request_id.has_value());
     fixture.AnswerPermission(*parent, *request_id, {"bash:/usr/bin/tool"});
 
@@ -865,7 +881,7 @@ TEST_CASE("a child inherits the grants its parent already held", "[subagent][gra
     REQUIRE_FALSE(child_id.empty());
     auto child = fixture.sessions->Find(child_id);
     REQUIRE(child != nullptr);
-    for (const auto& event : fixture.DrainQueue(*child)) {
+    for (const auto& event : fixture.DrainQueue(child)) {
         CHECK_FALSE(event.has_permission_request());
     }
 }
@@ -894,9 +910,9 @@ TEST_CASE("terminating a blocking subagent unblocks its parent with an error res
         std::make_unique<testing::FakeTool>("bash", tools::ToolCategory::Execute, "ran"));
 
     parent->SubmitTurn("go");
-    const auto child_id = fixture.WaitForSubagentStarted(*parent);
+    const auto child_id = fixture.WaitForSubagentStarted(parent);
     REQUIRE(child_id.has_value());
-    REQUIRE(fixture.WaitForPermissionRequest(*fixture.sessions->Find(*child_id)).has_value());
+    REQUIRE(fixture.WaitForPermissionRequest(fixture.sessions->Find(*child_id)).has_value());
 
     // Closing the child's tab terminates it; the parent must unblock with an
     // error rather than hang on its synchronous wait.
@@ -930,11 +946,11 @@ TEST_CASE("cancelling a parent turn terminates its blocking child", "[subagent][
         std::make_unique<testing::FakeTool>("bash", tools::ToolCategory::Execute, "ran"));
 
     parent->SubmitTurn("go");
-    const auto child_id = fixture.WaitForSubagentStarted(*parent);
+    const auto child_id = fixture.WaitForSubagentStarted(parent);
     REQUIRE(child_id.has_value());
     auto child = fixture.sessions->Find(*child_id);
     REQUIRE(child != nullptr);
-    REQUIRE(fixture.WaitForPermissionRequest(*child).has_value());
+    REQUIRE(fixture.WaitForPermissionRequest(child).has_value());
 
     // CancelTurn while the parent is parked in the blocking wait. The wait
     // loop must observe the cancellation, terminate the child, and return --
@@ -946,7 +962,7 @@ TEST_CASE("cancelling a parent turn terminates its blocking child", "[subagent][
 
     // The turn ended cancelled, and the session survives it.
     bool saw_cancelled_turn = false;
-    for (const auto& event : fixture.DrainQueue(*parent)) {
+    for (const auto& event : fixture.DrainQueue(parent)) {
         if (event.has_turn_completed() &&
             event.turn_completed().stop_reason() == v1::STOP_REASON_CANCELLED) {
             saw_cancelled_turn = true;
@@ -1050,17 +1066,17 @@ TEST_CASE("a subagent gets no /-command surface", "[subagent][commands][invarian
 
     parent->SubmitTurn("go");
     REQUIRE(parent->WaitForIdleForTesting(10s));
-    const auto child_id = fixture.WaitForSubagentStarted(*parent);
+    const auto child_id = fixture.WaitForSubagentStarted(parent);
     REQUIRE(child_id.has_value());
     auto child = fixture.sessions->Find(*child_id);
     REQUIRE(child != nullptr);
     REQUIRE(child->WaitForIdleForTesting(10s));
 
-    const auto answer = [&fixture](agent::Session& session) {
+    const auto answer = [&fixture](const std::shared_ptr<agent::Session>& session) {
         agent::QueuedCommand command;
         command.request_id = "probe";
         command.name = "help";
-        session.RunCommandNow(command);
+        session->RunCommandNow(command);
         for (const auto& event : fixture.DrainQueue(session)) {
             if (event.has_command_result() && event.command_result().request_id() == "probe") {
                 return event.command_result().message();
@@ -1072,8 +1088,8 @@ TEST_CASE("a subagent gets no /-command surface", "[subagent][commands][invarian
     // The parent answers /help with its listing; the child answers that it has
     // no command subsystem at all. Both ANSWER -- a dropped invocation would
     // hang a client either way -- but only one of them can act.
-    CHECK(answer(*parent).find("/agent") != std::string::npos);
-    CHECK(answer(*child).find("not available") != std::string::npos);
+    CHECK(answer(parent).find("/agent") != std::string::npos);
+    CHECK(answer(child).find("not available") != std::string::npos);
 }
 
 // --- advisor inheritance ----------------------------------------------------------
@@ -1114,14 +1130,14 @@ TEST_CASE("a child defaults to no advisor even when one is configured",
     child_script->Push(testing::TextResponse("child result"));
 
     parent->SubmitTurn("go");
-    const auto child_id = fixture.WaitForSubagentStarted(*parent);
+    const auto child_id = fixture.WaitForSubagentStarted(parent);
     REQUIRE(child_id.has_value());
     auto child = fixture.sessions->Find(*child_id);
     REQUIRE(child != nullptr);
 
     // The child parks on the wire prompt: the child preset's execute is Ask and
     // no advisor answered it, even though the manager holds an auto-approver.
-    const auto request_id = fixture.WaitForPermissionRequest(*child);
+    const auto request_id = fixture.WaitForPermissionRequest(child);
     REQUIRE(request_id.has_value());
     CHECK(bash_ptr->calls.empty());
 
@@ -1149,7 +1165,7 @@ TEST_CASE("advisor_inherit opts the child into the configured advisor",
     child_script->Push(testing::TextResponse("child result"));
 
     parent->SubmitTurn("go");
-    const auto child_id = fixture.WaitForSubagentStarted(*parent);
+    const auto child_id = fixture.WaitForSubagentStarted(parent);
     REQUIRE(child_id.has_value());
 
     // The inherited advisor answered the child's Ask: the tool runs without any
@@ -1158,7 +1174,7 @@ TEST_CASE("advisor_inherit opts the child into the configured advisor",
     CHECK(bash_ptr->calls.size() == 1);
     auto child = fixture.sessions->Find(*child_id);
     REQUIRE(child != nullptr);
-    for (const auto& event : fixture.DrainQueue(*child)) {
+    for (const auto& event : fixture.DrainQueue(child)) {
         CHECK_FALSE(event.has_permission_request());
     }
 }

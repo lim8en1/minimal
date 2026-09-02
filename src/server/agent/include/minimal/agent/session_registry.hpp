@@ -1,6 +1,7 @@
 #pragma once
 
-// Owns every live session, and runs the initial-attach guard.
+// Owns every live session, and runs the lifetime rules: the initial-attach
+// guard, the detached-idle reaper, and the process idle exit.
 //
 // THE GUARD IS A SAFETY NET, NOT A DESIGNED FLOW. Attaching to a session --
 // including a subagent child announced by SubagentStartedEvent -- is a client
@@ -8,11 +9,14 @@
 // subagent emits events before its tab attaches; it is "never-yet-attached =>
 // terminate after a short grace period", which only fires against a client that
 // failed its obligation. Once a session has been attached, stream drop is what
-// terminates it. See ARCHITECTURE.md "Session lifetime".
+// DETACHES it (S5): the session outlives its clients and is collected by the
+// detached-idle reaper only after it has been fully quiescent for
+// sessions.detached_idle_ttl_seconds. See ARCHITECTURE.md "Session lifetime".
 
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -50,12 +54,41 @@ public:
 
 class SessionRegistry {
 public:
+    // S5 lifetime policy, settable after construction (main reads settings
+    // once and wires the idle-exit halves it owns). Every duration here is a
+    // settings.json value (SessionSettings / ServerSettings) with a
+    // documented default; nothing at the use site is hardcoded.
+    struct ReaperConfig {
+        // The never-attach guard (sessions.initial_attach_guard_seconds).
+        std::chrono::milliseconds initial_attach_guard = std::chrono::seconds(10);
+        // A fully quiescent detached session (no subscribers, no turn in
+        // flight, no live background tasks, no subagent children) is
+        // terminated after being quiescent this long. Collecting a quiescent
+        // session is lossless: the transcript stays in SQLite, and re-attach
+        // becomes resume. 0 = never reap detached sessions.
+        std::chrono::seconds detached_idle_ttl = std::chrono::seconds(1800);
+        // Once zero clients are attached AND zero sessions are live, fire
+        // on_idle_expired after this linger. 0 = never (daemon deployment).
+        std::chrono::seconds idle_shutdown = std::chrono::seconds(5);
+        // The service's attached-stream count; empty disables the idle exit.
+        std::function<std::size_t()> attached_clients;
+        // Wired to Server::RequestShutdown by main. Fired from the reaper
+        // thread; must not block.
+        std::function<void()> on_idle_expired;
+    };
+
     SessionRegistry(const AgentPresetRegistry& presets, tools::ToolRegistry& tools,
                     const llm::ProviderFactoryRegistry& providers,
                     SessionObserverRegistry& observers, session::SessionDatabase& db,
                     LoopConfig loop_config, common::Logger& logger,
                     std::chrono::milliseconds initial_attach_guard = std::chrono::seconds(10));
     ~SessionRegistry();
+
+    // Replaces the lifetime policy before any session exists (or after -- the
+    // reaper reads it under the mutex each tick). The constructor's
+    // initial_attach_guard parameter stays for call sites that never touch
+    // this; setting it overrides the guard too.
+    void set_reaper_config(ReaperConfig config);
 
     SessionRegistry(const SessionRegistry&) = delete;
     SessionRegistry& operator=(const SessionRegistry&) = delete;
@@ -82,6 +115,14 @@ public:
     // project_root, not in any preset.
     void set_project_context(config::ProjectContextSettings settings) {
         project_context_ = settings;
+    }
+
+    // sessions.unattended_prompt_timeout_seconds, read once at startup like
+    // project_context above and applied through the same CreateResolved
+    // funnel. Zero (the default) means every prompt waits forever, unchanged
+    // from before S5.
+    void set_prompt_timeout(std::chrono::milliseconds timeout) {
+        prompt_timeout_ = timeout;
     }
 
     // The process-wide hook dispatcher (track O). Optional and borrowed; set
@@ -130,6 +171,12 @@ public:
 
 private:
     void ReaperMain();
+    // The lock-already-held twin of ChildCount(), for ReaperMain -- which
+    // holds mutex_ across its whole sweep. Calling the public ChildCount()
+    // from there would relock a non-recursive std::mutex on the same thread
+    // and deadlock the reaper permanently, wedging every subsequent Find()/
+    // size()/etc. behind a lock nobody will ever release.
+    std::size_t ChildCountLocked(const std::string& parent_id) const;
 
     const AgentPresetRegistry& presets_;
     // Optional and borrowed; every session gets the same one.
@@ -150,8 +197,16 @@ private:
         disabled.enabled = false;
         return disabled;
     }();
+    std::chrono::milliseconds prompt_timeout_{0};
     common::Logger& logger_;
     std::chrono::milliseconds initial_attach_guard_;
+    ReaperConfig reaper_config_;
+    // When each session was FIRST observed detached-and-quiescent (the
+    // reaper-local half of the idle-TTL rule; the session itself carries no
+    // timestamps for it). Erased whenever a session is active or attached.
+    std::unordered_map<std::string, std::chrono::steady_clock::time_point> quiescent_since_;
+    // When the process first observed zero clients and zero sessions.
+    std::optional<std::chrono::steady_clock::time_point> idle_since_;
 
     mutable std::mutex mutex_;
     std::condition_variable reaper_cv_;

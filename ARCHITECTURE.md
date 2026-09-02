@@ -129,9 +129,9 @@ gRPC permits one concurrent reader and one concurrent writer on a `ServerReaderW
 
 **`TurnCompletedEvent` is the end-of-turn signal**, and the stream stays open across it. Nothing else can serve: a turn makes one provider call per tool round, so `stop_reason` arrives several times before the turn is actually finished. Without an explicit terminator a single-turn client cannot know when to half-close, and both sides block — the client waiting for output that will never come, the server waiting for a turn that will never be sent. An interactive client never notices, because a human decides when to stop; `minimal -p` has no human, which is why building it first is what found this. It is emitted on **every** exit path including failures, since a client that learns a turn ended only by seeing it succeed hangs on every error.
 
-**Session lifetime**: stream close **terminates** the session — see "Session lifetime" below. There is no detached state in v1, which is why `PendingRequests` has no grace-timer machinery.
+**Session lifetime**: a bare stream close **detaches** the session (S5); it keeps running and its transcript keeps growing in SQLite. Explicit termination is `EndSession{TERMINATE}`, or the idle reaper collecting a fully quiescent detached session — see "Session lifetime" below, including what that costs `PendingRequests`.
 
-**Both session queues are bounded, by different rules.** The outbound `EventQueue` caps at 65,536 events AND 64 MiB of protobuf bytes (a count-only bound does not bound RAM when one event can carry megabytes) and blocks the producer (`Push` is worker-only; the reader uses `TryPush` and answers refusals). The session's *work* queue (turns + mutating commands) caps at 32 items and REFUSES beyond that, answering each refusal on the wire — one turn can run for minutes, so an unbounded work queue let a client enqueue transcript-sized turns faster than the worker consumed them, growing memory without limit. Termination closes the outbound queue BEFORE joining the worker: `Push` blocks at the cap and is woken only by `Close` or `Pop`, so a worker parked on a full queue behind a stalled writer deadlocks a join that waits for a close scheduled after the join. Closing first wakes the producer; `Pop` still drains before honoring the close, so a live writer receives the backlog.
+**Both session queues are bounded, by different rules.** The outbound side is `rpc::EventBroadcaster` (S5.1): one drop-oldest queue PER SUBSCRIBER, capped at 65,536 events and 64 MiB of protobuf bytes each (a count-only bound does not bound RAM when one event can carry megabytes). `Publish` never blocks the session worker — a full or absent subscriber drops its own oldest and gets a `ResyncRequiredEvent`, so the session's progress is never gated on any one subscriber draining; the durable record is the transcript in SQLite, these queues are ephemeral. The session's *work* queue (turns + mutating commands) caps at 32 items and REFUSES beyond that, answering each refusal on the wire — one turn can run for minutes, so an unbounded work queue let a client enqueue transcript-sized turns faster than the worker consumed them, growing memory without limit.
 
 **Cancel must reach the worker even through a full queue.** The worst state backpressure creates — a worker parked in `Push` behind a stalled-but-connected client — is exactly the state a user needs cancel to reach, and without extra machinery only stream close helped. `Cancel`/`Terminate` therefore latch **drop-mode** on the outbound queue (`AbortWaitingProducers`): until the consumer next drains, `Push` refuses over-bounds events instead of blocking on them, the stream sink's `bool` contract turns each refusal into the loop abort, and the turn unwinds. The latch self-heals at the next successful `Pop`, so ordinary backpressure resumes afterward and one cancel cannot degrade the queue for its life. Two deliberate carve-outs keep the unwedge from creating new silences: the turn's exit signal is queued with `PushTerminal` (drop-mode never applies — a headless client detects the end of a turn by `TurnCompletedEvent` alone), and `Terminate` queues its terminal event with `TryPush` before closing the queue (below).
 
@@ -222,28 +222,79 @@ auto-denying their work is worse than waiting.
 
 ## Session lifetime — `src/server/agent/`
 
-**Two outcomes, not three.** There is no detach in v1:
+**Three outcomes.** S5 added detach, and N clients may attach to one session
+(a future web UI alongside the terminal UI):
 
 | Action | Compute | Transcript |
 |---|---|---|
-| **Terminate** — close a tab, or the stream drops | stopped | kept (SQLite) |
+| **Detach** — a stream drops, or a client sends `EndSession{DETACH}` | keeps running | kept (SQLite) |
+| **Terminate** — `EndSession{TERMINATE}`, or the idle reaper collects a quiescent detached session | stopped | kept (SQLite) |
 | **Delete** — session view, confirmed | stopped | removed |
 
-Rationale: a detached state would be the sole reason `PendingRequests` needs attach/detach notification, a grace timer, and fail-closed-on-timeout semantics — machinery that exists only to answer "what happens to a permission prompt when nobody is listening?". **No session ever runs unattached**, so the question is unaskable rather than answered. It also removes the need for worker parking and, most significantly, **the daemon requirement**: with nothing outliving its client, the server is refcounted by attached clients and exits when the last one leaves — auto-spawned by the client, no idle-timeout tuning, no persistent background process.
+A bare stream drop now **detaches**, not terminates: a crashed terminal must
+not destroy in-flight work, which is the whole point of this. The session
+stays live with zero subscribers; its turn (if any) keeps going, output lands
+in the SQLite transcript, and the idle reaper (`SessionRegistry::ReaperMain`)
+collects it only once it has been fully quiescent — no subscribers, no turn in
+flight, no live background tasks, no subagent children — for
+`sessions.detached_idle_ttl_seconds` (0 = never reap). **The durable record is
+the transcript in SQLite; events are ephemeral notifications.** A subscriber
+that misses events (drop-oldest overflow, or attaching after another
+subscriber already has) gets a `ResyncRequiredEvent` and refetches through
+`GetMessages`, rather than the session's progress ever being gated on any one
+subscriber's queue draining.
 
-What this gives up: "close the terminal, the agent keeps working, come back later." The transcript survives regardless; only the in-flight turn is lost. Purely additive to reintroduce later (an `EndSession{DETACH}` message slots back in), so it is deferred, not foreclosed.
+What this bought back, and what it cost: the v1 argument below no longer
+holds unconditionally, but each piece it protected has a narrow, explicit
+answer now — see the fan-out, lifetime, and prompts entries below — rather
+than being reopened wholesale. The v1 argument, kept for context: a detached
+state is the sole reason `PendingRequests` needs an attach/detach notion, a
+grace timer, and fail-closed-on-timeout semantics — machinery that exists
+only to answer "what happens to a permission prompt when nobody is
+listening?" With detach real, that question IS askable, so it is answered
+explicitly: prompts wait forever by default (unchanged from v1), and an
+operator can opt a session into a bound via
+`sessions.unattended_prompt_timeout_seconds` (0 = wait forever) — one
+config-gated timeout on `PendingRequests::AwaitResponse`, not a new
+invariant. It also cost the "no daemon" guarantee its unconditional form: the
+server no longer exits the instant the last client detaches, since a
+detached session may still be mid-turn. The exit condition is now **zero
+attached clients AND zero live sessions**, held for
+`server.idle_shutdown_seconds` (0 = never — a true daemon deployment); the
+common case (one client, no detached sessions left behind) still exits
+promptly, and auto-spawn (connect-or-spawn + pid lock) stays correct under
+this.
 
-**One carve-out.** The rule is *not* "unattached ⇒ terminate," because a subagent session emits events before its tab attaches. Terminate fires on stream drop **after having been attached**; a never-yet-attached session gets a short initial-attach timeout (~10 s) purely as a guard against a non-conforming client. Attaching to child sessions is a **client protocol obligation** (see Non-interactive client), so this is a safety net, not a designed flow.
+**Fan-out (S5.1).** `Session` no longer owns a single `EventQueue` with one
+attach flag; `rpc::EventBroadcaster` (`src/server/rpc/event_broadcaster.{hpp,cpp}`)
+holds a subscriber set, one bounded drop-oldest queue per attached stream.
+`Publish` never blocks — a full or absent subscriber cannot stall the
+session's progress — and a small backlog covers the pre-attach window a
+subagent's events arrive in before its tab attaches.
+
+**Prompts with N clients, and with none (S5.3).** A permission or
+confirmation request broadcasts to every subscriber; first answer wins
+(`PendingRequests::Resolve` reports whether THIS call was the winner), and
+every other subscriber gets a `PromptResolvedEvent` so its modal dismisses
+instead of sitting on an already-answered question.
+
+**One carve-out, unchanged from v1.** The rule is *not* "unattached ⇒
+terminate," because a subagent session emits events before its tab attaches.
+A never-yet-attached session still gets a short initial-attach timeout
+(`sessions.initial_attach_guard_seconds`, ~10 s default) purely as a guard
+against a non-conforming client. Attaching to child sessions is a **client
+protocol obligation** (see Non-interactive client), so this is a safety net,
+not a designed flow.
 
 **Termination reuses the cancellation path** (atomic cancel flag → `bool` stream sink aborts the provider request → tools observe `is_cancelled`), then joins and reaps the worker. No new mechanism. Cancel is a GENERATION, not a flag: the worker records the generation when it pops a turn, and a turn is cancelled iff the generation has moved since — a flag cleared before the pop loses a cancel that landed while the worker was between turns, one cleared after the pop loses one that landed in the pop-to-clear window. A cancel landing inside a retry backoff reports `StopReason::Cancelled`, not `Unknown` — the headless exit code derives from this value. And the terminal state is on the wire: `Terminate` queues a `SessionEndedEvent` before closing the queue, so a client attached to a session killed server-side sees an explicit end instead of silence (see the termination ordering above).
 
-**Server shutdown must be *requested*, not performed, from an RPC handler.** The last-client-detached callback fires at the tail of `OpenSession`, on the handler thread, and `grpc::Server::Shutdown()` blocks until every in-flight RPC completes — including the one calling it. So `Server::RequestShutdown()` only sets a flag, and a thread inside `Server::Wait()` does the blocking part. Getting this wrong hangs the binary on every run while every unit test still passes, because a test that merely records the callback never exercises it.
+**Server shutdown must be *requested*, not performed, from an RPC handler or the reaper thread.** `Server::RequestShutdown()` only sets a flag; a thread inside `Server::Wait()` does the actual blocking `grpc::Server::Shutdown()`, which waits for every in-flight RPC to complete. Calling the blocking form directly from the tail of `OpenSession` (the handler thread) would wait for the very RPC calling it and hang the binary on every run; the same trap applies to `SessionRegistry::ReaperMain`, which fires `on_idle_expired` — wired to `RequestShutdown`, never `Shutdown` — from its own background thread once `ReaperConfig::idle_shutdown` elapses with zero attached clients and zero live sessions. Getting this wrong hangs the binary while every unit test still passes, because a test that merely records the callback never exercises it.
 
 **Shutdown is graceful under a deadline.** The blocking `Shutdown` inside `Wait()` passes a time limit (30 s): in-flight RPCs get the window to finish, then are cancelled. An unbounded graceful shutdown let a half-open stream — a client whose process died without closing its socket — block `Wait()` and therefore process exit indefinitely, since the stream errors only when something is left to error it. The deadline expiry is logged, so a forced cancellation is visible in the server log rather than merely abrupt.
 
 - **Confirm when work is in flight.** Closing a tab mid-turn destroys running work, so it routes through the existing `ConfirmationBroker`; closing an idle tab needs no prompt.
 - **Terminating a blocking subagent must unblock its parent** — the parent's `SpawnSubagentTool` is synchronously waiting and receives an error `ToolResultBlock` (the child's completion signal fires on every exit path, teardown included) rather than hanging. Cancelling the parent's turn propagates the same way: the wait observes the parent's cancellation and terminates the child. "Every exit path" includes a terminate that lands BEFORE the seeded turn ever ran (the initial-attach reaper, or a terminate racing `SubmitTurn`): the completion hook fires from `Terminate` with a synthesized `Cancelled` result, because the only alternative is a blocking parent waiting on a promise nothing will ever set.
-- **Client quit** = closing every tab: terminates all attached sessions, with one confirmation if any have work in flight.
+- **Client quit (S5.4)** detaches every tab (`Stream::Detach()`, which sends `EndSession{DETACH}` and lets the writer flush before joining — no `TryCancel`, unlike `Close()`) rather than terminating; a session with a turn in flight keeps running unattended. `ctrl+w` (closing one tab) still terminates, with the existing confirmation if work is in flight — that path is unchanged.
 
 ## LLM provider adapter — `src/server/llm/`
 
@@ -1629,7 +1680,7 @@ Two checks specifically for the naming model: warn when a `per_tool_overrides` /
 - `llamacpp-kv` plugin (`/save-session`, `/restore-session`, `/erase-session`) — designed, deliberately not shipped in v1.
 - **Branch-tree traversal**: rewind/redo ships as a per-session cursor (§ *Session traversal*); returning to an abandoned branch AFTER the fork needs parent pointers and would make every linear-transcript invariant a tree walk. Additive, not foreclosed.
 - **File-state checkpoints (shadow git)**: the observer seam (`OnSessionRewound` + tool-invocation seqs) is in place; the plugin is not.
-- Session detach (`EndSession{DETACH}`), deliberately deferred — see Session lifetime.
+- **Auto re-attaching live sessions on client start.** S5.4 added `SessionSummary.is_live` and the picker shows a "live" marker for such rows, but startup itself (T8) always opens a fresh session for the cwd rather than checking for a live one to re-attach to — the two behaviors were never reconciled, and doing so is a product decision (does a live session for the same cwd take priority over "start working"?), not a mechanical follow-up. `AttachTab` (already used for subagents) is the mechanism whenever this is decided.
 - Status-bar segment and panel/picker column slots for client plugins (renderer slot ships in v1).
 - Tab-bar overflow behavior with many sessions × subagents.
 - Backend-reported `usage` of `0` from some OpenAI-compatible proxies — no fallback estimate is designed; the harness itself carries no estimate, and the cost-tracker plugin records such turns as *unpriced* ("unknown"), never as a zero-dollar turn.

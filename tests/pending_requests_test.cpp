@@ -226,12 +226,14 @@ TEST_CASE("a slot is released even when the waiter unwinds", "[pending_requests]
 TEST_CASE("the first answer wins over a retransmission", "[pending_requests]") {
     // A duplicate is a client retransmitting, not changing its mind. Overwriting
     // an answer the worker may already have acted on would be worse than
-    // ignoring it.
+    // ignoring it. The return value distinguishes winner from loser (S5.3:
+    // only the winner should broadcast PromptResolvedEvent) -- a duplicate
+    // answer is reported false even though the slot exists.
     auto pending = std::make_shared<PendingRequests>();
     auto registration = Register(pending, "req-1");
 
     CHECK(pending->Resolve("req-1", ConfirmationAnswer{"allow"}));
-    CHECK(pending->Resolve("req-1", ConfirmationAnswer{"deny"}));
+    CHECK_FALSE(pending->Resolve("req-1", ConfirmationAnswer{"deny"}));
 
     auto waiter = AwaitInBackground(pending, registration);
     REQUIRE(waiter.Ready());
@@ -263,6 +265,41 @@ TEST_CASE("many concurrent registrations each get their own answer", "[pending_r
         CHECK(std::get<ConfirmationAnswer>(waiters[i].Get().value()).chosen_option ==
               "answer-" + std::to_string(i));
     }
+}
+
+TEST_CASE("a timeout elapsing with no answer returns nullopt, not a decision",
+          "[pending_requests]") {
+    // sessions.unattended_prompt_timeout_seconds's opt-in fail-closed path: the
+    // timeout produces exactly the same "no answer" outcome as cancellation, so
+    // WirePermissionChecker/WireConfirmationBroker need no new branch for it.
+    auto pending = std::make_shared<PendingRequests>();
+    auto registration = Register(pending, "req-1");
+
+    auto waiter = RunInBackground([pending, registration] {
+        return registration->AwaitResponse(20ms);
+    });
+
+    REQUIRE(waiter.Ready());
+    CHECK_FALSE(waiter.Get().has_value());
+    // The slot survives the timeout (the Registration is still alive) and
+    // still has no answer in it -- a late answer is a normal first answer,
+    // not a duplicate, so Resolve() must not crash or spuriously report a
+    // collision. Nobody is waiting on it any more, which is fine: Resolve()
+    // has no notion of "this waiter already gave up."
+    CHECK(pending->Resolve("req-1", ConfirmationAnswer{"too-late"}));
+}
+
+TEST_CASE("an answer landing before the timeout still wins", "[pending_requests]") {
+    auto pending = std::make_shared<PendingRequests>();
+    auto registration = Register(pending, "req-1");
+
+    auto waiter = RunInBackground(
+        [pending, registration] { return registration->AwaitResponse(5s); });
+    CHECK_FALSE(waiter.WaitFor(50ms));
+
+    CHECK(pending->Resolve("req-1", ConfirmationAnswer{"allow"}));
+    REQUIRE(waiter.Ready());
+    CHECK(std::get<ConfirmationAnswer>(waiter.Get().value()).chosen_option == "allow");
 }
 
 TEST_CASE("a cross-delivered answer keeps its type", "[pending_requests]") {

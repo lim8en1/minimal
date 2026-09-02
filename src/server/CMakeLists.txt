@@ -66,6 +66,7 @@ add_library(minimal_server_core SHARED
     plugins/plugin_discovery.cpp
     rpc/proto_convert.cpp
     rpc/pending_requests.cpp
+    rpc/event_broadcaster.cpp
     rpc/command_executor.cpp
     rpc/auth_provider.cpp
     rpc/auth_interceptor.cpp

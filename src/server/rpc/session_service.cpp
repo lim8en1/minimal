@@ -89,7 +89,7 @@ void ApplyAdvisor(const config::PermissionsConfig& permissions,
     if (!permissions.advisor || advisors == nullptr) return;
     auto advisor = advisors->Find(*permissions.advisor);
     if (advisor == nullptr) return;
-    params.channels = agent::MakeSessionChannels();
+    params.channels = agent::MakeSessionChannels(params.session_id);
     auto cancel_source = std::make_shared<tools::AdvisorCancelSource>();
     params.permission_checker = std::make_unique<tools::AdvisedPermissionChecker>(
         std::move(advisor),
@@ -333,6 +333,14 @@ grpc::Status SessionServiceImpl::ResumeSession(const v1::CreateSessionRequest* r
     return grpc::Status::OK;
 }
 
+void SessionServiceImpl::PublishPromptResolved(agent::Session& session,
+                                               const std::string& request_id) {
+    v1::ServerEvent event;
+    event.set_session_id(session.info().session_id);
+    event.mutable_prompt_resolved()->set_request_id(request_id);
+    session.queue().Publish(std::move(event));
+}
+
 void SessionServiceImpl::Dispatch(const v1::ClientEvent& event, agent::Session& session) {
     switch (event.payload_case()) {
         case v1::ClientEvent::kChatTurn:
@@ -341,20 +349,28 @@ void SessionServiceImpl::Dispatch(const v1::ClientEvent& event, agent::Session& 
             session.SubmitTurn(event.chat_turn().text());
             return;
 
-        case v1::ClientEvent::kPermissionResponse:
+        case v1::ClientEvent::kPermissionResponse: {
             // Carried across as the typed variant, still unparsed: parsing
             // belongs on the worker, which can afford to fail, not on the
             // reader, which must not stall. The payload case IS the type --
             // the variant makes a wrong-kind answer structurally unreadable
             // at the waiter rather than merely failing to parse there.
-            session.pending().Resolve(event.permission_response().request_id(),
-                                      PermissionAnswer{event.permission_response().SerializeAsString()});
+            const auto& request_id = event.permission_response().request_id();
+            if (session.pending().Resolve(
+                    request_id, PermissionAnswer{event.permission_response().SerializeAsString()})) {
+                PublishPromptResolved(session, request_id);
+            }
             return;
+        }
 
-        case v1::ClientEvent::kConfirmationResponse:
-            session.pending().Resolve(event.confirmation_response().request_id(),
-                                      ConfirmationAnswer{event.confirmation_response().chosen_option()});
+        case v1::ClientEvent::kConfirmationResponse: {
+            const auto& request_id = event.confirmation_response().request_id();
+            if (session.pending().Resolve(
+                    request_id, ConfirmationAnswer{event.confirmation_response().chosen_option()})) {
+                PublishPromptResolved(session, request_id);
+            }
             return;
+        }
 
         case v1::ClientEvent::kCancel:
             session.Cancel();
@@ -389,6 +405,18 @@ void SessionServiceImpl::Dispatch(const v1::ClientEvent& event, agent::Session& 
             session.SubmitRewind(queued);
             return;
         }
+
+        case v1::ClientEvent::kEndSession:
+            // Never reached: OpenSession's read loop intercepts has_end_session()
+            // before calling Dispatch, for both the first event and every
+            // subsequent one, because ending the stream is a decision only
+            // that loop can unwind around. Kept as an explicit case (rather
+            // than falling to no case at all) so the switch stays exhaustive
+            // and a future call site cannot reintroduce the silent-no-op bug
+            // this once was.
+            logger_.warn("session {}: end_session reached Dispatch (should be unreachable)",
+                        session.info().session_id);
+            return;
 
         case v1::ClientEvent::PAYLOAD_NOT_SET:
             logger_.warn("session {}: client event with no payload", session.info().session_id);
@@ -492,63 +520,88 @@ grpc::Status SessionServiceImpl::OpenSession(
     }
 
     // THE COUNT LEADS THE CLAIM. attached_ used to be incremented only AFTER
-    // TryAttach succeeded, which opened a window between the two: this stream
+    // the attach succeeded, which opened a window between the two: this stream
     // was provably attached but not yet counted, so another stream's
-    // ReleaseAttachment could fetch_sub from 1 to 0 -- firing
+    // ReleaseClientSlot could fetch_sub from 1 to 0 -- firing
     // on_last_client_detached_, i.e. requesting process shutdown, while a
     // client was attached. Counting first (and releasing on every refused
     // path below) closes it: the count is accurate from the moment the stream
     // is committed to serving this session.
     attached_.fetch_add(1, std::memory_order_acq_rel);
-    if (!session->TryAttach()) {
-        // One stream per session. Attaching anyway would silently split the
-        // event stream between two writers draining one queue, and the first to
-        // close would terminate the session under the other -- both of which
-        // look like flaky output rather than a protocol error.
-        ReleaseClientSlot();
-        return grpc::Status(grpc::StatusCode::ALREADY_EXISTS,
-                            "session '" + first.session_id() + "' already has a client attached");
-    }
     // A session the reaper or another stream is already tearing down must not be
-    // attached to at all: its queue is closing, and the client would see an
+    // attached to at all: its broadcaster is closing, and the client would see an
     // immediately-empty stream with no error explaining why.
     if (session->terminated()) {
-        session->Detach();
         ReleaseClientSlot();
         return grpc::Status(grpc::StatusCode::NOT_FOUND,
                             "session '" + first.session_id() + "' is already terminated");
     }
 
+    // S5: this stream SUBSCRIBES. N streams may attach to one session; the
+    // broadcaster owns the fan-out (one drop-oldest queue per stream, backlog
+    // seeding for the first subscriber, a resync notice for a later one), so
+    // there is no single-consumer claim to race for and no ALREADY_EXISTS to
+    // refuse with. The old refusal existed because one queue had one consumer.
+    const auto subscriber = session->Subscribe();
+
     // First on the stream, before anything the client's first event produces:
     // a freshly attached tab has everything its status bar renders from frame
-    // one. TryPush -- this is the RPC thread, which never blocks on a full
-    // queue; losing one metadata event degrades to "segments render nothing",
-    // the same treatment an unknown segment id gets.
-    EmitSessionMetadata(*session);
+    // one. Targeted at THIS subscriber -- the other streams attached already
+    // have their metadata. This is the RPC thread: PublishTo never blocks.
+    EmitSessionMetadata(*session, subscriber);
 
-    // The one and only Write() caller for this stream. It drains the SESSION's
-    // queue, not a stream-owned one, so anything produced before this moment is
-    // still here and goes out first.
+    // The one and only Write() caller for this stream. It drains THIS stream's
+    // subscriber queue, not a shared one, so concurrent streams never split
+    // each other's events.
     std::thread writer;
-    auto fail = [this, &session, &writer](const std::string& reason) {
-        sessions_.Terminate(session->info().session_id);
-        session->queue().Close();
+    bool terminate_requested = false;
+    auto finish = [&](bool terminate, grpc::Status status) -> grpc::Status {
+        // Order is the whole point, and it DIFFERS by outcome:
+        //  * TERMINATE: Terminate broadcasts SessionEndedEvent to every
+        //    subscriber and closes every queue drain-first -- so a client
+        //    that explicitly asked to terminate (and is still reading) SEES
+        //    the terminal event before its stream ends. The writer drains
+        //    and unwinds from Pop; the join below cannot hang.
+        //  * DETACH (and every bare drop): only THIS stream's queue closes,
+        //    which is what unwinds a writer parked in Pop.
+        if (terminate) sessions_.Terminate(session->info().session_id);
+        session->Unsubscribe(subscriber);
         if (writer.joinable()) writer.join();
-        ReleaseAttachment(*session);
-        return grpc::Status(grpc::StatusCode::INTERNAL, reason);
+        ReleaseClientSlot();
+        return status;
     };
     try {
-        writer = std::thread([stream, session] {
-            while (auto event = session->queue().Pop()) {
+        writer = std::thread([stream, session, subscriber] {
+            while (auto event = session->queue().Pop(subscriber)) {
                 if (!stream->Write(*event)) break;  // client went away
             }
         });
 
-        Dispatch(first, *session);
+        // has_end_session() must be checked on `first` too: session_id and
+        // end_session are both fields on the same ClientEvent, so a client is
+        // free to name the session and ask to end it in one message. Routing
+        // that into Dispatch() would silently no-op it (no kEndSession case
+        // there -- the decision belongs here, where the read loop can unwind
+        // around it) and this stream would then sit reading for a session it
+        // already asked to leave.
+        if (first.has_end_session()) {
+            terminate_requested = first.end_session().mode() != v1::EndSession::DETACH;
+        } else {
+            Dispatch(first, *session);
 
-        v1::ClientEvent event;
-        while (stream->Read(&event)) {
-            Dispatch(event, *session);
+            v1::ClientEvent event;
+            while (stream->Read(&event)) {
+                if (event.has_end_session()) {
+                    // Handled HERE, not in Dispatch: the decision ends THIS
+                    // stream's read loop, and only the handler knows how to
+                    // unwind around it. TERMINATE stops the session; DETACH is
+                    // the graceful form of a drop.
+                    terminate_requested =
+                        event.end_session().mode() != v1::EndSession::DETACH;
+                    break;
+                }
+                Dispatch(event, *session);
+            }
         }
     } catch (const std::exception& e) {
         // Unwinding without restoring the attach count would leak it, and the
@@ -556,45 +609,42 @@ grpc::Status SessionServiceImpl::OpenSession(
         // Dispatch branches are non-throwing by contract; this guard exists so
         // that contract can be violated without bricking shutdown.
         logger_.warn("session {}: OpenSession failed: {}", first.session_id(), e.what());
-        return fail(e.what());
+        return finish(/*terminate=*/true,
+                      grpc::Status(grpc::StatusCode::INTERNAL, e.what()));
     } catch (...) {
         // The SAME containment for an exception of an unknown flavor: the
         // contract above was guarded only against std::exception, so anything
         // else would have unwound past the refcount restore and bricked
         // shutdown outright.
         logger_.warn("session {}: OpenSession failed (unknown exception)", first.session_id());
-        return fail("unknown exception");
+        return finish(/*terminate=*/true,
+                      grpc::Status(grpc::StatusCode::INTERNAL, "unknown exception"));
     }
 
-    // Stream close TERMINATES the session -- there is no detached state in v1,
-    // so a dropped stream is unambiguous. Terminate() closes the queue (before
-    // joining the worker, so a worker parked on a full queue is woken rather
-    // than deadlocked), which is what lets the writer finish rather than
-    // blocking forever on Pop().
-    sessions_.Terminate(session->info().session_id);
-    if (writer.joinable()) writer.join();
-    ReleaseAttachment(*session);
-    return grpc::Status::OK;
-}
-
-void SessionServiceImpl::ReleaseAttachment(agent::Session& session) {
-    // ONE function, called by both exits, because the two used to differ in the
-    // half that matters. The catch path restored the count and stopped there --
-    // so a client whose stream unwound decremented to zero without ever firing
-    // the callback, and main() wires that callback to RequestShutdown(). The
-    // whole no-daemon design ("refcounted by attached clients, gone when the
-    // last one leaves") then never fired: the process held the socket forever
-    // and the next auto-spawning client found a zombie it could not replace.
-    //
-    // The catch block existed precisely for a stream that unwinds, and its own
-    // comment says it is there so the refcount cannot leak -- it just did not
-    // carry the consequence of reaching zero. Splitting that decision across two
-    // call sites is what let them drift, so there is now only one.
-    session.Detach();
-    ReleaseClientSlot();
+    // S5 LIFETIME: a bare stream drop DETACHES -- a crashed terminal must not
+    // destroy in-flight work, which is the whole feature. The session stays
+    // live with zero subscribers: its turn keeps going, output lands in the
+    // SQLite transcript, and the idle reaper collects it only after it has
+    // been fully quiescent for sessions.detached_idle_ttl_seconds. The
+    // never-attached guard is untouched: a stream that never named a session
+    // never reaches this path, and a session nobody ever attaches to still
+    // dies on the guard. Exceptions still terminate (conservative).
+    return finish(/*terminate=*/terminate_requested, grpc::Status::OK);
 }
 
 void SessionServiceImpl::ReleaseClientSlot() {
+    // ONE decrement of attached_, used by EVERY exit of OpenSession, because
+    // the exits used to differ in the half that matters. The catch path once
+    // restored the count and stopped there -- so a client whose stream unwound
+    // decremented to zero without ever firing the callback, and main() wires
+    // that callback to RequestShutdown(). The whole no-daemon design
+    // ("refcounted by attached clients, gone when the last one leaves") then
+    // never fired: the process held the socket forever and the next
+    // auto-spawning client found a zombie it could not replace. The catch
+    // block existed precisely for a stream that unwinds, and its own comment
+    // said it was there so the refcount cannot leak -- it just did not carry
+    // the consequence of reaching zero. Firing the last-client callback is
+    // part of the decrement, not something callers may do selectively.
     if (attached_.fetch_sub(1, std::memory_order_acq_rel) == 1 && on_last_client_detached_) {
         on_last_client_detached_();
     }
@@ -671,7 +721,14 @@ grpc::Status SessionServiceImpl::ListSessions(grpc::ServerContext* context,
 
     try {
         for (const auto& summary : db_.ListSessions(filter)) {
-            *response->add_sessions() = ToProto(summary);
+            auto* proto_summary = response->add_sessions();
+            *proto_summary = ToProto(summary);
+            // S5.4: from the live registry, not the stored row -- true iff a
+            // Session object for this id exists right now (attached or
+            // detached-but-running). One Find() per row; ListSessions pages
+            // are bounded (ClampPageSize above), so this is not an unbounded
+            // registry-mutex-under-lock scan.
+            proto_summary->set_is_live(sessions_.Find(summary.session_id) != nullptr);
         }
     } catch (const std::exception& e) {
         logger_.warn("ListSessions: {}", e.what());
@@ -824,9 +881,11 @@ grpc::Status SessionServiceImpl::DeleteSession(grpc::ServerContext* context,
     if (request->session_id().empty()) {
         return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "session_id is required");
     }
-    // A live session is a stream's subject: deleting the row under a Session
-    // that appends to it would turn every later write into a foreign-key error.
-    // The client closes the tab (which terminates the session) before deleting.
+    // A live session (attached OR detached -- S5) is a stream's subject:
+    // deleting the row under a Session that appends to it would turn every
+    // later write into a foreign-key error. Closing a tab only detaches now
+    // (S5.2); the client sends EndSession{TERMINATE} (or waits for the idle
+    // reaper to collect a quiescent detached session) before deleting.
     if (sessions_.Find(request->session_id()) != nullptr) {
         return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION,
                             "session '" + request->session_id() +
@@ -839,7 +898,8 @@ grpc::Status SessionServiceImpl::DeleteSession(grpc::ServerContext* context,
     return grpc::Status::OK;
 }
 
-void SessionServiceImpl::EmitSessionMetadata(agent::Session& session) {
+void SessionServiceImpl::EmitSessionMetadata(
+    agent::Session& session, const rpc::EventBroadcaster::Handle& subscriber) {
     // preset_snapshot(), never preset(): this runs on the RPC thread. The copy
     // carries the resolved model reference and the window the compactor's
     // strategies resolve against -- the `max` half of the status bar's {tokens}.
@@ -855,8 +915,11 @@ void SessionServiceImpl::EmitSessionMetadata(agent::Session& session) {
     metadata->set_model(preset.model_ref.str());
     metadata->set_permission_mode(RunModeString(session.run_mode()));
     metadata->set_context_window_tokens(preset.context_window_tokens.value_or(0));
-    if (!session.queue().TryPush(std::move(event))) {
-        logger_.warn("session {}: queue is full; SessionMetadataEvent dropped",
+    // Targeted at the new subscriber only -- the streams already attached have
+    // their metadata. Never blocks; a refusal means the stream went away mid-
+    // attach, which the handler unwind below handles.
+    if (!session.queue().PublishTo(subscriber, std::move(event))) {
+        logger_.warn("session {}: stream closed during attach; SessionMetadataEvent dropped",
                      session.info().session_id);
     }
 }

@@ -12,10 +12,11 @@
 // session owns, so it is testable in-process with no channel.
 
 #include <atomic>
+#include <chrono>
 #include <string>
 
 #include "minimal/commands/confirmation_broker.hpp"
-#include "minimal/rpc/event_queue.hpp"
+#include "minimal/rpc/event_broadcaster.hpp"
 #include "minimal/rpc/pending_requests.hpp"
 #include "minimal/v1/session_service.pb.h"
 
@@ -23,13 +24,16 @@ namespace minimal::rpc {
 
 class WireConfirmationBroker : public commands::ConfirmationBroker {
 public:
-    WireConfirmationBroker(std::string session_id, EventQueue<v1::ServerEvent>& queue,
-                           PendingRequests& pending);
+    // unattended_timeout: sessions.unattended_prompt_timeout_seconds, see
+    // WirePermissionChecker. Zero (the default) waits forever.
+    WireConfirmationBroker(std::string session_id, EventBroadcaster& queue,
+                           PendingRequests& pending,
+                           std::chrono::milliseconds unattended_timeout = {});
 
-    // Blocks the worker until the client answers, the turn is cancelled, or the
-    // session terminates. The last two return an empty chosen_option -- "no
-    // answer", which the dispatcher maps onto a policy, rather than this
-    // inventing one.
+    // Blocks the worker until the client answers, the turn is cancelled, the
+    // session terminates, or (if configured) the unattended timeout elapses.
+    // Every one of those returns an empty chosen_option -- "no answer", which
+    // the dispatcher maps onto a policy, rather than this inventing one.
     commands::ConfirmationResponse RequestConfirmation(
         const commands::ConfirmationRequest& request) override;
 
@@ -37,8 +41,9 @@ private:
     std::string NextRequestId();
 
     std::string session_id_;
-    EventQueue<v1::ServerEvent>& queue_;
+    EventBroadcaster& queue_;
     PendingRequests& pending_;
+    std::chrono::milliseconds unattended_timeout_;
     // "confirm-" keeps ids distinct from WirePermissionChecker's "perm-" for
     // logs and diagnostics. It is NOT the safety mechanism -- the typed
     // PendingAnswer variant is: a permission answer delivered against this id

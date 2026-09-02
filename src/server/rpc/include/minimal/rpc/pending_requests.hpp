@@ -6,12 +6,16 @@
 // the reason the three-thread-per-session topology exists at all. See
 // ARCHITECTURE.md "Concurrency model".
 //
-// WAITS INDEFINITELY, deliberately. There is no timeout and no fail-closed
-// path. A client is present by construction (no detached sessions -- see
-// "Session lifetime"), so the only way a wait outlives its answer is termination,
-// which cancels explicitly. A human may simply be away, and auto-denying their
-// work because they went to lunch is worse than waiting.
+// WAITS INDEFINITELY BY DEFAULT. S5 allows a session to run detached, so a
+// prompt can now legitimately have nobody to answer it; the default is still
+// to wait rather than fail-closed, on the same reasoning as before -- a human
+// may simply be away, and auto-denying their work is worse than waiting. An
+// operator who wants a hard bound opts in per-session via
+// sessions.unattended_prompt_timeout_seconds (0 = wait forever), which rides
+// in as an optional timeout on AwaitResponse. Termination still cancels
+// explicitly, as it always did.
 
+#include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -67,12 +71,16 @@ public:
         Registration(const Registration&) = delete;
         Registration& operator=(const Registration&) = delete;
 
-        // Blocks until Resolve() names this id, or until cancellation.
-        // nullopt means "no answer" -- either the turn was cancelled or the
-        // session is terminating. Callers must treat it as exactly that, never
-        // as a decision: mapping it onto Deny here would put a policy choice
-        // inside a synchronisation primitive.
-        std::optional<PendingAnswer> AwaitResponse();
+        // Blocks until Resolve() names this id, cancellation, or (if timeout
+        // is set to a positive duration) the deadline passing unanswered.
+        // nullopt means "no answer" -- turn cancelled, session terminating,
+        // or timed out. Callers must treat it as exactly that, never as a
+        // decision: mapping it onto Deny here would put a policy choice
+        // inside a synchronisation primitive. std::nullopt (the default)
+        // means wait forever, matching the type this session's
+        // unattended_prompt_timeout_seconds setting is 0 for.
+        std::optional<PendingAnswer> AwaitResponse(
+            std::optional<std::chrono::milliseconds> timeout = std::nullopt);
 
         const std::string& request_id() const { return request_id_; }
 

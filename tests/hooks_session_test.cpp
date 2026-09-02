@@ -12,6 +12,7 @@
 
 #include "deadline.hpp"
 #include "fakes.hpp"
+#include "session_events.hpp"
 #include "minimal/agent/session.hpp"
 #include "minimal/common/logger.hpp"
 #include "minimal/hooks/hook_dispatcher.hpp"
@@ -73,17 +74,17 @@ struct HookSessionFixture {
         session = std::make_unique<agent::Session>(
             std::move(params), preset, std::move(owned_provider), std::move(owned_store),
             tools_registry, loop_config, observers, common::DefaultLogger());
+        stream = std::make_unique<testing::SessionStream>(*session);
     }
 
-    std::vector<v1::ServerEvent> DrainQueue() {
-        std::vector<v1::ServerEvent> out;
-        while (auto event = session->queue().TryPop()) out.push_back(std::move(*event));
-        return out;
-    }
+    std::vector<v1::ServerEvent> DrainQueue() { return stream->Drain(); }
 
     ~HookSessionFixture() {
+        stream.reset();
         if (session) session->Terminate();
     }
+
+    std::unique_ptr<testing::SessionStream> stream;
 
     std::filesystem::path block_script;
     std::unique_ptr<minimal::hooks::HookDispatcher> dispatcher;

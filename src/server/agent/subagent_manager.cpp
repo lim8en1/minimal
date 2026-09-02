@@ -195,7 +195,7 @@ SubagentOutcome SubagentManager::Spawn(const SubagentRequest& request,
     // producer uses is repeated here, against the CHILD's channels; the
     // ceilings above still bound what the child (advised or not) may run.
     if (advisor_inherit_ && advisor_) {
-        params.channels = MakeSessionChannels();
+        params.channels = MakeSessionChannels(params.session_id);
         auto cancel_source = std::make_shared<tools::AdvisorCancelSource>();
         params.permission_checker = std::make_unique<tools::AdvisedPermissionChecker>(
             advisor_,
@@ -285,7 +285,7 @@ SubagentOutcome SubagentManager::Spawn(const SubagentRequest& request,
     started->set_child_session_id(child_id);
     started->set_task(request.task);
     started->set_blocking(blocking);
-    parent->queue().Push(std::move(started_event));
+    parent->queue().Publish(std::move(started_event));
 
     // core.subagent_started: observe-only, fired at the same moment as the
     // wire event above. The task text is the parent model's own formulation --

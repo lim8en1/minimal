@@ -209,6 +209,16 @@ v1::ClientEvent ChatTurn(const std::string& session_id, const std::string& text)
     return event;
 }
 
+// S5.2: a bare stream drop now detaches rather than terminates, so tests that
+// need the session actually GONE (resume-from-store, delete-after-close) must
+// say so explicitly on the wire.
+v1::ClientEvent EndSession(const std::string& session_id, v1::EndSession::Mode mode) {
+    v1::ClientEvent event;
+    event.set_session_id(session_id);
+    event.mutable_end_session()->set_mode(mode);
+    return event;
+}
+
 // Half-closes, then READS TO END OF STREAM before finishing.
 //
 // Draining is not politeness, it is required. gRPC's sync API blocks in Write()
@@ -223,6 +233,27 @@ grpc::Status DrainAndFinish(Stream& stream) {
     while (stream->Read(&discarded)) {
     }
     return stream->Finish();
+}
+
+// Reads until the turn terminator, collecting each event's payload case --
+// the shape two streams' deliveries are asserted equal on. Per-subscriber
+// notices (attach metadata, resync) are excluded: they are addressed to one
+// stream, not part of the session's content order. Returns empty if the
+// stream dies before the terminator.
+template <typename Stream>
+std::vector<v1::ServerEvent::PayloadCase> ReadUntilTurnCompleted(Stream& stream) {
+    std::vector<v1::ServerEvent::PayloadCase> cases;
+    v1::ServerEvent event;
+    while (stream.Read(&event)) {
+        const auto payload = event.payload_case();
+        if (payload == v1::ServerEvent::kSessionMetadata ||
+            payload == v1::ServerEvent::kResyncRequired) {
+            continue;
+        }
+        cases.push_back(payload);
+        if (payload == v1::ServerEvent::kTurnCompleted) return cases;
+    }
+    return {};
 }
 
 // Reads until the turn terminator. A test that wants the transcript on disk has
@@ -512,6 +543,136 @@ TEST_CASE("a permission prompt is answered over the wire", "[session_service]") 
     CHECK(saw_finished_tool);
 }
 
+TEST_CASE("answering a permission prompt dismisses every other subscriber's copy",
+          "[session_service][S5]") {
+    // S5.3: two clients attached to one session both see the prompt; whichever
+    // answers first resolves it (Resolve()'s winner tracking), and the OTHER
+    // gets PromptResolvedEvent so its modal does not sit on a dead question.
+    ServiceFixture fixture;
+    auto tool = std::make_unique<testing::FakeTool>("bash", tools::ToolCategory::Execute, "ran it");
+    tool->set_disclosure({"run make", {{"bash:/usr/bin/make", "/usr/bin/make *"}}, true});
+    fixture.tools.Register(std::move(tool));
+    fixture.Script(testing::ToolUseResponse("call-1", "bash", {{"command", "make"}}));
+    fixture.Script(testing::TextResponse("built"));
+    fixture.Write("permissions.json", nlohmann::json{{"fallback", {{"execute", "ask"}}}}.dump());
+    fixture.Start();
+
+    const std::string session_id = fixture.CreateSession();
+
+    grpc::ClientContext context_a;
+    auto stream_a = fixture.stub->OpenSession(&context_a);
+    REQUIRE(stream_a->Write(ChatTurn(session_id, "build it")));
+
+    grpc::ClientContext context_b;
+    auto stream_b = fixture.stub->OpenSession(&context_b);
+    v1::ClientEvent attach_b;
+    attach_b.set_session_id(session_id);
+    attach_b.mutable_attach();
+    REQUIRE(stream_b->Write(attach_b));
+    v1::ServerEvent metadata_b;
+    REQUIRE(stream_b->Read(&metadata_b));  // the attach-time SessionMetadataEvent
+
+    // Stream A drives the turn and sees the permission_request; stream B sees
+    // the same request (broadcast) but never answers it.
+    std::string request_id;
+    v1::ServerEvent event_a;
+    while (stream_a->Read(&event_a)) {
+        if (event_a.has_permission_request()) {
+            request_id = event_a.permission_request().request_id();
+            break;
+        }
+    }
+    REQUIRE_FALSE(request_id.empty());
+
+    v1::ServerEvent event_b;
+    bool b_saw_request = false;
+    while (stream_b->Read(&event_b)) {
+        if (event_b.has_permission_request()) {
+            CHECK(event_b.permission_request().request_id() == request_id);
+            b_saw_request = true;
+            break;
+        }
+    }
+    REQUIRE(b_saw_request);
+
+    v1::ClientEvent answer;
+    answer.set_session_id(session_id);
+    auto* response = answer.mutable_permission_response();
+    response->set_request_id(request_id);
+    response->set_decision(v1::PERMISSION_DECISION_ALLOW);
+    REQUIRE(stream_a->Write(answer));
+
+    // B, having never answered, sees PromptResolvedEvent for the same id.
+    bool b_saw_resolved = false;
+    while (stream_b->Read(&event_b)) {
+        if (event_b.has_prompt_resolved()) {
+            CHECK(event_b.prompt_resolved().request_id() == request_id);
+            b_saw_resolved = true;
+            break;
+        }
+    }
+    CHECK(b_saw_resolved);
+
+    (void)DrainAndFinish(stream_a);
+    (void)DrainAndFinish(stream_b);
+}
+
+TEST_CASE("a duplicate permission answer from a second client is a harmless no-op",
+          "[session_service][S5]") {
+    // The other half of first-answer-wins: B answering AFTER A already did
+    // must not crash, double-broadcast, or override A's decision.
+    ServiceFixture fixture;
+    auto tool = std::make_unique<testing::FakeTool>("bash", tools::ToolCategory::Execute, "ran it");
+    tool->set_disclosure({"run make", {{"bash:/usr/bin/make", "/usr/bin/make *"}}, true});
+    fixture.tools.Register(std::move(tool));
+    fixture.Script(testing::ToolUseResponse("call-1", "bash", {{"command", "make"}}));
+    fixture.Script(testing::TextResponse("built"));
+    fixture.Write("permissions.json", nlohmann::json{{"fallback", {{"execute", "ask"}}}}.dump());
+    fixture.Start();
+
+    const std::string session_id = fixture.CreateSession();
+
+    grpc::ClientContext context_a;
+    auto stream_a = fixture.stub->OpenSession(&context_a);
+    REQUIRE(stream_a->Write(ChatTurn(session_id, "build it")));
+
+    std::string request_id;
+    v1::ServerEvent event_a;
+    while (stream_a->Read(&event_a)) {
+        if (event_a.has_permission_request()) {
+            request_id = event_a.permission_request().request_id();
+            break;
+        }
+    }
+    REQUIRE_FALSE(request_id.empty());
+
+    v1::ClientEvent allow;
+    allow.set_session_id(session_id);
+    allow.mutable_permission_response()->set_request_id(request_id);
+    allow.mutable_permission_response()->set_decision(v1::PERMISSION_DECISION_ALLOW);
+    REQUIRE(stream_a->Write(allow));
+
+    // A retransmit (a duplicate DENY): must not flip the already-granted
+    // decision, and must not crash dispatch. There is only one stream, so this
+    // just proves the server does not choke on it -- the winner-only-broadcast
+    // behavior itself is covered above with a second, non-answering client.
+    v1::ClientEvent deny;
+    deny.set_session_id(session_id);
+    deny.mutable_permission_response()->set_request_id(request_id);
+    deny.mutable_permission_response()->set_decision(v1::PERMISSION_DECISION_DENY);
+    REQUIRE(stream_a->Write(deny));
+
+    bool saw_finished_tool = false;
+    while (stream_a->Read(&event_a)) {
+        if (event_a.has_tool_execution() && !event_a.tool_execution().started()) {
+            saw_finished_tool = true;
+            break;
+        }
+    }
+    (void)DrainAndFinish(stream_a);
+    CHECK(saw_finished_tool);  // ran, i.e. the first answer (ALLOW) is the one that stuck
+}
+
 TEST_CASE("a denial over the wire produces an error result, not a hang", "[session_service]") {
     ServiceFixture fixture;
     auto tool = std::make_unique<testing::FakeTool>("bash", tools::ToolCategory::Execute, "ran it");
@@ -642,10 +803,13 @@ TEST_CASE("an incomplete disclosure prompts every time", "[session_service]") {
     CHECK(prompts == 2);  // granted both times, and asked both times anyway
 }
 
-TEST_CASE("closing the stream terminates the session", "[session_service]") {
-    // There is no detached state in v1, so a dropped stream is unambiguous.
+TEST_CASE("closing the stream detaches rather than terminates", "[session_service][S5]") {
+    // S5.2: a bare drop is now the graceful form of leaving, not an implicit
+    // terminate -- a crashed terminal must not destroy in-flight work. The
+    // session stays live in the registry with zero subscribers.
     ServiceFixture fixture;
     fixture.Script(testing::TextResponse("hi"));
+    fixture.Script(testing::TextResponse("and again"));
     fixture.Start();
 
     const std::string session_id = fixture.CreateSession();
@@ -661,6 +825,34 @@ TEST_CASE("closing the stream terminates the session", "[session_service]") {
         (void)DrainAndFinish(stream);
     }
 
+    const auto deadline = std::chrono::steady_clock::now() + 500ms;
+    while (session->has_subscribers() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(10ms);
+    }
+    CHECK_FALSE(session->terminated());
+    CHECK_FALSE(session->has_subscribers());
+    CHECK(fixture.sessions->Find(session_id) == session);
+}
+
+TEST_CASE("an explicit TERMINATE ends the session for good", "[session_service][S5]") {
+    ServiceFixture fixture;
+    fixture.Script(testing::TextResponse("hi"));
+    fixture.Start();
+
+    const std::string session_id = fixture.CreateSession();
+    auto session = fixture.sessions->Find(session_id);
+    REQUIRE(session != nullptr);
+
+    {
+        grpc::ClientContext context;
+        auto stream = fixture.stub->OpenSession(&context);
+        REQUIRE(stream->Write(ChatTurn(session_id, "hi")));
+        v1::ServerEvent event;
+        stream->Read(&event);
+        REQUIRE(stream->Write(EndSession(session_id, v1::EndSession::TERMINATE)));
+        (void)DrainAndFinish(stream);
+    }
+
     const auto deadline = std::chrono::steady_clock::now() + 5s;
     while (!session->terminated() && std::chrono::steady_clock::now() < deadline) {
         std::this_thread::sleep_for(10ms);
@@ -669,11 +861,66 @@ TEST_CASE("closing the stream terminates the session", "[session_service]") {
     CHECK(fixture.sessions->Find(session_id) == nullptr);
 }
 
+TEST_CASE("EndSession as the very first event on a stream still detaches",
+          "[session_service][S5]") {
+    // session_id and end_session are both fields on one ClientEvent, so a
+    // client can name the session and leave it in the same message -- the
+    // read loop must special-case first-event EndSession exactly like every
+    // later one, not silently swallow it via Dispatch (which has no case for
+    // it and would leave the stream sitting in the read loop instead).
+    ServiceFixture fixture;
+    fixture.Start();
+
+    const std::string session_id = fixture.CreateSession();
+    auto session = fixture.sessions->Find(session_id);
+    REQUIRE(session != nullptr);
+
+    grpc::ClientContext context;
+    auto stream = fixture.stub->OpenSession(&context);
+    REQUIRE(stream->Write(EndSession(session_id, v1::EndSession::DETACH)));
+    const auto status = DrainAndFinish(stream);
+    CHECK(status.ok());
+    CHECK_FALSE(session->terminated());
+}
+
+TEST_CASE("client::SessionClient::Stream::Detach leaves the session running",
+          "[session_service][S5]") {
+    // The real client-side call S5.4 adds: quit's teardown uses this instead
+    // of the destructive Close(). Driven through the real channel, unlike the
+    // proto-level EndSession(...) helper other S5 tests use directly.
+    ServiceFixture fixture;
+    fixture.Script(testing::TextResponse("hi"));
+    fixture.Start();
+
+    const std::string session_id = fixture.CreateSession();
+    auto session = fixture.sessions->Find(session_id);
+    REQUIRE(session != nullptr);
+
+    minimal::client::SessionClient client(rpc::SocketTarget(fixture.socket));
+    auto stream = client.MakeStream([](const v1::ServerEvent&) {});
+    REQUIRE(stream->Attach(session_id).has_value());
+    stream->Resume();
+
+    const auto deadline = std::chrono::steady_clock::now() + 2s;
+    while (!session->has_subscribers() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(10ms);
+    }
+    REQUIRE(session->has_subscribers());
+
+    stream->Detach();
+
+    CHECK(stream->status().ok());
+    CHECK_FALSE(session->terminated());
+    CHECK_FALSE(session->has_subscribers());
+    CHECK(fixture.sessions->Find(session_id) == session);
+}
+
 TEST_CASE("the last client detaching signals shutdown", "[session_service]") {
     // No daemon: the server is refcounted by attached clients and goes away when
     // the last one leaves.
     ServiceFixture fixture;
     fixture.Script(testing::TextResponse("hi"));
+    fixture.Script(testing::TextResponse("and again"));
     fixture.Start();
 
     const std::string session_id = fixture.CreateSession();
@@ -918,6 +1165,38 @@ TEST_CASE("ListSessions without a project_root is refused rather than answered e
           grpc::StatusCode::INVALID_ARGUMENT);
 }
 
+TEST_CASE("ListSessions.is_live reflects the live registry, not the stored row",
+          "[session_service][S5]") {
+    ServiceFixture fixture;
+    fixture.Script(testing::TextResponse("hi"));
+    fixture.Start();
+
+    const std::string live_id = fixture.CreateSession();
+    const std::string dead_id = fixture.CreateSession();
+    fixture.sessions->Terminate(dead_id);
+    REQUIRE(fixture.sessions->Find(dead_id) == nullptr);
+    REQUIRE(fixture.sessions->Find(live_id) != nullptr);
+
+    grpc::ClientContext context;
+    v1::ListSessionsRequest request;
+    request.set_include_all_dirs(true);
+    v1::ListSessionsResponse response;
+    REQUIRE(fixture.stub->ListSessions(&context, request, &response).ok());
+
+    bool saw_live = false, saw_dead = false;
+    for (const auto& summary : response.sessions()) {
+        if (summary.session_id() == live_id) {
+            CHECK(summary.is_live());
+            saw_live = true;
+        } else if (summary.session_id() == dead_id) {
+            CHECK_FALSE(summary.is_live());
+            saw_dead = true;
+        }
+    }
+    CHECK(saw_live);
+    CHECK(saw_dead);
+}
+
 TEST_CASE("a failed CreateSession leaves no session row behind",
           "[session_service][naming]") {
     // The database mints the id, so its row exists before the Session does. If
@@ -954,6 +1233,7 @@ TEST_CASE("a half-open stream cannot block shutdown past the grace deadline",
     // with a deadline short enough to assert on.
     ServiceFixture fixture;
     fixture.Script(testing::TextResponse("hi"));
+    fixture.Script(testing::TextResponse("and again"));
     fixture.Start();
     const std::string session_id = fixture.CreateSession();
 
@@ -990,6 +1270,7 @@ TEST_CASE("a command invocation is answered while the subsystem is missing",
           "[session_service]") {
     ServiceFixture fixture;
     fixture.Script(testing::TextResponse("hi"));
+    fixture.Script(testing::TextResponse("and again"));
     fixture.Start();
 
     const std::string session_id = fixture.CreateSession();
@@ -1140,6 +1421,7 @@ TEST_CASE("DeleteSession is refused while the session is open, works after close
           "[session_service][e5]") {
     ServiceFixture fixture;
     fixture.Script(testing::TextResponse("hi"));
+    fixture.Script(testing::TextResponse("and again"));
     fixture.Start();
 
     const std::string session_id = fixture.CreateSession();
@@ -1179,9 +1461,12 @@ TEST_CASE("DeleteSession is refused while the session is open, works after close
               grpc::StatusCode::NOT_FOUND);
     }
 
-    // Close the stream, which terminates the session; the row is now deletable,
-    // and the delete cascades to messages (the store-level guarantee the
-    // session_store tests cover -- here we assert the RPC wiring only).
+    // S5.2: closing the stream only detaches, so the row stays undeletable
+    // until the session is actually gone -- send an explicit TERMINATE first.
+    // Once it is, the row is deletable and the delete cascades to messages
+    // (the store-level guarantee the session_store tests cover -- here we
+    // assert the RPC wiring only).
+    REQUIRE(stream->Write(EndSession(session_id, v1::EndSession::TERMINATE)));
     (void)DrainAndFinish(stream);
     {
         grpc::ClientContext ctx;
@@ -1332,43 +1617,111 @@ TEST_CASE("the generic plugin channel streams PluginSubscribe payloads",
     CHECK_FALSE(refused_status.ok());
 }
 
-TEST_CASE("a second client on the same session is refused, not silently served",
+TEST_CASE("a second client on the same session is served the same events",
           "[session_service][invariant]") {
-    // The outbound queue has ONE consumer by design (ARCHITECTURE.md,
-    // "Concurrency model"): events buffer on the SESSION so a producer never has
-    // to know whether anyone is listening. Two streams draining it would give
-    // each a random half of the events, and the first to close would terminate
-    // the session under the other -- which looks like flaky output, not a
-    // protocol error. MarkAttached was a latch that never said no.
+    // S5 FLIPS THE OLD INVARIANT. The outbound side is a broadcaster with one
+    // drop-oldest queue per attached stream (event_broadcaster.hpp), so a
+    // second stream is SERVED, not refused -- that is the seam multi-client
+    // attach (a web UI beside the TUI) rides on. The old single-consumer
+    // design would have split the event stream between two writers draining
+    // one queue; Deliver copies per subscriber instead, so both streams see
+    // the same payloads in the same order.
     ServiceFixture fixture;
     fixture.Script(testing::TextResponse("hi"));
+    fixture.Script(testing::TextResponse("and again"));
     fixture.Start();
 
     const std::string session_id = fixture.CreateSession();
 
+    // Both clients name the stream and attach BEFORE the turn, so neither
+    // misses anything and neither should be told to resync.
     grpc::ClientContext first_context;
     auto first = fixture.stub->OpenSession(&first_context);
     v1::ClientEvent naming;
     naming.set_session_id(session_id);
-    naming.mutable_chat_turn()->set_text("hello");
+    naming.mutable_attach();
     REQUIRE(first->Write(naming));
-
-    // Wait for the first stream to actually be attached; OpenSession claims the
-    // session on its first inbound message, not at connect.
-    v1::ServerEvent event;
-    REQUIRE(first->Read(&event));
 
     grpc::ClientContext second_context;
     auto second = fixture.stub->OpenSession(&second_context);
     REQUIRE(second->Write(naming));
-    v1::ServerEvent unused;
-    while (second->Read(&unused)) {
-    }
-    const auto status = second->Finish();
-    CHECK(status.error_code() == grpc::StatusCode::ALREADY_EXISTS);
 
-    // The first stream is unharmed: it still owns the session and its turn.
+    // Each stream opens with the attach-time delivery notices: the FIRST
+    // subscriber gets its metadata directly; the LATE one is told to resync
+    // first (it missed everything the first subscriber's stream took -- at
+    // minimum the transcript) and gets its metadata after.
+    v1::ServerEvent event;
+    REQUIRE(first->Read(&event));
+    REQUIRE(event.has_session_metadata());
+    REQUIRE(second->Read(&event));
+    REQUIRE(event.has_resync_required());
+    REQUIRE(event.resync_required().reason() == "late_attach");
+    REQUIRE(second->Read(&event));
+    REQUIRE(event.has_session_metadata());
+
+    // A turn submitted on the FIRST stream is visible on BOTH, in the same
+    // payload order, ending in turn_completed on each.
+    REQUIRE(first->Write(ChatTurn(session_id, "hello")));
+    const auto first_payloads = ReadUntilTurnCompleted(*first);
+    const auto second_payloads = ReadUntilTurnCompleted(*second);
+    REQUIRE_FALSE(first_payloads.empty());
+    REQUIRE(first_payloads == second_payloads);
+    CHECK(first_payloads.back() == v1::ServerEvent::kTurnCompleted);
+
+    // Either stream can keep driving the session.
+    REQUIRE(second->Write(ChatTurn(session_id, "and again?")));
+    CHECK(WaitForTurnCompleted(*second));
+    CHECK(WaitForTurnCompleted(*first));
+
+
     (void)DrainAndFinish(first);
+    (void)DrainAndFinish(second);
+}
+
+TEST_CASE("a subscriber that stops reading cannot stall the session's turn",
+          "[session_service][invariant]") {
+    // THE INVARIANT (S5): the turn is never gated on any subscriber. A wedged
+    // stream's queue drops its own oldest once full and latches a resync
+    // notice; the live subscriber keeps receiving everything in order. The
+    // old single-queue design ran the whole turn on the reader's backpressure:
+    // one stalled client parked the worker.
+    ServiceFixture fixture;
+    fixture.Script(testing::TextResponse("hi"), {llm::StreamEvent{
+                                                     llm::TextDeltaEvent{0, "chatty"}}});
+    fixture.Start();
+
+    const std::string session_id = fixture.CreateSession();
+
+    grpc::ClientContext wedged_context;
+    auto wedged = fixture.stub->OpenSession(&wedged_context);
+    v1::ClientEvent naming;
+    naming.set_session_id(session_id);
+    naming.mutable_attach();
+    REQUIRE(wedged->Write(naming));
+
+    grpc::ClientContext live_context;
+    auto live = fixture.stub->OpenSession(&live_context);
+    REQUIRE(live->Write(naming));
+
+    // The wedged stream's attach notices sit unread from here on. The live
+    // stream attached SECOND: it is told to resync (it missed the wedged
+    // stream's window) before its own metadata.
+    v1::ServerEvent event;
+    REQUIRE(live->Read(&event));
+    REQUIRE(event.has_resync_required());
+    REQUIRE(live->Read(&event));
+    REQUIRE(event.has_session_metadata());
+
+    REQUIRE(live->Write(ChatTurn(session_id, "hello")));
+    // The live stream sees the whole turn -- the wedged one never reads, so
+    // this proves delivery does not wait on it.
+    CHECK(WaitForTurnCompleted(*live));
+
+    // The session survived the wedged reader; the wedged stream was served
+    // its attach notices (it just never consumed them).
+    CHECK(fixture.sessions->Find(session_id) != nullptr);
+    (void)DrainAndFinish(live);
+    (void)DrainAndFinish(wedged);
 }
 
 TEST_CASE("CancelTurn over the wire ends the turn and leaves the session usable",
@@ -1741,6 +2094,10 @@ TEST_CASE("a stored session resumes with its history intact", "[session_service]
         auto stream = fixture.stub->OpenSession(&context);
         REQUIRE(stream->Write(ChatTurn(session_id, "remember the number 7")));
         REQUIRE(WaitForTurnCompleted(*stream));
+        // S5.2: a bare drop only detaches now, so an explicit TERMINATE is
+        // what actually ends the session -- this test wants it gone, for the
+        // resume-from-store path below.
+        REQUIRE(stream->Write(EndSession(session_id, v1::EndSession::TERMINATE)));
         (void)DrainAndFinish(stream);
     }
     WaitForTerminated(*fixture.sessions, session_id);
@@ -1771,6 +2128,7 @@ TEST_CASE("a stored session resumes with its history intact", "[session_service]
     CHECK(std::get<llm::TextBlock>(sent[1].content.front()).text == "first answer");
     CHECK(std::get<llm::TextBlock>(sent[2].content.front()).text == "what number did I give you?");
 
+    REQUIRE(stream->Write(EndSession(session_id, v1::EndSession::TERMINATE)));
     (void)DrainAndFinish(stream);
     WaitForTerminated(*fixture.sessions, session_id);
 
@@ -1805,6 +2163,7 @@ TEST_CASE("a stored session resumes with its history intact", "[session_service]
 TEST_CASE("resume validates its request", "[session_service][resume]") {
     ServiceFixture fixture;
     fixture.Script(testing::TextResponse("hi"));
+    fixture.Script(testing::TextResponse("and again"));
     fixture.Start();
 
     SECTION("an unknown session is NOT_FOUND") {
@@ -1910,6 +2269,7 @@ TEST_CASE("resume repairs a transcript torn mid-tool-sequence", "[session_servic
     CHECK(repair->tool_use_id == "call-1");
     CHECK(repair->is_error);
 
+    REQUIRE(stream->Write(EndSession(row.session_id, v1::EndSession::TERMINATE)));
     (void)DrainAndFinish(stream);
     WaitForTerminated(*fixture.sessions, row.session_id);
 }
@@ -1920,6 +2280,7 @@ TEST_CASE("a failed resume leaves the stored session intact", "[session_service]
     // it is the user's existing session, not one this call made.
     ServiceFixture fixture;
     fixture.Script(testing::TextResponse("hi"));
+    fixture.Script(testing::TextResponse("and again"));
     fixture.Start();
 
     const std::string session_id = fixture.CreateSession();
@@ -1962,6 +2323,7 @@ TEST_CASE("a store fault on resume is never reported as a missing session",
         auto stream = fixture.stub->OpenSession(&context);
         REQUIRE(stream->Write(ChatTurn(session_id, "hello")));
         REQUIRE(WaitForTurnCompleted(*stream));
+        REQUIRE(stream->Write(EndSession(session_id, v1::EndSession::TERMINATE)));
         (void)DrainAndFinish(stream);
     }
     WaitForTerminated(*fixture.sessions, session_id);
@@ -2018,6 +2380,7 @@ TEST_CASE("the model flag applies on resume, and a malformed one is refused ther
         auto stream = fixture.stub->OpenSession(&context);
         REQUIRE(stream->Write(ChatTurn(session_id, "hello")));
         REQUIRE(WaitForTurnCompleted(*stream));
+        REQUIRE(stream->Write(EndSession(session_id, v1::EndSession::TERMINATE)));
         (void)DrainAndFinish(stream);
     }
     WaitForTerminated(*fixture.sessions, session_id);

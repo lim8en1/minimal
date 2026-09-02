@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "fakes.hpp"
+#include "session_events.hpp"
 #include "minimal/agent/agent_loop.hpp"
 #include "minimal/agent/session.hpp"
 #include "minimal/common/logger.hpp"
@@ -123,6 +124,7 @@ struct SqliteSessionFixture {
     agent::LoopConfig loop_config;
     testing::FakeLlmProvider* provider = nullptr;
     std::unique_ptr<agent::Session> session;
+    std::unique_ptr<testing::SessionStream> stream;
 
     // The counting observer, registered before Start() so it sees everything.
     int rewind_notifications = 0;
@@ -167,6 +169,7 @@ struct SqliteSessionFixture {
         session = std::make_unique<agent::Session>(
             std::move(params), std::move(preset), std::move(owned_provider),
             std::move(owned_store), registry, loop_config, observers, common::DefaultLogger());
+        stream = std::make_unique<testing::SessionStream>(*session);
     }
 
     // Runs one user turn to completion, scripted with the given reply.
@@ -176,11 +179,7 @@ struct SqliteSessionFixture {
         REQUIRE(session->WaitForIdleForTesting(5s));
     }
 
-    std::vector<v1::ServerEvent> DrainQueue() {
-        std::vector<v1::ServerEvent> out;
-        while (auto event = session->queue().TryPop()) out.push_back(std::move(*event));
-        return out;
-    }
+    std::vector<v1::ServerEvent> DrainQueue() { return stream->Drain(); }
 
     const v1::SessionRewoundEvent* FindRewound(const std::vector<v1::ServerEvent>& events) {
         for (const auto& event : events) {

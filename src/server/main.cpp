@@ -471,6 +471,8 @@ int main(int argc, char** argv) {
     // its own project_root, at creation/resume/spawn -- never at startup, since
     // the server serves many project roots and no file belongs to all of them.
     sessions.set_project_context(settings.project_context);
+    sessions.set_prompt_timeout(
+        std::chrono::seconds(settings.sessions.unattended_prompt_timeout_seconds));
     sessions.set_hook_dispatcher(&hook_dispatcher);
 
     // Stage-4 wiring for the core support service Provided above (see the
@@ -550,12 +552,21 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    // NO DAEMON: refcounted by attached clients, gone when the last one leaves.
-    // That is what lets a client auto-spawn a server without anyone tuning an
-    // idle timeout or reaping a stray background process.
-    // RequestShutdown, not Shutdown: this fires at the tail of OpenSession, on
-    // the handler thread, and the blocking form would wait for that very RPC.
-    service.set_on_last_client_detached([&server] { server.RequestShutdown(); });
+    // S5: a session now outlives the client that opened it (detach, not just
+    // terminate), so "last client detached" no longer means "safe to exit" --
+    // a detached session may still be mid-turn. The reaper owns the exit
+    // decision instead: idle_shutdown fires only once zero clients are
+    // attached AND zero sessions are live, linger included. 0 = never (daemon
+    // deployment). RequestShutdown, not Shutdown: this can fire from the
+    // reaper thread or the tail of OpenSession, and the blocking form would
+    // wait for the very RPC that triggered it.
+    minimal::agent::SessionRegistry::ReaperConfig reaper_config;
+    reaper_config.initial_attach_guard = std::chrono::seconds(settings.sessions.initial_attach_guard_seconds);
+    reaper_config.detached_idle_ttl = std::chrono::seconds(settings.sessions.detached_idle_ttl_seconds);
+    reaper_config.idle_shutdown = std::chrono::seconds(settings.server.idle_shutdown_seconds);
+    reaper_config.attached_clients = [&service] { return service.attached_clients(); };
+    reaper_config.on_idle_expired = [&server] { server.RequestShutdown(); };
+    sessions.set_reaper_config(std::move(reaper_config));
 
     std::printf("\nlistening on %s\n", server.target().c_str());
     std::fflush(stdout);

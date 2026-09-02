@@ -33,8 +33,14 @@ std::string HumanTime(std::int64_t unix_ms) {
 }
 
 std::string Label(const v1::SessionSummary& session) {
-    return session.name() + "  ·  " + std::to_string(session.message_count()) +
-           " msgs  ·  " + HumanTime(session.updated_at_unix_ms());
+    // S5.4: "live" marks a session with a Session object still running
+    // server-side (attached or detached) -- selecting it attaches to the
+    // live stream rather than resuming from the stored transcript, and its
+    // turn may still be in flight.
+    std::string label = session.name() + "  ·  " + std::to_string(session.message_count()) +
+                        " msgs  ·  " + HumanTime(session.updated_at_unix_ms());
+    if (session.is_live()) label += "  ·  live";
+    return label;
 }
 
 }  // namespace

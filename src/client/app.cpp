@@ -1797,13 +1797,15 @@ int RunTui(const minimal::client::ParsedArgs& args) {
 
     // Join the async RPC worker BEFORE tearing down tabs: a job's completion
     // (RequestScrollback et al.) publishes into SessionState/AppState the
-    // same way a reader thread's dispatch does, and CloseAllTabs() below
+    // same way a reader thread's dispatch does, and DetachAllTabs() below
     // destroys the very tabs a straggling job would publish into.
     app->StopRpcQueue();
 
-    // Closing the TUI closes every tab: terminate all attached sessions
-    // (ARCHITECTURE.md "Session lifetime" -- nothing outlives its client).
-    app->CloseAllTabs();
+    // S5.4: quitting the TUI DETACHES every tab rather than terminating it --
+    // a session now outlives the client that opened it, so closing the
+    // terminal must not destroy in-flight work. ctrl+w (CloseTab) is the
+    // explicit per-tab terminate path and is unchanged.
+    app->DetachAllTabs();
     return kOk;
 }
 

@@ -968,7 +968,8 @@ Not scheduled, recorded so they are decisions rather than oversights.
 - **The shared-token auth plugin is deferred** — the `AuthProvider` registry, the pass-through default, and the wire guard are built (§11); the example plugin that registers one is not.
 - ~~**`tree-sitter` grammars**~~ — the dead vcpkg entry is real now: `tree-sitter` core moved to base dependencies and `tree-sitter-bash` is vendored via `FetchContent` (the command scanner, §12.40). The rest of the curated set arrives with track E, which now only needs to declare targets on plumbing that already exists.
 - ~~Anthropic provider~~ — **landed** (`provider-anthropic`), and needed zero core changes: the "additive changes" this gap once predicted (`cache_control` fields, a widened `system`) turned out to be decisions the provider makes locally from the existing unified model, not fields on it. See ARCHITECTURE.md's LLM provider adapter section.
-- Everything else under § *Deferred / open items*: Windows, `llamacpp-kv`, parallel tool dispatch, session detach, tab-bar overflow.
+- ~~Session detach~~ — **landed** (S5: `EndSession{DETACH}`, N-client fan-out via `EventBroadcaster`, the idle reaper, broadcast prompts with first-answer-wins). What is left is a product decision, not a gap: auto re-attaching a live session on client start was never reconciled with T8's "always start fresh" — see ARCHITECTURE.md's Deferred list.
+- Everything else under § *Deferred / open items*: Windows, `llamacpp-kv`, parallel tool dispatch, tab-bar overflow.
 
 ---
 

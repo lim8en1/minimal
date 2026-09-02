@@ -18,6 +18,7 @@
 #include "minimal/mcp/mcp_client_manager.hpp"
 #include "minimal/tools/tool_registry.hpp"
 #include "support/fakes.hpp"
+#include "support/session_events.hpp"
 #include "support/temp_dir.hpp"
 
 using namespace std::chrono_literals;
@@ -77,20 +78,22 @@ struct Fixture {
         session = std::make_unique<agent::Session>(
             std::move(params), preset, std::move(owned_provider), std::move(owned_store), registry,
             agent::LoopConfig{}, observers, minimal::common::DefaultLogger());
+        stream = std::make_unique<testing::SessionStream>(*session);
     }
 
     void Script(llm::ChatResponse response) { scripted.emplace_back(std::move(response), std::vector<llm::StreamEvent>{}); }
 
-    std::vector<v1::ServerEvent> DrainQueue() {
-        std::vector<v1::ServerEvent> out;
-        while (auto event = session->queue().TryPop()) out.push_back(std::move(*event));
-        return out;
-    }
+    std::vector<v1::ServerEvent> DrainQueue() { return stream->Drain(); }
 
     ~Fixture() {
+        stream.reset();
         if (session) session->Terminate();
         std::remove(mcp_config_path.c_str());
     }
+
+    // The fixture's stand-in writer: subscribed for the fixture's lifetime so
+    // DrainQueue never injects a resync notice into the event sequence.
+    std::unique_ptr<testing::SessionStream> stream;
 
     std::string mcp_config_path;
     agent::AgentPreset preset;
@@ -328,7 +331,7 @@ TEST_CASE("a subagent whose preset requires a dead server does not start", "[ses
     parent_params.project_root = dir.path();
     parent_params.mcp_manager = &manager;
     auto parent = sessions.Create(std::move(parent_params));
-    parent->TryAttach();
+    const auto parent_sub = parent->Subscribe();  // a client is present in every designed flow
 
     agent::SubagentRequest request;
     request.task = "do the thing";

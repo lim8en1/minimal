@@ -125,6 +125,15 @@ std::shared_ptr<Session> SessionRegistry::CreateResolved(SessionParams params,
     } else if (!error.empty()) {
         logger_.warn("session {}: {}", params.session_id, error);
     }
+    // S5.3: same funnel, same reasoning -- a producer that built its own
+    // permission_checker (an advised session) owns its own timeout policy, so
+    // this only takes effect on the default WirePermissionChecker/
+    // WireConfirmationBroker Session builds when params.permission_checker is
+    // null. Overwriting an explicit non-zero value a producer already set
+    // would defeat that override, so only the funnel default applies.
+    if (params.unattended_prompt_timeout == std::chrono::milliseconds::zero()) {
+        params.unattended_prompt_timeout = prompt_timeout_;
+    }
     // The user's model outranks the preset's. Applied here rather than inside
     // the preset registry because it is a property of this SESSION, not of the
     // preset -- two sessions on one preset can be running different models. In
@@ -286,6 +295,10 @@ std::shared_ptr<Session> SessionRegistry::Find(const std::string& session_id) co
 
 std::size_t SessionRegistry::ChildCount(const std::string& parent_id) const {
     std::lock_guard<std::mutex> lock(mutex_);
+    return ChildCountLocked(parent_id);
+}
+
+std::size_t SessionRegistry::ChildCountLocked(const std::string& parent_id) const {
     // CONCURRENT children only -- the definition the subagent limit needs. Two
     // states free a slot: the session terminated (reaped or stream-closed), or
     // its single seeded turn finished (a finished child stays in the map until
@@ -327,33 +340,99 @@ void SessionRegistry::TerminateAll() {
     for (auto& session : doomed) session->Terminate();
 }
 
+void SessionRegistry::set_reaper_config(ReaperConfig config) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    reaper_config_ = std::move(config);
+    initial_attach_guard_ = std::chrono::duration_cast<std::chrono::milliseconds>(
+        reaper_config_.initial_attach_guard);
+    reaper_cv_.notify_all();   // a shorter guard takes effect on the next tick
+}
+
 void SessionRegistry::ReaperMain() {
     while (true) {
         std::vector<std::shared_ptr<Session>> doomed;
+        bool fire_idle_exit = false;
         {
             std::unique_lock<std::mutex> lock(mutex_);
-            // Polling at a fraction of the guard keeps the reap within one tick
-            // of the deadline without a timer per session.
+            // Polling at a fraction of the guard keeps every deadline below
+            // within one tick of its target without a timer per session.
             reaper_cv_.wait_for(lock, initial_attach_guard_ / 4, [this] { return stopping_; });
             if (stopping_) return;
 
             const auto now = std::chrono::steady_clock::now();
             for (auto it = sessions_.begin(); it != sessions_.end();) {
                 const auto& session = it->second;
-                const bool expired = !session->ever_attached() &&
-                                     (now - session->created_at()) > initial_attach_guard_;
-                if (expired) {
+                const bool guard_expired = !session->ever_attached() &&
+                                           (now - session->created_at()) > initial_attach_guard_;
+                if (guard_expired) {
                     logger_.warn(
                         "session {}: no client attached within the guard period; terminating",
                         it->first);
                     doomed.push_back(session);
                     it = sessions_.erase(it);
+                    quiescent_since_.erase(doomed.back()->info().session_id);
+                    continue;
+                }
+                // S5: the detached-idle reaper. ALL of these must hold, and
+                // each one protects in-flight work that reaping would kill:
+                //   ever_attached -- the guard above owns never-attached
+                //     sessions; this rule owns everyone else.
+                //   no subscribers -- an attached client IS the reason to
+                //     keep the session; detachment starts the clock.
+                //   idle -- no turn in flight, no queued work. A worker
+                //     parked on a permission prompt counts as busy (it is
+                //     mid-turn), so unattended prompts are never reaped --
+                //     matching "they wait indefinitely" by default.
+                //   no live background tasks -- reaping would killpg them.
+                //   no subagent children -- a reaped parent loses the child's
+                //     completion injection.
+                const bool detached_quiescent =
+                    session->ever_attached() && !session->has_subscribers() &&
+                    session->idle() && session->background_tasks_live() == 0 &&
+                    ChildCountLocked(it->first) == 0;
+                if (!detached_quiescent) {
+                    quiescent_since_.erase(it->first);
+                    ++it;
+                    continue;
+                }
+                auto since = quiescent_since_.find(it->first);
+                if (since == quiescent_since_.end()) {
+                    quiescent_since_.emplace(it->first, now);
+                    ++it;
+                    continue;
+                }
+                if (reaper_config_.detached_idle_ttl.count() > 0 &&
+                    now - since->second >= reaper_config_.detached_idle_ttl) {
+                    logger_.warn("session {}: detached and quiescent for {}s; terminating",
+                                 it->first, reaper_config_.detached_idle_ttl.count());
+                    doomed.push_back(session);
+                    it = sessions_.erase(it);
+                    quiescent_since_.erase(it->first);
                 } else {
                     ++it;
                 }
             }
+
+            // The process idle exit (S5): zero attached clients AND zero live
+            // sessions, held for server.idle_shutdown_seconds. The old
+            // on-last-client-detached fired the instant the count hit zero,
+            // which only worked because sessions could not outlive clients.
+            if (reaper_config_.idle_shutdown.count() > 0 && reaper_config_.attached_clients &&
+                reaper_config_.on_idle_expired) {
+                if (sessions_.empty() && reaper_config_.attached_clients() == 0) {
+                    if (!idle_since_) idle_since_ = now;
+                    fire_idle_exit = now - *idle_since_ >= reaper_config_.idle_shutdown;
+                } else {
+                    idle_since_.reset();
+                }
+            }
         }
         for (auto& session : doomed) session->Terminate();
+        // OUTSIDE the lock: RequestShutdown must not run while the registry
+        // mutex is held (it joins RPC handlers that may be inside the
+        // service, waiting on nothing of ours -- but the lock is cheap to
+        // respect and the callback is arbitrary code).
+        if (fire_idle_exit && reaper_config_.on_idle_expired) reaper_config_.on_idle_expired();
 
         // The tick this thread already runs is the WAL checkpoint's home
         // (SessionDatabase::MaybeRunPassiveCheckpoint): wal_autocheckpoint=0

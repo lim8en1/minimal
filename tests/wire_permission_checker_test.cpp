@@ -19,9 +19,25 @@ namespace {
 // so a wedged checker thread can be abandoned without dangling. See
 // tests/support/deadline.hpp.
 struct Harness {
-    rpc::EventQueue<v1::ServerEvent> queue;
+    rpc::EventBroadcaster broadcaster{"sess-1"};
+    rpc::EventBroadcaster::Handle subscriber = broadcaster.Subscribe();
     rpc::PendingRequests pending;
-    rpc::WirePermissionChecker checker{"sess-1", queue, pending};
+    rpc::WirePermissionChecker checker{"sess-1", broadcaster, pending};
+
+    // Blocking, like the old queue's Pop: the checker publishes on its own
+    // thread, and the transport's drain waits for it.
+    std::optional<v1::ServerEvent> Pop() { return broadcaster.Pop(subscriber); }
+    std::size_t size() const { return broadcaster.queued(subscriber); }
+};
+
+// sessions.unattended_prompt_timeout_seconds set to a real, short bound.
+struct TimeoutHarness {
+    rpc::EventBroadcaster broadcaster{"sess-1"};
+    rpc::EventBroadcaster::Handle subscriber = broadcaster.Subscribe();
+    rpc::PendingRequests pending;
+    rpc::WirePermissionChecker checker{"sess-1", broadcaster, pending, 20ms};
+
+    std::optional<v1::ServerEvent> Pop() { return broadcaster.Pop(subscriber); }
 };
 
 tools::PermissionRequest BashRequest(bool complete = true) {
@@ -56,7 +72,7 @@ TEST_CASE("a permission request round-trips to an answer", "[wire_permission]") 
 
     // The checker publishes, then blocks. Draining the queue is the transport's
     // job -- here, this thread's.
-    const auto event = harness->queue.Pop();
+    const auto event = harness->Pop();
     REQUIRE(event.has_value());
     REQUIRE(event->has_permission_request());
     const auto& request = event->permission_request();
@@ -82,11 +98,49 @@ TEST_CASE("a permission request round-trips to an answer", "[wire_permission]") 
     CHECK(response.granted_keys[0] == "bash:/usr/bin/make");
 }
 
+TEST_CASE("an unattended prompt with a configured timeout denies rather than hanging forever",
+          "[wire_permission][S5]") {
+    // sessions.unattended_prompt_timeout_seconds's fail-closed opt-in: with
+    // nobody attached to answer, the default is to wait forever (see the
+    // untimed harness above), but an operator who configured a bound gets
+    // Deny instead of a worker parked indefinitely.
+    auto harness = std::make_shared<TimeoutHarness>();
+
+    auto answered = RunInBackground(
+        [harness] { return harness->checker.check(BashRequest()); });
+
+    const auto event = harness->Pop();
+    REQUIRE(event.has_value());
+
+    REQUIRE(answered.Ready());  // the 20ms timeout elapses well inside the 2s deadline
+    CHECK(answered.Get().decision == tools::PermissionDecision::Deny);
+}
+
+TEST_CASE("an answer arriving before the timeout still wins",
+          "[wire_permission][S5]") {
+    auto harness = std::make_shared<TimeoutHarness>();
+
+    auto answered = RunInBackground(
+        [harness] { return harness->checker.check(BashRequest()); });
+
+    const auto event = harness->Pop();
+    REQUIRE(event.has_value());
+    const auto& request = event->permission_request();
+
+    CHECK(harness->pending.Resolve(
+        request.request_id(),
+        rpc::PermissionAnswer{
+            Answer(v1::PERMISSION_DECISION_ALLOW, request.request_id(), {"bash:/usr/bin/make"})}));
+
+    REQUIRE(answered.Ready());
+    CHECK(answered.Get().decision == tools::PermissionDecision::Allow);
+}
+
 TEST_CASE("a denial round-trips as a denial", "[wire_permission]") {
     auto harness = std::make_shared<Harness>();
     auto answered = RunInBackground([harness] { return harness->checker.check(BashRequest()); });
 
-    const auto event = harness->queue.Pop();
+    const auto event = harness->Pop();
     REQUIRE(event.has_value());
     const std::string id = event->permission_request().request_id();
     harness->pending.Resolve(id,
@@ -102,7 +156,7 @@ TEST_CASE("a grant the request never offered is refused", "[wire_permission]") {
     auto harness = std::make_shared<Harness>();
     auto answered = RunInBackground([harness] { return harness->checker.check(BashRequest()); });
 
-    const auto event = harness->queue.Pop();
+    const auto event = harness->Pop();
     REQUIRE(event.has_value());
     const std::string id = event->permission_request().request_id();
     harness->pending.Resolve(
@@ -120,7 +174,7 @@ TEST_CASE("an incomplete disclosure says so on the wire", "[wire_permission]") {
     auto answered =
         RunInBackground([harness] { return harness->checker.check(BashRequest(false)); });
 
-    const auto event = harness->queue.Pop();
+    const auto event = harness->Pop();
     REQUIRE(event.has_value());
     CHECK_FALSE(event->permission_request().complete());
 
@@ -138,7 +192,7 @@ TEST_CASE("cancellation unblocks a waiting check as a denial", "[wire_permission
     auto harness = std::make_shared<Harness>();
     auto answered = RunInBackground([harness] { return harness->checker.check(BashRequest()); });
 
-    REQUIRE(harness->queue.Pop().has_value());
+    REQUIRE(harness->Pop().has_value());
     CHECK_FALSE(answered.WaitFor(50ms));
 
     harness->pending.Shutdown();
@@ -153,7 +207,7 @@ TEST_CASE("an unparseable answer denies rather than crashing", "[wire_permission
     auto harness = std::make_shared<Harness>();
     auto answered = RunInBackground([harness] { return harness->checker.check(BashRequest()); });
 
-    const auto event = harness->queue.Pop();
+    const auto event = harness->Pop();
     REQUIRE(event.has_value());
     harness->pending.Resolve(event->permission_request().request_id(),
                              rpc::PermissionAnswer{"not a protobuf"});
@@ -171,7 +225,7 @@ TEST_CASE("a confirmation answer delivered against a permission id denies struct
     auto harness = std::make_shared<Harness>();
     auto answered = RunInBackground([harness] { return harness->checker.check(BashRequest()); });
 
-    const auto event = harness->queue.Pop();
+    const auto event = harness->Pop();
     REQUIRE(event.has_value());
     harness->pending.Resolve(event->permission_request().request_id(),
                              rpc::ConfirmationAnswer{"allow"});
@@ -184,7 +238,7 @@ TEST_CASE("each request gets its own correlation id", "[wire_permission]") {
     auto harness = std::make_shared<Harness>();
 
     auto first = RunInBackground([harness] { return harness->checker.check(BashRequest()); });
-    const auto first_event = harness->queue.Pop();
+    const auto first_event = harness->Pop();
     REQUIRE(first_event.has_value());
     const std::string first_id = first_event->permission_request().request_id();
     harness->pending.Resolve(
@@ -192,7 +246,7 @@ TEST_CASE("each request gets its own correlation id", "[wire_permission]") {
     REQUIRE(first.Ready());
 
     auto second = RunInBackground([harness] { return harness->checker.check(BashRequest()); });
-    const auto second_event = harness->queue.Pop();
+    const auto second_event = harness->Pop();
     REQUIRE(second_event.has_value());
     const std::string second_id = second_event->permission_request().request_id();
     CHECK(second_id != first_id);
@@ -208,7 +262,7 @@ TEST_CASE("answering the previous request does not release the current one",
     auto harness = std::make_shared<Harness>();
 
     auto first = RunInBackground([harness] { return harness->checker.check(BashRequest()); });
-    const auto first_event = harness->queue.Pop();
+    const auto first_event = harness->Pop();
     REQUIRE(first_event.has_value());
     const std::string first_id = first_event->permission_request().request_id();
     harness->pending.Resolve(
@@ -216,7 +270,7 @@ TEST_CASE("answering the previous request does not release the current one",
     REQUIRE(first.Ready());
 
     auto second = RunInBackground([harness] { return harness->checker.check(BashRequest()); });
-    const auto second_event = harness->queue.Pop();
+    const auto second_event = harness->Pop();
     REQUIRE(second_event.has_value());
 
     // Replay the first answer. Its slot is gone, so it resolves nothing.
@@ -246,14 +300,14 @@ TEST_CASE("the worker/reader split is load-bearing, not incidental", "[wire_perm
 
     auto both_jobs = RunInBackground([harness] {
         harness->checker.check(BashRequest());    // blocks here...
-        return harness->queue.Pop().has_value();  // ...so this is unreachable
+        return harness->Pop().has_value();  // ...so this is unreachable
     });
 
     CHECK_FALSE(both_jobs.WaitFor(300ms));
     // The request was published and is still sitting unread, because the only
     // thread that was going to read it is blocked waiting for the answer that
     // reading it would have produced. That is the deadlock, exactly.
-    CHECK(harness->queue.size() == 1);
+    CHECK(harness->size() == 1);
 
     // Released through cancellation rather than by draining, so the assertion
     // above is not quietly undone by the test itself -- and so this does not

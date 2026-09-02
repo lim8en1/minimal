@@ -224,6 +224,19 @@ void SessionState::OnSessionEnded() {
     state_ = SessionStateKind::Done;
 }
 
+void SessionState::OnResyncRequired(const std::string& reason) {
+    std::lock_guard lk(mtx_);
+    // The streamed material on hand may be missing pieces -- drop the live
+    // half (the persisted transcript has the authoritative record) and mark
+    // the content changed so the frame pump's newest-slice refresh fires. A
+    // pending prompt is NOT dropped: the server replays outstanding prompts
+    // on attach (S5.3), and a prompt whose modal is showing is still real.
+    streaming_accumulated_.clear();
+    is_streaming_ = false;
+    ++transcript_version_;
+    common::DefaultLogger().info("session {}: resync required ({})", session_id_, reason);
+}
+
 // Pending modals -------------------------------------------------------------
 
 void SessionState::SetPermissionRequest(std::unique_ptr<PendingPermission> req) {
@@ -589,6 +602,16 @@ void AppState::DispatchToTab(const std::string& session_id, const v1::ServerEven
         target->OnTurnCompleted(event.turn_completed());   // Done + occupancy metrics
     } else if (event.has_error()) {
         target->OnError(event.error().message());
+    } else if (event.has_resync_required()) {
+        // S5: this stream's delivery had a hole. The durable record is the
+        // transcript; bumping the version makes the next maintain() pass
+        // refetch the newest scrollback through the async RPC queue (T2).
+        target->OnResyncRequired(event.resync_required().reason());
+    } else if (event.has_prompt_resolved()) {
+        // S5.3: another subscriber answered first. Dismiss this tab's modal
+        // for that request_id if it still has one open -- a no-op on the tab
+        // that answered, since it already cleared its own on send.
+        target->ClearPendingFor(event.prompt_resolved().request_id());
     } else if (event.has_session_metadata()) {
         target->OnSessionMetadata(event.session_metadata());   // refreshes tab label later
     } else if (event.has_stream_event()) {
@@ -943,6 +966,22 @@ void AppState::CloseAllTabs() {
     }
     // Outside the lock: Close() drains and joins the stream's threads.
     for (auto& stream : to_close) stream->Close();
+}
+
+void AppState::DetachAllTabs() {
+    // S5.4: quit's teardown. Same shape as CloseAllTabs() -- copy the streams
+    // out from under the lock, then act on the copies -- but Detach() instead
+    // of Close(): every session this client was attached to keeps running
+    // server-side (any turn in flight completes unattended), rather than
+    // being torn down just because the terminal closed.
+    std::vector<std::shared_ptr<SessionClient::Stream>> to_detach;
+    {
+        std::lock_guard lk(mtx_);
+        for (auto& tab : tabs_) to_detach.push_back(tab.stream);
+        tabs_.clear();
+        focused_id_.clear();
+    }
+    for (auto& stream : to_detach) stream->Detach();
 }
 
 AppState::TabEntry* AppState::FindTab(const std::string& session_id) {

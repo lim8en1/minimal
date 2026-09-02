@@ -38,6 +38,7 @@
 #include "minimal/config/settings_config.hpp"
 #include "minimal/rpc/auth_interceptor.hpp"
 #include "minimal/rpc/command_executor.hpp"
+#include "minimal/rpc/event_broadcaster.hpp"
 #include "minimal/tools/permission_advisor.hpp"
 #include "minimal/session/session_reader.hpp"
 #include "minimal/v1/session_service.grpc.pb.h"
@@ -136,16 +137,15 @@ private:
     // session's work queue. Reader thread; must not block on either path.
     void DispatchCommand(const v1::CommandInvocation& invocation, agent::Session& session);
 
+    // S5.3: broadcasts PromptResolvedEvent(request_id) to every subscriber
+    // once Resolve() reports THIS answer as the winner -- called from
+    // Dispatch, reader thread, so this must not block (Publish never does).
+    void PublishPromptResolved(agent::Session& session, const std::string& request_id);
+
     // Parses CreateSessionRequest.model onto params. Shared by fresh creation
     // and resume, so the two cannot disagree about whether --model applies.
     grpc::Status ApplyModelOverride(const v1::CreateSessionRequest& request,
                                     agent::SessionParams& params) const;
-
-    // Detach and drop this stream's reference, firing on_last_client_detached_
-    // if it was the last. BOTH exits of OpenSession go through here: the catch
-    // path used to decrement without firing, which left the refcounted server
-    // unable to ever notice it had zero clients.
-    void ReleaseAttachment(agent::Session& session);
 
     // The one decrement of attached_, shared by every exit -- the successful
     // detach, the attach-refused exits (which counted themselves first, see
@@ -157,10 +157,12 @@ private:
     // The metadata event a freshly attached stream opens with: name,
     // agent_preset, model, permission_mode and the resolved context window --
     // the wire source for the status bar's {model}/{agent}/{permission_mode}
-    // and {tokens} used/max. One emission per attach, before the client's
-    // first event is dispatched, so a tab has everything it renders from the
-    // first frame.
-    void EmitSessionMetadata(agent::Session& session);
+    // and {tokens} used/max. One emission per attach, targeted at THAT
+    // subscriber (the streams already attached have theirs), before the
+    // client's first event is dispatched, so a tab has everything it renders
+    // from the first frame.
+    void EmitSessionMetadata(agent::Session& session,
+                             const rpc::EventBroadcaster::Handle& subscriber);
 
     // Runs read-only commands off the reader thread. Its destructor joins the
     // pool, and a task may borrow `sessions_`/`commands_` -- both outlive this

@@ -13,6 +13,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "fakes.hpp"
+#include "session_events.hpp"
 #include "minimal/agent/session_registry.hpp"
 #include "minimal/agent/session_support.hpp"
 #include "minimal/common/logger.hpp"
@@ -92,9 +93,9 @@ struct SupportFixture {
 // Drains the session's outbound queue, looking for a session_metadata event.
 bool QueueHasRename(agent::Session& session, const std::string& name) {
     bool found = false;
-    while (auto event = session.queue().TryPop()) {
-        if (event->has_session_metadata() && event->session_metadata().name() == name &&
-            event->session_metadata().session_id() == session.session_id()) {
+    for (const auto& event : testing::DrainEvents(session)) {
+        if (event.has_session_metadata() && event.session_metadata().name() == name &&
+            event.session_metadata().session_id() == session.session_id()) {
             found = true;
         }
     }
@@ -205,7 +206,7 @@ TEST_CASE("RenameSession refuses a session the user named at creation",
     CHECK(session->info().name == "chosen by the user");
     CHECK(fixture.db->GetSession(session->session_id())->name == "chosen by the user");
     // No event: nothing changed, so nothing to refresh.
-    CHECK(session->queue().TryPop() == std::nullopt);
+    CHECK(testing::DrainEvents(*session).empty());
 }
 
 TEST_CASE("RenameSession refuses an empty name", "[session_support][naming]") {

@@ -120,6 +120,35 @@ struct LoggingSettings {
     std::int64_t max_files = 5;
 };
 
+// Session lifetime policy (S5). Every timeout is a settings.json key with a
+// documented default -- none of these is hardcoded at the use site -- and
+// 0 means "never" wherever a 0 makes sense, so an operator can opt into the
+// extreme policy rather than discover it is the only one.
+struct SessionSettings {
+    // How long a fully QUiescent detached session (no turn in flight, no live
+    // background tasks, no subagent children, no subscribers) lives before the
+    // reaper terminates it. Collecting a quiescent session is lossless: the
+    // transcript stays in SQLite and re-attach becomes resume. 0 = never reap
+    // (sessions live until explicitly terminated or deleted).
+    std::int64_t detached_idle_ttl_seconds = 1800;
+    // An unanswered permission/confirmation prompt is denied after this long.
+    // 0 (the default) waits forever: a human may simply be away, and
+    // auto-denying their work is worse than waiting (ARCHITECTURE.md).
+    std::int64_t unattended_prompt_timeout_seconds = 0;
+    // The never-attached guard: a session no client attaches to is terminated
+    // after this grace period. Purely a safety net against a non-conforming
+    // client; surfacing it here replaced a hardcoded constructor default.
+    std::int64_t initial_attach_guard_seconds = 10;
+};
+
+// Server process lifetime. With detach, the server legitimately outlives its
+// clients while sessions are still live; this governs the tail.
+struct ServerSettings {
+    // Once there are zero attached clients AND zero live sessions, exit after
+    // this linger. 0 = never exit (true daemon deployment).
+    std::int64_t idle_shutdown_seconds = 5;
+};
+
 struct SettingsConfig {
     std::string default_agent_preset;
     // "<provider>/<model>". Was default_provider, which named a connection back
@@ -137,6 +166,8 @@ struct SettingsConfig {
     ToolsSettings tools;
     ToolsViewSettings tools_view;
     ProjectContextSettings project_context;
+    SessionSettings sessions;
+    ServerSettings server;
     std::string session_db_path;
     LoggingSettings logging;
 };

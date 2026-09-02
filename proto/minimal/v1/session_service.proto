@@ -80,6 +80,22 @@ message RewindRequest {
   }
 }
 
+// How a client ends its stream, explicitly. The stream's session_id already
+// names the target; the mode decides what happens to it.
+message EndSession {
+  enum Mode {
+    MODE_UNSPECIFIED = 0;
+    // Stop the session now (the in-flight turn unwinds as cancelled). Same
+    // outcome as the old v1 semantics for every stream close.
+    TERMINATE = 1;
+    // Leave the session running with this stream detached: the turn keeps
+    // going, output lands in the SQLite transcript, and a later client
+    // re-attaches (or resumes) to pick it up.
+    DETACH = 2;
+  }
+  Mode mode = 1;
+}
+
 message ClientEvent {
   // Redundant on every message rather than bound once via stream metadata —
   // trades a few bytes for messages that are self-describing on their own
@@ -93,13 +109,18 @@ message ClientEvent {
     CancelTurn cancel = 6;
     Attach attach = 7;
     RewindRequest rewind = 8;
+    EndSession end_session = 9;
   }
 }
 
-// Note: there is deliberately no EndSession message. Closing the stream
-// terminates the session (see ARCHITECTURE.md -- Session lifetime); detach is
-// not supported in v1, so stream closure is unambiguous. A DETACH mode would
-// slot in here additively if that changes.
+// Stream lifecycle (S5): a bare stream drop DETACHES -- a crashed terminal
+// must not destroy in-flight work. Explicit EndSession{TERMINATE} stops the
+// session; EndSession{DETACH} is the graceful version of a drop. A session no
+// client ever attaches to is still terminated by the initial-attach guard
+// (~10 s), and a detached session is eventually collected by the idle reaper
+// (sessions.detached_idle_ttl_seconds) once it has been fully quiescent --
+// no turn, no background tasks, no subagent children -- for that long.
+// See ARCHITECTURE.md -- Session lifetime.
 
 // --- Server -> client payloads ---
 
@@ -305,6 +326,30 @@ message SessionRewoundEvent {
 // its turn normally still ends with turn_completed, then ends (stream close).
 message SessionEndedEvent {}
 
+// This subscriber's event stream has a HOLE: the durable record is the
+// transcript in SQLite, events are ephemeral notifications, and this client
+// missed some of them. The response is always the same -- refetch the
+// transcript through GetMessages (newest page first) and treat nothing seen on
+// this stream before this event as complete. Delivered when the broadcaster
+// had to drop-oldest into this subscriber's queue (overflow), or when a client
+// attaches to a session that already had a subscriber (late_attach): the
+// transcript is authoritative for everything either of them missed.
+message ResyncRequiredEvent {
+  // "overflow" (this subscriber's queue overflowed and oldest events were
+  // evicted) or "late_attach" (another client was attached to this session
+  // before this one). Informational -- the client action is identical.
+  string reason = 1;
+}
+
+// S5.3: a permission_request or confirmation_request this session broadcast
+// to every subscriber has been answered by ONE of them (first answer wins).
+// Delivered to every subscriber, including the one that answered -- clearing
+// an already-cleared prompt is a no-op there -- so every OTHER client's modal
+// for this request_id dismisses instead of sitting on a dead question.
+message PromptResolvedEvent {
+  string request_id = 1;
+}
+
 message ServerEvent {
   // Which session this event belongs to. Required because one client multiplexes
   // several sessions (tabs), including subagent children of the focused session.
@@ -323,6 +368,8 @@ message ServerEvent {
     BackgroundTaskEvent background_task = 12;
     SessionRewoundEvent session_rewound = 13;
     SessionEndedEvent session_ended = 14;
+    ResyncRequiredEvent resync_required = 15;
+    PromptResolvedEvent prompt_resolved = 16;
   }
 }
 
@@ -379,6 +426,12 @@ message SessionSummary {
   // include_subagents set returns rows the client cannot tell apart from
   // top-level ones, which makes the flag useless.
   string parent_session_id = 8;
+  // S5.4: true iff a live Session object for this id currently exists in the
+  // server's SessionRegistry -- attached OR detached-but-still-running, not
+  // the persisted row. Lets the picker offer "attach" (this session is live;
+  // its transcript may still be growing) instead of "resume" (load from the
+  // stored transcript, the only option before S5) for the same session_id.
+  bool is_live = 9;
 }
 
 message ListSessionsRequest {
@@ -472,7 +525,9 @@ message PluginCallResponse {
 service SessionService {
   // Primary channel for one open session: user turns in, streamed model output
   // and permission/confirmation/command round-trips out, multiplexed over a
-  // single bidirectional stream. Closing the stream terminates the session.
+  // single bidirectional stream. Dropping the stream detaches; send
+  // EndSession{TERMINATE} to stop the session explicitly (see the message's
+  // comment for the full lifecycle).
   rpc OpenSession(stream ClientEvent) returns (stream ServerEvent);
 
   rpc GetMessages(GetMessagesRequest) returns (GetMessagesResponse);

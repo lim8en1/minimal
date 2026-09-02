@@ -11,6 +11,7 @@
 
 #include "deadline.hpp"
 #include "fakes.hpp"
+#include "session_events.hpp"
 #include "minimal/agent/session.hpp"
 #include "minimal/common/logger.hpp"
 #include "minimal/rpc/wire_permission_checker.hpp"
@@ -67,9 +68,10 @@ struct SessionFixture {
         params.on_turn_finished = on_turn_finished;
         params.wake_on_injection = wake_on_injection;
 
-        session = std::make_unique<agent::Session>(
+        session = std::make_shared<agent::Session>(
             std::move(params), preset, std::move(owned_provider), std::move(owned_store),
             tools_registry, loop_config, observers, common::DefaultLogger());
+        stream = std::make_unique<testing::SessionStream>(session);
     }
 
     void Script(llm::ChatResponse response, std::vector<llm::StreamEvent> events = {}) {
@@ -87,14 +89,14 @@ struct SessionFixture {
     // Session-created default.
     std::shared_ptr<agent::SessionChannels> params_channels;
 
-    // Drains everything currently queued. The writer thread's job, done inline.
-    std::vector<v1::ServerEvent> DrainQueue() {
-        std::vector<v1::ServerEvent> out;
-        while (auto event = session->queue().TryPop()) out.push_back(std::move(*event));
-        return out;
-    }
+    // Drains everything currently queued for the fixture's subscriber. The
+    // writer thread's job, done inline.
+    std::vector<v1::ServerEvent> DrainQueue() { return stream->Drain(); }
 
     ~SessionFixture() {
+        // The stream unsubscribes first (declared after session, destroyed
+        // before it), then Terminate closes whatever remains.
+        stream.reset();
         if (session) session->Terminate();
     }
 
@@ -113,7 +115,11 @@ struct SessionFixture {
     bool wake_on_injection = false;
     testing::FakeLlmProvider* provider = nullptr;
     testing::InMemoryHistoryStore* store = nullptr;  // owned by the session
-    std::unique_ptr<agent::Session> session;
+    std::shared_ptr<agent::Session> session;
+    // Declared AFTER session so it is destroyed first and unsubscribes before
+    // the session dies. The stream also OWNS a shared_ptr to the session, so
+    // a test that resets fixture.session mid-case cannot dangle the stream.
+    std::unique_ptr<testing::SessionStream> stream;
 };
 
 // Drains until a PermissionRequest shows up, returning its request_id. The
@@ -393,7 +399,7 @@ TEST_CASE("an advise thread abandoned at the budget polls a flag that outlives t
     // the REAL wire checker over shared channels, so the budget's fall-through
     // is the human path and the prompt actually round-trips.
     fixture.injected_cancel_source = cancel_source;
-    fixture.params_channels = agent::MakeSessionChannels();
+    fixture.params_channels = agent::MakeSessionChannels("sess-advise");
     fixture.injected_checker = std::make_unique<tools::AdvisedPermissionChecker>(
         advisor,
         std::make_unique<rpc::WirePermissionChecker>("sess-advise", fixture.params_channels->queue,
@@ -448,33 +454,35 @@ TEST_CASE("terminating with a turn in flight joins cleanly", "[session]") {
     CHECK(fixture->session->terminated());
 }
 
-TEST_CASE("terminating a worker parked on a full queue returns instead of deadlocking",
+TEST_CASE("terminating a session whose subscriber never drains returns instead of deadlocking",
           "[session][invariant]") {
-    // THE INVARIANT: Push() blocks at the queue cap and only Close() or Pop()
-    // wakes it, so Terminate() must close the queue BEFORE joining the worker.
-    // It once joined first -- reachable whenever a client stalls or dies
-    // mid-stream and the queue fills: the writer stops draining, the worker
-    // parks in Push, and the join waits for a worker that waits for a close
-    // that was scheduled after the join. Restore the old order and this test
-    // deadlocks rather than fails.
+    // THE INVARIANT (S5): Publish is drop-oldest and never blocks, so NO
+    // producer -- worker, reader, watcher -- can be parked on a full queue,
+    // and a client that stops draining cannot stall the turn. What can still
+    // park is a writer in Pop, and Terminate must unwind it: CloseAll closes
+    // every subscriber queue drain-first BEFORE the worker join. The old
+    // blocking-Push design once joined first and deadlocked; restore that
+    // order and this test wedges rather than fails.
     SessionFixture fixture;
     fixture.Script(testing::TextResponse("hi"), {llm::TextDeltaEvent{0, "a chatty response"}});
     fixture.Start();
 
-    // Fill the queue to its cap; nothing will drain it -- the writer is the
-    // test's problem here, and it is not draining.
-    std::size_t pushed = 0;
-    while (true) {
+    // Attach a stream and never drain it -- the missing writer, exactly.
+    testing::SessionStream wedged(*fixture.session);
+    for (int i = 0; i < 70000; ++i) {
         v1::ServerEvent filler;
         filler.set_session_id("sess-1");
-        if (!fixture.session->queue().TryPush(std::move(filler))) break;
-        ++pushed;
+        // Publish always accepts until the broadcaster closes: capacity
+        // refusal no longer exists, the queue drops its own oldest instead.
+        (void)fixture.session->queue().Publish(std::move(filler));
     }
-    REQUIRE(pushed > 0);  // sanity: the cap is real and reachable
+    // The cap is real and reachable, and drop-oldest held it.
+    CHECK(wedged.queued() == rpc::EventBroadcaster::kDefaultMaxEvents);
 
-    // The turn's first stream event has nowhere to go: the worker parks in Push.
+    // The turn runs to completion anyway -- the worker is never gated on a
+    // client.
     fixture.session->SubmitTurn("hello");
-    std::this_thread::sleep_for(50ms);
+    REQUIRE(fixture.session->WaitForIdleForTesting(5s));
 
     auto terminated = testing::RunInBackground([&fixture] {
         fixture.session->Terminate();
@@ -484,9 +492,10 @@ TEST_CASE("terminating a worker parked on a full queue returns instead of deadlo
     CHECK(fixture.session->terminated());
 }
 
-// Emits exactly one output chunk -- the push that parks when the outbound
-// queue is full -- and records its own progress, so the test can observe the
-// park and the unwedge from outside.
+// Emits one output chunk -- a publish into whatever queue state the test set
+// up -- and then parks on the turn's cancel token until cancelled. The park
+// makes the cancel rendezvous deterministic: the loop cannot proceed to its
+// next provider call while the tool is parked, so Cancel always lands mid-turn.
 class EmittingTool : public tools::Tool {
 public:
     EmittingTool(std::string name, std::atomic<bool>& started, std::atomic<bool>& finished)
@@ -494,7 +503,7 @@ public:
         spec_.name = std::move(name);
         spec_.category = tools::ToolCategory::ReadOnly;
         spec_.definition.name = spec_.name;
-        spec_.definition.description = "emits one output chunk";
+        spec_.definition.description = "emits one output chunk, then parks until cancelled";
         spec_.definition.input_schema = nlohmann::json::object();
     }
 
@@ -502,45 +511,50 @@ public:
 
     tools::ToolResult execute(const nlohmann::json&, tools::ToolContext& ctx) override {
         started_.store(true, std::memory_order_release);
-        if (ctx.emit_output) ctx.emit_output("chunk");
+        if (ctx.emit_output) ctx.emit_output("chunk");  // must not park, whatever the queue
+        emitted_.store(true, std::memory_order_release);
+        if (ctx.cancel_token != nullptr) {
+            std::unique_lock<std::mutex> lock(ctx.cancel_token->Mu());
+            ctx.cancel_token->Cv().wait(lock, [&] { return ctx.cancel_token->IsCancelled(); });
+        }
         finished_.store(true, std::memory_order_release);
         return {false, "done"};
     }
 
+    bool emitted() const { return emitted_.load(std::memory_order_acquire); }
+
 private:
-    tools::ToolSpec spec_;
     std::atomic<bool>& started_;
     std::atomic<bool>& finished_;
+    std::atomic<bool> emitted_{false};
+    tools::ToolSpec spec_;
 };
 
-TEST_CASE("cancel unwedges a worker parked on a full queue", "[session][invariant]") {
-    // THE INVARIANT: Cancel must reach the one state backpressure creates --
-    // a worker parked in EventQueue::Push on a full queue behind a
-    // stalled-but-connected client. AbortWaitingProducers latches drop-mode;
-    // the parked push refuses instead of blocking, the tool returns, and the
-    // turn unwinds with Cancelled. Remove the abort and the emit_output push
-    // below parks forever: the turn the user cancelled cannot end, and the
-    // finished latch never sets.
+TEST_CASE("a turn runs and cancels cleanly while the subscriber queue is full",
+          "[session][invariant]") {
+    // THE INVARIANT (S5): nothing a CLIENT does -- including never draining --
+    // can park a producer. The tool's emit_output publishes into a full queue,
+    // which drops its own oldest and keeps going, so the tool finishes on its
+    // own and a cancel reaches the turn through the generation/token path
+    // alone. The old version of this test asserted the queue unwedge
+    // (AbortWaitingProducers) that made that reachable; drop-oldest publish
+    // removed the park and the invariant became structural. What must still
+    // hold: the turn ends with its TurnCompleted(Cancelled), and the session
+    // lives on.
     SessionFixture fixture;
     std::atomic<bool> started{false};
     std::atomic<bool> finished{false};
-    fixture.tools_registry.Register(std::make_unique<EmittingTool>("spew", started, finished));
-    // No stream events: the provider call itself never pushes, so the ONLY
-    // park is the tool's emit_output -- which cannot be raced, because the
-    // queue is already full when the turn starts.
+    auto tool = std::make_unique<EmittingTool>("spew", started, finished);
+    auto* tool_ptr = tool.get();
+    fixture.tools_registry.Register(std::move(tool));
     fixture.Script(testing::ToolUseResponse("call-1", "spew"));
     fixture.Start();
 
-    // Fill the queue to ONE slot short of its cap; nothing will drain it (the
-    // writer is the test's problem here). The single remaining slot is taken
-    // by the tool's started lifecycle event, so the tool's own emit_output
-    // push is GUARANTEED to park -- which is what makes the cancel rendezvous
-    // below race-free.
-    const std::size_t cap = fixture.session->queue().max_size();
-    while (fixture.session->queue().size() < cap - 1) {
+    testing::SessionStream wedged(*fixture.session);
+    for (int i = 0; i < 70000; ++i) {
         v1::ServerEvent filler;
         filler.set_session_id("sess-1");
-        REQUIRE(fixture.session->queue().TryPush(std::move(filler)));
+        (void)fixture.session->queue().Publish(std::move(filler));
     }
 
     fixture.session->SubmitTurn("go");
@@ -549,14 +563,21 @@ TEST_CASE("cancel unwedges a worker parked on a full queue", "[session][invarian
            std::chrono::steady_clock::now() < started_deadline) {
         std::this_thread::sleep_for(1ms);
     }
-    REQUIRE(started.load(std::memory_order_acquire));  // the tool ran; its chunk push parked
+    REQUIRE(started.load(std::memory_order_acquire));  // the tool ran; its chunk publish dropped
+    // Give the chunk publish a moment to have returned: the tool parks only
+    // AFTER emit_output comes back, so reaching `emitted` proves the publish
+    // into the full queue did not park.
+    const auto emitted_deadline = std::chrono::steady_clock::now() + 5s;
+    while (!tool_ptr->emitted() && std::chrono::steady_clock::now() < emitted_deadline) {
+        std::this_thread::sleep_for(1ms);
+    }
+    CHECK(tool_ptr->emitted());
 
     fixture.session->Cancel();
 
-    // The parked push must refuse promptly. Waiting for the TOOL's own
-    // finish -- not for TurnCompleted, whose delivery legitimately waits for
-    // room -- is what makes this assert the unwedge itself rather than
-    // accidental draining.
+    // The parked tool wakes on the cancel token, the turn unwinds, and the
+    // TurnCompleted carrying Cancelled is published into the still-full
+    // queue -- drop-oldest makes room, so the terminator always lands.
     const auto finished_deadline = std::chrono::steady_clock::now() + 5s;
     while (!finished.load(std::memory_order_acquire) &&
            std::chrono::steady_clock::now() < finished_deadline) {
@@ -564,21 +585,15 @@ TEST_CASE("cancel unwedges a worker parked on a full queue", "[session][invarian
     }
     CHECK(finished.load(std::memory_order_acquire));
 
-    // Now drain: the fillers come out first, then the turn's TurnCompleted --
-    // a PushTerminal, so the unwedge could not swallow it -- carrying
-    // Cancelled, because the loop re-checked cancellation after the tool
-    // returned.
     std::optional<v1::StopReason> observed;
-    auto drainer = testing::RunInBackground([&fixture, &observed] {
-        while (auto event = fixture.session->queue().Pop()) {
-            if (event->has_turn_completed()) {
-                observed = event->turn_completed().stop_reason();
-                return true;
-            }
+    const auto drained_deadline = std::chrono::steady_clock::now() + 5s;
+    while (std::chrono::steady_clock::now() < drained_deadline) {
+        for (const auto& event : wedged.Drain()) {
+            if (event.has_turn_completed()) observed = event.turn_completed().stop_reason();
         }
-        return false;
-    });
-    REQUIRE(drainer.WaitFor(5s));
+        if (observed.has_value()) break;
+        std::this_thread::sleep_for(1ms);
+    }
     REQUIRE(observed.has_value());
     CHECK(*observed == v1::STOP_REASON_CANCELLED);
     CHECK_FALSE(fixture.session->terminated());  // cancel ends the turn, not the session
@@ -711,8 +726,8 @@ TEST_CASE("a non-standard exception in the turn path degrades instead of termina
     CHECK_FALSE(session.terminated());  // one degraded turn, a live session
 
     bool saw_error = false;
-    while (auto event = session.queue().TryPop()) {
-        if (event->has_error()) saw_error = true;
+    for (const auto& event : testing::DrainEvents(session)) {
+        if (event.has_error()) saw_error = true;
     }
     CHECK(saw_error);
     session.Terminate();
@@ -756,11 +771,12 @@ TEST_CASE("the queue closes on termination so a writer can finish", "[session]")
     fixture.session->SubmitTurn("hello");
     REQUIRE(fixture.session->WaitForIdleForTesting(5s));
 
+    testing::SessionStream stream(*fixture.session);
     fixture.session->Terminate();
     CHECK(fixture.session->queue().closed());
 
     // Drains to exhaustion and then reports closed, rather than blocking.
-    while (fixture.session->queue().Pop().has_value()) {
+    while (stream.Pop().has_value()) {
     }
     SUCCEED("writer drained to completion without blocking");
 }
@@ -1206,8 +1222,8 @@ TEST_CASE("an injection on an idle session wakes the worker when the setting is 
     // And the client saw a turn_completed for the wake turn -- a headless
     // client that had closed its side would otherwise hang.
     bool saw_completed = false;
-    while (auto event = fixture.session->queue().TryPop()) {
-        if (event->has_turn_completed()) saw_completed = true;
+    for (const auto& event : fixture.DrainQueue()) {
+        if (event.has_turn_completed()) saw_completed = true;
     }
     CHECK(saw_completed);
 }

@@ -221,6 +221,14 @@ public:
     // the real "Done" (✓) signal, distinct from a turn merely completing.
     void OnSessionEnded();
 
+    // The server reported a HOLE in this stream's event delivery
+    // (ResyncRequiredEvent): drop-oldest overflow on this subscriber's queue,
+    // or a late attach that missed events another subscriber took. Events are
+    // ephemeral; the durable record is the transcript, so the response is to
+    // discard the possibly-incomplete live material (streaming segments) and
+    // let the frame pump refetch the newest scrollback.
+    void OnResyncRequired(const std::string& reason);
+
     // --- Pending interactions ---
     void SetPermissionRequest(std::unique_ptr<PendingPermission> req);
     void SetConfirmationRequest(std::unique_ptr<PendingConfirmation> req);
@@ -419,9 +427,16 @@ public:
     // status bar target it.
     std::string FocusedSessionId() const;
 
-    // Closes every tab: the TUI's quit path. Terminate-all is the session
-    // lifetime rule -- nothing outlives its client.
+    // Closes (terminates) every tab. Used by ctrl+w's explicit close, not
+    // quit -- see DetachAllTabs for that (S5.4: a session now outlives the
+    // client that opened it, so quitting the app is no longer the same
+    // action as terminating every open session).
     void CloseAllTabs();
+
+    // Detaches every tab: the TUI's quit path. Every session this client was
+    // attached to keeps running server-side; a turn in flight completes
+    // unattended, and the session is resumable/re-attachable afterward.
+    void DetachAllTabs();
 
     // --- E5 extension seams (host-owned; both optional) ----------------------
 

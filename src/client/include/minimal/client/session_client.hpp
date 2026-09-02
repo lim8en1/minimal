@@ -101,6 +101,18 @@ public:
         // the session is being torn down regardless.
         void Close();
 
+        // S5.4: the graceful sibling of Close(). Sends EndSession{DETACH}
+        // (queued ahead of closing_, so anything already pending flushes
+        // first), then half-closes and joins WITHOUT the TryCancel() Close()
+        // uses -- the point of detaching is to let the writer actually
+        // deliver that message rather than possibly losing it to a cancel
+        // race, and the server ends this stream's RPC normally once it reads
+        // the DETACH (Dispatch's read loop, session_service.cpp), so there is
+        // nothing here for a cancel to rescue. The SESSION keeps running;
+        // only this stream ends. Safe from any thread, idempotent (shares
+        // Close()'s closed_ latch -- whichever of the two runs first wins).
+        void Detach();
+
         // Unblocks the underlying call without the full Close() discipline
         // (joins, Finish). For streams being discarded without ever having
         // been resumed -- a duplicate AttachTab that must not terminate the

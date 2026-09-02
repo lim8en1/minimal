@@ -509,11 +509,17 @@ TEST_CASE("stopping early still drains the stream", "[headless]") {
     CHECK(status.ok());
     CHECK(seen == 1);
 
+    // S5.2: a bare drop detaches rather than terminates, so the session
+    // itself outlives the stream now -- what this test actually guards is
+    // that the client dropping out early does not wedge the server's writer
+    // thread, which shows up as the subscriber going away promptly.
+    auto session = fixture.sessions->Find(created.session_id);
+    REQUIRE(session != nullptr);
     const auto deadline = std::chrono::steady_clock::now() + 5s;
-    while (fixture.sessions->size() > 0 && std::chrono::steady_clock::now() < deadline) {
+    while (session->has_subscribers() && std::chrono::steady_clock::now() < deadline) {
         std::this_thread::sleep_for(10ms);
     }
-    CHECK(fixture.sessions->size() == 0);
+    CHECK_FALSE(session->has_subscribers());
 }
 
 TEST_CASE("a stored session resumes headlessly", "[headless][resume]") {
@@ -549,8 +555,16 @@ TEST_CASE("a stored session resumes headlessly", "[headless][resume]") {
                 .ok());
     CHECK(first_text == "the answer is 42");
 
-    // RunTurn returned, so the stream closed and the server terminated the
-    // session. Resume it rather than creating a new one.
+    // S5.2: RunTurn returning only detaches the stream now, and a detached
+    // session is still "open" as far as resume's ALREADY_EXISTS guard is
+    // concerned -- correctly so, since it may still be mid-turn. The client
+    // does not yet have a graceful terminate call (that is S5.4); until then,
+    // simulate what will eventually be an explicit close, directly through
+    // the registry this fixture already owns.
+    fixture.sessions->Terminate(created.session_id);
+    REQUIRE(fixture.sessions->Find(created.session_id) == nullptr);
+
+    // Resume it rather than creating a new one.
     client::SessionClient::CreateOptions resume;
     resume.resume_session_id = created.session_id;
     resume.run_mode = v1::PERMISSION_RUN_MODE_ALLOW_ONLY;

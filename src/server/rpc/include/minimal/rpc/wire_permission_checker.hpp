@@ -8,16 +8,18 @@
 // and blocks there, which is safe ONLY because the gRPC reader thread keeps
 // draining and can deliver the answer that unblocks it.
 //
-// Deliberately free of gRPC. It publishes onto the session's EventQueue and
-// waits on PendingRequests; who drains that queue is the transport's problem.
+// Deliberately free of gRPC. It publishes onto the session's event broadcaster
+// and waits on PendingRequests; who drains that queue is the transport's problem.
 // That keeps the permission round-trip testable in-process, against the real
 // implementation rather than a stand-in for it.
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
+#include <optional>
 #include <string>
 
-#include "minimal/rpc/event_queue.hpp"
+#include "minimal/rpc/event_broadcaster.hpp"
 #include "minimal/rpc/pending_requests.hpp"
 #include "minimal/tools/permission_checker.hpp"
 #include "minimal/v1/session_service.pb.h"
@@ -26,18 +28,24 @@ namespace minimal::rpc {
 
 class WirePermissionChecker : public tools::PermissionChecker {
 public:
-    WirePermissionChecker(std::string session_id, EventQueue<v1::ServerEvent>& queue,
-                          PendingRequests& pending);
+    // unattended_timeout: sessions.unattended_prompt_timeout_seconds. Zero
+    // (the default) waits forever, unchanged from before S5 -- a detached
+    // session opts into a bound explicitly.
+    WirePermissionChecker(std::string session_id, EventBroadcaster& queue,
+                          PendingRequests& pending,
+                          std::chrono::milliseconds unattended_timeout = {});
 
-    // Blocks the calling (session worker) thread until answered or cancelled.
+    // Blocks the calling (session worker) thread until answered, cancelled,
+    // or (if configured) the unattended timeout elapses.
     tools::PermissionResponse check(const tools::PermissionRequest& request) override;
 
 private:
     std::string NextRequestId();
 
     std::string session_id_;
-    EventQueue<v1::ServerEvent>& queue_;
+    EventBroadcaster& queue_;
     PendingRequests& pending_;
+    std::chrono::milliseconds unattended_timeout_;
     std::atomic<std::uint64_t> next_id_{0};
 };
 

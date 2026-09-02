@@ -11,8 +11,8 @@
 //              Calls SubmitTurn / Cancel / pending().Resolve and returns.
 //   Worker  -- owned here. Blocks freely: permission waits, provider calls,
 //              bash subprocesses.
-//   Writer  -- owned by the transport, drains queue() and is the sole Write()
-//              caller.
+//   Writer  -- owned by the transport, drains its subscriber queue via
+//              Pop(handle) and is the sole Write() caller for its stream.
 //
 // Running the loop on the reader thread would deadlock on the first gated tool
 // call: check() would block the very thread that has to deliver the answer.
@@ -48,7 +48,7 @@
 #include "minimal/hooks/hook_dispatcher.hpp"
 #include "minimal/llm/provider.hpp"
 #include "minimal/llm/provider_factory_registry.hpp"
-#include "minimal/rpc/event_queue.hpp"
+#include "minimal/rpc/event_broadcaster.hpp"
 #include "minimal/rpc/pending_requests.hpp"
 #include "minimal/rpc/wire_confirmation_broker.hpp"
 #include "minimal/rpc/wire_permission_checker.hpp"
@@ -72,17 +72,24 @@ class ProviderInstanceCache;  // borrowed via set_provider_instance_cache
 // shareable block: the params PRODUCER creates them so it can also build a
 // WirePermissionChecker (or a decoration over one) before the Session exists --
 // the seam the permission advisor composes through (docs/EXTENSIBILITY.md §3).
-// Session owns the block through a shared_ptr; the queue and pending maps are
-// exactly the members Session used to hold, unchanged in behavior.
+// Session owns the block through a shared_ptr; the broadcaster and pending maps
+// are exactly the members Session used to hold, unchanged in behavior.
 struct SessionChannels {
-    // BYTE-BOUNDED as well as count-bounded: a count-only bound does not bound
-    // RAM when one event can carry megabytes -- bash streams 8 KiB output
-    // chunks per ToolOutputDelta, so the 65,536-event cap was ~540 MB per
-    // stalled client, and the queue exists precisely for the stalled client.
-    // The size function is the protobuf cost, computed once per Push.
-    rpc::EventQueue<v1::ServerEvent> queue{
-        65536, rpc::EventQueue<v1::ServerEvent>::kDefaultMaxBytes,
-        [](const v1::ServerEvent& event) { return event.ByteSizeLong(); }};
+    // The event FAN-OUT point (event_broadcaster.hpp): one bounded drop-oldest
+    // queue per attached stream, plus the zero-subscriber backlog that is the
+    // old pre-attach buffer's successor. Publish NEVER blocks -- the session's
+    // progress is never gated on any subscriber; a slow or absent one drops
+    // oldest and latches a ResyncRequiredEvent, and the transcript in SQLite
+    // (written mid-turn, history_store.hpp) is the durable record a client
+    // recovers through. Built with the session id because the resync notices
+    // it synthesizes must be wire-valid events.
+    explicit SessionChannels(std::string session_id) : queue(std::move(session_id)) {}
+    rpc::EventBroadcaster queue;
+    // Live background tasks: STARTED increments, a terminal state decrements.
+    // Lives HERE, on the shared_ptr block, because the task_event_sink that
+    // maintains it is captured by background watchers that may fire after the
+    // Session is gone (the same lifetime rule as the sinks above).
+    std::atomic<std::size_t> background_tasks_live{0};
     rpc::PendingRequests pending;
     // Cross-thread staging for out-of-band messages (non-blocking subagent
     // completions, background task results), drained at turn boundaries. Lives
@@ -94,8 +101,8 @@ struct SessionChannels {
     InjectionQueue injections;
 };
 
-inline std::shared_ptr<SessionChannels> MakeSessionChannels() {
-    return std::make_shared<SessionChannels>();
+inline std::shared_ptr<SessionChannels> MakeSessionChannels(std::string session_id) {
+    return std::make_shared<SessionChannels>(std::move(session_id));
 }
 
 struct SessionParams {
@@ -185,6 +192,15 @@ struct SessionParams {
     // set it explicitly (a test with its own dispatcher wins over the funnel
     // default, mirroring how params.permission_checker behaves).
     const hooks::HookDispatcher* hooks = nullptr;
+
+    // S5.3: sessions.unattended_prompt_timeout_seconds, set by the registry
+    // funnel (SessionRegistry::set_prompt_timeout, mirroring
+    // set_project_context). Zero -- the default -- means wait forever, the
+    // behaviour every prompt had before detach existed. Applied to the
+    // default WirePermissionChecker/WireConfirmationBroker this constructor
+    // builds; a producer that supplies its own permission_checker owns its
+    // own timeout policy.
+    std::chrono::milliseconds unattended_prompt_timeout{0};
 };
 
 // One item of work for the session worker. A variant rather than two queues,
@@ -291,8 +307,9 @@ public:
     // every way a session can die.
     void Terminate();
 
-    // Drained by the writer thread; the sole Write() source.
-    rpc::EventQueue<v1::ServerEvent>& queue() { return channels_->queue; }
+    // Drained by each stream's writer thread via Pop(handle); Publish is the
+    // sole event source. See event_broadcaster.hpp for the fan-out policy.
+    rpc::EventBroadcaster& queue() { return channels_->queue; }
     // Resolved from the reader thread when a Permission/Confirmation response
     // arrives.
     rpc::PendingRequests& pending() { return channels_->pending; }
@@ -301,13 +318,12 @@ public:
 
     // The titler path (a SessionObserver plugin, reached through
     // SessionSupportService::RenameSession): updates the in-memory name and
-    // TryPushes a SessionMetadataEvent so an attached client refreshes its tab
+    // Publishes a SessionMetadataEvent so an attached client refreshes its tab
     // label. The DATABASE write belongs to the caller -- the service does
     // rename-then-notify, keeping Session free of store concerns it does not
-    // otherwise have. TryPush, never Push: this runs on the titler's detached
-    // thread, which must never block (and only the worker may block on this
-    // queue); a dropped event on a full queue is display-only, the persisted
-    // name is the authoritative record.
+    // otherwise have. Publish never blocks (the titler runs on a detached
+    // thread); after Terminate the event is simply lost -- a dropped metadata
+    // refresh is display-only, the persisted name is the authoritative record.
     //
     // Safe from any thread. This is the ONLY mutation info_ ever takes after
     // construction, and it synchronizes on mutex_; the internal Notify* sites
@@ -393,19 +409,35 @@ public:
     // The initial-attach guard reads these. A session that has never been
     // attached is reaped after a short grace period -- purely a safety net
     // against a non-conforming client, since attaching is a client protocol
-    // obligation (see ARCHITECTURE.md "Session lifetime"). Once attached, the
-    // guard no longer applies: stream drop is what terminates from then on.
-    // Claims the session for one stream. False means someone is already
-    // attached, and the caller must refuse rather than attach anyway: the
-    // outbound queue has ONE consumer by design, so a second writer draining it
-    // would give each stream a random half of the events -- and the first stream
-    // to close would terminate the session under the other. Exchange rather than
-    // a store so the check and the claim cannot race.
-    bool TryAttach() {
+    // obligation (see ARCHITECTURE.md "Session lifetime").
+    //
+    // S5: N STREAMS MAY ATTACH, not one. Subscribe hands the caller a handle
+    // its writer thread pops from; the broadcaster (event_broadcaster.hpp)
+    // owns the fan-out policy -- the first subscriber seeds from the backlog,
+    // later ones are told to resync. Unsubscribe detaches exactly one stream;
+    // the session outlives its subscribers and dies only through Terminate.
+    rpc::EventBroadcaster::Handle Subscribe() {
         ever_attached_.store(true, std::memory_order_release);
-        return !attached_.exchange(true, std::memory_order_acq_rel);
+        return channels_->queue.Subscribe();
     }
-    void Detach() { attached_.store(false, std::memory_order_release); }
+    void Unsubscribe(const rpc::EventBroadcaster::Handle& handle) {
+        channels_->queue.Unsubscribe(handle);
+    }
+    // True while at least one stream is attached. The reaper's detached-idle
+    // rule reads this; it deliberately replaces the old single-stream
+    // `attached_` flag, which existed only because one queue had one consumer.
+    bool has_subscribers() const { return channels_->queue.subscriber_count() > 0; }
+
+    // Live background tasks (background bash whose STARTED event has not yet
+    // been followed by a terminal one). The reaper's quiescence rule reads
+    // this: reaping a session with running background work would kill that
+    // work. Conservative failure mode -- a watcher that dies without emitting
+    // a terminal event leaks the count UPWARD, i.e. toward "never reap".
+    // The counter itself lives on the channels block (SessionChannels), which
+    // is the object the maintaining sink outlives.
+    std::size_t background_tasks_live() const {
+        return channels_->background_tasks_live.load(std::memory_order_acquire);
+    }
 
     bool ever_attached() const { return ever_attached_.load(std::memory_order_acquire); }
     std::chrono::steady_clock::time_point created_at() const { return created_at_; }
@@ -439,9 +471,8 @@ private:
     void RunOneRewind(const QueuedRewind& request);
     void RunRewind(std::int64_t target_seq);
     void RunRedo();
-    // Answers a rewind with an ErrorEvent. Worker paths may Push (blocking is
-    // allowed there); reader-side refusals go through SubmitRewind's TryPush
-    // path instead.
+    // Answers a rewind with an ErrorEvent. Publish never blocks on any path;
+    // the only refusal is a broadcaster closed by termination.
     void EmitRewindRefusal(const std::string& reason);
     // The success event: what the active transcript now ends at, so the client
     // can trim its scrollback and clear streaming state.
@@ -449,8 +480,8 @@ private:
     // Builds the context and dispatches. Shared by the worker path and the
     // read-only pool path so the two cannot diverge on what a command may reach.
     void ExecuteCommand(const QueuedCommand& command, bool busy);
-    // Publishes a CommandResult. TryPush: ExecuteCommand also runs on the RPC
-    // layer's pool, and only the worker may block.
+    // Publishes a CommandResult. Publish never blocks, so the RPC pool and the
+    // worker are equally safe callers.
     void EmitCommandResult(v1::ServerEvent event, const QueuedCommand& command);
     // The turn terminator. Emitted on EVERY exit path, including failures --
     // a client that learns a turn ended only by seeing it succeed hangs on
@@ -542,9 +573,6 @@ private:
     // stops accepting. Only ever set when on_turn_finished exists.
     std::atomic<bool> subagent_finished_{false};
     std::atomic<bool> ever_attached_{false};
-    // Currently attached, as distinct from ever attached: the guard above is a
-    // one-way latch for the reaper, this one goes back down on detach.
-    std::atomic<bool> attached_{false};
     std::chrono::steady_clock::time_point created_at_ = std::chrono::steady_clock::now();
 
     mutable std::mutex mutex_;

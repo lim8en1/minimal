@@ -28,7 +28,8 @@ PendingRequests::Registration::~Registration() {
     if (owner_ != nullptr) owner_->Unregister(request_id_);
 }
 
-std::optional<PendingAnswer> PendingRequests::Registration::AwaitResponse() {
+std::optional<PendingAnswer> PendingRequests::Registration::AwaitResponse(
+    std::optional<std::chrono::milliseconds> timeout) {
     if (owner_ == nullptr) return std::nullopt;
 
     std::unique_lock<std::mutex> lock(owner_->mutex_);
@@ -36,11 +37,21 @@ std::optional<PendingAnswer> PendingRequests::Registration::AwaitResponse() {
     // resolve-before-await work: by the time this runs the answer may already be
     // sitting in the slot, and a notification-based wait would have missed it and
     // blocked forever.
-    owner_->cv_.wait(lock, [this] {
+    auto ready = [this] {
         if (owner_->AnswerIsUnreachable(epoch_)) return true;
         const auto it = owner_->slots_.find(request_id_);
         return it == owner_->slots_.end() || it->second.answer.has_value();
-    });
+    };
+    if (timeout.has_value() && *timeout > std::chrono::milliseconds::zero()) {
+        // A timeout that elapses with no answer is indistinguishable here from
+        // any other "no answer" outcome -- the check below falls through to
+        // the same nullopt every unresolved wakeup produces, deliberately: the
+        // caller (WirePermissionChecker / WireConfirmationBroker) already
+        // treats nullopt as its one "nobody answered" case.
+        owner_->cv_.wait_for(lock, *timeout, ready);
+    } else {
+        owner_->cv_.wait(lock, ready);
+    }
 
     // Checked again rather than inferred from the predicate: an answer that
     // landed in the same wakeup as a cancellation is still an answer nobody is
@@ -62,17 +73,25 @@ PendingRequests::Registration PendingRequests::Register(std::string request_id) 
 }
 
 bool PendingRequests::Resolve(const std::string& request_id, PendingAnswer answer) {
+    bool won = false;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         const auto it = slots_.find(request_id);
         if (it == slots_.end()) return false;
         // First answer wins. A duplicate is a client retransmitting, not a
         // change of mind, and silently overwriting an answer a worker may
-        // already have acted on would be worse than ignoring it.
-        if (!it->second.answer.has_value()) it->second.answer = std::move(answer);
+        // already have acted on would be worse than ignoring it. The return
+        // value distinguishes the two cases -- S5.3 needs to know whether
+        // THIS call was the one that actually answered, so it broadcasts
+        // PromptResolvedEvent to dismiss every other subscriber's modal
+        // exactly once, not once per client that happened to answer.
+        if (!it->second.answer.has_value()) {
+            it->second.answer = std::move(answer);
+            won = true;
+        }
     }
     cv_.notify_all();
-    return true;
+    return won;
 }
 
 void PendingRequests::CancelAll() {
