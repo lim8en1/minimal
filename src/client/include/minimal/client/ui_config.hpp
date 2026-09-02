@@ -19,6 +19,10 @@
 //   tool_output_buffer_bytes -- the per-tool live-stdout ring buffer's byte
 //     cap, applied at append time (head + marker + tail), mirroring the
 //     server's persisted-result cap.
+//   theme -- the name of a themes/<name>.json file (without extension), e.g.
+//     "dark" or "light". A name Theme::Load cannot find falls back to the
+//     terminal-default theme with a startup warning, the same degrade rule
+//     as everything else here.
 
 #include <filesystem>
 #include <string>
@@ -34,6 +38,9 @@ struct UiConfig {
     // defaulted.
     int scrollback_window_max_messages = 0;
     int tool_output_buffer_bytes = 0;
+
+    // Empty = "dark" (the built-in default).
+    std::string theme;
 };
 
 UiConfig LoadUiConfig(const std::filesystem::path& config_dir);

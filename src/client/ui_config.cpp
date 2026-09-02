@@ -35,6 +35,11 @@ UiConfig LoadUiConfig(const std::filesystem::path& config_dir) {
     } else if (it != parsed.end()) {
         common::DefaultLogger().warn("ui.json: \"status_format\" must be a string -- ignored");
     }
+    if (auto it = parsed.find("theme"); it != parsed.end() && it->is_string()) {
+        config.theme = it->get<std::string>();
+    } else if (it != parsed.end()) {
+        common::DefaultLogger().warn("ui.json: \"theme\" must be a string -- ignored");
+    }
     const auto positive_int = [&parsed](const char* key, int& out) {
         if (auto it = parsed.find(key); it != parsed.end()) {
             if (it->is_number_integer() && it->get<int>() > 0) {

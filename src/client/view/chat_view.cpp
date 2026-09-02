@@ -105,6 +105,15 @@ ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
         column.push_back(text("assistant") | color(theme_.ColorFor("assistant_message")) | bold);
         column.push_back(streaming.Render(theme_));
     }
+
+    // The enclosing `yframe` (app.cpp) scrolls to whatever element in this
+    // subtree requests focus; with none, its offset stays 0 and it shows the
+    // TOP of the transcript forever, hiding everything -- including live
+    // streaming output -- past the first screen. `focus()` here is a DOM
+    // marker only (Requirement::focused, not an FTXUI Component), so it
+    // cannot steal keyboard focus from the prompt editor, a sibling in the
+    // outer frame; it only tells THIS frame where to scroll.
+    if (!column.empty()) column.back() = focus(std::move(column.back()));
     return vbox(std::move(column));
 }
 

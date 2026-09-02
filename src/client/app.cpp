@@ -745,9 +745,14 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         if (!attribution.plugin_name.empty()) loaded_plugins.push_back(attribution.plugin_name);
     }
 
+    // ui.json's "theme" selects the file (themes/<name>.json); empty means
+    // the built-in default. Previously hardcoded to "dark" regardless of
+    // config, which made the bundled light.json -- and any user theme --
+    // unreachable from the TUI.
+    const std::string theme_name = !ui.theme.empty() ? ui.theme : std::string("dark");
     Theme theme = [&] {
         try {
-            return Theme::Load(config_dir / "themes", "dark", depth, &loaded_plugins);
+            return Theme::Load(config_dir / "themes", theme_name, depth, &loaded_plugins);
         } catch (const std::exception& e) {
             std::fprintf(stderr, "minimal: %s; using terminal defaults\n", e.what());
             // An empty-but-valid document: "no colors set" is the fallback,
@@ -1473,9 +1478,20 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         }
         if (MatchesAny(event, KeyToEvents(keys.KeyFor("jump.attention")))) {
             // Crosses groups; wraps. Only Waiting tabs qualify (the ! glyph).
+            // Scans starting just AFTER the focused tab -- not a fixed index 1,
+            // which ignored which tab was actually focused and could "jump" to
+            // the focused tab itself, a visible no-op exactly when Waiting is
+            // the reason someone pressed the key.
             const auto tabs = app->GetAllTabs();
+            std::size_t start = 0;
             for (std::size_t i = 0; i < tabs.size(); ++i) {
-                const std::size_t idx = (tabs.size() + 1 + i) % tabs.size();   // +1: skip current
+                if (tabs[i].session_id == sid) {
+                    start = i;
+                    break;
+                }
+            }
+            for (std::size_t i = 0; i < tabs.size(); ++i) {
+                const std::size_t idx = (start + 1 + i) % tabs.size();   // +1: skip current
                 if (tabs[idx].attention_glyph == '!') {
                     app->SetFocusedTab(tabs[idx].session_id);
                     return true;
