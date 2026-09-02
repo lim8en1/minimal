@@ -34,6 +34,7 @@
 // others from running.
 
 #include <atomic>
+#include <condition_variable>
 #include <cstddef>
 #include <functional>
 #include <memory>
@@ -96,6 +97,11 @@ private:
 
     mutable std::mutex mutex_;
     std::vector<std::shared_ptr<SessionObserver>> observers_;
+    // Notified whenever outstanding_ reaches zero, under mutex_ -- the
+    // decrement itself must happen under the same lock WaitForIdleForTesting
+    // waits on, or the transition-to-zero and the wait can race (classic
+    // lost wakeup).
+    std::condition_variable idle_cv_;
 
     common::Logger& logger_;
     rpc::EventQueue<std::function<void()>> tasks_;

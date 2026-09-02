@@ -14,7 +14,11 @@ SessionObserverRegistry::SessionObserverRegistry(common::Logger& logger,
         // OnSessionEnded for the same session.
         while (auto task = tasks_.Pop()) {
             (*task)();
-            outstanding_.fetch_sub(1, std::memory_order_acq_rel);
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                outstanding_.fetch_sub(1, std::memory_order_acq_rel);
+            }
+            idle_cv_.notify_all();
         }
     });
 }
@@ -78,8 +82,12 @@ void SessionObserverRegistry::Dispatch(std::function<void(SessionObserver&)> cal
     })) {
         // Refused: the queue is full (a wedged observer) or already closed
         // (shutdown). Undo the outstanding count the task will never decrement,
-        // or WaitForIdleForTesting spins forever on a task that does not exist.
-        outstanding_.fetch_sub(1, std::memory_order_acq_rel);
+        // or WaitForIdleForTesting waits forever on a task that does not exist.
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            outstanding_.fetch_sub(1, std::memory_order_acq_rel);
+        }
+        idle_cv_.notify_all();
         const auto n = dropped_.fetch_add(1, std::memory_order_acq_rel) + 1;
         if (!tasks_.closed()) {
             logger_.warn("session observer notification dropped (queue full); {} dropped so far",
@@ -121,9 +129,8 @@ void SessionObserverRegistry::NotifySessionEnded(SessionInfo info) {
 }
 
 void SessionObserverRegistry::WaitForIdleForTesting() {
-    while (outstanding_.load(std::memory_order_acquire) > 0) {
-        std::this_thread::yield();
-    }
+    std::unique_lock<std::mutex> lock(mutex_);
+    idle_cv_.wait(lock, [this] { return outstanding_.load(std::memory_order_acquire) == 0; });
 }
 
 }  // namespace minimal::agent
