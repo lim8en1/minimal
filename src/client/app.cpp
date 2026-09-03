@@ -848,7 +848,9 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     // FocusedDetails() return references into its own members.
     minimal::client::TabMaintenance tab_maintenance(minimal::client::TabMaintenance::Dependencies{
         *app, engine, chat_surface, view_registry, plugin_views, plugin_modal_child,
-        show_plugin_modal, open_picker, open_agent_picker, tab_ui});
+        show_plugin_modal, open_picker, open_agent_picker, tab_ui, theme, message_registry,
+        renderer_registry, permission_child, show_permission, confirmation_child,
+        show_confirmation});
     // Same names the inline code declared directly -- every lambda below
     // this point (with_keys' KeyContext, the still-inline render body)
     // captures `[&]`, i.e. by ordinary lexical scoping.
@@ -922,16 +924,17 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         }
     };
 
-    // FrameRenderer owns the tab body / permission-confirmation-modal /
-    // status-bar / plugin-panel assembly; constructed once, referencing
-    // RunTui's locals the same way TabMaintenance/PickerController do.
-    // `frame_renderer` itself must never be moved/copied for the rest of
-    // RunTui's lifetime (its Dependencies hold references into RunTui's own
-    // objects, resolved once at construction).
+    // FrameRenderer owns the tab body / status-bar / plugin-panel assembly;
+    // constructed once, referencing RunTui's locals the same way
+    // TabMaintenance/PickerController do. `frame_renderer` itself must never
+    // be moved/copied for the rest of RunTui's lifetime (its Dependencies
+    // hold references into RunTui's own objects, resolved once at
+    // construction). The permission/confirmation modal rebuild lives in
+    // TabMaintenance now (Part 3.2) -- FrameRenderer no longer touches
+    // permission_child/show_permission/confirmation_child/show_confirmation.
     minimal::client::FrameRenderer frame_renderer(minimal::client::FrameRenderer::Dependencies{
         *app, theme, focused, focused_details, tab_ui, start_view_registry, message_registry,
-        renderer_registry, status_registry, engine, permission_child, show_permission,
-        confirmation_child, show_confirmation, show_panel, panel_height,
+        renderer_registry, status_registry, engine, show_panel, panel_height,
         env.ui.tools_panel_stdout_buffer_lines > 0 ? env.ui.tools_panel_stdout_buffer_lines : 100,
         editor, status_format, plugin_views});
     auto session_view = Renderer(editor, [&] { return frame_renderer.Render(); });

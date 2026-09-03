@@ -24,6 +24,18 @@ SessionState::Snapshot TabMaintenance::Maintain(const std::string& session_id,
     if (snap.session_id.empty() && session_id != snap.session_id) return snap;
     TabUi& ui = deps_.tab_ui[session_id];
 
+    // The chat view itself: constructed once per tab, lazily -- a tab that
+    // never leaves the start-view banner (a fresh session with nothing
+    // streamed or persisted yet) may never need one, but building it here
+    // rather than in Render() means Render() is a pure read of ui.chat for
+    // every tab this method has processed at least once (Render() keeps its
+    // own null-guarded fallback for the one documented race where it hasn't
+    // -- see frame_renderer.cpp).
+    if (!ui.chat) {
+        ui.chat = std::make_unique<ChatView>(deps_.theme, deps_.message_registry,
+                                             deps_.renderer_registry);
+    }
+
     const auto make_stream = [&] { return deps_.engine.MakeStream(); };
 
     // Stream recreation keys on turn_seq (SessionState's counter, bumped
@@ -97,6 +109,63 @@ void TabMaintenance::HandleNotice(const SessionState::Snapshot& snap) {
     // the unknown segment id's.
 }
 
+// The permission modal for the focused tab: rebuilt when the outstanding
+// request changes, shown while it is unanswered. Moved here from
+// FrameRenderer::Render() (Part 3.2): deciding "is this a NEW request" and
+// rebuilding a modal component are event-path decisions, and Render() must
+// stay a pure read -- see frame_renderer.hpp's file comment for the
+// property this restores. Both blocks below are verbatim what Render() used
+// to do, just relocated.
+void TabMaintenance::MaintainModals(const SessionState::Snapshot& snap) {
+    TabUi& ui = deps_.tab_ui[focused_];
+
+    if (snap.pending_permission.has_value()) {
+        const auto& request = *snap.pending_permission;
+        if (ui.grants_for_request != request.request_id) {
+            ui.grants = std::make_unique<GrantToggles>();
+            ui.grants_for_request = request.request_id;
+            const auto session_id = focused_;
+            GrantToggles& toggles = *ui.grants;
+            AppState& app = deps_.app;
+            *deps_.permission_child = MakePermissionModal(
+                request, toggles, deps_.theme,
+                [&app, session_id, request, &toggles](bool allow) {
+                    // granted_keys FILTERED to what this request offered
+                    // (GrantToggles reads the request's own offers).
+                    app.AnswerPermission(session_id, request.request_id,
+                                         allow ? v1::PERMISSION_DECISION_ALLOW
+                                               : v1::PERMISSION_DECISION_DENY,
+                                         allow ? toggles.GrantedKeys(request)
+                                               : std::vector<std::string>{});
+                });
+        }
+        deps_.show_permission = true;
+    } else {
+        deps_.show_permission = false;
+    }
+
+    // The wire confirmation modal: same rebuild-on-new-request-id rule as
+    // the permission modal above. Both are never set at once (each Set
+    // clears the other in SessionState).
+    if (snap.pending_confirmation.has_value()) {
+        const auto& request = *snap.pending_confirmation;
+        if (ui.confirmation_for_request != request.request_id) {
+            ui.confirmation_for_request = request.request_id;
+            const auto session_id = focused_;
+            const auto request_copy = request;
+            AppState& app = deps_.app;
+            *deps_.confirmation_child = MakeConfirmationModal(
+                request_copy, deps_.theme,
+                [&app, session_id, request_copy](const std::string& chosen) {
+                    app.AnswerConfirmation(session_id, request_copy.request_id, chosen);
+                });
+        }
+        deps_.show_confirmation = true;
+    } else {
+        deps_.show_confirmation = false;
+    }
+}
+
 void TabMaintenance::Run() {
     const uint64_t version = deps_.app.UiVersion();
     if (version == last_ui_version_) return;
@@ -109,6 +178,8 @@ void TabMaintenance::Run() {
     }
     if (focused_.empty()) {
         focused_details_ = SessionState::Snapshot{};
+        deps_.show_permission = false;
+        deps_.show_confirmation = false;
         return;
     }
     // ONE deep snapshot per pass: GetDetails is a full protobuf copy of the
@@ -120,6 +191,7 @@ void TabMaintenance::Run() {
     // Maintain() settled on.
     focused_details_ = Maintain(focused_, deps_.app.GetDetails(focused_));
     HandleNotice(focused_details_);
+    MaintainModals(focused_details_);
 }
 
 }  // namespace minimal::client

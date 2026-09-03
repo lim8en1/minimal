@@ -2,7 +2,6 @@
 
 #include "minimal/client/render/markdown_renderer.hpp"
 #include "minimal/client/view/chat_view.hpp"
-#include "minimal/client/view/prompt_modal.hpp"
 #include "minimal/client/view/status_bar.hpp"
 #include "minimal/client/view/tab_bar.hpp"
 #include "minimal/client/view/tools_panel.hpp"
@@ -92,19 +91,19 @@ ftxui::Element FrameRenderer::Render() {
             if (!start.empty()) {
                 for (auto& element : start) rows.push_back(std::move(element) | flex);
             } else {
+                // ui.chat/ui.streaming are normally built by
+                // TabMaintenance::Maintain (Part 3.2), but Maintain() returns
+                // EARLY -- skipping that -- whenever GetDetails raced a tab
+                // that just closed (snap.session_id empty) or a chat-surface
+                // plugin currently owns the tab; a frame landing here with no
+                // start view registered (so `start` stayed empty) then found
+                // one or both still null on its very first render. Lazily
+                // built here too, so neither is ever a null deref regardless
+                // of which path built it.
                 if (!ui.chat) {
                     ui.chat = std::make_unique<ChatView>(deps_.theme, deps_.message_registry,
                                                          deps_.renderer_registry);
                 }
-                // ui.streaming is normally built by TabMaintenance::Maintain's
-                // stream recreation, but Maintain() returns EARLY -- skipping
-                // that -- whenever GetDetails raced a tab that just closed
-                // (snap.session_id empty) or a chat-surface plugin currently
-                // owns the tab; a frame landing here with no start view
-                // registered (so `start` stayed empty) then found
-                // ui.streaming still null on its very first render. Lazily
-                // built here too, so *ui.streaming is never a null deref
-                // regardless of which path built it.
                 if (!ui.streaming) ui.streaming = deps_.engine.MakeStream();
                 rows.push_back(ui.chat->Render(snap, *ui.streaming) | yframe |
                                vscroll_indicator | flex);
@@ -128,59 +127,7 @@ ftxui::Element FrameRenderer::Render() {
                                                      : deps_.theme.ColorFor("system_message")));
             }
         }
-
-        // The permission modal for the focused tab: rebuilt when the
-        // outstanding request changes, shown while it is unanswered.
-        if (snap.pending_permission.has_value()) {
-            const auto& request = *snap.pending_permission;
-            TabUi& ui2 = deps_.tab_ui[focused];
-            if (ui2.grants_for_request != request.request_id) {
-                ui2.grants = std::make_unique<GrantToggles>();
-                ui2.grants_for_request = request.request_id;
-                const auto session_id = focused;
-                GrantToggles& toggles = *ui2.grants;
-                AppState& app = deps_.app;
-                *deps_.permission_child = MakePermissionModal(
-                    request, toggles, deps_.theme,
-                    [&app, session_id, request, &toggles](bool allow) {
-                        // granted_keys FILTERED to what this request offered
-                        // (GrantToggles reads the request's own offers).
-                        app.AnswerPermission(session_id, request.request_id,
-                                             allow ? v1::PERMISSION_DECISION_ALLOW
-                                                   : v1::PERMISSION_DECISION_DENY,
-                                             allow ? toggles.GrantedKeys(request)
-                                                   : std::vector<std::string>{});
-                    });
-            }
-            deps_.show_permission = true;
-        } else {
-            deps_.show_permission = false;
-        }
-
-        // The wire confirmation modal: same rebuild-on-new-request-id rule
-        // as the permission modal above. Both are never set at once (each
-        // Set clears the other in SessionState).
-        if (snap.pending_confirmation.has_value()) {
-            const auto& request = *snap.pending_confirmation;
-            TabUi& ui2 = deps_.tab_ui[focused];
-            if (ui2.confirmation_for_request != request.request_id) {
-                ui2.confirmation_for_request = request.request_id;
-                const auto session_id = focused;
-                const auto request_copy = request;
-                AppState& app = deps_.app;
-                *deps_.confirmation_child = MakeConfirmationModal(
-                    request_copy, deps_.theme,
-                    [&app, session_id, request_copy](const std::string& chosen) {
-                        app.AnswerConfirmation(session_id, request_copy.request_id, chosen);
-                    });
-            }
-            deps_.show_confirmation = true;
-        } else {
-            deps_.show_confirmation = false;
-        }
     } else {
-        deps_.show_permission = false;
-        deps_.show_confirmation = false;
         Elements start = RenderStartViews("");
         if (start.empty()) {
             rows.push_back(vbox({text("minimal") | bold,

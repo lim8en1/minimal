@@ -26,7 +26,9 @@
 
 #include <ftxui/component/component.hpp>
 
+#include "minimal/client/plugins/registries.hpp"
 #include "minimal/client/render/streaming_markdown_view.hpp"
+#include "minimal/client/render/theme.hpp"
 #include "minimal/client/scrollback_refresh.hpp"
 #include "minimal/client/state.hpp"
 #include "minimal/client/view/chat_view.hpp"
@@ -91,6 +93,20 @@ public:
         std::function<void()> open_agent_picker;
         // NOT owned -- see the file comment on declaration ordering.
         std::map<std::string, TabUi>& tab_ui;
+
+        // Part 3.2: the ChatView construction, and the permission/
+        // confirmation modal rebuild-on-new-request logic, both moved here
+        // from FrameRenderer::Render() -- see tab_ui.cpp's MaintainModals
+        // for why (Render() must stay a pure read; deciding "is this a NEW
+        // request" and rebuilding a modal component are event-path
+        // decisions, not render-path ones).
+        const Theme& theme;
+        plugins::MessageRendererRegistry& message_registry;
+        plugins::ToolResultRendererRegistry& renderer_registry;
+        std::shared_ptr<ftxui::Component>& permission_child;
+        bool& show_permission;
+        std::shared_ptr<ftxui::Component>& confirmation_child;
+        bool& show_confirmation;
     };
 
     explicit TabMaintenance(Dependencies deps);
@@ -113,6 +129,11 @@ public:
 private:
     SessionState::Snapshot Maintain(const std::string& session_id, SessionState::Snapshot snap);
     void HandleNotice(const SessionState::Snapshot& snap);
+    // The permission/confirmation modals: rebuilt when the focused tab's
+    // outstanding request changes, shown while unanswered. Only called when
+    // `focused_` is non-empty (Run() resets both flags to false itself in
+    // the no-tab case, mirroring Render()'s old two-branch structure).
+    void MaintainModals(const SessionState::Snapshot& snap);
 
     Dependencies deps_;
     std::string focused_;

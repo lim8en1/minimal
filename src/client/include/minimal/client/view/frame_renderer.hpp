@@ -9,13 +9,15 @@
 // FrameRenderer::Render() is called from an ftxui::Renderer callback and
 // must stay side-effect-free and non-blocking with respect to NETWORK/RPC
 // work -- exactly the contract session_view's lambda already documented.
-// It is NOT side-effect-free with respect to UI STATE (it still rebuilds
-// permission_child/confirmation_child and flips show_permission/
-// show_confirmation on a new request id, and lazily constructs a tab's
-// ChatView/streaming view) -- that mutation-in-Render() property is
-// UNCHANGED from the inline code. Moving it out of Render() entirely is a
-// separate behavioral cleanup (ARCHITECTURE.md review, Part 3.2), not
-// bundled into this structural move.
+// Part 3.2 moved the permission/confirmation modal rebuild-on-new-request
+// logic, and the primary ChatView/streaming-view construction, into
+// TabMaintenance (view/tab_ui.hpp) -- both are event-path decisions
+// ("is this a NEW request", "has this tab been seen before"), not render-
+// path ones. Render() keeps ONE narrow exception: a null-guarded fallback
+// construction of ui.chat/ui.streaming, for the documented race where
+// TabMaintenance::Maintain() returns early before ever seeing this tab (see
+// its own comment) -- a lazy idempotent construct-if-null is not the same
+// risk class as the modal rebuild-and-flip logic that moved out entirely.
 
 #include <map>
 #include <memory>
@@ -53,11 +55,6 @@ public:
         plugins::ToolResultRendererRegistry& renderer_registry;
         plugins::StatusSegmentRegistry& status_registry;
         plugins::MarkdownEngine& engine;
-
-        std::shared_ptr<ftxui::Component>& permission_child;
-        bool& show_permission;
-        std::shared_ptr<ftxui::Component>& confirmation_child;
-        bool& show_confirmation;
 
         bool& show_panel;
         int panel_height;   // constant for now; a resize handle is future polish (ARCHITECTURE.md)
