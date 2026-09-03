@@ -100,6 +100,12 @@ using SessionEvent = std::variant<llm::StreamEvent, ToolLifecycleEvent, tools::B
                                   SubagentStarted, SessionMetadataChanged, SessionEnded,
                                   SessionRewound, TurnCompleted, SessionError>;
 
-using SessionEventSink = std::function<void(const SessionEvent&)>;
+// Returns whether the transport accepted the event -- mirrors
+// EventBroadcaster::Publish's own return exactly (false only means the
+// broadcaster is closed, i.e. the session is terminating). Not void: several
+// call sites warn on a dropped event, and the stream event path uses the
+// return value to abort an in-flight provider request when a race loses to
+// Terminate between the IsCancelled() check and the publish.
+using SessionEventSink = std::function<bool(const SessionEvent&)>;
 
 }  // namespace minimal::agent
