@@ -523,6 +523,32 @@ void AppState::DisableChatSurface(const char* reason) {
     }
 }
 
+void AppState::ApplyUiBounds(SessionState& state) const {
+    state.SetBounds(
+        scrollback_max_messages_ > 0 ? scrollback_max_messages_
+                                     : SessionState::kDefaultScrollbackWindowMaxMessages,
+        tool_output_buffer_bytes_ > 0 ? tool_output_buffer_bytes_
+                                      : SessionState::kDefaultToolOutputBufferBytes);
+}
+
+void AppState::WireOnClosed(SessionClient::Stream& stream, const std::string& session_id) {
+    stream.SetOnClosed([this, session_id](const grpc::Status& status) {
+        if (auto state = GetState(session_id)) {
+            // The reader's Finish() status distinguishes transport death from a
+            // clean server-side close: a crashed server used to render as a
+            // happy "Done ✓" tab that silently swallowed typed input. The
+            // status RIDES IN on the callback -- reaching back into the stream
+            // from here could make this callback the stream's last owner while
+            // the reader thread is inside it (see Stream::SetOnClosed).
+            if (IsTransportDeath(status)) {
+                state->OnError("connection lost: " + status.error_message());
+            } else {
+                state->OnSessionEnded();
+            }
+        }
+    });
+}
+
 // Open a brand-new session as a tab. Two-phase: create the stream + session id under no
 // app lock (session creation is blocking), register the entry, THEN Resume() the reader so
 // the first dispatched event can never race an unregistered tab.
@@ -540,11 +566,7 @@ std::string AppState::OpenTab(const SessionClient::CreateOptions& opts) {
         TabEntry entry;
         entry.stream = stream;
         entry.info.state = std::make_shared<SessionState>(*sid);
-        entry.info.state->SetBounds(
-            scrollback_max_messages_ > 0 ? scrollback_max_messages_
-                                         : SessionState::kDefaultScrollbackWindowMaxMessages,
-            tool_output_buffer_bytes_ > 0 ? tool_output_buffer_bytes_
-                                          : SessionState::kDefaultToolOutputBufferBytes);
+        ApplyUiBounds(*entry.info.state);
         entry.info.session_id = *sid;
         entry.info.parent_session_id = std::nullopt;   // root tab (a child gets its parent set)
         entry.info.root_ordinal = ++next_root_ordinal_;   // a fresh group id
@@ -555,21 +577,7 @@ std::string AppState::OpenTab(const SessionClient::CreateOptions& opts) {
     }   // lock released here, before the reader thread can dispatch back into us
     BumpUiVersion();
 
-    stream->SetOnClosed([this, sid = *sid](const grpc::Status& status) {
-        if (auto state = GetState(sid)) {
-            // The reader's Finish() status distinguishes transport death from a
-            // clean server-side close: a crashed server used to render as a
-            // happy "Done ✓" tab that silently swallowed typed input. The
-            // status RIDES IN on the callback -- reaching back into the stream
-            // from here could make this callback the stream's last owner while
-            // the reader thread is inside it (see Stream::SetOnClosed).
-            if (IsTransportDeath(status)) {
-                state->OnError("connection lost: " + status.error_message());
-            } else {
-                state->OnSessionEnded();
-            }
-        }
-    });
+    WireOnClosed(*stream, *sid);
     stream->Resume();   // start threads AFTER unlock — a dispatched event must find this entry
     return *sid;
 }
@@ -607,11 +615,7 @@ std::string AppState::AttachTab(const std::string& session_id, int64_t parent_or
         TabEntry entry;
         entry.stream = stream;
         entry.info.state = std::make_shared<SessionState>(session_id);
-        entry.info.state->SetBounds(
-            scrollback_max_messages_ > 0 ? scrollback_max_messages_
-                                         : SessionState::kDefaultScrollbackWindowMaxMessages,
-            tool_output_buffer_bytes_ > 0 ? tool_output_buffer_bytes_
-                                          : SessionState::kDefaultToolOutputBufferBytes);
+        ApplyUiBounds(*entry.info.state);
         entry.info.session_id = session_id;
 
         // Parent-of-group: locate the leader (root) of this group so subagents inherit its ordinal.
@@ -637,15 +641,7 @@ std::string AppState::AttachTab(const std::string& session_id, int64_t parent_or
         tabs_.push_back(std::move(entry));
     }   // lock released here, before the reader thread can dispatch back into us
 
-    stream->SetOnClosed([this, session_id](const grpc::Status& status) {
-        if (auto state = GetState(session_id)) {
-            if (IsTransportDeath(status)) {
-                state->OnError("connection lost: " + status.error_message());
-            } else {
-                state->OnSessionEnded();
-            }
-        }
-    });
+    WireOnClosed(*stream, session_id);
     stream->Resume();   // start threads AFTER unlock — same guard as OpenTab
     return session_id;
 }

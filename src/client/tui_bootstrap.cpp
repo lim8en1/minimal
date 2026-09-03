@@ -163,40 +163,16 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
         // collision), and an identity no kind claims is dangling on a single
         // kind -- reported once, not four times. Addressing stays CANONICAL
         // (keybindings.json addresses ids, never aliases).
-        const auto alias_on_kind = [&](const std::string& key, const std::string& target) {
-            const auto matches = [](const std::vector<plugins::Attribution>& attributions,
-                                    const std::string& qualified) {
-                for (const auto& a : attributions) {
-                    if (a.plugin_name + "." + a.original_name == qualified) return true;
-                }
-                return false;
-            };
-            if (matches(out.view_registry.attributions(), key)) {
-                names.SetAlias(minimal::plugins::NameKind::ViewId, key, target);
-            } else if (matches(out.renderer_registry.attributions(), key)) {
-                names.SetAlias(minimal::plugins::NameKind::ToolResultRenderer, key, target);
-            } else {
-                bool matched_message = false;
-                for (const auto& [kind, attribution] : out.message_registry.claims()) {
-                    (void)kind;
-                    if (attribution.plugin_name + "." + attribution.original_name == key) {
-                        names.SetAlias(minimal::plugins::NameKind::MessageRenderer, key, target);
-                        matched_message = true;
-                    }
-                }
-                if (!matched_message) {
-                    if (matches(out.status_registry.attributions(), key)) {
-                        names.SetAlias(minimal::plugins::NameKind::StatusSegment, key, target);
-                    } else if (matches(out.grammar_registry.attributions(), key)) {
-                        names.SetAlias(minimal::plugins::NameKind::SyntaxGrammar, key, target);
-                    } else {
-                        names.SetAlias(minimal::plugins::NameKind::ViewId, key, target);   // dangling
-                    }
-                }
-            }
+        const std::vector<AliasCandidate> alias_candidates = {
+            {minimal::plugins::NameKind::ViewId, &out.view_registry.attributions()},
+            {minimal::plugins::NameKind::ViewId, &out.start_view_registry.attributions()},
+            {minimal::plugins::NameKind::ToolResultRenderer, &out.renderer_registry.attributions()},
+            {minimal::plugins::NameKind::StatusSegment, &out.status_registry.attributions()},
+            {minimal::plugins::NameKind::SyntaxGrammar, &out.grammar_registry.attributions()},
         };
         for (const auto& [alias_key, alias_target] : plugin_config.aliases) {
-            alias_on_kind(alias_key, alias_target);
+            const auto kind = MatchAliasKind(alias_candidates, out.message_registry.claims(), alias_key);
+            names.SetAlias(kind, alias_key, alias_target);
         }
         const auto resolved = names.Resolve();
         for (const auto& collision : resolved.fatal_collisions) {
@@ -213,21 +189,16 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
 
     // Loaded plugin names feed the theme's section check.
     std::vector<std::string> loaded_plugins;
-    for (const auto& attribution : out.view_registry.attributions()) {
-        if (!attribution.plugin_name.empty()) loaded_plugins.push_back(attribution.plugin_name);
-    }
-    for (const auto& attribution : out.start_view_registry.attributions()) {
-        if (!attribution.plugin_name.empty()) loaded_plugins.push_back(attribution.plugin_name);
-    }
-    for (const auto& attribution : out.renderer_registry.attributions()) {
-        if (!attribution.plugin_name.empty()) loaded_plugins.push_back(attribution.plugin_name);
-    }
-    for (const auto& attribution : out.status_registry.attributions()) {
-        if (!attribution.plugin_name.empty()) loaded_plugins.push_back(attribution.plugin_name);
-    }
-    for (const auto& attribution : out.grammar_registry.attributions()) {
-        if (!attribution.plugin_name.empty()) loaded_plugins.push_back(attribution.plugin_name);
-    }
+    const auto collect_loaded = [&loaded_plugins](const std::vector<plugins::Attribution>& attributions) {
+        for (const auto& a : attributions) {
+            if (!a.plugin_name.empty()) loaded_plugins.push_back(a.plugin_name);
+        }
+    };
+    collect_loaded(out.view_registry.attributions());
+    collect_loaded(out.start_view_registry.attributions());
+    collect_loaded(out.renderer_registry.attributions());
+    collect_loaded(out.status_registry.attributions());
+    collect_loaded(out.grammar_registry.attributions());
 
     // ui.json's "theme" selects the file (themes/<name>.json); empty means
     // the built-in default. Previously hardcoded to "dark" regardless of
@@ -343,6 +314,31 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
     }
 
     return true;
+}
+
+minimal::plugins::NameKind MatchAliasKind(
+    const std::vector<AliasCandidate>& candidates,
+    const std::vector<std::pair<ChatRowKind, plugins::Attribution>>& message_claims,
+    const std::string& key) {
+    const auto matches = [](const std::vector<plugins::Attribution>& attributions,
+                            const std::string& qualified) {
+        for (const auto& a : attributions) {
+            if (a.plugin_name + "." + a.original_name == qualified) return true;
+        }
+        return false;
+    };
+    for (const auto& candidate : candidates) {
+        if (matches(*candidate.attributions, key)) return candidate.kind;
+    }
+    // message_claims is (kind, attribution) pairs, a different shape from
+    // the others' plain attributions() -- stays its own check.
+    for (const auto& [kind, attribution] : message_claims) {
+        (void)kind;
+        if (attribution.plugin_name + "." + attribution.original_name == key) {
+            return minimal::plugins::NameKind::MessageRenderer;
+        }
+    }
+    return minimal::plugins::NameKind::ViewId;   // dangling
 }
 
 }  // namespace minimal::client

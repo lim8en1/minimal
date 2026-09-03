@@ -152,6 +152,56 @@ void CloseCancelPipe() {
     g_cancel_pipe[0] = g_cancel_pipe[1] = -1;
 }
 
+// The one JSONL shape for --jsonl mode, shared by the parent turn's own event
+// loop and every child/subagent attach loop -- the child loop used to be a
+// hand-duplicated subset that had drifted (missing hit_max_turns and
+// subagent_started), so a nested subagent's own child spawn, or a child
+// hitting the turn ceiling, silently fell through to {"type":"event"}.
+nlohmann::json ServerEventToJsonLine(const minimal::v1::ServerEvent& event) {
+    nlohmann::json line;
+    line["session_id"] = event.session_id();
+    if (event.has_stream_event()) {
+        const auto& stream = event.stream_event();
+        if (stream.has_text_delta()) {
+            line["type"] = "text_delta";
+            line["text"] = stream.text_delta().text();
+        } else if (stream.has_message_delta()) {
+            line["type"] = "message_delta";
+            line["stop_reason"] =
+                minimal::v1::StopReason_Name(stream.message_delta().stop_reason());
+        } else {
+            line["type"] = "stream_event";
+        }
+    } else if (event.has_tool_execution()) {
+        line["type"] = "tool_execution";
+        line["tool_name"] = event.tool_execution().tool_name();
+        line["started"] = event.tool_execution().started();
+    } else if (event.has_error()) {
+        line["type"] = "error";
+        line["message"] = event.error().message();
+    } else if (event.has_subagent_started()) {
+        line["type"] = "subagent_started";
+        line["child_session_id"] = event.subagent_started().child_session_id();
+    } else if (event.has_turn_completed()) {
+        line["type"] = "turn_completed";
+        line["hit_max_turns"] = event.turn_completed().hit_max_turns();
+    } else if (event.has_session_ended()) {
+        line["type"] = "session_ended";
+    } else {
+        line["type"] = "event";
+    }
+    return line;
+}
+
+// The common case for OpenTab: a brand-new session rooted at the cwd, no
+// resume, no explicit preset/name. Callers that need those (the startup
+// resume path, ~line 210) build CreateOptions by hand instead.
+minimal::client::SessionClient::CreateOptions DefaultCreateOptions() {
+    minimal::client::SessionClient::CreateOptions opts;
+    opts.project_root = std::filesystem::current_path().string();
+    return opts;
+}
+
 int RunHeadless(const HeadlessOptions& options) {
     // Already resolved by ParseArgs -- a bare path became a unix:// target
     // there, so what is printed on failure is what was actually dialled.
@@ -294,42 +344,7 @@ int RunHeadless(const HeadlessOptions& options) {
             if (options.jsonl) {
                 // One JSON value per line, so the stream stays parseable
                 // incrementally rather than only once complete.
-                nlohmann::json line;
-                line["session_id"] = event.session_id();
-                if (event.has_stream_event()) {
-                    const auto& stream = event.stream_event();
-                    if (stream.has_text_delta()) {
-                        line["type"] = "text_delta";
-                        line["text"] = stream.text_delta().text();
-                    } else if (stream.has_message_delta()) {
-                        line["type"] = "message_delta";
-                        line["stop_reason"] = minimal::v1::StopReason_Name(
-                            stream.message_delta().stop_reason());
-                    } else {
-                        line["type"] = "stream_event";
-                    }
-                } else if (event.has_tool_execution()) {
-                    line["type"] = "tool_execution";
-                    line["tool_name"] = event.tool_execution().tool_name();
-                    line["started"] = event.tool_execution().started();
-                } else if (event.has_error()) {
-                    line["type"] = "error";
-                    line["message"] = event.error().message();
-                } else if (event.has_subagent_started()) {
-                    line["type"] = "subagent_started";
-                    line["child_session_id"] = event.subagent_started().child_session_id();
-                } else if (event.has_turn_completed()) {
-                    // The child branch had this and the parent's did not, so a
-                    // JSONL consumer could see a subagent's turn end but never
-                    // the top-level one -- it arrived as {"type":"event"}.
-                    line["type"] = "turn_completed";
-                    line["hit_max_turns"] = event.turn_completed().hit_max_turns();
-                } else if (event.has_session_ended()) {
-                    line["type"] = "session_ended";
-                } else {
-                    line["type"] = "event";
-                }
-                PrintJsonLine(line);
+                PrintJsonLine(ServerEventToJsonLine(event));
             } else if (event.has_stream_event() && event.stream_event().has_text_delta()) {
                 // Text mode prints the assistant's words and nothing else.
                 std::fputs(event.stream_event().text_delta().text().c_str(), stdout);
@@ -377,27 +392,7 @@ int RunHeadless(const HeadlessOptions& options) {
                 child_attaches.emplace_back([&client, child_id, jsonl = options.jsonl] {
                     client.Attach(child_id, [jsonl](const minimal::v1::ServerEvent& child_event) {
                         if (jsonl) {
-                            nlohmann::json line;
-                            line["session_id"] = child_event.session_id();
-                            if (child_event.has_stream_event() &&
-                                child_event.stream_event().has_text_delta()) {
-                                line["type"] = "text_delta";
-                                line["text"] = child_event.stream_event().text_delta().text();
-                            } else if (child_event.has_tool_execution()) {
-                                line["type"] = "tool_execution";
-                                line["tool_name"] = child_event.tool_execution().tool_name();
-                                line["started"] = child_event.tool_execution().started();
-                            } else if (child_event.has_error()) {
-                                line["type"] = "error";
-                                line["message"] = child_event.error().message();
-                            } else if (child_event.has_turn_completed()) {
-                                line["type"] = "turn_completed";
-                            } else if (child_event.has_session_ended()) {
-                                line["type"] = "session_ended";
-                            } else {
-                                line["type"] = "event";
-                            }
-                            PrintJsonLine(line);
+                            PrintJsonLine(ServerEventToJsonLine(child_event));
                         }
                         // The child's one turn ends at turn_completed -- or the
                         // child is killed server-side (a cancelled blocking
@@ -664,8 +659,7 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         const std::string sid = app->FocusedSessionId();
         if (sid.empty()) {
             app->RunOnRpcQueue([app, text] {
-                minimal::client::SessionClient::CreateOptions opts;
-                opts.project_root = std::filesystem::current_path().string();
+                const auto opts = DefaultCreateOptions();
                 if (const auto new_sid = app->OpenTab(opts); !new_sid.empty()) {
                     app->SendChatTurn(new_sid, text);
                 }
@@ -801,8 +795,7 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     auto open_new_session = [&] {
         show_picker = false;
         app->RunOnRpcQueue([app] {
-            minimal::client::SessionClient::CreateOptions opts;
-            opts.project_root = std::filesystem::current_path().string();
+            const auto opts = DefaultCreateOptions();
             if (const auto sid = app->OpenTab(opts); !sid.empty()) app->SetFocusedTab(sid);
         });
     };
@@ -898,8 +891,7 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     // its own "+ new session" row for the moment this WAS covering: reaching
     // history from a session already open.
     {
-        minimal::client::SessionClient::CreateOptions opts;
-        opts.project_root = std::filesystem::current_path().string();
+        const auto opts = DefaultCreateOptions();
         if (app->OpenTab(opts).empty()) {
             std::fprintf(stderr, "minimal: warning: could not create a session; "
                                  "ctrl+o opens the session picker\n");

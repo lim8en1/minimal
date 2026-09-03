@@ -46,6 +46,7 @@
 #include "minimal/client/session_client.hpp"
 #include "minimal/client/status_format.hpp"
 #include "minimal/client/ui_config.hpp"
+#include "minimal/plugins/name_registry.hpp"
 
 namespace minimal::client {
 
@@ -102,5 +103,33 @@ struct TuiEnvironment {
 // that as minimal's kUnavailable exit code, same as the inline code's
 // `return kUnavailable` did at each of these points.
 bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out);
+
+// One kind's attribution list, for MatchAliasKind below. `attributions`
+// points into a registry's own storage (stable for BuildTuiEnvironment's
+// whole call), never owned here.
+struct AliasCandidate {
+    minimal::plugins::NameKind kind;
+    const std::vector<plugins::Attribution>* attributions;
+};
+
+// The alias-resolution matching decision BuildTuiEnvironment applies to
+// every entry in client-plugins.json's "aliases" map: which NameKind a
+// qualified "plugin.original_name" alias key belongs to. Checks `candidates`
+// first (view/tool-renderer/status-segment/syntax-grammar registries, in
+// whatever order the caller supplies -- BuildTuiEnvironment includes BOTH
+// view_registry and start_view_registry under NameKind::ViewId, since both
+// register views addressable the same way), then `message_claims`
+// separately (MessageRendererRegistry::claims() is (ChatRowKind,
+// Attribution) pairs, a different shape from the others' plain
+// attributions()). Falls back to NameKind::ViewId -- the "dangling" case,
+// since ViewId is the canonical kind keybindings.json addresses -- when no
+// candidate matches at all.
+//
+// Pure and independently testable: takes only Attribution/ChatRowKind data,
+// no registries, no plugin loading required to exercise it.
+minimal::plugins::NameKind MatchAliasKind(
+    const std::vector<AliasCandidate>& candidates,
+    const std::vector<std::pair<ChatRowKind, plugins::Attribution>>& message_claims,
+    const std::string& key);
 
 }  // namespace minimal::client

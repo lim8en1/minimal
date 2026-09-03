@@ -630,6 +630,13 @@ private:
     // by CloseTab (which erases the TabEntry and drops the shared_ptr) while
     // the reader thread was still between the lookup and the call.
     std::shared_ptr<SessionState> GetState(const std::string& session_id) const;
+
+    // Applies the resolved ui.json bounds (0 = built-in default) to a
+    // freshly constructed SessionState -- identical in OpenTab and AttachTab.
+    void ApplyUiBounds(SessionState& state) const;
+    // Wires the stream's on-closed handler (transport-death vs. clean-close
+    // routing) for `session_id` -- identical in OpenTab and AttachTab.
+    void WireOnClosed(SessionClient::Stream& stream, const std::string& session_id);
 };
 
 }  // namespace minimal::client
