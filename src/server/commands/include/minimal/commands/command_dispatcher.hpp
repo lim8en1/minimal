@@ -24,4 +24,13 @@ namespace minimal::commands {
 CommandResult Dispatch(const CommandRegistry& registry, const std::string& name,
                        const CommandArgs& args, CommandContext& context, bool busy);
 
+// The two refusal messages Dispatch() and the reader-thread pre-check
+// (SessionServiceImpl::DispatchCommand, which must answer an unknown/busy
+// command before it is ever queued) both produce verbatim -- shared so the
+// wording cannot drift between the two call graphs, which otherwise differ
+// entirely (order of checks, extra read-only and no-registry cases on the
+// reader side).
+std::string UnknownCommandMessage(const std::string& name);
+std::string BusyRefusalMessage(const std::string& name);
+
 }  // namespace minimal::commands

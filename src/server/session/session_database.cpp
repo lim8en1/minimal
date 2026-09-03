@@ -13,17 +13,17 @@
 
 #include "minimal/common/config_paths.hpp"
 #include "minimal/common/file_lock.hpp"
+#include "minimal/common/sqlite_util.hpp"
 #include "minimal/session/message_codec.hpp"
 #include "minimal/session/ulid.hpp"
 
 namespace minimal::session {
 namespace {
 
-std::int64_t NowMillis() {
-    return std::chrono::duration_cast<std::chrono::milliseconds>(
-               std::chrono::system_clock::now().time_since_epoch())
-        .count();
-}
+using common::ExecChecked;
+using common::NowMillis;
+using common::Stmt;
+using common::ThrowSqliteError;
 
 const std::vector<Migration>& DefaultMigrationsImpl() {
     static const std::vector<Migration> migrations = {{
@@ -143,10 +143,6 @@ const std::vector<Migration>& DefaultMigrationsImpl() {
     return migrations;
 }
 
-[[noreturn]] void ThrowSqliteError(sqlite3* db, const std::string& context) {
-    throw std::runtime_error(context + ": " + sqlite3_errmsg(db));
-}
-
 // The terminating code of a row loop, checked. `while (step() == SQLITE_ROW)`
 // exits on SQLITE_DONE and equally on SQLITE_BUSY, SQLITE_IOERR and
 // SQLITE_CORRUPT -- so a mid-scan failure returned a SHORT result that every
@@ -157,15 +153,6 @@ const std::vector<Migration>& DefaultMigrationsImpl() {
 // cannot parse, which made the strict half a guard over the lax half's output.
 void CheckRowLoopEnd(sqlite3* db, int rc, const std::string& context) {
     if (rc != SQLITE_DONE) ThrowSqliteError(db, context);
-}
-
-void ExecChecked(sqlite3* db, const char* sql, const std::string& context) {
-    char* err = nullptr;
-    if (sqlite3_exec(db, sql, nullptr, nullptr, &err) != SQLITE_OK) {
-        const std::string message = err ? err : "unknown error";
-        sqlite3_free(err);
-        throw std::runtime_error(context + ": " + message);
-    }
 }
 
 // Reads user_version, refuses a database ahead of this binary, and applies every
@@ -227,10 +214,7 @@ void ApplyMigrations(sqlite3* db, int target_version, const std::vector<Migratio
                     "failed to record schema version");
         ExecChecked(db, "COMMIT;", "failed to commit migration");
     } catch (...) {
-        char* err = nullptr;
-        if (sqlite3_exec(db, "ROLLBACK;", nullptr, nullptr, &err) != SQLITE_OK && err) {
-            sqlite3_free(err);
-        }
+        common::BestEffortRollback(db);
         throw;
     }
 }
@@ -282,20 +266,6 @@ std::string SessionNameFromText(std::string_view text) {
     return TruncateToCodePoints(CollapseWhitespace(text), kDefaultNameMaxChars);
 }
 
-struct Stmt {
-    sqlite3_stmt* stmt = nullptr;
-    explicit Stmt(sqlite3* db, const char* sql, const std::string& context) {
-        if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
-            ThrowSqliteError(db, context);
-        }
-    }
-    ~Stmt() {
-        if (stmt) sqlite3_finalize(stmt);
-    }
-    Stmt(const Stmt&) = delete;
-    Stmt& operator=(const Stmt&) = delete;
-};
-
 // Reuses a prepared statement across calls. sqlite3_prepare is cheap next to
 // the work most statements do, but AppendMessage runs four of them per message
 // on the path every turn pays, so the hot ones live in SessionDatabase's cache.
@@ -334,6 +304,53 @@ public:
 
     sqlite3_stmt* stmt = nullptr;
 };
+
+// Shape shared by every "seq, content_json, token_count, created_at" query --
+// collected raw under mu_, decoded (the expensive JSON parse) outside it.
+struct RawRow {
+    std::int64_t seq;
+    std::string json;
+    int token_count;
+    std::int64_t created_at;
+};
+
+// The collect half: steps a prepared, already-bound statement of the
+// "seq, content_json, token_count, created_at" shape to completion. Must be
+// called with mu_ held; `context` names the caller's own error message so a
+// step failure still reads as theirs.
+std::vector<RawRow> CollectRows(sqlite3_stmt* stmt, sqlite3* db, const std::string& context) {
+    std::vector<RawRow> rows;
+    int rc = SQLITE_OK;
+    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+        RawRow row;
+        row.seq = sqlite3_column_int64(stmt, 0);
+        row.json = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+        row.token_count = sqlite3_column_int(stmt, 2);
+        row.created_at = sqlite3_column_int64(stmt, 3);
+        rows.push_back(std::move(row));
+    }
+    CheckRowLoopEnd(db, rc, context);
+    return rows;
+}
+
+// The decode half: strict, meant to run OUTSIDE mu_ -- the JSON parse is the
+// expensive part of a large resume or page, and holding the one database
+// mutex through it would stall every other session's appends and reads.
+StoredMessage DecodeRow(RawRow&& row) {
+    StoredMessage stored;
+    stored.seq = row.seq;
+    stored.message = JsonToMessage(nlohmann::json::parse(std::move(row.json)));
+    stored.token_count = row.token_count;
+    stored.created_at_unix_ms = row.created_at;
+    return stored;
+}
+
+std::vector<StoredMessage> DecodeRows(std::vector<RawRow> rows) {
+    std::vector<StoredMessage> out;
+    out.reserve(rows.size());
+    for (auto& row : rows) out.push_back(DecodeRow(std::move(row)));
+    return out;
+}
 
 }  // namespace
 
@@ -900,12 +917,6 @@ MessagePage SessionDatabase::GetMessagesPage(const std::string& session_id,
     // total. COALESCE folds the "no cursor" case into the same comparison, the
     // planner constrains on seq, and any real cursor is an exact seek. The
     // sentinel cannot collide with a row: seq values here are row indices.
-    struct RawRow {
-        std::int64_t seq;
-        std::string json;
-        int token_count;
-        std::int64_t created_at;
-    };
     std::vector<RawRow> rows;
     bool has_more = false;
     {
@@ -957,15 +968,7 @@ MessagePage SessionDatabase::GetMessagesPage(const std::string& session_id,
     // SQL-level filtering, not as a second source of truth.
     MessagePage page;
     page.has_more = has_more;
-    page.messages.reserve(rows.size());
-    for (auto& row : rows) {
-        StoredMessage stored;
-        stored.seq = row.seq;
-        stored.message = JsonToMessage(nlohmann::json::parse(std::move(row.json)));
-        stored.token_count = row.token_count;
-        stored.created_at_unix_ms = row.created_at;
-        page.messages.push_back(std::move(stored));
-    }
+    page.messages = DecodeRows(std::move(rows));
     return page;
 }
 
@@ -974,12 +977,6 @@ std::vector<StoredMessage> SessionDatabase::LoadMessages(const std::string& sess
     // in order. Same strict decode as the paging path -- an undecodable row is
     // corruption or a newer binary's work, and must surface as an error rather
     // than as a silently truncated history that would then be re-persisted.
-    struct RawRow {
-        std::int64_t seq;
-        std::string json;
-        int token_count;
-        std::int64_t created_at;
-    };
     std::vector<RawRow> rows;
     {
         std::lock_guard lock(mu_);
@@ -988,36 +985,17 @@ std::vector<StoredMessage> SessionDatabase::LoadMessages(const std::string& sess
                          " WHERE session_id = ?1 AND discarded = 0 ORDER BY seq ASC;",
                          "failed to load messages");
         sqlite3_bind_text(query.stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
-        int rc = SQLITE_OK;
-        while ((rc = sqlite3_step(query.stmt)) == SQLITE_ROW) {
-            RawRow row;
-            row.seq = sqlite3_column_int64(query.stmt, 0);
-            row.json = reinterpret_cast<const char*>(sqlite3_column_text(query.stmt, 1));
-            row.token_count = sqlite3_column_int(query.stmt, 2);
-            row.created_at = sqlite3_column_int64(query.stmt, 3);
-            rows.push_back(std::move(row));
-        }
         // THE RESUME PATH, and the most damaging place to return short: a
         // partial read becomes the loop's working history while
         // SqliteHistoryStore keeps appending at MAX(seq) + 1, so the session
         // runs on a transcript with a hole in it and nothing ever says so.
-        CheckRowLoopEnd(db_, rc, "failed to load messages");
+        rows = CollectRows(query.stmt, db_, "failed to load messages");
     }
 
     // Decode OUTSIDE the lock. The JSON parse is the expensive part of a large
     // resume, and holding the one database mutex through it would stall every
     // other session's appends and reads for the whole load.
-    std::vector<StoredMessage> out;
-    out.reserve(rows.size());
-    for (auto& row : rows) {
-        StoredMessage stored;
-        stored.seq = row.seq;
-        stored.message = JsonToMessage(nlohmann::json::parse(std::move(row.json)));
-        stored.token_count = row.token_count;
-        stored.created_at_unix_ms = row.created_at;
-        out.push_back(std::move(stored));
-    }
-    return out;
+    return DecodeRows(std::move(rows));
 }
 
 std::int64_t SessionDatabase::LastMessageSeq(const std::string& session_id) const {
@@ -1123,12 +1101,6 @@ std::vector<StoredMessage> SessionDatabase::LoadMessagesFrom(const std::string& 
     // Same shape and strictness as LoadMessages -- the checkpoint-resume path
     // is exactly as damaged by a short read -- with the seq floor that keeps a
     // resumed long session's load proportional to the kept context.
-    struct RawRow {
-        std::int64_t seq;
-        std::string json;
-        int token_count;
-        std::int64_t created_at;
-    };
     std::vector<RawRow> rows;
     {
         std::lock_guard lock(mu_);
@@ -1138,29 +1110,10 @@ std::vector<StoredMessage> SessionDatabase::LoadMessagesFrom(const std::string& 
                          "failed to load messages after seq");
         sqlite3_bind_text(query.stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_int64(query.stmt, 2, after_seq);
-        int rc = SQLITE_OK;
-        while ((rc = sqlite3_step(query.stmt)) == SQLITE_ROW) {
-            RawRow row;
-            row.seq = sqlite3_column_int64(query.stmt, 0);
-            row.json = reinterpret_cast<const char*>(sqlite3_column_text(query.stmt, 1));
-            row.token_count = sqlite3_column_int(query.stmt, 2);
-            row.created_at = sqlite3_column_int64(query.stmt, 3);
-            rows.push_back(std::move(row));
-        }
-        CheckRowLoopEnd(db_, rc, "failed to load messages after seq");
+        rows = CollectRows(query.stmt, db_, "failed to load messages after seq");
     }
 
-    std::vector<StoredMessage> out;
-    out.reserve(rows.size());
-    for (auto& row : rows) {
-        StoredMessage stored;
-        stored.seq = row.seq;
-        stored.message = JsonToMessage(nlohmann::json::parse(std::move(row.json)));
-        stored.token_count = row.token_count;
-        stored.created_at_unix_ms = row.created_at;
-        out.push_back(std::move(stored));
-    }
-    return out;
+    return DecodeRows(std::move(rows));
 }
 
 std::optional<StoredMessage> SessionDatabase::LoadMessage(const std::string& session_id,

@@ -49,4 +49,18 @@ struct Usage {
     int cache_read_input_tokens = 0, cache_creation_input_tokens = 0;
 };
 
+// Concatenates every TextBlock in a content array, in order. Other block
+// kinds (tool use/result, thinking) contribute nothing -- callers that need a
+// broader byte count (e.g. token estimation) compute their own, since which
+// kinds count is a policy decision this data-model header does not make.
+inline std::string TextOf(const std::vector<ContentBlock>& content) {
+    std::string out;
+    for (const auto& block : content) {
+        if (const auto* text = std::get_if<TextBlock>(&block)) out += text->text;
+    }
+    return out;
+}
+
+inline std::string TextOf(const Message& message) { return TextOf(message.content); }
+
 }  // namespace minimal::llm

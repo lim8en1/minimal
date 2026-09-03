@@ -13,4 +13,8 @@ namespace minimal::config {
 tools::PermissionMode ParsePermissionMode(const std::string& value);        // "allow"|"ask"|"deny", else throws
 tools::PermissionRunMode ParsePermissionRunMode(const std::string& value);  // "normal"|"bypass"|"allow-only", else throws
 
+// Inverse of ParsePermissionRunMode -- same spellings, used to render the run
+// mode back over the wire (e.g. session metadata's permission_mode field).
+std::string ToString(tools::PermissionRunMode mode);
+
 }  // namespace minimal::config

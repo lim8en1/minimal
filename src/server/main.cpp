@@ -29,6 +29,7 @@
 #include "minimal/common/config_paths.hpp"
 #include "minimal/common/logger.hpp"
 #include "minimal/common/logging_setup.hpp"
+#include "minimal/common/read_file.hpp"
 #include "minimal/config/fd_hygiene.hpp"
 #include "minimal/config/permissions_config.hpp"
 #include "minimal/config/sanity_check.hpp"
@@ -51,14 +52,6 @@
 #include "minimal/tools/tool_registry.hpp"
 
 namespace {
-
-std::string ReadFileOrEmpty(const std::filesystem::path& path) {
-    std::ifstream in(path);
-    if (!in) return {};
-    std::ostringstream buffer;
-    buffer << in.rdbuf();
-    return buffer.str();
-}
 
 // ATOMIC, and only when the content actually changed.
 //
@@ -119,7 +112,7 @@ int main(int argc, char** argv) {
     // cmake/SeedConfig.cmake); by the time the server runs, those files are the
     // user's and this process only reads them.
     const auto plugins_json = config_dir / "plugins.json";
-    const auto plugins_json_before = ReadFileOrEmpty(plugins_json);
+    const auto plugins_json_before = minimal::common::ReadFileOrEmpty(plugins_json);
     auto plugin_config = minimal::plugins::ParsePluginConfig(plugins_json_before);
 
     // LOGGING FIRST, before anything logs. DefaultLogger() caches spdlog's
@@ -260,7 +253,7 @@ int main(int argc, char** argv) {
     nlohmann::json tools_settings = nlohmann::json::object();
     try {
         tools_settings =
-            nlohmann::json::parse(ReadFileOrEmpty(config_dir / "settings.json")).value("tools",
+            nlohmann::json::parse(minimal::common::ReadFileOrEmpty(config_dir / "settings.json")).value("tools",
                                                                                        nlohmann::json::object());
     } catch (const std::exception&) {
     }
@@ -495,22 +488,10 @@ int main(int argc, char** argv) {
 
     // The signal router's channel registry, from the startup-parsed
     // channels.json: subscriptions validate against declared channels, not
-    // connected ones. The MCP manager below delivers channel notifications
-    // into this router (declared here first, so it outlives the manager's
-    // wiring).
-    for (const auto& entry : sanity.channels().entries) {
-        // Mirror McpClientManager's own skip rules exactly, or the router
-        // would validate a subscription to a channel the manager never built
-        // a handle for -- CheckSelector would pass, EnsureAlive would then
-        // fail (or, worse, silently resolve to an unrelated mcps.json server
-        // handle of the same name), producing "subscribed but no signal ever
-        // arrives" with no error anywhere. The sanity check already warns
-        // about both cases from the config side; this is the enforcement.
-        if (!entry.enabled) continue;  // deliberate opt-out, silent
-        if (entry.name == minimal::config::kReservedInternalChannelName) continue;  // reserved
-        if (sanity.mcps().Find(entry.name) != nullptr) continue;  // name collision: mcps.json wins
-        signal_router.RegisterChannel(entry);
-    }
+    // connected ones. Populated below, once the MCP manager exists -- see
+    // there for why the enabled/reserved/collision filtering happens through
+    // it rather than by re-deriving the same rules here (declared here
+    // first, so it outlives the manager's wiring).
 
     // The shared MCP server processes: one connection per enabled mcps.json
     // entry, shared across every session. Core, like the MCP client itself.
@@ -540,6 +521,25 @@ int main(int argc, char** argv) {
         minimal::config::LoadMcpsConfig(config_dir / "mcps.json"), tools, mcp_limits,
         minimal::common::DefaultLogger(), std::move(channel_wiring));
     minimal::mcp::McpClientManager& mcp = *mcp_manager;
+
+    // Register with the router only the channels the manager actually built
+    // a handle for -- asking the manager directly, rather than re-deriving
+    // its enabled/reserved/collision rules here, is what keeps this in sync
+    // with EnsureAlive's own view: a subscription to anything else would pass
+    // CheckSelector and then either fail at EnsureAlive or, worse, silently
+    // resolve to an unrelated mcps.json server handle of the same name,
+    // producing "subscribed but no signal ever arrives" with no error
+    // anywhere. The sanity check already warns about both skip cases from
+    // the config side; this is the enforcement.
+    {
+        const auto enabled_channels = mcp.EnabledChannelNames();
+        for (const auto& entry : sanity.channels().entries) {
+            if (std::find(enabled_channels.begin(), enabled_channels.end(), entry.name) !=
+                enabled_channels.end()) {
+                signal_router.RegisterChannel(entry);
+            }
+        }
+    }
 
     // Registered by the harness itself, like SkillTool, but only NOW: the
     // manager needs the SessionRegistry to exist, and no session can build a

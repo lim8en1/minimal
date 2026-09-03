@@ -240,11 +240,14 @@ public:
     // body is shared with RunTurn(seed); only the seed differs.
     TurnResult RunTurn();
 
-    // Queued by a non-blocking subagent's completion, flushed at a turn boundary
-    // rather than injected out-of-band: landing a user message between a
-    // tool_use and its tool_result is a hard 400 on both wire formats. False
-    // means the session is terminating and the message was not staged.
-    bool QueueInjectedMessage(llm::Message message);
+    // A bare push onto the injection queue, flushed at a turn boundary rather
+    // than injected out-of-band: landing a user message between a tool_use
+    // and its tool_result is a hard 400 on both wire formats. Unrelated to
+    // Session::QueueInjectedMessage (no terminated_ guard, no worker wakeup)
+    // despite the similar name -- production callers go through Session,
+    // which every real AgentLoop is wrapped by; this exists for tests that
+    // construct a bare AgentLoop.
+    bool PushInjectedMessage(llm::Message message);
 
     const std::vector<llm::Message>& history() const { return history_; }
     llm::ChatRequest BuildChatRequest() const;

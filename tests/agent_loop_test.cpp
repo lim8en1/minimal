@@ -1050,7 +1050,7 @@ TEST_CASE("a queued subagent result lands at a turn boundary", "[agent_loop][sub
     h.provider.PushResponse(TextResponse("done"));
     h.Build();
 
-    h.loop->QueueInjectedMessage(UserText("[Subagent finished] result"));
+    h.loop->PushInjectedMessage(UserText("[Subagent finished] result"));
     h.loop->RunTurn(UserText("go"));
 
     // Find the injected message and assert it does not sit between an assistant
@@ -1073,18 +1073,6 @@ TEST_CASE("a queued subagent result lands at a turn boundary", "[agent_loop][sub
     }
 }
 
-namespace {
-
-std::string TextOf(const llm::Message& message) {
-    std::string out;
-    for (const auto& block : message.content) {
-        if (const auto* text = std::get_if<llm::TextBlock>(&block)) out += text->text;
-    }
-    return out;
-}
-
-}  // namespace
-
 TEST_CASE("an injection queued while idle precedes the first provider call of the next turn",
           "[agent_loop][subagent][background]") {
     // The flush used to happen only at tool-cycle boundaries and turn end, so
@@ -1096,7 +1084,7 @@ TEST_CASE("an injection queued while idle precedes the first provider call of th
     h.provider.PushResponse(SmallTextResponse("ack"));
     h.Build();
 
-    h.loop->QueueInjectedMessage(UserText("[Background task bg-1 completed] build passed"));
+    h.loop->PushInjectedMessage(UserText("[Background task bg-1 completed] build passed"));
     h.loop->RunTurn(UserText("go"));
 
     // Working history: injection before seed.
@@ -1121,7 +1109,7 @@ TEST_CASE("the seedless wake turn carries only the injected messages", "[agent_l
     h.provider.PushResponse(SmallTextResponse("noticed"));
     h.Build();
 
-    h.loop->QueueInjectedMessage(UserText("[Background task bg-2 failed] exit 1"));
+    h.loop->PushInjectedMessage(UserText("[Background task bg-2 failed] exit 1"));
     const auto result = h.loop->RunTurn();
 
     CHECK(result.stop_reason == llm::StopReason::EndTurn);

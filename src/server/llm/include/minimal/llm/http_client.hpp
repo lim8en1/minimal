@@ -18,6 +18,11 @@ struct HttpHeader {
 // pure enough to unit test without a real transport.
 std::optional<std::string> FindHeaderCI(const std::vector<HttpHeader>& headers, std::string_view name);
 
+// The pairwise compare FindHeaderCI is built on, exposed for callers (e.g. a
+// streaming callback's own per-response header vector) that need to compare
+// header names directly rather than look one up in an assembled HttpResponse.
+bool HeaderNameEquals(std::string_view a, std::string_view b);
+
 struct HttpRequest {
     std::string url;
     std::vector<HttpHeader> headers;

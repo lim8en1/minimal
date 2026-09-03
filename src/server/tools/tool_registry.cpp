@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <utility>
 
+#include "minimal/mcp/naming.hpp"
 #include "minimal/tools/aliased_tool.hpp"
 
 namespace minimal::tools {
@@ -95,7 +96,7 @@ std::vector<llm::ToolDefinition> ToolRegistry::DefinitionsFor(
         // live set) and are added by DefinitionsForMcpServers(). Letting "*"
         // sweep them in here would advertise a dead or de-scoped server's
         // tools to the model.
-        if (name.rfind("mcp__", 0) == 0) continue;
+        if (name.rfind(mcp::kMcpPrefix, 0) == 0) continue;
         // Filter on the PERMISSION key, not the map key: allowed_tools never
         // references an alias (ARCHITECTURE.md, "Name collisions and aliases"),
         // so an aliased tool is addressed by its original/qualified name while
@@ -122,7 +123,7 @@ std::vector<llm::ToolDefinition> ToolRegistry::DefinitionsForMcpServers(
     std::vector<std::string> prefixes;
     prefixes.reserve(servers.size());
     for (const auto& server : servers) {
-        prefixes.push_back("mcp__" + server + "__");
+        prefixes.push_back(std::string(mcp::kMcpPrefix) + server + std::string(mcp::kMcpSeparator));
     }
 
     std::shared_lock<std::shared_mutex> lock(mutex_);
@@ -154,7 +155,7 @@ std::string_view ToolRegistry::PermissionKeyFor(std::string_view surface_name) c
 
 void ToolRegistry::ReplaceMcpTools(const std::string& server_name,
                                    std::vector<std::unique_ptr<Tool>> tools) {
-    const std::string prefix = "mcp__" + server_name + "__";
+    const std::string prefix = std::string(mcp::kMcpPrefix) + server_name + std::string(mcp::kMcpSeparator);
     std::unique_lock<std::shared_mutex> lock(mutex_);
 
     // Retire the server's previous set: out of the map. An executor already

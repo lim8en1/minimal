@@ -325,6 +325,23 @@ ResolvedModel ProvidersConfig::BuildDiscoveredLocked(const ProviderEntry& entry,
     return resolved;
 }
 
+std::string DescribeModels(const ProvidersConfig& providers) {
+    const auto refs = providers.ModelRefs();
+    if (refs.empty()) return "no models at all (providers.json is empty)";
+    std::string out;
+    for (const auto& ref : refs) {
+        if (!out.empty()) out += ", ";
+        out += ref;
+    }
+    return out;
+}
+
+std::string DescribeDiscovery(const ProvidersConfig& providers, const std::string& provider_name) {
+    const auto status = providers.discovery_status(provider_name);
+    if (!status.attempted || status.ok) return {};
+    return "; discovery for provider '" + provider_name + "' failed: " + status.error;
+}
+
 ProvidersConfig ParseProvidersConfig(const nlohmann::json& doc) {
     // The pre-`models` schema was a top-level array of flat provider+model
     // records. Named explicitly rather than allowed to fail as "expected an

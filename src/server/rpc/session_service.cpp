@@ -12,6 +12,8 @@
 
 #include "minimal/agent/mention_resolver.hpp"
 #include "minimal/agent/signal_router.hpp"
+#include "minimal/commands/command_dispatcher.hpp"
+#include "minimal/config/permission_codec.hpp"
 #include "minimal/mcp/mcp_client_manager.hpp"
 #include "minimal/mcp/signal_protocol.hpp"
 #include "minimal/plugins/plugin_abi.h"
@@ -43,17 +45,6 @@ constexpr int kMaxPageSize = 1000;
 int ClampPageSize(int requested, int fallback) {
     if (requested <= 0) requested = fallback;
     return std::min(requested, kMaxPageSize);
-}
-
-// The status bar renders text; a string over the wire keeps a new run mode from
-// needing a wire release to be renderable. Same spellings /permission-mode takes.
-std::string RunModeString(tools::PermissionRunMode mode) {
-    switch (mode) {
-        case tools::PermissionRunMode::AllowOnly: return "allow-only";
-        case tools::PermissionRunMode::Bypass: return "bypass";
-        case tools::PermissionRunMode::Normal: return "normal";
-    }
-    return "normal";
 }
 
 // The fallback when no registry was wired (tests, or a service built before
@@ -557,8 +548,7 @@ void SessionServiceImpl::DispatchCommand(const v1::CommandInvocation& invocation
     // to reach the client from the READER: queueing it for the worker is the
     // very thing being refused.
     if (!session.idle() && dynamic_cast<const commands::LLMCommand*>(command) != nullptr) {
-        session.RejectCommand(queued, "/" + queued.name +
-                                          " cannot run while a turn is in flight; cancel it first");
+        session.RejectCommand(queued, commands::BusyRefusalMessage(queued.name));
         return;
     }
     // An unknown command is answered now too. Queueing it to be told "unknown
@@ -569,7 +559,7 @@ void SessionServiceImpl::DispatchCommand(const v1::CommandInvocation& invocation
     // right answer is the session's "the /-command subsystem is not available",
     // which is a different fact and belongs where it already lives.
     if (commands_ != nullptr && command == nullptr) {
-        session.RejectCommand(queued, "unknown command: /" + queued.name + " (try /help)");
+        session.RejectCommand(queued, commands::UnknownCommandMessage(queued.name));
         return;
     }
 
@@ -1005,7 +995,7 @@ void SessionServiceImpl::EmitSessionMetadata(
     metadata->set_name(session.info().name);
     metadata->set_agent_preset(session.info().agent_preset);
     metadata->set_model(preset.model_ref.str());
-    metadata->set_permission_mode(RunModeString(session.run_mode()));
+    metadata->set_permission_mode(config::ToString(session.run_mode()));
     metadata->set_context_window_tokens(preset.context_window_tokens.value_or(0));
     // Targeted at the new subscriber only -- the streams already attached have
     // their metadata. Never blocks; a refusal means the stream went away mid-

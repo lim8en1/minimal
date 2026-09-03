@@ -423,7 +423,7 @@ TEST_CASE("a rewound loop drops pending subagent completions", "[rewind][agent_l
 
     REQUIRE_NOTHROW(h.loop->RunTurn(testing::UserText("a")));
     // A background subagent finished while the user was deciding to rewind.
-    h.loop->QueueInjectedMessage(testing::UserText("late completion"));
+    h.loop->PushInjectedMessage(testing::UserText("late completion"));
 
     h.loop->TruncateAfter(0);
     h.provider.PushResponse(testing::TextResponse("after rewind"));

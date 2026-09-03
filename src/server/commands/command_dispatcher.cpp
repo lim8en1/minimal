@@ -2,13 +2,21 @@
 
 namespace minimal::commands {
 
+std::string UnknownCommandMessage(const std::string& name) {
+    return "unknown command: /" + name + " (try /help)";
+}
+
+std::string BusyRefusalMessage(const std::string& name) {
+    return "/" + name + " cannot run while a turn is in flight; cancel it first";
+}
+
 CommandResult Dispatch(const CommandRegistry& registry, const std::string& name,
                        const CommandArgs& args, CommandContext& context, bool busy) {
     Command* command = registry.Find(name);
     if (command == nullptr) {
         // Answered, never dropped: a client waiting on a CommandResult would
         // otherwise hang on a request the server quietly discarded.
-        return CommandResult::Error("unknown command: /" + name + " (try /help)");
+        return CommandResult::Error(UnknownCommandMessage(name));
     }
 
     // An LLMCommand specifically, not any non-read-only command. A mutating
@@ -19,8 +27,7 @@ CommandResult Dispatch(const CommandRegistry& registry, const std::string& name,
     // pointless once the context it was aimed at has moved on. `!ReadOnly()` was
     // true of both, so this refused commands the queue exists to serve.
     if (busy && dynamic_cast<const LLMCommand*>(command) != nullptr) {
-        return CommandResult::Error("/" + name +
-                                    " cannot run while a turn is in flight; cancel it first");
+        return CommandResult::Error(BusyRefusalMessage(name));
     }
 
     if (command->RequiresConfirmation()) {

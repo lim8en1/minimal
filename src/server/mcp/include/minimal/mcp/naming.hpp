@@ -9,6 +9,8 @@ namespace minimal::mcp {
 // that keeps them collision-free with built-ins and across servers, and how
 // tools::mcp_server_of() recovers the owning server for the server-scoped
 // permission chain.
+inline constexpr std::string_view kMcpPrefix = "mcp__";
+inline constexpr std::string_view kMcpSeparator = "__";
 
 // True when `server_name` can take part in that mangling unambiguously:
 // non-empty, no `__` (it would make the wire name ambiguous against the
@@ -24,5 +26,10 @@ bool IsValidMcpToolName(std::string_view tool_name);
 // Preconditions: both names valid. Not checked here -- the caller validates
 // first and decides its own failure mode (config error vs. skipped tool).
 std::string McpToolName(std::string_view server_name, std::string_view tool_name);
+
+// Inverse of McpToolName: recovers the server segment from a wire name, or
+// empty if `tool_name` is not one of ours (missing prefix, or no separator
+// after it). Used by the server-scoped permission chain (tools::mcp_server_of()).
+std::string McpServerOf(std::string_view tool_name);
 
 }  // namespace minimal::mcp

@@ -12,18 +12,6 @@
 namespace minimal::agent {
 namespace {
 
-// Concatenates every TextBlock in an assistant message. This is what a subagent
-// hands back to its parent.
-std::string TextOf(const llm::Message& message) {
-    std::string out;
-    for (const auto& block : message.content) {
-        if (const auto* text = std::get_if<llm::TextBlock>(&block)) {
-            out += text->text;
-        }
-    }
-    return out;
-}
-
 std::vector<const llm::ToolUseBlock*> ToolUsesOf(const llm::Message& message) {
     std::vector<const llm::ToolUseBlock*> out;
     for (const auto& block : message.content) {
@@ -194,7 +182,11 @@ void AgentLoop::AppendAndPersist(llm::Message message, std::optional<int> output
     history_.push_back(std::move(message));
 }
 
-bool AgentLoop::QueueInjectedMessage(llm::Message message) {
+// Unrelated to Session::QueueInjectedMessage despite the similar shape: that
+// one guards on terminated_ and wakes the session's own worker via turn_cv_,
+// neither of which AgentLoop has -- this is a bare push, used directly only
+// by tests that construct a bare AgentLoop with no Session wrapper.
+bool AgentLoop::PushInjectedMessage(llm::Message message) {
     return injections_->Push(std::move(message));
 }
 
@@ -771,7 +763,7 @@ void AgentLoop::RunTurnLoop(TurnResult& result, bool flush_first) {
         // across the later move into history_: a vector move relocates the
         // heap buffer's ownership, not the elements.
         llm::Message assistant{llm::Role::Assistant, std::move(response.content)};
-        result.final_text = TextOf(assistant);
+        result.final_text = llm::TextOf(assistant);
         const auto tool_uses = ToolUsesOf(assistant);
         // The only per-message token count that exists: this response's output.
         AppendAndPersist(std::move(assistant), response.usage.output_tokens);

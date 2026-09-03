@@ -4,6 +4,8 @@
 #include <stdexcept>
 #include <unordered_set>
 
+#include "minimal/config/parse_util.hpp"
+
 namespace minimal::config {
 
 bool IsValidSignalName(std::string_view name) {
@@ -100,27 +102,7 @@ ChannelEntry ParseEntry(const std::string& name, const nlohmann::json& entry) {
             result.args.push_back(arg.get<std::string>());
         }
     }
-    if (entry.contains("env")) {
-        if (!entry.at("env").is_object()) {
-            throw std::runtime_error("env must be an object of strings");
-        }
-        for (const auto& [key, value] : entry.at("env").items()) {
-            if (!value.is_string()) {
-                throw std::runtime_error("env value for '" + key + "' must be a string");
-            }
-            std::string parsed = value.get<std::string>();
-            // The value lands in a spawned child's environment; a CR/LF is
-            // either nonsense no channel process expects or an injection
-            // payload. Config is the user's own file: reject rather than
-            // silently mangle it. Mirrors mcps_config.cpp's ParseStringMap,
-            // which applies the same rule to the same use.
-            if (parsed.find('\r') != std::string::npos || parsed.find('\n') != std::string::npos) {
-                throw std::runtime_error("env value for '" + key +
-                                         "' contains a CR or LF, which is not allowed");
-            }
-            result.env.emplace(key, std::move(parsed));
-        }
-    }
+    if (entry.contains("env")) result.env = ParseStringMap(entry.at("env"), "env");
 
     result.enabled = entry.value("enabled", result.enabled);
     return result;

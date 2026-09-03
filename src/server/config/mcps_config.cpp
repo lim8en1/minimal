@@ -4,6 +4,8 @@
 #include <stdexcept>
 #include <unordered_set>
 
+#include "minimal/config/parse_util.hpp"
+
 namespace minimal::config {
 
 namespace {
@@ -16,30 +18,6 @@ std::string EntryLabel(const nlohmann::json& entry, std::size_t index) {
         return "entry '" + entry.at("name").get<std::string>() + "'";
     }
     return "entry #" + std::to_string(index);
-}
-
-std::unordered_map<std::string, std::string> ParseStringMap(const nlohmann::json& doc,
-                                                            const char* field) {
-    std::unordered_map<std::string, std::string> out;
-    if (!doc.is_object()) {
-        throw std::runtime_error(std::string(field) + " must be an object of strings");
-    }
-    for (const auto& [key, value] : doc.items()) {
-        if (!value.is_string()) {
-            throw std::runtime_error(std::string(field) + " value for '" + key + "' must be a string");
-        }
-        std::string parsed = value.get<std::string>();
-        // Both fields land in an outbound HTTP header or a child's environment;
-        // a CR/LF in the value is either a header-injection payload (a second
-        // header smuggled into the request) or nonsense no MCP server expects.
-        // Config is the user's own file: reject rather than silently mangle it.
-        if (parsed.find('\r') != std::string::npos || parsed.find('\n') != std::string::npos) {
-            throw std::runtime_error(std::string(field) + " value for '" + key +
-                                     "' contains a CR or LF, which is not allowed");
-        }
-        out.emplace(key, std::move(parsed));
-    }
-    return out;
 }
 
 // No index parameter: the caller catches and labels every failure with

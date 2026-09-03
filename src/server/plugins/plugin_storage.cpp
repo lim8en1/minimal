@@ -2,7 +2,6 @@
 
 #include <sqlite3.h>
 
-#include <chrono>
 #include <cstddef>
 #include <memory>
 #include <stdexcept>
@@ -11,42 +10,15 @@
 #include <utility>
 
 #include "minimal/common/file_lock.hpp"
+#include "minimal/common/sqlite_util.hpp"
 
 namespace minimal::plugins {
 namespace {
 
-std::int64_t NowMillis() {
-    return std::chrono::duration_cast<std::chrono::milliseconds>(
-               std::chrono::system_clock::now().time_since_epoch())
-        .count();
-}
-
-[[noreturn]] void ThrowSqliteError(sqlite3* db, const std::string& context) {
-    throw std::runtime_error(context + ": " + sqlite3_errmsg(db));
-}
-
-void ExecChecked(sqlite3* db, const char* sql, const std::string& context) {
-    char* err = nullptr;
-    if (sqlite3_exec(db, sql, nullptr, nullptr, &err) != SQLITE_OK) {
-        const std::string message = err ? err : "unknown error";
-        sqlite3_free(err);
-        throw std::runtime_error(context + ": " + message);
-    }
-}
-
-struct Stmt {
-    sqlite3_stmt* stmt = nullptr;
-    explicit Stmt(sqlite3* db, const char* sql, const std::string& context) {
-        if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
-            ThrowSqliteError(db, context);
-        }
-    }
-    ~Stmt() {
-        if (stmt) sqlite3_finalize(stmt);
-    }
-    Stmt(const Stmt&) = delete;
-    Stmt& operator=(const Stmt&) = delete;
-};
+using common::ExecChecked;
+using common::NowMillis;
+using common::Stmt;
+using common::ThrowSqliteError;
 
 void BindText(sqlite3_stmt* stmt, int index, std::string_view value, const std::string& context) {
     if (sqlite3_bind_text(stmt, index, value.data(), static_cast<int>(value.size()),
@@ -121,10 +93,7 @@ void ApplyMigrations(sqlite3* db, int target_version) {
                     "plugin storage: failed to record schema version");
         ExecChecked(db, "COMMIT;", "plugin storage: failed to commit migration");
     } catch (...) {
-        char* err = nullptr;
-        if (sqlite3_exec(db, "ROLLBACK;", nullptr, nullptr, &err) != SQLITE_OK && err) {
-            sqlite3_free(err);
-        }
+        common::BestEffortRollback(db);
         throw;
     }
 }

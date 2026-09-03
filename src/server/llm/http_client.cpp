@@ -7,9 +7,7 @@
 
 namespace minimal::llm {
 
-namespace {
-
-bool IEquals(std::string_view a, std::string_view b) {
+bool HeaderNameEquals(std::string_view a, std::string_view b) {
     if (a.size() != b.size()) return false;
     for (std::size_t i = 0; i < a.size(); ++i) {
         if (std::tolower(static_cast<unsigned char>(a[i])) != std::tolower(static_cast<unsigned char>(b[i])))
@@ -17,6 +15,8 @@ bool IEquals(std::string_view a, std::string_view b) {
     }
     return true;
 }
+
+namespace {
 
 void EnsureGlobalInit() {
     struct CurlGlobalInit {
@@ -310,7 +310,7 @@ HttpResponse PerformRequest(const HttpRequest& request, Mode mode, const HttpHea
 
 std::optional<std::string> FindHeaderCI(const std::vector<HttpHeader>& headers, std::string_view name) {
     for (const auto& header : headers) {
-        if (IEquals(header.name, name)) return header.value;
+        if (HeaderNameEquals(header.name, name)) return header.value;
     }
     return std::nullopt;
 }
@@ -350,10 +350,6 @@ HttpSession::~HttpSession() {
     if (handle_ != nullptr) curl_easy_cleanup(AsCurl(handle_));
 }
 
-// The reset must run after EVERY transfer -- success, transport failure, or
-// sink abort: options are per-transfer (a request_timeout set once would leak
-// into an unbounded later transfer), while the connection cache survives the
-// reset. That asymmetry is the whole reason this class works.
 namespace {
 
 // The reset must run after EVERY transfer -- success, transport failure, or

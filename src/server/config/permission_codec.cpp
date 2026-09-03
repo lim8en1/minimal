@@ -18,4 +18,13 @@ tools::PermissionRunMode ParsePermissionRunMode(const std::string& value) {
     throw std::runtime_error("invalid permission run mode: '" + value + "' (expected normal|bypass|allow-only)");
 }
 
+std::string ToString(tools::PermissionRunMode mode) {
+    switch (mode) {
+        case tools::PermissionRunMode::AllowOnly: return "allow-only";
+        case tools::PermissionRunMode::Bypass: return "bypass";
+        case tools::PermissionRunMode::Normal: return "normal";
+    }
+    return "normal";
+}
+
 }  // namespace minimal::config

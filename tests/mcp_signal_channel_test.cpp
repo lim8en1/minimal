@@ -3,6 +3,7 @@
 
 #include <unistd.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -192,6 +193,69 @@ TEST_CASE("McpClientManager: channel entries connect, verify, and route", "[mcp]
     // the registry got no tools from a tool-less channel.
     REQUIRE(manager.EnsureAlive("ci", alive_error));
     CHECK(connects.load() == 1);
+}
+
+// A channel name colliding with an ENABLED mcps.json server: the server wins
+// the name, the channel is skipped -- EnabledChannelNames() must agree with
+// the manager's own handles_, since that is what it is built from.
+TEST_CASE("McpClientManager: EnabledChannelNames omits a channel colliding with an enabled server",
+          "[mcp][signals]") {
+    minimal::tools::ToolRegistry registry;
+    minimal::mcp::ChannelWiring wiring;
+    wiring.config = minimal::config::ParseChannelsConfig(
+        nlohmann::json{{"dup", {{"mode", "extended"}, {"command", kFakeChannel}}}});
+
+    const std::string mcps_path =
+        "/tmp/minimal_mcp_channel_test_" + std::to_string(getpid()) + "_collide.json";
+    {
+        auto file = std::ofstream(mcps_path);
+        file << nlohmann::json::array({nlohmann::json{{"name", "dup"},
+                                                       {"transport", "stdio"},
+                                                       {"command", kFakeServer},
+                                                       {"enabled", true}}})
+                    .dump();
+    }
+    minimal::mcp::McpLimits limits = TestLimits();
+    minimal::mcp::McpClientManager manager(minimal::config::LoadMcpsConfig(mcps_path), registry,
+                                           limits, minimal::common::DefaultLogger(),
+                                           std::move(wiring));
+    std::remove(mcps_path.c_str());
+
+    const auto names = manager.EnabledChannelNames();
+    CHECK(std::find(names.begin(), names.end(), "dup") == names.end());
+}
+
+// A channel name matching only a DISABLED mcps.json entry is NOT a real
+// collision -- the disabled entry never gets a handle, so the channel does.
+// Regression for a bug where the router's OWN skip check (mirroring the
+// manager's rules by re-deriving them from raw config instead of asking the
+// manager) matched on name alone, ignoring `enabled`, and refused a
+// subscription to a channel the manager had actually wired up successfully.
+TEST_CASE("McpClientManager: EnabledChannelNames includes a channel matching only a disabled server",
+          "[mcp][signals]") {
+    minimal::tools::ToolRegistry registry;
+    minimal::mcp::ChannelWiring wiring;
+    wiring.config = minimal::config::ParseChannelsConfig(
+        nlohmann::json{{"dup", {{"mode", "extended"}, {"command", kFakeChannel}}}});
+
+    const std::string mcps_path =
+        "/tmp/minimal_mcp_channel_test_" + std::to_string(getpid()) + "_nocollide.json";
+    {
+        auto file = std::ofstream(mcps_path);
+        file << nlohmann::json::array({nlohmann::json{{"name", "dup"},
+                                                       {"transport", "stdio"},
+                                                       {"command", kFakeServer},
+                                                       {"enabled", false}}})
+                    .dump();
+    }
+    minimal::mcp::McpLimits limits = TestLimits();
+    minimal::mcp::McpClientManager manager(minimal::config::LoadMcpsConfig(mcps_path), registry,
+                                           limits, minimal::common::DefaultLogger(),
+                                           std::move(wiring));
+    std::remove(mcps_path.c_str());
+
+    const auto names = manager.EnabledChannelNames();
+    CHECK(std::find(names.begin(), names.end(), "dup") != names.end());
 }
 
 TEST_CASE("McpClientManager: a channel entry whose server lacks the capability fails loudly",

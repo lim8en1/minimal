@@ -13,18 +13,6 @@ namespace {
 constexpr std::string_view kSummaryFraming =
     "The earlier part of this conversation was compacted into the following summary.\n\n";
 
-// Concatenates every TextBlock in a content array -- the only kind a
-// summarization response is expected to contain.
-std::string TextOf(const std::vector<llm::ContentBlock>& content) {
-    std::string out;
-    for (const auto& block : content) {
-        if (const auto* text = std::get_if<llm::TextBlock>(&block)) {
-            out += text->text;
-        }
-    }
-    return out;
-}
-
 bool IsBlank(std::string_view text) {
     for (const char c : text) {
         if (!std::isspace(static_cast<unsigned char>(c))) return false;
@@ -154,7 +142,7 @@ std::optional<CompactionResult> compact_messages(
         return std::nullopt;
     }
 
-    const std::string text = TextOf(response.content);
+    const std::string text = llm::TextOf(response.content);
     if (IsBlank(text)) {
         logger.error("{}compaction produced no usable text; skipping", where);
         return std::nullopt;

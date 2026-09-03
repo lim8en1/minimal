@@ -490,4 +490,13 @@ bool McpClientManager::IsConfigured(const std::string& server_name) const {
     return handles_.count(server_name) != 0;
 }
 
+std::vector<std::string> McpClientManager::EnabledChannelNames() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    std::vector<std::string> names;
+    for (const auto& [name, handle] : handles_) {
+        if (handle->is_channel) names.push_back(name);
+    }
+    return names;
+}
+
 }  // namespace minimal::mcp

@@ -11,32 +11,6 @@
 #include "minimal/session/sqlite_history_store.hpp"
 
 namespace minimal::agent {
-namespace {
-
-// Same shape as the preset registry's message: a miss is answered by showing
-// what exists, because it is nearly always a typo or an unconfigured provider.
-std::string DescribeModels(const config::ProvidersConfig& providers) {
-    const auto refs = providers.ModelRefs();
-    if (refs.empty()) return "no models at all (providers.json is empty)";
-    std::string out;
-    for (const auto& ref : refs) {
-        if (!out.empty()) out += ", ";
-        out += ref;
-    }
-    return out;
-}
-
-// Miss reporting (track N): a typo and a dead catalog must read differently.
-// Silent when discovery was never attempted or succeeded -- the latter means
-// the model is genuinely not served, which the listing above already says.
-std::string DescribeDiscovery(const config::ProvidersConfig& providers,
-                              const std::string& provider_name) {
-    const auto status = providers.discovery_status(provider_name);
-    if (!status.attempted || status.ok) return {};
-    return "; discovery for provider '" + provider_name + "' failed: " + status.error;
-}
-
-}  // namespace
 
 SessionRegistry::SessionRegistry(const AgentPresetRegistry& presets, tools::ToolRegistry& tools,
                                  const llm::ProviderFactoryRegistry& providers,
@@ -161,8 +135,8 @@ std::shared_ptr<Session> SessionRegistry::CreateResolved(SessionParams params,
         if (model == nullptr) {
             throw std::runtime_error("unknown model '" + params.model_override->str() +
                                      "'; providers.json defines " +
-                                     DescribeModels(presets_.providers()) +
-                                     DescribeDiscovery(presets_.providers(),
+                                     config::DescribeModels(presets_.providers()) +
+                                     config::DescribeDiscovery(presets_.providers(),
                                                        params.model_override->provider));
         }
         ApplyModel(preset, *model);

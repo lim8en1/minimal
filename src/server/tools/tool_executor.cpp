@@ -3,13 +3,11 @@
 #include <algorithm>
 #include <utility>
 
+#include "minimal/mcp/naming.hpp"
 #include "minimal/tools/path_confinement.hpp"
 
 namespace minimal::tools {
 namespace {
-
-constexpr std::string_view kMcpPrefix = "mcp__";
-constexpr std::string_view kMcpSeparator = "__";
 
 llm::ToolResultBlock ErrorResult(const std::string& tool_use_id, std::string text) {
     llm::ToolResultBlock block;
@@ -21,13 +19,7 @@ llm::ToolResultBlock ErrorResult(const std::string& tool_use_id, std::string tex
 
 }  // namespace
 
-std::string mcp_server_of(const std::string& tool_name) {
-    if (tool_name.rfind(kMcpPrefix, 0) != 0) return {};
-    const auto rest = tool_name.substr(kMcpPrefix.size());
-    const auto sep = rest.find(kMcpSeparator);
-    if (sep == std::string::npos) return {};
-    return rest.substr(0, sep);
-}
+std::string mcp_server_of(const std::string& tool_name) { return mcp::McpServerOf(tool_name); }
 
 ToolExecutor::ToolExecutor(ToolRegistry& registry, PermissionChecker& checker,
                             PermissionPolicy policy, McpPermissionPolicy mcp_policy,

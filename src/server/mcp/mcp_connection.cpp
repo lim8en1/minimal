@@ -1,7 +1,6 @@
 #include "minimal/mcp/mcp_connection.hpp"
 
 #include <algorithm>
-#include <cctype>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -357,16 +356,9 @@ private:
                     *status = code;
                     // Names arrive verbatim from the wire (libcurl does not
                     // normalize case): compare case-insensitively, the same
-                    // rule llm::FindHeaderCI exists for.
-                    auto equals_ci = [](std::string_view a, std::string_view b) {
-                        return a.size() == b.size() &&
-                               std::equal(a.begin(), a.end(), b.begin(), [](char x, char y) {
-                                   return std::tolower(static_cast<unsigned char>(x)) ==
-                                          std::tolower(static_cast<unsigned char>(y));
-                               });
-                    };
+                    // rule llm::FindHeaderCI is built on.
                     for (const auto& header : headers) {
-                        if (equals_ci(header.name, "Content-Type")) {
+                        if (llm::HeaderNameEquals(header.name, "Content-Type")) {
                             *is_sse = header.value.find("text/event-stream") != std::string::npos;
                         }
                         // A CR/LF in a value libcurl handed back verbatim would
@@ -378,7 +370,7 @@ private:
                         // here and at BuildRequest), so this degrades to that
                         // existing, well-defined path rather than forwarding a
                         // sanitized-but-still-adversarial value.
-                        if (equals_ci(header.name, "mcp-session-id") &&
+                        if (llm::HeaderNameEquals(header.name, "mcp-session-id") &&
                             header.value.find('\r') == std::string::npos &&
                             header.value.find('\n') == std::string::npos) {
                             *session_id = header.value;

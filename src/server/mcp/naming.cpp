@@ -6,9 +6,6 @@ namespace minimal::mcp {
 
 namespace {
 
-constexpr std::string_view kPrefix = "mcp__";
-constexpr std::string_view kSeparator = "__";
-
 bool HasDisallowedCharacter(std::string_view name) {
     return std::any_of(name.begin(), name.end(), [](char c) {
         const auto u = static_cast<unsigned char>(c);
@@ -21,7 +18,7 @@ bool HasDisallowedCharacter(std::string_view name) {
 }  // namespace
 
 bool IsValidMcpServerName(std::string_view server_name) {
-    return !server_name.empty() && server_name.find(kSeparator) == std::string_view::npos &&
+    return !server_name.empty() && server_name.find(kMcpSeparator) == std::string_view::npos &&
            !HasDisallowedCharacter(server_name);
 }
 
@@ -31,12 +28,20 @@ bool IsValidMcpToolName(std::string_view tool_name) {
 
 std::string McpToolName(std::string_view server_name, std::string_view tool_name) {
     std::string out;
-    out.reserve(kPrefix.size() + server_name.size() + kSeparator.size() + tool_name.size());
-    out.append(kPrefix);
+    out.reserve(kMcpPrefix.size() + server_name.size() + kMcpSeparator.size() + tool_name.size());
+    out.append(kMcpPrefix);
     out.append(server_name);
-    out.append(kSeparator);
+    out.append(kMcpSeparator);
     out.append(tool_name);
     return out;
+}
+
+std::string McpServerOf(std::string_view tool_name) {
+    if (tool_name.substr(0, kMcpPrefix.size()) != kMcpPrefix) return {};
+    const auto rest = tool_name.substr(kMcpPrefix.size());
+    const auto sep = rest.find(kMcpSeparator);
+    if (sep == std::string_view::npos) return {};
+    return std::string(rest.substr(0, sep));
 }
 
 }  // namespace minimal::mcp

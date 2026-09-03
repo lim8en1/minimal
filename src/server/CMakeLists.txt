@@ -23,6 +23,7 @@ add_library(minimal_server_core SHARED
     config/settings_config.cpp
     config/permissions_config.cpp
     config/hooks_config.cpp
+    config/parse_util.cpp
     config/mcps_config.cpp
     config/channels_config.cpp
     config/skill_registry.cpp

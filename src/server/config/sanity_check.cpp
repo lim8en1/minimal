@@ -10,6 +10,7 @@
 #include <unordered_set>
 
 #include "minimal/common/config_paths.hpp"
+#include "minimal/common/read_file.hpp"
 #include "minimal/hooks/hook_dispatcher.hpp"
 
 namespace minimal::config {
@@ -21,14 +22,6 @@ CheckResult Fatal(const std::string& check, const std::string& message) {
 
 CheckResult Warning(const std::string& check, const std::string& message) {
     return {CheckSeverity::Warning, check, message};
-}
-
-std::string ReadFileOrEmpty(const std::filesystem::path& path) {
-    std::ifstream in(path);
-    if (!in) return {};
-    std::ostringstream buffer;
-    buffer << in.rdbuf();
-    return buffer.str();
 }
 
 std::string JoinNames(const std::vector<std::string>& names) {
@@ -145,7 +138,7 @@ std::vector<CheckResult> StartupSanityCheck::check_config_files() {
 
     // plugins.json degrades to empty BY DESIGN -- but a silently degraded file
     // is exactly what this check exists to make loud.
-    const auto plugins_text = ReadFileOrEmpty(dir / "plugins.json");
+    const auto plugins_text = common::ReadFileOrEmpty(dir / "plugins.json");
     if (!plugins_text.empty()) {
         const auto probe = nlohmann::json::parse(plugins_text, nullptr, /*allow_exceptions=*/false);
         if (probe.is_discarded() || !probe.is_object()) {

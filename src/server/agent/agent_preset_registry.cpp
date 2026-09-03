@@ -8,19 +8,12 @@
 #include "minimal/agent/agent_preset_frontmatter.hpp"
 #include "minimal/agent/permission_resolution.hpp"
 #include "minimal/common/logger.hpp"
+#include "minimal/common/read_file.hpp"
 #include "minimal/config/frontmatter.hpp"
 
 namespace minimal::agent {
 
 namespace {
-
-std::string ReadFileOrEmpty(const std::filesystem::path& path) {
-    std::ifstream in(path);
-    if (!in) return {};
-    std::ostringstream buffer;
-    buffer << in.rdbuf();
-    return buffer.str();
-}
 
 std::string ReadFileRequired(const std::filesystem::path& path, const std::string& what) {
     std::ifstream in(path);
@@ -72,31 +65,6 @@ std::string RenderSkillListing(const std::vector<std::string>& resolved,
     return out.str();
 }
 
-// What providers.json actually offers, for a "no such model" error. A miss here
-// is almost always a typo or a provider the user has not configured yet, and
-// both are answered by seeing the list rather than by being told the name was
-// wrong.
-std::string DescribeAvailableModels(const config::ProvidersConfig& providers) {
-    const auto refs = providers.ModelRefs();
-    if (refs.empty()) return "no models at all (providers.json is empty)";
-    std::ostringstream out;
-    for (std::size_t i = 0; i < refs.size(); ++i) {
-        if (i != 0) out << ", ";
-        out << refs[i];
-    }
-    return out.str();
-}
-
-// Miss reporting (track N): a typo and a dead catalog must read differently.
-// Silent when discovery was never attempted or succeeded -- the latter means
-// the model is genuinely not served, which the listing above already says.
-std::string DescribeDiscovery(const config::ProvidersConfig& providers,
-                              const std::string& provider_name) {
-    const auto status = providers.discovery_status(provider_name);
-    if (!status.attempted || status.ok) return {};
-    return "; discovery for provider '" + provider_name + "' failed: " + status.error;
-}
-
 }  // namespace
 
 AgentPresetRegistry::AgentPresetRegistry(std::filesystem::path config_dir,
@@ -109,9 +77,9 @@ AgentPresetRegistry::AgentPresetRegistry(std::filesystem::path config_dir,
       skills_(skills) {
     // Both optional at this phase -- a real deployment's absence is the
     // startup sanity check's job to flag, not this constructor's.
-    subagent_prefix_ = ReadFileOrEmpty(config_dir_ / "prompts" / "subagent.md");
+    subagent_prefix_ = common::ReadFileOrEmpty(config_dir_ / "prompts" / "subagent.md");
     default_compression_prompt_ =
-        config::parse_frontmatter_markdown(ReadFileOrEmpty(config_dir_ / "prompts" / "compression.md")).body;
+        config::parse_frontmatter_markdown(common::ReadFileOrEmpty(config_dir_ / "prompts" / "compression.md")).body;
 }
 
 AgentPreset AgentPresetRegistry::Resolve(const std::string& preset_name) const {
@@ -195,8 +163,8 @@ AgentPreset AgentPresetRegistry::ResolveUncached(const std::string& preset_name)
     if (!model) {
         throw std::runtime_error("agent preset '" + preset_name + "' names unknown model '" +
                                  model_text + "'; providers.json defines " +
-                                 DescribeAvailableModels(providers_) +
-                                 DescribeDiscovery(providers_, ref->provider));
+                                 config::DescribeModels(providers_) +
+                                 config::DescribeDiscovery(providers_, ref->provider));
     }
 
     AgentPreset preset;

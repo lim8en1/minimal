@@ -277,6 +277,17 @@ private:
                                                            std::unique_lock<std::mutex>& lock) const;
 };
 
+// What providers.json actually offers, for a "no such model" error. A miss is
+// almost always a typo or a provider the user has not configured yet, and
+// both are answered by seeing the list rather than by being told the name was
+// wrong.
+std::string DescribeModels(const ProvidersConfig& providers);
+
+// Miss reporting: a typo and a dead catalog must read differently. Silent
+// when discovery was never attempted or succeeded -- the latter means the
+// model is genuinely not served, which DescribeModels already says.
+std::string DescribeDiscovery(const ProvidersConfig& providers, const std::string& provider_name);
+
 // Pure. Throws std::runtime_error on: a top-level array (the pre-`models` schema
 // -- refused by name rather than silently misparsed), a provider missing
 // `backend`/`url`, a provider with no `models` UNLESS it sets "discover": true

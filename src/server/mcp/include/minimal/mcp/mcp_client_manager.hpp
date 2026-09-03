@@ -101,6 +101,14 @@ public:
     std::vector<std::string> ServerNames() const;
     bool IsConfigured(const std::string& server_name) const;
 
+    // Channel names that survived construction's enabled/reserved/collision
+    // rules -- the channels this manager actually built a handle for and
+    // will deliver notifications through. A caller validating channel
+    // subscriptions (the signal router) must check against this, not against
+    // channels.json directly, or it would validate a subscription to a
+    // channel the manager never built a handle for.
+    std::vector<std::string> EnabledChannelNames() const;
+
 private:
     struct ServerHandle;
     class HandleInvoker;
