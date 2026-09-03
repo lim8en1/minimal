@@ -24,6 +24,9 @@
 #include <string>
 #include <unordered_map>
 #include <variant>
+#include <vector>
+
+#include "minimal/tools/permission_checker.hpp"
 
 namespace minimal::rpc {
 
@@ -37,9 +40,14 @@ namespace minimal::rpc {
 // The "perm-"/"confirm-" id prefixes remain, as diagnostics, but they are no
 // longer load-bearing.
 struct PermissionAnswer {
-    // Still serialized at this layer: parsing the proto stays on the worker,
-    // which can afford to fail, not on the reader, which must not stall.
-    std::string serialized_response;
+    tools::PermissionDecision decision = tools::PermissionDecision::Deny;
+    // NOT YET FILTERED against any particular disclosure: a grant key is only
+    // meaningful as the answer to something a specific prompt offered, and
+    // only the waiter that built that prompt (WirePermissionChecker, holding
+    // the original PermissionRequest::disclosure) can filter it. The reader
+    // thread that decodes the client's wire message has no disclosure to
+    // filter against, so it hands these across verbatim.
+    std::vector<std::string> granted_keys;
 };
 struct ConfirmationAnswer {
     std::string chosen_option;

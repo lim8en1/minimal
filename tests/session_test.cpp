@@ -369,12 +369,9 @@ TEST_CASE("a cancelled turn does not deny-lock the next one", "[session]") {
     const auto request_id = WaitForPermissionRequest(*fixture);
     REQUIRE(request_id.has_value());
 
-    v1::PermissionResponse answer;
-    answer.set_request_id(*request_id);
-    answer.set_decision(v1::PERMISSION_DECISION_ALLOW);
     REQUIRE(testing::Transport(*fixture->session)
                 .pending()
-                .Resolve(*request_id, rpc::PermissionAnswer{answer.SerializeAsString()}));
+                .Resolve(*request_id, rpc::PermissionAnswer{tools::PermissionDecision::Allow, {}}));
 
     REQUIRE(fixture->session->WaitForIdleForTesting(5s));
     CHECK(tool_ptr->calls.size() == 1);
@@ -433,12 +430,9 @@ TEST_CASE("an advise thread abandoned at the budget polls a flag that outlives t
     REQUIRE(fixture.session->SubmitTurn("go"));
     const auto request_id = WaitForPermissionRequest(fixture);
     REQUIRE(request_id.has_value());  // the budget expired; the human decides
-    v1::PermissionResponse answer;
-    answer.set_request_id(*request_id);
-    answer.set_decision(v1::PERMISSION_DECISION_ALLOW);
     REQUIRE(testing::Transport(*fixture.session)
                 .pending()
-                .Resolve(*request_id, rpc::PermissionAnswer{answer.SerializeAsString()}));
+                .Resolve(*request_id, rpc::PermissionAnswer{tools::PermissionDecision::Allow, {}}));
     REQUIRE(fixture.session->WaitForIdleForTesting(5s));
 
     // Terminate fires the flag; destroying the session drops every owner but

@@ -1,7 +1,9 @@
 #include "minimal/rpc/wire_permission_checker.hpp"
 
+#include <algorithm>
 #include <utility>
 
+#include "minimal/common/logger.hpp"
 #include "minimal/rpc/proto_convert.hpp"
 
 namespace minimal::rpc {
@@ -56,21 +58,32 @@ tools::PermissionResponse WirePermissionChecker::check(const tools::PermissionRe
         return tools::PermissionResponse{tools::PermissionDecision::Deny, {}};
     }
 
-    // The reader hands the serialized PermissionResponse across as the typed
+    // The reader hands the decoded decision/granted_keys across as the typed
     // variant. A ConfirmationAnswer landing here -- a client answering the
     // wrong kind of request -- is structurally unreadable (get_if returns
-    // null), which is the same fail-closed outcome a malformed payload had.
-    // Parsing it HERE rather than at the dispatch site keeps the reader thread
-    // free of anything that could fail or allocate meaningfully.
+    // null), the same fail-closed outcome a malformed payload had.
     const auto* answer = std::get_if<PermissionAnswer>(&*registration_answer);
     if (answer == nullptr) {
         return tools::PermissionResponse{tools::PermissionDecision::Deny, {}};
     }
-    v1::PermissionResponse decoded;
-    if (!decoded.ParseFromString(answer->serialized_response)) {
-        return tools::PermissionResponse{tools::PermissionDecision::Deny, {}};
+    // A grant key is only meaningful as the answer to something THIS request
+    // offered -- filtered here, not at the reader, because only the request
+    // that built the disclosure knows what it offered. Taking arbitrary keys
+    // off the wire would let a client mint permissions for binaries no prompt
+    // ever showed a human.
+    tools::PermissionResponse out;
+    out.decision = answer->decision;
+    for (const auto& key : answer->granted_keys) {
+        const bool was_offered =
+            std::any_of(request.disclosure.grants.begin(), request.disclosure.grants.end(),
+                        [&key](const tools::GrantOffer& offer) { return offer.key == key; });
+        if (was_offered) {
+            out.granted_keys.push_back(key);
+        } else {
+            common::DefaultLogger().warn("wire_permission_checker: ignoring ungranted key '{}'", key);
+        }
     }
-    return FromProto(decoded, request.disclosure);
+    return out;
 }
 
 }  // namespace minimal::rpc

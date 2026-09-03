@@ -431,9 +431,13 @@ void SessionServiceImpl::Dispatch(const v1::ClientEvent& event, agent::Session& 
             // reader, which must not stall. The payload case IS the type --
             // the variant makes a wrong-kind answer structurally unreadable
             // at the waiter rather than merely failing to parse there.
-            const auto& request_id = event.permission_response().request_id();
-            if (Transport(session).pending().Resolve(
-                    request_id, PermissionAnswer{event.permission_response().SerializeAsString()})) {
+            const auto& permission_response = event.permission_response();
+            const auto& request_id = permission_response.request_id();
+            PermissionAnswer answer;
+            answer.decision = FromProto(permission_response.decision());
+            answer.granted_keys.assign(permission_response.granted_keys().begin(),
+                                       permission_response.granted_keys().end());
+            if (Transport(session).pending().Resolve(request_id, std::move(answer))) {
                 PublishPromptResolved(session, request_id);
             }
             return;

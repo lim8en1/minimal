@@ -311,7 +311,8 @@ TEST_CASE("a cross-delivered answer keeps its type", "[pending_requests]") {
     auto pending = std::make_shared<PendingRequests>();
     auto registration = Register(pending, "req-1");
 
-    CHECK(pending->Resolve("req-1", minimal::rpc::PermissionAnswer{"<serialized proto>"}));
+    CHECK(pending->Resolve("req-1", minimal::rpc::PermissionAnswer{
+                                        minimal::tools::PermissionDecision::Allow, {}}));
 
     auto waiter = AwaitInBackground(pending, registration);
     REQUIRE(waiter.Ready());

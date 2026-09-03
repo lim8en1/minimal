@@ -221,12 +221,9 @@ struct SubagentFixture {
 
     void AnswerPermission(agent::Session& session, const std::string& request_id,
                           std::vector<std::string> granted_keys = {}) {
-        v1::PermissionResponse answer;
-        answer.set_request_id(request_id);
-        answer.set_decision(v1::PERMISSION_DECISION_ALLOW);
-        for (auto& key : granted_keys) answer.add_granted_keys(std::move(key));
         REQUIRE(testing::Transport(session).pending().Resolve(
-            request_id, rpc::PermissionAnswer{answer.SerializeAsString()}));
+            request_id,
+            rpc::PermissionAnswer{tools::PermissionDecision::Allow, std::move(granted_keys)}));
     }
 
     void Write(const std::filesystem::path& relative, const std::string& contents) {

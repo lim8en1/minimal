@@ -53,13 +53,13 @@ tools::PermissionRequest BashRequest(bool complete = true) {
     return request;
 }
 
-std::string Answer(v1::PermissionDecision decision, const std::string& request_id,
-                   std::vector<std::string> granted = {}) {
-    v1::PermissionResponse response;
-    response.set_request_id(request_id);
-    response.set_decision(decision);
-    for (auto& key : granted) response.add_granted_keys(std::move(key));
-    return response.SerializeAsString();
+// The reader thread hands decision+granted_keys across undecoded from any
+// particular wire message (see pending_requests.hpp's PermissionAnswer) --
+// this mirrors that shape directly rather than round-tripping through a
+// serialized v1::PermissionResponse nothing here needs.
+rpc::PermissionAnswer Answer(tools::PermissionDecision decision,
+                             std::vector<std::string> granted = {}) {
+    return rpc::PermissionAnswer{decision, std::move(granted)};
 }
 
 }  // namespace
@@ -88,8 +88,7 @@ TEST_CASE("a permission request round-trips to an answer", "[wire_permission]") 
 
     CHECK(harness->pending.Resolve(
         request.request_id(),
-        rpc::PermissionAnswer{
-            Answer(v1::PERMISSION_DECISION_ALLOW, request.request_id(), {"bash:/usr/bin/make"})}));
+        Answer(tools::PermissionDecision::Allow, {"bash:/usr/bin/make"})));
 
     REQUIRE(answered.Ready());
     const auto response = answered.Get();
@@ -129,8 +128,7 @@ TEST_CASE("an answer arriving before the timeout still wins",
 
     CHECK(harness->pending.Resolve(
         request.request_id(),
-        rpc::PermissionAnswer{
-            Answer(v1::PERMISSION_DECISION_ALLOW, request.request_id(), {"bash:/usr/bin/make"})}));
+        Answer(tools::PermissionDecision::Allow, {"bash:/usr/bin/make"})));
 
     REQUIRE(answered.Ready());
     CHECK(answered.Get().decision == tools::PermissionDecision::Allow);
@@ -144,7 +142,7 @@ TEST_CASE("a denial round-trips as a denial", "[wire_permission]") {
     REQUIRE(event.has_value());
     const std::string id = event->permission_request().request_id();
     harness->pending.Resolve(id,
-                             rpc::PermissionAnswer{Answer(v1::PERMISSION_DECISION_DENY, id)});
+                             Answer(tools::PermissionDecision::Deny));
 
     REQUIRE(answered.Ready());
     CHECK(answered.Get().decision == tools::PermissionDecision::Deny);
@@ -160,8 +158,7 @@ TEST_CASE("a grant the request never offered is refused", "[wire_permission]") {
     REQUIRE(event.has_value());
     const std::string id = event->permission_request().request_id();
     harness->pending.Resolve(
-        id, rpc::PermissionAnswer{
-                Answer(v1::PERMISSION_DECISION_ALLOW, id, {"bash:/usr/bin/make", "bash:/bin/rm"})});
+        id, Answer(tools::PermissionDecision::Allow, {"bash:/usr/bin/make", "bash:/bin/rm"}));
 
     REQUIRE(answered.Ready());
     const auto response = answered.Get();
@@ -180,7 +177,7 @@ TEST_CASE("an incomplete disclosure says so on the wire", "[wire_permission]") {
 
     const std::string id = event->permission_request().request_id();
     harness->pending.Resolve(id,
-                             rpc::PermissionAnswer{Answer(v1::PERMISSION_DECISION_ALLOW, id)});
+                             Answer(tools::PermissionDecision::Allow));
     REQUIRE(answered.Ready());
 }
 
@@ -201,19 +198,6 @@ TEST_CASE("cancellation unblocks a waiting check as a denial", "[wire_permission
     const auto response = answered.Get();
     CHECK(response.decision == tools::PermissionDecision::Deny);
     CHECK(response.granted_keys.empty());
-}
-
-TEST_CASE("an unparseable answer denies rather than crashing", "[wire_permission]") {
-    auto harness = std::make_shared<Harness>();
-    auto answered = RunInBackground([harness] { return harness->checker.check(BashRequest()); });
-
-    const auto event = harness->Pop();
-    REQUIRE(event.has_value());
-    harness->pending.Resolve(event->permission_request().request_id(),
-                             rpc::PermissionAnswer{"not a protobuf"});
-
-    REQUIRE(answered.Ready());
-    CHECK(answered.Get().decision == tools::PermissionDecision::Deny);
 }
 
 TEST_CASE("a confirmation answer delivered against a permission id denies structurally",
@@ -242,7 +226,7 @@ TEST_CASE("each request gets its own correlation id", "[wire_permission]") {
     REQUIRE(first_event.has_value());
     const std::string first_id = first_event->permission_request().request_id();
     harness->pending.Resolve(
-        first_id, rpc::PermissionAnswer{Answer(v1::PERMISSION_DECISION_ALLOW, first_id)});
+        first_id, Answer(tools::PermissionDecision::Allow));
     REQUIRE(first.Ready());
 
     auto second = RunInBackground([harness] { return harness->checker.check(BashRequest()); });
@@ -251,7 +235,7 @@ TEST_CASE("each request gets its own correlation id", "[wire_permission]") {
     const std::string second_id = second_event->permission_request().request_id();
     CHECK(second_id != first_id);
     harness->pending.Resolve(second_id,
-                             rpc::PermissionAnswer{Answer(v1::PERMISSION_DECISION_ALLOW, second_id)});
+                             Answer(tools::PermissionDecision::Allow));
     REQUIRE(second.Ready());
 }
 
@@ -266,7 +250,7 @@ TEST_CASE("answering the previous request does not release the current one",
     REQUIRE(first_event.has_value());
     const std::string first_id = first_event->permission_request().request_id();
     harness->pending.Resolve(
-        first_id, rpc::PermissionAnswer{Answer(v1::PERMISSION_DECISION_ALLOW, first_id)});
+        first_id, Answer(tools::PermissionDecision::Allow));
     REQUIRE(first.Ready());
 
     auto second = RunInBackground([harness] { return harness->checker.check(BashRequest()); });
@@ -275,12 +259,12 @@ TEST_CASE("answering the previous request does not release the current one",
 
     // Replay the first answer. Its slot is gone, so it resolves nothing.
     CHECK_FALSE(harness->pending.Resolve(
-        first_id, rpc::PermissionAnswer{Answer(v1::PERMISSION_DECISION_ALLOW, first_id)}));
+        first_id, Answer(tools::PermissionDecision::Allow)));
     CHECK_FALSE(second.WaitFor(100ms));
 
     const std::string second_id = second_event->permission_request().request_id();
     harness->pending.Resolve(second_id,
-                             rpc::PermissionAnswer{Answer(v1::PERMISSION_DECISION_DENY, second_id)});
+                             Answer(tools::PermissionDecision::Deny));
     REQUIRE(second.Ready());
     CHECK(second.Get().decision == tools::PermissionDecision::Deny);
 }
