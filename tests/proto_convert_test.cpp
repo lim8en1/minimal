@@ -315,6 +315,109 @@ TEST_CASE("LlmError carries its classification onto the wire", "[proto_convert]"
     CHECK_FALSE(fatal_out.is_retryable());
 }
 
+// --- Session events ------------------------------------------------------------
+
+TEST_CASE("every SessionEvent alternative lands on its ServerEvent oneof", "[proto_convert]") {
+    const std::string session_id = "sess-1";
+    auto trip = [&](const agent::SessionEvent& event) { return ToProto(session_id, event); };
+
+    CHECK(trip(llm::StreamEvent{llm::MessageStopEvent{}}).session_id() == session_id);
+    CHECK(trip(llm::StreamEvent{llm::MessageStopEvent{}}).payload_case() ==
+          v1::ServerEvent::kStreamEvent);
+
+    agent::ToolLifecycleEvent lifecycle;
+    lifecycle.tool_use_id = "t1";
+    lifecycle.tool_name = "bash";
+    lifecycle.started = false;
+    lifecycle.is_error = true;
+    lifecycle.started_at_unix_ms = 42;
+    const auto execution = trip(lifecycle).tool_execution();
+    CHECK(execution.tool_use_id() == "t1");
+    CHECK(execution.tool_name() == "bash");
+    CHECK_FALSE(execution.started());
+    CHECK(execution.is_error());
+    CHECK(execution.started_at_unix_ms() == 42);
+
+    tools::BackgroundTaskEvent task;
+    task.task_id = "bg1";
+    task.tool_use_id = "t1";
+    task.command = "sleep 1";
+    task.pid = 123;
+    task.state = tools::BackgroundTaskEvent::State::kKilled;
+    const auto background = trip(task).background_task();
+    CHECK(background.task_id() == "bg1");
+    CHECK(background.pid() == 123);
+    CHECK(background.state() == v1::BackgroundTaskEvent::KILLED);
+
+    const llm::LlmError provider_error(llm::LlmErrorCategory::RateLimit, "slow down", 429);
+    const auto provider_error_out = trip(provider_error).error();
+    CHECK(provider_error_out.category() == v1::LLM_ERROR_CATEGORY_RATE_LIMIT);
+    CHECK(provider_error_out.is_retryable());
+
+    agent::SessionCommandResult command_result;
+    command_result.request_id = "req-1";
+    command_result.result = commands::CommandResult::Error("nope");
+    command_result.result.display = commands::CommandDisplay::kView;
+    command_result.result.view_hint = "diff";
+    const auto command_out = trip(command_result).command_result();
+    CHECK(command_out.request_id() == "req-1");
+    CHECK(command_out.status() == v1::COMMAND_STATUS_ERROR);
+    CHECK(command_out.message() == "nope");
+    CHECK(command_out.display() == v1::COMMAND_DISPLAY_VIEW);
+    CHECK(command_out.view_hint() == "diff");
+
+    const auto delta_out = trip(agent::ToolOutputDelta{"t1", "chunk"}).tool_output_delta();
+    CHECK(delta_out.tool_use_id() == "t1");
+    CHECK(delta_out.chunk() == "chunk");
+
+    const auto subagent_out =
+        trip(agent::SubagentStarted{"child-1", "do the thing", true}).subagent_started();
+    CHECK(subagent_out.child_session_id() == "child-1");
+    CHECK(subagent_out.task() == "do the thing");
+    CHECK(subagent_out.blocking());
+
+    agent::SessionMetadataChanged partial_name;
+    partial_name.name = "new name";
+    partial_name.partial = true;
+    const auto partial_out = trip(partial_name).session_metadata();
+    CHECK(partial_out.session_id() == session_id);
+    CHECK(partial_out.name() == "new name");
+    CHECK(partial_out.agent_preset().empty());
+    CHECK(partial_out.context_window_tokens() == 0);
+
+    agent::SessionMetadataChanged full;
+    full.name = "n";
+    full.agent_preset = "default";
+    full.model = "anthropic/sonnet";
+    full.permission_mode = "normal";
+    full.context_window_tokens = 200000;
+    full.partial = false;
+    const auto full_out = trip(full).session_metadata();
+    CHECK(full_out.agent_preset() == "default");
+    CHECK(full_out.model() == "anthropic/sonnet");
+    CHECK(full_out.context_window_tokens() == 200000);
+
+    CHECK(trip(agent::SessionEnded{}).payload_case() == v1::ServerEvent::kSessionEnded);
+
+    const auto rewound_out = trip(agent::SessionRewound{5, 4}).session_rewound();
+    CHECK(rewound_out.truncated_to_seq() == 5);
+    CHECK(rewound_out.active_last_seq() == 4);
+
+    agent::TurnCompleted turn;
+    turn.stop_reason = llm::StopReason::ToolUse;
+    turn.usage = llm::Usage{1, 2, 3, 4};
+    turn.hit_max_turns = true;
+    const auto turn_out = trip(turn).turn_completed();
+    CHECK(turn_out.stop_reason() == v1::STOP_REASON_TOOL_USE);
+    CHECK(turn_out.usage().input_tokens() == 1);
+    CHECK(turn_out.hit_max_turns());
+
+    const auto error_out = trip(agent::SessionError{"backlog full"}).error();
+    CHECK(error_out.category() == v1::LLM_ERROR_CATEGORY_UNSPECIFIED);
+    CHECK(error_out.message() == "backlog full");
+    CHECK_FALSE(error_out.is_retryable());
+}
+
 // --- Permission round-trip ---------------------------------------------------
 
 TEST_CASE("a permission request carries its disclosure", "[proto_convert]") {

@@ -487,6 +487,111 @@ v1::ErrorEvent ToProto(const llm::LlmError& error) {
     return out;
 }
 
+// --- Session events ------------------------------------------------------------
+
+v1::ServerEvent ToProto(const std::string& session_id, const agent::SessionEvent& event) {
+    v1::ServerEvent out;
+    out.set_session_id(session_id);
+    std::visit(
+        [&out](const auto& value) {
+            using T = std::decay_t<decltype(value)>;
+            if constexpr (std::is_same_v<T, llm::StreamEvent>) {
+                *out.mutable_stream_event() = ToProto(value);
+            } else if constexpr (std::is_same_v<T, agent::ToolLifecycleEvent>) {
+                auto* execution = out.mutable_tool_execution();
+                execution->set_tool_use_id(value.tool_use_id);
+                execution->set_tool_name(value.tool_name);
+                *execution->mutable_input() = JsonToStruct(value.input);
+                execution->set_started(value.started);
+                if (!value.started) execution->set_is_error(value.is_error);
+                execution->set_started_at_unix_ms(value.started_at_unix_ms);
+            } else if constexpr (std::is_same_v<T, tools::BackgroundTaskEvent>) {
+                auto* message = out.mutable_background_task();
+                message->set_task_id(value.task_id);
+                message->set_tool_use_id(value.tool_use_id);
+                message->set_command(value.command);
+                message->set_pid(value.pid);
+                switch (value.state) {
+                    case tools::BackgroundTaskEvent::State::kStarted:
+                        message->set_state(v1::BackgroundTaskEvent::STARTED);
+                        break;
+                    case tools::BackgroundTaskEvent::State::kCompleted:
+                        message->set_state(v1::BackgroundTaskEvent::COMPLETED);
+                        break;
+                    case tools::BackgroundTaskEvent::State::kFailed:
+                        message->set_state(v1::BackgroundTaskEvent::FAILED);
+                        break;
+                    case tools::BackgroundTaskEvent::State::kTimedOut:
+                        message->set_state(v1::BackgroundTaskEvent::TIMED_OUT);
+                        break;
+                    case tools::BackgroundTaskEvent::State::kKilled:
+                        message->set_state(v1::BackgroundTaskEvent::KILLED);
+                        break;
+                }
+            } else if constexpr (std::is_same_v<T, llm::LlmError>) {
+                *out.mutable_error() = ToProto(value);
+            } else if constexpr (std::is_same_v<T, agent::SessionCommandResult>) {
+                auto* result = out.mutable_command_result();
+                result->set_request_id(value.request_id);
+                result->set_status(value.result.status == commands::CommandResult::Status::kOk
+                                       ? v1::COMMAND_STATUS_OK
+                                       : v1::COMMAND_STATUS_ERROR);
+                result->set_message(value.result.message);
+                result->set_display(value.result.display == commands::CommandDisplay::kView
+                                         ? v1::COMMAND_DISPLAY_VIEW
+                                         : value.result.display == commands::CommandDisplay::kSilent
+                                               ? v1::COMMAND_DISPLAY_SILENT
+                                               : v1::COMMAND_DISPLAY_STATUS);
+                result->set_view_hint(value.result.view_hint);
+            } else if constexpr (std::is_same_v<T, agent::ToolOutputDelta>) {
+                auto* delta = out.mutable_tool_output_delta();
+                delta->set_tool_use_id(value.tool_use_id);
+                delta->set_chunk(value.chunk);
+            } else if constexpr (std::is_same_v<T, agent::SubagentStarted>) {
+                auto* started = out.mutable_subagent_started();
+                started->set_child_session_id(value.child_session_id);
+                started->set_task(value.task);
+                started->set_blocking(value.blocking);
+            } else if constexpr (std::is_same_v<T, agent::SessionMetadataChanged>) {
+                auto* metadata = out.mutable_session_metadata();
+                metadata->set_session_id(out.session_id());
+                metadata->set_name(value.name);
+                // `partial` mirrors today's two name-only emission sites
+                // (SetName, MaybeEmitNameFromStore): the other fields are left
+                // at their proto default rather than sent as zero values that
+                // could be mistaken for an authoritative update.
+                if (!value.partial) {
+                    metadata->set_agent_preset(value.agent_preset);
+                    metadata->set_model(value.model);
+                    metadata->set_permission_mode(value.permission_mode);
+                    metadata->set_context_window_tokens(value.context_window_tokens);
+                }
+            } else if constexpr (std::is_same_v<T, agent::SessionEnded>) {
+                out.mutable_session_ended();
+            } else if constexpr (std::is_same_v<T, agent::SessionRewound>) {
+                auto* rewound = out.mutable_session_rewound();
+                rewound->set_truncated_to_seq(value.truncated_to_seq);
+                rewound->set_active_last_seq(value.active_last_seq);
+            } else if constexpr (std::is_same_v<T, agent::TurnCompleted>) {
+                auto* completed = out.mutable_turn_completed();
+                completed->set_stop_reason(ToProto(value.stop_reason));
+                *completed->mutable_usage() = ToProto(value.usage);
+                completed->set_hit_max_turns(value.hit_max_turns);
+            } else if constexpr (std::is_same_v<T, agent::SessionError>) {
+                auto* error = out.mutable_error();
+                error->set_category(v1::LLM_ERROR_CATEGORY_UNSPECIFIED);
+                error->set_message(value.message);
+                error->set_is_retryable(false);
+            } else {
+                // Same guarantee as every other domain->wire visit in this file: a
+                // new SessionEvent alternative must not compile into PAYLOAD_NOT_SET.
+                static_assert(kAlwaysFalse<T>, "ToProto: unhandled SessionEvent alternative");
+            }
+        },
+        event);
+    return out;
+}
+
 // --- Permission round-trip ---------------------------------------------------
 
 v1::PermissionRequest ToProto(const tools::PermissionRequest& request) {

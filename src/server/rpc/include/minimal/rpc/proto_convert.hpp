@@ -22,6 +22,7 @@
 #include <google/protobuf/struct.pb.h>
 #include <nlohmann/json.hpp>
 
+#include "minimal/agent/session_event.hpp"
 #include "minimal/llm/chat.hpp"
 #include "minimal/llm/message.hpp"
 #include "minimal/llm/provider.hpp"
@@ -101,6 +102,16 @@ std::optional<llm::StreamEvent> FromProto(const v1::StreamEvent& event);
 // --- Errors ------------------------------------------------------------------
 
 v1::ErrorEvent ToProto(const llm::LlmError& error);
+
+// --- Session events ------------------------------------------------------------
+//
+// The one entry point through which agent::SessionEvent ever becomes a wire
+// message. `session_id` is threaded in rather than carried on the domain
+// event, matching every other agent-side payload (SessionObserver's
+// SessionInfo does the same) -- ServerEvent.session_id is a transport
+// concern the domain type has no reason to know about.
+
+v1::ServerEvent ToProto(const std::string& session_id, const agent::SessionEvent& event);
 
 // --- Permission round-trip ---------------------------------------------------
 
