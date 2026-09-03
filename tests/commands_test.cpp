@@ -94,6 +94,23 @@ TEST_CASE("bare /agent opens the picker view rather than switching or erroring",
     CHECK(fixture.preset().name == "build");  // unchanged
 }
 
+TEST_CASE("agent switch by name reports the status line, not the picker view",
+          "[commands][regression]") {
+    // AgentCommand's static Display()/ViewHint() (kView/"agents") describe
+    // the command for the catalog, where /agent AS A WHOLE is view-capable
+    // -- the dispatcher used to apply that unconditionally to every
+    // invocation, so a successful "/agent <name>" switch ALSO reported
+    // kView, and the client reopened the picker it was just answered from
+    // right after the switch took effect. DisplayFor/ViewHintFor make the
+    // picker-vs-status choice per-invocation, keyed on whether a name was
+    // given.
+    CommandFixture fixture;
+    const auto result = fixture.Run("agent", {"other"});
+    REQUIRE(result.status == Status::kOk);
+    CHECK(result.display == commands::CommandDisplay::kStatus);
+    CHECK(result.view_hint.empty());
+}
+
 TEST_CASE("agent reports an unknown preset rather than throwing", "[commands]") {
     CommandFixture fixture;
     const auto result = fixture.Run("agent", {"nonexistent"});

@@ -182,6 +182,20 @@ public:
     }
     std::string_view ViewHint() const override { return "agents"; }
 
+    // Only the bare "/agent" (list) opens the picker; "/agent <name>" is a
+    // direct switch and has nothing to show -- without this override the
+    // dispatcher's static Display()/ViewHint() above (correct for the
+    // catalog, where /agent AS A WHOLE is view-capable) applied to EVERY
+    // invocation, so a successful switch re-opened the picker it was just
+    // answered from.
+    minimal::commands::CommandDisplay DisplayFor(const CommandArgs& args) const override {
+        return args.positional.empty() ? minimal::commands::CommandDisplay::kView
+                                        : minimal::commands::CommandDisplay::kStatus;
+    }
+    std::string_view ViewHintFor(const CommandArgs& args) const override {
+        return args.positional.empty() ? std::string_view("agents") : std::string_view{};
+    }
+
     CommandResult Execute(CommandContext& context, const CommandArgs& args) override {
         if (args.positional.empty()) {
             return CommandResult::Ok("agent list requested");

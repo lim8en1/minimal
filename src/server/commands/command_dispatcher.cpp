@@ -56,10 +56,10 @@ CommandResult Dispatch(const CommandRegistry& registry, const std::string& name,
         // that failed has nothing to show, and errors belong on the notice
         // line (EXTENSIBILITY 4.4: "errors too, styled as errors").
         outcome.display = outcome.status == CommandResult::Status::kOk
-                              ? command->Display()
+                              ? command->DisplayFor(args)
                               : CommandDisplay::kStatus;
         if (outcome.display == CommandDisplay::kView) {
-            outcome.view_hint = std::string(command->ViewHint());
+            outcome.view_hint = std::string(command->ViewHintFor(args));
         }
         return outcome;
     } catch (const std::exception& error) {

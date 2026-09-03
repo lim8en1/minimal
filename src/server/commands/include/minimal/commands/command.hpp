@@ -93,10 +93,31 @@ public:
     // safe answer, and what every existing command keeps getting for free. A
     // View-displaying command pairs this with ViewHint(); the client falls back
     // to the status line when the hint names no view it knows.
+    //
+    // STATIC, args-independent metadata: describes the command in the
+    // abstract, for the catalog (ListCommands/the client's /help palette),
+    // where no particular invocation's args exist yet.
     virtual CommandDisplay Display() const { return CommandDisplay::kStatus; }
 
     // The client view id Display() == kView opens/refreshes. Empty otherwise.
     virtual std::string_view ViewHint() const { return {}; }
+
+    // The dispatcher's actual per-invocation decision (command_dispatcher.cpp):
+    // defaults to the static Display()/ViewHint() above, which is correct for
+    // every command whose result always surfaces the same way. Override this
+    // pair instead of Display()/ViewHint() when a command's own args change
+    // where THIS invocation's result belongs -- e.g. bare "/agent" opens the
+    // picker (kView), but "/agent <name>" is a direct switch with nothing to
+    // show (kStatus); Display()/ViewHint() still answer kView/"agents" for the
+    // catalog, since the command AS A WHOLE is view-capable.
+    virtual CommandDisplay DisplayFor(const CommandArgs& args) const {
+        (void)args;
+        return Display();
+    }
+    virtual std::string_view ViewHintFor(const CommandArgs& args) const {
+        (void)args;
+        return ViewHint();
+    }
 
     virtual CommandResult Execute(CommandContext& context, const CommandArgs& args) = 0;
 };
