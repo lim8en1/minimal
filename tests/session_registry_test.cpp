@@ -312,6 +312,28 @@ TEST_CASE("two detached quiescent sessions are both reaped by the idle TTL, on s
     CHECK(second->terminated());
 }
 
+TEST_CASE("the reaper calls the configured periodic checkpoint callback, not the database directly",
+          "[session_registry]") {
+    // ReaperConfig::periodic_checkpoint replaces a direct SessionDatabase&
+    // call on every reaper tick -- a fake-store-backed registry (no real WAL)
+    // must be able to observe the tick fire without a live SQLite file.
+    RegistryFixture fixture(200ms);
+    fixture.config.WriteDefaults();
+    fixture.Build();
+
+    std::atomic<int> calls{0};
+    agent::SessionRegistry::ReaperConfig config;
+    config.initial_attach_guard = 200ms;
+    config.periodic_checkpoint = [&calls] { calls.fetch_add(1); };
+    fixture.registry->set_reaper_config(config);
+
+    const auto deadline = std::chrono::steady_clock::now() + 1000ms;
+    while (calls.load() == 0 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(20ms);
+    }
+    CHECK(calls.load() > 0);
+}
+
 TEST_CASE("TerminateAll stops every live session", "[session_registry]") {
     RegistryFixture fixture;
     fixture.config.WriteDefaults();

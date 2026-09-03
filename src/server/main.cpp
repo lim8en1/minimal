@@ -627,6 +627,9 @@ int main(int argc, char** argv) {
     reaper_config.idle_shutdown = std::chrono::seconds(settings.server.idle_shutdown_seconds);
     reaper_config.attached_clients = [&service] { return service.attached_clients(); };
     reaper_config.on_idle_expired = [&server] { server.RequestShutdown(); };
+    reaper_config.periodic_checkpoint = [&session_db] {
+        (void)session_db->MaybeRunPassiveCheckpoint();
+    };
     sessions.set_reaper_config(std::move(reaper_config));
 
     std::printf("\nlistening on %s\n", server.target().c_str());

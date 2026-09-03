@@ -75,6 +75,14 @@ public:
         // Wired to Server::RequestShutdown by main. Fired from the reaper
         // thread; must not block.
         std::function<void()> on_idle_expired;
+        // Called on every reaper tick, after the sweep, outside the registry
+        // mutex -- production wires this to
+        // SessionDatabase::MaybeRunPassiveCheckpoint() (wal_autocheckpoint=0
+        // moved checkpoint I/O off the append path onto this thread, the
+        // process's periodic one). A callback, not a concrete
+        // SessionDatabase&, so the registry itself does not need a real WAL
+        // to be reaper-testable. Empty (the default) means no periodic work.
+        std::function<void()> periodic_checkpoint;
     };
 
     SessionRegistry(const AgentPresetRegistry& presets, tools::ToolRegistry& tools,

@@ -456,12 +456,9 @@ void SessionRegistry::ReaperMain() {
         // respect and the callback is arbitrary code).
         if (fire_idle_exit && reaper_config_.on_idle_expired) reaper_config_.on_idle_expired();
 
-        // The tick this thread already runs is the WAL checkpoint's home
-        // (SessionDatabase::MaybeRunPassiveCheckpoint): wal_autocheckpoint=0
-        // moved checkpoint I/O off the append path, and the reaper is the
-        // process's periodic thread that is allowed to take it. Best-effort;
-        // the boolean is only whether a threshold was reached.
-        (void)db_.MaybeRunPassiveCheckpoint();
+        // The tick this thread already runs is the WAL checkpoint's home;
+        // see ReaperConfig::periodic_checkpoint.
+        if (reaper_config_.periodic_checkpoint) reaper_config_.periodic_checkpoint();
     }
 }
 
