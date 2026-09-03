@@ -1,9 +1,9 @@
 #include "minimal/config/hooks_config.hpp"
 
-#include <fstream>
-#include <iterator>
 #include <stdexcept>
 #include <string>
+
+#include "minimal/config/json_config_loader.hpp"
 
 namespace minimal::config {
 namespace {
@@ -93,13 +93,16 @@ HooksConfig ParseHooksConfig(const nlohmann::json& doc) {
 }
 
 HooksConfig LoadHooksConfig(const std::filesystem::path& path) {
-    std::ifstream in(path);
-    if (!in) return HooksConfig{};  // no hooks.json is the normal no-hooks state
-    std::string contents((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-    if (contents.empty()) return HooksConfig{};
-    nlohmann::json doc = nlohmann::json::parse(contents, /*callback=*/nullptr,
-                                               /*allow_exceptions=*/true);
-    return ParseHooksConfig(doc);
+    // No hooks.json, or an empty one, is the normal no-hooks state -- the only
+    // one of the six loaders where an empty-but-present file is absence, not
+    // malformed content.
+    //
+    // Malformed JSON now throws a wrapped std::runtime_error ("hooks.json:
+    // invalid JSON: ...") like every other loader, instead of letting a raw
+    // nlohmann::json::parse_error escape -- a deliberate Phase 3 behavior
+    // change (see hooks_config_test.cpp, updated in the same commit).
+    return LoadJsonConfig<HooksConfig>(path, "hooks", AbsencePolicy::kDefaultOnMissing,
+                                       EmptyFilePolicy::kTreatAsAbsent, ParseHooksConfig);
 }
 
 }  // namespace minimal::config

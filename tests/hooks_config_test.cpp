@@ -106,6 +106,9 @@ TEST_CASE("a missing file is the normal no-hooks state", "[hooks_config]") {
 TEST_CASE("a malformed FILE throws -- the sanity check reports it", "[hooks_config]") {
     const auto dir = std::filesystem::temp_directory_path() / "minimal_hooks_config_test";
     Write(dir, "hooks.json", "{ not json ");
-    REQUIRE_THROWS_AS(LoadHooksConfig(dir / "hooks.json"), nlohmann::json::parse_error);
+    // Phase 3: normalized onto the same wrapped std::runtime_error every other
+    // loader throws for malformed JSON, instead of a raw nlohmann::json::parse_error.
+    REQUIRE_THROWS_WITH(LoadHooksConfig(dir / "hooks.json"),
+                        Catch::Matchers::ContainsSubstring("hooks.json: invalid JSON:"));
     std::filesystem::remove_all(dir);
 }

@@ -1,9 +1,9 @@
 #include "minimal/config/mcps_config.hpp"
 
-#include <fstream>
 #include <stdexcept>
 #include <unordered_set>
 
+#include "minimal/config/json_config_loader.hpp"
 #include "minimal/config/parse_util.hpp"
 
 namespace minimal::config {
@@ -94,15 +94,9 @@ McpsConfig ParseMcpsConfig(const nlohmann::json& doc) {
 }
 
 McpsConfig LoadMcpsConfig(const std::filesystem::path& path) {
-    std::ifstream in(path);
-    if (!in) return McpsConfig{};  // absence is the normal "no MCP" state, not an error
-    nlohmann::json doc;
-    try {
-        in >> doc;
-    } catch (const nlohmann::json::exception& error) {
-        throw std::runtime_error("mcps.json: invalid JSON: " + std::string(error.what()));
-    }
-    return ParseMcpsConfig(doc);
+    // Absence is the normal "no MCP" state, not an error.
+    return LoadJsonConfig<McpsConfig>(path, "mcps", AbsencePolicy::kDefaultOnMissing,
+                                      EmptyFilePolicy::kTreatAsMalformed, ParseMcpsConfig);
 }
 
 }  // namespace minimal::config

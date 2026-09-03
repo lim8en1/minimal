@@ -1,11 +1,11 @@
 #include "minimal/config/providers_config.hpp"
 
 #include <algorithm>
-#include <fstream>
 #include <stdexcept>
 #include <utility>
 
 #include "minimal/common/config_paths.hpp"
+#include "minimal/config/json_config_loader.hpp"
 
 namespace minimal::config {
 namespace {
@@ -343,7 +343,7 @@ std::string DescribeDiscovery(const ProvidersConfig& providers, const std::strin
     return "; discovery for provider '" + provider_name + "' failed: " + status.error;
 }
 
-ProvidersConfig ParseProvidersConfig(const nlohmann::json& doc) {
+ProvidersConfig ParseProvidersConfigUnwrapped(const nlohmann::json& doc) {
     // The pre-`models` schema was a top-level array of flat provider+model
     // records. Named explicitly rather than allowed to fail as "expected an
     // object": someone hitting this has a working file from a previous build and
@@ -463,16 +463,22 @@ ProvidersConfig ParseProvidersConfig(const nlohmann::json& doc) {
     return config;
 }
 
-ProvidersConfig LoadProvidersConfig(const std::filesystem::path& path) {
-    std::ifstream in(path);
-    if (!in) throw std::runtime_error("providers.json not found: " + path.string());
-    nlohmann::json doc;
+ProvidersConfig ParseProvidersConfig(const nlohmann::json& doc) {
+    // ParseProvidersConfigUnwrapped already throws well-formed
+    // "providers.json: ..." runtime_errors for every schema violation it
+    // anticipates (checked with contains()/is_*() before every get<T>()); this
+    // only catches a stray nlohmann::json::exception a future unguarded get<T>()
+    // might leak, normalizing it the same way settings/permissions self-wrap.
     try {
-        in >> doc;
+        return ParseProvidersConfigUnwrapped(doc);
     } catch (const nlohmann::json::exception& error) {
-        throw std::runtime_error("providers.json: invalid JSON: " + std::string(error.what()));
+        throw std::runtime_error(std::string("providers.json: ") + error.what());
     }
-    return ParseProvidersConfig(doc);
+}
+
+ProvidersConfig LoadProvidersConfig(const std::filesystem::path& path) {
+    return LoadJsonConfig<ProvidersConfig>(path, "providers", AbsencePolicy::kThrow,
+                                           EmptyFilePolicy::kTreatAsMalformed, ParseProvidersConfig);
 }
 
 }  // namespace minimal::config

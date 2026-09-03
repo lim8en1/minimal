@@ -1,7 +1,8 @@
 #include "minimal/config/settings_config.hpp"
 
-#include <fstream>
 #include <stdexcept>
+
+#include "minimal/config/json_config_loader.hpp"
 
 namespace minimal::config {
 
@@ -239,15 +240,8 @@ SettingsConfig ParseSettingsConfig(const nlohmann::json& doc) {
 }
 
 SettingsConfig LoadSettingsConfig(const std::filesystem::path& path) {
-    std::ifstream in(path);
-    if (!in) throw std::runtime_error("settings.json not found: " + path.string());
-    nlohmann::json doc;
-    try {
-        in >> doc;
-    } catch (const nlohmann::json::exception& error) {
-        throw std::runtime_error("settings.json: invalid JSON: " + std::string(error.what()));
-    }
-    return ParseSettingsConfig(doc);
+    return LoadJsonConfig<SettingsConfig>(path, "settings", AbsencePolicy::kThrow,
+                                          EmptyFilePolicy::kTreatAsMalformed, ParseSettingsConfig);
 }
 
 }  // namespace minimal::config

@@ -1,9 +1,9 @@
 #include "minimal/config/channels_config.hpp"
 
-#include <fstream>
 #include <stdexcept>
 #include <unordered_set>
 
+#include "minimal/config/json_config_loader.hpp"
 #include "minimal/config/parse_util.hpp"
 
 namespace minimal::config {
@@ -137,15 +137,9 @@ ChannelsConfig ParseChannelsConfig(const nlohmann::json& doc) {
 }
 
 ChannelsConfig LoadChannelsConfig(const std::filesystem::path& path) {
-    std::ifstream in(path);
-    if (!in) return ChannelsConfig{};  // absence is the normal "no channels" state, not an error
-    nlohmann::json doc;
-    try {
-        in >> doc;
-    } catch (const nlohmann::json::exception& error) {
-        throw std::runtime_error("channels.json: invalid JSON: " + std::string(error.what()));
-    }
-    return ParseChannelsConfig(doc);
+    // Absence is the normal "no channels" state, not an error.
+    return LoadJsonConfig<ChannelsConfig>(path, "channels", AbsencePolicy::kDefaultOnMissing,
+                                          EmptyFilePolicy::kTreatAsMalformed, ParseChannelsConfig);
 }
 
 }  // namespace minimal::config

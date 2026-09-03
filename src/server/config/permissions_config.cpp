@@ -1,8 +1,8 @@
 #include "minimal/config/permissions_config.hpp"
 
-#include <fstream>
 #include <stdexcept>
 
+#include "minimal/config/json_config_loader.hpp"
 #include "minimal/config/permission_codec.hpp"
 
 namespace minimal::config {
@@ -68,15 +68,9 @@ PermissionsConfig ParsePermissionsConfig(const nlohmann::json& doc) {
 }
 
 PermissionsConfig LoadPermissionsConfig(const std::filesystem::path& path) {
-    std::ifstream in(path);
-    if (!in) throw std::runtime_error("permissions.json not found: " + path.string());
-    nlohmann::json doc;
-    try {
-        in >> doc;
-    } catch (const nlohmann::json::exception& error) {
-        throw std::runtime_error("permissions.json: invalid JSON: " + std::string(error.what()));
-    }
-    return ParsePermissionsConfig(doc);
+    return LoadJsonConfig<PermissionsConfig>(path, "permissions", AbsencePolicy::kThrow,
+                                             EmptyFilePolicy::kTreatAsMalformed,
+                                             ParsePermissionsConfig);
 }
 
 }  // namespace minimal::config
