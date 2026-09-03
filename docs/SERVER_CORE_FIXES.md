@@ -299,78 +299,111 @@ below.
 
 ---
 
-## Phase 4 — Full event extraction (the centerpiece)
+## Phase 4 — Full event extraction (the centerpiece) — DONE
 
-**Design.** New `agent::SessionEvent` — a variant over *existing* domain types
-(`llm::StreamEvent`, `ToolLifecycleEvent`, `tools::BackgroundTaskEvent`,
-`llm::LlmError`, `commands::CommandResult`, `TurnSummary`) plus new small
-structs for the rest — and a one-method `agent::SessionEventSink`. `rpc/` owns
-an `EventTranslator` implementing the sink (domain → `v1::ServerEvent` via new
-`proto_convert` mappers, feeding the existing `EventBroadcaster`, which keeps
-carrying protos — it is transport). Wire format unchanged; plugins never touch
-`ServerEvent` (verified), so the new vocabulary does **not** become plugin ABI;
-the client is untouched.
+Shipped as 4 independently-buildable, `ctest`-green commits (steps 5-9 of the
+original plan landed as one combined commit — the compiler forces it: slimming
+`SessionChannels` breaks every direct consumer, including 6 test files, in
+the same edit that makes the type change). Design intent survived intact
+(`agent::SessionEvent`, `rpc::EventTranslator`, wire format unchanged,
+`headless_e2e_test` passes unmodified); several of the plan's mechanics
+turned out different once implemented — corrected below.
 
-Facts established by the emission-surface survey:
-- 27 `v1::ServerEvent` construction sites in the server: 22 in agent/
-  (21 in `session.cpp` via `MakeEvent` + 4 ctor-wired sink lambdas;
-  1 in `subagent_manager.cpp:282-288`), 5 in rpc/ (legitimately transport-owned:
-  `resync_required`, `prompt_resolved`, attach-time full `session_metadata`,
-  and the two prompt-request events built by the wire checkers).
-- `agent_loop.cpp` already emits zero protos — the pattern works.
-- Permission/confirmation prompts need **no** domain event: `WirePermissionChecker`
-  implements the domain port `tools::PermissionChecker` and
-  `WireConfirmationBroker` implements `commands::ConfirmationBroker`; only
-  their *ownership* moves out of Session (composition factory below).
-
-Steps (each independently mergeable):
-
-1. **Vocabulary**: `agent/session_event.hpp`. New payload structs:
-   `SubagentStarted{child_session_id, task, blocking}`,
-   `SessionMetadataChanged{name, agent_preset, model, permission_mode,
-   context_window_tokens, partial}` (name-only variants use partial),
-   `SessionEnded`, `ToolOutputDelta{tool_use_id, chunk}`,
-   `ErrorEvent{category, message, http_status, is_retryable}`.
-2. **Translation**: `proto_convert` gains `ToProto(SessionEvent) ->
-   v1::ServerEvent` with the file's existing totality discipline (exhaustive
-   switch, `static_assert` terminal else).
-3. **Composition factory** `rpc/session_wiring.{hpp,cpp}`: builds the channels
-   block, `EventTranslator` + broadcaster, `WirePermissionChecker`,
-   `WireConfirmationBroker`, `PendingRequests`. One recipe consumed by both
-   `session_service.cpp:90-103` (`ApplyAdvisor`) and
-   `subagent_manager.cpp:197-206` — kills the checker-composition duplication
-   (three sites today incl. `session.cpp:55-61`). `SessionParams` receives the
-   sink + the two interfaces only.
-4. **Session gutting**: all 21 proto sites in `session.cpp` become domain
-   emission. Invariants that must survive (from the survey):
-   - the channels `shared_ptr` remains the lifetime anchor for watcher threads
-     that outlive Session (`session.cpp:107-129` capture semantics);
-   - `background_tasks_live` counter bookkeeping (`session.cpp:132-145`)
-     moves domain-side — Session counts STARTED/KILLED before forwarding; the
-     reaper's quiescence rule depends on it;
-   - ordering: `SessionEnded` published before `CloseAll`
-     (`session.cpp:797-811`); metadata-before-`TurnCompleted`
-     (`session.cpp:1045-1054`); `SubagentStarted` before the child's first
-     event.
-5. **Reader-thread refusals move rpc-side**: `RejectCommand`
-   (`session.cpp:363-378`, invoked by `session_service.cpp:536/560/572`)
-   dissolves — dispatcher returns the refusal reason as domain data,
-   `session_service` builds the `command_result` event itself.
-6. **`subagent_started`**: `SubagentManager` emits the domain event on the
-   parent's sink.
-7. **Answer direction de-proto'd**: `PendingAnswer`
-   (`pending_requests.hpp:39-47`) carries a domain
-   `tools::PermissionResponse` (parsed on the reader thread) instead of a
-   serialized proto string — removes the last inward proto leak.
-8. **Attach-time full metadata**: `session_service.cpp:991-1015` keeps
-   building it from domain accessors; `preset_snapshot()` / `run_mode()`
-   remain on Session.
-9. **Cut the cord**: delete `agent/session.hpp:51-54` rpc includes +
-   `session_service.pb.h`; `Session::queue()`/`pending()` exposure replaced by
-   the sink interface. `session_service` owns `Subscribe/Unsubscribe` instead
-   of borrowing them from Session.
-10. **Tests**: `session_test`, `event_broadcaster_test` updated;
-    `headless_e2e_test` passes **unmodified** (hard gate).
+- **Vocabulary and translation** (`agent/session_event.hpp`,
+  `rpc::ToProto(session_id, SessionEvent)`): the plan's alternative list was
+  half right. `TurnSummary` is **not** the `turn_completed` alternative —
+  `Session::EmitTurnCompleted` takes `(StopReason, Usage, hit_max_turns)` and
+  feeds `TurnCompletedEvent`; `TurnSummary` is a *different* object
+  (`first_seq`, `tool_names_invoked`, no `hit_max_turns`) assembled
+  separately for `SessionObserver::OnTurnCompleted` — a new `TurnCompleted`
+  struct is the wire-shaped one, `TurnSummary` untouched. The doc's single
+  `ErrorEvent{category, message, http_status, is_retryable}` also overfit:
+  9 of the 10 error-emitting sites in `session.cpp` hardcode
+  `category=UNSPECIFIED`/no `http_status`/`is_retryable=false` — only
+  `message` ever varies — so those became a minimal `SessionError{message}`,
+  leaving `llm::LlmError` (already in the variant) as the one alternative
+  that carries a real category. `commands::CommandResult` alone cannot cross
+  to the wire either: `CommandResult.request_id` needed for the proto lives
+  on `QueuedCommand`, not on the outcome a `Command` returns, so a
+  `SessionCommandResult{request_id, CommandResult}` wrapper carries both.
+- **`SessionChannels` split**: the domain half (`InjectionQueue`,
+  `background_tasks_live`) stays in `agent/`, unchanged; the transport half
+  (`EventBroadcaster`, `PendingRequests`) moves to a new
+  `rpc::TransportChannels`, reached only through `rpc::EventTranslator`
+  behind `SessionParams::event_sink`/`transport_handle` (a type-erased
+  `shared_ptr<void>` — deliberate, so `agent::Session` never names the
+  concrete `rpc::` type it points at). `SessionEventSink` ended up
+  `bool(const SessionEvent&)`, not the originally-sketched `void`: several
+  session.cpp sites warn on a dropped event, and the stream-event path uses
+  the return value to abort an in-flight provider request on the race
+  between an `IsCancelled()` check and `Terminate` closing the broadcaster —
+  a void sink would have silently dropped both behaviors.
+- **`rpc::session_wiring` ended up two-phase, not one factory**: a real
+  timing constraint the plan missed — `ApplyPermissionAdvisor` (the advisor
+  decision) runs at `session_service.cpp`/`subagent_manager.cpp`'s
+  composition sites, strictly *before*
+  `SessionRegistry::CreateResolved`'s funnel resolves
+  `unattended_prompt_timeout`. The default `WirePermissionChecker` and the
+  always-built `WireConfirmationBroker` both need that resolved value, so a
+  second function, `FinishSessionWiring`, runs from `CreateResolved` itself
+  right after the resolution, building whichever of
+  {transport, default checker, confirmation broker} the early phase left
+  unbuilt. This is what actually kills the three-way duplicate composition
+  (`session_service.cpp`, `subagent_manager.cpp`, and `Session`'s own former
+  ctor fallback) — not two of three, as an earlier draft of this doc
+  described.
+- **`Session` emission cutover**: all 21 `session.cpp` sites and
+  `subagent_manager.cpp`'s `subagent_started` now build a `SessionEvent` and
+  call the sink (`Session::EmitEvent`), preserving every invariant the
+  emission-surface survey flagged (`SessionEnded` before closing the
+  transport, `MaybeEmitNameFromStore` before `EmitTurnCompleted`,
+  `SubagentStarted` before the child's first event) and the exact per-site
+  warn-on-drop behavior each one had. `RejectCommand` did **not** dissolve
+  into `session_service` as the plan proposed — `session_service.cpp` calls
+  it as an ordinary method on a live `Session` at three sites, and
+  duplicating command-result construction three times would have fought the
+  phase's own dedup goal; it now emits `SessionCommandResult` like every
+  other command-result site instead.
+- **Cutting the cord**: `agent/session.hpp` and `agent/session.cpp` depend on
+  `rpc/` **nowhere** now — not just the four originally-named includes, the
+  full `v1/session_service.pb.h` include, and every `rpc::` type
+  (`EventBroadcaster`, `PendingRequests`, `WirePermissionChecker`,
+  `WireConfirmationBroker`) it used to construct or return.
+  `Session::queue()`/`pending()`/`Subscribe()`/`Unsubscribe()` are gone;
+  `session_service.cpp` owns `Subscribe`/`Unsubscribe` directly against the
+  transport (a `Transport()` helper casting the opaque handle back to
+  `EventTranslator`), paired with new `Session::NotifyAttached()`/
+  `NotifyDetached()` so `has_subscribers()`/`ever_attached()` keep working
+  off a mirrored counter. `WireConfirmationBroker` got the injection seam it
+  never had (`SessionParams::confirmation_broker`) as a forced side effect —
+  `Session`'s ctor can no longer construct one itself.
+- **Fail loud, not silent**: `Session`'s constructor (`RequireWiring`) throws
+  immediately if any wiring field is missing, rather than surfacing later as
+  a dropped event or a `std::bad_function_call` from inside a lambda. Every
+  production session gets these from `FinishSessionWiring`; the 6 test files
+  that construct a `Session` directly (bypassing the registry) call it
+  themselves.
+- **Answer direction de-proto'd**, landed as a separate commit:
+  `PendingRequests::PermissionAnswer` was a serialized-proto string, parsed
+  on the worker via `ParseFromString`. It is now
+  `{tools::PermissionDecision, std::vector<std::string> granted_keys}`,
+  decoded by the reader thread from the already-typed `v1::PermissionResponse`
+  it holds (no re-serialize-then-reparse round trip). Grant-key filtering
+  against the request's disclosure stays on the worker
+  (`wire_permission_checker.cpp`) — only the `WirePermissionChecker` that
+  built the original request's disclosure can filter against it; the reader
+  has no access to that state. This removed
+  `wire_permission_checker_test.cpp`'s "an unparseable answer denies rather
+  than crashing" case — that failure mode cannot occur at this layer
+  anymore; the equivalent coverage already exists at
+  `proto_convert_test.cpp`'s "an unspecified permission decision denies".
+- **Gate**: `headless_e2e_test.cpp` has **zero** diff across the whole phase
+  and its 46 cases pass; full suite (1507 cases) green; a ThreadSanitizer
+  build (`-fsanitize=thread`, vcpkg binary cache hit — no dependency
+  rebuild needed) of every `[session]`/`[wire_permission]`/
+  `[event_translator]`/`[broadcaster]`/`[pending_requests]`/
+  `[session_registry]`/`[subagent]`/`[headless]`/`[resume]` case (257 cases,
+  ~41k assertions) reports zero data races.
 
 ---
 
@@ -491,5 +524,5 @@ Steps (each independently mergeable):
 | 1 Dedup | M | Low | full ctest, zero behavior change | DONE |
 | 2 Moves | M | Low-Med | build + ctest after include churn | DONE |
 | 3 Config | M | Medium | config/sanity/e2e tests | DONE |
-| 4 Event extraction | **L** | Medium | `headless_e2e_test` unmodified-pass | |
+| 4 Event extraction | **L** | Medium | `headless_e2e_test` unmodified-pass | DONE |
 | 5 Slimming | M-L | Medium | per-step ctest | |
