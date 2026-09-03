@@ -29,6 +29,7 @@ add_library(minimal_client_core SHARED
     view/prompt_editor.cpp
     view/status_bar.cpp
     view/tools_panel.cpp
+    view/filterable_menu.cpp
     view/session_picker.cpp
     view/agent_picker.cpp
     view/picker_controller.cpp

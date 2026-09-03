@@ -105,7 +105,7 @@ void PickerController::RebuildAgentPickerComponent() {
                  // typed command would take (AppState::SendCommand) --
                  // AgentCommand::Execute's by-name branch, precedence rules
                  // and all, runs unchanged. No new mutation code.
-                 deps_.app.SendCommand(deps_.app.FocusedSessionId(), "agent " + name);
+                 deps_.app.SendCommand(deps_.app.FocusedSessionId(), "/agent " + name);
                  deps_.show_agent_picker = false;
              },
          .on_close = [this] { deps_.show_agent_picker = false; }});

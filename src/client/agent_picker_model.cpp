@@ -1,18 +1,10 @@
 #include "minimal/client/agent_picker_model.hpp"
 
-#include <algorithm>
-#include <cctype>
+#include "minimal/client/utf8.hpp"
 
 namespace minimal::client {
 
 namespace {
-
-std::string ToLower(std::string_view text) {
-    std::string out(text);
-    std::transform(out.begin(), out.end(), out.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    return out;
-}
 
 bool MatchesFilter(const v1::AgentPresetSummary& preset, const std::string& lowered_filter) {
     if (lowered_filter.empty()) return true;

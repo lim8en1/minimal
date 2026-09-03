@@ -10,10 +10,23 @@
 // 60th byte fell inside a multi-byte sequence into an opaque "could not create
 // a session" parse error, with nothing pointing at the name.
 
+#include <algorithm>
+#include <cctype>
 #include <cstddef>
 #include <string>
+#include <string_view>
 
 namespace minimal::client {
+
+// ASCII-only lowercasing for case-insensitive filter matching (the pickers'
+// session/preset names and descriptions). Not full Unicode case-folding --
+// nothing in this codebase needs that yet.
+inline std::string ToLower(std::string_view text) {
+    std::string out(text);
+    std::transform(out.begin(), out.end(), out.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return out;
+}
 
 // Never returns more than `max_bytes`, and never ends mid-character: a sequence
 // straddling the limit is dropped whole.
