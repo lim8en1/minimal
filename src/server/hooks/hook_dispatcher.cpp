@@ -89,39 +89,45 @@ const HookPointSpec* HookDispatcher::Find(std::string_view point) const {
     return it == points_.end() ? nullptr : &it->second.spec;
 }
 
+std::vector<std::string> HookDispatcher::DescribeActionWarnings(
+    const config::HookActionConfig& action) const {
+    std::vector<std::string> warnings;
+    const auto it = points_.find(action.on);
+    if (it == points_.end()) {
+        warnings.push_back("action on unknown hook point '" + action.on +
+                           "' -- is the plugin that provides it enabled?");
+        return warnings;
+    }
+    for (const auto& [field, value] : action.filter) {
+        (void)value;
+        const auto& filterable = it->second.spec.filterable;
+        if (std::find(filterable.begin(), filterable.end(), field) == filterable.end()) {
+            warnings.push_back("action on '" + action.on + "' filters on field '" + field +
+                               "', which the point does not declare filterable -- the action will "
+                               "never match");
+        }
+    }
+    if (action.filter.empty()) {
+        warnings.push_back("action on '" + action.on +
+                           "' has no filter -- it answers EVERY emission of the point");
+    }
+    if (!it->second.spec.veto_capable) {
+        warnings.push_back("action on '" + action.on +
+                           "' targets an observe-only point: an exit code of 2 has no effect there");
+    }
+    return warnings;
+}
+
 std::vector<std::string> HookDispatcher::Configure(const config::HooksConfig& config) {
     std::vector<std::string> warnings;
     // Returned, not logged: the caller (main) prints them once, deduplicated
     // against the sanity check's identical findings. Logging here too made
     // every warning surface twice.
-    const auto warn = [&](std::string message) {
-        warnings.push_back(std::move(message));
-    };
-
     for (const auto& action : config.hooks) {
+        for (auto& warning : DescribeActionWarnings(action)) warnings.push_back(std::move(warning));
+
         const auto it = points_.find(action.on);
-        if (it == points_.end()) {
-            warn("action on unknown hook point '" + action.on +
-                 "' -- is the plugin that provides it enabled?");
-            continue;
-        }
-        for (const auto& [field, value] : action.filter) {
-            (void)value;
-            const auto& filterable = it->second.spec.filterable;
-            if (std::find(filterable.begin(), filterable.end(), field) == filterable.end()) {
-                warn("action on '" + action.on + "' filters on field '" + field +
-                     "', which the point does not declare filterable -- the action will never "
-                     "match");
-            }
-        }
-        if (action.filter.empty()) {
-            warn("action on '" + action.on + "' has no filter -- it answers EVERY emission of "
-                 "the point");
-        }
-        if (!it->second.spec.veto_capable) {
-            warn("action on '" + action.on +
-                 "' targets an observe-only point: an exit code of 2 has no effect there");
-        }
+        if (it == points_.end()) continue;  // DescribeActionWarnings already reported it
 
         Action mapped;
         mapped.command = action.command;

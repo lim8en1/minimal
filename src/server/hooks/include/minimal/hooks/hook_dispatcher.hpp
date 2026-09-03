@@ -195,6 +195,13 @@ public:
     // of the sanity check's findings.
     std::vector<std::string> Configure(const config::HooksConfig& config);
 
+    // Structural warnings for one hooks.json action against currently-
+    // registered points -- exactly what Configure checks when it seals,
+    // without mutating anything. Shared with the startup sanity check's
+    // check_hooks() so the two never drift (in particular, the "no filter --
+    // answers EVERY emission" warning, which used to exist only here).
+    std::vector<std::string> DescribeActionWarnings(const config::HookActionConfig& action) const;
+
     // --- Emission -------------------------------------------------------------
 
     // Synchronous dispatch for veto-capable points. nullopt = passed (also:

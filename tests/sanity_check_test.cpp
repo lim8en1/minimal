@@ -1004,10 +1004,15 @@ TEST_CASE("hooks actions validate against registered points", "[sanity_check][ho
 
     const auto results = RunChecks(f);
     const auto hooks = ByCheck(results, "hooks");
-    REQUIRE(hooks.size() == 3);
+    // 4, not 3: core.post_tool_use's action has no filter AND targets an
+    // observe-only point -- both are now reported (check_hooks and
+    // HookDispatcher::Configure share one warning generator as of Phase 3,
+    // closing a prior asymmetry where only Configure reported "no filter").
+    REQUIRE(hooks.size() == 4);
     CHECK(hooks[0]->message.find("unknown hook point 'someplugin.gone'") != std::string::npos);
     CHECK(hooks[1]->message.find("does not declare filterable") != std::string::npos);
-    CHECK(hooks[2]->message.find("observe-only point") != std::string::npos);
+    CHECK(hooks[2]->message.find("has no filter") != std::string::npos);
+    CHECK(hooks[3]->message.find("observe-only point") != std::string::npos);
 }
 
 TEST_CASE("a well-formed hooks.json produces no hook warnings", "[sanity_check][hooks]") {

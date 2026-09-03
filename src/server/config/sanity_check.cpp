@@ -802,34 +802,13 @@ std::vector<CheckResult> StartupSanityCheck::check_hooks() {
     // Point-relative warnings. These need the dispatcher because the point is
     // code -- core's or a plugin's -- and the check is deliberately structural:
     // it reads which points REGISTERED, never fires one. Run before Configure,
-    // whose own warnings are the runtime backstop.
+    // whose own warnings are the runtime backstop. Shared with Configure via
+    // DescribeActionWarnings so the two can never drift.
     if (inputs_.hook_dispatcher == nullptr) return results;
 
     for (const auto& action : hooks_.hooks) {
-        const auto* spec = inputs_.hook_dispatcher->Find(action.on);
-        if (spec == nullptr) {
-            results.push_back(Warning("hooks",
-                                      "action on unknown hook point '" + action.on +
-                                          "' -- is the plugin that provides it enabled?"));
-            continue;
-        }
-        for (const auto& [field, value] : action.filter) {
-            (void)value;
-            const bool filterable = std::find(spec->filterable.begin(), spec->filterable.end(),
-                                              field) != spec->filterable.end();
-            if (!filterable) {
-                results.push_back(Warning("hooks",
-                                          "action on '" + action.on + "' filters on field '" +
-                                              field +
-                                              "', which the point does not declare filterable -- "
-                                              "the action will never match"));
-            }
-        }
-        if (!spec->veto_capable) {
-            results.push_back(Warning("hooks",
-                                      "action on '" + action.on +
-                                          "' targets an observe-only point: an exit code of 2 "
-                                          "has no effect there"));
+        for (const auto& warning : inputs_.hook_dispatcher->DescribeActionWarnings(action)) {
+            results.push_back(Warning("hooks", warning));
         }
     }
     return results;
