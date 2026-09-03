@@ -8,6 +8,7 @@
 
 #include "minimal/agent/compaction_boundary.hpp"
 #include "minimal/agent/compaction_trigger.hpp"
+#include "minimal/agent/transcript_repair.hpp"
 
 namespace minimal::agent {
 namespace {

@@ -4,8 +4,8 @@
 #include <stdexcept>
 #include <utility>
 
-#include "minimal/agent/compaction_boundary.hpp"
 #include "minimal/agent/signal_router.hpp"
+#include "minimal/agent/transcript_repair.hpp"
 #include "minimal/config/project_context.hpp"
 #include "minimal/session/session_reader.hpp"
 #include "minimal/session/sqlite_history_store.hpp"

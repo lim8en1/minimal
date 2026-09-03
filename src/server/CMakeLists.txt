@@ -39,6 +39,7 @@ add_library(minimal_server_core SHARED
     agent/mention_expansion.cpp
     plugins/name_resolution.cpp
     agent/compaction_boundary.cpp
+    agent/transcript_repair.cpp
     agent/compaction_strategy.cpp
     agent/compaction_trigger.cpp
     agent/context_compactor.cpp
