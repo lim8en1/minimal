@@ -172,7 +172,7 @@ public:
     // is genuinely absent even under a discover-entry. See discovery_status().
     std::shared_ptr<const ResolvedModel> Resolve(const ModelRef& ref) const;
 
-    bool empty() const { return models_.empty(); }
+    bool empty() const { return catalog_.models_.empty(); }
 
     // Every `<provider>/<model>` this config can serve right now, sorted:
     // static entries plus DISCOVERED models already in the runtime cache. A
@@ -184,7 +184,7 @@ public:
     // The providers this file defines, keyed by name -- including discover
     // entries that name no static model. Parse-time only, plus direct
     // construction in tests.
-    const std::map<std::string, ProviderEntry>& provider_entries() const { return providers_; }
+    const std::map<std::string, ProviderEntry>& provider_entries() const { return catalog_.providers_; }
 
     // Injection point for discovery (main.cpp, after plugin load). Once per
     // process; the hook is called under the config mutex and must not
@@ -214,58 +214,64 @@ public:
     void AddProvider(ProviderEntry entry);
 
 private:
-    // LIFETIME NOTE: values are written once, at insertion (parse for models_,
-    // publish for overlay_), and never mutated in place. Refresh replaces
-    // entries wholesale -- old objects stay alive through any shared_ptr still
-    // holding them -- so a Resolve snapshot remains valid across refreshes.
-    // Ordered, so ModelRefs() is sorted without a second pass and two runs list
-    // providers identically.
-    std::map<std::string, std::shared_ptr<const ResolvedModel>> models_;  // "<provider>/<model>"
-    std::map<std::string, ProviderEntry> providers_;  // parse-time only, never mutated after
+    // Immutable once parsed: written only at insertion (Add/AddProvider,
+    // parse-time), never mutated in place, no lock needed. Ordered, so
+    // ModelRefs() is sorted without a second pass and two runs list providers
+    // identically.
+    struct ImmutableCatalog {
+        std::map<std::string, std::shared_ptr<const ResolvedModel>> models_;  // "<provider>/<model>"
+        std::map<std::string, ProviderEntry> providers_;  // never mutated after parse
+    };
+    ImmutableCatalog catalog_;
 
     // --- lazy discovery state -------------------------------------------------
-    // Serializes catalog fetches per provider. The network call runs holding
-    // ONLY the provider's gate, so one hung catalog cannot stall session
-    // creation or listings -- the failure mode a global lock across the fetch
-    // would produce. Lock order is always gate -> mutex_, never the reverse.
-    struct FetchGate {
-        std::mutex mtx;
-    };
-    // Entries are created lazily (Resolve) or up front (RefreshDiscovery) and
-    // never erased, so a gate reference held across an unlock stays valid.
-    mutable std::map<std::string, FetchGate> gates_;  // by provider name
+    // Everything the discovery cache needs, grouped so the split from
+    // ImmutableCatalog above is structural, not just a naming convention.
+    // Refresh replaces overlay_ entries wholesale -- old objects stay alive
+    // through any shared_ptr still holding them -- so a Resolve snapshot
+    // remains valid across refreshes.
+    struct DiscoveryCacheState {
+        // Serializes catalog fetches per provider. The network call runs
+        // holding ONLY the provider's gate, so one hung catalog cannot stall
+        // session creation or listings -- the failure mode a global lock
+        // across the fetch would produce. Lock order is always gate ->
+        // mutex_, never the reverse.
+        struct FetchGate {
+            std::mutex mtx;
+        };
+        // Entries are created lazily (Resolve) or up front (RefreshDiscovery)
+        // and never erased, so a gate reference held across an unlock stays
+        // valid.
+        mutable std::map<std::string, FetchGate> gates_;  // by provider name
 
-    struct DiscoveryCache {
-        std::uint64_t generation = 0;  // future config reload; always 0 today
-        bool attempted = false;
-        bool ok = false;
-        std::string error;
-        std::map<std::string, llm::DiscoveredModel> models;  // by model id
-    };
+        struct DiscoveryCache {
+            std::uint64_t generation = 0;  // future config reload; always 0 today
+            bool attempted = false;
+            bool ok = false;
+            std::string error;
+            std::map<std::string, llm::DiscoveredModel> models;  // by model id
+        };
 
-    // Guards gates_, discovery_, overlay_, hook_ and generation_ (models_ and
-    // providers_ are parse-time only).
-    mutable std::mutex mutex_;
-    DiscoveryHook hook_;
-    std::uint64_t generation_ = 0;
-    mutable std::map<std::string, DiscoveryCache> discovery_;  // by provider name
-    // Discovered models, and overlay copies of static models enriched with a
-    // discovered context window. Keyed "<provider>/<model>".
-    mutable std::map<std::string, std::shared_ptr<const ResolvedModel>> overlay_;
+        // Guards gates_, discovery_, overlay_, hook_ and generation_.
+        mutable std::mutex mutex_;
+        DiscoveryHook hook_;
+        std::uint64_t generation_ = 0;
+        mutable std::map<std::string, DiscoveryCache> discovery_;  // by provider name
+        // Discovered models, and overlay copies of static models enriched with
+        // a discovered context window. Keyed "<provider>/<model>".
+        mutable std::map<std::string, std::shared_ptr<const ResolvedModel>> overlay_;
+    };
+    DiscoveryCacheState cache_;
 
     const ProviderEntry* FindProviderLocked(const std::string& name) const;
     // Calls the hook -- the network I/O. Requires NO lock held; `entry` points
-    // into providers_, which is parse-time only and never mutated after.
+    // into catalog_.providers_, which is parse-time only and never mutated after.
     DiscoveryOutcome FetchOutcome(const ProviderEntry& entry) const;
     // Writes one outcome into the cache and materializes every discovered
     // model into the overlay, so a later Resolve of any of them is a lookup,
-    // never a rebuild. mutex_ held.
+    // never a rebuild. cache_.mutex_ held.
     void PublishLocked(const ProviderEntry& entry, const DiscoveryOutcome& outcome,
-                       DiscoveryCache& cache) const;
-    // The overlay ResolvedModel for one discovered model: the entry's
-    // connection and provider-level defaults, the backend's id and window.
-    ResolvedModel BuildDiscoveredLocked(const ProviderEntry& entry,
-                                        const llm::DiscoveredModel& discovered) const;
+                       DiscoveryCacheState::DiscoveryCache& cache) const;
     // The discover-entry half of Resolve: ensures the provider's catalog has
     // been consulted this generation (fetching under the per-provider gate
     // with no config lock held, double-checking after the wait), then returns
