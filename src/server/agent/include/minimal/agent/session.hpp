@@ -36,7 +36,6 @@
 
 #include "minimal/agent/agent_loop.hpp"
 #include "minimal/agent/agent_preset.hpp"
-#include "minimal/agent/history_store.hpp"
 #include "minimal/agent/agent_preset_registry.hpp"
 #include "minimal/agent/injection_queue.hpp"
 #include "minimal/agent/session_observer_registry.hpp"
@@ -52,6 +51,7 @@
 #include "minimal/rpc/pending_requests.hpp"
 #include "minimal/rpc/wire_confirmation_broker.hpp"
 #include "minimal/rpc/wire_permission_checker.hpp"
+#include "minimal/session/history_store.hpp"
 #include "minimal/session/history_window.hpp"
 #include "minimal/session/session_reader.hpp"
 #include "minimal/tools/permission_advisor.hpp"
@@ -263,7 +263,7 @@ public:
     // portion begins -- what compaction checkpoints are written against (see
     // AgentLoop's constructor for the invariant).
     Session(SessionParams params, AgentPreset preset, std::shared_ptr<llm::LlmProvider> provider,
-            std::unique_ptr<HistoryStore> store, tools::ToolRegistry& registry,
+            std::unique_ptr<session::HistoryStore> store, tools::ToolRegistry& registry,
             LoopConfig loop_config, SessionObserverRegistry& observers, common::Logger& logger,
             std::vector<llm::Message> seeded_history = {},
             std::optional<std::int64_t> seed_first_persisted_seq = std::nullopt,
@@ -542,7 +542,7 @@ private:
     // SHARED across sessions, so the session holds a reference rather than
     // ownership. Stateless-by-contract providers are freely shareable.
     std::shared_ptr<llm::LlmProvider> provider_;
-    std::unique_ptr<HistoryStore> store_;
+    std::unique_ptr<session::HistoryStore> store_;
 
     // Track M: the read side of the durable transcript and the tool-facing
     // window over it (docs/EXTENSIBILITY.md §2.1). Declared BEFORE loop_ so

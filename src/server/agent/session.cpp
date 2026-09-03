@@ -24,7 +24,7 @@ v1::ServerEvent MakeEvent(const std::string& session_id) {
 }  // namespace
 
 Session::Session(SessionParams params, AgentPreset preset,
-                 std::shared_ptr<llm::LlmProvider> provider, std::unique_ptr<HistoryStore> store,
+                 std::shared_ptr<llm::LlmProvider> provider, std::unique_ptr<session::HistoryStore> store,
                  tools::ToolRegistry& registry, LoopConfig loop_config,
                  SessionObserverRegistry& observers, common::Logger& logger,
                  std::vector<llm::Message> seeded_history,

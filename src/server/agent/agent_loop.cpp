@@ -96,7 +96,7 @@ bool ElideLargestToolResult(std::vector<llm::Message>& history) {
 }  // namespace
 
 AgentLoop::AgentLoop(llm::LlmProvider& provider, tools::ToolExecutor& executor,
-                      tools::ToolRegistry& registry, HistoryStore& store, AgentPreset preset,
+                      tools::ToolRegistry& registry, session::HistoryStore& store, AgentPreset preset,
                       LoopConfig config, SessionContext session,
                       std::function<bool()> is_cancelled, llm::StreamEventSink event_sink,
                       Compactor compactor, std::vector<llm::Message> seeded_history,

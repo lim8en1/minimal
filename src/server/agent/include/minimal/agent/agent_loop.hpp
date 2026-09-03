@@ -15,7 +15,6 @@
 
 #include "minimal/agent/agent_preset.hpp"
 #include "minimal/agent/context_compactor.hpp"
-#include "minimal/agent/history_store.hpp"
 #include "minimal/agent/injection_queue.hpp"
 #include "minimal/common/logger.hpp"
 #include "minimal/config/settings_config.hpp"
@@ -25,6 +24,7 @@
 #include "minimal/llm/provider.hpp"
 #include "minimal/llm/stream_event.hpp"
 #include "minimal/llm/token_accounting.hpp"
+#include "minimal/session/history_store.hpp"
 #include "minimal/session/history_window.hpp"
 #include "minimal/tools/tool.hpp"
 #include "minimal/tools/tool_executor.hpp"
@@ -197,7 +197,7 @@ struct TurnResult {
 class AgentLoop {
 public:
     AgentLoop(llm::LlmProvider& provider, tools::ToolExecutor& executor,
-              tools::ToolRegistry& registry, HistoryStore& store, AgentPreset preset,
+              tools::ToolRegistry& registry, session::HistoryStore& store, AgentPreset preset,
               LoopConfig config, SessionContext session, std::function<bool()> is_cancelled,
               llm::StreamEventSink event_sink, Compactor compactor,
               // RESUME: the stored transcript, loaded without being re-appended.
@@ -385,7 +385,7 @@ private:
     std::reference_wrapper<llm::LlmProvider> provider_;
     tools::ToolExecutor& executor_;
     tools::ToolRegistry& registry_;
-    HistoryStore& store_;
+    session::HistoryStore& store_;
     AgentPreset preset_;
     // The project's instructions (AGENTS.md/CLAUDE.md), rendered. Constant for
     // the session's life -- loaded once at creation/resume -- so it never

@@ -4,7 +4,7 @@
 #include <cstdint>
 #include <string>
 
-#include "minimal/agent/history_store.hpp"
+#include "minimal/session/history_store.hpp"
 #include "minimal/session/session_database.hpp"
 
 namespace minimal::session {
@@ -13,7 +13,7 @@ namespace minimal::session {
 // process-wide SessionDatabase (and its single connection/mutex). The AgentLoop
 // sees only the one-method interface; seq assignment, default naming, and the
 // updated_at touch are SessionDatabase concerns, applied in one transaction.
-class SqliteHistoryStore : public agent::HistoryStore {
+class SqliteHistoryStore : public HistoryStore {
 public:
     SqliteHistoryStore(SessionDatabase& db, std::string session_id);
 

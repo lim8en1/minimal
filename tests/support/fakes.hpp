@@ -20,10 +20,10 @@
 #include <utility>
 #include <vector>
 
-#include "minimal/agent/history_store.hpp"
 #include "minimal/commands/command.hpp"
 #include "minimal/commands/command_context.hpp"
 #include "minimal/llm/provider.hpp"
+#include "minimal/session/history_store.hpp"
 #include "minimal/tools/permission.hpp"
 #include "minimal/tools/permission_checker.hpp"
 #include "minimal/tools/tool.hpp"
@@ -287,7 +287,7 @@ private:
     std::mutex mu_;
 };
 
-class InMemoryHistoryStore : public agent::HistoryStore {
+class InMemoryHistoryStore : public session::HistoryStore {
 public:
     // Token counts are a persistence concern; the in-memory fake ignores them.
     void Append(const llm::Message& message, std::optional<int> output_tokens) override {

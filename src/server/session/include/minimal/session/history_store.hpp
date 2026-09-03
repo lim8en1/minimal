@@ -6,7 +6,7 @@
 
 #include "minimal/llm/message.hpp"
 
-namespace minimal::agent {
+namespace minimal::session {
 
 // Append-only, deliberately.
 //
@@ -96,4 +96,4 @@ public:
     virtual std::optional<std::string> StoredName() const { return std::nullopt; }
 };
 
-}  // namespace minimal::agent
+}  // namespace minimal::session
