@@ -1189,7 +1189,7 @@ Every state is derived client-side from events already on the wire — no server
 
 Blocking subagents auto-focus their tab (the parent is stuck waiting anyway); non-blocking ones open in the background. Navigation: `Ctrl+Tab`/`Ctrl+Shift+Tab` linear, `Alt+←/→` between root groups, plus **jump-to-next-attention** crossing everything. All remappable.
 
-**Group lifecycle**: closing a tab terminates its session; closing a root tab terminates its whole group. Finished subagent tabs remain (✓) until closed manually so the transcript stays readable. Tab-bar overflow needs a scroll/condense rule — flagged, not designed.
+**Group lifecycle**: closing a tab terminates its session; closing a root tab terminates its whole group. Finished subagent tabs remain (✓) until closed manually so the transcript stays readable. **Tab-bar overflow**: when every tab's cell doesn't fit the terminal width, `RenderTabBar` shows a contiguous window of tabs around the focused one and a `«N` / `N»` count on whichever side has tabs hidden — the focused tab is never scrolled out of view, and a marker's reserved width is reclaimed the instant its side reaches the end of the tab list (`ComputeTabBarWindow`, `src/client/view/tab_bar.{hpp,cpp}`, unit-tested).
 
 ### Running-tools panel
 

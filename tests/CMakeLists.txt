@@ -100,6 +100,7 @@ add_executable(minimal_tests
     session_state_test.cpp
     app_state_test.cpp
     view_factory_test.cpp
+    tab_bar_test.cpp
     modal_host_test.cpp
     keybindings_test.cpp
     keybinding_dispatch_test.cpp
