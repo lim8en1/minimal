@@ -189,37 +189,113 @@ consumer list for the HTTP/SSE move was incomplete, and its framing of the
 
 ---
 
-## Phase 3 — Config ownership
+## Phase 3 — Config ownership — DONE
 
-1. **`LoadJsonConfig(path, AbsencePolicy)` foundation** in `config/` + shared
-   file-read. All six `Load*Config` functions collapse onto it with explicit
-   per-file absence policy (currently: settings/permissions/providers throw;
-   mcps/channels return empty; hooks treats empty-file-as-absent — silently
-   divergent). Sites: `settings_config.cpp:241`, `permissions_config.cpp:70`,
-   `providers_config.cpp:448`, `mcps_config.cpp:118`, `channels_config.cpp:157`,
-   `hooks_config.cpp:95`.
-2. **settings.json parsed three times** → parsed once in `main` via
-   `SettingsConfig`. Remove `main.cpp:134` (logging load) and `main.cpp:262-264`
-   (ad-hoc `json::parse` of the tools slice that bypasses the schema).
-3. **`sanity_check` demoted from composition root to validator.** Today the
-   845-line linter *loads* all configs (`sanity_check.cpp:110-182`) and `main`
-   harvests them (`take_session_db()` etc.). After: configs load in `main`
-   (the true composition root), `SanityCheck` receives them by injection.
-4. **Env/secret mechanisms unified.** `${VAR}` interpolation (connect-time,
-   `mcp/env_interpolation.cpp`) becomes the one mechanism, extended to
-   providers.json (alongside the existing `api_key_env`, which keeps working);
-   empty-value semantics unified to "empty = unset" (fixes
-   `mcp_client_manager.cpp:205-208` treating empty as resolved, vs
-   `providers_config.cpp:39` / `config_paths.cpp:12-14`).
-5. **`ProvidersConfig` split**: immutable parse-result snapshot vs a separate
-   `ModelDiscoveryCache` runtime service (mutex, gates, overlays, generations
-   currently all in one class — `providers_config.cpp:88-326`).
-6. **Policy out of `main.cpp`**: model-discovery fallback lambda
-   (`main.cpp:422-438`) moves into `AgentPresetRegistry`/discovery cache;
-   hooks-warning dedup (`main.cpp:469-478`) moves into `HookDispatcher`.
-7. **Bounded-queue policy shared**: the byte-accounting / oversized-event /
-   drain-then-close rules implemented twice (`event_queue.hpp:233-247` vs
-   `event_broadcaster.cpp:196-227`) → one `BoundedItemPolicy` helper.
+Shipped as 8 independently-buildable, `ctest`-green commits (step 2 below
+was a decision with no code change). Unlike Phases 1-2, this phase's charter
+explicitly allowed user-visible behavior changes — three landed, each called
+out below and in its commit message, never silent. The doc's original line
+numbers were mostly stale (`main.cpp` had shifted from Phase 2 edits), and
+two items were structurally bigger or smaller than described — corrected
+below.
+
+1. **`LoadJsonConfig<T>` foundation**, `config/json_config_loader.hpp`. All
+   six `Load*Config` functions collapse onto one template parameterized by
+   `AbsencePolicy` (throw vs. default-on-missing) and `EmptyFilePolicy`
+   (malformed vs. absent) — the real divergence turned out finer than the doc
+   claimed: only `hooks.json` treats an empty-but-present file as absent;
+   `mcps.json`/`channels.json` treat it as malformed, same as
+   settings/permissions/providers. **Behavior change**: `hooks.json`'s
+   malformed-JSON case now throws the same wrapped `std::runtime_error` every
+   other loader already threw, instead of a raw `nlohmann::json::parse_error`
+   (a test was locked to the old raw type; updated in the same commit).
+   Deliberately does not read via `common::ReadFileOrEmpty` (Phase 1) — that
+   helper collapses "could not open" and "opened but empty" into one result,
+   erasing exactly the distinction the two policies exist to preserve.
+2. **settings.json's two early duplicate reads hoisted into one.** Logging
+   setup (stage 1) and the tools-slice extraction (stage 2) each read the
+   file independently, ahead of the sanity check's own authoritative parse
+   (stage 3) — both now source one hoisted `LoadSettingsConfig` call. Added
+   `ToolsSettings::raw` (the full parsed `"tools"` object, verbatim) so the
+   tools-slice site could stop bypassing `SettingsConfig` entirely without
+   narrowing its documented "forwarded verbatim, no schema imposed" contract.
+   **Behavior change, called out in the commit**: the hoisted preload uses
+   full validation, so a schema violation *anywhere* in settings.json (not
+   just in `logging`/`tools`) now leaves both early sites at their
+   absent-file defaults — in practice inconsequential, since the sanity check
+   aborts the process at stage 3 regardless. Stage 3's own read is
+   deliberately left alone (see item 3's disposition below).
+3. **`sanity_check` full injection — deferred, not shipped.** Verified the
+   doc's premise was only half right: `main.cpp`'s own comment claimed
+   settings/permissions/providers/mcps were all harvested from the sanity
+   check, but `sanity.providers()` and `sanity.mcps()` were **never called**
+   — `providers.json` and `mcps.json` were independently reloaded elsewhere
+   (see item 8), and `permissions.json` was harvested *and* redundantly
+   reloaded. Fixed those consuming-side redundancies directly (items 6, 8)
+   instead of inverting `StartupSanityCheck` into an injectable validator —
+   deferred as disproportionate: 87 call sites across 44 `TEST_CASE`s in
+   `tests/sanity_check_test.cpp` rely on it loading files itself, for a
+   blast radius that buys nothing once the actual redundancy is gone.
+4. **Env-lookup semantics unified onto "empty = unset."** Three independent
+   `getenv` paths existed (not two): MCP `${VAR}` interpolation
+   (`mcp_client_manager.cpp`'s lookup lambda) treated a set-but-empty
+   variable as resolved to `""`; `providers.json`'s `api_key_env`
+   (`providers_config.cpp`) and `src/common/config_paths.cpp`'s
+   `$HOME`/`$XDG_*` resolution already agreed on "empty = unset." Added
+   `common::LookupEnv(name)` as the one shared primitive; all three paths now
+   use it. **Behavior change**: an MCP `${VAR}` referencing a set-but-empty
+   variable now fails to resolve instead of substituting `""` (regression
+   test added). Extending `${VAR}` syntax to `providers.json` was evaluated
+   and **deferred** — no concrete driver beyond symmetry; `api_key_env`
+   already gets equivalent semantics via `LookupEnv` without new syntax.
+5. **`ProvidersConfig` split**, internal only. Its own mutex doc-comment
+   already stated the exact boundary; split into `ImmutableCatalog`
+   (`models_`/`providers_`, no lock) and `DiscoveryCacheState` (everything
+   the mutex guards). **Kept as one public class, not two**: `operator=`,
+   `Resolve`, `ResolveDiscovered`, `PublishLocked`, `ModelRefs`, and
+   `RefreshDiscovery` all read/write both groups, so a two-public-class split
+   would be non-mechanical for no caller-facing benefit — every construction
+   site only ever goes through `ParseProvidersConfig`/`LoadProvidersConfig`
+   regardless. `BuildDiscoveredLocked`, which touched neither group despite
+   its name, became a free function.
+6. **Policy out of `main.cpp` — one item kept in place, one moved.** The
+   model-discovery "adapter" turned out to be a ~15-line `DiscoveryHook`
+   lambda, not the discovery cache itself (that already lived entirely in
+   `ProvidersConfig`, see item 5) — `AgentPresetRegistry` doesn't hold a
+   `ModelCatalogRegistry&` today, so moving it would mean a new method to
+   hold 15 lines. **Left in `main.cpp`.** The hooks-warning dedup *did* move:
+   `check_hooks()` re-implemented `HookDispatcher::Configure`'s point
+   validation by hand and had silently drifted — `Configure` emitted a
+   "no filter" warning `check_hooks()` never produced, contradicting
+   `main.cpp`'s own comment that `Configure` "adds nothing beyond the
+   check." Extracted into `HookDispatcher::DescribeActionWarnings()`, shared
+   by both. **Behavior change**: the sanity check now also reports
+   filter-less hooks.json actions (one test's fixture updated).
+7. **Bounded-queue policy — partially shared, mostly deferred.**
+   `EventBroadcaster::Deliver`'s per-subscriber eviction and `Publish`'s
+   zero-subscriber backlog eviction (a **third, previously unflagged**
+   in-file duplicate of the same rule) now share one `EvictOldestUntilFits`
+   helper. **Deliberately not unified** with `common::EventQueue`'s
+   `Fits`/`Accept` (moved to `src/common/` in Phase 2): `EventQueue` blocks
+   or refuses on overflow and never evicts — a guarantee two unrelated
+   production consumers (`HookDispatcher`, `SessionObserverRegistry`) depend
+   on — while `EventBroadcaster` always evicts and never blocks. The two
+   classes' overflow *actions* are genuinely different QoS models; only the
+   `Fits`-shaped bounding *predicate* is byte-for-byte identical, and
+   templating just that across both was judged not worth the coupling risk
+   for the savings.
+8. **`mcps.json`/`permissions.json` double-parses eliminated** (found during
+   item 3's verification, not originally itemized). `main.cpp` built
+   `McpClientManager` from an independent `LoadMcpsConfig` call instead of
+   `sanity.mcps()` — fixed with a pure call-site change.
+   `AgentPresetRegistry`'s constructor independently reloaded
+   `permissions.json` despite `sanity.permissions()` already being computed
+   and used elsewhere — fixed with an additive 4-arg constructor overload (the
+   existing 3-arg one is unchanged, still used by 30+ test call sites).
+   `providers.json`'s double-parse is **intentionally left alone** —
+   `main.cpp`'s own comment documents it as deliberate: the live,
+   discovery-hooked instance `AgentPresetRegistry` builds is not
+   interchangeable with the sanity check's un-hooked one.
 
 ---
 
@@ -377,6 +453,20 @@ Steps (each independently mergeable):
   copy at `sanity_check.cpp:490-499`; that function checks directory
   writability, unrelated to PATH/executable resolution — doc error, not a
   real duplicate.)
+- `StartupSanityCheck` staying a composition root for settings/permissions/
+  providers/hooks (Phase 3): the actual redundancy this would have fixed
+  (`providers.json`/`mcps.json` never harvested despite being parsed, a
+  redundant `permissions.json` reload) is already gone at the consuming side
+  — `sanity_check_test.cpp`'s 87 call sites across 44 cases all rely on the
+  "write file(s), call `RunAll()`, assert" idiom, and inverting it now buys
+  nothing further.
+- Bounded-queue policy between `common::EventQueue` and `EventBroadcaster`
+  (Phase 3): confirmed genuinely divergent overflow QoS (block-and-never-evict,
+  relied on by `HookDispatcher`/`SessionObserverRegistry`, vs.
+  always-evict-never-block) — only the `Fits`-shaped bounding predicate is
+  identical, and sharing just that risked coupling two deliberately different
+  models for marginal savings. `EventBroadcaster`'s own internal duplicate
+  (`Deliver` vs. `Publish`'s backlog eviction) was fixed instead.
 
 ---
 
@@ -400,6 +490,6 @@ Steps (each independently mergeable):
 | 0 Bugs | S | Low | regression tests + tsan | DONE |
 | 1 Dedup | M | Low | full ctest, zero behavior change | DONE |
 | 2 Moves | M | Low-Med | build + ctest after include churn | DONE |
-| 3 Config | M | Medium | config/sanity/e2e tests | |
+| 3 Config | M | Medium | config/sanity/e2e tests | DONE |
 | 4 Event extraction | **L** | Medium | `headless_e2e_test` unmodified-pass | |
 | 5 Slimming | M-L | Medium | per-step ctest | |
