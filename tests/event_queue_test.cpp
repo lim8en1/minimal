@@ -8,9 +8,9 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "deadline.hpp"
-#include "minimal/rpc/event_queue.hpp"
+#include "minimal/common/event_queue.hpp"
 
-using minimal::rpc::EventQueue;
+using minimal::common::EventQueue;
 using minimal::testing::RunInBackground;
 using namespace std::chrono_literals;
 

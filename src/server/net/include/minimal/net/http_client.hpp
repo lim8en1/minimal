@@ -8,7 +8,7 @@
 #include <string_view>
 #include <vector>
 
-namespace minimal::llm {
+namespace minimal::net {
 
 struct HttpHeader {
     std::string name, value;
@@ -119,4 +119,4 @@ private:
     void* handle_ = nullptr;  // never null after the constructor
 };
 
-}  // namespace minimal::llm
+}  // namespace minimal::net

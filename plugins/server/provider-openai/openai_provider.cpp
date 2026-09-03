@@ -2,7 +2,7 @@
 
 #include <exception>
 
-#include "minimal/llm/sse_parser.hpp"
+#include "minimal/net/sse_parser.hpp"
 #include "openai_error_mapping.hpp"
 #include "openai_request.hpp"
 #include "openai_response.hpp"
@@ -18,8 +18,8 @@ namespace {
 
 }  // namespace
 
-llm::HttpRequest OpenAiProvider::BuildHttpRequest(std::string body, bool streaming) const {
-    llm::HttpRequest request;
+net::HttpRequest OpenAiProvider::BuildHttpRequest(std::string body, bool streaming) const {
+    net::HttpRequest request;
     std::string base = config_.base_url;
     while (!base.empty() && base.back() == '/') base.pop_back();
     request.url = base + "/chat/completions";
@@ -40,13 +40,13 @@ llm::ChatResponse OpenAiProvider::Complete(const llm::ChatRequest& request) {
     // this replaces duplicated the tools vector (every schema DOM), the
     // parameters object and the system string per call -- and, worse, per
     // RETRY ATTEMPT, since the loop calls this method once per attempt.
-    llm::HttpRequest http_request = BuildHttpRequest(BuildRequestBody(request, /*stream=*/false),
+    net::HttpRequest http_request = BuildHttpRequest(BuildRequestBody(request, /*stream=*/false),
                                                      /*streaming=*/false);
 
-    llm::HttpResponse http_response;
+    net::HttpResponse http_response;
     try {
         http_response = http_.Post(http_request);
-    } catch (const llm::HttpError& error) {
+    } catch (const net::HttpError& error) {
         throw ClassifyTransportFailure(error);
     }
 
@@ -65,20 +65,20 @@ llm::ChatResponse OpenAiProvider::Complete(const llm::ChatRequest& request) {
 }
 
 llm::ChatResponse OpenAiProvider::StreamComplete(const llm::ChatRequest& request, const llm::StreamEventSink& sink) {
-    llm::HttpRequest http_request = BuildHttpRequest(BuildRequestBody(request, /*stream=*/true),
+    net::HttpRequest http_request = BuildHttpRequest(BuildRequestBody(request, /*stream=*/true),
                                                      /*streaming=*/true);
 
     OpenAiStreamReassembler reassembler;
-    llm::SseParser sse_parser;
+    net::SseParser sse_parser;
     int response_status = 0;
-    std::vector<llm::HttpHeader> response_headers;
+    std::vector<net::HttpHeader> response_headers;
     std::string error_body;
     bool is_error_status = false;
     bool cancelled_by_sink = false;
     bool error_body_capped = false;
     std::exception_ptr pending_error;
 
-    auto on_headers = [&](int status, const std::vector<llm::HttpHeader>& headers) {
+    auto on_headers = [&](int status, const std::vector<net::HttpHeader>& headers) {
         response_status = status;
         response_headers = headers;
         is_error_status = status < 200 || status >= 300;
@@ -155,7 +155,7 @@ llm::ChatResponse OpenAiProvider::StreamComplete(const llm::ChatRequest& request
 
     try {
         http_.StreamPost(http_request, on_headers, on_chunk);
-    } catch (const llm::HttpError& error) {
+    } catch (const net::HttpError& error) {
         rethrow_pending_if_any();
         // The reader aborted the error body at its classification cap (the
         // on_chunk error branch returned false). Classify by the STATUS we
@@ -166,7 +166,7 @@ llm::ChatResponse OpenAiProvider::StreamComplete(const llm::ChatRequest& request
         if (error_body_capped && response_status != 0) {
             throw ClassifyHttpFailure(response_status, error_body, response_headers);
         }
-        if (cancelled_by_sink || error.kind() == llm::HttpErrorKind::Cancelled) {
+        if (cancelled_by_sink || error.kind() == net::HttpErrorKind::Cancelled) {
             try {
                 // Blocks announced but never closed: the client's view has to be
                 // consistent even when the stream was cut. The sink is passed

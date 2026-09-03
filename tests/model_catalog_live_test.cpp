@@ -23,7 +23,7 @@ TEST_CASE("model discovery lists a live OpenAI-shaped backend", "[model_catalog]
         SKIP("MINIMAL_LLM_BASE_URL not set -- no live backend to talk to");
     }
 
-    OpenAiModelCatalog catalog{minimal::llm::HttpClient{}};
+    OpenAiModelCatalog catalog{minimal::net::HttpClient{}};
     minimal::llm::ProviderConfig config;
     config.base_url = base_url;
 

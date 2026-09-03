@@ -4,7 +4,7 @@
 #include <string_view>
 #include <vector>
 
-namespace minimal::llm {
+namespace minimal::net {
 
 struct SseFrame {
     std::string event = "message";
@@ -29,4 +29,4 @@ private:
     bool pending_has_data_ = false;
 };
 
-}  // namespace minimal::llm
+}  // namespace minimal::net

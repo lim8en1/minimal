@@ -37,7 +37,7 @@ std::string PercentEncode(std::string_view text) {
 
 class WebSearchTool : public tools::Tool {
 public:
-    WebSearchTool(WebSettings settings, llm::HttpClient http)
+    WebSearchTool(WebSettings settings, net::HttpClient http)
         : settings_(std::move(settings)), http_(std::move(http)) {
         spec_.name = "web_search";
         spec_.category = ToolCategory::Execute;
@@ -87,17 +87,17 @@ public:
         url += (url.find('?') == std::string::npos) ? '?' : '&';
         url += "q=" + PercentEncode(query) + "&count=" + std::to_string(max_results);
 
-        llm::HttpRequest request;
+        net::HttpRequest request;
         request.url = url;
         request.request_timeout = std::chrono::milliseconds(settings_.search_timeout_ms);
         if (!settings_.search_api_key.empty()) {
             request.headers.push_back({"Authorization", "Bearer " + settings_.search_api_key});
         }
 
-        llm::HttpResponse response;
+        net::HttpResponse response;
         try {
             response = http_.Get(request);
-        } catch (const llm::HttpError& error) {
+        } catch (const net::HttpError& error) {
             return Error(std::string("web_search: ") + error.what());
         }
         if (response.status < 200 || response.status >= 300) {
@@ -136,12 +136,12 @@ public:
 private:
     ToolSpec spec_;
     WebSettings settings_;
-    llm::HttpClient http_;  // stateless -- see HttpClient's own contract
+    net::HttpClient http_;  // stateless -- see HttpClient's own contract
 };
 
 }  // namespace
 
-std::unique_ptr<tools::Tool> MakeWebSearchTool(WebSettings settings, llm::HttpClient http) {
+std::unique_ptr<tools::Tool> MakeWebSearchTool(WebSettings settings, net::HttpClient http) {
     return std::make_unique<WebSearchTool>(std::move(settings), std::move(http));
 }
 

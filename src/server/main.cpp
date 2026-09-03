@@ -27,10 +27,10 @@
 #include "minimal/agent/subagent_manager.hpp"
 #include "minimal/common/abi_tag.hpp"
 #include "minimal/common/config_paths.hpp"
+#include "minimal/common/fd_hygiene.hpp"
 #include "minimal/common/logger.hpp"
 #include "minimal/common/logging_setup.hpp"
 #include "minimal/common/read_file.hpp"
-#include "minimal/config/fd_hygiene.hpp"
 #include "minimal/config/permissions_config.hpp"
 #include "minimal/config/sanity_check.hpp"
 #include "minimal/config/settings_config.hpp"
@@ -587,7 +587,7 @@ int main(int argc, char** argv) {
     // them all close-on-exec so a bash command, MCP stdio server or hook
     // action inherits only what its spawner explicitly dups. Retires the §7
     // fd-hygiene gap structurally instead of chasing each spawner's fds.
-    const auto cloexec_marked = minimal::config::MarkInheritedFdsCloseOnExec();
+    const auto cloexec_marked = minimal::common::MarkInheritedFdsCloseOnExec();
     if (cloexec_marked != 0) {
         std::printf("  fd hygiene: %zu descriptor(s) marked close-on-exec\n", cloexec_marked);
     }

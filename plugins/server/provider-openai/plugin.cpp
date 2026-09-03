@@ -38,7 +38,7 @@ void minimal_plugin_register_model_catalogs(
     // stateless utility (one CURL handle per call), so one shared instance is
     // safe across concurrent resolvers.
     registry.Register("openai", std::make_shared<minimal::provider_openai::OpenAiModelCatalog>(
-                                    minimal::llm::HttpClient{}));
+                                    minimal::net::HttpClient{}));
 }
 
 }  // extern "C"

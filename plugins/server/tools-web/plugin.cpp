@@ -35,8 +35,8 @@ void minimal_plugin_register_tools(
     const minimal::plugins::PluginRegistrationContext& context) {
     const auto settings = minimal::tools_web::ParseWebSettings(context.config);
 
-    registry.Register(minimal::tools_web::MakeWebFetchTool(settings, minimal::llm::HttpClient{}));
-    registry.Register(minimal::tools_web::MakeWebSearchTool(settings, minimal::llm::HttpClient{}));
+    registry.Register(minimal::tools_web::MakeWebFetchTool(settings, minimal::net::HttpClient{}));
+    registry.Register(minimal::tools_web::MakeWebSearchTool(settings, minimal::net::HttpClient{}));
 }
 
 }  // extern "C"

@@ -44,7 +44,7 @@
 #include <optional>
 #include <utility>
 
-namespace minimal::rpc {
+namespace minimal::common {
 
 template <typename T>
 class EventQueue {
@@ -266,4 +266,4 @@ private:
     bool drops_ = false;
 };
 
-}  // namespace minimal::rpc
+}  // namespace minimal::common

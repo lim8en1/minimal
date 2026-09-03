@@ -61,8 +61,8 @@ llm::LlmErrorCategory CategoryForStatus(int status) {
 // values (negative, overflow, an HTTP-date) leave the hint unset rather than
 // turning into a wild wait, same discipline as provider-openai's parser.
 std::optional<std::chrono::milliseconds> ParseRetryAfter(
-    const std::vector<llm::HttpHeader>& headers) {
-    const auto value = llm::FindHeaderCI(headers, "Retry-After");
+    const std::vector<net::HttpHeader>& headers) {
+    const auto value = net::FindHeaderCI(headers, "Retry-After");
     if (!value) return std::nullopt;
     try {
         std::size_t consumed = 0;
@@ -79,7 +79,7 @@ std::optional<std::chrono::milliseconds> ParseRetryAfter(
 }  // namespace
 
 llm::LlmError ClassifyHttpFailure(int status, const std::string& body,
-                                  const std::vector<llm::HttpHeader>& headers) {
+                                  const std::vector<net::HttpHeader>& headers) {
     const ParsedError parsed = ParseErrorBody(body);
     const std::optional<std::chrono::milliseconds> retry_after = ParseRetryAfter(headers);
 
@@ -102,7 +102,7 @@ llm::LlmError ClassifyErrorEventData(std::string_view data) {
     return llm::LlmError(category, message);
 }
 
-llm::LlmError ClassifyTransportFailure(const llm::HttpError& error) {
+llm::LlmError ClassifyTransportFailure(const net::HttpError& error) {
     return llm::LlmError(llm::LlmErrorCategory::Transport, error.what());
 }
 

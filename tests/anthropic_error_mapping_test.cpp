@@ -81,7 +81,7 @@ TEST_CASE("ClassifyErrorEventData: non-JSON data falls back to ServerError with 
 }
 
 TEST_CASE("ClassifyTransportFailure: always Transport", "[anthropic_error]") {
-    const llm::HttpError http_error(llm::HttpErrorKind::ConnectFailed, "connection refused");
+    const net::HttpError http_error(net::HttpErrorKind::ConnectFailed, "connection refused");
     const auto error = ClassifyTransportFailure(http_error);
     CHECK(error.category() == llm::LlmErrorCategory::Transport);
 }

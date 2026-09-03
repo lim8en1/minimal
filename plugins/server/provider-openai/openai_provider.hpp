@@ -2,8 +2,8 @@
 
 #include <nlohmann/json.hpp>
 
-#include "minimal/llm/http_client.hpp"
 #include "minimal/llm/provider.hpp"
+#include "minimal/net/http_client.hpp"
 
 namespace minimal::provider_openai {
 
@@ -19,10 +19,10 @@ public:
     llm::ChatResponse StreamComplete(const llm::ChatRequest& request, const llm::StreamEventSink& sink) override;
 
 private:
-    llm::HttpRequest BuildHttpRequest(std::string body, bool streaming) const;
+    net::HttpRequest BuildHttpRequest(std::string body, bool streaming) const;
 
     llm::ProviderConfig config_;
-    llm::HttpClient http_;  // stateless -- see HttpClient's own contract
+    net::HttpClient http_;  // stateless -- see HttpClient's own contract
 };
 
 }  // namespace minimal::provider_openai

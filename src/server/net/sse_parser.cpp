@@ -1,8 +1,8 @@
-#include "minimal/llm/sse_parser.hpp"
+#include "minimal/net/sse_parser.hpp"
 
 #include <stdexcept>
 
-namespace minimal::llm {
+namespace minimal::net {
 namespace {
 
 std::string_view strip_cr(std::string_view line) {
@@ -112,4 +112,4 @@ std::vector<SseFrame> SseParser::Feed(std::string_view chunk) {
     return frames;
 }
 
-}  // namespace minimal::llm
+}  // namespace minimal::net

@@ -84,7 +84,7 @@ std::vector<llm::DiscoveredModel> ParseModelList(const std::string& body) {
 }
 
 std::vector<llm::DiscoveredModel> OpenAiModelCatalog::List(const llm::ProviderConfig& config) const {
-    llm::HttpRequest request;
+    net::HttpRequest request;
     request.url = ModelsUrl(config.base_url);
     request.connect_timeout = config.connect_timeout;
     request.request_timeout = kListRequestTimeout;
@@ -92,7 +92,7 @@ std::vector<llm::DiscoveredModel> OpenAiModelCatalog::List(const llm::ProviderCo
         request.headers.push_back({"Authorization", "Bearer " + config.api_key});
     }
 
-    const llm::HttpResponse response = http_.Get(request);
+    const net::HttpResponse response = http_.Get(request);
     if (response.status < 200 || response.status >= 300) {
         // Classified the same way a chat call against the same backend would
         // be, so a 401 from a stale key reads as an auth error, not "catalog

@@ -1,8 +1,8 @@
 #include <catch2/catch_test_macros.hpp>
 
-#include "minimal/llm/sse_parser.hpp"
+#include "minimal/net/sse_parser.hpp"
 
-using namespace minimal::llm;
+using namespace minimal::net;
 
 namespace {
 

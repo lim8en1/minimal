@@ -8,9 +8,9 @@
 #include <thread>
 #include <utility>
 
-#include "minimal/llm/http_client.hpp"
-#include "minimal/llm/sse_parser.hpp"
 #include "minimal/mcp/mcp_stdio_shim.hpp"
+#include "minimal/net/http_client.hpp"
+#include "minimal/net/sse_parser.hpp"
 
 namespace minimal::mcp {
 
@@ -309,8 +309,8 @@ public:
 private:
     int64_t NextId() { return next_id_++; }
 
-    llm::HttpRequest BuildRequest(const std::string& body) const {
-        llm::HttpRequest request;
+    net::HttpRequest BuildRequest(const std::string& body) const {
+        net::HttpRequest request;
         request.url = endpoint_.url;
         request.body = body;
         request.request_timeout = request_timeout_;
@@ -346,19 +346,19 @@ private:
         auto is_sse = std::make_shared<bool>(false);
         auto session_id = std::make_shared<std::string>();
         auto buffer = std::make_shared<std::string>();
-        auto parser = std::make_shared<llm::SseParser>();
+        auto parser = std::make_shared<net::SseParser>();
 
         try {
             session_.StreamPost(
                 BuildRequest(body),
                 [status, is_sse, session_id](int code,
-                                             const std::vector<llm::HttpHeader>& headers) {
+                                             const std::vector<net::HttpHeader>& headers) {
                     *status = code;
                     // Names arrive verbatim from the wire (libcurl does not
                     // normalize case): compare case-insensitively, the same
-                    // rule llm::FindHeaderCI is built on.
+                    // rule net::FindHeaderCI is built on.
                     for (const auto& header : headers) {
-                        if (llm::HeaderNameEquals(header.name, "Content-Type")) {
+                        if (net::HeaderNameEquals(header.name, "Content-Type")) {
                             *is_sse = header.value.find("text/event-stream") != std::string::npos;
                         }
                         // A CR/LF in a value libcurl handed back verbatim would
@@ -370,7 +370,7 @@ private:
                         // here and at BuildRequest), so this degrades to that
                         // existing, well-defined path rather than forwarding a
                         // sanitized-but-still-adversarial value.
-                        if (llm::HeaderNameEquals(header.name, "mcp-session-id") &&
+                        if (net::HeaderNameEquals(header.name, "mcp-session-id") &&
                             header.value.find('\r') == std::string::npos &&
                             header.value.find('\n') == std::string::npos) {
                             *session_id = header.value;
@@ -396,7 +396,7 @@ private:
                     buffer->append(chunk);
                     return true;
                 });
-        } catch (const llm::HttpError& e) {
+        } catch (const net::HttpError& e) {
             // The abort path lands here too; a completed slot means the
             // response was found, not that anything failed. Read under the
             // slot mutex: Complete() may have run on this thread, but the
@@ -450,14 +450,14 @@ private:
                                                 {"params", nlohmann::json::object()}}
                                     .dump();
         try {
-            const llm::HttpResponse response = session_.Post(BuildRequest(body));
+            const net::HttpResponse response = session_.Post(BuildRequest(body));
             if (response.status < 200 || response.status >= 300) {
                 error = "MCP server returned HTTP " + std::to_string(response.status) +
                         " for " + method;
                 return false;
             }
             return true;
-        } catch (const llm::HttpError& e) {
+        } catch (const net::HttpError& e) {
             error = std::string("MCP transport error: ") + e.what();
             return false;
         }
@@ -467,7 +467,7 @@ private:
     // run on the single worker thread -- the session's not-thread-safe
     // contract holds by construction, and requests to one host reuse the
     // TCP+TLS connection instead of re-handshaking per call.
-    llm::HttpSession session_;
+    net::HttpSession session_;
     McpEndpoint endpoint_;
     std::chrono::milliseconds request_timeout_;
     std::int64_t max_list_pages_;

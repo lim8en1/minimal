@@ -1,11 +1,11 @@
-#include "minimal/llm/http_client.hpp"
+#include "minimal/net/http_client.hpp"
 
 #include <cctype>
 #include <chrono>
 
 #include <curl/curl.h>
 
-namespace minimal::llm {
+namespace minimal::net {
 
 bool HeaderNameEquals(std::string_view a, std::string_view b) {
     if (a.size() != b.size()) return false;
@@ -376,4 +376,4 @@ HttpResponse HttpSession::StreamPost(const HttpRequest& request, const HttpHeade
     return ConfigureAndPerform(curl, request, Mode::Streaming, &on_headers, &on_chunk);
 }
 
-}  // namespace minimal::llm
+}  // namespace minimal::net

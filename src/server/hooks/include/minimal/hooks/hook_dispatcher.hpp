@@ -63,10 +63,10 @@
 #include <utility>
 #include <vector>
 
+#include "minimal/common/event_queue.hpp"
 #include "minimal/common/logger.hpp"
 #include "minimal/config/hooks_config.hpp"
 #include "minimal/llm/chat.hpp"
-#include "minimal/rpc/event_queue.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -249,7 +249,7 @@ private:
     // destructor. Mutable because Emit/EmitAsync are const: they run after
     // Configure sealed the ACTION map, but the queue and counters are runtime
     // state by design.
-    mutable rpc::EventQueue<std::function<void()>> tasks_;
+    mutable common::EventQueue<std::function<void()>> tasks_;
     mutable std::thread dispatcher_thread_;
     mutable std::atomic<int> outstanding_{0};
     mutable std::atomic<std::size_t> dropped_{0};

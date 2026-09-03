@@ -215,7 +215,7 @@ TEST_CASE("HtmlToText: malformed markup does not hang or crash", "[tools_web][ht
 
 TEST_CASE("web_fetch: plain text response is returned as-is", "[tools_web][fetch]") {
     LoopbackServer server({HttpResponseOf(200, "OK", "text/plain", "hello world")});
-    auto tool = MakeWebFetchTool(LocalSettings(), llm::HttpClient{});
+    auto tool = MakeWebFetchTool(LocalSettings(), net::HttpClient{});
     auto ctx = Context();
     const auto result = tool->execute({{"url", server.url()}}, ctx);
     CHECK_FALSE(result.is_error);
@@ -224,7 +224,7 @@ TEST_CASE("web_fetch: plain text response is returned as-is", "[tools_web][fetch
 
 TEST_CASE("web_fetch: an HTML response is converted to text", "[tools_web][fetch]") {
     LoopbackServer server({HttpResponseOf(200, "OK", "text/html", "<p>hello <b>world</b></p>")});
-    auto tool = MakeWebFetchTool(LocalSettings(), llm::HttpClient{});
+    auto tool = MakeWebFetchTool(LocalSettings(), net::HttpClient{});
     auto ctx = Context();
     const auto result = tool->execute({{"url", server.url()}}, ctx);
     CHECK_FALSE(result.is_error);
@@ -234,7 +234,7 @@ TEST_CASE("web_fetch: an HTML response is converted to text", "[tools_web][fetch
 
 TEST_CASE("web_fetch: a non-2xx status is a tool error", "[tools_web][fetch]") {
     LoopbackServer server({HttpResponseOf(404, "Not Found", "text/plain", "gone")});
-    auto tool = MakeWebFetchTool(LocalSettings(), llm::HttpClient{});
+    auto tool = MakeWebFetchTool(LocalSettings(), net::HttpClient{});
     auto ctx = Context();
     const auto result = tool->execute({{"url", server.url()}}, ctx);
     CHECK(result.is_error);
@@ -247,7 +247,7 @@ TEST_CASE("web_fetch: an absolute redirect is followed", "[tools_web][fetch]") {
     LoopbackServer redirector(
         {HttpResponseOf(302, "Found", "text/plain", "", {"Location: " + target_url})});
 
-    auto tool = MakeWebFetchTool(LocalSettings(), llm::HttpClient{});
+    auto tool = MakeWebFetchTool(LocalSettings(), net::HttpClient{});
     auto ctx = Context();
     const auto result = tool->execute({{"url", redirector.url()}}, ctx);
     CHECK_FALSE(result.is_error);
@@ -257,7 +257,7 @@ TEST_CASE("web_fetch: an absolute redirect is followed", "[tools_web][fetch]") {
 TEST_CASE("web_fetch: a relative redirect is refused, not guessed at", "[tools_web][fetch]") {
     LoopbackServer server(
         {HttpResponseOf(302, "Found", "text/plain", "", {"Location: /login"})});
-    auto tool = MakeWebFetchTool(LocalSettings(), llm::HttpClient{});
+    auto tool = MakeWebFetchTool(LocalSettings(), net::HttpClient{});
     auto ctx = Context();
     const auto result = tool->execute({{"url", server.url()}}, ctx);
     CHECK(result.is_error);
@@ -266,7 +266,7 @@ TEST_CASE("web_fetch: a relative redirect is refused, not guessed at", "[tools_w
 
 TEST_CASE("web_fetch: a loopback URL is refused before any request is made",
          "[tools_web][fetch]") {
-    auto tool = MakeWebFetchTool(WebSettings{}, llm::HttpClient{});
+    auto tool = MakeWebFetchTool(WebSettings{}, net::HttpClient{});
     auto ctx = Context();
     const auto result = tool->execute({{"url", "http://127.0.0.1:1/"}}, ctx);
     CHECK(result.is_error);
@@ -278,7 +278,7 @@ TEST_CASE("web_fetch: allow_private_hosts opts a loopback target back in",
     LoopbackServer server({HttpResponseOf(200, "OK", "text/plain", "local")});
     WebSettings settings;
     settings.fetch_allow_private_hosts = true;
-    auto tool = MakeWebFetchTool(settings, llm::HttpClient{});
+    auto tool = MakeWebFetchTool(settings, net::HttpClient{});
     auto ctx = Context();
     const auto result = tool->execute({{"url", server.url()}}, ctx);
     CHECK_FALSE(result.is_error);
@@ -286,14 +286,14 @@ TEST_CASE("web_fetch: allow_private_hosts opts a loopback target back in",
 }
 
 TEST_CASE("web_fetch: 'url' is required", "[tools_web][fetch]") {
-    auto tool = MakeWebFetchTool(WebSettings{}, llm::HttpClient{});
+    auto tool = MakeWebFetchTool(WebSettings{}, net::HttpClient{});
     auto ctx = Context();
     const auto result = tool->execute(nlohmann::json::object(), ctx);
     CHECK(result.is_error);
 }
 
 TEST_CASE("web_fetch: declares network_access_required", "[tools_web][fetch]") {
-    auto tool = MakeWebFetchTool(WebSettings{}, llm::HttpClient{});
+    auto tool = MakeWebFetchTool(WebSettings{}, net::HttpClient{});
     CHECK(tool->network_access_required());
 }
 
@@ -302,7 +302,7 @@ TEST_CASE("web_fetch: declares network_access_required", "[tools_web][fetch]") {
 // ---------------------------------------------------------------------------
 
 TEST_CASE("web_search: reports plainly when unconfigured", "[tools_web][search]") {
-    auto tool = MakeWebSearchTool(WebSettings{}, llm::HttpClient{});
+    auto tool = MakeWebSearchTool(WebSettings{}, net::HttpClient{});
     auto ctx = Context();
     const auto result = tool->execute({{"query", "test"}}, ctx);
     CHECK(result.is_error);
@@ -316,7 +316,7 @@ TEST_CASE("web_search: a configured backend's results are formatted", "[tools_we
 
     WebSettings settings;
     settings.search_api_url = server.url();
-    auto tool = MakeWebSearchTool(settings, llm::HttpClient{});
+    auto tool = MakeWebSearchTool(settings, net::HttpClient{});
     auto ctx = Context();
     const auto result = tool->execute({{"query", "test"}}, ctx);
     CHECK_FALSE(result.is_error);
@@ -331,7 +331,7 @@ TEST_CASE("web_search: an unexpected backend shape is a clear tool error",
         {HttpResponseOf(200, "OK", "application/json", R"({"unexpected": true})")});
     WebSettings settings;
     settings.search_api_url = server.url();
-    auto tool = MakeWebSearchTool(settings, llm::HttpClient{});
+    auto tool = MakeWebSearchTool(settings, net::HttpClient{});
     auto ctx = Context();
     const auto result = tool->execute({{"query", "test"}}, ctx);
     CHECK(result.is_error);
@@ -341,7 +341,7 @@ TEST_CASE("web_search: an unexpected backend shape is a clear tool error",
 TEST_CASE("web_search: 'query' is required", "[tools_web][search]") {
     WebSettings settings;
     settings.search_api_url = "http://127.0.0.1:1/";
-    auto tool = MakeWebSearchTool(settings, llm::HttpClient{});
+    auto tool = MakeWebSearchTool(settings, net::HttpClient{});
     auto ctx = Context();
     const auto result = tool->execute(nlohmann::json::object(), ctx);
     CHECK(result.is_error);

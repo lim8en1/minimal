@@ -43,8 +43,8 @@
 #include <vector>
 
 #include "minimal/agent/session_observer.hpp"
+#include "minimal/common/event_queue.hpp"
 #include "minimal/common/logger.hpp"
-#include "minimal/rpc/event_queue.hpp"
 
 namespace minimal::agent {
 
@@ -104,7 +104,7 @@ private:
     std::condition_variable idle_cv_;
 
     common::Logger& logger_;
-    rpc::EventQueue<std::function<void()>> tasks_;
+    common::EventQueue<std::function<void()>> tasks_;
     std::thread dispatcher_;
     std::atomic<int> outstanding_{0};
     // Notifications refused because the queue was full or closed. Counted so a

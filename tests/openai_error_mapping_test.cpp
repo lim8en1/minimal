@@ -43,13 +43,13 @@ TEST_CASE("ClassifyHttpFailure: falls back to a generic message when body isn't 
 }
 
 TEST_CASE("ClassifyTransportFailure: every non-Cancelled kind maps to Transport", "[openai_error_mapping]") {
-    CHECK(ClassifyTransportFailure(llm::HttpError(llm::HttpErrorKind::ConnectFailed, "x")).category() ==
+    CHECK(ClassifyTransportFailure(net::HttpError(net::HttpErrorKind::ConnectFailed, "x")).category() ==
           llm::LlmErrorCategory::Transport);
-    CHECK(ClassifyTransportFailure(llm::HttpError(llm::HttpErrorKind::TlsError, "x")).category() ==
+    CHECK(ClassifyTransportFailure(net::HttpError(net::HttpErrorKind::TlsError, "x")).category() ==
           llm::LlmErrorCategory::Transport);
-    CHECK(ClassifyTransportFailure(llm::HttpError(llm::HttpErrorKind::Timeout, "x")).category() ==
+    CHECK(ClassifyTransportFailure(net::HttpError(net::HttpErrorKind::Timeout, "x")).category() ==
           llm::LlmErrorCategory::Transport);
-    CHECK(ClassifyTransportFailure(llm::HttpError(llm::HttpErrorKind::Other, "x")).category() ==
+    CHECK(ClassifyTransportFailure(net::HttpError(net::HttpErrorKind::Other, "x")).category() ==
           llm::LlmErrorCategory::Transport);
 }
 

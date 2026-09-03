@@ -14,8 +14,8 @@ add_library(minimal_server_core SHARED
     tools/path_confinement.cpp
     tools/file_access.cpp
     tools/atomic_write.cpp
-    llm/sse_parser.cpp
-    llm/http_client.cpp
+    net/sse_parser.cpp
+    net/http_client.cpp
     llm/token_accounting.cpp
     config/frontmatter.cpp
     config/permission_codec.cpp
@@ -28,7 +28,6 @@ add_library(minimal_server_core SHARED
     config/channels_config.cpp
     config/skill_registry.cpp
     config/project_context.cpp
-    config/fd_hygiene.cpp
     config/sanity_check.cpp
     hooks/hook_dispatcher.cpp
     hooks/hook_shell.cpp
@@ -91,6 +90,7 @@ add_library(minimal::server_core ALIAS minimal_server_core)
 target_include_directories(minimal_server_core PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/tools/include"
     "${CMAKE_CURRENT_SOURCE_DIR}/llm/include"
+    "${CMAKE_CURRENT_SOURCE_DIR}/net/include"
     "${CMAKE_CURRENT_SOURCE_DIR}/config/include"
     "${CMAKE_CURRENT_SOURCE_DIR}/plugins/include"
     "${CMAKE_CURRENT_SOURCE_DIR}/hooks/include"

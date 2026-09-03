@@ -1,6 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
 
-#include "minimal/llm/http_client.hpp"
+#include "minimal/net/http_client.hpp"
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -14,7 +14,7 @@
 #include <string>
 #include <thread>
 
-using namespace minimal::llm;
+using namespace minimal::net;
 
 namespace {
 

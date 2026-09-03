@@ -6,7 +6,7 @@
 #include <sstream>
 #include <stdexcept>
 
-#include "minimal/llm/http_client.hpp"
+#include "minimal/net/http_client.hpp"
 
 namespace minimal::cost_tracker {
 namespace {
@@ -26,13 +26,13 @@ std::string Iso8601UtcNow() {
 RatesFetchOutcome FetchAndUpdateRates(const CostSettings& settings, CostStore& store,
                                       RateTable& rates) {
     RatesFetchOutcome outcome;
-    llm::HttpRequest request;
+    net::HttpRequest request;
     request.url = settings.rates_fetch_url;
     request.request_timeout = std::chrono::milliseconds(settings.rates_fetch_timeout_ms);
-    llm::HttpResponse response;
+    net::HttpResponse response;
     try {
-        response = llm::HttpClient{}.Get(request);
-    } catch (const llm::HttpError& error) {
+        response = net::HttpClient{}.Get(request);
+    } catch (const net::HttpError& error) {
         outcome.error = std::string("fetching rates failed: ") + error.what();
         return outcome;
     }

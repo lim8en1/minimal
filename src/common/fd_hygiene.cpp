@@ -1,4 +1,4 @@
-#include "minimal/config/fd_hygiene.hpp"
+#include "minimal/common/fd_hygiene.hpp"
 
 #include <dirent.h>
 #include <fcntl.h>
@@ -6,7 +6,7 @@
 
 #include <cstdlib>
 
-namespace minimal::config {
+namespace minimal::common {
 
 std::size_t MarkInheritedFdsCloseOnExec() {
     std::size_t marked = 0;
@@ -35,4 +35,4 @@ std::size_t MarkInheritedFdsCloseOnExec() {
     return marked;
 }
 
-}  // namespace minimal::config
+}  // namespace minimal::common

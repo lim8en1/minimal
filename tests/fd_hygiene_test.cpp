@@ -12,7 +12,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 
-#include "minimal/config/fd_hygiene.hpp"
+#include "minimal/common/fd_hygiene.hpp"
 #include "temp_dir.hpp"
 
 TEST_CASE("MarkInheritedFdsCloseOnExec marks descriptors opened without O_CLOEXEC",
@@ -23,7 +23,7 @@ TEST_CASE("MarkInheritedFdsCloseOnExec marks descriptors opened without O_CLOEXE
     REQUIRE(fd >= 0);
     REQUIRE((::fcntl(fd, F_GETFD) & FD_CLOEXEC) == 0);
 
-    minimal::config::MarkInheritedFdsCloseOnExec();
+    minimal::common::MarkInheritedFdsCloseOnExec();
 
     CHECK((::fcntl(fd, F_GETFD) & FD_CLOEXEC) != 0);
     ::close(fd);
@@ -36,7 +36,7 @@ TEST_CASE("already-marked descriptors are left alone and stdio is never touched"
     const int fd = ::open(probe.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0644);
     REQUIRE(fd >= 0);
 
-    minimal::config::MarkInheritedFdsCloseOnExec();
+    minimal::common::MarkInheritedFdsCloseOnExec();
 
     CHECK((::fcntl(fd, F_GETFD) & FD_CLOEXEC) != 0);
     ::close(fd);

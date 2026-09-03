@@ -28,11 +28,11 @@ std::string ExtractMessage(const std::string& body, int status) {
 // it to 503/529 overloads routinely. Hostile or absurd values (negative,
 // overflow, an HTTP-date in the ms field) leave the hint unset rather than
 // turning into a wild wait.
-std::optional<std::chrono::milliseconds> ParseRetryAfter(const std::vector<llm::HttpHeader>& headers) {
-    std::optional<std::string> value = llm::FindHeaderCI(headers, "retry-after-ms");
+std::optional<std::chrono::milliseconds> ParseRetryAfter(const std::vector<net::HttpHeader>& headers) {
+    std::optional<std::string> value = net::FindHeaderCI(headers, "retry-after-ms");
     bool is_ms = true;
     if (!value) {
-        value = llm::FindHeaderCI(headers, "Retry-After");
+        value = net::FindHeaderCI(headers, "Retry-After");
         is_ms = false;
     }
     if (!value) return std::nullopt;
@@ -53,7 +53,7 @@ std::optional<std::chrono::milliseconds> ParseRetryAfter(const std::vector<llm::
 
 }  // namespace
 
-llm::LlmError ClassifyHttpFailure(int status, const std::string& body, const std::vector<llm::HttpHeader>& headers) {
+llm::LlmError ClassifyHttpFailure(int status, const std::string& body, const std::vector<net::HttpHeader>& headers) {
     std::string message = ExtractMessage(body, status);
     std::optional<std::chrono::milliseconds> retry_after = ParseRetryAfter(headers);
 
@@ -105,7 +105,7 @@ llm::LlmError ClassifyErrorEventData(std::string_view data) {
     return llm::LlmError(category, message);
 }
 
-llm::LlmError ClassifyTransportFailure(const llm::HttpError& error) {
+llm::LlmError ClassifyTransportFailure(const net::HttpError& error) {
     return llm::LlmError(llm::LlmErrorCategory::Transport, error.what());
 }
 

@@ -15,8 +15,8 @@ using tools::ToolSpec;
 
 ToolResult Error(std::string message) { return ToolResult{true, std::move(message)}; }
 
-bool ContentTypeIsHtml(const std::vector<llm::HttpHeader>& headers) {
-    const auto content_type = llm::FindHeaderCI(headers, "Content-Type");
+bool ContentTypeIsHtml(const std::vector<net::HttpHeader>& headers) {
+    const auto content_type = net::FindHeaderCI(headers, "Content-Type");
     if (!content_type) return false;
     // "text/html", "application/xhtml+xml", with or without a charset
     // parameter -- a plain substring check is enough here, this is not a
@@ -29,8 +29,8 @@ bool ContentTypeIsHtml(const std::vector<llm::HttpHeader>& headers) {
 // getting that wrong silently (e.g. dropping the scheme/host) is worse than
 // declining to follow it, so this tool reports "cannot follow" instead of
 // guessing.
-std::optional<std::string> AbsoluteRedirectTarget(const std::vector<llm::HttpHeader>& headers) {
-    const auto location = llm::FindHeaderCI(headers, "Location");
+std::optional<std::string> AbsoluteRedirectTarget(const std::vector<net::HttpHeader>& headers) {
+    const auto location = net::FindHeaderCI(headers, "Location");
     if (!location) return std::nullopt;
     if (location->rfind("http://", 0) == 0 || location->rfind("https://", 0) == 0) {
         return *location;
@@ -40,7 +40,7 @@ std::optional<std::string> AbsoluteRedirectTarget(const std::vector<llm::HttpHea
 
 class WebFetchTool : public tools::Tool {
 public:
-    WebFetchTool(WebSettings settings, llm::HttpClient http)
+    WebFetchTool(WebSettings settings, net::HttpClient http)
         : settings_(std::move(settings)), http_(std::move(http)) {
         spec_.name = "web_fetch";
         spec_.category = ToolCategory::Execute;
@@ -70,14 +70,14 @@ public:
             const UrlCheck check = CheckUrl(url, settings_.fetch_allow_private_hosts);
             if (!check.ok) return Error("web_fetch: refused (" + check.reason + ")");
 
-            llm::HttpRequest request;
+            net::HttpRequest request;
             request.url = url;
             request.request_timeout = std::chrono::milliseconds(settings_.fetch_timeout_ms);
 
-            llm::HttpResponse response;
+            net::HttpResponse response;
             try {
                 response = http_.Get(request);
-            } catch (const llm::HttpError& error) {
+            } catch (const net::HttpError& error) {
                 return Error(std::string("web_fetch: ") + error.what());
             }
 
@@ -107,12 +107,12 @@ public:
 private:
     ToolSpec spec_;
     WebSettings settings_;
-    llm::HttpClient http_;  // stateless -- see HttpClient's own contract
+    net::HttpClient http_;  // stateless -- see HttpClient's own contract
 };
 
 }  // namespace
 
-std::unique_ptr<tools::Tool> MakeWebFetchTool(WebSettings settings, llm::HttpClient http) {
+std::unique_ptr<tools::Tool> MakeWebFetchTool(WebSettings settings, net::HttpClient http) {
     return std::make_unique<WebFetchTool>(std::move(settings), std::move(http));
 }
 

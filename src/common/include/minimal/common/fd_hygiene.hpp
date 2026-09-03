@@ -2,7 +2,7 @@
 
 #include <cstddef>
 
-namespace minimal::config {
+namespace minimal::common {
 
 // Marks every open file descriptor above stdio close-on-exec, so a child
 // spawned later (bash commands, MCP stdio servers, hook actions) inherits only
@@ -17,4 +17,4 @@ namespace minimal::config {
 // Returns the number of descriptors newly marked.
 std::size_t MarkInheritedFdsCloseOnExec();
 
-}  // namespace minimal::config
+}  // namespace minimal::common

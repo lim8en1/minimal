@@ -16,9 +16,9 @@
 #include <string>
 #include <vector>
 
-#include "minimal/llm/http_client.hpp"
 #include "minimal/llm/model_catalog.hpp"
 #include "minimal/llm/provider.hpp"
+#include "minimal/net/http_client.hpp"
 
 namespace minimal::provider_openai {
 
@@ -32,12 +32,12 @@ std::vector<llm::DiscoveredModel> ParseModelList(const std::string& body);
 // concurrently from resolvers on several session workers and the command pool.
 class OpenAiModelCatalog : public llm::ModelCatalog {
 public:
-    explicit OpenAiModelCatalog(const llm::HttpClient& http) : http_(http) {}
+    explicit OpenAiModelCatalog(const net::HttpClient& http) : http_(http) {}
 
     std::vector<llm::DiscoveredModel> List(const llm::ProviderConfig& config) const override;
 
 private:
-    llm::HttpClient http_;
+    net::HttpClient http_;
 };
 
 }  // namespace minimal::provider_openai

@@ -6,7 +6,7 @@
 #include "anthropic_request.hpp"
 #include "anthropic_response.hpp"
 #include "anthropic_stream_reassembler.hpp"
-#include "minimal/llm/sse_parser.hpp"
+#include "minimal/net/sse_parser.hpp"
 
 namespace minimal::provider_anthropic {
 
@@ -20,8 +20,8 @@ constexpr const char* kAnthropicVersion = "2023-06-01";
 
 }  // namespace
 
-llm::HttpRequest AnthropicProvider::BuildHttpRequest(std::string body, bool streaming) const {
-    llm::HttpRequest request;
+net::HttpRequest AnthropicProvider::BuildHttpRequest(std::string body, bool streaming) const {
+    net::HttpRequest request;
     std::string base = config_.base_url;
     while (!base.empty() && base.back() == '/') base.pop_back();
     // Unlike provider-openai's convention, base_url here is expected WITHOUT
@@ -42,13 +42,13 @@ llm::HttpRequest AnthropicProvider::BuildHttpRequest(std::string body, bool stre
 }
 
 llm::ChatResponse AnthropicProvider::Complete(const llm::ChatRequest& request) {
-    llm::HttpRequest http_request = BuildHttpRequest(BuildRequestBody(request, /*stream=*/false),
+    net::HttpRequest http_request = BuildHttpRequest(BuildRequestBody(request, /*stream=*/false),
                                                      /*streaming=*/false);
 
-    llm::HttpResponse http_response;
+    net::HttpResponse http_response;
     try {
         http_response = http_.Post(http_request);
-    } catch (const llm::HttpError& error) {
+    } catch (const net::HttpError& error) {
         throw ClassifyTransportFailure(error);
     }
 
@@ -68,20 +68,20 @@ llm::ChatResponse AnthropicProvider::Complete(const llm::ChatRequest& request) {
 
 llm::ChatResponse AnthropicProvider::StreamComplete(const llm::ChatRequest& request,
                                                     const llm::StreamEventSink& sink) {
-    llm::HttpRequest http_request = BuildHttpRequest(BuildRequestBody(request, /*stream=*/true),
+    net::HttpRequest http_request = BuildHttpRequest(BuildRequestBody(request, /*stream=*/true),
                                                      /*streaming=*/true);
 
     AnthropicStreamReassembler reassembler;
-    llm::SseParser sse_parser;
+    net::SseParser sse_parser;
     int response_status = 0;
-    std::vector<llm::HttpHeader> response_headers;
+    std::vector<net::HttpHeader> response_headers;
     std::string error_body;
     bool is_error_status = false;
     bool cancelled_by_sink = false;
     bool error_body_capped = false;
     std::exception_ptr pending_error;
 
-    auto on_headers = [&](int status, const std::vector<llm::HttpHeader>& headers) {
+    auto on_headers = [&](int status, const std::vector<net::HttpHeader>& headers) {
         response_status = status;
         response_headers = headers;
         is_error_status = status < 200 || status >= 300;
@@ -139,12 +139,12 @@ llm::ChatResponse AnthropicProvider::StreamComplete(const llm::ChatRequest& requ
 
     try {
         http_.StreamPost(http_request, on_headers, on_chunk);
-    } catch (const llm::HttpError& error) {
+    } catch (const net::HttpError& error) {
         rethrow_pending_if_any();
         if (error_body_capped && response_status != 0) {
             throw ClassifyHttpFailure(response_status, error_body, response_headers);
         }
-        if (cancelled_by_sink || error.kind() == llm::HttpErrorKind::Cancelled) {
+        if (cancelled_by_sink || error.kind() == net::HttpErrorKind::Cancelled) {
             try {
                 // Blocks announced but never closed: a user cancel is
                 // reported as Cancelled, not a parse failure -- same

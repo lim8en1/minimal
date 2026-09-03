@@ -55,7 +55,7 @@ struct McpLimits {
 using NotificationSink = std::function<void(const std::string&)>;
 
 // One live MCP server connection -- either a spawned stdio subprocess (cpp-mcp)
-// or a Streamable-HTTP endpoint (hand-rolled over llm::HttpClient + SseParser;
+// or a Streamable-HTTP endpoint (hand-rolled over net::HttpClient + SseParser;
 // cpp-mcp's bundled sse_client speaks the legacy SSE protocol and cannot talk
 // to a modern streamable-http server).
 //
