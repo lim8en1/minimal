@@ -17,6 +17,7 @@
 #include "minimal/mcp/mcp_client_manager.hpp"
 #include "minimal/mcp/signal_protocol.hpp"
 #include "minimal/plugins/plugin_abi.h"
+#include "minimal/rpc/event_translator.hpp"
 #include "minimal/rpc/proto_convert.hpp"
 #include "minimal/rpc/session_wiring.hpp"
 
@@ -53,6 +54,16 @@ int ClampPageSize(int requested, int fallback) {
 const agent::MentionResolver& DefaultMentionResolver() {
     static const agent::PrefixMentionResolver resolver;
     return resolver;
+}
+
+// Session's public surface deliberately never names rpc::EventTranslator --
+// this is the one cast back to the concrete type, for the transport
+// operations (Subscribe/Unsubscribe/Pop/Publish/PublishTo/Resolve) that only
+// this layer needs. Safe: `session` owns the referenced EventTranslator for
+// as long as `session` itself is alive (SessionParams::transport_handle is
+// required at construction, never reassigned after).
+EventTranslator& Transport(agent::Session& session) {
+    return *static_cast<EventTranslator*>(session.transport().get());
 }
 
 }  // namespace
@@ -403,7 +414,7 @@ void SessionServiceImpl::PublishPromptResolved(agent::Session& session,
     v1::ServerEvent event;
     event.set_session_id(session.info().session_id);
     event.mutable_prompt_resolved()->set_request_id(request_id);
-    session.queue().Publish(std::move(event));
+    Transport(session).queue().Publish(std::move(event));
 }
 
 void SessionServiceImpl::Dispatch(const v1::ClientEvent& event, agent::Session& session) {
@@ -421,7 +432,7 @@ void SessionServiceImpl::Dispatch(const v1::ClientEvent& event, agent::Session& 
             // the variant makes a wrong-kind answer structurally unreadable
             // at the waiter rather than merely failing to parse there.
             const auto& request_id = event.permission_response().request_id();
-            if (session.pending().Resolve(
+            if (Transport(session).pending().Resolve(
                     request_id, PermissionAnswer{event.permission_response().SerializeAsString()})) {
                 PublishPromptResolved(session, request_id);
             }
@@ -430,7 +441,7 @@ void SessionServiceImpl::Dispatch(const v1::ClientEvent& event, agent::Session& 
 
         case v1::ClientEvent::kConfirmationResponse: {
             const auto& request_id = event.confirmation_response().request_id();
-            if (session.pending().Resolve(
+            if (Transport(session).pending().Resolve(
                     request_id, ConfirmationAnswer{event.confirmation_response().chosen_option()})) {
                 PublishPromptResolved(session, request_id);
             }
@@ -606,7 +617,12 @@ grpc::Status SessionServiceImpl::OpenSession(
     // seeding for the first subscriber, a resync notice for a later one), so
     // there is no single-consumer claim to race for and no ALREADY_EXISTS to
     // refuse with. The old refusal existed because one queue had one consumer.
-    const auto subscriber = session->Subscribe();
+    // NotifyAttached is this layer's obligation in exchange for owning
+    // Subscribe/Unsubscribe directly: it keeps ever_attached()/
+    // has_subscribers() (the reaper's initial-attach guard and detached-idle
+    // rule) accurate now that Session itself cannot see subscriber_count().
+    const auto subscriber = Transport(*session).queue().Subscribe();
+    session->NotifyAttached();
 
     // First on the stream, before anything the client's first event produces:
     // a freshly attached tab has everything its status bar renders from frame
@@ -629,14 +645,15 @@ grpc::Status SessionServiceImpl::OpenSession(
         //  * DETACH (and every bare drop): only THIS stream's queue closes,
         //    which is what unwinds a writer parked in Pop.
         if (terminate) sessions_.Terminate(session->info().session_id);
-        session->Unsubscribe(subscriber);
+        Transport(*session).queue().Unsubscribe(subscriber);
+        session->NotifyDetached();
         if (writer.joinable()) writer.join();
         ReleaseClientSlot();
         return status;
     };
     try {
         writer = std::thread([stream, session, subscriber] {
-            while (auto event = session->queue().Pop(subscriber)) {
+            while (auto event = Transport(*session).queue().Pop(subscriber)) {
                 if (!stream->Write(*event)) break;  // client went away
             }
         });
@@ -1030,7 +1047,7 @@ void SessionServiceImpl::EmitSessionMetadata(
     // Targeted at the new subscriber only -- the streams already attached have
     // their metadata. Never blocks; a refusal means the stream went away mid-
     // attach, which the handler unwind below handles.
-    if (!session.queue().PublishTo(subscriber, std::move(event))) {
+    if (!Transport(session).queue().PublishTo(subscriber, std::move(event))) {
         logger_.warn("session {}: stream closed during attach; SessionMetadataEvent dropped",
                      session.info().session_id);
     }

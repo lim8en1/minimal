@@ -14,12 +14,27 @@
 #include "fakes.hpp"
 #include "minimal/agent/session_registry.hpp"
 #include "minimal/common/logger.hpp"
+#include "session_events.hpp"
 #include "temp_dir.hpp"
 
 using namespace minimal;
 using namespace std::chrono_literals;
 
 namespace {
+
+// Session's public surface no longer owns Subscribe/Unsubscribe (Phase 4:
+// SessionServiceImpl owns them against the transport directly); these mirror
+// what it does, for tests that just need a subscriber present.
+rpc::EventBroadcaster::Handle Subscribe(agent::Session& session) {
+    auto handle = testing::Transport(session).queue().Subscribe();
+    session.NotifyAttached();
+    return handle;
+}
+
+void Unsubscribe(agent::Session& session, const rpc::EventBroadcaster::Handle& handle) {
+    testing::Transport(session).queue().Unsubscribe(handle);
+    session.NotifyDetached();
+}
 
 // A throwaway config directory, unique per process: catch_discover_tests runs
 // every TEST_CASE as its own ctest entry, so a fixed path would be wiped out
@@ -243,7 +258,7 @@ TEST_CASE("an attached session outlives the guard", "[session_registry]") {
     fixture.Build();
 
     auto session = fixture.registry->Create(Params("s1"));
-    const auto subscriber = session->Subscribe();
+    const auto subscriber = Subscribe(*session);
 
     std::this_thread::sleep_for(700ms);  // several guard periods
     CHECK(fixture.registry->size() == 1);
@@ -275,10 +290,10 @@ TEST_CASE("two detached quiescent sessions are both reaped by the idle TTL, on s
     // drops back to false: exactly the detached-quiescent state the reaper
     // reaps.
     {
-        const auto first_sub = first->Subscribe();
-        first->Unsubscribe(first_sub);
-        const auto second_sub = second->Subscribe();
-        second->Unsubscribe(second_sub);
+        const auto first_sub = Subscribe(*first);
+        Unsubscribe(*first, first_sub);
+        const auto second_sub = Subscribe(*second);
+        Unsubscribe(*second, second_sub);
     }
     CHECK(fixture.registry->size() == 2);
 
@@ -304,8 +319,8 @@ TEST_CASE("TerminateAll stops every live session", "[session_registry]") {
 
     auto first = fixture.registry->Create(Params("s1"));
     auto second = fixture.registry->Create(Params("s2"));
-    const auto first_sub = first->Subscribe();
-    const auto second_sub = second->Subscribe();
+    const auto first_sub = Subscribe(*first);
+    const auto second_sub = Subscribe(*second);
     CHECK(fixture.registry->size() == 2);
 
     fixture.registry->TerminateAll();
@@ -321,8 +336,8 @@ TEST_CASE("sessions are independent", "[session_registry]") {
 
     auto first = fixture.registry->Create(Params("s1"));
     auto second = fixture.registry->Create(Params("s2"));
-    const auto first_sub = first->Subscribe();
-    const auto second_sub = second->Subscribe();
+    const auto first_sub = Subscribe(*first);
+    const auto second_sub = Subscribe(*second);
 
     fixture.registry->Terminate("s1");
     CHECK(first->terminated());

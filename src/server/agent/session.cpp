@@ -7,18 +7,40 @@
 #include "minimal/agent/provider_instance_cache.hpp"
 
 #include <exception>
+#include <stdexcept>
 #include <utility>
 
 #include "minimal/agent/mention_expansion.hpp"
-#include "minimal/rpc/proto_convert.hpp"
 
 namespace minimal::agent {
 namespace {
 
-v1::ServerEvent MakeEvent(const std::string& session_id) {
-    v1::ServerEvent event;
-    event.set_session_id(session_id);
-    return event;
+// Fails construction loudly, before any member is built, rather than letting
+// a missing wiring field surface later as a silently-dropped event or a
+// std::bad_function_call from deep inside a lambda. Every real session gets
+// these from rpc::FinishSessionWiring (SessionRegistry::CreateResolved); a
+// test that constructs a Session directly must call it (or
+// rpc::ApplyPermissionAdvisor + rpc::FinishSessionWiring) itself first.
+SessionParams&& RequireWiring(SessionParams&& params) {
+    if (!params.event_sink) {
+        throw std::invalid_argument("SessionParams::event_sink is required");
+    }
+    if (!params.permission_checker) {
+        throw std::invalid_argument("SessionParams::permission_checker is required");
+    }
+    if (!params.confirmation_broker) {
+        throw std::invalid_argument("SessionParams::confirmation_broker is required");
+    }
+    if (!params.transport_handle) {
+        throw std::invalid_argument("SessionParams::transport_handle is required");
+    }
+    if (!params.cancel_pending_requests || !params.shutdown_pending_requests ||
+        !params.close_transport) {
+        throw std::invalid_argument(
+            "SessionParams::cancel_pending_requests/shutdown_pending_requests/close_transport are "
+            "required");
+    }
+    return std::move(params);
 }
 
 }  // namespace
@@ -29,7 +51,7 @@ Session::Session(SessionParams params, AgentPreset preset,
                  SessionObserverRegistry& observers, common::Logger& logger,
                  std::vector<llm::Message> seeded_history,
                  std::optional<std::int64_t> seed_first_persisted_seq, bool seed_head_is_summary)
-    : params_(std::move(params)),
+    : params_(RequireWiring(std::move(params))),
       preset_(std::move(preset)),
       logger_(logger),
       observers_(observers),
@@ -46,19 +68,19 @@ Session::Session(SessionParams params, AgentPreset preset,
                           ? std::make_unique<session::HistoryWindow>(*history_reader_,
                                                                      params_.session_id)
                           : nullptr),
-      // The channels block comes from the producer when it composed a checker
-      // that had to be built against the queue and pending maps (an advised
-      // permission checker, docs/EXTENSIBILITY.md §3); otherwise Session makes
-      // its own, which is what every plain session and test does.
-      channels_(params_.channels ? std::move(params_.channels)
-                                 : MakeSessionChannels(params_.session_id)),
-      checker_(params_.permission_checker ? std::move(params_.permission_checker)
-                                          : std::make_unique<rpc::WirePermissionChecker>(
-                                                params_.session_id, channels_->queue,
-                                                channels_->pending,
-                                                params_.unattended_prompt_timeout)),
-      confirmations_(params_.session_id, channels_->queue, channels_->pending,
-                     params_.unattended_prompt_timeout),
+      // Domain-only cross-thread state (background task bookkeeping,
+      // injections) -- always Session's own now that the transport half
+      // (queue, pending) lives on the producer-supplied wiring instead.
+      channels_(MakeSessionChannels()),
+      // Every field below is producer-supplied -- see RequireWiring above and
+      // rpc::FinishSessionWiring for who builds the wire defaults.
+      checker_(std::move(params_.permission_checker)),
+      confirmations_(std::move(params_.confirmation_broker)),
+      event_sink_(std::move(params_.event_sink)),
+      transport_(std::move(params_.transport_handle)),
+      shutdown_pending_requests_(std::move(params_.shutdown_pending_requests)),
+      cancel_pending_requests_(std::move(params_.cancel_pending_requests)),
+      close_transport_(std::move(params_.close_transport)),
       // The run mode the client asked for wins over the configured default: it
       // is a property of the CLIENT, not of the config. A headless run has no
       // human to answer a prompt, so it must be able to say so. apply_run_mode()
@@ -104,31 +126,29 @@ Session::Session(SessionParams params, AgentPreset preset,
     context.history = history_window_.get();
 
     const std::string session_id = params_.session_id;
-    // Sinks that OUTLIVE their invocation (background bash's watcher captures
-    // them past the tool call, the turn, and this worker's lifetime) must be
-    // backed by the channels shared_ptr, never by `this` or a raw queue
-    // pointer: after Terminate, Publish into the closed broadcaster refuses
-    // harmlessly instead of dangling. The worker-only sinks below capture raw
-    // pointers deliberately -- they cannot be invoked after the worker joins.
+    // The domain channels block (background task bookkeeping, injections)
+    // still needs sharing with sinks that OUTLIVE their invocation --
+    // background bash's watcher captures it past the tool call, the turn,
+    // and this worker's lifetime. event_sink_ needs no such care: every copy
+    // of it is independently self-sufficient (it is backed by an
+    // rpc::EventTranslator, whose own copy of the transport shared_ptr keeps
+    // the broadcaster alive on its own), so any sink below may capture it by
+    // value regardless of which thread ends up calling it.
     const auto channels = channels_;
-    auto* queue = &channels_->queue;
 
     context.injections = std::shared_ptr<InjectionQueue>(channels, &channels_->injections);
     context.session_lifetime = channels_;
 
-    context.tool_output_sink = [channels, session_id](std::string_view tool_use_id,
-                                                      std::string_view chunk) {
-        v1::ServerEvent event = MakeEvent(session_id);
-        auto* delta = event.mutable_tool_output_delta();
-        delta->set_tool_use_id(std::string(tool_use_id));
-        delta->set_chunk(std::string(chunk));
-        // Publish never blocks (event_broadcaster.hpp): a slow or absent
+    context.tool_output_sink = [sink = event_sink_](std::string_view tool_use_id,
+                                                    std::string_view chunk) {
+        // The sink never blocks (event_broadcaster.hpp): a slow or absent
         // subscriber drops its oldest and resyncs, and no subscriber at all
         // buffers in the backlog. The turn never waits on a client.
-        channels->queue.Publish(std::move(event));
+        sink(SessionEvent{ToolOutputDelta{std::string(tool_use_id), std::string(chunk)}});
     };
 
-    context.task_event_sink = [channels, session_id](const tools::BackgroundTaskEvent& task) {
+    context.task_event_sink = [channels, sink = event_sink_,
+                               session_id](const tools::BackgroundTaskEvent& task) {
         auto& live_tasks = channels->background_tasks_live;
         // Quiescence bookkeeping for the reaper (see background_tasks_live).
         // STARTED increments; every terminal state decrements -- floored at
@@ -143,36 +163,13 @@ Session::Session(SessionParams params, AgentPreset preset,
                                                      std::memory_order_acquire)) {
             }
         }
-        v1::ServerEvent event = MakeEvent(session_id);
-        auto* message = event.mutable_background_task();
-        message->set_task_id(task.task_id);
-        message->set_tool_use_id(task.tool_use_id);
-        message->set_command(task.command);
-        message->set_pid(task.pid);
-        switch (task.state) {
-            case tools::BackgroundTaskEvent::State::kStarted:
-                message->set_state(v1::BackgroundTaskEvent::STARTED);
-                break;
-            case tools::BackgroundTaskEvent::State::kCompleted:
-                message->set_state(v1::BackgroundTaskEvent::COMPLETED);
-                break;
-            case tools::BackgroundTaskEvent::State::kFailed:
-                message->set_state(v1::BackgroundTaskEvent::FAILED);
-                break;
-            case tools::BackgroundTaskEvent::State::kTimedOut:
-                message->set_state(v1::BackgroundTaskEvent::TIMED_OUT);
-                break;
-            case tools::BackgroundTaskEvent::State::kKilled:
-                message->set_state(v1::BackgroundTaskEvent::KILLED);
-                break;
-        }
-        // The caller may be the watcher thread, never the worker. Publish
+        // The caller may be the watcher thread, never the worker. The sink
         // never blocks and refuses only a closed broadcaster (termination):
         // that is the one case worth a warning, because "dropped" events
         // during normal operation are the designed degradation for a stalled
         // subscriber -- the transcript, not this status channel, is the
         // authoritative record.
-        if (!channels->queue.Publish(std::move(event))) {
+        if (!sink(SessionEvent{task})) {
             // DefaultLogger is process-lifetime; the session logger is the
             // same object. This lambda can outlive `logger_`'s session, but
             // not the logger itself.
@@ -182,16 +179,8 @@ Session::Session(SessionParams params, AgentPreset preset,
         }
     };
 
-    context.tool_lifecycle_sink = [this, queue, session_id](const ToolLifecycleEvent& lifecycle) {
-        v1::ServerEvent event = MakeEvent(session_id);
-        auto* execution = event.mutable_tool_execution();
-        execution->set_tool_use_id(lifecycle.tool_use_id);
-        execution->set_tool_name(lifecycle.tool_name);
-        *execution->mutable_input() = rpc::JsonToStruct(lifecycle.input);
-        execution->set_started(lifecycle.started);
-        if (!lifecycle.started) execution->set_is_error(lifecycle.is_error);
-        execution->set_started_at_unix_ms(lifecycle.started_at_unix_ms);
-        queue->Publish(std::move(event));
+    context.tool_lifecycle_sink = [this, sink = event_sink_](const ToolLifecycleEvent& lifecycle) {
+        sink(SessionEvent{lifecycle});
 
         // AND THE OBSERVER SIDE, which had no producer at all. ARCHITECTURE.md
         // documents OnToolExecuted as one of the four SessionObserver hooks, and
@@ -221,14 +210,12 @@ Session::Session(SessionParams params, AgentPreset preset,
     // how a session ends up with two half-working ways to stop.
     //
     // The sink's IsCancelled check is the cancel half (a full queue can no
-    // longer refuse anything -- Publish is drop-oldest, never blocking). The
+    // longer refuse anything -- the sink is drop-oldest, never blocking). The
     // refusal false is now purely Terminate: closed means the session is
     // ending, and the request must stop.
-    llm::StreamEventSink event_sink = [this, queue, session_id](const llm::StreamEvent& stream) {
+    llm::StreamEventSink stream_event_sink = [this, sink = event_sink_](const llm::StreamEvent& stream) {
         if (IsCancelled()) return false;
-        v1::ServerEvent event = MakeEvent(session_id);
-        *event.mutable_stream_event() = rpc::ToProto(stream);
-        return queue->Publish(std::move(event));
+        return sink(SessionEvent{stream});
     };
 
     // The real summarizer. Passed as the plain function rather than wrapped,
@@ -247,7 +234,7 @@ Session::Session(SessionParams params, AgentPreset preset,
     // portion begins, which is what compaction checkpoints are written against.
     loop_ = std::make_unique<AgentLoop>(
         *provider_, executor_, registry, *store_, preset_, loop_config, std::move(context),
-        [this] { return IsCancelled(); }, std::move(event_sink),
+        [this] { return IsCancelled(); }, std::move(stream_event_sink),
         loop_config.compaction_summarizer ? loop_config.compaction_summarizer : Compactor(compact_messages),
         std::move(seeded_history), seed_first_persisted_seq, seed_head_is_summary,
         std::move(params_.project_context));
@@ -277,15 +264,10 @@ void Session::RefreshMcpServers() {
             live.push_back(server);
             continue;
         }
-        // Surfaced, not swallowed: an ErrorEvent on the outbound queue is the
+        // Surfaced, not swallowed: an error on the outbound stream is the
         // same channel a failed turn uses, so the client sees WHY the
         // server's tools never appeared.
-        v1::ServerEvent event = MakeEvent(params_.session_id);
-        auto* err = event.mutable_error();
-        err->set_category(v1::LLM_ERROR_CATEGORY_UNSPECIFIED);
-        err->set_message(error);
-        err->set_is_retryable(false);
-        channels_->queue.Publish(std::move(event));
+        EmitEvent(SessionEvent{SessionError{error}});
         logger_.warn("session {}: MCP server '{}' disabled: {}", params_.session_id, server,
                      error);
     }
@@ -319,15 +301,10 @@ bool Session::SubmitTurn(std::string text) {
     }
     if (refused) {
         // Answer the refusal rather than dropping it: the client sent a turn and
-        // must learn it was not accepted. Publish never blocks (this runs on
+        // must learn it was not accepted. The sink never blocks (this runs on
         // the reader, which must never block even on its own error path), and
         // it only refuses a closed broadcaster.
-        v1::ServerEvent event = MakeEvent(params_.session_id);
-        auto* error = event.mutable_error();
-        error->set_category(v1::LLM_ERROR_CATEGORY_UNSPECIFIED);
-        error->set_message("session backlog is full; turn refused");
-        error->set_is_retryable(false);
-        if (!channels_->queue.Publish(std::move(event))) {
+        if (!EmitEvent(SessionEvent{SessionError{"session backlog is full; turn refused"}})) {
             logger_.warn("session {}: turn refused and the queue refused the error too; client will not see it",
                          params_.session_id);
         }
@@ -361,16 +338,11 @@ bool Session::SubmitCommand(QueuedCommand command) {
 }
 
 void Session::RejectCommand(const QueuedCommand& command, const std::string& reason) {
-    v1::ServerEvent event = MakeEvent(params_.session_id);
-    auto* result = event.mutable_command_result();
-    result->set_request_id(command.request_id);
-    result->set_status(v1::COMMAND_STATUS_ERROR);
-    result->set_message(reason);
-    // Refusals surface on the notice line like any other error; UNSPECIFIED is
-    // never sent deliberately -- the client treats it as STATUS anyway, but an
-    // explicit value keeps the wire self-describing.
-    result->set_display(v1::COMMAND_DISPLAY_STATUS);
-    if (!channels_->queue.Publish(std::move(event))) {
+    // Refusals surface on the notice line like any other error --
+    // CommandResult::Error's default display (kStatus) is already what the
+    // wire wants here.
+    if (!EmitEvent(SessionEvent{SessionCommandResult{command.request_id,
+                                                     commands::CommandResult::Error(reason)}})) {
         logger_.warn("session {}: command '{}' refused and the queue is full; client will not "
                      "see it",
                      params_.session_id, command.name);
@@ -463,43 +435,26 @@ void Session::ApplyPreset(AgentPreset preset) {
 }
 
 void Session::ExecuteCommand(const QueuedCommand& command, bool busy) {
-    v1::ServerEvent event = MakeEvent(params_.session_id);
-    auto* result = event.mutable_command_result();
-    result->set_request_id(command.request_id);
-
     if (commands_ == nullptr || presets_ == nullptr) {
         // No registry wired: answer rather than drop, or a client waiting on a
         // CommandResult hangs on a request nobody will ever handle.
-        result->set_status(v1::COMMAND_STATUS_ERROR);
-        result->set_message("the /-command subsystem is not available in this session");
-        EmitCommandResult(std::move(event), command);
+        EmitCommandResult(
+            commands::CommandResult::Error("the /-command subsystem is not available in this session"),
+            command);
         return;
     }
 
-    commands::CommandContext context(*this, *presets_, confirmations_, logger_);
-    const auto outcome = commands::Dispatch(*commands_, command.name, command.args, context, busy);
-
-    result->set_status(outcome.status == commands::CommandResult::Status::kOk
-                           ? v1::COMMAND_STATUS_OK
-                           : v1::COMMAND_STATUS_ERROR);
-    result->set_message(outcome.message);
-    // Where the result surfaces (EXTENSIBILITY 4.4). The dispatcher already
-    // downgraded an error to the status line; this copies the surviving value.
-    result->set_display(outcome.display == commands::CommandDisplay::kView
-                            ? v1::COMMAND_DISPLAY_VIEW
-                            : outcome.display == commands::CommandDisplay::kSilent
-                                  ? v1::COMMAND_DISPLAY_SILENT
-                                  : v1::COMMAND_DISPLAY_STATUS);
-    result->set_view_hint(outcome.view_hint);
-    EmitCommandResult(std::move(event), command);
+    commands::CommandContext context(*this, *presets_, *confirmations_, logger_);
+    auto outcome = commands::Dispatch(*commands_, command.name, command.args, context, busy);
+    EmitCommandResult(std::move(outcome), command);
 }
 
-void Session::EmitCommandResult(v1::ServerEvent event, const QueuedCommand& command) {
-    // Publish never blocks: ExecuteCommand runs on the worker AND on the RPC
+void Session::EmitCommandResult(commands::CommandResult result, const QueuedCommand& command) {
+    // The sink never blocks: ExecuteCommand runs on the worker AND on the RPC
     // layer's command pool. A refusal means the broadcaster is closed
     // (termination); capacity never refuses -- a stalled subscriber drops its
     // own oldest instead.
-    if (!channels_->queue.Publish(std::move(event))) {
+    if (!EmitEvent(SessionEvent{SessionCommandResult{command.request_id, std::move(result)}})) {
         logger_.warn("session {}: broadcaster closed; CommandResult for '{}' dropped",
                      params_.session_id, command.name);
     }
@@ -516,12 +471,8 @@ bool Session::SubmitRewind(QueuedRewind request) {
     // Malformed before queued: neither action named. The queue would only
     // defer the same answer, and nothing about it depends on the worker.
     if (!request.redo && request.target_seq < 0) {
-        v1::ServerEvent event = MakeEvent(params_.session_id);
-        auto* error = event.mutable_error();
-        error->set_category(v1::LLM_ERROR_CATEGORY_UNSPECIFIED);
-        error->set_message("rewind request names neither a target seq nor a redo");
-        error->set_is_retryable(false);
-        if (!channels_->queue.Publish(std::move(event))) {
+        if (!EmitEvent(SessionEvent{
+                SessionError{"rewind request names neither a target seq nor a redo"}})) {
             logger_.warn("session {}: malformed rewind refused and the queue is full",
                          params_.session_id);
         }
@@ -530,12 +481,7 @@ bool Session::SubmitRewind(QueuedRewind request) {
     // Subagent refusal is reader-side: it is a property of params alone, no
     // worker pass could change it, and a child has no user to edit its prompt.
     if (!params_.parent_session_id.empty()) {
-        v1::ServerEvent event = MakeEvent(params_.session_id);
-        auto* error = event.mutable_error();
-        error->set_category(v1::LLM_ERROR_CATEGORY_UNSPECIFIED);
-        error->set_message("subagent sessions cannot be rewound");
-        error->set_is_retryable(false);
-        if (!channels_->queue.Publish(std::move(event))) {
+        if (!EmitEvent(SessionEvent{SessionError{"subagent sessions cannot be rewound"}})) {
             logger_.warn("session {}: subagent rewind refused and the queue is full",
                          params_.session_id);
         }
@@ -557,13 +503,8 @@ bool Session::SubmitRewind(QueuedRewind request) {
     }
     if (refused) {
         // Same contract as SubmitTurn: refusal answered on the wire, never
-        // dropped. Publish never blocks on the reader thread.
-        v1::ServerEvent event = MakeEvent(params_.session_id);
-        auto* error = event.mutable_error();
-        error->set_category(v1::LLM_ERROR_CATEGORY_UNSPECIFIED);
-        error->set_message("session backlog is full; rewind refused");
-        error->set_is_retryable(false);
-        if (!channels_->queue.Publish(std::move(event))) {
+        // dropped. The sink never blocks on the reader thread.
+        if (!EmitEvent(SessionEvent{SessionError{"session backlog is full; rewind refused"}})) {
             logger_.warn("session {}: rewind refused and the queue is full; client will not "
                          "see it",
                          params_.session_id);
@@ -689,22 +630,13 @@ void Session::RunRedo() {
 }
 
 void Session::EmitRewindRefusal(const std::string& reason) {
-    // Worker path. Publish never refuses for capacity, so a refusal the
+    // Worker path. The sink never refuses for capacity, so a refusal the
     // subscriber needs can only be lost by termination itself.
-    v1::ServerEvent event = MakeEvent(params_.session_id);
-    auto* error = event.mutable_error();
-    error->set_category(v1::LLM_ERROR_CATEGORY_UNSPECIFIED);
-    error->set_message(reason);
-    error->set_is_retryable(false);
-    channels_->queue.Publish(std::move(event));
+    EmitEvent(SessionEvent{SessionError{reason}});
 }
 
 void Session::EmitSessionRewound(std::int64_t truncated_to_seq, std::int64_t active_last_seq) {
-    v1::ServerEvent event = MakeEvent(params_.session_id);
-    auto* rewound = event.mutable_session_rewound();
-    rewound->set_truncated_to_seq(truncated_to_seq);
-    rewound->set_active_last_seq(active_last_seq);
-    channels_->queue.Publish(std::move(event));
+    EmitEvent(SessionEvent{SessionRewound{truncated_to_seq, active_last_seq}});
 }
 
 bool Session::QueueInjectedMessage(llm::Message message) {
@@ -741,7 +673,7 @@ void Session::Cancel() {
     // not on its next poll slice. Everything a live token's waiters do from
     // here is the same path a deadline takes -- a cancelled tool call.
     cancel_source_.CancelAll();
-    // (No queue unwedge any more: Publish is drop-oldest and never blocks, so
+    // (No queue unwedge any more: the sink is drop-oldest and never blocks, so
     // no producer can be parked on a full subscriber queue for a cancel to
     // reach. The old AbortWaitingProducers existed for exactly that park.)
     // Wakes a worker parked on a permission prompt. Without this, cancelling
@@ -752,7 +684,7 @@ void Session::Cancel() {
     // prompt in the session answering "no answer" instantly, which
     // WirePermissionChecker turns into Deny, so one CancelTurn would silently
     // deny-lock a session that reports itself alive and keeps accepting turns.
-    channels_->pending.CancelAll();
+    cancel_pending_requests_();
 }
 
 void Session::JoinWorkerOnce() {
@@ -783,7 +715,7 @@ void Session::Terminate() {
     // parked on a gate mid-teardown -- including one parked in
     // WirePermissionChecker::check on a question the client will never answer.
     cancel_source_.CancelAll();
-    channels_->pending.Shutdown();
+    shutdown_pending_requests_();
     // Refuses future out-of-band pushes: a background task finishing mid-
     // teardown learns "session gone" from its schedule_injection returning
     // false, exactly like a subagent's completion hook. Already-staged
@@ -793,28 +725,26 @@ void Session::Terminate() {
     channels_->injections.Close();
     turn_cv_.notify_all();
 
-    // THE TERMINAL WIRE EVENT, published to every subscriber before CloseAll
-    // so each writer drains it. A session terminated under attached streams --
-    // a child whose blocking spawn was cancelled, a reaper eviction -- used to
-    // go silent: the attached handler looped on a queue that would never
-    // produce again and the client could not distinguish "killed" from
-    // "finished quietly". Publish never blocks and cannot refuse for capacity;
-    // the only refusal is a broadcaster that is already closed.
-    {
-        v1::ServerEvent event = MakeEvent(params_.session_id);
-        (void)event.mutable_session_ended();
-        if (!channels_->queue.Publish(std::move(event))) {
-            logger_.warn("session {}: SessionEnded dropped (queue full or closed)",
-                         params_.session_id);
-        }
+    // THE TERMINAL WIRE EVENT, published to every subscriber before closing
+    // the transport so each writer drains it. A session terminated under
+    // attached streams -- a child whose blocking spawn was cancelled, a
+    // reaper eviction -- used to go silent: the attached handler looped on a
+    // queue that would never produce again and the client could not
+    // distinguish "killed" from "finished quietly". The sink never blocks and
+    // cannot refuse for capacity; the only refusal is a broadcaster that is
+    // already closed.
+    if (!EmitEvent(SessionEvent{SessionEnded{}})) {
+        logger_.warn("session {}: SessionEnded dropped (queue full or closed)",
+                     params_.session_id);
     }
 
-    // CloseAll BEFORE the join. Every subscriber queue closes drain-first, so
-    // each attached writer delivers what it holds (the SessionEndedEvent among
-    // it) and then unwinds from Pop with nullopt; the worker cannot be parked
-    // on a full queue any more (Publish never blocks), so the join cannot
-    // deadlock the way the old blocking-Push design feared.
-    channels_->queue.CloseAll();
+    // Close the transport AFTER the join above would be too late: every
+    // subscriber queue closes drain-first, so each attached writer delivers
+    // what it holds (the SessionEnded event among it) and then unwinds, and
+    // the worker cannot be parked on a full queue any more (the sink never
+    // blocks), so the join below cannot deadlock the way the old
+    // blocking-Push design feared.
+    close_transport_();
 
     if (worker_.get_id() != std::this_thread::get_id()) JoinWorkerOnce();
 
@@ -846,14 +776,13 @@ void Session::SetName(std::string name) {
         std::lock_guard<std::mutex> lock(mutex_);
         info_.name = name;
     }
-    v1::ServerEvent event = MakeEvent(params_.session_id);
-    auto* metadata = event.mutable_session_metadata();
-    metadata->set_session_id(params_.session_id);
-    metadata->set_name(name);
-    // Publish: the titler thread must never block (it never does now), and
-    // after Terminate closes the broadcaster the event is simply lost -- the
-    // session is gone, so there is nobody to refresh.
-    channels_->queue.Publish(std::move(event));
+    // The sink never blocks (the titler runs on a detached thread); after
+    // Terminate the event is simply lost -- the session is gone, so there is
+    // nobody to refresh.
+    SessionMetadataChanged metadata;
+    metadata.name = std::move(name);
+    metadata.partial = true;
+    EmitEvent(SessionEvent{std::move(metadata)});
 }
 
 void Session::WorkerMain() {
@@ -945,7 +874,7 @@ void Session::RunOneTurn(std::optional<std::string> text) {
     // On the WORKER, deliberately, not in SubmitTurn: SubmitTurn runs on the
     // gRPC reader, which must never block, and a hook action is a subprocess
     // with a budget. The observable semantics are unchanged -- nothing is
-    // persisted, and the client gets an ErrorEvent -- but the wedge risk lands
+    // persisted, and the client gets an error -- but the wedge risk lands
     // on the thread that is allowed to block.
     //
     // TOP-LEVEL ONLY: a subagent's seeded task is the parent model's own
@@ -971,12 +900,7 @@ void Session::RunOneTurn(std::optional<std::string> text) {
                                                [this] { return IsCancelled(); })) {
             logger_.warn("session {}: user_prompt_submit hook blocked the prompt: {}",
                          params_.session_id, *blocked);
-            v1::ServerEvent event = MakeEvent(params_.session_id);
-            auto* error = event.mutable_error();
-            error->set_category(v1::LLM_ERROR_CATEGORY_UNSPECIFIED);
-            error->set_message("prompt rejected by hook: " + *blocked);
-            error->set_is_retryable(false);
-            channels_->queue.Publish(std::move(event));
+            EmitEvent(SessionEvent{SessionError{"prompt rejected by hook: " + *blocked}});
             vetoed = true;
         }
     }
@@ -1005,17 +929,10 @@ void Session::RunOneTurn(std::optional<std::string> text) {
             // The loop rethrows once retries are exhausted. The session survives:
             // one failed turn is not a reason to tear down a conversation the user
             // can retry.
-            v1::ServerEvent event = MakeEvent(params_.session_id);
-            *event.mutable_error() = rpc::ToProto(error);
-            channels_->queue.Publish(std::move(event));
+            EmitEvent(SessionEvent{error});
             logger_.warn("session {}: turn failed: {}", params_.session_id, error.what());
         } catch (const std::exception& e) {
-            v1::ServerEvent event = MakeEvent(params_.session_id);
-            auto* error = event.mutable_error();
-            error->set_category(v1::LLM_ERROR_CATEGORY_UNSPECIFIED);
-            error->set_message(e.what());
-            error->set_is_retryable(false);
-            channels_->queue.Publish(std::move(event));
+            EmitEvent(SessionEvent{SessionError{e.what()}});
             logger_.warn("session {}: turn threw: {}", params_.session_id, e.what());
         } catch (...) {
             // Neither an LlmError nor a std::exception. The catches above existed to
@@ -1023,12 +940,7 @@ void Session::RunOneTurn(std::optional<std::string> text) {
             // process -- but anything else escaping here would still have reached
             // std::terminate through WorkerMain. Same treatment: one degraded turn,
             // a live session.
-            v1::ServerEvent event = MakeEvent(params_.session_id);
-            auto* error = event.mutable_error();
-            error->set_category(v1::LLM_ERROR_CATEGORY_UNSPECIFIED);
-            error->set_message("the turn threw an unrecognized exception");
-            error->set_is_retryable(false);
-            channels_->queue.Publish(std::move(event));
+            EmitEvent(SessionEvent{SessionError{"the turn threw an unrecognized exception"}});
             logger_.warn("session {}: turn threw a non-standard exception", params_.session_id);
         }
     }
@@ -1108,17 +1020,12 @@ void Session::RunOneTurn(std::optional<std::string> text) {
 
 void Session::EmitTurnCompleted(llm::StopReason stop_reason, const llm::Usage& usage,
                                 bool hit_max_turns) {
-    v1::ServerEvent event = MakeEvent(params_.session_id);
-    auto* completed = event.mutable_turn_completed();
-    completed->set_stop_reason(rpc::ToProto(stop_reason));
-    *completed->mutable_usage() = rpc::ToProto(usage);
-    completed->set_hit_max_turns(hit_max_turns);
-    // Publish (the old PushTerminal's job): this is the turn's exit signal,
-    // and a headless client detects the end of a turn by it alone. Publish
-    // never blocks and never refuses for capacity -- a full subscriber drops
-    // its oldest to make room -- so the terminator always lands on every
-    // attached stream unless the broadcaster is already closed.
-    channels_->queue.Publish(std::move(event));
+    // This is the turn's exit signal, and a headless client detects the end
+    // of a turn by it alone. The sink never blocks and never refuses for
+    // capacity -- a full subscriber drops its oldest to make room -- so the
+    // terminator always lands on every attached stream unless the
+    // broadcaster is already closed.
+    EmitEvent(SessionEvent{TurnCompleted{stop_reason, usage, hit_max_turns}});
 }
 
 void Session::MaybeEmitNameFromStore() {
@@ -1139,11 +1046,10 @@ void Session::MaybeEmitNameFromStore() {
         std::lock_guard<std::mutex> lock(mutex_);
         info_.name = *stored;
     }
-    v1::ServerEvent event = MakeEvent(params_.session_id);
-    auto* metadata = event.mutable_session_metadata();
-    metadata->set_session_id(params_.session_id);
-    metadata->set_name(*stored);
-    channels_->queue.Publish(std::move(event));
+    SessionMetadataChanged metadata;
+    metadata.name = *stored;
+    metadata.partial = true;
+    EmitEvent(SessionEvent{std::move(metadata)});
 }
 
 bool Session::idle() const {

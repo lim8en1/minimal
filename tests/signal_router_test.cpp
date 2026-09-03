@@ -13,6 +13,7 @@
 #include "minimal/agent/session.hpp"
 #include "minimal/agent/signal_router.hpp"
 #include "minimal/common/logger.hpp"
+#include "minimal/rpc/session_wiring.hpp"
 
 using namespace minimal;
 using namespace std::chrono_literals;
@@ -44,6 +45,7 @@ struct RouterSessionFixture {
         params.agent_preset = "test";
         params.project_root = std::filesystem::temp_directory_path();
         params.wake_on_injection = wake_on_injection;
+        rpc::FinishSessionWiring(params);
 
         session = std::make_shared<agent::Session>(std::move(params), preset,
                                                    std::move(owned_provider),

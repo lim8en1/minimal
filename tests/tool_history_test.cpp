@@ -24,6 +24,7 @@
 #include "minimal/agent/session.hpp"
 #include "minimal/agent/session_registry.hpp"
 #include "minimal/common/logger.hpp"
+#include "minimal/rpc/session_wiring.hpp"
 #include "minimal/session/history_window.hpp"
 #include "minimal/session/session_database.hpp"
 #include "temp_dir.hpp"
@@ -251,6 +252,7 @@ TEST_CASE("sessions on non-SQLite stores see history == nullptr and tools degrad
     params.session_id = "sess-null";
     params.agent_preset = "test";
     params.project_root = std::filesystem::temp_directory_path();
+    rpc::FinishSessionWiring(params);
 
     agent::Session session(std::move(params), preset, std::move(provider), std::move(store),
                            registry, agent::LoopConfig{}, observers, common::DefaultLogger());

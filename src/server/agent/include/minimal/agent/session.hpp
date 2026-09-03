@@ -8,7 +8,8 @@
 // "Concurrency model"):
 //
 //   Reader  -- the gRPC handler thread. Never blocks on anything but Read().
-//              Calls SubmitTurn / Cancel / pending().Resolve and returns.
+//              Calls SubmitTurn / Cancel / resolves a pending permission or
+//              confirmation request through the transport and returns.
 //   Worker  -- owned here. Blocks freely: permission waits, provider calls,
 //              bash subprocesses.
 //   Writer  -- owned by the transport, drains its subscriber queue via
@@ -38,19 +39,17 @@
 #include "minimal/agent/agent_preset.hpp"
 #include "minimal/agent/agent_preset_registry.hpp"
 #include "minimal/agent/injection_queue.hpp"
+#include "minimal/agent/session_event.hpp"
 #include "minimal/agent/session_observer_registry.hpp"
 #include "minimal/commands/command_context.hpp"
 #include "minimal/commands/command_dispatcher.hpp"
 #include "minimal/commands/command_registry.hpp"
+#include "minimal/commands/confirmation_broker.hpp"
 #include "minimal/common/logger.hpp"
 #include "minimal/config/providers_config.hpp"
 #include "minimal/hooks/hook_dispatcher.hpp"
 #include "minimal/llm/provider.hpp"
 #include "minimal/llm/provider_factory_registry.hpp"
-#include "minimal/rpc/event_broadcaster.hpp"
-#include "minimal/rpc/pending_requests.hpp"
-#include "minimal/rpc/wire_confirmation_broker.hpp"
-#include "minimal/rpc/wire_permission_checker.hpp"
 #include "minimal/session/history_store.hpp"
 #include "minimal/session/history_window.hpp"
 #include "minimal/session/session_reader.hpp"
@@ -58,7 +57,6 @@
 #include "minimal/tools/permission_checker.hpp"
 #include "minimal/tools/tool_executor.hpp"
 #include "minimal/tools/tool_registry.hpp"
-#include "minimal/v1/session_service.pb.h"
 
 namespace minimal::mcp {
 class McpClientManager;       // borrowed via SessionParams::mcp_manager
@@ -69,29 +67,19 @@ namespace minimal::agent {
 class ProviderInstanceCache;  // borrowed via set_provider_instance_cache
 class SignalRouter;           // borrowed via SessionParams::signal_router
 
-// The session's two transport-side primitives, extracted from Session into a
-// shareable block: the params PRODUCER creates them so it can also build a
-// WirePermissionChecker (or a decoration over one) before the Session exists --
-// the seam the permission advisor composes through (docs/EXTENSIBILITY.md §3).
-// Session owns the block through a shared_ptr; the broadcaster and pending maps
-// are exactly the members Session used to hold, unchanged in behavior.
+// Session's domain-only cross-thread state -- the half of what this block used
+// to bundle that has nothing to do with the wire. The transport half
+// (EventBroadcaster, PendingRequests) split out to rpc::TransportChannels
+// (see rpc/transport_channels.hpp) once Session stopped touching either
+// directly; this block keeps existing, by shared_ptr, for exactly the same
+// reason it always did -- background watcher threads capture it and may
+// outlive both the worker and Session itself.
 struct SessionChannels {
-    // The event FAN-OUT point (event_broadcaster.hpp): one bounded drop-oldest
-    // queue per attached stream, plus the zero-subscriber backlog that is the
-    // old pre-attach buffer's successor. Publish NEVER blocks -- the session's
-    // progress is never gated on any subscriber; a slow or absent one drops
-    // oldest and latches a ResyncRequiredEvent, and the transcript in SQLite
-    // (written mid-turn, history_store.hpp) is the durable record a client
-    // recovers through. Built with the session id because the resync notices
-    // it synthesizes must be wire-valid events.
-    explicit SessionChannels(std::string session_id) : queue(std::move(session_id)) {}
-    rpc::EventBroadcaster queue;
     // Live background tasks: STARTED increments, a terminal state decrements.
     // Lives HERE, on the shared_ptr block, because the task_event_sink that
     // maintains it is captured by background watchers that may fire after the
-    // Session is gone (the same lifetime rule as the sinks above).
+    // Session is gone.
     std::atomic<std::size_t> background_tasks_live{0};
-    rpc::PendingRequests pending;
     // Cross-thread staging for out-of-band messages (non-blocking subagent
     // completions, background task results), drained at turn boundaries. Lives
     // HERE -- on the shared_ptr block -- because that is exactly the object a
@@ -102,8 +90,8 @@ struct SessionChannels {
     InjectionQueue injections;
 };
 
-inline std::shared_ptr<SessionChannels> MakeSessionChannels(std::string session_id) {
-    return std::make_shared<SessionChannels>(std::move(session_id));
+inline std::shared_ptr<SessionChannels> MakeSessionChannels() {
+    return std::make_shared<SessionChannels>();
 }
 
 struct SessionParams {
@@ -112,20 +100,47 @@ struct SessionParams {
     std::string name;
     std::string agent_preset;
     std::filesystem::path project_root;
-    // The transport-side primitives this session uses. Producers create one via
-    // MakeSessionChannels() whenever they also build a checker (below); null
-    // means Session creates its own -- the path every plain test takes.
-    std::shared_ptr<SessionChannels> channels;
     // The permission decision source for this session. Null means the wire
     // checker (the default -- prompts round-trip to the client). A producer
     // that configured an advisor composes AdvisedPermissionChecker(wire) and
     // injects it; a test injects any fake. ToolExecutor sees one checker
-    // either way.
+    // either way. Populated for every real session by
+    // rpc::FinishSessionWiring, called from SessionRegistry::CreateResolved --
+    // see that function for why Session's constructor cannot build the
+    // default itself any more.
     std::unique_ptr<tools::PermissionChecker> permission_checker;
     // Set only when permission_checker is an AdvisedPermissionChecker composed
     // around this shared holder: Session installs its own cancel predicate into
     // it in the constructor body, before the worker starts. Null otherwise.
     std::shared_ptr<tools::AdvisorCancelSource> advisor_cancel_source;
+    // Where every SessionEvent Session emits goes. Built by
+    // rpc::ApplyPermissionAdvisor/FinishSessionWiring against a real
+    // rpc::EventTranslator; a test injects any fake sink. Required -- Session's
+    // constructor throws if this is unset, rather than silently dropping every
+    // event, since nothing about a missing sink is otherwise observable until
+    // a client notices events never arrive.
+    SessionEventSink event_sink;
+    // Always the wire default (rpc::WireConfirmationBroker) in production --
+    // unlike permission_checker, there is no advisor for confirmations to
+    // decorate. A test injects any fake. Required, same reasoning as
+    // event_sink.
+    std::unique_ptr<commands::ConfirmationBroker> confirmation_broker;
+    // Opaque handle to whatever rpc::EventTranslator backs event_sink, kept
+    // alive here so callers that need the underlying rpc::EventBroadcaster/
+    // PendingRequests (SessionServiceImpl's Subscribe/Unsubscribe/Resolve) can
+    // reach it via Session::transport() without agent/ ever naming the
+    // concrete rpc:: type. Session itself never dereferences this.
+    std::shared_ptr<void> transport_handle;
+    // Terminate()/Cancel()'s hooks into the transport's PendingRequests, which
+    // Session can no longer name directly. See PendingRequests::Shutdown/
+    // CancelAll for what each does and why they are two different calls.
+    std::function<void()> shutdown_pending_requests;
+    std::function<void()> cancel_pending_requests;
+    // Terminate()'s hook to close every subscriber queue on the transport
+    // (EventBroadcaster::CloseAll), which Session can no longer name
+    // directly. Called AFTER the terminal SessionEnded event is published, so
+    // every attached writer drains it before unwinding.
+    std::function<void()> close_transport;
     // Set when the client asked for a specific mode (the headless client asks
     // for AllowOnly); unset means the preset's configured mode stands. For a
     // subagent the spawner has ALREADY clamped it against the parent's via
@@ -331,12 +346,19 @@ public:
     // every way a session can die.
     void Terminate();
 
-    // Drained by each stream's writer thread via Pop(handle); Publish is the
-    // sole event source. See event_broadcaster.hpp for the fan-out policy.
-    rpc::EventBroadcaster& queue() { return channels_->queue; }
-    // Resolved from the reader thread when a Permission/Confirmation response
-    // arrives.
-    rpc::PendingRequests& pending() { return channels_->pending; }
+    // Publishes a SessionEvent through the sink every producer inside this
+    // class already uses internally; the one entry point external callers
+    // (SubagentManager, announcing a spawned child on the PARENT's stream) get
+    // too, so nothing outside Session ever needs to reach the transport
+    // directly. Returns what the sink returned -- see SessionEventSink's
+    // comment for what the bool means.
+    bool EmitEvent(const SessionEvent& event) { return event_sink_(event); }
+
+    // The opaque handle to this session's rpc::EventTranslator, for callers
+    // that must reach the real transport (SessionServiceImpl's
+    // Subscribe/Unsubscribe/Resolve/Pop). Never null once construction
+    // succeeds -- SessionParams::transport_handle is required.
+    std::shared_ptr<void> transport() const { return transport_; }
 
     const SessionInfo& info() const { return info_; }
 
@@ -435,22 +457,22 @@ public:
     // against a non-conforming client, since attaching is a client protocol
     // obligation (see ARCHITECTURE.md "Session lifetime").
     //
-    // S5: N STREAMS MAY ATTACH, not one. Subscribe hands the caller a handle
-    // its writer thread pops from; the broadcaster (event_broadcaster.hpp)
-    // owns the fan-out policy -- the first subscriber seeds from the backlog,
-    // later ones are told to resync. Unsubscribe detaches exactly one stream;
-    // the session outlives its subscribers and dies only through Terminate.
-    rpc::EventBroadcaster::Handle Subscribe() {
+    // S5: N STREAMS MAY ATTACH, not one. SessionServiceImpl owns the actual
+    // Subscribe/Unsubscribe against the transport (via transport()) now that
+    // Session no longer names rpc::EventBroadcaster -- these two calls are
+    // its obligation to Session in exchange: bracket every subscribe/
+    // unsubscribe so ever_attached()/has_subscribers() keep meaning what they
+    // always meant. The reaper's detached-idle rule reads has_subscribers();
+    // it deliberately replaced the old single-stream `attached_` flag, which
+    // existed only because one queue had one consumer.
+    void NotifyAttached() {
         ever_attached_.store(true, std::memory_order_release);
-        return channels_->queue.Subscribe();
+        subscriber_count_.fetch_add(1, std::memory_order_acq_rel);
     }
-    void Unsubscribe(const rpc::EventBroadcaster::Handle& handle) {
-        channels_->queue.Unsubscribe(handle);
+    void NotifyDetached() { subscriber_count_.fetch_sub(1, std::memory_order_acq_rel); }
+    bool has_subscribers() const {
+        return subscriber_count_.load(std::memory_order_acquire) > 0;
     }
-    // True while at least one stream is attached. The reaper's detached-idle
-    // rule reads this; it deliberately replaces the old single-stream
-    // `attached_` flag, which existed only because one queue had one consumer.
-    bool has_subscribers() const { return channels_->queue.subscriber_count() > 0; }
 
     // Live background tasks (background bash whose STARTED event has not yet
     // been followed by a terminal one). The reaper's quiescence rule reads
@@ -504,9 +526,9 @@ private:
     // Builds the context and dispatches. Shared by the worker path and the
     // read-only pool path so the two cannot diverge on what a command may reach.
     void ExecuteCommand(const QueuedCommand& command, bool busy);
-    // Publishes a CommandResult. Publish never blocks, so the RPC pool and the
-    // worker are equally safe callers.
-    void EmitCommandResult(v1::ServerEvent event, const QueuedCommand& command);
+    // Publishes a CommandResult. The sink never blocks, so the RPC pool and
+    // the worker are equally safe callers.
+    void EmitCommandResult(commands::CommandResult result, const QueuedCommand& command);
     // The turn terminator. Emitted on EVERY exit path, including failures --
     // a client that learns a turn ended only by seeing it succeed hangs on
     // every error.
@@ -552,13 +574,27 @@ private:
     std::shared_ptr<const session::SessionReader> history_reader_;
     std::unique_ptr<session::HistoryWindow> history_window_;
 
-    // The transport-side primitives, created here or shared in via params (see
-    // SessionParams::channels).
+    // Domain-only cross-thread state; always Session's own (nothing external
+    // ever needs to share it since the transport half split out).
     std::shared_ptr<SessionChannels> channels_;
-    // The permission decision source: the wire default built here, or the
-    // producer's composition (an advised checker, a test fake) moved in.
+    // The permission decision source: always producer-supplied now (the wire
+    // default, an advised checker, or a test fake) -- see
+    // SessionParams::permission_checker.
     std::unique_ptr<tools::PermissionChecker> checker_;
-    rpc::WireConfirmationBroker confirmations_;
+    std::unique_ptr<commands::ConfirmationBroker> confirmations_;
+    // Where every SessionEvent this class emits goes. See EmitEvent() and
+    // SessionParams::event_sink.
+    SessionEventSink event_sink_;
+    // Opaque; see transport() and SessionParams::transport_handle.
+    std::shared_ptr<void> transport_;
+    std::function<void()> shutdown_pending_requests_;
+    std::function<void()> cancel_pending_requests_;
+    std::function<void()> close_transport_;
+    // Mirrors the transport's own subscriber count (Session cannot query it
+    // directly any more) so has_subscribers()/ever_attached() keep working off
+    // NotifyAttached()/NotifyDetached() calls from whoever owns Subscribe/
+    // Unsubscribe now (SessionServiceImpl).
+    std::atomic<std::size_t> subscriber_count_{0};
 
     tools::ToolExecutor executor_;
     std::unique_ptr<AgentLoop> loop_;

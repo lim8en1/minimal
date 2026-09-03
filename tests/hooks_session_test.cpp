@@ -16,6 +16,7 @@
 #include "minimal/agent/session.hpp"
 #include "minimal/common/logger.hpp"
 #include "minimal/hooks/hook_dispatcher.hpp"
+#include "minimal/rpc/session_wiring.hpp"
 
 using namespace minimal;
 using namespace std::chrono_literals;
@@ -70,6 +71,7 @@ struct HookSessionFixture {
         params.agent_preset = "test";
         params.project_root = std::filesystem::temp_directory_path();
         params.hooks = dispatcher.get();
+        rpc::FinishSessionWiring(params);
 
         session = std::make_unique<agent::Session>(
             std::move(params), preset, std::move(owned_provider), std::move(owned_store),

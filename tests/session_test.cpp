@@ -14,7 +14,7 @@
 #include "session_events.hpp"
 #include "minimal/agent/session.hpp"
 #include "minimal/common/logger.hpp"
-#include "minimal/rpc/wire_permission_checker.hpp"
+#include "minimal/rpc/session_wiring.hpp"
 #include "minimal/tools/permission_advisor.hpp"
 #include "temp_dir.hpp"
 
@@ -60,13 +60,24 @@ struct SessionFixture {
         params.name = "test session";
         params.agent_preset = "test";
         params.project_root = project_root;
-        params.channels = params_channels;
         params.permission_checker = std::move(injected_checker);
         params.advisor_cancel_source = injected_cancel_source;
+        params.transport_handle = injected_transport_handle;
+        params.event_sink = injected_event_sink;
+        params.cancel_pending_requests = injected_cancel_pending_requests;
+        params.shutdown_pending_requests = injected_shutdown_pending_requests;
+        params.close_transport = injected_close_transport;
         params.seed_grants = seed_grants;
         params.policy_ceiling = policy_ceiling;
         params.on_turn_finished = on_turn_finished;
         params.wake_on_injection = wake_on_injection;
+        // Builds whatever the test did not inject above: a real transport
+        // (unless one already came from rpc::ApplyPermissionAdvisor), the
+        // default WirePermissionChecker (unless a fake/advised one was
+        // injected), and always the WireConfirmationBroker -- the same
+        // funnel SessionRegistry::CreateResolved runs for every production
+        // session.
+        rpc::FinishSessionWiring(params);
 
         session = std::make_shared<agent::Session>(
             std::move(params), preset, std::move(owned_provider), std::move(owned_store),
@@ -84,10 +95,15 @@ struct SessionFixture {
     // Set alongside an injected AdvisedPermissionChecker: the Session keeps
     // this holder's flag and fires it in Cancel()/Terminate().
     std::shared_ptr<tools::AdvisorCancelSource> injected_cancel_source;
-    // Channels the test created to compose a checker over (the producer
-    // shape); forwarded to SessionParams::channels at Start(). Null keeps the
-    // Session-created default.
-    std::shared_ptr<agent::SessionChannels> params_channels;
+    // The transport/sink an advised composition (rpc::ApplyPermissionAdvisor)
+    // already built, forwarded to SessionParams at Start() so the checker and
+    // the session publish through the SAME transport. Null keeps
+    // FinishSessionWiring's own default (a fresh transport).
+    std::shared_ptr<void> injected_transport_handle;
+    agent::SessionEventSink injected_event_sink;
+    std::function<void()> injected_cancel_pending_requests;
+    std::function<void()> injected_shutdown_pending_requests;
+    std::function<void()> injected_close_transport;
 
     // Drains everything currently queued for the fixture's subscriber. The
     // writer thread's job, done inline.
@@ -356,8 +372,9 @@ TEST_CASE("a cancelled turn does not deny-lock the next one", "[session]") {
     v1::PermissionResponse answer;
     answer.set_request_id(*request_id);
     answer.set_decision(v1::PERMISSION_DECISION_ALLOW);
-    REQUIRE(fixture->session->pending().Resolve(
-        *request_id, rpc::PermissionAnswer{answer.SerializeAsString()}));
+    REQUIRE(testing::Transport(*fixture->session)
+                .pending()
+                .Resolve(*request_id, rpc::PermissionAnswer{answer.SerializeAsString()}));
 
     REQUIRE(fixture->session->WaitForIdleForTesting(5s));
     CHECK(tool_ptr->calls.size() == 1);
@@ -394,17 +411,22 @@ TEST_CASE("an advise thread abandoned at the budget polls a flag that outlives t
     fixture.tools_registry.Register(
         std::make_unique<testing::FakeTool>("slow", tools::ToolCategory::Execute));
     auto advisor = std::make_shared<PollsLate>();
-    auto cancel_source = std::make_shared<tools::AdvisorCancelSource>();
-    // The producer composition (ApplyAdvisor's shape): the inner checker is
-    // the REAL wire checker over shared channels, so the budget's fall-through
-    // is the human path and the prompt actually round-trips.
-    fixture.injected_cancel_source = cancel_source;
-    fixture.params_channels = agent::MakeSessionChannels("sess-advise");
-    fixture.injected_checker = std::make_unique<tools::AdvisedPermissionChecker>(
-        advisor,
-        std::make_unique<rpc::WirePermissionChecker>("sess-advise", fixture.params_channels->queue,
-                                                     fixture.params_channels->pending),
-        cancel_source, std::chrono::milliseconds{100});
+    // The producer composition (rpc::ApplyPermissionAdvisor's shape): the
+    // inner checker is the REAL wire checker over a real transport, so the
+    // budget's fall-through is the human path and the prompt actually
+    // round-trips.
+    {
+        agent::SessionParams temp;
+        temp.session_id = "sess-advise";
+        rpc::ApplyPermissionAdvisor(temp, advisor, std::chrono::milliseconds{100});
+        fixture.injected_checker = std::move(temp.permission_checker);
+        fixture.injected_cancel_source = temp.advisor_cancel_source;
+        fixture.injected_transport_handle = temp.transport_handle;
+        fixture.injected_event_sink = temp.event_sink;
+        fixture.injected_cancel_pending_requests = temp.cancel_pending_requests;
+        fixture.injected_shutdown_pending_requests = temp.shutdown_pending_requests;
+        fixture.injected_close_transport = temp.close_transport;
+    }
     fixture.Script(testing::ToolUseResponse("tu1", "slow"));
     fixture.Script(testing::TextResponse("unreached"));
     fixture.Start("sess-advise");
@@ -414,8 +436,9 @@ TEST_CASE("an advise thread abandoned at the budget polls a flag that outlives t
     v1::PermissionResponse answer;
     answer.set_request_id(*request_id);
     answer.set_decision(v1::PERMISSION_DECISION_ALLOW);
-    REQUIRE(fixture.session->pending().Resolve(
-        *request_id, rpc::PermissionAnswer{answer.SerializeAsString()}));
+    REQUIRE(testing::Transport(*fixture.session)
+                .pending()
+                .Resolve(*request_id, rpc::PermissionAnswer{answer.SerializeAsString()}));
     REQUIRE(fixture.session->WaitForIdleForTesting(5s));
 
     // Terminate fires the flag; destroying the session drops every owner but
@@ -474,7 +497,7 @@ TEST_CASE("terminating a session whose subscriber never drains returns instead o
         filler.set_session_id("sess-1");
         // Publish always accepts until the broadcaster closes: capacity
         // refusal no longer exists, the queue drops its own oldest instead.
-        (void)fixture.session->queue().Publish(std::move(filler));
+        (void)testing::Transport(*fixture.session).queue().Publish(std::move(filler));
     }
     // The cap is real and reachable, and drop-oldest held it.
     CHECK(wedged.queued() == rpc::EventBroadcaster::kDefaultMaxEvents);
@@ -554,7 +577,7 @@ TEST_CASE("a turn runs and cancels cleanly while the subscriber queue is full",
     for (int i = 0; i < 70000; ++i) {
         v1::ServerEvent filler;
         filler.set_session_id("sess-1");
-        (void)fixture.session->queue().Publish(std::move(filler));
+        (void)testing::Transport(*fixture.session).queue().Publish(std::move(filler));
     }
 
     fixture.session->SubmitTurn("go");
@@ -716,6 +739,7 @@ TEST_CASE("a non-standard exception in the turn path degrades instead of termina
     params.session_id = "sess-throw";
     params.agent_preset = "test";
     params.project_root = fixture.project_root;
+    rpc::FinishSessionWiring(params);
 
     agent::Session session(std::move(params), fixture.preset, std::move(provider),
                            std::move(store), fixture.tools_registry, fixture.loop_config,
@@ -798,7 +822,7 @@ TEST_CASE("the queue closes on termination so a writer can finish", "[session]")
 
     testing::SessionStream stream(*fixture.session);
     fixture.session->Terminate();
-    CHECK(fixture.session->queue().closed());
+    CHECK(testing::Transport(*fixture.session).queue().closed());
 
     // Drains to exhaustion and then reports closed, rather than blocking.
     while (stream.Pop().has_value()) {
@@ -926,6 +950,7 @@ TEST_CASE("a client-requested run mode overrides the preset's", "[session]") {
     params.agent_preset = "test";
     params.project_root = fixture.project_root;
     params.run_mode_override = tools::PermissionRunMode::AllowOnly;
+    rpc::FinishSessionWiring(params);
 
     auto owned_store = std::make_unique<testing::InMemoryHistoryStore>();
     auto* store = owned_store.get();
@@ -1125,6 +1150,7 @@ TEST_CASE("a policy ceiling reaches the session's executor", "[session][subagent
     params.project_root = fixture.project_root;
     params.policy_ceiling = ceiling;
     params.run_mode_override = tools::PermissionRunMode::AllowOnly;
+    rpc::FinishSessionWiring(params);
 
     auto owned_store = std::make_unique<testing::InMemoryHistoryStore>();
     auto* store = owned_store.get();

@@ -7,7 +7,6 @@
 #include <utility>
 
 #include "minimal/rpc/session_wiring.hpp"
-#include "minimal/v1/session_service.pb.h"
 
 namespace minimal::agent {
 namespace {
@@ -273,13 +272,7 @@ SubagentOutcome SubagentManager::Spawn(const SubagentRequest& request,
     // Announce BEFORE the child produces anything: attaching to the child is a
     // client protocol obligation, and this event is what starts it. The child's
     // own events buffer in its queue until the client gets there.
-    v1::ServerEvent started_event;
-    started_event.set_session_id(parent_id);
-    auto* started = started_event.mutable_subagent_started();
-    started->set_child_session_id(child_id);
-    started->set_task(request.task);
-    started->set_blocking(blocking);
-    parent->queue().Publish(std::move(started_event));
+    parent->EmitEvent(SessionEvent{SubagentStarted{child_id, request.task, blocking}});
 
     // core.subagent_started: observe-only, fired at the same moment as the
     // wire event above. The task text is the parent model's own formulation --

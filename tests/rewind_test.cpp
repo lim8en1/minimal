@@ -21,6 +21,7 @@
 #include "minimal/agent/agent_loop.hpp"
 #include "minimal/agent/session.hpp"
 #include "minimal/common/logger.hpp"
+#include "minimal/rpc/session_wiring.hpp"
 #include "minimal/session/session_database.hpp"
 #include "minimal/session/session_reader.hpp"
 #include "minimal/session/sqlite_history_store.hpp"
@@ -159,6 +160,7 @@ struct SqliteSessionFixture {
         params.project_root = std::filesystem::path(row.project_root);
         // THE REAL READER: rewind validation and reload read through it.
         params.history_reader = std::make_shared<session::SessionReader>(db);
+        rpc::FinishSessionWiring(params);
 
         agent::AgentPreset preset;
         preset.name = "test";

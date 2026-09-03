@@ -16,6 +16,7 @@
 #include "minimal/config/mcps_config.hpp"
 #include "minimal/config/settings_config.hpp"
 #include "minimal/mcp/mcp_client_manager.hpp"
+#include "minimal/rpc/session_wiring.hpp"
 #include "minimal/tools/tool_registry.hpp"
 #include "support/fakes.hpp"
 #include "support/session_events.hpp"
@@ -74,6 +75,7 @@ struct Fixture {
         params.agent_preset = "test";
         params.project_root = std::filesystem::temp_directory_path();
         params.mcp_manager = manager.get();
+        rpc::FinishSessionWiring(params);
 
         session = std::make_unique<agent::Session>(
             std::move(params), preset, std::move(owned_provider), std::move(owned_store), registry,
@@ -331,7 +333,9 @@ TEST_CASE("a subagent whose preset requires a dead server does not start", "[ses
     parent_params.project_root = dir.path();
     parent_params.mcp_manager = &manager;
     auto parent = sessions.Create(std::move(parent_params));
-    const auto parent_sub = parent->Subscribe();  // a client is present in every designed flow
+    // a client is present in every designed flow
+    const auto parent_sub = testing::Transport(*parent).queue().Subscribe();
+    parent->NotifyAttached();
 
     agent::SubagentRequest request;
     request.task = "do the thing";

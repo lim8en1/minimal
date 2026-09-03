@@ -7,6 +7,7 @@
 #include "minimal/agent/signal_router.hpp"
 #include "minimal/agent/transcript_repair.hpp"
 #include "minimal/config/project_context.hpp"
+#include "minimal/rpc/session_wiring.hpp"
 #include "minimal/session/session_reader.hpp"
 #include "minimal/session/sqlite_history_store.hpp"
 
@@ -112,6 +113,14 @@ std::shared_ptr<Session> SessionRegistry::CreateResolved(SessionParams params,
     if (params.unattended_prompt_timeout == std::chrono::milliseconds::zero()) {
         params.unattended_prompt_timeout = prompt_timeout_;
     }
+    // Builds whatever the advisor-composition callers (ApplyAdvisor,
+    // SubagentManager) did not already build for this session: the transport
+    // (if no advisor applied), the default WirePermissionChecker (if no
+    // advisor applied), and -- always -- the WireConfirmationBroker. Must run
+    // AFTER unattended_prompt_timeout resolves just above: both of those
+    // defaults are built against it, and this is the one funnel every
+    // session (top-level, resume, subagent) passes through after that point.
+    rpc::FinishSessionWiring(params);
     // Signal-channel instructions ride AFTER the project context in the same
     // system section: both are operator-authored framing of the environment,
     // and both are constant within the session (subscriptions are fixed at
