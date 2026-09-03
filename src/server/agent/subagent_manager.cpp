@@ -6,8 +6,6 @@
 #include <future>
 #include <utility>
 
-#include "minimal/rpc/session_wiring.hpp"
-
 namespace minimal::agent {
 namespace {
 
@@ -190,12 +188,14 @@ SubagentOutcome SubagentManager::Spawn(const SubagentRequest& request,
 
     // Inheritance is OPT-IN for the advisor: the default child answers Ask
     // through its own wire checker -- the human -- even when the parent had an
-    // advisor. With advisor_inherit set, the same composition the top-level
-    // producer uses (rpc::ApplyPermissionAdvisor) is repeated here, against the
-    // CHILD's channels; the ceilings above still bound what the child (advised
-    // or not) may run.
+    // advisor. With advisor_inherit set, the same SELECTION the top-level
+    // producer records is recorded here; rpc::FinishSessionWiring composes it
+    // against the CHILD's own channels when the registry funnel wires the
+    // child. The ceilings above still bound what the child (advised or not)
+    // may run.
     if (advisor_inherit_) {
-        rpc::ApplyPermissionAdvisor(params, advisor_, advisor_timeout_);
+        params.selected_advisor = advisor_;
+        params.advisor_timeout = advisor_timeout_;
     }
 
     // The completion signal. Blocking waits on it here; non-blocking uses it on

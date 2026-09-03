@@ -408,14 +408,16 @@ TEST_CASE("an advise thread abandoned at the budget polls a flag that outlives t
     fixture.tools_registry.Register(
         std::make_unique<testing::FakeTool>("slow", tools::ToolCategory::Execute));
     auto advisor = std::make_shared<PollsLate>();
-    // The producer composition (rpc::ApplyPermissionAdvisor's shape): the
+    // The producer composition (selected_advisor + FinishSessionWiring): the
     // inner checker is the REAL wire checker over a real transport, so the
     // budget's fall-through is the human path and the prompt actually
     // round-trips.
     {
         agent::SessionParams temp;
         temp.session_id = "sess-advise";
-        rpc::ApplyPermissionAdvisor(temp, advisor, std::chrono::milliseconds{100});
+        temp.selected_advisor = advisor;
+        temp.advisor_timeout = std::chrono::milliseconds{100};
+        rpc::FinishSessionWiring(temp);
         fixture.injected_checker = std::move(temp.permission_checker);
         fixture.injected_cancel_source = temp.advisor_cancel_source;
         fixture.injected_transport_handle = temp.transport_handle;

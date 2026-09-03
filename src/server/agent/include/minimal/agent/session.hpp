@@ -240,6 +240,16 @@ struct SessionParams {
     // builds; a producer that supplies its own permission_checker owns its
     // own timeout policy.
     std::chrono::milliseconds unattended_prompt_timeout{0};
+
+    // --- Advisor selection (Phase 5 step 3) -----------------------------------
+    // A composition call site (SessionServiceImpl::ApplyAdvisor,
+    // SubagentManager's advisor-inheritance path) sets these to record WHICH
+    // advisor applies, if any -- pure selection, no wiring. Null means no
+    // advisor. rpc::FinishSessionWiring, called from the one funnel every
+    // session passes through, is what actually BUILDS the composed checker
+    // from these, after unattended_prompt_timeout above has resolved.
+    std::shared_ptr<tools::PermissionAdvisor> selected_advisor;
+    std::chrono::milliseconds advisor_timeout{0};
 };
 
 // One item of work for the session worker. A variant rather than two queues,

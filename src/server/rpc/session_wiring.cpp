@@ -11,9 +11,9 @@ namespace minimal::rpc {
 namespace {
 
 // Builds a fresh TransportChannels + EventTranslator and wires every
-// transport-shaped SessionParams field from it. Shared by
-// ApplyPermissionAdvisor (early) and FinishSessionWiring (late, only when
-// ApplyPermissionAdvisor did not already run this for the session).
+// transport-shaped SessionParams field from it. Called by
+// FinishSessionWiring only when a producer did not already supply one
+// (params.transport_handle set) -- a test injecting its own transport.
 std::shared_ptr<EventTranslator> BuildTransport(agent::SessionParams& params) {
     auto transport = MakeTransportChannels(params.session_id);
     auto translator = std::make_shared<EventTranslator>(params.session_id, transport);
@@ -28,13 +28,14 @@ std::shared_ptr<EventTranslator> BuildTransport(agent::SessionParams& params) {
     return translator;
 }
 
-}  // namespace
-
+// The advisor-composition recipe: wraps a WirePermissionChecker (never
+// timed out -- the human fallback has no budget) in an
+// AdvisedPermissionChecker. File-local now that FinishSessionWiring is its
+// only caller.
 void ApplyPermissionAdvisor(agent::SessionParams& params,
                              std::shared_ptr<tools::PermissionAdvisor> advisor,
-                             std::chrono::milliseconds advisor_timeout) {
-    if (advisor == nullptr) return;
-    auto translator = BuildTransport(params);
+                             std::chrono::milliseconds advisor_timeout,
+                             const std::shared_ptr<EventTranslator>& translator) {
     auto cancel_source = std::make_shared<tools::AdvisorCancelSource>();
     params.permission_checker = std::make_unique<tools::AdvisedPermissionChecker>(
         std::move(advisor),
@@ -44,12 +45,17 @@ void ApplyPermissionAdvisor(agent::SessionParams& params,
     params.advisor_cancel_source = std::move(cancel_source);
 }
 
+}  // namespace
+
 void FinishSessionWiring(agent::SessionParams& params) {
     std::shared_ptr<EventTranslator> translator =
         params.transport_handle ? std::static_pointer_cast<EventTranslator>(params.transport_handle)
                                 : BuildTransport(params);
 
-    if (!params.permission_checker) {
+    if (params.selected_advisor) {
+        ApplyPermissionAdvisor(params, std::move(params.selected_advisor), params.advisor_timeout,
+                               translator);
+    } else if (!params.permission_checker) {
         params.permission_checker = std::make_unique<WirePermissionChecker>(
             params.session_id, translator->queue(), translator->pending(),
             params.unattended_prompt_timeout);
