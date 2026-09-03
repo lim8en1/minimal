@@ -24,6 +24,7 @@ SessionRegistry::SessionRegistry(const AgentPresetRegistry& presets, tools::Tool
       provider_cache_(providers, logger),
       observers_(observers),
       db_(db),
+      history_reader_(std::make_shared<session::SessionReader>(db_)),
       loop_config_(loop_config),
       logger_(logger),
       initial_attach_guard_(initial_attach_guard) {
@@ -182,8 +183,9 @@ std::shared_ptr<Session> SessionRegistry::CreateResolved(SessionParams params,
     // top-level and SubagentManager spawns alike -- so a child's window is
     // bound to the child's own id with no extra code, and its tools see its
     // transcript only. Sessions built outside the registry (plain tests on
-    // fake stores) leave it null, and ctx.history is null with it.
-    params.history_reader = std::make_shared<session::SessionReader>(db_);
+    // fake stores) leave it null, and ctx.history is null with it. The SAME
+    // registry-lifetime reader every session shares -- see history_reader_.
+    params.history_reader = history_reader_;
 
     // Track O: the same funnel property wires the hook dispatcher. A producer
     // that set one explicitly (a test with its own) wins; everyone else gets
@@ -207,11 +209,10 @@ std::shared_ptr<Session> SessionRegistry::CreateResolved(SessionParams params,
     std::optional<std::int64_t> seed_first_persisted_seq;
     bool seed_head_is_summary = false;
     if (params.resume) {
-        const session::SessionReader reader(db_);
         const auto checkpoint = db_.LoadCompactionCheckpoint(session_id);
         if (checkpoint) {
             seeded_history.push_back(checkpoint->summary);
-            for (auto& stored : reader.LoadAfter(session_id, checkpoint->boundary_seq)) {
+            for (auto& stored : history_reader_->LoadAfter(session_id, checkpoint->boundary_seq)) {
                 if (!seed_first_persisted_seq) seed_first_persisted_seq = stored.seq;
                 seeded_history.push_back(std::move(stored.message));
             }
@@ -224,7 +225,7 @@ std::shared_ptr<Session> SessionRegistry::CreateResolved(SessionParams params,
             logger_.info("session {}: resuming from compaction checkpoint (covers seq <= {})",
                          session_id, checkpoint->boundary_seq);
         } else {
-            for (auto& stored : reader.LoadAll(session_id)) {
+            for (auto& stored : history_reader_->LoadAll(session_id)) {
                 if (!seed_first_persisted_seq) seed_first_persisted_seq = stored.seq;
                 seeded_history.push_back(std::move(stored.message));
             }

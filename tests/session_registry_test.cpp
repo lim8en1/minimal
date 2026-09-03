@@ -547,6 +547,28 @@ TEST_CASE("resume of an already-open session is refused", "[session_registry][re
     CHECK(fixture.registry->size() == 1);
 }
 
+TEST_CASE("top-level and resumed sessions share the registry's one SessionReader instance",
+          "[session_registry][resume]") {
+    // SessionReader is stateless (holds only the database, every method takes
+    // session_id) -- CreateResolved used to build a fresh one per session plus
+    // a second stack-local one just for resume; both collapse onto one
+    // registry-lifetime instance.
+    RegistryFixture fixture;
+    fixture.config.WriteDefaults();
+    fixture.Build();
+
+    const auto row = fixture.db->CreateSession("resumable", std::nullopt, "/proj", "build");
+    auto fresh = fixture.registry->Create(Params("fresh"));
+
+    auto resume_params = Params(row.session_id);
+    resume_params.resume = true;
+    auto resumed = fixture.registry->Create(std::move(resume_params));
+
+    REQUIRE(fresh->history_reader() != nullptr);
+    REQUIRE(resumed->history_reader() != nullptr);
+    CHECK(fresh->history_reader() == resumed->history_reader());
+}
+
 TEST_CASE("a concurrent duplicate construction is refused before any side effect",
           "[session_registry][resume][invariant]") {
     // THE RESERVATION: the id is claimed under the registry mutex before any

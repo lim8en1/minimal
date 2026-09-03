@@ -36,6 +36,7 @@
 #include "minimal/hooks/hook_dispatcher.hpp"
 #include "minimal/llm/provider_factory_registry.hpp"
 #include "minimal/session/session_database.hpp"
+#include "minimal/session/session_reader.hpp"
 #include "minimal/tools/tool_registry.hpp"
 
 namespace minimal::agent {
@@ -211,6 +212,12 @@ private:
     // CreateResolved funnel.
     const hooks::HookDispatcher* hooks_ = nullptr;
     session::SessionDatabase& db_;
+    // Track M: the one SessionReader every session (top-level, resume, and
+    // SubagentManager spawns alike) reads its transcript through --
+    // stateless (holds only db_, every method takes session_id), so one
+    // registry-lifetime instance suffices where CreateResolved used to build
+    // a fresh one per session plus a second stack-local one for resume.
+    std::shared_ptr<session::SessionReader> history_reader_;
     LoopConfig loop_config_;
     config::ProjectContextSettings project_context_ = [] {
         config::ProjectContextSettings disabled;
