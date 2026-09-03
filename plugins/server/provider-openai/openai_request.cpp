@@ -15,10 +15,14 @@ namespace {
 // emitting duplicate JSON keys: the previous implementation built a nlohmann
 // object (last write wins); a string builder that merely appended both would
 // leave precedence to the receiving parser, which is not a guarantee.
+// "cache_control" / "cache_ttl" are consumed by the builder (see
+// CacheControlEnabled / CacheTtl) and must never leak onto the wire, same rule
+// as provider-anthropic's treatment of "cache_ttl".
 const std::set<std::string_view>& StructuralKeys() {
     static const std::set<std::string_view> keys = {"model",    "messages",   "stream",
                                                     "tools",    "tool_choice", "max_tokens",
-                                                    "stream_options"};
+                                                    "stream_options", "cache_control",
+                                                    "cache_ttl"};
     return keys;
 }
 
@@ -33,6 +37,40 @@ void AppendStringValue(std::string& out, std::string_view value) {
     // is O(its own length), never O(the history).
     out += nlohmann::json(value).dump();
 }
+
+// OpenRouter routes OpenAI-shaped requests to backends that cache the way
+// Anthropic does -- and Anthropic-model caching through OpenRouter is only
+// reachable by marking message content parts with `cache_control`. The flag is
+// OPT-IN per provider/model in providers.json ("parameters": {"cache_control":
+// true}) because plain OpenAI, llama.cpp and vLLM cache prompts automatically
+// (or reject unknown content-part fields outright); off, the builder's output
+// is byte-identical to what it has always produced.
+bool CacheControlEnabled(const nlohmann::json& parameters) {
+    return parameters.is_object() && parameters.contains("cache_control") &&
+           parameters.at("cache_control").is_boolean() &&
+           parameters.at("cache_control").get<bool>();
+}
+
+// Same key provider-anthropic consumes, for parity: "5m" (the default, key
+// omitted) or "1h". Only meaningful when CacheControlEnabled is true.
+std::string CacheTtl(const nlohmann::json& parameters) {
+    if (parameters.is_object() && parameters.contains("cache_ttl") &&
+        parameters.at("cache_ttl").is_string()) {
+        return parameters.at("cache_ttl").get<std::string>();
+    }
+    return "";
+}
+
+// One wire message under construction. Content is split out of the shell so
+// the tail-breakpoint decision (below) can upgrade a plain string content into
+// a marked content-part array WITHOUT string surgery on already-serialized
+// JSON -- the wire message is only assembled at flush time.
+struct WireMessage {
+    std::string head;   // '{"role":...,"content":' (tool messages: + tool_call_id)
+    std::string content;  // quoted-escaped string, "null", or a pre-built part array
+    bool content_is_string = false;  // upgradeable to a marked part array
+    std::string tail;   // tool_calls / closing brace
+};
 
 }  // namespace
 
@@ -119,17 +157,67 @@ std::string BuildRequestBody(const llm::ChatRequest& request, bool stream) {
     // One flag for the WHOLE array: a single llm::Message can serialize into
     // SEVERAL wire messages (a user text flush plus one tool message per
     // result), so the flag is shared by every emission site, not per iteration.
+    //
+    // THE LAST WIRE MESSAGE IS HELD, not written immediately: when cache_control
+    // is on, its content must become a marked part array (the conversation-tail
+    // breakpoint -- the OpenAI-shaped equivalent of provider-anthropic's
+    // auto-placed top-level cache_control), and which message is last is only
+    // known once the walk is over. Every earlier message flushes verbatim, so
+    // the flag-off body and the flag-on prefix stay byte-stable -- the cached
+    // prefix is never disturbed turn to turn.
+    const bool caching = CacheControlEnabled(request.parameters);
+    const std::string ttl = CacheTtl(request.parameters);
+
+    const auto write_message = [&](const WireMessage& message, bool tail_breakpoint) {
+        out += message.head;
+        if (message.content_is_string && tail_breakpoint) {
+            out += R"([{"type":"text","text":)";
+            out += message.content;
+            out += R"(,"cache_control":{"type":"ephemeral")";
+            if (!ttl.empty()) {
+                out += R"(,"ttl":)";
+                out += nlohmann::json(ttl).dump();
+            }
+            out += "}}]";
+        } else {
+            out += message.content;
+        }
+        out += message.tail;
+    };
+
     bool first_message = true;
-    const auto emit_message = [&](std::string serialized) {
-        if (!first_message) out += ',';
-        first_message = false;
-        out += std::move(serialized);
+    WireMessage held;
+    bool have_held = false;
+    const auto emit_message = [&](WireMessage message) {
+        if (have_held) {
+            if (!first_message) out += ',';
+            first_message = false;
+            write_message(held, /*tail_breakpoint=*/false);
+        }
+        held = std::move(message);
+        have_held = true;
     };
 
     if (request.system) {
-        std::string system = R"({"role":"system","content":)";
-        AppendStringValue(system, *request.system);
-        system += '}';
+        WireMessage system;
+        system.head = R"({"role":"system","content":)";
+        if (caching) {
+            // A part array, not a bare string, so it can carry a cache_control
+            // breakpoint: tools render before system on the wire, so this one
+            // marker caches both -- the same tools+system strategy as
+            // provider-anthropic's system block.
+            system.head += R"([{"type":"text","text":)";
+            AppendStringValue(system.head, *request.system);
+            system.head += R"(,"cache_control":{"type":"ephemeral")";
+            if (!ttl.empty()) {
+                system.head += R"(,"ttl":)";
+                system.head += nlohmann::json(ttl).dump();
+            }
+            system.head += "}}]";
+        } else {
+            AppendStringValue(system.head, *request.system);
+        }
+        system.tail = "}";
         emit_message(std::move(system));
     }
 
@@ -143,9 +231,11 @@ std::string BuildRequestBody(const llm::ChatRequest& request, bool stream) {
         // mixed, so labeling a flush as "user" here is always correct.
         const auto flush_user_text = [&]() {
             if (!pending_text.empty()) {
-                std::string user = R"({"role":"user","content":)";
-                AppendStringValue(user, pending_text);
-                user += '}';
+                WireMessage user;
+                user.head = R"({"role":"user","content":)";
+                user.content_is_string = true;
+                AppendStringValue(user.content, pending_text);
+                user.tail = "}";
                 emit_message(std::move(user));
                 pending_text.clear();
             }
@@ -168,11 +258,13 @@ std::string BuildRequestBody(const llm::ChatRequest& request, bool stream) {
                 tool_calls += "}}";
             } else if (const auto* tool_result = std::get_if<llm::ToolResultBlock>(&block)) {
                 flush_user_text();
-                std::string tool = R"({"role":"tool","tool_call_id":)";
-                AppendStringValue(tool, tool_result->tool_use_id);
-                tool += R"(,"content":)";
-                AppendStringValue(tool, JoinResultContent(tool_result->content));
-                tool += '}';
+                WireMessage tool;
+                tool.head = R"({"role":"tool","tool_call_id":)";
+                AppendStringValue(tool.head, tool_result->tool_use_id);
+                tool.head += R"(,"content":)";
+                tool.content_is_string = true;
+                AppendStringValue(tool.content, JoinResultContent(tool_result->content));
+                tool.tail = "}";
                 emit_message(std::move(tool));
             }
             // ThinkingBlock has no chat-completions equivalent -- dropped silently.
@@ -181,21 +273,32 @@ std::string BuildRequestBody(const llm::ChatRequest& request, bool stream) {
         if (message.role == llm::Role::User) {
             flush_user_text();
         } else {
-            std::string assistant = R"({"role":"assistant","content":)";
+            WireMessage assistant;
+            assistant.head = R"({"role":"assistant","content":)";
             // OpenAI allows a null content when tool_calls carries the payload.
             if (pending_text.empty() && !first_tool_call) {
-                assistant += "null";
+                assistant.content = "null";  // nothing to hang a breakpoint on
             } else {
-                AppendStringValue(assistant, pending_text);
+                assistant.content_is_string = true;
+                AppendStringValue(assistant.content, pending_text);
             }
             if (!first_tool_call) {
-                assistant += R"(,"tool_calls":[)";
-                assistant += tool_calls;
-                assistant += ']';
+                assistant.tail += R"(,"tool_calls":[)";
+                assistant.tail += tool_calls;
+                assistant.tail += ']';
             }
-            assistant += '}';
+            assistant.tail += '}';
             emit_message(std::move(assistant));
         }
+    }
+
+    // The held message is the last wire message: the tail breakpoint lands on
+    // it when caching is on (and on nothing when it is a pre-marked system
+    // message or a content-less assistant tool_call message).
+    if (have_held) {
+        if (!first_message) out += ',';
+        first_message = false;
+        write_message(held, caching);
     }
     out += ']';
 

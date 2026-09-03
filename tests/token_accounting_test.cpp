@@ -36,6 +36,19 @@ TEST_CASE("context_occupancy is a pure function of one Usage", "[token_accountin
     CHECK(context_occupancy(Usage{10, 5, 0, 0}) == 15);
 }
 
+TEST_CASE("context occupancy counts cache tokens, which are context too", "[token_accounting]") {
+    // input_tokens is the UNCACHED portion (Anthropic's convention, which
+    // provider-openai's ParseUsage now normalizes to). The context served from
+    // / written to the prompt cache must be added back or the status bar and
+    // the compaction trigger under-count cached sessions.
+    CHECK(context_occupancy(Usage{10, 5, 80, 5}) == 100);
+
+    TokenAccumulator acc;
+    acc.RecordTurn(Usage{900, 40, 800, 0});
+    CHECK(acc.last_occupancy() == 1740);
+    CHECK(acc.last_input_tokens() == 900);  // the raw field stays untouched
+}
+
 TEST_CASE("SeedOccupancy sets the trigger input without touching cumulative totals",
           "[token_accounting]") {
     // Resume seeds an ESTIMATE of the loaded context so the compaction trigger

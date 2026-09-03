@@ -71,7 +71,11 @@ struct ChatRequest {
     // resolved providers.json entry (temperature, top_p, reasoning_effort,
     // id_slot, ...). Structural fields above always win on serialize, so a
     // misconfigured `parameters` can tweak generation but never corrupt the
-    // conversation or tool-calling mechanics.
+    // conversation or tool-calling mechanics. A few keys are CONSUMED by the
+    // provider builders instead of passing through -- "cache_control" and
+    // "cache_ttl" steer prompt-cache breakpoint emission (see
+    // provider-openai/openai_request.hpp and provider-anthropic) -- and are
+    // dropped from the wire like any other structural key.
     nlohmann::json parameters = nlohmann::json::object();
 };
 

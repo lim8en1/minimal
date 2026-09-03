@@ -29,6 +29,23 @@ namespace minimal::provider_openai {
 // parameters object, the system string) per call AND PER RETRY ATTEMPT just
 // to flip that one bool. The body is byte-identical across the attempts of
 // one tool round; the flag is all that ever differed.
+//
+// PROMPT CACHING (opt-in): `parameters.cache_control = true` (consumed here,
+// never emitted verbatim -- it names a StructuralKey) switches the serializer
+// to OpenRouter's Anthropic-style form, which is how Anthropic-model caching is
+// reachable through OpenAI-shaped endpoints: `system` becomes a content-part
+// array carrying a `cache_control` breakpoint (tools render before system on
+// the wire, so this one marker caches tools + system together), and the LAST
+// wire message's content becomes a marked part array too -- the growing
+// conversation tail, auto-advanced by the walk the same way provider-anthropic
+// places its top-level breakpoint. `parameters.cache_ttl` ("5m" default, or
+// "1h") sets the breakpoints' ttl, the same key provider-anthropic consumes.
+// Flag off -- the default -- leaves the body byte-identical to the historical
+// form: plain OpenAI, llama.cpp and vLLM cache prompts without markers (or
+// reject unknown content-part fields), and a marked message would only ever
+// reach those backends by misconfiguration. The tail message's `tool_calls`
+// and assistant null-content cases carry no breakpoint (there is no text part
+// to hang it on); the system breakpoint still covers the prefix there.
 std::string BuildRequestBody(const llm::ChatRequest& request, bool stream);
 
 // Tool definitions and tool_choice are small and structured; nlohmann is the

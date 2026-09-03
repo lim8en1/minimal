@@ -258,3 +258,117 @@ TEST_CASE("BuildRequestBody: max_tokens presence and precedence over parameters"
     without_max.parameters = {{"max_tokens", 1}};
     CHECK_FALSE(ParseBody(without_max).contains("max_tokens"));
 }
+
+TEST_CASE("BuildRequestBody: cache_control flag off is the historical body", "[openai_request][cache]") {
+    // Default: no flag, no markers. Plain OpenAI, llama.cpp and vLLM either
+    // auto-cache or reject unknown content-part fields, so the flagged-on form
+    // must never reach them by accident.
+    Fixture fixture = BaseRequest();
+    auto& request = fixture.request;
+    request.system = "you are a bot";
+
+    const nlohmann::json body = ParseBody(request);
+
+    REQUIRE(body["messages"].size() == 2);
+    CHECK(body["messages"][0]["content"].is_string());
+    CHECK(body["messages"][1]["content"].is_string());
+    CHECK(body.dump().find("cache_control") == std::string::npos);
+}
+
+TEST_CASE("BuildRequestBody: cache_control keys are consumed, never leaked verbatim",
+          "[openai_request][cache][invariant]") {
+    Fixture fixture = BaseRequest();
+    auto& request = fixture.request;
+    request.parameters = {{"cache_control", true}, {"cache_ttl", "1h"}};
+
+    const std::string text = BuildRequestBody(request, /*stream=*/false);
+
+    // StructuralKeys drops them; only the builder's OWN cache_control output
+    // (inside message content) may appear.
+    CHECK(nlohmann::json::parse(text).contains("cache_control") == false);
+    CHECK(text.find("\"cache_ttl\"") == std::string::npos);
+}
+
+TEST_CASE("BuildRequestBody: cache_control marks the system block and the conversation tail",
+          "[openai_request][cache]") {
+    // OpenRouter's Anthropic-style form: system as a marked part array (tools
+    // render before system, so one marker caches both) plus a breakpoint on the
+    // LAST wire message -- the growing tail. Everything before the tail stays a
+    // plain string so the cached prefix is byte-stable.
+    Fixture fixture({
+        llm::Message{llm::Role::User, {llm::TextBlock{"first turn"}}},
+        llm::Message{llm::Role::Assistant, {llm::TextBlock{"earlier answer"}}},
+        llm::Message{llm::Role::User, {llm::TextBlock{"the tail"}}},
+    });
+    auto& request = fixture.request;
+    request.system = "you are a bot";
+    request.parameters = {{"cache_control", true}};
+
+    const nlohmann::json messages = ParseBody(request)["messages"];
+
+    REQUIRE(messages.size() == 4);
+    CHECK(messages[0]["content"][0]["cache_control"]["type"] == "ephemeral");
+    CHECK(messages[0]["content"][0]["text"] == "you are a bot");
+    CHECK(messages[1]["content"].is_string());
+    CHECK(messages[2]["content"].is_string());
+    CHECK(messages[3]["content"][0]["cache_control"]["type"] == "ephemeral");
+    CHECK(messages[3]["content"][0]["text"] == "the tail");
+}
+
+TEST_CASE("BuildRequestBody: cache_control lands on the last EXPLODED wire message",
+          "[openai_request][cache]") {
+    // One llm::Message of tool results becomes N wire messages; the breakpoint
+    // goes on the final one, not the llm::Message boundary.
+    llm::ToolResultBlock result1{"call_1", {llm::TextBlock{"result one"}}, false};
+    llm::ToolResultBlock result2{"call_2", {llm::TextBlock{"result two"}}, false};
+    Fixture fixture({llm::Message{llm::Role::User, {result1, result2}}});
+    fixture.request.parameters = {{"cache_control", true}};
+
+    const nlohmann::json messages = ParseBody(fixture.request)["messages"];
+
+    REQUIRE(messages.size() == 2);
+    CHECK(messages[0]["content"].is_string());
+    CHECK_FALSE(messages[0].contains("cache_control"));
+    CHECK(messages[1]["content"][0]["cache_control"]["type"] == "ephemeral");
+    CHECK(messages[1]["content"][0]["text"] == "result two");
+}
+
+TEST_CASE("BuildRequestBody: cache_control skips a content-less assistant tail",
+          "[openai_request][cache]") {
+    // An assistant tool_call message has no text part to hang the breakpoint
+    // on -- content stays null and the system marker still covers the prefix.
+    Fixture fixture({
+        llm::Message{llm::Role::User, {llm::TextBlock{"run it"}}},
+        llm::Message{llm::Role::Assistant,
+                     {llm::ToolUseBlock{"call_1", "read", {{"path", "a.txt"}}}}},
+    });
+    auto& request = fixture.request;
+    request.system = "sys";
+    request.parameters = {{"cache_control", true}};
+
+    const nlohmann::json messages = ParseBody(request)["messages"];
+
+    REQUIRE(messages.size() == 3);
+    CHECK(messages[2]["content"].is_null());
+    CHECK(messages[2]["tool_calls"].size() == 1);
+    CHECK(messages[0]["content"][0]["cache_control"]["type"] == "ephemeral");
+}
+
+TEST_CASE("BuildRequestBody: cache_ttl sets the breakpoints' ttl, same key as provider-anthropic",
+          "[openai_request][cache]") {
+    Fixture fixture = BaseRequest();
+    auto& request = fixture.request;
+    request.system = "sys";
+    request.parameters = {{"cache_control", true}, {"cache_ttl", "1h"}};
+
+    const nlohmann::json body = ParseBody(request);
+
+    CHECK(body["messages"][0]["content"][0]["cache_control"]["ttl"] == "1h");
+    CHECK(body["messages"][1]["content"][0]["cache_control"]["ttl"] == "1h");
+
+    Fixture default_ttl_fixture = BaseRequest();
+    default_ttl_fixture.request.system = "sys";
+    default_ttl_fixture.request.parameters = {{"cache_control", true}};
+    const nlohmann::json no_ttl = ParseBody(default_ttl_fixture.request);
+    CHECK(no_ttl["messages"][0]["content"][0]["cache_control"] == nlohmann::json({{"type", "ephemeral"}}));
+}

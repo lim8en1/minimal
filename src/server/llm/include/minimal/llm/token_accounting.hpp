@@ -7,8 +7,9 @@
 namespace minimal::llm {
 
 // Context occupancy (status-bar used/max, compaction trigger) is the LAST turn's
-// input+output, never a running sum across turns: each turn's input_tokens
-// already contains the whole history, so summing would double-count
+// input+cache+output, never a running sum across turns: each turn's input_tokens
+// already contains the whole history (cache tokens excluded -- providers report
+// those separately; see context_occupancy), so summing would double-count
 // quadratically and fire compaction far too early.
 std::int64_t context_occupancy(const Usage& last_turn);
 

@@ -47,7 +47,12 @@ TEST_CASE("MapFinishReason", "[openai_response]") {
     CHECK(MapFinishReason("something_new") == llm::StopReason::Unknown);
 }
 
-TEST_CASE("ParseUsage: including cached tokens", "[openai_response]") {
+TEST_CASE("ParseUsage: cached tokens are split out of input, Anthropic-convention", "[openai_response]") {
+    // prompt_tokens INCLUDES the cached tokens (OpenAI semantics); ParseUsage
+    // normalizes to the Anthropic convention (input_tokens = UNCACHED prompt)
+    // that cost_model's input+cache_read pricing and the token totals assume.
+    // Without the subtraction a cached turn is billed twice: full input rate
+    // plus cache-read rate on the same tokens.
     auto usage_json = nlohmann::json::parse(R"({
         "prompt_tokens": 100, "completion_tokens": 20,
         "prompt_tokens_details": {"cached_tokens": 40}
@@ -55,10 +60,28 @@ TEST_CASE("ParseUsage: including cached tokens", "[openai_response]") {
 
     llm::Usage usage = ParseUsage(usage_json);
 
-    CHECK(usage.input_tokens == 100);
+    CHECK(usage.input_tokens == 60);  // 100 prompt - 40 cached
     CHECK(usage.output_tokens == 20);
     CHECK(usage.cache_read_input_tokens == 40);
     CHECK(usage.cache_creation_input_tokens == 0);
+}
+
+TEST_CASE("ParseUsage: DeepSeek-style flat cache keys are honored as a fallback",
+          "[openai_response]") {
+    // DeepSeek's native API reports hits/misses flat instead of nested.
+    const auto usage = ParseUsage(nlohmann::json::parse(
+        R"({"prompt_tokens": 100, "completion_tokens": 5, "prompt_cache_hit_tokens": 30,
+            "prompt_cache_miss_tokens": 70})"));
+    CHECK(usage.cache_read_input_tokens == 30);
+    CHECK(usage.input_tokens == 70);  // misses only
+
+    // Nested wins when both shapes are present; the fallback only fires on a
+    // zero/absent nested count.
+    const auto both = ParseUsage(nlohmann::json::parse(
+        R"({"prompt_tokens": 100, "completion_tokens": 5, "prompt_cache_hit_tokens": 30,
+            "prompt_tokens_details": {"cached_tokens": 40}})"));
+    CHECK(both.cache_read_input_tokens == 40);
+    CHECK(both.input_tokens == 60);
 }
 
 TEST_CASE("ParseNonStreamingResponse: missing choices throws OpenAiParseError", "[openai_response]") {

@@ -40,9 +40,25 @@ llm::Usage ParseUsage(const nlohmann::json& usage_json) {
     llm::Usage usage;
     usage.input_tokens = SafeTokenCount(usage_json, "prompt_tokens");
     usage.output_tokens = SafeTokenCount(usage_json, "completion_tokens");
-    if (usage_json.contains("prompt_tokens_details") && usage_json["prompt_tokens_details"].contains("cached_tokens")) {
-        usage.cache_read_input_tokens = SafeTokenCount(usage_json["prompt_tokens_details"], "cached_tokens");
+
+    // OpenAI-shape backends report cached prompt tokens under
+    // prompt_tokens_details.cached_tokens (OpenAI itself, OpenRouter's
+    // normalized accounting); DeepSeek's native API uses flat
+    // prompt_cache_hit_tokens instead. Same quantity, two shapes.
+    int cached = 0;
+    if (usage_json.contains("prompt_tokens_details") && usage_json["prompt_tokens_details"].is_object()) {
+        cached = SafeTokenCount(usage_json["prompt_tokens_details"], "cached_tokens");
     }
+    if (cached == 0) {
+        cached = SafeTokenCount(usage_json, "prompt_cache_hit_tokens");
+    }
+    usage.cache_read_input_tokens = cached;
+    // prompt_tokens INCLUDES the cached tokens (OpenAI semantics); everything
+    // downstream -- cost_model's input+cache_read pricing, cumulative input
+    // totals -- assumes the Anthropic convention where input_tokens EXCLUDES
+    // them. Subtract here, once, at the adapter boundary: cached prompt tokens
+    // are billed at the cache-read rate, never twice (full rate + read rate).
+    usage.input_tokens = std::max(0, usage.input_tokens - cached);
     // cache_creation_input_tokens has no OpenAI equivalent -- stays 0.
     return usage;
 }

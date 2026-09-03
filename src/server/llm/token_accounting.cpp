@@ -3,7 +3,13 @@
 namespace minimal::llm {
 
 std::int64_t context_occupancy(const Usage& last_turn) {
-    return static_cast<std::int64_t>(last_turn.input_tokens) + last_turn.output_tokens;
+    // Cache tokens ARE context: providers report input_tokens as the UNCACHED
+    // portion (Anthropic's semantics, which provider-openai's ParseUsage now
+    // normalizes to), so occupancy must add back what was served from / written
+    // to the prompt cache or status-bar "used" and the compaction trigger
+    // under-count cached sessions.
+    return static_cast<std::int64_t>(last_turn.input_tokens) + last_turn.output_tokens +
+           last_turn.cache_read_input_tokens + last_turn.cache_creation_input_tokens;
 }
 
 void TokenAccumulator::RecordTurn(const Usage& turn) {
