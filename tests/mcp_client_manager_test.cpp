@@ -254,6 +254,24 @@ TEST_CASE("McpClientManager: ${ENV_VAR} interpolation reaches the child and unse
         CHECK(connect_error.find("MINIMAL_TEST_MARKER_VAR") != std::string::npos);
         std::remove(path.c_str());
     }
+
+    SECTION("a set-but-empty variable is treated the same as unset, not resolved to \"\"") {
+        // Phase 3: env-lookup semantics unified onto "empty = unset" everywhere
+        // (providers.json's api_key_env and $HOME/$XDG_* already worked this
+        // way). A set-but-empty MCP env var used to resolve silently; it must
+        // now fail the same way an unset one does.
+        ::setenv("MINIMAL_TEST_MARKER_VAR", "", 1);
+        ToolRegistry fresh_registry;
+        const std::string path = WriteMcpsConfig(nlohmann::json::array({entry}).dump());
+        McpClientManager fresh(LoadMcpsConfig(path), fresh_registry,
+                               {std::chrono::seconds(5), std::chrono::seconds(5)},
+                               minimal::common::DefaultLogger());
+        std::string connect_error = "untouched";
+        CHECK_FALSE(fresh.EnsureAlive("fake", connect_error));
+        CHECK(connect_error.find("MINIMAL_TEST_MARKER_VAR") != std::string::npos);
+        std::remove(path.c_str());
+        ::unsetenv("MINIMAL_TEST_MARKER_VAR");
+    }
 }
 
 TEST_CASE("McpClientManager: server names that cannot be namespaced are refused", "[mcp_manager]") {

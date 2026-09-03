@@ -4,30 +4,30 @@
 #include <stdexcept>
 
 namespace minimal::common {
-namespace {
 
-// getenv, but treats an empty value as unset -- an exported-but-empty XDG_CONFIG_HOME
-// is common and must not resolve to "/minimal".
-const char* EnvOrNull(const char* name) {
-    const char* v = std::getenv(name);
-    return (v && *v) ? v : nullptr;
+std::optional<std::string> LookupEnv(std::string_view name) {
+    const char* v = std::getenv(std::string(name).c_str());
+    if (v == nullptr || *v == '\0') return std::nullopt;
+    return std::string(v);
 }
 
+namespace {
+
 std::filesystem::path HomeOrThrow() {
-    if (const char* home = EnvOrNull("HOME")) return home;
+    if (auto home = LookupEnv("HOME")) return *home;
     throw std::runtime_error("cannot resolve config directory: $HOME is unset");
 }
 
 }  // namespace
 
 std::filesystem::path ConfigDir() {
-    if (const char* override_dir = EnvOrNull("MINIMAL_CONFIG_DIR")) return override_dir;
-    if (const char* xdg = EnvOrNull("XDG_CONFIG_HOME")) return std::filesystem::path(xdg) / "minimal";
+    if (auto override_dir = LookupEnv("MINIMAL_CONFIG_DIR")) return *override_dir;
+    if (auto xdg = LookupEnv("XDG_CONFIG_HOME")) return std::filesystem::path(*xdg) / "minimal";
     return HomeOrThrow() / ".config" / "minimal";
 }
 
 std::filesystem::path DataDir() {
-    if (const char* xdg = EnvOrNull("XDG_DATA_HOME")) return std::filesystem::path(xdg) / "minimal";
+    if (auto xdg = LookupEnv("XDG_DATA_HOME")) return std::filesystem::path(*xdg) / "minimal";
     return HomeOrThrow() / ".local" / "share" / "minimal";
 }
 

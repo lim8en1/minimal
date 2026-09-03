@@ -1,10 +1,11 @@
 #include "minimal/config/providers_config.hpp"
 
 #include <algorithm>
-#include <cstdlib>
 #include <fstream>
 #include <stdexcept>
 #include <utility>
+
+#include "minimal/common/config_paths.hpp"
 
 namespace minimal::config {
 namespace {
@@ -35,12 +36,12 @@ std::string ResolveApiKey(const nlohmann::json& provider, const std::string& whe
     if (!has_env) return {};  // a local server needs none
 
     const std::string name = provider.at("api_key_env").get<std::string>();
-    const char* value = std::getenv(name.c_str());
-    if (value == nullptr || *value == '\0') {
+    const auto value = common::LookupEnv(name);
+    if (!value) {
         throw std::runtime_error("providers.json: " + where + " names api_key_env '" + name +
                                  "' which is unset");
     }
-    return value;
+    return *value;
 }
 
 // The model's value if it has one, else the provider's. Shallow by design: a

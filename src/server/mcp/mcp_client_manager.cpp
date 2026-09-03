@@ -1,9 +1,9 @@
 #include "minimal/mcp/mcp_client_manager.hpp"
 
-#include <cstdlib>
 #include <optional>
 #include <utility>
 
+#include "minimal/common/config_paths.hpp"
 #include "minimal/common/logger.hpp"
 #include "minimal/mcp/env_interpolation.hpp"
 #include "minimal/mcp/naming.hpp"
@@ -202,11 +202,7 @@ std::optional<config::McpServerEntry> ResolveEndpoint(const config::McpServerEnt
     // mcps_config.hpp. An unresolvable marker is a connect failure naming the
     // ENTRY -- never the value.
     config::McpServerEntry resolved = entry;
-    auto lookup = [](std::string_view name) -> std::optional<std::string> {
-        const char* value = std::getenv(std::string(name).c_str());
-        if (value == nullptr) return std::nullopt;
-        return std::string(value);
-    };
+    auto lookup = [](std::string_view name) { return common::LookupEnv(name); };
     // A bare `$NAME` is not interpolated (only `${NAME}` is) -- documented,
     // intentional passthrough. It is also indistinguishable at a glance from a
     // forgotten pair of braces, so a plausible-looking one gets a warning
