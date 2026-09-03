@@ -48,9 +48,7 @@ SessionParams&& RequireWiring(SessionParams&& params) {
 Session::Session(SessionParams params, AgentPreset preset,
                  std::shared_ptr<llm::LlmProvider> provider, std::unique_ptr<session::HistoryStore> store,
                  tools::ToolRegistry& registry, LoopConfig loop_config,
-                 SessionObserverRegistry& observers, common::Logger& logger,
-                 std::vector<llm::Message> seeded_history,
-                 std::optional<std::int64_t> seed_first_persisted_seq, bool seed_head_is_summary)
+                 SessionObserverRegistry& observers, common::Logger& logger, ResumeSeed seed)
     : params_(RequireWiring(std::move(params))),
       preset_(std::move(preset)),
       logger_(logger),
@@ -228,16 +226,14 @@ Session::Session(SessionParams params, AgentPreset preset,
     // memory.compaction_strategy; unset (every test that builds a LoopConfig
     // by hand) falls back to compact_messages, today's only behavior.
     //
-    // seeded_history is non-empty only on resume: the stored transcript becomes
-    // the loop's working history WITHOUT being re-appended to the store it was
-    // loaded from. The seq/head companions carry where that seed's persisted
-    // portion begins, which is what compaction checkpoints are written against.
+    // seed is non-default only on resume: the stored transcript becomes the
+    // loop's working history WITHOUT being re-appended to the store it was
+    // loaded from. See ResumeSeed for what its fields carry.
     loop_ = std::make_unique<AgentLoop>(
         *provider_, executor_, registry, *store_, preset_, loop_config, std::move(context),
         [this] { return IsCancelled(); }, std::move(stream_event_sink),
         loop_config.compaction_summarizer ? loop_config.compaction_summarizer : Compactor(compact_messages),
-        std::move(seeded_history), seed_first_persisted_seq, seed_head_is_summary,
-        std::move(params_.project_context));
+        std::move(seed), std::move(params_.project_context));
 
     // MCP liveness at session start, BEFORE the worker exists: this thread is
     // allowed to block (the RPC reader is a different one), and the loop must

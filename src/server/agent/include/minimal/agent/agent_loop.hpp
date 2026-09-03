@@ -191,6 +191,33 @@ struct TurnResult {
     std::string model;
 };
 
+// RESUME: the stored transcript, loaded without being re-appended -- the
+// store already holds it. Empty/default-constructed for a fresh session.
+// The three fields must agree with each other (see first_persisted_seq
+// below), which is exactly why they travel as one struct instead of three
+// separately-threaded constructor arguments: Session and AgentLoop each used
+// to take them as three trailing params that had to stay in sync by
+// convention across two call sites.
+struct ResumeSeed {
+    // Construction-time seeding (rather than a later setter) means a turn can
+    // never run against a half-initialized history. Seeded history also seeds
+    // the occupancy estimate, so auto-compaction can fire BEFORE the first
+    // post-resume provider call -- without that, a resumed session whose
+    // stored context exceeds the window would fail the call outright.
+    std::vector<llm::Message> history;
+    // Where the seed's PERSISTED portion begins in the store's seq space --
+    // what the compaction checkpoint's boundary_seq derives from. nullopt for
+    // a fresh session (nothing persisted yet) or a seed with no persisted
+    // messages. With a checkpoint seed, this is boundary_seq + 1 and
+    // head_is_summary is true: the seed's first message is the synthetic
+    // summary, which is not in the store. The INVARIANT that makes this one
+    // number sufficient: the persisted messages in history_ are always a
+    // contiguous suffix of the stored transcript, because appends continue at
+    // MAX(seq)+1 and compaction only ever folds from the head.
+    std::optional<std::int64_t> first_persisted_seq;
+    bool head_is_summary = false;
+};
+
 // Runs on the session worker thread. Blocks freely -- permission waits, provider
 // calls, tool subprocesses -- which is safe only because the gRPC reader thread
 // is separate and keeps draining.
@@ -199,27 +226,7 @@ public:
     AgentLoop(llm::LlmProvider& provider, tools::ToolExecutor& executor,
               tools::ToolRegistry& registry, session::HistoryStore& store, AgentPreset preset,
               LoopConfig config, SessionContext session, std::function<bool()> is_cancelled,
-              llm::StreamEventSink event_sink, Compactor compactor,
-              // RESUME: the stored transcript, loaded without being re-appended.
-              // Construction-time seeding (rather than a later setter) means a
-              // turn can never run against a half-initialized history. Empty for
-              // a new session. Seeded history also seeds the occupancy estimate,
-              // so auto-compaction can fire BEFORE the first post-resume
-              // provider call -- without that, a resumed session whose stored
-              // context exceeds the window would fail the call outright.
-              std::vector<llm::Message> seeded_history = {},
-              // Where the seed's PERSISTED portion begins in the store's seq
-              // space -- what the compaction checkpoint's boundary_seq derives
-              // from. nullopt for a fresh session (nothing persisted yet) or a
-              // seed with no persisted messages. With a checkpoint seed, this
-              // is boundary_seq + 1 and head_is_summary is true: the seed's
-              // first message is the synthetic summary, which is not in the
-              // store. The INVARIANT that makes this one number sufficient:
-              // the persisted messages in history_ are always a contiguous
-              // suffix of the stored transcript, because appends continue at
-              // MAX(seq)+1 and compaction only ever folds from the head.
-              std::optional<std::int64_t> seed_first_persisted_seq = std::nullopt,
-              bool seed_head_is_summary = false,
+              llm::StreamEventSink event_sink, Compactor compactor, ResumeSeed seed = {},
               // The rendered project-context section (AGENTS.md/CLAUDE.md),
               // loaded from project_root by the registry and carried on
               // SessionParams. Appended after the preset's system prompt on

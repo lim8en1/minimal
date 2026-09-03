@@ -181,9 +181,8 @@ struct Harness {
     }
 
     void Build(agent::AgentPreset preset = {}, agent::LoopConfig config = {},
-               agent::Compactor compactor = {}, std::vector<llm::Message> seeded_history = {},
-               std::optional<std::int64_t> seed_first_persisted_seq = std::nullopt,
-               bool seed_head_is_summary = false, std::string project_context = {}) {
+               agent::Compactor compactor = {}, agent::ResumeSeed seed = {},
+               std::string project_context = {}) {
         if (preset.allowed_tools.empty()) preset.allowed_tools = {"*"};
         if (preset.provider.model_name.empty()) preset.provider.model_name = "test-model";
         preset.permission_mode = AllowAllPolicy();
@@ -210,8 +209,7 @@ struct Harness {
                 seen_events.push_back(e);
                 return !cancel_flag.load();
             },
-            std::move(compactor), std::move(seeded_history), seed_first_persisted_seq,
-            seed_head_is_summary, std::move(project_context));
+            std::move(compactor), std::move(seed), std::move(project_context));
     }
 };
 
@@ -523,7 +521,7 @@ TEST_CASE("project context rides the session, not the preset", "[agent_loop][inv
     SECTION("appended after the preset body; empty preset still carries it") {
         agent::AgentPreset preset;
         preset.system_prompt = "You are a build agent.";
-        h.Build(preset, agent::LoopConfig{}, {}, {}, std::nullopt, false,
+        h.Build(preset, agent::LoopConfig{}, {}, {},
                 "## Project context\n\nAlways run the tests.");
 
         const auto request = h.loop->BuildChatRequest();
@@ -534,7 +532,7 @@ TEST_CASE("project context rides the session, not the preset", "[agent_loop][inv
     SECTION("survives SetPreset") {
         agent::AgentPreset preset;
         preset.system_prompt = "first";
-        h.Build(preset, agent::LoopConfig{}, {}, {}, std::nullopt, false,
+        h.Build(preset, agent::LoopConfig{}, {}, {},
                 "## Project context\n\nAlways run the tests.");
 
         agent::AgentPreset replacement;
@@ -548,7 +546,7 @@ TEST_CASE("project context rides the session, not the preset", "[agent_loop][inv
               std::string::npos);
     }
     SECTION("stable across rebuilds of the same session") {
-        h.Build(agent::AgentPreset{}, agent::LoopConfig{}, {}, {}, std::nullopt, false,
+        h.Build(agent::AgentPreset{}, agent::LoopConfig{}, {}, {},
                 "## Project context\n\nAlways run the tests.");
         const auto first = h.loop->BuildChatRequest();
         const auto second = h.loop->BuildChatRequest();
@@ -667,7 +665,7 @@ TEST_CASE("compaction re-seeds the occupancy estimate", "[agent_loop][compaction
     h.provider.PushResponse(big_usage_tool_use);       // occupancy 105: compacts
     h.provider.PushResponse(TextResponse("done"));     // occupancy 15: below the trigger
     h.Build({}, agent::LoopConfig{.auto_compact = true, .compaction_trigger = FixedTrigger(40)},
-            compactor, std::move(seeded));
+            compactor, agent::ResumeSeed{.history = std::move(seeded)});
 
     h.loop->RunTurn(UserText("go"));
 
@@ -699,7 +697,7 @@ TEST_CASE("the occupancy estimate covers the system prompt and the tools array",
     h.provider.PushResponse(TextResponse("done"));
     h.Build(preset, agent::LoopConfig{.auto_compact = true,
                                       .compaction_trigger = FixedTrigger(10)},
-            compactor, std::move(seeded));
+            compactor, agent::ResumeSeed{.history = std::move(seeded)});
 
     h.loop->RunTurn(UserText("go"));
 
@@ -758,8 +756,11 @@ TEST_CASE("a checkpoint-seeded resume replaces the checkpoint with correct arith
         return agent::CompactionResult{UserText("[new summary]"), 0};
     };
     h.Build({}, agent::LoopConfig{.auto_compact = true, .compaction_trigger = FixedTrigger(10)},
-            compactor, {UserText("[old summary]"), UserText(long_text), UserText(long_text)}, 5,
-            /*seed_head_is_summary=*/true);
+            compactor,
+            agent::ResumeSeed{
+                .history = {UserText("[old summary]"), UserText(long_text), UserText(long_text)},
+                .first_persisted_seq = 5,
+                .head_is_summary = true});
 
     h.loop->RunTurn(UserText("x"));
 
@@ -785,8 +786,10 @@ TEST_CASE("clearing the working set clears the checkpoint", "[agent_loop][compac
         return agent::CompactionResult{UserText("[summary]"), 0};
     };
     h.Build({}, agent::LoopConfig{.auto_compact = true, .compaction_trigger = FixedTrigger(10)},
-            compactor, {UserText("[old summary]"), UserText(long_text)}, 5,
-            /*seed_head_is_summary=*/true);
+            compactor,
+            agent::ResumeSeed{.history = {UserText("[old summary]"), UserText(long_text)},
+                              .first_persisted_seq = 5,
+                              .head_is_summary = true});
 
     h.loop->RunTurn(UserText("x"));
     REQUIRE(h.store.checkpoint_boundary.has_value());
@@ -1216,7 +1219,7 @@ TEST_CASE("a seeded loop sends the stored history but never re-appends it",
         llm::Message{llm::Role::Assistant, {llm::TextBlock{"second answer"}}},
     };
     h.provider.PushResponse(TextResponse("third answer"));
-    h.Build({}, {}, {}, seeded);
+    h.Build({}, {}, {}, agent::ResumeSeed{.history = seeded});
 
     const auto result = h.loop->RunTurn(UserText("third user message"));
 
@@ -1264,7 +1267,7 @@ TEST_CASE("a seeded history can trigger compaction before the first provider cal
     config.auto_compact = true;
     config.compaction_trigger.kind = config::CompactionTriggerSettings::Kind::FixedTokens;
     config.compaction_trigger.tokens = 100;
-    h.Build({}, config, compactor, std::move(seeded));
+    h.Build({}, config, compactor, agent::ResumeSeed{.history = std::move(seeded)});
 
     h.loop->RunTurn(UserText("continue"));
 
@@ -1735,7 +1738,8 @@ TEST_CASE("LoopConfig.cut_selector is consulted instead of the legacy history.si
         return std::size_t{1};
     };
     h.Build({}, config, compactor,
-            {UserText("a"), UserText("b"), UserText("c"), UserText("d")});
+            agent::ResumeSeed{.history = {UserText("a"), UserText("b"), UserText("c"),
+                                          UserText("d")}});
 
     const auto cut = h.loop->CompactNow();
     REQUIRE(cut.has_value());
@@ -1775,8 +1779,9 @@ TEST_CASE("a proposed cut is still snapped to a safe tool-call boundary, never t
         return std::size_t{1};  // between the tool_use and its own result -- unsafe
     };
     h.Build({}, config, compactor,
-            {llm::Message{llm::Role::Assistant, {use}}, llm::Message{llm::Role::User, {result}},
-             UserText("c"), UserText("d")});
+            agent::ResumeSeed{.history = {llm::Message{llm::Role::Assistant, {use}},
+                                          llm::Message{llm::Role::User, {result}}, UserText("c"),
+                                          UserText("d")}});
 
     const auto cut = h.loop->CompactNow();
     CHECK_FALSE(cut.has_value());
@@ -1808,7 +1813,8 @@ TEST_CASE("no safe compaction boundary elides the largest tool result instead of
     huge.content = {llm::TextBlock{std::string(5000, 'x')}};
 
     h.Build({}, {}, compactor,
-            {llm::Message{llm::Role::Assistant, {use}}, llm::Message{llm::Role::User, {huge}}});
+            agent::ResumeSeed{.history = {llm::Message{llm::Role::Assistant, {use}},
+                                          llm::Message{llm::Role::User, {huge}}}});
 
     const auto cut = h.loop->CompactNow();
     CHECK_FALSE(cut.has_value());     // nothing was folded into a summary
@@ -1843,7 +1849,8 @@ TEST_CASE("no safe boundary AND nothing worth eliding falls back to the genuine 
         return agent::CompactionResult{UserText("[summary]"), 0};
     };
     h.Build({}, {}, compactor,
-            {llm::Message{llm::Role::Assistant, {use}}, llm::Message{llm::Role::User, {small}}});
+            agent::ResumeSeed{.history = {llm::Message{llm::Role::Assistant, {use}},
+                                          llm::Message{llm::Role::User, {small}}}});
 
     const auto cut = h.loop->CompactNow();
     CHECK_FALSE(cut.has_value());

@@ -84,27 +84,12 @@ std::shared_ptr<Session> SessionRegistry::CreateResolved(SessionParams params,
     } guard{*this, session_id};
 
     // Read before params is moved from.
-    const std::string params_parent = params.parent_session_id;
-    const std::filesystem::path project_root = params.project_root;
+    const bool has_parent = !params.parent_session_id.empty();
     SignalRouter* const signal_router = params.signal_router;
     const std::vector<std::string> signal_selectors = std::move(params.signal_selectors);
-    const bool signal_resume = params.resume;
+    const bool resume = params.resume;
 
-    // PROJECT CONTEXT (AGENTS.md/CLAUDE.md), loaded HERE -- in the funnel every
-    // session passes through: top-level creation, resume, and SubagentManager
-    // spawns alike. The file is a property of the session's project_root, which
-    // no preset knows; the rendered section rides SessionParams into the loop,
-    // which appends it after the preset body on every request. Absence is the
-    // normal state and silent; a file that exists but cannot be read is worth
-    // one warning, since the operator wrote instructions and got silence.
-    std::string error;
-    if (auto context = config::LoadProjectContext(project_root, project_context_, &error)) {
-        params.project_context = config::RenderProjectContextSection(*context);
-        logger_.info("session {}: loaded project context from {}", params.session_id,
-                     context->source_path.string());
-    } else if (!error.empty()) {
-        logger_.warn("session {}: {}", params.session_id, error);
-    }
+    ApplyProjectContext(params);
     // S5.3: same funnel, same reasoning -- a producer that built its own
     // permission_checker (an advised session) owns its own timeout policy, so
     // this only takes effect on the default WirePermissionChecker/
@@ -122,61 +107,19 @@ std::shared_ptr<Session> SessionRegistry::CreateResolved(SessionParams params,
     // defaults are built against it, and this is the one funnel every
     // session (top-level, resume, subagent) passes through after that point.
     rpc::FinishSessionWiring(params);
-    // Signal-channel instructions ride AFTER the project context in the same
-    // system section: both are operator-authored framing of the environment,
-    // and both are constant within the session (subscriptions are fixed at
-    // start). Appending here, in the funnel, keeps AgentLoop unaware of
-    // signals -- it renders one context string.
-    if (!params.signal_context.empty()) {
-        if (params.project_context.empty()) {
-            params.project_context = std::move(params.signal_context);
-        } else {
-            params.project_context += "\n\n" + params.signal_context;
-        }
-        params.signal_context.clear();
-    }
+    AppendSignalContext(params);
+
     // The user's model outranks the preset's. Applied here rather than inside
     // the preset registry because it is a property of this SESSION, not of the
     // preset -- two sessions on one preset can be running different models. In
     // CreateResolved rather than Create so a SUBAGENT spawned with an inherited
     // preset honours it too.
-    if (params.model_override) {
-        const auto model = presets_.providers().Resolve(*params.model_override);
-        if (model == nullptr) {
-            throw std::runtime_error("unknown model '" + params.model_override->str() +
-                                     "'; providers.json defines " +
-                                     config::DescribeModels(presets_.providers()) +
-                                     config::DescribeDiscovery(presets_.providers(),
-                                                       params.model_override->provider));
-        }
-        ApplyModel(preset, *model);
-    }
+    preset = ResolveModel(std::move(preset), params.model_override);
 
     LoopConfig loop_config = loop_config_;
     if (max_turns_override.has_value()) loop_config.max_turns = *max_turns_override;
 
-    // The kind string is what selects a factory. A preset can only reach this
-    // point with a provider entry that parsed, so an unregistered kind means a
-    // plugin is missing or disabled -- worth naming explicitly, because the
-    // symptom otherwise is a session that fails on its first turn for no stated
-    // reason.
-    if (!providers_.Has(preset.provider_kind)) {
-        throw std::runtime_error("agent preset '" + params.agent_preset +
-                                 "' needs provider kind '" + preset.provider_kind +
-                                 "', which no loaded plugin registered");
-    }
-
-    // SHARED, not per-session: providers are stateless by contract, so two
-    // sessions on one providers.json entry share one instance instead of each
-    // paying construction. The entry NAME is the key (immutable at runtime);
-    // the model override already applied above does not change it -- two
-    // models on one entry share the connection by design.
-    auto provider = provider_cache_.GetOrCreate(preset.model_ref.provider, preset.provider_kind,
-                                                preset.provider);
-    if (provider == nullptr) {
-        throw std::runtime_error("provider kind '" + preset.provider_kind +
-                                 "' failed to construct");
-    }
+    auto provider = ResolveProvider(preset, params.agent_preset);
 
     // Track M (docs/EXTENSIBILITY.md §2.1): the read side of the transcript.
     // Set here because this is the one funnel every session passes through --
@@ -192,6 +135,101 @@ std::shared_ptr<Session> SessionRegistry::CreateResolved(SessionParams params,
     // the process-wide one without knowing it exists.
     if (params.hooks == nullptr) params.hooks = hooks_;
 
+    ResumeSeed seed = resume ? LoadResumeSeed(session_id) : ResumeSeed{};
+
+    auto store = std::make_unique<session::SqliteHistoryStore>(db_, session_id);
+    // loop_config, not loop_config_: CreateResolved may have overridden max_turns
+    // for a subagent, whose whole life is one bounded turn.
+    auto session = std::make_shared<Session>(std::move(params), std::move(preset),
+                                             std::move(provider), std::move(store), tools_,
+                                             loop_config, observers_, logger_, std::move(seed));
+    // Wired before the session is findable, so the first command a client sends
+    // cannot arrive at a session that has no registry yet. Signal subscription
+    // (inside PublishSession's locked block) is part of the same "findable"
+    // bar -- an internal signal addressed to this session_id must never be
+    // able to observe it before its declared subscriptions exist.
+    WireSession(*session, has_parent);
+    PublishSession(session_id, session, signal_router, signal_selectors, resume);
+
+    guard.committed = true;
+    reaper_cv_.notify_all();
+    return session;
+}
+
+void SessionRegistry::ApplyProjectContext(SessionParams& params) const {
+    // PROJECT CONTEXT (AGENTS.md/CLAUDE.md), loaded HERE -- in the funnel every
+    // session passes through: top-level creation, resume, and SubagentManager
+    // spawns alike. The file is a property of the session's project_root, which
+    // no preset knows; the rendered section rides SessionParams into the loop,
+    // which appends it after the preset body on every request. Absence is the
+    // normal state and silent; a file that exists but cannot be read is worth
+    // one warning, since the operator wrote instructions and got silence.
+    std::string error;
+    if (auto context = config::LoadProjectContext(params.project_root, project_context_, &error)) {
+        params.project_context = config::RenderProjectContextSection(*context);
+        logger_.info("session {}: loaded project context from {}", params.session_id,
+                     context->source_path.string());
+    } else if (!error.empty()) {
+        logger_.warn("session {}: {}", params.session_id, error);
+    }
+}
+
+void SessionRegistry::AppendSignalContext(SessionParams& params) const {
+    // Signal-channel instructions ride AFTER the project context in the same
+    // system section: both are operator-authored framing of the environment,
+    // and both are constant within the session (subscriptions are fixed at
+    // start). Appending here, in the funnel, keeps AgentLoop unaware of
+    // signals -- it renders one context string.
+    if (params.signal_context.empty()) return;
+    if (params.project_context.empty()) {
+        params.project_context = std::move(params.signal_context);
+    } else {
+        params.project_context += "\n\n" + params.signal_context;
+    }
+    params.signal_context.clear();
+}
+
+AgentPreset SessionRegistry::ResolveModel(
+    AgentPreset preset, const std::optional<config::ModelRef>& model_override) const {
+    if (!model_override) return preset;
+    const auto model = presets_.providers().Resolve(*model_override);
+    if (model == nullptr) {
+        throw std::runtime_error("unknown model '" + model_override->str() +
+                                 "'; providers.json defines " +
+                                 config::DescribeModels(presets_.providers()) +
+                                 config::DescribeDiscovery(presets_.providers(), model_override->provider));
+    }
+    ApplyModel(preset, *model);
+    return preset;
+}
+
+std::shared_ptr<llm::LlmProvider> SessionRegistry::ResolveProvider(
+    const AgentPreset& preset, const std::string& agent_preset_name) {
+    // The kind string is what selects a factory. A preset can only reach this
+    // point with a provider entry that parsed, so an unregistered kind means a
+    // plugin is missing or disabled -- worth naming explicitly, because the
+    // symptom otherwise is a session that fails on its first turn for no stated
+    // reason.
+    if (!providers_.Has(preset.provider_kind)) {
+        throw std::runtime_error("agent preset '" + agent_preset_name + "' needs provider kind '" +
+                                 preset.provider_kind + "', which no loaded plugin registered");
+    }
+
+    // SHARED, not per-session: providers are stateless by contract, so two
+    // sessions on one providers.json entry share one instance instead of each
+    // paying construction. The entry NAME is the key (immutable at runtime);
+    // the model override already applied above does not change it -- two
+    // models on one entry share the connection by design.
+    auto provider = provider_cache_.GetOrCreate(preset.model_ref.provider, preset.provider_kind,
+                                                preset.provider);
+    if (provider == nullptr) {
+        throw std::runtime_error("provider kind '" + preset.provider_kind +
+                                 "' failed to construct");
+    }
+    return provider;
+}
+
+ResumeSeed SessionRegistry::LoadResumeSeed(const std::string& session_id) {
     // RESUME: load the stored transcript as the loop's working history. Loaded,
     // not replayed -- everything below appends NEW messages at MAX(seq) + 1, so
     // the stored rows must not go through the store again or the transcript
@@ -205,64 +243,50 @@ std::shared_ptr<Session> SessionRegistry::CreateResolved(SessionParams params,
     // to summarize half of a 3M-token history through one model window. No
     // checkpoint (never compacted, or a pre-checkpoint session) falls back to
     // the full-transcript load.
-    std::vector<llm::Message> seeded_history;
-    std::optional<std::int64_t> seed_first_persisted_seq;
-    bool seed_head_is_summary = false;
-    if (params.resume) {
-        const auto checkpoint = db_.LoadCompactionCheckpoint(session_id);
-        if (checkpoint) {
-            seeded_history.push_back(checkpoint->summary);
-            for (auto& stored : history_reader_->LoadAfter(session_id, checkpoint->boundary_seq)) {
-                if (!seed_first_persisted_seq) seed_first_persisted_seq = stored.seq;
-                seeded_history.push_back(std::move(stored.message));
-            }
-            seed_head_is_summary = true;
-            if (!seed_first_persisted_seq) {
-                // Empty tail: the boundary is still exactly where the persisted
-                // portion will resume on the next append.
-                seed_first_persisted_seq = checkpoint->boundary_seq + 1;
-            }
-            logger_.info("session {}: resuming from compaction checkpoint (covers seq <= {})",
-                         session_id, checkpoint->boundary_seq);
-        } else {
-            for (auto& stored : history_reader_->LoadAll(session_id)) {
-                if (!seed_first_persisted_seq) seed_first_persisted_seq = stored.seq;
-                seeded_history.push_back(std::move(stored.message));
-            }
+    ResumeSeed seed;
+    const auto checkpoint = db_.LoadCompactionCheckpoint(session_id);
+    if (checkpoint) {
+        seed.history.push_back(checkpoint->summary);
+        for (auto& stored : history_reader_->LoadAfter(session_id, checkpoint->boundary_seq)) {
+            if (!seed.first_persisted_seq) seed.first_persisted_seq = stored.seq;
+            seed.history.push_back(std::move(stored.message));
         }
-
-        // A session cancelled mid-tool-execution -- or a process killed between
-        // the assistant append and the tool-results append -- ends with an
-        // unanswered tool_use, which no provider accepts. Synthesize the
-        // missing error results as one REAL message (persisted like any other
-        // append) rather than refusing to resume: cancellation is ordinary,
-        // and the transcript stays an exact, valid prefix either way. The
-        // repair appends at MAX(seq)+1, so a checkpoint boundary (which only
-        // covers earlier seqs) is unaffected by it.
-        if (auto repair = synthesize_missing_tool_results(seeded_history)) {
-            logger_.info(
-                "session {}: stored transcript ends mid tool call; appending synthesized "
-                "error results before resuming",
-                session_id);
-            db_.AppendMessage(session_id, *repair, 0);
-            seeded_history.push_back(std::move(*repair));
+        seed.head_is_summary = true;
+        if (!seed.first_persisted_seq) {
+            // Empty tail: the boundary is still exactly where the persisted
+            // portion will resume on the next append.
+            seed.first_persisted_seq = checkpoint->boundary_seq + 1;
+        }
+        logger_.info("session {}: resuming from compaction checkpoint (covers seq <= {})",
+                     session_id, checkpoint->boundary_seq);
+    } else {
+        for (auto& stored : history_reader_->LoadAll(session_id)) {
+            if (!seed.first_persisted_seq) seed.first_persisted_seq = stored.seq;
+            seed.history.push_back(std::move(stored.message));
         }
     }
 
-    auto store = std::make_unique<session::SqliteHistoryStore>(db_, session_id);
-    // loop_config, not loop_config_: CreateResolved may have overridden max_turns
-    // for a subagent, whose whole life is one bounded turn.
-    auto session = std::make_shared<Session>(std::move(params), std::move(preset),
-                                             std::move(provider), std::move(store), tools_,
-                                             loop_config, observers_, logger_,
-                                             std::move(seeded_history), seed_first_persisted_seq,
-                                             seed_head_is_summary);
-    // Wired before the session is findable, so the first command a client sends
-    // cannot arrive at a session that has no registry yet. Signal subscription
-    // (below, inside the locked block) is part of the same "findable" bar --
-    // an internal signal addressed to this session_id must never be able to
-    // observe it before its declared subscriptions exist.
-    session->set_presets(&presets_);
+    // A session cancelled mid-tool-execution -- or a process killed between
+    // the assistant append and the tool-results append -- ends with an
+    // unanswered tool_use, which no provider accepts. Synthesize the
+    // missing error results as one REAL message (persisted like any other
+    // append) rather than refusing to resume: cancellation is ordinary,
+    // and the transcript stays an exact, valid prefix either way. The
+    // repair appends at MAX(seq)+1, so a checkpoint boundary (which only
+    // covers earlier seqs) is unaffected by it.
+    if (auto repair = synthesize_missing_tool_results(seed.history)) {
+        logger_.info(
+            "session {}: stored transcript ends mid tool call; appending synthesized "
+            "error results before resuming",
+            session_id);
+        db_.AppendMessage(session_id, *repair, 0);
+        seed.history.push_back(std::move(*repair));
+    }
+    return seed;
+}
+
+void SessionRegistry::WireSession(Session& session, bool has_parent) {
+    session.set_presets(&presets_);
     // A SUBAGENT GETS NO COMMAND SURFACE. Commands are a user control channel,
     // and a child has no user: its client attaches to observe, and the spawn was
     // driven by the parent's model rather than by a person with a prompt.
@@ -273,41 +297,41 @@ std::shared_ptr<Session> SessionRegistry::CreateResolved(SessionParams params,
     // spawn_subagent back and reopen the recursion ARCHITECTURE.md calls a hard
     // rule. Closing the surface removes the whole class rather than patching the
     // one command that happens to reach it today.
-    session->set_commands(params_parent.empty() ? commands_ : nullptr);
-    session->set_provider_factories(&providers_);
-    session->set_provider_instance_cache(&provider_cache_);
+    session.set_commands(has_parent ? nullptr : commands_);
+    session.set_provider_factories(&providers_);
+    session.set_provider_instance_cache(&provider_cache_);
+}
 
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        // Signal subscriptions register HERE, inside the same critical section
-        // that makes the session findable in sessions_ -- not afterward from
-        // the RPC layer. ApplySignals already validated every selector before
-        // the DB row/Session existed, so Subscribe here cannot fail for a
-        // reason a client could have avoided; a failure is logged, not
-        // surfaced, exactly like the RPC-layer code this replaces. This closes
-        // the TOCTOU window where an internal signal addressed to session_id,
-        // sent the instant after CreateSession's response, found no subscriber
-        // even though the request that minted the id had already declared one.
-        if (signal_router != nullptr && !signal_selectors.empty()) {
-            if (signal_resume) signal_router->Unsubscribe(session_id);
-            for (const auto& selector : signal_selectors) {
-                std::string error;
-                if (!signal_router->Subscribe(session, selector, error)) {
-                    logger_.warn("session {}: subscribing '{}' failed: {}", session_id, selector,
-                                error);
-                }
+void SessionRegistry::PublishSession(const std::string& session_id,
+                                     const std::shared_ptr<Session>& session,
+                                     SignalRouter* signal_router,
+                                     const std::vector<std::string>& signal_selectors,
+                                     bool signal_resume) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    // Signal subscriptions register HERE, inside the same critical section
+    // that makes the session findable in sessions_ -- not afterward from
+    // the RPC layer. ApplySignals already validated every selector before
+    // the DB row/Session existed, so Subscribe here cannot fail for a
+    // reason a client could have avoided; a failure is logged, not
+    // surfaced, exactly like the RPC-layer code this replaces. This closes
+    // the TOCTOU window where an internal signal addressed to session_id,
+    // sent the instant after CreateSession's response, found no subscriber
+    // even though the request that minted the id had already declared one.
+    if (signal_router != nullptr && !signal_selectors.empty()) {
+        if (signal_resume) signal_router->Unsubscribe(session_id);
+        for (const auto& selector : signal_selectors) {
+            std::string error;
+            if (!signal_router->Subscribe(session, selector, error)) {
+                logger_.warn("session {}: subscribing '{}' failed: {}", session_id, selector, error);
             }
         }
-        // The RESERVATION made at the top of this function is what guarantees
-        // exclusivity -- no other construction can be in flight for this id,
-        // and no live session carries it. Inserting and releasing the claim in
-        // the same critical section leaves no window between the two states.
-        sessions_[session_id] = session;
-        reserved_.erase(session_id);
     }
-    guard.committed = true;
-    reaper_cv_.notify_all();
-    return session;
+    // The RESERVATION made at the top of CreateResolved is what guarantees
+    // exclusivity -- no other construction can be in flight for this id,
+    // and no live session carries it. Inserting and releasing the claim in
+    // the same critical section leaves no window between the two states.
+    sessions_[session_id] = session;
+    reserved_.erase(session_id);
 }
 
 std::shared_ptr<Session> SessionRegistry::Find(const std::string& session_id) const {

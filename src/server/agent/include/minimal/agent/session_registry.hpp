@@ -199,6 +199,29 @@ private:
     // size()/etc. behind a lock nobody will ever release.
     std::size_t ChildCountLocked(const std::string& parent_id) const;
 
+    // --- CreateResolved's builder steps (Phase 5 step 5) ----------------------
+    // Split out of one ~250-line function; CreateResolved is now the ~15-line
+    // sequence that calls these in order. Each keeps the exact behavior (and
+    // most of the comments) the inline block it replaced had -- this is a
+    // structural split, not a behavior change.
+    void ApplyProjectContext(SessionParams& params) const;
+    void AppendSignalContext(SessionParams& params) const;
+    AgentPreset ResolveModel(AgentPreset preset,
+                             const std::optional<config::ModelRef>& model_override) const;
+    std::shared_ptr<llm::LlmProvider> ResolveProvider(const AgentPreset& preset,
+                                                       const std::string& agent_preset_name);
+    ResumeSeed LoadResumeSeed(const std::string& session_id);
+    // The two set_* wirings CreateResolved still applies to a live Session
+    // after construction (Phase 5 step 3 folds the rest into the constructor;
+    // these two -- presets/commands/provider factories/instance cache -- are
+    // this step's own follow-up, not done here).
+    void WireSession(Session& session, bool has_parent);
+    // The locked "findable" section: signal subscriptions, then the sessions_
+    // insertion, in the same critical section (see the call site for why).
+    void PublishSession(const std::string& session_id, const std::shared_ptr<Session>& session,
+                        SignalRouter* signal_router, const std::vector<std::string>& signal_selectors,
+                        bool signal_resume);
+
     const AgentPresetRegistry& presets_;
     // Optional and borrowed; every session gets the same one.
     const commands::CommandRegistry* commands_ = nullptr;

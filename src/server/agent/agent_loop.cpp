@@ -100,9 +100,7 @@ AgentLoop::AgentLoop(llm::LlmProvider& provider, tools::ToolExecutor& executor,
                       tools::ToolRegistry& registry, session::HistoryStore& store, AgentPreset preset,
                       LoopConfig config, SessionContext session,
                       std::function<bool()> is_cancelled, llm::StreamEventSink event_sink,
-                      Compactor compactor, std::vector<llm::Message> seeded_history,
-                      std::optional<std::int64_t> seed_first_persisted_seq,
-                      bool seed_head_is_summary, std::string project_context)
+                      Compactor compactor, ResumeSeed seed, std::string project_context)
     : provider_(provider),
       executor_(executor),
       registry_(registry),
@@ -114,9 +112,9 @@ AgentLoop::AgentLoop(llm::LlmProvider& provider, tools::ToolExecutor& executor,
       is_cancelled_(std::move(is_cancelled)),
       event_sink_(std::move(event_sink)),
       compactor_(std::move(compactor)),
-      history_(std::move(seeded_history)),
-      first_persisted_seq_(seed_first_persisted_seq),
-      head_is_summary_(seed_head_is_summary),
+      history_(std::move(seed.history)),
+      first_persisted_seq_(seed.first_persisted_seq),
+      head_is_summary_(seed.head_is_summary),
       pool_(config.max_parallel_tool_calls) {
     // The injection queue is shared with the session's channels block when
     // there is one (the producers are foreign threads and must see the same
