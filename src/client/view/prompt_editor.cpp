@@ -284,6 +284,14 @@ ftxui::Component MakePromptEditor(
         // query itself fires from the render gate below -- no timers, no
         // threads; frame timing carries it).
         //
+        // Backspace/Delete re-arm too: they are edits, and leaving them out
+        // stranded the OPEN list on deleted text -- "/se" then three
+        // backspaces left the "/se" suggestions on screen over an EMPTY
+        // input, where Enter "accepted" a completion the user had already
+        // erased. The render-time command block re-populates the list the
+        // same frame when the remaining text is still a command line, so
+        // clearing here never flickers a live list off.
+        //
         // The '/'+name command catalog match used to run HERE too, reading
         // state.content -- but CatchEventBase runs this handler BEFORE
         // passing the event to the wrapped Input (see ftxui's
@@ -297,7 +305,7 @@ ftxui::Component MakePromptEditor(
         // showed nothing until a second character landed. It now runs at
         // render time instead (below, in the Renderer), reading content
         // AFTER Input has applied every event so far this frame.
-        if (event.is_character()) {
+        if (event.is_character() || event == Event::Backspace || event == Event::Delete) {
             // Editing a recalled line exits browsing -- it is no longer the
             // same text as history[cursor], so further up/down should not
             // silently discard what was just typed.
@@ -394,8 +402,20 @@ ftxui::Component MakePromptEditor(
             // Capped and scrollable: an unbounded list (a broad "/" or "@"
             // prefix against a large catalog) used to grow as tall as it
             // needed, squeezing the transcript above it out of view.
-            lines.push_back(vbox(std::move(items)) | size(HEIGHT, LESS_THAN, 8) | yframe |
-                            vscroll_indicator);
+            //
+            // Decorator ORDER is load-bearing (FTXUI 7): `yframe` must wrap
+            // the content and `size` must wrap the FRAME. The reverse --
+            // size | yframe -- broke scrolling entirely: Size::SetBox clamps
+            // the content's box to the cap, but the frame's own requirement
+            // min_y shrinks to the cap too, so when the surrounding layout
+            // hands the frame MORE than the cap the frame sees
+            // "internal == external, nothing to scroll" (dy clamps to 0) and
+            // the content below the cap is simply CLIPPED -- arrowing down
+            // past the edge stopped moving the view. yframe-first keeps the
+            // full content height inside the frame, so the `focus` anchor on
+            // the selected row actually scrolls it into view.
+            lines.push_back(vbox(std::move(items)) | yframe |
+                            size(HEIGHT, LESS_THAN, 8) | vscroll_indicator);
         }
         return vbox(std::move(lines));
     });

@@ -19,7 +19,6 @@
 #include "minimal/plugins/plugin_abi.h"
 #include "minimal/rpc/event_translator.hpp"
 #include "minimal/rpc/proto_convert.hpp"
-#include "minimal/rpc/session_wiring.hpp"
 
 #include "minimal/plugins/plugin_rpc.hpp"
 
@@ -84,17 +83,18 @@ SessionServiceImpl::SessionServiceImpl(agent::SessionRegistry& sessions,
 
 namespace {
 
-// Looks up permissions.json's configured advisor (if any) and hands off to
-// the shared composition recipe -- rpc::ApplyPermissionAdvisor -- also used
-// by SubagentManager's advisor-inheritance path. No advisor configured, or
-// the named plugin not loaded (a runtime condition the sanity check warns
-// about): params carry no checker and Session builds the wire default -- the
-// human, as always.
+// Looks up permissions.json's configured advisor (if any) and records the
+// SELECTION on params -- composition happens later, in
+// rpc::FinishSessionWiring, called from the one funnel every session (this
+// path and SubagentManager's advisor-inheritance path alike) passes through.
+// No advisor configured, or the named plugin not loaded (a runtime condition
+// the sanity check warns about): params carry no selection and
+// FinishSessionWiring builds the wire default -- the human, as always.
 void ApplyAdvisor(const config::PermissionsConfig& permissions,
                   const tools::PermissionAdvisorRegistry* advisors, agent::SessionParams& params) {
     if (!permissions.advisor || advisors == nullptr) return;
-    ApplyPermissionAdvisor(params, advisors->Find(*permissions.advisor),
-                           std::chrono::milliseconds(permissions.advisor_timeout_ms));
+    params.selected_advisor = advisors->Find(*permissions.advisor);
+    params.advisor_timeout = std::chrono::milliseconds(permissions.advisor_timeout_ms);
 }
 
 }  // namespace
@@ -105,6 +105,33 @@ void SessionServiceImpl::set_on_last_client_detached(std::function<void()> callb
 
 std::size_t SessionServiceImpl::attached_clients() const {
     return attached_.load(std::memory_order_acquire);
+}
+
+std::chrono::milliseconds SessionServiceImpl::client_idle_for() const {
+    const std::int64_t last = last_ping_steady_ms_.load(std::memory_order_acquire);
+    if (last < 0) {
+        // Nobody ever pinged: as "quiet for as long as the reaper can see".
+        return std::chrono::milliseconds::max();
+    }
+    const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch())
+                            .count();
+    return std::chrono::milliseconds(std::max<std::int64_t>(0, now_ms - last));
+}
+
+// Client presence heartbeat (see PingRequest in the proto). A live client
+// with nothing attached -- the TUI before its first session -- sends these so
+// the reaper's idle exit can tell "nobody is here" from "somebody is here
+// with nothing to show for it yet". Touch nothing but the timestamp.
+grpc::Status SessionServiceImpl::Ping(grpc::ServerContext* context, const v1::PingRequest*,
+                                      v1::PingResponse*) {
+    if (const auto auth = EnsureAuthenticated(auth_providers_, context); !auth.ok()) return auth;
+    last_ping_steady_ms_.store(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch())
+            .count(),
+        std::memory_order_release);
+    return grpc::Status::OK;
 }
 
 int SessionServiceImpl::ScrollbackPageSize() const {

@@ -52,6 +52,7 @@
 #include "minimal/client/view/prompt_editor.hpp"
 #include "minimal/client/view/prompt_modal.hpp"
 #include "minimal/client/view/agent_picker.hpp"
+#include "minimal/client/view/commands_help.hpp"
 #include "minimal/client/view/keymap_help.hpp"
 #include "minimal/client/view/picker_controller.hpp"
 #include "minimal/client/view/session_picker.hpp"
@@ -578,6 +579,7 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     bool show_agent_picker = false;
     bool show_model_picker = false;
     bool show_keymap_help = false;
+    bool show_commands_help = false;
     bool show_quit_confirm = false;
     bool show_permission = false;
     bool show_confirmation = false;
@@ -731,7 +733,18 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     // resolve "N user turns back" to a seq itself, the server never told it
     // one. /new is a client tab operation (open + focus a fresh session,
     // distinct from a subagent spawn) the server has no part in either.
-    auto submit_command = [app, create_session_and_run](const std::string& line) {
+    auto submit_command = [app, create_session_and_run, &show_commands_help](const std::string& line) {
+        // Bare /help is answered CLIENT-SIDE from the ListCommands catalog:
+        // the server's listing reached the transient notice line, whose
+        // viewport caps at a handful of rows -- with more commands than that,
+        // the tail was simply unreachable (no scrolling, no surface). The
+        // overlay is filterable and scrollable, and reads the same live
+        // catalog the /-autocomplete offers. "/help <command>" still goes to
+        // the server: a single command's usage/summary is one short notice.
+        if (line == "/help") {
+            show_commands_help = true;
+            return;
+        }
         const std::string sid = app->FocusedSessionId();
         if (line == "/redo") {
             app->SendRewind(sid, std::nullopt, /*redo=*/true);
@@ -890,6 +903,14 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     // confirm_modal/delete_modal below.
     auto keymap_help_view = minimal::client::MakeKeymapHelpView(
         env.keybindings.all(), theme, [&] { show_keymap_help = false; });
+
+    // Built once, like keymap_help_view: the catalog was fetched once at
+    // connect and never changes (see its comment), and `theme` is a RunTui
+    // local that outlives the frame. Opened by the bare `/help` interception
+    // in submit_command -- the notice line's handful of rows could not hold
+    // the full command listing.
+    auto commands_help_view = minimal::client::MakeCommandsHelpView(
+        command_catalog, theme, [&] { show_commands_help = false; });
 
     // --- plugin views (panel region + modal layer) -----------------------------
     // Panels: rendered in the frame beside the tools panel; one shared
@@ -1098,6 +1119,7 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     tree = Modal(tree, agent_picker_host_interactive, &show_agent_picker);
     tree = Modal(tree, model_picker_host_interactive, &show_model_picker);
     tree = Modal(tree, keymap_help_view, &show_keymap_help);
+    tree = Modal(tree, commands_help_view, &show_commands_help);
     auto with_quit_confirm = Modal(tree, confirm_modal, &show_quit_confirm);
     auto with_confirmation = Modal(with_quit_confirm, confirmation_host_interactive,
                                    &show_confirmation);
@@ -1134,9 +1156,28 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         }
     });
 
+    // THE HEARTBEAT: the server's idle exit (server.idle_shutdown_seconds,
+    // default 5s) fires once zero sessions are live AND zero streams are
+    // attached AND no recent Ping arrived. A TUI on its empty-state welcome
+    // view -- before its first session, which is created lazily on the first
+    // submission -- holds neither, so without a beat the server shut itself
+    // down while the user was still composing that first message: the
+    // reported "start client, fiddle with /-autocomplete, submit, server
+    // stops". One Ping per ~2s marks the client alive; quitting the TUI
+    // stops the beats and the server exits on its own linger as designed.
+    std::thread heartbeat([&] {
+        int tick = 0;
+        while (running.load(std::memory_order_acquire)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            if (++tick % 20 != 0) continue;   // one beat per ~2s
+            (void)client->Ping();   // failures ignored -- see SessionClient::Ping
+        }
+    });
+
     screen.Loop(final_tree);
     running.store(false, std::memory_order_release);
     pump.join();
+    heartbeat.join();
 
     // Join the async RPC worker BEFORE tearing down tabs: a job's completion
     // (RequestScrollback et al.) publishes into SessionState/AppState the

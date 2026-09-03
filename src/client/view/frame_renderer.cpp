@@ -195,8 +195,15 @@ ftxui::Element FrameRenderer::Render() {
                     if (newline == std::string_view::npos) break;
                     pos = newline + 1;
                 }
-                rows.push_back(vbox(std::move(notice_lines)) |
-                               size(HEIGHT, LESS_THAN, 6) | yframe | vscroll_indicator |
+                // size AFTER yframe (not the reverse): Size::SetBox clamps
+                // the content box to the cap while the frame's requirement
+                // min_y shrinks to the cap, so with size FIRST the frame
+                // believes "nothing to scroll" and content below the cap is
+                // silently clipped -- a long notice (e.g. /help's listing)
+                // showed only its head. yframe-first keeps the full height
+                // inside the frame, so the cap is a viewport, not a guillotine.
+                rows.push_back(vbox(std::move(notice_lines)) | yframe |
+                               size(HEIGHT, LESS_THAN, 6) | vscroll_indicator |
                                bgcolor(deps_.theme.ColorFor("status_bar_bg")) |
                                color(notice.is_error ? deps_.theme.ColorFor("error")
                                                      : deps_.theme.ColorFor("system_message")));
@@ -220,7 +227,7 @@ ftxui::Element FrameRenderer::Render() {
         // frame (chat, plugin panels below, the pickers) has one; this was
         // the one silent exception.
         rows.push_back(RenderToolsPanel(tabs, deps_.tools_panel_stdout_buffer_lines, deps_.theme) |
-                       size(HEIGHT, LESS_THAN, deps_.panel_height) | yframe | vscroll_indicator);
+                       yframe | size(HEIGHT, LESS_THAN, deps_.panel_height) | vscroll_indicator);
     }
 
     // Plugin PANEL views, beside the tools panel -- moved here (this used to
@@ -234,7 +241,7 @@ ftxui::Element FrameRenderer::Render() {
         if (entry.view->spec().placement == plugins::ViewPlacement::Panel && entry.visible) {
             try {
                 rows.push_back(entry.component->Render() |
-                               size(HEIGHT, LESS_THAN, deps_.panel_height) | yframe);
+                               yframe | size(HEIGHT, LESS_THAN, deps_.panel_height));
             } catch (const std::exception& error) {
                 common::DefaultLogger().error("plugin view '{}' threw: {}",
                                               std::string(entry.view->spec().id), error.what());

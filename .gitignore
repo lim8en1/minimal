@@ -10,6 +10,13 @@ out/
 cmake-build-*/
 install/
 
+# Stray CMake configure output (cmake run in the repo root instead of build/)
+/CMakeCache.txt
+/CMakeFiles/
+/CMakeUserPresets.json
+/SeedConfig.cmake
+/Testing/
+
 # vcpkg manifest-mode install tree
 vcpkg_installed/
 

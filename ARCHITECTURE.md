@@ -260,11 +260,18 @@ config-gated timeout on `PendingRequests::AwaitResponse`, not a new
 invariant. It also cost the "no daemon" guarantee its unconditional form: the
 server no longer exits the instant the last client detaches, since a
 detached session may still be mid-turn. The exit condition is now **zero
-attached clients AND zero live sessions**, held for
+attached clients AND zero live sessions AND no recent client Ping**, held for
 `server.idle_shutdown_seconds` (0 = never — a true daemon deployment); the
 common case (one client, no detached sessions left behind) still exits
 promptly, and auto-spawn (connect-or-spawn + pid lock) stays correct under
-this.
+this. The Ping half (`rpc Ping(PingRequest)` on SessionService, wired into
+`ReaperConfig::client_idle_for`) exists because a live client can hold
+neither a stream nor a session: the TUI creates its first session lazily on
+the first submission, so its empty-state welcome view attaches nothing —
+without a heartbeat the reaper read that silence as "nobody is here" and shut
+the server down while the user was still composing. The TUI sends one Ping
+every ~2s from a background thread; quitting stops the beats and the linger
+expires on its own.
 
 **Fan-out (S5.1).** `Session` no longer owns a single `EventQueue` with one
 attach flag; `rpc::EventBroadcaster` (`src/server/rpc/event_broadcaster.{hpp,cpp}`)
@@ -686,7 +693,7 @@ class PromptShorthandCommand : public LLMCommand {};  // submits an interpolated
 
 **Command results never enter the chat, and never reach the model.** A result is a wire event only — by construction it appends to no history and is sent to no provider; the ruling is about display. `CommandDisplay` decides where it surfaces: an ephemeral **status line** (errors included, styled as errors — never persisted), a **view** (`view_hint` names the client view a pair plugin registered), or **silent**. The one exception is `PromptShorthandCommand`: it submits an interpolated prompt as a user turn, so its content reaches the model *as the turn itself* and enters the chat exactly as a normal user turn would — never as a result message. The Harness/LLM boundary is the **conversation path** — the turn queue and chat-completions requests — not "network vs. no network": `/model-info` is a read-only `HarnessCommand` that fetches model metadata over HTTP and renders a view, safely beside a live turn. Subagent completion injections are *not* command results; they stay real messages the model must see. Finer inheritance under `Command` stays open; `docs/EXTENSIBILITY.md` §4.4 is the spec.
 
-`CommandRegistry` holds both uniformly. `/help` lists live from `Name()`/`Summary()`/`Usage()` — no config-directory manifest, since a command's value is the code it runs and a data-only manifest would be a drift-prone shadow copy. `CommandDispatcher`: parse → busy-check → confirm if required → execute → emit result.
+`CommandRegistry` holds both uniformly. `/help` lists live from `Name()`/`Summary()`/`Usage()` — no config-directory manifest, since a command's value is the code it runs and a data-only manifest would be a drift-prone shadow copy. `CommandDispatcher`: parse → busy-check → confirm if required → execute → emit result. In the TUI a bare `/help` is intercepted client-side (`submit_command`) and answered from the ListCommands catalog — the same data the /-autocomplete offers — as a scrollable, filterable overlay: the server's listing reached the transient notice line, whose viewport caps at a handful of rows a larger catalog could not fit. The server command remains for the headless/CLI path, and `/help <command>` (per-command detail, one short notice) still routes to it.
 
 **Confirmation** reuses a transport-level primitive rather than `PermissionChecker` itself (tool permission requests carry LLM-originated tool input; command confirmations don't fit that shape):
 

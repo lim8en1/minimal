@@ -439,9 +439,19 @@ void SessionRegistry::ReaperMain() {
             // sessions, held for server.idle_shutdown_seconds. The old
             // on-last-client-detached fired the instant the count hit zero,
             // which only worked because sessions could not outlive clients.
+            //
+            // With a wired client_idle_for, "zero" must ALSO mean "no recent
+            // Ping": a live session-less client (the TUI's welcome state)
+            // holds neither a stream nor a session, and only its heartbeat
+            // distinguishes it from an empty world. See ReaperConfig::
+            // client_idle_for.
             if (reaper_config_.idle_shutdown.count() > 0 && reaper_config_.attached_clients &&
                 reaper_config_.on_idle_expired) {
-                if (sessions_.empty() && reaper_config_.attached_clients() == 0) {
+                bool quiet = sessions_.empty() && reaper_config_.attached_clients() == 0;
+                if (quiet && reaper_config_.client_idle_for) {
+                    quiet = reaper_config_.client_idle_for() >= reaper_config_.idle_shutdown;
+                }
+                if (quiet) {
                     if (!idle_since_) idle_since_ = now;
                     fire_idle_exit = now - *idle_since_ >= reaper_config_.idle_shutdown;
                 } else {

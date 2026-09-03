@@ -72,6 +72,18 @@ public:
         std::chrono::seconds idle_shutdown = std::chrono::seconds(5);
         // The service's attached-stream count; empty disables the idle exit.
         std::function<std::size_t()> attached_clients;
+        // How long since a live client last made itself known -- the age of
+        // the service's most recent Ping (see PingRequest). The idle exit
+        // holds only while this too has exceeded idle_shutdown: a client that
+        // is alive but holds nothing -- a TUI on its empty-state welcome
+        // view, before its first session -- attaches no stream and creates no
+        // session, and without this signal the reaper would read that silence
+        // as "nobody is here" and shut the server down under the user.
+        // Duration::max() (or any value >= idle_shutdown) means "no recent
+        // sign of life". Empty disables this half (the count/session halves
+        // alone decide), which keeps the reaper's tests and any pre-Ping
+        // service on the old behavior.
+        std::function<std::chrono::milliseconds()> client_idle_for;
         // Wired to Server::RequestShutdown by main. Fired from the reaper
         // thread; must not block.
         std::function<void()> on_idle_expired;

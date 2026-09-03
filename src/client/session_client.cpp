@@ -104,6 +104,19 @@ SessionClient::ListSessionsResult SessionClient::ListSessions(const ListSessions
     return result;
 }
 
+// Presence heartbeat (see PingRequest in the proto). Fire-and-forget: the
+// caller (the TUI's heartbeat thread) treats every failure -- including "the
+// server is gone" -- as a non-event; the next beat simply tries again until
+// the process exits. A short deadline so a wedged connection cannot park the
+// thread for the default gRPC deadline.
+grpc::Status SessionClient::Ping() {
+    grpc::ClientContext context;
+    context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(1));
+    v1::PingRequest request;
+    v1::PingResponse response;
+    return stub_->Ping(&context, request, &response);
+}
+
 SessionClient::ListCommandsResult SessionClient::ListCommands() {
     grpc::ClientContext context;
     context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(2));

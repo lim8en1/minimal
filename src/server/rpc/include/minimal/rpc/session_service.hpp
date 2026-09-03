@@ -87,6 +87,8 @@ public:
                               v1::ListCommandsResponse*) override;
     grpc::Status DeleteSession(grpc::ServerContext*, const v1::DeleteSessionRequest*,
                                v1::DeleteSessionResponse*) override;
+    grpc::Status Ping(grpc::ServerContext*, const v1::PingRequest*,
+                      v1::PingResponse*) override;
     grpc::Status PluginCall(grpc::ServerContext*, const v1::PluginCallRequest*,
                             v1::PluginCallResponse*) override;
     grpc::Status PluginSubscribe(grpc::ServerContext*, const v1::PluginCallRequest*,
@@ -135,6 +137,11 @@ public:
     void set_services(const plugins::ServiceRegistry* services) { services_ = services; }
 
     std::size_t attached_clients() const;
+
+    // How long since a live client last Pinged (see PingRequest); duration::
+    // max() when none ever has. main wires this into the reaper's idle-exit
+    // half so a session-less-but-alive TUI does not read as "nobody here".
+    std::chrono::milliseconds client_idle_for() const;
 
 private:
     // settings.memory.scrollback_page_size, or the built-in floor when it is
@@ -230,6 +237,11 @@ private:
 
     std::function<void()> on_last_client_detached_;
     std::atomic<std::size_t> attached_{0};
+    // Steady-clock milliseconds at the most recent Ping; -1 = none ever.
+    // Atomic because the reaper thread reads it between heartbeats. Kept as
+    // raw steady ms (not a time_point member read under a lock) so the
+    // reaper's poll stays lock-free on both sides.
+    std::atomic<std::int64_t> last_ping_steady_ms_{-1};
 };
 
 }  // namespace minimal::rpc

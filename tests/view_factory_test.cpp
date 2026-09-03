@@ -26,6 +26,7 @@
 #include "minimal/client/render/theme.hpp"
 #include "minimal/client/state.hpp"
 #include "minimal/client/view/chat_view.hpp"
+#include "minimal/client/view/commands_help.hpp"
 #include "minimal/client/view/prompt_editor.hpp"
 #include "minimal/client/view/prompt_modal.hpp"
 #include "minimal/client/view/session_picker.hpp"
@@ -956,4 +957,121 @@ TEST_CASE("prompt editor: typing while browsing history exits browse mode",
     REQUIRE(SendEvent(editor, ftx::Event::Character("!")));
     CHECK_FALSE(state.history_cursor.has_value());
     CHECK(state.content == "old entry!");   // the edit itself is preserved
+}
+
+TEST_CASE("prompt editor: deleting the whole command line closes the stale suggestion list",
+          "[prompt_editor][regression]") {
+    // Regression: Backspace/Delete were not edits as far as the editor was
+    // concerned -- only is_character() re-armed the list. "/se" then three
+    // backspaces left the "/se" suggestions rendered over an EMPTY input,
+    // where the still-open list's Enter "accepted" a completion the user had
+    // already erased. The render-time command block re-populates the list
+    // the same frame when the remaining text is still a command line, so a
+    // live list never flickers off.
+    const auto theme = TestTheme();
+    PromptEditorState state;
+    std::vector<std::string> texts;
+    std::vector<std::string> commands;
+    const std::vector<CommandCatalogEntry> catalog = {
+        {"send", "send a thing", false, false},
+        {"session", "session stuff", false, false},
+        {"set", "set stuff", false, false}};
+    auto editor = MakePromptEditor(
+        theme, state, [&](const std::string& t) { texts.push_back(t); },
+        [&](const std::string& c) { commands.push_back(c); },
+        [](const std::string&) { return std::vector<std::string>{}; },
+        [&catalog]() -> const std::vector<CommandCatalogEntry>& { return catalog; });
+
+    Type(editor, "/se");
+    RenderFrame(editor);
+    REQUIRE(state.list_open);
+    REQUIRE_FALSE(state.suggestions.empty());
+
+    // Remove all using delete (backspace), exactly the reported repro.
+    for (int i = 0; i < 3; ++i) REQUIRE(SendEvent(editor, ftx::Event::Backspace));
+    RenderFrame(editor);
+    CHECK(state.content.empty());
+    CHECK_FALSE(state.list_open);   // the stale list is gone with its text
+    CHECK(state.suggestions.empty());
+    CHECK(state.completions.empty());
+
+    // And the next submission is the plain text the user actually typed --
+    // it must land as a chat turn, never as an autocomplete insertion.
+    Type(editor, "hi");
+    REQUIRE(SendEvent(editor, ftx::Event::Return));
+    REQUIRE(texts.size() == 1);
+    CHECK(texts[0] == "hi");
+    CHECK(commands.empty());
+}
+
+TEST_CASE("prompt editor: arrowing past the suggestion viewport scrolls the "
+          "selection into view",
+          "[prompt_editor][regression]") {
+    // Regression: the suggestion list wrapped its content as
+    // `size(HEIGHT, LESS_THAN, 8) | yframe`. In FTXUI 7 that ORDER breaks
+    // focus-based scrolling: Size::SetBox clamps the content box to the cap
+    // while the frame's requirement min_y shrinks to the cap too, so the
+    // frame sees internal == external ("nothing to scroll") and everything
+    // past the cap is silently clipped -- a broad "/" against a long catalog
+    // showed only the head, and arrowing down stopped moving the view.
+    // yframe-first (frame inside the cap) keeps the full height inside the
+    // frame, so the selected row's `focus` anchor scrolls it into view.
+    const auto theme = TestTheme();
+    PromptEditorState state;
+    const std::vector<CommandCatalogEntry> catalog = [] {
+        std::vector<CommandCatalogEntry> entries;
+        for (int i = 0; i < 15; ++i) {
+            entries.push_back({"cmd" + std::to_string(i), "summary " + std::to_string(i), false,
+                               false});
+        }
+        return entries;
+    }();
+    auto editor = MakePromptEditor(
+        theme, state, [](const std::string&) {}, [](const std::string&) {},
+        [](const std::string&) { return std::vector<std::string>{}; },
+        [&catalog]() -> const std::vector<CommandCatalogEntry>& { return catalog; });
+
+    REQUIRE(SendEvent(editor, ftx::Event::Character("/")));
+    RenderFrame(editor);
+    REQUIRE(state.list_open);
+    REQUIRE(state.suggestions.size() == 15);
+
+    // Move the selection well past the 8-row viewport.
+    for (int i = 0; i < 10; ++i) REQUIRE(SendEvent(editor, ftx::Event::ArrowDown));
+    REQUIRE(state.suggestion_selected == 10);
+
+    const std::string frame = RenderFrame(editor);
+    CHECK(frame.find("cmd10") != std::string::npos);   // the selection is visible
+    CHECK(frame.find("cmd0 ") == std::string::npos);   // the head scrolled away
+}
+
+// ---------------------------------------------------------------------------
+// /help overlay (commands help view)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("commands help overlay lists the whole catalog and closes on Escape",
+          "[commands_help]") {
+    // Regression: /help's server-side listing reached the transient notice
+    // line, capped at a handful of rows with no way to scroll -- a catalog
+    // larger than the viewport was unreachable. The overlay is built from
+    // the client's ListCommands catalog, so the LAST entry below must be
+    // rendered too.
+    const auto theme = TestTheme();
+    const std::vector<CommandCatalogEntry> catalog = [] {
+        std::vector<CommandCatalogEntry> entries;
+        for (int i = 0; i < 15; ++i) {
+            entries.push_back({"cmd" + std::to_string(i), "summary " + std::to_string(i), false,
+                               false});
+        }
+        return entries;
+    }();
+    bool closed = false;
+    auto view = MakeCommandsHelpView(catalog, theme, [&] { closed = true; });
+
+    const std::string frame = RenderFrame(view);
+    CHECK(frame.find("cmd0") != std::string::npos);   // the head
+    CHECK(frame.find("cmd14") != std::string::npos);  // ...and the tail, unreachable before
+
+    REQUIRE(SendEvent(view, ftx::Event::Escape));
+    CHECK(closed);
 }

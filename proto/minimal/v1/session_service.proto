@@ -569,6 +569,15 @@ message PluginCallResponse {
   string json_payload = 1;
 }
 
+// Client presence heartbeat. A client that is alive but holds no session --
+// a TUI sitting on its empty-state welcome view has nothing attached -- sends
+// these so the reaper's idle exit (server.idle_shutdown_seconds) does not
+// mistake "zero live sessions, zero attached streams" for "nobody is here".
+// Carries nothing; the timestamp it refreshes IS the payload.
+message PingRequest {}
+
+message PingResponse {}
+
 service SessionService {
   // Primary channel for one open session: user turns in, streamed model output
   // and permission/confirmation/command round-trips out, multiplexed over a
@@ -593,6 +602,9 @@ service SessionService {
   // machinery. Without it, plugin commands are invisible to /-autocomplete.
   rpc ListCommands(ListCommandsRequest) returns (ListCommandsResponse);
   rpc DeleteSession(DeleteSessionRequest) returns (DeleteSessionResponse);
+
+  // Client presence heartbeat; see PingRequest above.
+  rpc Ping(PingRequest) returns (PingResponse);
 
   rpc PluginCall(PluginCallRequest) returns (PluginCallResponse);
   rpc PluginSubscribe(PluginCallRequest) returns (stream PluginCallResponse);

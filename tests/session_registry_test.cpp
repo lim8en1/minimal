@@ -312,6 +312,63 @@ TEST_CASE("two detached quiescent sessions are both reaped by the idle TTL, on s
     CHECK(second->terminated());
 }
 
+// --- Idle exit: the Ping half -------------------------------------------------
+
+TEST_CASE("the idle exit holds while a session-less client keeps pinging", "[session_registry]") {
+    // Regression: the idle exit fired once zero sessions were live and zero
+    // streams attached. A live client that holds NEITHER -- the TUI's
+    // empty-state welcome view, before its first session -- attached no
+    // stream and created no session, so the server shut itself down under
+    // the user (the reported "start client, fiddle with /-autocomplete,
+    // submit, server stops"). With client_idle_for wired, a fresh Ping
+    // every beat holds the exit off indefinitely.
+    RegistryFixture fixture(200ms);   // 50ms reaper tick
+    fixture.config.WriteDefaults();
+    fixture.Build();
+
+    std::atomic<int> idle_exits{0};
+    agent::SessionRegistry::ReaperConfig config;
+    config.initial_attach_guard = 200ms;   // 50ms reaper tick
+    config.idle_shutdown = std::chrono::seconds(1);
+    config.attached_clients = [] { return 0; };
+    config.client_idle_for = [] {
+        return std::chrono::milliseconds(0);   // pinged just now, every beat
+    };
+    config.on_idle_expired = [&idle_exits] { idle_exits.fetch_add(1); };
+    fixture.registry->set_reaper_config(config);
+
+    std::this_thread::sleep_for(1600ms);   // several idle_shutdown periods
+    CHECK(idle_exits.load() == 0);
+}
+
+TEST_CASE("the idle exit fires when the last client ping has gone stale", "[session_registry]") {
+    // The counterpart: an absent or long-gone client (its heartbeat stopped
+    // -- the TUI quit) must still let the server exit on its linger. The
+    // old two-halves behavior is unchanged; this only proves the Ping half
+    // does not wedge the exit open forever.
+    RegistryFixture fixture(200ms);
+    fixture.config.WriteDefaults();
+    fixture.Build();
+
+    std::atomic<int> idle_exits{0};
+    agent::SessionRegistry::ReaperConfig config;
+    config.initial_attach_guard = 200ms;   // 50ms reaper tick
+    config.idle_shutdown = std::chrono::seconds(1);
+    config.attached_clients = [] { return 0; };
+    config.client_idle_for = [] {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::seconds(3600));   // last beat: an hour ago
+    };
+    config.on_idle_expired = [&idle_exits] { idle_exits.fetch_add(1); };
+    fixture.registry->set_reaper_config(config);
+
+    const auto deadline = std::chrono::steady_clock::now() + 2500ms;
+    while (idle_exits.load() == 0 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(20ms);
+    }
+    CHECK(idle_exits.load() > 0);
+}
+
 TEST_CASE("the reaper calls the configured periodic checkpoint callback, not the database directly",
           "[session_registry]") {
     // ReaperConfig::periodic_checkpoint replaces a direct SessionDatabase&

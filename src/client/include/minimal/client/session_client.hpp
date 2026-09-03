@@ -225,6 +225,13 @@ public:
     };
     CreateResult CreateSession(const CreateOptions& options);
 
+    // Presence heartbeat (see PingRequest in the proto). Status is rarely
+    // interesting: the TUI's heartbeat thread calls this on a loop and
+    // ignores failures -- a dead server makes every beat fail until the
+    // process exits, which is exactly the signal the server's reaper uses
+    // in reverse.
+    grpc::Status Ping();
+
     // Scrollback, keyset-paginated -- a separate RPC from the live bidi stream so
     // paging through a 512k-1M token history never competes with turn traffic.
     // before_seq is the exclusive upper bound (nullopt = most recent page); see

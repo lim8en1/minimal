@@ -626,6 +626,10 @@ int main(int argc, char** argv) {
     reaper_config.detached_idle_ttl = std::chrono::seconds(settings.sessions.detached_idle_ttl_seconds);
     reaper_config.idle_shutdown = std::chrono::seconds(settings.server.idle_shutdown_seconds);
     reaper_config.attached_clients = [&service] { return service.attached_clients(); };
+    // The Ping half of the idle decision: a live client that holds neither a
+    // stream nor a session (the TUI's welcome state) would otherwise read as
+    // fully idle and get its server shut down under it. See PingRequest.
+    reaper_config.client_idle_for = [&service] { return service.client_idle_for(); };
     reaper_config.on_idle_expired = [&server] { server.RequestShutdown(); };
     reaper_config.periodic_checkpoint = [&session_db] {
         (void)session_db->MaybeRunPassiveCheckpoint();
