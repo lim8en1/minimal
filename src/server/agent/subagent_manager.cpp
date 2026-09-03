@@ -6,7 +6,7 @@
 #include <future>
 #include <utility>
 
-#include "minimal/rpc/wire_permission_checker.hpp"
+#include "minimal/rpc/session_wiring.hpp"
 #include "minimal/v1/session_service.pb.h"
 
 namespace minimal::agent {
@@ -192,17 +192,11 @@ SubagentOutcome SubagentManager::Spawn(const SubagentRequest& request,
     // Inheritance is OPT-IN for the advisor: the default child answers Ask
     // through its own wire checker -- the human -- even when the parent had an
     // advisor. With advisor_inherit set, the same composition the top-level
-    // producer uses is repeated here, against the CHILD's channels; the
-    // ceilings above still bound what the child (advised or not) may run.
-    if (advisor_inherit_ && advisor_) {
-        params.channels = MakeSessionChannels(params.session_id);
-        auto cancel_source = std::make_shared<tools::AdvisorCancelSource>();
-        params.permission_checker = std::make_unique<tools::AdvisedPermissionChecker>(
-            advisor_,
-            std::make_unique<rpc::WirePermissionChecker>(params.session_id, params.channels->queue,
-                                                         params.channels->pending),
-            cancel_source, advisor_timeout_);
-        params.advisor_cancel_source = std::move(cancel_source);
+    // producer uses (rpc::ApplyPermissionAdvisor) is repeated here, against the
+    // CHILD's channels; the ceilings above still bound what the child (advised
+    // or not) may run.
+    if (advisor_inherit_) {
+        rpc::ApplyPermissionAdvisor(params, advisor_, advisor_timeout_);
     }
 
     // The completion signal. Blocking waits on it here; non-blocking uses it on

@@ -80,6 +80,7 @@ add_executable(minimal_tests
     command_executor_test.cpp
     auth_test.cpp
     wire_permission_checker_test.cpp
+    session_wiring_test.cpp
     session_observer_test.cpp
     session_store_test.cpp
     session_test.cpp

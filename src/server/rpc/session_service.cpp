@@ -18,6 +18,7 @@
 #include "minimal/mcp/signal_protocol.hpp"
 #include "minimal/plugins/plugin_abi.h"
 #include "minimal/rpc/proto_convert.hpp"
+#include "minimal/rpc/session_wiring.hpp"
 
 #include "minimal/plugins/plugin_rpc.hpp"
 
@@ -72,25 +73,17 @@ SessionServiceImpl::SessionServiceImpl(agent::SessionRegistry& sessions,
 
 namespace {
 
-// The advisor composition for one session: the channels block comes first
-// (the wire checker is built against it), then the advised checker owns that
-// wire checker, and the shared cancel holder travels in params so the Session
-// can install its own predicate. No advisor configured, or the named plugin
-// not loaded (a runtime condition the sanity check warns about): params carry
-// no checker and Session builds the wire default -- the human, as always.
+// Looks up permissions.json's configured advisor (if any) and hands off to
+// the shared composition recipe -- rpc::ApplyPermissionAdvisor -- also used
+// by SubagentManager's advisor-inheritance path. No advisor configured, or
+// the named plugin not loaded (a runtime condition the sanity check warns
+// about): params carry no checker and Session builds the wire default -- the
+// human, as always.
 void ApplyAdvisor(const config::PermissionsConfig& permissions,
                   const tools::PermissionAdvisorRegistry* advisors, agent::SessionParams& params) {
     if (!permissions.advisor || advisors == nullptr) return;
-    auto advisor = advisors->Find(*permissions.advisor);
-    if (advisor == nullptr) return;
-    params.channels = agent::MakeSessionChannels(params.session_id);
-    auto cancel_source = std::make_shared<tools::AdvisorCancelSource>();
-    params.permission_checker = std::make_unique<tools::AdvisedPermissionChecker>(
-        std::move(advisor),
-        std::make_unique<WirePermissionChecker>(params.session_id, params.channels->queue,
-                                                params.channels->pending),
-        cancel_source, std::chrono::milliseconds(permissions.advisor_timeout_ms));
-    params.advisor_cancel_source = std::move(cancel_source);
+    ApplyPermissionAdvisor(params, advisors->Find(*permissions.advisor),
+                           std::chrono::milliseconds(permissions.advisor_timeout_ms));
 }
 
 }  // namespace
