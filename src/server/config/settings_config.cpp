@@ -80,6 +80,7 @@ ToolsSettings ParseTools(const nlohmann::json& doc) {
     ToolsSettings result;
     if (!doc.contains("tools")) return result;
     const auto& tools = doc.at("tools");
+    result.raw = tools;
     result.read = tools.value("read", result.read);
     result.edit = tools.value("edit", result.edit);
     result.bash = tools.value("bash", result.bash);

@@ -162,6 +162,26 @@ TEST_CASE("ParseSettingsConfig: tools settings pass through as raw JSON", "[sett
     CHECK(config.tools.read == nlohmann::json::object());
 }
 
+TEST_CASE("ParseSettingsConfig: tools.raw carries the whole slice verbatim, including keys "
+          "ParseTools does not recognize",
+          "[settings_config]") {
+    // Phase 3: main.cpp forwards this to every plugin as context.tools_settings
+    // without going through the typed fields above -- a plugin's own top-level
+    // key under "tools" (here "a_plugin_only_key") must survive intact.
+    nlohmann::json doc = {{"tools", {{"bash", {{"timeout_ms", 5000}}},
+                                     {"a_plugin_only_key", {{"anything", true}}}}}};
+
+    auto config = ParseSettingsConfig(doc);
+    CHECK(config.tools.raw == doc.at("tools"));
+    CHECK(config.tools.raw.at("a_plugin_only_key") == nlohmann::json{{"anything", true}});
+}
+
+TEST_CASE("ParseSettingsConfig: tools.raw defaults to an empty object with no \"tools\" key",
+          "[settings_config]") {
+    auto config = ParseSettingsConfig(nlohmann::json::object());
+    CHECK(config.tools.raw == nlohmann::json::object());
+}
+
 TEST_CASE("ParseSettingsConfig: tools.mcp knobs overridable, max_list_pages must be positive",
           "[settings_config]") {
     nlohmann::json doc = {{"tools", {{"mcp", {{"connect_timeout_ms", 1000},

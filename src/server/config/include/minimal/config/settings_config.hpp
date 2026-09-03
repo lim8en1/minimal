@@ -88,6 +88,13 @@ struct ToolsSettings {
     // compaction. Truncated over the cap, with a visible marker, never an
     // error result -- a large result is not a refusal. 0 disables.
     std::int64_t max_result_bytes = 10 * 1024 * 1024;
+    // The full parsed "tools" JSON object, verbatim -- alongside the typed
+    // fields above -- so a plugin's own top-level key under "tools" that
+    // ParseTools does not recognize still reaches PluginLoader intact. This
+    // is what main.cpp forwards as context.tools_settings: core imposes no
+    // schema on that slice, and the typed fields above exist for core's own
+    // consumers, not to replace this passthrough.
+    nlohmann::json raw = nlohmann::json::object();
 };
 
 struct ToolsViewSettings {

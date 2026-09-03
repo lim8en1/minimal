@@ -13,6 +13,7 @@
 #include <exception>
 #include <fstream>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <unordered_set>
@@ -115,23 +116,34 @@ int main(int argc, char** argv) {
     const auto plugins_json_before = minimal::common::ReadFileOrEmpty(plugins_json);
     auto plugin_config = minimal::plugins::ParsePluginConfig(plugins_json_before);
 
+    // Read settings.json ONCE, tolerantly, ahead of the sanity check's own
+    // authoritative parse two stages later -- both the logging setup below
+    // and the tools-slice extraction in stage 2 need pieces of it before then.
+    // A malformed file (or one with a schema violation anywhere in it) leaves
+    // this nullopt, and both sites fall back to their pre-Phase-3 defaults
+    // exactly as if settings.json were absent: the sanity check is what
+    // reports the real problem, at stage 3, with a proper message. A process
+    // that reaches stage 3 with a bad settings.json aborts there regardless
+    // (see the any_fatal check below) -- the narrow window where plugin load
+    // (stage 2) sees an empty tools-slice instead of a slice from a
+    // file that fails validation elsewhere never reaches serving traffic.
+    std::optional<minimal::config::SettingsConfig> settings_preload;
+    try {
+        settings_preload = minimal::config::LoadSettingsConfig(config_dir / "settings.json");
+    } catch (const std::exception&) {
+    }
+
     // LOGGING FIRST, before anything logs. DefaultLogger() caches spdlog's
     // default on first use for the process lifetime, so this has to land ahead
     // of it -- and ahead of plugin load, which is the first thing with anything
-    // to say. Read here with a tolerant parse rather than from the sanity
-    // check's SettingsConfig, because the sanity check runs two stages later and
-    // its own findings are among the things that need somewhere to go.
+    // to say.
     {
         minimal::common::LoggingOptions logging;
-        try {
-            const auto settings = minimal::config::LoadSettingsConfig(config_dir / "settings.json");
-            logging.level = settings.logging.level;
-            logging.path = settings.logging.path;
-            logging.max_size_mb = settings.logging.max_size_mb;
-            logging.max_files = settings.logging.max_files;
-        } catch (const std::exception&) {
-            // Malformed settings.json is the sanity check's to report, at stage
-            // 3, with a proper message. Console defaults until then.
+        if (settings_preload) {
+            logging.level = settings_preload->logging.level;
+            logging.path = settings_preload->logging.path;
+            logging.max_size_mb = settings_preload->logging.max_size_mb;
+            logging.max_files = settings_preload->logging.max_files;
         }
         if (logging.path.empty()) {
             // The documented home is the DATA dir, beside session_db_path --
@@ -247,16 +259,12 @@ int main(int argc, char** argv) {
     services.Provide(minimal::agent::kSignalServiceName, &signal_router);
 
     // The tools slice of settings.json is forwarded verbatim to every plugin;
-    // core imposes no schema on it. Loaded defensively because a missing or
-    // malformed settings.json must not stop plugins from loading -- the startup
-    // sanity check is what will report it.
-    nlohmann::json tools_settings = nlohmann::json::object();
-    try {
-        tools_settings =
-            nlohmann::json::parse(minimal::common::ReadFileOrEmpty(config_dir / "settings.json")).value("tools",
-                                                                                       nlohmann::json::object());
-    } catch (const std::exception&) {
-    }
+    // core imposes no schema on it. Falls back to {} exactly as if
+    // settings.json were absent when the stage-1 preload above failed --
+    // a missing or malformed settings.json must not stop plugins from
+    // loading, the startup sanity check is what will report it.
+    const nlohmann::json tools_settings =
+        settings_preload ? settings_preload->tools.raw : nlohmann::json::object();
 
     minimal::plugins::PluginLoader loader(tools, providers, tools_settings, &observers, &commands,
                                           &auth_providers, &permission_advisors, &model_catalogs,
