@@ -394,21 +394,26 @@ int main(int argc, char** argv) {
     }
 
     // --- Stage 4: serve ------------------------------------------------------
-    // Settings, permissions and the session database were already loaded and
-    // validated by the sanity check; take them from there rather than re-reading
-    // the same files. The preset registry used to load settings.json a THIRD time --
-    // main ran the loop on the sanity check's parse while the registry resolved
-    // default_model from its own, so the sanity check could validate content
-    // the server was not running. It receives the sanity check's parse now;
-    // providers.json remains its own to load, and cannot fail
-    // now that its parsing is proven -- the catch is defense-in-depth.
+    // Settings, permissions, mcps, channels, and the session database were
+    // already loaded and validated by the sanity check; take them from there
+    // rather than re-reading the same files. The preset registry used to
+    // reload settings.json AND permissions.json itself (the former a third
+    // parse, main ran the loop on the sanity check's copy while the registry
+    // resolved default_model from its own; the latter a harmless-but-redundant
+    // second parse) -- it receives both from here now (Phase 3). Likewise
+    // McpClientManager below took mcps.json (config_dir / "mcps.json")
+    // independently; it now takes sanity.mcps(). providers.json remains its
+    // own to load: the live, discovery-hooked instance the preset registry
+    // builds is not interchangeable with the sanity check's un-hooked one
+    // (see ProvidersConfig's discovery cache) -- and cannot fail now that its
+    // parsing is proven -- the catch is defense-in-depth.
     minimal::config::SettingsConfig settings = sanity.settings();
     minimal::config::PermissionsConfig permissions = sanity.permissions();
     std::unique_ptr<minimal::agent::AgentPresetRegistry> presets;
     auto session_db = sanity.take_session_db();
     try {
         presets = std::make_unique<minimal::agent::AgentPresetRegistry>(config_dir, skills,
-                                                                        settings);
+                                                                        settings, permissions);
     } catch (const std::exception& e) {
         std::fprintf(stderr, "\nconfiguration error (%s): %s\n", config_dir.c_str(), e.what());
         return 1;
@@ -526,8 +531,8 @@ int main(int argc, char** argv) {
         signal_router.SetChannelInstructions(channel, instructions);
     };
     auto mcp_manager = std::make_unique<minimal::mcp::McpClientManager>(
-        minimal::config::LoadMcpsConfig(config_dir / "mcps.json"), tools, mcp_limits,
-        minimal::common::DefaultLogger(), std::move(channel_wiring));
+        sanity.mcps(), tools, mcp_limits, minimal::common::DefaultLogger(),
+        std::move(channel_wiring));
     minimal::mcp::McpClientManager& mcp = *mcp_manager;
 
     // Register with the router only the channels the manager actually built

@@ -313,6 +313,34 @@ TEST_CASE("AgentPresetRegistry: permission chain layers take effect in priority 
     CHECK(policy.mode_for("other", ToolCategory::Execute) == PermissionMode::Ask);
 }
 
+TEST_CASE("AgentPresetRegistry: the 4-arg overload uses the injected PermissionsConfig, "
+          "not permissions.json on disk",
+          "[agent_preset_registry]") {
+    // Phase 3: main.cpp passes the sanity check's already-parsed
+    // PermissionsConfig instead of letting this class re-read the file.
+    // permissions.json on disk says "deny"; the injected config says
+    // "allow" -- the resolved policy must reflect the injection, proving no
+    // reload happened.
+    TempConfigDir config;
+    config.WriteDefaults();
+    config.WriteJson("permissions.json", {{"fallback", {{"execute", "deny"}}}});
+    config.Write("agents/build.md",
+                  "---\n"
+                  "name: build\n"
+                  "model: openai-main/gpt-4o-mini\n"
+                  "---\n"
+                  "body\n");
+    config::SkillRegistry skills = config::SkillRegistry::Load(config.dir);
+    const auto injected = config::ParsePermissionsConfig(
+        nlohmann::json{{"fallback", {{"execute", "allow"}}}});
+    AgentPresetRegistry registry(config.dir, skills,
+                                 config::LoadSettingsConfig(config.dir / "settings.json"),
+                                 injected);
+
+    const auto& policy = registry.Resolve("build").permission_mode;
+    CHECK(policy.mode_for("bash", ToolCategory::Execute) == PermissionMode::AlwaysAllow);
+}
+
 TEST_CASE("AgentPresetRegistry: global per-tool override applies when preset is silent",
           "[agent_preset_registry]") {
     TempConfigDir config;

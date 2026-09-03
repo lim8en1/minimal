@@ -47,6 +47,15 @@ public:
     AgentPresetRegistry(std::filesystem::path config_dir, const config::SkillRegistry& skills,
                         const config::SettingsConfig& settings);
 
+    // Same as above, but takes an already-parsed PermissionsConfig instead of
+    // loading permissions.json itself -- the production path (main.cpp),
+    // once the startup sanity check has already loaded and validated it.
+    // Delegated to by the 3-arg overload above, which still loads its own
+    // copy for every other caller (tests construct this directly).
+    AgentPresetRegistry(std::filesystem::path config_dir, const config::SkillRegistry& skills,
+                        const config::SettingsConfig& settings,
+                        const config::PermissionsConfig& permissions);
+
     // Throws if agents/<preset_name>.md doesn't exist, or its `provider`
     // doesn't resolve (a providers.json entry, or "default" with no
     // settings.json default_provider). The returned preset always has

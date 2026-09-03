@@ -70,10 +70,17 @@ std::string RenderSkillListing(const std::vector<std::string>& resolved,
 AgentPresetRegistry::AgentPresetRegistry(std::filesystem::path config_dir,
                                          const config::SkillRegistry& skills,
                                          const config::SettingsConfig& settings)
+    : AgentPresetRegistry(config_dir, skills, settings,
+                          config::LoadPermissionsConfig(config_dir / "permissions.json")) {}
+
+AgentPresetRegistry::AgentPresetRegistry(std::filesystem::path config_dir,
+                                         const config::SkillRegistry& skills,
+                                         const config::SettingsConfig& settings,
+                                         const config::PermissionsConfig& permissions)
     : config_dir_(std::move(config_dir)),
       providers_(config::LoadProvidersConfig(config_dir_ / "providers.json")),
       settings_(settings),
-      permissions_(config::LoadPermissionsConfig(config_dir_ / "permissions.json")),
+      permissions_(permissions),
       skills_(skills) {
     // Both optional at this phase -- a real deployment's absence is the
     // startup sanity check's job to flag, not this constructor's.
