@@ -19,7 +19,8 @@ void ChatView::RebuildRows(const SessionState::Snapshot& snapshot) {
     if (rendered_session_id_ != snapshot.session_id) {
         row_cache_.clear();
     }
-    const std::vector<ChatRow> rows = ChatRowsFromMessages(snapshot.scrollback_page);
+    const std::vector<ChatRow> rows =
+        ChatRowsFromMessages(*snapshot.scrollback_page);
     rendered_rows_.clear();
     rendered_rows_.reserve(rows.size());
 
@@ -97,6 +98,20 @@ ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
     for (auto& parts : rendered_rows_) {
         for (auto& part : parts) column.push_back(part);
         column.push_back(text(" "));  // breathing room between rows
+    }
+
+    // The turn the user JUST submitted, echoed optimistically (state.cpp's
+    // OnChatSubmitted): rendered through the same UserText renderer the
+    // persisted rows use, so the echo and the row it retires look identical.
+    // Positioned ahead of the streaming block -- the reply comes AFTER the
+    // prompt, always. Cleared server-side of this view: a page apply past the
+    // submit-time baseline swaps in the persisted (expanded) row.
+    if (!snapshot.pending_user_text.empty()) {
+        ChatRow echo{.kind = ChatRowKind::UserText, .text = snapshot.pending_user_text};
+        if (const auto* renderer = message_renderers_.Find(ChatRowKind::UserText)) {
+            column.push_back(renderer->Render(echo, theme_));
+            column.push_back(text(" "));
+        }
     }
 
     // The in-flight block: streamed deltas via the engine's debounced view.

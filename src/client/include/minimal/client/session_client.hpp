@@ -290,6 +290,21 @@ public:
     };
     ListAgentPresetsResult ListAgentPresets();
 
+    // The model picker's list: every configured or discovered model ref.
+    // refresh_discovery re-fetches every discover-entry's catalog first
+    // (provider catalogs are fetched in parallel server-side, but the wall
+    // clock is still bounded by the slowest provider -- hence the longer
+    // deadline than a pure listing gets). The bare listing never triggers a
+    // fetch, so it keeps the short standard deadline.
+    struct ListModelsOptions {
+        bool refresh_discovery = false;
+    };
+    struct ListModelsResult {
+        v1::ListModelsResponse response;
+        grpc::Status status;
+    };
+    ListModelsResult ListModels(const ListModelsOptions& options);
+
     // Deletes a stored session that has no stream open. The picker's delete
     // action closes the tab first; the server refuses an open session.
     grpc::Status DeleteSession(const std::string& session_id);

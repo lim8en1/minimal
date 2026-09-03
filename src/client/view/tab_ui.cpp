@@ -96,6 +96,8 @@ void TabMaintenance::HandleNotice(const SessionState::Snapshot& snap) {
         deps_.open_picker();   // core mapping: the picker modal
     } else if (notice.view_hint == "agents") {
         deps_.open_agent_picker();   // core mapping: bare `/agent`
+    } else if (notice.view_hint == "models") {
+        deps_.open_model_picker();   // core mapping: bare `/model`
     } else if (auto* view = deps_.view_registry.Find(notice.view_hint)) {
         for (auto& entry : deps_.plugin_views) {
             if (entry.view == view) entry.visible = true;

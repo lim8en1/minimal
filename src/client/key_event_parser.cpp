@@ -92,6 +92,13 @@ std::vector<Event> ParseKeySpec(const std::string& spec) {
     // kitty keyboard protocol / CSI-u).
     if (lower == "ctrl+tab") return {Event::Special("\x1b[27;5;9~")};
     if (lower == "ctrl+shift+tab") return {Event::Special("\x1b[27;6;9~")};
+    // shift+tab ("backtab"): terminals send the legacy CSI Z sequence; CSI-u
+    // terminals send the explicit modifier form. Both listed so a Match()
+    // succeeds on whichever arrives (the same dual-candidate rule as
+    // ctrl+tab above).
+    if (lower == "shift+tab") {
+        return {Event::TabReverse, Event::Special("\x1b[27;2;9~")};
+    }
 
     std::vector<std::string> parts = Split(lower, '+');
     if (parts.empty()) return {};

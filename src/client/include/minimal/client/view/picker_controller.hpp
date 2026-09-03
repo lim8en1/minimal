@@ -46,9 +46,11 @@ public:
         // (permission_child, confirmation_child, ...).
         std::shared_ptr<ftxui::Component>& picker_slot;
         std::shared_ptr<ftxui::Component>& agent_picker_slot;
+        std::shared_ptr<ftxui::Component>& model_picker_slot;
 
         bool& show_picker;
         bool& show_agent_picker;
+        bool& show_model_picker;
 
         // The session picker's delete flow stages its OWN confirmation
         // layer (styled like the quit one) rather than deleting inline.
@@ -74,10 +76,23 @@ public:
     // to preserve across opens.
     void OpenAgentPicker();
 
+    // Shared by the bare `/model` view_hint and the picker's own ctrl+r.
+    // The bare open lists what the server already knows (static models plus
+    // any cached discovery); `refresh` re-fetches every discover-entry's
+    // catalog first, which can take seconds and blocks the calling thread --
+    // acceptable for an explicit user action, the same bounded-pause trade
+    // every picker fetch here makes.
+    void OpenModelPicker(bool refresh);
+
 private:
     void FetchPickerPage(bool reset);
     void RebuildPickerComponent();
     void RebuildAgentPickerComponent();
+    void RebuildModelPickerComponent();
+
+    // The picker's open action: ATTACH for a live row, RESUME otherwise --
+    // see the definition for why the split is load-bearing.
+    std::string OpenPickedSession(const std::string& session_id);
 
     // T8: the picker's raw accumulated list, in server delivery order
     // (updated_at DESC, id ASC per session_service.proto). Filter/sort are
@@ -96,6 +111,10 @@ private:
     // The agent picker's list: fetched whole on each open (no pagination,
     // no sort -- agents/*.md is small and has no "recent" axis).
     std::vector<v1::AgentPresetSummary> agent_picker_presets_;
+    // The model picker's list: fetched whole on each open (refs are sorted
+    // server-side; grouping is a pure display transform). No pagination --
+    // even a large discovered catalog is one response of small rows.
+    std::vector<v1::ModelSummary> model_picker_models_;
 };
 
 }  // namespace minimal::client

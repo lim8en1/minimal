@@ -11,4 +11,12 @@ std::optional<ModelRef> ParseModelRef(std::string_view text) {
     return ModelRef{std::string(text.substr(0, slash)), std::string(text.substr(slash + 1))};
 }
 
+std::optional<ModelRef> SplitModelRef(std::string_view text) {
+    const auto slash = text.find('/');
+    if (slash == std::string_view::npos || slash == 0 || slash + 1 == text.size()) {
+        return std::nullopt;
+    }
+    return ModelRef{std::string(text.substr(0, slash)), std::string(text.substr(slash + 1))};
+}
+
 }  // namespace minimal::common

@@ -117,9 +117,23 @@ public:
         SessionStateKind state = SessionStateKind::Idle;
 
         // Scrollback window (keyset-paged). Most recent N messages, descending.
-        std::vector<v1::StoredMessage> scrollback_page;
+        // SHARED, copy-on-apply: the page only changes when a fetch applies,
+        // so snapshots taken between applies (one per wire event, on the
+        // maintenance pass) share one buffer instead of deep-copying up to
+        // scrollback_max_messages_ messages per event -- per-delta copies
+        // during a busy turn were the render freeze. Never null.
+        std::shared_ptr<const std::vector<v1::StoredMessage>> scrollback_page;
         bool has_earlier_messages = false;   // paging back will yield more
         int64_t last_loaded_seq = -1;        // cursor for the next "load older"
+
+        // The turn the user JUST submitted, echoed optimistically: the
+        // persisted row (with the server-side @-mention expansion) only
+        // reaches a page via a fetch, and mid-turn nothing fetched -- so a
+        // submitted message did not render until the turn ENDED, after the
+        // assistant's streaming reply. Rendered by the chat view ahead of the
+        // streaming block; cleared once a page apply proves the real row
+        // landed (any seq newer than the submit-time baseline), or on error.
+        std::string pending_user_text;
 
         // Streaming assistant response (partial markdown building up)
         std::string streaming_text;          // empty when not streaming
@@ -306,6 +320,13 @@ public:
     void ApplyScrollbackPage(const v1::GetMessagesResponse& resp);
     bool CanLoadMore() const;
 
+    // Records the optimistic echo of a turn the user just submitted (called
+    // by SendChatTurn after the event was accepted onto the wire). Cleared by
+    // the next page apply that carries a seq past the submit-time baseline --
+    // the persisted user row, with the server's @-mention expansion, replaces
+    // the echo -- or by an error/session end, which leave nothing to echo.
+    void OnChatSubmitted(const std::string& text);
+
     // Resolves an outstanding async refresh that came back EMPTY or failed:
     // bumps refresh_seq without touching any content, so the frame that
     // requested it can tell "resolved, nothing changed" from "still
@@ -327,6 +348,11 @@ private:
     // and sets scrollback_trimmed_ -- an unbounded append let a long PageUp
     // materialize a 1M-token transcript in client memory.
     std::vector<v1::StoredMessage> scrollback_page_;
+    // The shared, immutable view of scrollback_page_ handed out by
+    // TakeSnapshot. Rebuilt (one copy) at the end of ApplyScrollbackPage --
+    // the only mutation site -- so every snapshot between applies shares it.
+    std::shared_ptr<const std::vector<v1::StoredMessage>> scrollback_page_shared_ =
+        std::make_shared<const std::vector<v1::StoredMessage>>();
     int64_t last_loaded_seq_ = -1;      // oldest seq loaded so far (descending)
     bool has_earlier_ = false;
     uint64_t transcript_version_ = 0;
@@ -335,6 +361,14 @@ private:
     bool scrollback_trimmed_ = false;
     int scrollback_max_messages_ = kDefaultScrollbackWindowMaxMessages;
     int tool_output_buffer_bytes_ = kDefaultToolOutputBufferBytes;
+
+    // The optimistic user-turn echo (see Snapshot::pending_user_text). The
+    // baseline is the page's NEWEST seq at submit time (front of the
+    // descending window): any later apply whose newest seq is past it proves
+    // the persisted row (appended FIRST by the server, before any turn
+    // output) is in the page and the echo can go.
+    std::string pending_user_text_;
+    int64_t pending_user_baseline_seq_ = -1;
 
     // Latest /-command outcome (transient notice line; never a chat row).
     // notice_seq_ advances on every OnCommandResult so consumers can tell a

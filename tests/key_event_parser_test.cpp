@@ -44,6 +44,15 @@ TEST_CASE("ParseKeySpec: exact backward compatibility with the old 12-key table"
     CHECK(Has(ParseKeySpec("ctrl+c"), Event::CtrlC));
 }
 
+TEST_CASE("ParseKeySpec: shift+tab (backtab) matches both terminal encodings",
+          "[key_event_parser]") {
+    // permission.cycle's binding: the legacy CSI Z sequence most terminals
+    // send, plus the explicit CSI-u modifier form -- Match() tries every
+    // candidate, so either arrival is recognized.
+    CHECK(Has(ParseKeySpec("shift+tab"), Event::TabReverse));
+    CHECK(Has(ParseKeySpec("shift+tab"), Event::Special("\x1b[27;2;9~")));
+}
+
 TEST_CASE("ParseKeySpec: plain letters and digits", "[key_event_parser]") {
     CHECK(Has(ParseKeySpec("q"), Event::Character("q")));
     CHECK(Has(ParseKeySpec("Q"), Event::Character("q")));   // case-insensitive spec

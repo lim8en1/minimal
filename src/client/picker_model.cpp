@@ -28,9 +28,11 @@ std::string HumanTime(std::int64_t unix_ms) {
 
 std::string Label(const v1::SessionSummary& session) {
     // S5.4: "live" marks a session with a Session object still running
-    // server-side (attached or detached) -- selecting it attaches to the
-    // live stream rather than resuming from the stored transcript, and its
-    // turn may still be in flight.
+    // server-side (attached or detached). Selecting the row ATTACHES to the
+    // running instance (PickerController::OpenPickedSession); resume from the
+    // stored transcript is for the non-live rows, and a resume sent for a
+    // live session is refused server-side ("already open") -- the two verbs
+    // are not interchangeable.
     std::string label = session.name() + "  ·  " + std::to_string(session.message_count()) +
                         " msgs  ·  " + HumanTime(session.updated_at_unix_ms());
     if (session.is_live()) label += "  ·  live";

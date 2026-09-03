@@ -56,6 +56,11 @@ struct ChatRow {
     nlohmann::json tool_input = nlohmann::json::object();
     std::string attachment_path;  // UserAttachment: the path="..." from the frame
     bool tool_is_error = false;   // ToolActivity only
+    // ToolActivity only: true for a tool_use whose tool_result is NOT in the
+    // same scrollback page (an in-flight call, or a window boundary cut
+    // between the pair) -- the renderer shows the input summary instead of a
+    // body. A result-bearing row never sets it.
+    bool tool_pending = false;
 };
 
 // Rows in DISPLAY order (oldest first) from a DESCENDING-seq scrollback page --

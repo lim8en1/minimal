@@ -82,7 +82,9 @@ SessionState::Snapshot SnapshotWithText(const std::string& session_id, uint64_t 
     SessionState::Snapshot snap;
     snap.session_id = session_id;
     snap.transcript_version = version;
-    snap.scrollback_page = {StoredUserText(1, text)};
+    snap.scrollback_page =
+        std::make_shared<const std::vector<v1::StoredMessage>>(
+            std::vector<v1::StoredMessage>{StoredUserText(1, text)});
     return snap;
 }
 
@@ -98,9 +100,12 @@ SessionState::Snapshot SnapshotWithRows(const std::string& session_id, uint64_t 
     SessionState::Snapshot snap;
     snap.session_id = session_id;
     snap.transcript_version = version;
+    std::vector<v1::StoredMessage> page;
     for (int i = count - 1; i >= 0; --i) {
-        snap.scrollback_page.push_back(StoredUserText(i + 1, "row-" + std::to_string(i)));
+        page.push_back(StoredUserText(i + 1, "row-" + std::to_string(i)));
     }
+    snap.scrollback_page = std::make_shared<const std::vector<v1::StoredMessage>>(
+        std::move(page));
     return snap;
 }
 

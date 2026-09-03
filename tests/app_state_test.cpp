@@ -496,7 +496,7 @@ TEST_CASE("SessionClient::GetMessages feeds ApplyScrollbackPage with real wire d
     SessionState state(created.session_id);
     state.ApplyScrollbackPage(page.response);
     auto snap = state.TakeSnapshot();
-    CHECK(snap.scrollback_page.size() == static_cast<size_t>(page.response.messages_size()));
+    CHECK(snap.scrollback_page->size() == static_cast<size_t>(page.response.messages_size()));
     CHECK(snap.last_loaded_seq == page.response.messages(page.response.messages_size() - 1).seq());
 }
 
@@ -688,7 +688,7 @@ TEST_CASE("ResumeTab revives a stored session and its tab sends again",
         while (std::chrono::steady_clock::now() < deadline) {
             app.RequestScrollback(sid, /*newest=*/true);
             std::this_thread::sleep_for(50ms);
-            if (app.GetDetails(sid).scrollback_page.size() >= n) return true;
+            if (app.GetDetails(sid).scrollback_page->size() >= n) return true;
         }
         return false;
     };
@@ -807,7 +807,7 @@ TEST_CASE("sends on a stream that died with the session are refused visibly",
     while (std::chrono::steady_clock::now() < turn_deadline) {
         app.RequestScrollback(sid, /*newest=*/true);
         std::this_thread::sleep_for(50ms);
-        if (app.GetDetails(sid).scrollback_page.size() >= 2) {
+        if (app.GetDetails(sid).scrollback_page->size() >= 2) {
             turn_done = true;
             break;
         }

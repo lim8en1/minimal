@@ -235,7 +235,10 @@ grpc::Status SessionServiceImpl::ApplyModelOverride(const v1::CreateSessionReque
     // client sent something wrong, which is a different thing from the server
     // not being able to honour something well-formed.
     if (request.model().empty()) return grpc::Status::OK;
-    params.model_override = config::ParseModelRef(request.model());
+    // SplitModelRef, not ParseModelRef: a client may name a discovered model
+    // whose id itself carries slashes ("openrouter/anthropic/claude-opus-5"),
+    // and strict parsing would make those unaddressable from --model/resume.
+    params.model_override = config::SplitModelRef(request.model());
     if (!params.model_override) {
         return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
                             "model '" + request.model() +
@@ -813,6 +816,40 @@ grpc::Status SessionServiceImpl::ListAgentPresets(grpc::ServerContext*,
         auto* proto_summary = response->add_presets();
         proto_summary->set_name(summary.name);
         proto_summary->set_description(summary.description);
+    }
+    return grpc::Status::OK;
+}
+
+grpc::Status SessionServiceImpl::ListModels(grpc::ServerContext*,
+                                            const v1::ListModelsRequest* request,
+                                            v1::ListModelsResponse* response) {
+    if (presets_ == nullptr) return grpc::Status::OK;  // empty list; see set_presets
+    const auto& providers = presets_->providers();
+
+    // refresh_discovery is the /providers refresh role, relocated into the
+    // picker: an explicit re-fetch of every discover-entry's catalog before
+    // listing. It is caller-requested network I/O with a bounded cost (each
+    // provider's own gate, all providers in parallel), which is why the listing
+    // RPC ITSELF never triggers a fetch -- a cold cache simply lists what is
+    // already known (static models), and the picker tells the user about the
+    // rest.
+    if (request->refresh_discovery()) providers.RefreshDiscovery();
+
+    // ModelRefs is static ∪ cached-discovered, mutex-guarded, sorted ascending.
+    // Resolve per ref for the context window: a pure config lookup, no
+    // provider I/O (the model object already exists; a discover-entry ref not
+    // in the cache cannot appear here because ModelRefs lists only what is
+    // materialized).
+    for (const auto& ref_text : providers.ModelRefs()) {
+        auto* proto_model = response->add_models();
+        proto_model->set_ref(ref_text);
+        if (const auto parsed = config::SplitModelRef(ref_text)) {
+            if (const auto model = providers.Resolve(*parsed)) {
+                if (model->context_window_tokens) {
+                    proto_model->set_context_window_tokens(*model->context_window_tokens);
+                }
+            }
+        }
     }
     return grpc::Status::OK;
 }

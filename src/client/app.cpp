@@ -565,6 +565,7 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     bool show_panel = false;
     bool show_picker = false;
     bool show_agent_picker = false;
+    bool show_model_picker = false;
     bool show_quit_confirm = false;
     bool show_permission = false;
     bool show_confirmation = false;
@@ -789,6 +790,11 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     auto agent_picker_host_interactive =
         minimal::client::MakeModalHost(agent_picker_child, show_agent_picker);
 
+    // --- model picker -----------------------------------------------------------
+    auto model_picker_child = std::make_shared<Component>();
+    auto model_picker_host_interactive =
+        minimal::client::MakeModalHost(model_picker_child, show_model_picker);
+
     // T8: typing on an empty app already starts a session directly
     // (submit_chat, above); the picker's "+ new session" row is the same
     // action reached from inside the modal, with no text to send yet.
@@ -806,10 +812,12 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     // frame assembly and MakeModalHost calls read from, unchanged).
     minimal::client::PickerController picker_controller(
         minimal::client::PickerController::Dependencies{
-            *client, *app, theme, picker_child, agent_picker_child, show_picker,
-            show_agent_picker, staged_delete_id, show_delete_confirm, open_new_session});
+            *client, *app, theme, picker_child, agent_picker_child, model_picker_child,
+            show_picker, show_agent_picker, show_model_picker, staged_delete_id,
+            show_delete_confirm, open_new_session});
     auto open_picker = [&] { picker_controller.OpenSessionPicker(); };
     auto open_agent_picker = [&] { picker_controller.OpenAgentPicker(); };
+    auto open_model_picker = [&] { picker_controller.OpenModelPicker(/*refresh=*/false); };
 
     // --- plugin views (panel region + modal layer) -----------------------------
     // Panels: rendered in the frame beside the tools panel; one shared
@@ -848,9 +856,9 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     // FocusedDetails() return references into its own members.
     minimal::client::TabMaintenance tab_maintenance(minimal::client::TabMaintenance::Dependencies{
         *app, engine, chat_surface, view_registry, plugin_views, plugin_modal_child,
-        show_plugin_modal, open_picker, open_agent_picker, tab_ui, theme, message_registry,
-        renderer_registry, permission_child, show_permission, confirmation_child,
-        show_confirmation});
+        show_plugin_modal, open_picker, open_agent_picker, open_model_picker, tab_ui, theme,
+        message_registry, renderer_registry, permission_child, show_permission,
+        confirmation_child, show_confirmation});
     // Same names the inline code declared directly -- every lambda below
     // this point (with_keys' KeyContext, the still-inline render body)
     // captures `[&]`, i.e. by ordinary lexical scoping.
@@ -978,8 +986,9 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     });
 
     // Modal stack, OUTERMOST = TOPMOST: the security UI (permission prompt)
-    // above the wire confirmation above the quit confirmation above the picker
-    // above the delete confirmation above the plugin modals above the frame
+    // above the wire confirmation above the quit confirmation above the
+    // session/agent/model pickers above the delete confirmation above the
+    // plugin modals above the frame
     // (with its global keybindings). E4's nesting had the picker outermost;
     // E5 reorders so the never-preempted invariant is actually structural end
     // to end -- no modal layer sits above the permission prompt, and plugin
@@ -996,6 +1005,7 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     tree = Modal(tree, delete_modal, &show_delete_confirm);
     tree = Modal(tree, picker_host_interactive, &show_picker);
     tree = Modal(tree, agent_picker_host_interactive, &show_agent_picker);
+    tree = Modal(tree, model_picker_host_interactive, &show_model_picker);
     auto with_quit_confirm = Modal(tree, confirm_modal, &show_quit_confirm);
     auto with_confirmation = Modal(with_quit_confirm, confirmation_host_interactive,
                                    &show_confirmation);

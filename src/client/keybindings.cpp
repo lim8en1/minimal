@@ -23,6 +23,7 @@ const std::unordered_map<std::string, std::string>& DefaultBindings() {
         {"jump.attention", "alt+a"},
         {"session.picker", "ctrl+o"},
         {"agent.picker", "alt+g"},
+        {"permission.cycle", "shift+tab"},
         {"panel.toggle", "ctrl+t"},
         {"tab.close", "ctrl+w"},
         {"chat.load_older", "pageup"},

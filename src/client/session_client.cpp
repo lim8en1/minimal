@@ -120,6 +120,21 @@ SessionClient::ListAgentPresetsResult SessionClient::ListAgentPresets() {
     return result;
 }
 
+SessionClient::ListModelsResult SessionClient::ListModels(const ListModelsOptions& options) {
+    grpc::ClientContext context;
+    // A refresh waits on every discover-entry's catalog fetch (parallel
+    // server-side, bounded by the slowest provider's own timeout); a bare
+    // listing touches only config. The 15 s covers the refresh path's worst
+    // case without letting a hung provider wedge the picker indefinitely.
+    context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(
+                              options.refresh_discovery ? 15 : 2));
+    ListModelsResult result;
+    v1::ListModelsRequest request;
+    request.set_refresh_discovery(options.refresh_discovery);
+    result.status = stub_->ListModels(&context, request, &result.response);
+    return result;
+}
+
 grpc::Status SessionClient::DeleteSession(const std::string& session_id) {
     grpc::ClientContext context;
     context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(2));

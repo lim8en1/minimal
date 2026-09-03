@@ -146,6 +146,7 @@ struct ServiceFixture {
             *sessions, *db, config::SettingsConfig{}, service_permissions,
             common::DefaultLogger(), &permission_advisors);
         service->set_services(&services);
+        service->set_presets(presets.get());
         sessions->set_commands(&commands);
         service->set_commands(&commands);
         service->set_mention_resolvers(&mention_resolvers);
@@ -1622,6 +1623,52 @@ TEST_CASE("the generic plugin channel streams PluginSubscribe payloads",
                                  &refused_status) ==
           minimal::client::SubscribeOutcome::kError);
     CHECK_FALSE(refused_status.ok());
+}
+
+TEST_CASE("ListModels lists static refs cold and discovered refs after refresh",
+          "[session_service][models]") {
+    ServiceFixture fixture;
+    // A discover-entry the config never names models for.
+    fixture.Write("providers.json",
+                  R"({"providers":{"main":{"backend":"fake","url":"http://localhost/v1",
+                      "models":{"test-model":{}}},
+                     "disc":{"backend":"fake","url":"http://disc/v1","discover":true}}})");
+    fixture.Start();
+    fixture.presets->SetDiscoveryHook([](const std::string&, const llm::ProviderConfig&) {
+        return config::DiscoveryOutcome{
+            /*catalog_present=*/true, /*ok=*/true, {},
+            {llm::DiscoveredModel{"discovered-model", 12345, nlohmann::json::object()}}};
+    });
+
+    // Cold, the discover-entry contributes nothing (a listing never triggers
+    // the lazy fetch).
+    {
+        minimal::client::SessionClient client(rpc::SocketTarget(fixture.socket));
+        const auto result = client.ListModels({});
+        REQUIRE(result.status.ok());
+        REQUIRE(result.response.models().size() == 1);
+        CHECK(result.response.models(0).ref() == "main/test-model");
+    }
+
+    // refresh_discovery fetches NOW; the discovered model joins the listing
+    // with its context window, and a later bare listing serves it from cache.
+    minimal::client::SessionClient client(rpc::SocketTarget(fixture.socket));
+    {
+        minimal::client::SessionClient::ListModelsOptions opts;
+        opts.refresh_discovery = true;
+        const auto result = client.ListModels(opts);
+        REQUIRE(result.status.ok());
+        REQUIRE(result.response.models().size() == 2);
+        // Refs are sorted ascending: "disc/..." before "main/...".
+        CHECK(result.response.models(0).ref() == "disc/discovered-model");
+        CHECK(result.response.models(0).context_window_tokens() == 12345);
+        CHECK(result.response.models(1).ref() == "main/test-model");
+    }
+    {
+        const auto warm = client.ListModels({});
+        REQUIRE(warm.status.ok());
+        CHECK(warm.response.models().size() == 2);
+    }
 }
 
 TEST_CASE("a second client on the same session is served the same events",

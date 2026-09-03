@@ -173,7 +173,16 @@ TEST_CASE("the model flag is validated before a server is contacted", "[client_a
     SECTION("half a reference is refused") {
         CHECK(Parse({"-p", "hi", "--model", "local/"}).action == ParsedArgs::Action::Error);
         CHECK(Parse({"-p", "hi", "--model", "/qwen4"}).action == ParsedArgs::Action::Error);
-        CHECK(Parse({"-p", "hi", "--model", "a/b/c"}).action == ParsedArgs::Action::Error);
+    }
+
+    SECTION("a nested id is accepted: the first '/' splits, later ones are the model") {
+        // Discovered catalogs serve slashy ids (openrouter/anthropic/claude-*).
+        // A mis-split ref resolves to nothing server-side and is reported as
+        // "unknown model" -- strictness here would only make real refs
+        // unaddressable.
+        const auto parsed = Parse({"-p", "hi", "--model", "a/b/c"});
+        REQUIRE(parsed.action == ParsedArgs::Action::Headless);
+        CHECK(parsed.headless.model == "a/b/c");
     }
 
     SECTION("no --model leaves it to the preset") {

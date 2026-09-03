@@ -79,6 +79,8 @@ public:
                               v1::ListSessionsResponse*) override;
     grpc::Status ListAgentPresets(grpc::ServerContext*, const v1::ListAgentPresetsRequest*,
                                   v1::ListAgentPresetsResponse*) override;
+    grpc::Status ListModels(grpc::ServerContext*, const v1::ListModelsRequest*,
+                            v1::ListModelsResponse*) override;
     grpc::Status SuggestPaths(grpc::ServerContext*, const v1::SuggestPathsRequest*,
                               v1::SuggestPathsResponse*) override;
     grpc::Status ListCommands(grpc::ServerContext*, const v1::ListCommandsRequest*,

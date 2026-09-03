@@ -86,25 +86,42 @@ TEST_CASE("@-mention attachment blocks become attachment rows, text stays verbat
     CHECK(rows[2].attachment_path == "src/");
 }
 
-TEST_CASE("tool calls become activity rows carrying the call's name and result body",
+TEST_CASE("a tool call whose result is in the page renders ONCE, with name and body",
           "[chat_model]") {
     // Descending: the RESULT is newer than its use (the use ran first), so it
-    // comes first in the page.
+    // comes first in the page. The use used to push a SECOND, empty row --
+    // the "tool bash" with nothing under it, once per call.
     std::vector<v1::StoredMessage> page;
     page.push_back(MakeMessage(v1::ROLE_USER, {ToolResult("t1", "stdout tail", false)}));
     page.push_back(MakeMessage(v1::ROLE_ASSISTANT, {ToolUse("t1", "bash")}));
 
     const auto rows = client::ChatRowsFromMessages(page);
 
-    REQUIRE(rows.size() == 2);
-    // Display order (oldest first): the use one-liner, then the result body.
+    REQUIRE(rows.size() == 1);
+    // The result row is the authoritative rendering: the call's name (which
+    // rides on the USE) joined with the output body.
+    CHECK(rows[0].kind == ChatRowKind::ToolActivity);
+    CHECK(rows[0].tool_name == "bash");
+    CHECK(rows[0].text == "stdout tail");
+    CHECK_FALSE(rows[0].tool_is_error);
+    CHECK_FALSE(rows[0].tool_pending);
+}
+
+TEST_CASE("a tool_use with no result in the page stays, flagged pending",
+          "[chat_model]") {
+    // An in-flight call (or a window boundary that cut between the pair):
+    // dropping the row entirely would hide a call the model made, so it
+    // renders as pending instead.
+    std::vector<v1::StoredMessage> page;
+    page.push_back(MakeMessage(v1::ROLE_ASSISTANT, {ToolUse("t1", "bash")}));
+
+    const auto rows = client::ChatRowsFromMessages(page);
+
+    REQUIRE(rows.size() == 1);
     CHECK(rows[0].kind == ChatRowKind::ToolActivity);
     CHECK(rows[0].tool_name == "bash");
     CHECK(rows[0].text.empty());
-    CHECK(rows[1].kind == ChatRowKind::ToolActivity);
-    CHECK(rows[1].tool_name == "bash");  // the name rides on the USE, not the result
-    CHECK(rows[1].text == "stdout tail");
-    CHECK_FALSE(rows[1].tool_is_error);
+    CHECK(rows[0].tool_pending);
 }
 
 TEST_CASE("an errored tool result is marked, not hidden", "[chat_model]") {
@@ -114,8 +131,8 @@ TEST_CASE("an errored tool result is marked, not hidden", "[chat_model]") {
 
     const auto rows = client::ChatRowsFromMessages(page);
 
-    REQUIRE(rows.size() == 2);
-    CHECK(rows[1].tool_is_error);
+    REQUIRE(rows.size() == 1);
+    CHECK(rows[0].tool_is_error);
 }
 
 TEST_CASE("a subagent completion injection is a System row, not tool activity",
@@ -126,13 +143,11 @@ TEST_CASE("a subagent completion injection is a System row, not tool activity",
 
     const auto rows = client::ChatRowsFromMessages(page);
 
-    // The spawn CALL is still tool activity; the RESULT it eventually produced
-    // is the harness speaking.
-    REQUIRE(rows.size() == 2);
-    CHECK(rows[0].kind == ChatRowKind::ToolActivity);
-    CHECK(rows[0].tool_name == "spawn_subagent");
-    CHECK(rows[1].kind == ChatRowKind::System);
-    CHECK(rows[1].text == "child text");
+    // The result is the harness speaking, and with the duplicate use row gone
+    // the System row IS the spawn's rendering.
+    REQUIRE(rows.size() == 1);
+    CHECK(rows[0].kind == ChatRowKind::System);
+    CHECK(rows[0].text == "child text");
     // The injection stays a REAL persisted message -- the model must see it at
     // the turn boundary (EXTENSIBILITY §4.4). Only its presentation is special.
 }
@@ -182,19 +197,16 @@ TEST_CASE("every row carries its source message's seq, whatever branch produced 
 
     const auto rows = client::ChatRowsFromMessages(page);
 
-    REQUIRE(rows.size() == 5);
-    // Display order (oldest first): text(0), bash use(10), bash result(20),
-    // spawn use(30), spawn result(40).
+    REQUIRE(rows.size() == 3);
+    // Display order (oldest first): text(0), bash result(20) -- the use's row
+    // is deduped into it -- then the spawn's System row(40).
     CHECK(rows[0].kind == ChatRowKind::AgentMarkdown);
     CHECK(rows[0].seq == 0);
     CHECK(rows[1].kind == ChatRowKind::ToolActivity);
-    CHECK(rows[1].seq == 10);
-    CHECK(rows[2].kind == ChatRowKind::ToolActivity);
-    CHECK(rows[2].seq == 20);
-    CHECK(rows[3].kind == ChatRowKind::ToolActivity);
-    CHECK(rows[3].seq == 30);
-    CHECK(rows[4].kind == ChatRowKind::System);
-    CHECK(rows[4].seq == 40);
+    CHECK(rows[1].seq == 20);
+    CHECK(rows[1].tool_name == "bash");
+    CHECK(rows[2].kind == ChatRowKind::System);
+    CHECK(rows[2].seq == 40);
     for (const auto& row : rows) CHECK(row.seq >= 0);   // none left at the -1 sentinel
 }
 

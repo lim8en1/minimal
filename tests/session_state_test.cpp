@@ -351,12 +351,72 @@ TEST_CASE("first scrollback page becomes the window", "[session_state][scrollbac
     state.ApplyScrollbackPage(PageOf({20, 19, 18}, /*has_more=*/true));
 
     auto snap = state.TakeSnapshot();
-    REQUIRE(snap.scrollback_page.size() == 3);
-    REQUIRE(snap.scrollback_page.front().seq() == 20);
-    REQUIRE(snap.scrollback_page.back().seq() == 18);
+    REQUIRE(snap.scrollback_page->size() == 3);
+    REQUIRE(snap.scrollback_page->front().seq() == 20);
+    REQUIRE(snap.scrollback_page->back().seq() == 18);
     REQUIRE(snap.has_earlier_messages);
     REQUIRE(snap.last_loaded_seq == 18);
     REQUIRE(state.CanLoadMore());
+}
+
+// THE RENDER-FREEZE REGRESSION: the persisted user row only reached a page
+// through a fetch, and nothing fetched mid-turn, so a submitted message did
+// not render until the turn ENDED -- after the assistant's streaming reply.
+// OnChatSubmitted echoes the turn optimistically; a page apply past the
+// submit-time baseline retires it in favor of the persisted (expanded) row.
+TEST_CASE("a submitted turn echoes optimistically until the persisted row lands",
+          "[session_state][optimistic]") {
+    SessionState state("s-1");
+    state.ApplyScrollbackPage(PageOf({10, 9}, /*has_more=*/false));
+
+    state.OnChatSubmitted("hi @test.tar.gz");
+    auto snap = state.TakeSnapshot();
+    CHECK(snap.pending_user_text == "hi @test.tar.gz");
+    CHECK(snap.state == SessionStateKind::Working);   // accepted onto the wire
+
+    SECTION("a page apply with no newer seq keeps the echo") {
+        // The server has not persisted anything yet (a raced fetch).
+        state.ApplyScrollbackPage(PageOf({10, 9}, /*has_more=*/false));
+        CHECK(state.TakeSnapshot().pending_user_text == "hi @test.tar.gz");
+    }
+
+    SECTION("a page apply past the baseline retires the echo") {
+        // The user row (seq 11) -- and anything after it -- is now in the page.
+        state.ApplyScrollbackPage(PageOf({11, 10, 9}, /*has_more=*/false));
+        CHECK(state.TakeSnapshot().pending_user_text.empty());
+        CHECK(state.TakeSnapshot().scrollback_page->front().seq() == 11);
+    }
+
+    SECTION("an error clears the echo: nothing will retire it otherwise") {
+        state.OnError("connection lost");
+        CHECK(state.TakeSnapshot().pending_user_text.empty());
+    }
+
+    SECTION("a session end clears the echo") {
+        state.OnSessionEnded();
+        CHECK(state.TakeSnapshot().pending_user_text.empty());
+    }
+}
+
+TEST_CASE("snapshots between applies share one page buffer", "[session_state][perf]") {
+    // The per-event deep copy: TakeSnapshot used to copy every stored message
+    // on EVERY wire event (one call per maintenance pass), which during a
+    // busy turn meant a full-window copy per stream delta. The page is now
+    // copy-on-apply: successive snapshots between applies are the SAME
+    // buffer, and only an apply that changes rows produces a new one.
+    SessionState state("s-1");
+    state.ApplyScrollbackPage(PageOf({5, 4, 3}, /*has_more=*/false));
+    auto first = state.TakeSnapshot();
+    auto second = state.TakeSnapshot();
+    REQUIRE(first.scrollback_page != nullptr);
+    CHECK(first.scrollback_page.get() == second.scrollback_page.get());
+
+    state.ApplyScrollbackPage(PageOf({6, 5, 4, 3}, /*has_more=*/false));
+    auto third = state.TakeSnapshot();
+    CHECK(third.scrollback_page.get() != first.scrollback_page.get());
+    CHECK(third.scrollback_page->front().seq() == 6);
+    // The old snapshot's view is untouched by the new apply.
+    CHECK(first.scrollback_page->front().seq() == 5);
 }
 
 TEST_CASE("an older page prepends, growing the window", "[session_state][scrollback]") {
@@ -365,9 +425,9 @@ TEST_CASE("an older page prepends, growing the window", "[session_state][scrollb
     state.ApplyScrollbackPage(PageOf({17, 16}, /*has_more=*/false));
 
     auto snap = state.TakeSnapshot();
-    REQUIRE(snap.scrollback_page.size() == 5);
-    REQUIRE(snap.scrollback_page.front().seq() == 20);
-    REQUIRE(snap.scrollback_page.back().seq() == 16);
+    REQUIRE(snap.scrollback_page->size() == 5);
+    REQUIRE(snap.scrollback_page->front().seq() == 20);
+    REQUIRE(snap.scrollback_page->back().seq() == 16);
     REQUIRE(snap.last_loaded_seq == 16);
     REQUIRE_FALSE(snap.has_earlier_messages);
     REQUIRE_FALSE(state.CanLoadMore());
@@ -380,8 +440,8 @@ TEST_CASE("a page newer than the current window replaces it (bounded memory)",
     state.ApplyScrollbackPage(PageOf({30, 29}, /*has_more=*/true));   // e.g. a fresh live page
 
     auto snap = state.TakeSnapshot();
-    REQUIRE(snap.scrollback_page.size() == 2);
-    REQUIRE(snap.scrollback_page.front().seq() == 30);
+    REQUIRE(snap.scrollback_page->size() == 2);
+    REQUIRE(snap.scrollback_page->front().seq() == 30);
 }
 
 TEST_CASE("an empty page still propagates has_more", "[session_state][scrollback]") {
@@ -408,9 +468,9 @@ TEST_CASE("INVARIANT: paging backward twice must grow the window, not reset it",
     // If the cursor logic were broken (e.g. always replacing instead of
     // conditionally prepending), this would be 2, not 7 -- only the last page
     // applied would survive.
-    REQUIRE(snap.scrollback_page.size() == 7);
-    REQUIRE(snap.scrollback_page.front().seq() == 20);
-    REQUIRE(snap.scrollback_page.back().seq() == 14);
+    REQUIRE(snap.scrollback_page->size() == 7);
+    REQUIRE(snap.scrollback_page->front().seq() == 20);
+    REQUIRE(snap.scrollback_page->back().seq() == 14);
 }
 
 // Track R1b-5: the notice used to be built by a hand-copied subset of the
@@ -463,23 +523,23 @@ TEST_CASE("INVARIANT: paging older beyond the cap evicts newest pages and flags 
     state.SetBounds(/*scrollback_max_messages=*/5, /*tool_output_buffer_bytes=*/64 * 1024);
 
     state.ApplyScrollbackPage(PageOf({99, 98, 97, 96, 95}, /*has_more=*/true));
-    REQUIRE(state.TakeSnapshot().scrollback_page.size() == 5);
+    REQUIRE(state.TakeSnapshot().scrollback_page->size() == 5);
     REQUIRE_FALSE(state.TakeSnapshot().scrollback_trimmed);
 
     // Each older page appends 3 rows; the window must stay at 5, evicting from
     // the newest end.
     state.ApplyScrollbackPage(PageOf({94, 93, 92}, /*has_more=*/true));
     auto snap = state.TakeSnapshot();
-    REQUIRE(snap.scrollback_page.size() == 5);
+    REQUIRE(snap.scrollback_page->size() == 5);
     REQUIRE(snap.scrollback_trimmed);
-    CHECK(snap.scrollback_page.front().seq() == 96);   // 99, 98, 97 evicted (8 rows -> 5)
-    CHECK(snap.scrollback_page.back().seq() == 92);
+    CHECK(snap.scrollback_page->front().seq() == 96);   // 99, 98, 97 evicted (8 rows -> 5)
+    CHECK(snap.scrollback_page->back().seq() == 92);
 
     // A newest-slice refresh resets the trim flag and the window.
     state.ApplyScrollbackPage(PageOf({99, 98, 97}, /*has_more=*/false));
     snap = state.TakeSnapshot();
     CHECK_FALSE(snap.scrollback_trimmed);
-    CHECK(snap.scrollback_page.size() == 3);
+    CHECK(snap.scrollback_page->size() == 3);
 }
 
 // Track R2-5: the tool-output "ring buffer" caps AT APPEND (head 1/4 + marker +

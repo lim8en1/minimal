@@ -78,6 +78,7 @@ namespace minimal::config {
 // code reads in one namespace.
 using common::ModelRef;
 using common::ParseModelRef;
+using common::SplitModelRef;
 
 // One PROVIDER -- the connection an entry defines, kept even when it declares
 // no static models (a discover-entry is addressable through its catalog).

@@ -197,8 +197,10 @@ ParsedArgs ParseArgs(int argc, const char* const* argv) {
             if (!value) return parsed;
             // Checked here rather than server-side only: the shape is decidable
             // locally, and failing before a connection is attempted keeps a typo
-            // from looking like an unreachable server.
-            if (!common::ParseModelRef(*value)) {
+            // from looking like an unreachable server. SplitModelRef (not
+            // ParseModelRef): a discovered model's id may carry its own slash
+            // ("openrouter/anthropic/claude-opus-5").
+            if (!common::SplitModelRef(*value)) {
                 parsed.action = ParsedArgs::Action::Error;
                 parsed.error = "--model '" + std::string(*value) +
                                "' must be <provider>/<model>, e.g. local/qwen4";

@@ -91,6 +91,7 @@ public:
         bool& show_plugin_modal;
         std::function<void()> open_picker;
         std::function<void()> open_agent_picker;
+        std::function<void()> open_model_picker;
         // NOT owned -- see the file comment on declaration ordering.
         std::map<std::string, TabUi>& tab_ui;
 

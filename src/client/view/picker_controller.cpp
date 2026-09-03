@@ -3,6 +3,7 @@
 #include <filesystem>
 
 #include "minimal/client/view/agent_picker.hpp"
+#include "minimal/client/view/model_picker.hpp"
 #include "minimal/client/view/session_picker.hpp"
 
 namespace minimal::client {
@@ -21,6 +22,32 @@ PickerController::PickerController(Dependencies deps) : deps_(std::move(deps)) {
 namespace {
 constexpr int32_t kPickerPageSize = 100;
 }  // namespace
+
+// The picker's open action, decided per ROW: a LIVE session (is_live -- a
+// Session object still exists server-side, attached or detached) ATTACHES to
+// the running instance, the way the row's label has always claimed; a stored
+// one RESUMES from the transcript. Routing a live session through ResumeTab
+// instead made the server refuse the resume with "already open" -- the exact
+// "resume failed" a user saw after quitting with ctrl+c (which detaches, and
+// leaves every session live) and reopening the client.
+std::string PickerController::OpenPickedSession(const std::string& session_id) {
+    for (const auto& session : picker_data_.sessions) {
+        if (session.session_id() != session_id) continue;
+        if (session.is_live()) {
+            if (std::string attached = deps_.app.AttachTab(session_id); !attached.empty()) {
+                return attached;
+            }
+            // is_live was stale -- the session ended between the list fetch
+            // and this click (or this client already had the tab, which both
+            // paths handle). Resume is the remaining option, and its failure
+            // is visible (an Error-state tab), never silent.
+        }
+        return deps_.app.ResumeTab(session_id);
+    }
+    // Not in the fetched pages (a stale picker): resume is the only
+    // meaningful try -- there is nothing to attach to that the list knows of.
+    return deps_.app.ResumeTab(session_id);
+}
 
 void PickerController::FetchPickerPage(bool reset) {
     if (reset) {
@@ -54,15 +81,9 @@ void PickerController::RebuildPickerComponent() {
         picker_data_.sessions, picker_data_.include_all_dirs, picker_data_.has_more, deps_.theme,
         {.on_resume =
              [this](const std::string& session_id) {
-                 // A PAST session resumes into its own root group; it is
-                 // not a child of whatever is focused. ResumeTab re-issues
-                 // CreateSession with resume_session_id -- the server must
-                 // revive the stored session before the stream names it
-                 // (bare attach answered NOT_FOUND and the dead stream then
-                 // swallowed every prompt) -- and registers a refused
-                 // resume as a visible Error-state tab instead of
-                 // dropping the pick on the floor. It never returns "".
-                 deps_.app.SetFocusedTab(deps_.app.ResumeTab(session_id));
+                 // A PAST session opens into its own root group; it is not a
+                 // child of whatever is focused. It never returns "".
+                 deps_.app.SetFocusedTab(this->OpenPickedSession(session_id));
                  deps_.show_picker = false;
              },
          .on_delete =
@@ -127,6 +148,39 @@ void PickerController::OpenAgentPicker() {
         agent_picker_presets_.assign(presets.begin(), presets.end());
     }
     RebuildAgentPickerComponent();
+}
+
+// The model picker: bare /model opens with what the server already knows;
+// ctrl:r from inside re-opens with discovery refreshed (the fetch can take
+// seconds -- every provider's catalog, parallel server-side -- which is why
+// it is an explicit action and not the open default).
+void PickerController::OpenModelPicker(bool refresh) {
+    deps_.show_model_picker = true;
+    model_picker_models_.clear();
+    SessionClient::ListModelsOptions opts;
+    opts.refresh_discovery = refresh;
+    const auto result = deps_.client.ListModels(opts);
+    if (result.status.ok()) {
+        const auto& models = result.response.models();
+        model_picker_models_.assign(models.begin(), models.end());
+    }
+    RebuildModelPickerComponent();
+}
+
+void PickerController::RebuildModelPickerComponent() {
+    *deps_.model_picker_slot = MakeModelPicker(
+        model_picker_models_, deps_.theme,
+        {.on_select =
+             [this](const std::string& ref) {
+                 // Re-sends "/model <ref>" over the exact same path a typed
+                 // command would take (AppState::SendCommand) --
+                 // ModelCommand::Execute's by-ref branch, precedence rules
+                 // and all, runs unchanged. No new mutation code.
+                 deps_.app.SendCommand(deps_.app.FocusedSessionId(), "/model " + ref);
+                 deps_.show_model_picker = false;
+             },
+         .on_refresh_discovery = [this] { OpenModelPicker(/*refresh=*/true); },
+         .on_close = [this] { deps_.show_model_picker = false; }});
 }
 
 }  // namespace minimal::client

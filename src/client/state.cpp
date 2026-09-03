@@ -73,7 +73,8 @@ SessionState::Snapshot SessionState::TakeSnapshot() {
     s.session_id = session_id_;
     s.display_name = display_name_;
     s.state = state_;
-    s.scrollback_page = scrollback_page_;
+    s.scrollback_page = scrollback_page_shared_;   // shared, copy-on-apply
+    s.pending_user_text = pending_user_text_;
     s.has_earlier_messages = has_earlier_;
     s.last_loaded_seq = last_loaded_seq_;
     s.streaming_text = streaming_accumulated_;
@@ -256,6 +257,10 @@ void SessionState::OnError(const std::string& error_message) {
     cancel_requested_ = false;   // a cancel can BE the error path (dead stream)
     pending_permission_.reset();
     pending_confirmation_.reset();
+    // The turn failed before any page apply could retire the echo; nothing
+    // will, so drop it here rather than leaving a ghost of an unacknowledged
+    // message above the error.
+    pending_user_text_.clear();
     state_ = SessionStateKind::Error;
     // The message is part of the outcome: dropped here, an errored tab showed
     // only a state tint and "cannot send"/"connection lost"/"resume failed"
@@ -278,6 +283,7 @@ void SessionState::OnSessionEnded() {
     cancel_requested_ = false;
     pending_permission_.reset();
     pending_confirmation_.reset();
+    pending_user_text_.clear();   // same rule as OnError: nothing will retire it
     state_ = SessionStateKind::Done;
 }
 
@@ -305,7 +311,12 @@ void SessionState::SetPermissionRequest(std::unique_ptr<PendingPermission> req) 
     std::lock_guard lk(mtx_);
     pending_permission_ = std::move(*req);
     pending_confirmation_.reset();
-    if (state_ == SessionStateKind::Done || state_ == SessionStateKind::Idle) {
+    // Waiting from ANY active-turn state: mid-turn prompts used to arrive
+    // with the tab in Working/Thinking (a tool row, or streamed text, had
+    // already moved it off Idle) and left it there -- the modal still showed,
+    // but the tab read as busy rather than blocked. Only Error outranks a
+    // prompt: a failed turn has nothing to wait on.
+    if (state_ != SessionStateKind::Error) {
         state_ = SessionStateKind::Waiting;
     }
 }
@@ -314,7 +325,7 @@ void SessionState::SetConfirmationRequest(std::unique_ptr<PendingConfirmation> r
     std::lock_guard lk(mtx_);
     pending_confirmation_ = std::move(*req);
     pending_permission_.reset();
-    if (state_ == SessionStateKind::Done || state_ == SessionStateKind::Idle) {
+    if (state_ != SessionStateKind::Error) {
         state_ = SessionStateKind::Waiting;
     }
 }
@@ -476,8 +487,33 @@ void SessionState::ApplyScrollbackPage(const v1::GetMessagesResponse& resp) {
 
     last_loaded_seq_ = scrollback_page_.empty() ? -1 : scrollback_page_.back().seq();
     has_earlier_ = resp.has_more();
+    // The one copy the shared page ever pays: rows changed, so the old
+    // snapshot's view must stay stable for whatever frame is still reading it.
+    scrollback_page_shared_ =
+        std::make_shared<const std::vector<v1::StoredMessage>>(scrollback_page_);
+    // The persisted user row (appended FIRST by the server, before any turn
+    // output) is provably in this page once the page's NEWEST seq moved past
+    // the submit-time baseline -- retire the optimistic echo and let the real
+    // row (with the server-side @-mention expansion) take over. Newest, not
+    // last_loaded_seq_: the window is DESCENDING, so back() is the
+    // load-older cursor and moves when OLDER pages arrive too.
+    if (!pending_user_text_.empty() && !scrollback_page_.empty() &&
+        scrollback_page_.front().seq() > pending_user_baseline_seq_) {
+        pending_user_text_.clear();
+    }
     ++transcript_version_;
     ++refresh_seq_;
+}
+
+void SessionState::OnChatSubmitted(const std::string& text) {
+    std::lock_guard lk(mtx_);
+    pending_user_text_ = text;
+    // The page's NEWEST seq (descending window: front, not back/back).
+    pending_user_baseline_seq_ =
+        scrollback_page_.empty() ? -1 : scrollback_page_.front().seq();
+    // Immediate state feedback, too: the turn was ACCEPTED onto the wire, so
+    // the tab is no longer Idle even before the server says anything.
+    if (state_ == SessionStateKind::Idle) state_ = SessionStateKind::Working;
 }
 
 bool SessionState::CanLoadMore() const {
@@ -1021,7 +1057,25 @@ void AppState::SendChatTurn(const std::string& session_id, const std::string& te
             state->OnError("cannot send: the stream is closing or stalled");
             BumpUiVersion();
         }
+        return;
     }
+
+    // OPTIMISTIC ECHO. The persisted user row only reaches a page through a
+    // fetch, and nothing fetched mid-turn -- so the submitted message did not
+    // render until the turn ENDED, after the assistant's streaming reply had
+    // been visible for the whole turn (the reported "assistant renders before
+    // user hi"). Echo the text now; the server-side @-mention expansion
+    // (attachments render differently from raw text) arrives with the
+    // persisted row and retires the echo.
+    if (auto state = GetState(session_id)) {
+        state->OnChatSubmitted(text);
+        BumpUiVersion();
+    }
+    // And fetch eagerly: with the echo covering the latency, this is what
+    // swaps in the authoritative expanded row within one round trip instead
+    // of at turn end. One redundant fetch when the turn-end refresh fires
+    // anyway; the refresh machine tolerates out-of-band applies.
+    RequestScrollback(session_id, /*newest=*/true);
 }
 
 void AppState::RequestSuggestPaths(const std::string& session_id, const std::string& prefix,
@@ -1211,7 +1265,7 @@ std::optional<int64_t> AppState::FindRewindTargetSeq(const std::string& session_
     // already walks from the newest message backward.
     const auto snapshot = state->TakeSnapshot();
     int remaining = n;
-    for (const auto& stored : snapshot.scrollback_page) {
+    for (const auto& stored : *snapshot.scrollback_page) {
         if (stored.message().role() != v1::ROLE_USER) continue;
         if (--remaining == 0) return stored.seq();
     }

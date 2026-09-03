@@ -57,7 +57,15 @@ Element RenderUserText(const ChatRow& row, const Theme& theme) {
     using namespace ftxui;
     // Verbatim: the user's text is echoed, never re-rendered as markdown
     // (their underscores are not emphasis).
-    return paragraph(row.text) | color(theme.ColorFor("user_message")) | bold;
+    //
+    // Labeled, like the assistant rows below: an unlabeled bold block forced
+    // the reader to infer the speaker from styling alone -- exactly the
+    // "difficult to map user/assistant" complaint. Same one-word label shape
+    // the assistant rows use, so the roles scan as a pair.
+    return vbox({
+        text("user") | color(theme.ColorFor("user_message")) | bold,
+        paragraph(row.text) | color(theme.ColorFor("user_message")) | bold,
+    });
 }
 
 Element RenderUserAttachment(const ChatRow& row, const Theme& theme) {
@@ -80,6 +88,21 @@ Element RenderThinking(const ChatRow& row, const Theme& theme) {
                      color(theme.ColorFor("thinking")) | dim});
 }
 
+// A bounded one-line summary of what the tool was asked to do, for the row
+// header: the model's input IS the orientation ("which file", "which
+// command"), and a bare "tool bash" line with nothing under it reads as
+// noise. Compact JSON, truncated -- the authoritative record is persisted.
+std::string InputSummary(const nlohmann::json& input) {
+    if (input.is_null() || input.empty()) return "";
+    try {
+        std::string summary = input.dump();
+        if (summary.size() > 120) summary = summary.substr(0, 120) + "…";
+        return summary;
+    } catch (const std::exception&) {
+        return "";   // a non-serializable input degrades to no summary
+    }
+}
+
 Element RenderToolActivity(const ChatRow& row, const Theme& theme) {
     using namespace ftxui;
     const std::string name = row.tool_name.empty() ? std::string("tool") : row.tool_name;
@@ -88,8 +111,20 @@ Element RenderToolActivity(const ChatRow& row, const Theme& theme) {
     if (row.tool_is_error) {
         line.push_back(text(" FAILED") | color(theme.ColorFor("error")));
     }
+    if (row.tool_pending) {
+        // The call has no result in this page yet: mark it rather than
+        // presenting an empty-ended entry ("tool bash" with nothing under it
+        // read as a broken render, not as "running").
+        line.push_back(text(" ·") | color(theme.ColorFor("system_message")) | dim);
+    }
     Elements parts;
     parts.push_back(hbox(std::move(line)));
+    // The input summary rides the header of EVERY tool row (pending and
+    // result alike): it is what makes "tool bash" say what was run.
+    const std::string summary = InputSummary(row.tool_input);
+    if (!summary.empty()) {
+        parts.push_back(paragraph(summary) | color(theme.ColorFor("system_message")) | dim);
+    }
     if (!row.text.empty()) {
         // Bounded body: the capped persisted ToolResultBlock is the
         // authoritative record; this is orientation, not an archive.

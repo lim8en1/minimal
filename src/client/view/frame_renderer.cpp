@@ -84,9 +84,9 @@ ftxui::Element FrameRenderer::Render() {
             // body instead of an empty transcript. has_earlier_messages
             // keeps a resumed session from flashing the banner during the
             // async scrollback window before its first page applies.
-            const bool fresh_session = snap.scrollback_page.empty() &&
-                                       snap.streaming_text.empty() &&
-                                       !snap.has_earlier_messages;
+            const bool fresh_session =
+                (!snap.scrollback_page || snap.scrollback_page->empty()) &&
+                snap.streaming_text.empty() && !snap.has_earlier_messages;
             Elements start = fresh_session ? RenderStartViews(focused) : Elements{};
             if (!start.empty()) {
                 for (auto& element : start) rows.push_back(std::move(element) | flex);

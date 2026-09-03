@@ -32,28 +32,14 @@ TEST_CASE("help lists every registered command and explains one", "[commands]") 
 
     const auto listing = fixture.Run("help");
     REQUIRE(listing.status == Status::kOk);
-    for (const char* name : {"/help", "/providers", "/compact", "/clear", "/agent", "/model",
+    for (const char* name : {"/help", "/compact", "/clear", "/agent", "/model",
                              "/permission-mode"}) {
         INFO("expected " << name << " in the listing");
         CHECK(listing.message.find(name) != std::string::npos);
     }
 
     const auto one = fixture.Run("help", {"model"});
-    CHECK(one.message.find("<provider>/<model>") != std::string::npos);
-}
-
-TEST_CASE("providers marks the active reference, not the model id", "[commands][invariant]") {
-    // Two providers can point at the same url and serve the same model id with
-    // different limits, so matching on connection-plus-id marks BOTH. Only the
-    // <provider>/<model> reference identifies which is in force. This was wrong
-    // first, and a manual run against two such entries is what showed it.
-    CommandFixture fixture;
-    const auto listing = fixture.Run("providers");
-    REQUIRE(listing.status == Status::kOk);
-
-    CHECK(listing.message.find("* main/fast") != std::string::npos);
-    CHECK(listing.message.find("  main/slow") != std::string::npos);
-    CHECK(listing.message.find("* main/slow") == std::string::npos);
+    CHECK(one.message.find("[provider/model]") != std::string::npos);
 }
 
 TEST_CASE("a user-chosen model survives an agent switch", "[commands][invariant]") {
@@ -94,6 +80,33 @@ TEST_CASE("bare /agent opens the picker view rather than switching or erroring",
     CHECK(fixture.preset().name == "build");  // unchanged
 }
 
+TEST_CASE("bare /model opens the model picker rather than erroring", "[commands]") {
+    // The replacement for /providers: interactive selection lives in the
+    // client's searchable view, fetched by the client itself over ListModels.
+    CommandFixture fixture;
+    const auto result = fixture.Run("model");
+    CHECK(result.status == Status::kOk);
+    CHECK(result.display == commands::CommandDisplay::kView);
+    CHECK(result.view_hint == "models");
+    CHECK(fixture.preset().name == "build");          // unchanged
+    CHECK_FALSE(fixture.model_override().has_value());  // nothing switched
+}
+
+TEST_CASE("model switch by reference reports the status line, not the picker view",
+          "[commands][regression]") {
+    // ModelCommand's static Display()/ViewHint() (kView/"models") describe
+    // the command for the catalog; DisplayFor/ViewHintFor make the
+    // picker-vs-status choice per-invocation, exactly like AgentCommand's --
+    // without which a successful "/model <ref>" switch ALSO reported kView
+    // and the client reopened the picker it was just answered from.
+    CommandFixture fixture;
+    const auto result = fixture.Run("model", {"main/slow"});
+    REQUIRE(result.status == Status::kOk);
+    CHECK(result.display == commands::CommandDisplay::kStatus);
+    CHECK(result.view_hint.empty());
+    CHECK(fixture.preset().model_ref.str() == "main/slow");
+}
+
 TEST_CASE("agent switch by name reports the status line, not the picker view",
           "[commands][regression]") {
     // AgentCommand's static Display()/ViewHint() (kView/"agents") describe
@@ -118,12 +131,13 @@ TEST_CASE("agent reports an unknown preset rather than throwing", "[commands]") 
     CHECK(fixture.preset().name == "build");  // unchanged
 }
 
-TEST_CASE("/providers refresh re-lists discoverable providers and switching works",
+TEST_CASE("switching to a discovered model resolves it lazily, window and all",
           "[commands][discover]") {
-    // Track N end to end through the command surface: a discover-entry nobody
-    // configured models for serves /model after a refresh, and the discovered
-    // context window rides ApplyModel into the preset -- which is what the
-    // compaction trigger reads.
+    // Track N through the surviving surface: with /providers gone, a
+    // discover-entry's models are reached by /model directly. Resolve is
+    // what triggers the lazy discovery fetch (a listing never does), and
+    // the discovered context window rides ApplyModel into the preset --
+    // which is what the compaction trigger reads.
     CommandFixture fixture;
     fixture.WriteProviders(R"({"providers":{"main":{"backend":"fake","url":"http://x/v1",
                               "models":{"fast":{"context_window_tokens":1000}}},
@@ -141,58 +155,20 @@ TEST_CASE("/providers refresh re-lists discoverable providers and switching work
                                             hook_models};
         });
 
-    // Static-only listing: the cold discover-entry contributes nothing.
-    const auto cold = fixture.Run("providers");
-    REQUIRE(cold.status == Status::kOk);
-    CHECK(cold.message.find("main/fast") != std::string::npos);
-    CHECK(cold.message.find("disc/") == std::string::npos);
-
-    // Refresh fetches NOW and reports the count.
-    const auto refreshed = fixture.Run("providers", {"refresh"});
-    REQUIRE(refreshed.status == Status::kOk);
-    CHECK(refreshed.message.find("disc: 1 model(s)") != std::string::npos);
-    CHECK(calls == 1);
-
-    // The listing now includes the discovered model, with its window.
-    const auto warm = fixture.Run("providers");
-    CHECK(warm.message.find("disc/newmodel") != std::string::npos);
-    CHECK(warm.message.find("12345 ctx") != std::string::npos);
-    CHECK(calls == 1);  // cached; listing did not refetch
-
-    // And the discovered model is switchable, window and all.
+    // The switch resolves disc/newmodel, which IS the lazy discovery fetch.
     const auto switched = fixture.Run("model", {"disc/newmodel"});
     REQUIRE(switched.status == Status::kOk);
     CHECK(fixture.preset().model_ref.str() == "disc/newmodel");
     REQUIRE(fixture.preset().context_window_tokens.has_value());
     CHECK(*fixture.preset().context_window_tokens == 12345);
+    CHECK(calls == 1);  // cached; a second switch of the same ref refetches nothing
+
+    // An unknown ref under a warm discovery failure is an honest error, and
+    // neither touched the session beyond the first switch.
+    const auto unknown = fixture.Run("model", {"disc/nope"});
+    CHECK(unknown.status == Status::kError);
     CHECK(calls == 1);
-}
-
-TEST_CASE("/providers refresh with no discoverable providers is an honest error",
-          "[commands][discover]") {
-    CommandFixture fixture;  // static config only
-    const auto result = fixture.Run("providers", {"refresh"});
-    CHECK(result.status == Status::kError);
-    CHECK(result.message.find("no discoverable providers") != std::string::npos);
-}
-
-TEST_CASE("/providers refresh reports a dead catalog instead of throwing",
-          "[commands][discover]") {
-    CommandFixture fixture;
-    fixture.WriteProviders(R"({"providers":{"main":{"backend":"fake","url":"http://x/v1",
-                              "models":{"fast":{"context_window_tokens":1000}}},
-                             "disc":{"backend":"fake","url":"http://disc/v1",
-                                     "discover":true}}})");
-    fixture.ReloadPresets();
-    fixture.SetDiscoveryHook([](const std::string&, const llm::ProviderConfig&) {
-        return config::DiscoveryOutcome{/*catalog_present=*/true, /*ok=*/false,
-                                        "connection refused", {}};
-    });
-
-    const auto refreshed = fixture.Run("providers", {"refresh"});
-    REQUIRE(refreshed.status == Status::kOk);  // the command ran; the CATALOG failed
-    CHECK(refreshed.message.find("disc: discovery failed -- connection refused") !=
-          std::string::npos);
+    CHECK(fixture.preset().model_ref.str() == "disc/newmodel");
 }
 
 TEST_CASE("model refuses what it cannot resolve", "[commands]") {    CommandFixture fixture;
@@ -268,7 +244,7 @@ TEST_CASE("a read-only command still answers while a turn is in flight",
     // answerable beside a live turn, and the dispatcher is what allows it.
     CommandFixture fixture;
     CHECK(fixture.Run("help", {}, /*busy=*/true).status == Status::kOk);
-    CHECK(fixture.Run("providers", {}, /*busy=*/true).status == Status::kOk);
+    CHECK(fixture.Run("sessions", {}, /*busy=*/true).status == Status::kOk);
 }
 
 TEST_CASE("permission-mode validates its argument", "[commands]") {

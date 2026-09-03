@@ -106,6 +106,21 @@ std::vector<ChatRow> ChatRowsFromMessages(const std::vector<v1::StoredMessage>& 
         return it != tool_calls.end() ? &it->second : nullptr;
     };
 
+    // Pre-pass over the page for RESULT ids: an assistant tool_use block
+    // whose result also sits in this page must not render its own row --
+    // that was the "tool bash" with nothing under it, once per call, and
+    // the visible reason a transcript read as noise. The result row is the
+    // authoritative rendering (it has the output); the tool_use row only
+    // matters when the result is NOT here yet (an in-flight call, or a
+    // result evicted with an older page -- the window boundary can cut
+    // between them), where a pending marker is exactly the right thing.
+    std::unordered_set<std::string> result_ids;
+    for (const auto& stored : descending) {
+        for (const auto& block : stored.message().content()) {
+            if (block.has_tool_result()) result_ids.insert(block.tool_result().tool_use_id());
+        }
+    }
+
     for (auto it = descending.rbegin(); it != descending.rend(); ++it) {
         const auto& message = it->message();
         const int64_t message_seq = it->seq();
@@ -142,9 +157,21 @@ std::vector<ChatRow> ChatRowsFromMessages(const std::vector<v1::StoredMessage>& 
                         tool_calls.insert_or_assign(
                             block.tool_use().id(),
                             ToolCall{block.tool_use().name(), input});
+                        // No result row in this page for this id: skip the
+                        // duplicate -- the result row renders the call WITH
+                        // its output. What remains is a pending row only
+                        // when the result is genuinely absent (in-flight, or
+                        // the window boundary cut between the pair), and the
+                        // renderer marks that with the input summary. A plain
+                        // `continue` (not the IIFE's `return`): later blocks
+                        // of the same message must still produce their rows.
+                        if (result_ids.count(block.tool_use().id()) != 0) {
+                            continue;
+                        }
                         rows.push_back(ChatRow{.kind = ChatRowKind::ToolActivity,
                                                .tool_name = block.tool_use().name(),
-                                               .tool_input = std::move(input)});
+                                               .tool_input = std::move(input),
+                                               .tool_pending = true});
                     }
                 }
                 return;

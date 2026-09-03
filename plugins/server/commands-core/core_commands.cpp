@@ -54,72 +54,6 @@ private:
     const minimal::commands::CommandRegistry& registry_;
 };
 
-// Reads providers.json's resolved contents, marking the one in use. No LLM call,
-// no session state touched -- so it answers while a turn is running.
-class ProvidersCommand : public HarnessCommand {
-public:
-    std::string_view Name() const override { return "providers"; }
-    std::string_view Summary() const override { return "List configured models"; }
-    std::string_view Usage() const override { return "/providers [refresh]"; }
-    bool ReadOnly() const override { return true; }
-
-    CommandResult Execute(CommandContext& context, const CommandArgs& args) override {
-        if (!args.positional.empty() && args.positional.front() == "refresh") {
-            return Refresh(context);
-        }
-
-        const auto refs = context.providers().ModelRefs();
-        if (refs.empty()) {
-            return CommandResult::Error(
-                "no models configured; edit providers.json (see providers.example.json)");
-        }
-        // Compared as a REFERENCE, not as a connection plus a model id: two
-        // providers can serve the same model at the same url with different
-        // limits, and matching on those would mark both.
-        //
-        // Via preset_snapshot(), not preset(): this command is ReadOnly and
-        // runs on the RPC layer's pool, not the worker -- a reference into the
-        // live preset could race a concurrent /agent or /model rewriting it.
-        const std::string active = context.session().preset_snapshot().model_ref.str();
-
-        std::ostringstream out;
-        for (const auto& ref : refs) {
-            const auto parsed = minimal::common::ParseModelRef(ref);
-            const auto model = parsed ? context.providers().Resolve(*parsed) : nullptr;
-            out << (ref == active ? "* " : "  ") << ref;
-            if (model != nullptr && model->context_window_tokens) {
-                out << "  (" << *model->context_window_tokens << " ctx)";
-            }
-            out << "\n";
-        }
-        return CommandResult::Ok(out.str());
-    }
-
-private:
-    // Re-lists every "discover": true provider NOW (evicts the runtime cache
-    // and refetches). ReadOnly like the listing itself: it runs on the RPC
-    // layer's pool -- network I/O must never land on a session worker -- and
-    // the discovery cache is mutex-guarded against exactly that concurrency.
-    // Note this lists freshly discovered models under STATIC entries too; the
-    // conversation is untouched either way.
-    static CommandResult Refresh(CommandContext& context) {
-        const auto outcomes = context.providers().RefreshDiscovery();
-        if (outcomes.empty()) {
-            return CommandResult::Error(
-                "no discoverable providers: set \"discover\": true on a providers.json entry");
-        }
-        std::ostringstream out;
-        for (const auto& outcome : outcomes) {
-            if (outcome.ok) {
-                out << outcome.provider << ": " << outcome.model_count << " model(s)\n";
-            } else {
-                out << outcome.provider << ": discovery failed -- " << outcome.error << "\n";
-            }
-        }
-        return CommandResult::Ok(out.str());
-    }
-};
-
 class CompactCommand : public LLMCommand {
 public:
     std::string_view Name() const override { return "compact"; }
@@ -226,25 +160,56 @@ public:
     }
 };
 
+// Bare /model opens the client's model picker (display=View, view_hint
+// "models"), the same shape as AgentCommand's bare form: the command itself
+// carries no data, the client fetches the model list itself over ListModels.
+// "/model <provider>/<model>" is a direct switch, unchanged. ReadOnly() stays
+// false (the default) even though the no-arg branch touches nothing, for the
+// same reason AgentCommand's does: the by-ref branch mutates session state and
+// a command that can mutate must queue at a turn boundary every time.
 class ModelCommand : public HarnessCommand {
 public:
     std::string_view Name() const override { return "model"; }
-    std::string_view Summary() const override { return "Switch model, overriding the preset's"; }
-    std::string_view Usage() const override { return "/model <provider>/<model>"; }
+    std::string_view Summary() const override {
+        return "Switch model, or open the model picker";
+    }
+    std::string_view Usage() const override { return "/model [provider/model]"; }
+
+    minimal::commands::CommandDisplay Display() const override {
+        return minimal::commands::CommandDisplay::kView;
+    }
+    std::string_view ViewHint() const override { return "models"; }
+
+    // Only the bare "/model" opens the picker; "/model <ref>" is a direct
+    // switch with nothing to show -- without this the dispatcher's static
+    // Display() applied to EVERY invocation and a successful switch re-opened
+    // the picker it was just answered from (the exact bug AgentCommand's
+    // DisplayFor override exists for).
+    minimal::commands::CommandDisplay DisplayFor(const CommandArgs& args) const override {
+        return args.positional.empty() ? minimal::commands::CommandDisplay::kView
+                                       : minimal::commands::CommandDisplay::kStatus;
+    }
+    std::string_view ViewHintFor(const CommandArgs& args) const override {
+        return args.positional.empty() ? std::string_view("models") : std::string_view{};
+    }
 
     CommandResult Execute(CommandContext& context, const CommandArgs& args) override {
         if (args.positional.empty()) {
-            return CommandResult::Error("usage: /model <provider>/<model> (see /providers)");
+            return CommandResult::Ok("model list requested");
         }
         const std::string& text = args.positional.front();
-        const auto ref = minimal::common::ParseModelRef(text);
+        // SplitModelRef, not ParseModelRef: a discovered model's id may
+        // itself carry slashes ("openrouter/anthropic/claude-opus-5").
+        const auto ref = minimal::common::SplitModelRef(text);
         if (!ref) {
             return CommandResult::Error("'" + text +
-                                        "' must be <provider>/<model>, e.g. local/qwen4");
+                                        "' must be <provider>/<model>, e.g. local/qwen4 "
+                                        "(or run /model with no arguments)");
         }
         const auto model = context.providers().Resolve(*ref);
         if (model == nullptr) {
-            return CommandResult::Error("unknown model '" + text + "' (see /providers)");
+            return CommandResult::Error("unknown model '" + text +
+                                        "' (run /model with no arguments for the list)");
         }
 
         // Recorded on the SESSION, not folded into the preset, so a later /agent
@@ -319,7 +284,6 @@ std::vector<std::unique_ptr<Command>> MakeCoreCommands() {
     // registry -- so the registry reference is bound at register time by the
     // plugin entry point, not here. Everything else is self-contained.
     std::vector<std::unique_ptr<Command>> out;
-    out.push_back(std::make_unique<ProvidersCommand>());
     out.push_back(std::make_unique<CompactCommand>());
     out.push_back(std::make_unique<ClearCommand>());
     out.push_back(std::make_unique<AgentCommand>());

@@ -475,6 +475,29 @@ message ListAgentPresetsResponse {
   repeated AgentPresetSummary presets = 1;
 }
 
+// One selectable model for the /model picker: "<provider>/<model>" plus the
+// context window the picker shows for orientation. No `active` flag: the
+// status bar already renders the focused session's model from
+// SessionMetadataEvent, and liveness of "which model is in force" is
+// per-session, not a property of the catalog.
+message ModelSummary {
+  string ref = 1;
+  // 0 = unknown; the picker renders nothing for it, matching the
+  // unknown-segment rule the status bar uses.
+  int64 context_window_tokens = 2;
+}
+
+message ListModelsRequest {
+  // Explicit re-fetch of every discover-entry's catalog before listing (the
+  // picker's ctrl+r). The bare listing NEVER triggers a fetch: a cold cache
+  // lists static models only, and discovery stays lazy at first resolve.
+  bool refresh_discovery = 1;
+}
+
+message ListModelsResponse {
+  repeated ModelSummary models = 1;
+}
+
 // Deletes a stored session that no stream has open. The database delete
 // cascades to messages and subagent children (session_database.hpp). Refused
 // for a session whose stream is open -- the client closes the tab first.
@@ -557,6 +580,12 @@ service SessionService {
   rpc GetMessages(GetMessagesRequest) returns (GetMessagesResponse);
   rpc ListSessions(ListSessionsRequest) returns (ListSessionsResponse);
   rpc ListAgentPresets(ListAgentPresetsRequest) returns (ListAgentPresetsResponse);
+  // The /model picker's list: every configured or discovered model ref.
+  // Read-only against providers.json's resolved contents plus the discovery
+  // cache -- a cold cache contributes nothing (a listing never triggers a
+  // provider fetch; /providers refresh's eviction role is gone with the
+  // command). Server sorts refs ascending.
+  rpc ListModels(ListModelsRequest) returns (ListModelsResponse);
   rpc CreateSession(CreateSessionRequest) returns (CreateSessionResponse);
   rpc SuggestPaths(SuggestPathsRequest) returns (SuggestPathsResponse);
   // Unary, fetched once at connect: plugins load at startup and config is read

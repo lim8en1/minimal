@@ -20,10 +20,15 @@ namespace minimal::client {
 
 // One row of the filtered list. `id` is caller-defined: session_id for the
 // session picker (empty => the synthetic "+ new session" row), preset name
-// for the agent picker.
+// for the agent picker, "<provider>/<model>" for the model picker.
 struct MenuRow {
     std::string label;
     std::string id;
+    // A header row is a group label (the model picker's provider names):
+    // rendered bold and never prefixed with the cursor, and Enter on it is
+    // swallowed. It IS highlightable -- Menu owns arrow-key navigation, and
+    // hand-rolling a skipping list for one picker's sake was not worth it.
+    bool header = false;
 };
 
 // What on_extra_key needs to answer a key the generic handler doesn't

@@ -30,4 +30,15 @@ struct ModelRef {
 // first one silently yields a provider called "a".
 std::optional<ModelRef> ParseModelRef(std::string_view text);
 
+// The interactive-path split: everything after the FIRST '/' is the model.
+// Discovered catalogs legitimately serve model ids that contain slashes --
+// OpenRouter's "anthropic/claude-opus-5" under provider "openrouter" makes
+// the full ref three segments -- and strict parsing would make those
+// unaddressable from every surface that names a model interactively
+// (--model, /model, the picker). The wrong-split risk strict parsing guards
+// against does not exist here: a mis-split ref resolves to nothing and is
+// reported as "unknown model", which is the honest outcome for a typo.
+// nullopt when either half would be empty.
+std::optional<ModelRef> SplitModelRef(std::string_view text);
+
 }  // namespace minimal::common

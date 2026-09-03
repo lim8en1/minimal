@@ -9,6 +9,7 @@ add_library(minimal_client_core SHARED
     session_client.cpp
     rpc_queue.cpp
     picker_model.cpp
+    model_picker_model.cpp
     agent_picker_model.cpp
     state.cpp
     keybindings.cpp
@@ -31,6 +32,7 @@ add_library(minimal_client_core SHARED
     view/tools_panel.cpp
     view/filterable_menu.cpp
     view/session_picker.cpp
+    view/model_picker.cpp
     view/agent_picker.cpp
     view/picker_controller.cpp
     view/tab_ui.cpp

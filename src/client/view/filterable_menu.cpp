@@ -37,11 +37,35 @@ ftxui::Component MakeFilterableMenuModal(
     };
     rebuild();
 
-    auto menu = Menu(&state->labels, &state->selected);
+    // Header rows (the model picker's provider groups) get their own entry
+    // style: bold, flush-left, never cursor-prefixed or inverted. Normal rows
+    // replicate FTXUI's DefaultOptionTransform plus one indent level, so the
+    // two tiers read visually. The transform reads state->rows by index --
+    // the same shared block every closure here uses, so it can never outlive
+    // or diverge from what Menu itself is displaying.
+    MenuOption menu_options;
+    menu_options.entries_option.transform =
+        [state](const EntryState& entry) -> Element {
+        const bool is_header = entry.index >= 0 &&
+                               entry.index < static_cast<int>(state->rows.size()) &&
+                               state->rows[entry.index].header;
+        if (is_header) {
+            return text(state->rows[entry.index].label) | bold;
+        }
+        std::string label =
+            (std::string(entry.active ? "> " : "  ") + "  ") + state->rows[entry.index].label;
+        Element e = text(std::move(label));
+        if (entry.focused) e = e | inverted;
+        if (entry.active) e = e | bold;
+        return e;
+    };
+
+    auto menu = Menu(&state->labels, &state->selected, menu_options);
 
     auto interactive = CatchEvent(menu, [state, callbacks, rebuild](const Event& event) {
         if (event == Event::Return) {
-            if (!state->rows.empty() && callbacks.on_select) {
+            if (!state->rows.empty() && !state->rows[state->selected].header &&
+                callbacks.on_select) {
                 callbacks.on_select(state->rows[state->selected]);
             }
             return true;   // consumed either way: no double-submit on empty list

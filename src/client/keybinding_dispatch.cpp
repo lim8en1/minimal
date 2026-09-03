@@ -183,6 +183,29 @@ bool HandleGlobalKey(KeyContext& ctx, const ftxui::Event& event) {
         ctx.open_agent_picker();
         return true;
     }
+    if (ctx.keymap.Matches("permission.cycle", event)) {
+        // The interactive loop for /permission-mode: shift+tab cycles
+        // normal -> bypass -> allow-only -> normal, then re-sends the result
+        // through the EXACT path a typed command takes (SendCommand) --
+        // server-side validation, the bypass confirmation modal (widening
+        // permissions is exactly the thing worth asking about) and the
+        // status-bar segment update all come from the existing machinery,
+        // not from this handler. An unknown/absent mode string counts as
+        // normal (the server default a fresh session starts on).
+        if (!sid.empty()) {
+            const std::string current = ctx.app.GetDetails(sid).permission_mode;
+            std::string next;
+            if (current == "bypass") {
+                next = "allow-only";
+            } else if (current == "allow-only") {
+                next = "normal";
+            } else {
+                next = "bypass";   // "normal", empty, or unrecognized
+            }
+            ctx.app.SendCommand(sid, "/permission-mode " + next);
+        }
+        return true;
+    }
     if (ctx.keymap.Matches("panel.toggle", event)) {
         ctx.show_panel = !ctx.show_panel;
         return true;
