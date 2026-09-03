@@ -98,6 +98,25 @@ struct ClientFixture {
         });
     }
 
+    // Two text responses on ONE provider instance. The registry CACHES the
+    // provider per providers.json entry (session_registry.cpp: "SHARED, not
+    // per-session"), so a factory registered AFTER a session exists never
+    // reaches it -- re-scripting between phases does nothing for a resumed
+    // session. Consuming both responses from the shared instance is how a
+    // resume test scripts its second phase.
+    void ScriptTwo(const std::string& first, const std::string& second) {
+        providers.Register("fake", [first, second](const llm::ProviderConfig&) {
+            auto provider = std::make_unique<testing::FakeLlmProvider>();
+            for (const auto* text : {&first, &second}) {
+                provider->PushResponse(
+                    testing::TextResponse(*text),
+                    {llm::StreamEvent{llm::MessageStartEvent{"m-1", "test-model"}},
+                     llm::StreamEvent{llm::MessageStopEvent{}}});
+            }
+            return provider;
+        });
+    }
+
     void Start() {
         presets = std::make_unique<agent::AgentPresetRegistry>(
             dir, skills, config::LoadSettingsConfig(dir / "settings.json"));
@@ -292,19 +311,21 @@ TEST_CASE("FindRewindTargetSeq resolves the Nth user turn back", "[app_state][re
     // worker gets to it -- a single call raced against the two turns above
     // landing server-side can legitimately fetch an empty page (WaitFor only
     // proves the tab observed Idle, not that persistence finished). Re-issue
-    // it each retry so the eventual fetch sees the settled transcript.
-    std::optional<int64_t> newest_user_seq;
+    // it each retry so the eventual fetch sees the settled transcript -- and
+    // gate on the SECOND user turn: gating on the first can break the loop
+    // while turn 2 is still in flight, leaving the page one turn short.
+    std::optional<int64_t> older_user_seq;
     const auto deadline = std::chrono::steady_clock::now() + 5s;
     while (std::chrono::steady_clock::now() < deadline) {
         app.RequestScrollback(sid, /*newest=*/true);
         std::this_thread::sleep_for(50ms);
-        newest_user_seq = app.FindRewindTargetSeq(sid, 1);
-        if (newest_user_seq.has_value()) break;
+        older_user_seq = app.FindRewindTargetSeq(sid, 2);
+        if (older_user_seq.has_value()) break;
     }
-    REQUIRE(newest_user_seq.has_value());
-
-    const auto older_user_seq = app.FindRewindTargetSeq(sid, 2);
     REQUIRE(older_user_seq.has_value());
+
+    const auto newest_user_seq = app.FindRewindTargetSeq(sid, 1);
+    REQUIRE(newest_user_seq.has_value());
     CHECK(*older_user_seq < *newest_user_seq);
 
     CHECK_FALSE(app.FindRewindTargetSeq(sid, 3).has_value());   // only two user turns exist
@@ -479,6 +500,32 @@ TEST_CASE("SessionClient::GetMessages feeds ApplyScrollbackPage with real wire d
     CHECK(snap.last_loaded_seq == page.response.messages(page.response.messages_size() - 1).seq());
 }
 
+// Polls a tab's DEEP snapshot until `pred` is true or the deadline trips (the
+// pending-modal data rides GetDetails, not the light tab list).
+template <typename Pred>
+bool WaitForDetails(AppState& app, const std::string& session_id, Pred pred,
+                    std::chrono::milliseconds timeout = 5s) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (pred(app.GetDetails(session_id))) return true;
+        std::this_thread::sleep_for(5ms);
+    }
+    return false;
+}
+
+// Waits until the tab has actually ATTACHED -- the server emits its metadata
+// event to the new subscriber immediately on attach, so a non-empty
+// agent_preset proves the naming event won its race against thread startup.
+// Anything that terminates the session server-side MUST wait for this first:
+// terminating a session the stream never attached to answers the bidi with
+// NOT_FOUND, which is the attach-refusal path, not a clean end.
+bool WaitForAttached(AppState& app, const std::string& session_id,
+                     std::chrono::milliseconds timeout = 5s) {
+    return WaitForDetails(app, session_id, [](const SessionState::Snapshot& s) {
+        return !s.agent_preset.empty();
+    }, timeout);
+}
+
 TEST_CASE("a session terminated server-side (not via CloseTab) reaches Done",
           "[app_state]") {
     // OnSessionEnded matters precisely when the tab is still present but its
@@ -496,8 +543,12 @@ TEST_CASE("a session terminated server-side (not via CloseTab) reaches Done",
     REQUIRE_FALSE(sid.empty());
     REQUIRE(app.HasTab(sid));
 
+    REQUIRE(WaitForAttached(app, sid));
     fixture.sessions->Terminate(sid);   // server-side; the tab is untouched by AppState
 
+    // The wire SessionEndedEvent (published before the server closes the
+    // subscriber queues) routes to OnSessionEnded -- the stream itself stays
+    // open, so the tab must not depend on a stream close to reach Done.
     REQUIRE(WaitFor(app, sid, [](const AppState::TabSnapshot& t) {
         return t.state == SessionStateKind::Done;
     }));
@@ -535,19 +586,6 @@ TEST_CASE("INVARIANT: closing a tab while its turn streams cannot use-after-free
 // answer. Both round-trip over a real socket through the real dispatch path
 // the TUI uses -- the client-side half of session_service_test's coverage.
 // ---------------------------------------------------------------------------
-
-// Polls a tab's DEEP snapshot until `pred` is true or the deadline trips (the
-// pending-modal data rides GetDetails, not the light tab list).
-template <typename Pred>
-bool WaitForDetails(AppState& app, const std::string& session_id, Pred pred,
-                    std::chrono::milliseconds timeout = 5s) {
-    const auto deadline = std::chrono::steady_clock::now() + timeout;
-    while (std::chrono::steady_clock::now() < deadline) {
-        if (pred(app.GetDetails(session_id))) return true;
-        std::this_thread::sleep_for(5ms);
-    }
-    return false;
-}
 
 TEST_CASE("SendCancel ends a busy turn and the session stays usable", "[app_state][cancel]") {
     // An Ask-gated tool parks the turn at a deterministic point (the same
@@ -622,4 +660,168 @@ TEST_CASE("a wire confirmation is answered and unwedges the tab", "[app_state][c
     CHECK(WaitForDetails(app, sid, [](const SessionState::Snapshot& s) {
         return s.latest_notice.has_value();
     }));
+}
+
+// ---------------------------------------------------------------------------
+// ResumeTab: the picker's "open a past session" action. The regression this
+// covers is THE session-resume bug: the picker used to bare-attach, the
+// server answered NOT_FOUND for any stored (non-live) session, and the dead
+// stream silently swallowed every prompt and /command -- while the tab still
+// RENDERED its history, because scrollback reads the database directly.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("ResumeTab revives a stored session and its tab sends again",
+          "[app_state][resume]") {
+    ClientFixture fixture;
+    fixture.ScriptTwo("first reply", "second reply");
+    fixture.Start();
+
+    AppState app(fixture.client);
+    const auto sid = app.OpenTab(fixture.Options("resume-me"));
+    REQUIRE_FALSE(sid.empty());
+
+    // A bare state-Idle wait passes instantly (the tab is Idle BEFORE the
+    // turn's first event lands), so turn completion is polled through the
+    // transcript itself: the turn is over exactly when its rows are durable.
+    const auto wait_rows = [&app](const std::string& sid, size_t n) {
+        const auto deadline = std::chrono::steady_clock::now() + 5s;
+        while (std::chrono::steady_clock::now() < deadline) {
+            app.RequestScrollback(sid, /*newest=*/true);
+            std::this_thread::sleep_for(50ms);
+            if (app.GetDetails(sid).scrollback_page.size() >= n) return true;
+        }
+        return false;
+    };
+
+    app.SendChatTurn(sid, "first message");
+    REQUIRE(wait_rows(sid, 2));   // user + assistant, persisted
+
+    // TERMINATE (not detach): the transcript stays in SQLite, but the LIVE
+    // session must be gone -- ResumeSession refuses an already-open session.
+    // CloseTab drops the client side; the registry drop is polled.
+    app.CloseTab(sid);
+    fixture.sessions->Terminate(sid);
+    const auto deadline = std::chrono::steady_clock::now() + 5s;
+    while (fixture.sessions->Find(sid) != nullptr &&
+           std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(10ms);
+    }
+    REQUIRE(fixture.sessions->Find(sid) == nullptr);
+
+    REQUIRE(app.ResumeTab(sid) == sid);
+    REQUIRE(app.HasTab(sid));
+    CHECK(app.GetAllTabs()[0].is_focused);   // the app was empty: focus-if-empty
+
+    // THE BUG: a picked stored session must be LIVE, not a dead tab that
+    // renders history but drops input.
+    app.SendChatTurn(sid, "second message");
+    REQUIRE(wait_rows(sid, 4));   // the resumed turn completed ON TOP of the stored transcript
+
+    // History intact across the resume: all four rows in order, nothing
+    // duplicated or renumbered (the client-side mirror of "a stored session
+    // resumes with its history intact", session_service_test.cpp).
+    const auto page = fixture.client->GetMessages(sid, std::nullopt, 10);
+    REQUIRE(page.status.ok());
+    REQUIRE(page.response.messages_size() == 4);
+    CHECK(page.response.messages(3).message().content(0).text().text() == "first message");
+    CHECK(page.response.messages(2).message().content(0).text().text() == "first reply");
+    CHECK(page.response.messages(1).message().content(0).text().text() == "second message");
+    CHECK(page.response.messages(0).message().content(0).text().text() == "second reply");
+}
+
+TEST_CASE("ResumeTab of an unknown session registers a visible error tab",
+          "[app_state][resume]") {
+    ClientFixture fixture;
+    fixture.Script("hi");
+    fixture.Start();
+
+    AppState app(fixture.client);
+    const auto ghost = "01ARZ3NDEKTSV4RRFFQ69G5FAV";   // well-formed, nonexistent
+
+    // A refused resume still registers the tab -- in the Error state, with
+    // the refusal as its notice -- instead of silently doing nothing.
+    REQUIRE(app.ResumeTab(ghost) == ghost);
+    REQUIRE(app.HasTab(ghost));
+    CHECK(app.GetAllTabs()[0].is_focused);
+    CHECK(WaitForDetails(app, ghost, [](const SessionState::Snapshot& s) {
+        return s.latest_notice.has_value() && s.latest_notice->is_error;
+    }));
+    CHECK(app.GetDetails(ghost).state == SessionStateKind::Error);
+
+    // And sends on that stream-less tab refuse VISIBLY, not silently.
+    app.SendChatTurn(ghost, "hello?");
+    CHECK(WaitForDetails(app, ghost, [](const SessionState::Snapshot& s) {
+        return s.latest_notice.has_value() &&
+               s.latest_notice->message.find("cannot send") != std::string::npos;
+    }));
+}
+
+TEST_CASE("ResumeTab on an already-open tab focuses it instead of duplicating",
+          "[app_state][resume]") {
+    ClientFixture fixture;
+    fixture.Script("hi");
+    fixture.Start();
+
+    AppState app(fixture.client);
+    const auto sid_a = app.OpenTab(fixture.Options("a"));
+    const auto sid_b = app.OpenTab(fixture.Options("b"));
+    REQUIRE_FALSE(sid_a.empty());
+    REQUIRE_FALSE(sid_b.empty());
+    app.SetFocusedTab(sid_b);
+
+    // The old picker path silently no-opped this pick (AttachTab refused the
+    // duplicate and returned ""); the user's pick must at least land focus.
+    // (Focus comes from the picker's own SetFocusedTab after ResumeTab.)
+    REQUIRE(app.ResumeTab(sid_a) == sid_a);
+    REQUIRE(app.GetAllTabs().size() == 2);
+    app.SetFocusedTab(sid_a);
+    for (const auto& t : app.GetAllTabs()) {
+        if (t.session_id == sid_a) CHECK(t.is_focused);
+        if (t.session_id == sid_b) CHECK_FALSE(t.is_focused);
+    }
+}
+
+// The other half of the dead-stream fix: once a stream's reader has observed
+// the end (Finish() ran), the stream is latched closed -- a Send() must be
+// REFUSED (surfacing OnError) rather than accepted into a queue the writer's
+// failed Write() then silently drains. The old behavior: typing into a
+// session that ended server-side vanished without a trace.
+TEST_CASE("sends on a stream that died with the session are refused visibly",
+          "[app_state][resume]") {
+    ClientFixture fixture;
+    fixture.Script("hi");
+    fixture.Start();
+
+    AppState app(fixture.client);
+    const auto sid = app.OpenTab(fixture.Options("dies"));
+    REQUIRE_FALSE(sid.empty());
+    REQUIRE(WaitForAttached(app, sid));   // terminate an ATTACHED session, not a refused bidi
+
+    // Complete one turn (durable rows prove completion; a bare state-Idle
+    // wait passes instantly -- the tab is Idle before the turn starts). The
+    // fetch is re-issued per retry: nothing else drives scrollback refreshes
+    // in a headless test.
+    app.SendChatTurn(sid, "go");
+    bool turn_done = false;
+    const auto turn_deadline = std::chrono::steady_clock::now() + 5s;
+    while (std::chrono::steady_clock::now() < turn_deadline) {
+        app.RequestScrollback(sid, /*newest=*/true);
+        std::this_thread::sleep_for(50ms);
+        if (app.GetDetails(sid).scrollback_page.size() >= 2) {
+            turn_done = true;
+            break;
+        }
+    }
+    REQUIRE(turn_done);
+
+    fixture.sessions->Terminate(sid);
+    REQUIRE(WaitFor(app, sid, [](const AppState::TabSnapshot& t) {
+        return t.state == SessionStateKind::Done;
+    }));
+
+    app.SendChatTurn(sid, "anyone there?");
+    CHECK(WaitForDetails(app, sid, [](const SessionState::Snapshot& s) {
+        return s.latest_notice.has_value() && s.latest_notice->is_error;
+    }));
+    CHECK(app.GetDetails(sid).state == SessionStateKind::Error);
 }

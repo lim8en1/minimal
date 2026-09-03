@@ -55,9 +55,14 @@ void PickerController::RebuildPickerComponent() {
         {.on_resume =
              [this](const std::string& session_id) {
                  // A PAST session resumes into its own root group; it is
-                 // not a child of whatever is focused.
-                 deps_.app.AttachTab(session_id);
-                 deps_.app.SetFocusedTab(session_id);
+                 // not a child of whatever is focused. ResumeTab re-issues
+                 // CreateSession with resume_session_id -- the server must
+                 // revive the stored session before the stream names it
+                 // (bare attach answered NOT_FOUND and the dead stream then
+                 // swallowed every prompt) -- and registers a refused
+                 // resume as a visible Error-state tab instead of
+                 // dropping the pick on the floor. It never returns "".
+                 deps_.app.SetFocusedTab(deps_.app.ResumeTab(session_id));
                  deps_.show_picker = false;
              },
          .on_delete =

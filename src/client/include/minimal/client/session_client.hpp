@@ -59,15 +59,23 @@ public:
         Stream& operator=(const Stream&) = delete;
         ~Stream();
 
-        // Creates a fresh session (calls CreateSession) and names the bidi with an
-        // empty ClientEvent carrying the id — so the stream is attached even before the
-        // caller's first real turn. Does NOT start reader/writer threads yet. Returns the
-        // new session_id, or nullopt on failure (see status()).
+        // Creates a fresh session -- or, when opts.resume_session_id is set,
+        // RESUMES that stored session (CreateSession carries the id; the
+        // stored row's name/preset/project_root govern, so the other identity
+        // fields must stay empty) -- and names the bidi with an empty
+        // ClientEvent carrying the id, so the stream is attached even before
+        // the caller's first real turn. Does NOT start reader/writer threads
+        // yet. Returns the session_id, or nullopt on failure (see status()).
         std::optional<std::string> Open(const CreateOptions& opts);
 
-        // Attaches to an already-existing server-side session by id (resume / subagent).
-        // Names the stream on its first ClientEvent; does not start threads yet. Returns
-        // the session_id, or nullopt if OpenSession failed.
+        // Attaches to a session ALREADY LIVE server-side by id (a subagent the
+        // parent's stream just announced). Names the stream on its first
+        // ClientEvent; does not start threads yet. Never fails here -- and
+        // never performs a RESUME: a stored (not live) session must go through
+        // Open() with resume_session_id, because OpenSession resolves its id
+        // against the live registry only and would answer NOT_FOUND. The
+        // returned optional is always engaged; a failed attach surfaces
+        // later, as the reader's Finish() status via the on-closed callback.
         std::optional<std::string> Attach(const std::string& session_id);
 
         // Starts the reader + writer threads. Call AFTER the owning tab is registered in
@@ -130,6 +138,15 @@ public:
         const std::string& session_id() const { return session_id_; }
         bool resumed() const { return resumed_.load(); }
 
+        // True once the reader delivered at least one ServerEvent. The
+        // on-closed handler's one reliable attach-refusal discriminator: a
+        // stream the server refused (unknown/terminated session at OpenSession)
+        // ends WITHOUT ever having delivered an event, while a stream that was
+        // genuinely attached and later terminated ends with the same NOT_FOUND
+        // status after a lifetime of events. Status code alone cannot tell
+        // these apart; this can.
+        bool received_any() const { return received_any_.load(std::memory_order_acquire); }
+
     private:
         friend class SessionClient;
         Stream(std::shared_ptr<grpc::Channel> ch, EventCallback cb);
@@ -158,6 +175,7 @@ public:
         std::condition_variable send_cv_;
         std::deque<v1::ClientEvent> send_queue_;
         std::atomic<bool> closing_{false};
+        std::atomic<bool> received_any_{false};   // reader: first event delivered (see received_any())
 
         // Bounded like the server's outbound EventQueue (65k) -- a stream whose
         // server side stopped reading must not grow client memory without

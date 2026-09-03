@@ -154,10 +154,11 @@ public:
         // buffer-size heuristic, which could splice two rapid turns.
         uint64_t turn_seq = 0;
 
-        // The latest /-command outcome, for the transient notice line. NEVER a
-        // chat row (EXTENSIBILITY §4.4) — that is a type-level property of
-        // CommandNotice, not a rendering choice made here. The display/view_hint
-        // fields carry the E5 CommandDisplay refinement.
+        // The latest /-command outcome, for the transient notice line, or a
+        // client-side error (a refused send, a dead stream, a failed resume).
+        // NEVER a chat row (EXTENSIBILITY §4.4) — that is a type-level
+        // property of CommandNotice, not a rendering choice made here. The
+        // display/view_hint fields carry the E5 CommandDisplay refinement.
         std::optional<CommandNotice> latest_notice;
 
         // Monotonic per-session id for latest_notice: the VIEW side-effects
@@ -259,6 +260,13 @@ public:
     // The session's stream ended (server closed it / session terminated) --
     // the real "Done" (✓) signal, distinct from a turn merely completing.
     void OnSessionEnded();
+
+    // True once OnSessionEnded ran: the session is terminated server-side and
+    // the server will silently drop everything sent to it. Senders check this
+    // to refuse visibly instead of queueing into a void (the stream itself
+    // often stays open after a session_ended -- the server's read loop does
+    // not close on termination).
+    bool IsEnded() const;
 
     // The server reported a HOLE in this stream's event delivery
     // (ResyncRequiredEvent): drop-oldest overflow on this subscriber's queue,
@@ -406,6 +414,19 @@ public:
     // the picker picks an existing session, or when a child subagent starts.
     //   parent_ordinal anchors grouping; -1 => treat as new root group.
     std::string AttachTab(const std::string& session_id, int64_t parent_ordinal = -1);
+
+    // Resume a STORED session (the session picker's "open a past session"
+    // action): re-issues CreateSession with resume_session_id so the server
+    // revives the session from its transcript BEFORE the stream names it --
+    // bare attach answers NOT_FOUND for a stored session, and the dead
+    // stream used to swallow every prompt/command silently. A tab already
+    // open (or registered by a racing call) is returned without
+    // duplicating; a resume the server REFUSES still registers the tab --
+    // in the Error state, with the refusal as its visible notice -- so a
+    // failed pick is something the user can see and close. Always returns
+    // `session_id` (the registered tab's id); focus-if-empty follows
+    // OpenTab's rule, and the picker focuses explicitly afterward.
+    std::string ResumeTab(const std::string& session_id);
 
     // Called by the reader thread for every ServerEvent whose payload is not bound to
     // a tab the client already owns (e.g. SubagentStarted on the PARENT's stream).
@@ -626,6 +647,13 @@ private:
     void FocusWithWrap(bool forward);       // shared logic for the two cycle methods
     TabEntry* FindTab(const std::string& session_id);  // unlocked, mutex held by caller
     std::shared_ptr<SessionClient::Stream> GetStream(const std::string& session_id);
+
+    // Refuses VISIBLY when the tab's session has ended (wire SessionEnded /
+    // stream close): the server drops everything for a terminated session --
+    // usually silently -- so a send into it must not be queued. Returns true
+    // (and surfaces the error on the tab) when sending must stop. `verb`
+    // words the refusal ("send", "answer", "cancel").
+    bool RefuseIfEnded(const std::string& session_id, const char* verb);
     // OWNING copy: a raw pointer here escaped the lock and could be destroyed
     // by CloseTab (which erases the TabEntry and drops the shared_ptr) while
     // the reader thread was still between the lookup and the call.
@@ -634,8 +662,9 @@ private:
     // Applies the resolved ui.json bounds (0 = built-in default) to a
     // freshly constructed SessionState -- identical in OpenTab and AttachTab.
     void ApplyUiBounds(SessionState& state) const;
-    // Wires the stream's on-closed handler (transport-death vs. clean-close
-    // routing) for `session_id` -- identical in OpenTab and AttachTab.
+    // Wires the stream's on-closed handler (transport-death vs. attach-refusal
+    // vs. clean-close routing) for `session_id` -- identical in OpenTab and
+    // AttachTab.
     void WireOnClosed(SessionClient::Stream& stream, const std::string& session_id);
 };
 

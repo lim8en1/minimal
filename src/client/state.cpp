@@ -249,7 +249,7 @@ void SessionState::ClearStreaming() {
     is_streaming_ = false;
 }
 
-void SessionState::OnError(const std::string&) {
+void SessionState::OnError(const std::string& error_message) {
     std::lock_guard lk(mtx_);
     is_streaming_ = false;
     turn_ended_ = true;   // the errored turn is over; the next stream is a new one
@@ -257,6 +257,15 @@ void SessionState::OnError(const std::string&) {
     pending_permission_.reset();
     pending_confirmation_.reset();
     state_ = SessionStateKind::Error;
+    // The message is part of the outcome: dropped here, an errored tab showed
+    // only a state tint and "cannot send"/"connection lost"/"resume failed"
+    // explained nothing -- the failure read as the harness ignoring input.
+    // The notice line is the established transient surface; an error notice
+    // renders there in the error color, and its default STATUS display runs
+    // no view side-effects (TabMaintenance::HandleNotice).
+    latest_notice_ = CommandNotice{error_message, /*is_error=*/true,
+                                   v1::COMMAND_DISPLAY_STATUS, /*view_hint=*/{}};
+    ++notice_seq_;
 }
 
 // The real "subagent session stopped" signal (ARCHITECTURE.md): the session's
@@ -270,6 +279,11 @@ void SessionState::OnSessionEnded() {
     pending_permission_.reset();
     pending_confirmation_.reset();
     state_ = SessionStateKind::Done;
+}
+
+bool SessionState::IsEnded() const {
+    std::lock_guard lk(mtx_);
+    return state_ == SessionStateKind::Done;
 }
 
 void SessionState::OnResyncRequired(const std::string& reason) {
@@ -502,6 +516,26 @@ bool IsTransportDeath(const grpc::Status& status) {
     }
 }
 
+// The attach-time refusals OpenSession can answer with INSTEAD of attaching
+// (unknown session_id, session already terminated, subagent resumed
+// standalone, resume validation): the bidi never carried a live session, and
+// the tab must say WHY it is dead rather than render the clean "Done ✓" of a
+// session that actually ran. Code alone cannot always carry that distinction
+// -- a stream refused at attach and a stream that ran and then lost its
+// session can end with the same NOT_FOUND -- so callers pair this with
+// Stream::received_any() (see WireOnClosed).
+bool IsAttachRefusal(const grpc::Status& status) {
+    switch (status.error_code()) {
+        case grpc::StatusCode::NOT_FOUND:
+        case grpc::StatusCode::ALREADY_EXISTS:
+        case grpc::StatusCode::FAILED_PRECONDITION:
+        case grpc::StatusCode::INVALID_ARGUMENT:
+            return true;
+        default:
+            return false;
+    }
+}
+
 }  // namespace
 
 AppState::AppState(std::shared_ptr<SessionClient> client) : client_(std::move(client)) {}
@@ -532,19 +566,32 @@ void AppState::ApplyUiBounds(SessionState& state) const {
 }
 
 void AppState::WireOnClosed(SessionClient::Stream& stream, const std::string& session_id) {
-    stream.SetOnClosed([this, session_id](const grpc::Status& status) {
+    stream.SetOnClosed([this, session_id, &stream](const grpc::Status& status) {
         if (auto state = GetState(session_id)) {
-            // The reader's Finish() status distinguishes transport death from a
-            // clean server-side close: a crashed server used to render as a
-            // happy "Done ✓" tab that silently swallowed typed input. The
-            // status RIDES IN on the callback -- reaching back into the stream
-            // from here could make this callback the stream's last owner while
-            // the reader thread is inside it (see Stream::SetOnClosed).
+            // The reader's Finish() status distinguishes transport death, an
+            // attach refusal, and a clean server-side close: a crashed server
+            // used to render as a happy "Done ✓" tab that silently swallowed
+            // typed input, and so did an attach the server refused (the
+            // picker-resume bug: the dead tab even RENDERED its history,
+            // because scrollback reads the database directly). The status
+            // RIDES IN on the callback -- reaching back into the stream from
+            // here could make this callback the stream's last owner while the
+            // reader thread is inside it (see Stream::SetOnClosed) -- the one
+            // safe read is `received_any()`, an atomic the reader itself set.
+            //
+            // The refusal check NEEDS that flag: a terminated session's stream
+            // ends with the very same NOT_FOUND an attach refusal carries
+            // ("unknown session_id" / "already terminated"), and it must reach
+            // the clean Done. Only a stream that never delivered a single
+            // event -- attach refused -- is an error.
             if (IsTransportDeath(status)) {
                 state->OnError("connection lost: " + status.error_message());
+            } else if (!stream.received_any() && IsAttachRefusal(status)) {
+                state->OnError("session attach failed: " + status.error_message());
             } else {
                 state->OnSessionEnded();
             }
+            BumpUiVersion();   // a close with no preceding event must still repaint
         }
     });
 }
@@ -646,6 +693,74 @@ std::string AppState::AttachTab(const std::string& session_id, int64_t parent_or
     return session_id;
 }
 
+// Resume a STORED session (the picker's "open a past session" action): the
+// CreateSession RPC is re-issued with resume_session_id so the server revives
+// the session from its transcript (ResumeSession) BEFORE the bidi names it.
+// Bare attach (AttachTab) resolves its id against the LIVE registry only, so
+// it answered NOT_FOUND for every session from a previous run -- and the dead
+// stream then swallowed every prompt and /command silently while the tab still
+// rendered its history (scrollback reads the database directly). See
+// Stream::Open's resume branch for the wire shape.
+std::string AppState::ResumeTab(const std::string& session_id) {
+    {   // already open here: focusing it (the picker's next call) beats a
+        // duplicate stream against one live session
+        std::lock_guard lk(mtx_);
+        if (FindTab(session_id) != nullptr) return session_id;
+    }
+
+    // Resume carries session_id (and the client-owned run_mode) ONLY: the
+    // stored row's name/preset/project_root govern, and the server rejects
+    // the rest (SessionServiceImpl::ResumeSession).
+    SessionClient::CreateOptions opts;
+    opts.resume_session_id = session_id;
+
+    auto stream = client_->MakeStream(
+        [this](const v1::ServerEvent& e) { DispatchToTab(e.session_id(), e); });
+    const auto opened = stream->Open(opts);
+    if (!opened) {
+        // The resume was refused and NOTHING was attached (Open names the bidi
+        // only on success): the stream object is inert and simply dropped. The
+        // refusal is not logged-and-forgotten either -- the tab below carries
+        // it visibly.
+        common::DefaultLogger().error("resume of session {} failed: {}", session_id,
+                                      stream->status().error_message());
+    }
+    const bool live = opened.has_value();
+
+    {   // register under a lock, then drop it before starting the reader thread
+        std::lock_guard lk(mtx_);
+        if (FindTab(session_id) != nullptr) {
+            // A duplicate slipped through the race window (two concurrent
+            // ResumeTab calls): same rule as AttachTab's -- the naming event
+            // was never sent (threads off), so cancelling the call cannot
+            // disturb the session the winning caller is resuming.
+            stream->Cancel();
+            return session_id;
+        }
+        TabEntry entry;
+        entry.stream = live ? stream : nullptr;   // copy: `stream` is used below
+        entry.info.state = std::make_shared<SessionState>(session_id);
+        ApplyUiBounds(*entry.info.state);
+        entry.info.session_id = session_id;
+        entry.info.parent_session_id = std::nullopt;   // a resumed past session is its own root
+        entry.info.root_ordinal = ++next_root_ordinal_;
+        entry.info.spawn_seq = next_spawn_seq_++;
+        // Focus an empty app on its first tab (OpenTab's rule).
+        if (focused_id_.empty()) focused_id_ = session_id;
+        if (!live) {
+            entry.info.state->OnError("resume failed: " + stream->status().error_message());
+        }
+        tabs_.push_back(std::move(entry));
+    }   // lock released here, before the reader thread can dispatch back into us
+    BumpUiVersion();
+
+    if (live) {
+        WireOnClosed(*stream, session_id);
+        stream->Resume();   // start threads AFTER unlock -- same guard as OpenTab/AttachTab
+    }
+    return session_id;
+}
+
 bool AppState::HasTab(const std::string& session_id) const {
     std::lock_guard lk(mtx_);
     for (const auto& tab : tabs_) {
@@ -708,6 +823,16 @@ void AppState::DispatchToTab(const std::string& session_id, const v1::ServerEven
         target->ClearPendingFor(event.prompt_resolved().request_id());
     } else if (event.has_session_metadata()) {
         target->OnSessionMetadata(event.session_metadata());   // refreshes tab label later
+    } else if (event.has_session_ended()) {
+        // THE TERMINAL EVENT (Session::Terminate publishes it before closing
+        // every subscriber queue): a session terminated server-side while this
+        // client was attached. Unrouted, it went silent -- the stream itself
+        // stays open (the server's read loop keeps reading), so the tab could
+        // only leave Done-marking to a stream close that never comes, and
+        // every send into the dead session vanished server-side. Terminal
+        // state, same as a stream close: pending modals are dropped (nothing
+        // can answer them anymore).
+        target->OnSessionEnded();
     } else if (event.has_stream_event()) {
         const auto& se = event.stream_event();
         if (se.has_text_delta()) {
@@ -814,9 +939,16 @@ void AppState::CloseTab(const std::string& session_id) {
                 // regardless of which tab closed -- closing tab 2 of 10
                 // landed on tab 10.
                 const auto next = tabs_.erase(it);
-                if (was_focused && !tabs_.empty()) {
-                    focused_id_ = (next != tabs_.end() ? next : std::prev(tabs_.end()))
-                                      ->info.session_id;
+                if (was_focused) {
+                    // ... and when the LAST tab closed there is no neighbor:
+                    // focus must clear (as CloseAllTabs/DetachAllTabs do), or
+                    // FocusedSessionId() dangles on the closed id -- reads as
+                    // "a tab is focused" to every caller, and the next
+                    // picker-resume's focus-if-empty rule never fires.
+                    focused_id_ = !tabs_.empty()
+                                      ? (next != tabs_.end() ? next : std::prev(tabs_.end()))
+                                            ->info.session_id
+                                      : std::string{};
                 }
                 break;
             }
@@ -867,7 +999,16 @@ void AppState::FocusWithWrap(bool forward) {
 
 void AppState::SendChatTurn(const std::string& session_id, const std::string& text) {
     auto stream = GetStream(session_id);
-    if (!stream) return;
+    if (!stream) {
+        // A tab with no stream (a refused resume) must say so: a silent
+        // return here reads as "the model ignored me".
+        if (auto state = GetState(session_id)) {
+            state->OnError("cannot send: this session is not attached");
+            BumpUiVersion();
+        }
+        return;
+    }
+    if (RefuseIfEnded(session_id, "send")) return;
 
     v1::ClientEvent ev;
     ev.set_session_id(session_id);
@@ -878,6 +1019,7 @@ void AppState::SendChatTurn(const std::string& session_id, const std::string& te
     if (!stream->Send(ev)) {
         if (auto state = GetState(session_id)) {
             state->OnError("cannot send: the stream is closing or stalled");
+            BumpUiVersion();
         }
     }
 }
@@ -904,7 +1046,13 @@ void AppState::AnswerPermission(const std::string& session_id, const std::string
     // offered by the PermissionRequest may be answered. The server filters extras too, but
     // answering is a local no-op here so the round-trip stays cheap.
     auto stream = GetStream(session_id);
-    if (!stream) return;
+    if (!stream) {
+        if (auto state = GetState(session_id)) {
+            state->OnError("cannot answer: this session is not attached");
+        }
+        return;
+    }
+    if (RefuseIfEnded(session_id, "answer")) return;
 
     v1::ClientEvent ev;
     ev.set_session_id(session_id);
@@ -919,6 +1067,7 @@ void AppState::AnswerPermission(const std::string& session_id, const std::string
     if (!stream->Send(ev)) {
         if (auto state = GetState(session_id)) {
             state->OnError("cannot answer: the stream is closing or stalled");
+            BumpUiVersion();
         }
         return;
     }
@@ -930,7 +1079,13 @@ void AppState::AnswerConfirmation(const std::string& session_id, const std::stri
                                   const std::string& chosen_option) {
     BumpUiVersion();
     auto stream = GetStream(session_id);
-    if (!stream) return;
+    if (!stream) {
+        if (auto state = GetState(session_id)) {
+            state->OnError("cannot answer: this session is not attached");
+        }
+        return;
+    }
+    if (RefuseIfEnded(session_id, "answer")) return;
 
     v1::ClientEvent ev;
     ev.set_session_id(session_id);
@@ -942,6 +1097,7 @@ void AppState::AnswerConfirmation(const std::string& session_id, const std::stri
     if (!stream->Send(ev)) {
         if (auto state = GetState(session_id)) {
             state->OnError("cannot answer: the stream is closing or stalled");
+            BumpUiVersion();
         }
         return;
     }
@@ -957,7 +1113,16 @@ void AppState::AnswerConfirmation(const std::string& session_id, const std::stri
 
 void AppState::SendCommand(const std::string& session_id, const std::string& line) {
     auto stream = GetStream(session_id);
-    if (!stream) return;
+    if (!stream) {
+        // Same rule as SendChatTurn: a `/`-command on a stream-less tab
+        // (a refused resume) must say why nothing happened.
+        if (auto state = GetState(session_id)) {
+            state->OnError("cannot send: this session is not attached");
+            BumpUiVersion();
+        }
+        return;
+    }
+    if (RefuseIfEnded(session_id, "send")) return;
 
     const auto invocation = SplitCommand(line);
     v1::ClientEvent ev;
@@ -979,6 +1144,7 @@ void AppState::SendCommand(const std::string& session_id, const std::string& lin
     if (!stream->Send(ev)) {
         if (auto state = GetState(session_id)) {
             state->OnError("cannot send: the stream is closing or stalled");
+            BumpUiVersion();
         }
     }
 }
@@ -986,7 +1152,13 @@ void AppState::SendCommand(const std::string& session_id, const std::string& lin
 void AppState::SendCancel(const std::string& session_id) {
     BumpUiVersion();   // the "cancelling…" hint renders this frame, not the next event's
     auto stream = GetStream(session_id);
-    if (!stream) return;
+    if (!stream) {
+        if (auto state = GetState(session_id)) {
+            state->OnError("cannot cancel: this session is not attached");
+        }
+        return;
+    }
+    if (RefuseIfEnded(session_id, "cancel")) return;
     // The hint stands until the turn ends (TurnCompleted / Error / session
     // end clear it) -- queuing the send alone would leave the press silent
     // while the server winds down.
@@ -1001,7 +1173,14 @@ void AppState::SendCancel(const std::string& session_id) {
 void AppState::SendRewind(const std::string& session_id, std::optional<int64_t> target_seq,
                           bool redo) {
     auto stream = GetStream(session_id);
-    if (!stream) return;
+    if (!stream) {
+        if (auto state = GetState(session_id)) {
+            state->OnError("cannot send: this session is not attached");
+            BumpUiVersion();
+        }
+        return;
+    }
+    if (RefuseIfEnded(session_id, "rewind")) return;
 
     v1::ClientEvent ev;
     ev.set_session_id(session_id);
@@ -1018,6 +1197,7 @@ void AppState::SendRewind(const std::string& session_id, std::optional<int64_t> 
     if (!stream->Send(ev)) {
         if (auto state = GetState(session_id)) {
             state->OnError("cannot send: the stream is closing or stalled");
+            BumpUiVersion();
         }
     }
 }
@@ -1174,6 +1354,14 @@ AppState::TabEntry* AppState::FindTab(const std::string& session_id) {
         if (tab.info.session_id == session_id) return &tab;
     }
     return nullptr;
+}
+
+bool AppState::RefuseIfEnded(const std::string& session_id, const char* verb) {
+    const auto state = GetState(session_id);
+    if (!state || !state->IsEnded()) return false;
+    state->OnError(std::string("cannot ") + verb + ": this session has ended");
+    BumpUiVersion();
+    return true;
 }
 
 std::shared_ptr<SessionClient::Stream> AppState::GetStream(const std::string& session_id) {

@@ -398,10 +398,24 @@ std::optional<std::string> SessionClient::Stream::Open(const CreateOptions& opts
     // must not hang the frame loop past this.
     context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(5));
     v1::CreateSessionRequest request;
-    request.set_project_root(opts.project_root);
-    request.set_agent_preset(opts.agent_preset);
-    request.set_name(opts.name);
-    request.set_run_mode(opts.run_mode);
+    if (!opts.resume_session_id.empty()) {
+        // RESUME of a stored session: the stored row governs name, agent_preset
+        // and project_root, and the server REJECTS a resume carrying any of
+        // them (SessionServiceImpl::ResumeSession) -- only the id (and the
+        // client-owned run_mode) go out. Mirrors the headless --resume path;
+        // the TUI's picker resume rides the same branch. Skipping this step
+        // and only naming the bidi was the "picked a past session, then
+        // typing did nothing" bug: OpenSession resolves its id against the
+        // LIVE registry only, answered NOT_FOUND, and the dead stream
+        // swallowed every prompt.
+        request.set_session_id(opts.resume_session_id);
+        request.set_run_mode(opts.run_mode);
+    } else {
+        request.set_project_root(opts.project_root);
+        request.set_agent_preset(opts.agent_preset);
+        request.set_name(opts.name);
+        request.set_run_mode(opts.run_mode);
+    }
 
     v1::CreateSessionResponse response;
     SetStatus(stub_->CreateSession(&context, request, &response));
@@ -545,6 +559,7 @@ void SessionClient::Stream::LaunchReaderThread() {
     reader_ = std::thread([this] {
         v1::ServerEvent event;
         while (bidi_ && bidi_->Read(&event)) {
+            received_any_.store(true, std::memory_order_release);
             if (event_cb_) event_cb_(event);   // delivers to AppState; may itself Send()
         }
         // Read() returned false: the server closed its send side -- because the
@@ -553,6 +568,16 @@ void SessionClient::Stream::LaunchReaderThread() {
         // This thread drained the call, so it owns Finish() -- whose status is
         // the only way a transport death is distinguishable from a clean close.
         if (bidi_) SetStatus(bidi_->Finish());
+        // The stream is over either way -- latch closing_ BEFORE the callback:
+        // a Send() accepted by a dead stream used to be dropped by the writer's
+        // failed Write() with no error ever surfaced (the "picked a stored
+        // session, then typing did nothing" bug). With the latch set, Send()
+        // returns false and the AppState send paths surface it.
+        {
+            std::lock_guard lk(qmtx_);
+            closing_.store(true, std::memory_order_release);
+        }
+        send_cv_.notify_all();   // wake the writer onto the latch, not its poll timer
         // The status is captured BEFORE the callback: the callback's last
         // act can release the last shared_ptr holding this Stream, and ~Stream
         // (running right here on the reader thread) must not race it.
