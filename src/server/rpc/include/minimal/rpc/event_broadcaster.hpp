@@ -131,7 +131,16 @@ private:
     // caller to already hold it -- never nest them.
     bool Deliver(SubscriberState& sub, v1::ServerEvent event);
     void AcceptLocked(SubscriberState& sub, v1::ServerEvent event, std::size_t bytes);
-    bool FitsLocked(const SubscriberState& sub, std::size_t bytes) const;
+    // Evicts the oldest item(s) from `items` until `incoming_bytes` fits under
+    // max_events_/max_bytes_, or the container empties -- the drop-oldest rule
+    // shared by Deliver's per-subscriber queue and Publish's zero-subscriber
+    // backlog, which otherwise duplicated it against two differently-shaped
+    // containers (Item-with-cached-bytes vs. a bare event with bytes tracked
+    // alongside). `byte_cost` reads one item's byte cost; `pop_front` removes
+    // it. Returns whether anything was evicted.
+    template <typename Container, typename ByteCostFn>
+    bool EvictOldestUntilFits(Container& items, std::size_t& bytes_total,
+                              std::size_t incoming_bytes, ByteCostFn byte_cost) const;
     // Latches the subscriber's resync flag (once) and appends the notice.
     void TakeResyncLocked(SubscriberState& sub, const char* reason);
     static std::size_t SizeOf(const v1::ServerEvent& event);

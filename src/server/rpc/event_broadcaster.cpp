@@ -94,11 +94,8 @@ bool EventBroadcaster::Publish(v1::ServerEvent event) {
             // drop-oldest policy. A drop latches the backlog, so the next
             // subscriber resyncs instead of trusting a partial record.
             const std::size_t bytes = SizeOf(event);
-            while (!backlog_.empty() &&
-                   (backlog_.size() >= max_events_ ||
-                    (max_bytes_ != 0 && backlog_bytes_ + bytes > max_bytes_))) {
-                backlog_bytes_ -= SizeOf(backlog_.front());
-                backlog_.pop_front();
+            if (EvictOldestUntilFits(backlog_, backlog_bytes_, bytes,
+                                     [](const v1::ServerEvent& e) { return SizeOf(e); })) {
                 backlog_latched_ = true;
             }
             backlog_bytes_ += bytes;
@@ -202,11 +199,8 @@ bool EventBroadcaster::Deliver(SubscriberState& sub, v1::ServerEvent event) {
         // A single event larger than the whole cap is accepted onto an EMPTY
         // queue rather than dropped into an unreachable loop (the old queue's
         // oversized-event rule, kept verbatim).
-        while (!FitsLocked(sub, bytes) && !sub.events.empty()) {
-            sub.bytes -= sub.events.front().bytes;
-            sub.events.pop_front();
-            dropped = true;
-        }
+        dropped = EvictOldestUntilFits(sub.events, sub.bytes, bytes,
+                                       [](const SubscriberState::Item& item) { return item.bytes; });
         AcceptLocked(sub, std::move(event), bytes);
         if (dropped) TakeResyncLocked(sub, "overflow");
     }
@@ -220,10 +214,18 @@ void EventBroadcaster::AcceptLocked(SubscriberState& sub, v1::ServerEvent event,
     sub.events.push_back(SubscriberState::Item{std::move(event), bytes});
 }
 
-bool EventBroadcaster::FitsLocked(const SubscriberState& sub, std::size_t bytes) const {
-    if (sub.events.size() >= max_events_) return false;
-    if (max_bytes_ == 0) return true;
-    return sub.events.empty() || sub.bytes + bytes <= max_bytes_;
+template <typename Container, typename ByteCostFn>
+bool EventBroadcaster::EvictOldestUntilFits(Container& items, std::size_t& bytes_total,
+                                            std::size_t incoming_bytes, ByteCostFn byte_cost) const {
+    bool dropped = false;
+    while (!items.empty() &&
+           (items.size() >= max_events_ ||
+            (max_bytes_ != 0 && bytes_total + incoming_bytes > max_bytes_))) {
+        bytes_total -= byte_cost(items.front());
+        items.pop_front();
+        dropped = true;
+    }
+    return dropped;
 }
 
 // Latches and appends the resync notice -- once. Re-latching (a second drop
