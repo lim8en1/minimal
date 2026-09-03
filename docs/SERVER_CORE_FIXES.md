@@ -141,25 +141,51 @@ dedup; see "Explicitly not fixing" below):
 
 ---
 
-## Phase 2 — Structural moves (clean cuts, no compat shims)
+## Phase 2 — Structural moves (clean cuts, no compat shims) — DONE
 
-- **`rpc/event_queue.hpp` → `common/`** (`minimal/common/event_queue.hpp`). It
-  is a generic concurrency primitive; `hooks/hook_dispatcher.hpp:69` and
-  `agent/session_observer_registry.hpp:46` currently include from `rpc/`.
-- **HTTP/SSE out of `llm/`** → new `src/server/net/` module, namespace
-  `minimal::net`. `http_client` + `sse_parser` move; consumers updated:
-  `mcp/mcp_connection.cpp` (HttpTransport), tools-web plugin, cost-tracker,
-  provider-openai. `llm/` keeps only LLM concerns.
+Shipped as 5 independently-buildable, `ctest`-green commits. The doc's
+consumer list for the HTTP/SSE move was incomplete, and its framing of the
+`HistoryStore` fix blamed the wrong include — both corrected below.
+
+- **`rpc/event_queue.hpp` → `common/`** (`minimal/common/event_queue.hpp`,
+  namespace `minimal::common`). Generic concurrency primitive, header-only
+  (no `.cpp`, no CMake source-list change needed). Consumers updated:
+  `hooks/hook_dispatcher.hpp:69`, `agent/session_observer_registry.hpp:47`
+  (doc had this at line 46), `tests/event_queue_test.cpp`.
 - **`config/fd_hygiene` → `common/`.** Process-level POSIX utility, nothing
-  configurational about it.
-- **`HistoryStore` interface flipped to the session side** — currently
-  `session/sqlite_history_store.hpp:7` includes `agent/history_store.hpp` while
-  `agent/session_registry.cpp:11` includes back into `session/` (circular
-  directory dependency, interface on the wrong side). Interface moves to
-  `session/`; agent/ depends on session/ only.
-- **`synthesize_missing_tool_results` → own file** (`agent/transcript_repair`).
-  Torn-tail repair is not compaction-boundary logic; it currently squats in
-  `compaction_boundary.cpp:63-105`.
+  configurational about it. Consumers: `main.cpp` (include only — the call
+  site's position, right before the gRPC server is constructed, is an
+  ordering constraint independent of the header's location, and did not
+  move), `tests/fd_hygiene_test.cpp`.
+- **HTTP/SSE out of `llm/`** → new `src/server/net/` module, namespace
+  `minimal::net`. `http_client` (incl. Phase 1's `HeaderNameEquals`) +
+  `sse_parser` move; `llm/` keeps only genuine LLM concerns (chat, message,
+  provider, model_catalog, token_accounting). **The doc's consumer list was
+  incomplete** — verified and updated: `mcp/mcp_connection.cpp`
+  (`HttpTransport`), tools-web, cost-tracker, provider-openai (all named in
+  the original list), plus **provider-anthropic** (same usage shape as
+  provider-openai, missing from the original list) and
+  **`plugins/include/minimal/plugins/plugin_abi.h`** (the frozen ABI
+  umbrella header that directly includes both and is how every plugin sees
+  them transitively — also missing from the original list, and the one
+  file where missing it would have silently broken every plugin).
+- **`HistoryStore` interface flipped to the session side**, now
+  `session::HistoryStore` (not merely relocated while staying in
+  `minimal::agent` — the interface and its `SqliteHistoryStore`
+  implementation now share a namespace). **Doc correction**: the doc blamed
+  `agent/session_registry.cpp:11`'s include of `session/sqlite_history_store.hpp`
+  as "the circular half" needing to go away. That include is legitimate
+  (agent/ constructing a concrete `session::SqliteHistoryStore` for
+  `Session`) and did not change. The actual, narrower fix: only
+  `agent/history_store.hpp`'s definition moved, removing `session/`'s one
+  remaining include of an `agent/` header.
+- **`synthesize_missing_tool_results` → own file**
+  (`agent/transcript_repair.{hpp,cpp}`). Confirmed zero coupling to
+  `snap_compaction_boundary` (no shared state or helper) — it was torn-tail
+  resume repair squatting in `compaction_boundary.cpp:63-105`, not
+  compaction-boundary logic. Test cases split out of
+  `compaction_boundary_test.cpp` into `transcript_repair_test.cpp` at their
+  pre-existing seam.
 
 ---
 
@@ -373,7 +399,7 @@ Steps (each independently mergeable):
 |-------|------|------|------|--------|
 | 0 Bugs | S | Low | regression tests + tsan | DONE |
 | 1 Dedup | M | Low | full ctest, zero behavior change | DONE |
-| 2 Moves | M | Low-Med | build + ctest after include churn | |
+| 2 Moves | M | Low-Med | build + ctest after include churn | DONE |
 | 3 Config | M | Medium | config/sanity/e2e tests | |
 | 4 Event extraction | **L** | Medium | `headless_e2e_test` unmodified-pass | |
 | 5 Slimming | M-L | Medium | per-step ctest | |
