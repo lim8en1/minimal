@@ -81,7 +81,7 @@ void minimal_plugin_register_provider_factories(
 void minimal_plugin_register_mention_resolver(
     minimal::agent::MentionResolverRegistry& registry,
     const minimal::plugins::PluginRegistrationContext&) {
-    registry.Register(std::make_shared<FixtureResolver>());
+    registry.TrySetOverride(std::make_shared<FixtureResolver>());
 }
 void minimal_plugin_register_model_catalogs(
     minimal::llm::ModelCatalogRegistry& registry,

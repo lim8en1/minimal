@@ -54,16 +54,21 @@ public:
 };
 
 // Exclusive: ONE strategy is in force. First plugin (plugins.json order) wins;
-// a later registration logs a warning and is ignored -- two plugins fighting
-// over the suggestion box would make which one you get depend on load order,
-// which is the failure mode the collision rules exist to prevent everywhere else.
+// a later call logs a warning, is rejected (returns false), and the slot keeps
+// its first occupant -- two plugins fighting over the suggestion box would
+// make which one you get depend on load order, which is the failure mode the
+// collision rules exist to prevent everywhere else. Named "override", not
+// "registry": this is one settable slot, not an additive collection.
 class MentionResolverRegistry {
 public:
     explicit MentionResolverRegistry(common::Logger& logger);
 
     // Startup-only in production (plugin load), but mutex-guarded so a test or
-    // a future hot path cannot turn that assumption into a data race.
-    void Register(std::shared_ptr<MentionResolver> resolver);
+    // a future hot path cannot turn that assumption into a data race. Returns
+    // false, without replacing the current override, if a slot is already
+    // taken -- the caller can tell rejection apart from success instead of
+    // relying on the warning log.
+    bool TrySetOverride(std::shared_ptr<MentionResolver> resolver);
 
     // The plugin override, or the core default when none registered. Never null.
     const MentionResolver& Active() const;

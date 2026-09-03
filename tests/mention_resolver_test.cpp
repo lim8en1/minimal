@@ -148,11 +148,11 @@ TEST_CASE("the registry is exclusive: first registration wins", "[mention_resolv
     };
 
     CHECK_FALSE(registry.has_override());
-    registry.Register(std::make_shared<Fixed>("first"));
-    registry.Register(std::make_shared<Fixed>("second"));
+    CHECK(registry.TrySetOverride(std::make_shared<Fixed>("first")));
+    CHECK_FALSE(registry.TrySetOverride(std::make_shared<Fixed>("second")));
 
-    // The second registration is a warning and a no-op -- which strategy is in
-    // force must never depend on load order.
+    // The second call is a warning and a no-op, signaled by its false return --
+    // which strategy is in force must never depend on load order.
     REQUIRE(registry.has_override());
     TempDir dir;
     CHECK(registry.Active().Suggest("", dir.path(), 50) == std::vector<std::string>{"first"});

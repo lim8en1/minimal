@@ -71,15 +71,16 @@ std::vector<std::string> PrefixMentionResolver::Suggest(std::string_view prefix,
 
 MentionResolverRegistry::MentionResolverRegistry(common::Logger& logger) : logger_(logger) {}
 
-void MentionResolverRegistry::Register(std::shared_ptr<MentionResolver> resolver) {
-    if (resolver == nullptr) return;
+bool MentionResolverRegistry::TrySetOverride(std::shared_ptr<MentionResolver> resolver) {
+    if (resolver == nullptr) return false;
     std::lock_guard<std::mutex> lock(mutex_);
     if (override_ != nullptr) {
         logger_.warn("a mention resolver is already registered; ignoring a second one -- "
                      "the seam is exclusive, first registration wins");
-        return;
+        return false;
     }
     override_ = std::move(resolver);
+    return true;
 }
 
 const MentionResolver& MentionResolverRegistry::Active() const {
