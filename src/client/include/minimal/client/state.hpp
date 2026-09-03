@@ -151,6 +151,14 @@ public:
         // Status-bar occupancy from the LAST turn only (NOT cumulative — see ARCH).
         int64_t input_tokens = 0;
         int64_t output_tokens = 0;
+        // Also last-turn-only, also from Usage (TurnCompletedEvent), also
+        // discarded until now: cache hit/miss for the turn that just ran.
+        // Cumulative totals -- across turns, in $ -- are NOT tracked here;
+        // that's the bundled cost-tracker server plugin's job (it already
+        // does this, see plugins/server/cost-tracker), consumed by a paired
+        // client plugin rather than duplicated in core state.
+        int64_t cache_read_tokens = 0;
+        int64_t cache_write_tokens = 0;
 
         // Bumped whenever the persisted transcript changed in a way the chat
         // view should re-fetch (new scrollback page applied, turn completed).
@@ -400,6 +408,8 @@ private:
 
     int64_t input_tokens_ = 0;   // last turn occupancy
     int64_t output_tokens_ = 0;
+    int64_t cache_read_tokens_ = 0;
+    int64_t cache_write_tokens_ = 0;
 };
 
 // ============================================================================

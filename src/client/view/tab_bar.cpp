@@ -1,8 +1,12 @@
 #include "minimal/client/view/tab_bar.hpp"
 
 #include <algorithm>
+#include <array>
+#include <chrono>
 
 #include <ftxui/screen/terminal.hpp>
+
+#include "minimal/client/utf8.hpp"
 
 namespace minimal::client {
 
@@ -65,42 +69,104 @@ TabBarWindow ComputeTabBarWindow(const std::vector<int>& cell_widths, int availa
 
 namespace {
 
-ftxui::Color StateColor(SessionStateKind state, const Theme& theme) {
+ftxui::Color StateColor(SessionStateKind state, bool active, const Theme& theme) {
     switch (state) {
-        case SessionStateKind::Waiting: return theme.ColorFor("attention");
-        case SessionStateKind::Error:   return theme.ColorFor("error");
-        case SessionStateKind::Done:    return theme.ColorFor("system_message");
-        case SessionStateKind::Idle:    return theme.ColorFor("border_unfocused");
-        case SessionStateKind::Thinking:
-        case SessionStateKind::Working: return theme.ColorFor("assistant_message");
+        case SessionStateKind::Waiting:  return theme.ColorFor("attention");
+        case SessionStateKind::Error:    return theme.ColorFor("error");
+        case SessionStateKind::Done:     return theme.ColorFor("system_message");
+        // border_unfocused is a BORDER role (1.70:1 dark / 1.16:1 light
+        // against status_bar_bg -- fine for a hairline, useless as body
+        // text), but this was the only place in the app using it as a tab
+        // LABEL color; combined with the `dim` modifier below it made idle
+        // tabs unreadable. system_message/assistant_message are the roles
+        // every other body text in the app already uses for exactly this
+        // idle/active distinction.
+        case SessionStateKind::Idle:
+            return active ? theme.ColorFor("assistant_message") : theme.ColorFor("system_message");
+        // Thinking and Working used to share this color, making them
+        // visually identical (the reported complaint: no way to tell "the
+        // model is composing a reply" from "a tool is running" without
+        // opening the tools panel). Distinct roles now; StateGlyph below
+        // gives them a distinct SHAPE too, so the difference survives even
+        // on a theme that hasn't customized either role from its default.
+        case SessionStateKind::Thinking: return theme.ColorFor("thinking");
+        case SessionStateKind::Working:  return theme.ColorFor("working");
     }
     return ftxui::Color::Default;
 }
 
-std::string Truncate(const std::string& name, std::size_t max) {
-    // Code-point truncation (ASCII-safe cut of a UTF-8 string would split a
-    // code point): count continuation bytes 0b10xxxxxx toward the length.
-    if (name.size() <= max) return name;
-    std::size_t end = max;
-    while (end > 0 && (static_cast<unsigned char>(name[end]) & 0xC0) == 0x80) --end;
-    return name.substr(0, end);
+// Animated for Thinking/Working, static otherwise. Computed from wall clock
+// at RENDER time rather than stored per-tab: storing a frame index would
+// need a dedicated timer to advance it, and the frame pump already redraws
+// continuously while a tab is actually Thinking/Working (every delta bumps
+// ui_version_) -- an idle tab never asks for this branch, so no animation
+// ever needs a redraw nothing else already provides. Waiting keeps its own
+// '!' glyph (RenderTabCell's attention_glyph, unchanged) -- this function
+// never emits a second signal for it.
+constexpr std::array<const char*, 8> kSpinnerFrames = {"⠋", "⠙", "⠹", "⠸",
+                                                       "⠼", "⠴", "⠦", "⠧"};
+
+std::string StateGlyph(SessionStateKind state) {
+    switch (state) {
+        case SessionStateKind::Thinking:
+        case SessionStateKind::Working: {
+            using namespace std::chrono;
+            const auto ms = duration_cast<milliseconds>(steady_clock::now().time_since_epoch());
+            const auto frame = static_cast<std::size_t>(ms.count() / 120) % kSpinnerFrames.size();
+            return kSpinnerFrames[frame];
+        }
+        case SessionStateKind::Done:  return "✓";
+        case SessionStateKind::Error: return "✗";
+        case SessionStateKind::Waiting:
+        case SessionStateKind::Idle:
+            return "";
+    }
+    return "";
 }
 
 }  // namespace
 
 namespace {
 
-// One tab's label (Truncate()d, with room reserved for the attention
-// glyph) and its approximate rendered width -- byte length, the same
-// UTF-8-display-width approximation Truncate() itself already makes, kept
-// consistent rather than mixing a byte-based truncation with a
-// codepoint-aware width estimate.
-std::pair<std::string, int> LabelAndWidth(const AppState::TabSnapshot& tab) {
-    std::string label = Truncate(tab.display_name, 16);
-    if (tab.attention_glyph != '\0') label += ' ';   // room for the glyph
-    int width = static_cast<int>(label.size());
-    if (tab.attention_glyph != '\0') width += 1;      // the glyph itself
+// " │ ", the separator rendered between adjacent tab cells so labels can
+// never fuse into one run-together string.
+constexpr int kSeparatorWidth = 3;
+
+// Digits in a 1-based tab index, for the label prefix's width.
+int DigitWidth(std::size_t n) {
+    int digits = 1;
+    for (std::size_t v = n; v >= 10; v /= 10) ++digits;
+    return digits;
+}
+
+// One tab's label -- "<index> <name>", name column-truncated (see
+// utf8.hpp: codepoint-width, not byte length, so a CJK/emoji name isn't cut
+// to a fraction of the visible characters an ASCII name of the same budget
+// would get) -- with room reserved for the attention glyph, and its
+// rendered width in display columns.
+std::pair<std::string, int> LabelAndWidth(const AppState::TabSnapshot& tab, std::size_t index) {
+    const std::string prefix = std::to_string(index) + " ";
+    std::string label = prefix + TruncateUtf8Columns(tab.display_name, 16);
+    int width = DigitWidth(index) + 1 + std::min<int>(16, static_cast<int>(Utf8ColumnWidth(
+                                                              tab.display_name)));
+    if (tab.attention_glyph != '\0') {
+        label += ' ';
+        width += 2;  // the separating space plus the glyph itself
+    }
     if (tab.is_subagent) width += 1;                  // the indent space
+    // The state glyph, when this state has one: one display column plus a
+    // separating space, approximated as a flat +2 rather than the glyph's
+    // own (multi-byte, UTF-8) string length -- StateGlyph's glyphs are all
+    // single-width, so byte length would OVERcount and reserve more room
+    // than the glyph actually occupies.
+    if (!StateGlyph(tab.state).empty()) width += 2;
+    // One separator (" │ ", 3 columns) reserved per tab so adjacent labels
+    // never fuse into one run-together string -- the actual separator is
+    // only rendered BETWEEN visible cells (n-1 of them), so this slightly
+    // over-reserves budget for the last visible tab; a cosmetic non-issue,
+    // the same tolerance ComputeTabBarWindow's fixed marker width already
+    // accepts.
+    width += kSeparatorWidth;
     return {std::move(label), width};
 }
 
@@ -110,8 +176,22 @@ ftxui::Element RenderTabCell(const AppState::TabSnapshot& tab, const std::string
     const bool active = tab.is_focused;
 
     Element content = text(label);
-    content |= color(StateColor(tab.state, theme));
-    content |= (active ? bold : dim);
+    content |= color(StateColor(tab.state, active, theme));
+    // `dim` stacking on an already-borderline color was exactly what made an
+    // idle, unfocused tab (border_unfocused, 1.70:1 dark / 1.16:1 light)
+    // unreadable -- now that Idle uses a legible role on its own
+    // (StateColor above), it no longer needs `dim` to read as "not focused".
+    if (active) {
+        content |= bold;
+    } else if (tab.state != SessionStateKind::Idle) {
+        content |= dim;
+    }
+
+    const std::string glyph = StateGlyph(tab.state);
+    if (!glyph.empty()) {
+        content = hbox({text(glyph + " ") | color(StateColor(tab.state, active, theme)),
+                        std::move(content)});
+    }
     if (tab.attention_glyph != '\0') {
         // THE color-independent signal. Not a spinner, not a state word:
         // Waiting is the one state a human must act on.
@@ -138,7 +218,7 @@ ftxui::Element RenderTabBar(const std::vector<AppState::TabSnapshot>& tabs, cons
     widths.reserve(tabs.size());
     std::size_t focused_index = 0;
     for (std::size_t i = 0; i < tabs.size(); ++i) {
-        auto [label, width] = LabelAndWidth(tabs[i]);
+        auto [label, width] = LabelAndWidth(tabs[i], i + 1);
         labels.push_back(std::move(label));
         widths.push_back(width);
         if (tabs[i].is_focused) focused_index = i;
@@ -158,6 +238,7 @@ ftxui::Element RenderTabBar(const std::vector<AppState::TabSnapshot>& tabs, cons
         cells.push_back(text("«" + std::to_string(window.hidden_before) + " ") | dim);
     }
     for (std::size_t i = window.visible_start; i < window.visible_end; ++i) {
+        if (!cells.empty()) cells.push_back(text(" │ ") | dim);  // never let labels fuse
         cells.push_back(RenderTabCell(tabs[i], labels[i], theme));
     }
     if (window.hidden_after > 0) {

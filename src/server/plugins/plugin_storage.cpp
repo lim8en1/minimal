@@ -101,14 +101,22 @@ void ApplyMigrations(sqlite3* db, int target_version) {
 }  // namespace
 
 PluginStorage::PluginStorage(const std::filesystem::path& db_path) : path_(db_path) {
-    // Same single-writer guarantee as the session store, the same way: a
-    // second process on plugins.db is refused at open (see ExclusiveFileLock).
-    lock_ = std::make_unique<common::ExclusiveFileLock>(db_path);
-
+    // The directory FIRST: ExclusiveFileLock opens `db_path + ".lock"`
+    // immediately below, and open() with O_CREAT still fails ENOENT when a
+    // DIRECTORY component is missing (O_CREAT only covers the leaf file) --
+    // a fresh XDG_DATA_HOME/first run on this machine threw "cannot open
+    // lock file .../plugins.db.lock: No such file or directory" instead of
+    // just working, the same first-run case the session store already
+    // handles correctly (session_database.cpp creates its own directory
+    // before opening too).
     std::error_code ec;
     if (path_.has_parent_path()) {
         std::filesystem::create_directories(path_.parent_path(), ec);
     }
+
+    // Same single-writer guarantee as the session store, the same way: a
+    // second process on plugins.db is refused at open (see ExclusiveFileLock).
+    lock_ = std::make_unique<common::ExclusiveFileLock>(db_path);
 
     if (sqlite3_open(path_.c_str(), &db_) != SQLITE_OK) {
         const std::string message = db_ ? sqlite3_errmsg(db_) : "sqlite3_open failed";

@@ -135,6 +135,14 @@ struct KeyContext {
     // own show_x = true, so this needs nothing back from them.
     std::function<void()> open_picker;
     std::function<void()> open_agent_picker;
+    // model.picker: previously reachable only via /model -- session.picker
+    // and agent.picker each had a default binding, this did not.
+    std::function<void()> open_model_picker;
+    // help.overlay: the keymap help overlay. Unlike the pickers above, this
+    // one is built once (not staged through a modal host) -- app.cpp's
+    // comment on keymap_help_view explains why (no async fetch to rebind
+    // for).
+    std::function<void()> open_keymap_help;
     std::function<void()> request_quit;         // ctrl+q / idle ctrl+c: app.cpp owns the confirm-if-busy logic
     std::function<void(const std::string&)> close_tab;
     std::function<void(const std::string& session_id, int delta_rows)> scroll_chat;   // ChatView::ScrollBy, if that tab has one
@@ -148,6 +156,16 @@ struct KeyContext {
     // PendingClose and opens the confirmation modal. Not called when nothing
     // is in flight -- HandleGlobalKey closes those tabs directly via close_tab.
     std::function<void(std::vector<std::string> ids)> confirm_close;
+
+    // chat.row_up/chat.row_down: ChatView::MoveRowFocus, if that tab has one.
+    // Same sign convention as scroll_chat (positive = toward older).
+    std::function<void(const std::string& session_id, int delta)> move_row_focus;
+    // chat.toggle_collapse: ChatView::ToggleCollapseFocused.
+    std::function<void(const std::string& session_id)> toggle_collapse_focused;
+    // chat.toggle_collapse_all: ChatView::ToggleCollapseAll.
+    std::function<void(const std::string& session_id)> toggle_collapse_all;
+    // chat.toggle_timestamps: ChatView::ToggleTimestamps.
+    std::function<void(const std::string& session_id)> toggle_timestamps;
 };
 
 // The global-keybinding CatchEvent body (app.cpp's with_keys), as a function

@@ -23,7 +23,6 @@ ftxui::Component MakeSessionPicker(const std::vector<v1::SessionSummary>& sessio
 
     FilterableMenuSpec spec{
         .window_title = "resume a session",
-        .header_label = " sessions ",
         .hint_line = " enter: open  ·  ctrl+d: delete  ·  tab: sort  ·  "
                     "ctrl+a: all dirs  ·  esc: close",
         .status_suffix =

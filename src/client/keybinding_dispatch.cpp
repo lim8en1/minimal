@@ -183,6 +183,14 @@ bool HandleGlobalKey(KeyContext& ctx, const ftxui::Event& event) {
         ctx.open_agent_picker();
         return true;
     }
+    if (ctx.keymap.Matches("model.picker", event)) {
+        ctx.open_model_picker();
+        return true;
+    }
+    if (ctx.keymap.Matches("help.overlay", event)) {
+        ctx.open_keymap_help();
+        return true;
+    }
     if (ctx.keymap.Matches("permission.cycle", event)) {
         // The interactive loop for /permission-mode: shift+tab cycles
         // normal -> bypass -> allow-only -> normal, then re-sends the result
@@ -243,6 +251,26 @@ bool HandleGlobalKey(KeyContext& ctx, const ftxui::Event& event) {
     }
     if (ctx.keymap.Matches("chat.scroll_bottom", event)) {
         if (!sid.empty()) ctx.scroll_chat_to_bottom(sid);
+        return true;
+    }
+    if (ctx.keymap.Matches("chat.row_up", event)) {
+        if (!sid.empty()) ctx.move_row_focus(sid, 1);   // toward older
+        return true;
+    }
+    if (ctx.keymap.Matches("chat.row_down", event)) {
+        if (!sid.empty()) ctx.move_row_focus(sid, -1);   // toward newest
+        return true;
+    }
+    if (ctx.keymap.Matches("chat.toggle_collapse", event)) {
+        if (!sid.empty()) ctx.toggle_collapse_focused(sid);
+        return true;
+    }
+    if (ctx.keymap.Matches("chat.toggle_collapse_all", event)) {
+        if (!sid.empty()) ctx.toggle_collapse_all(sid);
+        return true;
+    }
+    if (ctx.keymap.Matches("chat.toggle_timestamps", event)) {
+        if (!sid.empty()) ctx.toggle_timestamps(sid);
         return true;
     }
     if (ctx.keymap.Matches("tab.close", event)) {

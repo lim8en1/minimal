@@ -1,5 +1,7 @@
 #include "minimal/client/view/frame_renderer.hpp"
 
+#include <string_view>
+
 #include "minimal/client/render/markdown_renderer.hpp"
 #include "minimal/client/view/chat_view.hpp"
 #include "minimal/client/view/status_bar.hpp"
@@ -8,7 +10,51 @@
 #include "minimal/common/abi_tag.hpp"
 #include "minimal/common/logger.hpp"
 
+#include <ftxui/screen/terminal.hpp>
+
 namespace minimal::client {
+
+namespace {
+
+// The {activity} status segment: short text for "is the model doing
+// something right now", distinct from the tab bar's glyph (tab_bar.cpp's
+// StateGlyph) -- this is the FOCUSED session's detail, spelled out, where the
+// glyph is a compact per-tab signal. Idle/unknown renders nothing, same rule
+// every other segment follows (an empty value = the segment isn't shown).
+//
+// Reads the LIGHT per-tab snapshot (TabSnapshot), not deps_.focused_details
+// (the DEEP snapshot): focused_details is TabMaintenance's CACHED output,
+// refreshed on its own schedule, not necessarily every render -- state and
+// tool name are exactly the "cheap facts" TakeLightSnapshot exists for
+// (fresh every single Render() call, the same source the tab bar's own
+// live-updating glyph already reads), so sourcing this from the deep
+// snapshot would have shown a stale activity a frame or more behind the
+// glyph right next to it.
+std::string ActivityLabel(SessionStateKind state,
+                          const std::vector<ToolExecutionState>& tools) {
+    switch (state) {
+        case SessionStateKind::Thinking:
+            return "thinking…";
+        case SessionStateKind::Working:
+            // The gate-order-first tool, not necessarily the one that
+            // finishes first (parallel dispatch) -- good enough as "what's
+            // running" orientation, not a live ticker.
+            if (!tools.empty() && !tools.front().tool_name.empty()) {
+                return "running " + tools.front().tool_name + "…";
+            }
+            return "working…";
+        case SessionStateKind::Waiting:
+            return "waiting";
+        case SessionStateKind::Error:
+            return "error";
+        case SessionStateKind::Done:
+        case SessionStateKind::Idle:
+            return "";
+    }
+    return "";
+}
+
+}  // namespace
 
 FrameRenderer::FrameRenderer(Dependencies deps) : deps_(std::move(deps)) {}
 
@@ -43,8 +89,17 @@ ftxui::Element FrameRenderer::Render() {
     // with respect to RPC/network work. deps_.focused_details is
     // TabMaintenance's cached output.
 
+    // Below this, the tab bar and notice line drop out entirely so the
+    // editor and status bar (kept out of ftxui's flex-shrink set below)
+    // always keep their rows instead of the vbox shrink pass squeezing a
+    // fixed-size row to 0/negative height and drawing the next row on top of
+    // it.
+    constexpr int kCriticalHeight = 8;
+    const int term_height = ftxui::Terminal::Size().dimy;
+    const bool space_critical = term_height > 0 && term_height < kCriticalHeight;
+
     Elements rows;
-    rows.push_back(RenderTabBar(tabs, deps_.theme));
+    if (!space_critical) rows.push_back(RenderTabBar(tabs, deps_.theme));
 
     const std::string& focused = deps_.focused;
     const SessionState::Snapshot& focused_details = deps_.focused_details;
@@ -117,11 +172,31 @@ ftxui::Element FrameRenderer::Render() {
         // HandleNotice, once per notice; here a View notice renders nothing
         // (the view it opened is the surface), and STATUS/errors render as
         // the persistent line until the next result replaces them.
-        if (snap.latest_notice.has_value()) {
+        if (!space_critical && snap.latest_notice.has_value()) {
             const auto& notice = *snap.latest_notice;
             if (notice.display != v1::COMMAND_DISPLAY_VIEW &&
                 notice.display != v1::COMMAND_DISPLAY_SILENT) {
-                rows.push_back(text(" " + notice.message) |
+                // One text() per line, not one text() over the whole
+                // (possibly multi-line) message: text() declares itself ONE
+                // row tall regardless of embedded '\n's, so a multi-line
+                // notice (e.g. /help's listing) drew past its allotted row
+                // and overwrote whatever the vbox placed below it (the tools
+                // panel, the editor). A vbox of per-line rows reports its
+                // TRUE height, and the size()+yframe below caps and scrolls
+                // it instead of letting it dominate the frame.
+                Elements notice_lines;
+                std::string_view remaining(notice.message);
+                std::size_t pos = 0;
+                while (pos < remaining.size()) {
+                    const std::size_t newline = remaining.find('\n', pos);
+                    const std::size_t end =
+                        newline == std::string_view::npos ? remaining.size() : newline;
+                    notice_lines.push_back(text(" " + std::string(remaining.substr(pos, end - pos))));
+                    if (newline == std::string_view::npos) break;
+                    pos = newline + 1;
+                }
+                rows.push_back(vbox(std::move(notice_lines)) |
+                               size(HEIGHT, LESS_THAN, 6) | yframe | vscroll_indicator |
                                bgcolor(deps_.theme.ColorFor("status_bar_bg")) |
                                color(notice.is_error ? deps_.theme.ColorFor("error")
                                                      : deps_.theme.ColorFor("system_message")));
@@ -141,11 +216,37 @@ ftxui::Element FrameRenderer::Render() {
     }
 
     if (deps_.show_panel) {
+        // vscroll_indicator: every other scrollable yframe region in the
+        // frame (chat, plugin panels below, the pickers) has one; this was
+        // the one silent exception.
         rows.push_back(RenderToolsPanel(tabs, deps_.tools_panel_stdout_buffer_lines, deps_.theme) |
-                       size(HEIGHT, LESS_THAN, deps_.panel_height) | yframe);
+                       size(HEIGHT, LESS_THAN, deps_.panel_height) | yframe | vscroll_indicator);
     }
 
-    rows.push_back(deps_.editor->Render() | flex);
+    // Plugin PANEL views, beside the tools panel -- moved here (this used to
+    // sit after the status bar, rendering every plugin panel BELOW it,
+    // contradicting this very comment) so they actually land next to the
+    // tools panel they're described as beside. Events reach the visible ones
+    // through the frame's CatchEvent (see with_keys). A throwing view is
+    // hidden for the frame that threw (never fatal), like the status
+    // segments below.
+    for (auto& entry : deps_.plugin_views) {
+        if (entry.view->spec().placement == plugins::ViewPlacement::Panel && entry.visible) {
+            try {
+                rows.push_back(entry.component->Render() |
+                               size(HEIGHT, LESS_THAN, deps_.panel_height) | yframe);
+            } catch (const std::exception& error) {
+                common::DefaultLogger().error("plugin view '{}' threw: {}",
+                                              std::string(entry.view->spec().id), error.what());
+            } catch (...) {
+                common::DefaultLogger().error(
+                    "plugin view '{}' threw a non-standard exception",
+                    std::string(entry.view->spec().id));
+            }
+        }
+    }
+
+    rows.push_back(deps_.editor->Render());
 
     // Status bar. model/agent/permission_mode render from focused_details
     // below (the E5 metadata emission); empty/unknown renders as nothing,
@@ -179,6 +280,12 @@ ftxui::Element FrameRenderer::Render() {
         if (!focused_details.permission_mode.empty()) {
             values["permission_mode"] = focused_details.permission_mode;
         }
+        for (const auto& tab : tabs) {
+            if (tab.session_id != focused) continue;
+            const auto activity = ActivityLabel(tab.state, tab.tools);
+            if (!activity.empty()) values["activity"] = activity;
+            break;
+        }
     }
     // Registered segment providers fill their own ids. Render runs on the
     // render thread at ~20 Hz -- the provider contract (cheap, never
@@ -186,7 +293,7 @@ ftxui::Element FrameRenderer::Render() {
     // segment renders nothing for this frame), never fatal.
     for (const auto& segment : deps_.status_registry.segments()) {
         try {
-            values[std::string(segment->id())] = segment->Render();
+            values[std::string(segment->id())] = segment->Render(focused);
         } catch (const std::exception& error) {
             common::DefaultLogger().error("status segment '{}' threw: {}",
                                           std::string(segment->id()), error.what());
@@ -195,27 +302,8 @@ ftxui::Element FrameRenderer::Render() {
                                           "exception", std::string(segment->id()));
         }
     }
-    rows.push_back(RenderStatusBar(deps_.status_format, values, deps_.theme));
-
-    // Plugin PANEL views, beside the tools panel. Events reach the visible
-    // ones through the frame's CatchEvent (see with_keys). A throwing view
-    // is hidden for the frame that threw (never fatal), like the status
-    // segments.
-    for (auto& entry : deps_.plugin_views) {
-        if (entry.view->spec().placement == plugins::ViewPlacement::Panel && entry.visible) {
-            try {
-                rows.push_back(entry.component->Render() |
-                               size(HEIGHT, LESS_THAN, deps_.panel_height) | yframe);
-            } catch (const std::exception& error) {
-                common::DefaultLogger().error("plugin view '{}' threw: {}",
-                                              std::string(entry.view->spec().id), error.what());
-            } catch (...) {
-                common::DefaultLogger().error(
-                    "plugin view '{}' threw a non-standard exception",
-                    std::string(entry.view->spec().id));
-            }
-        }
-    }
+    rows.push_back(RenderStatusBar(deps_.status_format, values, deps_.theme,
+                                   ftxui::Terminal::Size().dimx));
 
     return vbox(std::move(rows));
 }

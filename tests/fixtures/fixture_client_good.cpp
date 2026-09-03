@@ -20,7 +20,7 @@ public:
     FixtureSegment(std::string echo, plugins::AttentionSink* attention, std::string raise_tab)
         : echo_(std::move(echo)), attention_(attention), raise_tab_(std::move(raise_tab)) {}
     std::string_view id() const override { return "fixture_seg"; }
-    std::string Render() const override {
+    std::string Render(const std::string&) const override {
         // POST-LOAD seam use: the sink pointer was captured from the
         // registration context; Render is where a real plugin would use it
         // (attention raises happen while the TUI runs, long after LoadAll).
@@ -42,7 +42,7 @@ class FixtureToolRenderer final : public plugins::ToolResultRenderer {
 public:
     std::string_view tool_name() const override { return "fixture_tool"; }
     ftxui::Element Render(const nlohmann::json&, std::string_view result_text, bool,
-                          const Theme&) const override {
+                          const Theme&, const plugins::RowRenderContext&) const override {
         return ftxui::text("fixture rendered: " + std::string(result_text));
     }
 };
@@ -51,7 +51,8 @@ public:
 // the registry's claims() and the render via the registry dispatch.
 class FixtureThinkingRenderer final : public plugins::MessageRenderer {
 public:
-    ftxui::Element Render(const ChatRow& row, const Theme&) const override {
+    ftxui::Element Render(const ChatRow& row, const Theme&,
+                          const plugins::RowRenderContext&) const override {
         return ftxui::text("fixture thinking: " + std::to_string(row.text.size()));
     }
 };

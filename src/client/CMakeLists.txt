@@ -11,6 +11,7 @@ add_library(minimal_client_core SHARED
     picker_model.cpp
     model_picker_model.cpp
     agent_picker_model.cpp
+    keymap_help_model.cpp
     state.cpp
     keybindings.cpp
     keybinding_dispatch.cpp
@@ -34,6 +35,7 @@ add_library(minimal_client_core SHARED
     view/session_picker.cpp
     view/model_picker.cpp
     view/agent_picker.cpp
+    view/keymap_help.cpp
     view/picker_controller.cpp
     view/tab_ui.cpp
     view/frame_renderer.cpp

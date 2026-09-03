@@ -96,7 +96,9 @@ ftxui::Component MakeFilterableMenuModal(
     return Renderer(interactive, [interactive, state, spec, theme] {
         using namespace ftxui;
         Elements rows;
-        rows.push_back(text(spec.header_label) | bold);
+        // No separate header row here: it used to repeat window_title's own
+        // text right below it ("resume a session" / " sessions ") -- the
+        // window's title already says what this is.
         rows.push_back(text(spec.hint_line) | dim);
         std::string status = " filter: " + (state->filter.empty() ? "(none)" : state->filter);
         if (spec.status_suffix) status += spec.status_suffix(state->filter);
@@ -106,7 +108,11 @@ ftxui::Component MakeFilterableMenuModal(
             rows.push_back(text(spec.empty_message) | dim);
         }
         rows.push_back(interactive->Render() | vscroll_indicator | frame | flex);
-        return window(text(spec.window_title), vbox(std::move(rows)) | size(HEIGHT, LESS_THAN, 20)) |
+        // Padded with a space each side, matching prompt_modal.cpp's " permission "/
+        // " confirm " -- window() draws the border flush against the title text
+        // otherwise, and this shell's callers previously left it unpadded.
+        return window(text(" " + spec.window_title + " "),
+                      vbox(std::move(rows)) | size(HEIGHT, LESS_THAN, 20)) |
                color(theme.ColorFor("border_focused"));
     });
 }

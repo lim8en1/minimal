@@ -294,6 +294,63 @@ TEST_CASE("edit rejects an unknown command", "[tools_fs][edit]") {
     CHECK(tool->execute({{"command", "delete_everything"}, {"path", "a.txt"}}, ctx).is_error);
 }
 
+// --- permission disclosure ----------------------------------------------------
+//
+// Regression: the base Tool::Disclose default names only the TOOL
+// ("read"/"write"/"edit"), never the file -- so the permission modal asked
+// the user to authorize a filesystem operation without saying which file,
+// though the very next transcript row (post-approval) named it. Each of
+// these asserts the disclosed summary names the path, and (write/edit) says
+// what will happen to it.
+
+TEST_CASE("read discloses the path", "[tools_fs][read][disclosure]") {
+    Fixture f;
+    auto tool = tools_fs::MakeReadTool(f.settings);
+    auto ctx = f.Context();
+    const auto disclosure = tool->Disclose({{"path", "src/main.cpp"}}, ctx);
+    CHECK(disclosure.summary.find("src/main.cpp") != std::string::npos);
+    CHECK(disclosure.complete);
+}
+
+TEST_CASE("read's disclosure is incomplete when the path is missing", "[tools_fs][read][disclosure]") {
+    Fixture f;
+    auto tool = tools_fs::MakeReadTool(f.settings);
+    auto ctx = f.Context();
+    const auto disclosure = tool->Disclose({}, ctx);
+    CHECK_FALSE(disclosure.complete);
+}
+
+TEST_CASE("write discloses the path and that it creates or overwrites",
+          "[tools_fs][write][disclosure]") {
+    Fixture f;
+    auto tool = tools_fs::MakeWriteTool(f.settings);
+    auto ctx = f.Context();
+    const auto disclosure = tool->Disclose({{"path", "out.txt"}, {"content", "hello"}}, ctx);
+    CHECK(disclosure.summary.find("out.txt") != std::string::npos);
+    CHECK(disclosure.summary.find("creates or overwrites") != std::string::npos);
+    CHECK(disclosure.summary.find("5 bytes") != std::string::npos);
+}
+
+TEST_CASE("edit discloses the path and the command", "[tools_fs][edit][disclosure]") {
+    Fixture f;
+    auto tool = tools_fs::MakeEditTool(f.settings);
+    auto ctx = f.Context();
+    const auto disclosure = tool->Disclose(
+        {{"command", "str_replace"}, {"path", "a.txt"}, {"old_str", "x"}, {"new_str", "y"}}, ctx);
+    CHECK(disclosure.summary.find("a.txt") != std::string::npos);
+    CHECK(disclosure.summary.find("str_replace") != std::string::npos);
+    CHECK(disclosure.summary.find("replaces text") != std::string::npos);
+}
+
+TEST_CASE("edit create's disclosure says it creates the file", "[tools_fs][edit][disclosure]") {
+    Fixture f;
+    auto tool = tools_fs::MakeEditTool(f.settings);
+    auto ctx = f.Context();
+    const auto disclosure = tool->Disclose({{"command", "create"}, {"path", "new.txt"}}, ctx);
+    CHECK(disclosure.summary.find("new.txt") != std::string::npos);
+    CHECK(disclosure.summary.find("creates this file") != std::string::npos);
+}
+
 // --- integration with the permission gate ------------------------------------
 
 TEST_CASE("out-of-workdir access is refused by the executor, not by the tool",

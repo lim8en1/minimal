@@ -109,7 +109,13 @@ public:
         ftxui::Elements lines;
         lines.push_back(Title(theme));
         for (const auto& line : art) {
-            lines.push_back(ftxui::text(line) | ftxui::color(theme.ColorFor("banner_art")));
+            // hcenter: the vbox's own width is set by its WIDEST row (an art
+            // line, almost always) -- without this every SHORTER row (the
+            // title, the hint) sat flush left inside that box instead of
+            // centered against it, reading as lopsided once the enclosing
+            // frame_renderer.cpp centers the whole block.
+            lines.push_back(ftxui::text(line) | ftxui::color(theme.ColorFor("banner_art")) |
+                            ftxui::hcenter);
         }
         lines.push_back(Hint(theme));
         return ftxui::vbox(std::move(lines));
@@ -162,23 +168,31 @@ private:
     ftxui::Element Fallback(const Theme& theme) const {
         return ftxui::vbox({Title(theme),
                             ftxui::text(config_.text) | ftxui::bold |
-                                ftxui::color(theme.ColorFor("banner_art")),
+                                ftxui::color(theme.ColorFor("banner_art")) | ftxui::hcenter,
                             Hint(theme)});
     }
 
     // The title block above the art -- the word in caps plus the version the
     // RUNNING binary reports, never one hardcoded into the plugin. The
-    // byline is fixed: like the version, it is NOT configurable.
+    // byline is fixed: like the version, it is NOT configurable. hcenter on
+    // each line independently -- see the art-line comment in Render().
     ftxui::Element Title(const Theme& theme) const {
         return ftxui::vbox(
             {ftxui::text("MINIMAL v" + std::string(minimal::common::Version())) | ftxui::bold |
-                 ftxui::color(theme.ColorFor("banner_art")),
-             ftxui::text(std::string("   by ") + kAuthor) | ftxui::color(theme.ColorFor("banner_hint"))});
+                 ftxui::color(theme.ColorFor("banner_art")) | ftxui::hcenter,
+             ftxui::text(std::string("   by ") + kAuthor) | ftxui::color(theme.ColorFor("banner_hint")) |
+                 ftxui::hcenter});
     }
 
+    // paragraph(), not text(): text() reports its full length as a fixed
+    // width requirement, so on a narrow terminal the enclosing `| center`
+    // (frame_renderer.cpp) crops it SYMMETRICALLY from both edges -- which is
+    // why this line used to lose its own FRONT ("ype here" instead of "type
+    // here"), not just its tail. paragraph() wraps to whatever width the
+    // block actually gets instead of being cropped.
     ftxui::Element Hint(const Theme& theme) const {
-        return ftxui::text("ctrl+o opens the session picker; typing starts a session") |
-               ftxui::dim | ftxui::color(theme.ColorFor("banner_hint"));
+        return ftxui::paragraph("ctrl+o opens the session picker; typing starts a session") |
+               ftxui::dim | ftxui::color(theme.ColorFor("banner_hint")) | ftxui::hcenter;
     }
 
     plugins::ViewSpec spec_{"logo.banner", "minimal banner", plugins::ViewPlacement::Panel, ""};

@@ -14,6 +14,7 @@
 namespace minimal::tools_search {
 namespace {
 
+using tools::PermissionDisclosure;
 using tools::ToolCategory;
 using tools::ToolContext;
 using tools::ToolResult;
@@ -61,6 +62,26 @@ public:
     std::optional<std::string> ExtractPath(const nlohmann::json& input) const override {
         if (!input.contains("path") || !input.at("path").is_string()) return std::nullopt;
         return input.at("path").get<std::string>();
+    }
+
+    // The base default named only "glob" -- neither the pattern nor where it
+    // searches. glob is ReadOnly (usually pre-allowed), but an out-of-workdir
+    // `path` or a stricter fallback.read_only still raises this prompt, and
+    // it should say what it's about to read.
+    PermissionDisclosure Disclose(const nlohmann::json& input, const ToolContext&) const override {
+        PermissionDisclosure disclosure;
+        if (!input.contains("pattern") || !input.at("pattern").is_string()) {
+            disclosure.summary = "glob: <invalid input>";
+            disclosure.complete = false;
+            return disclosure;
+        }
+        const auto pattern = input.at("pattern").get<std::string>();
+        std::string path = ".";
+        if (input.contains("path") && input.at("path").is_string()) {
+            path = input.at("path").get<std::string>();
+        }
+        disclosure.summary = "glob: " + pattern + " in " + path;
+        return disclosure;
     }
 
     ToolResult execute(const nlohmann::json& input, ToolContext& ctx) override {

@@ -61,7 +61,6 @@ struct FilterableMenuCallbacks {
 
 struct FilterableMenuSpec {
     std::string window_title;    // "resume a session" / "switch agent preset"
-    std::string header_label;    // " sessions " / " agents "
     std::string hint_line;       // caller-composed: key hints differ per picker
     // Appended after " filter: X" (or "(none)") -- the session picker adds
     // sort/all-dirs/more-below; the agent picker leaves this empty. Composed

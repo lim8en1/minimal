@@ -12,3 +12,9 @@
 # feature.
 
 add_subdirectory(logo)
+
+# cost-view is the second: a `{cost}` status-bar segment consuming the
+# bundled server-side cost-tracker plugin's PluginCall RPC, the intended
+# first real (non-reference-shape) consumer of that surface.
+
+add_subdirectory(cost-view)

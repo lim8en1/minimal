@@ -511,6 +511,28 @@ TEST_CASE("command notice maps display/view_hint and advances the notice sequenc
     CHECK(snap.notice_seq == 2);
 }
 
+// Regression: a stale /-command notice (an old /help listing, a stale error)
+// used to sit pinned across the WHOLE next turn -- persisted transcript rows
+// are the record of what happened, so a status line about the LAST command
+// has nothing to say about a turn the user just started.
+TEST_CASE("submitting a chat turn clears a stale command notice", "[session_state][notice]") {
+    SessionState state("s-1");
+
+    v1::CommandResult evt;
+    evt.set_message("11 commands");
+    evt.set_status(v1::COMMAND_STATUS_OK);
+    evt.set_display(v1::COMMAND_DISPLAY_STATUS);
+    state.OnCommandResult(evt);
+    REQUIRE(state.TakeSnapshot().latest_notice.has_value());
+    const uint64_t seq_before = state.TakeSnapshot().notice_seq;
+
+    state.OnChatSubmitted("what next");
+
+    const auto snap = state.TakeSnapshot();
+    CHECK_FALSE(snap.latest_notice.has_value());
+    CHECK(snap.notice_seq > seq_before);
+}
+
 // Track R2-4: the scrollback window is a bounded SLIDING window. Loading older
 // pages beyond the cap evicts from the window's NEWEST end and flags it -- the
 // pre-R2 append grew client memory without bound (a long PageUp on a 1M-token

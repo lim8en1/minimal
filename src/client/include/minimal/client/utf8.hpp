@@ -39,4 +39,40 @@ inline std::string TruncateUtf8(const std::string& text, std::size_t max_bytes) 
     return text.substr(0, end);
 }
 
+// Counts CODEPOINTS (lead bytes), not raw bytes: an approximation of terminal
+// column width that treats every codepoint as one column. Not a full wcwidth
+// (a wide CJK glyph still counts as 1, so it under-measures those), but a
+// vast improvement over counting UTF-8 BYTES, which over-counts every
+// non-ASCII character 2-4x -- the bug this replaced (tab_bar.cpp truncating
+// and budgeting tab labels by `std::string::size()`).
+inline std::size_t Utf8ColumnWidth(std::string_view text) {
+    std::size_t count = 0;
+    for (unsigned char c : text) {
+        if ((c & 0xC0) != 0x80) ++count;  // not a continuation byte
+    }
+    return count;
+}
+
+// Truncates to at most `max_columns` display columns (see Utf8ColumnWidth
+// above), appending an ellipsis when truncation happens. Never splits a
+// codepoint. One column of `max_columns` is reserved for the ellipsis itself,
+// so the result's own column width never exceeds `max_columns`.
+inline std::string TruncateUtf8Columns(const std::string& text, std::size_t max_columns) {
+    if (Utf8ColumnWidth(text) <= max_columns) return text;
+    if (max_columns == 0) return "";
+    const std::size_t keep = max_columns - 1;
+    std::size_t seen = 0;
+    std::size_t cut = text.size();
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        if ((static_cast<unsigned char>(text[i]) & 0xC0) != 0x80) {
+            if (seen == keep) {
+                cut = i;
+                break;
+            }
+            ++seen;
+        }
+    }
+    return text.substr(0, cut) + "\xE2\x80\xA6";  // U+2026 HORIZONTAL ELLIPSIS
+}
+
 }  // namespace minimal::client

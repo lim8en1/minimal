@@ -1,10 +1,30 @@
 #include "minimal/client/chat_model.hpp"
 
+#include <chrono>
+#include <cstddef>
+#include <cstdio>
+#include <ctime>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
 
 namespace minimal::client {
+
+std::string FormatClockTime(int64_t unix_ms) {
+    if (unix_ms <= 0) return "";
+    const std::time_t seconds = static_cast<std::time_t>(unix_ms / 1000);
+    std::tm local{};
+#if defined(_WIN32)
+    localtime_s(&local, &seconds);
+#else
+    localtime_r(&seconds, &local);
+#endif
+    char buf[16];
+    const int written = std::snprintf(buf, sizeof(buf), "%02d:%02d:%02d", local.tm_hour,
+                                      local.tm_min, local.tm_sec);
+    if (written <= 0) return "";
+    return std::string(buf);
+}
 
 namespace {
 
@@ -239,15 +259,36 @@ std::vector<ChatRow> ChatRowsFromMessages(const std::vector<v1::StoredMessage>& 
         }();
 
         // Stamp every row this message produced with its transcript seq --
-        // the chat view's per-row render cache is keyed by it (track R3).
-        // Runs unconditionally now: every branch above returns out of the
-        // IIFE rather than `continue`-ing past this.
+        // the chat view's per-row render cache is keyed by it (track R3) --
+        // and the message's wall-clock timestamp, for the chat view's
+        // per-row clock display (never a MessageRenderer concern, see
+        // ChatRow::created_at_unix_ms). Runs unconditionally now: every
+        // branch above returns out of the IIFE rather than `continue`-ing
+        // past this.
         for (auto r = rows.begin() + static_cast<std::ptrdiff_t>(first_row_of_message);
              r != rows.end(); ++r) {
             r->seq = message_seq;
+            r->created_at_unix_ms = it->created_at_unix_ms();
         }
     }
     return rows;
+}
+
+bool CollapsedByDefault(const ChatRow& row) {
+    constexpr std::size_t kAttachmentCollapseThresholdChars = 2000;
+    switch (row.kind) {
+        case ChatRowKind::Thinking:
+            return true;
+        case ChatRowKind::ToolActivity:
+            return true;
+        case ChatRowKind::UserAttachment:
+            return row.text.size() > kAttachmentCollapseThresholdChars;
+        case ChatRowKind::UserText:
+        case ChatRowKind::AgentMarkdown:
+        case ChatRowKind::System:
+            return false;
+    }
+    return false;
 }
 
 CommandNotice NoticeFromCommandResult(const v1::CommandResult& result) {

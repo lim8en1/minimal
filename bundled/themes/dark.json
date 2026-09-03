@@ -3,21 +3,24 @@
   "colors": {
     "user_message": "#7dd3fc",
     "assistant_message": "#e5e7eb",
-    "thinking": "#6b7280",
+    "thinking": "#7a8190",
+    "working": "#86efac",
     "system_message": "#a1a1aa",
     "error": "#f87171",
     "attention": "#fbbf24",
     "border_focused": "#7dd3fc",
     "border_unfocused": "#3f3f46",
+    "row_focused": "#fbbf24",
     "status_bar_bg": "#18181b",
     "banner_art": "#7dd3fc",
-    "banner_hint": "#52525b",
+    "banner_hint": "#81818d",
     "syntax_keyword": "#c084fc",
     "syntax_string": "#86efac",
-    "syntax_comment": "#71717a",
+    "syntax_comment": "#808089",
     "syntax_number": "#fbbf24",
     "syntax_function": "#7dd3fc",
     "syntax_type": "#fde047",
-    "syntax_operator": "#e5e7eb"
+    "syntax_operator": "#e5e7eb",
+    "syntax_plain": "#e5e7eb"
   }
 }

@@ -104,6 +104,8 @@ add_executable(minimal_tests
     app_state_test.cpp
     view_factory_test.cpp
     tab_bar_test.cpp
+    status_bar_test.cpp
+    utf8_test.cpp
     modal_host_test.cpp
     keybindings_test.cpp
     keybinding_dispatch_test.cpp
@@ -111,6 +113,7 @@ add_executable(minimal_tests
     rpc_queue_test.cpp
     picker_model_test.cpp
     agent_picker_model_test.cpp
+    keymap_help_model_test.cpp
     model_picker_model_test.cpp
     model_ref_test.cpp
     tui_bootstrap_test.cpp

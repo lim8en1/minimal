@@ -35,6 +35,24 @@ void SetUserVersion(const std::filesystem::path& path, int version) {
 
 }  // namespace
 
+// Regression: ExclusiveFileLock used to open db_path + ".lock" BEFORE the
+// parent directory was created -- open()'s O_CREAT only covers the leaf
+// file, not a missing directory component, so a genuinely fresh
+// XDG_DATA_HOME (nothing has ever run on this machine) threw "cannot open
+// lock file .../plugins.db.lock: No such file or directory" instead of just
+// working. session_database.cpp already got this right; PluginStorage's
+// constructor now creates the directory first, same order.
+TEST_CASE("PluginStorage creates its own parent directory on first use",
+          "[plugin_storage]") {
+    TempDir dir;
+    const auto nested = dir.path() / "fresh" / "data" / "dir";
+    REQUIRE_FALSE(std::filesystem::exists(nested));
+
+    auto storage = plugins::PluginStorage(nested / "plugins.db");
+    storage.Set("checklist", "s1", "value");
+    CHECK(storage.Get("checklist", "s1") == std::optional<std::string>("value"));
+}
+
 TEST_CASE("set/get round-trips per plugin and key", "[plugin_storage]") {
     Fixture f;
     auto storage = f.Make();

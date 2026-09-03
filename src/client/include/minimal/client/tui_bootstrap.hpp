@@ -11,22 +11,30 @@
 // *** ADDRESS-STABILITY CONTRACT -- READ BEFORE TOUCHING THIS FILE ***
 // Several fields below hold a pointer or reference into ANOTHER field of the
 // SAME TuiEnvironment: `attention_sink` captures `&attention_state`,
-// `highlighter` captures `theme` by reference (SyntaxHighlighter stores
-// `const Theme&`), `renderer` captures `&*theme` and `&*highlighter`
-// (MarkdownRenderer stores raw pointers), and `engine` is a reference into
-// `engine_registry`'s own heap-owned MarkdownEngine. None of this is safe
-// under a MOVE: if the whole struct were ever returned by value or otherwise
-// relocated, every one of those captured addresses would go stale -- the
-// exact "closures/pointers outlive the object they point into" bug class
-// documented throughout app.cpp (see e.g. MarkdownRenderer's own
-// construction comment). BuildTuiEnvironment therefore takes `out` BY
-// REFERENCE and fills it IN PLACE rather than returning a TuiEnvironment by
-// value: the caller must declare `TuiEnvironment env;` as a plain local and
-// never move, copy, or return it. `theme`/`highlighter`/`renderer` are
-// std::optional specifically because SyntaxHighlighter/MarkdownRenderer are
-// not default-constructible (reference/pointer members) -- emplace()
-// constructs them IN the optional's own inline storage, which lives at a
-// fixed offset within `out` for as long as `out` itself is never relocated.
+// `highlighter` captures `theme` by reference AND captures `&languages`
+// (SyntaxHighlighter stores `const Theme&` and, in the grammar-table
+// constructor, a `const std::vector<LanguageDefinition>*`), `renderer`
+// captures `&*theme` and `&*highlighter` (MarkdownRenderer stores raw
+// pointers), and `engine` is a reference into `engine_registry`'s own
+// heap-owned MarkdownEngine. None of this is safe under a MOVE: if the whole
+// struct were ever returned by value or otherwise relocated, every one of
+// those captured addresses would go stale -- the exact "closures/pointers
+// outlive the object they point into" bug class documented throughout
+// app.cpp (see e.g. MarkdownRenderer's own construction comment).
+// `languages` in particular MUST live here, not as a local in
+// BuildTuiEnvironment: a local's storage ends when the function returns,
+// which is exactly what `highlighter` is still pointing at afterwards --
+// this was a real bug (a dangling `languages_` deref, SIGSEGV on the first
+// rendered fenced code block, in every session thereafter since the
+// transcript persists the block and resuming re-renders it).
+// BuildTuiEnvironment therefore takes `out` BY REFERENCE and fills it IN
+// PLACE rather than returning a TuiEnvironment by value: the caller must
+// declare `TuiEnvironment env;` as a plain local and never move, copy, or
+// return it. `theme`/`highlighter`/`renderer` are std::optional specifically
+// because SyntaxHighlighter/MarkdownRenderer are not default-constructible
+// (reference/pointer members) -- emplace() constructs them IN the optional's
+// own inline storage, which lives at a fixed offset within `out` for as long
+// as `out` itself is never relocated.
 
 #include <cstdint>
 #include <filesystem>
@@ -75,8 +83,21 @@ struct TuiEnvironment {
     plugins::ChatSurfaceRegistry surface_registry;
     plugins::MarkdownEngineRegistry engine_registry;
 
+    // The raw action->key-STRING table (core defaults + the user's file +
+    // every plugin view's EnsureDefault), kept alongside `keymap` below for
+    // the keymap help overlay -- ResolvedKeymap only stores parsed Event
+    // candidates, not the original spec strings, so it cannot answer "what
+    // key is bound to this action" as human-readable text.
+    Keybindings keybindings;
     ResolvedKeymap keymap;
     std::vector<StatusSegment> status_format;
+
+    // The assembled grammar table (vendored defaults plus plugin additions):
+    // `highlighter` below stores a POINTER into this vector, so it must live
+    // here rather than as a BuildTuiEnvironment local -- see the
+    // address-stability contract above. Declared before `highlighter` so
+    // destruction runs in the safe order too.
+    std::vector<LanguageDefinition> languages;
 
     // See the address-stability contract above: constructed via emplace(),
     // never reassigned wholesale.

@@ -595,3 +595,38 @@ TEST_CASE("brace expansion is translation-capped, however deeply the model nests
     CHECK_FALSE(translated.has_value());
     CHECK(elapsed < std::chrono::seconds(2));
 }
+
+// --- permission disclosure ----------------------------------------------------
+//
+// Regression: the base Tool::Disclose default named only the tool
+// ("glob"/"grep"), never the pattern or search root -- both ReadOnly, so
+// usually pre-allowed, but an out-of-workdir path or a stricter
+// fallback.read_only still raises this prompt, and it should say what it's
+// about to read.
+
+TEST_CASE("glob discloses the pattern and search root", "[tools_search][glob_tool][disclosure]") {
+    Fixture f;
+    auto tool = tools_search::MakeGlobTool(f.settings);
+    auto ctx = f.Context();
+    const auto disclosure = tool->Disclose({{"pattern", "*.cpp"}, {"path", "src"}}, ctx);
+    CHECK(disclosure.summary.find("*.cpp") != std::string::npos);
+    CHECK(disclosure.summary.find("src") != std::string::npos);
+}
+
+TEST_CASE("glob's disclosure defaults the search root to '.'", "[tools_search][glob_tool][disclosure]") {
+    Fixture f;
+    auto tool = tools_search::MakeGlobTool(f.settings);
+    auto ctx = f.Context();
+    const auto disclosure = tool->Disclose({{"pattern", "*.cpp"}}, ctx);
+    CHECK(disclosure.summary.find("*.cpp") != std::string::npos);
+    CHECK(disclosure.summary.find(".") != std::string::npos);
+}
+
+TEST_CASE("grep discloses the pattern and search root", "[tools_search][grep_tool][disclosure]") {
+    Fixture f;
+    auto tool = tools_search::MakeGrepTool(f.settings);
+    auto ctx = f.Context();
+    const auto disclosure = tool->Disclose({{"pattern", "TODO"}, {"path", "src"}}, ctx);
+    CHECK(disclosure.summary.find("TODO") != std::string::npos);
+    CHECK(disclosure.summary.find("src") != std::string::npos);
+}

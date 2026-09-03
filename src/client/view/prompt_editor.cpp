@@ -24,9 +24,23 @@ std::string MentionPrefixAt(const std::string& text) {
     return text.substr(at + 1);
 }
 
-// The command name still being typed: content IS '/' + non-space characters,
-// and nothing else. Once whitespace lands the command is chosen and editing
-// its arguments is nobody's autocomplete business.
+// True while `text` is STILL a command name being typed: '/' plus zero or
+// more non-space characters, and nothing else. Once whitespace lands the
+// command is chosen and editing its arguments is nobody's autocomplete
+// business. "Zero" is deliberate -- a bare "/" is the START of typing a
+// command name, not a finished non-command line -- see CommandPrefixOf below,
+// which used to conflate that with "not a command line at all" (both
+// returned "").
+bool IsCommandNameInProgress(const std::string& text) {
+    if (text.empty() || text.front() != '/') return false;
+    for (std::size_t i = 1; i < text.size(); ++i) {
+        if (std::isspace(static_cast<unsigned char>(text[i]))) return false;
+    }
+    return true;
+}
+
+// The command name typed so far, once IsCommandNameInProgress is true (an
+// empty result then means "match every command", not "not a command line").
 std::string CommandPrefixOf(const std::string& text) {
     if (text.empty() || text.front() != '/') return "";
     for (std::size_t i = 1; i < text.size(); ++i) {
@@ -64,7 +78,7 @@ ftxui::Component MakePromptEditor(
     const auto accept_suggestion = [&] {
         if (state.suggestion_selected < static_cast<int>(state.completions.size())) {
             const std::string& completion = state.completions[state.suggestion_selected];
-            if (!CommandPrefixOf(state.content).empty()) {
+            if (IsCommandNameInProgress(state.content)) {
                 // A command line IS its prefix: whole-line replacement.
                 state.content = completion;
                 state.cursor_position = static_cast<int>(state.content.size());
@@ -105,6 +119,43 @@ ftxui::Component MakePromptEditor(
     auto with_events = CatchEvent(
         input, [&state, accept_suggestion, on_text, on_command,
                 command_catalog](const Event& event) {
+        // Readline line-editing: ctrl+a/e/u/k, the bindings terminal users
+        // reach for by reflex. Operate on the WHOLE buffer, not a visual
+        // line, matching FTXUI's own Home/End (input.cpp: cursor_position() =
+        // 0 / content->size()) -- ctrl+a/e are exactly those two keys under
+        // another name, so a multi-line prompt behaves the same either way.
+        // ctrl+w (delete word backward, also standard readline) is
+        // deliberately NOT here: it is already the global tab.close binding
+        // (keybindings.cpp), and the editor's CatchEvent runs before that
+        // dispatch -- claiming it here would silently break closing a tab
+        // while the prompt has focus, which is effectively always.
+        // Byte encoding matches key_event_parser.cpp's CtrlLetter exactly
+        // (ctrl+<letter> is ASCII letter - 'a' + 1); duplicated rather than
+        // shared because that helper is file-local to key_event_parser.cpp.
+        static const Event kCtrlA = Event::Character(std::string(1, '\x01'));
+        static const Event kCtrlE = Event::Character(std::string(1, '\x05'));
+        static const Event kCtrlK = Event::Character(std::string(1, '\x0B'));
+        static const Event kCtrlU = Event::Character(std::string(1, '\x15'));
+        if (event == kCtrlA) {
+            state.cursor_position = 0;
+            return true;
+        }
+        if (event == kCtrlE) {
+            state.cursor_position = static_cast<int>(state.content.size());
+            return true;
+        }
+        if (event == kCtrlU || event == kCtrlK) {
+            const auto pos = std::clamp<std::size_t>(
+                static_cast<std::size_t>(state.cursor_position), 0, state.content.size());
+            if (event == kCtrlU) {
+                state.content.erase(0, pos);
+                state.cursor_position = 0;
+            } else {
+                state.content.erase(pos);
+            }
+            return true;
+        }
+
         // Alt+Enter (ESC CR) inserts a newline -- the portable multi-line key.
         static const Event kAltEnterCr = Event::Character("\x1b\r");
         static const Event kAltEnterLf = Event::Character("\x1b\n");
@@ -130,9 +181,29 @@ ftxui::Component MakePromptEditor(
         // user was reaching for `/compact` from the open list was a silent
         // trap. Only when the list is CLOSED does Enter fall through to
         // submit, unchanged from before.
+        //
+        // EXCEPT when the input already equals the selected completion
+        // (trimmed of the trailing space a command completion adds): the
+        // user typed the whole command out by hand, so this Enter fell
+        // through and hit the (now-identical) "accept" path, which just
+        // reinserted the same text and consumed the keystroke -- typing
+        // "/help" in full and pressing Enter silently did nothing, requiring
+        // a second Enter to actually submit. Falling through to the ordinary
+        // submit path below instead.
         if (state.list_open && !state.suggestions.empty() && event == Event::Return) {
-            accept_suggestion();
-            return true;
+            bool already_typed = false;
+            if (state.suggestion_selected < static_cast<int>(state.completions.size())) {
+                std::string completed = state.completions[state.suggestion_selected];
+                while (!completed.empty() &&
+                       std::isspace(static_cast<unsigned char>(completed.back()))) {
+                    completed.pop_back();
+                }
+                already_typed = (completed == state.content);
+            }
+            if (!already_typed) {
+                accept_suggestion();
+                return true;
+            }
         }
         if (event == Event::Return) {
             std::string line = state.content;
@@ -209,33 +280,28 @@ ftxui::Component MakePromptEditor(
             return true;
         }
 
-        // After every character edit: either the @-mention debounce re-arms
-        // (the query itself fires from the render gate below -- no timers, no
-        // threads; frame timing carries it) or, for a '/'+name prefix, the
-        // LOCAL command catalog filters immediately.
+        // After every character edit, the @-mention debounce re-arms (the
+        // query itself fires from the render gate below -- no timers, no
+        // threads; frame timing carries it).
+        //
+        // The '/'+name command catalog match used to run HERE too, reading
+        // state.content -- but CatchEventBase runs this handler BEFORE
+        // passing the event to the wrapped Input (see ftxui's
+        // catch_event.cpp: `if (on_event_(event)) return true; else return
+        // ComponentBase::OnEvent(event);`), so the character just typed
+        // had NOT been inserted into state.content yet. The match was
+        // therefore always one keystroke stale -- invisible for a multi-
+        // character prefix (the NEXT keystroke's check caught up), but total
+        // silence for a BARE "/": there is no next keystroke to catch it up,
+        // so the single biggest discoverability affordance in the app
+        // showed nothing until a second character landed. It now runs at
+        // render time instead (below, in the Renderer), reading content
+        // AFTER Input has applied every event so far this frame.
         if (event.is_character()) {
             // Editing a recalled line exits browsing -- it is no longer the
             // same text as history[cursor], so further up/down should not
             // silently discard what was just typed.
             state.history_cursor.reset();
-            const std::string command_prefix = CommandPrefixOf(state.content);
-            if (!command_prefix.empty() && command_catalog != nullptr) {
-                state.suggestions.clear();
-                state.completions.clear();
-                for (const auto& entry : command_catalog()) {
-                    if (entry.name.rfind(command_prefix, 0) != 0) continue;
-                    std::string display = "/" + entry.name + " -- " + entry.summary;
-                    if (entry.submits_prompt) display += "  (submits a prompt as your turn)";
-                    if (entry.read_only) display += "  (read-only)";
-                    state.suggestions.push_back(std::move(display));
-                    state.completions.push_back("/" + entry.name + " ");
-                }
-                state.list_open = !state.suggestions.empty();
-                state.suggestion_selected = 0;
-                state.query_pending = false;
-                return false;   // the character itself still goes to the Input
-            }
-
             state.pending_prefix = MentionPrefixAt(state.content);
             state.query_pending = !state.pending_prefix.empty();
             state.query_at = std::chrono::steady_clock::now() + kSuggestDebounce;
@@ -253,6 +319,38 @@ ftxui::Component MakePromptEditor(
 
     return Renderer(with_events, [=, &state, &theme] {
         using namespace ftxui;
+
+        // The '/'+name command catalog match: read HERE, after Input has
+        // applied every event so far this frame, not from the character
+        // handler above (see its comment for why that read was stale).
+        // IsCommandNameInProgress, not "prefix non-empty": a bare "/" has an
+        // EMPTY prefix (CommandPrefixOf("/") == ""), and that must still
+        // mean "list every command" (rfind("", 0) == 0 matches any name),
+        // not "not a command line".
+        if (IsCommandNameInProgress(state.content) && command_catalog != nullptr) {
+            const std::string command_prefix = CommandPrefixOf(state.content);
+            std::vector<std::string> suggestions;
+            std::vector<std::string> completions;
+            for (const auto& entry : command_catalog()) {
+                if (entry.name.rfind(command_prefix, 0) != 0) continue;
+                std::string display = "/" + entry.name + " -- " + entry.summary;
+                if (entry.submits_prompt) display += "  (submits a prompt as your turn)";
+                if (entry.read_only) display += "  (read-only)";
+                suggestions.push_back(std::move(display));
+                completions.push_back("/" + entry.name + " ");
+            }
+            // Only touch the selection when the matched SET actually
+            // changed -- this runs every frame (~20 Hz), and resetting
+            // suggestion_selected unconditionally would undo an ArrowUp/
+            // ArrowDown the user just made while the prefix stayed put.
+            if (suggestions != state.suggestions) {
+                state.suggestions = std::move(suggestions);
+                state.completions = std::move(completions);
+                state.suggestion_selected = 0;
+            }
+            state.list_open = !state.suggestions.empty();
+            state.query_pending = false;
+        }
 
         // The debounce gate: once the delay has passed and the prefix is
         // unchanged, ask the server. suggest() returning nullopt means the
@@ -283,10 +381,21 @@ ftxui::Component MakePromptEditor(
                 auto item = text("  " + state.suggestions[i]);
                 item |= color(selected ? theme.ColorFor("border_focused")
                                        : theme.ColorFor("system_message"));
-                if (selected) item |= bold;
+                if (selected) {
+                    item |= bold;
+                    // The DOM scroll anchor (not keyboard focus -- see
+                    // ChatView's row cursor for the same pattern): keeps the
+                    // selected row inside the capped, scrollable viewport
+                    // below as Up/Down moves past its edge.
+                    item |= focus;
+                }
                 items.push_back(std::move(item));
             }
-            lines.push_back(vbox(std::move(items)));
+            // Capped and scrollable: an unbounded list (a broad "/" or "@"
+            // prefix against a large catalog) used to grow as tall as it
+            // needed, squeezing the transcript above it out of view.
+            lines.push_back(vbox(std::move(items)) | size(HEIGHT, LESS_THAN, 8) | yframe |
+                            vscroll_indicator);
         }
         return vbox(std::move(lines));
     });

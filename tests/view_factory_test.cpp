@@ -77,6 +77,32 @@ v1::StoredMessage StoredUserText(int64_t seq, const std::string& text) {
     return stored;
 }
 
+// A completed call to a tool with no NAME-specific ToolResultRenderer
+// registered -- true of every BUILT-IN tool (bash, edit, read, ...), since
+// that registry is plugin-only. Two messages: the assistant's tool_use (seq)
+// and the user's tool_result (seq+1) that resolves it into ONE ToolActivity
+// row (ChatRowsFromMessages drops the bare tool_use row once its result is
+// in the same page).
+std::vector<v1::StoredMessage> StoredToolCallAndResult(int64_t seq, const std::string& tool_name,
+                                                        const std::string& result_text) {
+    v1::StoredMessage call;
+    call.set_seq(seq);
+    call.mutable_message()->set_role(v1::ROLE_ASSISTANT);
+    auto* use = call.mutable_message()->add_content()->mutable_tool_use();
+    use->set_id("call-1");
+    use->set_name(tool_name);
+
+    v1::StoredMessage result;
+    result.set_seq(seq + 1);
+    result.mutable_message()->set_role(v1::ROLE_USER);
+    auto* tool_result = result.mutable_message()->add_content()->mutable_tool_result();
+    tool_result->set_tool_use_id("call-1");
+    tool_result->add_content()->mutable_text()->set_text(result_text);
+
+    // Descending by seq, newest first -- matches a real scrollback page.
+    return {std::move(result), std::move(call)};
+}
+
 SessionState::Snapshot SnapshotWithText(const std::string& session_id, uint64_t version,
                                         const std::string& text) {
     SessionState::Snapshot snap;
@@ -329,6 +355,33 @@ TEST_CASE("permission modal: Escape denies without recording grants") {
     CHECK_FALSE(*answered);
 }
 
+TEST_CASE("permission modal: with grants offered, the footer advertises tab/space") {
+    const auto theme = TestTheme();
+    GrantToggles toggles;
+    const auto request = MakePermissionRequest();  // has two grants
+    auto modal = MakePermissionModal(request, toggles, theme, [](bool) {});
+    const auto frame = RenderFrame(modal);
+    CHECK(frame.find("tab/arrow: move") != std::string::npos);
+    CHECK(frame.find("toggle grants") != std::string::npos);
+}
+
+TEST_CASE("permission modal: with no grants offered, the footer omits the dead "
+          "tab/space affordances") {
+    // Regression: the footer used to always advertise "tab/arrow: move" and
+    // "space: toggle grants", even on a request with nothing to move between
+    // or toggle -- dead keys advertised on the security-decision surface.
+    const auto theme = TestTheme();
+    GrantToggles toggles;
+    auto request = MakePermissionRequest();
+    request.grants.clear();
+    auto modal = MakePermissionModal(request, toggles, theme, [](bool) {});
+    const auto frame = RenderFrame(modal);
+    CHECK(frame.find("enter: allow") != std::string::npos);
+    CHECK(frame.find("esc: deny") != std::string::npos);
+    CHECK(frame.find("tab/arrow: move") == std::string::npos);
+    CHECK(frame.find("toggle grants") == std::string::npos);
+}
+
 // ---------------------------------------------------------------------------
 // Confirmation modal
 // ---------------------------------------------------------------------------
@@ -491,6 +544,39 @@ TEST_CASE("chat view: a session switch at an EQUAL transcript version re-renders
     CHECK(frame_b.find("alpha") == std::string::npos);
 }
 
+TEST_CASE("chat view: a completed tool call with no name-specific renderer still renders "
+         "(falls back to the message-kind default)") {
+    const auto theme = TestTheme();
+    minimal::client::MarkdownRenderer renderer(&theme, nullptr);
+    plugins::MarkdownEngineRegistry engine_registry;
+    plugins::RegisterDefaultMarkdownEngine(engine_registry, renderer);
+    auto& engine = *engine_registry.engine;
+    plugins::MessageRendererRegistry messages;
+    plugins::ToolResultRendererRegistry tool_renderers;   // deliberately empty: no plugin
+    plugins::RegisterCoreMessageRenderers(messages);
+    plugins::RegisterCoreAgentMarkdownRenderer(messages, engine);
+
+    ChatView view(theme, messages, tool_renderers);
+    auto stream = engine.MakeStream();
+
+    SessionState::Snapshot snap;
+    snap.session_id = "session-tool";
+    snap.transcript_version = 1;
+    snap.scrollback_page = std::make_shared<const std::vector<v1::StoredMessage>>(
+        StoredToolCallAndResult(1, "bash", "total 0\ndrwxr-xr-x  2 x  x  64 x x"));
+
+    const auto frame = RenderElement(view.Render(snap, *stream));
+    CHECK(frame.find("bash") != std::string::npos);
+
+    // ToolActivity rows collapse by default (one-liner; expandable body) --
+    // focus and expand this one to verify the fallback renderer's body
+    // content, not just its header.
+    view.MoveRowFocus(0);
+    view.ToggleCollapseFocused();
+    const auto expanded = RenderElement(view.Render(snap, *stream));
+    CHECK(expanded.find("total 0") != std::string::npos);
+}
+
 TEST_CASE("chat view: ScrollBy moves the viewport off the pinned-to-newest default") {
     // Pre-fix, Render() always focus()ed the LAST row unconditionally, so no
     // key or mouse event could ever change what's visible -- this is the
@@ -632,6 +718,10 @@ TEST_CASE("prompt editor: Enter accepts the highlighted suggestion instead of su
     for (const char c : std::string_view("/comp")) {
         REQUIRE(SendEvent(editor, ftx::Event::Character(std::string{c})));
     }
+    // The command-catalog match runs at RENDER time (it must read content
+    // AFTER Input applies each keystroke -- see MakePromptEditor's comment on
+    // why the character handler itself would read one keystroke stale).
+    RenderFrame(editor);
     REQUIRE(state.list_open);
     REQUIRE_FALSE(state.suggestions.empty());
 
@@ -647,6 +737,92 @@ TEST_CASE("prompt editor: Enter accepts the highlighted suggestion instead of su
     REQUIRE(SendEvent(editor, ftx::Event::Return));
     REQUIRE(commands.size() == 1);
     CHECK(commands[0] == "/compact");
+}
+
+TEST_CASE("prompt editor: Enter submits in ONE press when the user typed the "
+          "whole command by hand", "[prompt_editor][regression]") {
+    // Regression: with the list open (any prefix match keeps it open, even
+    // an EXACT one), Enter always ran the "accept suggestion" branch first --
+    // for a fully-typed "/help", that reinserted the identical text and
+    // consumed the keystroke, so submitting required a SECOND Enter. This
+    // typed the full name in one call to SendEvent (character by character),
+    // then presses Enter exactly once.
+    const auto theme = TestTheme();
+    PromptEditorState state;
+    std::vector<std::string> commands;
+    const std::vector<CommandCatalogEntry> catalog = {
+        {"help", "list commands", true, false}, {"help2", "unrelated", true, false}};
+    auto editor = MakePromptEditor(
+        theme, state, [](const std::string&) {}, [&](const std::string& c) { commands.push_back(c); },
+        [](const std::string&) { return std::vector<std::string>{}; },
+        [&catalog]() -> const std::vector<CommandCatalogEntry>& { return catalog; });
+
+    for (const char c : std::string_view("/help")) {
+        REQUIRE(SendEvent(editor, ftx::Event::Character(std::string{c})));
+    }
+    // Render once so the catalog match (render-time -- see MakePromptEditor's
+    // comment) actually populates state.suggestions before Enter is sent;
+    // otherwise this Enter would trivially fall through an EMPTY list rather
+    // than exercising the "already typed the selection" fallthrough below.
+    RenderFrame(editor);
+    REQUIRE(state.list_open);   // "/help" is still a PREFIX of "/help2"
+    REQUIRE_FALSE(state.suggestions.empty());
+
+    REQUIRE(SendEvent(editor, ftx::Event::Return));
+    REQUIRE(commands.size() == 1);
+    CHECK(commands[0] == "/help");
+}
+
+TEST_CASE("prompt editor: a bare '/' lists every command", "[prompt_editor][regression]") {
+    // Regression: CommandPrefixOf("/") returns "" (empty prefix), and the
+    // catalog-matching guard used to read "!prefix.empty()" -- so a bare '/'
+    // (the single biggest discoverability affordance in the app) showed no
+    // suggestions at all, indistinguishable from "not a command line".
+    const auto theme = TestTheme();
+    PromptEditorState state;
+    const std::vector<CommandCatalogEntry> catalog = {{"help", "list commands", true, false},
+                                                       {"compact", "compact history", false, false}};
+    auto editor = MakePromptEditor(
+        theme, state, [](const std::string&) {}, [](const std::string&) {},
+        [](const std::string&) { return std::vector<std::string>{}; },
+        [&catalog]() -> const std::vector<CommandCatalogEntry>& { return catalog; });
+
+    REQUIRE(SendEvent(editor, ftx::Event::Character("/")));
+    RenderFrame(editor);   // the catalog match runs at render time
+    CHECK(state.list_open);
+    REQUIRE(state.suggestions.size() == 2);
+}
+
+TEST_CASE("prompt editor: ctrl+a/e/u/k are readline-style line editing", "[prompt_editor]") {
+    const auto theme = TestTheme();
+    PromptEditorState state;
+    auto editor = MakePromptEditor(
+        theme, state, [](const std::string&) {}, [](const std::string&) {},
+        [](const std::string&) { return std::vector<std::string>{}; }, nullptr);
+
+    state.content = "hello world";
+    state.cursor_position = 5;   // between "hello" and " world"
+
+    SECTION("ctrl+k kills from the cursor to the end") {
+        REQUIRE(SendEvent(editor, ftx::Event::Character(std::string(1, '\x0B'))));
+        CHECK(state.content == "hello");
+        CHECK(state.cursor_position == 5);
+    }
+    SECTION("ctrl+u kills from the start to the cursor") {
+        REQUIRE(SendEvent(editor, ftx::Event::Character(std::string(1, '\x15'))));
+        CHECK(state.content == " world");
+        CHECK(state.cursor_position == 0);
+    }
+    SECTION("ctrl+a moves the cursor to the start") {
+        REQUIRE(SendEvent(editor, ftx::Event::Character(std::string(1, '\x01'))));
+        CHECK(state.content == "hello world");   // unchanged
+        CHECK(state.cursor_position == 0);
+    }
+    SECTION("ctrl+e moves the cursor to the end") {
+        REQUIRE(SendEvent(editor, ftx::Event::Character(std::string(1, '\x05'))));
+        CHECK(state.content == "hello world");   // unchanged
+        CHECK(state.cursor_position == static_cast<int>(state.content.size()));
+    }
 }
 
 TEST_CASE("prompt editor: the stale suggestion list is not completable mid-debounce") {

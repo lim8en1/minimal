@@ -13,6 +13,7 @@ namespace minimal::tools_fs {
 namespace {
 
 using tools::ConfineResult;
+using tools::PermissionDisclosure;
 using tools::ToolCategory;
 using tools::ToolContext;
 using tools::ToolResult;
@@ -99,6 +100,23 @@ public:
         return ExtractPathField(input);
     }
 
+    // The base default (spec().name -- the bare word "read") disclosed
+    // NOTHING about the target: the permission prompt asked the user to
+    // authorize reading a file without saying which one, though the very
+    // next transcript row (post-approval) named it. Named here instead, at
+    // the moment that actually matters.
+    PermissionDisclosure Disclose(const nlohmann::json& input, const ToolContext&) const override {
+        PermissionDisclosure disclosure;
+        const auto path = ExtractPathField(input);
+        if (!path) {
+            disclosure.summary = "read: <invalid input>";
+            disclosure.complete = false;
+            return disclosure;
+        }
+        disclosure.summary = "read: " + *path;
+        return disclosure;
+    }
+
     ToolResult execute(const nlohmann::json& input, ToolContext& ctx) override {
         std::string error;
         const auto resolved = ResolveForUse(ctx, input, /*must_exist=*/true, error);
@@ -164,6 +182,25 @@ public:
     bool path_confinement_supported() const override { return true; }
     std::optional<std::string> ExtractPath(const nlohmann::json& input) const override {
         return ExtractPathField(input);
+    }
+
+    // See ReadTool::Disclose: the base default named only the tool, never
+    // the file this MUTATES -- the least informative case for the tool
+    // category with the most consequence.
+    PermissionDisclosure Disclose(const nlohmann::json& input, const ToolContext&) const override {
+        PermissionDisclosure disclosure;
+        const auto path = ExtractPathField(input);
+        if (!path) {
+            disclosure.summary = "write: <invalid input>";
+            disclosure.complete = false;
+            return disclosure;
+        }
+        std::string size_note;
+        if (const auto it = input.find("content"); it != input.end() && it->is_string()) {
+            size_note = " (" + std::to_string(it->get<std::string>().size()) + " bytes)";
+        }
+        disclosure.summary = "write: " + *path + size_note + " -- creates or overwrites this file";
+        return disclosure;
     }
 
     ToolResult execute(const nlohmann::json& input, ToolContext& ctx) override {
@@ -236,6 +273,26 @@ public:
         // declared (write) category, which is the safe direction anyway.
         if (CommandOf(input) == "view") return ToolCategory::ReadOnly;
         return std::nullopt;
+    }
+
+    // See ReadTool::Disclose. `command` is named alongside the path: "edit"
+    // alone doesn't say whether this views, creates, or overwrites part of a
+    // file, and those are different questions to authorize.
+    PermissionDisclosure Disclose(const nlohmann::json& input, const ToolContext&) const override {
+        PermissionDisclosure disclosure;
+        const auto path = ExtractPathField(input);
+        const auto command = CommandOf(input);
+        if (!path || command.empty()) {
+            disclosure.summary = "edit: <invalid input>";
+            disclosure.complete = false;
+            return disclosure;
+        }
+        std::string note;
+        if (command == "create") note = " -- creates this file";
+        else if (command == "str_replace") note = " -- replaces text in this file";
+        else if (command == "insert") note = " -- inserts text into this file";
+        disclosure.summary = "edit (" + command + "): " + *path + note;
+        return disclosure;
     }
 
     ToolResult execute(const nlohmann::json& input, ToolContext& ctx) override {

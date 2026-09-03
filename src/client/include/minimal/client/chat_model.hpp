@@ -61,7 +61,27 @@ struct ChatRow {
     // between the pair) -- the renderer shows the input summary instead of a
     // body. A result-bearing row never sets it.
     bool tool_pending = false;
+    // The originating message's StoredMessage.created_at_unix_ms; 0 for a
+    // synthetic row (seq == -1), which has no backing message to date it.
+    // Rendered by ChatView itself (layout, not per-kind presentation), never
+    // by a MessageRenderer -- see chat_view.cpp.
+    int64_t created_at_unix_ms = 0;
 };
+
+// Formats a wall-clock timestamp for a chat row: local "HH:MM:SS", or empty
+// for 0 (no timestamp known -- a synthetic row). Local time, not UTC: this is
+// what a human reads next to a message they just watched arrive.
+std::string FormatClockTime(int64_t unix_ms);
+
+// The kind's own built-in collapse default -- the least-specific tier of the
+// per-row/global/kind-default resolution (ChatView owns the other two
+// tiers). Shared between ChatView (which resolves the state) and core's
+// renderers (which render collapsed vs. expanded from it), so the threshold
+// cannot drift between "starts collapsed" and "looks collapsed". Thinking is
+// always collapsed by default; ToolActivity and UserAttachment collapse only
+// once their content passes a small size threshold -- most tool calls and
+// most mentions are short enough to just read.
+bool CollapsedByDefault(const ChatRow& row);
 
 // Rows in DISPLAY order (oldest first) from a DESCENDING-seq scrollback page --
 // exactly what GetMessages returns, so no caller re-sorts. User messages that

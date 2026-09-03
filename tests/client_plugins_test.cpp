@@ -102,7 +102,8 @@ PluginCandidate Candidate(const std::string& file, nlohmann::json config = {}) {
 // Minimal in-test implementations for registry-semantics tests.
 class StubMessageRenderer final : public MessageRenderer {
 public:
-    ftxui::Element Render(const ChatRow&, const Theme&) const override {
+    ftxui::Element Render(const ChatRow&, const Theme&,
+                          const RowRenderContext&) const override {
         return ftxui::text("stub");
     }
 };
@@ -238,7 +239,7 @@ TEST_CASE("the client loader loads a real plugin through a real dlopen",
     REQUIRE(fixtures->status_segments.segments().size() == 1);
     // Config echo: the segment renders THIS plugin's own config slice, through
     // a real dlopen.
-    CHECK(fixtures->status_segments.segments().front()->Render() == "hello");
+    CHECK(fixtures->status_segments.segments().front()->Render("") == "hello");
     CHECK(fixtures->status_segments.Find("fixture_seg") != nullptr);
 
     REQUIRE(fixtures->renderers.Find("fixture_tool") != nullptr);
@@ -459,7 +460,7 @@ TEST_CASE("host seams survive the load: a plugin raises attention AFTER LoadAll"
     REQUIRE(segment != nullptr);
 
     // Post-load use: the load is long over; the sink must still be alive.
-    CHECK(segment->Render() == "seam-check");
+    CHECK(segment->Render("") == "seam-check");
     CHECK(fixtures->attention.TabRaised("seam-session"));
 }
 

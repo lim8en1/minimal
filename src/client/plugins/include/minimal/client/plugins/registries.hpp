@@ -93,6 +93,17 @@ private:
     bool global_ = false;
 };
 
+// --- Row render context (collapse state) ------------------------------------
+//
+// Travels with every MessageRenderer/ToolResultRenderer call, same as `theme`
+// -- the "render-time inputs travel with the call" rule above. `collapsed` is
+// the row's RESOLVED state (the three-tier per-row/global/kind-default
+// resolution lives in ChatView, not here): a renderer decides what collapsed
+// vs. expanded LOOKS like for its own kind, never whether a row is collapsed.
+struct RowRenderContext {
+    bool collapsed = false;
+};
+
 // --- Tool-result renderers (keyed by tool name) -----------------------------
 
 // A renderer for one tool's RESULT row -- "a diff view for `edit`", per
@@ -108,7 +119,8 @@ public:
     // file path, not just the hunk text (ARCHITECTURE.md). `tool_input` is the
     // JSON the model sent with the call; empty object when unavailable.
     virtual ftxui::Element Render(const nlohmann::json& tool_input, std::string_view result_text,
-                                  bool is_error, const Theme& theme) const = 0;
+                                  bool is_error, const Theme& theme,
+                                  const RowRenderContext& ctx) const = 0;
 };
 
 // --- Message-kind presentation (keyed by ChatRowKind) -----------------------
@@ -123,7 +135,8 @@ public:
 class MessageRenderer {
 public:
     virtual ~MessageRenderer() = default;
-    virtual ftxui::Element Render(const ChatRow& row, const Theme& theme) const = 0;
+    virtual ftxui::Element Render(const ChatRow& row, const Theme& theme,
+                                  const RowRenderContext& ctx) const = 0;
 };
 
 // --- Status-bar segments (keyed by segment id) ------------------------------
@@ -134,13 +147,19 @@ public:
 // the keybindings.json rule for names unknown at compile time.
 //
 // Render() is called on the render thread each frame (~20 Hz): it must be
-// cheap and must never block. Color comes from theme roles, never hardcoded;
-// the v1 contract is text (the core segments are strings too).
+// cheap and must never block -- a segment that needs live data (a plugin RPC,
+// say) fetches it on its OWN background thread and has Render() read a cached
+// answer, never call out synchronously from here. Color comes from theme
+// roles, never hardcoded; the v1 contract is text (the core segments are
+// strings too). `focused_session_id` is the render-time input every other
+// registry already takes (see the file banner) -- a segment that cares about
+// THE focused tab (a per-session token/cost readout, say) has no other way to
+// learn which one that is; empty when no tab is focused.
 class StatusSegment {
 public:
     virtual ~StatusSegment() = default;
     virtual std::string_view id() const = 0;
-    virtual std::string Render() const = 0;
+    virtual std::string Render(const std::string& focused_session_id) const = 0;
 };
 
 // --- Syntax grammars (additive, keyed by language) --------------------------

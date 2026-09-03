@@ -35,6 +35,13 @@ int ModalBodyHeightBudget() {
     return dimy > 8 ? dimy - 6 : 10;
 }
 
+// One column of breathing room on each side: window() draws its border
+// flush against the content otherwise, so transcript-like text (a bash
+// command, a file path) reads as if it were spilling past the frame.
+Element PadHorizontal(Element content) {
+    return ftxui::hbox({ftxui::text(" "), std::move(content) | ftxui::flex, ftxui::text(" ")});
+}
+
 }  // namespace
 
 ftxui::Component MakePermissionModal(const PendingPermission& request, GrantToggles& toggles,
@@ -129,16 +136,35 @@ ftxui::Component MakePermissionModal(const PendingPermission& request, GrantTogg
             rows[2] |= focus;   // the summary
         }
 
+        // The footer only advertises affordances that actually do something:
+        // tab/arrow and space are dead keys on a request with no grants to
+        // move between or toggle, and advertising them anyway just invites
+        // a press that does nothing. Two-space separators, matching the
+        // pickers' own hint lines (session_picker.cpp etc.), not the three
+        // this line used to use -- also just enough narrower to keep the
+        // full list on one row once interior padding (below) is in play.
+        std::string footer_text = "enter: allow  ·  esc: deny";
+        if (!request.grants.empty()) footer_text += "  ·  tab/arrow: move  ·  space: toggle grants";
+
         // Content scrolls; the keyboard hints stay pinned below it -- visible
         // no matter how much content there is (the clipped-footer bug).
+        // paragraph(), not text(): with every affordance listed, this line
+        // can run past the modal's own width (interior padding narrows it
+        // further) -- text() would silently clip the tail (the exact "toggle
+        // grants" the user needs), paragraph() wraps onto a second line.
         return window(text(" permission "),
-                      vbox({
+                      PadHorizontal(vbox({
                           vbox(std::move(rows)) | yframe | vscroll_indicator |
                               size(HEIGHT, LESS_THAN, ModalBodyHeightBudget()),
-                          text("enter: allow   ·   esc: deny   ·   tab/arrow: move   ·   space: toggle grants") |
-                              dim,
-                      })) |
-               size(WIDTH, LESS_THAN, 80) | color(theme.ColorFor("attention"));
+                          separator(),
+                          paragraph(footer_text) | dim,
+                      }))) |
+               // 82, not 80: PadHorizontal above spends 2 columns of the
+               // modal's own width on the new interior margin -- widening
+               // the cap by the same 2 keeps the footer's actual usable
+               // width (and therefore its one-line layout) unchanged from
+               // before the margin was added.
+               size(WIDTH, LESS_THAN, 82) | color(theme.ColorFor("attention"));
     });
     // RunTui's on_answer reads toggles.GrantedKeys(request) -- the filtered
     // keys ride along from state it owns, so the modal never mints a key.
@@ -192,12 +218,13 @@ ftxui::Component MakeConfirmationModal(const PendingConfirmation& request, const
         // at all when the wire request offers no cancel option -- see the
         // CatchEvent below.)
         return window(text(" confirm "),
-                      vbox({
+                      PadHorizontal(vbox({
                           vbox(std::move(rows)) | yframe | vscroll_indicator |
                               size(HEIGHT, LESS_THAN, ModalBodyHeightBudget()),
+                          has_cancel ? separator() : emptyElement(),
                           has_cancel ? text("esc: cancel") | dim : emptyElement(),
-                      })) |
-               size(WIDTH, LESS_THAN, 70) | color(theme.ColorFor("attention"));
+                      }))) |
+               size(WIDTH, LESS_THAN, 72) | color(theme.ColorFor("attention"));  // see the 82 note above
     });
     // Escape picks the "cancel" option when the modal offers one: both
     // destructive confirms do, and the picker/permission modals already honor

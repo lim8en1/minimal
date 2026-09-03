@@ -23,6 +23,8 @@ const std::unordered_map<std::string, std::string>& DefaultBindings() {
         {"jump.attention", "alt+a"},
         {"session.picker", "ctrl+o"},
         {"agent.picker", "alt+g"},
+        {"model.picker", "alt+m"},
+        {"help.overlay", "f1"},
         {"permission.cycle", "shift+tab"},
         {"panel.toggle", "ctrl+t"},
         {"tab.close", "ctrl+w"},
@@ -30,6 +32,19 @@ const std::unordered_map<std::string, std::string>& DefaultBindings() {
         {"chat.scroll_up", "ctrl+up"},
         {"chat.scroll_down", "ctrl+down"},
         {"chat.scroll_bottom", "end"},
+        // Not shift+up/down: the key parser's arrow-key branch has no
+        // distinct encoding for shift+arrow (it degrades to plain arrow,
+        // ParseKeySpec's own "ctrl+/alt+/plain only" comment) -- alt+j/k
+        // (vim-style) are actually distinguishable events instead.
+        {"chat.row_up", "alt+k"},
+        {"chat.row_down", "alt+j"},
+        {"chat.toggle_collapse", "alt+c"},
+        // Not alt+shift+c: a modified LETTER only consults `shift` in the
+        // plain case (ParseKeySpec's single-letter branch) -- combined with
+        // alt it silently drops shift and collides with plain alt+c.
+        // ctrl+alt+c is an actually distinct encoding (CtrlAltLetter).
+        {"chat.toggle_collapse_all", "ctrl+alt+c"},
+        {"chat.toggle_timestamps", "alt+t"},
         {"turn.cancel", "escape"},
         {"app.quit", "ctrl+q"},
     };

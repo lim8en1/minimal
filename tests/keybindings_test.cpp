@@ -66,6 +66,32 @@ TEST_CASE("Load reads the user's file and fills only what it omits", "[keybindin
     CHECK(kb.KeyFor("app.quit") == "ctrl+q");
 }
 
+// Regression: bundled/keybindings.json (the file `cmake --install` copies
+// into a fresh config dir) fell behind DefaultBindings() by six actions --
+// Load's own default-filling (above) means the app still WORKED with the
+// missing ones, but a user reading their own keybindings.json to see what's
+// bound would never learn those six existed at all. This is the assertion
+// Load's tolerance can't provide: the SHIPPED FILE, not just the code
+// defaults, must name every core action.
+TEST_CASE("bundled/keybindings.json has an entry for every core action",
+          "[keybindings]") {
+    std::ifstream in(std::filesystem::path(MINIMAL_BUNDLED_DIR) / "keybindings.json");
+    REQUIRE(in.is_open());
+    const std::string contents((std::istreambuf_iterator<char>(in)),
+                               std::istreambuf_iterator<char>());
+    const auto bundled = client::Keybindings::Parse(contents);
+
+    // A path that can never exist resolves Load to pure code defaults
+    // (its own "fresh config dir" branch) -- the code-side source of truth.
+    const auto defaults = client::Keybindings::Load("/nonexistent/minimal-keybindings-sync-check");
+
+    for (const auto& [action, key] : defaults.all()) {
+        INFO("action: " << action);
+        REQUIRE(bundled.all().count(action) == 1);
+        CHECK(bundled.KeyFor(action) == key);
+    }
+}
+
 // --- status format ----------------------------------------------------------
 
 TEST_CASE("status format splits literals from segments", "[status_format]") {

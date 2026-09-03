@@ -50,6 +50,8 @@ SessionState::Snapshot SessionState::TakeLightSnapshot(bool include_tool_output)
     }
     s.input_tokens = input_tokens_;
     s.output_tokens = output_tokens_;
+    s.cache_read_tokens = cache_read_tokens_;
+    s.cache_write_tokens = cache_write_tokens_;
     s.cancel_requested = cancel_requested_;
     s.model = model_;
     s.agent_preset = agent_preset_;
@@ -88,6 +90,8 @@ SessionState::Snapshot SessionState::TakeSnapshot() {
     s.tools = tools_;
     s.input_tokens = input_tokens_;
     s.output_tokens = output_tokens_;
+    s.cache_read_tokens = cache_read_tokens_;
+    s.cache_write_tokens = cache_write_tokens_;
     s.cancel_requested = cancel_requested_;
     s.transcript_version = transcript_version_;
     s.turn_ended = turn_ended_;
@@ -185,6 +189,8 @@ void SessionState::OnTurnCompleted(const v1::TurnCompletedEvent& evt) {
     cancel_requested_ = false;   // the interrupted turn ended -- whatever the stop reason
     input_tokens_ = evt.usage().input_tokens();
     output_tokens_ = evt.usage().output_tokens();
+    cache_read_tokens_ = evt.usage().cache_read_input_tokens();
+    cache_write_tokens_ = evt.usage().cache_creation_input_tokens();
     // Turn completion is bookkeeping, not a state transition: `Done` means the
     // SESSION ended (see OnSessionEnded), not that a turn finished -- the
     // preceding message_stop already resolved state_ (normally to Idle). An
@@ -514,6 +520,12 @@ void SessionState::OnChatSubmitted(const std::string& text) {
     // Immediate state feedback, too: the turn was ACCEPTED onto the wire, so
     // the tab is no longer Idle even before the server says anything.
     if (state_ == SessionStateKind::Idle) state_ = SessionStateKind::Working;
+    // A stale /-command notice (an old /help listing, a stale error) used to
+    // sit pinned across the WHOLE next turn -- persisted transcript rows are
+    // the record of what happened, so a status line about the LAST command
+    // has nothing to say about the new one the user just started.
+    latest_notice_.reset();
+    ++notice_seq_;
 }
 
 bool SessionState::CanLoadMore() const {

@@ -17,7 +17,6 @@ ftxui::Component MakeAgentPresetPicker(const std::vector<v1::AgentPresetSummary>
 
     const FilterableMenuSpec spec{
         .window_title = "switch agent preset",
-        .header_label = " agents ",
         .hint_line = " enter: switch  ·  esc: close",
         .status_suffix = nullptr,
         .empty_message = " (no agent presets match)",

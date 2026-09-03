@@ -17,7 +17,6 @@ ftxui::Component MakeModelPicker(const std::vector<v1::ModelSummary>& models,
 
     FilterableMenuSpec spec{
         .window_title = "switch model",
-        .header_label = " models ",
         .hint_line = " enter: switch  ·  ctrl+r: refresh discovery  ·  esc: close",
         .empty_message = " (no models match)",
     };

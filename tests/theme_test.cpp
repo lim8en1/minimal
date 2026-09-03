@@ -96,7 +96,7 @@ TEST_CASE("Bundled themes keep text roles legible on their background family") {
         "user_message",    "assistant_message", "thinking",      "system_message",
         "error",           "attention",         "syntax_keyword", "syntax_string",
         "syntax_comment",  "syntax_number",     "syntax_function", "syntax_type",
-        "syntax_operator",
+        "syntax_operator", "syntax_plain",      "banner_hint",
     };
     const struct {
         const char* name;

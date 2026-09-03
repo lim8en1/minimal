@@ -20,7 +20,7 @@ namespace minimal::client {
 namespace {
 
 constexpr const char* kDefaultStatusFormat =
-    "{version} | {session} | {tokens} | {model} | {agent} | {permission_mode}";
+    "{version} | {session} | {activity} | {tokens} | {model} | {agent} | {permission_mode}";
 
 }  // namespace
 
@@ -240,7 +240,12 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
     // in KeyFor and a string+vector+Events in ParseKeySpec, for a table that
     // never changes again after startup. keymap.Unmapped() subsumes the
     // per-action warning loop this replaces.
-    out.keymap = ResolvedKeymap::Build(keys);
+    // Kept alongside the resolved (parsed-Event) form: the keymap help
+    // overlay (help.overlay) needs the raw action->key STRINGS to display,
+    // which ResolvedKeymap does not retain (it stores parsed Event
+    // candidates, not the original spec strings).
+    out.keybindings = keys;
+    out.keymap = ResolvedKeymap::Build(out.keybindings);
     for (const auto& [action, key] : out.keymap.Unmapped()) {
         std::fprintf(stderr, "minimal: no key mapping for '%s' -> '%s'\n", action.c_str(),
                      key.c_str());
@@ -261,20 +266,21 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
     // The highlighter consults the assembled grammar table (vendored defaults
     // plus plugin additions), so a plugin's language highlights like a vendored
     // one. The renderer owns it; the engine routes fenced code through it.
-    const std::vector<minimal::client::LanguageDefinition> languages = [&] {
-        std::vector<minimal::client::LanguageDefinition> result;
-        for (const auto& grammar : out.grammar_registry.grammars()) {
-            result.push_back(minimal::client::LanguageDefinition{
-                grammar->Language(), grammar->LanguageFn(), grammar->Rules()});
-        }
-        return result;
-    }();
+    // Built INTO out.languages, not a local: SyntaxHighlighter stores a raw
+    // pointer to this vector (see the address-stability contract in the
+    // header), so its storage must outlive the highlighter, not just this
+    // function call.
+    for (const auto& grammar : out.grammar_registry.grammars()) {
+        out.languages.push_back(minimal::client::LanguageDefinition{
+            grammar->Language(), grammar->LanguageFn(), grammar->Rules()});
+    }
     // emplace, not assignment: SyntaxHighlighter stores `const Theme&`, so it
     // has no default constructor and no operator= -- it can only ever be
     // constructed in place, once, with its final arguments (see the
     // address-stability contract in the header). `*out.theme` is already at
-    // ITS final address (out.theme.emplace() ran above, on `out` itself).
-    out.highlighter.emplace(*out.theme, languages);
+    // ITS final address (out.theme.emplace() ran above, on `out` itself), and
+    // `out.languages` is too (populated in place, just above).
+    out.highlighter.emplace(*out.theme, out.languages);
 
     // Core defaults fill every slot no plugin claimed. The engine first (the
     // agent-markdown default renders through it), then the kind defaults.
