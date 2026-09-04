@@ -49,9 +49,12 @@ seeding): **[BUILD.md](BUILD.md)**.
 | `--output-format text\|jsonl` | headless output format |
 | `--signals LIST` | comma-separated signals to receive (requires `-p`) |
 | `--dangerously-bypass` | bypass permission gating |
+| `--no-autospawn` | never start a server; fail if none is reachable |
 
 `minimal-server` — the server: `--listen <path>` (socket path) and
-`--version`. Normally spawned for you.
+`--version`. Normally spawned for you by the first client that needs it; it
+exits on its own once nothing has used it for a while (sessions stay
+resumable for `sessions.detached_idle_ttl_seconds`, default 30 min).
 
 ## Configuration
 

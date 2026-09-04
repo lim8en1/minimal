@@ -98,6 +98,7 @@ std::string UsageText() {
            "                              session: 'channel/signal', 'channel' (extended\n"
            "                              channels), or 'sessions' (agent-to-agent)\n"
            "      --dangerously-bypass  skip every permission check\n"
+           "      --no-autospawn      never start a server; fail if none is reachable\n"
            "      --version\n"
            "\n"
            "SIGINT/SIGTERM during a -p turn cancels it through the protocol: the\n"
@@ -246,6 +247,8 @@ ParsedArgs ParseArgs(int argc, const char* const* argv) {
             }
         } else if (name == "--dangerously-bypass") {
             parsed.headless.bypass = true;
+        } else if (name == "--no-autospawn") {
+            parsed.headless.autospawn = false;
         } else {
             // NOT IGNORED. Dropping unrecognised arguments is what let the -p bug
             // above stay quiet: the swallowed target and the real prompt both

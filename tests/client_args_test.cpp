@@ -282,3 +282,14 @@ TEST_CASE("the --signals flag without -p is an error, like --resume", "[client_a
     REQUIRE(parsed.action == ParsedArgs::Action::Error);
     CHECK(parsed.error.find("--signals needs -p") != std::string::npos);
 }
+
+TEST_CASE("auto-spawn defaults on and --no-autospawn turns it off", "[client_args]") {
+    CHECK(Parse({"-p", "hi"}).headless.autospawn);
+    const auto off = Parse({"-p", "hi", "--no-autospawn"});
+    REQUIRE(off.action == ParsedArgs::Action::Headless);
+    CHECK_FALSE(off.headless.autospawn);
+
+    // The flag exists so a script never blocks on a startup: the usage text has
+    // to be where they find it.
+    CHECK(UsageText().find("--no-autospawn") != std::string::npos);
+}

@@ -95,6 +95,7 @@ add_executable(minimal_tests
     session_service_test.cpp
     subagent_e2e_test.cpp
     headless_e2e_test.cpp
+    server_spawn_test.cpp
     plugin_storage_test.cpp
     plugin_rpc_test.cpp
     checklist_test.cpp
@@ -273,6 +274,12 @@ target_compile_options(minimal_mcp_fake_server PRIVATE ${MINIMAL_WARNING_FLAGS})
 add_dependencies(minimal_tests minimal_mcp_fake_server)
 target_compile_definitions(minimal_tests PRIVATE
     MINIMAL_MCP_FAKE_SERVER="$<TARGET_FILE:minimal_mcp_fake_server>")
+
+# The auto-spawn E2E test execs the REAL minimal-server binary (spawn -> serve
+# -> idle reaper self-exit), so it needs its path and its build dependency.
+add_dependencies(minimal_tests minimal-server)
+target_compile_definitions(minimal_tests PRIVATE
+    MINIMAL_SPAWN_TEST_SERVER="$<TARGET_FILE:minimal-server>")
 
 # Scripted stdio SIGNAL-CHANNEL server, hand-rolled (no cpp-mcp: its server
 # cannot push a notification over stdio -- see fake_signal_channel.cpp and the

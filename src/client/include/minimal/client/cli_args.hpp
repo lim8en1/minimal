@@ -48,6 +48,10 @@ struct HeadlessOptions {
     std::vector<std::string> signals;
     bool jsonl = false;
     bool bypass = false;
+    // When nothing is listening on a unix-socket target, the client starts one
+    // (see server_spawn.hpp). --no-autospawn restores the old "cannot reach"
+    // error; a non-unix target never spawns regardless.
+    bool autospawn = true;
 };
 
 struct ParsedArgs {

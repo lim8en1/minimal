@@ -41,6 +41,7 @@
 #include "minimal/client/keybindings.hpp"
 #include "minimal/client/session_client.hpp"
 #include "minimal/client/scrollback_refresh.hpp"
+#include "minimal/client/server_spawn.hpp"
 #include "minimal/client/status_format.hpp"
 #include "minimal/client/tui_bootstrap.hpp"
 #include "minimal/client/ui_config.hpp"
@@ -210,8 +211,18 @@ int RunHeadless(const HeadlessOptions& options) {
     const std::string target =
         options.server.empty() ? minimal::client::DefaultServerTarget() : options.server;
 
+    // Auto-spawn BEFORE the client's channel exists: the probe channel this
+    // creates has the process's only sockets at that moment, so the forked
+    // server inherits nothing to hold open.
+    minimal::client::SpawnOptions spawn_options;
+    spawn_options.enabled = options.autospawn;
+    const bool reachable = minimal::client::EnsureServerRunning(
+        target, spawn_options, [](const std::string& line) {
+            std::fprintf(stderr, "minimal: %s\n", line.c_str());
+        });
+
     minimal::client::SessionClient client(target);
-    if (!client.WaitForConnected(std::chrono::seconds(5))) {
+    if (!reachable || !client.WaitForConnected(std::chrono::seconds(5))) {
         std::fprintf(stderr, "cannot reach a minimal-server at %s\n", target.c_str());
         std::fprintf(stderr, "start one with: minimal-server --listen %s\n",
                      target.rfind("unix://", 0) == 0 ? target.c_str() + 7 : "<socket path>");
@@ -494,8 +505,18 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     const std::string target = args.headless.server.empty()
                                    ? minimal::client::DefaultServerTarget()
                                    : args.headless.server;
+
+    // Auto-spawn before the client's channel exists, so the forked server
+    // inherits no stray descriptors (same reason as the headless path).
+    minimal::client::SpawnOptions spawn_options;
+    spawn_options.enabled = args.headless.autospawn;
+    const bool reachable =
+        minimal::client::EnsureServerRunning(target, spawn_options, [](const std::string& line) {
+            std::fprintf(stderr, "minimal: %s\n", line.c_str());
+        });
+
     auto client = std::make_shared<minimal::client::SessionClient>(target);
-    if (!client->WaitForConnected(std::chrono::seconds(2))) {
+    if (!reachable || !client->WaitForConnected(std::chrono::seconds(2))) {
         std::fprintf(stderr, "cannot reach a minimal-server at %s\n", target.c_str());
         std::fprintf(stderr, "start one with: minimal-server --listen %s\n",
                      target.rfind("unix://", 0) == 0 ? target.c_str() + 7 : "<socket path>");

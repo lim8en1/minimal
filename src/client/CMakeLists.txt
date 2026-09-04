@@ -6,6 +6,7 @@
 # which is what lets client plugins link minimal::client_core directly.
 add_library(minimal_client_core SHARED
     cli_args.cpp
+    server_spawn.cpp
     session_client.cpp
     rpc_queue.cpp
     picker_model.cpp

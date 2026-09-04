@@ -263,8 +263,8 @@ detached session may still be mid-turn. The exit condition is now **zero
 attached clients AND zero live sessions AND no recent client Ping**, held for
 `server.idle_shutdown_seconds` (0 = never — a true daemon deployment); the
 common case (one client, no detached sessions left behind) still exits
-promptly, and auto-spawn (connect-or-spawn + pid lock) stays correct under
-this. The Ping half (`rpc Ping(PingRequest)` on SessionService, wired into
+promptly, and client auto-spawn (§ Non-interactive client, "Auto-spawn") stays
+correct under this. The Ping half (`rpc Ping(PingRequest)` on SessionService, wired into
 `ReaperConfig::client_idle_for`) exists because a live client can hold
 neither a stream nor a session: the TUI creates its first session lazily on
 the first submission, so its empty-state welcome view attaches nothing —
@@ -1259,7 +1259,9 @@ minimal -p PROMPT [--server TARGET] [--agent PRESET] [--model PROVIDER/MODEL]
                   [--output-format text|jsonl] [--dangerously-bypass]
 ```
 
-`--server` defaults to `unix://<data dir>/server.sock` and accepts **either a bare socket path or a full gRPC target** — `minimal-server --listen` takes a path, and two halves of the same pairing that disagree is a trap rather than a preference (`--server /tmp/x.sock` produced a gRPC resolver error naming neither flag). A value containing `://`, or shaped like `host:port`, is passed through untouched. **The client does not yet auto-spawn a server**; it reports how to start one, naming the `--listen` argument that matches what was dialled. The refcounted-exit half is implemented, which is what auto-spawn will rely on.
+`--server` defaults to `unix://<data dir>/server.sock` and accepts **either a bare socket path or a full gRPC target** — `minimal-server --listen` takes a path, and two halves of the same pairing that disagree is a trap rather than a preference (`--server /tmp/x.sock` produced a gRPC resolver error naming neither flag). A value containing `://`, or shaped like `host:port`, is passed through untouched.
+
+**Auto-spawn** (`client/server_spawn.{hpp,cpp}`): when nothing is listening on a **unix-socket** target, the client starts a server itself — `--no-autospawn` restores the "cannot reach" error, and a non-unix target never spawns (a remote server is outside the local-only trust model and is the user's to start). Binary resolution: `$MINIMAL_SERVER_BIN`, then the client's own directory (installed layout), then the build-tree layout. The spawn is a double-fork + `setsid` — the server is a peer of one started by hand, not a managed child, so its diagnostics go to `<data dir>/server-spawn.log` and its lifetime belongs to the same reaper policy as any other server's: a session the client leaves behind (a headless run's, a TUI quit's) stays resumable for `sessions.detached_idle_ttl_seconds` (default 30 min), and the idle exit fires once nothing is left (§ Session lifetime). Startup races resolve through machinery that already existed: a server binding a taken socket fails its bind and exits, and the spawner's probe finds the winner; a socket left by a *crashed* server is cleaned by `rpc::Server`'s connect-probe (`SocketIsDead`) before binding. The probe timeout (~25 s) covers config load, plugin load, and the sanity check, which is why spawn failure is diagnosed as a timeout naming the log rather than by reading the child's exit — the double fork makes that exit unobservable by design. The E2E test runs the real lifecycle against the real binary: spawn, serve, reaper self-exit.
 
 `--resume SESSION_ID` continues a stored session instead of creating one — the headless expression of `CreateSessionRequest.session_id` (§ *Session storage*, "Resume"). The resumed session keeps its stored preset and `project_root`, so the flag is mutually exclusive with `--agent`, and the run-mode default (`AllowOnly`) applies to the resumed turn exactly as to a fresh one. It requires `-p`: resuming runs one headless turn, and the interactive surface that would own a non-headless resume is the TUI's session picker, not a flag.
 

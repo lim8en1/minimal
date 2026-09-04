@@ -159,7 +159,7 @@ Test depth was inverted relative to integration risk: every well-tested layer wa
 
 **Strictly dependent on A:** C, D, E, G, and every RPC beyond `CreateSession`/`OpenSession`. **A is now done, so all of them were unblocked; D is now done too.**
 
-**Deferred out of A, deliberately:** client auto-spawn of the server (connect-or-spawn with a lock file). The refcounted-exit half it depends on is built and tested.
+**Deferred out of A, deliberately — now done:** client auto-spawn of the server (connect-or-spawn; the stale-socket probe of `rpc::Server` took the lock file's job). Implemented as `src/client/server_spawn.{hpp,cpp}`; see ARCHITECTURE.md § Non-interactive client, "Auto-spawn".
 
 **Rationale for A first** is `ARCHITECTURE.md` § *Non-interactive client*: the headless client is "the natural E2E harness — a second reason to build it before the TUI." It converts the entire existing suite from unit-tested to actually-exercised at the lowest possible cost.
 
