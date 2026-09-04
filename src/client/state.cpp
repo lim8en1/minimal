@@ -22,32 +22,35 @@ namespace minimal::client {
 SessionState::SessionState(std::string session_id, std::string name)
     : session_id_(std::move(session_id)), display_name_(std::move(name)) {}
 
+std::vector<ToolExecutionState> SessionState::CopyToolsLocked(bool include_output) const {
+    if (include_output) return tools_;   // bounded (R2); the tools panel renders these
+    // Field-by-field, NOT `tool; tool.buffered_output.clear()` -- that would
+    // copy the (up to 64 KiB) buffer first and clear it after, paying exactly
+    // the cost this exists to avoid. Every other field is cheap (small
+    // strings, a timestamp, two bools).
+    std::vector<ToolExecutionState> light;
+    light.reserve(tools_.size());
+    for (const auto& tool : tools_) {
+        ToolExecutionState t;
+        t.tool_use_id = tool.tool_use_id;
+        t.tool_name = tool.tool_name;
+        t.summary = tool.summary;
+        t.started_at_unix_ms = tool.started_at_unix_ms;
+        t.started = tool.started;
+        t.is_error = tool.is_error;
+        t.is_background = tool.is_background;
+        light.push_back(std::move(t));
+    }
+    return light;
+}
+
 SessionState::Snapshot SessionState::TakeLightSnapshot(bool include_tool_output) {
     std::lock_guard lk(mtx_);
     Snapshot s;
     s.session_id = session_id_;
     s.display_name = display_name_;
     s.state = state_;
-    if (include_tool_output) {
-        s.tools = tools_;   // bounded (R2); the tools panel renders these
-    } else {
-        // Field-by-field, NOT `tool; tool.buffered_output.clear()` -- that
-        // would copy the (up to 64 KiB) buffer first and clear it after,
-        // paying exactly the cost this branch exists to avoid. Every other
-        // field is cheap (small strings, a timestamp, two bools).
-        s.tools.reserve(tools_.size());
-        for (const auto& tool : tools_) {
-            ToolExecutionState light;
-            light.tool_use_id = tool.tool_use_id;
-            light.tool_name = tool.tool_name;
-            light.summary = tool.summary;
-            light.started_at_unix_ms = tool.started_at_unix_ms;
-            light.started = tool.started;
-            light.is_error = tool.is_error;
-            light.is_background = tool.is_background;
-            s.tools.push_back(std::move(light));
-        }
-    }
+    s.tools = CopyToolsLocked(include_tool_output);
     s.input_tokens = input_tokens_;
     s.output_tokens = output_tokens_;
     s.cache_read_tokens = cache_read_tokens_;
@@ -81,13 +84,19 @@ SessionState::Snapshot SessionState::TakeSnapshot() {
     s.last_loaded_seq = last_loaded_seq_;
     s.streaming_text = streaming_accumulated_;
     s.is_streaming_finalized = !is_streaming_;   // not streaming => finalized this turn
+    s.live_segments = live_segments_;
     if (pending_permission_) {
         s.pending_permission = *pending_permission_;
     }
     if (pending_confirmation_) {
         s.pending_confirmation = *pending_confirmation_;
     }
-    s.tools = tools_;
+    // LIGHT tool copy: ChatView::RenderLiveToolRow (the only deep-snapshot
+    // tool reader) never reads buffered_output -- the running-tools panel is what
+    // renders that, off TakeLightSnapshot(true) instead. This used to copy
+    // every tool's full (up to 64 KiB) live buffer on every focused-tab deep
+    // snapshot for a consumer that ignores it.
+    s.tools = CopyToolsLocked(/*include_output=*/false);
     s.input_tokens = input_tokens_;
     s.output_tokens = output_tokens_;
     s.cache_read_tokens = cache_read_tokens_;
@@ -147,10 +156,36 @@ void SessionState::StageDisplayAgentPreset(std::string preset_name) {
 
 void SessionState::AppendStreamingText(std::string_view text) {
     std::lock_guard lk(mtx_);
+    // Track C4: a NEW live segment starts on a fresh turn (live_segments_
+    // empty), a block boundary (is_streaming_ false -- the previous block's
+    // content_block_stop already finalized it), or when the most recent
+    // live entry is a TOOL marker (text resumed after a tool call). This is
+    // what lets the render path show this turn's text and tool activity
+    // interleaved in arrival order, instead of every tool row appearing
+    // after ALL the text regardless of how far apart the model actually
+    // put them (ChatView used to render one flat text block, then every
+    // live tool row, unconditionally last).
+    const bool new_segment = live_segments_.empty() || !is_streaming_ ||
+                             live_segments_.back().kind != LiveTurnSegment::Kind::Text;
+    if (new_segment) {
+        live_segments_.push_back(LiveTurnSegment{.kind = LiveTurnSegment::Kind::Text});
+    }
+    live_segments_.back().text.append(text);
+
     // A NEW TURN begins only after the previous one ENDED (TurnCompleted/Error)
     // -- message stops fire between tool cycles WITHIN one turn, so arming on
     // is_streaming_ alone would re-key the stream mid-turn. (See turn_seq in
     // the Snapshot.)
+    // A new BLOCK within the same turn: the previous block's
+    // content_block_stop already finalized (is_streaming_ false), but the
+    // TURN itself has not ended (turn_ended_ false) -- text -> tool -> text,
+    // or thinking -> text. Without a separator the two blocks' raw markdown
+    // fuses into one document (an unclosed fence from block one would eat
+    // block two whole); a blank line is the same break ComposeDocument
+    // already puts between rendered blocks (markdown_renderer.cpp).
+    if (!turn_ended_ && !is_streaming_ && !streaming_accumulated_.empty()) {
+        streaming_accumulated_.append("\n\n");
+    }
     if (turn_ended_) {
         ++turn_seq_;
         turn_ended_ = false;
@@ -282,6 +317,7 @@ void SessionState::ClearStreaming() {
     std::lock_guard lk(mtx_);
     streaming_accumulated_.clear();
     is_streaming_ = false;
+    live_segments_.clear();
 }
 
 void SessionState::OnError(const std::string& error_message) {
@@ -335,6 +371,7 @@ void SessionState::OnResyncRequired(const std::string& reason) {
     // on attach (S5.3), and a prompt whose modal is showing is still real.
     streaming_accumulated_.clear();
     is_streaming_ = false;
+    live_segments_.clear();
     ++transcript_version_;
     common::DefaultLogger().info("session {}: resync required ({})", session_id_, reason);
 }
@@ -397,6 +434,11 @@ void SessionState::OnToolStarted(const v1::ToolExecutionEvent& evt) {
     tool.summary = evt.summary();
     tool.started_at_unix_ms = std::chrono::milliseconds(evt.started_at_unix_ms());
     tools_.push_back(std::move(tool));
+    // Track C4: a marker in the SAME arrival-order timeline text segments
+    // use, so the live view can render this tool call between the text
+    // that preceded and followed it instead of after everything.
+    live_segments_.push_back(
+        LiveTurnSegment{.kind = LiveTurnSegment::Kind::Tool, .tool_use_id = evt.tool_use_id()});
 
     auto& live = tools_.back();   // the row just pushed, regardless of how many precede it
     live.started = true;
@@ -511,6 +553,11 @@ void SessionState::OnBackgroundTask(const v1::BackgroundTaskEvent& evt) {
     tool.started = !is_terminal;
     tool.is_error = is_terminal && is_error;
     tools_.push_back(std::move(tool));
+    // Same C4 marker OnToolStarted pushes -- a reopened background row (its
+    // own STARTED never reached this client, or the row already finished
+    // and was swept) is still live content for whatever turn is current now.
+    live_segments_.push_back(
+        LiveTurnSegment{.kind = LiveTurnSegment::Kind::Tool, .tool_use_id = evt.tool_use_id()});
 }
 
 // Scrollback -----------------------------------------------------------------

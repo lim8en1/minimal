@@ -20,7 +20,17 @@ TabMaintenance::TabMaintenance(Dependencies deps) : deps_(std::move(deps)) {}
 // will see the applied page in a freshly-taken snapshot.
 SessionState::Snapshot TabMaintenance::Maintain(const std::string& tab_id,
                                                 SessionState::Snapshot snap) {
-    if (deps_.chat_surface != nullptr || deps_.app.EffectiveChatSurface() != nullptr) return snap;
+    // Gated SOLELY on EffectiveChatSurface(): it is what actually renders the
+    // tab body (FrameRenderer::Render reads the same accessor), and it turns
+    // null the moment a registered surface throws and
+    // AppState::DisableChatSurface runs -- the frame falls back to the core
+    // ChatView right then. A prior revision also checked a by-value copy of
+    // the registered surface pointer (constant since bootstrap), which made
+    // this return early forever once a surface was ever registered, even
+    // after DisableChatSurface flipped the effective accessor back to null:
+    // the core view the frame fell back to never got fed a streaming delta
+    // or a scrollback refresh, so the fallback rendered nothing, permanently.
+    if (deps_.app.EffectiveChatSurface() != nullptr) return snap;
     // A sessionless tab (no session yet) has nothing streamed or persisted:
     // no ChatView, no streaming bookkeeping, no refresh. Its SessionState
     // gains an id the moment EnsureSession resolves, and the next pass runs.
@@ -41,27 +51,56 @@ SessionState::Snapshot TabMaintenance::Maintain(const std::string& tab_id,
 
     const auto make_stream = [&] { return deps_.engine.MakeStream(); };
 
-    // Stream recreation keys on turn_seq (SessionState's counter, bumped
-    // when a new streaming turn begins), NOT on the old buffer-size
-    // heuristic: turn A ending and turn B streaming past A's byte count
-    // between two frames spliced B's middle onto A's cached tail, silently.
-    if (ui.streaming == nullptr || ui.streaming_turn != snap.turn_seq) {
-        ui.streaming = make_stream();
-        ui.streaming_seen = 0;
+    // One stream slot per live_segments entry (track C4), index-aligned;
+    // recreated WHOLESALE on turn_seq (SessionState's counter, bumped when a
+    // new streaming turn begins) -- same trigger the old single shared
+    // `streaming` field used, NOT the old buffer-size heuristic: turn A
+    // ending and turn B streaming past A's byte count between two frames
+    // spliced B's middle onto A's cached tail, silently. Segments only ever
+    // APPEND within a turn (AppendStreamingText/OnToolStarted push, nothing
+    // removes mid-turn), so growing the vector to match -- without clearing
+    // slots already built for EARLIER segments -- is exactly what a new
+    // segment arriving needs.
+    if (ui.streaming_turn != snap.turn_seq) {
+        ui.live_text_streams.clear();
         ui.streaming_turn = snap.turn_seq;
-        ui.finalized_for_turn = false;
-    } else if (snap.streaming_text.size() > ui.streaming_seen) {
-        ui.streaming->AppendDelta(std::string_view(snap.streaming_text).substr(ui.streaming_seen));
-        ui.streaming_seen = snap.streaming_text.size();
     }
-
-    // The turn's authoritative reparse (the engine contract: Finalize
-    // replaces artifacts from mid-stream unclosed spans). Without this
-    // wiring the contract was dead code -- the last tokens of a stream
-    // rendered only when the debounce's next tick happened to fire.
-    if (snap.is_streaming_finalized && !ui.finalized_for_turn && ui.streaming) {
-        ui.streaming->Finalize();
-        ui.finalized_for_turn = true;
+    if (ui.live_text_streams.size() < snap.live_segments.size()) {
+        ui.live_text_streams.resize(snap.live_segments.size());
+    }
+    for (std::size_t i = 0; i < snap.live_segments.size(); ++i) {
+        if (snap.live_segments[i].kind != LiveTurnSegment::Kind::Text) continue;
+        LiveTextStreamSlot& slot = ui.live_text_streams[i];
+        const std::string& text = snap.live_segments[i].text;
+        if (!slot.view) slot.view = make_stream();
+        if (text.size() > slot.seen) {
+            slot.view->AppendDelta(std::string_view(text).substr(slot.seen));
+            slot.seen = text.size();
+            // New text on an ALREADY-finalized segment means a re-arm at
+            // the engine level (StreamingMarkdownView::AppendDelta, track
+            // A1) -- mirror that here too, so this segment gets its own
+            // fresh authoritative reparse when it next finalizes, exactly
+            // like the engine's own re-arm.
+            slot.finalized_for_turn = false;
+        }
+    }
+    // The MOST RECENT text segment's authoritative reparse (the engine
+    // contract: Finalize replaces artifacts from mid-stream unclosed spans).
+    // is_streaming_finalized fires once per BLOCK boundary, and blocks are
+    // strictly sequential (never interleaved with each other -- only with
+    // tool activity, which is what live_segments itself now records), so it
+    // always names the LAST text segment in the timeline; an earlier one
+    // already got its own Finalize when ITS block ended.
+    if (snap.is_streaming_finalized) {
+        for (std::size_t i = snap.live_segments.size(); i-- > 0;) {
+            if (snap.live_segments[i].kind != LiveTurnSegment::Kind::Text) continue;
+            LiveTextStreamSlot& slot = ui.live_text_streams[i];
+            if (slot.view && !slot.finalized_for_turn) {
+                slot.view->Finalize();
+                slot.finalized_for_turn = true;
+            }
+            break;
+        }
     }
 
     // Resolve any outstanding refresh and act on the version mismatch --
@@ -177,6 +216,13 @@ void TabMaintenance::Run() {
     const uint64_t version = deps_.app.UiVersion();
     if (version == last_ui_version_) return;
     last_ui_version_ = version;
+
+    // A picker's async fetch completion is exactly what bumped the version
+    // that got this pass past the gate above (PickerController::QueueApply
+    // calls AppState::NotifyExternalUpdate, the same BumpUiVersion every
+    // ordinary mutation goes through) -- draining it here, unconditionally,
+    // is what turns that wake into an actual rebuild of the picker's modal.
+    if (deps_.poll_pickers) deps_.poll_pickers();
 
     const auto tabs = deps_.app.GetAllTabs();
     focused_.clear();

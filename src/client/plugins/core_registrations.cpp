@@ -182,9 +182,18 @@ Element RenderToolActivity(const ChatRow& row, const Theme& theme, const RowRend
         // Bounded body: the capped persisted ToolResultBlock is the
         // authoritative record; this is orientation, not an archive.
         std::string body = row.text;
-        const auto last_newline =
-            body.size() > 4000 ? body.rfind('\n', body.size() - 4000) : std::string::npos;
-        if (last_newline != std::string::npos) body = "... " + body.substr(last_newline);
+        if (body.size() > 4000) {
+            const auto last_newline = body.rfind('\n', body.size() - 4000);
+            // A newline within the tail window: keep from there, as before.
+            // No newline at all (a megabyte of single-line JSON/base64, say)
+            // used to fall through and render the FULL body -- rfind returns
+            // npos both when the tail has no '\n' and (via the ternary this
+            // replaced) when body was short enough to skip the search
+            // entirely, and the old code treated both as "render everything"
+            // instead of "hard-truncate the tail".
+            body = "... " + (last_newline != std::string::npos ? body.substr(last_newline)
+                                                                : body.substr(body.size() - 4000));
+        }
         parts.push_back(paragraph(body) | color(theme.ColorFor("system_message")) | dim);
     }
     return vbox(std::move(parts));

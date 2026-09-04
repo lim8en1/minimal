@@ -156,21 +156,24 @@ ftxui::Element FrameRenderer::Render() {
             if (!start.empty()) {
                 for (auto& element : start) rows.push_back(std::move(element) | flex);
             } else {
-                // ui.chat/ui.streaming are normally built by
-                // TabMaintenance::Maintain (Part 3.2), but Maintain() returns
-                // EARLY -- skipping that -- whenever GetDetails raced a tab
-                // that just closed (snap.session_id empty) or a chat-surface
-                // plugin currently owns the tab; a frame landing here with no
-                // start view registered (so `start` stayed empty) then found
-                // one or both still null on its very first render. Lazily
-                // built here too, so neither is ever a null deref regardless
-                // of which path built it.
+                // ui.chat is normally built by TabMaintenance::Maintain
+                // (Part 3.2), but Maintain() returns EARLY -- skipping that
+                // -- whenever GetDetails raced a tab that just closed
+                // (snap.session_id empty) or a chat-surface plugin currently
+                // owns the tab; a frame landing here with no start view
+                // registered (so `start` stayed empty) then found it still
+                // null on its very first render. Lazily built here too, so
+                // it is never a null deref regardless of which path built
+                // it. ui.live_text_streams needs no such fallback (track
+                // C4): ChatView::Render defensively skips any live_segments
+                // index it has no slot for, so an empty (or short) vector
+                // here just means "nothing live rendered yet" -- exactly
+                // right for this same race, not a null-deref risk.
                 if (!ui.chat) {
                     ui.chat = std::make_unique<ChatView>(deps_.theme, deps_.message_registry,
                                                          deps_.renderer_registry);
                 }
-                if (!ui.streaming) ui.streaming = deps_.engine.MakeStream();
-                rows.push_back(ui.chat->Render(snap, *ui.streaming) | yframe |
+                rows.push_back(ui.chat->Render(snap, ui.live_text_streams) | yframe |
                                vscroll_indicator | flex);
             }
         }

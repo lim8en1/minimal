@@ -6,6 +6,8 @@
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
+#include <ftxui/dom/elements.hpp>
+#include <ftxui/screen/screen.hpp>
 
 namespace minimal::client {
 
@@ -13,6 +15,21 @@ namespace {
 
 Theme TestTheme() {
     return Theme::Parse(R"({"name": "test", "colors": {}})", ColorDepth::Truecolor);
+}
+
+// Renders Highlight()'s Elements to text, the same "ToText" pattern
+// client_plugins_test.cpp uses: asserts CONTENT, not visual layout.
+std::string ToText(const ftxui::Elements& lines) {
+    std::string out;
+    for (const auto& line : lines) {
+        ftxui::Screen screen(200, 1);
+        ftxui::Render(screen, line);
+        std::string row = screen.ToString();
+        while (!row.empty() && (row.back() == ' ' || row.back() == '\r')) row.pop_back();
+        out += row;
+        out += '\n';
+    }
+    return out;
 }
 
 // Applies the span list with the same rule the renderer documents -- Plain is
@@ -99,6 +116,44 @@ TEST_CASE("Every vendored language categorizes its comment") {
             Resolve(test_case.code, highlighter.HighlightCode(test_case.code, test_case.language));
         CHECK(HasPiece(pieces, HighlightCategory::Comment, test_case.comment_text));
     }
+}
+
+// B2: Highlight() memoizes its result on (language, code) -- a completed code
+// block is byte-identical between a streaming message's 120 ms debounce
+// ticks, so re-running the tree-sitter traversal AND rebuilding every
+// ftxui::text Element for it was pure waste. This checks the cache SERVES
+// THE RIGHT CONTENT, not merely that it's fast: two different snippets in the
+// same language must not collide, and re-highlighting the FIRST one after the
+// SECOND (a cache hit past the most-recent entry) must still return its own
+// text, not the second's.
+TEST_CASE("Highlight caches by (language, code) without cross-contaminating entries") {
+    // A NAMED local, not TestTheme() inline: SyntaxHighlighter stores
+    // `const Theme&`, and a reference member initialized from a temporary
+    // constructor ARGUMENT is not lifetime-extended by that -- only a
+    // reference bound directly to a temporary is. `HighlightCode()` (every
+    // other test in this file) never touches theme_, so that dangling
+    // reference stayed latent; Highlight() does (color_of/ColorFor), and
+    // this is the first test in the file to call it.
+    const Theme theme = TestTheme();
+    const SyntaxHighlighter highlighter(theme);
+    const std::string code_a = "int a() { return 1; }\n";
+    const std::string code_b = "int b() { return 2; }\n";
+
+    const std::string first_a = ToText(highlighter.Highlight(code_a, "cpp"));
+    CHECK(first_a.find("return 1") != std::string::npos);
+
+    const std::string first_b = ToText(highlighter.Highlight(code_b, "cpp"));
+    CHECK(first_b.find("return 2") != std::string::npos);
+    CHECK(first_b != first_a);
+
+    // A repeat of `code_a` -- now the SECOND-most-recent cache entry -- must
+    // still resolve to its own content, not `code_b`'s.
+    const std::string second_a = ToText(highlighter.Highlight(code_a, "cpp"));
+    CHECK(second_a == first_a);
+
+    // Same code, different language key: must not collide on `code` alone.
+    const std::string as_python = ToText(highlighter.Highlight(code_a, "python"));
+    CHECK_FALSE(as_python.empty());
 }
 
 }  // namespace minimal::client

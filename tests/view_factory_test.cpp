@@ -531,18 +531,178 @@ TEST_CASE("chat view: a session switch at an EQUAL transcript version re-renders
     plugins::RegisterCoreAgentMarkdownRenderer(messages, engine);
 
     ChatView view(theme, messages, tool_renderers);
-    auto stream = engine.MakeStream();
 
     // Tab A, version 2. Then tab B, ALSO at version 2: the per-session
     // counter collides across tabs, so version alone cannot key the cache.
-    const auto frame_a = RenderElement(view.Render(SnapshotWithText("session-a", 2, "alpha"),
-                                                   *stream));
+    const auto frame_a = RenderElement(view.Render(SnapshotWithText("session-a", 2, "alpha")));
     CHECK(frame_a.find("alpha") != std::string::npos);
 
-    const auto frame_b = RenderElement(view.Render(SnapshotWithText("session-b", 2, "beta"),
-                                                   *stream));
+    const auto frame_b = RenderElement(view.Render(SnapshotWithText("session-b", 2, "beta")));
     CHECK(frame_b.find("beta") != std::string::npos);   // fails pre-fix: stale "alpha"
     CHECK(frame_b.find("alpha") == std::string::npos);
+}
+
+// B3: RebuildRows caches ChatRowsFromMessages' own output on scrollback_page's
+// pointer identity, so a rebuild triggered by a collapse-epoch bump ALONE
+// (no new page) reuses it instead of re-walking the whole scrollback window.
+// This proves the cache serves FRESH content on a genuine page swap for the
+// SAME session (the risk a naive "keyed on session_id alone" cache would
+// have gotten wrong), not just that it's fast.
+TEST_CASE("chat view: a new scrollback page for the SAME session is not served stale "
+         "from the row-materialization cache") {
+    const auto theme = TestTheme();
+    minimal::client::MarkdownRenderer renderer(&theme, nullptr);
+    plugins::MarkdownEngineRegistry engine_registry;
+    plugins::RegisterDefaultMarkdownEngine(engine_registry, renderer);
+    auto& engine = *engine_registry.engine;
+    plugins::MessageRendererRegistry messages;
+    plugins::ToolResultRendererRegistry tool_renderers;
+    plugins::RegisterCoreMessageRenderers(messages);
+    plugins::RegisterCoreAgentMarkdownRenderer(messages, engine);
+
+    ChatView view(theme, messages, tool_renderers);
+
+    const auto snap_v1 = SnapshotWithText("session-fresh", 1, "first page");
+    const auto frame_1 = RenderElement(view.Render(snap_v1));
+    CHECK(frame_1.find("first page") != std::string::npos);
+
+    // A DIFFERENT scrollback_page shared_ptr (a real fetch would rebuild it
+    // too -- state.cpp's ApplyScrollbackPage is the only mutation site),
+    // same session, higher version: must render the NEW content, not a
+    // cache hit keyed loosely enough to miss the page swap. seq 2, NOT
+    // SnapshotWithText's fixed seq 1: a transcript's seq is server-assigned
+    // and never reused (state.cpp), which is the invariant row_cache_ itself
+    // relies on ("same-key rows from one message are stable") -- reusing
+    // seq 1 here would hit THAT per-row Elements cache with v1's stale
+    // render, a self-inflicted test bug rather than anything the
+    // materialized-rows cache under test gets wrong.
+    SessionState::Snapshot snap_v2 = snap_v1;
+    snap_v2.transcript_version = 2;
+    snap_v2.scrollback_page = std::make_shared<const std::vector<v1::StoredMessage>>(
+        std::vector<v1::StoredMessage>{StoredUserText(2, "second page")});
+    const auto frame_2 = RenderElement(view.Render(snap_v2));
+    CHECK(frame_2.find("second page") != std::string::npos);
+    CHECK(frame_2.find("first page") == std::string::npos);
+
+    // Re-rendering the SAME (v2) snapshot again -- e.g. a collapse toggle
+    // elsewhere bumping only collapse_epoch_ -- must still show v2's content:
+    // the materialized-rows cache hit must not resurrect v1's rows.
+    const auto frame_2_again = RenderElement(view.Render(snap_v2));
+    CHECK(frame_2_again == frame_2);
+}
+
+// C2: a reader scrolled up mid-turn must not watch their own viewport slide
+// toward the newest content as the model keeps streaming underneath. Anchors
+// on scroll_from_bottom_ > 0 used to be measured as a distance from the
+// literal end of `column` -- which includes the live streaming block and
+// live tool rows, both of which grow every delta/tool event -- so the SAME
+// scroll_from_bottom_ value pointed at a DIFFERENT row every time more
+// content streamed in.
+TEST_CASE("chat view: scrolling up mid-turn stays put while the streaming block grows") {
+    const auto theme = TestTheme();
+    minimal::client::MarkdownRenderer renderer(&theme, nullptr);
+    plugins::MarkdownEngineRegistry engine_registry;
+    plugins::RegisterDefaultMarkdownEngine(engine_registry, renderer);
+    auto& engine = *engine_registry.engine;
+    plugins::MessageRendererRegistry messages;
+    plugins::ToolResultRendererRegistry tool_renderers;
+    plugins::RegisterCoreMessageRenderers(messages);
+    plugins::RegisterCoreAgentMarkdownRenderer(messages, engine);
+
+    ChatView view(theme, messages, tool_renderers);
+
+    // 20 persisted rows; scroll up far enough (15 of 20) that the anchored
+    // row sits well clear of the live streaming tail in a short viewport.
+    auto snapshot = SnapshotWithRows("session-drift", 1, 20);
+    view.ScrollBy(15);
+
+    // One live TEXT segment (track C4: what a real streaming turn's
+    // SessionState::Snapshot carries -- live_segments, not just the flat
+    // streaming_text convenience field ChatView no longer renders from
+    // directly), fed through its own stream slot exactly like
+    // TabMaintenance::Maintain does.
+    std::vector<LiveTextStreamSlot> streams(1);
+    const auto append_segment = [&](const std::string& text) {
+        snapshot.live_segments = {LiveTurnSegment{.kind = LiveTurnSegment::Kind::Text,
+                                                  .text = text}};
+        if (!streams[0].view) streams[0].view = engine.MakeStream();
+        streams[0].view->AppendDelta(std::string_view(text).substr(streams[0].seen));
+        streams[0].seen = text.size();
+    };
+
+    append_segment("the reply so far");
+    const auto before =
+        RenderElement(view.Render(snapshot, streams) | ftx::yframe, /*width=*/40, /*height=*/6);
+    CHECK(before.find("row-19") == std::string::npos);   // scrolled well clear of the newest
+
+    // More deltas land -- same persisted page (same transcript_version), just
+    // a longer live tail, exactly what happens between two frames of one
+    // streaming turn.
+    append_segment("the reply so far, now with a great deal more text streamed in "
+                   "since the last frame, several sentences longer than before");
+    const auto after =
+        RenderElement(view.Render(snapshot, streams) | ftx::yframe, /*width=*/40, /*height=*/6);
+
+    // The anchored (persisted) row is unaffected by how much grew below it --
+    // pre-fix, this frame differed on every delta even though nothing the
+    // user was actually looking at had changed.
+    CHECK(after == before);
+}
+
+// C4: the live view renders this turn's text and tool activity INTERLEAVED,
+// in the order SessionState recorded them -- not the whole streaming block
+// first and every tool row after it regardless of when each actually
+// happened. Asserted on relative POSITION in the rendered frame text
+// (find() index order), the same "content, not visuals" contract this
+// file's other tests already use.
+TEST_CASE("chat view: live text and tool activity render interleaved, "
+         "in arrival order", "[chat_view][live_segments]") {
+    const auto theme = TestTheme();
+    minimal::client::MarkdownRenderer renderer(&theme, nullptr);
+    plugins::MarkdownEngineRegistry engine_registry;
+    plugins::RegisterDefaultMarkdownEngine(engine_registry, renderer);
+    auto& engine = *engine_registry.engine;
+    plugins::MessageRendererRegistry messages;
+    plugins::ToolResultRendererRegistry tool_renderers;
+    plugins::RegisterCoreMessageRenderers(messages);
+    plugins::RegisterCoreAgentMarkdownRenderer(messages, engine);
+
+    ChatView view(theme, messages, tool_renderers);
+
+    SessionState::Snapshot snap;
+    snap.session_id = "session-interleave";
+    snap.transcript_version = 1;
+    snap.live_segments = {
+        LiveTurnSegment{.kind = LiveTurnSegment::Kind::Text, .text = "opening remarks"},
+        LiveTurnSegment{.kind = LiveTurnSegment::Kind::Tool, .tool_use_id = "call-1"},
+        LiveTurnSegment{.kind = LiveTurnSegment::Kind::Text, .text = "closing remarks"},
+    };
+    ToolExecutionState tool;
+    tool.tool_use_id = "call-1";
+    tool.tool_name = "search_the_archives";
+    tool.started = true;
+    snap.tools = {tool};
+
+    std::vector<LiveTextStreamSlot> streams(3);
+    streams[0].view = engine.MakeStream();
+    streams[0].view->AppendDelta("opening remarks");
+    streams[0].seen = 15;
+    streams[2].view = engine.MakeStream();
+    streams[2].view->AppendDelta("closing remarks");
+    streams[2].seen = 15;
+
+    const auto frame = RenderElement(view.Render(snap, streams));
+    const auto opening_pos = frame.find("opening remarks");
+    const auto tool_pos = frame.find("search_the_archives");
+    const auto closing_pos = frame.find("closing remarks");
+    REQUIRE(opening_pos != std::string::npos);
+    REQUIRE(tool_pos != std::string::npos);
+    REQUIRE(closing_pos != std::string::npos);
+    // Pre-fix, BOTH text pieces rendered as one fused block ABOVE the tool
+    // row unconditionally -- "closing remarks" would appear before, not
+    // after, "search_the_archives".
+    CHECK(opening_pos < tool_pos);
+    CHECK(tool_pos < closing_pos);
 }
 
 TEST_CASE("chat view: a completed tool call with no name-specific renderer still renders "
@@ -558,7 +718,6 @@ TEST_CASE("chat view: a completed tool call with no name-specific renderer still
     plugins::RegisterCoreAgentMarkdownRenderer(messages, engine);
 
     ChatView view(theme, messages, tool_renderers);
-    auto stream = engine.MakeStream();
 
     SessionState::Snapshot snap;
     snap.session_id = "session-tool";
@@ -566,7 +725,7 @@ TEST_CASE("chat view: a completed tool call with no name-specific renderer still
     snap.scrollback_page = std::make_shared<const std::vector<v1::StoredMessage>>(
         StoredToolCallAndResult(1, "bash", "total 0\ndrwxr-xr-x  2 x  x  64 x x"));
 
-    const auto frame = RenderElement(view.Render(snap, *stream));
+    const auto frame = RenderElement(view.Render(snap));
     CHECK(frame.find("bash") != std::string::npos);
 
     // ToolActivity rows collapse by default (one-liner; expandable body) --
@@ -574,7 +733,7 @@ TEST_CASE("chat view: a completed tool call with no name-specific renderer still
     // content, not just its header.
     view.MoveRowFocus(0);
     view.ToggleCollapseFocused();
-    const auto expanded = RenderElement(view.Render(snap, *stream));
+    const auto expanded = RenderElement(view.Render(snap));
     CHECK(expanded.find("total 0") != std::string::npos);
 }
 
@@ -593,7 +752,6 @@ TEST_CASE("chat view: ScrollBy moves the viewport off the pinned-to-newest defau
     plugins::RegisterCoreAgentMarkdownRenderer(messages, engine);
 
     ChatView view(theme, messages, tool_renderers);
-    auto stream = engine.MakeStream();
     const auto snapshot = SnapshotWithRows("session-scroll", 1, 40);
 
     // A viewport far shorter than 40 rows: yframe can only show a slice, so
@@ -602,7 +760,7 @@ TEST_CASE("chat view: ScrollBy moves the viewport off the pinned-to-newest defau
     // this doesn't assert an exact edge -- just that the visible slice
     // actually changes). Default (no ScrollBy call): pinned to the newest row.
     const auto pinned =
-        RenderElement(view.Render(snapshot, *stream) | ftx::yframe, /*width=*/40, /*height=*/8);
+        RenderElement(view.Render(snapshot) | ftx::yframe, /*width=*/40, /*height=*/8);
     CHECK(pinned.find("row-39") != std::string::npos);
 
     // Scroll toward older messages (positive == toward older), far enough
@@ -610,7 +768,7 @@ TEST_CASE("chat view: ScrollBy moves the viewport off the pinned-to-newest defau
     // slice: proves ScrollBy actually moves the anchor rather than a no-op.
     view.ScrollBy(30);
     const auto scrolled =
-        RenderElement(view.Render(snapshot, *stream) | ftx::yframe, /*width=*/40, /*height=*/8);
+        RenderElement(view.Render(snapshot) | ftx::yframe, /*width=*/40, /*height=*/8);
     CHECK(scrolled != pinned);
     CHECK(scrolled.find("row-39") == std::string::npos);
 
@@ -618,7 +776,7 @@ TEST_CASE("chat view: ScrollBy moves the viewport off the pinned-to-newest defau
     // reproducing the original (pre-scroll) view exactly.
     view.ScrollBy(-30);
     const auto repinned =
-        RenderElement(view.Render(snapshot, *stream) | ftx::yframe, /*width=*/40, /*height=*/8);
+        RenderElement(view.Render(snapshot) | ftx::yframe, /*width=*/40, /*height=*/8);
     CHECK(repinned == pinned);
 }
 
@@ -626,7 +784,7 @@ TEST_CASE("chat view: ScrollToBottom resets the anchor directly, not just relati
     // The scroll-position-drift UX fix: previously the only way back to the
     // newest row after scrolling up was walking down one row at a time (or
     // knowing exactly how far up you'd gone). ScrollToBottom() is bound to
-    // chat.scroll_bottom (End) and also called on every chat turn submit.
+    // chat.scroll_bottom (PageDown) and also called on every chat turn submit.
     const auto theme = TestTheme();
     minimal::client::MarkdownRenderer renderer(&theme, nullptr);
     plugins::MarkdownEngineRegistry engine_registry;
@@ -638,20 +796,19 @@ TEST_CASE("chat view: ScrollToBottom resets the anchor directly, not just relati
     plugins::RegisterCoreAgentMarkdownRenderer(messages, engine);
 
     ChatView view(theme, messages, tool_renderers);
-    auto stream = engine.MakeStream();
     const auto snapshot = SnapshotWithRows("session-scroll-bottom", 1, 40);
 
     const auto pinned =
-        RenderElement(view.Render(snapshot, *stream) | ftx::yframe, /*width=*/40, /*height=*/8);
+        RenderElement(view.Render(snapshot) | ftx::yframe, /*width=*/40, /*height=*/8);
 
     view.ScrollBy(30);   // scroll far up, same as the ScrollBy test above
     const auto scrolled =
-        RenderElement(view.Render(snapshot, *stream) | ftx::yframe, /*width=*/40, /*height=*/8);
+        RenderElement(view.Render(snapshot) | ftx::yframe, /*width=*/40, /*height=*/8);
     CHECK(scrolled != pinned);
 
     view.ScrollToBottom();   // one call, not "however far up ScrollBy went"
     const auto back =
-        RenderElement(view.Render(snapshot, *stream) | ftx::yframe, /*width=*/40, /*height=*/8);
+        RenderElement(view.Render(snapshot) | ftx::yframe, /*width=*/40, /*height=*/8);
     CHECK(back == pinned);
     CHECK(back.find("row-39") != std::string::npos);
 }
@@ -688,6 +845,87 @@ TEST_CASE("prompt editor: Tab splices the mention token, preserving the prose") 
     // after "@src/ma"), landing mid-word instead of at the end of the
     // spliced completion.
     CHECK(state.cursor_position == static_cast<int>(state.content.size()));
+}
+
+// C5: accept_suggestion used to splice over content.rfind('@') -- the LAST
+// '@' anywhere in the buffer -- regardless of where the cursor actually was.
+// Editing an EARLIER, unfinished mention (cursor moved back into it, e.g. to
+// fix a typo) completed the WRONG token and destroyed everything typed after
+// the cursor, including a second, later '@' mention.
+TEST_CASE("prompt editor: Tab completes the mention AT THE CURSOR, not the "
+         "last '@' in the buffer", "[prompt_editor][regression]") {
+    const auto theme = TestTheme();
+    PromptEditorState state;
+    std::vector<std::string> texts;
+    std::vector<std::string> commands;
+    auto editor = MakePromptEditor(
+        theme, state, [&](const std::string& t) { texts.push_back(t); },
+        [&](const std::string& c) { commands.push_back(c); },
+        [](const std::string&) { return std::vector<std::string>{}; });
+
+    // "compare @fo and @bar.txt", cursor placed right after the FIRST,
+    // unfinished mention -- a second '@' mention sits further along the
+    // line, past the cursor. Driven directly through `state` (not
+    // SendEvent's character-by-character typing, which only ever leaves the
+    // cursor at the end) -- exactly the "user pressed Left to fix an
+    // earlier mention" scenario, which the debounce/character-handler path
+    // isn't what's under test here; the SPLICE is.
+    state.content = "compare @fo and @bar.txt";
+    state.cursor_position = static_cast<int>(std::string("compare @fo").size());
+    state.list_open = true;
+    state.suggestions = {"src/foo.cpp"};
+    state.completions = {"src/foo.cpp"};
+    state.suggestion_selected = 0;
+
+    REQUIRE(SendEvent(editor, ftx::Event::Tab));
+
+    // The token AT THE CURSOR is completed; the prose and the SECOND mention
+    // after the cursor survive untouched. Pre-fix this produced
+    // "compare @fo and @src/foo.cpp" (completed the wrong, LAST '@') or
+    // worse, depending on which '@' rfind found.
+    CHECK(state.content == "compare @src/foo.cpp and @bar.txt");
+    CHECK(state.cursor_position ==
+         static_cast<int>(std::string("compare @src/foo.cpp").size()));
+}
+
+// C6: the render-time command-catalog rebuild skips its catalog scan when
+// (prefix, session) matches the last computed key -- safe only because it
+// ALSO checks state.suggestions still holds what THIS closure last wrote
+// there. accept_suggestion (Tab) clears state.suggestions out from under
+// it; backspacing back to the SAME prefix afterward must not serve a stale
+// "nothing changed" cache hit over that now-empty list.
+TEST_CASE("prompt editor: suggestions repopulate after accepting then returning "
+         "to the same prefix", "[prompt_editor][regression]") {
+    const auto theme = TestTheme();
+    PromptEditorState state;
+    std::vector<std::string> texts;
+    std::vector<std::string> commands;
+    const std::vector<CommandCatalogEntry> catalog = {
+        {"compact", "compact the history", false, false}};
+    auto editor = MakePromptEditor(
+        theme, state, [&](const std::string& t) { texts.push_back(t); },
+        [&](const std::string& c) { commands.push_back(c); },
+        [](const std::string&) { return std::vector<std::string>{}; },
+        [&catalog]() -> const std::vector<CommandCatalogEntry>& { return catalog; });
+
+    for (const char c : std::string_view("/compact")) {
+        REQUIRE(SendEvent(editor, ftx::Event::Character(std::string{c})));
+    }
+    RenderFrame(editor);
+    REQUIRE_FALSE(state.suggestions.empty());
+
+    REQUIRE(SendEvent(editor, ftx::Event::Tab));   // accepts -> "/compact ", clears suggestions
+    CHECK(state.content == "/compact ");
+    CHECK(state.suggestions.empty());
+
+    // Back to the EXACT prefix ("compact") the cache last saw -- a cache
+    // keyed on (prefix, session) alone would wrongly report a hit here and
+    // leave state.suggestions empty (and the list effectively unusable)
+    // instead of repopulating it.
+    REQUIRE(SendEvent(editor, ftx::Event::Backspace));
+    CHECK(state.content == "/compact");
+    RenderFrame(editor);
+    CHECK_FALSE(state.suggestions.empty());
 }
 
 TEST_CASE("prompt editor: Enter accepts the highlighted suggestion instead of submitting",

@@ -18,6 +18,7 @@
 #include <ftxui/dom/elements.hpp>
 
 #include <map>
+#include <memory>
 #include <optional>
 #include <tuple>
 #include <utility>
@@ -30,15 +31,31 @@
 
 namespace minimal::client {
 
+// One live TEXT segment's streaming view, owned and fed by TabMaintenance
+// (the event path -- track C4), read by ChatView::Render (which must stay a
+// pure read, like every other render-path consumer here). Parallel to
+// SessionState::Snapshot::live_segments BY INDEX: a Tool-kind segment's slot
+// stays default/unused, since only Text segments need a reparse debounce.
+struct LiveTextStreamSlot {
+    std::unique_ptr<plugins::MarkdownEngine::Stream> view;
+    std::size_t seen = 0;             // bytes of THIS segment's text already appended
+    bool finalized_for_turn = false;
+};
+
 class ChatView {
 public:
     ChatView(const Theme& theme,
              const plugins::MessageRendererRegistry& message_renderers,
              const plugins::ToolResultRendererRegistry& tool_renderers);
 
-    // `streaming` is the tab's own view; its debounce decides when to re-parse.
+    // `live_text_streams` is the tab's own per-segment views, index-aligned
+    // with snapshot.live_segments (TabMaintenance::Maintain builds and feeds
+    // them; each one's own debounce decides when it re-parses). A segment
+    // index beyond the vector's size, or a Tool-kind slot, renders nothing
+    // for THAT text entry -- defensive only; Maintain keeps the vector
+    // sized to match every live pass.
     ftxui::Element Render(const SessionState::Snapshot& snapshot,
-                          plugins::MarkdownEngine::Stream& streaming);
+                          const std::vector<LiveTextStreamSlot>& live_text_streams = {});
 
     // Moves the scroll position by `delta_rows` rows, counted from the
     // bottom: positive scrolls toward older messages (further back from the
@@ -48,7 +65,7 @@ public:
     void ScrollBy(int delta_rows);
 
     // Resets the scroll anchor to the newest row -- the default state.
-    // Bound to chat.scroll_bottom (End) and called on every chat turn
+    // Bound to chat.scroll_bottom (PageDown) and called on every chat turn
     // submit, so sending a message while scrolled up returns to the live
     // content instead of leaving it scrolled away from what just arrived.
     void ScrollToBottom() { scroll_from_bottom_ = 0; }
@@ -80,10 +97,11 @@ public:
 
 private:
     void RebuildRows(const SessionState::Snapshot& snapshot);
-    // The current turn's tool calls, rendered LIVE from the snapshot's tool
-    // list (the transcript's tool rows only reach a page via a fetch, which
-    // mid-turn nothing submits) -- "tools as soon as they are executed".
-    ftxui::Elements RenderLiveTools(const SessionState::Snapshot& snapshot) const;
+    // ONE tool's live status row (the transcript's tool rows only reach a
+    // page via a fetch, which mid-turn nothing submits) -- "tools as soon
+    // as they are executed". Called once per Tool-kind live_segments entry,
+    // interleaved with the text segments around it (track C4).
+    ftxui::Element RenderLiveToolRow(const ToolExecutionState& tool) const;
 
     using RowKey = std::pair<int64_t, int>;   // (transcript seq, occurrence within seq)
 
@@ -97,6 +115,11 @@ private:
     const plugins::ToolResultRendererRegistry& tool_renderers_;
     uint64_t rendered_version_ = 0;   // transcript_version these rows came from
     std::string rendered_session_id_; // which tab they came from (see Render)
+    // ChatRowsFromMessages' own output, cached on scrollback_page's pointer
+    // identity (see RebuildRows): a collapse-epoch-only rebuild reuses this
+    // instead of re-walking the page.
+    std::shared_ptr<const std::vector<v1::StoredMessage>> materialized_page_;
+    std::vector<ChatRow> materialized_rows_;
     // Aligned with the rows of the current snapshot (oldest first).
     std::vector<ftxui::Elements> rendered_rows_;
     // Same order/length as rendered_rows_ -- the row cursor's addressable

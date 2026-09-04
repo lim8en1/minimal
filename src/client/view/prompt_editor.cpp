@@ -13,15 +13,48 @@ using ftxui::Event;
 
 constexpr auto kSuggestDebounce = std::chrono::milliseconds(120);
 
-// The token being completed: the text after the last '@' not yet closed by
-// whitespace. Bash-completion shape: a mention is '@' + non-space characters.
-std::string MentionPrefixAt(const std::string& text) {
-    const std::size_t at = text.rfind('@');
-    if (at == std::string::npos) return "";
-    for (std::size_t i = at + 1; i < text.size(); ++i) {
-        if (std::isspace(static_cast<unsigned char>(text[i]))) return "";
+// The start index of the '@' token the CURSOR currently sits inside (or at
+// the end of), or nullopt if none. Scans backward from `cursor`: an '@' hit
+// before any whitespace means the cursor is inside a live mention token;
+// whitespace hit first (or the buffer start reached with neither) means it
+// isn't. Anchored at the cursor, not `text.rfind('@')` over the WHOLE
+// buffer -- editing an EARLIER '@' with the cursor placed back inside it
+// used to resolve to whichever '@' was LAST in the buffer, regardless of
+// where the cursor actually was.
+std::optional<std::size_t> MentionTokenStart(const std::string& text, int cursor) {
+    const std::size_t pos = std::clamp<std::size_t>(
+        cursor < 0 ? std::size_t{0} : static_cast<std::size_t>(cursor), std::size_t{0},
+        text.size());
+    std::size_t i = pos;
+    while (i > 0) {
+        const char c = text[i - 1];
+        if (c == '@') return i - 1;
+        if (std::isspace(static_cast<unsigned char>(c))) return std::nullopt;
+        --i;
     }
-    return text.substr(at + 1);
+    return std::nullopt;
+}
+
+// Where the token starting at `at` (an '@') ends: the next whitespace, or
+// the end of the buffer. Only accept_suggestion needs this -- MentionPrefixAt
+// (below) only ever needs up TO the cursor, not the whole token.
+std::size_t MentionTokenEnd(const std::string& text, std::size_t at) {
+    std::size_t i = at + 1;
+    while (i < text.size() && !std::isspace(static_cast<unsigned char>(text[i]))) ++i;
+    return i;
+}
+
+// The token being completed: the text between the '@' MentionTokenStart
+// found and the cursor -- what the user has typed SO FAR, which is what
+// narrows the suggestion list. Bash-completion shape: a mention is '@' +
+// non-space characters.
+std::string MentionPrefixAt(const std::string& text, int cursor) {
+    const auto at = MentionTokenStart(text, cursor);
+    if (!at.has_value()) return "";
+    const std::size_t pos = std::clamp<std::size_t>(
+        cursor < 0 ? std::size_t{0} : static_cast<std::size_t>(cursor), std::size_t{0},
+        text.size());
+    return text.substr(*at + 1, pos - *at - 1);
 }
 
 // True while `text` is STILL a command name being typed: '/' plus zero or
@@ -89,16 +122,32 @@ ftxui::Component MakePromptEditor(
                 // a '/'-leading line the dispatcher would route as a
                 // command. The '@' stays -- the server's expansion scans
                 // for '@' + non-space tokens.
-                const std::size_t at = state.content.rfind('@');
-                if (at != std::string::npos) {
-                    state.content = state.content.substr(0, at) + "@" + completion;
+                //
+                // The token replaced is the one AT THE CURSOR (MentionTokenStart),
+                // not content.rfind('@') over the whole buffer -- the old
+                // whole-buffer search always found the LAST '@' typed, so
+                // completing a mention the cursor had been moved back INTO
+                // (to fix an earlier one, say) spliced over -- and destroyed
+                // -- every char after the cursor up to and past that later
+                // '@', including whatever the user had typed after it. The
+                // WHOLE token is replaced (MentionTokenEnd), not just up to
+                // the cursor: completing mid-token ("@src|extra", cursor
+                // between them) should not leave "extra" glued onto the
+                // inserted path.
+                if (const auto at = MentionTokenStart(state.content, state.cursor_position)) {
+                    const std::size_t end = MentionTokenEnd(state.content, *at);
+                    const std::string spliced = "@" + completion;
+                    state.content =
+                        state.content.substr(0, *at) + spliced + state.content.substr(end);
+                    state.cursor_position = static_cast<int>(*at + spliced.size());
                 } else {
+                    // No '@' relative to the cursor -- should not normally
+                    // happen (MentionPrefixAt gated the query that produced
+                    // this completion list), but degrade to appending rather
+                    // than silently dropping a selected completion.
                     state.content += "@" + completion;
+                    state.cursor_position = static_cast<int>(state.content.size());
                 }
-                // MentionPrefixAt only offers a mention when the '@' token
-                // runs to the end of content with no trailing whitespace, so
-                // the splice above always lands the completion at the end.
-                state.cursor_position = static_cast<int>(state.content.size());
             }
         }
         state.list_open = false;
@@ -311,7 +360,11 @@ ftxui::Component MakePromptEditor(
             // same text as history[cursor], so further up/down should not
             // silently discard what was just typed.
             state.history_cursor.reset();
-            state.pending_prefix = MentionPrefixAt(state.content);
+            // state.cursor_position, read here, is stale by this same one
+            // keystroke (Input has not moved it for the CURRENT event
+            // either) -- consistent with state.content's own staleness
+            // (see the comment above), so the two stay correctly paired.
+            state.pending_prefix = MentionPrefixAt(state.content, state.cursor_position);
             state.query_pending = !state.pending_prefix.empty();
             // Mirrored for the redraw pump (RunTui, a different thread) --
             // see PromptEditorState::query_pending_hint.
@@ -329,7 +382,11 @@ ftxui::Component MakePromptEditor(
         return false;   // everything else goes to the Input
     });
 
-    return Renderer(with_events, [=, &state, &theme] {
+    return Renderer(with_events,
+                    [=, &state, &theme, cached_command_prefix = std::string(),
+                     cached_command_session_ok = false,
+                     cached_command_suggestions = std::vector<std::string>(),
+                     has_cached_command = false]() mutable {
         using namespace ftxui;
 
         // The '/'+name command catalog match: read HERE, after Input has
@@ -346,29 +403,55 @@ ftxui::Component MakePromptEditor(
             // session exists (a sessionless tab never offers a command that
             // would only refuse).
             const bool session_ok = !session_available || session_available();
-            std::vector<std::string> suggestions;
-            std::vector<std::string> completions;
-            for (const auto& entry : command_catalog()) {
-                if (entry.requires_session && !session_ok) continue;
-                if (entry.name.rfind(command_prefix, 0) != 0) continue;
-                std::string display = "/" + entry.name + " -- " + entry.summary;
-                if (entry.submits_prompt) display += "  (submits a prompt as your turn)";
-                if (entry.read_only) display += "  (read-only)";
-                suggestions.push_back(std::move(display));
-                completions.push_back("/" + entry.name + " ");
-            }
-            // Only touch the selection when the matched SET actually
-            // changed -- this runs every frame (~20 Hz), and resetting
-            // suggestion_selected unconditionally would undo an ArrowUp/
-            // ArrowDown the user just made while the prefix stayed put.
-            if (suggestions != state.suggestions) {
-                state.suggestions = std::move(suggestions);
-                state.completions = std::move(completions);
-                state.suggestion_selected = 0;
+
+            // Skip the catalog scan (and its per-entry string concatenation)
+            // when nothing that could change the result has: same prefix,
+            // same session availability, AND state.suggestions still holds
+            // exactly what THIS closure last wrote there. That third check
+            // is what makes this safe rather than merely fast -- it
+            // self-heals against an external clear (accept_suggestion's
+            // Tab/Enter handling, the character handler's re-arm) without
+            // this closure needing to know about either: a mismatch just
+            // falls through to the full rebuild below, same as a cache miss.
+            // This runs every frame (~20 Hz) for as long as a command name
+            // is being typed; the catalog is small and fixed since connect,
+            // but re-walking it and re-concatenating every entry's display
+            // string on every frame was still pure waste whenever nothing
+            // had actually changed.
+            const bool cache_hit = has_cached_command && command_prefix == cached_command_prefix &&
+                                   session_ok == cached_command_session_ok &&
+                                   state.suggestions == cached_command_suggestions;
+            if (!cache_hit) {
+                std::vector<std::string> suggestions;
+                std::vector<std::string> completions;
+                for (const auto& entry : command_catalog()) {
+                    if (entry.requires_session && !session_ok) continue;
+                    if (entry.name.rfind(command_prefix, 0) != 0) continue;
+                    std::string display = "/" + entry.name + " -- " + entry.summary;
+                    if (entry.submits_prompt) display += "  (submits a prompt as your turn)";
+                    if (entry.read_only) display += "  (read-only)";
+                    suggestions.push_back(std::move(display));
+                    completions.push_back("/" + entry.name + " ");
+                }
+                // Only touch the selection when the matched SET actually
+                // changed -- resetting suggestion_selected unconditionally
+                // would undo an ArrowUp/ArrowDown the user just made while
+                // the prefix stayed put.
+                if (suggestions != state.suggestions) {
+                    state.suggestions = std::move(suggestions);
+                    state.completions = std::move(completions);
+                    state.suggestion_selected = 0;
+                }
+                has_cached_command = true;
+                cached_command_prefix = command_prefix;
+                cached_command_session_ok = session_ok;
+                cached_command_suggestions = state.suggestions;
             }
             state.list_open = !state.suggestions.empty();
             state.query_pending = false;
             state.query_pending_hint.store(false, std::memory_order_release);
+        } else {
+            has_cached_command = false;   // left command-name mode: nothing to remember
         }
 
         // The debounce gate: once the delay has passed and the prefix is

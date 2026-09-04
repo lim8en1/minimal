@@ -190,8 +190,18 @@ TEST_CASE("tool tracking: start -> deltas -> finish, keyed by tool_use_id", "[se
 
     auto before_finish = state.TakeSnapshot();
     REQUIRE(before_finish.tools.size() == 1);
-    REQUIRE(before_finish.tools[0].buffered_output == "line one\nline two\n");
+    // TakeSnapshot (the DEEP, focused-tab snapshot) deliberately does NOT
+    // carry buffered_output: its only tool consumer (ChatView::RenderLiveToolRow)
+    // reads name/started/is_error/summary, never the buffer -- the
+    // running-tools panel is what renders that, off TakeLightSnapshot(true)
+    // below (track B1: copying up to 64 KiB per tool on every deep snapshot
+    // for a consumer that ignores it was pure waste).
+    REQUIRE(before_finish.tools[0].buffered_output.empty());
     REQUIRE(before_finish.tools[0].started);
+
+    auto light = state.TakeLightSnapshot(/*include_tool_output=*/true);
+    REQUIRE(light.tools.size() == 1);
+    REQUIRE(light.tools[0].buffered_output == "line one\nline two\n");
 
     state.OnToolFinished("t-1", FinishTool(/*is_error=*/false));
     auto after_finish = state.TakeSnapshot();
@@ -201,7 +211,8 @@ TEST_CASE("tool tracking: start -> deltas -> finish, keyed by tool_use_id", "[se
     // A delta arriving after finish for the same id is dropped -- it is no
     // longer the active execution.
     state.OnToolOutputDelta("t-1", "late, must not append");
-    REQUIRE(state.TakeSnapshot().tools[0].buffered_output == "line one\nline two\n");
+    REQUIRE(state.TakeLightSnapshot(/*include_tool_output=*/true).tools[0].buffered_output ==
+           "line one\nline two\n");
 }
 
 // --- background bash rows (ARCHITECTURE.md "Background bash rows") --------
@@ -578,7 +589,10 @@ TEST_CASE("INVARIANT: tool output deltas stay bounded, with marker and tail pres
     for (int i = 0; i < 16; ++i) {
         state.OnToolOutputDelta("t1", chunk);   // 16 KB total vs a 4 KB cap
     }
-    auto snap = state.TakeSnapshot();
+    // The running-tools panel is the only renderer of buffered_output, and it
+    // reads the LIGHT snapshot (include_tool_output=true) -- see the "tool
+    // tracking" test case above for why TakeSnapshot() no longer carries it.
+    auto snap = state.TakeLightSnapshot(/*include_tool_output=*/true);
     REQUIRE(snap.tools.size() == 1);
     const auto& out = snap.tools[0].buffered_output;
     CHECK(out.size() <= 4096 + 256);   // bounded (small slack for the marker)
@@ -631,6 +645,111 @@ TEST_CASE("turn_seq advances once per streaming turn", "[session_state]") {    S
     state.OnTurnCompleted(v1::TurnCompletedEvent{});   // ends the turn
     state.AppendStreamingText("next turn");
     CHECK(state.TakeSnapshot().turn_seq == 2);
+}
+
+// A1: a new content block WITHIN the same turn (text -> tool -> text, or
+// thinking -> text) must not fuse its raw markdown onto the previous block's
+// -- an unclosed fence from block one would otherwise eat block two whole.
+// The first delta of the turn gets no leading separator (nothing precedes
+// it); a turn boundary (OnTurnCompleted) gets none either, since streaming_text
+// is cleared at the turn boundary in practice (SessionState::ClearStreaming,
+// called by the post-turn scrollback apply) before the next turn's first delta.
+TEST_CASE("AppendStreamingText separates blocks within a turn, not across turns",
+          "[session_state]") {
+    SessionState state("s-1");
+
+    state.AppendStreamingText("block one");
+    CHECK(state.TakeSnapshot().streaming_text == "block one");
+
+    state.FinalizeStreamingText();   // content_block_stop: block one ends
+    state.AppendStreamingText("block two");   // same turn, a later block
+    CHECK(state.TakeSnapshot().streaming_text == "block one\n\nblock two");
+
+    // A THIRD block does not double up the separator against the second's.
+    state.FinalizeStreamingText();
+    state.AppendStreamingText("block three");
+    CHECK(state.TakeSnapshot().streaming_text == "block one\n\nblock two\n\nblock three");
+}
+
+// C4: live_segments records this turn's text and tool activity in ARRIVAL
+// order, not two separate groups (all text, then all tools). This is what
+// lets the live chat view interleave a tool call between the text before
+// and after it, matching the shape the PERSISTED rows decompose into
+// (ChatRowsFromMessages) instead of only converging to that shape once the
+// turn ends.
+TEST_CASE("live_segments records text and tool activity in arrival order",
+          "[session_state][live_segments]") {
+    using Kind = LiveTurnSegment::Kind;
+    SessionState state("s-1");
+
+    state.AppendStreamingText("intro text");
+    state.FinalizeStreamingText();   // content_block_stop: the text block ends
+    state.OnToolStarted(StartTool("t-1", "bash"));
+    state.OnToolFinished("t-1", FinishTool(/*is_error=*/false));
+    state.AppendStreamingText("closing text");   // a NEW block, after the tool
+
+    const auto snap = state.TakeSnapshot();
+    REQUIRE(snap.live_segments.size() == 3);
+    CHECK(snap.live_segments[0].kind == Kind::Text);
+    CHECK(snap.live_segments[0].text == "intro text");
+    CHECK(snap.live_segments[1].kind == Kind::Tool);
+    CHECK(snap.live_segments[1].tool_use_id == "t-1");
+    CHECK(snap.live_segments[2].kind == Kind::Text);
+    CHECK(snap.live_segments[2].text == "closing text");   // its OWN text, not the whole turn
+
+    // streaming_text (the flat convenience field) still carries everything,
+    // separator-joined, for consumers that only need "is anything
+    // streaming" or the total text as one string.
+    CHECK(snap.streaming_text == "intro text\n\nclosing text");
+}
+
+// PARALLEL tool dispatch (ARCHITECTURE.md "Tool dispatch is parallel", width
+// 4 by default): several tools started together each get their OWN marker,
+// in GATE order -- the same order snapshot.tools already preserves.
+TEST_CASE("live_segments gives each parallel tool its own marker, in gate order",
+          "[session_state][live_segments]") {
+    using Kind = LiveTurnSegment::Kind;
+    SessionState state("s-1");
+
+    state.AppendStreamingText("running a few tools");
+    state.FinalizeStreamingText();
+    state.OnToolStarted(StartTool("t-1", "bash"));
+    state.OnToolStarted(StartTool("t-2", "read"));
+    state.OnToolStarted(StartTool("t-3", "grep"));
+
+    const auto snap = state.TakeSnapshot();
+    REQUIRE(snap.live_segments.size() == 4);
+    CHECK(snap.live_segments[0].kind == Kind::Text);
+    CHECK(snap.live_segments[1].tool_use_id == "t-1");
+    CHECK(snap.live_segments[2].tool_use_id == "t-2");
+    CHECK(snap.live_segments[3].tool_use_id == "t-3");
+}
+
+// live_segments follows streaming_text's exact clear lifecycle: cleared by
+// ClearStreaming (the post-turn scrollback apply, once persisted rows take
+// over) and by OnResyncRequired (a hole in event delivery -- drop the live
+// half, the transcript is authoritative), never by the turn merely ending.
+TEST_CASE("live_segments clears alongside streaming_text, not before",
+          "[session_state][live_segments]") {
+    SessionState state("s-1");
+    state.AppendStreamingText("hello");
+    state.OnToolStarted(StartTool("t-1"));
+    REQUIRE(state.TakeSnapshot().live_segments.size() == 2);
+
+    v1::TurnCompletedEvent done;
+    state.OnTurnCompleted(done);
+    // The turn ending alone does NOT clear it -- the live content stays
+    // visible until the refresh actually swaps in the persisted rows,
+    // exactly like streaming_text.
+    CHECK(state.TakeSnapshot().live_segments.size() == 2);
+
+    state.ClearStreaming();
+    CHECK(state.TakeSnapshot().live_segments.empty());
+
+    state.AppendStreamingText("next turn");
+    state.OnResyncRequired("test");
+    CHECK(state.TakeSnapshot().live_segments.empty());
+    CHECK(state.TakeSnapshot().streaming_text.empty());
 }
 
 // ---------------------------------------------------------------------------

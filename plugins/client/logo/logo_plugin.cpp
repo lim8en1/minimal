@@ -22,6 +22,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <deque>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -133,6 +134,11 @@ private:
         auto cached = cache_.find(cache_key);
         if (cached != cache_.end()) return cached->second;
 
+        if (cache_.size() >= kCacheCap && !cache_order_.empty()) {
+            cache_.erase(cache_order_.front());
+            cache_order_.pop_front();
+        }
+        cache_order_.push_back(cache_key);
         const auto seed = rng_();
         return cache_.emplace(cache_key, Generate(seed)).first->second;
     }
@@ -199,6 +205,16 @@ private:
     LogoConfig config_;
     mutable std::mutex mtx_;
     mutable std::map<std::string, std::vector<std::string>> cache_;
+    // FIFO eviction order, kept alongside cache_ (regenerate_per_session=true
+    // means one entry PER SESSION ID ever opened, unbounded for a
+    // long-running client -- a session closed an hour ago has no other event
+    // that would ever remove its art). kCacheCap is generous for what a
+    // process realistically has open or recently open at once; eviction
+    // order is FIFO, not true LRU -- simplicity over precision for a cache
+    // this cheap to regenerate and this small per entry (a handful of ASCII
+    // lines).
+    mutable std::deque<std::string> cache_order_;
+    static constexpr std::size_t kCacheCap = 200;
     mutable std::mt19937 rng_;  // Render is loop-thread only; the mutex covers it anyway
 
     static constexpr const char* kSharedKey = "";

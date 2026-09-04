@@ -1046,8 +1046,9 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     // moved/copied for the rest of RunTui's lifetime -- Focused()/
     // FocusedDetails() return references into its own members.
     minimal::client::TabMaintenance tab_maintenance(minimal::client::TabMaintenance::Dependencies{
-        *app, engine, chat_surface, view_registry, plugin_views, plugin_modal_child,
-        show_plugin_modal, open_picker, open_agent_picker, open_model_picker, tab_ui, theme,
+        *app, engine, view_registry, plugin_views, plugin_modal_child,
+        show_plugin_modal, open_picker, open_agent_picker, open_model_picker,
+        [&picker_controller] { picker_controller.Poll(); }, tab_ui, theme,
         message_registry, renderer_registry, permission_child, show_permission,
         confirmation_child, show_confirmation});
     // Same names the inline code declared directly -- every lambda below
@@ -1067,16 +1068,28 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     auto delete_modal = minimal::client::MakeConfirmationModal(
         delete_request, theme, [&](const std::string& chosen) {
             if (chosen == "delete" && !staged_delete_id.empty()) {
-                // NOT stderr: the alternate screen is live (see
+                // Off the loop thread: DeleteSession carries a 2 s deadline
+                // (session_client.cpp), and this callback fires from inside
+                // the event loop -- a slow server used to stall the whole
+                // frame for the duration. `client` is captured by shared_ptr
+                // (not `&`): the job may still be in AppState's queue when
+                // this scope ends, and app->StopRpcQueue() (below, before
+                // teardown) joins the worker before `client` itself would go
+                // away, so the copy just needs to survive until then. NOT
+                // stderr on failure: the alternate screen is live (see
                 // ScreenInteractive::FullscreenAlternateScreen() below), and
-                // this callback fires from inside the event loop -- any
-                // out-of-band stdout/stderr write desyncs the repaint the
-                // same way a resize does, and the message was invisible
-                // behind the fullscreen buffer regardless.
-                if (const auto status = client->DeleteSession(staged_delete_id); !status.ok()) {
-                    minimal::common::DefaultLogger().error("delete failed: {}",
-                                                           status.error_message());
-                }
+                // an out-of-band stdout/stderr write from the worker thread
+                // would desync the repaint the same way a resize does, and
+                // the message was invisible behind the fullscreen buffer
+                // regardless -- logged instead, same as every other
+                // background-job failure in this file.
+                const std::string id = staged_delete_id;
+                app->RunOnRpcQueue([client, id] {
+                    if (const auto status = client->DeleteSession(id); !status.ok()) {
+                        minimal::common::DefaultLogger().error("delete failed: {}",
+                                                               status.error_message());
+                    }
+                });
             }
             staged_delete_id.clear();
             show_delete_confirm = false;
@@ -1259,7 +1272,13 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     // closed. Gated instead on query_pending_hint: a debounced query is
     // actually armed only for the ~100-150ms between a keystroke and its
     // answer, so this floor is now active for a sliver of the app's
-    // lifetime rather than always.
+    // lifetime rather than always. StreamingMarkdownView::PendingReparseHint
+    // is the same seam for the streaming markdown debounce: DispatchToTab
+    // bumps UiVersion() once per wire event (state.cpp), so a burst of
+    // deltas that PAUSES wakes this pump once for the pause's last delta --
+    // if that render landed before the debounce window closed, nothing
+    // bumps the version again when it DOES close, and the tail sat
+    // rendered-stale until an unrelated event happened to arrive.
     std::atomic<bool> running{true};
     std::thread pump([&] {
         uint64_t last_version = app->UiVersion();
@@ -1267,7 +1286,9 @@ int RunTui(const minimal::client::ParsedArgs& args) {
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
             const uint64_t version = app->UiVersion();
             const bool debounce_pending =
-                prompt_state.query_pending_hint.load(std::memory_order_acquire);
+                prompt_state.query_pending_hint.load(std::memory_order_acquire) ||
+                minimal::client::StreamingMarkdownView::PendingReparseHint().load(
+                    std::memory_order_acquire);
             if (version != last_version || debounce_pending) {
                 last_version = version;
                 screen.PostEvent(Event::Custom);

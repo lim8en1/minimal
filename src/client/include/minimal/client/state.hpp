@@ -59,6 +59,33 @@ struct ToolExecutionState {
 };
 
 // ============================================================================
+// The current turn's live content, in ARRIVAL order (track C4).
+//
+// A turn's blocks are strictly SEQUENTIAL on the wire (a tool_use block's
+// content_block_stop always precedes the next block's first delta, per the
+// streaming protocol) -- text and tool activity never interleave WITHIN one
+// block, but a turn as a whole is exactly the sequence "text, then a tool
+// round, then more text, ..." that this records. Rendering the OLD single
+// flattened buffer-plus-all-tool-rows-at-the-end (ChatView::Render, pre-C4)
+// lost that order: text emitted before AND after a tool call fused into one
+// block, with every tool row below both, however far apart the model
+// actually put them. This is what lets the live view match the FINAL
+// (persisted) row order instead of only converging to it at turn end.
+// ============================================================================
+
+struct LiveTurnSegment {
+    enum class Kind { Text, Tool };
+    Kind kind = Kind::Text;
+    // Kind::Text: this segment's OWN accumulated text (one content block's
+    // worth) -- NOT the whole turn's text, unlike Snapshot::streaming_text.
+    std::string text;
+    // Kind::Tool: which tool -- cross-referenced against Snapshot::tools by
+    // id at render time; this struct carries no tool state of its own so
+    // ToolExecutionState stays the single source of truth for it.
+    std::string tool_use_id;
+};
+
+// ============================================================================
 // Pending interactions awaiting user input (permission/confirmation modals)
 // ============================================================================
 
@@ -135,9 +162,22 @@ public:
         // landed (any seq newer than the submit-time baseline), or on error.
         std::string pending_user_text;
 
-        // Streaming assistant response (partial markdown building up)
+        // Streaming assistant response (partial markdown building up). The
+        // FLAT concatenation of every live_segments Text entry (blocks
+        // joined by a blank line, see AppendStreamingText) -- kept for
+        // consumers that only care "is anything streaming" or need the
+        // total text as one string (scrollback_refresh.cpp's refresh-latch
+        // check, frame_renderer.cpp's fresh-session check), and for
+        // TabMaintenance to diff against for the per-turn refresh-eligible
+        // check. The ORDERED view a chat surface actually renders from is
+        // live_segments below (track C4) -- streaming_text alone lost
+        // ordering relative to tool calls that happened between its blocks.
         std::string streaming_text;          // empty when not streaming
         bool is_streaming_finalized = false;
+        // This turn's live content in arrival order (LiveTurnSegment above).
+        // Empty exactly when streaming_text is (same clear sites:
+        // ClearStreaming, OnResyncRequired).
+        std::vector<LiveTurnSegment> live_segments;
 
         // Pending modals
         std::optional<PendingPermission> pending_permission;
@@ -358,6 +398,16 @@ public:
 private:
     void MaybeGoIdleLocked();   // mtx_ held by caller
 
+    // Shared by TakeSnapshot/TakeLightSnapshot(include_tool_output=false):
+    // `buffered_output` can hold up to tool_output_buffer_bytes_ (64 KiB
+    // default) per tool, and ChatView::RenderLiveToolRow -- the deep snapshot's
+    // only tool consumer -- reads name/started/is_error/summary, never the
+    // buffer (the running-tools panel is what renders it, off the LIGHT
+    // snapshot with include_tool_output=true). TakeSnapshot used to copy the
+    // buffer anyway on every focused-tab deep snapshot; this is the one place
+    // that decision is made now. mtx_ held by caller.
+    std::vector<ToolExecutionState> CopyToolsLocked(bool include_output) const;
+
     mutable std::mutex mtx_;
 
     std::string session_id_;
@@ -411,6 +461,9 @@ private:
     bool is_streaming_ = false;
     uint64_t turn_seq_ = 0;    // increments when a NEW TURN's stream starts
     bool turn_ended_ = true;   // armed by OnTurnCompleted/OnError; disarmed by the next delta
+    // This turn's live content in arrival order (track C4) -- see
+    // Snapshot::live_segments. Same clear sites as streaming_accumulated_.
+    std::vector<LiveTurnSegment> live_segments_;
 
     // Pending modals
     std::optional<PendingPermission> pending_permission_;
@@ -686,6 +739,15 @@ public:
     // Disables a surface that threw mid-render (loop thread). `reason` may be
     // null for a non-standard exception.
     void DisableChatSurface(const char* reason);
+
+    // Wakes the 20 Hz pump for state published OUTSIDE any AppState mutator
+    // -- PickerController's async fetch completions, e.g. (ARCHITECTURE.md
+    // review: picker RPCs used to run synchronously on the loop thread, up to
+    // 15 s for a model-discovery refresh). Every ordinary AppState mutation
+    // already bumps this same counter at its own entry point; a caller with
+    // no AppState state of its own to mutate has no other way to get the same
+    // wake. Safe from any thread, like every other AppState method.
+    void NotifyExternalUpdate() { BumpUiVersion(); }
 
     // Memory bounds for every SessionState created AFTER this call
     // (OpenTab/AttachTab). 0 leaves that bound at its built-in default.

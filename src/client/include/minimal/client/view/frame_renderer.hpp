@@ -14,10 +14,12 @@
 // TabMaintenance (view/tab_ui.hpp) -- both are event-path decisions
 // ("is this a NEW request", "has this tab been seen before"), not render-
 // path ones. Render() keeps ONE narrow exception: a null-guarded fallback
-// construction of ui.chat/ui.streaming, for the documented race where
+// construction of ui.chat, for the documented race where
 // TabMaintenance::Maintain() returns early before ever seeing this tab (see
 // its own comment) -- a lazy idempotent construct-if-null is not the same
 // risk class as the modal rebuild-and-flip logic that moved out entirely.
+// ui.live_text_streams (track C4) needs no such fallback: ChatView::Render
+// defensively skips any live_segments index it has no slot for.
 
 #include <map>
 #include <memory>

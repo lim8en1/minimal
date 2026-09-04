@@ -15,13 +15,22 @@
 // to MakeModalHost itself; this class only ever assigns *through* them
 // (`*picker_slot = ...`), the same as the inline closures did.
 //
-// Still SYNCHRONOUS (ListSessions/ListAgentPresets block the calling
-// thread), unchanged from the inline code -- making these async is a UX
-// fix (ARCHITECTURE.md review, Part 4), deliberately not bundled into this
-// structural move.
+// ASYNC (ARCHITECTURE.md review, Part 4): every list/refresh RPC
+// (ListSessions, ListAgentPresets, ListModels -- the last up to 15 s with
+// refresh_discovery) runs on AppState's own RPC worker via RunOnRpcQueue,
+// never the FTXUI loop thread. picker_data_/agent_picker_presets_/
+// model_picker_models_ and the modal Component slots are still
+// loop-thread-owned -- unchanged from the synchronous version -- so a
+// completion never touches them directly from the worker thread: it packages
+// plain fetched data into a closure and hands it to QueueApply, which stashes
+// it under async_mtx_ and wakes the pump (AppState::NotifyExternalUpdate).
+// Poll(), called from TabMaintenance::Run() on the event path, drains that
+// queue and runs each closure here on the loop thread -- that is the only
+// place picker_data_ or a modal slot is written from a fetch's result.
 
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -79,10 +88,14 @@ public:
     // Shared by the bare `/model` view_hint and the picker's own ctrl+r.
     // The bare open lists what the server already knows (static models plus
     // any cached discovery); `refresh` re-fetches every discover-entry's
-    // catalog first, which can take seconds and blocks the calling thread --
-    // acceptable for an explicit user action, the same bounded-pause trade
-    // every picker fetch here makes.
+    // catalog first, which can take seconds -- runs on AppState's RPC worker,
+    // never the loop thread (see the file comment).
     void OpenModelPicker(bool refresh);
+
+    // Drains completed async fetches and rebuilds whichever picker they
+    // belong to. Call every pass, unconditionally -- cheap (one lock, an
+    // empty check) when nothing is pending. See TabMaintenance::Run.
+    void Poll();
 
 private:
     void FetchPickerPage(bool reset);
@@ -90,9 +103,19 @@ private:
     void RebuildAgentPickerComponent();
     void RebuildModelPickerComponent();
 
+    // Queues `apply` to run on the LOOP THREAD from the next Poll(), and
+    // wakes the pump so that Poll() actually gets called. The caller (an
+    // RpcQueue job) must not have touched picker_data_/agent_picker_presets_/
+    // model_picker_models_ or a modal slot itself -- `apply` is where that
+    // happens, and it is one of those two things (never a bare RPC result).
+    void QueueApply(std::function<void()> apply);
+
     // The picker's open action: ATTACH for a live row, RESUME otherwise --
-    // see the definition for why the split is load-bearing.
-    std::string OpenPickedSession(const std::string& session_id);
+    // see the definition for why the split is load-bearing. `is_live` is
+    // resolved by the caller on the LOOP THREAD (a scan of picker_data_,
+    // loop-thread-owned) before this runs on the RPC worker -- reading
+    // picker_data_ from here instead would race Poll()'s own writes to it.
+    std::string OpenPickedSession(const std::string& session_id, bool is_live);
 
     // T8: the picker's raw accumulated list, in server delivery order
     // (updated_at DESC, id ASC per session_service.proto). Filter/sort are
@@ -115,6 +138,15 @@ private:
     // server-side; grouping is a pure display transform). No pagination --
     // even a large discovered catalog is one response of small rows.
     std::vector<v1::ModelSummary> model_picker_models_;
+
+    // The async completion handoff (see the file comment): a fetch running
+    // on AppState's RPC worker pushes its apply-closure here under the lock
+    // and wakes the pump; Poll() (loop thread) swaps the vector out under the
+    // same lock and runs each closure OUTSIDE it -- an apply closure that
+    // itself queued another fetch (OpenModelPicker's ctrl+r, say) must not
+    // dead-lock re-entering QueueApply while Poll() still holds it.
+    std::mutex async_mtx_;
+    std::vector<std::function<void()>> pending_apply_;
 };
 
 }  // namespace minimal::client

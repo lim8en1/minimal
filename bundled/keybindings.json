@@ -14,7 +14,7 @@
   "chat.load_older": "pageup",
   "chat.scroll_up": "ctrl+up",
   "chat.scroll_down": "ctrl+down",
-  "chat.scroll_bottom": "end",
+  "chat.scroll_bottom": "pagedown",
   "chat.row_up": "alt+k",
   "chat.row_down": "alt+j",
   "chat.toggle_collapse": "alt+c",

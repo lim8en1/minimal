@@ -751,6 +751,21 @@ std::vector<HighlightSpan> ApplySpanOverrides(std::string_view code,
 
 ftxui::Elements SyntaxHighlighter::Highlight(std::string_view code,
                                              std::string_view language) const {
+    // MRU-ordered linear scan: kHighlightCacheCap (64) is small enough that a
+    // handful of string compares is cheaper than the hashing/bucketing this
+    // would need to be an unordered_map, and simple enough that it needs no
+    // custom hasher for a (language, code) pair. theme_ is fixed for this
+    // instance's whole lifetime (bound at construction), so it is not part of
+    // the key.
+    for (auto it = highlight_cache_.begin(); it != highlight_cache_.end(); ++it) {
+        if (it->language == language && it->code == code) {
+            if (it != highlight_cache_.begin()) {
+                highlight_cache_.splice(highlight_cache_.begin(), highlight_cache_, it);
+            }
+            return highlight_cache_.front().lines;
+        }
+    }
+
     const std::vector<HighlightSpan> spans =
         ApplySpanOverrides(code, Collect(code, language, /*include_plain=*/false));
 
@@ -815,6 +830,9 @@ ftxui::Elements SyntaxHighlighter::Highlight(std::string_view code,
     // Trailing text after the last span.
     emit_range(pos, static_cast<uint32_t>(code.size()), HighlightCategory::Plain);
     flush_line();
+
+    highlight_cache_.push_front({std::string(language), std::string(code), lines});
+    if (highlight_cache_.size() > kHighlightCacheCap) highlight_cache_.pop_back();
     return lines;
 }
 

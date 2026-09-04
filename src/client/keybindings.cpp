@@ -31,7 +31,18 @@ const std::unordered_map<std::string, std::string>& DefaultBindings() {
         {"chat.load_older", "pageup"},
         {"chat.scroll_up", "ctrl+up"},
         {"chat.scroll_down", "ctrl+down"},
-        {"chat.scroll_bottom", "end"},
+        // Not "end": HandleGlobalKey (keybinding_dispatch.cpp) runs BEFORE the
+        // prompt editor ever sees an event (app.cpp wraps session_view, which
+        // wraps the editor, in the CatchEvent that dispatches these), so
+        // claiming plain End here made it unreachable for the editor's own
+        // cursor-to-end-of-buffer use -- Home worked (nothing claims it),
+        // End silently didn't. ctrl+end/alt+end have no single-candidate
+        // encoding in key_event_parser.cpp's ParseKeySpec (only unmodified
+        // named keys resolve there), so binding either would parse to nothing
+        // and warn at startup rather than actually fixing this. PageDown
+        // pairs naturally with chat.load_older's PageUp instead, and is
+        // already a parseable, unclaimed named key.
+        {"chat.scroll_bottom", "pagedown"},
         // Not shift+up/down: the key parser's arrow-key branch has no
         // distinct encoding for shift+arrow (it degrades to plain arrow,
         // ParseKeySpec's own "ctrl+/alt+/plain only" comment) -- alt+j/k

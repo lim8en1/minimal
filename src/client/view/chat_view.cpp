@@ -31,9 +31,23 @@ void ChatView::RebuildRows(const SessionState::Snapshot& snapshot) {
         row_cache_.clear();
         collapse_overrides_.clear();
         focused_row_.reset();
+        materialized_page_.reset();   // a different session's page is a different key space
     }
-    const std::vector<ChatRow> rows =
-        ChatRowsFromMessages(*snapshot.scrollback_page);
+    // ChatRowsFromMessages is a full O(n) walk over the scrollback window (up
+    // to scrollback_window_max_messages, 2000 default), copying every row's
+    // text and converting every tool call's input to JSON -- Render()'s
+    // rebuild gate fires on a COLLAPSE-EPOCH bump alone too (a toggle), which
+    // changes no page content at all, and this used to re-walk the whole page
+    // for that. scrollback_page is shared + copy-on-apply (state.hpp): its
+    // POINTER IDENTITY changes only when ApplyScrollbackPage actually
+    // rebuilt it, so it is exactly the right cache key -- the per-row
+    // Elements cache below already handles "which RENDERS to skip"; this is
+    // "skip re-deriving the ChatRows to render in the first place".
+    if (materialized_page_ != snapshot.scrollback_page) {
+        materialized_rows_ = ChatRowsFromMessages(*snapshot.scrollback_page);
+        materialized_page_ = snapshot.scrollback_page;
+    }
+    const std::vector<ChatRow>& rows = materialized_rows_;
     rendered_rows_.clear();
     rendered_rows_.reserve(rows.size());
     row_keys_.clear();
@@ -107,35 +121,36 @@ void ChatView::RebuildRows(const SessionState::Snapshot& snapshot) {
     rendered_collapse_epoch_ = collapse_epoch_;
 }
 
-// One dim status row per tool call of the CURRENT turn, in gate order -- the
-// same wording the running-tools panel uses ("running"/"FAILED"/"done"), so
-// the two surfaces never disagree. The transcript is still authoritative:
-// the post-turn page apply swaps these for the persisted tool rows.
-ftxui::Elements ChatView::RenderLiveTools(const SessionState::Snapshot& snapshot) const {
+// One dim status row for ONE tool call of the CURRENT turn -- the same
+// wording the running-tools panel uses ("running"/"FAILED"/"done"), so the
+// two surfaces never disagree. The transcript is still authoritative: the
+// post-turn page apply swaps these for the persisted tool rows.
+//
+// Singular (track C4): Render() calls this once per Tool-kind live_segments
+// entry, in ARRIVAL order interleaved with the text segments around it,
+// rather than looping the whole snapshot.tools list unconditionally last --
+// see the file's Render() for why that ordering was wrong.
+ftxui::Element ChatView::RenderLiveToolRow(const ToolExecutionState& tool) const {
     using namespace ftxui;
-    Elements rows;
-    for (const auto& tool : snapshot.tools) {
-        Elements line;
-        line.push_back(text("▎tool " + (tool.tool_name.empty() ? std::string("tool")
-                                                               : tool.tool_name)) |
-                       color(theme_.ColorFor("syntax_function")));
-        if (tool.started) {
-            line.push_back(text(" running…") | color(theme_.ColorFor("assistant_message")));
-        } else if (tool.is_error) {
-            line.push_back(text(" FAILED") | color(theme_.ColorFor("error")));
-        } else {
-            line.push_back(text(" done") | color(theme_.ColorFor("system_message")));
-        }
-        if (tool.summary.has_value() && !tool.summary->empty()) {
-            line.push_back(text("  " + *tool.summary) | dim);
-        }
-        rows.push_back(hbox(std::move(line)));
+    Elements line;
+    line.push_back(text("▎tool " + (tool.tool_name.empty() ? std::string("tool")
+                                                            : tool.tool_name)) |
+                   color(theme_.ColorFor("syntax_function")));
+    if (tool.started) {
+        line.push_back(text(" running…") | color(theme_.ColorFor("assistant_message")));
+    } else if (tool.is_error) {
+        line.push_back(text(" FAILED") | color(theme_.ColorFor("error")));
+    } else {
+        line.push_back(text(" done") | color(theme_.ColorFor("system_message")));
     }
-    return rows;
+    if (tool.summary.has_value() && !tool.summary->empty()) {
+        line.push_back(text("  " + *tool.summary) | dim);
+    }
+    return hbox(std::move(line));
 }
 
 ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
-                                plugins::MarkdownEngine::Stream& streaming) {
+                                const std::vector<LiveTextStreamSlot>& live_text_streams) {
     using namespace ftxui;
 
     // The cache key is (session_id, transcript_version): transcript_version is
@@ -222,20 +237,47 @@ ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
         }
     }
 
-    // The in-flight block: streamed deltas via the engine's debounced view.
-    // Rendered while the streaming text exists; a post-turn refresh swaps it
-    // for the persisted rows (SessionState::ClearStreaming after
-    // RequestScrollback's async apply).
-    if (!snapshot.streaming_text.empty()) {
-        column.push_back(text("assistant") | color(theme_.ColorFor("assistant_message")) | bold);
-        column.push_back(streaming.Render(theme_));
-    }
-
-    // The current turn's tool calls, live (see RenderLiveTools): a
-    // tool-calling turn whose model has emitted no text yet otherwise
-    // renders NOTHING until the post-turn refresh lands.
-    for (auto& part : RenderLiveTools(snapshot)) {
-        column.push_back(std::move(part));
+    // The current turn's live content, INTERLEAVED in arrival order (track
+    // C4). Text and tool activity used to render as two separate groups --
+    // the WHOLE streaming block first, unconditionally, then every live
+    // tool row -- so a tool call in the MIDDLE of a turn (text -> tool ->
+    // more text) rendered as if it happened at the very end, with the text
+    // before and after it fused into one block underneath it. Each
+    // live_segments entry is either a TEXT segment (fed its own debounced
+    // view, live_text_streams[i]) or a TOOL marker (looked up by id in
+    // snapshot.tools -- RenderLiveToolRow renders whatever that tool's
+    // CURRENT state is). A completed turn's page apply replaces this whole
+    // section with the persisted rows above, which decompose a tool-calling
+    // assistant turn into exactly this same interleaved shape
+    // (ChatRowsFromMessages) -- this is what lets the live view already
+    // look like where it is about to land, instead of only converging to it
+    // once the turn ends.
+    for (std::size_t i = 0; i < snapshot.live_segments.size(); ++i) {
+        const auto& segment = snapshot.live_segments[i];
+        if (segment.kind == LiveTurnSegment::Kind::Text) {
+            if (i >= live_text_streams.size() || !live_text_streams[i].view) continue;
+            column.push_back(text("assistant") | color(theme_.ColorFor("assistant_message")) |
+                             bold);
+            column.push_back(live_text_streams[i].view->Render(theme_));
+            column.push_back(text(" "));
+        } else {
+            const ToolExecutionState* tool = nullptr;
+            for (const auto& candidate : snapshot.tools) {
+                if (candidate.tool_use_id == segment.tool_use_id) {
+                    tool = &candidate;
+                    break;
+                }
+            }
+            // Not found: swept from snapshot.tools between OnTurnCompleted
+            // and the post-turn refresh applying (a brief window; the
+            // persisted rows are about to replace this whole section
+            // anyway) -- render nothing for this marker rather than stale
+            // or crashing.
+            if (tool != nullptr) {
+                column.push_back(RenderLiveToolRow(*tool));
+                column.push_back(text(" "));
+            }
+        }
     }
 
     // The enclosing `yframe` (app.cpp) scrolls to whatever element in this
@@ -247,15 +289,28 @@ ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
     // outer frame; it only tells THIS frame where to scroll.
     //
     // scroll_from_bottom_ picks WHICH row gets that marker: 0 (the default)
-    // is column.back(), reproducing the old pin-to-newest behavior exactly.
-    // Clamped here rather than in ScrollBy() -- the row count this frame is
-    // the only bound that matters, and it can shrink/grow between calls.
+    // is column.back(), reproducing the old pin-to-newest behavior exactly
+    // (including the live streaming block and live tool rows below the
+    // persisted rows -- "pinned" should track whatever is newest, streaming
+    // or not).
     //
-    // focused_row_ overrides that when set (chat.row_up/chat.row_down): the
-    // row cursor drives scroll position instead, addressed by the START
-    // index this same loop recorded above (the row can be several column
-    // elements wide; the marker still only needs to land on one of them for
-    // yframe to scroll the whole row into view).
+    // A NONZERO value anchors on a PERSISTED row instead, counted back from
+    // the newest one via row_start_index -- the same addressing
+    // focused_row_ uses below, just without the visible row-cursor marker.
+    // NOT column.size()-1-scroll_from_bottom_ (the pre-fix math): that
+    // measured the offset from the literal end of `column`, which keeps
+    // growing every delta while a turn streams (the live block) or a tool
+    // runs (RenderLiveToolRow) -- so a reader scrolled up mid-turn watched
+    // their own viewport slide toward the newest content on every tick,
+    // even though they never touched a key. Persisted rows (row_keys_) do
+    // NOT change mid-turn (the post-turn refresh is what applies a new
+    // page), so anchoring on one is stable regardless of how much streams in
+    // underneath. Clamped here rather than in ScrollBy() -- the row count
+    // this frame is the only bound that matters, and it can shrink/grow
+    // between calls.
+    //
+    // focused_row_ overrides both when set (chat.row_up/chat.row_down): the
+    // row cursor drives scroll position instead, addressed the same way.
     if (!column.empty()) {
         std::optional<std::size_t> focus_index;
         if (focused_row_.has_value()) {
@@ -265,10 +320,23 @@ ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
                 if (row_index < row_start_index.size()) focus_index = row_start_index[row_index];
             }
         }
+        if (!focus_index.has_value() && !row_keys_.empty()) {
+            // Clamped and STORED (not just clamped locally): a spam of
+            // ScrollBy(+1) past the oldest row must not leave scroll_from_bottom_
+            // ballooning past what any render can use, or "scroll back down"
+            // afterward would need to burn through that same overshoot one
+            // step at a time before the viewport visibly moved again.
+            scroll_from_bottom_ =
+                std::clamp(scroll_from_bottom_, 0, static_cast<int>(row_keys_.size()));
+            if (scroll_from_bottom_ > 0) {
+                const std::size_t rows_back = static_cast<std::size_t>(scroll_from_bottom_) - 1;
+                const std::size_t row_index = row_keys_.size() - 1 - rows_back;
+                if (row_index < row_start_index.size()) focus_index = row_start_index[row_index];
+            }
+        }
         if (!focus_index.has_value()) {
-            scroll_from_bottom_ = std::clamp(scroll_from_bottom_, 0,
-                                             static_cast<int>(column.size()) - 1);
-            focus_index = column.size() - 1 - static_cast<std::size_t>(scroll_from_bottom_);
+            scroll_from_bottom_ = 0;   // nothing to anchor on (e.g. no persisted rows yet): pin
+            focus_index = column.size() - 1;
         }
         column[*focus_index] = focus(std::move(column[*focus_index]));
     }

@@ -1,6 +1,8 @@
 #include "minimal/client/view/picker_controller.hpp"
 
 #include <filesystem>
+#include <iterator>
+#include <utility>
 
 #include "minimal/client/view/agent_picker.hpp"
 #include "minimal/client/view/model_picker.hpp"
@@ -10,12 +12,12 @@ namespace minimal::client {
 
 PickerController::PickerController(Dependencies deps) : deps_(std::move(deps)) {}
 
-// One page of the picker's list, kept synchronous like DeleteSession:
-// unlike an async target (a per-frame Renderer call, a per-keystroke
-// debounce), this runs once per explicit user action (open, toggle
-// all-dirs, load more) -- the same bounded-pause trade the rest of RunTui's
-// one-off calls make, and mutating picker_data_ / the picker slot from a
-// worker thread would race the loop thread that owns both.
+// One page of the picker's list. The RPC runs on AppState's RPC worker (see
+// the file comment); this function itself still runs on the loop thread --
+// it only builds the request (from picker_data_, loop-thread-owned) and, for
+// a reset, clears picker_data_ synchronously so the caller's immediate
+// RebuildPickerComponent() shows the cleared state right away, before the
+// fetch resolves.
 //
 // Requests one row beyond the page size to detect a further page: the wire
 // has no dedicated has_more field on ListSessionsResponse.
@@ -30,23 +32,44 @@ constexpr int32_t kPickerPageSize = 100;
 // instead made the server refuse the resume with "already open" -- the exact
 // "resume failed" a user saw after quitting with ctrl+c (which detaches, and
 // leaves every session live) and reopening the client.
-std::string PickerController::OpenPickedSession(const std::string& session_id) {
-    for (const auto& session : picker_data_.sessions) {
-        if (session.session_id() != session_id) continue;
-        if (session.is_live()) {
-            if (std::string attached = deps_.app.AttachTab(session_id); !attached.empty()) {
-                return attached;
-            }
-            // is_live was stale -- the session ended between the list fetch
-            // and this click (or this client already had the tab, which both
-            // paths handle). Resume is the remaining option, and its failure
-            // is visible (an Error-state tab), never silent.
+//
+// Runs on AppState's RPC worker (see the file comment) -- AttachTab/ResumeTab
+// carry 5 s deadlines, which used to block the loop thread on every open.
+// `is_live` is resolved by the CALLER, on the loop thread, before this is
+// queued -- `is_live` false (not found in the fetched pages: a stale picker,
+// or the picker was never asked) falls straight through to resume, the only
+// meaningful try when there is nothing to attach to that the list knows of.
+std::string PickerController::OpenPickedSession(const std::string& session_id, bool is_live) {
+    if (is_live) {
+        if (std::string attached = deps_.app.AttachTab(session_id); !attached.empty()) {
+            return attached;
         }
-        return deps_.app.ResumeTab(session_id);
+        // is_live was stale -- the session ended between the list fetch and
+        // this click (or this client already had the tab, which both paths
+        // handle). Resume is the remaining option, and its failure is
+        // visible (an Error-state tab), never silent.
     }
-    // Not in the fetched pages (a stale picker): resume is the only
-    // meaningful try -- there is nothing to attach to that the list knows of.
     return deps_.app.ResumeTab(session_id);
+}
+
+void PickerController::QueueApply(std::function<void()> apply) {
+    {
+        std::lock_guard<std::mutex> lock(async_mtx_);
+        pending_apply_.push_back(std::move(apply));
+    }
+    // Same counter every ordinary AppState mutation bumps -- wakes the 20 Hz
+    // pump so a frame lands with Poll() able to drain this.
+    deps_.app.NotifyExternalUpdate();
+}
+
+void PickerController::Poll() {
+    std::vector<std::function<void()>> ready;
+    {
+        std::lock_guard<std::mutex> lock(async_mtx_);
+        if (pending_apply_.empty()) return;
+        ready.swap(pending_apply_);
+    }
+    for (auto& apply : ready) apply();   // loop thread only, from here on
 }
 
 void PickerController::FetchPickerPage(bool reset) {
@@ -63,13 +86,22 @@ void PickerController::FetchPickerPage(bool reset) {
         opts.before_updated_at = last.updated_at_unix_ms();
         opts.before_id = last.session_id();
     }
-    const auto result = deps_.client.ListSessions(opts);
-    if (!result.status.ok()) return;
-    const auto& page = result.response.sessions();
-    const int64_t fetched = page.size();
-    picker_data_.has_more = fetched > kPickerPageSize;
-    const int64_t take = picker_data_.has_more ? kPickerPageSize : fetched;
-    picker_data_.sessions.insert(picker_data_.sessions.end(), page.begin(), page.begin() + take);
+    deps_.app.RunOnRpcQueue([this, opts] {
+        const auto result = deps_.client.ListSessions(opts);
+        if (!result.status.ok()) return;   // silent: matches the old no-op-on-failure
+        const auto& page = result.response.sessions();
+        const int64_t fetched = page.size();
+        const bool has_more = fetched > kPickerPageSize;
+        const int64_t take = has_more ? kPickerPageSize : fetched;
+        std::vector<v1::SessionSummary> rows(page.begin(), page.begin() + take);
+        QueueApply([this, rows = std::move(rows), has_more]() mutable {
+            picker_data_.has_more = has_more;
+            picker_data_.sessions.insert(picker_data_.sessions.end(),
+                                         std::make_move_iterator(rows.begin()),
+                                         std::make_move_iterator(rows.end()));
+            RebuildPickerComponent();
+        });
+    });
 }
 
 // Rebuilds the picker component from picker_data_'s CURRENT contents --
@@ -81,10 +113,26 @@ void PickerController::RebuildPickerComponent() {
         picker_data_.sessions, picker_data_.include_all_dirs, picker_data_.has_more, deps_.theme,
         {.on_resume =
              [this](const std::string& session_id) {
-                 // A PAST session opens into its own root group; it is not a
-                 // child of whatever is focused. It never returns "".
-                 deps_.app.SetFocusedTab(this->OpenPickedSession(session_id));
+                 // is_live is resolved HERE, on the loop thread, from
+                 // picker_data_ (loop-thread-owned) -- OpenPickedSession runs
+                 // on the RPC worker (AttachTab/ResumeTab carry a 5 s
+                 // deadline) and must not read picker_data_ itself, which
+                 // Poll() can be concurrently rewriting.
+                 bool is_live = false;
+                 for (const auto& session : picker_data_.sessions) {
+                     if (session.session_id() == session_id) {
+                         is_live = session.is_live();
+                         break;
+                     }
+                 }
+                 // Close immediately -- don't make the user wait on the
+                 // network to see the modal go away. A PAST session opens
+                 // into its own root group; it is not a child of whatever is
+                 // focused. OpenPickedSession never returns "".
                  deps_.show_picker = false;
+                 deps_.app.RunOnRpcQueue([this, session_id, is_live] {
+                     deps_.app.SetFocusedTab(this->OpenPickedSession(session_id, is_live));
+                 });
              },
          .on_delete =
              [this](const std::string& session_id) {
@@ -151,32 +199,49 @@ void PickerController::RebuildAgentPickerComponent() {
 
 void PickerController::OpenAgentPicker() {
     // One fresh fetch each time, like OpenSessionPicker: the preset list is
-    // small, so there is no pagination state to preserve across opens.
+    // small, so there is no pagination state to preserve across opens. The
+    // fetch itself runs on AppState's RPC worker (see the file comment); the
+    // picker opens showing whatever agent_picker_presets_ already holds
+    // (empty on a fresh open) and repopulates the moment the fetch resolves.
     deps_.show_agent_picker = true;
     agent_picker_presets_.clear();
-    const auto result = deps_.client.ListAgentPresets();
-    if (result.status.ok()) {
-        const auto& presets = result.response.presets();
-        agent_picker_presets_.assign(presets.begin(), presets.end());
-    }
     RebuildAgentPickerComponent();
+    deps_.app.RunOnRpcQueue([this] {
+        const auto result = deps_.client.ListAgentPresets();
+        if (!result.status.ok()) return;
+        std::vector<v1::AgentPresetSummary> presets(result.response.presets().begin(),
+                                                     result.response.presets().end());
+        QueueApply([this, presets = std::move(presets)]() mutable {
+            agent_picker_presets_ = std::move(presets);
+            RebuildAgentPickerComponent();
+        });
+    });
 }
 
 // The model picker: bare /model opens with what the server already knows;
-// ctrl:r from inside re-opens with discovery refreshed (the fetch can take
-// seconds -- every provider's catalog, parallel server-side -- which is why
-// it is an explicit action and not the open default).
+// ctrl:r from inside re-opens with discovery refreshed. `refresh_discovery`
+// waits on every discover-entry's own catalog fetch (parallel server-side,
+// bounded by the slowest provider's own timeout -- up to 15 s,
+// session_client.cpp's own ListModels deadline), which is exactly why this
+// runs on AppState's RPC worker rather than the loop thread: a 15 s stall
+// used to freeze the whole TUI -- no redraw, no keystroke, no streaming
+// progress -- for the duration.
 void PickerController::OpenModelPicker(bool refresh) {
     deps_.show_model_picker = true;
     model_picker_models_.clear();
+    RebuildModelPickerComponent();
     SessionClient::ListModelsOptions opts;
     opts.refresh_discovery = refresh;
-    const auto result = deps_.client.ListModels(opts);
-    if (result.status.ok()) {
-        const auto& models = result.response.models();
-        model_picker_models_.assign(models.begin(), models.end());
-    }
-    RebuildModelPickerComponent();
+    deps_.app.RunOnRpcQueue([this, opts] {
+        const auto result = deps_.client.ListModels(opts);
+        if (!result.status.ok()) return;
+        std::vector<v1::ModelSummary> models(result.response.models().begin(),
+                                             result.response.models().end());
+        QueueApply([this, models = std::move(models)]() mutable {
+            model_picker_models_ = std::move(models);
+            RebuildModelPickerComponent();
+        });
+    });
 }
 
 void PickerController::RebuildModelPickerComponent() {

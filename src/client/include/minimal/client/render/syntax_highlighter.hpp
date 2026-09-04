@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <list>
 #include <map>
 #include <memory>
 #include <span>
@@ -109,6 +110,25 @@ private:
     // load (negative cache).
     class ParserCache;
     std::unique_ptr<ParserCache> parser_cache_;
+
+    // Whole-result cache, keyed on (language, code): a COMPLETED code block
+    // (the common case once a stream's cursor has moved past it) is
+    // byte-identical between reparses, so every 120 ms debounce tick was
+    // re-running the tree-sitter traversal AND rebuilding every ftxui::text
+    // Element for a block that had not changed at all -- the dominant cost of
+    // a long, code-heavy streaming message, growing linearly through it as
+    // more blocks finished. MRU-ordered, bounded (kHighlightCacheCap): a
+    // streaming buffer holds only a handful of distinct blocks at once, so a
+    // small cap is a real bound, not a knob anyone needs to tune. ftxui::Element
+    // is a shared_ptr-backed handle (ChatView's own row cache relies on the
+    // same fact), so returning a cached Elements vector by copy is cheap.
+    struct HighlightCacheEntry {
+        std::string language;
+        std::string code;
+        ftxui::Elements lines;
+    };
+    static constexpr std::size_t kHighlightCacheCap = 64;
+    mutable std::list<HighlightCacheEntry> highlight_cache_;   // MRU at front
 };
 
 // Normalizes markdown fence aliases ("c++", "py", "sh", ...) to the canonical

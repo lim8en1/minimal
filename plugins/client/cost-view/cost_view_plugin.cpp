@@ -111,9 +111,15 @@ public:
         if (focused_session_id != focused_session_id_) {
             // A tab switch: wake the worker for an immediate refresh instead
             // of showing the PREVIOUS tab's totals for up to a whole poll
-            // interval under the new one's label.
+            // interval under the new one's label. refresh_requested_ is what
+            // actually wakes it -- wait_for's predicate used to be
+            // `return stop_;`, so this notify landed while the worker was
+            // still inside its 3 s wait with nothing telling it to stop
+            // waiting, and the segment sat blank (cached_text_ was just
+            // cleared) until the poll interval happened to elapse on its own.
             focused_session_id_ = focused_session_id;
             cached_text_.clear();
+            refresh_requested_ = true;
             cv_.notify_all();
         }
         return cached_text_;
@@ -137,7 +143,9 @@ private:
             } else {
                 lock.lock();
             }
-            cv_.wait_for(lock, std::chrono::seconds(3), [this] { return stop_; });
+            cv_.wait_for(lock, std::chrono::seconds(3),
+                        [this] { return stop_ || refresh_requested_; });
+            refresh_requested_ = false;   // consumed regardless of why the wait ended
         }
     }
 
@@ -160,6 +168,11 @@ private:
     mutable std::string focused_session_id_;
     mutable std::string cached_text_;
     bool stop_ = false;
+    // Set by Render() on a tab switch, under mtx_ (mutable: Render() is
+    // const). Wakes RunLoop's wait_for immediately instead of the notify
+    // landing with nothing in the predicate to act on it -- see Render()'s
+    // comment.
+    mutable bool refresh_requested_ = false;
 };
 
 }  // namespace
