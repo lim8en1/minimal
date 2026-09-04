@@ -39,7 +39,23 @@ std::string ResolveApiKey(const nlohmann::json& provider, const std::string& whe
     }
     if (has_key) return provider.at("api_key").get<std::string>();
     if (!has_env) {
-        // No inline key, no env: the credentials file is the last link.
+        // No inline key, no env: the credentials file is the last link -- but
+        // ONLY when this entry explicitly opts in with `"credentials":
+        // "auth-file"`. Without that gate, the fallback decouples "who names
+        // the request URL" from "who holds the secret": a providers.json entry
+        // pasted from an untrusted source, redirecting `url`/`options.baseURL`
+        // to an attacker's host and supplying no key of its own, would
+        // otherwise silently pull the operator's REAL key out of the shared
+        // auth store (this file, then opencode's own) and send it wherever
+        // `url` points -- on the first request, with nothing in providers.json
+        // that looks like a credential at all. Opt-in makes using the shared
+        // store a deliberate, visible act instead of an implicit default;
+        // without it, an entry with neither an inline key nor api_key_env
+        // resolves empty, same as before this fallback existed.
+        const bool opt_in = provider.contains("credentials") &&
+                            provider.at("credentials").is_string() &&
+                            provider.at("credentials").get<std::string>() == "auth-file";
+        if (!opt_in) return "";
         return LookupCredentialsFile(provider_name).value_or("");
     }
 

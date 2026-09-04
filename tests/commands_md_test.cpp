@@ -1,5 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <cstdlib>
 #include <fstream>
 #include <string>
 
@@ -12,15 +13,34 @@ using namespace minimal::commands_md;
 
 namespace {
 
+// RAII env override, matching commands_test.cpp's convention.
+class ScopedEnv {
+public:
+    ScopedEnv(const char* name, const char* value) : name_(name) {
+        if (const char* old = std::getenv(name)) { had_old_ = true; old_ = old; }
+        ::setenv(name, value, 1);
+    }
+    ~ScopedEnv() {
+        if (had_old_) ::setenv(name_.c_str(), old_.c_str(), 1);
+        else ::unsetenv(name_.c_str());
+    }
+private:
+    std::string name_;
+    bool had_old_ = false;
+    std::string old_;
+};
+
 // Writes one command file (parent directories included) and loads everything
-// under dir as commands.
+// under dir as commands. Trusted by default -- these tests exercise
+// parsing/rendering/execution, not the untrusted-confirmation gate, which has
+// its own dedicated tests below.
 std::vector<std::unique_ptr<commands::Command>> WriteAndLoad(
     const std::filesystem::path& dir, const std::filesystem::path& relative,
-    const std::string& contents) {
+    const std::string& contents, bool trusted = true) {
     const auto path = dir / relative;
     std::filesystem::create_directories(path.parent_path());
     std::ofstream(path) << contents;
-    return LoadCommands({dir});
+    return LoadCommands({{dir, trusted}});
 }
 
 const commands::Command* Find(const std::vector<std::unique_ptr<commands::Command>>& commands,
@@ -80,7 +100,7 @@ TEST_CASE("ParseCommandFile: declaring run and sh together throws, and so does a
     std::filesystem::create_directories(dir.path());
     auto write = [&dir](const std::string& name, const std::string& contents) {
         std::ofstream(dir.path() / name) << contents;
-        return ParseCommandFile(dir.path() / name);
+        return ParseCommandFile(dir.path() / name, /*trusted=*/true);
     };
     CHECK_THROWS_AS(write("bad.md",
                           "---\nsources:\n  x:\n    run: [\"a\"]\n    sh: \"a\"\n---\nb\n"),
@@ -130,6 +150,151 @@ TEST_CASE("commands-md: sources run, the body renders, and the composed text is 
     REQUIRE(fixture.submitted_turns().size() == 1);
     REQUIRE_FALSE(fixture.submitted_turns().empty());
     CHECK(fixture.submitted_turns().front() == "Report for main from branch-main.\n");
+}
+
+TEST_CASE("commands-md: a sh: source cannot see another source's output -- it stays a "
+          "literal, un-substituted token",
+          "[commands_md][compat]") {
+    testing::CommandFixture fixture;
+    testing::TempDir files;
+    commands::CommandRegistry registry;
+    // The B8 exploit shape: `ctx` tries to splice `title`'s OUTPUT into a shell
+    // string. Before the fix this ran the attacker's injected command; now
+    // {title} is an unknown token to the sh: substitution (source outputs are
+    // deliberately excluded from what a sh: script may see) and passes through
+    // literally, so the shell just echoes the braces back.
+    auto commands = WriteAndLoad(
+        files.path(), "inject.md",
+        "---\n"
+        "sources:\n"
+        "  title:\n"
+        "    sh: \"echo 'x; touch " +
+            (files.path() / "PWNED").string() +
+            "'\"\n"
+            "  ctx:\n"
+            "    sh: \"echo got:{title}\"\n"
+            "---\nDone: {ctx}\n");
+    for (auto& command : commands) registry.Register(std::move(command));
+
+    const auto result = DispatchOne(registry, fixture, "inject", {});
+    CAPTURE(result.message);
+    CHECK(result.status == commands::CommandResult::Status::kOk);
+    // The injected command must never have run.
+    CHECK_FALSE(std::filesystem::exists(files.path() / "PWNED"));
+    REQUIRE_FALSE(fixture.submitted_turns().empty());
+    CHECK(fixture.submitted_turns().front() == "Done: got:{title}\n");
+}
+
+TEST_CASE("commands-md: a user argument reaching a sh: script is shell-quoted, so shell "
+          "metacharacters in it cannot break out",
+          "[commands_md][compat]") {
+    testing::CommandFixture fixture;
+    testing::TempDir files;
+    commands::CommandRegistry registry;
+    auto commands = WriteAndLoad(
+        files.path(), "greet.md",
+        "---\nargs: [name]\nsources:\n  x:\n    sh: \"echo hi {name}\"\n---\nSaid: {x}\n");
+    for (auto& command : commands) registry.Register(std::move(command));
+
+    // A classic shell-injection payload as the argument: without quoting this
+    // would run `touch PWNED` as a second command.
+    const std::string payload = "a'; touch " + (files.path() / "PWNED").string() + "; echo '";
+    const auto result = DispatchOne(registry, fixture, "greet", {payload});
+    CAPTURE(result.message);
+    CHECK(result.status == commands::CommandResult::Status::kOk);
+    CHECK_FALSE(std::filesystem::exists(files.path() / "PWNED"));
+    REQUIRE_FALSE(fixture.submitted_turns().empty());
+    CHECK(fixture.submitted_turns().front() == "Said: hi " + payload + "\n");
+}
+
+TEST_CASE("commands-md: a generator does not inherit the server's own environment -- only "
+          "the allowlisted variables",
+          "[commands_md][compat]") {
+    ScopedEnv secret("MINIMAL_TEST_SECRET", "sk-do-not-leak-this");
+    testing::CommandFixture fixture;
+    testing::TempDir files;
+    commands::CommandRegistry registry;
+    auto commands = WriteAndLoad(
+        files.path(), "envcheck.md",
+        "---\nsources:\n  x:\n    sh: \"echo \\\"[$MINIMAL_TEST_SECRET]\\\"\"\n---\nGot: {x}\n");
+    for (auto& command : commands) registry.Register(std::move(command));
+
+    const auto result = DispatchOne(registry, fixture, "envcheck", {});
+    CAPTURE(result.message);
+    CHECK(result.status == commands::CommandResult::Status::kOk);
+    REQUIRE_FALSE(fixture.submitted_turns().empty());
+    // Not on the allowlist: expands to empty in the child's shell, not the
+    // real secret -- the whole point of B9's env scrub.
+    CHECK(fixture.submitted_turns().front() == "Got: []\n");
+}
+
+TEST_CASE("commands-md: a bare program name (no slash) resolves via PATH search, not just "
+          "absolute paths",
+          "[commands_md]") {
+    testing::CommandFixture fixture;
+    testing::TempDir files;
+    commands::CommandRegistry registry;
+    // "echo", not "/bin/echo": forces RunProcess's execve-over-allowlisted-PATH
+    // search rather than the direct-path case every other test exercises.
+    auto commands = WriteAndLoad(files.path(), "echoed.md",
+                                 "---\nsources:\n  x:\n    run: [\"echo\", \"hi-{y}\"]\n"
+                                 "args: [y]\n---\nGot: {x}\n");
+    for (auto& command : commands) registry.Register(std::move(command));
+
+    const auto result = DispatchOne(registry, fixture, "echoed", {"there"});
+    CAPTURE(result.message);
+    CHECK(result.status == commands::CommandResult::Status::kOk);
+    REQUIRE_FALSE(fixture.submitted_turns().empty());
+    CHECK(fixture.submitted_turns().front() == "Got: hi-there\n");
+}
+
+TEST_CASE("commands-md: an untrusted (project-local) command asks before running any source, "
+          "and cancel runs nothing",
+          "[commands_md][compat]") {
+    testing::CommandFixture fixture;
+    testing::TempDir files;
+    commands::CommandRegistry registry;
+    // trusted=false: the same shape LoadCommands gets for a project-local
+    // commands/ directory.
+    auto commands = WriteAndLoad(
+        files.path(), "touch.md",
+        "---\ndescription: writes a marker file\n"
+        "sources:\n  x:\n    run: [\"/usr/bin/touch\", \"" +
+            (files.path() / "marker").string() +
+            "\"]\n---\nDone: {x}\n",
+        /*trusted=*/false);
+    for (auto& command : commands) registry.Register(std::move(command));
+
+    // Cancel: the marker must not exist, and nothing reaches the session.
+    const auto declined = DispatchOne(registry, fixture, "touch", {}, /*answer=*/"cancel");
+    CHECK(declined.status == commands::CommandResult::Status::kError);
+    CHECK_FALSE(std::filesystem::exists(files.path() / "marker"));
+    CHECK(fixture.submitted_turns().empty());
+
+    // Confirmed ("run", the gate's affirmative option): the source executes
+    // and the turn is submitted, exactly like a trusted command.
+    const auto confirmed = DispatchOne(registry, fixture, "touch", {}, /*answer=*/"run");
+    CHECK(confirmed.status == commands::CommandResult::Status::kOk);
+    CHECK(std::filesystem::exists(files.path() / "marker"));
+    REQUIRE(fixture.submitted_turns().size() == 1);
+}
+
+TEST_CASE("commands-md: a trusted (global) command runs without the extra confirmation",
+          "[commands_md][compat]") {
+    testing::CommandFixture fixture;
+    testing::TempDir files;
+    commands::CommandRegistry registry;
+    // trusted=true (WriteAndLoad's default) with an answer the untrusted gate
+    // would reject ("cancel") -- if the gate ran anyway, this would fail.
+    auto commands = WriteAndLoad(files.path(), "hello.md",
+                                 "---\nsources:\n  x:\n    run: [\"/bin/echo\", \"hi\"]\n"
+                                 "---\nSaid: {x}\n");
+    for (auto& command : commands) registry.Register(std::move(command));
+
+    const auto result = DispatchOne(registry, fixture, "hello", {}, /*answer=*/"cancel");
+    CHECK(result.status == commands::CommandResult::Status::kOk);
+    REQUIRE(fixture.submitted_turns().size() == 1);
+    CHECK(fixture.submitted_turns().front() == "Said: hi\n");
 }
 
 TEST_CASE("commands-md: inserted values are never re-scanned (single-pass render)",
@@ -324,7 +489,7 @@ TEST_CASE("LoadCommands: the nearest directory wins a stem collision and malform
     std::ofstream(project.path() / "only-project.md") << "---\nargs: 42\n---\nb\n";
     std::ofstream(global.path() / "broken.md") << "---\nargs: 42\n---\nb\n";
 
-    const auto commands = LoadCommands({project.path(), global.path()});
+    const auto commands = LoadCommands({{project.path(), false}, {global.path(), true}});
     const auto* cmds = Find(commands, "cmds");
     REQUIRE(cmds != nullptr);
     CHECK(cmds->Summary() == "PROJECT");  // nearer dir wins

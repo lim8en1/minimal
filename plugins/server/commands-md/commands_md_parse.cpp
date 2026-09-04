@@ -177,10 +177,11 @@ Source DecodeSource(const std::string& name, const YAML::Node& node) {
 }
 
 MdCommandSpec DecodeSpec(const std::string& stem, const config::ParsedFrontmatter& parsed,
-                         const std::filesystem::path& path) {
+                         const std::filesystem::path& path, bool trusted) {
     MdCommandSpec spec;
     spec.name = stem;
     spec.source_file = path;
+    spec.trusted = trusted;
     const YAML::Node& node = parsed.frontmatter;
 
     if (node && node.IsMap()) {
@@ -225,7 +226,7 @@ MdCommandSpec DecodeSpec(const std::string& stem, const config::ParsedFrontmatte
 
 }  // namespace
 
-MdCommandSpec ParseCommandFile(const std::filesystem::path& path) {
+MdCommandSpec ParseCommandFile(const std::filesystem::path& path, bool trusted) {
     std::ifstream in(path);
     if (!in) throw std::runtime_error("command file not found: " + path.string());
     std::ostringstream buffer;
@@ -235,18 +236,21 @@ MdCommandSpec ParseCommandFile(const std::filesystem::path& path) {
     if (stem.empty() || stem.front() == '.') {
         throw std::runtime_error("command file: invalid name '" + stem + "'");
     }
-    return DecodeSpec(stem, config::parse_frontmatter_markdown(buffer.str()), path);
+    return DecodeSpec(stem, config::parse_frontmatter_markdown(buffer.str()), path, trusted);
 }
 
 std::vector<std::unique_ptr<commands::Command>> LoadCommands(
-    const std::vector<std::filesystem::path>& dirs) {
+    const std::vector<CommandDir>& dirs) {
     std::vector<std::unique_ptr<commands::Command>> out;
     // Nearest dir wins a stem collision: keep the first spec per stem in walk
-    // order, and log what was shadowed.
+    // order, and log what was shadowed. Callers list project directories
+    // before the global one -- see CommandDir's doc -- so "nearest" and "first
+    // in this loop" agree.
     std::map<std::string, std::filesystem::path> seen;
     std::vector<MdCommandSpec> specs;
 
-    for (const auto& dir : dirs) {
+    for (const auto& command_dir : dirs) {
+        const std::filesystem::path& dir = command_dir.path;
         std::error_code ec;
         if (dir.empty() || !std::filesystem::is_directory(dir, ec) || ec) continue;
         for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
@@ -265,7 +269,7 @@ std::vector<std::unique_ptr<commands::Command>> LoadCommands(
                 continue;
             }
             try {
-                specs.push_back(ParseCommandFile(entry.path()));
+                specs.push_back(ParseCommandFile(entry.path(), command_dir.trusted));
             } catch (const std::exception& error) {
                 // One malformed command must not hide the rest from the picker.
                 common::DefaultLogger().warn("command '{}' skipped in listing: {}",

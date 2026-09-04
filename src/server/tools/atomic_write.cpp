@@ -46,7 +46,8 @@ private:
 
 }  // namespace
 
-WriteOutcome write_file(const std::filesystem::path& confined_abs_path, std::string_view content) {
+WriteOutcome write_file(const std::filesystem::path& confined_abs_path, std::string_view content,
+                        std::optional<std::filesystem::perms> create_perms) {
     WriteOutcome outcome;
 
     const auto parent = confined_abs_path.parent_path();
@@ -105,6 +106,13 @@ WriteOutcome write_file(const std::filesystem::path& confined_abs_path, std::str
             outcome.error = "cannot preserve file mode: " + Errno();
             return outcome;
         }
+    } else if (create_perms.has_value()) {
+        // Caller-specified mode for a fresh file (a credentials store: never
+        // group/other-readable). mkstemp's own 0600 is already correct for
+        // that case, but set it explicitly rather than relying on an
+        // implementation detail of mkstemp to keep meaning what it means here.
+        std::filesystem::permissions(temp.path(), *create_perms,
+                                     std::filesystem::perm_options::replace, ec);
     } else {
         // mkstemp creates 0600; match what a normal file would get instead.
         std::filesystem::permissions(temp.path(),

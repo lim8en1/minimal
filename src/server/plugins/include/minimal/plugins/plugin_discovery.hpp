@@ -51,6 +51,15 @@ struct PluginConfig {
     // or not at all).
     std::map<std::string, std::string> aliases;
 
+    // Set when ParsePluginConfig could not parse the file at all (invalid JSON
+    // or a non-object top level). The caller must warn and skip the rewrite --
+    // silently persisting the degraded-to-empty default over the user's actual
+    // bytes would destroy every enablement decision and per-plugin config in a
+    // file they are explicitly invited to edit (a trailing comma would disable
+    // every user plugin on next boot). See tui_bootstrap.cpp's client-side
+    // twin, which this mirrors.
+    bool malformed = false;
+
     // EVERY OTHER TOP-LEVEL KEY, carried through untouched. This file is
     // rewritten on every start (discovery persists what it found), and the
     // serializer reconstructs the document from these fields -- so anything it

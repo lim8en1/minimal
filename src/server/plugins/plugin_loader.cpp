@@ -158,9 +158,11 @@ PluginRecord PluginLoader::LoadOne(const PluginCandidate& candidate) {
         return record;
     }
 
-    record.abi_tag = abi_tag_fn();
-    record.name = name_fn();
-    record.version = version_fn();
+    // A corrupt .so can return null here; a null char* into std::string is UB
+    // before the ABI check ever runs.
+    if (const char* tag = abi_tag_fn(); tag != nullptr) record.abi_tag = tag;
+    if (const char* name = name_fn(); name != nullptr) record.name = name;
+    if (const char* version = version_fn(); version != nullptr) record.version = version;
 
     // Checked before any registration callback runs: a plugin built against a
     // different toolchain must never get to execute against our types.

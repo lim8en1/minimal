@@ -115,6 +115,17 @@ int main(int argc, char** argv) {
     const auto plugins_json = config_dir / "plugins.json";
     const auto plugins_json_before = minimal::common::ReadFileOrEmpty(plugins_json);
     auto plugin_config = minimal::plugins::ParsePluginConfig(plugins_json_before);
+    // A malformed file degrades to an empty config; silently rewriting the
+    // user's bytes over that default at stage 2 would destroy every enablement
+    // decision and per-plugin config in a file they are explicitly invited to
+    // edit. Warn now and skip the rewrite below -- the client host applies the
+    // same discipline (tui_bootstrap.cpp).
+    if (plugin_config.malformed) {
+        std::fprintf(stderr,
+                     "minimal: warning: %s is malformed -- it was NOT rewritten; fix or "
+                     "remove it to enable plugin config management\n",
+                     plugins_json.c_str());
+    }
 
     // Read settings.json ONCE, tolerantly, ahead of the sanity check's own
     // authoritative parse two stages later -- both the logging setup below
@@ -168,8 +179,12 @@ int main(int argc, char** argv) {
         minimal::plugins::DiscoverPlugins(bundled_dir, user_dir, plugin_config);
 
     // Persist anything newly discovered, so its enablement is user-editable.
-    WriteConfigIfChanged(plugins_json, minimal::plugins::SerializePluginConfig(plugin_config),
-                         plugins_json_before);
+    // Skipped on a malformed source file -- see the warning at stage 1: writing
+    // the degraded-to-empty default back would erase the user's actual config.
+    if (!plugin_config.malformed) {
+        WriteConfigIfChanged(plugins_json, minimal::plugins::SerializePluginConfig(plugin_config),
+                             plugins_json_before);
+    }
 
     minimal::tools::ToolRegistry tools;
     minimal::llm::ProviderFactoryRegistry providers;

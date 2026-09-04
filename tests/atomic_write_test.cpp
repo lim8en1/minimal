@@ -147,3 +147,18 @@ TEST_CASE("a new file lands with ordinary 0644 permissions, not mkstemp's 0600",
     REQUIRE(::stat(path.c_str(), &st) == 0);
     CHECK((st.st_mode & 07777) == 0644);
 }
+
+TEST_CASE("create_perms overrides the default mode for a new file", "[atomic_write]") {
+    TempDir dir;
+    const auto path = dir.path() / "secret.txt";
+
+    REQUIRE(tools::write_file(path, "content",
+                              std::filesystem::perms::owner_read |
+                                  std::filesystem::perms::owner_write)
+                .ok);
+
+    struct stat st {};
+    REQUIRE(::stat(path.c_str(), &st) == 0);
+    CAPTURE(std::oct, st.st_mode & 07777);
+    CHECK((st.st_mode & 07777) == 0600);
+}

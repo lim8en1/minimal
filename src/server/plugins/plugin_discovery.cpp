@@ -36,7 +36,10 @@ PluginConfig ParsePluginConfig(const std::string& json_text) {
     if (json_text.empty()) return config;
 
     const auto parsed = nlohmann::json::parse(json_text, nullptr, /*allow_exceptions=*/false);
-    if (parsed.is_discarded() || !parsed.is_object()) return config;
+    if (parsed.is_discarded() || !parsed.is_object()) {
+        config.malformed = true;  // the caller warns and skips the rewrite
+        return config;
+    }
 
     if (auto it = parsed.find("plugins"); it != parsed.end() && it->is_array()) {
         for (const auto& item : *it) {
@@ -158,8 +161,21 @@ std::vector<PluginCandidate> DiscoverPlugins(const std::filesystem::path& bundle
     candidates.reserve(found.size());
 
     for (const auto& item : found) {
+        // Keyed by (provenance, file), NOT file alone: a user-dir plugin that
+        // happens to share a basename with a bundled one must never match the
+        // bundled entry and inherit its enabled:true. Before this, a dropped-in
+        // ~/.config/minimal/plugins/tools-fs.so matched the bundled tools-fs
+        // entry, was discovered enabled, dlopened, and ran its static
+        // initializers and every registration hook -- with no plugins.json
+        // edit and no confirmation -- before the (still-real) name collision
+        // aborted startup. Two independent entries let the user toggle each
+        // side separately, which is also what the collision warning below now
+        // tells them to do.
         auto existing = std::find_if(config.plugins.begin(), config.plugins.end(),
-                                     [&](const PluginConfig::Entry& e) { return e.file == item.file; });
+                                     [&](const PluginConfig::Entry& e) {
+                                         return e.file == item.file &&
+                                                e.provenance == item.provenance;
+                                     });
 
         if (existing == config.plugins.end()) {
             // Provenance decides the default, mechanically: shipped-with-this-build
@@ -175,13 +191,18 @@ std::vector<PluginCandidate> DiscoverPlugins(const std::filesystem::path& bundle
                             !DefaultsDisabled(item.file);
             config.plugins.push_back(entry);
             existing = std::prev(config.plugins.end());
-        } else if (existing->provenance != item.provenance) {
-            // The same basename discovered from BOTH directories: enablement is
-            // keyed by bare filename, so the two share one entry -- and both .so
-            // files still load, which is a guaranteed fatal name collision the
-            // user cannot see coming from plugins.json. Say so at discovery time;
-            // the documented replacement flow is disabling the bundled entry, and
-            // that needs the two to be distinguishable on disk at least.
+        }
+
+        // The same basename discovered from BOTH directories: both .so files
+        // still load (each under its own now-independent entry), which is a
+        // guaranteed fatal name collision the user cannot see coming from
+        // plugins.json alone. Say so at discovery time; the documented
+        // replacement flow is disabling one of the two entries.
+        const bool also_from_other_provenance = std::any_of(
+            config.plugins.begin(), config.plugins.end(), [&](const PluginConfig::Entry& e) {
+                return e.file == item.file && e.provenance != item.provenance;
+            });
+        if (also_from_other_provenance) {
             common::DefaultLogger().warn(
                 "plugin '{}' exists both bundled and in the user plugin dir; both will load and "
                 "the names will collide -- disable one of the two in plugins.json",

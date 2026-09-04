@@ -353,7 +353,12 @@ AgentPreset AgentPresetRegistry::ResolveUncached(
     preset.allowed_tools = raw.allowed_tools;
     preset.allowed_skills = tool_skills;
     preset.allowed_mcp_servers = raw.allowed_mcp_servers;
-    preset.permission_mode = BuildPermissionPolicy(raw.permission_mode, permissions_.global_layer);
+    // A project-local preset (repo-shipped agents/*.md, discovered ahead of
+    // config_dir per the walk above) is untrusted content: it may narrow the
+    // operator's permissions.json floor but must never widen it. See the
+    // preset_is_trusted doc on BuildPermissionPolicy.
+    preset.permission_mode =
+        BuildPermissionPolicy(raw.permission_mode, permissions_.global_layer, !from_project);
     preset.mcp_permissions = BuildMcpPermissionPolicy(raw.mcp_permissions, permissions_.mcp_default_mode);
     preset.run_mode = permissions_.default_run_mode;  // apply_run_mode() is applied once, downstream, by ToolExecutor
     preset.is_subagent = false;

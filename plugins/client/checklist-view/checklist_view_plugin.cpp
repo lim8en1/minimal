@@ -2,9 +2,10 @@
 //
 // Paired with the server's bundled `checklist` plugin (plugins/server/checklist),
 // which exposes per-session task lists over the generic PluginCall channel as
-// "checklist.rpc" ("get" {"session_id"} -> {"items":[{text,status}]}). This is
-// that data's UI, on the same shape as cost-view: the segment renders the
-// completed/total counts plus a marker while any task is in progress.
+// "checklist.rpc" ("get" {"session_id"} -> {"session_id":..., "items":
+// [{id,text,status}]}). This is that data's UI, on the same shape as cost-view:
+// the segment renders the completed/total counts plus a marker while any task
+// is in progress.
 //
 // StatusSegment::Render() runs on the render thread with a "cheap, never
 // block" contract, so this plugin never calls PluginCall from Render(): a
@@ -29,12 +30,20 @@ namespace {
 
 namespace plugins = minimal::client::plugins;
 
-// nullopt: no checklist yet (fresh session, refused/unreachable call, parse
-// failure) -- Render() shows nothing, same as any other unfilled segment.
+// nullopt: the response is not well-formed enough to trust at all (not an
+// object, no "items" array) -- RunLoop leaves the cache alone, same treatment
+// as a transport failure. A well-formed but EMPTY items array is a different
+// answer -- the checklist tool's `op=set, items: []` is documented as "clear
+// the list" -- so it returns "" rather than nullopt: unlike cost totals
+// (monotonic, so "no value" and "back to zero" never diverge), a checklist can
+// legitimately go from populated to empty, and conflating that with "could not
+// reach the server" left a stale non-empty count on screen for the rest of the
+// session once the model cleared its list.
 std::optional<std::string> FormatChecklist(const nlohmann::json& body) {
     if (!body.is_object()) return std::nullopt;
-    const auto& items = body.find("items");
-    if (items == body.end() || !items->is_array() || items->empty()) return std::nullopt;
+    const auto items = body.find("items");
+    if (items == body.end() || !items->is_array()) return std::nullopt;
+    if (items->empty()) return std::string();
 
     int completed = 0;
     int in_progress = 0;

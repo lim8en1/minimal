@@ -27,17 +27,26 @@ namespace {
 // agents/skills walk is: the cwd, then ancestors to the git root. Reused here
 // through config::ProjectDirs so the three discovery surfaces cannot disagree
 // about what "the project" is.
-std::vector<std::filesystem::path> CommandDirs() {
-    std::vector<std::filesystem::path> dirs;
-    dirs.push_back(minimal::common::ConfigDir() / "commands");
+//
+// PROJECT DIRECTORIES FIRST, the global config dir LAST: LoadCommands keeps
+// the first spec it sees per stem, so walk order IS shadow order, and
+// "nearest directory wins; project shadows global" (the documented rule, and
+// what the collision-warning message itself claims) requires project entries
+// to be seen before the global one. Each entry is tagged trusted/untrusted
+// per minimal::commands_md::CommandDir -- the global dir is the operator's own
+// config; the project dirs are working-tree-supplied content a command file
+// there did not ask the operator to trust (see MdCommandSpec::trusted).
+std::vector<minimal::commands_md::CommandDir> CommandDirs() {
+    std::vector<minimal::commands_md::CommandDir> dirs;
     const std::filesystem::path cwd = std::filesystem::current_path();
     if (!cwd.empty()) {
         const minimal::config::ProjectDirs project(cwd);
         for (const auto& dir : project.dirs()) {
-            dirs.push_back(dir / "commands");
-            dirs.push_back(dir / ".opencode" / "commands");
+            dirs.push_back({dir / "commands", /*trusted=*/false});
+            dirs.push_back({dir / ".opencode" / "commands", /*trusted=*/false});
         }
     }
+    dirs.push_back({minimal::common::ConfigDir() / "commands", /*trusted=*/true});
     return dirs;
 }
 

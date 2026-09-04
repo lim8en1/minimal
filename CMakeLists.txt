@@ -64,8 +64,61 @@ install(SCRIPT "${CMAKE_CURRENT_BINARY_DIR}/SeedConfig.cmake")
 # Plugins are source-compatible, not binary-compatible: they are rebuilt with the
 # harness. This tag is the "you forgot to rebuild" guard, not a compatibility
 # promise. Host and plugin bake the same value; a mismatch refuses to load.
+#
+# The toolchain fields alone do not catch a stale-but-same-compiler .so: two
+# builds of this tree at different commits, same compiler, produce identical
+# tags and the stale plugin loads and reads the wrong struct/vtable offsets.
+# The git revision closes that gap for the common case (a real ./configure &&
+# make build after a pull) -- it does not catch uncommitted local edits
+# rebuilt without a commit, which is why plugin_loader.cpp additionally
+# compares minimal_plugin_version() against the host's own version.
+find_package(Git QUIET)
+set(MINIMAL_GIT_REVISION "unknown")
+if(Git_FOUND)
+    execute_process(
+        COMMAND ${GIT_EXECUTABLE} rev-parse --short=12 HEAD
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        OUTPUT_VARIABLE MINIMAL_GIT_REVISION
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+        RESULT_VARIABLE MINIMAL_GIT_REVISION_RESULT)
+    if(NOT MINIMAL_GIT_REVISION_RESULT EQUAL 0 OR MINIMAL_GIT_REVISION STREQUAL "")
+        set(MINIMAL_GIT_REVISION "unknown")
+    endif()
+    # A checkout/commit changes .git/HEAD (and, on a branch, the ref file it
+    # points at) without touching any CMakeLists.txt -- without this, ninja
+    # would happily rebuild against a stale cached MINIMAL_GIT_REVISION.
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git/HEAD")
+        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+                     "${CMAKE_CURRENT_SOURCE_DIR}/.git/HEAD")
+        execute_process(
+            COMMAND ${GIT_EXECUTABLE} rev-parse --git-path HEAD
+            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+            OUTPUT_VARIABLE MINIMAL_GIT_HEAD_PATH
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET)
+        execute_process(
+            COMMAND ${GIT_EXECUTABLE} symbolic-ref -q HEAD
+            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+            OUTPUT_VARIABLE MINIMAL_GIT_SYMBOLIC_REF
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET)
+        if(NOT MINIMAL_GIT_SYMBOLIC_REF STREQUAL "")
+            execute_process(
+                COMMAND ${GIT_EXECUTABLE} rev-parse --git-path "${MINIMAL_GIT_SYMBOLIC_REF}"
+                WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+                OUTPUT_VARIABLE MINIMAL_GIT_REF_PATH
+                OUTPUT_STRIP_TRAILING_WHITESPACE
+                ERROR_QUIET)
+            if(EXISTS "${MINIMAL_GIT_REF_PATH}")
+                set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+                             "${MINIMAL_GIT_REF_PATH}")
+            endif()
+        endif()
+    endif()
+endif()
 set(MINIMAL_ABI_TAG
-    "${CMAKE_CXX_COMPILER_ID}-${CMAKE_CXX_COMPILER_VERSION}-cxx${CMAKE_CXX_STANDARD}-${CMAKE_SYSTEM_NAME}")
+    "${CMAKE_CXX_COMPILER_ID}-${CMAKE_CXX_COMPILER_VERSION}-cxx${CMAKE_CXX_STANDARD}-${CMAKE_SYSTEM_NAME}-${MINIMAL_GIT_REVISION}")
 message(STATUS "minimal plugin ABI tag: ${MINIMAL_ABI_TAG}")
 
 # --- Dependencies ------------------------------------------------------------

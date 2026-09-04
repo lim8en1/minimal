@@ -10,20 +10,46 @@ constexpr const char* kCategoryProbeToolName = "";
 }  // namespace
 
 tools::PermissionPolicy BuildPermissionPolicy(const tools::PermissionOverrideLayer& preset,
-                                               const tools::PermissionOverrideLayer& global) {
+                                               const tools::PermissionOverrideLayer& global,
+                                               bool preset_is_trusted) {
     tools::PermissionPolicy policy;
-    policy.read_only =
-        tools::resolve_permission_chain(kCategoryProbeToolName, tools::ToolCategory::ReadOnly, preset, global);
-    policy.file_write =
-        tools::resolve_permission_chain(kCategoryProbeToolName, tools::ToolCategory::FileWrite, preset, global);
-    policy.execute =
-        tools::resolve_permission_chain(kCategoryProbeToolName, tools::ToolCategory::Execute, preset, global);
+
+    // Untrusted mode: fold the preset-applied resolution against what global
+    // ALONE would have produced, taking the more restrictive of the two --
+    // the preset can narrow (e.g. Allow -> Ask) but never widen (Ask -> Allow).
+    auto category = [&](tools::ToolCategory cat) {
+        const auto with_preset =
+            tools::resolve_permission_chain(kCategoryProbeToolName, cat, preset, global);
+        if (preset_is_trusted) return with_preset;
+        const auto global_only = tools::resolve_permission_chain(
+            kCategoryProbeToolName, cat, tools::PermissionOverrideLayer{}, global);
+        return tools::most_restrictive(with_preset, global_only);
+    };
+    policy.read_only = category(tools::ToolCategory::ReadOnly);
+    policy.file_write = category(tools::ToolCategory::FileWrite);
+    policy.execute = category(tools::ToolCategory::Execute);
+
     policy.out_of_workdir = tools::resolve_out_of_workdir_chain(preset, global);
     policy.network = tools::resolve_network_chain(preset, global);
+    if (!preset_is_trusted) {
+        policy.out_of_workdir = tools::most_restrictive(
+            policy.out_of_workdir,
+            tools::resolve_out_of_workdir_chain(tools::PermissionOverrideLayer{}, global));
+        policy.network = tools::most_restrictive(
+            policy.network,
+            tools::resolve_network_chain(tools::PermissionOverrideLayer{}, global));
+    }
 
     policy.per_tool_overrides = global.per_tool_overrides;  // union...
     for (const auto& [name, mode] : preset.per_tool_overrides) {
-        policy.per_tool_overrides[name] = mode;  // ...preset wins on conflict
+        // ...preset wins on conflict -- but an UNTRUSTED preset may only ever
+        // narrow via AlwaysDeny. Ask/AlwaysAllow from an untrusted per-tool
+        // override is dropped rather than applied: confirming it would still
+        // be a narrowing for an arbitrary tool name requires that tool's
+        // ToolCategory, which this function does not have.
+        if (preset_is_trusted || mode == tools::PermissionMode::AlwaysDeny) {
+            policy.per_tool_overrides[name] = mode;
+        }
     }
     return policy;
 }

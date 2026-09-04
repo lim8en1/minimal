@@ -307,15 +307,27 @@ public:
                 }
             }
         }
-        doc[provider] = nlohmann::json{{"key", key}};
+        // A whole-object replace would silently discard whatever else lives
+        // under this provider's entry -- opencode's own auth.json uses an
+        // OAuth shape here ({"type":"oauth","refresh":...,"access":...}),
+        // which LookupKeyInAuthJson already tolerates by probing {"key",
+        // "api_key"}. Setting just the one field preserves the rest of
+        // whatever shape was already there.
+        if (!doc[provider].is_object()) doc[provider] = nlohmann::json::object();
+        doc[provider]["key"] = key;
         std::filesystem::create_directories(path.parent_path());
-        const tools::WriteOutcome written = tools::write_file(path, doc.dump() + "\n");
+        // 0600, not the default 0644: this file holds a live API key. Every
+        // other local account (and, on a shared box, every other tenant) can
+        // otherwise read it straight off disk.
+        const tools::WriteOutcome written = tools::write_file(
+            path, doc.dump() + "\n",
+            std::filesystem::perms::owner_read | std::filesystem::perms::owner_write);
         if (!written.ok) {
             return CommandResult::Error("could not write " + path.string() + ": " +
                                         written.error);
         }
-        return CommandResult::Ok("stored credential for '" + provider + "' in " +
-                                 path.string());
+        return CommandResult::Ok("stored credential for '" + provider + "' in " + path.string() +
+                                 " -- restart the server for it to take effect");
     }
 };
 

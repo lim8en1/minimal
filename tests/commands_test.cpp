@@ -8,6 +8,8 @@
 #include <string>
 #include <vector>
 
+#include <sys/stat.h>
+
 #include <catch2/catch_test_macros.hpp>
 
 #include <nlohmann/json.hpp>
@@ -498,4 +500,48 @@ TEST_CASE("/connect stores a credential in the data dir's auth.json and refuses 
     // Usage and validation: no silent junk in the credentials file.
     CHECK(fixture.Run("connect", {"local"}).status == Status::kError);
     CHECK(fixture.Run("connect", {"../evil", "key"}).status == Status::kError);
+}
+
+TEST_CASE("/connect writes auth.json 0600, never group/other-readable",
+          "[commands][connect]") {
+    CommandFixture fixture;
+    testing::TempDir data;
+    // data.path() itself, NOT its parent: the parent is the shared OS temp
+    // root (see TempDir), so pointing XDG_DATA_HOME there collides with every
+    // other test in this file that does the same -- fine for a test that only
+    // checks a merge across its own two calls, but this test's assertion is
+    // specifically about a FRESH file's mode, so it needs a root no other test
+    // case can have already written into.
+    ScopedEnv data_env("XDG_DATA_HOME", data.path().string().c_str());
+    const auto auth_path = data.path() / "minimal" / "auth.json";
+    std::filesystem::create_directories(auth_path.parent_path());
+
+    REQUIRE(fixture.Run("connect", {"local", "sk-test-123"}).status == Status::kOk);
+    REQUIRE(std::filesystem::exists(auth_path));
+
+    struct stat st {};
+    REQUIRE(::stat(auth_path.c_str(), &st) == 0);
+    CHECK((st.st_mode & 07777) == 0600);
+}
+
+TEST_CASE("/connect merges into an existing provider entry rather than replacing it -- an "
+          "opencode-shaped OAuth entry survives",
+          "[commands][connect]") {
+    CommandFixture fixture;
+    testing::TempDir data;
+    ScopedEnv data_env("XDG_DATA_HOME", data.path().string().c_str());
+    const auto auth_path = data.path() / "minimal" / "auth.json";
+    std::filesystem::create_directories(auth_path.parent_path());
+    // opencode's own OAuth shape for this provider, pre-existing.
+    std::ofstream(auth_path) << nlohmann::json{
+        {"anthropic", {{"type", "oauth"}, {"refresh", "r-token"}, {"access", "a-token"}}}}.dump();
+
+    REQUIRE(fixture.Run("connect", {"anthropic", "sk-new"}).status == Status::kOk);
+
+    const nlohmann::json stored = nlohmann::json::parse(std::ifstream(auth_path));
+    CHECK(stored.at("anthropic").at("key") == "sk-new");
+    // The refresh/access tokens must survive: a whole-object replace would
+    // have silently discarded them.
+    CHECK(stored.at("anthropic").at("refresh") == "r-token");
+    CHECK(stored.at("anthropic").at("access") == "a-token");
 }

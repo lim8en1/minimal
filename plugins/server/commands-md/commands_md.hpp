@@ -57,20 +57,40 @@ struct MdCommandSpec {
     std::vector<Source> sources;
     std::string body;                // inert template; empty = the sole text source's stdout
     std::filesystem::path source_file;  // diagnostics only
+    // False for a command file discovered from a PROJECT-LOCAL directory (the
+    // session's working tree, walked up to the git root -- see ProjectDirs):
+    // that is content the working directory supplied, not something the
+    // operator configured, the same distinction agent-preset resolution makes
+    // for `permission:`. An untrusted command's sources are disclosed and
+    // confirmed before ANY of them runs (MdCommand::Execute) -- a repo-shipped
+    // commands/*.md must not execute a generator program silently the first
+    // time someone types its name. A GLOBAL-config command (the operator's own
+    // config_dir/commands/) stays trusted and runs without that extra prompt,
+    // matching every other command in the harness.
+    bool trusted = true;
 };
 
 // Parses one .md file into a spec. Throws std::runtime_error with the reason on
 // any structural problem -- a broken command file must not load as a command
 // that fails at invocation with a mystery.
-MdCommandSpec ParseCommandFile(const std::filesystem::path& path);
+MdCommandSpec ParseCommandFile(const std::filesystem::path& path, bool trusted);
 
 // Builds the command object over a parsed spec.
 std::unique_ptr<commands::Command> MakeCommand(MdCommandSpec spec);
 
+// One directory to scan, tagged with whether files found there are trusted
+// (the operator's own global config) or not (project-local, working-tree
+// supplied). See MdCommandSpec::trusted.
+struct CommandDir {
+    std::filesystem::path path;
+    bool trusted = true;
+};
+
 // Loads every *.md under the given directories, nearest dir winning a stem
-// collision (project shadows global). Malformed files are warned and skipped:
+// collision (project shadows global -- `dirs` must therefore list project
+// directories BEFORE the global one). Malformed files are warned and skipped:
 // one broken command must not hide the rest from the picker.
 std::vector<std::unique_ptr<commands::Command>> LoadCommands(
-    const std::vector<std::filesystem::path>& dirs);
+    const std::vector<CommandDir>& dirs);
 
 }  // namespace minimal::commands_md
