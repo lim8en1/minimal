@@ -407,58 +407,137 @@ turned out different once implemented — corrected below.
 
 ---
 
-## Phase 5 — God-class slimming (builds on Phase 4)
+## Phase 5 — God-class slimming (builds on Phase 4) — DONE
 
-- **`session_service.cpp` (1069 lines, ≥6 responsibilities)**: advisor
-  composition and signal/MCP warm-up (`session_service.cpp:256-313`) move
-  behind the registry funnel; Phase 4.3 removes most of the rest.
-- **`CreateResolved` (250-line funnel, `session_registry.cpp:81-327`)** →
-  builder steps: project-context → model resolution → resume/repair →
-  construct → wire → publish. The resume seed-triple
-  (`seeded_history, seed_first_persisted_seq, seed_head_is_summary` — three
-  args that must agree) folds into one `ResumeSeed` struct; Session's 11-arg
-  ctor shrinks accordingly (AgentLoop's 14-arg too where shared).
-- **Two-phase init**: worker thread starts in Session's ctor
-  (`session.cpp:262`) but wiring completes later
-  (`session_registry.cpp:281-294`). All `set_*` wirings become
-  constructor-injected; delete the duplicate `set_mcp_manager` channel
-  (`session.hpp:419` — `SessionParams::mcp_manager` already exists).
-- **Naming policy out of SQLite**: the first-user-text-becomes-tab-label rule
-  currently lives inside `AppendMessage`'s transaction
-  (`session_database.cpp:244-283, 505-516, 602-616`). Session computes the
-  default name as a domain rule; the DB stores. Kills the post-turn
-  `MaybeEmitNameFromStore` poll (`session.cpp:1118-1141`) — replaced by a
-  `SessionMetadataChanged` emission at the same point in the turn.
-- **Reaper decoupled from WAL**: `ReaperMain` calls
-  `db_.MaybeRunPassiveCheckpoint()` every tick (`session_registry.cpp:476-481`)
-  and the registry holds a concrete `SessionDatabase&` (`session_registry.hpp:193`).
-  Registry takes a periodic-callback instead — unblocks fake-store testing.
-- **`LoopConfig` cleanup**: defaulting (`compaction_summarizer ? ... : default`)
-  moves from consumer (`session.cpp:251`) to producer; hooks stop being wired
-  twice (`LoopConfig::hooks` at `agent_loop.hpp:79` AND `SessionParams::hooks`
-  at `session.hpp:218`).
-- **One shared `SessionReader`** instead of a stateless per-session instance
-  (`session_registry.cpp:203` vs `session_support.cpp:17` proving one suffices).
-- **`MentionResolverRegistry`** is a single-slot registry that warns and ignores
-  a second registration (`mention_resolver.cpp:74-83`) — rename or make
-  semantics honest (settable optional).
-- **`CompactionStrategyRegistry`** (string-keyed registry with exactly one
-  registration, whose bundle dissolves into loose `std::function`s at
-  `main.cpp` before `AgentLoop` consumes it) → two named registries or one
-  factory; strategy object survives to the consumer.
-- **Structural twins**: shared rendezvous base for
-  `WirePermissionChecker`/`WireConfirmationBroker` (same
-  register-before-publish + timeout + fail-closed-decode skeleton,
-  `wire_permission_checker.cpp:25-74` vs `wire_confirmation_broker.cpp:20-56`)
-  — low marginal risk after Phase 4 touched both.
-- **`proto_convert` strictness (behavior change)**: malformed client content
-  blocks → `INVALID_ARGUMENT` instead of silent drop + log warning
-  (`proto_convert.cpp:356-364, 386-391`).
+Shipped as 10 independently-buildable, `ctest`-green commits (one step,
+advisor selection, split into two by an unrelated concurrent commit on the
+same file — see that item below). Every line-number citation in the
+original plan below was stale (Phase 4 shifted code without restructuring
+it); substance checked out except where called out. Two items shipped
+narrower than planned, one item shipped different in kind, one item
+deferred outright.
+
+- **`MentionResolverRegistry::Register` → `TrySetOverride`.** Bool-returning,
+  so a rejected second call is visible to the caller, not just a log line.
+  Pure rename; single-slot exclusivity unchanged.
+- **Reaper decoupled from WAL**: `ReaperConfig` gained a `periodic_checkpoint`
+  callback, called from the reaper tick instead of a direct
+  `db_.MaybeRunPassiveCheckpoint()`. `db_` stays a member — `CreateResolved`'s
+  other uses (history reader, resume seeding, message repair, store
+  construction) are untouched; only the reaper's own tick call moved.
+- **Advisor selection separated from composition.** `SessionParams` gained
+  `selected_advisor`/`advisor_timeout` — pure data, set by the two
+  composition call sites (`SessionServiceImpl::ApplyAdvisor`,
+  `SubagentManager`'s inheritance path) with no `rpc::` call at all.
+  `rpc::ApplyPermissionAdvisor` became a file-local helper inside
+  `session_wiring.cpp`, called from exactly one place — `FinishSessionWiring`
+  — after `unattended_prompt_timeout` resolves, preserving the ordering
+  constraint Phase 4's two-phase split existed for. `subagent_manager.cpp`
+  dropped its only `rpc::` dependency, extending Phase 4's "cutting the
+  cord." **Landed as two commits**: the `session_service.cpp` half of this
+  diff was sitting uncommitted in the working tree when an unrelated,
+  concurrently-authored commit (client heartbeat/Ping RPC work) swept it up
+  via a broad `git add`; the rest (`session.hpp`'s new fields,
+  `session_wiring.{hpp,cpp}`, `subagent_manager.cpp`, two test files) landed
+  in a follow-up commit noting the split.
+- **One shared `SessionReader`** replaces a fresh-per-session instance plus a
+  second stack-local one for resume — `SessionRegistry` now owns one
+  registry-lifetime `SessionReader`, the same pattern
+  `SessionSupport::Wire`'s `db_reader_` already proved works (`SessionReader`
+  is fully stateless: holds only the database, every method takes
+  `session_id`).
+- **`CreateResolved` decomposition + `ResumeSeed`.** The ~250-line funnel
+  split into named private methods (`ApplyProjectContext`,
+  `AppendSignalContext`, `ResolveModel`, `ResolveProvider`, `LoadResumeSeed`,
+  `PublishSession`) — `CreateResolved` itself is now a ~15-line call
+  sequence. The doc's step list missed a step: provider construction
+  (`providers_.Has` + `provider_cache_.GetOrCreate`) is its own named
+  `ResolveProvider`, not folded into another step. The three-loose-locals
+  resume seed (`seeded_history`/`seed_first_persisted_seq`/
+  `seed_head_is_summary`) folded into one `ResumeSeed` struct
+  (`agent_loop.hpp`, next to `LoopConfig`); `Session`'s ctor shrank 11→9
+  args, `AgentLoop`'s 14→12.
+- **Constructor-injected wiring.** `presets`/`commands`/`provider_factories`/
+  `provider_instance_cache` moved from post-construction `set_*` calls
+  (`SessionRegistry`, run after the worker thread already existed) into
+  `SessionParams` fields `Session`'s ctor reads directly. **Correction**:
+  `Session::set_mcp_manager` was not a duplicate wiring channel to merge —
+  grepping every `.set_mcp_manager(` call site in the tree found exactly two,
+  both resolving to the unrelated `SessionServiceImpl::set_mcp_manager`.
+  `Session::set_mcp_manager` had zero callers; deleted outright, not merged.
+- **`CompactionStrategy` survives to the consumer.** `LoopConfig` gained one
+  `compaction_strategy` field (the whole `CompactionStrategy` object) in
+  place of the two loose `cut_selector`/`compaction_summarizer`
+  `std::function`s `main.cpp` used to dissolve it into. A new
+  `LoopConfig::EffectiveCompactor()` centralizes the `compact_messages`
+  fallback the consumer (`Session`'s ctor) used to inline as a ternary —
+  the producer-side default, not a decision the consumer needs to know
+  about.
+- **Hooks de-duplicated onto `LoopConfig` alone.** `SessionParams::hooks` is
+  gone; `LoopConfig::hooks` (already driving `AgentLoop`'s compaction
+  emissions) is now also what `Session` reads for `ToolExecutor` and
+  `kUserPromptSubmit`, instead of a second field kept in sync with it only
+  by convention.
+- **Naming policy out of SQLite.** **Correction — narrower than planned**:
+  `SessionMetadataChanged` and its emission already existed (Phase 4 built
+  them; `Session::SetName` and the old `MaybeEmitNameFromStore` both already
+  emitted it). What actually moved is *where the default name is computed*:
+  a new pure function `agent::DefaultSessionName` (in new
+  `session_naming.{hpp,cpp}`) replaces `SessionDatabase`'s
+  `SessionNameFromText`/`CollapseWhitespace`/`TruncateToCodePoints`;
+  `AppendMessage` no longer inspects message content at all, only persists.
+  `SessionDatabase` gained a narrow `SetDefaultName` (the same guarded
+  `UPDATE ... WHERE name=''`, extracted from `AppendMessage`'s transaction
+  into its own statement); `HistoryStore::StoredName()` was replaced by
+  `SetDefaultNameIfUnset(name)`. `Session::RunOneTurn` computes the
+  candidate from the turn's raw text and calls the renamed
+  `EmitDefaultNameIfComputed` at the same post-turn point the old poll ran.
+  **Two behavior changes, both allowed under this doc's charter**: the
+  default name now derives from what the user typed, not the
+  mention-expanded message `AppendMessage` used to see; and the rename write
+  is a separate DB call, no longer atomic with the message insert
+  (self-healing — resume recomputes the same candidate from the same seeded
+  text against the same guard).
+- **Structural twins — corrected, not a base class.** `WirePermissionChecker`
+  and `WireConfirmationBroker` implement different interfaces
+  (`tools::PermissionChecker` vs `commands::ConfirmationBroker`, a
+  deliberate port/adapter split this doc's own "Explicitly not fixing"
+  section already calls out) and their event-construction/answer-filtering
+  halves are genuinely different shapes — only the middle (register, await,
+  fail-closed on no-answer, fail-closed on the wrong `PendingAnswer`
+  alternative) was byte-for-byte identical. New `rendezvous.hpp` extracts
+  exactly that middle as a free function template, `AwaitTypedAnswer<Answer>`,
+  plus a small composed `RequestIdGenerator` for the duplicated
+  atomic-counter-plus-prefix `NextRequestId`. `tests/wire_confirmation_broker_test.cpp`
+  is new — the confirmation side had no direct unit coverage before (only
+  indirect, through `session_service_test.cpp`).
+- **`proto_convert` strictness — deferred, not shipped.** Verified
+  `FromProto(const v1::Message&)`/`FromProto(const v1::ContentBlock&)` have
+  **zero production callers** anywhere in the tree: no inbound
+  client-content-block RPC path exists yet (`session_service.cpp` never
+  calls them; `event_translator.hpp` only uses the outbound `ToProto`
+  direction). Changing their signature to propagate `INVALID_ARGUMENT` now
+  would be speculative API design with no real caller to validate the
+  contract against. Moved to the "Deferred/documented" bullet below instead
+  of scheduled as a commit.
+- **`session_service.cpp`'s "signal/MCP warm-up moves behind the funnel"
+  — correction, already ~90% done.** Phase 4 already funneled the actual
+  *subscription registration* into `CreateResolved`'s locked block (see the
+  standing comment there: "Signal subscriptions register HERE... not
+  afterward from the RPC layer"). What remains in `session_service.cpp`'s
+  `ApplySignals` — selector validation and MCP channel warm-up — runs
+  *before* `sessions_.Create()` specifically so a bad selector can roll back
+  the just-inserted DB row before any session construction starts; moving
+  that into the funnel would mean duplicating rollback logic for no gain.
+  Left in place; no commit scheduled for it.
 - **Deferred/documented**: `PluginSubscribe` 20 ms polling thread per
-  subscription (`session_service.cpp:1062-1064`, sync-API limitation);
-  per-subscriber publish copies in `EventBroadcaster` (correct, throughput
-  note only); `ModelCatalog` being OpenAI-`/models`-shaped (documented
-  pragmatism).
+  subscription (`session_service.cpp`, sync-API limitation); per-subscriber
+  publish copies in `EventBroadcaster` (correct, throughput note only);
+  `ModelCatalog` being OpenAI-`/models`-shaped (documented pragmatism);
+  `proto_convert` inbound strictness (`FromProto(Message)`/
+  `FromProto(ContentBlock)`) — currently dead code, revisit when an inbound
+  client-content-block RPC path is built, against that caller's real
+  error-handling needs.
 
 ---
 
@@ -525,4 +604,4 @@ turned out different once implemented — corrected below.
 | 2 Moves | M | Low-Med | build + ctest after include churn | DONE |
 | 3 Config | M | Medium | config/sanity/e2e tests | DONE |
 | 4 Event extraction | **L** | Medium | `headless_e2e_test` unmodified-pass | DONE |
-| 5 Slimming | M-L | Medium | per-step ctest | |
+| 5 Slimming | M-L | Medium | per-step ctest | DONE |
