@@ -972,11 +972,16 @@ grpc::Status SessionServiceImpl::PluginCall(grpc::ServerContext* context,
 
     // Two dispatch conventions share this one generic RPC, and they cannot
     // collide: the E5 client-channel convention (PluginEndpoint) is Provided
-    // under the plugin's plain name, while the RPC-handler convention
-    // (PluginRpcHandler, e.g. checklist) is Provided under
-    // PluginRpcServiceName(name) -- "<plugin_name>.rpc". Try the plain name
-    // first; a hit there is by construction never a PluginRpcHandler.
-    if (void* service = services_->Find(request->plugin_name()); service != nullptr) {
+    // under PluginEndpointServiceName(name) -- "<plugin_name>.endpoint" --
+    // while the RPC-handler convention (PluginRpcHandler, e.g. checklist) is
+    // Provided under PluginRpcServiceName(name) -- "<plugin_name>.rpc". Both
+    // suffixed, deliberately: ServiceRegistry is one flat void*-typed
+    // namespace shared with plain §2.2 services, and a bare plugin_name key
+    // let ANY interface a plugin registered under its own name get
+    // static_cast to PluginEndpoint here -- a real vtable call through the
+    // wrong type, not a theoretical mismatch.
+    if (void* service = services_->Find(plugins::PluginEndpointServiceName(request->plugin_name()));
+        service != nullptr) {
         auto* endpoint = static_cast<plugins::PluginEndpoint*>(service);
         try {
             response->set_json_payload(endpoint->Call(request->method(), request->json_payload()));
@@ -1185,7 +1190,7 @@ grpc::Status SessionServiceImpl::PluginSubscribe(grpc::ServerContext* context,
     if (services_ == nullptr) {
         return grpc::Status(grpc::StatusCode::UNAVAILABLE, "the plugin channel is not offered");
     }
-    void* service = services_->Find(request->plugin_name());
+    void* service = services_->Find(plugins::PluginEndpointServiceName(request->plugin_name()));
     if (service == nullptr) {
         return grpc::Status(grpc::StatusCode::NOT_FOUND,
                             "no plugin provides a service under '" + request->plugin_name() + "'");

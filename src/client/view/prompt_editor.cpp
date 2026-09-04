@@ -313,6 +313,9 @@ ftxui::Component MakePromptEditor(
             state.history_cursor.reset();
             state.pending_prefix = MentionPrefixAt(state.content);
             state.query_pending = !state.pending_prefix.empty();
+            // Mirrored for the redraw pump (RunTui, a different thread) --
+            // see PromptEditorState::query_pending_hint.
+            state.query_pending_hint.store(state.query_pending, std::memory_order_release);
             state.query_at = std::chrono::steady_clock::now() + kSuggestDebounce;
             state.list_open = state.query_pending;
             state.suggestion_selected = 0;
@@ -365,6 +368,7 @@ ftxui::Component MakePromptEditor(
             }
             state.list_open = !state.suggestions.empty();
             state.query_pending = false;
+            state.query_pending_hint.store(false, std::memory_order_release);
         }
 
         // The debounce gate: once the delay has passed and the prefix is
@@ -381,6 +385,7 @@ ftxui::Component MakePromptEditor(
                 state.suggestions = std::move(*result);
                 state.completions = state.suggestions;
                 state.query_pending = false;
+                state.query_pending_hint.store(false, std::memory_order_release);
                 state.list_open = !state.suggestions.empty();
             }
         }

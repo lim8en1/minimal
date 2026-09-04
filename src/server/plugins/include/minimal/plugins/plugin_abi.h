@@ -120,8 +120,23 @@ struct PluginRegistrationContext {
 // A UI plugin is usually a PAIR: a server-side data source plus a client-side
 // view. The wire carries two generic RPCs (PluginCall / PluginSubscribe);
 // server-side, they dispatch by plugin_name through the ServiceRegistry to the
-// PluginEndpoint the plugin Provided under its own name. Core defines neither
-// payload nor semantics: the JSON both ways is the plugin's own.
+// PluginEndpoint the plugin Provided under PluginEndpointServiceName(name).
+// Core defines neither payload nor semantics: the JSON both ways is the
+// plugin's own.
+
+// "<plugin_name>.endpoint" -- the ServiceRegistry name a plugin's PluginCall/
+// PluginSubscribe data source is Provided under. Mirrors PluginRpcServiceName
+// (plugin_rpc.hpp) for the same reason: ServiceRegistry is one flat, generic
+// void*-typed namespace shared with plain §2.2 services (a plugin may Provide
+// both a PluginEndpoint and, say, a BashSessionStateService), so a bare
+// plugin_name key would let ANY interface registered under it get
+// static_cast to PluginEndpoint by PluginCall's lookup -- a real vtable call
+// through the wrong type, not a theoretical mismatch. The suffix makes that
+// collision unexpressible (NameRegistry would refuse two registrations under
+// the same key), the same way ".rpc" already does for PluginRpcHandler.
+inline std::string PluginEndpointServiceName(std::string_view plugin_name) {
+    return std::string(plugin_name) + ".endpoint";
+}
 
 // The push side of a subscription. Implemented by the RPC layer; a plugin's
 // push source holds it by shared_ptr. Thread-safe. Push returns false once the
@@ -133,10 +148,10 @@ public:
     virtual bool Push(std::string json_payload) = 0;
 };
 
-// What a plugin Provides under its own name to serve the generic channel.
-// Abstract, header-only, pure virtual: the RPC layer static_casts
-// ServiceRegistry::Find(plugin_name) to this and dispatches through the
-// vtable -- no symbol resolution, so RTLD_LOCAL costs nothing.
+// What a plugin Provides under PluginEndpointServiceName(its own name) to
+// serve the generic channel. Abstract, header-only, pure virtual: the RPC
+// layer static_casts ServiceRegistry::Find(...) to this and dispatches
+// through the vtable -- no symbol resolution, so RTLD_LOCAL costs nothing.
 class PluginEndpoint {
 public:
     virtual ~PluginEndpoint() = default;

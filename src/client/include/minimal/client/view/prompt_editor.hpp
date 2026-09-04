@@ -23,6 +23,7 @@
 // shorthands are annotated as the one kind that will submit a turn
 // (docs/EXTENSIBILITY.md 4.4), so a macro never surprises anyone.
 
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <functional>
@@ -54,6 +55,17 @@ struct PromptEditorState {
     std::string pending_prefix;
     std::chrono::steady_clock::time_point query_at{};
     bool query_pending = false;
+    // A CROSS-THREAD-SAFE mirror of query_pending, kept in sync at every site
+    // that writes query_pending -- NOT itself authoritative (query_pending
+    // is, and is read/written only on the FTXUI loop thread like every other
+    // field here). RunTui's redraw pump runs on its own thread and needs to
+    // know "is a debounced query armed" to decide whether to force a repaint
+    // between UiVersion() changes (the debounce fires from a render pass --
+    // see prompt_editor.cpp's render-time gate -- so nothing repaints, the
+    // timer never actually elapses). A plain bool read cross-thread here
+    // would be a data race (TSan-visible); this field exists solely to make
+    // that read well-defined.
+    std::atomic<bool> query_pending_hint{false};
 
     // Submitted-line recall (up/down arrow, readline-like), scoped to the
     // whole app rather than per-tab -- one editor Component is shared across

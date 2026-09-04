@@ -8,6 +8,7 @@
 #include <atomic>
 #include <cerrno>
 #include <chrono>
+#include <condition_variable>
 #include <csignal>
 #include <cstdio>
 #include <cstring>
@@ -1235,20 +1236,39 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     });
     tab_maintenance.Run();   // the first frame must not render an empty snapshot
 
+    // Shutdown signal shared by both background threads below: notified once,
+    // right after running.store(false), so a thread parked in a cv wait wakes
+    // IMMEDIATELY instead of riding out its own poll interval. Only the
+    // heartbeat actually waits on it (the pump still must wake every 50ms
+    // regardless, to notice a UiVersion() change with no other trigger) --
+    // shared rather than duplicated because both threads shut down at the
+    // same instant for the same reason.
+    std::mutex shutdown_mtx;
+    std::condition_variable shutdown_cv;
+
     // THE PUMP: reader threads wake nothing by themselves; this loop redraws
     // at up to 20 Hz from snapshots. Redraws are gated on the app's UI
     // revision -- an idle TUI used to repaint the full frame 20x per second
-    // no matter what. A 5 Hz floor remains so the editor's @-mention debounce
-    // gate (which fires FROM a render pass) is serviced while the user types.
+    // no matter what. The 50ms wake itself is not optional (nothing else can
+    // notice a UiVersion() change or the shutdown flag), but the OLD
+    // unconditional "force a repaint every 4th tick regardless" floor is:
+    // that existed only so the editor's @-mention debounce gate -- which
+    // fires FROM a render pass (prompt_editor.cpp has no timer of its own) --
+    // kept getting serviced while the user typed, and paid a full render
+    // pass 5x/s for the whole app's life to cover a window that is usually
+    // closed. Gated instead on query_pending_hint: a debounced query is
+    // actually armed only for the ~100-150ms between a keystroke and its
+    // answer, so this floor is now active for a sliver of the app's
+    // lifetime rather than always.
     std::atomic<bool> running{true};
     std::thread pump([&] {
         uint64_t last_version = app->UiVersion();
-        int tick = 0;
         while (running.load(std::memory_order_acquire)) {
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
-            ++tick;
             const uint64_t version = app->UiVersion();
-            if (version != last_version || tick % 4 == 0) {
+            const bool debounce_pending =
+                prompt_state.query_pending_hint.load(std::memory_order_acquire);
+            if (version != last_version || debounce_pending) {
                 last_version = version;
                 screen.PostEvent(Event::Custom);
             }
@@ -1264,17 +1284,25 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     // reported "start client, fiddle with /-autocomplete, submit, server
     // stops". One Ping per ~2s marks the client alive; quitting the TUI
     // stops the beats and the server exits on its own linger as designed.
+    //
+    // A condition_variable wait, not a 100ms-poll/20-tick counter: the old
+    // shape woke this thread 20x for every Ping it actually sent, and the
+    // shutdown flag was only ever checked between those 100ms slices, so
+    // quitting could wait up to 100ms on a thread doing nothing but counting.
+    // wait_for's predicate returns true (ending the wait early) the instant
+    // shutdown_cv is notified.
     std::thread heartbeat([&] {
-        int tick = 0;
-        while (running.load(std::memory_order_acquire)) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            if (++tick % 20 != 0) continue;   // one beat per ~2s
+        std::unique_lock<std::mutex> lock(shutdown_mtx);
+        while (!shutdown_cv.wait_for(lock, std::chrono::seconds(2), [&] {
+            return !running.load(std::memory_order_acquire);
+        })) {
             (void)client->Ping();   // failures ignored -- see SessionClient::Ping
         }
     });
 
     screen.Loop(final_tree);
     running.store(false, std::memory_order_release);
+    shutdown_cv.notify_all();   // wakes the heartbeat immediately, not on its next 2s tick
     pump.join();
     heartbeat.join();
 

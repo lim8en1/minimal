@@ -1,7 +1,7 @@
 // Serves the generic client channel (PluginCall / PluginSubscribe): Provides a
-// PluginEndpoint under the plugin's own name, which the RPC layer dispatches
-// to by plugin_name. The pair proof's SERVER half -- the client half is a
-// SessionClient::PluginCall/PluginSubscribe caller.
+// PluginEndpoint under PluginEndpointServiceName("fixture-endpoint"), which
+// the RPC layer dispatches to by plugin_name. The pair proof's SERVER half --
+// the client half is a SessionClient::PluginCall/PluginSubscribe caller.
 //
 // Contract (also asserted by the wire tests):
 //   Call("ping", payload)           -> {"pong": <payload verbatim>}
@@ -57,6 +57,6 @@ const char* minimal_plugin_version() { return "1.0.0"; }
 
 void minimal_plugin_register_services(plugins::ServiceRegistry& registry,
                                       const plugins::PluginRegistrationContext&) {
-    registry.Provide("fixture-endpoint", &Endpoint());
+    registry.Provide(plugins::PluginEndpointServiceName("fixture-endpoint"), &Endpoint());
 }
 }
