@@ -135,6 +135,12 @@ std::shared_ptr<Session> SessionRegistry::CreateResolved(SessionParams params,
     // the process-wide one without knowing it exists.
     if (params.hooks == nullptr) params.hooks = hooks_;
 
+    // Constructor-injected (Phase 5 step 3): presets/commands/provider
+    // factories/instance cache reach Session's ctor on `params`, closing the
+    // window a post-construction set_* call used to leave open between the
+    // worker thread starting and these becoming non-null.
+    ApplyConstructorWiring(params, has_parent);
+
     ResumeSeed seed = resume ? LoadResumeSeed(session_id) : ResumeSeed{};
 
     auto store = std::make_unique<session::SqliteHistoryStore>(db_, session_id);
@@ -143,12 +149,11 @@ std::shared_ptr<Session> SessionRegistry::CreateResolved(SessionParams params,
     auto session = std::make_shared<Session>(std::move(params), std::move(preset),
                                              std::move(provider), std::move(store), tools_,
                                              loop_config, observers_, logger_, std::move(seed));
-    // Wired before the session is findable, so the first command a client sends
-    // cannot arrive at a session that has no registry yet. Signal subscription
-    // (inside PublishSession's locked block) is part of the same "findable"
-    // bar -- an internal signal addressed to this session_id must never be
-    // able to observe it before its declared subscriptions exist.
-    WireSession(*session, has_parent);
+    // Made findable last: the session is fully wired (constructor-injected)
+    // and constructed before PublishSession's locked block registers signal
+    // subscriptions and inserts it into sessions_ -- an internal signal or
+    // command addressed to this session_id must never be able to observe it
+    // before that.
     PublishSession(session_id, session, signal_router, signal_selectors, resume);
 
     guard.committed = true;
@@ -285,8 +290,8 @@ ResumeSeed SessionRegistry::LoadResumeSeed(const std::string& session_id) {
     return seed;
 }
 
-void SessionRegistry::WireSession(Session& session, bool has_parent) {
-    session.set_presets(&presets_);
+void SessionRegistry::ApplyConstructorWiring(SessionParams& params, bool has_parent) {
+    params.presets = &presets_;
     // A SUBAGENT GETS NO COMMAND SURFACE. Commands are a user control channel,
     // and a child has no user: its client attaches to observe, and the spawn was
     // driven by the parent's model rather than by a person with a prompt.
@@ -297,9 +302,9 @@ void SessionRegistry::WireSession(Session& session, bool has_parent) {
     // spawn_subagent back and reopen the recursion ARCHITECTURE.md calls a hard
     // rule. Closing the surface removes the whole class rather than patching the
     // one command that happens to reach it today.
-    session.set_commands(has_parent ? nullptr : commands_);
-    session.set_provider_factories(&providers_);
-    session.set_provider_instance_cache(&provider_cache_);
+    params.commands = has_parent ? nullptr : commands_;
+    params.provider_factories = &providers_;
+    params.provider_instance_cache = &provider_cache_;
 }
 
 void SessionRegistry::PublishSession(const std::string& session_id,

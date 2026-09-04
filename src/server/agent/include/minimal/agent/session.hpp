@@ -250,6 +250,19 @@ struct SessionParams {
     // from these, after unattended_prompt_timeout above has resolved.
     std::shared_ptr<tools::PermissionAdvisor> selected_advisor;
     std::chrono::milliseconds advisor_timeout{0};
+
+    // --- Constructor-injected wiring (Phase 5 step 3) -------------------------
+    // Formerly set on the live Session by SessionRegistry via set_presets/
+    // set_commands/set_provider_factories/set_provider_instance_cache, AFTER
+    // construction -- a window during which the worker thread already
+    // existed but these were still null. All four borrowed, process-wide;
+    // unset in tests that never exercise /agent or a provider rebuild.
+    const AgentPresetRegistry* presets = nullptr;
+    // Null for a subagent: commands are a user control channel a child has
+    // none of (see WireSession's reasoning at the call site).
+    const commands::CommandRegistry* commands = nullptr;
+    const llm::ProviderFactoryRegistry* provider_factories = nullptr;
+    ProviderInstanceCache* provider_instance_cache = nullptr;
 };
 
 // One item of work for the session worker. A variant rather than two queues,
@@ -431,22 +444,10 @@ public:
 
 
 
-    // The registry the /agent command re-resolves against. Borrowed; it outlives
-    // every session.
+    // The registry the /agent command re-resolves against. Borrowed; it
+    // outlives every session. Constructor-injected from SessionParams --
+    // see that struct's "constructor-injected wiring" section.
     const AgentPresetRegistry* presets() const { return presets_; }
-    void set_presets(const AgentPresetRegistry* presets) { presets_ = presets; }
-    void set_commands(const commands::CommandRegistry* commands) { commands_ = commands; }
-    // Needed to rebuild the provider when a preset or model switch crosses
-    // provider entries. Borrowed; process-wide.
-    void set_provider_factories(const llm::ProviderFactoryRegistry* factories) {
-        provider_factories_ = factories;
-    }
-    // The shared instance cache the rebuild above routes through. Optional:
-    // without it the rebuild constructs a private instance (test sessions).
-    void set_mcp_manager(mcp::McpClientManager* manager) { mcp_manager_ = manager; }
-    void set_provider_instance_cache(ProviderInstanceCache* cache) {
-        provider_instance_cache_ = cache;
-    }
     // What a spawner reads off a PARENT at spawn time to derive the child's
     // inheritance: permission ceilings, the run mode to clamp against, the
     // grants to copy, and the preset whose allowed lists the child intersects.

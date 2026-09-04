@@ -235,6 +235,16 @@ Session::Session(SessionParams params, AgentPreset preset,
         loop_config.compaction_summarizer ? loop_config.compaction_summarizer : Compactor(compact_messages),
         std::move(seed), std::move(params_.project_context));
 
+    // Constructor-injected wiring (Phase 5 step 3): formerly set by
+    // SessionRegistry AFTER construction, via set_presets/set_commands/
+    // set_provider_factories/set_provider_instance_cache -- a window during
+    // which the worker thread below already existed but these were still
+    // null. See SessionParams for what each is borrowed from.
+    presets_ = params_.presets;
+    commands_ = params_.commands;
+    provider_factories_ = params_.provider_factories;
+    provider_instance_cache_ = params_.provider_instance_cache;
+
     // MCP liveness at session start, BEFORE the worker exists: this thread is
     // allowed to block (the RPC reader is a different one), and the loop must
     // already carry its final server set when the first turn can run.

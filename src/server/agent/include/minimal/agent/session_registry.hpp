@@ -211,11 +211,12 @@ private:
     std::shared_ptr<llm::LlmProvider> ResolveProvider(const AgentPreset& preset,
                                                        const std::string& agent_preset_name);
     ResumeSeed LoadResumeSeed(const std::string& session_id);
-    // The two set_* wirings CreateResolved still applies to a live Session
-    // after construction (Phase 5 step 3 folds the rest into the constructor;
-    // these two -- presets/commands/provider factories/instance cache -- are
-    // this step's own follow-up, not done here).
-    void WireSession(Session& session, bool has_parent);
+    // Phase 5 step 3: presets/commands/provider factories/instance cache used
+    // to be set on the live Session AFTER construction (WireSession, set_*
+    // calls) -- a window during which the worker thread already existed but
+    // these were still null. Now constructor-injected: this fills the
+    // SessionParams fields Session's ctor reads, before Session exists.
+    void ApplyConstructorWiring(SessionParams& params, bool has_parent);
     // The locked "findable" section: signal subscriptions, then the sessions_
     // insertion, in the same critical section (see the call site for why).
     void PublishSession(const std::string& session_id, const std::shared_ptr<Session>& session,
