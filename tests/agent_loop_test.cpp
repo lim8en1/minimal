@@ -1734,7 +1734,7 @@ TEST_CASE("LoopConfig.cut_selector is consulted instead of the legacy history.si
     // A cut_selector that always proposes 1, regardless of history size --
     // the opposite of history.size()/2, so the test fails if Compact() ever
     // falls back to the legacy default while a selector is set.
-    config.cut_selector = [](const std::vector<llm::Message>&, std::int64_t) {
+    config.compaction_strategy.cut_selector = [](const std::vector<llm::Message>&, std::int64_t) {
         return std::size_t{1};
     };
     h.Build({}, config, compactor,
@@ -1775,7 +1775,7 @@ TEST_CASE("a proposed cut is still snapped to a safe tool-call boundary, never t
     result.content = {llm::TextBlock{"ok"}};
 
     agent::LoopConfig config;
-    config.cut_selector = [](const std::vector<llm::Message>&, std::int64_t) {
+    config.compaction_strategy.cut_selector = [](const std::vector<llm::Message>&, std::int64_t) {
         return std::size_t{1};  // between the tool_use and its own result -- unsafe
     };
     h.Build({}, config, compactor,

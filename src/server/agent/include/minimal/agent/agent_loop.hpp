@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "minimal/agent/agent_preset.hpp"
+#include "minimal/agent/compaction_strategy.hpp"
 #include "minimal/agent/context_compactor.hpp"
 #include "minimal/agent/injection_queue.hpp"
 #include "minimal/common/logger.hpp"
@@ -78,19 +79,28 @@ struct LoopConfig {
     // session, read-only after Configure.
     const hooks::HookDispatcher* hooks = nullptr;
 
-    // S4: the compaction strategy's two halves, resolved ONCE in main.cpp by
-    // name (memory.compaction_strategy) via CompactionStrategyRegistry and
-    // copied into every session's LoopConfig -- cheap, two std::functions.
-    // Both null (every LoopConfig a test builds by hand, and any AgentLoop
-    // built directly with its own `compactor` constructor argument) falls
-    // back to today's production behavior exactly: cut_selector unset means
-    // AgentLoop::Compact() keeps the legacy history.size()/2 halving;
-    // compaction_summarizer unset means Session passes compact_messages the
-    // way it always has. Neither ever bypasses snap_compaction_boundary,
-    // which AgentLoop::Compact() applies unconditionally regardless of where
-    // the candidate cut came from.
-    CutSelector cut_selector;
-    Compactor compaction_summarizer;
+    // S4: the compaction strategy, resolved ONCE in main.cpp by name
+    // (memory.compaction_strategy) via CompactionStrategyRegistry and copied
+    // into every session's LoopConfig whole -- the strategy object survives
+    // to the consumer, rather than dissolving into two loose std::functions
+    // at the producer. Default-constructed (every LoopConfig a test builds by
+    // hand, and any AgentLoop built directly with its own `compactor`
+    // constructor argument) falls back to today's production behavior
+    // exactly: an unset cut_selector means AgentLoop::Compact() keeps the
+    // legacy history.size()/2 halving; EffectiveCompactor() below is what
+    // Session actually passes to AgentLoop's ctor. Neither half ever bypasses
+    // snap_compaction_boundary, which AgentLoop::Compact() applies
+    // unconditionally regardless of where the candidate cut came from.
+    CompactionStrategy compaction_strategy;
+
+    // The producer-resolved summarizer: compaction_strategy's own when a
+    // strategy set one, compact_messages (today's only behavior) otherwise.
+    // Centralized here so the consumer (Session's ctor, building AgentLoop)
+    // does not need to know what the fallback is.
+    Compactor EffectiveCompactor() const {
+        return compaction_strategy.summarize ? compaction_strategy.summarize
+                                             : Compactor(compact_messages);
+    }
 };
 
 // Brackets one tool invocation, surfaced to the client as ToolExecutionEvent.

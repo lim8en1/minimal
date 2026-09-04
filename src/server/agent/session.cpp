@@ -221,10 +221,10 @@ Session::Session(SessionParams params, AgentPreset preset,
     // an argument the loop supplies per call. That is what keeps a mid-session
     // /agent switch from compacting with the previous preset's prompt.
     //
-    // loop_config.compaction_summarizer (S4) is the configured strategy's
-    // summarize half, resolved once in main.cpp from
-    // memory.compaction_strategy; unset (every test that builds a LoopConfig
-    // by hand) falls back to compact_messages, today's only behavior.
+    // loop_config.EffectiveCompactor() (S4) resolves the configured strategy's
+    // summarize half (memory.compaction_strategy, set once in main.cpp) or
+    // falls back to compact_messages -- the producer-side default, so this
+    // call site does not need to know what the fallback is.
     //
     // seed is non-default only on resume: the stored transcript becomes the
     // loop's working history WITHOUT being re-appended to the store it was
@@ -232,8 +232,7 @@ Session::Session(SessionParams params, AgentPreset preset,
     loop_ = std::make_unique<AgentLoop>(
         *provider_, executor_, registry, *store_, preset_, loop_config, std::move(context),
         [this] { return IsCancelled(); }, std::move(stream_event_sink),
-        loop_config.compaction_summarizer ? loop_config.compaction_summarizer : Compactor(compact_messages),
-        std::move(seed), std::move(params_.project_context));
+        loop_config.EffectiveCompactor(), std::move(seed), std::move(params_.project_context));
 
     // Constructor-injected wiring (Phase 5 step 3): formerly set by
     // SessionRegistry AFTER construction, via set_presets/set_commands/

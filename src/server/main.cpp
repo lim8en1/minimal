@@ -452,15 +452,16 @@ int main(int argc, char** argv) {
     loop_config.max_tool_result_bytes = settings.tools.max_result_bytes;
     loop_config.hooks = &hook_dispatcher;
 
-    // S4: resolve memory.compaction_strategy ONCE here and copy its two
-    // halves into every session's LoopConfig. An unresolved name (typo, or
-    // the providing plugin is disabled -- the sanity check already warned)
-    // leaves both fields unset, which AgentLoop/Session treat as "use the
-    // built-in behavior" -- exactly what "summarize" itself does, so this
-    // degrades to the same place it would have resolved to anyway.
+    // S4: resolve memory.compaction_strategy ONCE here and copy the whole
+    // strategy object into every session's LoopConfig -- it survives to the
+    // consumer, rather than dissolving into two loose std::functions at this
+    // producer. An unresolved name (typo, or the providing plugin is
+    // disabled -- the sanity check already warned) leaves it default-
+    // constructed, which AgentLoop/LoopConfig::EffectiveCompactor() treat as
+    // "use the built-in behavior" -- exactly what "summarize" itself does,
+    // so this degrades to the same place it would have resolved to anyway.
     if (const auto* strategy = compaction_strategies.Find(settings.memory.compaction_strategy)) {
-        loop_config.cut_selector = strategy->cut_selector;
-        loop_config.compaction_summarizer = strategy->summarize;
+        loop_config.compaction_strategy = *strategy;
     }
 
     // Configure hooks (track O) now that every point -- core's and plugins' --

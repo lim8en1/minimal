@@ -470,8 +470,9 @@ std::optional<std::size_t> AgentLoop::Compact(std::string_view trigger) {
     // set -- honoring memory.compaction_keep_recent_tokens (W11) via a
     // token-budget walk from the tail, instead of the legacy plain halving
     // -- else the boundary snap below is what makes ANY candidate safe.
-    std::size_t candidate = config_.cut_selector
-                                ? config_.cut_selector(history_, config_.compaction_keep_recent_tokens)
+    std::size_t candidate = config_.compaction_strategy.cut_selector
+                                ? config_.compaction_strategy.cut_selector(
+                                      history_, config_.compaction_keep_recent_tokens)
                                 : history_.size() / 2;
 
     // Snapping backward to a complete tool-call cycle is mandatory: cutting
