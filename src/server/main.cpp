@@ -491,6 +491,7 @@ int main(int argc, char** argv) {
     // its own project_root, at creation/resume/spawn -- never at startup, since
     // the server serves many project roots and no file belongs to all of them.
     sessions.set_project_context(settings.project_context);
+    if (!settings.small_model.empty()) sessions.set_small_model(settings.small_model);
     sessions.set_prompt_timeout(
         std::chrono::seconds(settings.sessions.unattended_prompt_timeout_seconds));
     sessions.set_hook_dispatcher(&hook_dispatcher);

@@ -147,11 +147,14 @@ SessionClient::ListCommandsResult SessionClient::ListCommands() {
     return result;
 }
 
-SessionClient::ListAgentPresetsResult SessionClient::ListAgentPresets() {
+SessionClient::ListAgentPresetsResult SessionClient::ListAgentPresets(
+    const std::string& project_root) {
     grpc::ClientContext context;
     context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(2));
+    v1::ListAgentPresetsRequest request;
+    request.set_project_root(project_root);
     ListAgentPresetsResult result;
-    result.status = stub_->ListAgentPresets(&context, v1::ListAgentPresetsRequest{}, &result.response);
+    result.status = stub_->ListAgentPresets(&context, request, &result.response);
     return result;
 }
 

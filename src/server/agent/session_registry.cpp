@@ -50,7 +50,7 @@ std::shared_ptr<Session> SessionRegistry::Create(SessionParams params) {
     // the lookup read a moved-from name. A copy, not the cached reference: a
     // --model override mutates it, and the registry's cache must keep describing
     // the preset as written.
-    AgentPreset preset = presets_.Resolve(params.agent_preset);
+    AgentPreset preset = presets_.Resolve(params.agent_preset, params.project_root);
     return CreateResolved(std::move(params), std::move(preset));
 }
 

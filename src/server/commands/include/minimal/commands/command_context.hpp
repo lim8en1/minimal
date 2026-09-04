@@ -21,6 +21,7 @@
 //     would be surface built ahead of its consumer.
 
 #include <cassert>
+#include <filesystem>
 #include <optional>
 #include <string>
 
@@ -48,6 +49,13 @@ public:
     virtual ~SessionControl() = default;
 
     virtual const std::string& session_id() const = 0;
+
+    // The session's project root -- the confinement boundary, and the anchor
+    // for project-local discovery (agents/, skills/, commands/). Never empty
+    // for a real session: CreateSession requires it. Empty is legal for test
+    // fakes and means "no project scope" everywhere it is consumed.
+    virtual std::filesystem::path project_root() const = 0;
+
     virtual agent::AgentLoop& loop() = 0;
     virtual tools::ToolExecutor& executor() = 0;
 

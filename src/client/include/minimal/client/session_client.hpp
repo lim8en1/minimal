@@ -300,11 +300,13 @@ public:
     // fetched fresh on each open (unlike ListCommands, config can gain a new
     // preset file between opens and there is no invalidation machinery to
     // notice that, so this simply asks every time -- the list is small).
+    // `project_root` scopes the listing to the client's project (project-local
+    // agents/ merged, project shadows global); empty means global only.
     struct ListAgentPresetsResult {
         v1::ListAgentPresetsResponse response;
         grpc::Status status;
     };
-    ListAgentPresetsResult ListAgentPresets();
+    ListAgentPresetsResult ListAgentPresets(const std::string& project_root = {});
 
     // The model picker's list: every configured or discovered model ref.
     // refresh_discovery re-fetches every discover-entry's catalog first

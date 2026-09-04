@@ -114,6 +114,9 @@ public:
 
     // --- commands::SessionControl ------------------------------------------
     const std::string& session_id() const override { return session_id_; }
+    // The fixture's config dir doubles as the project root: no project-local
+    // scope beyond what a test writes into it deliberately.
+    std::filesystem::path project_root() const override { return dir_.path(); }
     agent::AgentLoop& loop() override { return *loop_; }
     tools::ToolExecutor& executor() override { return *executor_; }
     const agent::AgentPreset& preset() const override { return preset_; }

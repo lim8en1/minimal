@@ -82,11 +82,15 @@ Full reference — every field, type, default, and allowed value:
 
 Everything interesting ships as a plugin: `tools-fs`, `tools-search`,
 `tools-bash`, `tools-web`, `provider-openai`, `provider-anthropic`,
-`commands-core`, `checklist`, `signals-message`, `cost-tracker` (server), and
-`logo`, `cost-view` (client). Drop your own into `<config>/plugins/`,
-enable/disable or reconfigure any plugin in `plugins.json`, and rename
-tools/commands via its `"aliases"` map — see
+`commands-core`, `commands-md`, `checklist`, `signals-message`, `cost-tracker`
+(server), and `logo`, `cost-view`, `checklist-view` (client). Drop your own
+into `<config>/plugins/`, enable/disable or reconfigure any plugin in
+`plugins.json`, and rename tools/commands via its `"aliases"` map — see
 **[docs/PLUGINS.md](docs/PLUGINS.md)**.
+
+Markdown-defined `/`-commands work zero-copy with opencode's layout: put
+`.md` files in the project's `commands/` or `.opencode/commands/`, or the
+config dir's `commands/` — see **[docs/CONFIGURATION.md](docs/CONFIGURATION.md)**.
 
 ## Development
 

@@ -108,6 +108,17 @@ PermissionMode ToolExecutor::ResolveMode(const Tool& tool, const nlohmann::json&
         }
     }
 
+    // 2c. The tool's own per-invocation narrowing (the skill tool marks ask-mode
+    //     skills): the same most_restrictive fold as every dimension above, and
+    //     deliberately BEFORE the run mode -- Bypass washes the narrowed Ask
+    //     back to allow and AllowOnly clamps it to deny, exactly like any other
+    //     Ask. A tool can tighten its own call, never widen one.
+    if (mode != PermissionMode::AlwaysDeny) {
+        if (auto narrowed = tool.mode_override_for(input, ctx)) {
+            mode = most_restrictive(mode, *narrowed);
+        }
+    }
+
     // 3. Run mode wraps whatever the policy decided.
     return apply_run_mode(mode, run_mode_);
 }

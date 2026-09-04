@@ -227,12 +227,20 @@ struct SubagentFixture {
     }
 
     void Write(const std::filesystem::path& relative, const std::string& contents) {
+        // Parent directories too: the ctor pre-creates agents/ and prompts/, but
+        // a test writing skills/<name>/SKILL.md has no such head start.
+        std::filesystem::create_directories(dir.path() / relative.parent_path());
         std::ofstream(dir.path() / relative) << contents;
     }
 
     testing::TempDir dir;
     std::filesystem::path workdir = dir.path() / "work";
     config::SkillRegistry skills;
+
+    // Re-scans skills/ AFTER a test has written skill files: the member
+    // initialiser runs before the fixture body writes anything, so a skill
+    // test reloads explicitly before Build().
+    void LoadSkills() { skills = config::SkillRegistry::Load(dir.path()); }
     tools::ToolRegistry tools;
     llm::ProviderFactoryRegistry providers;
     std::map<std::string, std::shared_ptr<Script>> scripts;
@@ -1004,6 +1012,90 @@ TEST_CASE("max_turns bounds the child's loop", "[subagent][max_turns]") {
         std::lock_guard<std::mutex> lock(child_script->mu);
         CHECK(child_script->steps.size() == 1);  // r3 never asked for
     }
+}
+
+TEST_CASE("the preset's steps ceiling bounds the child even when the spawn does not",
+          "[subagent][max_turns][compat]") {
+    SubagentFixture fixture;
+    // The fixture's child preset without a request max_turns: the frontmatter
+    // ceiling is what bounds the loop -- a spawn request may lower it, never
+    // raise it, so its absence must not mean unbounded under a bounded preset.
+    fixture.Write("agents/child.md",
+                  "---\nname: child\nmodel: childmain/child-script\nallowed_tools: "
+                  "[\"*\"]\nsteps: 2\n---\nYou are the child agent.\n");
+    fixture.Build();
+    auto parent = fixture.CreateParent();
+
+    fixture.tools.Register(
+        std::make_unique<testing::FakeTool>("read", tools::ToolCategory::ReadOnly, "data"));
+
+    auto* parent_script = fixture.scripts["parent-script"].get();
+    auto* child_script = fixture.scripts["child-script"].get();
+    parent_script->Push(testing::ToolUseResponse(
+        "call-spawn", "spawn_subagent", {{"task", "loop forever"}, {"agent_preset", "child"}}));
+    parent_script->Push(testing::TextResponse("parent done"));
+    child_script->Push(testing::ToolUseResponse("r1", "read"));
+    child_script->Push(testing::ToolUseResponse("r2", "read"));
+    child_script->Push(testing::ToolUseResponse("r3", "read"));  // never consumed
+
+    parent->SubmitTurn("go");
+    REQUIRE(parent->WaitForIdleForTesting(10s));
+
+    const auto page = fixture.db->GetMessagesPage(parent->info().session_id, std::nullopt, 50);
+    const auto& block =
+        std::get<llm::ToolResultBlock>(page.messages[1].message.content.front());
+    CHECK(block.is_error);
+    CHECK(TextOf(block).find("max_turns") != std::string::npos);
+
+    {
+        std::lock_guard<std::mutex> lock(child_script->mu);
+        CHECK(child_script->steps.size() == 1);  // r3 never asked for
+    }
+}
+
+// --- skill clamp --------------------------------------------------------------------
+
+TEST_CASE("a child cannot widen a skill into preload its parent only allows",
+          "[subagent][compat]") {
+    SubagentFixture fixture;
+    fixture.Write("skills/research/SKILL.md",
+                  "---\nname: research\ndescription: Deep research.\n---\nRESEARCH BODY.\n");
+    fixture.Write("agents/main.md",
+                  "---\nname: main\nmodel: main/parent-script\nallowed_tools: [\"*\"]\n"
+                  "allowed_skills:\n  research: allow\n---\nYou are the main agent.\n");
+    fixture.Write("agents/child.md",
+                  "---\nname: child\nmodel: childmain/child-script\nallowed_tools: [\"*\"]\n"
+                  "allowed_skills:\n  research: preload\n---\nYou are the child agent.\n");
+    fixture.LoadSkills();
+    fixture.Build();
+    auto parent = fixture.CreateParent();
+
+    auto* parent_script = fixture.scripts["parent-script"].get();
+    auto* child_script = fixture.scripts["child-script"].get();
+    parent_script->Push(testing::ToolUseResponse(
+        "call-spawn", "spawn_subagent",
+        {{"task", "go"}, {"agent_preset", "child"}, {"blocking", false}}));
+    parent_script->Push(testing::TextResponse("parent done"));
+    child_script->Push(testing::TextResponse("child done"));
+
+    parent->SubmitTurn("go");
+    const auto child_id = fixture.WaitForSubagentStarted(parent);
+    REQUIRE(child_id.has_value());
+    auto child = fixture.sessions->Find(*child_id);
+    REQUIRE(child != nullptr);
+    REQUIRE(child->WaitForIdleForTesting(10s));
+
+    // The demotion is the point: the child asked for always-on, the parent
+    // offered on-demand, and the child is never MORE permissive than its
+    // parent -- so it gets the listing and the tool, not the prompt injection.
+    CHECK(child->preset().allowed_skills ==
+          (std::map<std::string, agent::SkillMode>{{"research", agent::SkillMode::Allow}}));
+    CHECK(child->preset().system_prompt.find("## Preloaded skills") == std::string::npos);
+    CHECK(child->preset().system_prompt.find("- research: Deep research.") != std::string::npos);
+
+    // And the equal-mode case survives intact: preload under preload stays
+    // preload (the child is not widening -- the parent already ships the body).
+    CHECK(parent->preset().system_prompt.find("RESEARCH BODY.") == std::string::npos);
 }
 
 // --- preset errors -------------------------------------------------------------------

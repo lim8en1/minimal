@@ -1,12 +1,36 @@
 #include "minimal/client/view/filterable_menu.hpp"
 
 #include <algorithm>
+#include <optional>
 
 #include <ftxui/component/component_options.hpp>
+#include <ftxui/dom/elements.hpp>
 
 #include "minimal/client/utf8.hpp"
 
 namespace minimal::client {
+namespace {
+
+// "#rrggbb" -> Color, case-insensitive, tolerant: anything malformed yields
+// nullopt (theme default) rather than an exception -- a picker row's cosmetics
+// must never break rendering.
+std::optional<ftxui::Color> RowColor(const std::string& value) {
+    if (value.size() != 7 || value.front() != '#') return std::nullopt;
+    auto nibble = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+    };
+    const int hi = nibble(value[1]) * 16 + nibble(value[2]);
+    const int mid = nibble(value[3]) * 16 + nibble(value[4]);
+    const int lo = nibble(value[5]) * 16 + nibble(value[6]);
+    if (hi < 0 || mid < 0 || lo < 0) return std::nullopt;
+    return ftxui::Color(static_cast<std::uint8_t>(hi), static_cast<std::uint8_t>(mid),
+                        static_cast<std::uint8_t>(lo));
+}
+
+}  // namespace
 
 ftxui::Component MakeFilterableMenuModal(
     std::function<std::vector<MenuRow>(const std::string& filter)> build_rows,
@@ -55,6 +79,9 @@ ftxui::Component MakeFilterableMenuModal(
         std::string label =
             (std::string(entry.active ? "> " : "  ") + "  ") + state->rows[entry.index].label;
         Element e = text(std::move(label));
+        if (const std::optional<ftxui::Color> tint = RowColor(state->rows[entry.index].color)) {
+            e = e | color(*tint);
+        }
         if (entry.focused) e = e | inverted;
         if (entry.active) e = e | bold;
         return e;

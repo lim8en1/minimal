@@ -32,6 +32,7 @@
 #include "minimal/agent/session.hpp"
 #include "minimal/agent/session_observer_registry.hpp"
 #include "minimal/common/logger.hpp"
+#include "minimal/common/model_ref.hpp"
 #include "minimal/config/settings_config.hpp"
 #include "minimal/hooks/hook_dispatcher.hpp"
 #include "minimal/llm/provider_factory_registry.hpp"
@@ -136,6 +137,44 @@ public:
     // project_root, not in any preset.
     void set_project_context(config::ProjectContextSettings settings) {
         project_context_ = settings;
+    }
+
+    // small_model (settings.json): resolves the <provider>/<model> reference
+    // ONCE against providers.json and the shared provider cache, and stamps
+    // the result into loop_config_ so every session compacts on it. Unset or
+    // unresolvable = compact on each session's own model (a failure here is a
+    // warning, never fatal: losing the cheap summarizer is a cost regression,
+    // not a broken harness).
+    void set_small_model(const std::string& provider_model) {
+        const auto ref = common::ParseModelRef(provider_model);
+        if (!ref) {
+            common::DefaultLogger().warn("settings.small_model '{}' is not a <provider>/<model> "
+                                         "reference; compaction uses each session's own model",
+                                         provider_model);
+            return;
+        }
+        const auto resolved = presets_.providers().Resolve(*ref);
+        if (resolved == nullptr) {
+            common::DefaultLogger().warn(
+                "settings.small_model '{}' resolves to nothing in providers.json; compaction "
+                "uses each session's own model",
+                provider_model);
+            return;
+        }
+        auto provider = provider_cache_.GetOrCreate(ref->provider, resolved->backend,
+                                                    resolved->provider);
+        if (provider == nullptr) {
+            common::DefaultLogger().warn("settings.small_model '{}' failed to construct a "
+                                         "provider; compaction uses each session's own model",
+                                         provider_model);
+            return;
+        }
+        LoopConfig::SmallModel small;
+        small.provider = std::move(provider);
+        small.model_name = resolved->provider.model_name;
+        small.parameters = resolved->parameters;
+        small.max_tokens = resolved->max_tokens;
+        loop_config_.small_model = std::move(small);
     }
 
     // sessions.unattended_prompt_timeout_seconds, read once at startup like

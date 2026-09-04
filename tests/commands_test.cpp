@@ -10,12 +10,34 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <nlohmann/json.hpp>
+
 #include "commands_core_fixture.hpp"
+#include "temp_dir.hpp"
 #include "minimal/plugins/name_resolution.hpp"
 
 using namespace minimal;
 using namespace minimal::testing;
 using Status = minimal::commands::CommandResult::Status;
+
+namespace {
+// RAII env override, matching config_paths_test.cpp's convention.
+class ScopedEnv {
+public:
+    ScopedEnv(const char* name, const char* value) : name_(name) {
+        if (const char* old = std::getenv(name)) { had_old_ = true; old_ = old; }
+        ::setenv(name, value, 1);
+    }
+    ~ScopedEnv() {
+        if (had_old_) ::setenv(name_.c_str(), old_.c_str(), 1);
+        else ::unsetenv(name_.c_str());
+    }
+private:
+    std::string name_;
+    bool had_old_ = false;
+    std::string old_;
+};
+}  // namespace
 
 TEST_CASE("an unknown command is answered, not dropped", "[commands]") {
     // A client waiting on a CommandResult hangs otherwise -- the same reasoning
@@ -446,4 +468,34 @@ TEST_CASE("sessionless dispatch refuses session-bound commands with the shared w
     // of the mixin is session-bound by construction -- and a sessioned
     // dispatch still runs it exactly as before.
     CHECK(commands::SessionRequiredMessage("x") == "/x needs a session; send a message to start one first");
+}
+
+// --- /connect (opencode-compat credentials) ---------------------------------------
+
+TEST_CASE("/connect stores a credential in the data dir's auth.json and refuses junk",
+          "[commands][connect]") {
+    CommandFixture fixture;
+    testing::TempDir data;
+    ScopedEnv data_env("XDG_DATA_HOME", (data.path().parent_path()).string().c_str());
+    // XDG_DATA_HOME points at the PARENT of "minimal": DataDir() appends the
+    // name itself, so write/inspect under data.path().parent_path()/minimal.
+    const auto auth_path = data.path().parent_path() / "minimal" / "auth.json";
+    std::filesystem::create_directories(auth_path.parent_path());
+
+    const auto result = fixture.Run("connect", {"local", "sk-test-123"});
+    CHECK(result.status == Status::kOk);
+    REQUIRE(std::filesystem::exists(auth_path));
+
+    nlohmann::json stored = nlohmann::json::parse(std::ifstream(auth_path));
+    CHECK(stored.at("local").at("key") == "sk-test-123");
+
+    // Merge, not replace: a second provider keeps the first.
+    CHECK(fixture.Run("connect", {"other", "key-2"}).status == Status::kOk);
+    stored = nlohmann::json::parse(std::ifstream(auth_path));
+    CHECK(stored.at("local").at("key") == "sk-test-123");
+    CHECK(stored.at("other").at("key") == "key-2");
+
+    // Usage and validation: no silent junk in the credentials file.
+    CHECK(fixture.Run("connect", {"local"}).status == Status::kError);
+    CHECK(fixture.Run("connect", {"../evil", "key"}).status == Status::kError);
 }

@@ -7,6 +7,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "minimal/agent/agent_preset_frontmatter.hpp"
 #include "minimal/config/providers_config.hpp"
 #include "minimal/llm/provider.hpp"
 #include "minimal/tools/permission.hpp"
@@ -28,14 +29,18 @@ struct AgentPreset {
     // a resolved preset cannot actually construct the provider it describes.
     std::string provider_kind;
     std::vector<std::string> allowed_tools;  // {"*"} means all registered
-    // RESOLVED, not the raw frontmatter list: `*` is already expanded and names
+    // RESOLVED, not the raw frontmatter map: `*` is already expanded and names
     // that are unknown or failed to load are already dropped, so this is exactly
     // the set the system-prompt listing advertises. Keeping it raw let the
     // listing and the tool-exposure gate be computed from different conditions
     // in different files, which is how they drifted -- `allowed_skills: [typo]`
     // offered the model a `skill` tool with nothing listed and no call that
-    // could succeed. Empty means the tool is withheld entirely.
-    std::vector<std::string> allowed_skills;
+    // could succeed. Holds ONLY Preload/Allow/Ask entries: explicit denies
+    // resolve out, because absence IS deny -- which is what makes the subagent
+    // clamp's "parent without the entry" rule uniform. Empty means the tool is
+    // withheld entirely. (Preload entries are consumed at resolve time -- their
+    // bodies ship in the system prompt -- and carry no tool-side access.)
+    std::map<std::string, SkillMode> allowed_skills;
     std::vector<std::string> allowed_mcp_servers;
     nlohmann::json parameters = nlohmann::json::object();  // from the resolved providers.json entry, not preset frontmatter
     // Also from the providers.json entry. Applies to every request the session
@@ -58,6 +63,17 @@ struct AgentPreset {
     tools::McpPermissionPolicy mcp_permissions;
     tools::PermissionRunMode run_mode = tools::PermissionRunMode::Normal;
     std::string compression_prompt;  // loaded text, not a filename
+
+    // --- opencode-compat surface (see agent_preset_frontmatter.hpp) ------------
+    // Visibility-only: spawn_subagent accepts any registered preset whatever
+    // the mode; mode decides whether the agent picker lists the preset.
+    AgentMode mode = AgentMode::All;
+    bool hidden = false;    // excluded from the picker listing even with mode All
+    std::string color;      // "#rrggbb" for the picker; other values render as the default
+    // Ceiling on tool rounds when this preset runs AS A SUBAGENT (spawn
+    // requests may lower it, never raise it). nullopt = unbounded. Applies to
+    // nothing else: a top-level session is the operator's to interrupt.
+    std::optional<int> steps;
 
     // Set for any session with a non-null parent_session_id. Drives the
     // unconditional exclusion of the subagent-spawn tool -- see

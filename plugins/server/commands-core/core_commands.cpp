@@ -2,9 +2,15 @@
 
 #include <sstream>
 #include <string>
+#include <system_error>
+
+#include <filesystem>
+#include <fstream>
 
 #include "minimal/commands/command_context.hpp"
+#include "minimal/common/config_paths.hpp"
 #include "minimal/commands/command_registry.hpp"
+#include "minimal/tools/atomic_write.hpp"
 #include "minimal/tools/permission.hpp"
 
 namespace minimal::commands_core {
@@ -144,7 +150,9 @@ public:
 
         minimal::agent::AgentPreset resolved;
         try {
-            resolved = context.presets().Resolve(wanted);
+            // The session's root anchors project-local discovery: /agent into a
+            // project preset works exactly like the session's own creation did.
+            resolved = context.presets().Resolve(wanted, context.session().project_root());
         } catch (const std::exception& error) {
             return CommandResult::Error(error.what());
         }
@@ -259,6 +267,58 @@ public:
 
 }  // namespace
 
+// /connect <provider> <api-key> -- stores a credential in the data dir's
+// auth.json ({"<provider>": {"key": "..."}}), the same shape (and, for the
+// opencode-compat path, the same file) ResolveApiKey's credentials-file link
+// reads. Core never writes config; a command plugin writing a CREDENTIALS file
+// outside the seeded config dir is the sanctioned /connect shape.
+class ConnectCommand : public Sessionless<HarnessCommand> {
+public:
+    std::string_view Name() const override { return "connect"; }
+    std::string_view Summary() const override {
+        return "Store a provider API key (used when providers.json names none)";
+    }
+    std::string_view Usage() const override { return "/connect <provider> <api-key>"; }
+
+    CommandResult Execute(CommandContext& context, const CommandArgs& args) override {
+        (void)context;
+        if (args.positional.size() != 2) {
+            return CommandResult::Error("usage: /connect <provider> <api-key>");
+        }
+        const std::string& provider = args.positional[0];
+        const std::string& key = args.positional[1];
+        if (provider.empty() || key.empty() ||
+            provider.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123"
+                                       "456789-.") != std::string::npos) {
+            return CommandResult::Error("invalid provider name or key");
+        }
+
+        const auto path = common::DataDir() / "auth.json";
+        nlohmann::json doc = nlohmann::json::object();
+        {   // merge into whatever is already stored
+            std::ifstream in(path);
+            if (in) {
+                try {
+                    doc = nlohmann::json::parse(in);
+                    if (!doc.is_object()) doc = nlohmann::json::object();
+                } catch (const std::exception&) {
+                    return CommandResult::Error(path.string() +
+                                                " is malformed; fix or remove it first");
+                }
+            }
+        }
+        doc[provider] = nlohmann::json{{"key", key}};
+        std::filesystem::create_directories(path.parent_path());
+        const tools::WriteOutcome written = tools::write_file(path, doc.dump() + "\n");
+        if (!written.ok) {
+            return CommandResult::Error("could not write " + path.string() + ": " +
+                                        written.error);
+        }
+        return CommandResult::Ok("stored credential for '" + provider + "' in " +
+                                 path.string());
+    }
+};
+
 std::vector<std::unique_ptr<Command>> MakeCoreCommands() {
     // /help needs the registry to list it, but it is being built to go INTO that
     // registry -- so the registry reference is bound at register time by the
@@ -269,6 +329,7 @@ std::vector<std::unique_ptr<Command>> MakeCoreCommands() {
     out.push_back(std::make_unique<AgentCommand>());
     out.push_back(std::make_unique<ModelCommand>());
     out.push_back(std::make_unique<SessionsCommand>());
+    out.push_back(std::make_unique<ConnectCommand>());
     return out;
 }
 

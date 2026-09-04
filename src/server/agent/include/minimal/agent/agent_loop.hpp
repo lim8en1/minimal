@@ -93,6 +93,20 @@ struct LoopConfig {
     // unconditionally regardless of where the candidate cut came from.
     CompactionStrategy compaction_strategy;
 
+    // small_model (opencode compat): an alternate <provider>/<model> for the
+    // SUMMARIZER call only -- never the session's own turns. Resolved once by
+    // SessionRegistry at startup (settings.small_model against providers.json
+    // + the shared provider cache) and copied into loop_config_ whole, so
+    // every session compacts on the cheap model without per-turn lookups.
+    // Unset = compact on the session's own provider, model and settings.
+    struct SmallModel {
+        std::shared_ptr<llm::LlmProvider> provider;
+        std::string model_name;
+        nlohmann::json parameters = nlohmann::json::object();
+        std::optional<int> max_tokens;
+    };
+    std::optional<SmallModel> small_model;
+
     // The producer-resolved summarizer: compaction_strategy's own when a
     // strategy set one, compact_messages (today's only behavior) otherwise.
     // Centralized here so the consumer (Session's ctor, building AgentLoop)

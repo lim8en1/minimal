@@ -1,9 +1,10 @@
 #pragma once
 
 #include <filesystem>
+#include <map>
+#include <optional>
 #include <mutex>
 #include <string>
-#include <unordered_map>
 
 #include "minimal/agent/agent_preset.hpp"
 #include "minimal/config/permissions_config.hpp"
@@ -17,6 +18,7 @@ namespace minimal::agent {
 struct AgentPresetSummary {
     std::string name;
     std::string description;
+    std::string color;  // "#rrggbb" from frontmatter; empty = theme default
 };
 
 // Loads providers.json/permissions.json/agents/*.md into fully resolved
@@ -67,14 +69,37 @@ public:
     // pointer that can die under it -- and every production caller copied the
     // result anyway, because a preset is per-session state a session then
     // mutates (--model, /agent).
-    AgentPreset Resolve(const std::string& preset_name) const;
+    //
+    // project_root anchors project-local discovery: <dir>/agents/<name>.md is
+    // searched along the ProjectDirs walk (nearest git worktree root included)
+    // BEFORE config_dir/agents/<name>.md, so a project can override a global
+    // preset by name (the shadowing is logged once per resolve, and the cache
+    // makes that once per (name, root)). An empty project_root -- the default,
+    // and what every global-only caller passes -- means no project scope. The
+    // project skill listing and allowed_skills resolution consult the same
+    // root, so a preset resolved for one project advertises exactly the skills
+    // SkillTool will serve in it.
+    //
+    // parent_skills (the spawn path) clamps the resolved skill modes BEFORE the
+    // system prompt is baked: an elementwise most-restrictive fold against the
+    // parent's map (Preload widest, Deny narrowest; a skill the parent lacks is
+    // deny). The clamp has to live here because a preload entry is CONSUMED at
+    // resolve time -- its body ships in the prompt -- so a post-resolve clamp
+    // could not stop the injection. Uncached when given: the clamp input varies
+    // per parent, and spawn is rare enough to pay a resolve every time.
+    AgentPreset Resolve(
+        const std::string& preset_name, const std::filesystem::path& project_root = {},
+        const std::optional<std::map<std::string, SkillMode>>& parent_skills = std::nullopt) const;
 
     // Lists every agents/*.md file's name + description WITHOUT resolving its
     // model/provider -- for a picker to show, not for the loop to run. A picker
     // listing one bad preset must not fail to show the rest, so a file that
     // fails to parse is logged and skipped rather than thrown. Sorted by name
-    // for a deterministic picker order.
-    std::vector<AgentPresetSummary> ListAvailable() const;
+    // for a deterministic picker order. A non-empty project_root merges the
+    // project-local agents/ directories into the listing (project shadows
+    // global on name collision).
+    std::vector<AgentPresetSummary> ListAvailable(
+        const std::filesystem::path& project_root = {}) const;
 
     const std::string& SubagentPrefix() const { return subagent_prefix_; }
 
@@ -97,7 +122,9 @@ public:
     }
 
 private:
-    AgentPreset ResolveUncached(const std::string& preset_name) const;
+    AgentPreset ResolveUncached(
+        const std::string& preset_name, const std::filesystem::path& project_root,
+        const std::optional<std::map<std::string, SkillMode>>& parent_skills) const;
 
     std::filesystem::path config_dir_;
     config::ProvidersConfig providers_;
@@ -111,11 +138,17 @@ private:
     // on a gRPC handler thread (before it takes its own lock), and
     // SubagentManager::Spawn runs on a session worker during a tool call. Two
     // concurrent CreateSessions, or a CreateSession racing a spawn_subagent, is
-    // a concurrent emplace into one unordered_map. The class comment's "config
-    // is read once at startup, there is no hot-reload" is true of the FILES; the
-    // cache is built at runtime, on demand, from whichever thread asks first.
+    // a concurrent emplace into one map. The class comment's "config is read
+    // once at startup, there is no hot-reload" is true of the FILES; the cache
+    // is built at runtime, on demand, from whichever thread asks first.
+    //
+    // Keyed by (preset name, canonical project root): project-local discovery
+    // makes a preset a function of the session's root, and two sessions with
+    // different roots resolve the same name independently. std::map over
+    // unordered_map because the pair key needs a hash otherwise, and preset
+    // counts are small.
     mutable std::mutex cache_mu_;
-    mutable std::unordered_map<std::string, AgentPreset> cache_;
+    mutable std::map<std::pair<std::string, std::filesystem::path>, AgentPreset> cache_;
 };
 
 }  // namespace minimal::agent

@@ -10,7 +10,7 @@ ftxui::Component MakeAgentPresetPicker(const std::vector<v1::AgentPresetSummary>
     auto build_rows = [presets](const std::string& filter) {
         std::vector<MenuRow> rows;
         for (const auto& row : BuildAgentPickerRows(presets, filter)) {
-            rows.push_back({row.label, row.name});
+            rows.push_back({row.label, row.name, /*header=*/false, row.color});
         }
         return rows;
     };

@@ -423,6 +423,9 @@ public:
     // command that touches this is not ReadOnly(), so it runs on the worker
     // between turns -- the same thread that reads it while running one.
     const std::string& session_id() const override { return params_.session_id; }
+    // Immutable for the session's lifetime (SessionParams::project_root): no
+    // lock, and safe from any thread.
+    std::filesystem::path project_root() const override { return params_.project_root; }
     AgentLoop& loop() override { return *loop_; }
     tools::ToolExecutor& executor() override { return executor_; }
     // WORKER-THREAD ONLY: a reference into state the worker rewrites in

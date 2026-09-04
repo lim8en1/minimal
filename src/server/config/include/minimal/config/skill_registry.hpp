@@ -1,9 +1,11 @@
 #pragma once
 
 #include <filesystem>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 namespace minimal::config {
@@ -24,8 +26,24 @@ struct SkillMeta {
 // reads only frontmatter, and bodies are read lazily by LoadBody(), on
 // invocation. That is what makes a large skills/ directory cheap to have.
 //
-// Thread-safety: const after Load(); LoadBody() holds no mutable state, so
-// concurrent calls from multiple session workers are safe.
+// Project-local overlay: alongside the global config_dir scan, the *For()
+// methods merge an overlay scanned from a session's project directories
+// (ProjectDirs, nearest git worktree root included) -- <dir>/skills/,
+// <dir>/.claude/skills/, <dir>/.agents/skills/ per directory, with the
+// Claude-compatible paths so a project can carry one skill library for every
+// agent harness that reads it. The nearest directory wins on a name collision,
+// and a project skill shadows a global one of the same name. A project overlay
+// can only be discovered per session -- project_root is a SESSION property --
+// so the merged view is built lazily per canonical root and cached; the frontmatter-only
+// scan keeps that cost at resident cost, and project-local problems (a broken
+// skill, an unreadable directory) surface through the same loaded/load_error
+// entries and logs a global scan produces, at resolve time rather than startup.
+//
+// Thread-safety: const after Load(); the global accessors hold no mutable
+// state, and the overlay cache is mutex-guarded, so concurrent calls from
+// multiple session workers are safe. Pointers handed out by FindFor() stay
+// valid for the process lifetime (the cache is never erased, and node-based
+// containers keep element addresses stable).
 class SkillRegistry {
 public:
     // Scans config_dir/skills/. Never throws for individual candidate problems:
@@ -53,9 +71,37 @@ public:
     // nullopt when the skill is unknown, not loaded, or unreadable at call time.
     std::optional<std::string> LoadBody(std::string_view name) const;
 
+    // --- project-local overlay -------------------------------------------------
+    // An empty project_root means "no project scope" and degenerates to the
+    // global view. AllFor() returns a snapshot (global ∪ overlay, project
+    // shadows global, sorted by name); FindFor() returns a pointer into the
+    // cached merged view (see the thread-safety note above).
+
+    // Sorted by name; deterministic, so a system-prompt listing built from it
+    // is stable inside the cached prefix.
+    std::vector<SkillMeta> AllFor(const std::filesystem::path& project_root) const;
+
+    // Overlay first, then global: the nearest declaration wins.
+    const SkillMeta* FindFor(const std::filesystem::path& project_root,
+                             std::string_view name) const;
+
+    std::optional<std::string> LoadBodyFor(const std::filesystem::path& project_root,
+                                           std::string_view name) const;
+
 private:
+    // The merged view for one canonical project root, built on first use and
+    // cached. GUARDED by cache->mu; callers get the reference only under it.
+    // Heap-held through Load()'s by-value return: a mutex is neither movable
+    // nor copyable, so a direct member would delete the move Load() needs.
+    struct OverlayCache {
+        std::mutex mu;
+        std::unordered_map<std::filesystem::path, std::vector<SkillMeta>> merged;
+    };
+    const std::vector<SkillMeta>& MergedFor(const std::filesystem::path& project_root) const;
+
     std::vector<SkillMeta> skills_;
     std::string scan_error_;
+    mutable std::unique_ptr<OverlayCache> cache_ = std::make_unique<OverlayCache>();
 };
 
 }  // namespace minimal::config

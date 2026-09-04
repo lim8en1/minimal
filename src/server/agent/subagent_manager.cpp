@@ -123,7 +123,8 @@ SubagentOutcome SubagentManager::Spawn(const SubagentRequest& request,
 
     AgentPreset child_preset;
     try {
-        child_preset = presets_.Resolve(preset_name);
+        child_preset = presets_.Resolve(preset_name, parent->info().project_root,
+                                        parent->preset().allowed_skills);
     } catch (const std::exception& e) {
         return SubagentOutcome::Error(e.what());
     }
@@ -142,8 +143,9 @@ SubagentOutcome SubagentManager::Spawn(const SubagentRequest& request,
     }
     child_preset.allowed_tools =
         intersect_allowed(parent->preset().allowed_tools, child_preset.allowed_tools);
-    child_preset.allowed_skills =
-        intersect_allowed(parent->preset().allowed_skills, child_preset.allowed_skills);
+    // Skills are already clamped INSIDE Resolve (against this parent's map) --
+    // they must be, because a preload entry is consumed at resolve time and a
+    // post-resolve clamp could not stop the prompt injection.
     child_preset.allowed_mcp_servers =
         intersect_allowed(parent->preset().allowed_mcp_servers, child_preset.allowed_mcp_servers);
 
@@ -248,10 +250,18 @@ SubagentOutcome SubagentManager::Spawn(const SubagentRequest& request,
 
     std::shared_ptr<Session> child;
     try {
+        // The preset's `steps` is a ceiling on the child's tool rounds: a spawn
+        // request may lower it, never raise it (and an unbounded request under
+        // a bounded preset inherits the bound). Computed before the move below.
+        std::optional<int> turns = request.max_turns > 0
+                                        ? std::optional<int>(request.max_turns)
+                                        : std::nullopt;
+        if (child_preset.steps.has_value() && *child_preset.steps > 0 &&
+            (!turns.has_value() || *turns > *child_preset.steps)) {
+            turns = *child_preset.steps;
+        }
         child = sessions_.CreateResolved(std::move(params), std::move(child_preset),
-                                         request.max_turns > 0
-                                             ? std::optional<int>(request.max_turns)
-                                             : std::nullopt);
+                                         std::move(turns));
     } catch (const std::exception& e) {
         // Inserting first is what makes the database the id authority, but it
         // also means a construction failure would leave a message-less session

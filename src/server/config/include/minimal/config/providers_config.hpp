@@ -92,6 +92,12 @@ struct ProviderEntry {
     nlohmann::json parameters = nlohmann::json::object();
     std::optional<int> max_tokens;
     std::optional<std::int64_t> context_window_tokens;
+    // Model-picker filters (opencode compat). whitelist keeps ONLY the listed
+    // model ids; blacklist removes the listed ones from whatever remains.
+    // Resolution is unaffected: a blacklisted model is still addressable by
+    // an explicit <provider>/<model>, it just does not appear in the picker.
+    std::vector<std::string> whitelist;
+    std::vector<std::string> blacklist;
 };
 
 // One model, with its provider's connection and its inherited settings already

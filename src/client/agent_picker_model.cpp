@@ -27,7 +27,7 @@ std::vector<AgentPickerRow> BuildAgentPickerRows(const std::vector<v1::AgentPres
     rows.reserve(presets.size());
     for (const auto& preset : presets) {
         if (!MatchesFilter(preset, lowered_filter)) continue;
-        rows.push_back(AgentPickerRow{Label(preset), preset.name()});
+        rows.push_back(AgentPickerRow{Label(preset), preset.name(), preset.color()});
     }
     return rows;
 }

@@ -18,3 +18,9 @@ add_subdirectory(logo)
 # first real (non-reference-shape) consumer of that surface.
 
 add_subdirectory(cost-view)
+
+# checklist-view is the third: a `{todo}` status-bar segment consuming the
+# bundled server-side checklist plugin's PluginCall RPC, on the cost-view
+# shape (background poll, tab-switch refresh, unfilled-segment degradation).
+
+add_subdirectory(checklist-view)

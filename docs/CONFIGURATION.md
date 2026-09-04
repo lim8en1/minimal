@@ -75,6 +75,7 @@ Full example (`bundled/settings.json`):
 |---|---|---|---|
 | `default_agent_preset` | string | `""` | file stem of an `agents/<name>.md` preset; unresolvable value → **fatal** |
 | `default_model` | string | `""` | `"<provider>/<model>"` (see providers.json); a typo → warning at startup, first use fails |
+| `small_model` | string | `""` | opencode-compat: `"<provider>/<model>"` for the compaction summarizer only; unset/unresolvable → each session compacts on its own model |
 | `default_theme` | string | `""` | client theme name (`themes/<name>.json`) |
 | `max_concurrent_subagents` | int | `4` | `<= 0` or `> 8` → warning |
 | `background_wake` | bool | `false` | |
@@ -368,8 +369,92 @@ Shape: `{ "name": ..., "colors": { ... } }` — hex color roles as in
   preset is **required**; a broken *non-default* preset only warns. A preset may
   name its own `model: <provider>/<model>`, overriding `default_model`
   (`--model` / `/model` override both).
+- **opencode-compat preset fields** — also accepted in the frontmatter:
+  `mode: all|primary|subagent` (subagent = spawnable but hidden from the agent
+  picker; never gates spawnability), `disable: true` (refuses to resolve, not
+  listed), `hidden: true` (not listed, still spawnable), `color: "#rrggbb"`
+  (agent picker), `steps: <int>` (ceiling on tool rounds when the preset runs
+  AS A SUBAGENT; a spawn request may lower it, never raise it), a deprecated
+  opencode `tools:` map (`name: true|false` → per-tool allow/deny overrides),
+  and a `permission:` block (`read/glob/grep/list`→read_only, `edit`/`write`→
+  file_write, `bash`→execute, `webfetch`/`websearch`→network,
+  `external_directory`→out_of_workdir; a native `permission_mode` field wins
+  over the alias). Any OTHER frontmatter key is passed through to the provider
+  as a request parameter (`temperature`, `top_p`, `reasoningEffort`, ...),
+  overriding the model config's value.
+- **Project-local presets** — a session's project root (walked up to the
+  enclosing git worktree root, `ProjectDirs`) is searched for
+  `<dir>/agents/<name>.md` BEFORE the config dir; the nearest declaration wins
+  and a project preset shadowing a global one is logged. Project presets are
+  merged into the agent picker listing (the picker sends the client's project
+  root) and resolve with the session's root for `/agent` and subagent spawns.
+  Project-local problems surface at resolve time as resolve errors/warnings,
+  not at startup.
+- **Project-local skills** — the same walk scans `<dir>/skills/*/SKILL.md` plus
+  the Claude-compatible `<dir>/.claude/skills/*/SKILL.md` and
+  `<dir>/.agents/skills/*/SKILL.md`; the nearest directory wins on a name
+  collision and a project skill shadows a global one. The preset's system-prompt
+  listing, its `allowed_skills` resolution, and the `skill` tool all consult the
+  same session-scoped view, so the prompt never advertises a skill the tool
+  would refuse.
+- **`allowed_skills` modes** — the list form means every entry is `allow`; the
+  map form gives per-skill `allow` (listed, tool loads outright), `ask` (listed,
+  marked "(asks before loading)"; the tool narrows its own permission resolution
+  to Ask with the stable grant key `skill:<name>`, so "always" covers later
+  loads of that skill only), `deny` (hidden; the tool refuses), and `preload`
+  (the full body ships in the system prompt at session start and survives
+  compaction like any constant section; not tool-callable). `"*"` is legal in
+  both forms and an explicit entry beats it for that name. Subagent clamping is
+  elementwise most-restrictive over `preload < allow < ask < deny` — a child
+  can never widen into its parent's preloads, and a preload under an
+  allow-only parent demotes to plain allow.
 - **`prompts/<name>.md`** — system prompt fragments (e.g. `compression.md`,
   `subagent.md`). Missing `compression.md` → warning.
+
+---
+
+## commands/ (custom slash-commands, `commands-md` plugin)
+
+Every `commands/*.md` file becomes a `/`-command (the file stem is the name).
+Discovery merges `<config>/commands/`, the project's `commands/`, and the
+project's `.opencode/commands/` (opencode's layout, so existing command files
+work zero-copy); the nearest directory wins a stem collision. The composed
+prompt is submitted as the turn itself via the sanctioned shorthand path —
+results of the RUN (errors, the submit notice) never enter the chat.
+
+```markdown
+---
+description: Deploy the thing          # autocomplete text
+args: [env]                            # required, bound to positionals in order
+optional: [namespace]
+sources:                               # execution lives HERE, not in the body
+  branch:
+    run: ["/usr/bin/git", "branch", "--show-current"]   # argv; {name} per entry
+  summary:
+    sh: "make summary"                 # shell string; XOR with run
+    output: {type: json, fields: [plan]}               # addressable fields
+    timeout: 30                        # seconds; default 600; 0 = infinite
+    output_cap: {max: 50000, on_exceed: confirm}       # token estimate; confirm|fail
+---
+Deploy {env} from {branch} per {output:summary.plan}.
+```
+
+- **The body is inert.** It is a single-pass render of already-evaluated
+  values: `{name}` (args, optionals, source names, `{args}`, positionals
+  `{1}`..), `{output:source.field}` for JSON sources. Inserted values are never
+  re-scanned. Unknown placeholders are a hard error — nothing is submitted.
+- **Sources are flat**, evaluated in declaration order, no cross-references.
+  Substitution in argv/scripts is lenient (only known names substitute; JSON
+  and shell braces pass through). An unfilled optional renders empty in the
+  body and OMITS its argv entry; a script referencing one errors.
+- **No body** → the prompt is the sole text source's stdout (a CLI util that
+  computes the whole prompt).
+- **opencode syntax desugars at load**: `$ARGUMENTS`→`{args}`, `$1`..`$9`→
+  positionals, each `` !`cmd` ``→an anonymous `sh` source. Mixing desugared
+  constructs with declared sources works and is lint-warned. Frontmatter
+  `agent:`/`model:`/`subtask:` warn as not-yet-supported.
+- **Failures** (nonzero exit, timeout, missing JSON field, declined cap) surface
+  as error status lines; nothing is submitted and nothing reaches the model.
 
 ---
 

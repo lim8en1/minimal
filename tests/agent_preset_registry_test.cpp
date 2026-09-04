@@ -563,7 +563,8 @@ TEST_CASE("AgentPresetRegistry: allowed_skills resolves to exactly what the list
                                   config::LoadSettingsConfig(config.dir / "settings.json"));
     const auto preset = registry.Resolve("build");
 
-    CHECK(preset.allowed_skills == std::vector<std::string>{"alpha"});
+    using SM = SkillMode;
+    CHECK(preset.allowed_skills == std::map<std::string, SkillMode>{{"alpha", SM::Allow}});
     CHECK(preset.system_prompt.find("- alpha: First skill.") != std::string::npos);
     CHECK(preset.system_prompt.find("typo") == std::string::npos);
     CHECK(preset.system_prompt.find("broken") == std::string::npos);
@@ -615,7 +616,7 @@ TEST_CASE("AgentPresetRegistry: allowed_skills ['*'] resolves to the loaded skil
                                   config::LoadSettingsConfig(config.dir / "settings.json"));
 
     CHECK(registry.Resolve("build").allowed_skills ==
-          (std::vector<std::string>{"alpha", "beta"}));
+          (std::map<std::string, SkillMode>{{"alpha", SkillMode::Allow}, {"beta", SkillMode::Allow}}));
 }
 
 TEST_CASE("AgentPresetRegistry: a skill that failed to load is excluded from the listing",
@@ -729,4 +730,275 @@ TEST_CASE("AgentPresetRegistry: allowed_skills ['*'] lists every loaded skill",
     const std::string prompt = registry.Resolve("build").system_prompt;
     CHECK(prompt.find("- alpha: First skill.") != std::string::npos);
     CHECK(prompt.find("- beta: Second skill.") != std::string::npos);
+}
+
+// --- project-local discovery ---------------------------------------------------
+
+TEST_CASE("AgentPresetRegistry: a project preset shadows a global one of the same name",
+          "[agent_preset_registry][project]") {
+    TempConfigDir config;
+    config.WriteDefaults();
+    config.Write("proj/.git/HEAD", "ref: refs/heads/main\n");
+    config.Write("proj/agents/build.md",
+                 "---\nname: build\nmodel: openai-main/gpt-4.1\n---\nPROJECT BUILD.\n");
+
+    config::SkillRegistry skills = config::SkillRegistry::Load(config.dir);
+    AgentPresetRegistry registry(config.dir, skills,
+                                  config::LoadSettingsConfig(config.dir / "settings.json"));
+    const auto project_root = config.dir / "proj";
+
+    const auto preset = registry.Resolve("build", project_root);
+    CHECK(preset.system_prompt == "PROJECT BUILD.\n");
+    // The project frontmatter won: gpt-4.1, not the global preset's gpt-4o-mini.
+    CHECK(preset.model_ref.str() == "openai-main/gpt-4.1");
+
+    // The global view is one Resolve away, unchanged: an empty root (or a
+    // different root) reads the global file.
+    CHECK(registry.Resolve("build").system_prompt == "You are a build agent.\n");
+}
+
+TEST_CASE("AgentPresetRegistry: a project-only preset resolves; a project root cannot "
+          "see another project's presets",
+          "[agent_preset_registry][project]") {
+    TempConfigDir config;
+    config.WriteDefaults();
+    config.Write("proj/.git/HEAD", "ref: refs/heads/main\n");
+    config.Write("proj/agents/local.md",
+                 "---\nname: local\nmodel: openai-main/gpt-4o-mini\n---\nLOCAL.\n");
+    config.Write("other/.git/HEAD", "ref: refs/heads/main\n");
+
+    config::SkillRegistry skills = config::SkillRegistry::Load(config.dir);
+    AgentPresetRegistry registry(config.dir, skills,
+                                  config::LoadSettingsConfig(config.dir / "settings.json"));
+
+    CHECK(registry.Resolve("local", config.dir / "proj").system_prompt == "LOCAL.\n");
+    // Unknown to the GLOBAL config and to the asking project: the same
+    // "unknown agent preset" error a global-only resolve throws.
+    CHECK_THROWS_AS(registry.Resolve("local", config.dir / "other"), std::runtime_error);
+    CHECK_THROWS_AS(registry.Resolve("local"), std::runtime_error);
+}
+
+TEST_CASE("AgentPresetRegistry: a preset resolved for a project advertises that "
+          "project's skills",
+          "[agent_preset_registry][project][skills]") {
+    TempConfigDir config;
+    config.WriteDefaults();
+    config.Write("agents/build.md",
+                 "---\nname: build\nmodel: openai-main/gpt-4o-mini\n"
+                 "allowed_skills:\n  - \"*\"\n---\nYou are a build agent.\n");
+    config.Write("skills/alpha/SKILL.md",
+                 "---\nname: alpha\ndescription: Global.\n---\nGlobal body.\n");
+    config.Write("proj/.git/HEAD", "ref: refs/heads/main\n");
+    config.Write("proj/skills/beta/SKILL.md",
+                 "---\nname: beta\ndescription: Project.\n---\nProject body.\n");
+
+    config::SkillRegistry skills = config::SkillRegistry::Load(config.dir);
+    AgentPresetRegistry registry(config.dir, skills,
+                                  config::LoadSettingsConfig(config.dir / "settings.json"));
+    const auto project_root = config.dir / "proj";
+
+    const auto in_project = registry.Resolve("build", project_root);
+    CHECK(in_project.allowed_skills ==
+          (std::map<std::string, SkillMode>{{"alpha", SkillMode::Allow}, {"beta", SkillMode::Allow}}));
+    CHECK(in_project.system_prompt.find("- beta: Project.") != std::string::npos);
+
+    // The same preset resolved WITHOUT project scope must not advertise a
+    // skill its sessions could not load: the listing and the tool must agree
+    // per root.
+    const auto global = registry.Resolve("build");
+    CHECK(global.allowed_skills == (std::map<std::string, SkillMode>{{"alpha", SkillMode::Allow}}));
+    CHECK(global.system_prompt.find("beta") == std::string::npos);
+}
+
+TEST_CASE("AgentPresetRegistry: ListAvailable merges project presets, project shadows global",
+          "[agent_preset_registry][project][list]") {
+    TempConfigDir config;
+    config.WriteDefaults();  // global "build"
+    config.Write("proj/.git/HEAD", "ref: refs/heads/main\n");
+    config.Write("proj/agents/build.md",
+                 "---\nname: build\ndescription: Project variant.\n---\nbody\n");
+    config.Write("proj/agents/local.md",
+                 "---\nname: local\ndescription: Local only.\n---\nbody\n");
+
+    config::SkillRegistry skills = config::SkillRegistry::Load(config.dir);
+    AgentPresetRegistry registry(config.dir, skills,
+                                  config::LoadSettingsConfig(config.dir / "settings.json"));
+    const auto project_root = config.dir / "proj";
+
+    const auto summaries = registry.ListAvailable(project_root);
+    REQUIRE(summaries.size() == 2);  // local + ONE build
+    CHECK(summaries[0].name == "build");
+    CHECK(summaries[0].description == "Project variant.");
+    CHECK(summaries[1].name == "local");
+
+    // No project scope: the global listing stands.
+    const auto global = registry.ListAvailable();
+    REQUIRE(global.size() == 1);
+    CHECK(global.front().name == "build");
+    CHECK(global.front().description.empty());  // global build.md has no description
+}
+
+// --- opencode-compat preset surface -----------------------------------------------
+
+TEST_CASE("AgentPresetRegistry: a disabled preset refuses to resolve and is not listed",
+          "[agent_preset_registry][compat]") {
+    TempConfigDir config;
+    config.WriteDefaults();
+    config.Write("agents/gone.md",
+                 "---\nname: gone\nmodel: openai-main/gpt-4o-mini\ndisable: true\n---\nbody\n");
+
+    config::SkillRegistry skills = config::SkillRegistry::Load(config.dir);
+    AgentPresetRegistry registry(config.dir, skills,
+                                  config::LoadSettingsConfig(config.dir / "settings.json"));
+
+    bool threw_disabled = false;
+    try {
+        registry.Resolve("gone");
+    } catch (const std::exception& e) {
+        threw_disabled = std::string(e.what()).find("disabled") != std::string::npos;
+    }
+    CHECK(threw_disabled);
+    for (const auto& summary : registry.ListAvailable()) {
+        CHECK(summary.name != "gone");
+    }
+}
+
+TEST_CASE("AgentPresetRegistry: hidden and subagent-mode presets stay resolvable but are "
+          "not listed",
+          "[agent_preset_registry][compat]") {
+    TempConfigDir config;
+    config.WriteDefaults();
+    config.Write("agents/scout.md",
+                 "---\nname: scout\nmodel: openai-main/gpt-4o-mini\nmode: subagent\n---\nbody\n");
+    config.Write("agents/secret.md",
+                 "---\nname: secret\nmodel: openai-main/gpt-4o-mini\nhidden: true\n---\nbody\n");
+
+    config::SkillRegistry skills = config::SkillRegistry::Load(config.dir);
+    AgentPresetRegistry registry(config.dir, skills,
+                                  config::LoadSettingsConfig(config.dir / "settings.json"));
+
+    for (const auto& summary : registry.ListAvailable()) {
+        CHECK(summary.name != "scout");
+        CHECK(summary.name != "secret");
+    }
+    // Visibility-only: both resolve, and both remain spawnable whatever the
+    // mode says (mode never gates spawnability).
+    CHECK(registry.Resolve("scout").system_prompt == "body\n");
+    CHECK(registry.Resolve("secret").system_prompt == "body\n");
+}
+
+TEST_CASE("AgentPresetRegistry: frontmatter parameter passthrough overrides the model config",
+          "[agent_preset_registry][compat]") {
+    TempConfigDir config;
+    config.WriteDefaults();  // provider-level parameters: {"temperature": 0.5}
+    config.Write("agents/build.md",
+                 "---\nname: build\nmodel: openai-main/gpt-4o-mini\ntemperature: 0.1\n"
+                 "reasoningEffort: high\n---\nbody\n");
+
+    config::SkillRegistry skills = config::SkillRegistry::Load(config.dir);
+    AgentPresetRegistry registry(config.dir, skills,
+                                  config::LoadSettingsConfig(config.dir / "settings.json"));
+
+    const auto& parameters = registry.Resolve("build").parameters;
+    CHECK(parameters["temperature"] == 0.1);  // the preset's extra beats the model's 0.5
+    CHECK(parameters["reasoningEffort"] == "high");
+}
+
+TEST_CASE("AgentPresetRegistry: the listing carries the preset color",
+          "[agent_preset_registry][compat]") {
+    TempConfigDir config;
+    config.WriteDefaults();
+    config.Write("agents/build.md",
+                 "---\nname: build\nmodel: openai-main/gpt-4o-mini\ncolor: \"#ff6b6b\"\n---\nbody\n");
+
+    config::SkillRegistry skills = config::SkillRegistry::Load(config.dir);
+    AgentPresetRegistry registry(config.dir, skills,
+                                  config::LoadSettingsConfig(config.dir / "settings.json"));
+
+    const auto summaries = registry.ListAvailable();
+    REQUIRE(summaries.size() == 1);
+    CHECK(summaries.front().color == "#ff6b6b");
+}
+
+// --- skill modes: preload / ask / deny ------------------------------------------
+
+TEST_CASE("AgentPresetRegistry: a preloaded skill ships its body in the system prompt and "
+          "is not tool-callable",
+          "[agent_preset_registry][skills][compat]") {
+    TempConfigDir config;
+    config.WriteDefaults();
+    config.Write("agents/build.md",
+                 "---\nname: build\nmodel: openai-main/gpt-4o-mini\n"
+                 "allowed_skills:\n  style: preload\n  other: allow\n---\nYou are a build agent.\n");
+    config.Write("skills/style/SKILL.md",
+                 "---\nname: style\ndescription: House style.\n---\nALWAYS USE TABS.\n");
+    config.Write("skills/other/SKILL.md",
+                 "---\nname: other\ndescription: Other.\n---\nOther body.\n");
+
+    config::SkillRegistry skills = config::SkillRegistry::Load(config.dir);
+    AgentPresetRegistry registry(config.dir, skills,
+                                  config::LoadSettingsConfig(config.dir / "settings.json"));
+
+    const auto preset = registry.Resolve("build");
+    // The preload section is a constant part of the prompt: it survives
+    // compaction by construction, exactly like the body and project context.
+    CHECK(preset.system_prompt.find("## Preloaded skills") != std::string::npos);
+    CHECK(preset.system_prompt.find("### style") != std::string::npos);
+    CHECK(preset.system_prompt.find("ALWAYS USE TABS.") != std::string::npos);
+    CHECK(preset.system_prompt.find("do not call the `skill` tool") != std::string::npos);
+    // Not in the tool-side listing, and no tool-side access: the prompt already
+    // carries the body, so calling the tool is a no-op the prompt forbids.
+    CHECK(preset.system_prompt.find("- style:") == std::string::npos);
+    CHECK(preset.allowed_skills.count("style") == 0);
+    CHECK(preset.allowed_skills == std::map<std::string, SkillMode>{{"other", SkillMode::Allow}});
+}
+
+TEST_CASE("AgentPresetRegistry: an ask-mode skill is listed, marked, and tool-callable "
+          "only after prompting",
+          "[agent_preset_registry][skills][compat]") {
+    TempConfigDir config;
+    config.WriteDefaults();
+    config.Write("agents/build.md",
+                 "---\nname: build\nmodel: openai-main/gpt-4o-mini\n"
+                 "allowed_skills:\n  style: ask\n  other: allow\n---\nYou are a build agent.\n");
+    config.Write("skills/style/SKILL.md",
+                 "---\nname: style\ndescription: House style.\n---\nALWAYS USE TABS.\n");
+    config.Write("skills/other/SKILL.md",
+                 "---\nname: other\ndescription: Other.\n---\nOther body.\n");
+
+    config::SkillRegistry skills = config::SkillRegistry::Load(config.dir);
+    AgentPresetRegistry registry(config.dir, skills,
+                                  config::LoadSettingsConfig(config.dir / "settings.json"));
+
+    const auto preset = registry.Resolve("build");
+    CHECK(preset.system_prompt.find("- style: House style. (asks before loading)") !=
+          std::string::npos);
+    CHECK(preset.allowed_skills == (std::map<std::string, SkillMode>{
+                                       {"other", SkillMode::Allow}, {"style", SkillMode::Ask}}));
+}
+
+TEST_CASE("AgentPresetRegistry: an explicit deny resolves out; specific beats the wildcard",
+          "[agent_preset_registry][skills][compat]") {
+    TempConfigDir config;
+    config.WriteDefaults();
+    config.Write("agents/build.md",
+                 "---\nname: build\nmodel: openai-main/gpt-4o-mini\n"
+                 "allowed_skills:\n  \"*\": ask\n  style: allow\n  secret: deny\n---\nbody\n");
+    config.Write("skills/style/SKILL.md",
+                 "---\nname: style\ndescription: s.\n---\nS.\n");
+    config.Write("skills/secret/SKILL.md",
+                 "---\nname: secret\ndescription: s.\n---\nS.\n");
+    config.Write("skills/other/SKILL.md",
+                 "---\nname: other\ndescription: s.\n---\nS.\n");
+
+    config::SkillRegistry skills = config::SkillRegistry::Load(config.dir);
+    AgentPresetRegistry registry(config.dir, skills,
+                                  config::LoadSettingsConfig(config.dir / "settings.json"));
+
+    // style's explicit allow beats the wildcard ask; secret's deny resolves
+    // OUT (absence is deny, which keeps the subagent clamp uniform); other
+    // inherits the wildcard ask.
+    CHECK(registry.Resolve("build").allowed_skills ==
+          (std::map<std::string, SkillMode>{{"other", SkillMode::Ask},
+                                            {"style", SkillMode::Allow}}));
 }

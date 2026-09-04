@@ -34,6 +34,9 @@ net::HttpRequest AnthropicProvider::BuildHttpRequest(std::string body, bool stre
     if (!config_.api_key.empty()) {
         request.headers.push_back({"x-api-key", config_.api_key});
     }
+    for (const auto& [name, value] : config_.headers) {
+        request.headers.push_back({name, value});
+    }
     request.body = std::move(body);
     request.connect_timeout = config_.connect_timeout;
     request.request_timeout = streaming ? std::chrono::milliseconds(0) : config_.request_timeout;

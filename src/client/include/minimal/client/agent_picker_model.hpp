@@ -15,6 +15,7 @@ namespace minimal::client {
 struct AgentPickerRow {
     std::string label;   // display text: "name  ·  description"
     std::string name;    // the preset name /agent <name> switches to
+    std::string color;   // "#rrggbb" from the preset; empty = theme default
 };
 
 // Every preset whose name or description contains `filter` case-insensitively,

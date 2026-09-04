@@ -1,6 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <atomic>
+#include <filesystem>
 #include <cstdlib>
 #include <fstream>
 #include <string>
@@ -8,9 +9,11 @@
 #include <vector>
 
 #include "minimal/config/providers_config.hpp"
+#include "minimal/config/settings_config.hpp"
 #include "temp_dir.hpp"
 
 using namespace minimal::config;
+namespace testing = minimal::testing;
 namespace llm = minimal::llm;
 
 namespace {
@@ -590,4 +593,145 @@ TEST_CASE("concurrent Resolve is safe and fetches once", "[providers][discover]"
     for (auto& t : threads) t.join();
     CHECK(resolved.load() == 8);
     CHECK(hook.calls == 1);  // one fetch, not eight
+}
+
+// --- opencode-compat provider surface ---------------------------------------------
+
+TEST_CASE("an opencode-shaped provider entry normalizes onto minimal's fields",
+          "[providers][compat]") {
+    testing::TempDir dir;
+    std::ofstream(dir.path() / "providers.json") << R"json({
+      "providers": {
+        "local": {
+          "npm": "@ai-sdk/openai-compatible",
+          "name": "LM Studio (local)",
+          "options": {
+            "baseURL": "http://127.0.0.1:1234/v1",
+            "apiKey": "lmstudio-key",
+            "headers": {"X-Oven": "hot"}
+          },
+          "models": {
+            "qwen": {"name": "Qwen (local)", "limit": {"context": 128000, "output": 65536}}
+          }
+        }
+      }
+    })json";
+
+    const auto config = LoadProvidersConfig(dir.path() / "providers.json");
+    const auto model = config.Resolve(ModelRef{"local", "qwen"});
+    REQUIRE(model != nullptr);
+    CHECK(model->backend == "openai");  // the one npm package that names a wire shape
+    CHECK(model->provider.base_url == "http://127.0.0.1:1234/v1");
+    CHECK(model->provider.api_key == "lmstudio-key");
+    REQUIRE(model->context_window_tokens.has_value());
+    CHECK(*model->context_window_tokens == 128000);
+    REQUIRE(model->max_tokens.has_value());
+    CHECK(*model->max_tokens == 65536);
+    REQUIRE(model->provider.headers.size() == 1);
+    CHECK(model->provider.headers[0].first == "X-Oven");
+    CHECK(model->provider.headers[0].second == "hot");
+}
+
+TEST_CASE("ModelRefs honors blacklist and whitelist as a listing filter only",
+          "[providers][compat]") {
+    testing::TempDir dir;
+    std::ofstream(dir.path() / "providers.json") << R"({
+      "providers": {
+        "anthropic": {
+          "backend": "openai",
+          "url": "https://api.anthropic.com/v1",
+          "whitelist": ["claude-sonnet"],
+          "models": {
+            "claude-sonnet": {},
+            "claude-opus": {},
+            "claude-haiku": {"blacklisted": true}
+          }
+        },
+        "openai": {
+          "backend": "openai",
+          "url": "https://api.openai.com/v1",
+          "blacklist": ["gpt-4o"],
+          "models": {"gpt-4o": {}, "gpt-4o-mini": {}}
+        }
+      }
+    })";
+    // The blacklist syntax lives on the provider, not a model; move haiku out.
+    std::ofstream(dir.path() / "providers.json") << R"({
+      "providers": {
+        "anthropic": {
+          "backend": "openai",
+          "url": "https://api.anthropic.com/v1",
+          "whitelist": ["claude-sonnet"],
+          "models": {"claude-sonnet": {}, "claude-opus": {}}
+        },
+        "openai": {
+          "backend": "openai",
+          "url": "https://api.openai.com/v1",
+          "blacklist": ["gpt-4o"],
+          "models": {"gpt-4o": {}, "gpt-4o-mini": {}}
+        }
+      }
+    })";
+
+    const auto config = LoadProvidersConfig(dir.path() / "providers.json");
+    const auto refs = config.ModelRefs();
+    // Filtered listing: anthropic shows only the whitelisted model; openai's
+    // blacklisted one is hidden, its sibling stays.
+    CHECK(std::find(refs.begin(), refs.end(), "anthropic/claude-sonnet") != refs.end());
+    CHECK(std::find(refs.begin(), refs.end(), "anthropic/claude-opus") == refs.end());
+    CHECK(std::find(refs.begin(), refs.end(), "openai/gpt-4o") == refs.end());
+    CHECK(std::find(refs.begin(), refs.end(), "openai/gpt-4o-mini") != refs.end());
+    // Filtering is a LISTING concern: an explicit resolve still works.
+    CHECK(config.Resolve(ModelRef{"anthropic", "claude-opus"}) != nullptr);
+    CHECK(config.Resolve(ModelRef{"openai", "gpt-4o"}) != nullptr);
+}
+
+TEST_CASE("a missing api_key falls back to the credentials file (minimal's, then "
+          "opencode's own)",
+          "[providers][compat]") {
+    testing::TempDir dir;
+
+    // 1. <DataDir>/auth.json: XDG_DATA_HOME points at the parent of "minimal".
+    {
+        testing::TempDir data;
+        ScopedEnv data_env("XDG_DATA_HOME", data.path().string().c_str());
+        const auto auth_dir = data.path() / "minimal";
+        std::filesystem::create_directories(auth_dir);
+        std::ofstream(auth_dir / "auth.json") << R"({"local": {"key": "minimal-stored"}})";
+        std::ofstream(dir.path() / "providers.json") << R"({
+          "providers": {"local": {"backend": "openai", "url": "http://x/v1",
+                                   "models": {"m": {}}}}
+        })";
+        const auto config = LoadProvidersConfig(dir.path() / "providers.json");
+        const auto model = config.Resolve(ModelRef{"local", "m"});
+        REQUIRE(model != nullptr);
+        CHECK(model->provider.api_key == "minimal-stored");
+    }
+
+    // 2. opencode's own auth store, honored zero-copy.
+    {
+        testing::TempDir home;
+        ScopedEnv home_env("HOME", home.path().string().c_str());
+        const auto oc_dir = home.path() / ".local" / "share" / "opencode";
+        std::filesystem::create_directories(oc_dir);
+        std::ofstream(oc_dir / "auth.json") << R"({"remote": {"type": "api", "key": "oc-key"}})";
+        std::ofstream(dir.path() / "providers2.json") << R"({
+          "providers": {"remote": {"backend": "openai", "url": "http://x/v1",
+                                    "models": {"m": {}}}}
+        })";
+        const auto config = LoadProvidersConfig(dir.path() / "providers2.json");
+        const auto model = config.Resolve(ModelRef{"remote", "m"});
+        REQUIRE(model != nullptr);
+        CHECK(model->provider.api_key == "oc-key");
+    }
+}
+
+TEST_CASE("small_model parses from settings.json", "[settings][compat]") {
+    testing::TempDir dir;
+    std::ofstream(dir.path() / "settings.json") << R"({"small_model": "main/fast"})";
+    const auto settings = LoadSettingsConfig(dir.path() / "settings.json");
+    CHECK(settings.small_model == "main/fast");
+
+    std::ofstream(dir.path() / "empty.json") << "{}";
+    CHECK(LoadSettingsConfig(dir.path() / "empty.json").small_model.empty());
 }

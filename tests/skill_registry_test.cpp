@@ -331,3 +331,131 @@ TEST_CASE("a whitespace-only description is no description at all", "[skill_regi
     CHECK_FALSE(meta->loaded);
     CHECK(meta->load_error.find("description") != std::string::npos);
 }
+
+// --- project-local overlay -----------------------------------------------------
+
+TEST_CASE("an empty project root degenerates to the global view", "[skill_registry]") {
+    TempConfigDir config;
+    config.Write("skills/alpha/SKILL.md", "---\ndescription: a.\n---\nA body.\n");
+
+    const SkillRegistry registry = SkillRegistry::Load(config.dir);
+
+    CHECK(registry.AllFor({}).size() == registry.All().size());
+    CHECK(registry.FindFor({}, "alpha") != nullptr);
+    CHECK(registry.FindFor({}, "beta") == nullptr);
+}
+
+TEST_CASE("a project skill is discovered and shadows a global one of the same name",
+          "[skill_registry]") {
+    TempConfigDir config;
+    config.Write("skills/alpha/SKILL.md", "---\ndescription: global.\n---\nGlobal body.\n");
+    config.Write("skills/only-global/SKILL.md", "---\ndescription: g.\n---\nG.\n");
+    // proj carries a .git marker, making it a project root for the walk.
+    config.Write("proj/.git/HEAD", "ref: refs/heads/main\n");
+    config.Write("proj/skills/alpha/SKILL.md", "---\ndescription: project.\n---\nProject body.\n");
+    config.Write("proj/skills/beta/SKILL.md", "---\ndescription: b.\n---\nB body.\n");
+
+    const SkillRegistry registry = SkillRegistry::Load(config.dir);
+    // Discovery canonicalizes the root (weakly_canonical), so the scanned
+    // candidates carry canonical paths -- the comparison must use them too.
+    const auto project_root = std::filesystem::weakly_canonical(config.dir / "proj");
+
+    const auto all = registry.AllFor(project_root);
+    REQUIRE(all.size() == 3);  // alpha shadowed in place, beta added
+
+    const SkillMeta* alpha = registry.FindFor(project_root, "alpha");
+    REQUIRE(alpha != nullptr);
+    CHECK(alpha->loaded);
+    CHECK(alpha->body_path == project_root / "skills" / "alpha" / "SKILL.md");
+    const auto body = registry.LoadBodyFor(project_root, "alpha");
+    REQUIRE(body.has_value());
+    CHECK(*body == "Project body.\n");
+
+    // The global view is untouched by the overlay: Find (not FindFor) still
+    // sees the global alpha, and the project-only beta is invisible to it.
+    CHECK(registry.Find("alpha")->body_path == config.dir / "skills" / "alpha" / "SKILL.md");
+    CHECK(registry.Find("beta") == nullptr);
+    CHECK(registry.FindFor(project_root, "only-global") != nullptr);
+}
+
+TEST_CASE("skill directories are honored along the ancestor walk up to the git root",
+          "[skill_registry]") {
+    TempConfigDir config;
+    config.Write("proj/.git/HEAD", "ref: refs/heads/main\n");
+    config.Write("proj/skills/top/SKILL.md", "---\ndescription: t.\n---\nT.\n");
+    config.Write("proj/sub/skills/deep/SKILL.md", "---\ndescription: d.\n---\nD.\n");
+
+    const SkillRegistry registry = SkillRegistry::Load(config.dir);
+
+    // A session rooted at proj/sub sees both: its own, and the worktree root's.
+    const auto all = registry.AllFor(config.dir / "proj" / "sub");
+    REQUIRE(all.size() == 2);
+    CHECK(all[0].name == "deep");
+    CHECK(all[1].name == "top");
+    CHECK(registry.LoadBodyFor(config.dir / "proj" / "sub", "top").has_value());
+}
+
+TEST_CASE("without a git root only the project root itself is searched", "[skill_registry]") {
+    TempConfigDir config;
+    // No .git anywhere in the arena: plain must not reach into its siblings or
+    // ancestors, whatever they are.
+    config.Write("plain/skills/mine/SKILL.md", "---\ndescription: m.\n---\nM.\n");
+    config.Write("outer/skills/theirs/SKILL.md", "---\ndescription: t.\n---\nT.\n");
+
+    const SkillRegistry registry = SkillRegistry::Load(config.dir);
+
+    const auto all = registry.AllFor(config.dir / "plain");
+    REQUIRE(all.size() == 1);
+    CHECK(all.front().name == "mine");
+    CHECK(registry.FindFor(config.dir / "plain", "theirs") == nullptr);
+}
+
+TEST_CASE("the Claude-compatible overlay directories load", "[skill_registry]") {
+    TempConfigDir config;
+    config.Write("proj/.git/HEAD", "ref: refs/heads/main\n");
+    config.Write("proj/.claude/skills/from-claude/SKILL.md",
+                 "---\ndescription: c.\n---\nC.\n");
+    config.Write("proj/.agents/skills/from-agents/SKILL.md",
+                 "---\ndescription: a.\n---\nA.\n");
+
+    const SkillRegistry registry = SkillRegistry::Load(config.dir);
+    const auto project_root = config.dir / "proj";
+
+    const auto all = registry.AllFor(project_root);
+    REQUIRE(all.size() == 2);
+    CHECK(all[0].name == "from-agents");
+    CHECK(all[1].name == "from-claude");
+    CHECK(registry.LoadBodyFor(project_root, "from-claude").has_value());
+}
+
+TEST_CASE("within a project the nearest directory wins on a name collision",
+          "[skill_registry]") {
+    TempConfigDir config;
+    config.Write("proj/.git/HEAD", "ref: refs/heads/main\n");
+    config.Write("proj/skills/dupe/SKILL.md", "---\ndescription: root.\n---\nRoot body.\n");
+    config.Write("proj/sub/skills/dupe/SKILL.md", "---\ndescription: sub.\n---\nSub body.\n");
+
+    const SkillRegistry registry = SkillRegistry::Load(config.dir);
+
+    // A session at proj/sub: its OWN dupe is nearer in the walk, so it wins
+    // over the worktree root's -- the same nearest-first rule that decides
+    // project-over-global.
+    const auto body = registry.LoadBodyFor(config.dir / "proj" / "sub", "dupe");
+    REQUIRE(body.has_value());
+    CHECK(*body == "Sub body.\n");
+}
+
+TEST_CASE("a broken project skill surfaces its reason like a global one", "[skill_registry]") {
+    TempConfigDir config;
+    config.Write("proj/.git/HEAD", "ref: refs/heads/main\n");
+    config.Write("proj/skills/broken/README.md", "no skill file here\n");
+
+    const SkillRegistry registry = SkillRegistry::Load(config.dir);
+    const auto project_root = config.dir / "proj";
+
+    const SkillMeta* meta = registry.FindFor(project_root, "broken");
+    REQUIRE(meta != nullptr);
+    CHECK_FALSE(meta->loaded);
+    CHECK(meta->load_error == "no SKILL.md in directory");
+    CHECK_FALSE(registry.LoadBodyFor(project_root, "broken").has_value());
+}

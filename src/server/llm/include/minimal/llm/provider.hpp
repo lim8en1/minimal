@@ -14,6 +14,12 @@ struct ProviderConfig {
     std::string base_url;
     std::string api_key;
     std::string model_name;
+    // Extra HTTP headers from providers.json ("headers": {"X-Thing": "value"},
+    // or the opencode-compat options.headers). The bundled chat providers
+    // append these after their own required headers; a header duplicating one
+    // the provider already sets (Content-Type, the auth header) is the
+    // operator's to avoid.
+    std::vector<std::pair<std::string, std::string>> headers;
     std::chrono::milliseconds connect_timeout{5000};
     std::chrono::milliseconds request_timeout{120000};
     std::chrono::milliseconds stream_idle_timeout{60000};

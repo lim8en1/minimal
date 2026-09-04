@@ -161,6 +161,11 @@ struct SettingsConfig {
     // "<provider>/<model>". Was default_provider, which named a connection back
     // when a connection implied exactly one model.
     std::string default_model;
+    // opencode-compat: an alternate <provider>/<model> for SUMMARIZATION calls
+    // (compaction). Empty = compact on the session's own model. Shape-checked
+    // by the sanity check; a reference providers.json cannot resolve warns and
+    // behaves as empty.
+    std::string small_model;
     std::string default_theme;
     std::int64_t max_concurrent_subagents = 4;
     // When an out-of-band message (a background task's result, a non-blocking

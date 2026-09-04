@@ -207,7 +207,13 @@ void PickerController::OpenAgentPicker() {
     agent_picker_presets_.clear();
     RebuildAgentPickerComponent();
     deps_.app.RunOnRpcQueue([this] {
-        const auto result = deps_.client.ListAgentPresets();
+        // The client's cwd is the same project root session creation sends
+        // (app.cpp), so the picker's project scope matches the sessions this
+        // client creates here. A resumed session whose stored root differs
+        // still resolves correctly server-side: /agent re-resolves against the
+        // SESSION's root, and the resolved preset is what runs.
+        const auto result =
+            deps_.client.ListAgentPresets(std::filesystem::current_path().string());
         if (!result.status.ok()) return;
         std::vector<v1::AgentPresetSummary> presets(result.response.presets().begin(),
                                                      result.response.presets().end());

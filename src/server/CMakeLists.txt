@@ -27,6 +27,7 @@ add_library(minimal_server_core SHARED
     config/mcps_config.cpp
     config/channels_config.cpp
     config/skill_registry.cpp
+    config/project_dirs.cpp
     config/project_context.cpp
     config/sanity_check.cpp
     hooks/hook_dispatcher.cpp

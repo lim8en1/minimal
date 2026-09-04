@@ -874,15 +874,16 @@ grpc::Status SessionServiceImpl::ListSessions(grpc::ServerContext* context,
 }
 
 grpc::Status SessionServiceImpl::ListAgentPresets(grpc::ServerContext* context,
-                                                  const v1::ListAgentPresetsRequest*,
+                                                  const v1::ListAgentPresetsRequest* request,
                                                   v1::ListAgentPresetsResponse* response) {
     if (const auto auth = EnsureAuthenticated(auth_providers_, context); !auth.ok()) return auth;
 
     if (presets_ == nullptr) return grpc::Status::OK;  // empty list; see set_presets
-    for (const auto& summary : presets_->ListAvailable()) {
+    for (const auto& summary : presets_->ListAvailable(request->project_root())) {
         auto* proto_summary = response->add_presets();
         proto_summary->set_name(summary.name);
         proto_summary->set_description(summary.description);
+        proto_summary->set_color(summary.color);
     }
     return grpc::Status::OK;
 }

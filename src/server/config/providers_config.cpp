@@ -1,10 +1,12 @@
 #include "minimal/config/providers_config.hpp"
 
 #include <algorithm>
+#include <fstream>
 #include <stdexcept>
 #include <utility>
 
 #include "minimal/common/config_paths.hpp"
+#include "minimal/common/logger.hpp"
 #include "minimal/config/json_config_loader.hpp"
 
 namespace minimal::config {
@@ -23,7 +25,10 @@ std::string RequireString(const nlohmann::json& node, const std::string& key,
 // api_key or api_key_env, never both. Resolved once here so nothing downstream
 // touches the environment -- and so an unset variable fails at startup rather
 // than on the first request.
-std::string ResolveApiKey(const nlohmann::json& provider, const std::string& where) {
+std::optional<std::string> LookupCredentialsFile(const std::string& provider_name);
+
+std::string ResolveApiKey(const nlohmann::json& provider, const std::string& where,
+                          const std::string& provider_name) {
     const bool has_key = provider.contains("api_key") && provider.at("api_key").is_string() &&
                          !provider.at("api_key").get<std::string>().empty();
     const bool has_env = provider.contains("api_key_env") &&
@@ -33,7 +38,10 @@ std::string ResolveApiKey(const nlohmann::json& provider, const std::string& whe
         throw std::runtime_error("providers.json: " + where + " sets both api_key and api_key_env");
     }
     if (has_key) return provider.at("api_key").get<std::string>();
-    if (!has_env) return {};  // a local server needs none
+    if (!has_env) {
+        // No inline key, no env: the credentials file is the last link.
+        return LookupCredentialsFile(provider_name).value_or("");
+    }
 
     const std::string name = provider.at("api_key_env").get<std::string>();
     const auto value = common::LookupEnv(name);
@@ -42,6 +50,56 @@ std::string ResolveApiKey(const nlohmann::json& provider, const std::string& whe
                                  "' which is unset");
     }
     return *value;
+}
+
+// Last link of the api-key chain: a credentials file. {"<provider>": {"key":
+// "..."}}, read from <data dir>/auth.json first and then opencode's own
+// credentials (~/.local/share/opencode/auth.json), so an existing opencode
+// install's keys are honored zero-copy. Missing files are the normal state;
+// malformed ones warn and yield nothing -- a local server needs no key, and a
+// cloud provider fails its own auth with a clear 401 rather than blocking
+// startup over a file that may belong to a different provider.
+std::optional<std::string> LookupKeyInAuthJson(const nlohmann::json& doc,
+                                               const std::string& provider_name) {
+    if (!doc.is_object() || !doc.contains(provider_name)) return std::nullopt;
+    const auto& entry = doc.at(provider_name);
+    if (!entry.is_object()) return std::nullopt;
+    for (const char* key : {"key", "api_key"}) {
+        if (entry.contains(key) && entry.at(key).is_string() &&
+            !entry.at(key).get<std::string>().empty()) {
+            return entry.at(key).get<std::string>();
+        }
+    }
+    return std::nullopt;
+}
+
+std::optional<std::string> LookupAuthFile(const std::filesystem::path& path,
+                                          const std::string& provider_name) {
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(path, ec) || ec) return std::nullopt;
+    std::ifstream in(path);
+    if (!in) return std::nullopt;
+    try {
+        return LookupKeyInAuthJson(nlohmann::json::parse(in), provider_name);
+    } catch (const std::exception& error) {
+        common::DefaultLogger().warn("credentials file {} is malformed and was ignored: {}",
+                                     path.string(), error.what());
+        return std::nullopt;
+    }
+}
+
+std::optional<std::string> LookupCredentialsFile(const std::string& provider_name) {
+    if (auto key = LookupAuthFile(common::DataDir() / "auth.json", provider_name)) return key;
+    // opencode-compat: its own auth store. Windows uses APPDATA, POSIX the
+    // XDG-ish path opencode documents.
+    if (const auto home = common::LookupEnv("HOME")) {
+        if (auto key = LookupAuthFile(std::filesystem::path(*home) / ".local" / "share" /
+                                          "opencode" / "auth.json",
+                                      provider_name)) {
+            return key;
+        }
+    }
+    return std::nullopt;
 }
 
 // The model's value if it has one, else the provider's. Shallow by design: a
@@ -82,6 +140,90 @@ template <typename T>
 std::optional<T> OwnNumber(const nlohmann::json& node, const char* key) {
     if (node.contains(key) && node.at(key).is_number()) return node.at(key).get<T>();
     return std::nullopt;
+}
+
+// opencode-compat normalization, applied to each provider entry BEFORE the
+// strict parse: an opencode-shaped entry is mapped onto minimal's fields in
+// place, and native minimal keys always win when both are present.
+//
+//   options.baseURL -> url        (only when url absent)
+//   options.apiKey  -> api_key    (only when neither api_key nor api_key_env)
+//   options.headers / headers -> connection headers (additive, both shapes)
+//   models.<id>.limit.context  -> context_window_tokens
+//   models.<id>.limit.output   -> max_tokens
+//   models.<id>.name -> dropped (the picker shows the ref id; no display name)
+//   npm -> consumed: the AI-SDK package selector maps to a backend kind, and
+//          the one package that names a wire shape (@ai-sdk/openai-compatible)
+//          is exactly what backend "openai" already speaks.
+//   blacklist / whitelist -> the picker filters (parsed into the entry below).
+nlohmann::json NormalizeOpencodeProvider(const nlohmann::json& provider,
+                                         const std::string& where) {
+    if (!provider.is_object()) return provider;
+    nlohmann::json out = provider;
+
+    if (out.contains("npm") && out.at("npm").is_string()) {
+        const std::string npm = out.at("npm").get<std::string>();
+        if (!out.contains("backend")) {
+            if (npm == "@ai-sdk/openai-compatible") {
+                out["backend"] = "openai";
+            } else {
+                common::DefaultLogger().warn(
+                    "providers.json: {} names npm '{}' with no backend; add \"backend\" "
+                    "(the npm package does not select the wire shape here)",
+                    where, npm);
+            }
+        }
+        out.erase("npm");
+    }
+
+    if (out.contains("options") && out.at("options").is_object()) {
+        const auto& options = out.at("options");
+        if (options.contains("baseURL") && options.at("baseURL").is_string() &&
+            !out.contains("url")) {
+            out["url"] = options.at("baseURL");
+        }
+        if (options.contains("apiKey") && options.at("apiKey").is_string() &&
+            !out.contains("api_key") && !out.contains("api_key_env")) {
+            out["api_key"] = options.at("apiKey");
+        }
+        if (options.contains("headers") && options.at("headers").is_object() &&
+            !out.contains("headers")) {
+            out["headers"] = options.at("headers");
+        }
+        out.erase("options");
+    }
+
+    // Headers: either shape normalizes to a flat array of [name, value] pairs.
+    if (out.contains("headers") && out.at("headers").is_object()) {
+        nlohmann::json flat = nlohmann::json::array();
+        for (const auto& [name, value] : out.at("headers").items()) {
+            if (value.is_string()) flat.push_back(nlohmann::json::array({name, value}));
+        }
+        out["headers"] = std::move(flat);
+    }
+
+    if (out.contains("models") && out.at("models").is_object()) {
+        nlohmann::json models = nlohmann::json::object();
+        for (const auto& [id, model] : out.at("models").items()) {
+            nlohmann::json normalized = model.is_object() ? model : nlohmann::json::object();
+            if (normalized.contains("limit") && normalized.at("limit").is_object()) {
+                const auto& limit = normalized.at("limit");
+                if (limit.contains("context") && limit.at("context").is_number_integer() &&
+                    !normalized.contains("context_window_tokens")) {
+                    normalized["context_window_tokens"] = limit.at("context");
+                }
+                if (limit.contains("output") && limit.at("output").is_number_integer() &&
+                    !normalized.contains("max_tokens")) {
+                    normalized["max_tokens"] = limit.at("output");
+                }
+                normalized.erase("limit");
+            }
+            normalized.erase("name");
+            models[id] = std::move(normalized);
+        }
+        out["models"] = std::move(models);
+    }
+    return out;
 }
 
 }  // namespace
@@ -286,6 +428,37 @@ std::vector<std::string> ProvidersConfig::ModelRefs() const {
     for (const auto& [key, unused] : cache_.overlay_) {
         if (!catalog_.models_.count(key)) out.push_back(key);
     }
+
+    // The picker filters (opencode compat): whitelist keeps only the listed
+    // model ids for that provider, then blacklist removes the listed ones.
+    // Resolution is untouched -- this is a listing concern, not an access rule.
+    // Providers_ is keyed by name and stable after parse, so the lookups are
+    // safe without a second lock.
+    bool filtered = false;
+    for (const auto& [name, entry] : catalog_.providers_) {
+        if (!entry.whitelist.empty() || !entry.blacklist.empty()) filtered = true;
+    }
+    if (filtered) {
+        out.erase(std::remove_if(out.begin(), out.end(),
+                                 [&](const std::string& key) {
+                                     const auto slash = key.find('/');
+                                     if (slash == std::string::npos) return false;
+                                     const auto entry = catalog_.providers_.find(key.substr(0, slash));
+                                     if (entry == catalog_.providers_.end()) return false;
+                                     const std::string model = key.substr(slash + 1);
+                                     if (!entry->second.whitelist.empty() &&
+                                         std::find(entry->second.whitelist.begin(),
+                                                   entry->second.whitelist.end(),
+                                                   model) == entry->second.whitelist.end()) {
+                                         return true;
+                                     }
+                                     return std::find(entry->second.blacklist.begin(),
+                                                      entry->second.blacklist.end(),
+                                                      model) != entry->second.blacklist.end();
+                                 }),
+                    out.end());
+    }
+
     std::sort(out.begin(), out.end());
     return out;
 }
@@ -396,22 +569,24 @@ ProvidersConfig ParseProvidersConfigUnwrapped(const nlohmann::json& doc) {
         if (!provider.is_object()) {
             throw std::runtime_error("providers.json: " + where + " must be an object");
         }
+        const nlohmann::json provider_normalized = NormalizeOpencodeProvider(provider, where);
 
-        const std::string backend = RequireString(provider, "backend", where);
-        const std::string url = RequireString(provider, "url", where);
-        const std::string api_key = ResolveApiKey(provider, where);
+        const std::string backend = RequireString(provider_normalized, "backend", where);
+        const std::string url = RequireString(provider_normalized, "url", where);
+        const std::string api_key = ResolveApiKey(provider_normalized, where, provider_name);
 
         bool discover = false;
-        if (provider.contains("discover")) {
-            if (!provider.at("discover").is_boolean()) {
+        if (provider_normalized.contains("discover")) {
+            if (!provider_normalized.at("discover").is_boolean()) {
                 throw std::runtime_error("providers.json: " + where +
                                          " sets \"discover\" which must be a boolean");
             }
-            discover = provider.at("discover").get<bool>();
+            discover = provider_normalized.at("discover").get<bool>();
         }
 
-        const bool has_models = provider.contains("models") && provider.at("models").is_object() &&
-                                !provider.at("models").empty();
+        const bool has_models = provider_normalized.contains("models") &&
+                                provider_normalized.at("models").is_object() &&
+                                !provider_normalized.at("models").empty();
         if (!has_models && !discover) {
             // A provider with no models is unaddressable -- nothing could name it
             // -- so it is a mistake rather than an empty-but-valid state. A
@@ -430,16 +605,35 @@ ProvidersConfig ParseProvidersConfigUnwrapped(const nlohmann::json& doc) {
         entry.connection.base_url = url;
         entry.connection.api_key = api_key;
         entry.discover = discover;
-        if (provider.contains("parameters") && provider.at("parameters").is_object()) {
-            entry.parameters = provider.at("parameters");
+        if (provider_normalized.contains("parameters") &&
+            provider_normalized.at("parameters").is_object()) {
+            entry.parameters = provider_normalized.at("parameters");
         }
-        entry.max_tokens = OwnNumber<int>(provider, "max_tokens");
-        entry.context_window_tokens = OwnNumber<std::int64_t>(provider, "context_window_tokens");
+        entry.max_tokens = OwnNumber<int>(provider_normalized, "max_tokens");
+        entry.context_window_tokens =
+            OwnNumber<std::int64_t>(provider_normalized, "context_window_tokens");
+        if (provider_normalized.contains("headers") && provider_normalized.at("headers").is_array()) {
+            for (const auto& pair : provider_normalized.at("headers")) {
+                if (pair.is_array() && pair.size() == 2 && pair[0].is_string() &&
+                    pair[1].is_string()) {
+                    entry.connection.headers.emplace_back(pair[0].get<std::string>(),
+                                                          pair[1].get<std::string>());
+                }
+            }
+        }
+        for (const char* key : {"whitelist", "blacklist"}) {
+            if (provider_normalized.contains(key) && provider_normalized.at(key).is_array()) {
+                for (const auto& id : provider_normalized.at(key)) {
+                    if (id.is_string()) (key[0] == 'w' ? entry.whitelist : entry.blacklist)
+                                           .push_back(id.get<std::string>());
+                }
+            }
+        }
         config.AddProvider(entry);
 
         if (!has_models) continue;  // discover-only entry: nothing static to resolve
 
-        for (const auto& [model_name, model] : provider.at("models").items()) {
+        for (const auto& [model_name, model] : provider_normalized.at("models").items()) {
             const std::string model_where = "model '" + provider_name + "/" + model_name + "'";
             if (!model.is_object()) {
                 throw std::runtime_error("providers.json: " + model_where + " must be an object");
@@ -458,6 +652,7 @@ ProvidersConfig ParseProvidersConfigUnwrapped(const nlohmann::json& doc) {
             resolved.provider.base_url = url;
             resolved.provider.api_key = api_key;
             resolved.provider.model_name = model_name;
+            resolved.provider.headers = entry.connection.headers;
             resolved.parameters = InheritParameters(provider, model);
             resolved.max_tokens = InheritNumber<int>(provider, model, "max_tokens", model_where);
             resolved.context_window_tokens =

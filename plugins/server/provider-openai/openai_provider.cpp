@@ -27,6 +27,9 @@ net::HttpRequest OpenAiProvider::BuildHttpRequest(std::string body, bool streami
     if (!config_.api_key.empty()) {
         request.headers.push_back({"Authorization", "Bearer " + config_.api_key});
     }
+    for (const auto& [name, value] : config_.headers) {
+        request.headers.push_back({name, value});
+    }
     request.body = std::move(body);
     request.connect_timeout = config_.connect_timeout;
     // Never cap total duration of a stream; the idle timeout covers stalls.

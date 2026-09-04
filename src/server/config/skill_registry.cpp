@@ -2,11 +2,14 @@
 
 #include <algorithm>
 #include <fstream>
+#include <mutex>
 #include <sstream>
 #include <system_error>
 #include <utility>
 
+#include "minimal/common/logger.hpp"
 #include "minimal/config/frontmatter.hpp"
+#include "minimal/config/project_dirs.hpp"
 
 namespace minimal::config {
 namespace {
@@ -125,6 +128,37 @@ SkillMeta LoadCandidate(const std::filesystem::path& candidate) {
     return meta;
 }
 
+// Iterates one skills/ directory, appending a candidate per direct entry. Never
+// throws; a directory that cannot be read reports false with the reason -- the
+// caller decides whether that is a startup scan_error_ (global) or a logged
+// warning (project overlay).
+bool ScanSkillsDir(const std::filesystem::path& skills_dir, std::vector<SkillMeta>& out,
+                   std::string& error) {
+    std::error_code ec;
+    std::filesystem::directory_iterator it(skills_dir, ec);
+    if (ec) {
+        error = "cannot read " + skills_dir.string() + ": " + ec.message();
+        return false;
+    }
+
+    for (; it != std::filesystem::directory_iterator(); it.increment(ec)) {
+        if (ec) {
+            error = "stopped scanning " + skills_dir.string() + ": " + ec.message();
+            return false;
+        }
+        // Dotfiles are never skills. Without this every macOS config directory
+        // that has been opened in Finder reports .DS_Store as a broken skill,
+        // and a startup check that always complains is one nobody reads. A
+        // non-dot stray (skills/foo.md) still gets its error: that is a real
+        // mistake worth naming.
+        const std::string name = it->path().filename().string();
+        if (!name.empty() && name.front() == '.') continue;
+
+        out.push_back(LoadCandidate(it->path()));
+    }
+    return true;
+}
+
 }  // namespace
 
 SkillRegistry SkillRegistry::Load(std::filesystem::path config_dir) {
@@ -150,26 +184,9 @@ SkillRegistry SkillRegistry::Load(std::filesystem::path config_dir) {
     }
     if (!is_dir) return registry;
 
-    std::filesystem::directory_iterator it(skills_dir, ec);
-    if (ec) {
-        registry.scan_error_ = "cannot read " + skills_dir.string() + ": " + ec.message();
-        return registry;
-    }
-
-    for (; it != std::filesystem::directory_iterator(); it.increment(ec)) {
-        if (ec) {
-            registry.scan_error_ = "stopped scanning " + skills_dir.string() + ": " + ec.message();
-            break;
-        }
-        // Dotfiles are never skills. Without this every macOS config directory
-        // that has been opened in Finder reports .DS_Store as a broken skill,
-        // and a startup check that always complains is one nobody reads. A
-        // non-dot stray (skills/foo.md) still gets its error: that is a real
-        // mistake worth naming.
-        const std::string name = it->path().filename().string();
-        if (!name.empty() && name.front() == '.') continue;
-
-        registry.skills_.push_back(LoadCandidate(it->path()));
+    std::string error;
+    if (!ScanSkillsDir(skills_dir, registry.skills_, error)) {
+        registry.scan_error_ = error;
     }
 
     std::sort(registry.skills_.begin(), registry.skills_.end(),
@@ -186,6 +203,123 @@ const SkillMeta* SkillRegistry::Find(std::string_view name) const {
 
 std::optional<std::string> SkillRegistry::LoadBody(std::string_view name) const {
     const SkillMeta* meta = Find(name);
+    if (meta == nullptr || !meta->loaded) return std::nullopt;
+
+    // Read failure must not fall through as an empty body: that would hand the
+    // model a successful-looking skill with no instructions in it.
+    const std::optional<std::string> contents = ReadFile(meta->body_path);
+    if (!contents) return std::nullopt;
+
+    ParsedFrontmatter parsed;
+    try {
+        parsed = parse_frontmatter_markdown(*contents);
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+    return parsed.body;
+}
+
+// --- project-local overlay -----------------------------------------------------
+
+namespace {
+
+// Subdirectory names scanned for skills within one project directory, in
+// preference order. "skills" is minimal's own convention; the dot-prefixed
+// paths are the Claude- and agent-compatible locations, so a project keeps one
+// skill library for every harness that reads it. (ScanSkillsDir's dotfile rule
+// applies to ENTRIES of a scanned directory, never to these explicit names.)
+constexpr const char* kProjectSkillSubdirs[] = {"skills", ".claude/skills", ".agents/skills"};
+
+std::filesystem::path CanonicalPath(const std::filesystem::path& path) {
+    std::error_code ec;
+    std::filesystem::path canonical = std::filesystem::weakly_canonical(path, ec);
+    if (ec) canonical = path;
+    return canonical;
+}
+
+// Every project skill the walk finds, nearest directory winning: the first
+// occurrence of a name in walk order survives, and a shadowed duplicate is
+// logged. This builder runs at most once per canonical root (the caller
+// caches), so the warnings are once per root, not once per call.
+std::vector<SkillMeta> BuildOverlay(const ProjectDirs& dirs) {
+    std::vector<SkillMeta> overlay;
+    std::unordered_map<std::string, std::size_t> index;
+    for (const auto& dir : dirs.dirs()) {
+        for (const char* sub : kProjectSkillSubdirs) {
+            const std::filesystem::path skills_dir = dir / sub;
+            std::error_code ec;
+            if (!std::filesystem::is_directory(skills_dir, ec) || ec) continue;
+
+            std::vector<SkillMeta> found;
+            std::string error;
+            if (!ScanSkillsDir(skills_dir, found, error)) {
+                // A project directory that cannot be read is a warning, not a
+                // fatal scan_error_: the session must still start, and the
+                // operator gets the reason either way.
+                common::DefaultLogger().warn("project skills scan failed: {}", error);
+                continue;
+            }
+            for (auto& meta : found) {
+                auto [it, inserted] = index.try_emplace(meta.name, overlay.size());
+                if (inserted) {
+                    overlay.push_back(std::move(meta));
+                } else {
+                    common::DefaultLogger().warn(
+                        "project skill '{}' from {} is shadowed by a nearer directory",
+                        meta.name, meta.body_path.string());
+                }
+            }
+        }
+    }
+    std::sort(overlay.begin(), overlay.end(),
+              [](const SkillMeta& a, const SkillMeta& b) { return a.name < b.name; });
+    return overlay;
+}
+
+}  // namespace
+
+const std::vector<SkillMeta>& SkillRegistry::MergedFor(
+    const std::filesystem::path& project_root) const {
+    std::lock_guard<std::mutex> lock(cache_->mu);
+    auto [it, inserted] = cache_->merged.try_emplace(CanonicalPath(project_root));
+    if (inserted) {
+        std::vector<SkillMeta> merged = skills_;
+        for (auto& meta : BuildOverlay(ProjectDirs(project_root))) {
+            auto found = std::find_if(merged.begin(), merged.end(),
+                                      [&meta](const SkillMeta& global) {
+                                          return global.name == meta.name;
+                                      });
+            if (found != merged.end()) {
+                *found = std::move(meta);  // project shadows global
+            } else {
+                merged.push_back(std::move(meta));
+            }
+        }
+        std::sort(merged.begin(), merged.end(),
+                  [](const SkillMeta& a, const SkillMeta& b) { return a.name < b.name; });
+        it->second = std::move(merged);
+    }
+    return it->second;
+}
+
+std::vector<SkillMeta> SkillRegistry::AllFor(const std::filesystem::path& project_root) const {
+    if (project_root.empty()) return skills_;
+    return MergedFor(project_root);
+}
+
+const SkillMeta* SkillRegistry::FindFor(const std::filesystem::path& project_root,
+                                        std::string_view name) const {
+    if (project_root.empty()) return Find(name);
+    const std::vector<SkillMeta>& merged = MergedFor(project_root);
+    for (const auto& meta : merged) {
+        if (meta.name == name) return &meta;
+    }
+    return nullptr;
+}
+
+std::optional<std::string> SkillRegistry::LoadBodyFor(const std::filesystem::path& project_root,
+                                                      std::string_view name) const {
+    const SkillMeta* meta = FindFor(project_root, name);
     if (meta == nullptr || !meta->loaded) return std::nullopt;
 
     // Read failure must not fall through as an empty body: that would hand the

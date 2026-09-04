@@ -500,9 +500,18 @@ message ListSessionsResponse {
 message AgentPresetSummary {
   string name = 1;
   string description = 2;
+  // "#rrggbb" from the preset frontmatter; empty = theme default. Any other
+  // value the client ignores rather than guessing.
+  string color = 3;
 }
 
-message ListAgentPresetsRequest {}
+message ListAgentPresetsRequest {
+  // The requesting session's project root. When set, project-local agents/
+  // directories along the git-root walk are merged into the listing (the
+  // nearest declaration shadows a global preset of the same name). Empty
+  // lists the global config dir only.
+  string project_root = 1;
+}
 
 message ListAgentPresetsResponse {
   repeated AgentPresetSummary presets = 1;

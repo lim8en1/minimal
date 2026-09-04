@@ -562,6 +562,17 @@ std::optional<std::size_t> AgentLoop::Compact(std::string_view trigger) {
     params.session_label = session_.session_id;
     params.is_cancelled = is_cancelled_;
 
+    // small_model, when configured: the summarizer ALONE runs on the alternate
+    // provider -- its model name, parameters and cap; the session's own model
+    // still answers every turn.
+    llm::LlmProvider& summarizer = provider_.get();
+    if (config_.small_model.has_value() && config_.small_model->provider != nullptr) {
+        summarizer = *config_.small_model->provider;
+        params.model_name = config_.small_model->model_name;
+        params.parameters = config_.small_model->parameters;
+        params.max_tokens = config_.small_model->max_tokens;
+    }
+
     // core.pre_compact: observe-only, fired once per compaction attempt, after
     // the boundary is known to be safe and before the summarizer call. Both the
     // auto trigger and /compact land here; `trigger` is filterable, since the
@@ -575,7 +586,7 @@ std::optional<std::size_t> AgentLoop::Compact(std::string_view trigger) {
                                                 {"occupancy_tokens", tokens_.last_occupancy()}});
     }
 
-    const auto result = compactor_(to_compact, provider_.get(), params);
+    const auto result = compactor_(to_compact, summarizer, params);
     if (!result) {
         // No compaction this cycle; do not retry on every tool cycle of this turn.
         compaction_failed_this_turn_ = true;
@@ -824,10 +835,17 @@ void AgentLoop::RunTurnLoop(TurnResult& result, bool flush_first) {
                              {},
                              [&] {
                                  tools::ToolContext ctx{session_.logger};
-                                 ctx.session_id = session_.session_id;
-                                 ctx.project_root = session_.project_root;
-                                 ctx.allowed_skills = preset_.allowed_skills;
-                                 ctx.is_cancelled = is_cancelled_;
+                                  ctx.session_id = session_.session_id;
+                                  ctx.project_root = session_.project_root;
+                                  // Map -> plain SkillAccess rows: Preload/Deny never
+                                  // reach the tool (preloaded bodies are in the prompt;
+                                  // denied names are absent = refused); Ask rides as
+                                  // the flag the tool narrows its own mode with.
+                                  for (const auto& [skill, mode] : preset_.allowed_skills) {
+                                      ctx.allowed_skills.push_back(
+                                          {skill, mode == SkillMode::Ask});
+                                  }
+                                  ctx.is_cancelled = is_cancelled_;
                                  ctx.cancel_token = cancel_token_;
                                  // Per invocation, from the Session-owned window: a
                                  // subagent sees only its own transcript, because the

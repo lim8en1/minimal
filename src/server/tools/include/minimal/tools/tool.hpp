@@ -61,10 +61,19 @@ struct ToolContext {
     // needs the id, and no tool can know it any other way.
     std::string tool_use_id;
 
-    // The active preset's allowed_skills for this session, as a plain list so
-    // the tools layer stays free of agent-layer types. SkillTool validates its
+    // The active preset's skill access for this session, as plain data so the
+    // tools layer stays free of agent-layer types. SkillTool validates its
     // input against it at invocation time; empty means no skills are permitted.
-    std::vector<std::string> allowed_skills;
+    // `ask` marks a skill loadable only after a permission prompt (opencode's
+    // `ask` mode) -- the skill tool narrows its own resolution for those via
+    // mode_override_for. Preloaded skills are NOT listed here: their bodies
+    // already sit in the system prompt, and calling the tool for them is a
+    // no-op the prompt forbids.
+    struct SkillAccess {
+        std::string name;
+        bool ask = false;
+    };
+    std::vector<SkillAccess> allowed_skills;
 
     // Checked before each tool runs and polled by long-running tools (bash).
     std::function<bool()> is_cancelled;
@@ -174,6 +183,19 @@ public:
     // reports ReadOnly though the tool's static category is FileWrite.
     virtual std::optional<ToolCategory> category_for(const nlohmann::json& input) const {
         (void)input;
+        return std::nullopt;
+    }
+
+    // Per-invocation permission NARROWING for tools whose danger depends on the
+    // ARGUMENTS rather than the tool (the skill tool: which skill body it is
+    // about to hand the model). Folded into ResolveMode as most_restrictive --
+    // it can only tighten, never widen -- and folded BEFORE the run mode so
+    // Bypass still washes an Ask back to allow and AllowOnly still clamps it to
+    // deny. Default: no narrowing.
+    virtual std::optional<PermissionMode> mode_override_for(const nlohmann::json& input,
+                                                            const ToolContext& ctx) const {
+        (void)input;
+        (void)ctx;
         return std::nullopt;
     }
 

@@ -24,6 +24,9 @@ add_executable(minimal_tests
     client_plugins_test.cpp
     commands_test.cpp
     "${CMAKE_SOURCE_DIR}/plugins/server/commands-core/core_commands.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/commands-md/commands_md.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/commands-md/commands_md_parse.cpp"
+    commands_md_test.cpp
     "${CMAKE_SOURCE_DIR}/plugins/server/signals-message/message_tool.cpp"
     token_accounting_test.cpp
     cancel_token_test.cpp
@@ -70,6 +73,7 @@ add_executable(minimal_tests
     tools_bash_test.cpp
     tool_pool_test.cpp
     skill_registry_test.cpp
+    project_dirs_test.cpp
     project_context_test.cpp
     skill_tool_test.cpp
     proto_convert_test.cpp

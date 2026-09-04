@@ -232,6 +232,7 @@ SettingsConfig ParseSettingsConfig(const nlohmann::json& doc) {
     try {
         config.default_agent_preset = doc.value("default_agent_preset", config.default_agent_preset);
         config.default_model = doc.value("default_model", config.default_model);
+        config.small_model = doc.value("small_model", config.small_model);
         config.default_theme = doc.value("default_theme", config.default_theme);
         config.max_concurrent_subagents = doc.value("max_concurrent_subagents", config.max_concurrent_subagents);
         config.background_wake = doc.value("background_wake", config.background_wake);

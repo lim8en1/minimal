@@ -1124,7 +1124,7 @@ TEST_CASE("the skill tool round-trips a lazy-loaded body through the loop", "[ag
     Harness h;
     h.EnableSkills({{"deploy", "Always run the smoke tests first.\n"}});
     agent::AgentPreset preset;
-    preset.allowed_skills = {"deploy"};
+    preset.allowed_skills = {{"deploy", agent::SkillMode::Allow}};
     preset.system_prompt = "You are a test agent.\n";
     h.provider.PushResponse(ToolUseResponse("tu1", "skill", {{"name", "deploy"}}));
     h.provider.PushResponse(TextResponse("done"));
@@ -1156,7 +1156,7 @@ TEST_CASE("the skill tool is offered only when the preset allows skills", "[agen
         Harness h;
         h.EnableSkills({{"deploy", "body\n"}});
         agent::AgentPreset preset;
-        preset.allowed_skills = {"deploy"};
+        preset.allowed_skills = {{"deploy", agent::SkillMode::Allow}};
         h.provider.PushResponse(TextResponse("hi"));
         h.Build(std::move(preset));
 
@@ -1188,7 +1188,7 @@ TEST_CASE("invoking a skill the preset does not allow yields an error result",
     // list and the tool is withheld rather than offered-but-unusable.
     h.EnableSkills({{"deploy", "body\n"}, {"other", "other body\n"}});
     agent::AgentPreset preset;
-    preset.allowed_skills = {"other"};
+    preset.allowed_skills = {{"other", agent::SkillMode::Allow}};
     h.provider.PushResponse(ToolUseResponse("tu1", "skill", {{"name", "deploy"}}));
     h.provider.PushResponse(TextResponse("ok"));
     h.Build(std::move(preset));

@@ -29,6 +29,10 @@ struct MenuRow {
     // swallowed. It IS highlightable -- Menu owns arrow-key navigation, and
     // hand-rolling a skipping list for one picker's sake was not worth it.
     bool header = false;
+    // Optional "#rrggbb" for the label (the agent picker's preset.color).
+    // Anything unparseable renders as the theme default -- a picker row must
+    // never throw over cosmetics.
+    std::string color;
 };
 
 // What on_extra_key needs to answer a key the generic handler doesn't

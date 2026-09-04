@@ -701,7 +701,7 @@ std::vector<CheckResult> StartupSanityCheck::check_naming_model() {
     // are silently dropped by resolution, which is correct for lookup but must
     // be loud at startup.
     for (const auto& [preset_name, raw] : presets_) {
-        for (const auto& skill : raw.allowed_skills) {
+        for (const auto& [skill, mode] : raw.allowed_skills) {
             if (skill == "*") continue;
             if (inputs_.skills.Find(skill) == nullptr) {
                 results.push_back(Warning("naming_model", "agent preset '" + preset_name +
@@ -709,6 +709,7 @@ std::vector<CheckResult> StartupSanityCheck::check_naming_model() {
             }
             // A known-but-not-loaded candidate is reported once at skill level
             // below, with its load_error, rather than once per referencing preset.
+            (void)mode;
         }
     }
 
