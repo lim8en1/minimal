@@ -110,7 +110,17 @@ message ClientEvent {
     Attach attach = 7;
     RewindRequest rewind = 8;
     EndSession end_session = 9;
+    // Shift+tab's direct run-mode switch: no command, no confirmation --
+    // the keybinding IS the confirmation. Applied at a turn boundary by the
+    // session worker (SetRunMode is worker-thread-only); a full
+    // SessionMetadataEvent announces the new mode to every subscriber.
+    SetRunModeEvent set_run_mode = 10;
   }
+}
+
+// A client-driven permission run-mode change (normal | bypass | allow-only).
+message SetRunModeEvent {
+  PermissionRunMode run_mode = 1;
 }
 
 // Stream lifecycle (S5): a bare stream drop DETACHES -- a crashed terminal
@@ -211,6 +221,29 @@ message CommandInfo {
   CommandKind kind = 4;
   CommandDisplay display = 5;
   bool read_only = 6;
+  // The Command::RequiresSession taxonomy answer: whether Execute needs a live
+  // session ref. The client filters these OUT of /-autocomplete and the /help
+  // overlay while the focused tab has no session (a sessionless tab), so a
+  // command that would only refuse server-side is never even offered.
+  bool requires_session = 7;
+}
+
+// A command invocation that needs no session at all: dispatched with a null
+// session ref, executed like the read-only fast path (no worker, no queue,
+// nothing appended -- commands never reach the conversation anyway). Only a
+// Sessionless<> command passes the dispatcher's guard; anything else answers
+// with an error result rather than a gRPC error, so clients can surface the
+// refusal on their notice line like any other command outcome.
+message RunSessionlessCommandRequest {
+  string name = 1;
+  CommandArgs args = 2;
+}
+
+// Reuses CommandResult (request_id stays empty: the unary round-trip needs no
+// echo). display/view_hint are shaped for THIS invocation, exactly as the
+// on-stream path shapes them.
+message RunSessionlessCommandResponse {
+  CommandResult result = 1;
 }
 
 message ListCommandsRequest {}
@@ -601,6 +634,11 @@ service SessionService {
   // once, so the command list cannot change mid-connection -- no invalidation
   // machinery. Without it, plugin commands are invisible to /-autocomplete.
   rpc ListCommands(ListCommandsRequest) returns (ListCommandsResponse);
+  // Executes a sessionless /-command (Sessionless<> taxonomy): /help,
+  // /sessions and their future siblings, runnable before any session exists --
+  // what keeps a sessionless tab from minting one just to open a picker.
+  rpc RunSessionlessCommand(RunSessionlessCommandRequest)
+      returns (RunSessionlessCommandResponse);
   rpc DeleteSession(DeleteSessionRequest) returns (DeleteSessionResponse);
 
   // Client presence heartbeat; see PingRequest above.

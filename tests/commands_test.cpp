@@ -32,8 +32,7 @@ TEST_CASE("help lists every registered command and explains one", "[commands]") 
 
     const auto listing = fixture.Run("help");
     REQUIRE(listing.status == Status::kOk);
-    for (const char* name : {"/help", "/compact", "/clear", "/agent", "/model",
-                             "/permission-mode"}) {
+    for (const char* name : {"/help", "/compact", "/clear", "/agent", "/model"}) {
         INFO("expected " << name << " in the listing");
         CHECK(listing.message.find(name) != std::string::npos);
     }
@@ -247,17 +246,6 @@ TEST_CASE("a read-only command still answers while a turn is in flight",
     CHECK(fixture.Run("sessions", {}, /*busy=*/true).status == Status::kOk);
 }
 
-TEST_CASE("permission-mode validates its argument", "[commands]") {
-    CommandFixture fixture;
-    fixture.confirmations.answer = "Yes";
-
-    CHECK(fixture.Run("permission-mode", {"bypass"}).status == Status::kOk);
-    CHECK(fixture.executor().run_mode() == tools::PermissionRunMode::Bypass);
-
-    CHECK(fixture.Run("permission-mode", {"sideways"}).status == Status::kError);
-    CHECK(fixture.executor().run_mode() == tools::PermissionRunMode::Bypass);  // unchanged
-}
-
 TEST_CASE("a throwing command does not take the worker down", "[commands]") {
     // The session survives a failed turn; it survives a failed command for the
     // same reason.
@@ -405,4 +393,57 @@ TEST_CASE("/compact works when the automatic trigger is Never", "[commands][inva
     REQUIRE(result.status == Status::kOk);
     CHECK(result.message.find("compacted") != std::string::npos);
     CHECK(fixture.loop().history().size() < 4);
+}
+
+// ---------------------------------------------------------------------------
+// The sessionless dispatch path (RunSessionlessCommand RPC): a NULL session
+// ref in the CommandContext, refused for everything but a Sessionless<>
+// command. This is the guard the sessionless-tab TUI flow leans on.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("sessionless dispatch answers help and the view-only commands",
+          "[commands][sessionless]") {
+    CommandFixture fixture;
+    minimal::commands::CommandArgs args;
+    minimal::commands::CommandContext context(nullptr, fixture.registry_presets_for_test(),
+                                              fixture.registry_confirmations_for_test(),
+                                              common::DefaultLogger());
+
+    const auto help = commands::DispatchSessionless(fixture.registry, "help", args, context);
+    REQUIRE(help.status == Status::kOk);
+    CHECK(help.message.find("/compact") != std::string::npos);
+
+    const auto sessions = commands::DispatchSessionless(fixture.registry, "sessions", args, context);
+    REQUIRE(sessions.status == Status::kOk);
+    // The view shaping is the point: the client opens its picker from THIS.
+    CHECK(sessions.display == minimal::commands::CommandDisplay::kView);
+    CHECK(sessions.view_hint == "sessions");
+
+    const auto unknown = commands::DispatchSessionless(fixture.registry, "nope", args, context);
+    CHECK(unknown.status == Status::kError);
+    CHECK(unknown.message.find("unknown command") != std::string::npos);
+}
+
+TEST_CASE("sessionless dispatch refuses session-bound commands with the shared wording",
+          "[commands][sessionless]") {
+    CommandFixture fixture;
+    minimal::commands::CommandArgs args;
+    minimal::commands::CommandContext context(nullptr, fixture.registry_presets_for_test(),
+                                              fixture.registry_confirmations_for_test(),
+                                              common::DefaultLogger());
+
+    // /clear is a sessioned HarnessCommand: refused WITHOUT executing (the
+    // fake session must stay untouched, not just answer an error).
+    const auto clear = commands::DispatchSessionless(fixture.registry, "clear", args, context);
+    REQUIRE(clear.status == Status::kError);
+    CHECK(clear.message == commands::SessionRequiredMessage("clear"));
+    CHECK(fixture.loop().history().empty());
+
+    const auto agent = commands::DispatchSessionless(fixture.registry, "agent", args, context);
+    CHECK(agent.status == Status::kError);
+
+    // RequiresSession defaults to true, so a plugin command that never heard
+    // of the mixin is session-bound by construction -- and a sessioned
+    // dispatch still runs it exactly as before.
+    CHECK(commands::SessionRequiredMessage("x") == "/x needs a session; send a message to start one first");
 }

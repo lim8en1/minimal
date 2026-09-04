@@ -56,7 +56,8 @@ ftxui::Component MakePromptEditor(
     std::function<void(const std::string&)> on_text,
     std::function<void(const std::string&)> on_command,
     const MentionSuggestor& suggest,
-    CommandCatalogSource command_catalog) {
+    CommandCatalogSource command_catalog,
+    std::function<bool()> session_available) {
     using namespace ftxui;
 
     // Multiline ON: Return-as-newline is the Input's default, so the submit
@@ -337,9 +338,15 @@ ftxui::Component MakePromptEditor(
         // not "not a command line".
         if (IsCommandNameInProgress(state.content) && command_catalog != nullptr) {
             const std::string command_prefix = CommandPrefixOf(state.content);
+            // The focused tab's session presence, probed once per frame this
+            // runs: entries marked requires_session are offered only when a
+            // session exists (a sessionless tab never offers a command that
+            // would only refuse).
+            const bool session_ok = !session_available || session_available();
             std::vector<std::string> suggestions;
             std::vector<std::string> completions;
             for (const auto& entry : command_catalog()) {
+                if (entry.requires_session && !session_ok) continue;
                 if (entry.name.rfind(command_prefix, 0) != 0) continue;
                 std::string display = "/" + entry.name + " -- " + entry.summary;
                 if (entry.submits_prompt) display += "  (submits a prompt as your turn)";

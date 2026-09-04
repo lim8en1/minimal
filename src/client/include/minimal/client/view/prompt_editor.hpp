@@ -75,6 +75,10 @@ struct CommandCatalogEntry {
     std::string summary;
     bool read_only = false;
     bool submits_prompt = false;  // PromptShorthand: the one kind that submits a turn
+    // Command::RequiresSession: excluded from /-autocomplete (and the /help
+    // overlay) while the focused tab has no session -- a command that cannot
+    // run without one is never offered as one.
+    bool requires_session = true;
 };
 
 // The @-mention query seam (T2: async). `nullopt` means "still waiting --
@@ -99,6 +103,11 @@ ftxui::Component MakePromptEditor(
     std::function<void(const std::string&)> on_text,
     std::function<void(const std::string&)> on_command,
     const MentionSuggestor& suggest,
-    CommandCatalogSource command_catalog = nullptr);
+    CommandCatalogSource command_catalog = nullptr,
+    // Cheap, loop-thread probe for "the focused tab has a session". Catalog
+    // entries with requires_session are offered only while this returns
+    // true (a sessionless tab never offers a command that cannot run on
+    // one). Null = always available.
+    std::function<bool()> session_available = nullptr);
 
 }  // namespace minimal::client

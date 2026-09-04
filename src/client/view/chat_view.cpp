@@ -107,6 +107,33 @@ void ChatView::RebuildRows(const SessionState::Snapshot& snapshot) {
     rendered_collapse_epoch_ = collapse_epoch_;
 }
 
+// One dim status row per tool call of the CURRENT turn, in gate order -- the
+// same wording the running-tools panel uses ("running"/"FAILED"/"done"), so
+// the two surfaces never disagree. The transcript is still authoritative:
+// the post-turn page apply swaps these for the persisted tool rows.
+ftxui::Elements ChatView::RenderLiveTools(const SessionState::Snapshot& snapshot) const {
+    using namespace ftxui;
+    Elements rows;
+    for (const auto& tool : snapshot.tools) {
+        Elements line;
+        line.push_back(text("▎tool " + (tool.tool_name.empty() ? std::string("tool")
+                                                               : tool.tool_name)) |
+                       color(theme_.ColorFor("syntax_function")));
+        if (tool.started) {
+            line.push_back(text(" running…") | color(theme_.ColorFor("assistant_message")));
+        } else if (tool.is_error) {
+            line.push_back(text(" FAILED") | color(theme_.ColorFor("error")));
+        } else {
+            line.push_back(text(" done") | color(theme_.ColorFor("system_message")));
+        }
+        if (tool.summary.has_value() && !tool.summary->empty()) {
+            line.push_back(text("  " + *tool.summary) | dim);
+        }
+        rows.push_back(hbox(std::move(line)));
+    }
+    return rows;
+}
+
 ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
                                 plugins::MarkdownEngine::Stream& streaming) {
     using namespace ftxui;
@@ -202,6 +229,13 @@ ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
     if (!snapshot.streaming_text.empty()) {
         column.push_back(text("assistant") | color(theme_.ColorFor("assistant_message")) | bold);
         column.push_back(streaming.Render(theme_));
+    }
+
+    // The current turn's tool calls, live (see RenderLiveTools): a
+    // tool-calling turn whose model has emitted no text yet otherwise
+    // renders NOTHING until the post-turn refresh lands.
+    for (auto& part : RenderLiveTools(snapshot)) {
+        column.push_back(std::move(part));
     }
 
     // The enclosing `yframe` (app.cpp) scrolls to whatever element in this

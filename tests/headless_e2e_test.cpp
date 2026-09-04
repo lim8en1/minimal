@@ -270,6 +270,54 @@ TEST_CASE("a headless turn returns the model's text", "[headless]") {
     CHECK(stop == v1::STOP_REASON_END_TURN);
 }
 
+TEST_CASE("text deltas stream BEFORE the turn completes", "[headless][streaming]") {
+    // Liveness, not correctness: the TUI's mid-turn rendering depends on
+    // deltas AND usage events arriving WHILE the turn runs, not batched
+    // behind TurnCompleted. The FakeLlmProvider emits its scripted events
+    // synchronously inside StreamComplete, so ordering here guards the
+    // SERVER's forwarding path (provider sink -> broadcaster -> subscriber
+    // stream) against a regression that buffers stream events until the
+    // turn ends.
+    HeadlessFixture fixture;
+    llm::Usage usage;
+    usage.input_tokens = 10;
+    usage.output_tokens = 5;
+    fixture.Script(testing::TextResponse("the answer is 42"),
+                   {llm::StreamEvent{llm::MessageStartEvent{"m-1", "test-model"}},
+                    llm::StreamEvent{llm::TextDeltaEvent{0, "the answer is 42"}},
+                    llm::StreamEvent{llm::UsageEvent{usage}},
+                    llm::StreamEvent{llm::ContentBlockStopEvent{0}},
+                    llm::StreamEvent{llm::MessageDeltaEvent{llm::StopReason::EndTurn}},
+                    llm::StreamEvent{llm::MessageStopEvent{}}});
+    fixture.Start();
+
+    client::SessionClient::CreateOptions options;
+    options.project_root = (fixture.dir / "work").string();
+    options.agent_preset = "main";
+    options.run_mode = v1::PERMISSION_RUN_MODE_ALLOW_ONLY;
+    const auto created = fixture.client->CreateSession(options);
+    REQUIRE(created.status.ok());
+    REQUIRE_FALSE(created.session_id.empty());
+
+    bool saw_delta_before_completed = false;
+    bool saw_completed = false;
+    bool saw_usage = false;
+    const auto status = fixture.client->RunTurn(
+        created.session_id, "what is the answer?", [&](const v1::ServerEvent& event) {
+            if (event.has_stream_event()) {
+                if (event.stream_event().has_text_delta()) {
+                    saw_delta_before_completed = !saw_completed;
+                }
+                if (event.stream_event().has_usage()) saw_usage = true;
+            }
+            if (event.has_turn_completed()) saw_completed = true;
+            return true;
+        });
+    CHECK(status.ok());
+    CHECK(saw_delta_before_completed);
+    CHECK(saw_usage);
+}
+
 TEST_CASE("a completed turn lands in the cost tracker's history", "[headless][cost-tracker]") {
     // The observer is the only writer, and this is the only tier that proves
     // the whole push path: RunTurn -> TurnSummary (model included) -> observer

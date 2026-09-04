@@ -10,6 +10,43 @@ std::string BusyRefusalMessage(const std::string& name) {
     return "/" + name + " cannot run while a turn is in flight; cancel it first";
 }
 
+std::string SessionRequiredMessage(const std::string& name) {
+    return "/" + name + " needs a session; send a message to start one first";
+}
+
+namespace {
+
+// The shared execute-and-shape tail of both dispatch paths: run the command,
+// map the outcome's display/view_hint for THIS invocation, and contain a
+// throw. `session_label` feeds the failure log line -- a sessionless context
+// has no id to print.
+CommandResult ExecuteAndShape(Command& command, const std::string& name,
+                              const CommandArgs& args, CommandContext& context,
+                              const std::string& session_label) {
+    try {
+        auto outcome = command.Execute(context, args);
+        // The command owns where its result surfaces; the dispatcher only
+        // carries it. Downgraded to the status line on error -- a View result
+        // that failed has nothing to show, and errors belong on the notice
+        // line (EXTENSIBILITY 4.4: "errors too, styled as errors").
+        outcome.display = outcome.status == CommandResult::Status::kOk
+                              ? command.DisplayFor(args)
+                              : CommandDisplay::kStatus;
+        if (outcome.display == CommandDisplay::kView) {
+            outcome.view_hint = std::string(command.ViewHintFor(args));
+        }
+        return outcome;
+    } catch (const std::exception& error) {
+        // A throwing command must not take the worker down with it: the session
+        // survives a failed turn, and it survives a failed command for the same
+        // reason.
+        context.logger().warn("session {}: /{} threw: {}", session_label, name, error.what());
+        return CommandResult::Error("/" + name + " failed: " + error.what());
+    }
+}
+
+}  // namespace
+
 CommandResult Dispatch(const CommandRegistry& registry, const std::string& name,
                        const CommandArgs& args, CommandContext& context, bool busy) {
     Command* command = registry.Find(name);
@@ -49,27 +86,48 @@ CommandResult Dispatch(const CommandRegistry& registry, const std::string& name,
         }
     }
 
-    try {
-        auto outcome = command->Execute(context, args);
-        // The command owns where its result surfaces; the dispatcher only
-        // carries it. Downgraded to the status line on error -- a View result
-        // that failed has nothing to show, and errors belong on the notice
-        // line (EXTENSIBILITY 4.4: "errors too, styled as errors").
-        outcome.display = outcome.status == CommandResult::Status::kOk
-                              ? command->DisplayFor(args)
-                              : CommandDisplay::kStatus;
-        if (outcome.display == CommandDisplay::kView) {
-            outcome.view_hint = std::string(command->ViewHintFor(args));
-        }
-        return outcome;
-    } catch (const std::exception& error) {
-        // A throwing command must not take the worker down with it: the session
-        // survives a failed turn, and it survives a failed command for the same
-        // reason.
-        context.logger().warn("session {}: /{} threw: {}", context.session().session_id(), name,
-                              error.what());
-        return CommandResult::Error("/" + name + " failed: " + error.what());
+    // The label is computed before the call, not inside its catch: a sessioned
+    // Dispatch context always has an id to print, and ExecuteAndShape already
+    // contains Execute's own throw.
+    return ExecuteAndShape(*command, name, args, context, context.session().session_id());
+}
+
+CommandResult DispatchSessionless(const CommandRegistry& registry, const std::string& name,
+                                  const CommandArgs& args, CommandContext& context) {
+    Command* command = registry.Find(name);
+    if (command == nullptr) {
+        // Same answered-never-dropped rule as Dispatch: the unary caller maps
+        // an error result to its notice line either way.
+        return CommandResult::Error(UnknownCommandMessage(name));
     }
+
+    // THE SESSIONLESS GUARD. RequiresSession() is the taxonomy answer; the
+    // LLM/prompt-shorthand and confirmation checks are defense-in-depth (a
+    // Sessionless<LLMCommand> would be a nonsense registration, but the types
+    // -- not conventions -- are what is asked here, the same rule the busy
+    // check runs on). There is no session worker and no broker behind a
+    // sessionless context, so anything that queues, blocks on a human, or
+    // touches the conversation path has nothing to stand on.
+    if (command->RequiresSession()) {
+        return CommandResult::Error(SessionRequiredMessage(name));
+    }
+    // ReadOnly() too: a sessionless invocation runs INLINE on the gRPC
+    // handler thread (RunSessionlessCommand), never on the bounded command
+    // pool -- the same reasoning that keeps a mutating command off the
+    // reader thread on the streamed path. A Sessionless<> command that is
+    // not also ReadOnly() would block that thread.
+    if (!command->ReadOnly()) {
+        return CommandResult::Error(SessionRequiredMessage(name));
+    }
+    if (dynamic_cast<const LLMCommand*>(command) != nullptr ||
+        dynamic_cast<const PromptShorthandCommand*>(command) != nullptr) {
+        return CommandResult::Error(SessionRequiredMessage(name));
+    }
+    if (command->RequiresConfirmation()) {
+        return CommandResult::Error("/" + name + " cannot ask for confirmation without a session");
+    }
+
+    return ExecuteAndShape(*command, name, args, context, "sessionless");
 }
 
 }  // namespace minimal::commands

@@ -80,6 +80,10 @@ public:
 
 private:
     void RebuildRows(const SessionState::Snapshot& snapshot);
+    // The current turn's tool calls, rendered LIVE from the snapshot's tool
+    // list (the transcript's tool rows only reach a page via a fetch, which
+    // mid-turn nothing submits) -- "tools as soon as they are executed".
+    ftxui::Elements RenderLiveTools(const SessionState::Snapshot& snapshot) const;
 
     using RowKey = std::pair<int64_t, int>;   // (transcript seq, occurrence within seq)
 

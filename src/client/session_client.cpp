@@ -117,6 +117,28 @@ grpc::Status SessionClient::Ping() {
     return stub_->Ping(&context, request, &response);
 }
 
+v1::CommandResult SessionClient::RunSessionlessCommand(const std::string& name,
+                                                       const std::vector<std::string>& positional,
+                                                       const std::string& raw) {
+    grpc::ClientContext context;
+    context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(2));
+    v1::RunSessionlessCommandRequest request;
+    request.set_name(name);
+    for (const auto& value : positional) request.mutable_args()->add_positional(value);
+    request.mutable_args()->set_raw(raw);
+    v1::RunSessionlessCommandResponse response;
+    const grpc::Status status = stub_->RunSessionlessCommand(&context, request, &response);
+    if (!status.ok()) {
+        // The caller surfaces the result on a notice line; a transport-level
+        // refusal must arrive as the same shape, never as a lost answer.
+        v1::CommandResult failed;
+        failed.set_status(v1::COMMAND_STATUS_ERROR);
+        failed.set_message(status.error_message());
+        return failed;
+    }
+    return response.result();
+}
+
 SessionClient::ListCommandsResult SessionClient::ListCommands() {
     grpc::ClientContext context;
     context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(2));

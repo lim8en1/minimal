@@ -369,6 +369,20 @@ public:
     void SetProvider(llm::LlmProvider& provider) { provider_ = provider; }
 
 private:
+    // The system/tools half of BuildChatRequest, factored out so
+    // EstimateContextTokens does not have to deep-copy the whole working
+    // history (BuildChatRequest's request.messages = history_) just to read
+    // request.system and request.tools -- for a 512k-1M-token session that
+    // copy ran on every compaction check, every resume, and every rewind/
+    // redo, exactly the RAM spike ARCHITECTURE.md's "the request body is
+    // serialized, not materialized" section argues against. messages stays
+    // empty; callers that need the full request still call BuildChatRequest.
+    struct SystemAndTools {
+        std::optional<std::string> system;
+        std::vector<llm::ToolDefinition> tools;
+    };
+    SystemAndTools BuildSystemAndTools() const;
+
     void AppendAndPersist(llm::Message message, std::optional<int> output_tokens = std::nullopt);
     // Break-path repair: a turn that ends on Cancelled/MaxTokens/ContentFilter/
     // Refusal/StopSequence with the response's tool_use blocks already appended

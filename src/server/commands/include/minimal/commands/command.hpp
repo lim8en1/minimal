@@ -88,6 +88,22 @@ public:
     // Defaults to false: the conservative answer is the one you get for free.
     virtual bool ReadOnly() const { return false; }
 
+    // Whether Execute needs a live session (a non-null CommandContext session
+    // ref). Defaults to true -- the safe answer: a command author who thinks
+    // about neither this nor ReadOnly() gets "session-bound" and can never
+    // dereference a null ref. The Sessionless<> mixin below is the sanctioned
+    // way to answer false; the dispatcher REFUSES a sessionless invocation of
+    // anything else (DispatchSessionless), so a plain command can never see
+    // context.has_session() == false.
+    //
+    // This is the COMMAND-level answer, not the invocation-level one. /agent
+    // and /model are per-invocation (bare form lists, named form mutates), and
+    // that wrinkle is owned by the CLIENT: on a sessionless tab it stages the
+    // named form into the tab's pending create-options (the choice rides
+    // CreateSessionRequest) and opens its own pickers for the bare form, so
+    // only genuinely sessionless commands are ever dispatched sessionless.
+    virtual bool RequiresSession() const { return true; }
+
     // Where this command's result surfaces on the client (the wire carries both
     // fields on CommandResult). The default is the ephemeral status line -- the
     // safe answer, and what every existing command keeps getting for free. A
@@ -146,5 +162,22 @@ public:
 // submission path. A shorthand that produced its prompt some other way would
 // break the invariant tests, not just the taxonomy.
 class PromptShorthandCommand : public Command {};
+
+// Mixin, not a closed marker subclass: `Sessionless<X>` composes with any
+// command kind, so a sessionless command keeps whatever taxonomy its base
+// carries (dynamic_cast<X*> still sees through it -- the same property
+// ListCommands' kind derivation relies on) instead of the codebase growing one
+// SessionlessHarnessCommand, SessionlessLLMCommand, ... per kind.
+//
+// Re-parent onto this to declare "Execute must tolerate a NULL session ref in
+// CommandContext". The final keeps the taxonomy honest: a command cannot
+// accidentally override itself back to session-bound. Only /help and /sessions
+// qualify today -- and ReadOnly() must hold too, which the sessionless
+// dispatch path (DispatchSessionless) enforces rather than trusts.
+template <typename Base>
+class Sessionless : public Base {
+public:
+    bool RequiresSession() const final { return false; }
+};
 
 }  // namespace minimal::commands

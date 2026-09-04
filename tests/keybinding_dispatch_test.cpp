@@ -34,7 +34,9 @@ AppState::TabSnapshot Tab(std::string id, bool is_subagent = false, int64_t root
                           char attention_glyph = '\0',
                           SessionStateKind state = SessionStateKind::Idle) {
     AppState::TabSnapshot tab;
-    tab.session_id = std::move(id);
+    // The dispatch functions key on the TAB id (the UI's handle, valid for
+    // sessionless tabs too), not the session id.
+    tab.tab_id = std::move(id);
     tab.is_subagent = is_subagent;
     tab.root_ordinal = root_ordinal;
     tab.attention_glyph = attention_glyph;

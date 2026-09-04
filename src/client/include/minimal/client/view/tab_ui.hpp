@@ -120,15 +120,16 @@ public:
     // every keystroke and mouse move that never touches AppState at all.
     void Run();
 
-    // What the last successful pass settled on. References into this
-    // object's own members -- valid as long as this TabMaintenance is
-    // (RunTui declares one plain local and never relocates it, same
+    // What the last successful pass settled on: the focused tab's TAB id
+    // (AppState's tab handle -- valid for sessionless tabs too). References
+    // into this object's own members -- valid as long as this TabMaintenance
+    // is (RunTui declares one plain local and never relocates it, same
     // requirement as PickerController/KeyContext's dependents).
     const std::string& Focused() const { return focused_; }
     const SessionState::Snapshot& FocusedDetails() const { return focused_details_; }
 
 private:
-    SessionState::Snapshot Maintain(const std::string& session_id, SessionState::Snapshot snap);
+    SessionState::Snapshot Maintain(const std::string& tab_id, SessionState::Snapshot snap);
     void HandleNotice(const SessionState::Snapshot& snap);
     // The permission/confirmation modals: rebuilt when the focused tab's
     // outstanding request changes, shown while unanswered. Only called when

@@ -8,7 +8,7 @@ std::string NextRootGroup(const std::vector<AppState::TabSnapshot>& tabs,
                           const std::string& focused, bool forward) {
     std::vector<std::string> roots;
     for (const auto& tab : tabs) {
-        if (!tab.is_subagent) roots.push_back(tab.session_id);
+        if (!tab.is_subagent) roots.push_back(tab.tab_id);
     }
     if (roots.empty()) return "";
 
@@ -23,14 +23,14 @@ std::string NextAttentionTab(const std::vector<AppState::TabSnapshot>& tabs,
                              const std::string& focused) {
     std::size_t start = 0;
     for (std::size_t i = 0; i < tabs.size(); ++i) {
-        if (tabs[i].session_id == focused) {
+        if (tabs[i].tab_id == focused) {
             start = i;
             break;
         }
     }
     for (std::size_t i = 0; i < tabs.size(); ++i) {
         const std::size_t idx = (start + 1 + i) % tabs.size();   // +1: skip current
-        if (tabs[idx].attention_glyph == '!') return tabs[idx].session_id;
+        if (tabs[idx].attention_glyph == '!') return tabs[idx].tab_id;
     }
     return "";
 }
@@ -39,7 +39,7 @@ bool AnyWorkInFlight(const std::vector<AppState::TabSnapshot>& tabs,
                     const std::vector<std::string>& ids) {
     for (const auto& id : ids) {
         for (const auto& tab : tabs) {
-            if (tab.session_id != id) continue;
+            if (tab.tab_id != id) continue;
             switch (tab.state) {
                 case SessionStateKind::Thinking:
                 case SessionStateKind::Working:
@@ -81,16 +81,16 @@ std::vector<std::string> TabsToClose(const std::vector<AppState::TabSnapshot>& t
     std::optional<int64_t> group;
     bool is_root = false;
     for (const auto& tab : tabs) {
-        if (tab.session_id == sid) {
+        if (tab.tab_id == sid) {
             group = tab.root_ordinal;
             is_root = !tab.is_subagent;
         }
     }
     std::vector<std::string> staged;
     for (const auto& tab : tabs) {
-        if (!is_root && tab.session_id != sid) continue;
+        if (!is_root && tab.tab_id != sid) continue;
         if (is_root && group.has_value() && tab.root_ordinal != *group) continue;
-        staged.push_back(tab.session_id);
+        staged.push_back(tab.tab_id);
     }
     return staged;
 }
@@ -146,7 +146,7 @@ bool HandleGlobalKey(KeyContext& ctx, const ftxui::Event& event) {
         bool busy = false;
         if (!sid.empty()) {
             for (const auto& tab : ctx.app.GetAllTabs()) {
-                if (tab.session_id != sid) continue;
+                if (tab.tab_id != sid) continue;
                 switch (tab.state) {
                     case SessionStateKind::Thinking:
                     case SessionStateKind::Working:
@@ -160,7 +160,11 @@ bool HandleGlobalKey(KeyContext& ctx, const ftxui::Event& event) {
             }
         }
         if (busy) {
-            ctx.app.SendCancel(sid);
+            // Busy implies sessioned (a sessionless tab has no turn to be in
+            // flight), so the SESSION-keyed cancel takes the focused tab's
+            // session id, not its tab handle.
+            const std::string session = ctx.app.FocusedSessionId();
+            if (!session.empty()) ctx.app.SendCancel(session);
             return true;
         }
         // Idle ctrl+c means quit: the universal exit reflex, otherwise DEAD
@@ -192,25 +196,28 @@ bool HandleGlobalKey(KeyContext& ctx, const ftxui::Event& event) {
         return true;
     }
     if (ctx.keymap.Matches("permission.cycle", event)) {
-        // The interactive loop for /permission-mode: shift+tab cycles
-        // normal -> bypass -> allow-only -> normal, then re-sends the result
-        // through the EXACT path a typed command takes (SendCommand) --
-        // server-side validation, the bypass confirmation modal (widening
-        // permissions is exactly the thing worth asking about) and the
-        // status-bar segment update all come from the existing machinery,
-        // not from this handler. An unknown/absent mode string counts as
-        // normal (the server default a fresh session starts on).
+        // shift+tab cycles normal -> bypass -> allow-only -> normal as a
+        // DIRECT wire event (SendSetRunMode) -- no command, no confirmation
+        // modal: the keybinding IS the confirmation. The server queues the
+        // change for its worker (applies at a turn boundary) and announces
+        // it back via SessionMetadataEvent, which is what the status bar's
+        // {permission_mode} segment refreshes from. An unknown/absent mode
+        // string counts as normal (the server default a fresh session
+        // starts on).
         if (!sid.empty()) {
-            const std::string current = ctx.app.GetDetails(sid).permission_mode;
-            std::string next;
+            // GetDetails is TAB-keyed (the focused handle may be a
+            // sessionless tab); the mode switch itself is a session-keyed
+            // wire event, so a sessionless tab simply has nothing to cycle.
+            const std::string& current = ctx.app.GetDetails(sid).permission_mode;
+            const std::string session = ctx.app.FocusedSessionId();
+            if (session.empty()) return true;
+            v1::PermissionRunMode next = v1::PERMISSION_RUN_MODE_BYPASS;
             if (current == "bypass") {
-                next = "allow-only";
+                next = v1::PERMISSION_RUN_MODE_ALLOW_ONLY;
             } else if (current == "allow-only") {
-                next = "normal";
-            } else {
-                next = "bypass";   // "normal", empty, or unrecognized
+                next = v1::PERMISSION_RUN_MODE_NORMAL;
             }
-            ctx.app.SendCommand(sid, "/permission-mode " + next);
+            ctx.app.SendSetRunMode(session, next);
         }
         return true;
     }
@@ -219,7 +226,10 @@ bool HandleGlobalKey(KeyContext& ctx, const ftxui::Event& event) {
         return true;
     }
     if (ctx.keymap.Matches("chat.load_older", event)) {
-        if (!sid.empty()) ctx.app.RequestScrollback(sid, /*newest=*/false);
+        // Session-keyed fetch: a sessionless tab has no scrollback to page.
+        if (const std::string session = ctx.app.FocusedSessionId(); !session.empty()) {
+            ctx.app.RequestScrollback(session, /*newest=*/false);
+        }
         return true;
     }
     // In-view scrollback: moves which already-rendered row is focused (see

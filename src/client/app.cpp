@@ -250,6 +250,34 @@ int RunHeadless(const HeadlessOptions& options) {
                                      : minimal::v1::PERMISSION_RUN_MODE_ALLOW_ONLY;
     create.signals = options.signals;
 
+    // SESSIONLESS COMMAND FAST PATH. A command the server catalog marks
+    // requires_session=false runs via RunSessionlessCommand with NO session
+    // created at all -- the same dispatch path the TUI's sessionless tabs
+    // use. A command-only run (`minimal /help`, `/sessions`) that created a
+    // session first was the headless twin of the TUI's junk-row bug: the
+    // command appends nothing to the transcript, so the run left a live
+    // 0-message row behind. An unknown command or one that needs a session
+    // falls through to the ordinary create-and-run path below, whose
+    // refusals read exactly as they always did.
+    if (options.command) {
+        const auto listed = client.ListCommands();
+        if (listed.status.ok()) {
+            for (const auto& info : listed.response.commands()) {
+                if (info.name() == options.command->name && !info.requires_session()) {
+                    const auto result = client.RunSessionlessCommand(
+                        options.command->name, options.command->positional,
+                        options.command->raw);
+                    if (!result.message().empty()) {
+                        std::fputs(result.message().c_str(), stdout);
+                        if (result.message().back() != '\n') std::fputc('\n', stdout);
+                    }
+                    return result.status() == minimal::v1::COMMAND_STATUS_ERROR ? kModelError
+                                                                                : kOk;
+                }
+            }
+        }
+    }
+
     const auto created = client.CreateSession(create);
     if (!created.status.ok()) {
         std::fprintf(stderr, "%s a session: %s\n",
@@ -533,20 +561,26 @@ int RunTui(const minimal::client::ParsedArgs& args) {
             for (const auto& info : listed.response.commands()) {
                 command_catalog.push_back(
                     {info.name(), info.summary(), info.read_only(),
-                     info.kind() == minimal::v1::COMMAND_KIND_PROMPT_SHORTHAND});
+                     info.kind() == minimal::v1::COMMAND_KIND_PROMPT_SHORTHAND,
+                     info.requires_session()});
             }
         }
     }
     // /new, /rewind, /redo are intercepted client-side (submit_command,
     // below) rather than routed through the server's ListCommands/Command
     // dispatch, so they have no CommandInfo of their own to appear here --
-    // added by hand so /-autocomplete still offers them.
+    // added by hand so /-autocomplete still offers them. requires_session:
+    // /new opens a sessionless TAB (no session to require); /rewind and
+    // /redo act on a session's transcript, so they are hidden until one
+    // exists.
     command_catalog.push_back({"new", "start a new session", /*read_only=*/false,
-                               /*submits_prompt=*/false});
+                               /*submits_prompt=*/false, /*requires_session=*/false});
     command_catalog.push_back({"rewind", "undo the most recent user turn (or N of them)",
-                               /*read_only=*/false, /*submits_prompt=*/false});
+                               /*read_only=*/false, /*submits_prompt=*/false,
+                               /*requires_session=*/true});
     command_catalog.push_back({"redo", "restore the most recently rewound turn",
-                               /*read_only=*/false, /*submits_prompt=*/false});
+                               /*read_only=*/false, /*submits_prompt=*/false,
+                               /*requires_session=*/true});
 
     // --- config + client plugins --------------------------------------------
     // ORDER MATTERS -- see tui_bootstrap.hpp/.cpp for the full sequence
@@ -609,13 +643,22 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     std::string staged_delete_id;   // the picker delete confirmation's subject
     PendingClose pending_close;
 
-    // Per-tab UI caches, keyed by session id. TabUi's type and the
+    // Per-tab UI caches, keyed by TAB id (AppState's tab handle -- the only
+    // key that exists for a sessionless tab). TabUi's type and the
     // maintenance logic that reads/writes it both live in
     // view/tab_ui.{hpp,cpp}; the MAP stays a plain RunTui local (not owned
     // by TabMaintenance) because close_tab (below) erases from it directly,
     // and close_tab is defined before TabMaintenance can be constructed --
     // it needs open_picker/plugin_modal_child, built later.
     std::map<std::string, minimal::client::TabUi> tab_ui;
+
+    // Picker-open lambdas, assigned after PickerController exists (below):
+    // submit_command (above's definition point) intercepts the bare
+    // /sessions //agent //model forms on sessionless tabs and needs to reach
+    // these without a server round trip.
+    std::function<void()> open_picker_fn = [] {};
+    std::function<void()> open_agent_picker_fn = [] {};
+    std::function<void()> open_model_picker_fn = [] {};
 
     // `focused`/`focused_details` become aliases into TabMaintenance once it
     // exists (below, after open_picker/plugin_modal_child) -- see the
@@ -680,81 +723,54 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         });
         return std::nullopt;
     };
-    // Typing on an empty app STARTS A SESSION (ARCHITECTURE.md "Session
-    // picker": with no prior sessions the client creates one directly). The
-    // welcome placeholder has always promised this -- but OpenTab was never
-    // wired to any UI path, so the promise was dead and a fresh TUI could not
-    // hold a conversation at all. OpenTab makes a blocking CreateSession RPC
-    // (5s deadline); T2 moves that off the loop thread via AppState's async
-    // RPC worker (RunOnRpcQueue) rather than widening OpenTab's own
-    // synchronous contract, which the E2E test suite and headless mode both
-    // depend on. OpenTab's own locking (and its auto-focus-on-first-tab rule)
-    // is safe from any thread, so this is a relocation of WHERE it runs, not
-    // a behavior change -- the frame just stays responsive while it runs.
-    //
-    // Shared by submit_chat's and submit_command's "no tab focused" fallback,
-    // and by /new: queues `action` and starts AT MOST ONE CreateSession round
-    // trip no matter how many actions stack up before it returns (typing a
-    // message immediately followed by a /-command, before the first OpenTab
-    // resolves, must land BOTH on the SAME new session -- two independent
-    // creates here used to be the "junk session" bug: the picker's "resume an
-    // existing session" flow raced against a startup auto-create and left the
-    // auto-created one behind as an empty extra tab). Actions run on the RPC
-    // worker thread (same thread OpenTab's own callers already used) -- never
-    // touch loop-thread-only state (tab_ui) from one.
-    struct SessionEnsureState {
-        std::mutex mtx;
-        bool creating = false;
-        std::vector<std::function<void(std::string)>> pending;
+    // --- tabs are sessionless until the first message ---------------------------
+    // OpenTab mints a TAB (a client-side container, no RPC, no server row);
+    // the session comes into existence only when a message is submitted
+    // (SubmitChatTurn -> AppState::EnsureSession, single-flight per tab on the
+    // RPC worker). The old create_session_and_run queue-and-create machinery
+    // lives inside AppState now, per tab; RunTui just opens-or-reuses a tab
+    // and hands it the action. This is the structural fix for the 0-message
+    // junk sessions: nothing reaches the server until there is something to
+    // say, and a tab abandoned before that leaves no row at all.
+    auto focused_or_new_tab = [app]() -> std::string {
+        if (std::string tab = app->FocusedTabId(); !tab.empty()) return tab;
+        return app->OpenTab(DefaultCreateOptions());   // local-only; focuses itself
     };
-    auto session_ensure = std::make_shared<SessionEnsureState>();
-    auto create_session_and_run = [app, session_ensure](std::function<void(std::string)> action) {
-        std::lock_guard lk(session_ensure->mtx);
-        session_ensure->pending.push_back(std::move(action));
-        if (session_ensure->creating) return;   // a create is already in flight; it'll run this too
-        session_ensure->creating = true;
-        app->RunOnRpcQueue([app, session_ensure] {
-            const auto new_sid = app->OpenTab(DefaultCreateOptions());
-            std::vector<std::function<void(std::string)>> to_run;
-            {
-                std::lock_guard cb_lk(session_ensure->mtx);
-                to_run.swap(session_ensure->pending);
-                session_ensure->creating = false;
-            }
-            // A failed create leaves the app empty; every queued action is
-            // dropped silently, the same visible outcome a synchronous call
-            // had on failure (the user sees no new tab and can retry).
-            if (new_sid.empty()) return;
-            for (auto& fn : to_run) fn(new_sid);
-        });
-    };
-    auto submit_chat = [app, &tab_ui, create_session_and_run](const std::string& text) {
-        const std::string sid = app->FocusedSessionId();
-        if (sid.empty()) {
-            create_session_and_run(
-                [app, text](std::string new_sid) { app->SendChatTurn(new_sid, text); });
-            return;
-        }
+    auto submit_chat = [app, &tab_ui, focused_or_new_tab](const std::string& text) {
+        const std::string tab = focused_or_new_tab();
         // Sending a turn returns the view to the newest row: scrolled-up
         // content would otherwise sit frozen while the reply streams in
         // somewhere below the visible viewport, reading as if nothing
         // happened. Same for a row cursor left over from browsing -- it would
         // otherwise keep pinning the view to a now-stale row through the
-        // whole new turn.
-        if (auto it = tab_ui.find(sid); it != tab_ui.end() && it->second.chat) {
+        // whole new turn. (A sessionless tab has no chat view yet -- the map
+        // lookup misses -- and nothing to scroll.)
+        if (auto it = tab_ui.find(tab); it != tab_ui.end() && it->second.chat) {
             it->second.chat->ScrollToBottom();
             it->second.chat->ClearRowFocus();
         }
-        app->SendChatTurn(sid, text);
+        app->SubmitChatTurn(tab, text);
     };
     // /rewind, /redo and /new are intercepted here rather than routed through
     // SendCommand: /rewind and /redo are client-native ClientEvents (a oneof
     // sibling of cancel/attach), not server-side Commands, so there is no
     // CommandInvocation for the server to run -- and the client also has to
     // resolve "N user turns back" to a seq itself, the server never told it
-    // one. /new is a client tab operation (open + focus a fresh session,
-    // distinct from a subagent spawn) the server has no part in either.
-    auto submit_command = [app, create_session_and_run, &show_commands_help](const std::string& line) {
+    // one. /new is a client tab operation (open + focus a fresh sessionless
+    // tab, distinct from a subagent spawn) the server has no part in either.
+    //
+    // SESSIONLESS TABS (no session yet): the command list the server catalog
+    // marks requires_session is EXCLUDED from autocomplete and the /help
+    // overlay, and an invocation typed anyway is answered client-side -- a
+    // session is never created for a command that cannot use one. The
+    // genuinely sessionless commands go over RunSessionlessCommand, and the
+    // picker-opening forms are answered outright client-side (the bare
+    // /sessions //agent //model results were only ever view_hints pointing at
+    // these same pickers -- the round trip minted the junk session and bought
+    // nothing).
+    auto submit_command = [app, &command_catalog, focused_or_new_tab, &show_commands_help,
+                           &open_picker_fn, &open_agent_picker_fn,
+                           &open_model_picker_fn](const std::string& line) {
         // Bare /help is answered CLIENT-SIDE from the ListCommands catalog:
         // the server's listing reached the transient notice line, whose
         // viewport caps at a handful of rows -- with more commands than that,
@@ -767,6 +783,7 @@ int RunTui(const minimal::client::ParsedArgs& args) {
             return;
         }
         const std::string sid = app->FocusedSessionId();
+        const bool has_session = !sid.empty();
         if (line == "/redo") {
             app->SendRewind(sid, std::nullopt, /*redo=*/true);
             return;
@@ -791,23 +808,66 @@ int RunTui(const minimal::client::ParsedArgs& args) {
             return;
         }
         if (line == "/new") {
-            // Always spawns, focused tab or not -- that's the point (a
-            // sibling session, not a reuse of whatever's already open).
-            create_session_and_run(
-                [app](std::string new_sid) { app->SetFocusedTab(new_sid); });
+            // Always spawns a NEW SESSIONLESS tab, focused tab or not --
+            // that's the point (a sibling workspace, not a reuse of
+            // whatever's already open). Nothing is created server-side until
+            // the first message names it.
+            app->SetFocusedTab(app->OpenTab(DefaultCreateOptions()));
             return;
         }
-        // No fallback for "no tab focused" here beyond what FindRewindTargetSeq
-        // /SendRewind above already no-op cleanly on: a bare /-command with no
-        // session yet lazily creates one and runs against it, the same as
-        // typing a plain message does -- previously this called
-        // SendCommand("", line) into the void and the command went nowhere.
-        if (sid.empty()) {
-            create_session_and_run(
-                [app, line](std::string new_sid) { app->SendCommand(new_sid, line); });
+        if (!has_session) {
+            // Picker-opening bare forms: client-owned UI, zero round trip,
+            // zero session. (/sessions' server-side result is exactly
+            // view_hint="sessions"; /agent //model's bare forms map the same
+            // way -- see TabMaintenance::HandleNotice.)
+            if (line == "/sessions") { open_picker_fn(); return; }
+            if (line == "/agent") { open_agent_picker_fn(); return; }
+            if (line == "/model") { open_model_picker_fn(); return; }
+            // Named /agent //model stage onto the tab's pending
+            // create-options: the choice rides CreateSessionRequest when the
+            // session is eventually created (the server validates it there),
+            // and the status bar reflects it immediately.
+            const auto parsed = minimal::client::SplitCommand(line);
+            if (parsed.name == "agent" && !parsed.positional.empty()) {
+                if (const std::string tab = focused_or_new_tab(); !tab.empty()) {
+                    app->StageAgentPreset(tab, parsed.positional.front());
+                    app->TabNotice(tab, "agent '" + parsed.positional.front() +
+                                            "' will be used when the session starts");
+                }
+                return;
+            }
+            if (parsed.name == "model" && !parsed.positional.empty()) {
+                if (const std::string tab = focused_or_new_tab(); !tab.empty()) {
+                    app->StageModel(tab, parsed.positional.front());
+                    app->TabNotice(tab, "model '" + parsed.positional.front() +
+                                            "' will be used when the session starts");
+                }
+                return;
+            }
+            // Everything else the catalog marks requires_session is refused
+            // here, visibly, without creating a session. An unknown command
+            // rides the same notice (the server's sessionless path would
+            // answer identically; this just skips the round trip).
+            bool sessionless = false;
+            for (const auto& entry : command_catalog) {
+                if (entry.name == parsed.name) {
+                    sessionless = !entry.requires_session;
+                    break;
+                }
+            }
+            if (!sessionless) {
+                if (const std::string tab = app->FocusedTabId(); !tab.empty()) {
+                    app->TabNotice(tab, "/" + parsed.name +
+                                            " needs a session; send a message to start one first");
+                }
+                return;
+            }
+            if (const std::string tab = focused_or_new_tab(); !tab.empty()) {
+                app->RunSessionlessCommand(tab, line);
+            }
             return;
         }
-        app->SendCommand(sid, line);
+        app->SubmitCommand(app->FocusedTabId(), line);
     };
     auto editor = minimal::client::MakePromptEditor(
         theme, prompt_state,
@@ -822,7 +882,11 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         // `editor`'s use, same lifetime argument as `state`/`theme` above.
         [&command_catalog]() -> const std::vector<minimal::client::CommandCatalogEntry>& {
             return command_catalog;
-        });
+        },
+        // The requires_session filter's probe (cheap: one locked read in
+        // AppState). An empty FocusedSessionId means no tab, or a tab whose
+        // session does not exist yet -- both hide the session-bound entries.
+        [&app]() { return !app->FocusedSessionId().empty(); });
 
     // --- permission modal (inner swapped per outstanding request) -------------
     // The host is a STABLE component in the tree; its inner component is
@@ -836,8 +900,8 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     auto permission_host_interactive =
         minimal::client::MakeModalHost(permission_child, show_permission);
 
-    // The server confirmation modal (/clear and /permission-mode ask through
-    // the ConfirmationBroker, which BLOCKS the session worker until answered):
+    // The server confirmation modal (/clear asks through the
+    // ConfirmationBroker, which BLOCKS the session worker until answered):
     // same host pattern as the permission prompt -- a STABLE component whose
     // inner modal is rebuilt when a new request_id arrives. The answer path
     // (AnswerConfirmation) existed and was dead code; nothing rendered the
@@ -894,13 +958,15 @@ int RunTui(const minimal::client::ParsedArgs& args) {
 
     // T8: typing on an empty app already starts a session directly
     // (submit_chat, above); the picker's "+ new session" row is the same
-    // action reached from inside the modal, with no text to send yet.
+    // action reached from inside the modal, with no text to send yet. The
+    // tab it opens is SESSIONLESS -- nothing is minted server-side until the
+    // first message (submit_chat -> SubmitChatTurn -> EnsureSession), so an
+    // abandoned "+ new" tab leaves no row behind.
     auto open_new_session = [&] {
         show_picker = false;
-        app->RunOnRpcQueue([app] {
-            const auto opts = DefaultCreateOptions();
-            if (const auto sid = app->OpenTab(opts); !sid.empty()) app->SetFocusedTab(sid);
-        });
+        if (const auto tab = app->OpenTab(DefaultCreateOptions()); !tab.empty()) {
+            app->SetFocusedTab(tab);
+        }
     };
 
     // Owns picker_data/agent_picker_presets and the fetch/rebuild/open
@@ -915,6 +981,11 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     auto open_picker = [&] { picker_controller.OpenSessionPicker(); };
     auto open_agent_picker = [&] { picker_controller.OpenAgentPicker(); };
     auto open_model_picker = [&] { picker_controller.OpenModelPicker(/*refresh=*/false); };
+    // Bind the submit_command intercepts (declared before, assigned now --
+    // they run only on user input, long after this line).
+    open_picker_fn = open_picker;
+    open_agent_picker_fn = open_agent_picker;
+    open_model_picker_fn = open_model_picker;
     auto open_keymap_help = [&] { show_keymap_help = true; };
 
     // Built once, unlike the pickers above: env.keybindings is already final
@@ -931,7 +1002,12 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     // in submit_command -- the notice line's handful of rows could not hold
     // the full command listing.
     auto commands_help_view = minimal::client::MakeCommandsHelpView(
-        command_catalog, theme, [&] { show_commands_help = false; });
+        command_catalog, theme, [&] { show_commands_help = false; },
+        // Same requires_session exclusion the autocomplete applies: while the
+        // focused tab has no session, the overlay lists only sessionless
+        // commands (the overlay rebuilds its rows on every open, so the probe
+        // is fresh each time).
+        [&app]() { return !app->FocusedSessionId().empty(); });
 
     // --- plugin views (panel region + modal layer) -----------------------------
     // Panels: rendered in the frame beside the tools panel; one shared
@@ -1012,13 +1088,15 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     // limit=200 fetch) for the common "start working" case. That traded a
     // startup CreateSession call every launch for a real cost: picking an
     // EXISTING session from ctrl+o left the just-created empty one open as a
-    // second, junk tab (and a junk row in the sessions table). Startup now
-    // creates NOTHING -- the empty-state welcome view already promises
-    // exactly this ("ctrl+o opens the session picker; typing starts a
-    // session", plugins/client/logo) -- and submit_chat/submit_command's
-    // shared create_session_and_run (above) lazily creates on the first
-    // non-command message, same round-trip count for the common case, zero
-    // junk tabs for the picker case.
+    // second, junk tab (and a junk row in the sessions table). Startup creates
+    // NOTHING -- and, since tabs became sessionless containers, neither does
+    // anything else until the first message: every create path (typing, /new,
+    // the picker's "+ new session") now opens a TAB only, and EnsureSession
+    // mints the session when the user actually submits (see the sessionless-
+    // tabs block above submit_chat). A command run on a sessionless tab never
+    // mints one at all: sessionless commands ride RunSessionlessCommand,
+    // session-bound ones are refused client-side, and the picker-opening bare
+    // forms open their pickers directly.
 
     // --- frame -----------------------------------------------------------------
     int panel_height = 12;
@@ -1033,7 +1111,7 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     auto request_quit = [&] {
         const auto tabs = app->GetAllTabs();
         std::vector<std::string> ids;
-        for (const auto& tab : tabs) ids.push_back(tab.session_id);
+        for (const auto& tab : tabs) ids.push_back(tab.tab_id);
         if (!AnyWorkInFlight(tabs, ids)) {
             quit();
         } else {

@@ -139,9 +139,19 @@ ftxui::Element FrameRenderer::Render() {
             // body instead of an empty transcript. has_earlier_messages
             // keeps a resumed session from flashing the banner during the
             // async scrollback window before its first page applies.
+            //
+            // pending_user_text/busy keep the banner off too: a FRESH session
+            // mid-turn -- especially a tool-calling turn whose model has not
+            // emitted any text yet -- still has things to show (the echoed
+            // prompt, live tool rows), and the banner hid exactly those
+            // (submit -> banner until the first text delta) .
+            const bool turn_busy = snap.state == SessionStateKind::Thinking ||
+                                   snap.state == SessionStateKind::Working ||
+                                   snap.state == SessionStateKind::Waiting;
             const bool fresh_session =
                 (!snap.scrollback_page || snap.scrollback_page->empty()) &&
-                snap.streaming_text.empty() && !snap.has_earlier_messages;
+                snap.streaming_text.empty() && !snap.has_earlier_messages &&
+                snap.pending_user_text.empty() && !turn_busy;
             Elements start = fresh_session ? RenderStartViews(focused) : Elements{};
             if (!start.empty()) {
                 for (auto& element : start) rows.push_back(std::move(element) | flex);
@@ -261,9 +271,13 @@ ftxui::Element FrameRenderer::Render() {
     std::map<std::string, std::string> values;
     values["version"] = std::string(common::Version());
     // The focused tab's DEEP snapshot (see focused_details above) drives
-    // the status bar's values.
-    if (!focused_details.session_id.empty()) {
-        values["session"] = focused_details.display_name;
+    // the status bar's values. A SESSIONLESS tab renders too: it has a name
+    // ("new session") and any staged /agent //model choices -- what it lacks
+    // is only the server-side metadata, which fills in at EnsureSession.
+    if (!focused.empty()) {
+        values["session"] = !focused_details.display_name.empty()
+                                ? focused_details.display_name
+                                : std::string("new session");
         // The interrupt press is never silent: from SendCancel until the
         // turn actually ends, the focused session says so (status bar =
         // the home of focused-session detail, per ARCHITECTURE.md).
@@ -288,7 +302,7 @@ ftxui::Element FrameRenderer::Render() {
             values["permission_mode"] = focused_details.permission_mode;
         }
         for (const auto& tab : tabs) {
-            if (tab.session_id != focused) continue;
+            if (tab.tab_id != focused) continue;
             const auto activity = ActivityLabel(tab.state, tab.tools);
             if (!activity.empty()) values["activity"] = activity;
             break;
@@ -300,7 +314,10 @@ ftxui::Element FrameRenderer::Render() {
     // segment renders nothing for this frame), never fatal.
     for (const auto& segment : deps_.status_registry.segments()) {
         try {
-            values[std::string(segment->id())] = segment->Render(focused);
+            // Segments are SESSION-keyed (cost-view caches per focused
+            // session); the frame's focused handle is a TAB id, so the
+            // snapshot's session id goes out (empty = no tab / sessionless).
+            values[std::string(segment->id())] = segment->Render(focused_details.session_id);
         } catch (const std::exception& error) {
             common::DefaultLogger().error("status segment '{}' threw: {}",
                                           std::string(segment->id()), error.what());

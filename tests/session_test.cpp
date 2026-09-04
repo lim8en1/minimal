@@ -1326,3 +1326,96 @@ TEST_CASE("the injection queue is bounded; over the limit is a refusal, not a qu
     CHECK(drained == agent::InjectionQueue::kMaxPending);
     CHECK(queue.Push(llm::Message{llm::Role::User, {llm::TextBlock{"after drain"}}}));
 }
+
+TEST_CASE("SubmitRunMode applies at a turn boundary and announces the new mode",
+          "[session][run_mode]") {
+    // shift+tab's wire path: the event queues for the worker (SetRunMode is
+    // worker-thread-only), the executor flips, and a full SessionMetadataEvent
+    // is what every attached client's {permission_mode} segment refreshes
+    // from -- without it the press LOOKED like a no-op.
+    SessionFixture fixture;
+    fixture.Script(testing::TextResponse("done"));
+    fixture.Start();
+
+    REQUIRE(
+        fixture.session->SubmitRunMode(agent::QueuedRunMode{tools::PermissionRunMode::Bypass}));
+    REQUIRE(fixture.session->WaitForIdleForTesting(5s));
+    CHECK(fixture.session->run_mode() == tools::PermissionRunMode::Bypass);
+
+    bool announced = false;
+    for (const auto& event : fixture.DrainQueue()) {
+        if (event.has_session_metadata() &&
+            event.session_metadata().permission_mode() == "bypass") {
+            announced = true;
+        }
+    }
+    CHECK(announced);
+}
+
+TEST_CASE("ApplyPreset refreshes info_ and announces the new metadata", "[session][metadata]") {
+    // /agent and /model land here: without the info_ refresh the tab label and
+    // {agent} kept the session's ORIGINAL preset, and without the event every
+    // attached client's status bar stayed stale until re-attach.
+    SessionFixture fixture;
+    fixture.Start();
+
+    auto switched = fixture.preset;
+    switched.name = "switched";
+    switched.context_window_tokens = 123456;
+    fixture.session->ApplyPreset(switched);
+
+    bool announced = false;
+    for (const auto& event : fixture.DrainQueue()) {
+        if (event.has_session_metadata() &&
+            event.session_metadata().agent_preset() == "switched" &&
+            event.session_metadata().context_window_tokens() == 123456) {
+            announced = true;
+        }
+    }
+    CHECK(announced);
+    CHECK(fixture.session->info().agent_preset == "switched");
+}
+
+TEST_CASE("SubmitRunMode is refused when the backlog is full, and answers on the wire",
+          "[session][run_mode][invariant]") {
+    // Same contract as SubmitTurn/SubmitRewind: a refusal is EMITTED (a
+    // SessionError), never dropped -- a keypress that did nothing silently is
+    // the exact failure the wire-answer rule exists to prevent. The worker is
+    // parked on a permission prompt so it consumes nothing while the flood
+    // fills the queue.
+    SessionFixture fixture;
+    fixture.preset.permission_mode = testing::AllowAllPolicy();
+    fixture.preset.permission_mode.execute = tools::PermissionMode::Ask;
+    fixture.tools_registry.Register(
+        std::make_unique<testing::FakeTool>("bash", tools::ToolCategory::Execute, "ran"));
+    fixture.Script(testing::ToolUseResponse("call-1", "bash"));  // parks on the prompt
+    fixture.Start();
+
+    fixture.session->SubmitTurn("go");
+    REQUIRE(WaitForPermissionRequest(fixture).has_value());  // worker parked; consumes nothing
+
+    int accepted = 0;
+    int refused = 0;
+    for (int i = 0; i < 1000; ++i) {
+        if (fixture.session->SubmitRunMode(
+                agent::QueuedRunMode{tools::PermissionRunMode::AllowOnly})) {
+            ++accepted;
+        } else {
+            ++refused;
+        }
+    }
+    CHECK(accepted > 0);
+    CHECK(refused > 0);
+
+    int refusal_events = 0;
+    for (const auto& event : fixture.DrainQueue()) {
+        if (event.has_error() &&
+            event.error().message().find("backlog") != std::string::npos) {
+            ++refusal_events;
+        }
+    }
+    CHECK(refusal_events == refused);
+
+    fixture.session->Cancel();  // unpark the worker from the prompt
+    fixture.session->Terminate();
+}

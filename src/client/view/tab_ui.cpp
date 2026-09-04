@@ -18,11 +18,14 @@ TabMaintenance::TabMaintenance(Dependencies deps) : deps_(std::move(deps)) {}
 // the result within the same call -- it returns the snapshot UNCHANGED, and
 // the worker's completion (BumpUiVersion) wakes the pump for a frame that
 // will see the applied page in a freshly-taken snapshot.
-SessionState::Snapshot TabMaintenance::Maintain(const std::string& session_id,
+SessionState::Snapshot TabMaintenance::Maintain(const std::string& tab_id,
                                                 SessionState::Snapshot snap) {
     if (deps_.chat_surface != nullptr || deps_.app.EffectiveChatSurface() != nullptr) return snap;
-    if (snap.session_id.empty() && session_id != snap.session_id) return snap;
-    TabUi& ui = deps_.tab_ui[session_id];
+    // A sessionless tab (no session yet) has nothing streamed or persisted:
+    // no ChatView, no streaming bookkeeping, no refresh. Its SessionState
+    // gains an id the moment EnsureSession resolves, and the next pass runs.
+    if (snap.session_id.empty()) return snap;
+    TabUi& ui = deps_.tab_ui[tab_id];
 
     // The chat view itself: constructed once per tab, lazily -- a tab that
     // never leaves the start-view banner (a fresh session with nothing
@@ -69,7 +72,7 @@ SessionState::Snapshot TabMaintenance::Maintain(const std::string& session_id,
     // itself is async and its application wakes the pump for a later
     // frame.
     if (AdvanceScrollbackRefresh(ui.refresh, snap) == ScrollbackRefreshAction::kSubmit) {
-        deps_.app.RequestScrollback(session_id, /*newest=*/true);
+        deps_.app.RequestScrollback(snap.session_id, /*newest=*/true);
     }
     return snap;
 }
@@ -126,7 +129,9 @@ void TabMaintenance::MaintainModals(const SessionState::Snapshot& snap) {
         if (ui.grants_for_request != request.request_id) {
             ui.grants = std::make_unique<GrantToggles>();
             ui.grants_for_request = request.request_id;
-            const auto session_id = focused_;
+            // AnswerPermission is SESSION-keyed; a modal can only exist on a
+            // sessioned tab, so the snapshot's session id is the right key.
+            const auto session_id = snap.session_id;
             GrantToggles& toggles = *ui.grants;
             AppState& app = deps_.app;
             *deps_.permission_child = MakePermissionModal(
@@ -153,7 +158,7 @@ void TabMaintenance::MaintainModals(const SessionState::Snapshot& snap) {
         const auto& request = *snap.pending_confirmation;
         if (ui.confirmation_for_request != request.request_id) {
             ui.confirmation_for_request = request.request_id;
-            const auto session_id = focused_;
+            const auto session_id = snap.session_id;   // SESSION-keyed (see above)
             const auto request_copy = request;
             AppState& app = deps_.app;
             *deps_.confirmation_child = MakeConfirmationModal(
@@ -176,7 +181,7 @@ void TabMaintenance::Run() {
     const auto tabs = deps_.app.GetAllTabs();
     focused_.clear();
     for (const auto& tab : tabs) {
-        if (tab.is_focused) focused_ = tab.session_id;
+        if (tab.is_focused) focused_ = tab.tab_id;
     }
     if (focused_.empty()) {
         focused_details_ = SessionState::Snapshot{};

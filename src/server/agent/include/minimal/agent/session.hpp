@@ -276,7 +276,14 @@ struct QueuedRewind {
     bool redo = false;
 };
 
-using WorkItem = std::variant<std::string, QueuedCommand, QueuedRewind>;  // string = a user turn
+// One client-driven run-mode change (shift+tab's direct switch). Queued to
+// the worker like a rewind because SetRunMode is worker-thread-only (the
+// executor reads it lock-free during tool dispatch).
+struct QueuedRunMode {
+    tools::PermissionRunMode mode = tools::PermissionRunMode::Normal;
+};
+
+using WorkItem = std::variant<std::string, QueuedCommand, QueuedRewind, QueuedRunMode>;  // string = a user turn
 
 class Session : public commands::SessionControl {
 public:
@@ -338,6 +345,13 @@ public:
     // where the queue can still carry one -- a client is never left waiting
     // on a rewind that was silently dropped.
     bool SubmitRewind(QueuedRewind request);
+
+    // Reader thread. Queues a permission run-mode change (shift+tab) for the
+    // worker, which applies it at a turn boundary -- the same
+    // worker-thread-only contract SetRunMode has. False means refused
+    // (terminated, or the work queue is full); a SessionError event answers
+    // the refusal on the wire, so the press is never silently dropped.
+    bool SubmitRunMode(QueuedRunMode request);
     // Cross-session splice point: a non-blocking subagent's worker queues its
     // completion here when it finishes; the session's own worker flushes it at
     // a turn boundary. False means the session is already terminating and the
@@ -513,6 +527,14 @@ private:
     void RunOneTurn(std::optional<std::string> text);
     void RunOneCommand(const QueuedCommand& command);
     void RunOneRewind(const QueuedRewind& request);
+    void RunOneRunMode(const QueuedRunMode& request);
+    // The full E-additions metadata set (name, preset, model, run mode,
+    // context window) as one SessionMetadataEvent. Called after anything
+    // mutates what it carries -- ApplyPreset, a run-mode switch -- so every
+    // attached client's status bar refreshes without a re-attach. Worker
+    // thread and the command pool are both safe: EmitEvent's sink never
+    // blocks.
+    void EmitMetadataChanged();
     void RunRewind(std::int64_t target_seq);
     void RunRedo();
     // Answers a rewind with an ErrorEvent. Publish never blocks on any path;

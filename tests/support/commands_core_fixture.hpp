@@ -105,7 +105,7 @@ public:
                                 bool busy = false) {
         commands::CommandArgs args;
         args.positional = std::move(positional);
-        commands::CommandContext context(*this, *presets_, confirmations, common::DefaultLogger());
+        commands::CommandContext context(this, *presets_, confirmations, common::DefaultLogger());
         return commands::Dispatch(registry, name, args, context, busy);
     }
 
@@ -157,6 +157,11 @@ public:
 
     commands::CommandRegistry registry;
     FakeConfirmationBroker confirmations;
+
+    // Accessors for tests that build their OWN CommandContext (the sessionless
+    // dispatch tests pass a null session ref into the same registries).
+    const agent::AgentPresetRegistry& registry_presets_for_test() const { return *presets_; }
+    commands::ConfirmationBroker& registry_confirmations_for_test() { return confirmations; }
 
 private:
     void Write(const std::filesystem::path& relative, const std::string& contents) const {

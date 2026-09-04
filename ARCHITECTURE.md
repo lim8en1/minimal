@@ -615,7 +615,7 @@ PermissionMode apply_run_mode(PermissionMode base, PermissionRunMode run_mode);
 // Normal    -> base unchanged (Ask still blocks on PermissionChecker).
 ```
 
-**`AllowOnly` exists specifically to make `Ask` safe non-interactively** — without it a headless run hitting an `Ask`-gated tool blocks forever waiting for a human who was never attached; `AllowOnly` auto-denies instead of hanging. `Bypass` ("trust everything") and `AllowOnly` ("never block, never silently risk it either") are different risk postures, not gradations. Set via `permissions.json`'s `default_run_mode` and mutable per-session via `/permission-mode`, which requires confirmation.
+**`AllowOnly` exists specifically to make `Ask` safe non-interactively** — without it a headless run hitting an `Ask`-gated tool blocks forever waiting for a human who was never attached; `AllowOnly` auto-denies instead of hanging. `Bypass` ("trust everything") and `AllowOnly` ("never block, never silently risk it either") are different risk postures, not gradations. Set via `permissions.json`'s `default_run_mode` and mutable per-session via the TUI's shift+tab (`permission.cycle`), which sends a `SetRunModeEvent` directly — no command, no confirmation; the keybinding is the confirmation. The change queues for the session worker (run modes are worker-thread-only state) and is announced back as a `SessionMetadataEvent`.
 
 ### Consent scoping
 
@@ -681,15 +681,24 @@ public:
     // Touches no session state, so it may run beside a live turn -- on a
     // short-lived task, never inline on the reader. Defaults to the safe answer.
     virtual bool ReadOnly() const { return false; }
+    // Whether Execute needs a live session ref. Defaults to true (the safe
+    // answer); the Sessionless<Base> mixin is the sanctioned way to answer
+    // false. The catalog exports this (`ListCommands.requires_session`) so
+    // the client can hide session-bound commands on sessionless tabs.
+    virtual bool RequiresSession() const { return true; }
     virtual CommandResult Execute(CommandContext&, const CommandArgs&) = 0;
 };
 
+template <typename Base> class Sessionless : public Base { ... };  // RequiresSession() == false,
+                                                                    // composes with any kind
 class HarnessCommand : public Command {};  // never touches the conversation path; read-only ones
                                             // may run concurrently with an in-flight turn
 class LLMCommand : public Command {};       // may issue provider requests or submit turns
 class PromptShorthandCommand : public LLMCommand {};  // submits an interpolated prompt as a
                                                       // user turn; the only kind that enters the chat
 ```
+
+**Sessionless dispatch**: a `Sessionless<>` command may run with a NULL session ref — the `RunSessionlessCommand` unary RPC dispatches it with no session at all, which is what lets a sessionless TUI tab (one whose session was never created) run `/help` and `/sessions` without minting a row. The dispatcher refuses everything else there (session-bound, LLM/prompt-shorthand, confirming commands) with an error result rather than a drop. `CommandContext` carries `SessionControl*` (nullable) plus `has_session()`; a sessionless-capable command branches on it, and `session()` asserts non-null for everyone else. `/agent` and `/model` are per-invocation wrinkle cases the client owns: on a sessionless tab the named form stages into the tab's pending create-options and the bare form opens the client's own picker, so only genuinely sessionless commands ever ride the sessionless path.
 
 **Command results never enter the chat, and never reach the model.** A result is a wire event only — by construction it appends to no history and is sent to no provider; the ruling is about display. `CommandDisplay` decides where it surfaces: an ephemeral **status line** (errors included, styled as errors — never persisted), a **view** (`view_hint` names the client view a pair plugin registered), or **silent**. The one exception is `PromptShorthandCommand`: it submits an interpolated prompt as a user turn, so its content reaches the model *as the turn itself* and enters the chat exactly as a normal user turn would — never as a result message. The Harness/LLM boundary is the **conversation path** — the turn queue and chat-completions requests — not "network vs. no network": `/model-info` is a read-only `HarnessCommand` that fetches model metadata over HTTP and renders a view, safely beside a live turn. Subagent completion injections are *not* command results; they stay real messages the model must see. Finer inheritance under `Command` stays open; `docs/EXTENSIBILITY.md` §4.4 is the spec.
 
@@ -707,9 +716,19 @@ Both `PermissionChecker`'s implementation and `CommandDispatcher` compose the sa
 
 **`CommandContext`** borrows references the session already owns: active `LlmProvider` and its resolved `ProviderConfig`, `SessionStore`, `AgentPresetRegistry` (+ active preset, mutable for `/agent`), `Settings`, plus `EmitStatus`/`EmitError`. It deliberately does **not** expose bash session state: bash is a plugin and owns that itself (see below).
 
-**Bundled commands** (`commands-core` plugin): `/help [command]`, `/providers`, `/compact` (`LLMCommand`), `/clear` (confirm), `/agent <preset>`, `/model <provider>/<model>`, `/permission-mode <normal|bypass|allow-only>` (confirm). `/help` and `/providers` are `ReadOnly()` and render as views; the config-changing commands surface as status lines. None enters the chat.
+**Bundled commands** (`commands-core` plugin): `/help [command]`, `/providers`, `/compact` (`LLMCommand`), `/clear` (confirm), `/agent <preset>`, `/model <provider>/<model>`, `/sessions`. `/help`, `/providers` and `/sessions` are `ReadOnly()` and render as views; the config-changing commands surface as status lines. None enters the chat. The permission run mode is NOT a command: shift+tab cycles it directly (see "Consent scoping" above).
 
-`/new`, `/attach` and `/sessions` are **deferred to the TUI** (track E): they drive a tab model, and a command creating a session no client can attach to would be wire surface built ahead of its consumer.
+`/new` and `/attach` are **deferred to the TUI** (track E): they drive the tab model directly rather than through a command.
+
+### Sessionless commands
+
+**A tab exists before its session does** (§ *TUI layout*, "Client state model"): `OpenTab` creates a client-side container with no server-side session, and the session is minted lazily on the tab's first submission. `/sessions` (open the picker) and `/help` are exactly the commands a user reaches for on that empty tab — the "0-message junk session" bug this design displaced was the TUI creating a real session just to run one of these. `Command::RequiresSession()` is the taxonomy answer (default `true`, the safe answer a command author gets for free); the `Sessionless<Base>` mixin (`command.hpp`) overrides it to `false` and composes with any command kind (`Sessionless<HarnessCommand>`, not a new `SessionlessHarnessCommand` type), so `dynamic_cast<HarnessCommand*>` still sees through it.
+
+`CommandContext::session_` is correspondingly **nullable**: `session()` asserts non-null, `session_if()`/`has_session()` are the branch a `Sessionless<>` command's `Execute` must take first. Only a command that is both `Sessionless<>` **and** `ReadOnly()` may run this way — `DispatchSessionless` (`command_dispatcher.cpp`) enforces both, plus refusing any `LLMCommand`/`PromptShorthandCommand` and anything `RequiresConfirmation()`: there is no session worker and no confirmation broker behind a sessionless context, so nothing that queues, blocks on a human, or touches the conversation path has anywhere to stand. `ReadOnly()` matters structurally, not just semantically: a sessionless invocation runs on `RunSessionlessCommandRequest` (a unary RPC) **inline on the gRPC handler thread**, the same reasoning that keeps a mutating on-stream command off the reader.
+
+**`/agent` and `/model` stay session-bound**, deliberately: their bare form (list) could in principle answer sessionless, but their named form (mutate) cannot, and splitting one command's behavior by argument shape across the sessionless/session-bound line would be a worse seam than the client owning it. The client resolves this itself — a sessionless tab stages a named `/model`/`/agent` choice into the tab's pending create-options (it rides the eventual `CreateSessionRequest`) and opens its own model/agent picker for the bare form via the session-free `ListModels`/`ListAgentPresets` RPCs — so only genuinely sessionless commands (`/help`, `/sessions`) are ever dispatched sessionless.
+
+`ListCommands`' wire `CommandInfo.requires_session` is what lets a client filter `/`-autocomplete and the `/help` overlay to commands that can actually run on the focused tab, rather than offering one that would only refuse.
 
 **`/agent` and `/model` are two knobs.** A preset supplies a *default* model; a model the user named outranks it and **survives a later `/agent`**, which re-resolves the preset from disk and must not silently undo the choice. The override lives on the session, not in the preset, which is what makes that possible. Neither takes the searchable picker ARCHITECTURE's UX implies — that arrives with the TUI; until then `/agent <name>` and `/model <provider>/<model>` take exact names, and `--agent`/`--model` cover the headless path.
 
@@ -1167,6 +1186,7 @@ Frame: `tab bar / active session view / optional panel / status bar`, plus a mod
 
 **Client state model:**
 
+- **A tab is a container; its session is a nullable reference.** `OpenTab` mints a TAB only — no RPC, no server row — and the session comes into existence when the first message is submitted (`SubmitChatTurn` → `EnsureSession`, a single-flight create on the async RPC worker; queued sends all land on the one created session). This is the structural fix for 0-message junk rows: nothing is persisted until there is something to say, and a tab abandoned before that leaves nothing behind. Tabs are keyed by a client-generated `tab_id` (session ids cannot key a sessionless tab); the session-keyed senders remain the wire layer beneath the tab-keyed `Submit*` entries. `/model <ref>` and `/agent <name>` on a sessionless tab STAGE into the tab's pending create-options (validated by the server at `CreateSession`, reflected in the status bar immediately) instead of minting a session to switch on.
 - `SessionState` per tab: **bounded sliding** scrollback window (against `GetMessages`; paging older beyond `ui.json`'s `scrollback_window_max_messages` evicts pages from the window's NEWEST end and flags the trim, which the view renders as a boundary marker -- the wire only pages descending, so newer pages return with the next turn refresh, never a silent gap), `StreamingMarkdownView` for the in-flight message (stream recreation keyed on `turn_seq`, not a buffer-size heuristic; `Finalize()` runs once per turn), derived tab state, pending prompt, per-session tool rows (output capped at append, head ¼ + marker + tail ¾).
 - The frame renders the FOCUSED tab from a deep snapshot (`GetDetails`); the tab list and the tools panel read light snapshots (`TakeLightSnapshot`) -- a frame deep-copies one tab, not every tab. The 20 Hz pump posts only when `UiVersion()` moved, plus a 5 Hz floor for the editor's debounce gate.
 - A chat-surface plugin's `OnEvent`/`Render` and status-segment `Render` are guarded: a THROW disables the surface (the core chat view takes over) or blanks the segment for the frame -- never process death. BLOCKING is a documented contract, not enforced (no dispatcher thread).
@@ -1215,7 +1235,7 @@ With parallel tool dispatch (width 4 by default) the multi-row case is the commo
 
 Since attached sessions are all visible as tabs, the picker is primarily a browser of **past (terminated)** sessions: filtered to the current `project_root` by default (`ctrl+a` to widen to `include_all_dirs`), excluding `parent_session_id IS NOT NULL`, showing name / message count / last-activity. A type-to-filter box matches name, session id, or `project_root`; `tab` toggles the sort between most-recently-updated and name; arrowing past the last loaded row (unfiltered) pages in more via the wire's keyset cursor (`before_updated_at`/`before_id`). Deletion is `ctrl+d`, confirmed — plain characters type into the filter instead. The first row is always a synthetic "+ new session" entry, `Enter`'s way of reaching `OpenTab` from inside the modal.
 
-Startup always creates a session directly, whether or not prior sessions exist for the cwd — the picker is opened on demand (`ctrl+o` or `/sessions`), not automatically: the common case is "start working," and paying a modal (plus a round trip just to check whether one is needed) on every cold start regardless was pure friction.
+Startup opens a **sessionless tab** rather than creating a session directly (§ *TUI layout*, "Client state model") — the picker is opened on demand (`ctrl+o` or `/sessions`), not automatically: the common case is "start working," and paying a modal (plus a round trip just to check whether one is needed) on every cold start regardless was pure friction. The no-session-until-first-message property is what the sessionless tab was built to guarantee in the first place; there is no longer a distinct "create a session directly" path to describe.
 
 ### Message-kind rendering
 

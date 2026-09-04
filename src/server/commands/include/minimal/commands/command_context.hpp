@@ -20,6 +20,7 @@
 //     command the power to create sessions before anything can attach to one
 //     would be surface built ahead of its consumer.
 
+#include <cassert>
 #include <optional>
 #include <string>
 
@@ -83,18 +84,32 @@ public:
 
 class CommandContext {
 public:
-    CommandContext(SessionControl& session, const agent::AgentPresetRegistry& presets,
+    // `session` is NULLABLE: a sessionless invocation (DispatchSessionless)
+    // passes nullptr, and only a Sessionless<> command may be dispatched that
+    // way -- the dispatcher refuses everything else before Execute, so a
+    // session-bound command can never observe the null. Commands reach the
+    // session through session() (asserts non-null); a sessionless-capable one
+    // branches on has_session() first.
+    CommandContext(SessionControl* session, const agent::AgentPresetRegistry& presets,
                    ConfirmationBroker& confirmations, common::Logger& logger)
         : session_(session), presets_(presets), confirmations_(confirmations), logger_(logger) {}
 
-    SessionControl& session() { return session_; }
+    // The session, as much of a command may touch. Implemented by agent::Session.
+    // ONLY legal when has_session() -- a Sessionless<> command must branch first.
+    SessionControl& session() {
+        assert(session_ != nullptr && "session() on a sessionless CommandContext");
+        return *session_;
+    }
+    SessionControl* session_if() const { return session_; }
+    bool has_session() const { return session_ != nullptr; }
+
     const agent::AgentPresetRegistry& presets() const { return presets_; }
     const config::ProvidersConfig& providers() const { return presets_.providers(); }
     ConfirmationBroker& confirmations() { return confirmations_; }
     common::Logger& logger() { return logger_; }
 
 private:
-    SessionControl& session_;
+    SessionControl* session_;
     const agent::AgentPresetRegistry& presets_;
     ConfirmationBroker& confirmations_;
     common::Logger& logger_;

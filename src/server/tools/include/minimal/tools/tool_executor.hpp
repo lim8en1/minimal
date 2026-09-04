@@ -102,9 +102,10 @@ public:
 
     std::size_t granted_count() const { return session_grants_.size(); }
 
-    // /permission-mode. Worker-thread only: changing it is not a read-only
-    // command, so it runs between turns rather than beside one -- which is what
-    // makes this safe without a lock while a tool dispatch reads it.
+    // shift+tab's run-mode switch (SetRunModeEvent). Worker-thread only:
+    // the change is queued to the session worker, so it runs between turns
+    // rather than beside one -- which is what makes this safe without a
+    // lock while a tool dispatch reads it.
     void SetRunMode(PermissionRunMode mode) { run_mode_ = mode; }
 
     // Session grants are copied into a subagent at spawn -- re-prompting for
@@ -113,8 +114,8 @@ public:
     std::vector<std::string> granted_keys() const;
 
     // The parent's run mode is the ceiling a child's is clamped against
-    // (clamp_run_mode), which a spawner cannot do without reading it. Also what
-    // /permission-mode reads back.
+    // (clamp_run_mode), which a spawner cannot do without reading it. Also
+    // what the client's {permission_mode} status segment reflects.
     PermissionRunMode run_mode() const { return run_mode_; }
 
     // The policies a spawner hands DOWN as its child's ceilings -- the

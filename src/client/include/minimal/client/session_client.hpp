@@ -287,6 +287,15 @@ public:
     };
     ListCommandsResult ListCommands();
 
+    // Executes a SESSIONLESS /-command (a Sessionless<> command on the
+    // server: /help, /sessions and their future siblings). Dispatched with
+    // no session at all -- the wire path that lets a sessionless tab run a
+    // command without minting a row. Bounded like ListCommands; a transport
+    // failure arrives as an ERROR CommandResult (never a dropped answer).
+    v1::CommandResult RunSessionlessCommand(const std::string& name,
+                                            const std::vector<std::string>& positional,
+                                            const std::string& raw);
+
     // The agent picker's list: every agents/*.md preset's name + description,
     // fetched fresh on each open (unlike ListCommands, config can gain a new
     // preset file between opens and there is no invalidation machinery to

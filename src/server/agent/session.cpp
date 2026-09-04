@@ -12,6 +12,7 @@
 
 #include "minimal/agent/mention_expansion.hpp"
 #include "minimal/agent/session_naming.hpp"
+#include "minimal/config/permission_codec.hpp"
 
 namespace minimal::agent {
 namespace {
@@ -391,6 +392,10 @@ void Session::ApplyPreset(AgentPreset preset) {
     {
         std::lock_guard<std::mutex> lock(mutex_);
         preset_ = std::move(preset);
+        // The preset NAME is external-callers' data (SessionInfo): EmitSessionMetadata
+        // and the tab label read it from info_, and a stale one here is why {agent}
+        // kept showing the session's original preset after /agent until re-attach.
+        if (!preset_.name.empty()) info_.agent_preset = preset_.name;
     }
     executor_.SetRunMode(params_.run_mode_override.value_or(preset_.run_mode));
     loop_->SetPreset(preset_);
@@ -398,6 +403,11 @@ void Session::ApplyPreset(AgentPreset preset) {
     // turn boundary (the same blocking contract as a preset swap): a dead
     // server in the new list is surfaced here, never discovered mid-turn.
     if (mcp_manager_ != nullptr) RefreshMcpServers();
+
+    // Announce the full metadata set so every attached client's status bar
+    // ({model} {agent} {permission_mode} {tokens}-max) refreshes NOW instead
+    // of only at its next attach.
+    EmitMetadataChanged();
 
     if (!provider_changed) return;
     if (provider_factories_ == nullptr) {
@@ -454,7 +464,7 @@ void Session::ExecuteCommand(const QueuedCommand& command, bool busy) {
         return;
     }
 
-    commands::CommandContext context(*this, *presets_, *confirmations_, logger_);
+    commands::CommandContext context(this, *presets_, *confirmations_, logger_);
     auto outcome = commands::Dispatch(*commands_, command.name, command.args, context, busy);
     EmitCommandResult(std::move(outcome), command);
 }
@@ -525,6 +535,33 @@ bool Session::SubmitRewind(QueuedRewind request) {
     return true;
 }
 
+bool Session::SubmitRunMode(QueuedRunMode request) {
+    // Same shape as SubmitRewind: one shared queue, one answer contract. No
+    // subagent refusal -- a child session's shift+tab is as legitimate as its
+    // parent's, bounded by clamp_run_mode only at spawn time.
+    bool refused = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (terminated_.load(std::memory_order_acquire)) return false;
+        if (work_.size() >= kMaxWorkItems) {
+            refused = true;
+        } else {
+            work_.push_back(std::move(request));
+        }
+    }
+    if (refused) {
+        if (!EmitEvent(
+                SessionEvent{SessionError{"session backlog is full; run-mode change refused"}})) {
+            logger_.warn("session {}: run-mode change refused and the queue is full; client "
+                         "will not see it",
+                         params_.session_id);
+        }
+        return false;
+    }
+    turn_cv_.notify_one();
+    return true;
+}
+
 // A rewind target must be a REAL user turn: role User carrying text. This
 // excludes injected subagent completions (User role, tool-result blocks only)
 // and anything else a human never typed -- rewinding "to" one would cut the
@@ -556,6 +593,33 @@ void Session::RunOneRewind(const QueuedRewind& request) {
     } catch (const std::exception& e) {
         logger_.warn("session {}: rewind failed: {}", params_.session_id, e.what());
         EmitRewindRefusal(e.what());
+    }
+}
+
+void Session::RunOneRunMode(const QueuedRunMode& request) {
+    // Worker thread, between turns -- SetRunMode's only safe calling context
+    // (the executor reads it lock-free during tool dispatch). The metadata
+    // event is what every attached client's {permission_mode} refreshes from.
+    executor_.SetRunMode(request.mode);
+    EmitMetadataChanged();
+}
+
+void Session::EmitMetadataChanged() {
+    const auto preset = preset_snapshot();
+    // InfoSnapshot(), not info_ directly: SetName() (the titler's observer
+    // thread) writes info_.name under mutex_, and this runs on the worker --
+    // a bare read here races that write (TSan-visible; a torn std::string
+    // read is a real crash, not just a stale value).
+    const auto info = InfoSnapshot();
+    SessionMetadataChanged metadata;
+    metadata.name = info.name;
+    metadata.agent_preset = info.agent_preset;
+    metadata.model = preset.model_ref.str();
+    metadata.permission_mode = config::ToString(executor_.run_mode());
+    metadata.context_window_tokens = preset.context_window_tokens.value_or(0);
+    if (!EmitEvent(SessionEvent{std::move(metadata)})) {
+        logger_.warn("session {}: metadata event dropped (broadcaster closed)",
+                     params_.session_id);
     }
 }
 
@@ -604,7 +668,7 @@ void Session::RunRewind(std::int64_t target_seq) {
         loop_->TruncateAfter(target_seq);
     }
 
-    observers_.NotifySessionRewound(info_, target_seq);
+    observers_.NotifySessionRewound(InfoSnapshot(), target_seq);
     // The active transcript now ends just before the target; -1 when the
     // target was seq 0.
     EmitSessionRewound(target_seq, target_seq - 1);
@@ -635,7 +699,7 @@ void Session::RunRedo() {
         loop_->RestorePersisted(std::move(messages), rows.front().seq);
     }
 
-    observers_.NotifySessionRewound(info_, -1);
+    observers_.NotifySessionRewound(InfoSnapshot(), -1);
     EmitSessionRewound(-1, history_reader_->ActiveLastSeq(params_.session_id));
 }
 
@@ -853,6 +917,8 @@ void Session::WorkerMain() {
             RunOneTurn(std::move(*text));
         } else if (auto* rewind = std::get_if<QueuedRewind>(&item)) {
             RunOneRewind(*rewind);
+        } else if (auto* run_mode = std::get_if<QueuedRunMode>(&item)) {
+            RunOneRunMode(*run_mode);
         } else {
             RunOneCommand(std::get<QueuedCommand>(item));
         }

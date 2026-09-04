@@ -192,7 +192,7 @@ ftxui::Component MakeConfirmationModal(const PendingConfirmation& request, const
     // per-frame snapshot members), the callback captured by value.
     const auto request_state = std::make_shared<PendingConfirmation>(request);
 
-    // The wire confirmations (/clear, /permission-mode) offer "Yes"/"No" with
+    // The wire confirmations (/clear) offer "Yes"/"No" with
     // no cancel option -- Escape is not an answer there (below), so the footer
     // must not advertise one.
     const bool has_cancel =

@@ -586,11 +586,39 @@ TEST_CASE("INVARIANT: tool output deltas stay bounded, with marker and tail pres
     CHECK(out.find("xxx") != std::string::npos);   // head AND tail content preserved
 }
 
+// {tokens} liveness: usage events arrive at message start (input half) and
+// message_delta (output half) DURING a turn; before OnUsage existed the
+// segment sat empty until TurnCompleted.
+TEST_CASE("OnUsage updates the token counters mid-turn", "[session_state]") {
+    SessionState state("s-1");
+
+    v1::UsageEvent evt;
+    evt.mutable_usage()->set_input_tokens(1200);
+    evt.mutable_usage()->set_output_tokens(34);
+    evt.mutable_usage()->set_cache_read_input_tokens(100);
+    evt.mutable_usage()->set_cache_creation_input_tokens(200);
+    state.OnUsage(evt);
+
+    const auto snap = state.TakeSnapshot();
+    CHECK(snap.input_tokens == 1200);
+    CHECK(snap.output_tokens == 34);
+    CHECK(snap.cache_read_tokens == 100);
+    CHECK(snap.cache_write_tokens == 200);
+
+    // The turn-end tally is still authoritative: it overwrites.
+    v1::TurnCompletedEvent done;
+    done.mutable_usage()->set_input_tokens(1300);
+    done.mutable_usage()->set_output_tokens(50);
+    state.OnTurnCompleted(done);
+    const auto final_snap = state.TakeSnapshot();
+    CHECK(final_snap.input_tokens == 1300);
+    CHECK(final_snap.output_tokens == 50);
+}
+
 // Track R2-8: stream recreation keys on turn_seq, not a buffer-size heuristic.
 // The seq must advance once per streaming turn (a new stream after the previous
 // one ended), and must NOT advance on intra-turn boundaries.
-TEST_CASE("turn_seq advances once per streaming turn", "[session_state]") {
-    SessionState state("s-1");
+TEST_CASE("turn_seq advances once per streaming turn", "[session_state]") {    SessionState state("s-1");
 
     state.AppendStreamingText("hel");
     state.AppendStreamingText("lo");
@@ -641,7 +669,7 @@ TEST_CASE("RequestCancel flags a busy tab; the turn end clears it", "[session_st
 
 TEST_CASE("answering a command confirmation leaves Waiting -- the wedge fix",
           "[session_state]") {
-    // A command confirmation (/clear, /permission-mode) is answered with no
+    // A command confirmation (/clear) is answered with no
     // tool events or message stops following: the server worker was BLOCKED
     // on the answer, so nothing else re-derives the tab state. Without
     // OnPendingResolved the tab stayed stranded in Waiting with the '!' glyph

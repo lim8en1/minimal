@@ -22,7 +22,7 @@ Installed to `<libdir>/minimal/plugins/`. All enabled by default unless noted.
 | `tools-web` | Tools `web_fetch`, `web_search` |
 | `provider-openai` | Provider kind `openai` (chat-completions shape) + model catalog for it |
 | `provider-anthropic` | Provider kind `anthropic` (Messages API, prompt caching) |
-| `commands-core` | Commands `/help`, `/clear`, `/compact`, `/agent`, `/model`, `/permission-mode`, `/sessions` |
+| `commands-core` | Commands `/help`, `/clear`, `/compact`, `/agent`, `/model`, `/sessions` |
 | `checklist` | Tool `checklist` + cross-plugin RPC endpoint `checklist.rpc` |
 | `signals-message` | Tool `message_session` (cross-session messaging on the core `signals` service) |
 | `cost-tracker` | Commands `/cost`, `/cost-update-rates`; per-session cost accumulation; RPC endpoint `cost-tracker.rpc` |

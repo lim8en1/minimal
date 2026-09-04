@@ -214,23 +214,18 @@ void AgentLoop::FlushInjectedMessages() {
     injections_->DrainAll([this](llm::Message message) { AppendAndPersist(std::move(message)); });
 }
 
-llm::ChatRequest AgentLoop::BuildChatRequest() const {
-    llm::ChatRequest request;
-    if (!preset_.system_prompt.empty()) request.system = preset_.system_prompt;
+AgentLoop::SystemAndTools AgentLoop::BuildSystemAndTools() const {
+    SystemAndTools out;
+    if (!preset_.system_prompt.empty()) out.system = preset_.system_prompt;
     // Project context appends AFTER the preset body: both are constant within
     // the session, so the request's prefix -- which the provider's prompt cache
     // keys on -- is stable either way, but appending keeps the preset's own
     // text at the very front across /agent switches.
     if (!project_context_.empty()) {
-        if (request.system) *request.system += "\n\n";
-        else request.system = std::string();
-        *request.system += project_context_;
+        if (out.system) *out.system += "\n\n";
+        else out.system = std::string();
+        *out.system += project_context_;
     }
-    request.messages = history_;
-    request.model = preset_.provider.model_name;
-    request.parameters = preset_.parameters;
-    request.max_tokens = preset_.max_tokens;
-    request.stream = true;
 
     std::vector<std::string> allowed = preset_.allowed_tools;
     if (preset_.is_subagent) {
@@ -241,51 +236,70 @@ llm::ChatRequest AgentLoop::BuildChatRequest() const {
                       allowed.end());
     }
 
-    request.tools = registry_.DefinitionsFor(allowed);
+    out.tools = registry_.DefinitionsFor(allowed);
     // Live MCP tools for the allowed-and-alive servers, merged into the same
     // sorted order -- this request is rebuilt every turn, so the merge must
     // preserve the deterministic prefix the prompt cache keys on.
     {
         std::vector<llm::ToolDefinition> mcp_defs =
             registry_.DefinitionsForMcpServers(mcp_servers_);
-        request.tools.insert(request.tools.end(), mcp_defs.begin(), mcp_defs.end());
-        std::sort(request.tools.begin(), request.tools.end(),
+        out.tools.insert(out.tools.end(), mcp_defs.begin(), mcp_defs.end());
+        std::sort(out.tools.begin(), out.tools.end(),
                   [](const llm::ToolDefinition& a, const llm::ToolDefinition& b) {
                       return a.name < b.name;
                   });
     }
     if (preset_.is_subagent) {
         // DefinitionsFor("*") would have re-admitted it.
-        request.tools.erase(std::remove_if(request.tools.begin(), request.tools.end(),
-                                            [](const llm::ToolDefinition& def) {
-                                                return def.name == kSpawnSubagentToolName;
-                                            }),
-                             request.tools.end());
+        out.tools.erase(std::remove_if(out.tools.begin(), out.tools.end(),
+                                       [](const llm::ToolDefinition& def) {
+                                           return def.name == kSpawnSubagentToolName;
+                                       }),
+                        out.tools.end());
     }
     if (preset_.allowed_skills.empty()) {
         // No skills in this preset: the tool would only ever return errors. One
         // post-erase suffices here (unlike the subagent case above) because it
         // covers both an explicit allowed_tools list and "*".
-        request.tools.erase(std::remove_if(request.tools.begin(), request.tools.end(),
-                                            [](const llm::ToolDefinition& def) {
-                                                return def.name == kSkillToolName;
-                                            }),
-                             request.tools.end());
+        out.tools.erase(std::remove_if(out.tools.begin(), out.tools.end(),
+                                       [](const llm::ToolDefinition& def) {
+                                           return def.name == kSkillToolName;
+                                       }),
+                        out.tools.end());
     }
+    return out;
+}
+
+llm::ChatRequest AgentLoop::BuildChatRequest() const {
+    llm::ChatRequest request;
+    SystemAndTools system_and_tools = BuildSystemAndTools();
+    request.system = std::move(system_and_tools.system);
+    request.tools = std::move(system_and_tools.tools);
+    request.messages = history_;
+    request.model = preset_.provider.model_name;
+    request.parameters = preset_.parameters;
+    request.max_tokens = preset_.max_tokens;
+    request.stream = true;
     return request;
 }
 
-// The estimate is built FROM the request -- system prompt, project context and
-// tools array included -- rather than alongside it, so the two cannot drift:
-// a /agent switch, a project-context load or an allowed-tools change all flow
-// through BuildChatRequest into both. The bytes/4 roughness matches
-// estimate_tokens, which is deliberate: the first real response replaces the
-// estimate with the backend's ground truth anyway.
+// The estimate is built FROM the same system/tools construction BuildChatRequest
+// uses -- system prompt, project context and tools array included -- rather
+// than alongside it, so the two cannot drift: a /agent switch, a
+// project-context load or an allowed-tools change flow through
+// BuildSystemAndTools into both. Deliberately does NOT go through
+// BuildChatRequest: that assigns request.messages = history_, a full deep copy
+// of the working history's every message and string that this call never
+// reads -- for a 512k-1M-token session, on every compaction check, resume, and
+// rewind/redo. The bytes/4 roughness matches estimate_tokens, which is
+// deliberate: the first real response replaces the estimate with the
+// backend's ground truth anyway.
 std::int64_t AgentLoop::EstimateContextTokens() const {
-    const llm::ChatRequest request = BuildChatRequest();
-    std::int64_t bytes =
-        request.system ? static_cast<std::int64_t>(request.system->size()) : 0;
-    for (const auto& def : request.tools) {
+    const SystemAndTools system_and_tools = BuildSystemAndTools();
+    std::int64_t bytes = system_and_tools.system
+                             ? static_cast<std::int64_t>(system_and_tools.system->size())
+                             : 0;
+    for (const auto& def : system_and_tools.tools) {
         bytes += static_cast<std::int64_t>(def.name.size() + def.description.size());
         bytes += JsonSizeEstimate(def.input_schema);
     }
@@ -958,6 +972,22 @@ void AgentLoop::RunTurnLoop(TurnResult& result, bool flush_first) {
         // (parallel_safe() == false) run here on the worker, one at a time, in
         // block order: their contract is "my invocations never overlap each
         // other", and the worker is the thread that guarantees it.
+        //
+        // RAII, not a bare call after both loops: pool tasks capture `&call`
+        // into `calls`, which lives on THIS stack frame (ToolPool rule 3 --
+        // the caller's stack must outlive Wait()). If anything between the
+        // submit loop and the explicit Wait() below throws -- a serial
+        // execute_one(), or Submit() itself hitting the pool's own
+        // exceptions -- the stack would unwind past `calls` without ever
+        // joining the pool, leaving its threads holding dangling references.
+        // Wait() is documented idempotent, so the guard's destructor and the
+        // explicit call below (kept for the ordinary, non-throwing path's
+        // readability) cost nothing extra when both run.
+        struct PoolWaitGuard {
+            tools::ToolPool& pool;
+            ~PoolWaitGuard() { pool.Wait(); }
+        } wait_guard{pool_};
+
         for (auto& call : calls) {
             if (call.to_pool) {
                 // `call` lives in `calls` on this stack until Wait() returns,

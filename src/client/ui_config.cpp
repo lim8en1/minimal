@@ -40,19 +40,24 @@ UiConfig LoadUiConfig(const std::filesystem::path& config_dir) {
     } else if (it != parsed.end()) {
         common::DefaultLogger().warn("ui.json: \"theme\" must be a string -- ignored");
     }
-    const auto positive_int = [&parsed](const char* key, int& out) {
+    const auto bounded_int = [&parsed](const char* key, int& out, int floor) {
         if (auto it = parsed.find(key); it != parsed.end()) {
-            if (it->is_number_integer() && it->get<int>() > 0) {
+            if (it->is_number_integer() && it->get<int>() >= floor) {
                 out = it->get<int>();
             } else {
                 common::DefaultLogger().warn(
-                    "ui.json: \"{}\" must be a positive integer -- ignored", key);
+                    "ui.json: \"{}\" must be an integer >= {} -- ignored", key, floor);
             }
         }
     };
-    positive_int("scrollback_window_max_messages", config.scrollback_window_max_messages);
-    positive_int("tool_output_buffer_bytes", config.tool_output_buffer_bytes);
-    positive_int("tools_panel_stdout_buffer_lines", config.tools_panel_stdout_buffer_lines);
+    bounded_int("scrollback_window_max_messages", config.scrollback_window_max_messages, 1);
+    // A floor well above the head+marker+tail split's fixed overhead
+    // (SessionState::OnToolOutputDelta's truncation marker alone is ~70
+    // bytes): a value below it made head_bytes/tail_budget underflow to a
+    // huge size_t and threw std::out_of_range out of the gRPC reader thread
+    // on the first delta past the cap.
+    bounded_int("tool_output_buffer_bytes", config.tool_output_buffer_bytes, 4096);
+    bounded_int("tools_panel_stdout_buffer_lines", config.tools_panel_stdout_buffer_lines, 1);
     return config;
 }
 

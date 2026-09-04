@@ -126,15 +126,27 @@ void PickerController::RebuildAgentPickerComponent() {
     *deps_.agent_picker_slot = MakeAgentPresetPicker(
         agent_picker_presets_, deps_.theme,
         {.on_select =
-             [this](const std::string& name) {
-                 // Re-sends "/agent <name>" over the exact same path a
-                 // typed command would take (AppState::SendCommand) --
-                 // AgentCommand::Execute's by-name branch, precedence rules
-                 // and all, runs unchanged. No new mutation code.
-                 deps_.app.SendCommand(deps_.app.FocusedSessionId(), "/agent " + name);
-                 deps_.show_agent_picker = false;
-             },
-         .on_close = [this] { deps_.show_agent_picker = false; }});
+              [this](const std::string& name) {
+                  // Sessioned tab: re-sends "/agent <name>" over the exact
+                  // same path a typed command would take
+                  // (AppState::SubmitCommand) -- AgentCommand::Execute's
+                  // by-name branch, precedence rules and all, runs
+                  // unchanged. No new mutation code. Sessionless tab (no
+                  // session yet): the choice STAGES onto the tab's pending
+                  // create-options -- it rides CreateSessionRequest when
+                  // the first message creates the session -- instead of
+                  // minting a session just to switch presets on it.
+                  const std::string tab = deps_.app.FocusedTabId();
+                  if (!tab.empty() && deps_.app.FocusedSessionId().empty()) {
+                      deps_.app.StageAgentPreset(tab, name);
+                      deps_.app.TabNotice(tab, "agent '" + name +
+                                                   "' will be used when the session starts");
+                  } else {
+                      deps_.app.SubmitCommand(tab, "/agent " + name);
+                  }
+                  deps_.show_agent_picker = false;
+              },
+          .on_close = [this] { deps_.show_agent_picker = false; }});
 }
 
 void PickerController::OpenAgentPicker() {
@@ -171,14 +183,25 @@ void PickerController::RebuildModelPickerComponent() {
     *deps_.model_picker_slot = MakeModelPicker(
         model_picker_models_, deps_.theme,
         {.on_select =
-             [this](const std::string& ref) {
-                 // Re-sends "/model <ref>" over the exact same path a typed
-                 // command would take (AppState::SendCommand) --
-                 // ModelCommand::Execute's by-ref branch, precedence rules
-                 // and all, runs unchanged. No new mutation code.
-                 deps_.app.SendCommand(deps_.app.FocusedSessionId(), "/model " + ref);
-                 deps_.show_model_picker = false;
-             },
+              [this](const std::string& ref) {
+                  // Sessioned tab: re-sends "/model <ref>" over the exact
+                  // same path a typed command would take
+                  // (AppState::SubmitCommand) -- ModelCommand::Execute's
+                  // by-ref branch, precedence rules and all, runs
+                  // unchanged. No new mutation code. Sessionless tab: the
+                  // choice stages onto the tab's pending create-options
+                  // (validated by the server at CreateSession), exactly
+                  // like the agent picker above.
+                  const std::string tab = deps_.app.FocusedTabId();
+                  if (!tab.empty() && deps_.app.FocusedSessionId().empty()) {
+                      deps_.app.StageModel(tab, ref);
+                      deps_.app.TabNotice(tab, "model '" + ref +
+                                                   "' will be used when the session starts");
+                  } else {
+                      deps_.app.SubmitCommand(tab, "/model " + ref);
+                  }
+                  deps_.show_model_picker = false;
+              },
          .on_refresh_discovery = [this] { OpenModelPicker(/*refresh=*/true); },
          .on_close = [this] { deps_.show_model_picker = false; }});
 }

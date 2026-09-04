@@ -409,7 +409,12 @@ void SessionRegistry::ReaperMain() {
             std::unique_lock<std::mutex> lock(mutex_);
             // Polling at a fraction of the guard keeps every deadline below
             // within one tick of its target without a timer per session.
-            reaper_cv_.wait_for(lock, initial_attach_guard_ / 4, [this] { return stopping_; });
+            // Floored: the parser rejects a zero/negative
+            // initial_attach_guard_seconds, but a test or direct construction
+            // that bypasses it must not turn this into a 0ms wait_for, which
+            // spins this thread at 100% CPU under the registry mutex.
+            const auto poll_interval = std::max(initial_attach_guard_ / 4, std::chrono::milliseconds(250));
+            reaper_cv_.wait_for(lock, poll_interval, [this] { return stopping_; });
             if (stopping_) return;
 
             const auto now = std::chrono::steady_clock::now();

@@ -37,9 +37,15 @@ EventBroadcaster::Handle EventBroadcaster::Subscribe() {
             // A stream attaching to a session that is already tearing down:
             // hand back a queue that is closed-and-empty so its writer exits
             // immediately, the same graceful answer the old closed EventQueue
-            // gave a late Pop.
+            // gave a late Pop. Returned HERE, before the shared tail below --
+            // that tail unconditionally does `subscribers_.push_back(sub)`,
+            // which would register a subscriber CloseAll() already returned
+            // from and nothing will ever remove (no Unsubscribe is coming for
+            // a stream that was never really attached), making
+            // subscriber_count() lie during teardown.
             std::lock_guard<std::mutex> sub_lock(sub->mutex);
             sub->closed = true;
+            return sub;
         } else if (ever_subscribed_) {
             // A LATER subscriber has provably missed events -- everything the
             // earlier subscriber's queue received. Resync first, then hand it
@@ -49,7 +55,12 @@ EventBroadcaster::Handle EventBroadcaster::Subscribe() {
             std::lock_guard<std::mutex> sub_lock(sub->mutex);
             TakeResyncLocked(*sub, "late_attach");
             for (auto& event : backlog_) {
-                AcceptLocked(*sub, std::move(event), SizeOf(event));
+                // Hoisted: argument evaluation order is unspecified, so
+                // SizeOf(event) inside the call could read a moved-from
+                // (zero-byte) event if the compiler moves first -- silently
+                // under-counting the per-subscriber byte bound.
+                const std::size_t bytes = SizeOf(event);
+                AcceptLocked(*sub, std::move(event), bytes);
             }
         } else {
             // FIRST subscriber: the pre-attach buffer's semantics, unchanged.
@@ -59,7 +70,12 @@ EventBroadcaster::Handle EventBroadcaster::Subscribe() {
             std::lock_guard<std::mutex> sub_lock(sub->mutex);
             if (backlog_latched_) TakeResyncLocked(*sub, "overflow");
             for (auto& event : backlog_) {
-                AcceptLocked(*sub, std::move(event), SizeOf(event));
+                // Hoisted: argument evaluation order is unspecified, so
+                // SizeOf(event) inside the call could read a moved-from
+                // (zero-byte) event if the compiler moves first -- silently
+                // under-counting the per-subscriber byte bound.
+                const std::size_t bytes = SizeOf(event);
+                AcceptLocked(*sub, std::move(event), bytes);
             }
         }
         backlog_.clear();

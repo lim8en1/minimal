@@ -115,7 +115,7 @@ private:
 struct KeyContext {
     AppState& app;
     const ResolvedKeymap& keymap;
-    const std::string& focused;   // the currently focused session id, this frame
+    const std::string& focused;   // the focused TAB id (TabMaintenance::Focused), this frame
 
     bool& show_panel;
     bool& show_plugin_modal;

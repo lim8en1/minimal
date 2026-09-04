@@ -140,4 +140,9 @@ v1::SessionSummary ToProto(const session::SessionSummary& summary);
 // that has the raw text a human typed, and the proto carries the result.
 commands::CommandArgs FromProto(const v1::CommandArgs& args);
 
+// Fills status/message/display/view_hint; `request_id` is the caller's to set
+// (the stream path echoes the invocation's, the sessionless unary leaves it
+// empty -- a synchronous response needs no correlation).
+void FillProto(v1::CommandResult& out, const commands::CommandResult& result);
+
 }  // namespace minimal::rpc

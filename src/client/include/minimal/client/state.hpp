@@ -256,6 +256,15 @@ public:
     void OnSessionCreated(std::string name);
     void OnSessionMetadata(const v1::SessionMetadataEvent& metadata);
 
+    // Sessionless-tab support. A tab's SessionState is constructed before its
+    // session exists (session_id "" and no metadata), so EnsureSession tells
+    // the state its id once the create resolves, and the /agent //model
+    // staging paths seed the status-bar fields directly (the wire metadata
+    // event only arrives once a session exists).
+    void SetSessionId(std::string session_id);
+    void StageDisplayModel(std::string model_ref);
+    void StageDisplayAgentPreset(std::string preset_name);
+
     // --- Streaming response ---
     void AppendStreamingText(std::string_view text);
     void FinalizeStreamingText();
@@ -263,6 +272,10 @@ public:
     // --- Turn boundaries (ToolExecution / TextDelta set Working/Thinking; these clear it) ---
     void OnTurnCompleted(const v1::TurnCompletedEvent& evt);
     void OnError(const std::string& error_message);
+
+    // Mid-turn usage (message_start/message_delta). Keeps {tokens} live
+    // during a turn; OnTurnCompleted still overwrites with the final tally.
+    void OnUsage(const v1::UsageEvent& evt);
 
     // /-command outcome. Stored as a transient notice for the notice line;
     // never enters the chat rows.
@@ -305,7 +318,7 @@ public:
 
     // A pending prompt was just answered. The server worker was BLOCKED on
     // this answer, so no further event is guaranteed to re-derive the tab
-    // state: a command confirmation (/clear, /permission-mode) produces no
+    // state: a command confirmation (/clear) produces no
     // tool events or message stops afterwards, and without this call the tab
     // stays stranded in Waiting with the '!' glyph and nothing pending.
     void OnPendingResolved();
@@ -417,7 +430,13 @@ private:
 // ============================================================================
 
 struct TabInfo {
-    std::string session_id;
+    // CLIENT-GENERATED tab identity: the primary key for every UI operation
+    // (focus, close, the tab_ui map, pending_close, keybinding targets). A tab
+    // exists before its session does (OpenTab mints nothing -- the session is
+    // created when the first message is sent), so session_id cannot serve as
+    // the key: every sessionless tab would collide on "".
+    std::string tab_id;
+    std::string session_id;                   // empty until the session exists
     std::shared_ptr<SessionState> state;      // never moves in the vector
 
     std::optional<std::string> parent_session_id;   // nullopt => root session
@@ -425,12 +444,15 @@ struct TabInfo {
     uint32_t spawn_seq = 0;           // global monotonic counter: stable sort key
 };
 
+// TEMPORARY DEBUG globals removed -- see git history for the deadlock diagnosis.
 class AppState {
 public:
     explicit AppState(std::shared_ptr<SessionClient> client);
 
     struct TabSnapshot {
-        std::string session_id;
+        std::string tab_id;            // the UI's tab handle (focus/close/map keys)
+        std::string session_id;        // empty while the tab has no session
+        bool has_session = false;      // what autocomplete / the /help overlay filter on
         std::string display_name;      // for tab bar / picker
         SessionStateKind state = SessionStateKind::Idle;
         bool is_subagent = false;
@@ -451,12 +473,29 @@ public:
     };
 
     // --- Tab management (all thread-safe) ---
+    //
+    // TAB vs SESSION. A tab is a client-side UI container holding a NULLABLE
+    // session reference. OpenTab creates ONLY the tab -- no RPC, no server-side
+    // row -- and the session comes into existence when the first message is
+    // sent (SubmitChatTurn -> EnsureSession), or never for a tab the user
+    // abandons. This is the fix for the 0-message junk sessions a startup or
+    // picker create used to leave behind: nothing is persisted until there is
+    // something to say. Tabs are keyed by a client-generated tab_id (every
+    // sessionless tab would collide on an empty session_id); the session-keyed
+    // senders below remain the wire layer and are only reached through a tab
+    // that HAS a session.
 
+    // Opens a SESSIONLESS tab carrying `opts` as its pending create-options
+    // (applied verbatim when the session is eventually created -- /model and
+    // /agent choices a user makes before the first message are staged here).
+    // Returns the new tab's tab_id. Never blocks, never touches the network.
     std::string OpenTab(const SessionClient::CreateOptions& opts);
 
-    // Attach a session already known to the server (resumes its stream). Used when
-    // the picker picks an existing session, or when a child subagent starts.
+    // Attach a session already known to the server as a tab (resumes its
+    // stream). Used when the picker picks a live session, or when a child
+    // subagent starts.
     //   parent_ordinal anchors grouping; -1 => treat as new root group.
+    // Returns the new tab's tab_id ("" on refusal/duplicate).
     std::string AttachTab(const std::string& session_id, int64_t parent_ordinal = -1);
 
     // Resume a STORED session (the session picker's "open a past session"
@@ -467,20 +506,36 @@ public:
     // open (or registered by a racing call) is returned without
     // duplicating; a resume the server REFUSES still registers the tab --
     // in the Error state, with the refusal as its visible notice -- so a
-    // failed pick is something the user can see and close. Always returns
-    // `session_id` (the registered tab's id); focus-if-empty follows
-    // OpenTab's rule, and the picker focuses explicitly afterward.
+    // failed pick is something the user can see and close. Always returns the
+    // registered tab's tab_id; focus-if-empty follows OpenTab's rule, and the
+    // picker focuses explicitly afterward.
     std::string ResumeTab(const std::string& session_id);
 
     // Called by the reader thread for every ServerEvent whose payload is not bound to
     // a tab the client already owns (e.g. SubagentStarted on the PARENT's stream).
     void OnSubagentSpawned(std::string_view parent_id, const v1::SubagentStartedEvent& evt);
 
-    void CloseTab(const std::string& session_id);
-    bool HasTab(const std::string& session_id) const;
+    // Both keyed by TAB id now (the session_id overload would be ambiguous for
+    // sessionless tabs, whose session_id is "").
+    void CloseTab(const std::string& tab_id);
+    bool HasTab(const std::string& tab_id) const;
 
     // --- Sending on a tab's stream (UI calls these; routes ClientEvents out) ---
 
+    // THE SEND ENTRIES for the prompt editor. Tab-keyed, and the only paths
+    // that can CREATE a session: on a tab whose session does not exist yet the
+    // action is queued and EnsureSession runs on the RPC worker (single-flight
+    // per tab), so a burst of submissions before the create resolves still
+    // lands on ONE session. On a sessioned tab both delegate inline, exactly
+    // like the session-keyed senders always did (fire-and-forget enqueue; no
+    // loop-thread blocking either way).
+    void SubmitChatTurn(const std::string& tab_id, const std::string& text);
+    void SubmitCommand(const std::string& tab_id, const std::string& line);
+
+    // The wire layer under the Submit* entries. Session-keyed: only legal on a
+    // tab that HAS a session (the Submit* wrappers route around them
+    // otherwise; a direct call with an unknown/empty id surfaces a visible
+    // refusal on the tab).
     void SendChatTurn(const std::string& session_id, const std::string& text);
 
     // A `/name args` prompt from the prompt editor. Split client-side (the same
@@ -490,6 +545,13 @@ public:
 
     // Ctrl-style interrupt of the tab's in-flight turn, if any.
     void SendCancel(const std::string& session_id);
+
+    // permission.cycle (shift+tab): a client-native wire event, like
+    // SendCancel/SendRewind -- no command, no confirmation modal (the
+    // keybinding IS the confirmation). The server queues the change for its
+    // worker and announces it back via SessionMetadataEvent, which is what
+    // the {permission_mode} status segment refreshes from.
+    void SendSetRunMode(const std::string& session_id, v1::PermissionRunMode mode);
 
     // Rewind is a client-native wire event (a oneof sibling of cancel/attach),
     // not a routed command -- sent directly like SendCancel, never through
@@ -543,16 +605,50 @@ public:
     // --- Focus (keybindings cycle forward/back through tabs in render order) ---
     void CycleFocusForward();
     void CycleFocusBackward();
-    void SetFocusedTab(const std::string& session_id);
+    void SetFocusedTab(const std::string& tab_id);
+
+    // --- Sessionless-tab staging (/agent, /model before the session exists) ---
+
+    // Stages a model/agent choice onto a tab WITHOUT a session (validated by
+    // the caller against the session-free ListModels/ListAgentPresets RPCs).
+    // The choice rides the tab's pending create-options when the session is
+    // eventually created, and seeds the tab's display metadata immediately so
+    // the status bar reflects it. Returns false (a no-op) when the tab already
+    // has a session -- callers send the real /model //agent command there.
+    bool StageModel(const std::string& tab_id, const std::string& model_ref);
+    bool StageAgentPreset(const std::string& tab_id, const std::string& preset_name);
+
+    // Runs `action` on the RPC worker once the tab's session exists (creating
+    // it if needed; single-flight per tab, queued actions share one create).
+    // On a sessioned tab, runs inline. `action` receives the session id and
+    // must not block.
+    void OnTabEnsureSession(const std::string& tab_id,
+                            std::function<void(const std::string& session_id)> action);
+
+    // Runs `line` as a SESSIONLESS command (the server's RunSessionlessCommand
+    // RPC, executed on the async RPC worker) and surfaces the result on the
+    // tab's notice line -- the same display/view_hint routing an on-stream
+    // command result gets. Only for tabs without a session; a sessioned tab
+    // uses the ordinary SubmitCommand path.
+    void RunSessionlessCommand(const std::string& tab_id, const std::string& line);
+
+    // Surfaces `message` on the tab's notice line (a kStatus command-result
+    // shape, so the frame renders it like any other outcome). The staging
+    // paths (/agent //model on a sessionless tab) report through this.
+    void TabNotice(const std::string& tab_id, const std::string& message);
 
     // --- Rendering ---
     // in render order. `include_tool_output`: see TakeLightSnapshot -- pass
     // true only when about to render the running-tools panel.
     std::vector<TabSnapshot> GetAllTabs(bool include_tool_output = false) const;
 
-    // The focused tab's session id ("" when no tabs). The prompt editor and
-    // status bar target it.
+    // The focused tab's session id ("" when no tabs, or when the focused tab
+    // has no session yet). The session-keyed senders target it.
     std::string FocusedSessionId() const;
+
+    // The focused tab's TAB id ("" when no tabs) -- the UI's handle for it,
+    // valid whether or not a session exists yet.
+    std::string FocusedTabId() const;
 
     // Closes (terminates) every tab. Used by ctrl+w's explicit close, not
     // quit -- see DetachAllTabs for that (S5.4: a session now outlives the
@@ -600,8 +696,9 @@ public:
     // DEEP snapshot of ONE tab -- the focused tab, for the frame. The pre-R
     // frame deep-copied EVERY tab (under each tab's lock) two to three times
     // per frame; with the light tab list (GetAllTabs -> TakeLightSnapshot)
-    // and this, a frame copies the focused tab once.
-    SessionState::Snapshot GetDetails(const std::string& session_id) const;
+    // and this, a frame copies the focused tab once. Keyed by TAB id (the
+    // focused handle may be a sessionless tab).
+    SessionState::Snapshot GetDetails(const std::string& tab_id) const;
 
     // Monotonic UI revision, bumped by every mutating entry point. The 20 Hz
     // pump posts a redraw ONLY when this moved (plus a low-rate floor for the
@@ -620,13 +717,14 @@ public:
     void StopRpcQueue() { rpc_queue_.Stop(); }
 
     // Escape hatch: runs an arbitrary job on the same async RPC worker,
-    // off the loop thread. For a call site that needs a synchronous
-    // AppState method itself (OpenTab, whose CreateSession RPC carries a 5s
-    // deadline) run off-thread, without widening that method's own contract
+    // off the loop thread. For a call site that needs a blocking AppState
+    // method itself (AttachTab/ResumeTab, whose CreateSession/Attach RPCs
+    // carry 5s deadlines; EnsureSession likewise) run off-thread, without
+    // widening that method's own contract
     // -- every AppState method's locking is already safe from any thread,
     // so this relocates WHERE it runs rather than changing what it does or
-    // returns, which matters here because OpenTab's synchronous
-    // session-id-on-return contract is load-bearing for the existing E2E
+    // returns, which matters here because the blocking tab openers'
+    // synchronous contract is load-bearing for the existing E2E
     // test suite (app_state_test.cpp) and for callers that legitimately
     // need it immediately (headless mode, tests).
     void RunOnRpcQueue(std::function<void()> job) { rpc_queue_.Submit(std::move(job)); }
@@ -634,7 +732,23 @@ public:
 private:
     struct TabEntry {
         TabInfo info;
-        std::shared_ptr<SessionClient::Stream> stream;   // persistent bidi (+ threads)
+        std::shared_ptr<SessionClient::Stream> stream;   // null while the tab is sessionless
+
+        // The CreateOptions a sessionless tab carries, applied verbatim by
+        // EnsureSession. Meaningless once `stream` exists (the options went
+        // out with the CreateSession that made it).
+        SessionClient::CreateOptions pending_create;
+
+        // Single-flight create for a sessionless tab (the per-tab form of the
+        // queue-and-create pattern that used to live in RunTui's
+        // create_session_and_run). `ensuring` is only ever set on the RPC
+        // worker (the sole EnsureSession runner); `pending` is pushed by any
+        // thread under mtx_ and drained by the worker after the create
+        // resolves. A failed create drops the pending actions -- their senders
+        // see the tab's visible error notice, the same outcome a synchronous
+        // failure always had.
+        bool ensuring = false;
+        std::vector<std::function<void(const std::string& session_id)>> pending;
     };
 
     // Routes a ServerEvent to its owned tab (by event.session_id()). Handles derived
@@ -644,6 +758,7 @@ private:
 
     mutable std::mutex mtx_;
     std::vector<TabEntry> tabs_;
+    uint64_t next_tab_seq_ = 0;   // tab_id minting ("t1", "t2", ...)
 
     int64_t next_root_ordinal_ = 0;
     uint32_t next_spawn_seq_ = 0;
@@ -689,7 +804,12 @@ private:
     std::atomic<bool> chat_surface_broken_{false};
 
     void FocusWithWrap(bool forward);       // shared logic for the two cycle methods
-    TabEntry* FindTab(const std::string& session_id);  // unlocked, mutex held by caller
+    // Unlocked, mutex held by caller. Tab-keyed (the UI's primary axis).
+    TabEntry* FindTab(const std::string& tab_id);
+    // Session-keyed lookups: wire-event routing (events carry session_id),
+    // the senders, and subagent parenting -- all only ever target tabs that
+    // have a session.
+    TabEntry* FindTabBySession(const std::string& session_id);
     std::shared_ptr<SessionClient::Stream> GetStream(const std::string& session_id);
 
     // Refuses VISIBLY when the tab's session has ended (wire SessionEnded /
@@ -697,11 +817,22 @@ private:
     // usually silently -- so a send into it must not be queued. Returns true
     // (and surfaces the error on the tab) when sending must stop. `verb`
     // words the refusal ("send", "answer", "cancel").
+    // RPC-worker only: creates the session for a sessionless tab (Stream::Open
+    // with the staged create-options), registers the stream, then drains the
+    // entry's pending actions. Returns the session id ("" on refusal, with the
+    // error surfaced visibly on the tab).
+    std::string EnsureSession(const std::string& tab_id);
+
+    // Kicks EnsureSession onto the RPC worker (callers hold no lock).
+    void RunEnsure(const std::string& tab_id);
+
     bool RefuseIfEnded(const std::string& session_id, const char* verb);
     // OWNING copy: a raw pointer here escaped the lock and could be destroyed
     // by CloseTab (which erases the TabEntry and drops the shared_ptr) while
     // the reader thread was still between the lookup and the call.
     std::shared_ptr<SessionState> GetState(const std::string& session_id) const;
+    // TAB-keyed variant (a sessionless tab has no session id to look up by).
+    std::shared_ptr<SessionState> GetStateByTab(const std::string& tab_id) const;
 
     // Applies the resolved ui.json bounds (0 = built-in default) to a
     // freshly constructed SessionState -- identical in OpenTab and AttachTab.

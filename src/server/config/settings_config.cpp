@@ -180,8 +180,14 @@ LoggingSettings ParseLogging(const nlohmann::json& doc) {
 }
 
 // Session lifetime policy. Negative values are the one misconfiguration the
-// parser refuses: 0 is meaningful ("never") everywhere, so a negative is a
-// typo nobody meant, and silently clamping it to 0 would invert the policy.
+// parser refuses: 0 is meaningful ("never") for the two timeout-shaped keys,
+// so a negative is a typo nobody meant, and silently clamping it to 0 would
+// invert the policy. `initial_attach_guard_seconds` is NOT in that family --
+// it is a safety-net window against a non-conforming client, not an optional
+// feature, so 0 has no "never" reading: it would terminate every session
+// before a client could possibly attach, and SessionRegistry's reaper polls
+// at a quarter of it, so 0 also spins that thread at 100% CPU. Rejected
+// alongside negative rather than silently reinterpreted.
 SessionSettings ParseSessions(const nlohmann::json& doc) {
     SessionSettings result;
     if (!doc.contains("sessions")) return result;
@@ -192,13 +198,16 @@ SessionSettings ParseSessions(const nlohmann::json& doc) {
         "unattended_prompt_timeout_seconds", result.unattended_prompt_timeout_seconds);
     result.initial_attach_guard_seconds =
         sessions.value("initial_attach_guard_seconds", result.initial_attach_guard_seconds);
-    for (const auto* key :
-         {"detached_idle_ttl_seconds", "unattended_prompt_timeout_seconds",
-          "initial_attach_guard_seconds"}) {
+    for (const auto* key : {"detached_idle_ttl_seconds", "unattended_prompt_timeout_seconds"}) {
         if (sessions.value(key, std::int64_t{0}) < 0) {
             throw std::runtime_error(
                 std::string("settings.json: sessions.") + key + " must not be negative (0 = never)");
         }
+    }
+    if (result.initial_attach_guard_seconds <= 0) {
+        throw std::runtime_error(
+            "settings.json: sessions.initial_attach_guard_seconds must be positive (it has no "
+            "\"never\" reading -- see the loader comment)");
     }
     return result;
 }

@@ -85,6 +85,9 @@ public:
                               v1::SuggestPathsResponse*) override;
     grpc::Status ListCommands(grpc::ServerContext*, const v1::ListCommandsRequest*,
                               v1::ListCommandsResponse*) override;
+    grpc::Status RunSessionlessCommand(grpc::ServerContext*,
+                                       const v1::RunSessionlessCommandRequest*,
+                                       v1::RunSessionlessCommandResponse*) override;
     grpc::Status DeleteSession(grpc::ServerContext*, const v1::DeleteSessionRequest*,
                                v1::DeleteSessionResponse*) override;
     grpc::Status Ping(grpc::ServerContext*, const v1::PingRequest*,

@@ -533,16 +533,7 @@ v1::ServerEvent ToProto(const std::string& session_id, const agent::SessionEvent
             } else if constexpr (std::is_same_v<T, agent::SessionCommandResult>) {
                 auto* result = out.mutable_command_result();
                 result->set_request_id(value.request_id);
-                result->set_status(value.result.status == commands::CommandResult::Status::kOk
-                                       ? v1::COMMAND_STATUS_OK
-                                       : v1::COMMAND_STATUS_ERROR);
-                result->set_message(value.result.message);
-                result->set_display(value.result.display == commands::CommandDisplay::kView
-                                         ? v1::COMMAND_DISPLAY_VIEW
-                                         : value.result.display == commands::CommandDisplay::kSilent
-                                               ? v1::COMMAND_DISPLAY_SILENT
-                                               : v1::COMMAND_DISPLAY_STATUS);
-                result->set_view_hint(value.result.view_hint);
+                FillProto(*result, value.result);
             } else if constexpr (std::is_same_v<T, agent::ToolOutputDelta>) {
                 auto* delta = out.mutable_tool_output_delta();
                 delta->set_tool_use_id(value.tool_use_id);
@@ -664,6 +655,19 @@ commands::CommandArgs FromProto(const v1::CommandArgs& args) {
     for (const auto& [key, value] : args.flags()) out.flags.emplace(key, value);
     out.raw = args.raw();
     return out;
+}
+
+void FillProto(v1::CommandResult& out, const commands::CommandResult& value) {
+    out.set_status(value.status == commands::CommandResult::Status::kOk
+                       ? v1::COMMAND_STATUS_OK
+                       : v1::COMMAND_STATUS_ERROR);
+    out.set_message(value.message);
+    out.set_display(value.display == commands::CommandDisplay::kView
+                        ? v1::COMMAND_DISPLAY_VIEW
+                        : value.display == commands::CommandDisplay::kSilent
+                              ? v1::COMMAND_DISPLAY_SILENT
+                              : v1::COMMAND_DISPLAY_STATUS);
+    out.set_view_hint(value.view_hint);
 }
 
 }  // namespace minimal::rpc

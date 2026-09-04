@@ -6,6 +6,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <filesystem>
 #include <thread>
 #include <utility>
@@ -251,7 +252,15 @@ grpc::Status SessionServiceImpl::CreateSession(grpc::ServerContext* context,
         // Roll the row back. Inserting first is what makes the id authoritative,
         // but it also means a failure here would otherwise leave a message-less
         // session sitting in the picker forever with no way to remove it.
-        db_.DeleteSession(row.session_id);
+        // Guarded: an exception leaving an RPC handler is UB (see
+        // ResumeSession's comment), and a store failure here must not
+        // shadow the FAILED_PRECONDITION the original error deserves.
+        try {
+            db_.DeleteSession(row.session_id);
+        } catch (const std::exception& rollback_error) {
+            logger_.warn("CreateSession: rollback after construction failure failed: {}",
+                        rollback_error.what());
+        }
         logger_.warn("CreateSession failed: {}", e.what());
         return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, e.what());
     }
@@ -510,6 +519,21 @@ void SessionServiceImpl::Dispatch(const v1::ClientEvent& event, agent::Session& 
                 queued.redo = true;
             }
             session.SubmitRewind(queued);
+            return;
+        }
+
+        case v1::ClientEvent::kSetRunMode: {
+            // Queued for the worker like a rewind: SetRunMode is
+            // worker-thread-only, so a mid-turn press applies at the turn
+            // boundary. UNSPECIFIED carries no mode -- ignored with a warning
+            // rather than silently flipping the session to the enum's default.
+            const auto mode = FromProto(event.set_run_mode().run_mode());
+            if (!mode.has_value()) {
+                logger_.warn("session {}: set_run_mode with no mode; ignored",
+                             session.info().session_id);
+                return;
+            }
+            session.SubmitRunMode(agent::QueuedRunMode{*mode});
             return;
         }
 
@@ -849,9 +873,11 @@ grpc::Status SessionServiceImpl::ListSessions(grpc::ServerContext* context,
     return grpc::Status::OK;
 }
 
-grpc::Status SessionServiceImpl::ListAgentPresets(grpc::ServerContext*,
+grpc::Status SessionServiceImpl::ListAgentPresets(grpc::ServerContext* context,
                                                   const v1::ListAgentPresetsRequest*,
                                                   v1::ListAgentPresetsResponse* response) {
+    if (const auto auth = EnsureAuthenticated(auth_providers_, context); !auth.ok()) return auth;
+
     if (presets_ == nullptr) return grpc::Status::OK;  // empty list; see set_presets
     for (const auto& summary : presets_->ListAvailable()) {
         auto* proto_summary = response->add_presets();
@@ -861,9 +887,11 @@ grpc::Status SessionServiceImpl::ListAgentPresets(grpc::ServerContext*,
     return grpc::Status::OK;
 }
 
-grpc::Status SessionServiceImpl::ListModels(grpc::ServerContext*,
+grpc::Status SessionServiceImpl::ListModels(grpc::ServerContext* context,
                                             const v1::ListModelsRequest* request,
                                             v1::ListModelsResponse* response) {
+    if (const auto auth = EnsureAuthenticated(auth_providers_, context); !auth.ok()) return auth;
+
     if (presets_ == nullptr) return grpc::Status::OK;  // empty list; see set_presets
     const auto& providers = presets_->providers();
 
@@ -908,11 +936,21 @@ grpc::Status SessionServiceImpl::SuggestPaths(grpc::ServerContext* context,
     std::filesystem::path project_root;
     if (const auto session = sessions_.Find(request->session_id())) {
         project_root = session->info().project_root;
-    } else if (const auto row = db_.GetSession(request->session_id())) {
-        project_root = row->project_root;
     } else {
-        return grpc::Status(grpc::StatusCode::NOT_FOUND,
-                            "unknown session: " + request->session_id());
+        // Guarded: GetSession can throw on a store failure (locked database,
+        // I/O error), and an exception leaving an RPC handler is UB -- the
+        // same rule ResumeSession's own comment states.
+        std::optional<session::SessionSummary> row;
+        try {
+            row = db_.GetSession(request->session_id());
+        } catch (const std::exception& e) {
+            return grpc::Status(grpc::StatusCode::INTERNAL, e.what());
+        }
+        if (!row) {
+            return grpc::Status(grpc::StatusCode::NOT_FOUND,
+                                "unknown session: " + request->session_id());
+        }
+        project_root = row->project_root;
     }
 
     const agent::MentionResolver& resolver =
@@ -1006,6 +1044,7 @@ grpc::Status SessionServiceImpl::ListCommands(grpc::ServerContext* context,
         info->set_summary(std::string(command->Summary()));
         info->set_usage(std::string(command->Usage()));
         info->set_read_only(command->ReadOnly());
+        info->set_requires_session(command->RequiresSession());
 
         // The taxonomy IS the type (the same rule the busy-check runs on), so
         // the kind is derived from it rather than carried as a flag a command
@@ -1033,6 +1072,51 @@ grpc::Status SessionServiceImpl::ListCommands(grpc::ServerContext* context,
     return grpc::Status::OK;
 }
 
+namespace {
+
+// Never consulted. DispatchSessionless refuses RequiresConfirmation commands
+// before Execute, so the broker a CommandContext structurally requires has no
+// sessionless caller; it exists to keep the context's shape uniform rather
+// than to fork a second context type for one missing member.
+class NullConfirmationBroker final : public commands::ConfirmationBroker {
+    commands::ConfirmationResponse RequestConfirmation(
+        const commands::ConfirmationRequest&) override {
+        return {};
+    }
+};
+
+}  // namespace
+
+grpc::Status SessionServiceImpl::RunSessionlessCommand(
+    grpc::ServerContext* context, const v1::RunSessionlessCommandRequest* request,
+    v1::RunSessionlessCommandResponse* response) {
+    if (const auto auth = EnsureAuthenticated(auth_providers_, context); !auth.ok()) return auth;
+
+    // Answered, never a gRPC error: the client maps the result onto its notice
+    // line exactly like an on-stream command outcome, so refusals travel as
+    // COMMAND_STATUS_ERROR payloads.
+    auto* result = response->mutable_result();
+    if (commands_ == nullptr || presets_ == nullptr) {
+        result->set_status(v1::COMMAND_STATUS_ERROR);
+        result->set_message("the /-command subsystem is not available");
+        return grpc::Status::OK;
+    }
+
+    // Inline on the handler thread, deliberately. A sessionless command is
+    // ReadOnly by the dispatcher's guard -- registry scans and listing
+    // requests, the same bounded class of work CreateSession does here -- and
+    // unlike the OpenSession reader thread there is no stream starving behind
+    // this call, so the command pool earns nothing by being involved.
+    static NullConfirmationBroker null_confirmations;
+    commands::CommandContext command_context(/*session=*/nullptr, *presets_, null_confirmations,
+                                             logger_);
+    const commands::CommandResult outcome =
+        commands::DispatchSessionless(*commands_, request->name(), FromProto(request->args()),
+                                      command_context);
+    FillProto(*result, outcome);
+    return grpc::Status::OK;
+}
+
 grpc::Status SessionServiceImpl::DeleteSession(grpc::ServerContext* context,
                                                const v1::DeleteSessionRequest* request,
                                                v1::DeleteSessionResponse*) {
@@ -1051,7 +1135,16 @@ grpc::Status SessionServiceImpl::DeleteSession(grpc::ServerContext* context,
                             "session '" + request->session_id() +
                                 "' is open; close it before deleting");
     }
-    if (!db_.DeleteSession(request->session_id())) {
+    // Guarded: a store failure (locked database, I/O error) must not leave
+    // the handler via an exception (UB), the same rule every other call
+    // site in this file follows.
+    bool deleted = false;
+    try {
+        deleted = db_.DeleteSession(request->session_id());
+    } catch (const std::exception& e) {
+        return grpc::Status(grpc::StatusCode::INTERNAL, e.what());
+    }
+    if (!deleted) {
         return grpc::Status(grpc::StatusCode::NOT_FOUND,
                             "no such session: " + request->session_id());
     }
@@ -1116,16 +1209,38 @@ grpc::Status SessionServiceImpl::PluginSubscribe(grpc::ServerContext* context,
             response.set_json_payload(std::move(json_payload));
             if (!writer_->Write(response)) {
                 closed_.store(true, std::memory_order_release);
+                cv_.notify_all();
             }
             return !closed_.load(std::memory_order_acquire);
         }
 
-        void Close() { closed_.store(true, std::memory_order_release); }
+        // Takes the SAME mutex Push() holds across writer_->Write(): without
+        // it, the handler could return (destroying the ServerWriter) while a
+        // plugin thread was still inside Write() on it -- a use-after-free.
+        // Locking here waits out any in-flight Push before this call returns.
+        void Close() {
+            std::lock_guard<std::mutex> lock(mtx_);
+            closed_.store(true, std::memory_order_release);
+            cv_.notify_all();
+        }
         bool closed() const { return closed_.load(std::memory_order_acquire); }
+
+        // Blocks the handler thread until Push()/Close() sets closed_, or
+        // `timeout` elapses (the caller's IsCancelled() backstop, since that
+        // is the only client-disconnect signal the sync API offers). Replaces
+        // a 20ms busy-poll that pinned one gRPC thread per live subscription
+        // at 50 wakeups/s for the subscription's whole life (a checklist or
+        // cost-tracker view can hold one open for a session's entire
+        // duration).
+        void WaitUntilClosed(std::chrono::milliseconds timeout) {
+            std::unique_lock<std::mutex> lock(mtx_);
+            cv_.wait_for(lock, timeout, [this] { return closed_.load(std::memory_order_acquire); });
+        }
 
     private:
         grpc::ServerWriter<v1::PluginCallResponse>* writer_;
         std::mutex mtx_;
+        std::condition_variable cv_;
         std::atomic<bool> closed_{false};
     };
 
@@ -1137,12 +1252,12 @@ grpc::Status SessionServiceImpl::PluginSubscribe(grpc::ServerContext* context,
     }
 
     // The call stays open while the subscriber lives. The endpoint pushes from
-    // its own threads; this thread waits and notices the end through either
-    // the sink closing (a failed Write) or the client cancelling. A bounded
-    // poll, not a blocking wait: IsCancelled is the only disconnect signal the
-    // sync API offers the handler.
+    // its own threads; this thread wakes immediately on a Push failure or an
+    // explicit Close (the condition variable), and otherwise wakes only every
+    // 500ms to check IsCancelled() -- the one client-disconnect signal the
+    // sync API offers that nothing else can push a wakeup for.
     while (!sink->closed() && !context->IsCancelled()) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        sink->WaitUntilClosed(std::chrono::milliseconds(500));
     }
     sink->Close();
     return grpc::Status::OK;

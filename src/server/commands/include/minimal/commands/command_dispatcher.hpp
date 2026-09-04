@@ -24,6 +24,15 @@ namespace minimal::commands {
 CommandResult Dispatch(const CommandRegistry& registry, const std::string& name,
                        const CommandArgs& args, CommandContext& context, bool busy);
 
+// The sessionless counterpart, for a CommandContext whose session ref is null
+// (the RunSessionlessCommand RPC). Only a command that is BOTH ReadOnly() and
+// Sessionless<> (RequiresSession() == false) may execute here; everything else
+// -- LLM and prompt-shorthand kinds by nature, confirming commands because
+// there is no session broker to round-trip through -- is refused with an
+// error result rather than dropped, so a caller always gets an answer.
+CommandResult DispatchSessionless(const CommandRegistry& registry, const std::string& name,
+                                  const CommandArgs& args, CommandContext& context);
+
 // The two refusal messages Dispatch() and the reader-thread pre-check
 // (SessionServiceImpl::DispatchCommand, which must answer an unknown/busy
 // command before it is ever queued) both produce verbatim -- shared so the
@@ -32,5 +41,6 @@ CommandResult Dispatch(const CommandRegistry& registry, const std::string& name,
 // reader side).
 std::string UnknownCommandMessage(const std::string& name);
 std::string BusyRefusalMessage(const std::string& name);
+std::string SessionRequiredMessage(const std::string& name);
 
 }  // namespace minimal::commands

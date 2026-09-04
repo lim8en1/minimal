@@ -16,11 +16,17 @@ using minimal::commands::CommandContext;
 using minimal::commands::CommandResult;
 using minimal::commands::HarnessCommand;
 using minimal::commands::LLMCommand;
+using minimal::commands::Sessionless;
 
 // The registry is reached through the context rather than captured at
 // construction, so /help lists what is registered NOW -- including commands from
 // plugins that loaded after this one.
-class HelpCommand : public HarnessCommand {
+//
+// Sessionless<HarnessCommand>: /help reads only the registry, so it executes
+// with a null session ref -- that is what lets it answer on the TUI's
+// sessionless tabs (a tab with no session yet) instead of forcing one into
+// existence just to list commands.
+class HelpCommand : public Sessionless<HarnessCommand> {
 public:
     explicit HelpCommand(const minimal::commands::CommandRegistry& registry)
         : registry_(registry) {}
@@ -224,44 +230,18 @@ public:
     }
 };
 
-class PermissionModeCommand : public HarnessCommand {
-public:
-    std::string_view Name() const override { return "permission-mode"; }
-    std::string_view Summary() const override { return "Change how tool permissions are decided"; }
-    std::string_view Usage() const override {
-        return "/permission-mode <normal|bypass|allow-only>";
-    }
-    // Widening permissions mid-session is exactly the thing worth asking about.
-    bool RequiresConfirmation() const override { return true; }
-
-    CommandResult Execute(CommandContext& context, const CommandArgs& args) override {
-        if (args.positional.empty()) {
-            return CommandResult::Error("usage: /permission-mode <normal|bypass|allow-only>");
-        }
-        const std::string& wanted = args.positional.front();
-        minimal::tools::PermissionRunMode mode{};
-        if (wanted == "normal") {
-            mode = minimal::tools::PermissionRunMode::Normal;
-        } else if (wanted == "bypass") {
-            mode = minimal::tools::PermissionRunMode::Bypass;
-        } else if (wanted == "allow-only") {
-            mode = minimal::tools::PermissionRunMode::AllowOnly;
-        } else {
-            return CommandResult::Error("unknown mode '" + wanted +
-                                        "' (want normal, bypass or allow-only)");
-        }
-        context.session().executor().SetRunMode(mode);
-        return CommandResult::Ok("permission mode: " + wanted);
-    }
-};
-
 // The result is the interface: display=View with view_hint="sessions" tells the
 // client to open its session picker, which fetches its own list over
 // ListSessions -- the command itself carries no data to show. ReadOnly because
 // it touches nothing, so it answers beside a live turn. The message exists for
 // a client with no picker (headless): display only governs WHERE a result
 // surfaces, never whether it is answered.
-class SessionsCommand : public HarnessCommand {
+//
+// Sessionless<HarnessCommand>: the point of /sessions is exactly that it needs
+// no session -- the demonstrated "0-message junk session" bug was the TUI
+// creating one just to run this command on the empty welcome app. With the
+// Sessionless<> mixin it dispatches sessionless instead.
+class SessionsCommand : public Sessionless<HarnessCommand> {
 public:
     std::string_view Name() const override { return "sessions"; }
     std::string_view Summary() const override { return "Open the session picker"; }
@@ -288,7 +268,6 @@ std::vector<std::unique_ptr<Command>> MakeCoreCommands() {
     out.push_back(std::make_unique<ClearCommand>());
     out.push_back(std::make_unique<AgentCommand>());
     out.push_back(std::make_unique<ModelCommand>());
-    out.push_back(std::make_unique<PermissionModeCommand>());
     out.push_back(std::make_unique<SessionsCommand>());
     return out;
 }

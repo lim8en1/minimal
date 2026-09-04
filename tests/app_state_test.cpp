@@ -123,6 +123,7 @@ struct ClientFixture {
         observers = std::make_unique<agent::SessionObserverRegistry>(common::DefaultLogger());
         db = std::make_unique<session::SessionDatabase>(dir / "sessions.db");
         for (auto& command : commands_core::MakeCoreCommands()) commands.Register(std::move(command));
+        commands.Register(commands_core::MakeHelpCommand(commands));
         sessions = std::make_unique<agent::SessionRegistry>(
             *presets, tools, providers, *observers, *db, agent::LoopConfig{},
             common::DefaultLogger(), attach_guard);
@@ -131,6 +132,7 @@ struct ClientFixture {
             *sessions, *db, config::SettingsConfig{}, config::PermissionsConfig{},
             common::DefaultLogger());
         service->set_commands(&commands);
+        service->set_presets(presets.get());   // RunSessionlessCommand dispatches against these
 
         socket = dir / "test.sock";
         server = std::make_unique<rpc::Server>(*service, socket);
@@ -172,37 +174,68 @@ struct ClientFixture {
     std::chrono::milliseconds attach_guard = std::chrono::seconds(10);
 };
 
+// The tab's SESSION id ("" while the tab is sessionless -- OpenTab mints a
+// tab only, the session appears with the first submitted message).
+std::string SessionIdOf(AppState& app, const std::string& tab_id) {
+    for (const auto& tab : app.GetAllTabs()) {
+        if (tab.tab_id == tab_id) return tab.session_id;
+    }
+    return "";
+}
+
 // Polls a tab's snapshot until `pred` is true or the deadline trips. AppState is
 // updated from a reader thread, so tests must wait rather than assert immediately.
+// Keyed by TAB id: the tab handle is the only identity a sessionless tab has.
 template <typename Pred>
-bool WaitFor(AppState& app, const std::string& session_id, Pred pred,
+bool WaitFor(AppState& app, const std::string& tab_id, Pred pred,
              std::chrono::milliseconds timeout = 5s) {
     const auto deadline = std::chrono::steady_clock::now() + timeout;
     while (std::chrono::steady_clock::now() < deadline) {
         for (const auto& tab : app.GetAllTabs()) {
-            if (tab.session_id == session_id && pred(tab)) return true;
+            if (tab.tab_id == tab_id && pred(tab)) return true;
         }
         std::this_thread::sleep_for(5ms);
     }
     return false;
 }
 
+// Waits until the tab's session exists (the first SubmitChatTurn's
+// EnsureSession round trip resolved).
+bool WaitForSession(AppState& app, const std::string& tab_id,
+                    std::chrono::milliseconds timeout = 5s) {
+    return WaitFor(app, tab_id, [](const AppState::TabSnapshot& t) { return t.has_session; },
+                   timeout);
+}
+
 }  // namespace
 
-TEST_CASE("OpenTab creates a real session and registers a tab", "[app_state]") {
+TEST_CASE("OpenTab opens a sessionless tab; the session appears on the first send",
+          "[app_state]") {
+    // THE 0-MESSAGE-ROW FIX: OpenTab mints a TAB (a client-side container) and
+    // no session -- nothing is created server-side until a message is
+    // submitted, so an abandoned tab leaves no row behind.
     ClientFixture fixture;
     fixture.Script("hi");
     fixture.Start();
 
     AppState app(fixture.client);
-    const auto sid = app.OpenTab(fixture.Options("first"));
-    REQUIRE_FALSE(sid.empty());
-    REQUIRE(app.HasTab(sid));
+    const auto tab = app.OpenTab(fixture.Options("first"));
+    REQUIRE_FALSE(tab.empty());
+    REQUIRE(app.HasTab(tab));
 
     auto tabs = app.GetAllTabs();
     REQUIRE(tabs.size() == 1);
-    CHECK(tabs[0].session_id == sid);
+    CHECK(tabs[0].tab_id == tab);
+    CHECK(tabs[0].session_id.empty());
+    CHECK_FALSE(tabs[0].has_session);
     CHECK(tabs[0].is_focused);
+
+    // The send is what creates the session.
+    app.SubmitChatTurn(tab, "hi");
+    REQUIRE(WaitForSession(app, tab));
+    REQUIRE_FALSE(SessionIdOf(app, tab).empty());
+    tabs = app.GetAllTabs();
+    CHECK(tabs[0].has_session);
 }
 
 TEST_CASE("two tabs do not cross-talk", "[app_state]") {
@@ -211,13 +244,14 @@ TEST_CASE("two tabs do not cross-talk", "[app_state]") {
     fixture.Start();
 
     AppState app(fixture.client);
-    const auto sid_a = app.OpenTab(fixture.Options("a"));
-    const auto sid_b = app.OpenTab(fixture.Options("b"));
-    REQUIRE_FALSE(sid_a.empty());
-    REQUIRE_FALSE(sid_b.empty());
+    const auto tab_a = app.OpenTab(fixture.Options("a"));
+    const auto tab_b = app.OpenTab(fixture.Options("b"));
+    REQUIRE_FALSE(tab_a.empty());
+    REQUIRE_FALSE(tab_b.empty());
 
-    app.SendChatTurn(sid_a, "hello from a");
-    REQUIRE(WaitFor(app, sid_a, [](const AppState::TabSnapshot& t) {
+    app.SubmitChatTurn(tab_a, "hello from a");
+    REQUIRE(WaitForSession(app, tab_a));
+    REQUIRE(WaitFor(app, tab_a, [](const AppState::TabSnapshot& t) {
         return t.state == SessionStateKind::Idle || t.state == SessionStateKind::Thinking ||
                t.state == SessionStateKind::Working;
     }));
@@ -227,7 +261,7 @@ TEST_CASE("two tabs do not cross-talk", "[app_state]") {
 
     bool b_touched = false;
     for (const auto& tab : app.GetAllTabs()) {
-        if (tab.session_id == sid_b) b_touched = (tab.state != SessionStateKind::Idle);
+        if (tab.tab_id == tab_b) b_touched = (tab.state != SessionStateKind::Idle);
     }
     CHECK_FALSE(b_touched);
 }
@@ -242,9 +276,10 @@ TEST_CASE("AttachTab resumes a session created out-of-band", "[app_state]") {
     REQUIRE_FALSE(created.session_id.empty());
 
     AppState app(fixture.client);
-    const auto sid = app.AttachTab(created.session_id);
-    REQUIRE(sid == created.session_id);
-    REQUIRE(app.HasTab(created.session_id));
+    const auto tab = app.AttachTab(created.session_id);
+    REQUIRE_FALSE(tab.empty());
+    REQUIRE(app.HasTab(tab));
+    CHECK(SessionIdOf(app, tab) == created.session_id);
 }
 
 TEST_CASE("AttachTab does not itself steal focus; callers must SetFocusedTab", "[app_state]") {
@@ -266,20 +301,20 @@ TEST_CASE("AttachTab does not itself steal focus; callers must SetFocusedTab", "
     const auto created = fixture.client->CreateSession(fixture.Options("resumed"));
     REQUIRE(created.status.ok());
 
-    const auto sid = app.AttachTab(created.session_id);
-    REQUIRE(sid == created.session_id);
-    REQUIRE(app.HasTab(created.session_id));
+    const auto tab = app.AttachTab(created.session_id);
+    REQUIRE_FALSE(tab.empty());
+    REQUIRE(app.HasTab(tab));
 
     bool resumed_focused = false;
-    for (const auto& tab : app.GetAllTabs()) {
-        if (tab.session_id == sid) resumed_focused = tab.is_focused;
+    for (const auto& t : app.GetAllTabs()) {
+        if (t.tab_id == tab) resumed_focused = t.is_focused;
     }
     CHECK_FALSE(resumed_focused);   // AttachTab alone leaves the original tab focused
 
-    app.SetFocusedTab(sid);
+    app.SetFocusedTab(tab);
     resumed_focused = false;
-    for (const auto& tab : app.GetAllTabs()) {
-        if (tab.session_id == sid) resumed_focused = tab.is_focused;
+    for (const auto& t : app.GetAllTabs()) {
+        if (t.tab_id == tab) resumed_focused = t.is_focused;
     }
     CHECK(resumed_focused);
 }
@@ -295,17 +330,21 @@ TEST_CASE("FindRewindTargetSeq resolves the Nth user turn back", "[app_state][re
     fixture.Start();
 
     AppState app(fixture.client);
-    const auto sid = app.OpenTab(fixture.Options("rewind-target"));
-    REQUIRE_FALSE(sid.empty());
+    const auto tab = app.OpenTab(fixture.Options("rewind-target"));
+    REQUIRE_FALSE(tab.empty());
 
-    app.SendChatTurn(sid, "first message");
-    REQUIRE(WaitFor(app, sid, [](const AppState::TabSnapshot& t) {
-        return t.state == SessionStateKind::Idle;
+    app.SubmitChatTurn(tab, "first message");
+    REQUIRE(WaitFor(app, tab, [](const AppState::TabSnapshot& t) {
+        return t.state == SessionStateKind::Idle && t.has_session;
     }));
-    app.SendChatTurn(sid, "second message");
-    REQUIRE(WaitFor(app, sid, [](const AppState::TabSnapshot& t) {
-        return t.state == SessionStateKind::Idle;
+    app.SubmitChatTurn(tab, "second message");
+    REQUIRE(WaitFor(app, tab, [](const AppState::TabSnapshot& t) {
+        return t.state == SessionStateKind::Idle && t.has_session;
     }));
+
+    // Scrollback/rewind resolution are SESSION-keyed wire paths.
+    const auto sid = SessionIdOf(app, tab);
+    REQUIRE_FALSE(sid.empty());
 
     // RequestScrollback is async and fetches a snapshot at whatever point the
     // worker gets to it -- a single call raced against the two turns above
@@ -337,8 +376,15 @@ TEST_CASE("subagent grouping and focus via OnSubagentSpawned", "[app_state]") {
     fixture.Start();
 
     AppState app(fixture.client);
-    const auto parent = app.OpenTab(fixture.Options("parent"));
-    REQUIRE_FALSE(parent.empty());
+    const auto parent_tab = app.OpenTab(fixture.Options("parent"));
+    REQUIRE_FALSE(parent_tab.empty());
+
+    // OnSubagentSpawned parents by the parent's SESSION id (the wire event
+    // carries session ids), so the parent tab needs a session first.
+    app.SubmitChatTurn(parent_tab, "hi");
+    REQUIRE(WaitForSession(app, parent_tab));
+    const auto parent_sid = SessionIdOf(app, parent_tab);
+    REQUIRE_FALSE(parent_sid.empty());
 
     // No real subagent spawning on this branch yet -- stand in with a second,
     // independently-created real session and drive AppState's own grouping/focus
@@ -349,14 +395,13 @@ TEST_CASE("subagent grouping and focus via OnSubagentSpawned", "[app_state]") {
     v1::SubagentStartedEvent blocking_evt;
     blocking_evt.set_child_session_id(created.session_id);
     blocking_evt.set_blocking(true);
-    app.OnSubagentSpawned(parent, blocking_evt);
+    app.OnSubagentSpawned(parent_sid, blocking_evt);
 
-    REQUIRE(app.HasTab(created.session_id));
     auto tabs = app.GetAllTabs();
     const AppState::TabSnapshot* parent_snap = nullptr;
     const AppState::TabSnapshot* child_snap = nullptr;
     for (const auto& t : tabs) {
-        if (t.session_id == parent) parent_snap = &t;
+        if (t.tab_id == parent_tab) parent_snap = &t;
         if (t.session_id == created.session_id) child_snap = &t;
     }
     REQUIRE(parent_snap != nullptr);
@@ -373,9 +418,13 @@ TEST_CASE("a non-blocking subagent attaches without moving focus", "[app_state]"
     fixture.Start();
 
     AppState app(fixture.client);
-    const auto parent = app.OpenTab(fixture.Options("parent"));
-    REQUIRE_FALSE(parent.empty());
+    const auto parent_tab = app.OpenTab(fixture.Options("parent"));
+    REQUIRE_FALSE(parent_tab.empty());
     REQUIRE(app.GetAllTabs()[0].is_focused);
+
+    app.SubmitChatTurn(parent_tab, "hi");
+    REQUIRE(WaitForSession(app, parent_tab));
+    const auto parent_sid = SessionIdOf(app, parent_tab);
 
     const auto created = fixture.client->CreateSession(fixture.Options("child"));
     REQUIRE(created.status.ok());
@@ -383,11 +432,10 @@ TEST_CASE("a non-blocking subagent attaches without moving focus", "[app_state]"
     v1::SubagentStartedEvent nonblocking_evt;
     nonblocking_evt.set_child_session_id(created.session_id);
     nonblocking_evt.set_blocking(false);
-    app.OnSubagentSpawned(parent, nonblocking_evt);
+    app.OnSubagentSpawned(parent_sid, nonblocking_evt);
 
-    REQUIRE(app.HasTab(created.session_id));
     for (const auto& t : app.GetAllTabs()) {
-        if (t.session_id == parent) CHECK(t.is_focused);
+        if (t.tab_id == parent_tab) CHECK(t.is_focused);
         if (t.session_id == created.session_id) CHECK_FALSE(t.is_focused);
     }
 }
@@ -398,17 +446,17 @@ TEST_CASE("CloseTab removes the tab and reassigns focus", "[app_state]") {
     fixture.Start();
 
     AppState app(fixture.client);
-    const auto sid_a = app.OpenTab(fixture.Options("a"));
-    const auto sid_b = app.OpenTab(fixture.Options("b"));
-    REQUIRE_FALSE(sid_a.empty());
-    REQUIRE_FALSE(sid_b.empty());
-    app.SetFocusedTab(sid_b);
+    const auto tab_a = app.OpenTab(fixture.Options("a"));
+    const auto tab_b = app.OpenTab(fixture.Options("b"));
+    REQUIRE_FALSE(tab_a.empty());
+    REQUIRE_FALSE(tab_b.empty());
+    app.SetFocusedTab(tab_b);
 
-    app.CloseTab(sid_b);
-    REQUIRE_FALSE(app.HasTab(sid_b));
+    app.CloseTab(tab_b);
+    REQUIRE_FALSE(app.HasTab(tab_b));
     auto tabs = app.GetAllTabs();
     REQUIRE(tabs.size() == 1);
-    CHECK(tabs[0].session_id == sid_a);
+    CHECK(tabs[0].tab_id == tab_a);
     CHECK(tabs[0].is_focused);   // closing the focused tab reassigns focus
 }
 
@@ -425,23 +473,23 @@ TEST_CASE("CloseTab on a MIDDLE tab focuses its neighbor, not tabs_.back()",
     fixture.Start();
 
     AppState app(fixture.client);
-    const auto sid_a = app.OpenTab(fixture.Options("a"));
-    const auto sid_b = app.OpenTab(fixture.Options("b"));
-    const auto sid_c = app.OpenTab(fixture.Options("c"));
-    const auto sid_d = app.OpenTab(fixture.Options("d"));
-    REQUIRE_FALSE(sid_a.empty());
-    REQUIRE_FALSE(sid_b.empty());
-    REQUIRE_FALSE(sid_c.empty());
-    REQUIRE_FALSE(sid_d.empty());
-    app.SetFocusedTab(sid_b);
+    const auto tab_a = app.OpenTab(fixture.Options("a"));
+    const auto tab_b = app.OpenTab(fixture.Options("b"));
+    const auto tab_c = app.OpenTab(fixture.Options("c"));
+    const auto tab_d = app.OpenTab(fixture.Options("d"));
+    REQUIRE_FALSE(tab_a.empty());
+    REQUIRE_FALSE(tab_b.empty());
+    REQUIRE_FALSE(tab_c.empty());
+    REQUIRE_FALSE(tab_d.empty());
+    app.SetFocusedTab(tab_b);
 
-    app.CloseTab(sid_b);   // the middle tab, focused
-    REQUIRE_FALSE(app.HasTab(sid_b));
+    app.CloseTab(tab_b);   // the middle tab, focused
+    REQUIRE_FALSE(app.HasTab(tab_b));
     auto tabs = app.GetAllTabs();
     REQUIRE(tabs.size() == 3);
-    CHECK(tabs[0].session_id == sid_a);
-    CHECK(tabs[1].session_id == sid_c);
-    CHECK(tabs[2].session_id == sid_d);
+    CHECK(tabs[0].tab_id == tab_a);
+    CHECK(tabs[1].tab_id == tab_c);
+    CHECK(tabs[2].tab_id == tab_d);
     CHECK(tabs[1].is_focused);      // c: the tab that shifted into b's slot
     CHECK_FALSE(tabs[2].is_focused);   // NOT d (tabs_.back()) -- the pre-fix bug
 }
@@ -457,19 +505,19 @@ TEST_CASE("CloseTab on the LAST tab falls back to the new last tab",
     fixture.Start();
 
     AppState app(fixture.client);
-    const auto sid_a = app.OpenTab(fixture.Options("a"));
-    const auto sid_b = app.OpenTab(fixture.Options("b"));
-    const auto sid_c = app.OpenTab(fixture.Options("c"));
-    REQUIRE_FALSE(sid_a.empty());
-    REQUIRE_FALSE(sid_b.empty());
-    REQUIRE_FALSE(sid_c.empty());
-    app.SetFocusedTab(sid_c);
+    const auto tab_a = app.OpenTab(fixture.Options("a"));
+    const auto tab_b = app.OpenTab(fixture.Options("b"));
+    const auto tab_c = app.OpenTab(fixture.Options("c"));
+    REQUIRE_FALSE(tab_a.empty());
+    REQUIRE_FALSE(tab_b.empty());
+    REQUIRE_FALSE(tab_c.empty());
+    app.SetFocusedTab(tab_c);
 
-    app.CloseTab(sid_c);   // the last tab, focused -- erase() returns end()
-    REQUIRE_FALSE(app.HasTab(sid_c));
+    app.CloseTab(tab_c);   // the last tab, focused -- erase() returns end()
+    REQUIRE_FALSE(app.HasTab(tab_c));
     auto tabs = app.GetAllTabs();
     REQUIRE(tabs.size() == 2);
-    CHECK(tabs[1].session_id == sid_b);
+    CHECK(tabs[1].tab_id == tab_b);
     CHECK(tabs[1].is_focused);
 }
 
@@ -501,13 +549,14 @@ TEST_CASE("SessionClient::GetMessages feeds ApplyScrollbackPage with real wire d
 }
 
 // Polls a tab's DEEP snapshot until `pred` is true or the deadline trips (the
-// pending-modal data rides GetDetails, not the light tab list).
+// pending-modal data rides GetDetails, not the light tab list). GetDetails is
+// TAB-keyed (a sessionless tab has no session id to key by).
 template <typename Pred>
-bool WaitForDetails(AppState& app, const std::string& session_id, Pred pred,
+bool WaitForDetails(AppState& app, const std::string& tab_id, Pred pred,
                     std::chrono::milliseconds timeout = 5s) {
     const auto deadline = std::chrono::steady_clock::now() + timeout;
     while (std::chrono::steady_clock::now() < deadline) {
-        if (pred(app.GetDetails(session_id))) return true;
+        if (pred(app.GetDetails(tab_id))) return true;
         std::this_thread::sleep_for(5ms);
     }
     return false;
@@ -519,9 +568,9 @@ bool WaitForDetails(AppState& app, const std::string& session_id, Pred pred,
 // Anything that terminates the session server-side MUST wait for this first:
 // terminating a session the stream never attached to answers the bidi with
 // NOT_FOUND, which is the attach-refusal path, not a clean end.
-bool WaitForAttached(AppState& app, const std::string& session_id,
+bool WaitForAttached(AppState& app, const std::string& tab_id,
                      std::chrono::milliseconds timeout = 5s) {
-    return WaitForDetails(app, session_id, [](const SessionState::Snapshot& s) {
+    return WaitForDetails(app, tab_id, [](const SessionState::Snapshot& s) {
         return !s.agent_preset.empty();
     }, timeout);
 }
@@ -539,20 +588,22 @@ TEST_CASE("a session terminated server-side (not via CloseTab) reaches Done",
     fixture.Start();
 
     AppState app(fixture.client);
-    const auto sid = app.OpenTab(fixture.Options("solo"));
-    REQUIRE_FALSE(sid.empty());
-    REQUIRE(app.HasTab(sid));
+    const auto tab = app.OpenTab(fixture.Options("solo"));
+    REQUIRE_FALSE(tab.empty());
+    REQUIRE(app.HasTab(tab));
 
-    REQUIRE(WaitForAttached(app, sid));
-    fixture.sessions->Terminate(sid);   // server-side; the tab is untouched by AppState
+    app.SubmitChatTurn(tab, "hi");
+    REQUIRE(WaitForSession(app, tab));
+    REQUIRE(WaitForAttached(app, tab));
+    fixture.sessions->Terminate(SessionIdOf(app, tab));   // server-side; the tab is untouched
 
     // The wire SessionEndedEvent (published before the server closes the
     // subscriber queues) routes to OnSessionEnded -- the stream itself stays
     // open, so the tab must not depend on a stream close to reach Done.
-    REQUIRE(WaitFor(app, sid, [](const AppState::TabSnapshot& t) {
+    REQUIRE(WaitFor(app, tab, [](const AppState::TabSnapshot& t) {
         return t.state == SessionStateKind::Done;
     }));
-    CHECK(app.HasTab(sid));   // the tab itself is never removed automatically
+    CHECK(app.HasTab(tab));   // the tab itself is never removed automatically
 }
 
 // Track R1b-4 (see .opencode/plans/track-r-remediation.md): DispatchToTab used
@@ -572,11 +623,11 @@ TEST_CASE("INVARIANT: closing a tab while its turn streams cannot use-after-free
 
     AppState app(fixture.client);
     for (int i = 0; i < 8; ++i) {
-        const auto sid = app.OpenTab(fixture.Options("close-race-" + std::to_string(i)));
-        REQUIRE_FALSE(sid.empty());
-        app.SendChatTurn(sid, "hi");   // stream events flowing on the reader thread
-        app.CloseTab(sid);             // erase + join while dispatch is in flight
-        REQUIRE_FALSE(app.HasTab(sid));
+        const auto tab = app.OpenTab(fixture.Options("close-race-" + std::to_string(i)));
+        REQUIRE_FALSE(tab.empty());
+        app.SubmitChatTurn(tab, "hi");   // stream events flowing on the reader thread
+        app.CloseTab(tab);               // erase + join while dispatch/ensure in flight
+        REQUIRE_FALSE(app.HasTab(tab));
     }
     CHECK(app.GetAllTabs().empty());
 }
@@ -599,29 +650,30 @@ TEST_CASE("SendCancel ends a busy turn and the session stays usable", "[app_stat
     fixture.Start();
 
     AppState app(fixture.client);
-    const auto sid = app.OpenTab(fixture.Options("cancel-me"));
-    REQUIRE_FALSE(sid.empty());
+    const auto tab = app.OpenTab(fixture.Options("cancel-me"));
+    REQUIRE_FALSE(tab.empty());
 
-    app.SendChatTurn(sid, "build it");
-    REQUIRE(WaitForDetails(app, sid,
+    app.SubmitChatTurn(tab, "build it");
+    REQUIRE(WaitForDetails(app, tab,
                            [](const SessionState::Snapshot& s) {
                                return s.pending_permission.has_value();
                            }));
-    CHECK(app.GetDetails(sid).state == SessionStateKind::Waiting);
+    CHECK(app.GetDetails(tab).state == SessionStateKind::Waiting);
 
     // THE VERB: the server ends the turn with STOP_REASON_CANCELLED and
     // answers the parked prompt with a denial (pending.CancelAll). Before
-    // this was wired the TUI had no interrupt at all.
-    app.SendCancel(sid);
-    CHECK(WaitFor(app, sid, [](const AppState::TabSnapshot& t) {
+    // this was wired the TUI had no interrupt at all. SendCancel is
+    // SESSION-keyed (a busy tab is necessarily sessioned).
+    app.SendCancel(SessionIdOf(app, tab));
+    CHECK(WaitFor(app, tab, [](const AppState::TabSnapshot& t) {
         return t.state == SessionStateKind::Idle;
     }));
-    CHECK_FALSE(app.GetDetails(sid).cancel_requested);   // retired by the turn end
-    CHECK_FALSE(app.GetDetails(sid).pending_permission.has_value());
+    CHECK_FALSE(app.GetDetails(tab).cancel_requested);   // retired by the turn end
+    CHECK_FALSE(app.GetDetails(tab).pending_permission.has_value());
 
     // A cancel must not poison the session: turn 2 runs to completion.
-    app.SendChatTurn(sid, "try again");
-    CHECK(WaitFor(app, sid, [](const AppState::TabSnapshot& t) {
+    app.SubmitChatTurn(tab, "try again");
+    CHECK(WaitFor(app, tab, [](const AppState::TabSnapshot& t) {
         return t.state == SessionStateKind::Idle;
     }));
 }
@@ -636,28 +688,31 @@ TEST_CASE("a wire confirmation is answered and unwedges the tab", "[app_state][c
     fixture.Start();
 
     AppState app(fixture.client);
-    const auto sid = app.OpenTab(fixture.Options("confirm-me"));
-    REQUIRE_FALSE(sid.empty());
+    const auto tab = app.OpenTab(fixture.Options("confirm-me"));
+    REQUIRE_FALSE(tab.empty());
 
-    app.SendCommand(sid, "/clear");
-    REQUIRE(WaitFor(app, sid, [](const AppState::TabSnapshot& t) {
+    // SubmitCommand on a sessionless tab runs EnsureSession first, then the
+    // command on the created session -- the same path a sessioned tab takes
+    // once the create resolves.
+    app.SubmitCommand(tab, "/clear");
+    REQUIRE(WaitFor(app, tab, [](const AppState::TabSnapshot& t) {
         return t.state == SessionStateKind::Waiting;
     }));
 
-    const auto pending = app.GetDetails(sid).pending_confirmation;
+    const auto pending = app.GetDetails(tab).pending_confirmation;
     REQUIRE(pending.has_value());
     REQUIRE(pending->options.size() == 2);   // the dispatcher's {"Yes", "No"}
 
-    app.AnswerConfirmation(sid, pending->request_id, "Yes");
+    app.AnswerConfirmation(SessionIdOf(app, tab), pending->request_id, "Yes");
 
     // THE WEDGE FIX: no tool events or message stops follow a command
     // confirmation, so the state must re-derive at the answer -- not sit in
     // Waiting until some unrelated event happens to arrive.
-    CHECK(WaitFor(app, sid, [](const AppState::TabSnapshot& t) {
+    CHECK(WaitFor(app, tab, [](const AppState::TabSnapshot& t) {
         return t.state == SessionStateKind::Idle;
     }));
     // The command actually ran: its result comes back as the notice.
-    CHECK(WaitForDetails(app, sid, [](const SessionState::Snapshot& s) {
+    CHECK(WaitForDetails(app, tab, [](const SessionState::Snapshot& s) {
         return s.latest_notice.has_value();
     }));
 }
@@ -677,29 +732,34 @@ TEST_CASE("ResumeTab revives a stored session and its tab sends again",
     fixture.Start();
 
     AppState app(fixture.client);
-    const auto sid = app.OpenTab(fixture.Options("resume-me"));
-    REQUIRE_FALSE(sid.empty());
+    const auto tab = app.OpenTab(fixture.Options("resume-me"));
+    REQUIRE_FALSE(tab.empty());
 
     // A bare state-Idle wait passes instantly (the tab is Idle BEFORE the
     // turn's first event lands), so turn completion is polled through the
     // transcript itself: the turn is over exactly when its rows are durable.
-    const auto wait_rows = [&app](const std::string& sid, size_t n) {
+    // RequestScrollback is SESSION-keyed; GetDetails is TAB-keyed -- hence
+    // the pair of ids.
+    const auto wait_rows = [&app](const std::string& tab, const std::string& session,
+                                  size_t n) {
         const auto deadline = std::chrono::steady_clock::now() + 5s;
         while (std::chrono::steady_clock::now() < deadline) {
-            app.RequestScrollback(sid, /*newest=*/true);
+            app.RequestScrollback(session, /*newest=*/true);
             std::this_thread::sleep_for(50ms);
-            if (app.GetDetails(sid).scrollback_page->size() >= n) return true;
+            if (app.GetDetails(tab).scrollback_page->size() >= n) return true;
         }
         return false;
     };
 
-    app.SendChatTurn(sid, "first message");
-    REQUIRE(wait_rows(sid, 2));   // user + assistant, persisted
+    app.SubmitChatTurn(tab, "first message");
+    REQUIRE(WaitForSession(app, tab));
+    const auto sid = SessionIdOf(app, tab);
+    REQUIRE(wait_rows(tab, sid, 2));   // user + assistant, persisted
 
     // TERMINATE (not detach): the transcript stays in SQLite, but the LIVE
     // session must be gone -- ResumeSession refuses an already-open session.
     // CloseTab drops the client side; the registry drop is polled.
-    app.CloseTab(sid);
+    app.CloseTab(tab);
     fixture.sessions->Terminate(sid);
     const auto deadline = std::chrono::steady_clock::now() + 5s;
     while (fixture.sessions->Find(sid) != nullptr &&
@@ -708,14 +768,18 @@ TEST_CASE("ResumeTab revives a stored session and its tab sends again",
     }
     REQUIRE(fixture.sessions->Find(sid) == nullptr);
 
-    REQUIRE(app.ResumeTab(sid) == sid);
-    REQUIRE(app.HasTab(sid));
+    // ResumeTab returns the NEW tab's tab id; the session id underneath is
+    // the same stored one.
+    const auto resumed = app.ResumeTab(sid);
+    REQUIRE_FALSE(resumed.empty());
+    REQUIRE(app.HasTab(resumed));
+    REQUIRE(SessionIdOf(app, resumed) == sid);
     CHECK(app.GetAllTabs()[0].is_focused);   // the app was empty: focus-if-empty
 
     // THE BUG: a picked stored session must be LIVE, not a dead tab that
     // renders history but drops input.
-    app.SendChatTurn(sid, "second message");
-    REQUIRE(wait_rows(sid, 4));   // the resumed turn completed ON TOP of the stored transcript
+    app.SubmitChatTurn(resumed, "second message");
+    REQUIRE(wait_rows(resumed, sid, 4));   // the resumed turn completed ON TOP of the stored transcript
 
     // History intact across the resume: all four rows in order, nothing
     // duplicated or renumbered (the client-side mirror of "a stored session
@@ -740,17 +804,20 @@ TEST_CASE("ResumeTab of an unknown session registers a visible error tab",
 
     // A refused resume still registers the tab -- in the Error state, with
     // the refusal as its notice -- instead of silently doing nothing.
-    REQUIRE(app.ResumeTab(ghost) == ghost);
-    REQUIRE(app.HasTab(ghost));
+    const auto tab = app.ResumeTab(ghost);
+    REQUIRE_FALSE(tab.empty());
+    REQUIRE(app.HasTab(tab));
     CHECK(app.GetAllTabs()[0].is_focused);
-    CHECK(WaitForDetails(app, ghost, [](const SessionState::Snapshot& s) {
+    CHECK(WaitForDetails(app, tab, [](const SessionState::Snapshot& s) {
         return s.latest_notice.has_value() && s.latest_notice->is_error;
     }));
-    CHECK(app.GetDetails(ghost).state == SessionStateKind::Error);
+    CHECK(app.GetDetails(tab).state == SessionStateKind::Error);
 
-    // And sends on that stream-less tab refuse VISIBLY, not silently.
+    // And sends on that stream-less tab refuse VISIBLY, not silently. (The
+    // refused tab's session_id IS the ghost id -- ResumeTab registers it --
+    // which is what the session-keyed sender resolves.)
     app.SendChatTurn(ghost, "hello?");
-    CHECK(WaitForDetails(app, ghost, [](const SessionState::Snapshot& s) {
+    CHECK(WaitForDetails(app, tab, [](const SessionState::Snapshot& s) {
         return s.latest_notice.has_value() &&
                s.latest_notice->message.find("cannot send") != std::string::npos;
     }));
@@ -763,21 +830,26 @@ TEST_CASE("ResumeTab on an already-open tab focuses it instead of duplicating",
     fixture.Start();
 
     AppState app(fixture.client);
-    const auto sid_a = app.OpenTab(fixture.Options("a"));
-    const auto sid_b = app.OpenTab(fixture.Options("b"));
-    REQUIRE_FALSE(sid_a.empty());
-    REQUIRE_FALSE(sid_b.empty());
-    app.SetFocusedTab(sid_b);
+    const auto tab_a = app.OpenTab(fixture.Options("a"));
+    const auto tab_b = app.OpenTab(fixture.Options("b"));
+    REQUIRE_FALSE(tab_a.empty());
+    REQUIRE_FALSE(tab_b.empty());
+    app.SetFocusedTab(tab_b);
+
+    // Give tab a a real session -- ResumeTab is SESSION-keyed.
+    app.SubmitChatTurn(tab_a, "hi");
+    REQUIRE(WaitForSession(app, tab_a));
+    const auto sid_a = SessionIdOf(app, tab_a);
 
     // The old picker path silently no-opped this pick (AttachTab refused the
     // duplicate and returned ""); the user's pick must at least land focus.
     // (Focus comes from the picker's own SetFocusedTab after ResumeTab.)
-    REQUIRE(app.ResumeTab(sid_a) == sid_a);
+    REQUIRE(app.ResumeTab(sid_a) == tab_a);
     REQUIRE(app.GetAllTabs().size() == 2);
-    app.SetFocusedTab(sid_a);
+    app.SetFocusedTab(tab_a);
     for (const auto& t : app.GetAllTabs()) {
-        if (t.session_id == sid_a) CHECK(t.is_focused);
-        if (t.session_id == sid_b) CHECK_FALSE(t.is_focused);
+        if (t.tab_id == tab_a) CHECK(t.is_focused);
+        if (t.tab_id == tab_b) CHECK_FALSE(t.is_focused);
     }
 }
 
@@ -793,21 +865,23 @@ TEST_CASE("sends on a stream that died with the session are refused visibly",
     fixture.Start();
 
     AppState app(fixture.client);
-    const auto sid = app.OpenTab(fixture.Options("dies"));
-    REQUIRE_FALSE(sid.empty());
-    REQUIRE(WaitForAttached(app, sid));   // terminate an ATTACHED session, not a refused bidi
+    const auto tab = app.OpenTab(fixture.Options("dies"));
+    REQUIRE_FALSE(tab.empty());
+    app.SubmitChatTurn(tab, "go");
+    REQUIRE(WaitForSession(app, tab));
+    const auto sid = SessionIdOf(app, tab);
+    REQUIRE(WaitForAttached(app, tab));   // terminate an ATTACHED session, not a refused bidi
 
     // Complete one turn (durable rows prove completion; a bare state-Idle
     // wait passes instantly -- the tab is Idle before the turn starts). The
     // fetch is re-issued per retry: nothing else drives scrollback refreshes
     // in a headless test.
-    app.SendChatTurn(sid, "go");
     bool turn_done = false;
     const auto turn_deadline = std::chrono::steady_clock::now() + 5s;
     while (std::chrono::steady_clock::now() < turn_deadline) {
         app.RequestScrollback(sid, /*newest=*/true);
         std::this_thread::sleep_for(50ms);
-        if (app.GetDetails(sid).scrollback_page->size() >= 2) {
+        if (app.GetDetails(tab).scrollback_page->size() >= 2) {
             turn_done = true;
             break;
         }
@@ -815,13 +889,109 @@ TEST_CASE("sends on a stream that died with the session are refused visibly",
     REQUIRE(turn_done);
 
     fixture.sessions->Terminate(sid);
-    REQUIRE(WaitFor(app, sid, [](const AppState::TabSnapshot& t) {
+    REQUIRE(WaitFor(app, tab, [](const AppState::TabSnapshot& t) {
         return t.state == SessionStateKind::Done;
     }));
 
     app.SendChatTurn(sid, "anyone there?");
-    CHECK(WaitForDetails(app, sid, [](const SessionState::Snapshot& s) {
+    CHECK(WaitForDetails(app, tab, [](const SessionState::Snapshot& s) {
         return s.latest_notice.has_value() && s.latest_notice->is_error;
     }));
-    CHECK(app.GetDetails(sid).state == SessionStateKind::Error);
+    CHECK(app.GetDetails(tab).state == SessionStateKind::Error);
+}
+
+// ---------------------------------------------------------------------------
+// Sessionless-tab behavior beyond the basics: a sessionless /-command, the
+// /agent //model staging, and the single-flight create under stacked sends.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("a sessionless command runs with no session created", "[app_state][sessionless]") {
+    // The heart of the junk-row fix: /help typed on a sessionless tab is
+    // dispatched over RunSessionlessCommand (no session, no stream, no row),
+    // and the tab stays sessionless afterwards.
+    ClientFixture fixture;
+    fixture.Script("hi");
+    fixture.Start();
+
+    AppState app(fixture.client);
+    const auto tab = app.OpenTab(fixture.Options("cmd"));
+    REQUIRE(app.GetAllTabs()[0].has_session == false);
+
+    app.RunSessionlessCommand(tab, "/help");
+    REQUIRE(WaitForDetails(app, tab, [](const SessionState::Snapshot& s) {
+        return s.latest_notice.has_value() &&
+               s.latest_notice->message.find("/compact") != std::string::npos;
+    }));
+
+    // The registry still holds ZERO sessions: nothing was minted to run a
+    // listing command.
+    CHECK(fixture.sessions->size() == 0);
+    CHECK(app.GetAllTabs()[0].has_session == false);
+}
+
+TEST_CASE("staged /agent rides the eventual CreateSession", "[app_state][sessionless]") {
+    ClientFixture fixture;
+    // A SECOND preset distinct from the default, so "the staged choice reached
+    // the session" is provable from the metadata event (the server default is
+    // also "main", which would make the assertion vacuous).
+    fixture.Write("agents/alt.md",
+                  "---\nname: alt\nmodel: main/test-model\nallowed_tools: [\"*\"]\n---\nAlt.\n");
+    fixture.Script("hi");
+    fixture.Start();
+
+    AppState app(fixture.client);
+    // NO preset in the create-options: what the session runs is whatever was
+    // staged before the first message.
+    SessionClient::CreateOptions opts;
+    opts.project_root = (fixture.dir / "work").string();
+    const auto tab = app.OpenTab(opts);
+    REQUIRE_FALSE(tab.empty());
+
+    // Visible notice + immediate display seeding (the status bar reflects the
+    // choice before any session exists). TabNotice is what the TUI's submit
+    // path pairs with the staging call, so mirror it here.
+    REQUIRE(app.StageAgentPreset(tab, "alt"));
+    app.TabNotice(tab, "agent 'alt' will be used when the session starts");
+    REQUIRE(WaitForDetails(app, tab, [](const SessionState::Snapshot& s) {
+        return s.latest_notice.has_value();
+    }));
+    CHECK(app.GetDetails(tab).agent_preset == "alt");
+
+    app.SubmitChatTurn(tab, "hi");
+    REQUIRE(WaitForSession(app, tab));
+    REQUIRE(WaitForAttached(app, tab));
+    // THE POINT: the created session runs the STAGED preset.
+    CHECK(app.GetDetails(tab).agent_preset == "alt");
+}
+
+TEST_CASE("sends stacked before the create resolves land on ONE session",
+          "[app_state][sessionless]") {
+    // The single-flight guarantee the TUI leans on: typing a message and
+    // immediately another (or a burst of queued submits) must produce ONE
+    // CreateSession, with both turns on it -- not two sessions and not a
+    // dropped message.
+    ClientFixture fixture;
+    fixture.ScriptTwo("first reply", "second reply");
+    fixture.Start();
+
+    AppState app(fixture.client);
+    const auto tab = app.OpenTab(fixture.Options("stacked"));
+    app.SubmitChatTurn(tab, "first");
+    app.SubmitChatTurn(tab, "second");
+    REQUIRE(WaitForSession(app, tab));
+    const auto sid = SessionIdOf(app, tab);
+
+    // Both turns completed on the created session (4 durable rows).
+    const auto deadline = std::chrono::steady_clock::now() + 5s;
+    bool settled = false;
+    while (std::chrono::steady_clock::now() < deadline) {
+        app.RequestScrollback(sid, /*newest=*/true);
+        std::this_thread::sleep_for(50ms);
+        if (app.GetDetails(tab).scrollback_page->size() >= 4) {
+            settled = true;
+            break;
+        }
+    }
+    REQUIRE(settled);
+    CHECK(fixture.sessions->size() == 1);
 }
