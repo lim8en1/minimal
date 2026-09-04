@@ -1,0 +1,158 @@
+#!/bin/sh
+# One-command setup for minimal: resolves (or bootstraps) vcpkg, then runs the
+# matching CMake preset. The classic flow is:
+#
+#   ./configure && make build && sudo make install
+#
+# This is a thin front-end for CMakePresets.json -- no autotools, no generated
+# Makefile. It writes build/config.mk so `make` knows which preset and prefix
+# were chosen; re-run ./configure (with different flags) to change them.
+#
+# vcpkg resolution order: --vcpkg-root > $VCPKG_ROOT > .vcpkg/ in this repo
+# (bootstrapped on first use if missing). The bootstrapped checkout is pinned
+# to the `builtin-baseline` commit in vcpkg.json, so the registry state does not
+# depend on whatever a fresh vcpkg master points at.
+
+set -eu
+
+REPO_ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+VCPKG_REPO_URL=https://github.com/microsoft/vcpkg
+
+preset=default
+prefix=/usr/local
+arg_vcpkg_root=''
+env_vcpkg_root=${VCPKG_ROOT:-}
+
+say()  { printf '%s\n' "configure: $*"; }
+die()  { printf '%s\n' "configure: error: $*" >&2; exit 1; }
+
+usage() {
+    cat <<EOF
+usage: ./configure [options]
+
+options:
+  --prefix=DIR        install prefix for 'make install' (default: /usr/local)
+  --debug             configure the Debug build (build-debug/)
+  --server-only       no TUI client, server + tests only (build-server/)
+  --asan              AddressSanitizer build (build-asan/)
+  --tsan              ThreadSanitizer build (build-tsan/)
+  --vcpkg-root=DIR    use this vcpkg checkout instead of \$VCPKG_ROOT or
+                      auto-bootstrapping one into ./.vcpkg/
+  -h, --help          this help
+
+Equivalent presets: default, debug, server-only, asan, tsan (see BUILD.md).
+EOF
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --prefix=*)      prefix=${1#*=} ;;
+        --vcpkg-root=*)  arg_vcpkg_root=${1#*=} ;;
+        --debug)         preset=debug ;;
+        --server-only)   preset=server-only ;;
+        --asan)          preset=asan ;;
+        --tsan)          preset=tsan ;;
+        -h|--help)       usage; exit 0 ;;
+        *)               usage >&2; die "unknown option: $1" ;;
+    esac
+    shift
+done
+
+case "$preset" in
+    default)     build_dir=build ;;
+    debug)       build_dir=build-debug ;;
+    server-only) build_dir=build-server ;;
+    asan)        build_dir=build-asan ;;
+    tsan)        build_dir=build-tsan ;;
+esac
+
+# --- prerequisites -----------------------------------------------------------
+
+need() {
+    command -v "$1" >/dev/null 2>&1 ||
+        die "missing prerequisite: $1 ($2)"
+}
+
+need git  "https://git-scm.com -- clones vcpkg"
+need cmake "https://cmake.org -- cmake >= 3.28 (FetchContent EXCLUDE_FROM_ALL)"
+need ninja "https://ninja-build.org -- generator used by all presets"
+need c++  "a C++20 compiler (Clang or GCC)"
+
+cmake_version=$(cmake --version | sed -n 's/^cmake version //p')
+cmake_major=$(printf '%s' "$cmake_version" | cut -d. -f1)
+cmake_minor=$(printf '%s' "$cmake_version" | cut -d. -f2)
+if [ "${cmake_major:-0}" -lt 3 ] ||
+   { [ "$cmake_major" -eq 3 ] && [ "${cmake_minor:-0}" -lt 28 ]; }; then
+    die "cmake >= 3.28 required, found: ${cmake_version:-unknown}"
+fi
+
+# --- vcpkg -------------------------------------------------------------------
+
+baseline=$(sed -n 's/.*"builtin-baseline"[[:space:]]*:[[:space:]]*"\([0-9a-fA-F]\{40\}\)".*/\1/p' \
+              "$REPO_ROOT/vcpkg.json")
+[ -n "$baseline" ] || die "cannot read builtin-baseline from vcpkg.json"
+
+bootstrap_vcpkg() {
+    dst=$1
+    if [ ! -d "$dst/.git" ]; then
+        say "cloning vcpkg into $dst ..."
+        git clone --depth 1 "$VCPKG_REPO_URL" "$dst"
+    fi
+    # Pin the checkout to the manifest's baseline so the commit is present in
+    # the local git database (vcpkg resolves builtin-baseline from it). A
+    # shallow clone usually cannot see an older commit by itself: try a cheap
+    # depth-1 fetch of that exact SHA first, fall back to unshallowing.
+    if [ "$(git -C "$dst" rev-parse HEAD)" != "$baseline" ]; then
+        say "pinning vcpkg to baseline $baseline ..."
+        git -C "$dst" fetch --depth 1 origin "$baseline" 2>/dev/null \
+            || git -C "$dst" fetch --unshallow origin
+        git -C "$dst" checkout --detach --quiet "$baseline"
+    fi
+    if [ ! -x "$dst/vcpkg" ]; then
+        say "bootstrapping vcpkg (first time only; the dependency builds are binary-cached) ..."
+        "$dst/bootstrap-vcpkg.sh" -disableMetrics
+    fi
+}
+
+if [ -n "$arg_vcpkg_root" ]; then
+    vcpkg_root=$arg_vcpkg_root
+elif [ -n "$env_vcpkg_root" ]; then
+    vcpkg_root=$env_vcpkg_root
+elif [ -d "$REPO_ROOT/.vcpkg" ]; then
+    vcpkg_root=$REPO_ROOT/.vcpkg
+else
+    vcpkg_root=$REPO_ROOT/.vcpkg
+    bootstrap_vcpkg "$vcpkg_root"
+fi
+
+[ -d "$vcpkg_root" ] || die "vcpkg root does not exist: $vcpkg_root"
+
+# Only manage the checkout we bootstrapped ourselves; an external VCPKG_ROOT is
+# the user's to update (bootstrap the binary if it is not built yet, though).
+if [ "$vcpkg_root" = "$REPO_ROOT/.vcpkg" ]; then
+    bootstrap_vcpkg "$vcpkg_root"
+elif [ ! -x "$vcpkg_root/vcpkg" ]; then
+    say "bootstrapping vcpkg binary in $vcpkg_root ..."
+    "$vcpkg_root/bootstrap-vcpkg.sh" -disableMetrics
+fi
+
+say "using vcpkg at $vcpkg_root"
+
+# --- configure ---------------------------------------------------------------
+
+cd "$REPO_ROOT"
+say "configuring preset '$preset' (install prefix: $prefix) ..."
+VCPKG_ROOT="$vcpkg_root" cmake --preset "$preset" \
+    -DCMAKE_INSTALL_PREFIX="$prefix"
+
+# State for the Makefile. Plain assignments, unquoted: make is being make about
+# spaces in paths, as usual.
+mkdir -p build
+{
+    printf '# Generated by ./configure -- change options by re-running ./configure.\n'
+    printf 'PRESET := %s\n'        "$preset"
+    printf 'BUILD_DIR := %s\n'     "$build_dir"
+    printf 'CONFIG_PREFIX := %s\n' "$prefix"
+} > build/config.mk
+
+say "done. next: make build   (then: sudo make install)"

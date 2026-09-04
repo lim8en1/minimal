@@ -6,6 +6,24 @@ checkout is the whole setup. The only dependency not in the vcpkg registry
 (`hkr04/cpp-mcp`) is vendored via `FetchContent`, pinned to a commit SHA, and
 fetched automatically.
 
+## Quick start
+
+```sh
+./configure && make build && sudo make install
+```
+
+`./configure` checks prerequisites, resolves vcpkg (see below), configures the
+default preset, and records the choice in `build/config.mk`; the `make` targets
+replay that state and auto-configure first if the build tree is missing.
+Options: `--prefix=DIR`, `--debug`, `--server-only`, `--asan`, `--tsan`,
+`--vcpkg-root=DIR`. Re-running `./configure` with different flags reconfigures;
+the per-preset `make debug` / `make asan` / ... targets are shorthands for the
+same thing.
+
+`sudo make install` seeds the invoking user's config dir (not root's). `make
+clean` removes build trees but keeps `.vcpkg/`; `make distclean` removes that
+too. The rest of this document describes what runs underneath.
+
 ## Prerequisites
 
 | Tool | Version | Notes |
@@ -21,10 +39,13 @@ All C/C++ dependencies come from the vcpkg manifest: `grpc`, `protobuf`,
 features, on by default). The per-language tree-sitter grammars (bash, C++,
 Python, JS/TS, JSON, YAML, Rust, Go) are vendored via FetchContent as well.
 
-Export `VCPKG_ROOT` before configuring:
+`VCPKG_ROOT` is optional: if it is not set, `./configure` bootstraps a vcpkg
+checkout into `./.vcpkg` (pinned to the `builtin-baseline` commit in
+`vcpkg.json`) on first run. Exporting it is only needed to use an existing
+checkout:
 
 ```sh
-export VCPKG_ROOT=/path/to/vcpkg
+export VCPKG_ROOT=/path/to/vcpkg   # optional; ./configure bootstraps one otherwise
 ```
 
 ## Build
@@ -48,7 +69,8 @@ tree. Subsequent builds are incremental.
 | `asan` | `build-asan/` | AddressSanitizer, first-party code *and* dependencies instrumented (`arm64-osx-asan` overlay triplet in `cmake/triplets/`) |
 | `tsan` | `build-tsan/` | ThreadSanitizer, same approach (`arm64-osx-tsan`) |
 
-Every preset inherits `default`, so all of them require `$VCPKG_ROOT`.
+Every preset inherits `default`, so all of them need a vcpkg checkout — via
+`$VCPKG_ROOT` or the one `./configure` bootstraps into `./.vcpkg`.
 
 ### CMake options
 

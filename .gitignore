@@ -20,6 +20,9 @@ install/
 # vcpkg manifest-mode install tree
 vcpkg_installed/
 
+# vcpkg checkout auto-bootstrapped by ./configure
+/.vcpkg/
+
 # Generated protobuf/gRPC sources
 *.pb.cc
 *.pb.h
