@@ -532,13 +532,16 @@ private:
     // every error.
     void EmitTurnCompleted(llm::StopReason stop_reason, const llm::Usage& usage,
                            bool hit_max_turns);
-    // A brand-new session is unnamed until its first user message lands: the
-    // free default name is set inside the store's append transaction, which the
-    // Session never sees. Once, after a turn, an unnamed session asks the store
-    // what the row now carries; a name updates info_ and goes out as a
-    // SessionMetadataEvent -- the wire source the TUI's tab label refreshes
-    // from. Worker thread only.
-    void MaybeEmitNameFromStore();
+    // A brand-new session is unnamed until its first user turn's text names it:
+    // `candidate` (agent::DefaultSessionName of the turn's raw text, computed
+    // by RunOneTurn before the turn runs) is stored via
+    // HistoryStore::SetDefaultNameIfUnset -- the domain rule (WHICH text
+    // counts, how it is shaped) lives here, not in SessionDatabase; the store
+    // only guards "still unnamed" and persists. Only when the store confirms
+    // this call is the one that set it does info_ update and a
+    // SessionMetadataEvent go out -- the wire source the TUI's tab label
+    // refreshes from. Worker thread only.
+    void EmitDefaultNameIfComputed(const std::string& candidate);
     bool IsCancelled() const;
     // The worker's wait predicate extension: should an out-of-band message
     // wake this parked worker and drive a seedless turn? Called under mutex_.

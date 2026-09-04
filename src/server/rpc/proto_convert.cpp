@@ -557,7 +557,7 @@ v1::ServerEvent ToProto(const std::string& session_id, const agent::SessionEvent
                 metadata->set_session_id(out.session_id());
                 metadata->set_name(value.name);
                 // `partial` mirrors today's two name-only emission sites
-                // (SetName, MaybeEmitNameFromStore): the other fields are left
+                // (SetName, EmitDefaultNameIfComputed): the other fields are left
                 // at their proto default rather than sent as zero values that
                 // could be mistaken for an authoritative update.
                 if (!value.partial) {

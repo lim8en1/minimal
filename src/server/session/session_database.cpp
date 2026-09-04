@@ -2,7 +2,6 @@
 
 #include <sqlite3.h>
 
-#include <cctype>
 #include <chrono>
 #include <stdexcept>
 #include <string>
@@ -217,53 +216,6 @@ void ApplyMigrations(sqlite3* db, int target_version, const std::vector<Migratio
         common::BestEffortRollback(db);
         throw;
     }
-}
-
-// Collapses whitespace runs to single spaces and drops leading/trailing, so a
-// multi-line prompt becomes a usable tab label. The c < 0x80 guard is what keeps
-// this from splitting a UTF-8 sequence: continuation bytes are all > 127, and
-// isspace() is locale-dependent above ASCII -- under a Latin-1 locale 0xA0 is a
-// space, so an unguarded call would delete bytes out of the middle of a
-// character. The server never calls setlocale today; this makes that not matter.
-std::string CollapseWhitespace(std::string_view text) {
-    std::string out;
-    bool pending_space = false;
-    for (const unsigned char c : text) {
-        if (c < 0x80 && std::isspace(c)) {
-            pending_space = true;
-        } else {
-            if (!out.empty() && pending_space) out += ' ';
-            pending_space = false;
-            out += static_cast<char>(c);
-        }
-    }
-    return out;
-}
-
-// Cuts at a code-point boundary, never mid-sequence. A stray continuation byte
-// counts as one character rather than desynchronizing the scan.
-std::string TruncateToCodePoints(std::string_view s, int max_chars) {
-    std::size_t chars = 0;
-    std::size_t i = 0;
-    while (i < s.size() && chars < static_cast<std::size_t>(max_chars)) {
-        const unsigned char c = static_cast<unsigned char>(s[i]);
-        std::size_t len;
-        if (c < 0x80) len = 1;
-        else if ((c & 0xE0) == 0xC0) len = 2;
-        else if ((c & 0xF0) == 0xE0) len = 3;
-        else if ((c & 0xF8) == 0xF0) len = 4;
-        else len = 1;
-        if (i + len > s.size()) len = s.size() - i;
-        i += len;
-        ++chars;
-    }
-    return std::string(s.substr(0, i));
-}
-
-// The free core default name: the first user message's text, made label-shaped.
-constexpr int kDefaultNameMaxChars = 60;
-std::string SessionNameFromText(std::string_view text) {
-    return TruncateToCodePoints(CollapseWhitespace(text), kDefaultNameMaxChars);
 }
 
 // Reuses a prepared statement across calls. sqlite3_prepare is cheap next to
@@ -519,19 +471,6 @@ std::int64_t SessionDatabase::AppendMessage(const std::string& session_id,
         MessageToJson(message).dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
     const char* role = message.role == llm::Role::User ? "user" : "assistant";
 
-    // Name candidate for the free default: the first user message carrying text.
-    // A tool-result-only user message (e.g. an injected subagent completion) is
-    // not a name, so the search simply continues with later messages.
-    std::string name_candidate;
-    if (message.role == llm::Role::User) {
-        for (const auto& block : message.content) {
-            if (const auto* text = std::get_if<llm::TextBlock>(&block)) {
-                name_candidate = SessionNameFromText(text->text);
-                break;
-            }
-        }
-    }
-
     std::lock_guard lock(mu_);
     const std::int64_t now = NextTimestamp();
 
@@ -616,22 +555,6 @@ std::int64_t SessionDatabase::AppendMessage(const std::string& session_id,
         }
         assigned_seq = sqlite3_column_int64(read_seq.stmt, 0);
 
-        // Only when the session still has no name: an explicit creation name or
-        // a name an observer plugin set later is never clobbered. The source
-        // is recorded with it (migration v6), so the rename seam can tell a
-        // generated title from a default apart from a user's choice.
-        if (!name_candidate.empty()) {
-            CachedStmt rename(db_, prepared_,
-                              "UPDATE sessions SET name = ?, name_source = 'default'"
-                              " WHERE id = ? AND name = '';",
-                              "failed to set default session name");
-            sqlite3_bind_text(rename.stmt, 1, name_candidate.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_bind_text(rename.stmt, 2, session_id.c_str(), -1, SQLITE_TRANSIENT);
-            if (sqlite3_step(rename.stmt) != SQLITE_DONE) {
-                ThrowSqliteError(db_, "failed to set default session name");
-            }
-        }
-
         ExecChecked(db_, "COMMIT;", "failed to commit append");
     } catch (...) {
         char* err = nullptr;
@@ -681,6 +604,24 @@ int SessionDatabase::wal_autocheckpoint() const {
         ThrowSqliteError(db_, "failed to read wal_autocheckpoint");
     }
     return sqlite3_column_int(query.stmt, 0);
+}
+
+bool SessionDatabase::SetDefaultName(const std::string& session_id, const std::string& name) {
+    std::lock_guard lock(mu_);
+    // Only when the session still has no name: an explicit creation name or a
+    // name an observer plugin set later is never clobbered. The source is
+    // recorded with it (migration v6), so the rename seam can tell a
+    // generated title from a default apart from a user's choice.
+    CachedStmt rename(db_, prepared_,
+                      "UPDATE sessions SET name = ?, name_source = 'default'"
+                      " WHERE id = ? AND name = '';",
+                      "failed to set default session name");
+    sqlite3_bind_text(rename.stmt, 1, name.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(rename.stmt, 2, session_id.c_str(), -1, SQLITE_TRANSIENT);
+    if (sqlite3_step(rename.stmt) != SQLITE_DONE) {
+        ThrowSqliteError(db_, "failed to set default session name");
+    }
+    return sqlite3_changes(db_) == 1;
 }
 
 bool SessionDatabase::UpdateSessionName(const std::string& session_id, const std::string& name) {

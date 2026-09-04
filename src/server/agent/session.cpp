@@ -11,6 +11,7 @@
 #include <utility>
 
 #include "minimal/agent/mention_expansion.hpp"
+#include "minimal/agent/session_naming.hpp"
 
 namespace minimal::agent {
 namespace {
@@ -878,6 +879,13 @@ bool Session::ShouldWakeForInjections() const {
 void Session::RunOneTurn(std::optional<std::string> text) {
     const auto started = std::chrono::steady_clock::now();
 
+    // Computed from the RAW text, before @-mention expansion below may move
+    // out of `text` -- a tab label reflects what the user typed, not inlined
+    // @file contents. Empty for a seedless wake turn (no candidate) and
+    // harmless to compute even for a vetoed or failed turn: the post-turn
+    // write is guarded by "still unnamed" either way.
+    const std::string default_name_candidate = text ? DefaultSessionName(*text) : std::string();
+
     // --- core.user_prompt_submit: the prompt veto seam -------------------------
     //
     // On the WORKER, deliberately, not in SubmitTurn: SubmitTurn runs on the
@@ -978,9 +986,9 @@ void Session::RunOneTurn(std::optional<std::string> text) {
     // records, from the server side). Bookkeeping events ride BEFORE the
     // terminator, never after.
     try {
-        MaybeEmitNameFromStore();
+        EmitDefaultNameIfComputed(default_name_candidate);
     } catch (...) {
-        logger_.warn("session {}: checking the store for a default name failed", params_.session_id);
+        logger_.warn("session {}: setting the default name failed", params_.session_id);
     }
     try {
         EmitTurnCompleted(result.stop_reason, result.last_usage, result.hit_max_turns);
@@ -1037,26 +1045,26 @@ void Session::EmitTurnCompleted(llm::StopReason stop_reason, const llm::Usage& u
     EmitEvent(SessionEvent{TurnCompleted{stop_reason, usage, hit_max_turns}});
 }
 
-void Session::MaybeEmitNameFromStore() {
-    // Two exit conditions before the query: already named (the ordinary case --
+void Session::EmitDefaultNameIfComputed(const std::string& candidate) {
+    if (candidate.empty()) return;
+    // Two exit conditions before the write: already named (the ordinary case --
     // a chosen name, a resumed session, or this method having run once), or
     // nothing appended yet (a turn that failed before its first message; there
-    // is no name to find and the next turn will ask again).
+    // is no name to set and the next turn will try again).
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!info_.name.empty()) return;
     }
     if (store_->last_appended_seq() < 0) return;
 
-    const auto stored = store_->StoredName();
-    if (!stored || stored->empty()) return;
+    if (!store_->SetDefaultNameIfUnset(candidate)) return;
 
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        info_.name = *stored;
+        info_.name = candidate;
     }
     SessionMetadataChanged metadata;
-    metadata.name = *stored;
+    metadata.name = candidate;
     metadata.partial = true;
     EmitEvent(SessionEvent{std::move(metadata)});
 }

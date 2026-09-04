@@ -169,6 +169,17 @@ public:
     std::int64_t AppendMessage(const std::string& session_id, const llm::Message& message,
                                int token_count = 0);
 
+    // Phase 5: the free-default-naming rule (first user text, made
+    // label-shaped) moved to agent::Session, which computes the candidate and
+    // calls this -- separate from AppendMessage's own transaction, since the
+    // caller no longer HAS to name the session atomically with persisting the
+    // message that inspired it (self-healing: a resumed session recomputes
+    // the same candidate from the same seeded text against the same guard
+    // below). Only takes effect while the session still has no name --
+    // returns whether it did, so the caller can tell "already named" from
+    // "just named" without a second query.
+    bool SetDefaultName(const std::string& session_id, const std::string& name);
+
     bool UpdateSessionName(const std::string& session_id, const std::string& name);
 
     // True when the session was created WITH an explicit name

@@ -1048,63 +1048,32 @@ TEST_CASE("creating a session with an unknown parent is an error", "[session][st
 }
 
 // --- Default session naming --------------------------------------------------------
+//
+// Phase 5: the free-default-naming RULE (which text counts, how it is
+// shaped) moved to agent::DefaultSessionName (session_naming_test.cpp) --
+// AppendMessage no longer inspects message content at all. What remains a
+// SessionDatabase concern is the guard: SetDefaultName only takes effect
+// while the session still has no name, and records the source.
 
-TEST_CASE("the first user message names an unnamed session, once", "[session][naming]") {
+TEST_CASE("SetDefaultName names an unnamed session, once", "[session][naming]") {
     TempDir dir;
     SessionDatabase db(dir.path() / "naming.db");
     const auto id = db.CreateSession("", std::nullopt, "/p", "build").session_id;
 
-    db.AppendMessage(id, UserMsg("Fix the login bug on the auth service"));
+    CHECK(db.SetDefaultName(id, "Fix the login bug on the auth service"));
     CHECK(db.GetSession(id)->name == "Fix the login bug on the auth service");
 
-    // Later messages never clobber the name.
-    db.AppendMessage(id, UserMsg("now also handle the logout path please"));
+    // A later call never clobbers the name -- and reports it did not.
+    CHECK_FALSE(db.SetDefaultName(id, "now also handle the logout path please"));
     CHECK(db.GetSession(id)->name == "Fix the login bug on the auth service");
 }
 
-TEST_CASE("an explicit creation name is preserved", "[session][naming]") {
+TEST_CASE("an explicit creation name blocks the default", "[session][naming]") {
     TempDir dir;
     SessionDatabase db(dir.path() / "explicit.db");
     const auto id = db.CreateSession("my chosen name", std::nullopt, "/p", "build").session_id;
-    db.AppendMessage(id, UserMsg("hello there"));
+    CHECK_FALSE(db.SetDefaultName(id, "hello there"));
     CHECK(db.GetSession(id)->name == "my chosen name");
-}
-
-TEST_CASE("a tool-result-only user message is not a name", "[session][naming]") {
-    TempDir dir;
-    SessionDatabase db(dir.path() / "toolonly.db");
-    const auto id = db.CreateSession("", std::nullopt, "/p", "build").session_id;
-
-    llm::ToolResultBlock result;
-    result.tool_use_id = "t1";
-    result.content.push_back(llm::TextBlock{"subagent finished its work"});
-    db.AppendMessage(id, llm::Message{llm::Role::User, {result}});
-    CHECK(db.GetSession(id)->name.empty());
-
-    // The next user message with text still names the session.
-    db.AppendMessage(id, UserMsg("the real question"));
-    CHECK(db.GetSession(id)->name == "the real question");
-}
-
-TEST_CASE("names are whitespace-collapsed and truncated at 60 code points", "[session][naming]") {
-    TempDir dir;
-    SessionDatabase db(dir.path() / "trunc.db");
-
-    const auto id = db.CreateSession("", std::nullopt, "/p", "build").session_id;
-    db.AppendMessage(id, UserMsg("  Fix   the\nlogin\tbug  "));
-    CHECK(db.GetSession(id)->name == "Fix the login bug");
-
-    // ASCII: exactly 60 characters survive.
-    const auto id2 = db.CreateSession("", std::nullopt, "/p", "build").session_id;
-    db.AppendMessage(id2, UserMsg(std::string(70, 'a')));
-    CHECK(db.GetSession(id2)->name == std::string(60, 'a'));
-
-    // UTF-8: truncation counts code points, never splitting a sequence.
-    const auto id3 = db.CreateSession("", std::nullopt, "/p", "build").session_id;
-    std::string long_unicode;
-    for (int i = 0; i < 70; ++i) long_unicode += "\xC3\xA9";  // é × 70
-    db.AppendMessage(id3, UserMsg(long_unicode));
-    CHECK(db.GetSession(id3)->name == long_unicode.substr(0, 120));  // 60 × 2 bytes
 }
 
 TEST_CASE("UpdateSessionName renames and reports unknown ids", "[session][naming]") {
@@ -1132,9 +1101,9 @@ TEST_CASE("name_source records where a name came from", "[session][naming]") {
     CHECK(db.IsExplicitlyNamed(explicit_id));
     CHECK(db.GetSession(explicit_id)->name_source == "explicit");
 
-    // Default rule (first user text) -- not explicit, and the column says so.
+    // Default rule -- not explicit, and the column says so.
     const auto default_id = db.CreateSession("", std::nullopt, "/p", "build").session_id;
-    db.AppendMessage(default_id, UserMsg("fix the login bug"));
+    CHECK(db.SetDefaultName(default_id, "fix the login bug"));
     CHECK_FALSE(db.IsExplicitlyNamed(default_id));
     CHECK(db.GetSession(default_id)->name_source == "default");
 

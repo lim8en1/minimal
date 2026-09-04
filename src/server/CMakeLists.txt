@@ -81,6 +81,7 @@ add_library(minimal_server_core SHARED
     agent/session.cpp
     agent/session_registry.cpp
     agent/session_support.cpp
+    agent/session_naming.cpp
     agent/signal_router.cpp
     session/ulid.cpp
     session/message_codec.cpp

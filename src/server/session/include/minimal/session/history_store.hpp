@@ -86,14 +86,17 @@ public:
         throw std::logic_error("this history store does not support rewind");
     }
 
-    // The name the durable store currently has for this session, if the store
-    // knows one. The SQLite store answers from the sessions row, which the free
-    // default-naming rule inside its append transaction may have set AFTER the
-    // Session was built from an empty name -- this is how the session learns the
-    // name its transcript was given, and emits the SessionMetadataEvent the
-    // client's tab label refreshes from. nullopt is "no news" (in-memory test
-    // fakes), never an error.
-    virtual std::optional<std::string> StoredName() const { return std::nullopt; }
+    // Sets the durable store's name for this session, but ONLY while it still
+    // has none -- an explicit creation name or one an observer plugin set
+    // later is never clobbered. Returns whether this call is the one that set
+    // it, so the caller (agent::Session, which computes the candidate as a
+    // domain rule -- see agent/session_naming.hpp) can tell "already named"
+    // from "just named" without a second read. Default no-op / false: in-
+    // memory test fakes have no durable row to name.
+    virtual bool SetDefaultNameIfUnset(const std::string& name) {
+        (void)name;
+        return false;
+    }
 };
 
 }  // namespace minimal::session

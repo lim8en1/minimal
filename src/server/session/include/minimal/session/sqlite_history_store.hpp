@@ -11,8 +11,10 @@ namespace minimal::session {
 
 // The durable HistoryStore: one instance per session, all of them sharing the
 // process-wide SessionDatabase (and its single connection/mutex). The AgentLoop
-// sees only the one-method interface; seq assignment, default naming, and the
-// updated_at touch are SessionDatabase concerns, applied in one transaction.
+// sees only the one-method interface; seq assignment and the updated_at touch
+// are SessionDatabase concerns, applied in one transaction. Default naming is
+// agent::Session's domain rule (agent/session_naming.hpp) now -- this class
+// only stores what it is told, via SetDefaultNameIfUnset.
 class SqliteHistoryStore : public HistoryStore {
 public:
     SqliteHistoryStore(SessionDatabase& db, std::string session_id);
@@ -37,10 +39,7 @@ public:
     std::int64_t SetDiscardedAfter(std::int64_t target_seq) override;
     std::int64_t UnmarkDiscarded() override;
 
-    // The row's current name. The default-naming rule inside AppendMessage may
-    // have set it after this Session was built; the read is only made while the
-    // session is still unnamed, so it costs one query per session lifetime.
-    std::optional<std::string> StoredName() const override;
+    bool SetDefaultNameIfUnset(const std::string& name) override;
 
 private:
     SessionDatabase& db_;

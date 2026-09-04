@@ -35,10 +35,8 @@ std::int64_t SqliteHistoryStore::UnmarkDiscarded() {
     return db_.UnmarkDiscarded(session_id_);
 }
 
-std::optional<std::string> SqliteHistoryStore::StoredName() const {
-    const auto row = db_.GetSession(session_id_);
-    if (!row || row->name.empty()) return std::nullopt;
-    return row->name;
+bool SqliteHistoryStore::SetDefaultNameIfUnset(const std::string& name) {
+    return db_.SetDefaultName(session_id_, name);
 }
 
 }  // namespace minimal::session
