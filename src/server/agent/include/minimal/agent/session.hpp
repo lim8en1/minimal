@@ -224,14 +224,6 @@ struct SessionParams {
     // servers and no liveness checks.
     mcp::McpClientManager* mcp_manager = nullptr;
 
-    // The process-wide hook dispatcher (track O). Borrowed; null in tests that
-    // do not exercise hooks, which makes every emission a no-op. Set by the
-    // registry -- the one funnel every session (top-level and subagent alike)
-    // passes through -- so producers need not know it exists; a producer MAY
-    // set it explicitly (a test with its own dispatcher wins over the funnel
-    // default, mirroring how params.permission_checker behaves).
-    const hooks::HookDispatcher* hooks = nullptr;
-
     // S5.3: sessions.unattended_prompt_timeout_seconds, set by the registry
     // funnel (SessionRegistry::set_prompt_timeout, mirroring
     // set_project_context). Zero -- the default -- means wait forever, the
@@ -611,6 +603,12 @@ private:
     const llm::ProviderFactoryRegistry* provider_factories_ = nullptr;
     ProviderInstanceCache* provider_instance_cache_ = nullptr;
     mcp::McpClientManager* mcp_manager_ = nullptr;
+    // The process-wide hook dispatcher (track O), read from loop_config.hooks
+    // in the constructor -- one field, not two (Phase 5 step 8):
+    // LoopConfig::hooks already drives AgentLoop's compaction emissions, so
+    // Session reads the same copy for kUserPromptSubmit and the ToolExecutor
+    // it builds, instead of also taking its own SessionParams::hooks.
+    const hooks::HookDispatcher* hooks_ = nullptr;
     // The user's explicit model choice. Outranks the preset's, and survives
     // /agent re-resolving it.
     std::optional<common::ModelRef> model_override_;

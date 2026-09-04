@@ -25,8 +25,8 @@ namespace {
 
 // The same scaffolding session_test.cpp uses, trimmed to what the
 // user_prompt_submit seam needs: a session on a fake store with a hook
-// dispatcher wired through SessionParams -- the field the registry funnel
-// would set in production.
+// dispatcher wired through LoopConfig::hooks -- the field the registry
+// funnel would set in production.
 struct HookSessionFixture {
     explicit HookSessionFixture(const std::filesystem::path& dir) : observers(common::DefaultLogger()) {
         preset.name = "test";
@@ -70,7 +70,7 @@ struct HookSessionFixture {
         params.name = "hook session";
         params.agent_preset = "test";
         params.project_root = std::filesystem::temp_directory_path();
-        params.hooks = dispatcher.get();
+        loop_config.hooks = dispatcher.get();
         rpc::FinishSessionWiring(params);
 
         session = std::make_unique<agent::Session>(

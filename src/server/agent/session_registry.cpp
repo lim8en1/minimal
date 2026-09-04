@@ -118,6 +118,12 @@ std::shared_ptr<Session> SessionRegistry::CreateResolved(SessionParams params,
 
     LoopConfig loop_config = loop_config_;
     if (max_turns_override.has_value()) loop_config.max_turns = *max_turns_override;
+    // Track O: the same funnel property wires the hook dispatcher. A producer
+    // that set one explicitly (a test with its own) wins; everyone else gets
+    // the process-wide one without knowing it exists. One field now, not two
+    // (Phase 5 step 8): Session reads this LoopConfig, not a second copy on
+    // SessionParams.
+    if (loop_config.hooks == nullptr) loop_config.hooks = hooks_;
 
     auto provider = ResolveProvider(preset, params.agent_preset);
 
@@ -129,11 +135,6 @@ std::shared_ptr<Session> SessionRegistry::CreateResolved(SessionParams params,
     // fake stores) leave it null, and ctx.history is null with it. The SAME
     // registry-lifetime reader every session shares -- see history_reader_.
     params.history_reader = history_reader_;
-
-    // Track O: the same funnel property wires the hook dispatcher. A producer
-    // that set one explicitly (a test with its own) wins; everyone else gets
-    // the process-wide one without knowing it exists.
-    if (params.hooks == nullptr) params.hooks = hooks_;
 
     // Constructor-injected (Phase 5 step 3): presets/commands/provider
     // factories/instance cache reach Session's ctor on `params`, closing the

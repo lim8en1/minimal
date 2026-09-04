@@ -147,8 +147,8 @@ public:
     }
 
     // The process-wide hook dispatcher (track O). Optional and borrowed; set
-    // before any session exists. Attached to every params.hooks that arrives
-    // null -- the funnel property, like the history reader below.
+    // before any session exists. Attached to every LoopConfig::hooks that
+    // arrives null -- the funnel property, like the history reader below.
     void set_hook_dispatcher(const hooks::HookDispatcher* hooks) { hooks_ = hooks; }
 
     std::shared_ptr<Session> Create(SessionParams params);

@@ -88,7 +88,7 @@ Session::Session(SessionParams params, AgentPreset preset,
       // grants as seed -- the whole inheritance lands in this one call.
       executor_(registry, *checker_, preset_.permission_mode, preset_.mcp_permissions,
                 params_.run_mode_override.value_or(preset_.run_mode), params_.policy_ceiling,
-                params_.mcp_policy_ceiling, params_.seed_grants, params_.hooks) {
+                params_.mcp_policy_ceiling, params_.seed_grants, loop_config.hooks) {
     // An advised checker was composed before this Session existed. The
     // producer shares the cancel HOLDER between the checker and these params;
     // the Session's only job is to keep the flag and fire it on Cancel/
@@ -243,6 +243,10 @@ Session::Session(SessionParams params, AgentPreset preset,
     commands_ = params_.commands;
     provider_factories_ = params_.provider_factories;
     provider_instance_cache_ = params_.provider_instance_cache;
+    // Phase 5 step 8: the same copy executor_'s init list above already used,
+    // kept here for kUserPromptSubmit -- one field, not a second
+    // SessionParams::hooks in sync with LoopConfig::hooks by convention.
+    hooks_ = loop_config.hooks;
 
     // MCP liveness at session start, BEFORE the worker exists: this thread is
     // allowed to block (the RPC reader is a different one), and the loop must
@@ -897,12 +901,12 @@ void Session::RunOneTurn(std::optional<std::string> text) {
     // shared exit reports exactly what the old hand-rolled veto emit did:
     // StopReason::Unknown, empty usage, hit_max_turns false.
     bool vetoed = false;
-    if (params_.hooks != nullptr && params_.parent_session_id.empty() && text) {
+    if (hooks_ != nullptr && params_.parent_session_id.empty() && text) {
         nlohmann::json payload{{"session_id", params_.session_id},
                                {"project_root", params_.project_root.string()},
                                {"prompt", *text}};
-        if (auto blocked = params_.hooks->Emit(hooks::kUserPromptSubmit, std::move(payload),
-                                               [this] { return IsCancelled(); })) {
+        if (auto blocked = hooks_->Emit(hooks::kUserPromptSubmit, std::move(payload),
+                                        [this] { return IsCancelled(); })) {
             logger_.warn("session {}: user_prompt_submit hook blocked the prompt: {}",
                          params_.session_id, *blocked);
             EmitEvent(SessionEvent{SessionError{"prompt rejected by hook: " + *blocked}});
