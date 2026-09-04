@@ -13,14 +13,13 @@
 // That keeps the permission round-trip testable in-process, against the real
 // implementation rather than a stand-in for it.
 
-#include <atomic>
 #include <chrono>
-#include <cstdint>
 #include <optional>
 #include <string>
 
 #include "minimal/rpc/event_broadcaster.hpp"
 #include "minimal/rpc/pending_requests.hpp"
+#include "minimal/rpc/rendezvous.hpp"
 #include "minimal/tools/permission_checker.hpp"
 #include "minimal/v1/session_service.pb.h"
 
@@ -40,13 +39,11 @@ public:
     tools::PermissionResponse check(const tools::PermissionRequest& request) override;
 
 private:
-    std::string NextRequestId();
-
     std::string session_id_;
     EventBroadcaster& queue_;
     PendingRequests& pending_;
     std::chrono::milliseconds unattended_timeout_;
-    std::atomic<std::uint64_t> next_id_{0};
+    RequestIdGenerator request_ids_{"perm-"};
 };
 
 }  // namespace minimal::rpc

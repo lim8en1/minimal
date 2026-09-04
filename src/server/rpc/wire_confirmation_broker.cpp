@@ -13,13 +13,9 @@ WireConfirmationBroker::WireConfirmationBroker(std::string session_id,
       pending_(pending),
       unattended_timeout_(unattended_timeout) {}
 
-std::string WireConfirmationBroker::NextRequestId() {
-    return "confirm-" + std::to_string(next_id_.fetch_add(1, std::memory_order_relaxed));
-}
-
 commands::ConfirmationResponse WireConfirmationBroker::RequestConfirmation(
     const commands::ConfirmationRequest& request) {
-    const std::string request_id = NextRequestId();
+    const std::string request_id = request_ids_.Next();
 
     // Before the push, always -- see the header.
     auto registration = pending_.Register(request_id);
@@ -34,17 +30,15 @@ commands::ConfirmationResponse WireConfirmationBroker::RequestConfirmation(
     for (const auto& option : request.options) wire->add_options(option);
     queue_.Publish(std::move(event));
 
-    const auto answer = registration.AwaitResponse(
-        unattended_timeout_ > std::chrono::milliseconds::zero()
-            ? std::optional(unattended_timeout_)
-            : std::nullopt);
-    if (!answer) return {};  // cancelled, terminating, or timed out: no answer, not a choice
-
-    // Typed variant: a PermissionAnswer delivered against this id -- a client
-    // answering the wrong kind of request -- is structurally unreadable here,
-    // the same fail-closed outcome an unoffered option gets below.
-    const auto* confirmation = std::get_if<ConfirmationAnswer>(&*answer);
-    if (confirmation == nullptr) return {};
+    // Cancelled, terminating, timed out, or a PermissionAnswer delivered
+    // against this id -- a client answering the wrong kind of request, which
+    // AwaitTypedAnswer's variant narrowing makes structurally unreadable
+    // rather than something this code has to detect by hand. Every case is
+    // "no answer, not a choice", the same fail-closed outcome an unoffered
+    // option gets below.
+    const std::optional<ConfirmationAnswer> confirmation =
+        AwaitTypedAnswer<ConfirmationAnswer>(registration, unattended_timeout_);
+    if (!confirmation) return {};
 
     // Only an option that was OFFERED counts. A client cannot invent one, for
     // the same reason granted_keys is filtered against what the permission

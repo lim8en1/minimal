@@ -17,15 +17,8 @@ WirePermissionChecker::WirePermissionChecker(std::string session_id,
       pending_(pending),
       unattended_timeout_(unattended_timeout) {}
 
-std::string WirePermissionChecker::NextRequestId() {
-    // Unique within the session, which is all correlation needs: request_id is
-    // only ever matched against this session's own PendingRequests, and
-    // ServerEvent already carries session_id alongside it.
-    return "perm-" + std::to_string(next_id_.fetch_add(1, std::memory_order_relaxed));
-}
-
 tools::PermissionResponse WirePermissionChecker::check(const tools::PermissionRequest& request) {
-    const std::string request_id = NextRequestId();
+    const std::string request_id = request_ids_.Next();
 
     // REGISTER BEFORE PUBLISHING. The client can answer the instant the event is
     // written, so the slot has to exist first -- otherwise a fast answer arrives
@@ -44,26 +37,16 @@ tools::PermissionResponse WirePermissionChecker::check(const tools::PermissionRe
     // gone. Every attached subscriber gets the prompt; first answer wins.
     queue_.Publish(std::move(event));
 
-    const std::optional<PendingAnswer> registration_answer = registration.AwaitResponse(
-        unattended_timeout_ > std::chrono::milliseconds::zero()
-            ? std::optional(unattended_timeout_)
-            : std::nullopt);
-    if (!registration_answer) {
-        // Cancelled, terminating, or (if sessions.unattended_prompt_timeout_
-        // seconds is set) timed out with nobody attached to answer. Deny is
-        // the correct outcome in every one of those cases -- the work is
-        // being torn down or nobody is there to grant it -- but it is a
-        // decision made HERE, not inside the synchronisation primitive, which
-        // deliberately reports only "no answer" for all three.
-        return tools::PermissionResponse{tools::PermissionDecision::Deny, {}};
-    }
-
-    // The reader hands the decoded decision/granted_keys across as the typed
-    // variant. A ConfirmationAnswer landing here -- a client answering the
-    // wrong kind of request -- is structurally unreadable (get_if returns
-    // null), the same fail-closed outcome a malformed payload had.
-    const auto* answer = std::get_if<PermissionAnswer>(&*registration_answer);
-    if (answer == nullptr) {
+    // Cancelled, terminating, timed out with nobody attached to answer, or a
+    // ConfirmationAnswer delivered against this id (a client answering the
+    // wrong kind of request -- structurally unreadable, the same fail-closed
+    // outcome a malformed payload had). Deny is the correct outcome in every
+    // one of those cases, but it is a decision made HERE, not inside
+    // AwaitTypedAnswer, which deliberately reports only "no usable answer"
+    // for all of them.
+    const std::optional<PermissionAnswer> answer =
+        AwaitTypedAnswer<PermissionAnswer>(registration, unattended_timeout_);
+    if (!answer) {
         return tools::PermissionResponse{tools::PermissionDecision::Deny, {}};
     }
     // A grant key is only meaningful as the answer to something THIS request
