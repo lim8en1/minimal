@@ -152,6 +152,23 @@ TEST_CASE("project context: search_ancestors walks upward", "[project_context]")
           std::filesystem::weakly_canonical(project.dir / "parent" / "AGENTS.md", ec));
 }
 
+TEST_CASE("project context: the ancestor walk terminates at the filesystem root",
+          "[project_context]") {
+    TempProject project;
+    project.Write("project/.keep", "");
+
+    // A candidate name that exists nowhere on the walk up to "/" keeps this
+    // hermetic: the machine's own /AGENTS.md or /CLAUDE.md must not decide
+    // the outcome. The walk must stop at the root, not spin there --
+    // parent_path() is a fixed point at "/" and never yields an empty path.
+    ProjectContextSettings settings = Settings(/*search_ancestors=*/true);
+    settings.files = {"no-such-context-file.md"};
+
+    std::string error;
+    CHECK_FALSE(LoadProjectContext(project.dir / "project", settings, &error).has_value());
+    CHECK(error.empty());
+}
+
 TEST_CASE("project context: proximity beats file order across directories",
           "[project_context][invariant]") {
     TempProject project;

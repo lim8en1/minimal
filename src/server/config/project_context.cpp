@@ -89,6 +89,10 @@ std::optional<ProjectContext> LoadProjectContext(const std::filesystem::path& pr
             return context;
         }
         if (!settings.search_ancestors) break;
+        // parent_path() is a fixed point at the filesystem root ("/" -> "/"),
+        // so the path never empties; stop the walk when the parent stops
+        // shrinking. Same idiom as project_dirs.cpp.
+        if (dir == dir.parent_path()) break;
     }
     return std::nullopt;
 }
