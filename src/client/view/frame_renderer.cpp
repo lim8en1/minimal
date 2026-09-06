@@ -166,7 +166,13 @@ ftxui::Element FrameRenderer::Render() {
                 (!snap.scrollback_page || snap.scrollback_page->empty()) &&
                 snap.streaming_text.empty() && !snap.has_earlier_messages &&
                 snap.pending_user_text.empty() && !turn_busy;
-            Elements start = fresh_session ? RenderStartViews(focused) : Elements{};
+            // Start views are SESSION-keyed like the status segments (a
+            // checklist/cost view caches per session) -- the frame's focused
+            // handle is a TAB id, so the snapshot's session id goes out
+            // (empty = no tab / sessionless). Passing the tab id used to
+            // make plugin start views read the wrong cache key.
+            Elements start =
+                fresh_session ? RenderStartViews(focused_details.session_id) : Elements{};
             if (!start.empty()) {
                 for (auto& element : start) rows.push_back(std::move(element) | flex);
             } else {

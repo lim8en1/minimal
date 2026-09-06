@@ -1375,6 +1375,13 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     // terminal must not destroy in-flight work. ctrl+w (CloseTab) is the
     // explicit per-tab terminate path and is unchanged.
     app->DetachAllTabs();
+
+    // Cancel subscribe streams BEFORE this function's locals unwind: `env`
+    // (the plugin environment) is declared after `client`, so it is
+    // destroyed FIRST, and a subscribing plugin that joins its worker in its
+    // destructor would deadlock on a stream nobody has cancelled -- the
+    // client's own destructor sweep only runs after env is already gone.
+    client->CancelSubscriptions();
     return kOk;
 }
 

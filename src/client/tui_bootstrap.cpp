@@ -338,6 +338,24 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
         }
     }
 
+    // Views get the same one-shot theme push ChatSurface does (default
+    // no-op; a view that threw is logged, not disabled -- its component may
+    // still be harmless, and panels are contained at render time anyway).
+    // StartView needs no push: its Render() takes the theme as a parameter.
+    for (const auto& view : out.view_registry.views()) {
+        try {
+            view->OnTheme(*out.theme);
+        } catch (const std::exception& error) {
+            std::fprintf(stderr, "minimal: view plugin '%s' threw on theme: %s\n",
+                         view->spec().id.c_str(), error.what());
+        } catch (...) {
+            std::fprintf(stderr,
+                         "minimal: view plugin '%s' threw on theme (non-standard "
+                         "exception)\n",
+                         view->spec().id.c_str());
+        }
+    }
+
     return true;
 }
 

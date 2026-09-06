@@ -277,6 +277,15 @@ public:
     virtual ~View() = default;
     virtual const ViewSpec& spec() const = 0;
     virtual ftxui::Component component() = 0;
+
+    // Called once after the theme is loaded (views register before it), the
+    // same push ChatSurface gets. Without it the interface's own "colors come
+    // from theme roles" contract (see plugin_abi.h's View docs) is
+    // unimplementable: a view has no other route to the resolved theme.
+    // Default no-op so views that hardcode styles keep compiling. A throw
+    // here disables nothing yet (the host catches); render-time calls are
+    // contained separately.
+    virtual void OnTheme(const Theme& theme) { (void)theme; }
 };
 
 // A registered view's runtime dispatch entry: the view's own spec, its

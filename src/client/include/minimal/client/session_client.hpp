@@ -225,6 +225,15 @@ public:
     explicit SessionClient(std::string server_address);
     ~SessionClient();
 
+    // Cancels every live PluginSubscribe reader (the destructor's sweep,
+    // callable early). The TUI calls this BEFORE its plugin environment is
+    // destroyed: plugin destructors run at env teardown and a subscribing
+    // plugin that joins its worker there would otherwise deadlock -- the
+    // worker parked in Read() on a stream nobody has cancelled yet, while
+    // ~SessionClient's own sweep only fires later (after env is already
+    // gone). Idempotent; safe from any thread.
+    void CancelSubscriptions();
+
     SessionClient(const SessionClient&) = delete;
     SessionClient& operator=(const SessionClient&) = delete;
 

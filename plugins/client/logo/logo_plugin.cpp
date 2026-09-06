@@ -52,6 +52,38 @@ struct LogoConfig {
     bool regenerate_per_session = true;
 };
 
+// A charset is a pool of PRINTABLE glyphs emitted one-per-cell into terminal
+// output. Control bytes and invalid UTF-8 fragments would otherwise land in
+// the frame verbatim (config-authored, so a mistake here is the operator's
+// own, but it still garbles the render). Invalid entries are dropped with a
+// warning rather than refusing the whole config.
+bool IsPrintableUtf8Glyph(const std::string& glyph) {
+    if (glyph.empty()) return false;
+    // Decode one UTF-8 sequence, leniently: any byte < 0x20 or 0x7F is a
+    // control character; any continuation structure that does not parse is a
+    // fragment. Multi-byte sequences are accepted wholesale (the generator
+    // slices per cell the same way it slices its own pools).
+    const auto byte = [&glyph](std::size_t i) {
+        return static_cast<unsigned char>(glyph[i]);
+    };
+    for (char c : glyph) {
+        const auto b = static_cast<unsigned char>(c);
+        if (b < 0x20 || b == 0x7F) return false;
+    }
+    const unsigned char lead = byte(0);
+    std::size_t length = 0;
+    if (lead < 0x80) return glyph.size() == 1;
+    if ((lead & 0xE0) == 0xC0) length = 2;
+    else if ((lead & 0xF0) == 0xE0) length = 3;
+    else if ((lead & 0xF8) == 0xF0) length = 4;
+    else return false;  // stray continuation byte as a lead
+    if (glyph.size() != length) return false;
+    for (std::size_t i = 1; i < length; ++i) {
+        if ((byte(i) & 0xC0) != 0x80) return false;
+    }
+    return true;
+}
+
 LogoConfig ParseConfig(const nlohmann::json& config) {
     LogoConfig out;
     if (!config.is_object()) return out;
@@ -59,7 +91,27 @@ LogoConfig ParseConfig(const nlohmann::json& config) {
         out.text = it->get<std::string>();
     }
     if (auto it = config.find("charset"); it != config.end() && it->is_string()) {
-        out.charset = it->get<std::string>();
+        std::string charset = it->get<std::string>();
+        // The charset is sliced PER GLYPH downstream, so it must be a
+        // sequence of single valid printable UTF-8 characters. Filter
+        // character by character: control bytes and fragments are dropped,
+        // and a charset left empty by the filter means the style's own pool
+        // is used (the empty-charset default).
+        std::string cleaned;
+        for (std::size_t i = 0; i < charset.size();) {
+            std::size_t length = 1;
+            const unsigned char lead = static_cast<unsigned char>(charset[i]);
+            if (lead >= 0xC0 && lead < 0xF8) {
+                length = lead < 0xE0 ? 2 : (lead < 0xF0 ? 3 : 4);
+            }
+            const std::string glyph = charset.substr(i, length);
+            if (IsPrintableUtf8Glyph(glyph)) cleaned += glyph;
+            else std::fprintf(stderr,
+                              "minimal: logo plugin: dropping non-printable byte(s) from "
+                              "charset config\n");
+            i += length;
+        }
+        out.charset = std::move(cleaned);
     }
     if (auto it = config.find("regenerate_per_session");
         it != config.end() && it->is_boolean()) {

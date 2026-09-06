@@ -38,6 +38,10 @@ SessionClient::~SessionClient() {
     // erase AFTER this destructor body -- against a registry that is still
     // alive. (The previous plain-member version raced that erase against
     // the member set's own destruction: use-after-destroy.)
+    CancelSubscriptions();
+}
+
+void SessionClient::CancelSubscriptions() {
     {
         std::lock_guard lk(subscribes_->mtx);
         for (auto* context : subscribes_->active) context->TryCancel();
