@@ -68,12 +68,34 @@ TEST_CASE("BuildPermissionPolicy: network is wired through", "[permission_resolu
     CHECK(policy.network == PermissionMode::AlwaysDeny);
 }
 
-TEST_CASE("BuildMcpPermissionPolicy: preset per-server wins", "[permission_resolution]") {
-    auto policy = BuildMcpPermissionPolicy({{"search", PermissionMode::AlwaysAllow}}, PermissionMode::AlwaysDeny);
+TEST_CASE("BuildMcpPermissionPolicy: trusted preset per-server wins", "[permission_resolution]") {
+    auto policy = BuildMcpPermissionPolicy({{"search", PermissionMode::AlwaysAllow}},
+                                           PermissionMode::AlwaysDeny, true);
     CHECK(policy.mode_for("search") == PermissionMode::AlwaysAllow);
 }
 
 TEST_CASE("BuildMcpPermissionPolicy: unset server falls to global default", "[permission_resolution]") {
-    auto policy = BuildMcpPermissionPolicy({}, PermissionMode::AlwaysDeny);
+    auto policy = BuildMcpPermissionPolicy({}, PermissionMode::AlwaysDeny, true);
     CHECK(policy.mode_for("unconfigured") == PermissionMode::AlwaysDeny);
+}
+
+TEST_CASE("BuildMcpPermissionPolicy: an untrusted preset may not widen the global default",
+          "[permission_resolution]") {
+    // Allow under a Deny floor folds to Deny; Allow under Ask folds to Ask.
+    // The clamp is what stops a repo-shipped preset from auto-approving MCP.
+    auto policy = BuildMcpPermissionPolicy({{"search", PermissionMode::AlwaysAllow}},
+                                           PermissionMode::AlwaysDeny, false);
+    CHECK(policy.mode_for("search") == PermissionMode::AlwaysDeny);
+
+    auto ask_floor = BuildMcpPermissionPolicy({{"search", PermissionMode::AlwaysAllow}},
+                                              PermissionMode::Ask, false);
+    CHECK(ask_floor.mode_for("search") == PermissionMode::Ask);
+}
+
+TEST_CASE("BuildMcpPermissionPolicy: an untrusted preset may still narrow", "[permission_resolution]") {
+    // Deny under an Allow default stays Deny: narrowing is the whole point of
+    // letting an untrusted preset speak at all.
+    auto policy = BuildMcpPermissionPolicy({{"search", PermissionMode::AlwaysDeny}},
+                                           PermissionMode::AlwaysAllow, false);
+    CHECK(policy.mode_for("search") == PermissionMode::AlwaysDeny);
 }

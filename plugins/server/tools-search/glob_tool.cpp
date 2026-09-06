@@ -114,6 +114,25 @@ public:
         // Literal fast path: no metacharacters means at most one concrete
         // path; walking the tree to find it would be theatre.
         if (IsLiteralGlob(pattern)) {
+            // CONFINEMENT BOUNDARY, not input validation: the join below puts
+            // the pattern straight against the confined root, so an absolute
+            // pattern would replace the root and a ".." component would
+            // escape it -- an existence oracle outside project_root from a
+            // ReadOnly (pre-allowed) tool with no permission prompt. The
+            // non-literal path needs no such check: the walker anchors at
+            // resolved.absolute_path and a pattern component can only match a
+            // real filename, which ".." never is.
+            const std::filesystem::path pattern_path(pattern);
+            if (pattern_path.is_absolute()) {
+                // The rejected pattern is deliberately not echoed: the reply
+                // must carry nothing a probing model could learn from.
+                return Error("pattern must be relative to the search root");
+            }
+            for (const auto& component : pattern_path) {
+                if (component == "..") {
+                    return Error("pattern must not traverse out of the search root");
+                }
+            }
             std::error_code ec;
             const auto target = resolved.absolute_path / pattern;
             const auto status = std::filesystem::symlink_status(target, ec);

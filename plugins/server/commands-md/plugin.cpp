@@ -61,7 +61,15 @@ const char* minimal_plugin_version() { return minimal::common::Version(); }
 void minimal_plugin_register_commands(
     minimal::commands::CommandRegistry& registry,
     const minimal::plugins::PluginRegistrationContext&) {
-    for (auto& command : minimal::commands_md::LoadCommands(CommandDirs())) {
+    for (auto& command : minimal::commands_md::LoadCommands(
+             CommandDirs(), [&registry](const minimal::commands_md::MdCommandSpec& spec) {
+                 // An untrusted (project-local) file whose command name is
+                 // already taken is SKIPPED, not registered: a duplicate
+                 // surface name is a fatal startup collision, so a cloned
+                 // repo's commands/help.md would otherwise refuse to let the
+                 // server start. The earlier registration wins.
+                 return minimal::commands_md::AcceptNonColliding(registry, spec);
+             })) {
         registry.Register(std::move(command));
     }
 }

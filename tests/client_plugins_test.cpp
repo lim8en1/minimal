@@ -336,6 +336,20 @@ TEST_CASE("the md4c default engine carries the streaming contract", "[client_plu
     CHECK(finalized.find("part two") != std::string::npos);
 }
 
+TEST_CASE("the md4c default engine renders GFM table HEADER cells", "[client_plugins]") {
+    // md4c emits the distinct MD_BLOCK_TH enum for a header cell, which the
+    // renderer's cell handling used to key on MD_BLOCK_TD alone -- header
+    // cells fell to the empty-text default and every GFM table lost its
+    // header row.
+    Theme theme = Theme::Parse(R"({"name":"t","colors":{}})", ColorDepth::Truecolor);
+    MarkdownRenderer renderer(&theme, nullptr);
+    const auto rendered =
+        ToText(renderer.Render("| Head | Tail |\n| --- | --- |\n| 1 | 2 |\n"));
+    CHECK(rendered.find("Head") != std::string::npos);
+    CHECK(rendered.find("Tail") != std::string::npos);
+    CHECK(rendered.find("1") != std::string::npos);   // body cells still render
+}
+
 TEST_CASE("client plugin discovery: provenance defaults, merge, and round-trip",
           "[client_plugins][discovery]") {
     // Round-trip: unmodelled keys survive the rewrite.
@@ -374,6 +388,33 @@ TEST_CASE("client plugin discovery: provenance defaults, merge, and round-trip",
     CHECK(candidates[2].file.filename() == "c.so");
     CHECK_FALSE(candidates[2].enabled);   // user default
     REQUIRE(config.plugins.size() == 3);  // written back for persistence
+}
+
+TEST_CASE("client plugin discovery: a user-dir twin of a bundled basename is its own "
+          "disabled entry",
+          "[client_plugins][discovery]") {
+    // Entries are keyed by (file, provenance), not basename alone: a user-dir
+    // .so named like a bundled one used to match the bundled entry and
+    // inherit its enabled:true -- loading a plugin nobody opted into.
+    TempDir dir;
+    std::filesystem::create_directories(dir.path() / "bundled/one");
+    std::filesystem::create_directories(dir.path() / "user");
+    std::ofstream(dir.path() / "bundled/one/twin.so") << "stub";
+    std::ofstream(dir.path() / "user/twin.so") << "stub";
+
+    ClientPluginConfig config;
+    const auto candidates =
+        DiscoverClientPlugins(dir.path() / "bundled", dir.path() / "user", config);
+    REQUIRE(candidates.size() == 2);   // two entries, not one shared one
+    CHECK(candidates[0].provenance == Provenance::Bundled);
+    CHECK(candidates[0].enabled);        // bundled default, its own entry
+    CHECK(candidates[1].provenance == Provenance::User);
+    CHECK_FALSE(candidates[1].enabled);  // user default -- nothing inherited
+    REQUIRE(config.plugins.size() == 2);
+    CHECK(config.plugins[0].file == "twin.so");
+    CHECK(config.plugins[0].provenance == Provenance::Bundled);
+    CHECK(config.plugins[1].file == "twin.so");
+    CHECK(config.plugins[1].provenance == Provenance::User);
 }
 
 TEST_CASE("theme sections merge after core roles and never shadow them",

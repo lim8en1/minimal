@@ -237,6 +237,16 @@ public:
     // dispatches to its own state plane. A surface owns its presentation and
     // buffering from there; scrollback pages come through ClientApi. A surface
     // NEVER opens its own connection.
+    //
+    // THREADING: OnEvent runs on each attached session's gRPC READER thread --
+    // one concurrent caller per session, so several may be inside OnEvent at
+    // the same time, and none of them is the render thread that calls
+    // component()/Render (the host takes no lock across the call -- see
+    // AppState::DispatchToTab). It must not block (a wedged reader thread
+    // stalls that session's whole data plane) and must be internally
+    // synchronized, both against other OnEvent calls and against Render.
+    // Events arrive in order PER SESSION; calls for different sessions
+    // interleave arbitrarily.
     virtual void OnEvent(const v1::ServerEvent& event) = 0;
 
     // Called once after the theme is loaded (plugins register before it). The

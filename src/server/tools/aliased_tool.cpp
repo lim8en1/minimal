@@ -22,6 +22,20 @@ std::optional<std::string> AliasedTool::ExtractPath(const nlohmann::json& input)
     return inner_->ExtractPath(input);
 }
 
+// The declarative virtuals must forward like everything above: through the
+// wrapper they would otherwise fall back to the Tool defaults (network false,
+// parallel_safe true, no narrowing) and an aliased web_fetch would skip the
+// network permission fold while an aliased bash lost its parallel dispatch
+// opt-out.
+bool AliasedTool::network_access_required() const { return inner_->network_access_required(); }
+
+bool AliasedTool::parallel_safe() const { return inner_->parallel_safe(); }
+
+std::optional<PermissionMode> AliasedTool::mode_override_for(const nlohmann::json& input,
+                                                             const ToolContext& ctx) const {
+    return inner_->mode_override_for(input, ctx);
+}
+
 std::optional<ToolCategory> AliasedTool::category_for(const nlohmann::json& input) const {
     return inner_->category_for(input);
 }

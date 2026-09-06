@@ -10,7 +10,9 @@
 // that cannot send it is limited to one-line prompts, and keybindings.json is
 // where a user would remap.
 //
-// @-MENTIONS: typing '@' opens the inline suggestion list, queried through the
+// @-MENTIONS: typing '@' arms the inline suggestion list (a bare '@' is a
+// live query too, but its empty prefix always resolves to an empty answer,
+// so the list opens once a character follows the '@'), queried through the
 // SuggestPaths RPC debounced ~100-150 ms (server-resolved, so every frontend
 // inherits the strategy). Hand-rolled inline list, NOT ftxui::Dropdown -- that
 // is a click-to-open selector; type-ahead reads better inline. Tab completes

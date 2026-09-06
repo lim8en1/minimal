@@ -468,6 +468,13 @@ std::optional<std::string> SessionClient::Stream::Open(const CreateOptions& opts
         request.set_agent_preset(opts.agent_preset);
         request.set_name(opts.name);
         request.set_run_mode(opts.run_mode);
+        // Sent either way -- see CreateOptions::model/signals. A /model choice
+        // staged on a sessionless tab rides these; dropping them here silently
+        // discarded the staged selection.
+        request.set_model(opts.model);
+        for (const auto& selector : opts.signals) {
+            request.add_signals(selector);
+        }
     }
 
     v1::CreateSessionResponse response;

@@ -53,6 +53,13 @@ const char* CategoryName(ToolCategory category) {
 
 PermissionMode ToolExecutor::ResolveMode(const Tool& tool, const nlohmann::json& input,
                                           const ToolContext& ctx) const {
+    return ResolveMode(tool, input, ctx, /*confinement_checked=*/nullptr,
+                       /*was_inside_project_root=*/nullptr);
+}
+
+PermissionMode ToolExecutor::ResolveMode(const Tool& tool, const nlohmann::json& input,
+                                          const ToolContext& ctx, bool* confinement_checked,
+                                          bool* was_inside_project_root) const {
     const std::string& name = tool.spec().name;  // surface name: what the model calls it
     const ToolCategory category = tool.category_for(input).value_or(tool.spec().category);
 
@@ -66,6 +73,11 @@ PermissionMode ToolExecutor::ResolveMode(const Tool& tool, const nlohmann::json&
         mcp_server.empty() ? policy_.mode_for(permission_key, category)
                            : mcp_policy_.mode_for(mcp_server);
 
+    // The confinement verdict of THIS invocation, consumed by the ceiling fold
+    // below and surfaced to Prepare for the execute-time re-check.
+    bool checked = false;
+    bool inside = false;
+
     // 2. Only if permitted, and only for path-bearing tools, fold in
     //    out_of_workdir. This is a FOLD, never a substitution: substituting
     //    would mean `file_write: deny` + `out_of_workdir: allow` permits writing
@@ -73,7 +85,9 @@ PermissionMode ToolExecutor::ResolveMode(const Tool& tool, const nlohmann::json&
     if (mode != PermissionMode::AlwaysDeny && tool.path_confinement_supported()) {
         if (auto path = tool.ExtractPath(input)) {
             const ConfineResult resolved = confine(ctx.project_root, *path, /*must_exist=*/false);
-            if (!resolved.ok || resolved.outside_project_root) {
+            checked = true;
+            inside = resolved.ok && !resolved.outside_project_root;
+            if (!inside) {
                 // An unresolvable path is treated as outside: fail closed rather
                 // than silently applying the in-workdir rule to something we
                 // could not place.
@@ -102,8 +116,20 @@ PermissionMode ToolExecutor::ResolveMode(const Tool& tool, const nlohmann::json&
         if (mcp_server.empty()) {
             if (policy_ceiling_) {
                 mode = most_restrictive(mode, policy_ceiling_->mode_for(permission_key, category));
+                // out_of_workdir and network are dimension FIELDS, not
+                // categories, so mode_for() never consults them: without this
+                // fold a child could exceed its parent on exactly those axes.
+                // Same conditions as this executor's own folds in 2/2a.
+                if (checked && !inside) {
+                    mode = most_restrictive(mode, policy_ceiling_->out_of_workdir);
+                }
+                if (tool.network_access_required()) {
+                    mode = most_restrictive(mode, policy_ceiling_->network);
+                }
             }
         } else if (mcp_ceiling_) {
+            // McpPermissionPolicy carries no out_of_workdir/network dimensions
+            // to fold -- per-server modes are all it has.
             mode = most_restrictive(mode, mcp_ceiling_->mode_for(mcp_server));
         }
     }
@@ -120,6 +146,8 @@ PermissionMode ToolExecutor::ResolveMode(const Tool& tool, const nlohmann::json&
     }
 
     // 3. Run mode wraps whatever the policy decided.
+    if (confinement_checked != nullptr) *confinement_checked = checked;
+    if (was_inside_project_root != nullptr) *was_inside_project_root = checked && inside;
     return apply_run_mode(mode, run_mode_);
 }
 
@@ -194,7 +222,12 @@ PreparedInvocation ToolExecutor::PrepareGuarded(const std::string& tool_use_id,
     // reads it from there.
     ctx.tool_use_id = tool_use_id;
 
-    const PermissionMode mode = ResolveMode(*tool, input, ctx);
+    // The confinement verdict rides out on the prepared invocation so Execute
+    // can re-check it: the two phases are separated by the rest of the round's
+    // gating, including Ask prompts that can sit for minutes.
+    const PermissionMode mode = ResolveMode(*tool, input, ctx,
+                                            &prepared.path_confinement_checked,
+                                            &prepared.was_inside_project_root);
 
     if (mode == PermissionMode::AlwaysDeny) {
         prepared.denial = ErrorResult(tool_use_id, "permission denied for tool: " + tool_name);
@@ -290,6 +323,29 @@ llm::ToolResultBlock ToolExecutor::Execute(const PreparedInvocation& prepared,
     if (ctx.is_cancelled && ctx.is_cancelled()) {
         return ErrorResult(prepared.tool_use_id,
                            "cancelled before execution: " + prepared.tool_name);
+    }
+
+    // TOCTOU re-check. The confinement classification in Prepare is not a lock:
+    // between the two phases -- possibly minutes, if an Ask sat on a human --
+    // the model can rename a symlink onto the path with a parallel bash call
+    // and route the operation outside project_root while the approved verdict
+    // said inside. Re-run the same confine() and refuse an inside->outside
+    // DIVERGENCE. A Prepare-time OUTSIDE verdict is not a divergence: the
+    // out-of-workdir fold already priced it in (possibly allowing it), so
+    // second-guessing it here would deny what the operator explicitly allowed.
+    // An unresolvable path fails closed, but only against a recorded inside:
+    // a recorded outside (or an unchecked call) is the executor's own
+    // classification and stays final.
+    if (prepared.path_confinement_checked && prepared.tool->path_confinement_supported()) {
+        if (auto path = prepared.tool->ExtractPath(prepared.input)) {
+            const ConfineResult resolved = confine(ctx.project_root, *path, /*must_exist=*/false);
+            if (prepared.was_inside_project_root &&
+                (!resolved.ok || resolved.outside_project_root)) {
+                return ErrorResult(prepared.tool_use_id,
+                                   "path escaped the workspace between approval and execution: " +
+                                       *path);
+            }
+        }
     }
 
     // Same never-throws contract as Prepare, same reasoning: execute() is

@@ -185,7 +185,11 @@ public:
                                ? ftxui::text("")
                                : ftxui::gridbox(std::move(block.table_rows));
                 break;
+            case MD_BLOCK_TH:
             case MD_BLOCK_TD: {
+                // md4c emits the DISTINCT enum MD_BLOCK_TH for a GFM header
+                // cell (md4c.h), not MD_BLOCK_TD -- the header cells used to
+                // fall to the default arm below and render as empty text.
                 // GFM cell alignment (':' colons in the delimiter row): md4c
                 // reports it per cell; the first draft ignored it, so every
                 // numeric column LLMs love to right-align rendered left.

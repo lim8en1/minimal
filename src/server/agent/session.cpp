@@ -911,17 +911,30 @@ void Session::WorkerMain() {
         // this pops one item at a time and RunOneTurn is atomic from here, so a
         // command can only ever land BETWEEN turns -- never between a tool_use
         // and its tool_result.
-        if (wake_turn) {
-            RunOneTurn(std::nullopt);
-        } else if (auto* text = std::get_if<std::string>(&item)) {
-            RunOneTurn(std::move(*text));
-        } else if (auto* rewind = std::get_if<QueuedRewind>(&item)) {
-            RunOneRewind(*rewind);
-        } else if (auto* run_mode = std::get_if<QueuedRunMode>(&item)) {
-            RunOneRunMode(*run_mode);
-        } else {
-            RunOneCommand(std::get<QueuedCommand>(item));
+        //
+        // A subagent's life is ONE turn, and SubmitTurn's check alone does not
+        // close it: an item queued while the seeded turn is still running is
+        // popped here only AFTER that turn ended (setting subagent_finished_).
+        // Re-check at pop time and drop EVERY item kind -- a command or rewind
+        // would act on a session its spawner has already collected just as
+        // wrongly as a turn would. The seeded turn itself is safe: the flag is
+        // set only when it ENDS, and it was popped while the flag was still
+        // false.
+        if (!subagent_finished_.load(std::memory_order_acquire)) {
+            if (wake_turn) {
+                RunOneTurn(std::nullopt);
+            } else if (auto* text = std::get_if<std::string>(&item)) {
+                RunOneTurn(std::move(*text));
+            } else if (auto* rewind = std::get_if<QueuedRewind>(&item)) {
+                RunOneRewind(*rewind);
+            } else if (auto* run_mode = std::get_if<QueuedRunMode>(&item)) {
+                RunOneRunMode(*run_mode);
+            } else {
+                RunOneCommand(std::get<QueuedCommand>(item));
+            }
         }
+        // else: dropped silently -- the session is finished and collected;
+        // there is no client stream left worth answering on.
 
         {
             std::lock_guard<std::mutex> lock(mutex_);

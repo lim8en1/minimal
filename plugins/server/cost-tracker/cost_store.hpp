@@ -7,7 +7,9 @@
 //
 // SHAPE. One blob per session, key "sessions/<session_id>", value JSON:
 //   {"parent_session_id": "...", "turns": [{"model", "at", "in", "out",
-//    "cr", "cw", "reported"}, ...]}
+//    "cr", "cw", "reported", "fs", "ls"}, ...]}
+// "fs"/"ls" are the turn's transcript seq bounds; blobs written before they
+// existed lack them and decode with the -1 sentinel (never re-cut on rewind).
 // One blob (not one row per turn) because the only readers are /cost and the
 // .rpc service, both of which want the whole session anyway, and the write
 // path is turn-granularity (seconds apart), so read-modify-write under
@@ -55,6 +57,10 @@ public:
 
     // Empty turns (and empty parent) when the session has none recorded.
     SessionHistory Load(const std::string& session_id) const;
+
+    // Overwrites the session's blob wholesale -- the OnSessionRewound rollback
+    // path. Same throw-on-failure contract as AppendTurn.
+    void Save(const std::string& session_id, const SessionHistory& history);
 
     // Every session id with a recorded turn, sorted.
     std::vector<std::string> SessionIds() const;

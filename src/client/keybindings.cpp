@@ -118,10 +118,16 @@ Keybindings Keybindings::Load(const std::filesystem::path& config_dir) {
     // Defaults fill actions the user's file does not mention, so an upgrade that
     // adds a core action still works without rewriting anyone's file. The user's
     // own binding always wins over the default for the same action.
-    for (const auto& [action, key] : DefaultBindings()) {
-        parsed.bindings_.emplace(action, key);
-    }
+    parsed.ApplyDefaults();
     return parsed;
+}
+
+void Keybindings::ApplyDefaults() {
+    // emplace, not assignment: the user's own binding always wins over the
+    // default for the same action.
+    for (const auto& [action, key] : DefaultBindings()) {
+        bindings_.emplace(action, key);
+    }
 }
 
 std::string Keybindings::KeyFor(std::string_view action, std::string_view fallback) const {

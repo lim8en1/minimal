@@ -468,16 +468,20 @@ namespace {
 class MdCommand : public commands::PromptShorthandCommand {
     using CommandResult = commands::CommandResult;
 public:
-    explicit MdCommand(MdCommandSpec spec) : spec_(std::move(spec)) {}
-
-    std::string_view Name() const override { return spec_.name; }
-    std::string_view Summary() const override { return spec_.summary; }
-    std::string_view Usage() const override {
+    explicit MdCommand(MdCommandSpec spec) : spec_(std::move(spec)) {
+        // Precomputed once: Usage() is a const override served to concurrent
+        // callers (ListCommands RPC, /help pool, session workers). Writing
+        // usage_ per call was an unsynchronized write to a mutable member --
+        // undefined behavior -- and returned a view into a string that the
+        // next call would resize out from under.
         usage_ = "/" + spec_.name;
         for (const auto& arg : spec_.args) usage_ += " <" + arg + ">";
         for (const auto& arg : spec_.optional) usage_ += " [" + arg + "]";
-        return usage_;
     }
+
+    std::string_view Name() const override { return spec_.name; }
+    std::string_view Summary() const override { return spec_.summary; }
+    std::string_view Usage() const override { return usage_; }
 
     // Submits a turn by definition: never read-only, never a view.
     CommandResult Execute(commands::CommandContext& context,
@@ -710,7 +714,7 @@ public:
 
 private:
     MdCommandSpec spec_;
-    mutable std::string usage_;
+    std::string usage_;  // immutable after construction; see the constructor
 };
 
 }  // namespace

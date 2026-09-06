@@ -192,7 +192,6 @@ int main(int argc, char** argv) {
     // Applied at registration, BEFORE the collision check below, so aliasing is
     // itself a way to resolve a collision rather than only a way to avoid one.
     commands.SetAliases({plugin_config.aliases.begin(), plugin_config.aliases.end()});
-    minimal::agent::SessionObserverRegistry observers(minimal::common::DefaultLogger());
     // The hook mechanism (track O). Owns the point registry -- the harness's
     // eleven conversation-path points are registered in its constructor,
     // reserved before any plugin loads -- and, after Configure below, the
@@ -200,7 +199,13 @@ int main(int argc, char** argv) {
     // dispatch are the two halves of the same seam, and a HookPoint handle a
     // plugin captured at load must reach the dispatch surface without a second
     // indirection.
+    //
+    // Declared BEFORE `observers` so reverse destruction leaves it standing
+    // while the registry drains: the bridge registered below holds a
+    // HookDispatcher&, and a pending bridge task must never EmitAsync on an
+    // already-destroyed dispatcher.
     minimal::hooks::HookDispatcher hook_dispatcher(minimal::common::DefaultLogger());
+    minimal::agent::SessionObserverRegistry observers(minimal::common::DefaultLogger());
     // The observer-to-hook bridge, registered FIRST so a user's hook action on
     // a lifecycle point runs before plugin observers reacting to the same
     // event. It converts session_created/session_ended/post_tool_use/stop onto
@@ -657,6 +662,14 @@ int main(int argc, char** argv) {
     std::fflush(stdout);
     server.Wait();
 
+    // Stop the reaper BEFORE the exit cascade destroys what its callbacks
+    // capture by reference: attached_clients/client_idle_for capture `service`
+    // and on_idle_expired captures `server`, both declared after `sessions` and
+    // so destroyed before ~SessionRegistry would stop the thread itself. The
+    // reaper ticks every >=250ms, and MCP teardown between server.Wait() and
+    // the registry's destruction takes seconds -- a real window, not a
+    // formality. TerminateAll does not touch the reaper, so it is unaffected.
+    sessions.StopReaper();
     sessions.TerminateAll();
     return 0;
 }

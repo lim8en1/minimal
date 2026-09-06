@@ -32,6 +32,12 @@ public:
     // throws, naming the path.
     static Keybindings Load(const std::filesystem::path& config_dir);
 
+    // Fills every core action the table does not already name with its default
+    // -- the same fill Load applies after a successful parse. The
+    // malformed-file fallback (which starts from a Parse("{}") table) calls it
+    // too: a broken file must degrade to the defaults, not to "nothing bound".
+    void ApplyDefaults();
+
     // The key for an action, or `fallback` when neither the user's file nor the
     // defaults define one. Every core action HAS a default, so the fallback is
     // for plugin-registered actions a user's older file predates.

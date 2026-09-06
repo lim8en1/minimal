@@ -26,6 +26,12 @@ public:
     void OnTurnCompleted(const agent::SessionInfo& info,
                          const agent::TurnSummary& summary) override;
 
+    // Drops the records the rewind discarded, so a retried turn is not counted
+    // twice. Redo (truncated_to_seq < 0) is a no-op: which records the restored
+    // tail maps to is unknowable here.
+    void OnSessionRewound(const agent::SessionInfo& info,
+                          std::int64_t truncated_to_seq) override;
+
 private:
     CostStore& store_;
 };

@@ -37,6 +37,11 @@ void SessionObserverRegistry::Register(std::shared_ptr<SessionObserver> observer
     observers_.push_back(std::move(observer));
 }
 
+void SessionObserverRegistry::RemoveAfter(std::size_t existing_count) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (existing_count < observers_.size()) observers_.resize(existing_count);
+}
+
 std::size_t SessionObserverRegistry::observer_count() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return observers_.size();

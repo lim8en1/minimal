@@ -38,11 +38,14 @@ struct Harness {
 };
 
 TurnRecord Turn(const std::string& model, std::int64_t in, std::int64_t out,
-                std::int64_t cr = 0, std::int64_t cw = 0, bool reported = true) {
+                std::int64_t cr = 0, std::int64_t cw = 0, bool reported = true,
+                std::int64_t first_seq = -1, std::int64_t last_seq = -1) {
     TurnRecord record;
     record.model = model;
     record.at_unix_ms = 0;
     record.usage = UsageRecord{in, out, cr, cw, reported};
+    record.first_seq = first_seq;
+    record.last_seq = last_seq;
     return record;
 }
 
@@ -237,6 +240,79 @@ TEST_CASE("the observer records turns with zero-usage honesty", "[cost_tracker]"
     CHECK(history.turns[0].usage.input_tokens == 100);
     CHECK(history.turns[0].usage.usage_reported);
     CHECK(!history.turns[1].usage.usage_reported);
+}
+
+TEST_CASE("turn records carry transcript seq bounds; old blobs decode with the sentinel",
+          "[cost_tracker]") {
+    Harness harness;
+    harness.store.AppendTurn("s1", "root", Turn("m1", 10, 5, 0, 0, true, /*first_seq=*/1,
+                                                /*last_seq=*/1));
+    harness.store.AppendTurn("s1", "root", Turn("m1", 1, 1, 0, 0, true, 3, 5));
+
+    const auto history = harness.store.Load("s1");
+    REQUIRE(history.turns.size() == 2);
+    CHECK(history.turns[0].first_seq == 1);
+    CHECK(history.turns[0].last_seq == 1);
+    CHECK(history.turns[1].last_seq == 5);
+
+    // An OLD-SCHEMA blob, written before the seq bounds existed: tolerant
+    // decode yields the -1 sentinel, which is what keeps such records from
+    // ever being cut on a rewind.
+    harness.storage.Set("cost-tracker", "sessions/old",
+                        R"({"parent_session_id": "root", "turns": [)"
+                        R"({"model": "m", "at": 0, "in": 1, "out": 1, "cr": 0, "cw": 0, )"
+                        R"("reported": true}]})");
+    const auto legacy = harness.store.Load("old");
+    REQUIRE(legacy.turns.size() == 1);
+    CHECK(legacy.turns[0].usage.input_tokens == 1);
+    CHECK(legacy.turns[0].first_seq == -1);
+    CHECK(legacy.turns[0].last_seq == -1);
+}
+
+TEST_CASE("rewind removes the records past the cut; redo and unclassifiable records stay",
+          "[cost_tracker][invariant]") {
+    // /rewind + retry used to double-count: the discarded turns stayed in the
+    // history blob and the re-executed turns appended on top.
+    Harness harness;
+    CostSessionObserver observer(harness.store);
+    agent::SessionInfo info;
+    info.session_id = "s1";
+
+    auto completed = [&observer, &info](std::int64_t first, std::int64_t last) {
+        agent::TurnSummary summary;
+        summary.model = "m1";
+        summary.first_seq = first;
+        summary.last_seq = last;
+        observer.OnTurnCompleted(info, summary);
+    };
+    completed(1, 1);
+    completed(3, 3);
+    completed(5, 7);
+
+    // Redo (-1) is a no-op: which records the restored tail maps to is
+    // unknowable here.
+    observer.OnSessionRewound(info, -1);
+    CHECK(harness.store.Load("s1").turns.size() == 3);
+
+    // Rewind to seq 3: the cut lands ON the target user message (RunRewind
+    // marks rows with seq >= that discarded), so the turn starting there and
+    // everything after are gone; the earlier turn stays.
+    observer.OnSessionRewound(info, 3);
+    const auto history = harness.store.Load("s1");
+    REQUIRE(history.turns.size() == 1);
+    CHECK(history.turns[0].last_seq == 1);
+
+    // A record without seq bounds (old blob) cannot be classified: never cut.
+    SessionHistory mixed;
+    mixed.turns.push_back(Turn("m", 1, 1));  // sentinel seqs
+    mixed.turns.push_back(Turn("m", 1, 1, 0, 0, true, 4, 4));
+    harness.store.Save("s2", mixed);
+    agent::SessionInfo other;
+    other.session_id = "s2";
+    observer.OnSessionRewound(other, 4);
+    const auto survivors = harness.store.Load("s2").turns;
+    REQUIRE(survivors.size() == 1);
+    CHECK(survivors[0].last_seq == -1);
 }
 
 TEST_CASE("plugin settings parse from the config slice with defaults",

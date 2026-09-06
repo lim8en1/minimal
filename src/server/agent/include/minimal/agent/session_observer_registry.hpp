@@ -79,6 +79,13 @@ public:
     // registry here.
     void Register(std::shared_ptr<SessionObserver> observer);
 
+    // Registration-time rollback for a plugin whose hook threw: drops every
+    // observer added after `existing_count`. Safe ONLY before any session
+    // exists -- no dispatched task can still hold a snapshot -- and the
+    // observer objects live in .so files that are never dlclosed, so
+    // destroying them here cannot dangle.
+    void RemoveAfter(std::size_t existing_count);
+
     void NotifySessionCreated(SessionInfo info);
     void NotifyTurnCompleted(SessionInfo info, TurnSummary summary);
     void NotifyToolExecuted(SessionInfo info, ToolInvocation invocation);

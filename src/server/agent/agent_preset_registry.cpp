@@ -359,7 +359,11 @@ AgentPreset AgentPresetRegistry::ResolveUncached(
     // preset_is_trusted doc on BuildPermissionPolicy.
     preset.permission_mode =
         BuildPermissionPolicy(raw.permission_mode, permissions_.global_layer, !from_project);
-    preset.mcp_permissions = BuildMcpPermissionPolicy(raw.mcp_permissions, permissions_.mcp_default_mode);
+    // Same untrusted-content rule as the line above, for MCP: a project
+    // preset's per-server modes may only narrow the global default, never
+    // widen it. See the preset_is_trusted doc on BuildMcpPermissionPolicy.
+    preset.mcp_permissions =
+        BuildMcpPermissionPolicy(raw.mcp_permissions, permissions_.mcp_default_mode, !from_project);
     preset.run_mode = permissions_.default_run_mode;  // apply_run_mode() is applied once, downstream, by ToolExecutor
     preset.is_subagent = false;
 

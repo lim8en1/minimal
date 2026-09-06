@@ -337,7 +337,8 @@ bool McpClientManager::StartHandle(const config::McpServerEntry& entry, ServerHa
     // a named reason rather than corrupting the wire namespace.
     if (!IsValidMcpServerName(entry.name)) {
         error = "MCP server name '" + entry.name +
-                "' cannot be namespaced (contains '__', whitespace or control characters)";
+                "' cannot be namespaced (contains '__', ends with '_', or contains whitespace "
+                "or control characters)";
         return false;
     }
 
@@ -346,8 +347,8 @@ bool McpClientManager::StartHandle(const config::McpServerEntry& entry, ServerHa
     std::size_t registered = 0;
     for (const auto& listing : *listings) {
         if (!IsValidMcpToolName(listing.name)) {
-            logger_.warn("MCP server '{}' tool '{}' skipped: name contains '__', whitespace or "
-                         "control characters",
+            logger_.warn("MCP server '{}' tool '{}' skipped: name contains '__', ends with '_', "
+                         "or contains whitespace or control characters",
                          entry.name, listing.name);
             continue;
         }

@@ -1,6 +1,7 @@
 #include "minimal/client/keybinding_dispatch.hpp"
 
 #include "minimal/client/key_event_parser.hpp"
+#include "minimal/common/logger.hpp"
 
 namespace minimal::client {
 
@@ -312,8 +313,24 @@ bool HandleGlobalKey(KeyContext& ctx, const ftxui::Event& event) {
     // keymap already knows them -- a user's file that already names them
     // still wins (EnsureDefault only fills what's unbound).
     for (auto& entry : ctx.plugin_views) {
-        if (entry.view->spec().placement == plugins::ViewPlacement::Panel && entry.visible &&
-            entry.component->OnEvent(event)) {
+        if (entry.view->spec().placement != plugins::ViewPlacement::Panel || !entry.visible) {
+            continue;
+        }
+        // OnEvent is plugin code on the input path: a throw here propagated
+        // out of the event loop and std::terminate'd the TUI. Contained, the
+        // event is treated as not consumed and the rest of dispatch proceeds.
+        bool consumed = false;
+        try {
+            consumed = entry.component->OnEvent(event);
+        } catch (const std::exception& error) {
+            common::DefaultLogger().warn("plugin view '{}' threw on an event: {}",
+                                         std::string(entry.view->spec().id), error.what());
+        } catch (...) {
+            common::DefaultLogger().warn(
+                "plugin view '{}' threw a non-standard exception on an event",
+                std::string(entry.view->spec().id));
+        }
+        if (consumed) {
             return true;
         }
     }

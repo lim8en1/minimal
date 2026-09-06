@@ -29,6 +29,14 @@ struct PreparedInvocation {
     nlohmann::json input;
     std::shared_ptr<Tool> tool;  // null iff denial is set
     std::optional<llm::ToolResultBlock> denial;
+
+    // The confinement verdict Prepare's out-of-workdir fold used, carried so
+    // Execute can re-check it (TOCTOU: the two phases are separated by the rest
+    // of the round's gating, including Ask prompts that can sit for minutes).
+    // checked=false when the fold never ran -- tool not path-bearing, no path
+    // extractable, or the call already denied.
+    bool path_confinement_checked = false;
+    bool was_inside_project_root = false;
 };
 
 // The single call site the agent loop uses for tool invocation. Permission
@@ -131,6 +139,14 @@ private:
     PreparedInvocation PrepareGuarded(const std::string& tool_use_id,
                                       const std::string& tool_name, const nlohmann::json& input,
                                       ToolContext& ctx);
+
+    // ResolveMode with the confinement verdict surfaced: Prepare needs the same
+    // classification the out-of-workdir fold used, both for the execute-time
+    // re-check and to fold the ceiling's out_of_workdir dimension. Either
+    // pointer may be null (the public overload passes null).
+    PermissionMode ResolveMode(const Tool& tool, const nlohmann::json& input,
+                                const ToolContext& ctx, bool* confinement_checked,
+                                bool* was_inside_project_root) const;
 
     ToolRegistry& registry_;
     PermissionChecker& checker_;

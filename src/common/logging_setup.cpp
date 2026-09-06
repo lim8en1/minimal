@@ -33,9 +33,12 @@ std::string ConfigureLogging(const LoggingOptions& options) {
     const auto level = ParseLevel(options.level, error);
 
     std::vector<spdlog::sink_ptr> sinks;
-    // The console sink stays. A server started in a terminal should keep
-    // printing there; the file is an addition, not a replacement.
-    sinks.push_back(std::make_shared<spdlog::sinks::stdout_color_sink_mt>());
+    // The console sink stays by default: a server started in a terminal should
+    // keep printing there; the file is an addition, not a replacement. The
+    // client opts out (see LoggingOptions::console).
+    if (options.console) {
+        sinks.push_back(std::make_shared<spdlog::sinks::stdout_color_sink_mt>());
+    }
 
     if (!options.path.empty()) {
         std::error_code ec;
@@ -52,8 +55,13 @@ std::string ConfigureLogging(const LoggingOptions& options) {
             sinks.push_back(std::make_shared<spdlog::sinks::rotating_file_sink_mt>(
                 options.path, max_bytes, max_files));
         } catch (const std::exception& e) {
-            // A log file we cannot open must not stop the server: the console
-            // sink is already in the list, so this degrades rather than fails.
+            // A log file we cannot open must not stop the server: this
+            // degrades rather than fails. With the console sink opted out
+            // that would mean dropping everything, so the console sink comes
+            // back for the degraded case despite the opt-out.
+            if (sinks.empty()) {
+                sinks.push_back(std::make_shared<spdlog::sinks::stdout_color_sink_mt>());
+            }
             error = "cannot open logging.path '" + options.path + "': " + e.what();
         }
     }

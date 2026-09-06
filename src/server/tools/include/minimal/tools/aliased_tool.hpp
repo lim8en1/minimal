@@ -12,7 +12,10 @@ namespace minimal::tools {
 // aliases"). The ONLY difference from the wrapped tool is spec(): `name` and
 // `definition.name` are rewritten to the alias, so what the model sees matches
 // the registry key. Everything else -- execute, disclosure, path extraction,
-// category -- behaves exactly as the plugin wrote it.
+// category, and every declarative virtual -- behaves exactly as the plugin
+// wrote it. The declarative forwarders are load-bearing: an aliased bash that
+// defaulted parallel_safe() to true would race, and an aliased web_fetch that
+// defaulted network_access_required() to false would skip the network fold.
 //
 // The wrapper exists because ToolSpec is const on every Tool: without it an
 // alias could re-key the registry map while the definition still advertised the
@@ -25,7 +28,11 @@ public:
     ToolResult execute(const nlohmann::json& input, ToolContext& ctx) override;
     bool path_confinement_supported() const override;
     std::optional<std::string> ExtractPath(const nlohmann::json& input) const override;
+    bool network_access_required() const override;
+    bool parallel_safe() const override;
     std::optional<ToolCategory> category_for(const nlohmann::json& input) const override;
+    std::optional<PermissionMode> mode_override_for(const nlohmann::json& input,
+                                                    const ToolContext& ctx) const override;
     PermissionDisclosure Disclose(const nlohmann::json& input, const ToolContext& ctx) const override;
 
 private:

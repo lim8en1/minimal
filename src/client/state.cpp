@@ -167,8 +167,13 @@ void SessionState::AppendStreamingText(std::string_view text) {
     // live tool row, unconditionally last).
     const bool new_segment = live_segments_.empty() || !is_streaming_ ||
                              live_segments_.back().kind != LiveTurnSegment::Kind::Text;
+    // The turn this segment belongs to: turn_ended_ still true means THIS
+    // append is the new turn's first -- it bumps turn_seq_ below, so the
+    // segment must already carry the bumped value.
+    const uint64_t segment_turn = turn_ended_ ? turn_seq_ + 1 : turn_seq_;
     if (new_segment) {
-        live_segments_.push_back(LiveTurnSegment{.kind = LiveTurnSegment::Kind::Text});
+        live_segments_.push_back(
+            LiveTurnSegment{.kind = LiveTurnSegment::Kind::Text, .turn_seq = segment_turn});
     }
     live_segments_.back().text.append(text);
 
@@ -320,6 +325,43 @@ void SessionState::ClearStreaming() {
     live_segments_.clear();
 }
 
+void SessionState::ClearStreamingIfCurrentTurn(uint64_t turn_seq) {
+    std::lock_guard lk(mtx_);
+    // Retire the live material of the turns the persisted page covers (seq <=
+    // the captured turn) -- keeping anything a NEWER turn has streamed since
+    // the fetch was submitted. A blanket clear here was the stale-clear bug:
+    // the user's next turn lost its opening deltas. A blanket KEEP was equally
+    // wrong: the retired turn's live text would double-render against the
+    // rows that now cover it. turn_seq only grows, so "capture > current"
+    // cannot happen; capture == current retires everything (the common
+    // turn-ended case).
+    const auto keep_end = std::stable_partition(
+        live_segments_.begin(), live_segments_.end(),
+        [turn_seq](const LiveTurnSegment& segment) { return segment.turn_seq > turn_seq; });
+    if (keep_end == live_segments_.begin()) {
+        // Nothing survives: the classic clear.
+        streaming_accumulated_.clear();
+        is_streaming_ = false;
+        live_segments_.clear();
+        return;
+    }
+    // Rebuild the flat accumulation from the surviving text segments (the
+    // blank-line break mirrors the within-turn block separator above).
+    std::string rebuilt;
+    for (auto it = live_segments_.begin(); it != keep_end; ++it) {
+        if (it->kind != LiveTurnSegment::Kind::Text || it->text.empty()) continue;
+        if (!rebuilt.empty()) rebuilt.append("\n\n");
+        rebuilt.append(it->text);
+    }
+    streaming_accumulated_ = std::move(rebuilt);
+    live_segments_.erase(keep_end, live_segments_.end());
+}
+
+uint64_t SessionState::CurrentTurnSeq() const {
+    std::lock_guard lk(mtx_);
+    return turn_seq_;
+}
+
 void SessionState::OnError(const std::string& error_message) {
     std::lock_guard lk(mtx_);
     is_streaming_ = false;
@@ -374,6 +416,45 @@ void SessionState::OnResyncRequired(const std::string& reason) {
     live_segments_.clear();
     ++transcript_version_;
     common::DefaultLogger().info("session {}: resync required ({})", session_id_, reason);
+}
+
+// SessionRewoundEvent (proto/minimal/v1): the transcript tail was cut (rewind)
+// or restored (redo). The durable record moved under the window -- trim it to
+// the ACTIVE transcript and drop the live/pending-turn state that belonged to
+// the discarded rows. Not a turn terminator, so state_ is left alone.
+void SessionState::OnSessionRewound(int64_t truncated_to_seq, int64_t active_last_seq) {
+    std::lock_guard lk(mtx_);
+    if (truncated_to_seq < 0) {
+        // REDO: the restored rows are unknown client-side -- clear the whole
+        // window so the refresh refetches them from the top.
+        scrollback_page_.clear();
+        has_earlier_ = true;
+    } else {
+        // Descending window: the cut rows sit at the FRONT.
+        while (!scrollback_page_.empty() && scrollback_page_.front().seq() > active_last_seq) {
+            scrollback_page_.erase(scrollback_page_.begin());
+        }
+        // Conservative: rows survived -> older pages may exist; setting true
+        // when they don't just costs one empty "load older" round trip.
+        has_earlier_ = !scrollback_page_.empty() ? true : has_earlier_;
+    }
+    last_loaded_seq_ = scrollback_page_.empty() ? -1 : scrollback_page_.back().seq();
+    // The live-state wipe ClearStreaming does (inlined: it locks, we hold mtx_),
+    // plus the pending-turn bookkeeping -- the rewound turn's echo has nothing
+    // left to retire it and a pending cancel belongs to the discarded turn.
+    streaming_accumulated_.clear();
+    is_streaming_ = false;
+    live_segments_.clear();
+    pending_user_text_.clear();
+    cancel_requested_ = false;
+    scrollback_page_shared_ =
+        std::make_shared<const std::vector<v1::StoredMessage>>(scrollback_page_);
+    // Same bookkeeping ApplyScrollbackPage resolves with: the version bump is
+    // the mismatch the refresh state machine refetches; the refresh_seq bump
+    // retires any fetch that was in flight across the rewind.
+    refresh_succeeded_ = true;
+    ++transcript_version_;
+    ++refresh_seq_;
 }
 
 // Pending modals -------------------------------------------------------------
@@ -437,8 +518,9 @@ void SessionState::OnToolStarted(const v1::ToolExecutionEvent& evt) {
     // Track C4: a marker in the SAME arrival-order timeline text segments
     // use, so the live view can render this tool call between the text
     // that preceded and followed it instead of after everything.
-    live_segments_.push_back(
-        LiveTurnSegment{.kind = LiveTurnSegment::Kind::Tool, .tool_use_id = evt.tool_use_id()});
+    live_segments_.push_back(LiveTurnSegment{.kind = LiveTurnSegment::Kind::Tool,
+                                             .turn_seq = turn_seq_,
+                                             .tool_use_id = evt.tool_use_id()});
 
     auto& live = tools_.back();   // the row just pushed, regardless of how many precede it
     live.started = true;
@@ -556,8 +638,9 @@ void SessionState::OnBackgroundTask(const v1::BackgroundTaskEvent& evt) {
     // Same C4 marker OnToolStarted pushes -- a reopened background row (its
     // own STARTED never reached this client, or the row already finished
     // and was swept) is still live content for whatever turn is current now.
-    live_segments_.push_back(
-        LiveTurnSegment{.kind = LiveTurnSegment::Kind::Tool, .tool_use_id = evt.tool_use_id()});
+    live_segments_.push_back(LiveTurnSegment{.kind = LiveTurnSegment::Kind::Tool,
+                                             .turn_seq = turn_seq_,
+                                             .tool_use_id = evt.tool_use_id()});
 }
 
 // Scrollback -----------------------------------------------------------------
@@ -571,13 +654,24 @@ void SessionState::ApplyScrollbackPage(const v1::GetMessagesResponse& resp) {
         return;
     }
 
-    if (scrollback_page_.empty() || resp.messages(0).seq() < last_loaded_seq_) {
-        // Older than what we hold: append. The window stays DESCENDING by seq
-        // (newest at index 0, matching what GetMessages returns), so an older
-        // page's newest slot must land just after the existing back of the
-        // window, not at its front.
-        scrollback_page_.insert(scrollback_page_.end(), resp.messages().begin(),
-                                resp.messages().end());
+    if (scrollback_page_.empty() ||
+        resp.messages(0).seq() > scrollback_page_.front().seq()) {
+        // Newer than what we hold — keep only the contiguous newest slice (bounded memory).
+        scrollback_page_.assign(resp.messages().begin(), resp.messages().end());
+        scrollback_trimmed_ = false;
+    } else {
+        // Older than (or overlapping) what we hold: append, SKIPPING rows we
+        // already hold. The assign branch above must only ever fire when the
+        // page's newest seq is genuinely newer than the window's -- a
+        // duplicate in-flight "load older" fetch (two presses inside one RPC
+        // round trip) returns the same before_seq page, and its apply taking
+        // the assign branch REPLACED the window with the older page: the
+        // newest rows vanished from the view.
+        const int64_t oldest_held = scrollback_page_.back().seq();
+        for (const auto& stored : resp.messages()) {
+            if (stored.seq() >= oldest_held) continue;   // already held (or a raced duplicate)
+            scrollback_page_.push_back(stored);
+        }
         // Sliding window (track R2): the wire has only desc-order paging
         // (before_seq), so there is no way to reload NEWER pages on demand --
         // eviction from the newest end is therefore flagged
@@ -588,10 +682,6 @@ void SessionState::ApplyScrollbackPage(const v1::GetMessagesResponse& resp) {
             scrollback_page_.erase(scrollback_page_.begin());
             scrollback_trimmed_ = true;
         }
-    } else {
-        // Newer than what we hold — keep only the contiguous newest slice (bounded memory).
-        scrollback_page_.assign(resp.messages().begin(), resp.messages().end());
-        scrollback_trimmed_ = false;
     }
 
     last_loaded_seq_ = scrollback_page_.empty() ? -1 : scrollback_page_.back().seq();
@@ -640,6 +730,18 @@ void SessionState::NoteRefreshFailed() {
     std::lock_guard lk(mtx_);
     refresh_succeeded_ = false;   // resolved with a failure -- see Snapshot::refresh_succeeded
     ++refresh_seq_;   // resolved (no content change) -- lets a mismatch retry next frame
+}
+
+bool SessionState::TryBeginOlderFetch() {
+    std::lock_guard lk(mtx_);
+    if (older_fetch_pending_) return false;
+    older_fetch_pending_ = true;
+    return true;
+}
+
+void SessionState::EndOlderFetch() {
+    std::lock_guard lk(mtx_);
+    older_fetch_pending_ = false;
 }
 
 // ===========================================================================
@@ -994,6 +1096,12 @@ void AppState::DispatchToTab(const std::string& session_id, const v1::ServerEven
         // state, same as a stream close: pending modals are dropped (nothing
         // can answer them anymore).
         target->OnSessionEnded();
+    } else if (event.has_session_rewound()) {
+        // Rewind/redo (proto: SessionRewoundEvent): trim the scrollback to the
+        // ACTIVE transcript and clear streaming/pending-turn state; the version
+        // bump inside makes the refresh state machine refetch what survived.
+        target->OnSessionRewound(event.session_rewound().truncated_to_seq(),
+                                 event.session_rewound().active_last_seq());
     } else if (event.has_stream_event()) {
         const auto& se = event.stream_event();
         if (se.has_text_delta()) {
@@ -1613,17 +1721,30 @@ void AppState::RequestScrollback(const std::string& session_id, bool newest) {
 
     std::optional<int64_t> cursor;
     if (!newest) {
+        // In-flight latch FIRST: two "load older" presses inside one RPC round
+        // trip fetch the same before_seq page, and the second apply used to
+        // replace the window with the older page. While one fetch is
+        // outstanding the press no-ops (ApplyScrollbackPage's overlap dedupe
+        // is the second layer, for fetches that raced the latch).
+        if (!state->TryBeginOlderFetch()) return;
         const auto snapshot = state->TakeSnapshot();
         cursor = NextScrollbackCursor(snapshot.last_loaded_seq, snapshot.has_earlier_messages);
-        if (!cursor.has_value()) return;   // history exhausted; nothing to ask
+        if (!cursor.has_value()) {
+            state->EndOlderFetch();   // history exhausted; nothing to ask
+            return;
+        }
     }
+
+    // The turn live at submit time (Fix: the persisted page covers THIS turn;
+    // a newer one that starts before the apply must keep its live text).
+    const uint64_t turn_at_submit = state->CurrentTurnSeq();
 
     // `this` is captured because BumpUiVersion() is AppState's own private
     // method -- SessionState has no back-reference to bump it, so the
     // original synchronous body called it directly instead. Safe: RunTui
     // joins the worker (StopRpcQueue) before AppState can be destroyed, so
     // no queued job outlives its `this`.
-    rpc_queue_.Submit([this, state, session_id, newest, cursor] {
+    rpc_queue_.Submit([this, state, session_id, newest, cursor, turn_at_submit] {
         v1::GetMessagesResponse resp;
         grpc::ClientContext context;
         // Bounded: the fetch runs off the loop thread now, but a wedged
@@ -1644,11 +1765,19 @@ void AppState::RequestScrollback(const std::string& session_id, bool newest) {
             // latched rendered_version to the pre-refresh version before
             // this failure was known.
             state->NoteRefreshFailed();
+            if (!newest) state->EndOlderFetch();   // the latch resolves on failure too
             BumpUiVersion();
             return;
         }
         state->ApplyScrollbackPage(resp);   // bumps transcript_version + refresh_seq
-        if (newest) state->ClearStreaming();
+        if (newest) {
+            // Turn-aware: only the turn this fetch was submitted under is
+            // provably covered by the persisted page (see
+            // ClearStreamingIfCurrentTurn).
+            state->ClearStreamingIfCurrentTurn(turn_at_submit);
+        } else {
+            state->EndOlderFetch();
+        }
         BumpUiVersion();
     });
 }

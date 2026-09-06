@@ -119,19 +119,33 @@ ftxui::Element FrameRenderer::Render() {
         plugins::ChatSurface* effective_surface = deps_.app.EffectiveChatSurface();
         if (effective_surface != nullptr) {
             if (!ui.surface_body || ui.surface_for != effective_surface) {
-                ui.surface_body = effective_surface->component();
-                ui.surface_for = effective_surface;
+                // component() is plugin code like the Render() below: its
+                // throw used to escape the frame and std::terminate the TUI.
+                // Same containment -- the surface is disabled (the core chat
+                // view takes over next frame), and a body that never arrived
+                // simply skips this frame's body row.
+                try {
+                    ui.surface_body = effective_surface->component();
+                    ui.surface_for = effective_surface;
+                } catch (const std::exception& error) {
+                    deps_.app.DisableChatSurface(error.what());
+                } catch (...) {
+                    deps_.app.DisableChatSurface(nullptr);
+                }
             }
-            try {
-                rows.push_back(ui.surface_body->Render() | yframe | vscroll_indicator | flex);
-            } catch (const std::exception& error) {
-                deps_.app.DisableChatSurface(error.what());
-                rows.push_back(text(" chat surface plugin threw -- the core chat view "
-                                    "takes over") | color(deps_.theme.ColorFor("error")));
-            } catch (...) {
-                deps_.app.DisableChatSurface(nullptr);
-                rows.push_back(text(" chat surface plugin threw -- the core chat view "
-                                    "takes over") | color(deps_.theme.ColorFor("error")));
+            if (ui.surface_body != nullptr && ui.surface_for == effective_surface) {
+                try {
+                    rows.push_back(ui.surface_body->Render() | yframe | vscroll_indicator |
+                                   flex);
+                } catch (const std::exception& error) {
+                    deps_.app.DisableChatSurface(error.what());
+                    rows.push_back(text(" chat surface plugin threw -- the core chat view "
+                                        "takes over") | color(deps_.theme.ColorFor("error")));
+                } catch (...) {
+                    deps_.app.DisableChatSurface(nullptr);
+                    rows.push_back(text(" chat surface plugin threw -- the core chat view "
+                                        "takes over") | color(deps_.theme.ColorFor("error")));
+                }
             }
         } else {
             // A FRESH session -- nothing persisted, nothing streaming, no

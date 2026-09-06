@@ -18,6 +18,8 @@ constexpr const char* kOutKey = "out";
 constexpr const char* kCacheReadKey = "cr";
 constexpr const char* kCacheWriteKey = "cw";
 constexpr const char* kReportedKey = "reported";
+constexpr const char* kFirstSeqKey = "fs";
+constexpr const char* kLastSeqKey = "ls";
 
 nlohmann::json ParseOrThrow(std::string_view json, const std::string& session_id) {
     try {
@@ -37,6 +39,8 @@ nlohmann::json EncodeTurn(const TurnRecord& turn) {
         {kCacheReadKey, turn.usage.cache_read_tokens},
         {kCacheWriteKey, turn.usage.cache_write_tokens},
         {kReportedKey, turn.usage.usage_reported},
+        {kFirstSeqKey, turn.first_seq},
+        {kLastSeqKey, turn.last_seq},
     };
 }
 
@@ -66,6 +70,15 @@ TurnRecord DecodeTurn(const nlohmann::json& entry, const std::string& session_id
     }
     if (const auto it = entry.find(kReportedKey); it != entry.end() && it->is_boolean()) {
         turn.usage.usage_reported = it->get<bool>();
+    }
+    // TOLERANT of absence: blobs written before the seq bounds existed decode
+    // with the struct's -1 sentinel. A record without bounds is never cut on
+    // rewind -- it cannot be classified, and it predates the fix.
+    if (const auto it = entry.find(kFirstSeqKey); it != entry.end() && it->is_number_integer()) {
+        turn.first_seq = it->get<std::int64_t>();
+    }
+    if (const auto it = entry.find(kLastSeqKey); it != entry.end() && it->is_number_integer()) {
+        turn.last_seq = it->get<std::int64_t>();
     }
     return turn;
 }
@@ -98,6 +111,11 @@ void CostStore::AppendTurn(const std::string& session_id, const std::string& par
         history.parent_session_id = parent_session_id;
     }
     history.turns.push_back(turn);
+    Save(session_id, history);
+}
+
+void CostStore::Save(const std::string& session_id, const SessionHistory& history) {
+    if (storage_ == nullptr) return;  // degraded: no storage seam, no history
     nlohmann::json document = nlohmann::json::object();
     document[kParentKey] = history.parent_session_id;
     nlohmann::json turns = nlohmann::json::array();

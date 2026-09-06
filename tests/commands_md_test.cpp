@@ -496,3 +496,51 @@ TEST_CASE("LoadCommands: the nearest directory wins a stem collision and malform
     CHECK(Find(commands, "only-project") == nullptr);  // malformed: skipped, no fallback
     CHECK(Find(commands, "broken") == nullptr);        // malformed in the farther dir: skipped
 }
+
+// The plugin's registration hook filters through AcceptNonColliding; exercised
+// here directly against a real registry.
+namespace {
+class FixedCommand : public commands::Command {
+public:
+    explicit FixedCommand(std::string name) : name_(std::move(name)) {}
+    std::string_view Name() const override { return name_; }
+    std::string_view Summary() const override { return "already registered"; }
+    std::string_view Usage() const override { return "/" + name_; }
+    commands::CommandResult Execute(commands::CommandContext&,
+                                    const commands::CommandArgs&) override {
+        return commands::CommandResult::Ok();
+    }
+private:
+    std::string name_;
+};
+}  // namespace
+
+TEST_CASE("AcceptNonColliding: an untrusted file colliding with a registered command is "
+          "vetoed; trusted files are not",
+          "[commands_md][invariant]") {
+    // A duplicate surface name is a FATAL startup collision, so a cloned
+    // repo's commands/help.md would otherwise refuse to let the server start.
+    // The veto drops the project-local file; the earlier registration wins.
+    testing::TempDir project;
+    testing::TempDir global;
+    std::ofstream(project.path() / "help.md") << "---\ndescription: PROJECT\n---\nProject.\n";
+    std::ofstream(project.path() / "deploy.md") << "---\ndescription: P deploy\n---\n.\n";
+    // A TRUSTED file colliding with the same name: the operator wrote it, so
+    // the collision stays the loud fatal it always was -- it is not vetoed.
+    std::ofstream(global.path() / "cost.md") << "---\ndescription: GLOBAL cost\n---\n.\n";
+
+    commands::CommandRegistry registry;
+    registry.Register(std::make_unique<FixedCommand>("help"));
+    const auto commands = LoadCommands({{project.path(), false}, {global.path(), true}},
+                                       [&registry](const MdCommandSpec& spec) {
+                                           return AcceptNonColliding(registry, spec);
+                                       });
+
+    CHECK(Find(commands, "help") == nullptr);    // untrusted collision: skipped
+    CHECK(Find(commands, "deploy") != nullptr);  // untrusted, no collision: kept
+    CHECK(Find(commands, "cost") != nullptr);    // trusted collision: kept (fatal path)
+
+    // The registered command still holds its slot: no collision, startup lives.
+    REQUIRE(registry.Find("help") != nullptr);
+    CHECK(registry.Find("help")->Summary() == "already registered");
+}

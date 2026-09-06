@@ -34,8 +34,13 @@ void AppendKey(std::string& out, std::string_view key) {
 
 void AppendStringValue(std::string& out, std::string_view value) {
     // nlohmann for the escaping, not the structure: a string's serialized form
-    // is O(its own length), never O(the history).
-    out += nlohmann::json(value).dump();
+    // is O(its own length), never O(the history). The replace error handler is
+    // load-bearing: tool output reaches message text unsanitized, and dump()'s
+    // default handler throws type_error.316 on invalid UTF-8 -- one binary
+    // tool result bricked every subsequent turn (and the compaction call).
+    // Invalid sequences become U+FFFD instead.
+    out += nlohmann::json(value).dump(-1, ' ', false,
+                                      nlohmann::json::error_handler_t::replace);
 }
 
 // OpenRouter routes OpenAI-shaped requests to backends that cache the way

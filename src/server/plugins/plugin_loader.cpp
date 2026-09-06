@@ -52,7 +52,10 @@ Fn Lookup(void* handle, const char* symbol) {
 }
 
 // Runs a plugin's registration callback with the attribution window open,
-// closing it and reporting on either exit.
+// closing it and reporting on either exit. On a throw, `rollback` runs after
+// the window closes: it strips what the plugin managed to register before
+// failing (see LoadOne), because a user plugin's failure is only a warning and
+// partially-initialized registrations would otherwise stay served.
 //
 // PLUGIN CODE IS NOT TRUSTED TO RETURN NORMALLY. These callbacks were called
 // bare: a throw propagated out of LoadOne, out of LoadAll, into main() -- which
@@ -61,25 +64,40 @@ Fn Lookup(void* handle, const char* symbol) {
 // after it to a plugin that had already failed. Every OTHER plugin entry point
 // in this tree is wrapped (observers in Dispatch, commands in Dispatch, tools in
 // ToolExecutor::Run); registration was the one that was not.
-template <typename Open, typename Body, typename Close>
+template <typename Open, typename Body, typename Close, typename Rollback>
 bool GuardedRegistration(PluginRecord& record, const char* what, Open&& open, Body&& body,
-                          Close&& close) {
+                          Close&& close, Rollback&& rollback) {
     open();
     try {
         body();
     } catch (const std::exception& error) {
         close();
+        rollback();
         record.status = LoadStatus::RegistrationThrew;
         record.error = std::string(what) + " threw: " + error.what();
         return false;
     } catch (...) {
         close();
+        rollback();
         record.status = LoadStatus::RegistrationThrew;
         record.error = std::string(what) + " threw a non-standard exception";
         return false;
     }
     close();
     return true;
+}
+
+// The data dir is keyed by the plugin's own declared name
+// (minimal_plugin_name), which is plugin-controlled input: "../..", an
+// absolute name, or anything carrying a separator would place the provisioned
+// directory outside plugin_data_root (or replace it outright). A name is one
+// plain directory component, nothing more. No other validation exists for
+// record.name -- the NameRegistry checks collisions and dangling aliases,
+// not name shape.
+bool IsSafeDataDirName(const std::string& name) {
+    return !name.empty() && name != "." && name != ".." &&
+           name.find('/') == std::string::npos &&
+           name.find('\\') == std::string::npos;
 }
 
 }  // namespace
@@ -188,16 +206,51 @@ PluginRecord PluginLoader::LoadOne(const PluginCandidate& candidate) {
     // it exists before the hooks that will use it run.
     context.storage = storage_;
     if (!plugin_data_root_.empty() && !record.name.empty()) {
-        std::error_code ec;
-        const auto dir = plugin_data_root_ / record.name;
-        std::filesystem::create_directories(dir, ec);
-        if (ec) {
-            common::DefaultLogger().warn("plugin '{}': could not create data dir {}: {}",
-                                         record.name, dir.string(), ec.message());
+        if (!IsSafeDataDirName(record.name)) {
+            // Skip provisioning, keep loading: the plugin simply runs with
+            // context.data_dir unset rather than writing outside the root.
+            common::DefaultLogger().warn(
+                "plugin '{}': refusing to provision a data dir for an unsafe name",
+                record.name);
         } else {
-            context.data_dir = dir;
+            std::error_code ec;
+            const auto dir = plugin_data_root_ / record.name;
+            std::filesystem::create_directories(dir, ec);
+            if (ec) {
+                common::DefaultLogger().warn("plugin '{}': could not create data dir {}: {}",
+                                             record.name, dir.string(), ec.message());
+            } else {
+                context.data_dir = dir;
+            }
         }
     }
+
+    // Partial-registration rollback, captured BEFORE the first hook runs. If
+    // any hook throws, everything the plugin registered in the removal-safe
+    // registries is stripped: a user plugin's failure is only a warning, so a
+    // partially-initialized plugin must not leave live, attributed artifacts
+    // behind. The four registries below carry attribution (observers via a
+    // count snapshot taken here); the REST do not -- hook points, provider
+    // factories, model catalogs, compaction strategies, permission advisors,
+    // mention resolvers and auth providers have no removal seam and stay live,
+    // which the warning says loudly. Removal is unaffected by aliasing:
+    // ApplyAliases runs after ALL plugin loading (main.cpp), so the tool and
+    // command maps are still keyed by original attribution names here.
+    const std::size_t observers_before =
+        observers_ != nullptr ? observers_->observer_count() : 0;
+    auto rollback = [this, &record, observers_before] {
+        tools_.RemoveByAttribution(record.name);
+        if (commands_ != nullptr) commands_->RemoveByAttribution(record.name);
+        if (services_ != nullptr) services_->RemoveByAttribution(record.name);
+        if (observers_ != nullptr) observers_->RemoveAfter(observers_before);
+        common::DefaultLogger().warn(
+            "plugin '{}': registration threw; PARTIALLY rolled back -- its tools, "
+            "commands, services and session observers were removed, but any hook "
+            "points, provider factories, model catalogs, compaction strategies, "
+            "permission advisors, mention resolvers or auth providers it registered "
+            "remain live",
+            record.name);
+    };
 
     // Attribution window: every tool registered inside it belongs to this
     // plugin, which is what lets a later collision name both culprits.
@@ -214,7 +267,7 @@ PluginRecord PluginLoader::LoadOne(const PluginCandidate& candidate) {
             if (!GuardedRegistration(record, "minimal_plugin_register_hook_points",
                                      [&] { hook_points_->SetAttribution(record.name); },
                                      [&] { register_points(*hook_points_, context); },
-                                     [&] { hook_points_->ClearAttribution(); })) {
+                                     [&] { hook_points_->ClearAttribution(); }, rollback)) {
                 return record;
             }
         }
@@ -228,7 +281,7 @@ PluginRecord PluginLoader::LoadOne(const PluginCandidate& candidate) {
             record, "minimal_plugin_register_tools",
             [&] { tools_.SetAttribution(record.name); },
             [&] { register_tools(tools_, context); },
-            [&] { tools_.ClearAttribution(); });
+            [&] { tools_.ClearAttribution(); }, rollback);
         if (!ok) return record;
     }
 
@@ -244,7 +297,7 @@ PluginRecord PluginLoader::LoadOne(const PluginCandidate& candidate) {
             record, "minimal_plugin_register_provider_factories",
             [&] { providers_.SetAttribution(record.name); },
             [&] { register_providers(providers_, context); },
-            [&] { providers_.ClearAttribution(); });
+            [&] { providers_.ClearAttribution(); }, rollback);
         if (!ok) return record;
         const auto after = providers_.kinds();
         std::set_difference(after.begin(), after.end(), before.begin(), before.end(),
@@ -262,7 +315,7 @@ PluginRecord PluginLoader::LoadOne(const PluginCandidate& candidate) {
                 record, "minimal_plugin_register_commands",
                 [&] { commands_->SetAttribution(record.name); },
                 [&] { register_commands(*commands_, context); },
-                [&] { commands_->ClearAttribution(); });
+                [&] { commands_->ClearAttribution(); }, rollback);
             if (!ok) return record;
         }
 
@@ -277,7 +330,7 @@ PluginRecord PluginLoader::LoadOne(const PluginCandidate& candidate) {
                 handle, "minimal_plugin_register_session_observer")) {
             if (!GuardedRegistration(record, "minimal_plugin_register_session_observer",
                                       [] {}, [&] { register_observer(*observers_, context); },
-                                      [] {})) {
+                                      [] {}, rollback)) {
                 return record;
             }
             record.registered_session_observer = true;
@@ -288,7 +341,8 @@ PluginRecord PluginLoader::LoadOne(const PluginCandidate& candidate) {
         if (auto register_auth = Lookup<RegisterAuthProviderFn>(
                 handle, "minimal_plugin_register_auth_provider")) {
             if (!GuardedRegistration(record, "minimal_plugin_register_auth_provider", [] {},
-                                      [&] { register_auth(*auth_providers_, context); }, [] {})) {
+                                      [&] { register_auth(*auth_providers_, context); }, [] {},
+                                      rollback)) {
                 return record;
             }
             record.registered_auth_provider = true;
@@ -300,7 +354,7 @@ PluginRecord PluginLoader::LoadOne(const PluginCandidate& candidate) {
                 handle, "minimal_plugin_register_mention_resolver")) {
             if (!GuardedRegistration(record, "minimal_plugin_register_mention_resolver",
                                       [] {}, [&] { register_resolver(*mention_resolvers_, context); },
-                                      [] {})) {
+                                      [] {}, rollback)) {
                 return record;
             }
             record.registered_mention_resolver = true;
@@ -317,7 +371,8 @@ PluginRecord PluginLoader::LoadOne(const PluginCandidate& candidate) {
             if (!GuardedRegistration(record, "minimal_plugin_register_permission_advisor",
                                       [&] { permission_advisors_->SetAttribution(record.name); },
                                       [&] { register_advisor(*permission_advisors_, context); },
-                                      [&] { permission_advisors_->ClearAttribution(); })) {
+                                      [&] { permission_advisors_->ClearAttribution(); },
+                                      rollback)) {
                 return record;
             }
         }
@@ -333,7 +388,8 @@ PluginRecord PluginLoader::LoadOne(const PluginCandidate& candidate) {
         if (auto register_catalogs = Lookup<RegisterModelCatalogsFn>(
                 handle, "minimal_plugin_register_model_catalogs")) {
             if (!GuardedRegistration(record, "minimal_plugin_register_model_catalogs", [] {},
-                                      [&] { register_catalogs(*model_catalogs_, context); }, [] {})) {
+                                      [&] { register_catalogs(*model_catalogs_, context); }, [] {},
+                                      rollback)) {
                 return record;
             }
         }
@@ -353,7 +409,7 @@ PluginRecord PluginLoader::LoadOne(const PluginCandidate& candidate) {
                 handle, "minimal_plugin_register_compaction_strategies")) {
             if (!GuardedRegistration(record, "minimal_plugin_register_compaction_strategies", [] {},
                                       [&] { register_strategies(*compaction_strategies_, context); },
-                                      [] {})) {
+                                      [] {}, rollback)) {
                 return record;
             }
         }
@@ -362,16 +418,6 @@ PluginRecord PluginLoader::LoadOne(const PluginCandidate& candidate) {
                             kinds_before.end(),
                             std::back_inserter(record.registered_compaction_strategy_kinds));
     }
-
-    // Marked Loaded HERE, before the services_ block below, not after it: a
-    // plugin whose minimal_plugin_register_services throws still returns with
-    // status == Loaded (GuardedRegistration's early `return record` below
-    // does not touch it). "Loaded" is therefore NOT a guarantee that every
-    // registration hook ran to completion -- only that everything up to this
-    // line did. docs/REMEDIATION_PLAN.md W10.2 plans a PartiallyLoaded status
-    // to close this; until then, a caller that cares must check
-    // registered_services rather than trust status alone.
-    record.status = LoadStatus::Loaded;
 
     if (services_ != nullptr) {
         // Same attribution window as tools and commands: a duplicate service
@@ -383,7 +429,7 @@ PluginRecord PluginLoader::LoadOne(const PluginCandidate& candidate) {
             if (!GuardedRegistration(record, "minimal_plugin_register_services",
                                       [&] { services_->SetAttribution(record.name); },
                                       [&] { register_services(*services_, context); },
-                                      [&] { services_->ClearAttribution(); })) {
+                                      [&] { services_->ClearAttribution(); }, rollback)) {
                 return record;
             }
         }
@@ -393,6 +439,13 @@ PluginRecord PluginLoader::LoadOne(const PluginCandidate& candidate) {
             record.registered_services.push_back(service_attributions[i].service_name);
         }
     }
+
+    // Marked Loaded HERE, after the LAST registration hook, so "Loaded" means
+    // every hook ran to completion. It used to be set before register_services,
+    // so a plugin whose services hook threw still returned Loaded -- and since
+    // the sanity check skips Loaded records, that failure produced no warning
+    // at all.
+    record.status = LoadStatus::Loaded;
 
     return record;
 }

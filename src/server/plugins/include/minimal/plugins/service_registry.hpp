@@ -105,6 +105,21 @@ public:
     };
     const std::vector<Attribution>& attributions() const { return attributions_; }
 
+    // Startup rollback for a plugin whose registration threw. Pre-Seal only
+    // (Provide is registration-time by contract, and the map is unguarded).
+    // Provide is LAST-WINS, and removal runs immediately after the failing
+    // hook -- before any later plugin loads -- so every name this plugin
+    // provided currently holds ITS pointer: erasing by name is exact.
+    void RemoveByAttribution(const std::string& plugin_name) {
+        std::vector<Attribution> kept;
+        kept.reserve(attributions_.size());
+        for (auto& attr : attributions_) {
+            if (attr.plugin_name == plugin_name) services_.erase(attr.service_name);
+            else kept.push_back(std::move(attr));
+        }
+        attributions_ = std::move(kept);
+    }
+
 private:
     std::string attribution_;
     std::vector<Attribution> attributions_;

@@ -53,6 +53,31 @@ TEST_CASE("Load on a fresh config dir yields the defaults", "[keybindings]") {
     CHECK(kb.KeyFor("nonexistent.action", "x") == "x");
 }
 
+TEST_CASE("ApplyDefaults fills an empty table with every core action", "[keybindings]") {
+    // The malformed-file fallback (tui_bootstrap's catch arm): Parse("{}") is
+    // an EMPTY table, and a broken keybindings.json must degrade to the
+    // defaults -- not to "every core action, quit included, unbound".
+    auto kb = client::Keybindings::Parse("{}");
+    REQUIRE(kb.all().empty());
+
+    kb.ApplyDefaults();
+
+    CHECK(kb.KeyFor("app.quit") == "ctrl+q");
+    CHECK(kb.KeyFor("tab.next") == "alt+down");
+    CHECK(kb.KeyFor("turn.cancel") == "escape");
+}
+
+TEST_CASE("ApplyDefaults never overwrites a binding already present", "[keybindings]") {
+    auto kb = client::Keybindings::Parse(R"({"app.quit": "ctrl+9"})");
+
+    kb.ApplyDefaults();
+
+    // The user's own binding wins over the default for the same action -- the
+    // same rule Load's default-fill has always applied.
+    CHECK(kb.KeyFor("app.quit") == "ctrl+9");
+    CHECK(kb.KeyFor("tab.next") == "alt+down");
+}
+
 TEST_CASE("Load reads the user's file and fills only what it omits", "[keybindings]") {
     TempDir dir;
     { std::ofstream out(dir.path() / "keybindings.json"); out << R"({"tab.next": "ctrl+l"})"; }

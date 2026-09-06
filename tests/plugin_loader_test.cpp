@@ -615,6 +615,64 @@ TEST_CASE("a plugin whose registration throws is reported, not fatal to the proc
     CHECK(records.front().error.find("registration is broken") != std::string::npos);
 }
 
+TEST_CASE("a throwing plugin's registrations are rolled back out of the registries",
+          "[plugin_loader][invariant]") {
+    // Rollback, not just reporting: a user plugin's failure is only a warning,
+    // so the tool registered before the throw would otherwise stay live,
+    // attributed, and served for the process lifetime.
+    Harness h;
+    const auto records = h.loader.LoadAll({Enabled("fixture-throws"), Enabled("fixture-good")});
+
+    REQUIRE(records.size() == 2);
+    CHECK(records[0].status == LoadStatus::RegistrationThrew);
+    CHECK(records[1].status == LoadStatus::Loaded);
+
+    // The tool registered before the throw is gone, attribution entry and all.
+    CHECK(h.tool_registry.Find("registered_before_throw") == nullptr);
+    for (const auto& attribution : h.tool_registry.attributions()) {
+        CHECK(attribution.plugin_name != "fixture-throws");
+    }
+    // And the plugin that loaded after it is untouched.
+    CHECK(h.tool_registry.Find("fixture_tool") != nullptr);
+}
+
+TEST_CASE("RemoveByAttribution strips one plugin's registrations and leaves the rest",
+          "[plugin_loader]") {
+    tools::ToolRegistry tools;
+    tools.SetAttribution("plugin-a");
+    tools.Register(std::make_unique<testing::FakeTool>("a_one", tools::ToolCategory::ReadOnly));
+    tools.Register(std::make_unique<testing::FakeTool>("a_two", tools::ToolCategory::ReadOnly));
+    tools.ClearAttribution();
+    tools.SetAttribution("plugin-b");
+    tools.Register(std::make_unique<testing::FakeTool>("b_one", tools::ToolCategory::ReadOnly));
+    tools.ClearAttribution();
+
+    tools.RemoveByAttribution("plugin-a");
+
+    CHECK(tools.Find("a_one") == nullptr);
+    CHECK(tools.Find("a_two") == nullptr);
+    CHECK(tools.Find("b_one") != nullptr);
+    REQUIRE(tools.attributions().size() == 1);
+    CHECK(tools.attributions().front().plugin_name == "plugin-b");
+
+    plugins::ServiceRegistry services;
+    static int a_service;
+    static int b_service;
+    services.SetAttribution("plugin-a");
+    services.Provide("a.service", &a_service);
+    services.ClearAttribution();
+    services.SetAttribution("plugin-b");
+    services.Provide("b.service", &b_service);
+    services.ClearAttribution();
+
+    services.RemoveByAttribution("plugin-a");
+
+    CHECK(services.Find("a.service") == nullptr);
+    CHECK(services.Find("b.service") != nullptr);
+    REQUIRE(services.attributions().size() == 1);
+    CHECK(services.attributions().front().plugin_name == "plugin-b");
+}
+
 TEST_CASE("a throwing plugin does not mis-attribute the next plugin's registrations",
           "[plugin_loader][invariant]") {
     // The attribution window is what lets a collision name both culprits. An

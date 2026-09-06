@@ -26,11 +26,35 @@ std::vector<std::string> PrefixMentionResolver::Suggest(std::string_view prefix,
     const std::string_view fragment =
         slash == std::string_view::npos ? prefix : prefix.substr(slash + 1);
 
+    // dir_part is raw client input. Absolute ("@/etc/pa") would REPLACE the
+    // root in operator/ and ".." would climb out of it, turning the suggest
+    // endpoint into a host-wide directory-enumeration oracle. Reject both
+    // before building `dir`.
+    const std::filesystem::path requested(dir_part);
+    if (requested.is_absolute()) return {};
+    for (const auto& part : requested) {
+        if (part == "..") return {};
+    }
+
     const std::filesystem::path dir =
         dir_part.empty() ? project_root : project_root / std::filesystem::path(dir_part);
 
     std::error_code ec;
     if (!std::filesystem::is_directory(dir, ec) || ec) return {};
+
+    // Second gate, for the entries the lexical check above cannot see: a
+    // symlink INSIDE the root may point out of it (following such links is
+    // today's intended semantics for in-root dirs, but only within the root).
+    // Containment is therefore decided on the CANONICAL path -- what will
+    // actually be iterated -- and anything that escapes project_root is
+    // refused. lexically_relative() is empty when the roots diverge and leads
+    // with ".." on escape, so both spellings of escape reject here.
+    std::error_code root_ec;
+    const std::filesystem::path canonical_dir = std::filesystem::weakly_canonical(dir, ec);
+    const std::filesystem::path canonical_root = std::filesystem::weakly_canonical(project_root, root_ec);
+    if (ec || root_ec) return {};
+    const std::filesystem::path rel = canonical_dir.lexically_relative(canonical_root);
+    if (rel.empty() || *rel.begin() == "..") return {};
 
     // directory_iterator order is unspecified -- collect, sort, then truncate,
     // so the result is deterministic and the limit cuts the head of a stable

@@ -71,6 +71,11 @@ struct UsageRecord {
 struct TurnRecord {
     std::string model;  // empty only for a turn that failed before a request was built
     std::int64_t at_unix_ms = 0;
+    // Transcript bounds, from TurnSummary. -1 is the "unknown" sentinel: blobs
+    // written before these fields existed decode without them, and a record
+    // carrying the sentinel cannot be classified on rewind (kept, never cut).
+    std::int64_t first_seq = -1;
+    std::int64_t last_seq = -1;
     UsageRecord usage;
 };
 

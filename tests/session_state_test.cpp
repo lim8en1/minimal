@@ -575,6 +575,82 @@ TEST_CASE("INVARIANT: paging older beyond the cap evicts newest pages and flags 
     CHECK(snap.scrollback_page->size() == 3);
 }
 
+// THE DUPLICATE-FETCH REGRESSION: two "load older" presses inside one RPC
+// round trip fetch the same before_seq page. The second apply used to fall
+// through to the newer/assign branch (its newest seq is no longer below the
+// window's oldest) and REPLACE the window with the older page -- the newest
+// rows vanished from the view.
+TEST_CASE("a fully-overlapping older page is a no-op, not a window replacement",
+          "[session_state][scrollback][regression]") {
+    SessionState state("s-1");
+    state.ApplyScrollbackPage(PageOf({20, 19, 18}, /*has_more=*/true));
+    state.ApplyScrollbackPage(PageOf({17, 16}, /*has_more=*/false));
+
+    // The raced duplicate: the SAME before_seq page applied a second time.
+    state.ApplyScrollbackPage(PageOf({17, 16}, /*has_more=*/false));
+
+    const auto snap = state.TakeSnapshot();
+    REQUIRE(snap.scrollback_page->size() == 5);   // not reset to 2
+    REQUIRE(snap.scrollback_page->front().seq() == 20);   // the newest rows survive
+    // Strictly descending: nothing was duplicated either.
+    for (std::size_t i = 1; i < snap.scrollback_page->size(); ++i) {
+        CHECK((*snap.scrollback_page)[i - 1].seq() > (*snap.scrollback_page)[i].seq());
+    }
+    CHECK(snap.last_loaded_seq == 16);
+}
+
+// SessionRewoundEvent: the server cut the transcript tail (rewind) or restored
+// it (redo). The client trims its window to the ACTIVE transcript (rows with
+// seq <= active_last_seq) and clears any streaming/pending-turn state -- the
+// cut rows are gone for good. The version bump inside is what makes the
+// refresh state machine refetch what survived.
+TEST_CASE("OnSessionRewound trims the window to the active transcript and clears live state",
+          "[session_state][rewind]") {
+    SessionState state("s-1");
+    state.ApplyScrollbackPage(PageOf({40, 39, 38, 37}, /*has_more=*/false));
+    state.AppendStreamingText("partial reply of the discarded turn");
+    state.OnChatSubmitted("the turn being rewound away");
+    state.RequestCancel();
+    const uint64_t version_before = state.TakeSnapshot().transcript_version;
+
+    state.OnSessionRewound(/*truncated_to_seq=*/39, /*active_last_seq=*/38);
+
+    const auto snap = state.TakeSnapshot();
+    REQUIRE(snap.scrollback_page->size() == 2);   // rows past active_last_seq are gone
+    CHECK(snap.scrollback_page->front().seq() == 38);
+    CHECK(snap.scrollback_page->back().seq() == 37);
+    CHECK(snap.last_loaded_seq == 37);
+    // Rows survived: conservatively older pages may exist (a spurious empty
+    // "load older" round trip costs nothing; a missing one loses history).
+    CHECK(snap.has_earlier_messages);
+    // Live/pending-turn state goes with the discarded turn.
+    CHECK(snap.streaming_text.empty());
+    CHECK(snap.live_segments.empty());
+    CHECK(snap.pending_user_text.empty());
+    CHECK_FALSE(snap.cancel_requested);
+    // The refetch triggers: version mismatch for the refresh state machine,
+    // refresh_seq bump for any fetch in flight across the rewind.
+    CHECK(snap.transcript_version > version_before);
+    CHECK(snap.refresh_succeeded);
+}
+
+TEST_CASE("OnSessionRewound REDO clears the whole window for a refetch",
+          "[session_state][rewind]") {
+    // Restored rows were never in the client's window; truncated_to_seq == -1
+    // marks a redo -- only a clean clear plus a refetch is correct.
+    SessionState state("s-1");
+    state.ApplyScrollbackPage(PageOf({40, 39, 38}, /*has_more=*/false));
+    state.AppendStreamingText("live text");
+
+    state.OnSessionRewound(/*truncated_to_seq=*/-1, /*active_last_seq=*/42);
+
+    const auto snap = state.TakeSnapshot();
+    REQUIRE(snap.scrollback_page->empty());
+    CHECK(snap.last_loaded_seq == -1);
+    CHECK(snap.has_earlier_messages);
+    CHECK(snap.streaming_text.empty());
+}
+
 // Track R2-5: the tool-output "ring buffer" caps AT APPEND (head 1/4 + marker +
 // tail 3/4), mirroring the server's persisted-result cap. The pre-R2 code
 // appended without bound and truncated only at RENDER time, so a chatty tool
@@ -750,6 +826,50 @@ TEST_CASE("live_segments clears alongside streaming_text, not before",
     state.OnResyncRequired("test");
     CHECK(state.TakeSnapshot().live_segments.empty());
     CHECK(state.TakeSnapshot().streaming_text.empty());
+}
+
+// THE STALE-CLEAR REGRESSION: the newest refresh applied its page then cleared
+// streaming UNCONDITIONALLY -- if the user's next turn had already started
+// streaming (a submit raced the fetch), its opening deltas were wiped until
+// the turn ended: a visible transcript gap. The clear is turn-aware now: the
+// persisted page covers the turn live at SUBMIT time, not whatever turn is
+// current at apply time.
+TEST_CASE("the newest-page clear keeps a NEWER turn's live text", "[session_state][streaming]") {
+    SessionState state("s-1");
+
+    SECTION("the common case -- turn ended, no new turn: the clear still happens") {
+        state.AppendStreamingText("turn one");
+        state.FinalizeStreamingText();
+        state.OnTurnCompleted(v1::TurnCompletedEvent{});
+        REQUIRE(state.TakeSnapshot().turn_seq == 1);
+
+        // A page captured at turn 1 applies; the live text is exactly what the
+        // persisted rows replace. Keeping it here would double-render.
+        state.ClearStreamingIfCurrentTurn(1);
+        CHECK(state.TakeSnapshot().streaming_text.empty());
+        CHECK(state.TakeSnapshot().live_segments.empty());
+    }
+
+    SECTION("a newer turn started since -- its live text survives") {
+        state.AppendStreamingText("turn one");
+        state.FinalizeStreamingText();
+        state.OnTurnCompleted(v1::TurnCompletedEvent{});
+        REQUIRE(state.TakeSnapshot().turn_seq == 1);
+
+        // Turn 2 begins before the fetch captured at turn 1 applies.
+        state.AppendStreamingText("turn two opening deltas");
+        REQUIRE(state.TakeSnapshot().turn_seq == 2);
+
+        state.ClearStreamingIfCurrentTurn(1);   // the stale, turn-1 capture
+        CHECK(state.TakeSnapshot().streaming_text == "turn two opening deltas");
+        REQUIRE(state.TakeSnapshot().live_segments.size() == 1);
+        CHECK(state.TakeSnapshot().live_segments[0].text == "turn two opening deltas");
+
+        // A fetch captured at the CURRENT turn clears as before.
+        state.ClearStreamingIfCurrentTurn(2);
+        CHECK(state.TakeSnapshot().streaming_text.empty());
+        CHECK(state.TakeSnapshot().live_segments.empty());
+    }
 }
 
 // ---------------------------------------------------------------------------

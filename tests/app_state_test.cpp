@@ -59,7 +59,8 @@ struct ClientFixture {
                               {{"main",
                                 {{"backend", "fake"},
                                  {"url", "http://localhost/v1"},
-                                 {"models", {{"test-model", nlohmann::json::object()}}}}}}}}
+                                 {"models", {{"test-model", nlohmann::json::object()},
+                                             {"other-model", nlohmann::json::object()}}}}}}}}
                   .dump());
         Write("settings.json", nlohmann::json{{"default_agent_preset", "main"}}.dump());
         Write("permissions.json", "{}");
@@ -368,6 +369,80 @@ TEST_CASE("FindRewindTargetSeq resolves the Nth user turn back", "[app_state][re
     CHECK(*older_user_seq < *newest_user_seq);
 
     CHECK_FALSE(app.FindRewindTargetSeq(sid, 3).has_value());   // only two user turns exist
+}
+
+// The client's half of the rewind feature: the server emits SessionRewoundEvent
+// for both verbs, and DispatchToTab must route it -- the dispatch chain used to
+// have no branch, so a rewind left the discarded rows on screen and a redo
+// never refetched the restored ones. Quiesces the RPC queue first so a stale
+// pre-rewind page cannot reapply over the event's effect (the fetches and the
+// rewind are not ordered against each other on the wire).
+TEST_CASE("a rewind trims the tab's scrollback; redo clears it for a refetch",
+          "[app_state][rewind]") {
+    ClientFixture fixture;
+    fixture.ScriptSteps({testing::TextResponse("first reply"), testing::TextResponse("second reply")});
+    fixture.Start();
+
+    AppState app(fixture.client);
+    const auto tab = app.OpenTab(fixture.Options("rewound"));
+    REQUIRE_FALSE(tab.empty());
+
+    const auto rows = [&app](const std::string& tab_id) {
+        return app.GetDetails(tab_id).scrollback_page->size();
+    };
+    const auto wait_rows = [&](const std::string& session, const std::string& tab_id,
+                               size_t n) {
+        const auto deadline = std::chrono::steady_clock::now() + 5s;
+        while (std::chrono::steady_clock::now() < deadline) {
+            app.RequestScrollback(session, /*newest=*/true);
+            std::this_thread::sleep_for(50ms);
+            if (rows(tab_id) >= n) return true;
+        }
+        return false;
+    };
+    // Runs after every fetch queued before it (the worker is FIFO): after this
+    // returns, no fetch can race the rewind event's effect on the window.
+    const auto quiesce = [&app] {
+        std::atomic<bool> drained{false};
+        app.RunOnRpcQueue([&drained] { drained = true; });
+        const auto deadline = std::chrono::steady_clock::now() + 5s;
+        while (!drained.load() && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(5ms);
+        }
+        return drained.load();
+    };
+
+    app.SubmitChatTurn(tab, "first message");
+    REQUIRE(WaitForSession(app, tab));
+    const auto sid = SessionIdOf(app, tab);
+    REQUIRE(wait_rows(sid, tab, 2));   // user + assistant, persisted
+    app.SubmitChatTurn(tab, "second message");
+    REQUIRE(wait_rows(sid, tab, 4));
+    REQUIRE(quiesce());
+
+    // REWIND to the second user turn: the server discards from target_seq
+    // onward (active_last_seq = target - 1) and emits the event; the client
+    // trims rows past active_last_seq instead of ignoring them.
+    const auto target = app.FindRewindTargetSeq(sid, 1);   // the newest user turn
+    REQUIRE(target.has_value());
+    app.SendRewind(sid, target, /*redo=*/false);
+    const auto trimmed = std::chrono::steady_clock::now() + 5s;
+    while (rows(tab) != 2 && std::chrono::steady_clock::now() < trimmed) {
+        std::this_thread::sleep_for(5ms);
+    }
+    REQUIRE(rows(tab) == 2);
+
+    // REDO (truncated_to_seq == -1): the restored rows are unknown client-side
+    // -- the window CLEARS (the refetch then brings all four rows back; a
+    // client that never handled the event would still show the trimmed two).
+    REQUIRE(quiesce());
+    app.SendRewind(sid, std::nullopt, /*redo=*/true);
+    const auto cleared = std::chrono::steady_clock::now() + 5s;
+    while (rows(tab) != 0 && std::chrono::steady_clock::now() < cleared) {
+        std::this_thread::sleep_for(5ms);
+    }
+    REQUIRE(rows(tab) == 0);
+    REQUIRE(wait_rows(sid, tab, 4));   // the restored transcript refetches whole
 }
 
 TEST_CASE("subagent grouping and focus via OnSubagentSpawned", "[app_state]") {
@@ -962,6 +1037,34 @@ TEST_CASE("staged /agent rides the eventual CreateSession", "[app_state][session
     REQUIRE(WaitForAttached(app, tab));
     // THE POINT: the created session runs the STAGED preset.
     CHECK(app.GetDetails(tab).agent_preset == "alt");
+}
+
+// THE STAGED-MODEL FIX: Stream::Open's create branch set project_root/preset/
+// name but never model -- a /model choice staged on a sessionless tab was
+// silently discarded by the create. The metadata event echoes the session's
+// resolved model reference, which is how the assertion reads it back.
+TEST_CASE("staged /model rides the eventual CreateSession", "[app_state][sessionless]") {
+    ClientFixture fixture;
+    fixture.Script("hi");
+    fixture.Start();
+
+    AppState app(fixture.client);
+    // NO model in the create-options: what the session runs is whatever was
+    // staged before the first message. ("main/other-model" exists in the
+    // fixture's providers.json but is NOT the preset's own -- the assertion
+    // would be vacuous against the default.) The preset comes from
+    // fixture.Options like every sibling test: the fixture's service is built
+    // with a default SettingsConfig, so there is no settings-level default to
+    // fall back on.
+    const auto tab = app.OpenTab(fixture.Options("modelled"));
+    REQUIRE_FALSE(tab.empty());
+
+    REQUIRE(app.StageModel(tab, "main/other-model"));
+    app.SubmitChatTurn(tab, "hi");
+    REQUIRE(WaitForSession(app, tab));
+    REQUIRE(WaitForAttached(app, tab));
+    // THE POINT: the created session runs the STAGED model.
+    CHECK(app.GetDetails(tab).model == "main/other-model");
 }
 
 TEST_CASE("sends stacked before the create resolves land on ONE session",

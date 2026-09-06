@@ -5,6 +5,10 @@
 #   - cpp-mcp-child-pid.patch: an atomic process_id_ plus a child_pid()
 #     accessor, so the harness can kill a wedged stdio child on teardown --
 #     see McpConnection::Teardown.
+#   - cpp-mcp-cloexec-pipes.patch: the stdio pipes are created with O_CLOEXEC
+#     and the child clears the flag on its dup'd fds 0/1, so the exec'd server
+#     keeps its stdio while no longer inheriting every parent fd (listening
+#     sockets, other children's pipes, log fds).
 #   - cpp-mcp-read-thread-eof.patch: the read thread fails every pending
 #     request when the pipe closes, so a child that dies mid-request unblocks
 #     its caller immediately instead of wedging it for the internal 60 s

@@ -1,10 +1,12 @@
 #include "minimal/rpc/server.hpp"
 
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/un.h>
 #include <unistd.h>
 
 #include <cerrno>
+#include <cstring>
 #include <system_error>
 #include <utility>
 
@@ -64,6 +66,16 @@ Server::Server(SessionServiceImpl& service, std::filesystem::path socket_path,
                              &selected_port);
     builder.RegisterService(&service);
     server_ = builder.BuildAndStart();  // null when the socket could not be bound
+    if (server_ != nullptr) {
+        // The socket IS the access control boundary (the topology is local and
+        // single-user -- see server.hpp), so force it owner-only regardless of
+        // the umask it was created under. Best-effort: a failure is logged, not
+        // fatal, rather than refusing to serve over a socket that exists.
+        if (::chmod(socket_path_.c_str(), 0700) != 0) {
+            common::DefaultLogger().warn("could not restrict permissions on {}: {}",
+                                         socket_path_.string(), std::strerror(errno));
+        }
+    }
 }
 
 Server::~Server() {

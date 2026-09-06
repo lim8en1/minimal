@@ -7,6 +7,7 @@
 #include "fakes.hpp"
 #include "minimal/tools/tool_executor.hpp"
 #include "minimal/tools/tool_registry.hpp"
+#include "temp_dir.hpp"
 
 using namespace minimal;
 using namespace minimal::testing;
@@ -230,6 +231,94 @@ TEST_CASE("network is never consulted for a tool that does not declare "
     const auto result = executor.Run("tu1", "bash", nlohmann::json::object(), ctx);
     CHECK_FALSE(result.is_error);
     CHECK(f.tool->calls.size() == 1);
+}
+
+// --- execute-time confinement re-check (TOCTOU) -------------------------------
+//
+// The Prepare-time classification is not a lock: between the two phases -- an
+// Ask can sit on a human for minutes -- a parallel call can rename a symlink
+// onto the path. Execute re-runs confine() and refuses an inside->outside
+// divergence.
+
+TEST_CASE("a path that escapes the workspace between Prepare and Execute is refused",
+          "[tool_executor][toctou]") {
+    testing::TempDir arena;
+    std::filesystem::create_directories(arena.path() / "sub");
+    std::filesystem::create_directory_symlink("sub", arena.path() / "link");
+
+    Fixture f;
+    auto& tool = f.AddTool("write", ToolCategory::FileWrite);
+    tool.set_path_key("path");
+    UnreachablePermissionChecker checker;
+
+    tools::ToolExecutor executor(f.registry, checker, AllowAllPolicy(), {},
+                                 PermissionRunMode::Normal);
+    auto ctx = f.Context(arena.path());
+
+    auto prepared = executor.Prepare("tu1", "write", {{"path", "link"}}, ctx);
+    REQUIRE_FALSE(prepared.denial);
+    REQUIRE(prepared.path_confinement_checked);
+    REQUIRE(prepared.was_inside_project_root);
+
+    // The race: repoint the symlink outside the root between the phases.
+    std::filesystem::remove(arena.path() / "link");
+    std::filesystem::create_directory_symlink("..", arena.path() / "link");
+
+    const auto block = executor.Execute(prepared, ctx);
+    CHECK(block.is_error);
+    CHECK(TextOf(block).find("escaped the workspace") != std::string::npos);
+    CHECK(tool.calls.empty());
+}
+
+TEST_CASE("Execute does not second-guess a Prepare-time outside classification",
+          "[tool_executor][toctou]") {
+    // Only a DIVERGENCE is refused. The out-of-workdir fold already priced an
+    // outside path in at Prepare (possibly allowing it, when the operator set
+    // out_of_workdir=allow); re-denying it at execute time would override that.
+    Fixture f;
+    auto& tool = f.AddTool("write", ToolCategory::FileWrite);
+    tool.set_path_key("path");
+    UnreachablePermissionChecker checker;
+
+    tools::ToolExecutor executor(f.registry, checker, AllowAllPolicy(), {},
+                                 PermissionRunMode::Normal);
+    auto ctx = f.Context();
+
+    auto prepared = executor.Prepare("tu1", "write", {{"path", "/etc/hosts"}}, ctx);
+    REQUIRE_FALSE(prepared.denial);
+    REQUIRE(prepared.path_confinement_checked);
+    REQUIRE_FALSE(prepared.was_inside_project_root);
+
+    const auto block = executor.Execute(prepared, ctx);
+    CHECK_FALSE(block.is_error);
+    CHECK(tool.calls.size() == 1);
+}
+
+TEST_CASE("a path unresolvable at execute time fails closed against a recorded inside",
+          "[tool_executor][toctou]") {
+    testing::TempDir arena;
+    std::filesystem::create_directories(arena.path() / "sub");
+
+    Fixture f;
+    auto& tool = f.AddTool("write", ToolCategory::FileWrite);
+    tool.set_path_key("path");
+    UnreachablePermissionChecker checker;
+
+    tools::ToolExecutor executor(f.registry, checker, AllowAllPolicy(), {},
+                                 PermissionRunMode::Normal);
+    auto ctx = f.Context(arena.path());
+
+    auto prepared = executor.Prepare("tu1", "write", {{"path", "sub"}}, ctx);
+    REQUIRE(prepared.was_inside_project_root);
+
+    // The swap this time leaves the path impossible to place at all: a
+    // self-referential symlink loop. Unresolvable counts as outside.
+    std::filesystem::remove(arena.path() / "sub");
+    std::filesystem::create_directory_symlink("sub", arena.path() / "sub");
+
+    const auto block = executor.Execute(prepared, ctx);
+    CHECK(block.is_error);
+    CHECK(tool.calls.empty());
 }
 
 TEST_CASE("MCP tools resolve per-server, not per-tool", "[tool_executor][mcp]") {
@@ -469,6 +558,57 @@ TEST_CASE("a ceiling can only tighten, never loosen", "[tool_executor][ceiling]"
     CHECK_FALSE(executor.Run("tu1", "bash", nlohmann::json::object(), ctx).is_error);
 
     CHECK(checker.seen.size() == 1);
+}
+
+TEST_CASE("a ceiling's out_of_workdir dimension governs a child's outside-path call",
+          "[tool_executor][ceiling][out_of_workdir]") {
+    // out_of_workdir is a dimension FIELD, not a category, so the ceiling's
+    // mode_for() never consulted it: without the explicit fold a child preset
+    // with out_of_workdir=allow would exceed its parent on exactly that axis.
+    Fixture f;
+    auto& tool = f.AddTool("write", ToolCategory::FileWrite);
+    tool.set_path_key("path");
+    UnreachablePermissionChecker checker;
+
+    tools::PermissionPolicy child = AllowAllPolicy();
+    tools::PermissionPolicy ceiling = AllowAllPolicy();
+    ceiling.out_of_workdir = PermissionMode::AlwaysDeny;
+
+    tools::ToolExecutor executor(f.registry, checker, child, {}, PermissionRunMode::Normal,
+                                 ceiling);
+    auto ctx = f.Context();
+
+    const auto outside = executor.Run("tu1", "write", {{"path", "/etc/hosts"}}, ctx);
+    CHECK(outside.is_error);
+    CHECK(f.tool->calls.empty());
+
+    // Inside the root the dimension does not apply: the same call on a
+    // workdir path still runs.
+    const auto inside = executor.Run("tu2", "write", {{"path", "local.txt"}}, ctx);
+    CHECK_FALSE(inside.is_error);
+    CHECK(f.tool->calls.size() == 1);
+}
+
+TEST_CASE("a ceiling's network dimension governs a network-capable tool",
+          "[tool_executor][ceiling][network]") {
+    // Same shape as the out_of_workdir ceiling: network is a field, not a
+    // category, so only the explicit fold keeps a child under its parent.
+    Fixture f;
+    auto& tool = f.AddTool("web_fetch", ToolCategory::Execute);
+    tool.set_network_access_required(true);
+    UnreachablePermissionChecker checker;
+
+    tools::PermissionPolicy child = AllowAllPolicy();
+    tools::PermissionPolicy ceiling = AllowAllPolicy();
+    ceiling.network = PermissionMode::AlwaysDeny;
+
+    tools::ToolExecutor executor(f.registry, checker, child, {}, PermissionRunMode::Normal,
+                                 ceiling);
+    auto ctx = f.Context();
+
+    const auto result = executor.Run("tu1", "web_fetch", nlohmann::json::object(), ctx);
+    CHECK(result.is_error);
+    CHECK(f.tool->calls.empty());
 }
 
 TEST_CASE("an mcp ceiling governs mcp tools, not the policy ceiling",

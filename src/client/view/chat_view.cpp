@@ -2,6 +2,8 @@
 
 #include <algorithm>
 
+#include "minimal/common/logger.hpp"
+
 namespace minimal::client {
 
 ChatView::ChatView(const Theme& theme,
@@ -97,10 +99,32 @@ void ChatView::RebuildRows(const SessionState::Snapshot& snapshot) {
         // exactly that case.
         if (row.kind == ChatRowKind::ToolActivity && !row.text.empty()) {
             if (const auto* renderer = tool_renderers_.Find(row.tool_name)) {
-                parts.push_back(renderer->Render(row.tool_input, row.text, row.tool_is_error,
-                                                 theme_, ctx));
+                // Plugin code on the render path: a throw here (or in the
+                // message-renderer calls below) propagated out of Render()
+                // and std::terminate'd the TUI. Contained, the row degrades
+                // to whatever earlier parts produced -- an empty one if none.
+                try {
+                    parts.push_back(renderer->Render(row.tool_input, row.text,
+                                                     row.tool_is_error, theme_, ctx));
+                } catch (const std::exception& error) {
+                    common::DefaultLogger().warn("tool-result renderer for '{}' threw: {}",
+                                                 row.tool_name, error.what());
+                } catch (...) {
+                    common::DefaultLogger().warn(
+                        "tool-result renderer for '{}' threw a non-standard exception",
+                        row.tool_name);
+                }
             } else if (const auto* fallback = message_renderers_.Find(row.kind)) {
-                parts.push_back(fallback->Render(row, theme_, ctx));
+                try {
+                    parts.push_back(fallback->Render(row, theme_, ctx));
+                } catch (const std::exception& error) {
+                    common::DefaultLogger().warn("message renderer for {} threw: {}",
+                                                 ToString(row.kind), error.what());
+                } catch (...) {
+                    common::DefaultLogger().warn(
+                        "message renderer for {} threw a non-standard exception",
+                        ToString(row.kind));
+                }
             }
         } else {
             const auto* renderer = message_renderers_.Find(row.kind);
@@ -108,7 +132,16 @@ void ChatView::RebuildRows(const SessionState::Snapshot& snapshot) {
             // wired host; kept as a guard so an unwired registry degrades to an
             // empty row rather than a crash.
             if (renderer != nullptr) {
-                parts.push_back(renderer->Render(row, theme_, ctx));
+                try {
+                    parts.push_back(renderer->Render(row, theme_, ctx));
+                } catch (const std::exception& error) {
+                    common::DefaultLogger().warn("message renderer for {} threw: {}",
+                                                 ToString(row.kind), error.what());
+                } catch (...) {
+                    common::DefaultLogger().warn(
+                        "message renderer for {} threw a non-standard exception",
+                        ToString(row.kind));
+                }
             }
         }
         fresh_cache.emplace(key, parts);

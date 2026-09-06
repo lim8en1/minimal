@@ -178,6 +178,33 @@ TEST_CASE("ReplaceMcpTools swaps a server's set atomically; an in-flight tool su
     CHECK(weak.expired());
 }
 
+TEST_CASE("ReplaceMcpTools removes only the named server's tools, not prefix-overlapping ones",
+          "[mcp_tool]") {
+    // Server "a_" is rejected by config validation now, but the registry must
+    // not rely on that: McpServerOf("mcp__a___x") is "a", not "a_", so a
+    // restart of "a" must leave "a_"'s tools (registered directly here,
+    // bypassing validation) untouched -- the old prefix erase wiped them all.
+    ToolRegistry registry;
+    auto invoker = std::make_shared<StubInvoker>(OkOutcome("x"));
+
+    std::vector<std::unique_ptr<Tool>> underscore_batch;
+    underscore_batch.push_back(std::make_unique<McpTool>("a_", Listing("x"), invoker));
+    registry.ReplaceMcpTools("a_", std::move(underscore_batch));
+    REQUIRE(registry.Find("mcp__a___x") != nullptr);
+
+    std::vector<std::unique_ptr<Tool>> plain_batch;
+    plain_batch.push_back(std::make_unique<McpTool>("a", Listing("t"), invoker));
+    registry.ReplaceMcpTools("a", std::move(plain_batch));
+
+    REQUIRE(registry.Find("mcp__a__t") != nullptr);
+    CHECK(registry.Find("mcp__a___x") != nullptr);  // not collateral damage
+
+    // An empty re-discovery of "a" still only touches "a"'s namespace.
+    registry.ReplaceMcpTools("a", {});
+    CHECK(registry.Find("mcp__a__t") == nullptr);
+    CHECK(registry.Find("mcp__a___x") != nullptr);
+}
+
 TEST_CASE("ReplaceMcpTools: first registration wins within a batch, foreign names refused", "[mcp_tool]") {
     ToolRegistry registry;
     auto invoker = std::make_shared<StubInvoker>(OkOutcome("x"));

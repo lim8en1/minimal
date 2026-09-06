@@ -227,6 +227,16 @@ public:
 
     void TerminateAll();
 
+    // Stops the reaper thread, exactly as the destructor does. Idempotent --
+    // safe to call twice, and the destructor stays safe after an explicit
+    // stop. Exists so a caller whose exit cascade destroys the objects the
+    // ReaperConfig callbacks capture (service, server) BEFORE this registry
+    // can quiesce the reaper first: TerminateAll does not touch the reaper,
+    // and without this the ~250ms tick would evaluate those by-reference
+    // captures on already-destroyed objects while its destructor still waits
+    // behind theirs in reverse destruction order.
+    void StopReaper();
+
     std::size_t size() const;
 
 private:

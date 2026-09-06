@@ -18,6 +18,19 @@ constexpr const char* kAnthropicVersion = "2023-06-01";
     throw llm::LlmError(llm::LlmErrorCategory::ParseError, error.what());
 }
 
+// BuildRequestBody runs OUTSIDE the transport try/catch blocks below, so an
+// exception out of it used to escape the provider unclassified. The string
+// escaping now replaces invalid UTF-8 rather than throwing; any residual
+// serializer failure is still classified here (same shape as provider-openai).
+std::string GuardedBuildRequestBody(const llm::ChatRequest& request, bool stream) {
+    try {
+        return BuildRequestBody(request, stream);
+    } catch (const std::exception& error) {
+        throw llm::LlmError(llm::LlmErrorCategory::RequestError,
+                            "failed to build request body: " + std::string(error.what()));
+    }
+}
+
 }  // namespace
 
 net::HttpRequest AnthropicProvider::BuildHttpRequest(std::string body, bool streaming) const {
@@ -45,8 +58,8 @@ net::HttpRequest AnthropicProvider::BuildHttpRequest(std::string body, bool stre
 }
 
 llm::ChatResponse AnthropicProvider::Complete(const llm::ChatRequest& request) {
-    net::HttpRequest http_request = BuildHttpRequest(BuildRequestBody(request, /*stream=*/false),
-                                                     /*streaming=*/false);
+    net::HttpRequest http_request =
+        BuildHttpRequest(GuardedBuildRequestBody(request, /*stream=*/false), /*streaming=*/false);
 
     net::HttpResponse http_response;
     try {
@@ -71,8 +84,8 @@ llm::ChatResponse AnthropicProvider::Complete(const llm::ChatRequest& request) {
 
 llm::ChatResponse AnthropicProvider::StreamComplete(const llm::ChatRequest& request,
                                                     const llm::StreamEventSink& sink) {
-    net::HttpRequest http_request = BuildHttpRequest(BuildRequestBody(request, /*stream=*/true),
-                                                     /*streaming=*/true);
+    net::HttpRequest http_request =
+        BuildHttpRequest(GuardedBuildRequestBody(request, /*stream=*/true), /*streaming=*/true);
 
     AnthropicStreamReassembler reassembler;
     net::SseParser sse_parser;

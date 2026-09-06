@@ -1,0 +1,27 @@
+diff --git a/src/mcp_stdio_client.cpp b/src/mcp_stdio_client.cpp
+index 2df79f5..789db90 100644
+--- a/src/mcp_stdio_client.cpp
++++ b/src/mcp_stdio_client.cpp
+@@ -338,13 +338,19 @@ bool stdio_client::start_server_process() {
+     
+ #else
+     // POSIX implementation
+-    // Create pipes
+-    if (pipe(stdin_pipe_) == -1) {
++    // Create pipes (minimal-mcp patch: close-on-exec so the forked child does
++    // not inherit the parent's listening sockets, other children's pipes, and
++    // log fds; dup2 clears the flag on the dup'd stdio ends below).
++    if (pipe(stdin_pipe_) == -1 ||
++        fcntl(stdin_pipe_[0], F_SETFD, FD_CLOEXEC) == -1 ||
++        fcntl(stdin_pipe_[1], F_SETFD, FD_CLOEXEC) == -1) {
+         LOG_ERROR("Failed to create stdin pipe: ", strerror(errno));
+         return false;
+     }
+     
+-    if (pipe(stdout_pipe_) == -1) {
++    if (pipe(stdout_pipe_) == -1 ||
++        fcntl(stdout_pipe_[0], F_SETFD, FD_CLOEXEC) == -1 ||
++        fcntl(stdout_pipe_[1], F_SETFD, FD_CLOEXEC) == -1) {
+         LOG_ERROR("Failed to create stdout pipe: ", strerror(errno));
+         close(stdin_pipe_[0]);
+         close(stdin_pipe_[1]);

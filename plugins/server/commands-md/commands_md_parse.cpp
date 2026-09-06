@@ -240,7 +240,7 @@ MdCommandSpec ParseCommandFile(const std::filesystem::path& path, bool trusted) 
 }
 
 std::vector<std::unique_ptr<commands::Command>> LoadCommands(
-    const std::vector<CommandDir>& dirs) {
+    const std::vector<CommandDir>& dirs, const SpecFilter& accept) {
     std::vector<std::unique_ptr<commands::Command>> out;
     // Nearest dir wins a stem collision: keep the first spec per stem in walk
     // order, and log what was shadowed. Callers list project directories
@@ -269,7 +269,9 @@ std::vector<std::unique_ptr<commands::Command>> LoadCommands(
                 continue;
             }
             try {
-                specs.push_back(ParseCommandFile(entry.path(), command_dir.trusted));
+                MdCommandSpec spec = ParseCommandFile(entry.path(), command_dir.trusted);
+                if (accept && !accept(spec)) continue;
+                specs.push_back(std::move(spec));
             } catch (const std::exception& error) {
                 // One malformed command must not hide the rest from the picker.
                 common::DefaultLogger().warn("command '{}' skipped in listing: {}",
@@ -281,6 +283,15 @@ std::vector<std::unique_ptr<commands::Command>> LoadCommands(
     out.reserve(specs.size());
     for (auto& spec : specs) out.push_back(MakeCommand(std::move(spec)));
     return out;
+}
+
+bool AcceptNonColliding(commands::CommandRegistry& registry, const MdCommandSpec& spec) {
+    if (spec.trusted || registry.Find(spec.name) == nullptr) return true;
+    common::DefaultLogger().warn(
+        "command '{}' from project-local file {} skipped: a command with that name is "
+        "already registered, and the existing one wins",
+        spec.name, spec.source_file.string());
+    return false;
 }
 
 }  // namespace minimal::commands_md

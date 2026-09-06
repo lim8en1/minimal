@@ -1,6 +1,7 @@
 #include "minimal/client/view/prompt_editor.hpp"
 
 #include <algorithm>
+#include <memory>
 
 #include <ftxui/component/event.hpp>
 
@@ -155,6 +156,12 @@ ftxui::Component MakePromptEditor(
         state.completions.clear();
     };
 
+    // Bracketed-paste mode (DECSET 2004) tracking -- see the handler's
+    // comment. LIVES ON THE COMPONENT (a shared_ptr the handler owns a copy
+    // of), not in PromptEditorState: it is input MODE, not per-tab content,
+    // and the state is copied into snapshots.
+    const auto pasting = std::make_shared<bool>(false);
+
     // accept_suggestion, on_text, on_command and command_catalog captured BY
     // VALUE (copies), not by reference: `[&]` here would bind references to
     // this factory's OWN PARAMETERS -- on_text/on_command/command_catalog are
@@ -168,7 +175,34 @@ ftxui::Component MakePromptEditor(
     // which outlives this component.
     auto with_events = CatchEvent(
         input, [&state, accept_suggestion, on_text, on_command,
-                command_catalog](const Event& event) {
+                command_catalog, pasting](const Event& event) {
+        // Bracketed paste (DECSET 2004): the terminal wraps a paste in
+        // \x1b[200~ ... \x1b[201~ and every line break inside it arrives as
+        // a plain Return, which used to submit each pasted line as its own
+        // turn. FTXUI 7 delivers an unknown CSI sequence as Event::Special
+        // with the raw bytes preserved (terminal_input_parser.cpp: ParseCSI's
+        // default arm returns SPECIAL; Event::Special keeps input()), so the
+        // markers are matchable here. While pasting, Return inserts a
+        // newline (exactly as Alt+Enter does -- see that branch for the
+        // cursor clamping) and the pasted characters pass through to the
+        // Input unchanged. A terminal without 2004 support never delivers
+        // the markers and behavior is exactly as it was before.
+        if (event.input().find("\x1b[200~") != std::string::npos) {
+            *pasting = true;
+            return true;   // swallowed
+        }
+        if (event.input().find("\x1b[201~") != std::string::npos) {
+            *pasting = false;
+            return true;   // swallowed
+        }
+        if (*pasting && event == Event::Return) {
+            const auto pos = std::clamp<std::size_t>(
+                static_cast<std::size_t>(state.cursor_position), 0, state.content.size());
+            state.content.insert(pos, "\n");
+            state.cursor_position = static_cast<int>(pos) + 1;
+            return true;   // consumed
+        }
+
         // Readline line-editing: ctrl+a/e/u/k, the bindings terminal users
         // reach for by reflex. Operate on the WHOLE buffer, not a visual
         // line, matching FTXUI's own Home/End (input.cpp: cursor_position() =
@@ -330,54 +364,24 @@ ftxui::Component MakePromptEditor(
             return true;
         }
 
-        // After every character edit, the @-mention debounce re-arms (the
-        // query itself fires from the render gate below -- no timers, no
-        // threads; frame timing carries it).
-        //
-        // Backspace/Delete re-arm too: they are edits, and leaving them out
-        // stranded the OPEN list on deleted text -- "/se" then three
-        // backspaces left the "/se" suggestions on screen over an EMPTY
-        // input, where Enter "accepted" a completion the user had already
-        // erased. The render-time command block re-populates the list the
-        // same frame when the remaining text is still a command line, so
-        // clearing here never flickers a live list off.
-        //
-        // The '/'+name command catalog match used to run HERE too, reading
-        // state.content -- but CatchEventBase runs this handler BEFORE
-        // passing the event to the wrapped Input (see ftxui's
-        // catch_event.cpp: `if (on_event_(event)) return true; else return
-        // ComponentBase::OnEvent(event);`), so the character just typed
-        // had NOT been inserted into state.content yet. The match was
-        // therefore always one keystroke stale -- invisible for a multi-
-        // character prefix (the NEXT keystroke's check caught up), but total
-        // silence for a BARE "/": there is no next keystroke to catch it up,
-        // so the single biggest discoverability affordance in the app
-        // showed nothing until a second character landed. It now runs at
-        // render time instead (below, in the Renderer), reading content
-        // AFTER Input has applied every event so far this frame.
+        // After every character edit, the @-mention match must re-derive --
+        // the query itself fires from the render gate below -- no timers, no
+        // threads; frame timing carries it. But the DERIVATION moved OUT of
+        // this handler (along with the '/'+name command match, once
+        // here too): this handler runs BEFORE the wrapped Input applies the
+        // event (see ftxui's catch_event.cpp, quoted in the comment below),
+        // so the state.content/cursor_position reads were one keystroke
+        // stale -- after "@ab" the debounce queried "a", a Backspace queried
+        // the prefix INCLUDING the char about to be deleted, and a bare "@"
+        // never armed at all. Both matches now derive at render time (below
+        // in the Renderer), reading content AFTER Input has applied every
+        // event so far this frame. Only bookkeeping that reads nothing of
+        // the buffer stays here.
         if (event.is_character() || event == Event::Backspace || event == Event::Delete) {
             // Editing a recalled line exits browsing -- it is no longer the
             // same text as history[cursor], so further up/down should not
             // silently discard what was just typed.
             state.history_cursor.reset();
-            // state.cursor_position, read here, is stale by this same one
-            // keystroke (Input has not moved it for the CURRENT event
-            // either) -- consistent with state.content's own staleness
-            // (see the comment above), so the two stay correctly paired.
-            state.pending_prefix = MentionPrefixAt(state.content, state.cursor_position);
-            state.query_pending = !state.pending_prefix.empty();
-            // Mirrored for the redraw pump (RunTui, a different thread) --
-            // see PromptEditorState::query_pending_hint.
-            state.query_pending_hint.store(state.query_pending, std::memory_order_release);
-            state.query_at = std::chrono::steady_clock::now() + kSuggestDebounce;
-            state.list_open = state.query_pending;
-            state.suggestion_selected = 0;
-            // The OLD list must not survive the re-arm: it matches a prefix
-            // the user has already typed past, and Tab within the debounce
-            // window completed the STALE entry. The list re-opens when the
-            // fresh answer lands.
-            state.suggestions.clear();
-            state.completions.clear();
         }
         return false;   // everything else goes to the Input
     });
@@ -386,7 +390,8 @@ ftxui::Component MakePromptEditor(
                     [=, &state, &theme, cached_command_prefix = std::string(),
                      cached_command_session_ok = false,
                      cached_command_suggestions = std::vector<std::string>(),
-                     has_cached_command = false]() mutable {
+                     has_cached_command = false, cached_mention_prefix = std::string(),
+                     has_cached_mention = false]() mutable {
         using namespace ftxui;
 
         // The '/'+name command catalog match: read HERE, after Input has
@@ -450,15 +455,69 @@ ftxui::Component MakePromptEditor(
             state.list_open = !state.suggestions.empty();
             state.query_pending = false;
             state.query_pending_hint.store(false, std::memory_order_release);
+            // Left mention mode for command mode: nothing to remember, so a
+            // return to a mention token re-arms from scratch (otherwise a
+            // re-entered token with an unchanged prefix would look cached
+            // and never query again).
+            has_cached_mention = false;
         } else {
             has_cached_command = false;   // left command-name mode: nothing to remember
+        }
+
+        // The '@'+name mention match: derived HERE like the command catalog
+        // above, reading state.content AFTER Input has applied every event
+        // so far this frame (the old arming ran in the character handler and
+        // was one keystroke stale for the same reason -- see that handler's
+        // comment). Anchored at the cursor, so it tracks the token the
+        // cursor sits in RIGHT NOW. A bare "@" is a live query too: its
+        // empty prefix resolves immediately to an empty answer with no RPC
+        // (app.cpp's `suggest` lambda), so arming it is free and the empty
+        // answer simply keeps the list closed.
+        if (!IsCommandNameInProgress(state.content)) {
+            const bool in_token =
+                MentionTokenStart(state.content, state.cursor_position).has_value();
+            const std::string prefix =
+                in_token ? MentionPrefixAt(state.content, state.cursor_position) : std::string();
+            // No live token means nothing may stay completable: vectors held
+            // over from the command path (the "/se" then three-backspaces
+            // regression) or from an answer that landed after its token died
+            // must go, or the next token change could splice a stale entry.
+            // The empty-check makes this a no-op on every steady-state frame.
+            if (!in_token && !state.suggestions.empty()) {
+                state.suggestions.clear();
+                state.completions.clear();
+                state.suggestion_selected = 0;
+                state.query_pending = false;
+                state.query_pending_hint.store(false, std::memory_order_release);
+            }
+            if (in_token != has_cached_mention || prefix != cached_mention_prefix) {
+                // The token appeared, left, or the typed prefix moved past
+                // the cached one: the old list matches text that is no
+                // longer under the cursor, and Tab within the debounce
+                // window would complete the STALE entry. Clear it and re-arm
+                // the debounce -- what the character handler used to do on
+                // every edit. The list re-opens when the fresh answer lands.
+                state.suggestions.clear();
+                state.completions.clear();
+                state.suggestion_selected = 0;
+                state.query_at = std::chrono::steady_clock::now() + kSuggestDebounce;
+                state.pending_prefix = prefix;
+                state.query_pending = in_token;
+                // Mirrored for the redraw pump (RunTui, a different thread) --
+                // see PromptEditorState::query_pending_hint.
+                state.query_pending_hint.store(in_token, std::memory_order_release);
+                has_cached_mention = in_token;
+                cached_mention_prefix = prefix;
+            }
+            state.list_open = in_token && !state.suggestions.empty();
         }
 
         // The debounce gate: once the delay has passed and the prefix is
         // unchanged, ask the server. suggest() returning nullopt means the
         // async fetch is still in flight (T2) -- keep polling on later
-        // frames rather than treating "not yet" as "empty"; a fresh
-        // character re-arms pending_prefix/query_at above and this check
+        // frames rather than treating "not yet" as "empty"; a changed
+        // prefix re-arms pending_prefix/query_at in the mention match above
+        // and this check
         // naturally moves on to the newer prefix, which is what makes a
         // stale answer harmless once it eventually arrives (see
         // AppState::RequestSuggestPaths / the `suggest` lambda in app.cpp).

@@ -34,8 +34,10 @@ TEST_CASE("IsValidMcpServerName rejects names that would corrupt the namespace",
     CHECK(IsValidMcpServerName("ida"));
     CHECK(IsValidMcpServerName("ida-pro"));
     CHECK(IsValidMcpServerName("a_b"));
+    CHECK(IsValidMcpServerName("my_server"));
     CHECK_FALSE(IsValidMcpServerName(""));            // empty: mcp____tool
     CHECK_FALSE(IsValidMcpServerName("a__b"));        // separator inside: ambiguous parse
+    CHECK_FALSE(IsValidMcpServerName("a_"));          // trailing '_': "a_"+"x" parses as "a"+"_"x
     CHECK_FALSE(IsValidMcpServerName("my server"));   // space
     CHECK_FALSE(IsValidMcpServerName("a\tb"));        // control
     CHECK_FALSE(IsValidMcpServerName("a\nb"));

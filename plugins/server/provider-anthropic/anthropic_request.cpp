@@ -30,8 +30,11 @@ void AppendKey(std::string& out, std::string_view key) {
 
 void AppendStringValue(std::string& out, std::string_view value) {
     // nlohmann for the escaping only, not the structure -- O(this string's
-    // length), never O(the history), same as provider-openai.
-    out += nlohmann::json(value).dump();
+    // length), never O(the history), same as provider-openai. The replace
+    // error handler keeps invalid UTF-8 (e.g. a binary tool result) from
+    // throwing type_error.316 out of the builder: it becomes U+FFFD instead.
+    out += nlohmann::json(value).dump(-1, ' ', false,
+                                      nlohmann::json::error_handler_t::replace);
 }
 
 std::string JoinResultContent(const std::vector<llm::ToolResultContentBlock>& content) {

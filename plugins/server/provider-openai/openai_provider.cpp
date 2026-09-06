@@ -16,6 +16,20 @@ namespace {
     throw llm::LlmError(llm::LlmErrorCategory::ParseError, error.what());
 }
 
+// BuildRequestBody runs OUTSIDE the transport try/catch blocks below, so an
+// exception out of it used to escape the provider unclassified (and, on the
+// agent loop, brick the session: every subsequent turn -- and the compaction
+// call -- threw again). The string escaping now replaces invalid UTF-8 rather
+// than throwing; any residual serializer failure is still classified here.
+std::string GuardedBuildRequestBody(const llm::ChatRequest& request, bool stream) {
+    try {
+        return BuildRequestBody(request, stream);
+    } catch (const std::exception& error) {
+        throw llm::LlmError(llm::LlmErrorCategory::RequestError,
+                            "failed to build request body: " + std::string(error.what()));
+    }
+}
+
 }  // namespace
 
 net::HttpRequest OpenAiProvider::BuildHttpRequest(std::string body, bool streaming) const {
@@ -43,8 +57,8 @@ llm::ChatResponse OpenAiProvider::Complete(const llm::ChatRequest& request) {
     // this replaces duplicated the tools vector (every schema DOM), the
     // parameters object and the system string per call -- and, worse, per
     // RETRY ATTEMPT, since the loop calls this method once per attempt.
-    net::HttpRequest http_request = BuildHttpRequest(BuildRequestBody(request, /*stream=*/false),
-                                                     /*streaming=*/false);
+    net::HttpRequest http_request =
+        BuildHttpRequest(GuardedBuildRequestBody(request, /*stream=*/false), /*streaming=*/false);
 
     net::HttpResponse http_response;
     try {
@@ -68,8 +82,8 @@ llm::ChatResponse OpenAiProvider::Complete(const llm::ChatRequest& request) {
 }
 
 llm::ChatResponse OpenAiProvider::StreamComplete(const llm::ChatRequest& request, const llm::StreamEventSink& sink) {
-    net::HttpRequest http_request = BuildHttpRequest(BuildRequestBody(request, /*stream=*/true),
-                                                     /*streaming=*/true);
+    net::HttpRequest http_request =
+        BuildHttpRequest(GuardedBuildRequestBody(request, /*stream=*/true), /*streaming=*/true);
 
     OpenAiStreamReassembler reassembler;
     net::SseParser sse_parser;

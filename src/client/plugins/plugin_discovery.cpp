@@ -129,9 +129,17 @@ std::vector<PluginCandidate> DiscoverClientPlugins(
     candidates.reserve(found.size());
 
     for (const auto& item : found) {
+        // Keyed by (provenance, file), NOT file alone -- ported from the
+        // server's DiscoverPlugins: a user-dir plugin that happens to share a
+        // basename with a bundled one (a dropped-in logo.so) used to match
+        // the bundled entry and inherit its enabled:true, dlopening and
+        // running a plugin nobody opted into. Two independent entries let
+        // the user toggle each side separately, which is also what the
+        // collision warning below tells them to do.
         auto existing = std::find_if(config.plugins.begin(), config.plugins.end(),
                                      [&](const ClientPluginConfig::Entry& e) {
-                                         return e.file == item.file;
+                                         return e.file == item.file &&
+                                                e.provenance == item.provenance;
                                      });
 
         if (existing == config.plugins.end()) {
@@ -143,9 +151,18 @@ std::vector<PluginCandidate> DiscoverClientPlugins(
             entry.enabled = (item.provenance == Provenance::Bundled);
             config.plugins.push_back(entry);
             existing = std::prev(config.plugins.end());
-        } else if (existing->provenance != item.provenance) {
-            // Same basename in both directories: one entry, two .so files, a
-            // guaranteed collision. Warned at discovery, like the server's.
+        }
+
+        // The same basename discovered from BOTH directories: both files
+        // still load (each under its own now-independent entry), which is a
+        // guaranteed name collision the user cannot see coming from
+        // client-plugins.json alone. Warned at discovery, like the server's.
+        const bool also_from_other_provenance = std::any_of(
+            config.plugins.begin(), config.plugins.end(),
+            [&](const ClientPluginConfig::Entry& e) {
+                return e.file == item.file && e.provenance != item.provenance;
+            });
+        if (also_from_other_provenance) {
             common::DefaultLogger().warn(
                 "client plugin '{}' exists both bundled and in the user plugin dir; both will "
                 "load and the names will collide -- disable one in client-plugins.json",

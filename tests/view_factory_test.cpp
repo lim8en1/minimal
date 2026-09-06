@@ -483,6 +483,36 @@ TEST_CASE("prompt editor: Alt+Enter inserts a newline AT THE CURSOR, not appende
     CHECK(state.cursor_position == 7);           // advanced past the inserted newline
 }
 
+// Bracketed paste (DECSET 2004): the terminal-side app wraps a paste in
+// \x1b[200~ ... \x1b[201~ and every line break inside it arrives as a plain
+// Return. Those Returns used to hit the submit path -- each pasted line went
+// out as its own turn. FTXUI 7 delivers the (unknown CSI) markers as
+// Event::Special with the raw bytes preserved, so the editor tracks the mode
+// and turns in-paste Returns into newlines.
+TEST_CASE("prompt editor: a bracketed paste becomes one multi-line buffer, not one "
+          "submit per line") {
+    const auto theme = TestTheme();
+    PromptEditorState state;
+    std::vector<std::string> texts;
+    auto editor = MakePromptEditor(
+        theme, state, [&](const std::string& t) { texts.push_back(t); },
+        [](const std::string&) {},
+        [](const std::string&) { return std::vector<std::string>{}; });
+
+    REQUIRE(SendEvent(editor, ftx::Event::Special("\x1b[200~")));   // paste start
+    REQUIRE(SendEvent(editor, ftx::Event::Character("one")));
+    REQUIRE(SendEvent(editor, ftx::Event::Return));   // in-paste: newline, NOT submit
+    REQUIRE(SendEvent(editor, ftx::Event::Character("two")));
+    REQUIRE(SendEvent(editor, ftx::Event::Special("\x1b[201~")));   // paste end
+    CHECK(state.content == "one\ntwo");
+    CHECK(texts.empty());   // nothing leaked out mid-paste
+
+    REQUIRE(SendEvent(editor, ftx::Event::Return));   // after the paste: submits normally
+    REQUIRE(texts.size() == 1);
+    CHECK(texts[0] == "one\ntwo");
+    CHECK(state.content.empty());
+}
+
 TEST_CASE("prompt editor: history recall places the cursor at the end of the recalled line") {
     const auto theme = TestTheme();
     PromptEditorState state;
@@ -831,9 +861,12 @@ TEST_CASE("prompt editor: Tab splices the mention token, preserving the prose") 
     for (const char c : std::string_view("please review @src/ma")) {
         REQUIRE(SendEvent(editor, ftx::Event::Character(std::string{c})));
     }
-    // The debounce gate fires from Render: wait out the 120 ms window.
+    // The debounce arms at Render (the match is derived there, after Input
+    // applied the keystrokes) and fires from a LATER render once the window
+    // has elapsed.
+    RenderFrame(editor);                              // arms the debounce
     std::this_thread::sleep_for(std::chrono::milliseconds(140));
-    RenderFrame(editor);
+    RenderFrame(editor);                              // the gate fires
     REQUIRE_FALSE(state.suggestions.empty());
 
     REQUIRE(SendEvent(editor, ftx::Event::Tab));
@@ -1076,19 +1109,24 @@ TEST_CASE("prompt editor: the stale suggestion list is not completable mid-debou
     for (const char c : std::string_view("@src")) {
         REQUIRE(SendEvent(editor, ftx::Event::Character(std::string{c})));
     }
+    // Arming happens at Render (see the Tab-splice test above): one render
+    // derives the prefix, a later one -- after the debounce window -- fires.
+    RenderFrame(editor);
     std::this_thread::sleep_for(std::chrono::milliseconds(140));
     RenderFrame(editor);
     REQUIRE_FALSE(state.suggestions.empty());   // results for "@src" arrived
 
-    // Keep typing: the re-arm clears the old list immediately. Pre-fix the old
-    // entries stayed completable inside the 120 ms window -- Tab completed a
-    // result for a prefix the user had already typed past.
+    // Keep typing: the render-time derivation clears the old list as soon as
+    // the prefix moves past it. Pre-fix the old entries stayed completable
+    // inside the 120 ms window -- Tab completed a result for a prefix the
+    // user had already typed past.
     for (const char c : std::string_view("cli")) {
         REQUIRE(SendEvent(editor, ftx::Event::Character(std::string{c})));
     }
+    RenderFrame(editor);   // the derivation sees the new prefix and re-arms
     CHECK(state.suggestions.empty());
     CHECK(state.completions.empty());
-    CHECK(state.list_open);   // a fresh answer will re-open it
+    CHECK_FALSE(state.list_open);   // a fresh answer re-opens it
 }
 
 // ---------------------------------------------------------------------------

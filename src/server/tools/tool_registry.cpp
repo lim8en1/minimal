@@ -1,6 +1,7 @@
 #include "minimal/tools/tool_registry.hpp"
 
 #include <algorithm>
+#include <set>
 #include <utility>
 
 #include "minimal/mcp/naming.hpp"
@@ -26,6 +27,35 @@ void ToolRegistry::Register(std::unique_ptr<Tool> tool) {
         shadowed_.push_back(Pending{attributions_.back(), std::move(shared)});
     } else {
         tools_.emplace(name, std::move(shared));
+    }
+}
+
+void ToolRegistry::RemoveByAttribution(const std::string& plugin_name) {
+    // Pre-alias, pre-serving rollback only -- see the header. owners_ parallels
+    // attributions_, so both compact together; tools_ and shadowed_ drop the
+    // entries whose OBJECT (not name) belonged to the plugin, which stays
+    // exact even across shadowed duplicate names.
+    const std::lock_guard<std::shared_mutex> lock(mutex_);
+    std::set<const Tool*> doomed;
+    std::size_t out = 0;
+    for (std::size_t i = 0; i < attributions_.size(); ++i) {
+        if (attributions_[i].plugin_name == plugin_name) {
+            doomed.insert(owners_[i]);
+            continue;
+        }
+        attributions_[out] = std::move(attributions_[i]);
+        owners_[out] = owners_[i];
+        ++out;
+    }
+    attributions_.resize(out);
+    owners_.resize(out);
+    for (auto it = tools_.begin(); it != tools_.end();) {
+        if (doomed.count(it->second.get()) != 0) it = tools_.erase(it);
+        else ++it;
+    }
+    for (auto it = shadowed_.begin(); it != shadowed_.end();) {
+        if (doomed.count(it->tool.get()) != 0) it = shadowed_.erase(it);
+        else ++it;
     }
 }
 
@@ -158,13 +188,20 @@ void ToolRegistry::ReplaceMcpTools(const std::string& server_name,
     const std::string prefix = std::string(mcp::kMcpPrefix) + server_name + std::string(mcp::kMcpSeparator);
     std::unique_lock<std::shared_mutex> lock(mutex_);
 
-    // Retire the server's previous set: out of the map. An executor already
+    // Retire the server's previous set: out of the map. Matching is on the
+    // RECORDING owner (the server that registered the tool), not the string
+    // prefix and not the parsed name: both "mcp__a__" prefix-matching and
+    // McpServerOf parsing would also erase every tool of server "a_" -- a
+    // restart of "a" wiping a superset namespace. The owner map is the only
+    // source of truth that survives ambiguous names. An executor already
     // holding the shared_ptr from Find() keeps the object alive for as long
     // as its invocation runs (bounded by the permission Ask plus the call
-    // itself); when the last reference drops, the object destroys itself.
-    // No retired list, no process-lifetime accounting.
+    // itself); when the last reference drops, the object destroys itself. No
+    // retired list, no process-lifetime accounting.
     for (auto it = tools_.begin(); it != tools_.end();) {
-        if (it->first.rfind(prefix, 0) == 0) {
+        const auto owner = mcp_owners_.find(it->first);
+        if (owner != mcp_owners_.end() && owner->second == server_name) {
+            mcp_owners_.erase(owner);
             it = tools_.erase(it);
         } else {
             ++it;
@@ -185,6 +222,7 @@ void ToolRegistry::ReplaceMcpTools(const std::string& server_name,
             continue;  // duplicate within the batch: first wins
         }
         tools_.emplace(name, std::move(shared));
+        mcp_owners_.emplace(name, server_name);
     }
 }
 

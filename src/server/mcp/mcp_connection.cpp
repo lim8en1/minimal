@@ -4,6 +4,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <exception>
 #include <string>
 #include <thread>
 #include <utility>
@@ -347,6 +348,10 @@ private:
         auto session_id = std::make_shared<std::string>();
         auto buffer = std::make_shared<std::string>();
         auto parser = std::make_shared<net::SseParser>();
+        // Exceptions must never escape into libcurl's C call stack (undefined
+        // behavior) -- caught in the chunk sink, stashed here, and converted
+        // to the error path once StreamPost has fully unwound.
+        auto pending_error = std::make_shared<std::exception_ptr>();
 
         try {
             session_.StreamPost(
@@ -377,18 +382,26 @@ private:
                         }
                     }
                 },
-                [slot, status, is_sse, session_id, buffer, parser,
+                [slot, status, is_sse, session_id, buffer, parser, pending_error,
                  id](std::string_view chunk) -> bool {
                     if (*is_sse) {
                         // SSE: incremental parse, stop at the response frame.
-                        for (const auto& frame : parser->Feed(chunk)) {
-                            if (frame.data.empty()) continue;
-                            nlohmann::json parsed =
-                                nlohmann::json::parse(frame.data, nullptr, false);
-                            if (FrameIdMatches(parsed, id)) {
-                                slot->Complete(std::move(parsed), {});
-                                return false;  // abort the transfer: we have our answer
+                        // SseParser::Feed throws on oversized lines; that must
+                        // not cross libcurl's C write callback, so it is
+                        // stashed and the transfer aborted cleanly.
+                        try {
+                            for (const auto& frame : parser->Feed(chunk)) {
+                                if (frame.data.empty()) continue;
+                                nlohmann::json parsed =
+                                    nlohmann::json::parse(frame.data, nullptr, false);
+                                if (FrameIdMatches(parsed, id)) {
+                                    slot->Complete(std::move(parsed), {});
+                                    return false;  // abort the transfer: we have our answer
+                                }
                             }
+                        } catch (...) {
+                            *pending_error = std::current_exception();
+                            return false;
                         }
                         return true;
                     }
@@ -403,6 +416,20 @@ private:
             // protocol must not depend on that timing.
             std::lock_guard<std::mutex> lock(slot->mu);
             if (!slot->done) {
+                *error = std::string("MCP transport error: ") + e.what();
+                return false;
+            }
+        }
+
+        // A parse throw stashed by the chunk sink surfaces here, once
+        // StreamPost has unwound -- converted to the error path (it is not a
+        // net::HttpError, so the catch above never sees it) rather than
+        // rethrown: escaping Rpc would only reach the worker's catch-all,
+        // leaving the slot incomplete and the caller burning its deadline.
+        if (*pending_error) {
+            try {
+                std::rethrow_exception(*pending_error);
+            } catch (const std::exception& e) {
                 *error = std::string("MCP transport error: ") + e.what();
                 return false;
             }

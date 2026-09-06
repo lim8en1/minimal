@@ -76,6 +76,11 @@ struct ToolExecutionState {
 struct LiveTurnSegment {
     enum class Kind { Text, Tool };
     Kind kind = Kind::Text;
+    // Which turn this segment belongs to (SessionState::turn_seq_ at the time
+    // the segment was created). The newest-page clear retires segments of the
+    // turn the persisted page covers while leaving a newer turn's live text
+    // alone -- without the stamp there is no way to tell them apart.
+    uint64_t turn_seq = 0;
     // Kind::Text: this segment's OWN accumulated text (one content block's
     // worth) -- NOT the whole turn's text, unlike Snapshot::streaming_text.
     std::string text;
@@ -332,6 +337,18 @@ public:
     // persisted row -- otherwise the same content would render twice.
     void ClearStreaming();
 
+    // Turn-aware ClearStreaming (AppState::RequestScrollback's newest apply).
+    // The persisted page covers the turn that was live at SUBMIT time
+    // (`turn_seq` captured then); a DIFFERENT turn that started since owns the
+    // live text now, and clearing it wiped the new turn's opening deltas until
+    // it ended -- a visible transcript gap. A matching turn_seq clears exactly
+    // as ClearStreaming does (the common case: turn ended, no new turn).
+    void ClearStreamingIfCurrentTurn(uint64_t turn_seq);
+
+    // The live turn's identity (Snapshot::turn_seq) without a full snapshot --
+    // what RequestScrollback captures at submit time for the check above.
+    uint64_t CurrentTurnSeq() const;
+
     // The session's stream ended (server closed it / session terminated) --
     // the real "Done" (✓) signal, distinct from a turn merely completing.
     void OnSessionEnded();
@@ -350,6 +367,14 @@ public:
     // discard the possibly-incomplete live material (streaming segments) and
     // let the frame pump refetch the newest scrollback.
     void OnResyncRequired(const std::string& reason);
+
+    // The server cut or restored the transcript tail (SessionRewoundEvent):
+    // rewind trims the window to the ACTIVE transcript (rows with seq <=
+    // active_last_seq); redo (truncated_to_seq == -1) restores rows the client
+    // has never seen, so the whole window is cleared for the refresh to
+    // refetch. Either way streaming/pending-turn state goes with the rows it
+    // belonged to. Not a turn terminator: no TurnCompletedEvent accompanies it.
+    void OnSessionRewound(int64_t truncated_to_seq, int64_t active_last_seq);
 
     // --- Pending interactions ---
     void SetPermissionRequest(std::unique_ptr<PendingPermission> req);
@@ -380,6 +405,16 @@ public:
     // --- Scrollback paging (keyset by seq) ---
     void ApplyScrollbackPage(const v1::GetMessagesResponse& resp);
     bool CanLoadMore() const;
+
+    // In-flight latch for "load older" fetches (AppState::RequestScrollback,
+    // newest=false). Two presses inside one RPC round trip fetch the SAME
+    // before_seq page, and the second apply used to fall through to the
+    // newer/assign branch -- replacing the window with the older page, newest
+    // rows vanishing. TryBeginOlderFetch claims the slot (false = one is
+    // outstanding, the caller no-ops); EndOlderFetch resolves it on BOTH apply
+    // paths, success and failure.
+    bool TryBeginOlderFetch();
+    void EndOlderFetch();
 
     // Records the optimistic echo of a turn the user just submitted (called
     // by SendChatTurn after the event was accepted onto the wire). Cleared by
@@ -449,6 +484,10 @@ private:
 
     // Set by RequestCancel, cleared when the turn actually ends.
     bool cancel_requested_ = false;
+
+    // The "load older" in-flight latch (see TryBeginOlderFetch). Never read
+    // outside mtx_.
+    bool older_fetch_pending_ = false;
 
     // Session metadata (see Snapshot).
     std::string model_;

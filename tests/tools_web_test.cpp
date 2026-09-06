@@ -209,6 +209,24 @@ TEST_CASE("HtmlToText: malformed markup does not hang or crash", "[tools_web][ht
     CHECK_NOTHROW(HtmlToText("<script>never closed"));
 }
 
+TEST_CASE("HtmlToText: a flood of '&' stays literal and does not decode a garbage tail",
+          "[tools_web][html_text]") {
+    // The ';' search used to run unbounded from every '&': a page of '&'s was
+    // O(N^2). Each '&' must still be emitted literally, and a long garbage
+    // tail after one '&' must not be swallowed into an entity.
+    const std::string flood(100000, '&');
+    CHECK(HtmlToText(flood) == flood);
+
+    const std::string tail = "&" + std::string(64, 'x');
+    CHECK(HtmlToText(tail) == tail);
+
+    // The window boundary holds: a body longer than the 13-byte entity window
+    // is not an entity even when it eventually finds a ';'.
+    const std::string over_window = "&" + std::string(12, 'a') + ";";
+    CHECK(HtmlToText(over_window) == over_window);
+    CHECK(HtmlToText("&amp;") == "&");
+}
+
 // ---------------------------------------------------------------------------
 // web_fetch
 // ---------------------------------------------------------------------------

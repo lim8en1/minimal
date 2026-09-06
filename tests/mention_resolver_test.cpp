@@ -105,6 +105,19 @@ TEST_CASE("a nonexistent directory yields an empty list, not an error", "[mentio
     CHECK(Resolver().Suggest("nope/", dir.path(), 50).empty());
 }
 
+TEST_CASE("a prefix outside the project root yields an empty list", "[mention_resolver]") {
+    // dir_part is raw client input: an absolute prefix would REPLACE the root
+    // in operator/ and ".." would climb out of it -- a host-wide enumeration
+    // oracle. Both must reject, while ordinary in-root descent still works.
+    TempDir dir;
+    MakeDir(dir, "src");
+    WriteFile(dir, "src/main.cpp");
+
+    CHECK(Resolver().Suggest("/etc/pa", dir.path(), 50).empty());
+    CHECK(Resolver().Suggest("../../etc/pa", dir.path(), 50).empty());
+    CHECK(Resolver().Suggest("src/ma", dir.path(), 50) == std::vector<std::string>{"src/main.cpp"});
+}
+
 TEST_CASE("results are sorted with directories and files interleaved", "[mention_resolver]") {
     TempDir dir;
     MakeDir(dir, "zeta");

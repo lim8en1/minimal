@@ -2,6 +2,10 @@
 
 #include <sqlite3.h>
 
+#include <fcntl.h>
+#include <unistd.h>
+
+#include <cerrno>
 #include <chrono>
 #include <stdexcept>
 #include <string>
@@ -322,6 +326,17 @@ SessionDatabase::SessionDatabase(const std::filesystem::path& db_path, const Ope
         std::filesystem::create_directories(path_.parent_path(), ec);
     }
 
+    // This file holds verbatim transcripts and tool output, which routinely
+    // carry secrets -- the same material atomic_write's credentials-store
+    // convention creates at 0600 -- so it must never be group/other-readable.
+    // Create it owner-only ourselves rather than letting sqlite3_open apply
+    // the umask (0644&~umask); sqlite3_open then finds the existing inode. A
+    // failure here falls through to sqlite3_open's own error handling below
+    // rather than masking it. The -wal/-shm sidecars inherit this mode.
+    if (const int fd = ::open(path_.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0600); fd >= 0) {
+        ::close(fd);
+    }
+
     if (sqlite3_open(path_.c_str(), &db_) != SQLITE_OK) {
         const std::string message = db_ ? sqlite3_errmsg(db_) : "sqlite3_open failed";
         if (db_) sqlite3_close(db_);
@@ -338,45 +353,57 @@ SessionDatabase::SessionDatabase(const std::filesystem::path& db_path, const Ope
     // landed checkpoint I/O inside a committing append -- under mu_, on the
     // tool-result path -- instead of on the reaper's tick (see
     // MaybeRunPassiveCheckpoint).
-    for (const char* pragma : {"PRAGMA journal_mode=WAL;", "PRAGMA foreign_keys=ON;",
-                               "PRAGMA synchronous=NORMAL;", "PRAGMA busy_timeout=5000;",
-                               "PRAGMA wal_autocheckpoint=0;"}) {
-        ExecChecked(db_, pragma, std::string("failed to set ") + pragma);
-    }
-
-    const auto& migrations = options.migrations ? *options.migrations : DefaultMigrations();
-    ApplyMigrations(db_, kSchemaVersion, migrations);
-
-    // Orphan sweep: message or checkpoint rows whose session is gone. This
-    // binary deletes messages BEFORE the session row (see DeleteSession), so a
-    // crash mid-delete leaves a session with a partial transcript, not
-    // orphans -- the sweep exists for databases written by paths that cannot
-    // make that promise (a legacy database, or one written while
-    // foreign_keys was off). One indexed pass at open: NOT EXISTS probes
-    // sessions through the (session_id, ...) index prefix per row rather than
-    // scanning the sessions table per message.
     //
-    // Best-effort by design: a failure (a corrupt page in the messages table,
-    // a busy disk) is rolled back and swallowed, because the sweep is hygiene
-    // rather than correctness -- refusing to open over it would make a
-    // corrupt-but-servable database unstartable, and the corruption surfaces
-    // at read time anyway.
+    // Everything from here can throw after sqlite3_open succeeded, and a
+    // constructor that exits via exception never runs the destructor (the
+    // object was never fully constructed) -- so without this try/catch the
+    // sqlite handle (fd + memory) and the -wal/-shm sidecars would leak. Close
+    // and rethrow.
     try {
-        ExecChecked(db_, "BEGIN IMMEDIATE;", "failed to begin orphan sweep");
-        ExecChecked(db_,
-                    "DELETE FROM messages WHERE NOT EXISTS"
-                    " (SELECT 1 FROM sessions s WHERE s.id = messages.session_id);",
-                    "failed to sweep orphaned messages");
-        ExecChecked(db_,
-                    "DELETE FROM compactions WHERE NOT EXISTS"
-                    " (SELECT 1 FROM sessions s WHERE s.id = compactions.session_id);",
-                    "failed to sweep orphaned compactions");
-        ExecChecked(db_, "COMMIT;", "failed to commit orphan sweep");
-    } catch (...) {
-        char* err = nullptr;
-        if (sqlite3_exec(db_, "ROLLBACK;", nullptr, nullptr, &err) != SQLITE_OK && err) {
-            sqlite3_free(err);
+        for (const char* pragma : {"PRAGMA journal_mode=WAL;", "PRAGMA foreign_keys=ON;",
+                                   "PRAGMA synchronous=NORMAL;", "PRAGMA busy_timeout=5000;",
+                                   "PRAGMA wal_autocheckpoint=0;"}) {
+            ExecChecked(db_, pragma, std::string("failed to set ") + pragma);
         }
+
+        const auto& migrations = options.migrations ? *options.migrations : DefaultMigrations();
+        ApplyMigrations(db_, kSchemaVersion, migrations);
+
+        // Orphan sweep: message or checkpoint rows whose session is gone. This
+        // binary deletes messages BEFORE the session row (see DeleteSession), so a
+        // crash mid-delete leaves a session with a partial transcript, not
+        // orphans -- the sweep exists for databases written by paths that cannot
+        // make that promise (a legacy database, or one written while
+        // foreign_keys was off). One indexed pass at open: NOT EXISTS probes
+        // sessions through the (session_id, ...) index prefix per row rather than
+        // scanning the sessions table per message.
+        //
+        // Best-effort by design: a failure (a corrupt page in the messages table,
+        // a busy disk) is rolled back and swallowed, because the sweep is hygiene
+        // rather than correctness -- refusing to open over it would make a
+        // corrupt-but-servable database unstartable, and the corruption surfaces
+        // at read time anyway.
+        try {
+            ExecChecked(db_, "BEGIN IMMEDIATE;", "failed to begin orphan sweep");
+            ExecChecked(db_,
+                        "DELETE FROM messages WHERE NOT EXISTS"
+                        " (SELECT 1 FROM sessions s WHERE s.id = messages.session_id);",
+                        "failed to sweep orphaned messages");
+            ExecChecked(db_,
+                        "DELETE FROM compactions WHERE NOT EXISTS"
+                        " (SELECT 1 FROM sessions s WHERE s.id = compactions.session_id);",
+                        "failed to sweep orphaned compactions");
+            ExecChecked(db_, "COMMIT;", "failed to commit orphan sweep");
+        } catch (...) {
+            char* err = nullptr;
+            if (sqlite3_exec(db_, "ROLLBACK;", nullptr, nullptr, &err) != SQLITE_OK && err) {
+                sqlite3_free(err);
+            }
+        }
+    } catch (...) {
+        sqlite3_close(db_);
+        db_ = nullptr;
+        throw;
     }
 }
 

@@ -1,5 +1,6 @@
 #include "minimal/client/view/tab_ui.hpp"
 
+#include "minimal/common/logger.hpp"
 #include "minimal/v1/session_service.pb.h"
 
 namespace minimal::client {
@@ -145,8 +146,22 @@ void TabMaintenance::HandleNotice(const SessionState::Snapshot& snap) {
             if (entry.view == view) entry.visible = true;
         }
         if (view->spec().placement == plugins::ViewPlacement::Modal) {
-            *deps_.plugin_modal_child = view->component();
-            deps_.show_plugin_modal = true;
+            // component() is plugin code on the notice path: a throw here
+            // propagated out of Maintain and std::terminate'd the TUI.
+            // Contained, the modal simply never opens.
+            try {
+                *deps_.plugin_modal_child = view->component();
+                deps_.show_plugin_modal = true;
+            } catch (const std::exception& error) {
+                common::DefaultLogger().warn("plugin view '{}' threw building its modal: {}",
+                                             std::string(view->spec().id), error.what());
+                *deps_.plugin_modal_child = nullptr;
+            } catch (...) {
+                common::DefaultLogger().warn(
+                    "plugin view '{}' threw a non-standard exception building its modal",
+                    std::string(view->spec().id));
+                *deps_.plugin_modal_child = nullptr;
+            }
         }
     }
     // A hint naming no view falls through: the unknown-view-id rule, like

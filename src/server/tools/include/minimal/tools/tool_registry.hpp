@@ -96,6 +96,14 @@ public:
     };
     const std::vector<Attribution>& attributions() const { return attributions_; }
 
+    // Startup rollback for a plugin whose registration threw: removes every
+    // tool -- and its attribution/owner entries -- attributed to `plugin_name`.
+    // Valid ONLY before ApplyAliases and before any session exists: aliases
+    // re-key the map by surface name, so attribution matching (original names)
+    // is only sound before it runs, and no executor can hold a Find() result
+    // yet, so dropping the shared_ptr here frees the tool outright.
+    void RemoveByAttribution(const std::string& plugin_name);
+
     // --- Permission keys ------------------------------------------------------
     //
     // surface_name -> the NON-alias key per_tool_overrides / allowed_tools may
@@ -118,11 +126,10 @@ public:
     //
     // Replaced tools are NOT freed here: they leave the map, but an executor
     // that already holds the shared_ptr from Find() keeps the object alive
-    // until its invocation finishes. A tool whose name is not
-    // `mcp__<server>__<something>` (checked by prefix, not by reparsing) is
-    // refused -- destroyed outright, since it was never Find-able and no
-    // executor can hold it: this entry point owns exactly one server's
-    // namespace. Within the batch, the FIRST registration of a name wins,
+    // until its invocation finishes. A tool whose name is not in this
+    // server's namespace (mcp__<server>__ prefix) is refused -- destroyed
+    // outright, since it was never Find-able and no executor can hold it:
+    // this entry point owns exactly one server's namespace. Within the batch, the FIRST registration of a name wins,
     // matching Register()'s rule; same for batch-internal duplicates.
     void ReplaceMcpTools(const std::string& server_name,
                          std::vector<std::unique_ptr<Tool>> tools);
@@ -152,9 +159,14 @@ private:
     // non-owning: ApplyAliases only matches against tools still in tools_ or
     // shadowed_, which keep them alive. MCP tools never register through
     // Register(), so these never dangle via ReplaceMcpTools (which erases
-    // only mcp__-prefixed names, none of which are attributed).
+    // only mcp__-namespaced names, none of which are attributed).
     std::vector<Tool*> owners_;
     std::unordered_map<std::string, std::string> permission_keys_;
+    // Tool name -> the MCP server that registered it. The authority for
+    // ReplaceMcpTools retirement: parsed names are ambiguous ("a_" vs "a" +
+    // "_x" tool), prefixes wipe superset namespaces, but the recording owner
+    // is exact. Guarded by mutex_.
+    std::unordered_map<std::string, std::string> mcp_owners_;
     bool aliases_applied_ = false;
 
     // mutable: readers are const and run on session workers; startup and MCP

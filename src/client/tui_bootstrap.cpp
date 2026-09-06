@@ -13,6 +13,7 @@
 #include "minimal/client/view/status_bar.hpp"
 #include "minimal/common/bundled_assets.hpp"
 #include "minimal/common/config_paths.hpp"
+#include "minimal/common/logger.hpp"
 #include "minimal/plugins/name_registry.hpp"
 
 namespace minimal::client {
@@ -222,7 +223,12 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
             return Keybindings::Load(out.config_dir);
         } catch (const std::exception& e) {
             std::fprintf(stderr, "minimal: %s; using default keybindings\n", e.what());
-            return Keybindings::Parse("{}");
+            // Parse("{}") is an EMPTY table: without the default fill, a
+            // malformed file silently unbound every core action (quit
+            // included) while the message above claimed the opposite.
+            Keybindings fallback = Keybindings::Parse("{}");
+            fallback.ApplyDefaults();
+            return fallback;
         }
     }();
 
@@ -231,7 +237,20 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
     // dispatch entries.
     for (const auto& view : out.view_registry.views()) {
         keys.EnsureDefault(view->spec().id, view->spec().default_keybinding);
-        out.plugin_views.push_back(PluginViewEntry{view.get(), view->component(), false});
+        // Plugin component code: a throw out of component() would propagate
+        // into the frame assembly (and, later, the ftxui loop, where it would
+        // std::terminate). Contained like every other plugin call site:
+        // logged, that view skipped, never fatal.
+        try {
+            out.plugin_views.push_back(PluginViewEntry{view.get(), view->component(), false});
+        } catch (const std::exception& error) {
+            common::DefaultLogger().warn("plugin view '{}' threw on component(): {}",
+                                         view->spec().id, error.what());
+        } catch (...) {
+            common::DefaultLogger().warn(
+                "plugin view '{}' threw on component() (non-standard exception)",
+                view->spec().id);
+        }
     }
     // Parsed ONCE, after keys.all() has settled (core defaults + the user's
     // file + every plugin view's EnsureDefault default, just folded in

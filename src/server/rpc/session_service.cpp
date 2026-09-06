@@ -1251,10 +1251,29 @@ grpc::Status SessionServiceImpl::PluginSubscribe(grpc::ServerContext* context,
     };
 
     auto sink = std::make_shared<WriterSink>(writer);
-    if (!endpoint->Subscribe(request->method(), request->json_payload(), sink)) {
-        return grpc::Status(grpc::StatusCode::NOT_FOUND,
-                            "plugin '" + request->plugin_name() + "' refused subscription to '" +
-                                request->method() + "'");
+    // Plugin code is not trusted to return normally (the same rule PluginCall's
+    // dispatch states), and an exception leaving an RPC handler is UB.
+    try {
+        if (!endpoint->Subscribe(request->method(), request->json_payload(), sink)) {
+            return grpc::Status(grpc::StatusCode::NOT_FOUND,
+                                "plugin '" + request->plugin_name() +
+                                    "' refused subscription to '" + request->method() + "'");
+        }
+    } catch (const std::exception& e) {
+        logger_.warn("plugin '{}' Subscribe('{}') threw: {}", request->plugin_name(),
+                     request->method(), e.what());
+        // Subscribe may have registered the sink before throwing -- the endpoint
+        // pushes from threads it owns -- so close it on the unwind; every
+        // straggler Push then fails harmlessly instead of outliving the stream.
+        sink->Close();
+        return grpc::Status(grpc::StatusCode::INTERNAL,
+                            "plugin endpoint threw: " + std::string(e.what()));
+    } catch (...) {
+        logger_.warn("plugin '{}' Subscribe('{}') threw a non-standard exception",
+                     request->plugin_name(), request->method());
+        sink->Close();
+        return grpc::Status(grpc::StatusCode::INTERNAL,
+                            "plugin endpoint threw a non-standard exception");
     }
 
     // The call stays open while the subscriber lives. The endpoint pushes from

@@ -32,13 +32,19 @@ SessionRegistry::SessionRegistry(const AgentPresetRegistry& presets, tools::Tool
 }
 
 SessionRegistry::~SessionRegistry() {
+    StopReaper();
+    TerminateAll();
+}
+
+// Idempotent by the joinable() check: a second call (or the destructor after
+// an explicit stop) finds the thread already joined and does nothing.
+void SessionRegistry::StopReaper() {
     {
         std::lock_guard<std::mutex> lock(mutex_);
         stopping_ = true;
     }
     reaper_cv_.notify_all();
     if (reaper_.joinable()) reaper_.join();
-    TerminateAll();
 }
 
 std::shared_ptr<Session> SessionRegistry::Create(SessionParams params) {

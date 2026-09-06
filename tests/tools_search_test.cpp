@@ -349,6 +349,29 @@ TEST_CASE("glob: invalid pattern is an error, not a silent empty result",
     CHECK(tool->execute({{"pattern", 7}}, ctx).is_error);
 }
 
+TEST_CASE("glob: the literal fast path is confined to the search root",
+          "[tools_search][glob_tool]") {
+    // The fast path joins the pattern straight onto the confined root, so an
+    // absolute pattern would replace the root and a ".." component would
+    // escape it -- an existence oracle outside project_root from a ReadOnly
+    // (pre-allowed) tool. Both must be rejected before the join.
+    Fixture f;
+    f.Write("src/main.cpp", "x");
+    auto tool = tools_search::MakeGlobTool(f.settings);
+    auto ctx = f.Context();
+
+    const auto absolute = tool->execute({{"pattern", "/etc/passwd"}}, ctx);
+    CHECK(absolute.is_error);
+    CHECK(absolute.content_text.find("etc/passwd") == std::string::npos);
+
+    CHECK(tool->execute({{"pattern", "../../etc"}}, ctx).is_error);
+
+    // An ordinary literal inside the root still takes the fast path.
+    const auto literal = tool->execute({{"pattern", "src/main.cpp"}}, ctx);
+    CHECK_FALSE(literal.is_error);
+    CHECK(literal.content_text == "src/main.cpp\n");
+}
+
 // --- grep tool -----------------------------------------------------------------
 
 TEST_CASE("grep: files_with_matches default mode with gitignore respected",

@@ -25,6 +25,9 @@
 
 #include <nlohmann/json.hpp>
 
+#include <spdlog/sinks/stdout_color_sinks.h>
+#include <spdlog/spdlog.h>
+
 #include <algorithm>
 #include <atomic>
 #include <map>
@@ -66,7 +69,9 @@
 #include "minimal/client/render/streaming_markdown_view.hpp"
 #include "minimal/client/render/theme.hpp"
 #include "minimal/common/abi_tag.hpp"
+#include "minimal/common/config_paths.hpp"
 #include "minimal/common/logger.hpp"
+#include "minimal/common/logging_setup.hpp"
 
 namespace {
 
@@ -626,6 +631,11 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     // frame fragments (old tab-bar lines, typed text) as "junk" above the live
     // frame. Any out-of-band stdout/stderr write would desync it the same way.
     auto screen = ftxui::ScreenInteractive::FullscreenAlternateScreen();
+    // ftxui 7 force-handles Ctrl+C by default -- it exits the loop and
+    // re-raises SIGINT EVEN when a component consumes the event -- which
+    // defeats this client's busy-cancel and quit confirmation. The client's
+    // own dispatch (keybinding_dispatch.cpp) must see Ctrl+C first.
+    screen.ForceHandleCtrlC(false);
     auto quit = screen.ExitLoopClosure();
 
     // --- frame state (loop thread only) --------------------------------------
@@ -1032,7 +1042,19 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     });
     auto plugin_modal_host_interactive = CatchEvent(plugin_modal_host, [&](const Event& event) {
         if (!show_plugin_modal || !*plugin_modal_child) return false;
-        return (*plugin_modal_child)->OnEvent(event);
+        // Plugin component code: a throw escaping into the ftxui loop would
+        // std::terminate the process. Contained like the render side above --
+        // logged, and the event treated as consumed.
+        try {
+            return (*plugin_modal_child)->OnEvent(event);
+        } catch (const std::exception& error) {
+            minimal::common::DefaultLogger().warn("plugin modal view threw on event: {}",
+                                                  error.what());
+        } catch (...) {
+            minimal::common::DefaultLogger().warn(
+                "plugin modal view threw on event (non-standard exception)");
+        }
+        return true;
     });
 
     // THE MAINTENANCE PASS: everything the frame needs but must not do from
@@ -1321,6 +1343,21 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         }
     });
 
+    // Bracketed paste (DECSET 2004): enabled for the duration of the loop, the
+    // terminal wraps a paste in ESC[200~ ... ESC[201~ markers. ftxui 7 has no
+    // paste support, but it forwards the markers verbatim as Event::Special
+    // (unknown CSI -> Special, full bytes preserved), which the prompt editor
+    // consumes to treat a multi-line paste as ONE turn instead of one
+    // submission per line. RAII, not a post-Loop write: an exception escaping
+    // the loop must not leave the terminal in paste mode.
+    struct BracketedPasteGuard {
+        ~BracketedPasteGuard() {
+            std::fputs("\x1b[?2004l", stdout);
+            std::fflush(stdout);
+        }
+    } bracketed_paste_guard;
+    std::fputs("\x1b[?2004h", stdout);
+    std::fflush(stdout);
     screen.Loop(final_tree);
     running.store(false, std::memory_order_release);
     shutdown_cv.notify_all();   // wakes the heartbeat immediately, not on its next 2s tick
@@ -1363,9 +1400,31 @@ int main(int argc, char** argv) {
             std::fputs(minimal::client::UsageText().c_str(), stderr);
             return kUsage;
         case minimal::client::ParsedArgs::Action::Headless:
-            return RunHeadless(parsed.headless);
         case minimal::client::ParsedArgs::Action::Tui:
             break;
+    }
+
+    // LOGGING BEFORE ANYTHING ELSE LOGS: DefaultLogger resolves to spdlog's
+    // console default on first use, and an out-of-band stdout/stderr write
+    // desyncs the alternate screen the same way a resize does (see RunTui);
+    // headless stdout carries JSONL. So client logs go to a rotating FILE
+    // under the data dir, never the terminal. Configured after the
+    // usage/version exits above -- those print to stdout on purpose -- and
+    // before any client code runs, per the ordering contract in
+    // logging_setup.hpp.
+    minimal::common::LoggingOptions logging;
+    logging.path = (minimal::common::DataDir() / "log" / "client.log").string();
+    // File-only: the client owns the terminal, and headless stdout carries
+    // JSONL. If the file cannot be opened, ConfigureLogging degrades back to
+    // the console sink rather than dropping every message.
+    logging.console = false;
+    const auto logging_error = minimal::common::ConfigureLogging(logging);
+    if (!logging_error.empty()) {
+        minimal::common::DefaultLogger().warn("logging: {}", logging_error);
+    }
+
+    if (parsed.action == minimal::client::ParsedArgs::Action::Headless) {
+        return RunHeadless(parsed.headless);
     }
     return RunTui(parsed);
 }

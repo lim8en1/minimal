@@ -69,9 +69,14 @@ const std::unordered_map<std::string, std::uint32_t>& NamedEntities() {
 // source bytes consumed (at least 1 -- an unrecognized "&..." with no
 // terminating ';' within a short window is emitted as a literal '&').
 std::size_t DecodeEntity(std::string_view html, std::size_t pos, std::string& out) {
-    const std::size_t semi = html.find(';', pos);
-    // A bare '&' or one whose ';' is implausibly far away is not an entity.
-    if (semi == std::string_view::npos || semi - pos > 12) {
+    // An entity is '&' + body + ';' with total length <= 13 from the '&', so
+    // the ';' search is bounded to that window. Unbounded, a page of '&'
+    // characters scanned to end-of-document per '&' -- O(N^2) on an 8MiB body
+    // was hours of CPU. npos compares past the window, so the unbounded miss
+    // lands in the same branch.
+    const std::size_t window_end = std::min(pos + 13, html.size());
+    const std::size_t semi = html.find(';', pos + 1);
+    if (semi >= window_end) {
         out += '&';
         return 1;
     }

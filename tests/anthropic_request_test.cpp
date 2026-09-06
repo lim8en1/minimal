@@ -172,6 +172,27 @@ TEST_CASE("BuildRequestBody: thinking blocks are dropped on replay", "[anthropic
     CHECK(body["messages"][0]["content"][0]["type"] == "text");
 }
 
+TEST_CASE("BuildRequestBody: invalid UTF-8 is replaced with U+FFFD, never thrown",
+          "[anthropic_request]") {
+    // Tool output reaches message text unsanitized; dump()'s default error
+    // handler used to throw type_error.316 on a binary tool result, and the
+    // provider's build call was outside its try/catch. The escaping now
+    // replaces invalid sequences instead of throwing.
+    const std::string binary = "bad \xff\xfe bytes";
+    Fixture fixture({llm::Message{llm::Role::User, {llm::TextBlock{binary}}}});
+    fixture.request.system = "sys \xff";
+    fixture.request.model = "claude-opus-5";
+    fixture.request.max_tokens = 1024;
+
+    nlohmann::json body;
+    REQUIRE_NOTHROW(body = ParseBody(fixture.request));
+
+    const std::string replacement = "\xEF\xBF\xBD";  // U+FFFD
+    CHECK(body["system"][0]["text"] == "sys " + replacement);
+    CHECK(body["messages"][0]["content"][0]["text"] ==
+          "bad " + replacement + replacement + " bytes");
+}
+
 TEST_CASE("ToAnthropicTools: no function wrapper, matches ToolDefinition directly",
          "[anthropic_request]") {
     llm::ToolDefinition tool;

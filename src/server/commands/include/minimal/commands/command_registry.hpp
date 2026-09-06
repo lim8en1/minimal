@@ -60,6 +60,15 @@ public:
     };
     const std::vector<Attribution>& attributions() const { return attributions_; }
 
+    // Startup rollback for a plugin whose registration threw: removes every
+    // command -- and its attribution entries -- attributed to `plugin_name`.
+    // Valid ONLY before the startup collision check and before aliases are
+    // applied (they run after ALL plugin loading, in main.cpp), when the map
+    // is still keyed by original attribution names. First-wins means the map
+    // slot holds the FIRST registrant of a surface name, so a colliding
+    // surface is erased only when no surviving attribution still claims it.
+    void RemoveByAttribution(const std::string& plugin_name);
+
 private:
     std::unordered_map<std::string, std::unique_ptr<Command>> commands_;  // by surface name
     std::string attribution_;

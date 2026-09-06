@@ -202,6 +202,25 @@ TEST_CASE("BuildRequestBody: text that needs JSON escaping survives a round-trip
     CHECK(body["messages"][1]["content"] == nasty);
 }
 
+TEST_CASE("BuildRequestBody: invalid UTF-8 is replaced with U+FFFD, never thrown",
+          "[openai_request]") {
+    // Tool output reaches message text unsanitized; dump()'s default error
+    // handler used to throw type_error.316 on a binary tool result, and the
+    // provider's build call was outside its try/catch -- one bad byte bricked
+    // every subsequent turn. The escaping now replaces invalid sequences.
+    const std::string binary = "bad \xff\xfe bytes";
+    Fixture fixture({llm::Message{llm::Role::User, {llm::TextBlock{binary}}}});
+    fixture.request.system = "sys \xff";
+
+    nlohmann::json body;
+    REQUIRE_NOTHROW(body = ParseBody(fixture.request));
+
+    const std::string replacement = "\xEF\xBF\xBD";  // U+FFFD
+    CHECK(body["messages"][0]["content"] == "sys " + replacement);
+    CHECK(body["messages"][1]["content"] ==
+          "bad " + replacement + replacement + " bytes");
+}
+
 TEST_CASE("ToOpenAiToolChoice: all four kinds", "[openai_request]") {
     CHECK(ToOpenAiToolChoice(llm::ToolChoiceSpec{llm::ToolChoiceKind::Auto, std::nullopt}) == "auto");
     CHECK(ToOpenAiToolChoice(llm::ToolChoiceSpec{llm::ToolChoiceKind::None, std::nullopt}) == "none");

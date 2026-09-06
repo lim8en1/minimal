@@ -14,8 +14,10 @@ inline constexpr std::string_view kMcpSeparator = "__";
 
 // True when `server_name` can take part in that mangling unambiguously:
 // non-empty, no `__` (it would make the wire name ambiguous against the
-// separator), no whitespace or control characters (spaces would read as two
-// words in the model-facing name; controls would corrupt logging).
+// separator), no trailing `_` (server "a_" + tool "x" would parse, at the
+// first `__`, as server "a" + tool "_x"), no whitespace or control
+// characters (spaces would read as two words in the model-facing name;
+// controls would corrupt logging).
 bool IsValidMcpServerName(std::string_view server_name);
 
 // Same rule for tool names reported by a remote server. Unlike server names,
