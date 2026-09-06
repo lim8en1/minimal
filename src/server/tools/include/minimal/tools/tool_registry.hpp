@@ -96,6 +96,26 @@ public:
     };
     const std::vector<Attribution>& attributions() const { return attributions_; }
 
+    // --- Per-preset tool_config namespaces ----------------------------------
+    //
+    // What config_namespace() each registered (non-MCP) tool claims, with the
+    // plugin that claimed it. The sanity check consumes both halves: owners for
+    // the "unclaimed tool_config key" warning, collisions for the fatal
+    // "two plugins claim one namespace" -- the NameRegistry discipline one
+    // level up. Multiple tools of ONE plugin sharing a namespace is normal
+    // (deduped here); a namespace claimed by a core built-in (empty plugin
+    // attribution) is likewise folded under "".
+    struct ConfigNamespaceCollision {
+        std::string ns;
+        std::string first_plugin;
+        std::string second_plugin;
+    };
+    struct ConfigNamespaceReport {
+        std::map<std::string, std::string> owners;  // namespace -> first claiming plugin
+        std::vector<ConfigNamespaceCollision> collisions;
+    };
+    ConfigNamespaceReport ConfigNamespaces() const;
+
     // Startup rollback for a plugin whose registration threw: removes every
     // tool -- and its attribution/owner entries -- attributed to `plugin_name`.
     // Valid ONLY before ApplyAliases and before any session exists: aliases

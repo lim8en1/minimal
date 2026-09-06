@@ -666,6 +666,20 @@ std::vector<CheckResult> StartupSanityCheck::check_name_collisions() {
                       PluginLabel(collision.second_plugin) +
                       " -- disable one of them; provider kinds cannot be aliased"));
     }
+
+    // Per-preset tool_config namespaces: the same fatal rule, one level up.
+    // Two plugins claiming one namespace would make which slice a tool read
+    // depend on plugin load order -- the exact outcome collision detection
+    // exists to prevent. There is no alias mechanism for a namespace.
+    const auto namespace_report = inputs_.tool_registry.ConfigNamespaces();
+    for (const auto& collision : namespace_report.collisions) {
+        results.push_back(
+            Fatal("name_collisions",
+                  "tool_config namespace '" + collision.ns + "' is claimed by both " +
+                      PluginLabel(collision.first_plugin) + " and " +
+                      PluginLabel(collision.second_plugin) +
+                      " -- disable one of them; config namespaces cannot be aliased"));
+    }
     return results;
 }
 
@@ -746,6 +760,22 @@ std::vector<CheckResult> StartupSanityCheck::check_naming_model() {
             if (mcps_.Find(server) == nullptr) {
                 results.push_back(Warning("naming_model", "agent preset '" + preset_name +
                                       "': allowed_mcp_servers entry '" + server + "' matches no mcps.json server"));
+            }
+        }
+    }
+
+    // tool_config namespace keys must name a namespace some registered tool
+    // claims (the allowed_skills-unknown gap, one level up): a typo or a slice
+    // stranded by a disabled plugin is silent data -- no tool will ever read
+    // it -- and must be loud at startup.
+    const auto claimed_namespaces = inputs_.tool_registry.ConfigNamespaces();
+    for (const auto& [preset_name, raw] : presets_) {
+        for (const auto& [ns, value] : raw.tool_config.items()) {
+            (void)value;
+            if (!claimed_namespaces.owners.count(ns)) {
+                results.push_back(Warning("naming_model", "agent preset '" + preset_name +
+                                      "': tool_config namespace '" + ns +
+                                      "' matches no registered tool (typo, or the providing plugin is disabled)"));
             }
         }
     }

@@ -63,6 +63,29 @@ void WriteFile(const std::filesystem::path& path, const std::string& content) {
     out << content;
 }
 
+// A tool that claims a tool_config namespace -- the declarative opt-in the
+// per-preset plugin-config mechanism keys on.
+class NsTool : public tools::Tool {
+public:
+    NsTool(std::string name, std::string ns) : ns_(std::move(ns)) {
+        spec_.name = std::move(name);
+        spec_.category = tools::ToolCategory::Execute;
+        spec_.definition.name = spec_.name;
+        spec_.definition.description = "namespace-claiming fake";
+        spec_.definition.input_schema = nlohmann::json::object();
+    }
+
+    const tools::ToolSpec& spec() const override { return spec_; }
+    tools::ToolResult execute(const nlohmann::json&, tools::ToolContext&) override {
+        return {false, "ok"};
+    }
+    std::string_view config_namespace() const override { return ns_; }
+
+private:
+    tools::ToolSpec spec_;
+    std::string ns_;
+};
+
 // A configuration that passes every check: the baseline each broken fixture is
 // one mutation away from.
 void WriteGoodConfig(const std::filesystem::path& dir) {
@@ -109,6 +132,16 @@ struct Fixture {
                       tools::ToolCategory category = tools::ToolCategory::Execute) {
         tool_registry.SetAttribution(plugin);
         tool_registry.Register(std::make_unique<FakeTool>(name, category));
+        tool_registry.ClearAttribution();
+    }
+
+    // Same, for a tool that claims a tool_config namespace via its
+    // config_namespace() -- the shape a plugin declaring per-preset config
+    // produces.
+    void RegisterNsTool(const std::string& plugin, const std::string& name,
+                        const std::string& ns) {
+        tool_registry.SetAttribution(plugin);
+        tool_registry.Register(std::make_unique<NsTool>(name, ns));
         tool_registry.ClearAttribution();
     }
 
@@ -755,6 +788,53 @@ TEST_CASE("allowed_mcp_servers naming no configured server warns", "[sanity_chec
     const auto hits = ByCheck(results, "naming_model");
     REQUIRE(hits.size() == 1);
     CHECK(hits[0]->message.find("ghost-mcp") != std::string::npos);
+}
+
+// --- tool_config namespaces --------------------------------------------------------------
+
+TEST_CASE("a tool_config namespace a registered tool claims produces no finding",
+          "[sanity_check][tool_config]") {
+    Fixture f;
+    WriteGoodConfig(f.config_dir);
+    ScopedEnv data("XDG_DATA_HOME", f.xdg_data.string().c_str());
+    f.RegisterNsTool("tools-python", "python_exec", "python");
+    f.RegisterNsTool("tools-python", "python_interrupt", "python");  // one plugin, two tools: normal
+    f.Write("agents/build.md",
+            "---\nname: build\nmodel: fixture-main/test-model\ntool_config:\n  python:\n    packages: [impacket]\n---\nBody.\n");
+
+    const auto results = RunChecks(f);
+    CHECK(ByCheck(results, "naming_model").empty());
+    CHECK(ByCheck(results, "name_collisions").empty());
+}
+
+TEST_CASE("a tool_config namespace no tool claims warns", "[sanity_check][tool_config]") {
+    Fixture f;
+    WriteGoodConfig(f.config_dir);
+    ScopedEnv data("XDG_DATA_HOME", f.xdg_data.string().c_str());
+    f.Write("agents/build.md",
+            "---\nname: build\nmodel: fixture-main/test-model\ntool_config:\n  ghost-ns:\n    key: 1\n---\nBody.\n");
+
+    const auto results = RunChecks(f);
+    const auto hits = ByCheck(results, "naming_model");
+    REQUIRE(hits.size() == 1);
+    CHECK(hits[0]->severity == CheckSeverity::Warning);
+    CHECK(hits[0]->message.find("ghost-ns") != std::string::npos);
+}
+
+TEST_CASE("two plugins claiming one tool_config namespace is fatal", "[sanity_check][tool_config]") {
+    Fixture f;
+    WriteGoodConfig(f.config_dir);
+    ScopedEnv data("XDG_DATA_HOME", f.xdg_data.string().c_str());
+    f.RegisterNsTool("tools-python", "python_exec", "python");
+    f.RegisterNsTool("other-plugin", "other_tool", "python");
+
+    const auto results = RunChecks(f);
+    const auto hits = ByCheck(results, "name_collisions");
+    REQUIRE(hits.size() == 1);
+    CHECK(hits[0]->severity == CheckSeverity::Fatal);
+    CHECK(hits[0]->message.find("tool_config namespace 'python'") != std::string::npos);
+    CHECK(hits[0]->message.find("tools-python") != std::string::npos);
+    CHECK(hits[0]->message.find("other-plugin") != std::string::npos);
 }
 
 // --- subagent limit ------------------------------------------------------------------------

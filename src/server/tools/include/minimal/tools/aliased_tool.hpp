@@ -29,6 +29,7 @@ public:
     bool path_confinement_supported() const override;
     std::optional<std::string> ExtractPath(const nlohmann::json& input) const override;
     bool network_access_required() const override;
+    std::string_view config_namespace() const override;
     bool parallel_safe() const override;
     std::optional<ToolCategory> category_for(const nlohmann::json& input) const override;
     std::optional<PermissionMode> mode_override_for(const nlohmann::json& input,

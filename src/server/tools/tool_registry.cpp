@@ -59,6 +59,30 @@ void ToolRegistry::RemoveByAttribution(const std::string& plugin_name) {
     }
 }
 
+ToolRegistry::ConfigNamespaceReport ToolRegistry::ConfigNamespaces() const {
+    // Startup-only consumption (the sanity check, before serving), but the
+    // uniform locking rule stands: every access to the attribution parallel
+    // arrays goes through mutex_.
+    std::shared_lock<std::shared_mutex> lock(mutex_);
+    ConfigNamespaceReport report;
+    for (std::size_t i = 0; i < attributions_.size(); ++i) {
+        const Tool* owner = owners_[i];
+        if (!owner) continue;
+        const std::string_view ns = owner->config_namespace();
+        if (ns.empty()) continue;
+        const auto inserted =
+            report.owners.emplace(std::string(ns), attributions_[i].plugin_name);
+        if (!inserted.second && inserted.first->second != attributions_[i].plugin_name) {
+            // Same-plugin duplicates are normal (one plugin, several tools, one
+            // namespace); only a CROSS-plugin claim is a collision, and the
+            // first two claimants name the diagnostic.
+            report.collisions.push_back(
+                {std::string(ns), inserted.first->second, attributions_[i].plugin_name});
+        }
+    }
+    return report;
+}
+
 void ToolRegistry::ApplyAliases(const std::map<std::string, std::string>& aliases) {
     // Startup-only: exclusive for the whole body. It manipulates tools_ and
     // shadowed_ directly and must not overlap a runtime MCP replacement.

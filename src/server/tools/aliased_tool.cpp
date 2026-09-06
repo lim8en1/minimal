@@ -29,6 +29,8 @@ std::optional<std::string> AliasedTool::ExtractPath(const nlohmann::json& input)
 // opt-out.
 bool AliasedTool::network_access_required() const { return inner_->network_access_required(); }
 
+std::string_view AliasedTool::config_namespace() const { return inner_->config_namespace(); }
+
 bool AliasedTool::parallel_safe() const { return inner_->parallel_safe(); }
 
 std::optional<PermissionMode> AliasedTool::mode_override_for(const nlohmann::json& input,

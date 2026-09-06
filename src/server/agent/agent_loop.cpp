@@ -902,6 +902,20 @@ void AgentLoop::RunTurnLoop(TurnResult& result, bool flush_first) {
             // their denial result and have no exclusivity to protect.
             call.to_pool = !denied_for_input && prepared.tool &&
                            prepared.tool->parallel_safe();
+            // Per-preset plugin config, resolved now that Prepare holds the
+            // tool object: the slice this tool's config_namespace() claims in
+            // the active preset's tool_config. Points into preset_, which is
+            // stable for the turn -- preset swaps land on this worker between
+            // turns (Session::ApplyPreset), never inside one.
+            if (prepared.tool) {
+                const std::string_view ns = prepared.tool->config_namespace();
+                if (!ns.empty()) {
+                    if (auto it = preset_.tool_config.find(std::string(ns));
+                        it != preset_.tool_config.end()) {
+                        call.ctx.tool_config = &it.value();
+                    }
+                }
+            }
             call.prepared = std::move(prepared);
             calls.push_back(std::move(call));
         }

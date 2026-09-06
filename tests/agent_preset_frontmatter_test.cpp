@@ -290,6 +290,59 @@ TEST_CASE("ParseAgentPresetFrontmatter: unknown keys become provider parameter p
     CHECK(preset.extra_parameters["reasoningEffort"] == "high");
 }
 
+// --- tool_config -----------------------------------------------------------------
+
+TEST_CASE("ParseAgentPresetFrontmatter: tool_config is a structural namespace map",
+          "[agent_preset_frontmatter][tool_config]") {
+    auto preset = Parse(
+        "---\n"
+        "name: a\n"
+        "tool_config:\n"
+        "  python:\n"
+        "    venv: .venv\n"
+        "    packages: [impacket, pefile]\n"
+        "  other-plugin:\n"
+        "    nested:\n"
+        "      deep: true\n"
+        "---\n"
+        "body\n");
+    REQUIRE(preset.tool_config.contains("python"));
+    CHECK(preset.tool_config["python"]["venv"] == ".venv");
+    REQUIRE(preset.tool_config["python"]["packages"].is_array());
+    CHECK(preset.tool_config["python"]["packages"][0] == "impacket");
+    CHECK(preset.tool_config["other-plugin"]["nested"]["deep"] == true);
+}
+
+TEST_CASE("ParseAgentPresetFrontmatter: absent tool_config is an empty object",
+          "[agent_preset_frontmatter][tool_config]") {
+    auto preset = Parse("---\nname: a\n---\nbody\n");
+    CHECK(preset.tool_config.is_object());
+    CHECK(preset.tool_config.empty());
+}
+
+TEST_CASE("ParseAgentPresetFrontmatter: tool_config never leaks into extra_parameters",
+          "[agent_preset_frontmatter][tool_config]") {
+    auto preset = Parse(
+        "---\n"
+        "name: a\n"
+        "tool_config:\n"
+        "  python:\n"
+        "    venv: .venv\n"
+        "---\n"
+        "body\n");
+    CHECK(preset.extra_parameters.empty());
+}
+
+TEST_CASE("ParseAgentPresetFrontmatter: malformed tool_config throws",
+          "[agent_preset_frontmatter][tool_config]") {
+    // A scalar is not a namespace map.
+    CHECK_THROWS_AS(Parse("---\nname: a\ntool_config: .venv\n---\nb\n"), std::runtime_error);
+    // A sequence is not a namespace map either.
+    CHECK_THROWS_AS(Parse("---\nname: a\ntool_config: [a, b]\n---\nb\n"), std::runtime_error);
+    // An empty-string namespace key would be unreachable by any tool.
+    CHECK_THROWS_AS(Parse("---\nname: a\ntool_config:\n  \"\": {}\n---\nb\n"), std::runtime_error);
+}
+
 // --- allowed_skills modes -------------------------------------------------------
 
 TEST_CASE("ParseAgentPresetFrontmatter: allowed_skills accepts the list and the map form",

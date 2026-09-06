@@ -64,6 +64,13 @@ struct AgentPreset {
     tools::PermissionRunMode run_mode = tools::PermissionRunMode::Normal;
     std::string compression_prompt;  // loaded text, not a filename
 
+    // Per-tool/per-plugin configuration from the preset's `tool_config`
+    // frontmatter map, VERBATIM ({namespace: {...}}). Delivered per-invocation
+    // to each tool as ToolContext::tool_config (its own config_namespace()
+    // slice), so a mid-session /agent re-resolve takes effect at the next tool
+    // call. Core interprets nothing; the claiming plugin owns its slice.
+    nlohmann::json tool_config = nlohmann::json::object();
+
     // --- opencode-compat surface (see agent_preset_frontmatter.hpp) ------------
     // Visibility-only: spawn_subagent accepts any registered preset whatever
     // the mode; mode decides whether the agent picker lists the preset.

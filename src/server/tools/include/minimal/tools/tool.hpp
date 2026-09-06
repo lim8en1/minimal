@@ -75,6 +75,18 @@ struct ToolContext {
     };
     std::vector<SkillAccess> allowed_skills;
 
+    // The active preset's slice of `tool_config` for THIS tool (its
+    // config_namespace() key in agents/*.md frontmatter), as plain data so the
+    // tools layer stays free of agent-layer types -- the same pattern as
+    // allowed_skills above. Null when the tool declares no namespace or the
+    // preset declares no slice for it. Points into the agent loop's preset,
+    // which is stable for the turn (preset swaps happen on the worker between
+    // turns), so a tool may retain the pointer for its invocation's duration
+    // -- background watchers included, which hold the ctx handles anyway.
+    // Core never interprets the contents: the plugin owns its slice's schema
+    // and its merge with its own plugins.json config.
+    const nlohmann::json* tool_config = nullptr;
+
     // Checked before each tool runs and polled by long-running tools (bash).
     std::function<bool()> is_cancelled;
 
@@ -162,6 +174,19 @@ public:
     // local machine, and tagging them would fold in a dimension that has
     // nothing to do with what they actually do.
     virtual bool network_access_required() const { return false; }
+
+    // Declarative opt-in for per-preset plugin config: the namespace this tool
+    // reads from the active preset's `tool_config` frontmatter map
+    // (agents/*.md: `tool_config: {<namespace>: {...}}`). Delivered
+    // per-invocation as ToolContext::tool_config -- THIS tool's slice only, or
+    // null when the preset declares none. Default empty: a tool that reads no
+    // per-preset config never sees anyone's slice. Two plugins claiming the
+    // same namespace is a FATAL startup collision (the NameRegistry discipline,
+    // one level up); several tools of ONE plugin sharing a namespace is normal.
+    // See ARCHITECTURE.md "Server plugins" and docs/PLUGINS.md for the author
+    // contract (the plugin owns its slice's schema and its merge with its own
+    // plugins.json config).
+    virtual std::string_view config_namespace() const { return {}; }
 
     // Declarative opt-OUT from parallel dispatch (see ARCHITECTURE.md "Tool
     // dispatch"): a tool whose execute() cannot safely overlap another

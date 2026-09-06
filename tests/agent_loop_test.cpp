@@ -1859,3 +1859,95 @@ TEST_CASE("no safe boundary AND nothing worth eliding falls back to the genuine 
     const auto& unchanged = std::get<llm::ToolResultBlock>(h.loop->history()[1].content.at(0));
     CHECK(std::get<llm::TextBlock>(unchanged.content.at(0)).text == "tiny");
 }
+
+// --- tool_config delivery --------------------------------------------------------
+
+// Records what ctx.tool_config pointed at during execute(), copying the slice
+// (the pointer itself is per-invocation and gone by the time the test reads).
+class ConfigProbeTool : public tools::Tool {
+public:
+    ConfigProbeTool(std::string name, std::string ns)
+        : name_(std::move(name)), ns_(std::move(ns)) {
+        spec_.name = name_;
+        spec_.category = ToolCategory::ReadOnly;
+        spec_.definition.name = name_;
+        spec_.definition.description = "config probe";
+        spec_.definition.input_schema = nlohmann::json::object();
+    }
+
+    const tools::ToolSpec& spec() const override { return spec_; }
+
+    tools::ToolResult execute(const nlohmann::json&, tools::ToolContext& ctx) override {
+        seen_slices.push_back(ctx.tool_config ? *ctx.tool_config : nlohmann::json());
+        return {false, name_};
+    }
+
+    std::string_view config_namespace() const override { return ns_; }
+
+    std::vector<nlohmann::json> seen_slices;
+
+private:
+    tools::ToolSpec spec_;
+    std::string name_;
+    std::string ns_;
+};
+
+TEST_CASE("a tool receives its tool_config slice from the active preset", "[agent_loop][tool_config]") {
+    Harness h;
+    h.registry.Register(std::make_unique<ConfigProbeTool>("probe", "python"));
+
+    agent::AgentPreset preset;
+    preset.tool_config = nlohmann::json{{"python", {{"venv", ".venv"}}},
+                                        {"other", {{"key", 1}}}};
+    h.provider.PushResponse(ToolUseResponse("tu1", "probe"));
+    h.provider.PushResponse(TextResponse("done"));
+    h.Build(preset);
+
+    h.loop->RunTurn(UserText("go"));
+
+    // The tool saw exactly its OWN namespace's slice -- not the raw map, not
+    // another plugin's keys.
+    const auto* owner = dynamic_cast<ConfigProbeTool*>(h.registry.Find("probe").get());
+    REQUIRE(owner != nullptr);
+    REQUIRE(owner->seen_slices.size() == 1);
+    CHECK(owner->seen_slices[0] == nlohmann::json{{"venv", ".venv"}});
+}
+
+TEST_CASE("a tool whose namespace the preset does not declare gets a null tool_config",
+          "[agent_loop][tool_config]") {
+    Harness h;
+    h.registry.Register(std::make_unique<ConfigProbeTool>("probe", "python"));
+
+    agent::AgentPreset preset;
+    preset.tool_config = nlohmann::json{{"other", {{"key", 1}}}};
+    h.provider.PushResponse(ToolUseResponse("tu1", "probe"));
+    h.provider.PushResponse(TextResponse("done"));
+    h.Build(preset);
+
+    h.loop->RunTurn(UserText("go"));
+
+    const auto* owner = dynamic_cast<ConfigProbeTool*>(h.registry.Find("probe").get());
+    REQUIRE(owner != nullptr);
+    REQUIRE(owner->seen_slices.size() == 1);
+    CHECK(owner->seen_slices[0].empty());
+}
+
+TEST_CASE("a tool that declares no namespace never sees a slice",
+          "[agent_loop][tool_config]") {
+    Harness h;
+    // FakeTool declares no config_namespace (the Tool default).
+    auto& tool = h.AddTool("read");
+    agent::AgentPreset preset;
+    preset.tool_config = nlohmann::json{{"python", {{"venv", ".venv"}}}};
+    h.provider.PushResponse(ToolUseResponse("tu1", "read"));
+    h.provider.PushResponse(TextResponse("done"));
+    h.Build(preset);
+
+    h.loop->RunTurn(UserText("go"));
+
+    CHECK(tool.calls.size() == 1);
+    // Nothing to assert on the slice itself without a probe; the point is that
+    // the delivery path neither crashes nor serves another namespace's data --
+    // exercised above. This test pins the default-config_namespace() path.
+    SUCCEED("no-namespace tool completed a turn with tool_config present on the preset");
+}

@@ -220,7 +220,7 @@ bool IsKnownKey(const std::string& key) {
         {"permission_mode", 0}, {"permission", 0},  {"tools", 0},
         {"mcp_permissions", 0}, {"compression_prompt", 0},
         {"mode", 0},          {"disable", 0},       {"hidden", 0},
-        {"color", 0},         {"steps", 0},
+        {"color", 0},         {"steps", 0},         {"tool_config", 0},
     };
     return kKnown.count(key) != 0;
 }
@@ -277,6 +277,29 @@ nlohmann::json DecodeExtraParameters(const YAML::Node& node) {
     return extras;
 }
 
+// tool_config: {<namespace>: {...}} -- per-tool plugin configuration, carried
+// verbatim (YamlToJson lowering, same as extra_parameters). Structural, so it
+// never reaches the provider; the namespace keys are collision-checked at
+// startup against what registered tools claim (see sanity_check).
+nlohmann::json DecodeToolConfig(const YAML::Node& node) {
+    const YAML::Node value = node["tool_config"];
+    if (!value) return nlohmann::json::object();
+    if (!value.IsMap()) {
+        throw std::runtime_error(
+            "agent preset: tool_config must be a map of {namespace: {...}}");
+    }
+    nlohmann::json result = nlohmann::json::object();
+    for (const auto& entry : value) {
+        const std::string ns = entry.first.as<std::string>();
+        if (ns.empty()) {
+            throw std::runtime_error(
+                "agent preset: tool_config has an empty-string namespace key");
+        }
+        result[ns] = YamlToJson(entry.second);
+    }
+    return result;
+}
+
 std::unordered_map<std::string, tools::PermissionMode> DecodeMcpPermissionsBlock(const YAML::Node& node) {
     std::unordered_map<std::string, tools::PermissionMode> result;
     const YAML::Node block = node["mcp_permissions"];
@@ -328,6 +351,7 @@ AgentPresetFrontmatter ParseAgentPresetFrontmatter(const config::ParsedFrontmatt
         result.steps = steps.as<int>();
     }
     result.extra_parameters = DecodeExtraParameters(node);
+    result.tool_config = DecodeToolConfig(node);
 
     result.body = parsed.body;
     return result;

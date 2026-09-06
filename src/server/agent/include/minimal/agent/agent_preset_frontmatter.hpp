@@ -81,6 +81,13 @@ struct AgentPresetFrontmatter {
     // Unknown frontmatter keys, merged OVER the resolved model's parameters at
     // registry resolve time (a preset's extra beats the model's default).
     nlohmann::json extra_parameters = nlohmann::json::object();
+    // Per-tool/per-plugin configuration, keyed by the namespace a tool's
+    // config_namespace() claims: `tool_config: {python: {venv: ".venv"}}`.
+    // Carried VERBATIM -- core never interprets a slice's contents; the plugin
+    // that claims the namespace owns its schema. A structural (non-passthrough)
+    // key, so it can never leak into extra_parameters and reach the provider
+    // as a request parameter.
+    nlohmann::json tool_config = nlohmann::json::object();
 };
 
 // Pure. Throws std::runtime_error on a missing `name`, a `model` that is not
