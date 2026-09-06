@@ -157,34 +157,9 @@ void Interpreter::ReaderLoop() {
                     diag_tail_.erase(0, diag_tail_.size() - kMaxDiagBytes);
                 }
             } else if (n == 0 || errno != EINTR) {
-                diag_open = false;
+                diag_open = false;  // diagnostics closed; the protocol side keeps this loop alive
             }
         }
-    }
-    // Diagnostics closed first (only that closes diag_open): keep draining the
-    // protocol side until it ends too.
-    while (out_open && !dead_.load(std::memory_order_acquire)) {
-        pollfd fds[1];
-        fds[0] = pollfd{out_fd_.get(), POLLIN, 0};
-        const int rc = poll(fds, 1, kPollSliceMs);
-        if (rc <= 0) continue;
-        char chunk[8192];
-        const ssize_t n = read(out_fd_.get(), chunk, sizeof(chunk));
-        if (n <= 0) {
-            MarkDead("interpreter exited" + (diag_tail_.empty() ? "" : ": " + diag_tail_),
-                     config_.session_lifetime.expired());
-            return;
-        }
-        line.append(chunk, static_cast<std::size_t>(n));
-        std::size_t start = 0;
-        while (true) {
-            const auto pos = line.find('\n', start);
-            if (pos == std::string::npos) break;
-            DrainLine(std::string_view(line).substr(start, pos - start));
-            if (dead_.load(std::memory_order_acquire)) return;
-            start = pos + 1;
-        }
-        line.erase(0, start);
     }
 }
 
@@ -205,10 +180,11 @@ void Interpreter::DrainLine(std::string_view line) {
     }
     if (body.contains("idle_interrupted")) {
         // A SIGINT landed with nothing running: the driver spent it and keeps
-        // serving. Recorded so the interrupt tool can say "nothing was
-        // running" instead of guessing at a wedged C extension.
+        // serving. Counted so the interrupt tool can say "nothing was
+        // running" instead of guessing at a wedged C extension. A counter, so
+        // every idle interrupt is distinguishable from its predecessors.
         std::lock_guard<std::mutex> lock(mu_);
-        idle_interrupted_ = true;
+        ++idle_interrupts_;
         ++progress_;
         cv_.notify_all();
         return;
@@ -386,11 +362,11 @@ Interpreter::InterruptOutcome Interpreter::WaitForInterrupt(
     std::chrono::milliseconds grace, const tools::CancelTokenPtr& cancel) {
     std::unique_lock<std::mutex> lock(mu_);
     const std::uint64_t start = progress_;
-    const bool start_idle = idle_interrupted_;
+    const std::uint64_t start_idle = idle_interrupts_;
     const auto deadline = std::chrono::steady_clock::now() + grace;
     while (true) {
         if (progress_ != start) {
-            return idle_interrupted_ != start_idle ? InterruptOutcome::kIdleInterrupt
+            return idle_interrupts_ != start_idle ? InterruptOutcome::kIdleInterrupt
                                                    : InterruptOutcome::kResponse;
         }
         if (dead_.load(std::memory_order_acquire)) return InterruptOutcome::kNoReaction;
@@ -421,7 +397,8 @@ void Interpreter::AdoptDeclared(const std::vector<std::string>& added) {
 void Interpreter::MarkDead(std::string reason, bool session_dead) {
     bool expected = false;
     if (!dead_.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) return;
-    death_reason_ = reason;
+    // `reason` rides into every pending outcome below; there is no separate
+    // death record to keep.
 
     std::vector<std::shared_ptr<Pending>> to_fail;
     {
@@ -439,6 +416,13 @@ void Interpreter::MarkDead(std::string reason, bool session_dead) {
     }
     for (const auto& p : to_fail) {
         if (session_dead) continue;  // the session is gone; nothing to report to
+        // Only ASYNC requests are injected: their completion would otherwise
+        // never be delivered. A SYNC request's tool call is the delivery --
+        // WaitSync wakes on the filled outcome above (or returns kDead when
+        // the entry is already gone) and the tool reports the loss itself;
+        // injecting too would duplicate the tool_use_id's result, which the
+        // provider rejects as an unexpected tool_result.
+        if (!p->async) continue;
         // The session is ALIVE and this death is an explicit kill (or a
         // crash): report each lost request honestly.
         if (p->handles.emit_task_event) {

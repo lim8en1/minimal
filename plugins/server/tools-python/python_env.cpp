@@ -22,12 +22,14 @@ namespace minimal::tools_python {
 namespace {
 
 // The server process's environment, filtered to the same allowlist bash seeds
-// from: the interpreter (and the subprocesses executed code spawns) needs
-// $HOME & co, and has no business inheriting provider API keys. The venv's
-// bin directory is PREPENDED to PATH so pip and venv tools resolve; VIRTUAL_ENV
-// is set for anything that sniffs it.
+// from ($PATH, $HOME & co -- bash_session_state.cpp): the interpreter (and the
+// subprocesses executed code spawns) needs those and has no business
+// inheriting provider API keys. The venv's bin directory is PREPENDED to PATH
+// so pip and venv tools resolve; VIRTUAL_ENV is set for anything that sniffs
+// it. PYTHONUNBUFFERED is deliberately absent: the child runs `python -I`,
+// which implies -E and would ignore it anyway.
 constexpr const char* kEnvAllowlist[] = {
-    "HOME", "USER", "LOGNAME", "SHELL", "TERM", "TERM_PROGRAM", "LANG", "TMPDIR",
+    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TERM", "TERM_PROGRAM", "LANG", "TMPDIR",
 };
 constexpr const char* kEnvAllowlistPrefixes[] = {"LC_"};
 
@@ -68,9 +70,8 @@ std::map<std::string, std::string> BuildChildEnv(const EnvPlan& plan,
         env["PATH"] = bin + ":" + old_path;
         env["VIRTUAL_ENV"] = plan.venv.string();
     }
-    // Driver-side per-stream capture cap; unbuffered diagnostics.
+    // Driver-side per-stream capture cap.
     env["_MINIMAL_PY_CAPTURE"] = std::to_string(settings.max_capture_bytes);
-    env["PYTHONUNBUFFERED"] = "1";
     return env;
 }
 
@@ -202,8 +203,11 @@ std::string EnsureEnvironment(const EnvPlan& plan, const PythonSettings& setting
             argv.push_back("-r");
             argv.push_back((plan.project_root / req).string());
         }
-        const auto run = RunCaptured(argv, plan.project_root, {}, settings.install_timeout,
-                                     256 * 1024);
+        // Same child env as venv creation and EnsurePackages: the install is a
+        // helper command that may spawn subprocesses (source builds, VCS
+        // backends) and needs $HOME for caches -- an empty env strands those.
+        const auto run = RunCaptured(argv, plan.project_root, BuildChildEnv(plan, settings),
+                                     settings.install_timeout, 256 * 1024);
         if (!run.ok || run.exit_status != 0) {
             *error = "installing declared packages failed (" + via + "): " +
                      (run.error.empty() ? run.output : run.error + " " + run.output);

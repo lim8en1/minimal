@@ -192,15 +192,17 @@ private:
     mutable std::mutex mu_;
     std::condition_variable cv_;
     std::map<std::string, std::shared_ptr<Pending>> pending_;
-    std::uint64_t progress_{0};       // bumped per delivered response or idle-interrupt
-    bool idle_interrupted_ = false;   // the driver spent a SIGINT with nothing running
+    std::uint64_t progress_{0};        // bumped per delivered response or idle-interrupt
+    std::uint64_t idle_interrupts_{0};  // monotonically bumped when the driver spends a SIGINT
+                                        // with nothing running (counter, not a flag: a flag
+                                        // would make the SECOND idle interrupt read as a
+                                        // response -- start==end on a sticky bool)
     std::vector<std::string> declared_;  // mutable via AdoptDeclared, guarded by mu_
     std::vector<std::string> notices_;   // one-time notice gates, guarded by mu_
     bool ready_ = false;
     std::string version_;
     std::string diag_tail_;  // last diagnostics seen, reported on death
     std::atomic<bool> dead_{false};
-    std::string death_reason_;
     // JOINED in the destructor; holds no reference to the interpreter.
     std::thread reader_;
 };

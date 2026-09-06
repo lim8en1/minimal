@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <memory>
 #include <mutex>
@@ -39,6 +40,34 @@ using tools_python::SpecName;
 namespace {
 
 bool HavePython3() { return !ResolveOnPath("python3").empty(); }
+
+// Process-environment scope guard (BuildChildEnv reads the real environ).
+class ScopedEnv {
+public:
+    ScopedEnv(const char* name, const char* value) : name_(name) {
+        if (const char* old = std::getenv(name)) {
+            had_old_ = true;
+            old_ = old;
+        }
+        if (value) {
+            ::setenv(name, value, 1);
+        } else {
+            ::unsetenv(name);
+        }
+    }
+    ~ScopedEnv() {
+        if (had_old_) {
+            ::setenv(name_.c_str(), old_.c_str(), 1);
+        } else {
+            ::unsetenv(name_.c_str());
+        }
+    }
+
+private:
+    std::string name_;
+    std::string old_;
+    bool had_old_ = false;
+};
 
 // A live control block for ctx.session_lifetime -- a default weak_ptr reads as
 // "session dead" and the reader would kill the interpreter instantly.
@@ -211,6 +240,34 @@ TEST_CASE("MakeEnvPlan: the declared contract drives venv intent", "[tools_pytho
     CHECK(declared.declared[0] == "impacket");
 }
 
+TEST_CASE("BuildChildEnv inherits PATH, prepends the venv bin, and sets VIRTUAL_ENV",
+          "[tools_python][env]") {
+    ScopedEnv path("PATH", "/opt/kept/bin");
+    TempDir dir;
+    const PythonSettings settings;
+
+    // Bare: no declared contract, no venv -- PATH passes through untouched.
+    const auto bare = MakeEnvPlan(dir.path(), PythonSlice{}, settings);
+    REQUIRE_FALSE(bare.wants_venv);
+    const auto bare_env = BuildChildEnv(bare, settings);
+    REQUIRE(bare_env.count("PATH") == 1);
+    CHECK(bare_env.at("PATH") == "/opt/kept/bin");
+    CHECK(bare_env.count("VIRTUAL_ENV") == 0);
+
+    // Venv: bin first, the inherited PATH behind it.
+    const auto venv = MakeEnvPlan(dir.path(), PythonSlice{{"requests"}, {}}, settings);
+    REQUIRE(venv.wants_venv);
+    const auto venv_env = BuildChildEnv(venv, settings);
+    CHECK(venv_env.at("PATH").rfind((dir.path() / ".venv" / "bin").string() + ":", 0) == 0);
+    CHECK(venv_env.at("PATH").find("/opt/kept/bin") != std::string::npos);
+    CHECK(venv_env.at("VIRTUAL_ENV") == (dir.path() / ".venv").string());
+
+    // The driver's capture knob rides along; PYTHONUNBUFFERED is deliberately
+    // absent (python -I implies -E and would ignore it anyway).
+    CHECK(bare_env.count("_MINIMAL_PY_CAPTURE") == 1);
+    CHECK(bare_env.count("PYTHONUNBUFFERED") == 0);
+}
+
 // --- interpreter (real python3) --------------------------------------------------
 
 TEST_CASE("the interpreter execs, evals, captures output and keeps state",
@@ -266,6 +323,62 @@ TEST_CASE("the interpreter execs, evals, captures output and keeps state",
     CHECK(outcome.stdout_text == "on stdout\n");
     CHECK(outcome.result == "None");
     CHECK(outcome.ok);
+}
+
+TEST_CASE("a trailing expression's value is returned even when statements precede it",
+          "[tools_python][interpreter]") {
+    if (!HavePython3()) SKIP("python3 not available");
+    TempDir dir;
+    PythonSettings settings;
+    settings.startup_timeout = 15;
+    InterpreterConfig config;
+    config.python_path = ResolveOnPath("python3");
+    config.cwd = dir.path();
+    config.env = {{"PATH", "/usr/bin:/bin:/usr/local/bin"}, {"HOME", dir.path().string()}};
+    config.session_lifetime = kLifetimeToken;
+    std::string error;
+    auto interp = Interpreter::Spawn(config, settings, common::DefaultLogger(), &error);
+    REQUIRE(interp != nullptr);
+
+    RequestHandles handles;
+    handles.session_lifetime = kLifetimeToken;
+    std::string submit_error;
+    RequestOutcome outcome;
+
+    // Statements + a trailing expression: the value survives (exec-only
+    // handling of the whole source would return '').
+    const auto id1 = interp->Submit("x = 40\nx + 2", false, handles, &submit_error);
+    REQUIRE(id1.has_value());
+    REQUIRE(interp->WaitSync(*id1, nullptr, std::chrono::steady_clock::now() + std::chrono::seconds(10),
+                             &outcome) == Interpreter::WaitOutcome::kCompleted);
+    CHECK(outcome.ok);
+    CHECK(outcome.result == "42");
+
+    // Statement-only code still yields ''.
+    const auto id2 = interp->Submit("y = 5", false, handles, &submit_error);
+    REQUIRE(id2.has_value());
+    REQUIRE(interp->WaitSync(*id2, nullptr, std::chrono::steady_clock::now() + std::chrono::seconds(10),
+                             &outcome) == Interpreter::WaitOutcome::kCompleted);
+    CHECK(outcome.ok);
+    CHECK(outcome.result.empty());
+
+    // The trailing expression is evaluated against the state the prefix built.
+    const auto id3 =
+        interp->Submit("def f():\n    return y\n\nf() * 2", false, handles, &submit_error);
+    REQUIRE(id3.has_value());
+    REQUIRE(interp->WaitSync(*id3, nullptr, std::chrono::steady_clock::now() + std::chrono::seconds(10),
+                             &outcome) == Interpreter::WaitOutcome::kCompleted);
+    CHECK(outcome.ok);
+    CHECK(outcome.result == "10");
+
+    // A syntax error still fails the request honestly and the interpreter lives.
+    const auto id4 = interp->Submit("def broken(:", false, handles, &submit_error);
+    REQUIRE(id4.has_value());
+    REQUIRE(interp->WaitSync(*id4, nullptr, std::chrono::steady_clock::now() + std::chrono::seconds(10),
+                             &outcome) == Interpreter::WaitOutcome::kCompleted);
+    CHECK_FALSE(outcome.ok);
+    CHECK(outcome.stderr_text.find("SyntaxError") != std::string::npos);
+    CHECK(interp->alive());
 }
 
 TEST_CASE("a failing request reports the traceback and the interpreter survives",
@@ -465,6 +578,31 @@ TEST_CASE("a soft interrupt with nothing running is reported, not lethal",
     CHECK(outcome.result == "'alive'");
 }
 
+TEST_CASE("consecutive idle interrupts are each reported as idle, never as a response",
+          "[tools_python][interpreter][interrupt]") {
+    if (!HavePython3()) SKIP("python3 not available");
+    TempDir dir;
+    PythonSettings settings;
+    settings.startup_timeout = 15;
+    InterpreterConfig config;
+    config.python_path = ResolveOnPath("python3");
+    config.cwd = dir.path();
+    config.env = {{"PATH", "/usr/bin:/bin:/usr/local/bin"}, {"HOME", dir.path().string()}};
+    config.session_lifetime = kLifetimeToken;
+    std::string error;
+    auto interp = Interpreter::Spawn(config, settings, common::DefaultLogger(), &error);
+    REQUIRE(interp != nullptr);
+
+    // The SECOND idle interrupt must read as idle too -- a sticky flag would
+    // misreport it as "the running request failed with KeyboardInterrupt".
+    for (int round = 0; round < 2; ++round) {
+        interp->SoftInterrupt();
+        CHECK(interp->WaitForInterrupt(std::chrono::seconds(5), nullptr) ==
+              Interpreter::InterruptOutcome::kIdleInterrupt);
+        CHECK(interp->alive());
+    }
+}
+
 TEST_CASE("a hard kill fails pending async requests and the interpreter is replaceable",
           "[tools_python][interpreter][interrupt]") {
     if (!HavePython3()) SKIP("python3 not available");
@@ -501,6 +639,62 @@ TEST_CASE("a hard kill fails pending async requests and the interpreter is repla
     WaitFor([&] { return injected->Has("test kill") || injected->Has("failed"); },
             std::chrono::seconds(10));
     CHECK(injected->Has(*id));
+}
+
+TEST_CASE("interpreter death while a sync request is parked delivers exactly ONE result",
+          "[tools_python][interpreter][interrupt]") {
+    if (!HavePython3()) SKIP("python3 not available");
+    TempDir dir;
+    PythonSettings settings;
+    settings.startup_timeout = 15;
+    InterpreterConfig config;
+    config.python_path = ResolveOnPath("python3");
+    config.cwd = dir.path();
+    config.env = {{"PATH", "/usr/bin:/bin:/usr/local/bin"}, {"HOME", dir.path().string()}};
+    config.session_lifetime = kLifetimeToken;
+    std::string error;
+    auto interp = Interpreter::Spawn(config, settings, common::DefaultLogger(), &error);
+    REQUIRE(interp != nullptr);
+
+    auto injected = std::make_shared<Injected>();
+    RequestHandles handles;
+    handles.tool_use_id = "tu_sync_dead";
+    handles.session_lifetime = kLifetimeToken;
+    handles.schedule_injection = [injected](llm::Message message) {
+        std::lock_guard<std::mutex> lock(injected->mu);
+        injected->messages.push_back(std::move(message));
+        return true;
+    };
+    std::string submit_error;
+    const auto id = interp->Submit("import time; time.sleep(30)", /*sync=*/false, handles,
+                                   &submit_error);
+    REQUIRE(id.has_value());
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+    // Park the sync wait, then kill underneath it. The sync request's delivery
+    // is its OWN tool result (the woken WaitSync); an injection too would send
+    // a second tool_result for the same tool_use_id -- a provider protocol
+    // violation.
+    int outcome_kind = -1;
+    bool outcome_ok = true;
+    std::thread waiter([&] {
+        RequestOutcome outcome;
+        const auto w = interp->WaitSync(*id, nullptr,
+                                        std::chrono::steady_clock::now() + std::chrono::seconds(15),
+                                        &outcome);
+        outcome_kind = static_cast<int>(w);
+        outcome_ok = outcome.ok;
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    interp->HardKill("test kill");
+    waiter.join();
+
+    // The woken wait claims the death outcome; the interpreter is gone.
+    CHECK(outcome_kind == static_cast<int>(Interpreter::WaitOutcome::kCompleted));
+    CHECK_FALSE(outcome_ok);
+    // ...and nothing was injected: the sync request's tool result is the ONLY
+    // delivery for its tool_use_id.
+    CHECK(injected->messages.empty());
 }
 
 TEST_CASE("a sync wait that outlives its deadline DEMOTES and the result still arrives",

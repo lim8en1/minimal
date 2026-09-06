@@ -50,13 +50,9 @@ minimal::tools_python::InterpreterStore& Interpreters() {
     return store;
 }
 
-// Parsed once at tool registration (the loader runs register_tools first),
-// the same seeding rule tools-bash uses for its store. A static with defaults
-// keeps direct constructions (tests) valid without a context.
-minimal::tools_python::PythonSettings& Settings() {
-    static minimal::tools_python::PythonSettings settings;
-    return settings;
-}
+// The settings are parsed once in minimal_plugin_register_tools (the loader
+// runs register_tools first) and handed to each tool by value; the plugin has
+// no process-global settings state.
 
 // Releases this plugin's per-session state AND kills the interpreter. The
 // observer is fire-and-forget, so the kill promptness belongs to the reader
@@ -84,7 +80,7 @@ void minimal_plugin_register_tools(
     // Per-preset DECLARED package contracts arrive separately, per invocation,
     // on ToolContext::tool_config (the `tool_config.python` frontmatter slice).
     const auto settings = minimal::tools_python::ParsePythonSettings(context.config);
-    Settings() = settings;    registry.Register(
+    registry.Register(
         minimal::tools_python::MakePythonExecTool(settings, Interpreters()));
     registry.Register(
         minimal::tools_python::MakePythonInterruptTool(settings, Interpreters()));

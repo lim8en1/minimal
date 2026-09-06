@@ -42,7 +42,7 @@
 
 namespace minimal::tools_python {
 
-inline constexpr const char* kDriverSource = R"PY(import io, json, os, sys, traceback
+inline constexpr const char* kDriverSource = R"PY(import ast, io, json, os, sys, traceback
 
 _MAX = int(os.environ.get("_MINIMAL_PY_CAPTURE", str(1 << 20)))
 
@@ -135,11 +135,18 @@ def _main():
         ok = True
         result = ""
         try:
-            try:
-                value = eval(compile(code, "<python-tool>", "eval"), G)
-                result = repr(value)
-            except SyntaxError:
-                exec(compile(code, "<python-tool>", "exec"), G)
+            # A trailing expression's value is the result -- even when it
+            # follows statements (which a plain eval-compile rejects). Split on
+            # the ast: exec the statement prefix, eval the trailing Expr node.
+            tree = ast.parse(code)
+            trailing = None
+            if tree.body and isinstance(tree.body[-1], ast.Expr):
+                trailing = tree.body[-1].value
+                tree.body = tree.body[:-1]
+            if tree.body:
+                exec(compile(tree, "<python-tool>", "exec"), G)
+            if trailing is not None:
+                result = repr(eval(compile(ast.Expression(trailing), "<python-tool>", "eval"), G))
         except BaseException:
             # KeyboardInterrupt included: a soft interrupt fails THIS request
             # only -- the interpreter and its state survive.
