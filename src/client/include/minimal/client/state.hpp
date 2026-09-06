@@ -156,6 +156,11 @@ public:
     // overflow a single "[...truncated]" marker segment is left at the
     // oldest position so the cut is visible, never silent.
     static constexpr std::size_t kMaxLiveSegments = 100;
+    // Consecutive scrollback-refresh failures after which the tab surfaces a
+    // visible error notice (see NoteRefreshFailed). Below this the existing
+    // frame-pass backoff (scrollback_refresh.hpp) handles the quiet retry;
+    // the notice exists so a stuck transcript is not a silent one.
+    static constexpr int kScrollbackFailureNoticeAfter = 3;
     void SetBounds(int scrollback_max_messages, int tool_output_buffer_bytes);
 
     // Renderable copy taken under a short lock held minimally (no blocking I/O).
@@ -194,6 +199,14 @@ public:
         // live_segments below (track C4) -- streaming_text alone lost
         // ordering relative to tool calls that happened between its blocks.
         std::string streaming_text;          // empty when not streaming
+        // Live thinking content (ThinkingDeltaEvent deltas, flat like
+        // streaming_text). Accumulated here so a thinking turn loses NOTHING
+        // on the live path -- before this field existed, thinking deltas were
+        // dropped client-side and materialized only in the turn-end refetch,
+        // a visible content jump. Cleared at exactly the same sites as
+        // streaming_text (ClearStreaming / ClearStreamingIfCurrentTurn /
+        // OnResyncRequired / OnSessionRewound).
+        std::string streaming_thinking_text;  // empty when not streaming
         bool is_streaming_finalized = false;
         // This turn's live content in arrival order (LiveTurnSegment above).
         // Empty exactly when streaming_text is (same clear sites:
@@ -337,6 +350,12 @@ public:
 
     // --- Streaming response ---
     void AppendStreamingText(std::string_view text);
+    // Thinking deltas, the mirror of AppendStreamingText for the model's
+    // thinking blocks: same cap-and-truncate budget, same turn arming, but a
+    // dedicated accumulation (live_segments_ model only Text and Tool
+    // segments, matching how the persisted turn records are rendered) so the
+    // view layer can present thinking separately from text.
+    void AppendStreamingThinking(std::string_view text);
     void FinalizeStreamingText();
 
     // --- Turn boundaries (ToolExecution / TextDelta set Working/Thinking; these clear it) ---
@@ -453,12 +472,20 @@ public:
     // the echo -- or by an error/session end, which leave nothing to echo.
     void OnChatSubmitted(const std::string& text);
 
-    // Resolves an outstanding async refresh that came back EMPTY or failed:
-    // bumps refresh_seq without touching any content, so the frame that
-    // requested it can tell "resolved, nothing changed" from "still
+    // Resolves an outstanding async scrollback refresh that came back EMPTY
+    // or failed: bumps refresh_seq without touching any content, so the frame
+    // that requested it can tell "resolved, nothing changed" from "still
     // waiting" and is free to retry on the next mismatch. ApplyScrollbackPage
     // bumps refresh_seq itself on the success path.
-    void NoteRefreshFailed();
+    //
+    // `reason` (optional) is the RPC's error message: counted across
+    // consecutive failures, the kScrollbackFailureNoticeAfter-th failure in a
+    // row surfaces a visible error notice on the tab's notice line -- the
+    // server refuses a transcript page with INTERNAL on an undecodable row,
+    // and before this the client retried forever with no user-visible
+    // symptom. Retrying itself stays the frame pass's job (its backoff is
+    // untouched); the notice only ends the silence.
+    void NoteRefreshFailed(const std::string& reason = {});
 
 private:
     void MaybeGoIdleLocked();   // mtx_ held by caller
@@ -494,6 +521,10 @@ private:
     uint64_t transcript_version_ = 0;
     uint64_t refresh_seq_ = 0;   // see Snapshot::refresh_seq
     bool refresh_succeeded_ = false;   // outcome of the attempt that bumped refresh_seq_
+    // Consecutive RESOLVED-FAILED scrollback fetches; reset by every
+    // successful apply. Drives the one-shot error notice in NoteRefreshFailed
+    // (retry pacing itself lives in scrollback_refresh.hpp's per-tab backoff).
+    int scrollback_failures_ = 0;
     bool scrollback_trimmed_ = false;
     bool scrollback_gap_ = false;   // see Snapshot::scrollback_gap
     int scrollback_max_messages_ = kDefaultScrollbackWindowMaxMessages;
@@ -536,6 +567,13 @@ private:
     // transcript itself is authoritative: the post-turn refresh re-fetches
     // the full persisted text (scrollback_refresh.hpp).
     std::string streaming_accumulated_;
+    // Live thinking accumulation (see Snapshot::streaming_thinking_text):
+    // same cap-and-truncate budget as the flat text buffer, plus the turn
+    // stamp the turn-aware clear sites need to retire it only when the
+    // persisted page actually covers its turn.
+    std::string thinking_accumulated_;
+    bool thinking_truncated_ = false;       // thinking_accumulated_ hit its cap
+    uint64_t thinking_turn_seq_ = 0;        // the turn the accumulation belongs to
     bool streaming_truncated_ = false;      // streaming_accumulated_ hit its cap
     bool live_segments_truncated_ = false;  // the marker segment is in place
     bool is_streaming_ = false;
@@ -697,8 +735,12 @@ public:
     // The client has no other way to let a user target a rewind -- raw
     // transcript seq numbers are never surfaced in the UI. Scans the tab's
     // current scrollback window backward for the n-th (1 = most recent)
-    // ROLE_USER message and returns its seq, or nullopt if fewer than n
-    // user turns are present in the loaded window.
+    // TEXT-BEARING ROLE_USER message and returns its seq, or nullopt if
+    // fewer than n user turns are present in the loaded window. Text-bearing
+    // (any non-empty TextBlock) is the SERVER's own IsRewindTarget predicate
+    // (agent/session.cpp): counting bare User rows here as well would let
+    // /rewind N target an injected subagent completion -- a position the
+    // user cannot re-enter as a prompt -- and be refused server-side.
     std::optional<int64_t> FindRewindTargetSeq(const std::string& session_id, int n);
 
     // Asynchronously re-fetches the scrollback window for a tab and applies

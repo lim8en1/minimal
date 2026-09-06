@@ -72,7 +72,7 @@ allowed_skills: { git-release: preload, internal-*: ask, experimental-x: deny }
 - `ask` — per-skill permission key `skill:<name>` through the existing Ask machinery.
 - `deny` — hidden from the listing entirely; `skill` tool refuses.
 - Subagent clamping (`subagent_manager.cpp`): most-restrictive lattice `deny > ask > allow > preload`.
-- Validation (opencode-strict, warn-not-fail): name regex `^[a-z0-9]+(-[a-z0-9]+)*$`, dir-name match, description ≤ 1024 chars, unknown frontmatter tolerated.
+- Validation (as built in `skill_registry.cpp`, warn-not-fail): the **directory name is the identity**; a frontmatter `name`, when present, must match it; a scalar non-empty `description` is required (collapsed to a single line, since it becomes one system-prompt bullet). There is **no name regex and no 1024-char cap** — the opencode-strict validation was not carried over. Unknown frontmatter tolerated.
 
 **Status: complete.** As built: `enum class SkillMode { Preload=0, Allow=1, Ask=2, Deny=3 }` (the ordering IS the clamp lattice). The resolved `AgentPreset::allowed_skills` holds only Preload/Allow/Ask — explicit denies resolve OUT, because absence is deny, which makes the clamp's "parent without the entry" rule uniform. Two structural findings fixed the sketch:
 
@@ -108,11 +108,11 @@ body: |
 - Body renders `{name}`, `{output:src.field}`, `{args}` in a single pass; **inserted values are never re-scanned**. No executors in the body.
 - No `body` → the prompt is the sole text source's stdout (error if multiple sources).
 
-**Opencode desugaring (parse-time):** `$ARGUMENTS`→`{args}`, `$1..$n`→args-list positionals, `` !`cmd` ``→anonymous `sh` source in appearance order, `@file`→body-level inert expansion (verify whether `SubmitTurn` rides the mention-expansion path; else expand via the plugin's `file_access` utility).
+**Opencode desugaring (parse-time):** `$ARGUMENTS`→`{args}`, `$1..$n`→args-list positionals, `` !`cmd` ``→anonymous `sh` source in appearance order. **`@file` expansion is NOT implemented** — `commands_md_parse.cpp` desugars only the three constructs above; the planned body-level expansion never shipped (the inert-body ruling removed the place it would have lived) and remains a known gap.
 
-**Subtask semantics:** `agent: <subagent>` (default) or `subtask: true` (any preset, primary included; parent ceilings apply) → `spawn_subagent` invocation, receiving frontmatter `model:` via an additive `model` param on `spawn_subagent`. Bare `agent: <primary>` without `subtask`, and bare `model:`, warn-unsupported v1.
+**Subtask semantics:** `agent: <subagent>` (default) or `subtask: true` (any preset, primary included; parent ceilings apply) → `spawn_subagent` invocation (`task` plus optional `agent_preset`/`blocking`/`max_turns` — the tool has **no `model` parameter**, so a frontmatter `model:` cannot be forwarded; bare `model:` warns-unsupported v1).
 
-**Failure & gating:** generator nonzero exit / timeout / missing `{output:field}` → `CommandResult{kError}` → ephemeral error status line; **no turn, no transcript entry** (test-pinned). Cap exceed → `confirm` default: ConfirmationBroker `[once / this session / cancel]`, session grant `commands-md:cap:<command>`; composes with run modes for free (bypass auto-allows, allow-only/headless auto-denies). `on_exceed: fail` available per source. Executed program+argv visible in the tools panel; env-allowlist + rlimits as in hooks/bash.
+**Failure & gating:** generator nonzero exit / timeout / missing `{output:field}` → `CommandResult{kError}` → ephemeral error status line; **no turn, no transcript entry** (test-pinned). Cap exceed → `confirm` default: a per-invocation ConfirmationBroker prompt (`submit` / `cancel`) — there is **no session-scoped "always" grant** (`commands-md:cap:<command>` never shipped; the code asks every time) and **no rlimits** are applied. `on_exceed: fail` available per source. Executed program+argv visible in the tools panel; generators run with a filtered env allowlist as in hooks/bash.
 
 **Registration:** each file → `PromptShorthandCommand` via `minimal_plugin_register_commands`; autocomplete and kind annotation free via `ListCommands`; renaming via `plugins.json` `aliases`.
 
@@ -173,4 +173,4 @@ Each phase ships with Catch2 tests beside the existing per-feature files (`agent
 | TUI diff rendering | renderer *slot* exists (`registries.hpp`), no implementation |
 | `@`-mention subagent invocation | prompt-editor autocomplete listing agent presets → `spawn_subagent` shorthand |
 | Models.dev-style catalog plugin | fits `ModelCatalogRegistry`; local-first design may prefer `discover: true` |
-| `PluginSubscribe` push | checklist polls first; push when a consumer needs live updates |
+| `PluginSubscribe` push consumer | the RPC is implemented server-side (dispatches to a plugin's `.endpoint`); no bundled plugin ships a push source yet — checklist still polls |

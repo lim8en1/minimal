@@ -509,9 +509,10 @@ std::optional<std::string> SessionClient::Stream::Open(const CreateOptions& opts
     }
     session_id_ = response.session().session_id();
 
-    // Name the stream on an empty ClientEvent carrying just the id — server attaches the
-    // bidi to this session without firing a turn/command. Sent FIRST (FIFO queue) before
-    // any user turn, so attach is complete even if the app queues its first payload fast.
+    // Name the stream with an Attach{} payload (see EnqueueNamingEvent):
+    // server attaches the bidi to this session without firing a turn/command.
+    // Sent FIRST (FIFO queue) before any user turn, so attach is complete even
+    // if the app queues its first payload fast.
     EnqueueNamingEvent();
     OpenBidi();   // create the bidi (lazy); threads start later
     return session_id_;
@@ -662,8 +663,16 @@ void SessionClient::Stream::SetStatus(const grpc::Status& status) {
 }
 
 void SessionClient::Stream::EnqueueNamingEvent() {
+    // The naming event MUST carry the empty Attach{} payload, not just the
+    // id: a payload-less ClientEvent falls through the server's Dispatch to
+    // its PAYLOAD_NOT_SET case, which logs "client event with no payload" on
+    // every ordinary TUI open. Attach{} is the documented mechanism for
+    // naming a stream without submitting work (session_service.proto), and
+    // Dispatch's kAttach case is a deliberate no-op for an already-attached
+    // stream -- idempotent, zero cost.
     v1::ClientEvent ev;
-    ev.set_session_id(session_id_);   // the ONLY field set: names the stream, fires no action
+    ev.set_session_id(session_id_);
+    ev.mutable_attach();
     std::unique_lock lk(qmtx_);
     send_queue_.push_back(ev);
 }

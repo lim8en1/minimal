@@ -14,6 +14,8 @@ message TextBlock {
 
 message ThinkingBlock {
   string text = 1;
+  // Currently unconsumed by clients (producer-only): reserved for provider
+  // replay/verification round-trips; kept for wire compatibility.
   optional string signature = 2;
 }
 

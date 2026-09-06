@@ -70,8 +70,8 @@ SessionState::Snapshot SessionState::TakeLightSnapshot(bool include_tool_output)
     s.permission_mode = permission_mode_;
     s.context_window_tokens = context_window_tokens_;
     // Deliberately NOT copied (heavy, and only the focused tab renders them):
-    // scrollback_page, streaming_text, pending_permission/confirmation,
-    // latest_notice.
+    // scrollback_page, streaming_text, streaming_thinking_text,
+    // pending_permission/confirmation, latest_notice.
     return s;
 }
 
@@ -92,6 +92,7 @@ SessionState::Snapshot SessionState::TakeSnapshot() {
     s.has_earlier_messages = has_earlier_;
     s.last_loaded_seq = last_loaded_seq_;
     s.streaming_text = streaming_accumulated_;
+    s.streaming_thinking_text = thinking_accumulated_;
     s.is_streaming_finalized = !is_streaming_;   // not streaming => finalized this turn
     s.live_segments = live_segments_;
     if (pending_permission_) {
@@ -266,6 +267,39 @@ void SessionState::FinalizeStreamingText() {
     MaybeGoIdleLocked();
 }
 
+// Thinking deltas (ThinkingDeltaEvent) get the same budget and turn arming
+// text deltas get, but a SEPARATE flat accumulation: live_segments_ model
+// only Text and Tool segments (that is what the persisted rows render as),
+// and the view layer needs thinking available independently anyway. Without
+// this the deltas were dropped outright -- thinking materialized only in the
+// turn-end refetch, a visible content jump mid-conversation.
+void SessionState::AppendStreamingThinking(std::string_view text) {
+    std::lock_guard lk(mtx_);
+    // Flat cap, same shape as streaming_accumulated_: truncate once, append
+    // the marker, drop further deltas -- the transcript is authoritative.
+    if (thinking_truncated_) return;
+    thinking_accumulated_.append(text);
+    if (thinking_accumulated_.size() > kStreamingTextCapBytes) {
+        thinking_accumulated_.resize(kStreamingTextCapBytes);
+        thinking_accumulated_.append(kStreamingTruncationMarker);
+        thinking_truncated_ = true;
+    }
+    // Turn arming mirrors AppendStreamingText exactly: thinking typically
+    // opens the turn (before the first text delta), so it must bump turn_seq_
+    // and stamp itself with the SAME value text's later segments will carry,
+    // or ClearStreamingIfCurrentTurn would retire (or keep) the two halves
+    // inconsistently.
+    if (turn_ended_) {
+        ++turn_seq_;
+        turn_ended_ = false;
+    }
+    thinking_turn_seq_ = turn_seq_;
+    is_streaming_ = true;
+    if (state_ != SessionStateKind::Error) {
+        state_ = SessionStateKind::Thinking;
+    }
+}
+
 // "Idle | MessageStopEvent, nothing pending" (ARCHITECTURE.md, Tab states and
 // attention). A tool-using turn emits several message_stops before the turn is
 // actually done -- this fires between tool cycles too, which is correct: the
@@ -374,6 +408,8 @@ void SessionState::ClearStreaming() {
     std::lock_guard lk(mtx_);
     streaming_accumulated_.clear();
     streaming_truncated_ = false;   // fresh accumulation: cap budget resets
+    thinking_accumulated_.clear();   // thinking retires with the text it preceded
+    thinking_truncated_ = false;
     is_streaming_ = false;
     live_segments_.clear();
     live_segments_truncated_ = false;
@@ -396,10 +432,19 @@ void SessionState::ClearStreamingIfCurrentTurn(uint64_t turn_seq) {
         // Nothing survives: the classic clear.
         streaming_accumulated_.clear();
         streaming_truncated_ = false;
+        thinking_accumulated_.clear();
+        thinking_truncated_ = false;
         is_streaming_ = false;
         live_segments_.clear();
         live_segments_truncated_ = false;
         return;
+    }
+    // The thinking accumulation is turn-stamped (see AppendStreamingThinking):
+    // retire it exactly when the persisted page covers its turn, keep it for
+    // a newer turn that started since -- the same rule the segments above get.
+    if (thinking_turn_seq_ <= turn_seq) {
+        thinking_accumulated_.clear();
+        thinking_truncated_ = false;
     }
     // Rebuild the flat accumulation from the surviving text segments (the
     // blank-line break mirrors the within-turn block separator above).
@@ -473,6 +518,8 @@ void SessionState::OnResyncRequired(const std::string& reason) {
     // on attach (S5.3), and a prompt whose modal is showing is still real.
     streaming_accumulated_.clear();
     streaming_truncated_ = false;
+    thinking_accumulated_.clear();
+    thinking_truncated_ = false;
     is_streaming_ = false;
     live_segments_.clear();
     live_segments_truncated_ = false;
@@ -509,6 +556,8 @@ void SessionState::OnSessionRewound(int64_t truncated_to_seq, int64_t active_las
     // left to retire it and a pending cancel belongs to the discarded turn.
     streaming_accumulated_.clear();
     streaming_truncated_ = false;
+    thinking_accumulated_.clear();
+    thinking_truncated_ = false;
     is_streaming_ = false;
     live_segments_.clear();
     live_segments_truncated_ = false;
@@ -719,6 +768,7 @@ void SessionState::OnBackgroundTask(const v1::BackgroundTaskEvent& evt) {
 void SessionState::ApplyScrollbackPage(const v1::GetMessagesResponse& resp) {
     std::lock_guard lk(mtx_);
     refresh_succeeded_ = true;   // resolved OK, even when the page is empty
+    scrollback_failures_ = 0;   // a success ends any failure streak (and its notice)
     if (resp.messages().empty()) {
         has_earlier_ = resp.has_more();   // no rows, but the server may still have older pages
         ++refresh_seq_;   // a resolved attempt (successful RPC, empty page) -- see NoteRefreshFailed
@@ -811,10 +861,25 @@ bool SessionState::CanLoadMore() const {
     return has_earlier_;
 }
 
-void SessionState::NoteRefreshFailed() {
+void SessionState::NoteRefreshFailed(const std::string& reason) {
     std::lock_guard lk(mtx_);
     refresh_succeeded_ = false;   // resolved with a failure -- see Snapshot::refresh_succeeded
     ++refresh_seq_;   // resolved (no content change) -- lets a mismatch retry next frame
+    // Retry PACING is scrollback_refresh.hpp's per-tab backoff; this counter
+    // only decides when the silence ends. A server that refuses every page
+    // (an undecodable transcript row answers INTERNAL) used to retry forever
+    // with no user-visible symptom -- a transcript frozen mid-conversation.
+    // Fire ONCE per streak (==, not >=): further failures extend the backoff
+    // window but must not spam the notice line every retry.
+    ++scrollback_failures_;
+    if (scrollback_failures_ == kScrollbackFailureNoticeAfter) {
+        latest_notice_ = CommandNotice{
+            "transcript refresh failed " + std::to_string(scrollback_failures_) +
+                " times in a row" + (reason.empty() ? "" : ": " + reason) +
+                "; still retrying -- the transcript shown may be stale",
+            /*is_error=*/true, v1::COMMAND_DISPLAY_STATUS, /*view_hint=*/{}};
+        ++notice_seq_;
+    }
 }
 
 bool SessionState::TryBeginOlderFetch() {
@@ -871,6 +936,21 @@ bool IsAttachRefusal(const grpc::Status& status) {
             return true;
         default:
             return false;
+    }
+}
+
+// Human names for the ErrorEvent taxonomy (common.proto LlmErrorCategory) --
+// what the error notice renders in parentheses next to the provider's message.
+// nullptr for UNSPECIFIED: an unnamed category contributes nothing.
+const char* ErrorCategoryName(v1::LlmErrorCategory category) {
+    switch (category) {
+        case v1::LLM_ERROR_CATEGORY_TRANSPORT: return "transport";
+        case v1::LLM_ERROR_CATEGORY_RATE_LIMIT: return "rate limit";
+        case v1::LLM_ERROR_CATEGORY_SERVER_ERROR: return "server error";
+        case v1::LLM_ERROR_CATEGORY_AUTH_ERROR: return "auth";
+        case v1::LLM_ERROR_CATEGORY_REQUEST_ERROR: return "request";
+        case v1::LLM_ERROR_CATEGORY_PARSE_ERROR: return "parse";
+        default: return nullptr;
     }
 }
 
@@ -1158,7 +1238,21 @@ void AppState::DispatchToTab(const std::string& session_id, const v1::ServerEven
     if (event.has_turn_completed()) {
         target->OnTurnCompleted(event.turn_completed());   // Done + occupancy metrics
     } else if (event.has_error()) {
-        target->OnError(event.error().message());
+        // The ErrorEvent taxonomy fields (category/http_status/is_retryable)
+        // are produced server-side; rendering them into the visible text is
+        // what makes a non-retryable failure READ as one instead of a generic
+        // error the user keeps re-sending.
+        const auto& err = event.error();
+        std::string message = err.message();
+        std::string tag;
+        if (const char* category = ErrorCategoryName(err.category())) tag = category;
+        if (err.has_http_status()) {
+            if (!tag.empty()) tag += ", ";
+            tag += "HTTP " + std::to_string(err.http_status());
+        }
+        if (!tag.empty()) message += " (" + tag + ")";
+        if (!err.is_retryable()) message += " [non-retryable]";
+        target->OnError(message);
     } else if (event.has_resync_required()) {
         // S5: this stream's delivery had a hole. The durable record is the
         // transcript; bumping the version makes the next maintain() pass
@@ -1199,11 +1293,18 @@ void AppState::DispatchToTab(const std::string& session_id, const v1::ServerEven
         const auto& se = event.stream_event();
         if (se.has_text_delta()) {
             target->AppendStreamingText(se.text_delta().text());
+        } else if (se.has_thinking_delta()) {
+            // Same live-path obligation as text_delta: dropping these made
+            // thinking appear only in the turn-end refetch (a visible jump).
+            target->AppendStreamingThinking(se.thinking_delta().text());
         } else if (se.has_usage()) {
             target->OnUsage(se.usage());
         } else if (se.has_content_block_stop() || se.has_message_stop()) {
             target->FinalizeStreamingText();
         }
+        // message_start carries only the provider's message id/model, which
+        // the TUI derives from SessionMetadataEvent instead -- nothing to
+        // accumulate, deliberately unhandled.
     } else if (event.has_permission_request()) {
         const auto& pr = event.permission_request();
         auto pp = std::make_unique<PendingPermission>();
@@ -1285,6 +1386,22 @@ void AppState::OnSubagentSpawned(std::string_view parent_id, const v1::SubagentS
         }
     }
     const std::string child_tab = AttachTab(evt.child_session_id(), parent_root);
+
+    // Subagent rows are created nameless server-side (subagent_manager.cpp
+    // mints the row with name=""), so the child tab's label used to fall back
+    // to the raw session id until -- if ever -- a naming observer ran. The
+    // event's `task` (the parent model's own formulation of the job) is the
+    // natural title; seed it ONLY while the tab is still unnamed and idle, so
+    // a real SessionMetadataEvent name always wins and a racing live turn is
+    // never disturbed.
+    if (!evt.task().empty()) {
+        if (auto child_state = GetState(evt.child_session_id())) {
+            const auto snap = child_state->TakeLightSnapshot();
+            if (snap.display_name.empty() && snap.state == SessionStateKind::Idle) {
+                child_state->OnSessionCreated(evt.task());
+            }
+        }
+    }
 
     // A blocking subagent pins its parent's turn, so focus follows it (parent is stuck waiting).
     if (evt.blocking() && !child_tab.empty()) SetFocusedTab(child_tab);
@@ -1804,10 +1921,25 @@ std::optional<int64_t> AppState::FindRewindTargetSeq(const std::string& session_
     // scrollback_page is DESCENDING by seq (newest at index 0, matching what
     // GetMessages returns -- see ApplyScrollbackPage), so a forward scan
     // already walks from the newest message backward.
+    //
+    // The predicate is the SERVER's IsRewindTarget (agent/session.cpp),
+    // mirrored here field-for-field: role User carrying ANY non-empty
+    // TextBlock. Counting bare User rows as well would let /rewind N target
+    // an injected subagent completion (User role, tool-result blocks only) --
+    // a position the server refuses to rewind to, and one the user could
+    // never re-enter as a prompt.
     const auto snapshot = state->TakeSnapshot();
     int remaining = n;
     for (const auto& stored : *snapshot.scrollback_page) {
         if (stored.message().role() != v1::ROLE_USER) continue;
+        bool text_bearing = false;
+        for (const auto& block : stored.message().content()) {
+            if (block.has_text() && !block.text().text().empty()) {
+                text_bearing = true;
+                break;
+            }
+        }
+        if (!text_bearing) continue;
         if (--remaining == 0) return stored.seq();
     }
     return std::nullopt;
@@ -1871,8 +2003,10 @@ void AppState::RequestScrollback(const std::string& session_id, bool newest) {
             // and retries -- this used to be a dead comment ("the next
             // trigger retries") because the loop-thread caller had already
             // latched rendered_version to the pre-refresh version before
-            // this failure was known.
-            state->NoteRefreshFailed();
+            // this failure was known. The status message rides along: the
+            // failure streak's user-visible notice (NoteRefreshFailed) names
+            // WHY the transcript stopped moving.
+            state->NoteRefreshFailed(status.error_message());
             if (!newest) state->EndOlderFetch();   // the latch resolves on failure too
             BumpUiVersion();
             return;

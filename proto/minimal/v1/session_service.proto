@@ -13,6 +13,8 @@ message UserChatTurn {
 
 message CommandArgs {
   repeated string positional = 1;
+  // Currently unconsumed (reserved): no client sends flags and no server
+  // command reads them; kept for wire compatibility.
   map<string, string> flags = 2;
   string raw = 3;
 }
@@ -153,6 +155,9 @@ message PermissionRequest {
   string request_id = 1;
   string tool_name = 2;
   ToolCategory category = 3;
+  // Currently unconsumed by clients (producer-only): the raw invocation input
+  // is available to server-side policy and plugins; clients render `summary`
+  // instead. Kept for wire compatibility.
   google.protobuf.Struct tool_input = 4;
   string summary = 5; // one-line human-readable description for the prompt
   // What this invocation was able to name, and therefore which grants may be
@@ -217,8 +222,13 @@ message CommandResult {
 message CommandInfo {
   string name = 1;
   string summary = 2;
+  // Currently unconsumed by clients (reserved): autocomplete and /help render
+  // summary/name only. Kept for wire compatibility.
   string usage = 3;
   CommandKind kind = 4;
+  // Currently unconsumed by clients (reserved): the display decision is taken
+  // from CommandResult.display at outcome time, not from the catalog. Kept
+  // for wire compatibility.
   CommandDisplay display = 5;
   bool read_only = 6;
   // The Command::RequiresSession taxonomy answer: whether Execute needs a live
@@ -261,6 +271,9 @@ message ListCommandsResponse {
 // stuck waiting on a blocking child, so its tab takes focus.
 message SubagentStartedEvent {
   string child_session_id = 1;
+  // Consumed as the child tab's fallback title while the session is unnamed
+  // (subagent rows are created nameless); a real SessionMetadataEvent name
+  // supersedes it.
   string task = 2;
   bool blocking = 3;
 }
@@ -329,6 +342,9 @@ message BackgroundTaskEvent {
   string task_id = 1;
   string tool_use_id = 2;
   string command = 3;
+  // Producer-only/reserved for diagnostics: clients key rows by tool_use_id
+  // and read command/state; pid and task_id are not consumed. Kept for wire
+  // compatibility.
   int32 pid = 4;
   State state = 5;
 }
@@ -412,6 +428,9 @@ message ServerEvent {
 message StoredMessage {
   int64 seq = 1;
   Message message = 2;
+  // Currently unconsumed by clients (producer-only/reserved): the persisted
+  // token tally is available for future budget displays; kept for wire
+  // compatibility.
   int32 token_count = 3;
   int64 created_at_unix_ms = 4;
 }
@@ -455,9 +474,9 @@ message SessionSummary {
   int32 message_count = 5;
   int64 created_at_unix_ms = 6;
   int64 updated_at_unix_ms = 7; // doubles as last-activity for picker sorting
-  // Empty for a top-level session. Without it, ListSessions with
-  // include_subagents set returns rows the client cannot tell apart from
-  // top-level ones, which makes the flag useless.
+  // Producer-only/reserved: the TUI tracks parent/child grouping from
+  // SubagentStartedEvent instead, so no client reads this field today. Kept
+  // for wire compatibility (and for clients that list subagents directly).
   string parent_session_id = 8;
   // S5.4: true iff a live Session object for this id currently exists in the
   // server's SessionRegistry -- attached OR detached-but-still-running, not

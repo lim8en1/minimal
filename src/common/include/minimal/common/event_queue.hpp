@@ -149,9 +149,14 @@ public:
         T event = std::move(events_.front().event);
         bytes_total_ -= events_.front().bytes;
         events_.pop_front();
-        // A successful drain ends drop-mode: room exists again, so ordinary
-        // backpressure -- block, never drop -- is the right policy from here.
-        drops_ = false;
+        // The self-heal is precise, not automatic: clearing the latch on ANY
+        // drain -- including one that freed no room -- re-wedged a producer
+        // that parked right after, because its wait predicate
+        // (closed_ || drops_ || Fits) is false on both counts again and only
+        // a SECOND cancel could reach it. Clear only when the drain actually
+        // created room (HasRoomLocked); until then Push keeps refusing, so
+        // the parked producer's way out survives.
+        if (drops_ && HasRoomLocked()) drops_ = false;
         space_cv_.notify_one();
         return event;
     }
@@ -163,7 +168,7 @@ public:
         T event = std::move(events_.front().event);
         bytes_total_ -= events_.front().bytes;
         events_.pop_front();
-        drops_ = false;  // same self-heal as Pop
+        if (drops_ && HasRoomLocked()) drops_ = false;  // same precise self-heal as Pop
         space_cv_.notify_one();
         return event;
     }
@@ -188,8 +193,9 @@ public:
     //
     // Latched rather than one-shot so a producer parking a moment AFTER the
     // cancel gets the same way out, and so the self-heal is visible: the
-    // latch clears at the next successful drain, when ordinary backpressure
-    // resumes. NOT Close(): cancel ends a turn, not the session -- the queued
+    // latch clears at the next drain that actually frees room (Pop/TryPop,
+    // see HasRoomLocked), when ordinary backpressure resumes. NOT Close():
+    // cancel ends a turn, not the session -- the queued
     // backlog stays deliverable, the queue stays open, and PushTerminal
     // events still wait for room.
     void AbortWaitingProducers() {
@@ -246,6 +252,17 @@ private:
         events_.push_back(Item{std::move(event), bytes});
     }
 
+    // Is there room for at least a minimal event right now -- below BOTH
+    // bounds? The drop-latch's self-heal condition (see Pop). Byte comparison
+    // is against max_bytes_ itself, not max minus an event size: the point is
+    // "did this drain move the queue back under the watermark it wedged at",
+    // not "would one specific event fit" -- that test is Push's own Fits.
+    bool HasRoomLocked() const {
+        if (events_.size() >= max_size_) return false;
+        if (max_bytes_ == 0) return true;   // count-bound only
+        return events_.empty() || bytes_total_ < max_bytes_;
+    }
+
     struct Item {
         T event;
         std::size_t bytes = 0;
@@ -260,9 +277,9 @@ private:
     std::size_t bytes_total_ = 0;
     SizeOf size_of_;
     bool closed_ = false;
-    // Drop-mode, latched by AbortWaitingProducers, cleared by the next
-    // successful drain: while set, Push refuses over-bounds events instead of
-    // blocking the worker on them.
+    // Drop-mode, latched by AbortWaitingProducers, cleared by the next drain
+    // that actually frees room (Pop/TryPop + HasRoomLocked): while set, Push
+    // refuses over-bounds events instead of blocking the worker on them.
     bool drops_ = false;
 };
 

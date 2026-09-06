@@ -94,12 +94,11 @@ Full example (`bundled/settings.json`):
 
 ### `tools.*`
 
-`tools` is also passed **verbatim to plugins** — unknown subkeys are legal and
-plugin-owned (e.g. per-tool settings for `read`/`edit`/`bash`). Core recognizes:
+`tools` is also passed **verbatim to plugins** as `tools_settings` — unknown
+subkeys are legal and plugin-owned. Core recognizes:
 
 | Field | Type | Default | Notes |
 |---|---|---|---|
-| `read`, `edit`, `bash` | object | `{}` | raw JSON, schema owned by the respective tool plugin |
 | `mcp.connect_timeout_ms` | int | `10000` | |
 | `mcp.request_timeout_ms` | int | `60000` | |
 | `mcp.max_list_pages` | int | `100` | must be ≥ 1 |
@@ -107,6 +106,38 @@ plugin-owned (e.g. per-tool settings for `read`/`edit`/`bash`). Core recognizes:
 | `max_parallel_tool_calls` | int | `4` | must be ≥ 1; `1` = inline execution, no pool threads |
 | `max_input_bytes` | int | `10485760` | ≥ 0; `0` disables the limit |
 | `max_result_bytes` | int | `10485760` | ≥ 0; `0` disables the limit |
+
+**No bundled tool plugin reads a `tools.read` / `tools.edit` / `tools.bash`
+slice from settings.json.** The `tools-fs` and `tools-bash` plugins take their
+knobs from their own `config` object in `plugins.json` (the per-plugin channel
+of EXTENSIBILITY §2.3). Core still parses `tools.read`/`edit`/`bash` into its
+settings struct, but nothing consumes them — put tool settings in
+`plugins.json`.
+
+### Per-plugin tool settings (`plugins.json` `config`)
+
+**`tools-fs`** — object with one sub-object per tool
+(`{"read": {...}, "edit": {...}}`; every field optional):
+
+| Key | Type | Default |
+|---|---|---|
+| `read.default_limit_lines` | int | `2000` |
+| `read.max_line_length` | int | `2000` |
+| `read.max_lines` | int | `2000` — the hard ceiling on any read window; `limit: 0` clamps to this too |
+| `edit.max_editable_file_bytes` | int | `5242880` (5 MiB) |
+
+**`tools-bash`** — flat object (every field optional):
+
+| Key | Type | Default |
+|---|---|---|
+| `timeout_ms` | int | `120000` |
+| `max_timeout_ms` | int | `600000` — ceiling on a model-supplied `timeout_ms` |
+| `background_max_timeout_ms` | int | `600000` |
+| `max_background_tasks` | int | `4` — per-session cap on live background tasks |
+| `max_output_bytes` | int | `1048576` (1 MiB) — bounds the persisted result |
+| `max_file_size_bytes` | int | `1073741824` (1 GiB) — RLIMIT_FSIZE backstop |
+| `shell` | string | `"/bin/sh"` |
+| `inherit_env` | string | `"allowlist"` — or `"all"`; anything else is a named parse error |
 
 ### `tools_view.*`
 

@@ -22,7 +22,8 @@ Installed to `<libdir>/minimal/plugins/`. All enabled by default unless noted.
 | `tools-web` | Tools `web_fetch`, `web_search` |
 | `provider-openai` | Provider kind `openai` (chat-completions shape) + model catalog for it |
 | `provider-anthropic` | Provider kind `anthropic` (Messages API, prompt caching) |
-| `commands-core` | Commands `/help`, `/clear`, `/compact`, `/agent`, `/model`, `/sessions` |
+| `commands-core` | Commands `/help`, `/clear`, `/compact`, `/agent`, `/model`, `/sessions`, `/connect` (stores a provider credential in `<data dir>/auth.json`) |
+| `commands-md` | Turns `commands/*.md` files into `/`-commands (config dir, project, and `.opencode/commands/`; opencode-syntax desugaring — see CONFIGURATION.md) |
 | `checklist` | Tool `checklist` + cross-plugin RPC endpoint `checklist.rpc` |
 | `signals-message` | Tool `message_session` (cross-session messaging on the core `signals` service) |
 | `cost-tracker` | Commands `/cost`, `/cost-update-rates`; per-session cost accumulation; RPC endpoint `cost-tracker.rpc` |
@@ -36,6 +37,7 @@ Installed to `<libdir>/minimal/plugins/client/`.
 |---|---|
 | `logo` | The ASCII-banner start view (random banner per session) |
 | `cost-view` | The `{cost}` status-bar segment (polls `cost-tracker.rpc`, renders cumulative $ / tokens) |
+| `checklist-view` | The `{todo}` status-bar segment (polls `checklist.rpc` for the focused session) |
 
 ## Discovery, enablement, replacement
 
@@ -106,15 +108,19 @@ views, start views, per-tool renderers, message renderers, status-bar
 segments, syntax grammars, chat surface (exclusive), markdown engine
 (exclusive).
 
-**Generic RPC channel:** a server plugin can `Provide` an endpoint named
-`<name>.rpc`, callable from any client via `PluginCall`/`PluginSubscribe`
-(the `cost-view` client plugin consumes `cost-tracker.rpc` this way).
+**Generic RPC channel:** the generic `PluginCall`/`PluginSubscribe` RPCs dispatch by plugin name through the `ServiceRegistry`, under two suffixed conventions that cannot collide:
+
+- **`<name>.rpc`** — a `PluginRpcHandler` (`plugin_rpc.hpp`): unary request/response. `checklist` and `cost-tracker` ship `.rpc` handlers (the `cost-view` client plugin polls `cost-tracker.rpc` this way).
+- **`<name>.endpoint`** — a `PluginEndpoint` (`plugin_abi.h`): unary `Call` plus a `Subscribe` half that pushes to the subscriber until it disconnects. `PluginSubscribe` dispatches to `.endpoint` providers only; no bundled plugin ships one yet.
+
+`PluginCall` tries `.endpoint` first, then falls back to `.rpc`.
 
 **Plugin storage:** per-plugin namespaced KV store (SQLite, under the data
 dir) plus a per-plugin scratch directory `<data>/plugins/<plugin_name>/`.
 
-Full API details and design notes: `docs/EXTENSIBILITY.md`. Test fakes in
-`tests/support/` are a build target and exported for plugin authors.
+Full API details and design notes: `docs/EXTENSIBILITY.md`. The test fakes in
+`tests/support/` (`minimal::test_support`) are an in-tree INTERFACE target for
+this repo's tests only — not installed or exported to plugin authors.
 
 ## Aliases
 

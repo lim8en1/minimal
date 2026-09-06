@@ -62,9 +62,11 @@ public:
         // Creates a fresh session -- or, when opts.resume_session_id is set,
         // RESUMES that stored session (CreateSession carries the id; the
         // stored row's name/preset/project_root govern, so the other identity
-        // fields must stay empty) -- and names the bidi with an empty
-        // ClientEvent carrying the id, so the stream is attached even before
-        // the caller's first real turn. Does NOT start reader/writer threads
+        // fields must stay empty) -- and names the bidi with a ClientEvent
+        // carrying the id and an empty Attach{} payload (the documented
+        // no-work naming mechanism; a payload-less event draws the server's
+        // "no payload" warning), so the stream is attached even before the
+        // caller's first real turn. Does NOT start reader/writer threads
         // yet. Returns the session_id, or nullopt on failure (see status()).
         std::optional<std::string> Open(const CreateOptions& opts);
 
@@ -169,7 +171,7 @@ public:
     void LaunchReaderThread();
     void LaunchWriterThread();
     void OpenBidi();             // constructs the gRPC bidi once (lazy); threads start in Resume()
-    void EnqueueNamingEvent();   // queue an empty ClientEvent that names the stream
+    void EnqueueNamingEvent();   // queue the naming ClientEvent (session_id + empty Attach{})
     // Joins the reader thread, EXCEPT on the reader thread itself (see
     // Close()'s self-join invariant): there it detaches instead -- joining
     // the current thread throws and would std::terminate via ~Stream.

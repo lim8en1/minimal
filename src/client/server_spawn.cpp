@@ -15,6 +15,7 @@
 
 #include "minimal/common/bundled_assets.hpp"
 #include "minimal/common/config_paths.hpp"
+#include "minimal/common/fd_hygiene.hpp"
 
 namespace minimal::client {
 namespace {
@@ -43,6 +44,15 @@ bool ExecutableFile(const std::filesystem::path& path) {
 // startup diagnostics live in the log, which is why the failure path names it.
 bool SpawnDetached(const std::filesystem::path& binary,
                    const std::filesystem::path& socket_path, const std::string& log_path) {
+    // Mark every inherited/long-lived descriptor close-on-exec BEFORE the
+    // fork: the exec'd server would otherwise inherit whatever this client
+    // holds (gRPC channel fds, log handles, plugin fds). Marking is harmless
+    // for the client itself -- CLOEXEC only closes at exec, and this process
+    // never execs -- while the grandchild's execl now inherits nothing but
+    // the redirects it opens itself. The server main() runs its own sweep
+    // after listen; this covers the one descriptor source it cannot see.
+    (void)common::MarkInheritedFdsCloseOnExec();
+
     const pid_t middle = ::fork();
     if (middle < 0) return false;
     if (middle == 0) {

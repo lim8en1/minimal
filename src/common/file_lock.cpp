@@ -64,26 +64,58 @@ ExclusiveFileLock::ExclusiveFileLock(const std::filesystem::path& db_path)
         }
     }
 
-    const int fd = ::open(lock_path_.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0644);
-    if (fd < 0) {
-        std::lock_guard lock(RegistryMutex());
-        HeldLocks().erase(lock_path_.string());
-        throw std::runtime_error("cannot open lock file " + lock_path_.string() + ": " +
-                                 std::strerror(errno));
-    }
+    // A fcntl lock belongs to the INODE behind the open fd, not to the path:
+    // if the lock file is unlinked (and possibly recreated) between our open
+    // and our F_SETLK -- a stale-file sweep is the realistic actor -- we lock
+    // a ghost inode while a second process locks the fresh file at the same
+    // path: two writers, one database. So after every acquire, fstat the OPEN
+    // fd and stat the PATH, and only accept when they name the same file.
+    // Bounded retries: each round re-opens whichever file now sits at the
+    // path, so the retry re-locks the real thing; a path that keeps churning
+    // under us is refused rather than raced indefinitely.
+    constexpr int kMaxIdentityAttempts = 3;
+    int fd = -1;
+    for (int attempt = 0;; ++attempt) {
+        fd = ::open(lock_path_.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0644);
+        if (fd < 0) {
+            std::lock_guard lock(RegistryMutex());
+            HeldLocks().erase(lock_path_.string());
+            throw std::runtime_error("cannot open lock file " + lock_path_.string() + ": " +
+                                     std::strerror(errno));
+        }
 
-    struct flock fl {};
-    fl.l_type = F_WRLCK;
-    fl.l_whence = SEEK_SET;
-    if (::fcntl(fd, F_SETLK, &fl) != 0) {
-        const std::string holder = ReadHolderPid(lock_path_);
+        struct flock fl {};
+        fl.l_type = F_WRLCK;
+        fl.l_whence = SEEK_SET;
+        if (::fcntl(fd, F_SETLK, &fl) != 0) {
+            const std::string holder = ReadHolderPid(lock_path_);
+            ::close(fd);
+            std::lock_guard lock(RegistryMutex());
+            HeldLocks().erase(lock_path_.string());
+            throw std::runtime_error("database " + db_path.string() +
+                                     " is already in use by process " + holder +
+                                     " (lock file " + lock_path_.string() +
+                                     "); refusing to open -- stop the other instance first");
+        }
+
+        struct stat locked_st {};
+        struct stat path_st {};
+        const bool same_file = ::fstat(fd, &locked_st) == 0 &&
+                               ::stat(lock_path_.c_str(), &path_st) == 0 &&
+                               locked_st.st_dev == path_st.st_dev &&
+                               locked_st.st_ino == path_st.st_ino;
+        if (same_file) break;
+
+        // Mismatch (a failed stat is a mismatch too: the file we locked was
+        // unlinked under us). Release the ghost and try again.
         ::close(fd);
-        std::lock_guard lock(RegistryMutex());
-        HeldLocks().erase(lock_path_.string());
-        throw std::runtime_error("database " + db_path.string() +
-                                 " is already in use by process " + holder +
-                                 " (lock file " + lock_path_.string() +
-                                 "); refusing to open -- stop the other instance first");
+        fd = -1;
+        if (attempt == kMaxIdentityAttempts - 1) {
+            std::lock_guard lock(RegistryMutex());
+            HeldLocks().erase(lock_path_.string());
+            throw std::runtime_error("lock file " + lock_path_.string() +
+                                     " kept changing under the lock attempt; refusing to open");
+        }
     }
 
     // Record the holder for the loser's error message. Diagnostic only: a
