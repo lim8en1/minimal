@@ -33,4 +33,15 @@ namespace minimal::client {
 
 std::vector<ftxui::Event> ParseKeySpec(const std::string& spec);
 
+// The collision identity of a key spec: a bare "ctrl+<letter>" whose C0
+// control byte doubles as another key's WHOLE event (ctrl+j/m -> enter,
+// ctrl+i -> tab, ctrl+h -> backspace; FTXUI uniformizes \r and 0x08 to \n
+// and DEL on input, so these are byte-identical matches, not near misses)
+// normalizes to that key's name, so keybindings.cpp can warn when two
+// bindings -- or a user binding and a default -- fight over the same
+// physical key despite spelling differently. Everything else returns its
+// lowercased form unchanged. Informational only: used for startup
+// warnings, never for event matching (ParseKeySpec above owns that).
+std::string NormalizeKeySpec(const std::string& spec);
+
 }  // namespace minimal::client

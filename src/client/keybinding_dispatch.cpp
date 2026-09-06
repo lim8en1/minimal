@@ -336,6 +336,19 @@ bool HandleGlobalKey(KeyContext& ctx, const ftxui::Event& event) {
     }
     for (auto& entry : ctx.plugin_views) {
         if (ctx.keymap.Matches(entry.view->spec().id, event)) {
+            // There is ONE modal slot: opening modal B while modal A is
+            // shown must retire A's `visible` flag along with replacing the
+            // slot's child. Left set, A counted as shown while it was not
+            // displayed, so A's own keypress first "toggled" it off -- one
+            // dead keypress before A could actually open.
+            if (entry.view->spec().placement == plugins::ViewPlacement::Modal) {
+                for (auto& shown : ctx.plugin_views) {
+                    if (&shown != &entry &&
+                        shown.view->spec().placement == plugins::ViewPlacement::Modal) {
+                        shown.visible = false;
+                    }
+                }
+            }
             entry.visible = !entry.visible;
             if (entry.view->spec().placement == plugins::ViewPlacement::Modal) {
                 *ctx.plugin_modal_child_slot = entry.component;

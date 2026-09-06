@@ -581,6 +581,9 @@ public:
         for (auto& [name, parser] : parsers_) {
             if (parser != nullptr) ts_parser_delete(parser);
         }
+        for (auto& [name, tree] : trees_) {
+            if (tree != nullptr) ts_tree_delete(tree);
+        }
     }
 
     TSParser* Get(const std::string& canonical, LanguageFnPtr language_fn, bool& ok) {
@@ -597,6 +600,27 @@ public:
         parsers_.emplace(canonical, parser);
         ok = parser != nullptr;
         return parser;
+    }
+
+    // The previous parse's tree for `canonical`, or nullptr. Incremental
+    // parsing hint for the streaming path: a code block still growing is
+    // re-highlighted every debounce tick, and each reparse used to start from
+    // scratch. Tree-sitter accepts ANY tree produced by the same parser as
+    // the base (an outdated one merely reduces how much is reused, never the
+    // result's correctness), so one tree slot per language is enough -- even
+    // two interleaved growing blocks stay correct, just with less reuse.
+    TSTree* LastTree(const std::string& canonical) {
+        const auto it = trees_.find(canonical);
+        return it != trees_.end() ? it->second : nullptr;
+    }
+
+    // Takes ownership of `tree` for `canonical`, releasing the tree it
+    // replaces. Only called with a tree from this language's own parser
+    // (tree-sitter requires the base tree and the parser to match).
+    void AdoptTree(const std::string& canonical, TSTree* tree) {
+        const auto it = trees_.find(canonical);
+        if (it != trees_.end() && it->second != nullptr) ts_tree_delete(it->second);
+        trees_[canonical] = tree;
     }
 
     // Node-type -> category, hashed once per language (the first draft walked
@@ -626,6 +650,9 @@ public:
 private:
     std::map<std::string, TSParser*> parsers_;
     std::unordered_map<std::string, RuleTable> tables_;
+    // One kept-alive tree per language, the base of the next incremental
+    // parse (see LastTree/AdoptTree above). Bounded by the language count.
+    std::unordered_map<std::string, TSTree*> trees_;
 };
 
 std::vector<HighlightSpan> SyntaxHighlighter::HighlightCode(std::string_view code,
@@ -675,11 +702,20 @@ std::vector<HighlightSpan> SyntaxHighlighter::Collect(std::string_view code,
         return it != rule_table.end() ? it->second : HighlightCategory::Plain;
     };
 
-    TSTree* tree = ts_parser_parse_string(parser, nullptr, code.data(),
-                                          static_cast<uint32_t>(code.size()));
+    // Incremental parse: feed the previous tree for this language as the base
+    // so a still-growing block's reparse only re-examines what changed (the
+    // dominant cost on the streaming path, where every debounce tick used to
+    // rebuild the whole tree from scratch). A cache miss -- first parse for
+    // the language, or after the parser itself was rebuilt -- starts from
+    // nullptr, which tree-sitter treats as a full parse. On parse failure the
+    // cached base is kept: it remains a valid base for the next attempt.
+    TSTree* old_tree = parser_cache_->LastTree(canonical);
+    TSTree* tree =
+        ts_parser_parse_string(parser, old_tree, code.data(), static_cast<uint32_t>(code.size()));
     if (tree == nullptr) {
         return {{HighlightCategory::Plain, 0, static_cast<uint32_t>(code.size())}};
     }
+    parser_cache_->AdoptTree(canonical, tree);
 
     std::vector<HighlightSpan> spans;
     TSTreeCursor cursor = ts_tree_cursor_new(ts_tree_root_node(tree));
@@ -714,7 +750,10 @@ std::vector<HighlightSpan> SyntaxHighlighter::Collect(std::string_view code,
         }
     }
     ts_tree_cursor_delete(&cursor);
-    ts_tree_delete(tree);
+    // `tree` stays owned by the parser cache: it is the incremental base for
+    // this block's next (likely grown) reparse, and a completed block never
+    // re-enters here at all -- the whole-result (language, code) cache above
+    // this call answers those.
     return spans;
 }
 

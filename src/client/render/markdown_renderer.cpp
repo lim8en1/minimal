@@ -54,6 +54,94 @@ struct Block {
     std::vector<Elements> table_rows;
 };
 
+// ftxui's text() drops tab characters entirely (its Screen writer never emits
+// them), so Makefile/YAML-style tab indentation silently vanished from code
+// blocks. Expand each tab to the next 4-column stop -- 4 rather than the 8 of
+// the traditional terminal tab stop because the rendered blocks are already
+// indented 2 spaces, and 8-column stops on top of that pushed typical code
+// past the frame width.
+std::string ExpandCodeTabs(std::string_view code) {
+    if (code.find('\t') == std::string_view::npos) return std::string(code);
+    std::string out;
+    out.reserve(code.size());
+    std::size_t column = 0;
+    for (const char c : code) {
+        if (c == '\t') {
+            const std::size_t stop = (column / 4 + 1) * 4;
+            out.append(stop - column, ' ');
+            column = stop;
+        } else {
+            out.push_back(c);
+            column = (c == '\n') ? 0 : column + 1;
+        }
+    }
+    return out;
+}
+
+// md4c reports entities VERBATIM ("&amp;", "&#38;", "&#x26;" arrive as their
+// literal source bytes) and leaves decoding to the consumer (md4c.h). Decode
+// the named set models actually emit plus decimal/hex numeric references;
+// anything unknown or malformed comes back unchanged -- the old behavior --
+// rather than guessed at.
+std::string DecodeEntity(std::string_view entity) {
+    struct Named {
+        std::string_view source;
+        const char* utf8;
+    };
+    static constexpr Named kNamed[] = {
+        {"&amp;", "&"}, {"&lt;", "<"}, {"&gt;", ">"}, {"&quot;", "\""}, {"&apos;", "'"},
+    };
+    for (const Named& named : kNamed) {
+        if (entity == named.source) return std::string(named.utf8);
+    }
+    if (entity.size() < 4 || entity.front() != '&' || entity[1] != '#' ||
+        entity.back() != ';') {
+        return std::string(entity);
+    }
+    std::string_view digits = entity.substr(2, entity.size() - 3);
+    const bool hex = !digits.empty() && (digits.front() == 'x' || digits.front() == 'X');
+    if (hex) digits.remove_prefix(1);
+    // 8 digits cap both the realistic cases and char32_t overflow: anything
+    // longer is malformed by construction.
+    if (digits.empty() || digits.size() > 8) return std::string(entity);
+    char32_t cp = 0;
+    for (const char c : digits) {
+        int value;
+        if (c >= '0' && c <= '9') {
+            value = c - '0';
+        } else if (hex && c >= 'a' && c <= 'f') {
+            value = c - 'a' + 10;
+        } else if (hex && c >= 'A' && c <= 'F') {
+            value = c - 'A' + 10;
+        } else {
+            return std::string(entity);
+        }
+        cp = cp * (hex ? 16u : 10u) + static_cast<char32_t>(value);
+    }
+    // Surrogates and out-of-range values would encode to invalid UTF-8 (and 0
+    // has no glyph); render them verbatim instead of corrupting the output.
+    if (cp == 0 || (cp >= 0xD800 && cp <= 0xDFFF) || cp > 0x10FFFF) {
+        return std::string(entity);
+    }
+    std::string out;
+    if (cp < 0x80) {
+        out.push_back(static_cast<char>(cp));
+    } else if (cp < 0x800) {
+        out.push_back(static_cast<char>(0xC0 | (cp >> 6)));
+        out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+    } else if (cp < 0x10000) {
+        out.push_back(static_cast<char>(0xE0 | (cp >> 12)));
+        out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+        out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+    } else {
+        out.push_back(static_cast<char>(0xF0 | (cp >> 18)));
+        out.push_back(static_cast<char>(0x80 | ((cp >> 12) & 0x3F)));
+        out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+        out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+    }
+    return out;
+}
+
 Element ApplyStyle(Element element, const InlineStyle& style, const Theme* theme) {
     if (style.code) {
         const ftxui::Color c =
@@ -318,8 +406,35 @@ public:
                 DimLast(top);
                 break;
             case MD_TEXT_ENTITY:
+                // md4c hands the entity's SOURCE text through and expects the
+                // consumer to decode it (see DecodeEntity). Code blocks are
+                // verbatim content -- md4c never reports entities inside one,
+                // so the append below is a just-in-case passthrough.
+                if (top.type == MD_BLOCK_CODE) {
+                    top.code_text.append(value);
+                } else if (top.type == MD_BLOCK_HTML) {
+                    PushStyledText(top, std::string(value), InlineStyle{});
+                    DimLast(top);
+                } else {
+                    PushStyledText(top, DecodeEntity(value), CurrentStyle());
+                }
+                break;
+            case MD_TEXT_NULLCHAR: {
+                // md4c does NOT do the replacement itself: MD_TEXT_NULLCHAR
+                // exists precisely so the CONSUMER can emit U+FFFD (vendored
+                // md4c.h: "CommonMark requires replacing NULL character with
+                // the replacement char U+FFFD ... this allows caller to do
+                // that easily"). The old fall-through with the wrong comment
+                // let ftxui's text() drop the byte, so NULs silently vanished.
+                static const std::string kReplacementChar = "\xEF\xBF\xBD";  // U+FFFD
+                if (top.type == MD_BLOCK_CODE) {
+                    top.code_text.append(kReplacementChar);
+                } else {
+                    PushStyledText(top, kReplacementChar, CurrentStyle());
+                }
+                break;
+            }
             case MD_TEXT_NORMAL:
-            case MD_TEXT_NULLCHAR:  // md4c maps NUL to U+FFFD; render as-is
             case MD_TEXT_LATEXMATH:
                 if (top.type == MD_BLOCK_CODE) {
                     top.code_text.append(value);
@@ -380,6 +495,10 @@ private:
         while (!block.code_text.empty() && block.code_text.back() == '\n') {
             block.code_text.pop_back();
         }
+        // Tabs are expanded BEFORE any path that builds Elements: ftxui's
+        // text() drops them, which silently deleted Makefile/YAML-style tab
+        // indentation (ExpandCodeTabs, above, for why 4-column stops).
+        block.code_text = ExpandCodeTabs(block.code_text);
         Elements lines;
         if (highlighter_ != nullptr && !block.code_language.empty()) {
             lines = highlighter_->Highlight(block.code_text, block.code_language);

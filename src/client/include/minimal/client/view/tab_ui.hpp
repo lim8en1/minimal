@@ -45,7 +45,11 @@ struct TabUi {
     // not one buffer the tool row rendered unconditionally after in full.
     std::vector<LiveTextStreamSlot> live_text_streams;
     std::optional<uint64_t> rendered_version;
-    std::unique_ptr<GrantToggles> grants;   // per outstanding request
+    // The permission modal's toggles are owned by the modal/closure pair
+    // (a shared_ptr captured by both, see TabMaintenance::MaintainModals) --
+    // there is deliberately no TabUi member holding them: a raw unique_ptr
+    // here once made the closure's validity depend on an implicit
+    // "never reset while its modal lives" invariant.
     std::string grants_for_request;
     // The wire confirmation modal's rebuild key, like grants_for_request:
     // the inner modal is rebuilt only when a NEW request_id arrives.

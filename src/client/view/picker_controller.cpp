@@ -76,7 +76,16 @@ void PickerController::FetchPickerPage(bool reset) {
     if (reset) {
         picker_data_.sessions.clear();
         picker_data_.has_more = false;
+    } else if (picker_fetch_in_flight_) {
+        // A second load-more for the SAME cursor (key-repeat queues it faster
+        // than the round trip) must not be queued: both arrivals would append
+        // the identical page and duplicate every row. The latch is released
+        // when the outstanding fetch's apply (or failure) lands; a RESET
+        // fetch is exempt -- it clears the model synchronously and carries a
+        // different cursor, so blocking it would strand the picker.
+        return;
     }
+    picker_fetch_in_flight_ = true;
     SessionClient::ListSessionsOptions opts;
     opts.project_root = std::filesystem::current_path().string();
     opts.include_all_dirs = picker_data_.include_all_dirs;
@@ -88,13 +97,21 @@ void PickerController::FetchPickerPage(bool reset) {
     }
     deps_.app.RunOnRpcQueue([this, opts] {
         const auto result = deps_.client.ListSessions(opts);
-        if (!result.status.ok()) return;   // silent: matches the old no-op-on-failure
+        if (!result.status.ok()) {
+            // Silent no-op on failure, matching the old behavior -- but the
+            // latch must still release, or every later load-more is dropped
+            // forever. It is loop-thread state, so the release itself goes
+            // through QueueApply rather than being written from this worker.
+            QueueApply([this] { picker_fetch_in_flight_ = false; });
+            return;
+        }
         const auto& page = result.response.sessions();
         const int64_t fetched = page.size();
         const bool has_more = fetched > kPickerPageSize;
         const int64_t take = has_more ? kPickerPageSize : fetched;
         std::vector<v1::SessionSummary> rows(page.begin(), page.begin() + take);
         QueueApply([this, rows = std::move(rows), has_more]() mutable {
+            picker_fetch_in_flight_ = false;
             picker_data_.has_more = has_more;
             picker_data_.sessions.insert(picker_data_.sessions.end(),
                                          std::make_move_iterator(rows.begin()),
@@ -150,11 +167,17 @@ void PickerController::RebuildPickerComponent() {
                  FetchPickerPage(/*reset=*/true);
                  RebuildPickerComponent();
              },
-         .on_load_more =
-             [this] {
-                 FetchPickerPage(/*reset=*/false);
-                 RebuildPickerComponent();
-             }});
+          .on_load_more =
+              [this] {
+                  // No immediate RebuildPickerComponent here: unlike the
+                  // ctrl+a toggle above, nothing observable changed yet (the
+                  // component's row snapshot still matches picker_data_), so
+                  // a rebuild would only throw away the user's filter text
+                  // and cursor position -- then the fetch's arrival rebuild
+                  // would do it a second time. The data-driven rebuild in
+                  // the apply closure is the only one.
+                  FetchPickerPage(/*reset=*/false);
+              }});
 }
 
 void PickerController::OpenSessionPicker() {

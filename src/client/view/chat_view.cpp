@@ -218,6 +218,14 @@ ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
         column.push_back(text("··· newer messages hidden -- they return with the next turn ···") |
                          dim | color(theme_.ColorFor("system_message")));
     }
+    // A discontinuity INSIDE the window (older-page append landed out of
+    // order -- e.g. a refresh racing a rewind): rows the transcript holds are
+    // simply absent from this view, and without a marker the hole reads as
+    // lost history. Same policy as the trimmed boundary: marked, never silent.
+    if (snapshot.scrollback_gap) {
+        column.push_back(text("··· some messages in this window could not be loaded ···") |
+                         dim | color(theme_.ColorFor("system_message")));
+    }
     // Tracks which column index each ROW's first element landed at, so the
     // row cursor (focused_row_) can mark the right element for scrolling and
     // highlighting below -- a row can be several Elements wide (parts.size()

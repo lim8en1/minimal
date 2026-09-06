@@ -13,6 +13,15 @@
 
 namespace minimal::client {
 
+namespace {
+// Appended ONCE when a streaming buffer (flat accumulation or a single live
+// segment) hits SessionState::kStreamingTextCapBytes; further deltas are
+// dropped after it -- the transcript is authoritative, the turn-end refresh
+// re-fetches the full persisted text.
+constexpr std::string_view kStreamingTruncationMarker =
+    "\n··· live text truncated -- the full text is in the transcript ···\n";
+}  // namespace
+
 // ===========================================================================
 // SessionState — one per tab, thread-safe snapshot surface.
 // All mutators lock an internal mutex (never held across RPC/IO), so they are
@@ -105,6 +114,7 @@ SessionState::Snapshot SessionState::TakeSnapshot() {
     s.transcript_version = transcript_version_;
     s.turn_ended = turn_ended_;
     s.scrollback_trimmed = scrollback_trimmed_;
+    s.scrollback_gap = scrollback_gap_;
     s.turn_seq = turn_seq_;
     s.latest_notice = latest_notice_;
     s.notice_seq = notice_seq_;
@@ -176,6 +186,34 @@ void SessionState::AppendStreamingText(std::string_view text) {
             LiveTurnSegment{.kind = LiveTurnSegment::Kind::Text, .turn_seq = segment_turn});
     }
     live_segments_.back().text.append(text);
+    // Per-segment cap: same 2 MiB budget as the flat accumulation, same
+    // shape (truncate once, append the marker, drop further deltas -- the
+    // transcript is authoritative, the turn-end refresh re-fetches).
+    if (!live_segments_.back().text_truncated &&
+        live_segments_.back().text.size() > kStreamingTextCapBytes) {
+        live_segments_.back().text.resize(kStreamingTextCapBytes);
+        live_segments_.back().text.append(kStreamingTruncationMarker);
+        live_segments_.back().text_truncated = true;
+    }
+    // Segment-COUNT cap: a turn with hundreds of tool round trips would
+    // otherwise grow live_segments_ (and the per-frame deep snapshot)
+    // without limit. Keep the NEWEST segments; on first overflow leave one
+    // marker segment at the oldest position so the cut is visible. A marker
+    // stamped turn_seq 0 is retired first by ClearStreamingIfCurrentTurn
+    // (0 <= any captured turn), which is exactly right: the refresh that
+    // covers the turn replaces it with persisted rows.
+    if (live_segments_.size() > kMaxLiveSegments) {
+        const auto keep_from = live_segments_.begin() +
+                               static_cast<std::ptrdiff_t>(live_segments_.size() - kMaxLiveSegments);
+        live_segments_.erase(live_segments_.begin(), keep_from);
+        if (!live_segments_truncated_) {
+            live_segments_.insert(live_segments_.begin(),
+                                  LiveTurnSegment{.kind = LiveTurnSegment::Kind::Text,
+                                                  .turn_seq = 0,
+                                                  .text = "[...truncated]"});
+            live_segments_truncated_ = true;
+        }
+    }
 
     // A NEW TURN begins only after the previous one ENDED (TurnCompleted/Error)
     // -- message stops fire between tool cycles WITHIN one turn, so arming on
@@ -188,14 +226,28 @@ void SessionState::AppendStreamingText(std::string_view text) {
     // fuses into one document (an unclosed fence from block one would eat
     // block two whole); a blank line is the same break ComposeDocument
     // already puts between rendered blocks (markdown_renderer.cpp).
-    if (!turn_ended_ && !is_streaming_ && !streaming_accumulated_.empty()) {
+    if (!turn_ended_ && !is_streaming_ && !streaming_accumulated_.empty() &&
+        !streaming_truncated_) {
         streaming_accumulated_.append("\n\n");
     }
     if (turn_ended_) {
         ++turn_seq_;
         turn_ended_ = false;
     }
-    streaming_accumulated_.append(text);
+    // Flat accumulation cap: further deltas are DROPPED once the truncation
+    // marker is in place (appending them past the cap would make the cap
+    // decorative and re-grow the per-frame snapshot cost). The transcript
+    // is authoritative -- the turn-end refresh re-fetches the full text.
+    if (streaming_truncated_) {
+        // already capped: skip the delta (the marker below is what renders)
+    } else {
+        streaming_accumulated_.append(text);
+        if (streaming_accumulated_.size() > kStreamingTextCapBytes) {
+            streaming_accumulated_.resize(kStreamingTextCapBytes);
+            streaming_accumulated_.append(kStreamingTruncationMarker);
+            streaming_truncated_ = true;
+        }
+    }
     is_streaming_ = true;
 
     // A fresh assistant turn supersedes any unanswered prompt (including Waiting
@@ -321,8 +373,10 @@ void SessionState::RequestCancel() {
 void SessionState::ClearStreaming() {
     std::lock_guard lk(mtx_);
     streaming_accumulated_.clear();
+    streaming_truncated_ = false;   // fresh accumulation: cap budget resets
     is_streaming_ = false;
     live_segments_.clear();
+    live_segments_truncated_ = false;
 }
 
 void SessionState::ClearStreamingIfCurrentTurn(uint64_t turn_seq) {
@@ -341,8 +395,10 @@ void SessionState::ClearStreamingIfCurrentTurn(uint64_t turn_seq) {
     if (keep_end == live_segments_.begin()) {
         // Nothing survives: the classic clear.
         streaming_accumulated_.clear();
+        streaming_truncated_ = false;
         is_streaming_ = false;
         live_segments_.clear();
+        live_segments_truncated_ = false;
         return;
     }
     // Rebuild the flat accumulation from the surviving text segments (the
@@ -354,6 +410,10 @@ void SessionState::ClearStreamingIfCurrentTurn(uint64_t turn_seq) {
         rebuilt.append(it->text);
     }
     streaming_accumulated_ = std::move(rebuilt);
+    // The rebuild already drops whatever pushed the old flat buffer past the
+    // cap (retired segments go with their turn), so the budget is fresh.
+    streaming_truncated_ =
+        streaming_accumulated_.size() > kStreamingTextCapBytes;
     live_segments_.erase(keep_end, live_segments_.end());
 }
 
@@ -412,8 +472,10 @@ void SessionState::OnResyncRequired(const std::string& reason) {
     // pending prompt is NOT dropped: the server replays outstanding prompts
     // on attach (S5.3), and a prompt whose modal is showing is still real.
     streaming_accumulated_.clear();
+    streaming_truncated_ = false;
     is_streaming_ = false;
     live_segments_.clear();
+    live_segments_truncated_ = false;
     ++transcript_version_;
     common::DefaultLogger().info("session {}: resync required ({})", session_id_, reason);
 }
@@ -439,12 +501,17 @@ void SessionState::OnSessionRewound(int64_t truncated_to_seq, int64_t active_las
         has_earlier_ = !scrollback_page_.empty() ? true : has_earlier_;
     }
     last_loaded_seq_ = scrollback_page_.empty() ? -1 : scrollback_page_.back().seq();
+    // The window was rebuilt wholesale: any previously-detected stitching gap
+    // describes rows that no longer exist in it.
+    scrollback_gap_ = false;
     // The live-state wipe ClearStreaming does (inlined: it locks, we hold mtx_),
     // plus the pending-turn bookkeeping -- the rewound turn's echo has nothing
     // left to retire it and a pending cancel belongs to the discarded turn.
     streaming_accumulated_.clear();
+    streaming_truncated_ = false;
     is_streaming_ = false;
     live_segments_.clear();
+    live_segments_truncated_ = false;
     pending_user_text_.clear();
     cancel_requested_ = false;
     scrollback_page_shared_ =
@@ -482,14 +549,18 @@ void SessionState::SetConfirmationRequest(std::unique_ptr<PendingConfirmation> r
     }
 }
 
-void SessionState::ClearPendingFor(std::string_view request_id) {
+bool SessionState::ClearPendingFor(std::string_view request_id) {
     std::lock_guard lk(mtx_);
+    bool cleared = false;
     if (pending_permission_ && pending_permission_->request_id == request_id) {
         pending_permission_.reset();
+        cleared = true;
     }
     if (pending_confirmation_ && pending_confirmation_->request_id == request_id) {
         pending_confirmation_.reset();
+        cleared = true;
     }
+    return cleared;
 }
 
 void SessionState::OnPendingResolved() {
@@ -659,6 +730,7 @@ void SessionState::ApplyScrollbackPage(const v1::GetMessagesResponse& resp) {
         // Newer than what we hold — keep only the contiguous newest slice (bounded memory).
         scrollback_page_.assign(resp.messages().begin(), resp.messages().end());
         scrollback_trimmed_ = false;
+        scrollback_gap_ = false;   // same reset as the newest-slice refresh's other boundary flag
     } else {
         // Older than (or overlapping) what we hold: append, SKIPPING rows we
         // already hold. The assign branch above must only ever fire when the
@@ -668,8 +740,21 @@ void SessionState::ApplyScrollbackPage(const v1::GetMessagesResponse& resp) {
         // the assign branch REPLACED the window with the older page: the
         // newest rows vanished from the view.
         const int64_t oldest_held = scrollback_page_.back().seq();
+        // Contiguity stitch: walking the page's DESC-order rows, each must be
+        // exactly one below the previous seq we hold/accepted. A row that
+        // lands BELOW that expectation means seqs are missing BETWEEN window
+        // and page (or inside the page) -- a server-side hole (deleted rows,
+        // a rewind race). The eviction marker (scrollback_trimmed_) cannot
+        // describe a hole in the middle, so this records scrollback_gap_ for
+        // the view the same way, and the newest-slice refresh clears both.
+        // Rows already held (seq >= oldest_held, a raced duplicate) and rows
+        // duplicating seqs the page itself already accepted are dropped.
+        int64_t expected_prev = oldest_held - 1;
         for (const auto& stored : resp.messages()) {
             if (stored.seq() >= oldest_held) continue;   // already held (or a raced duplicate)
+            if (stored.seq() > expected_prev) continue;  // duplicate within this page
+            if (stored.seq() < expected_prev) scrollback_gap_ = true;
+            expected_prev = stored.seq() - 1;
             scrollback_page_.push_back(stored);
         }
         // Sliding window (track R2): the wire has only desc-order paging
@@ -1083,7 +1168,15 @@ void AppState::DispatchToTab(const std::string& session_id, const v1::ServerEven
         // S5.3: another subscriber answered first. Dismiss this tab's modal
         // for that request_id if it still has one open -- a no-op on the tab
         // that answered, since it already cleared its own on send.
-        target->ClearPendingFor(event.prompt_resolved().request_id());
+        // OnPendingResolved must ride the same "actually cleared" condition:
+        // the dismissed prompt was the only thing parking the tab (the
+        // server worker was blocked on it), so the tab needs the same
+        // re-derive the local answer path does (AnswerConfirmation) --
+        // without it a tab whose prompt was answered elsewhere stranded in
+        // Waiting (the '!' glyph) and a command confirmation never recovered.
+        if (target->ClearPendingFor(event.prompt_resolved().request_id())) {
+            target->OnPendingResolved();
+        }
     } else if (event.has_session_metadata()) {
         target->OnSessionMetadata(event.session_metadata());   // refreshes tab label later
     } else if (event.has_session_ended()) {
@@ -1174,6 +1267,13 @@ void AppState::DispatchToTab(const std::string& session_id, const v1::ServerEven
 }
 
 void AppState::OnSubagentSpawned(std::string_view parent_id, const v1::SubagentStartedEvent& evt) {
+    // Teardown race: a SubagentStartedEvent can land on a reader thread while
+    // quit is running (DetachAllTabs/CloseAllTabs). Attaching then would open
+    // a stream AFTER the tabs_ snapshot -- teardown never sees it, never
+    // detaches it, and the tab's SessionState is touched mid-destruction.
+    // Drop the spawn instead: the session keeps running server-side and is
+    // resumable, exactly like every other session outlived by a quit.
+    if (shutting_down_.load(std::memory_order_acquire)) return;
     int64_t parent_root = 0;
     {   // find the group id of the parent BEFORE attaching so the child inherits it stably
         std::lock_guard lk(mtx_);
@@ -1482,12 +1582,15 @@ void AppState::RunSessionlessCommand(const std::string& tab_id, const std::strin
     // tab's SessionState exactly like an on-stream CommandResult, so the
     // notice line and the View side-effects (TabMaintenance::HandleNotice)
     // treat both identically.
+    // must_run: the command result resolves a user action (the tab's notice
+    // line / view side-effects); a keystroke-class suggestion may be dropped,
+    // an answered command may not (rpc_queue.hpp).
     rpc_queue_.Submit([this, state, invocation] {
         const auto result = client_->RunSessionlessCommand(invocation.name, invocation.positional,
                                                            invocation.raw);
         state->OnCommandResult(result);
         BumpUiVersion();
-    });
+    }, /*must_run=*/true);
 }
 
 void AppState::TabNotice(const std::string& tab_id, const std::string& message) {
@@ -1744,6 +1847,11 @@ void AppState::RequestScrollback(const std::string& session_id, bool newest) {
     // original synchronous body called it directly instead. Safe: RunTui
     // joins the worker (StopRpcQueue) before AppState can be destroyed, so
     // no queued job outlives its `this`.
+    // must_run: the job resolves SessionState's older_fetch_pending_ latch
+    // (opened by TryBeginOlderFetch before this Submit) and the refresh
+    // machine's refresh_pending (resolved only by a refresh_seq bump, which
+    // only a run produces) -- drop-oldest eviction of this job stranded both
+    // forever, so it is protected (rpc_queue.hpp).
     rpc_queue_.Submit([this, state, session_id, newest, cursor, turn_at_submit] {
         v1::GetMessagesResponse resp;
         grpc::ClientContext context;
@@ -1779,7 +1887,7 @@ void AppState::RequestScrollback(const std::string& session_id, bool newest) {
             state->EndOlderFetch();
         }
         BumpUiVersion();
-    });
+    }, /*must_run=*/true);
 }
 
 std::vector<AppState::TabSnapshot> AppState::GetAllTabs(bool include_tool_output) const {
@@ -1846,6 +1954,11 @@ std::string AppState::FocusedTabId() const {
 }
 
 void AppState::CloseAllTabs() {
+    // Latch BEFORE anything else -- before the tabs_ snapshot and the drain:
+    // a subagent spawn landing after the snapshot but before the clear is
+    // exactly the attach-we-never-detach race, and the latch is what makes
+    // OnSubagentSpawned refuse it (see there).
+    shutting_down_.store(true, std::memory_order_release);
     std::vector<std::shared_ptr<SessionClient::Stream>> to_close;
     {
         std::lock_guard lk(mtx_);
@@ -1868,6 +1981,12 @@ void AppState::DetachAllTabs() {
     // of Close(): every session this client was attached to keeps running
     // server-side (any turn in flight completes unattended), rather than
     // being torn down just because the terminal closed.
+    //
+    // Latch FIRST (before the tabs_ snapshot): a spawn landing after the
+    // snapshot would open a stream no teardown will ever detach -- see
+    // OnSubagentSpawned. Spawns racing BEFORE the latch are still drained by
+    // the tabs_ copy below (they are already in tabs_).
+    shutting_down_.store(true, std::memory_order_release);
     std::vector<std::shared_ptr<SessionClient::Stream>> to_detach;
     {
         std::lock_guard lk(mtx_);

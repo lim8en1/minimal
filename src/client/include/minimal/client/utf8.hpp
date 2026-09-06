@@ -39,38 +39,105 @@ inline std::string TruncateUtf8(const std::string& text, std::size_t max_bytes) 
     return text.substr(0, end);
 }
 
-// Counts CODEPOINTS (lead bytes), not raw bytes: an approximation of terminal
-// column width that treats every codepoint as one column. Not a full wcwidth
-// (a wide CJK glyph still counts as 1, so it under-measures those), but a
-// vast improvement over counting UTF-8 BYTES, which over-counts every
-// non-ASCII character 2-4x -- the bug this replaced (tab_bar.cpp truncating
-// and budgeting tab labels by `std::string::size()`).
-inline std::size_t Utf8ColumnWidth(std::string_view text) {
-    std::size_t count = 0;
-    for (unsigned char c : text) {
-        if ((c & 0xC0) != 0x80) ++count;  // not a continuation byte
+// Terminal display columns for one code point, per the ranges East Asian
+// Width marks Wide/Fullwidth and the common emoji planes. Not a full wcwidth
+// (no ambient-charset awareness, no unassigned-code-point subtleties) but it
+// covers what actually overflows a tab budget: CJK text and emoji count 2,
+// not 1, which is the bug this replaced (codepoint counting under-measured
+// those labels 2x, so "budgeted" tab bars still clipped or wrapped).
+inline std::size_t Utf8CharColumnWidth(char32_t cp) {
+    // Combining marks occupy no column of their own (they modify the
+    // preceding one).
+    if (cp >= 0x0300 && cp <= 0x036F) return 0;
+    if ((cp >= 0x1100 && cp <= 0x115F) ||    // Hangul Jamo leading consonants
+        (cp >= 0x2E80 && cp <= 0xA4CF) ||    // CJK radicals through Yijing hexagrams
+        (cp >= 0xAC00 && cp <= 0xD7A3) ||    // Hangul syllables
+        (cp >= 0xF900 && cp <= 0xFAFF) ||    // CJK compatibility ideographs
+        (cp >= 0xFE30 && cp <= 0xFE4F) ||    // CJK compatibility forms
+        (cp >= 0xFF00 && cp <= 0xFF60) ||    // fullwidth ASCII/forms
+        (cp >= 0xFFE0 && cp <= 0xFFE6) ||    // fullwidth symbols
+        (cp >= 0x1F300 && cp <= 0x1F64F) ||  // emoji (misc symbols and pictographs)
+        (cp >= 0x1F900 && cp <= 0x1F9FF) ||  // emoji (supplemental symbols)
+        (cp >= 0x20000 && cp <= 0x3FFFD)) {  // CJK extension planes B+
+        return 2;
     }
-    return count;
+    return 1;
+}
+
+// Decodes the UTF-8 code point at text[*i] and advances *i past it. Malformed
+// sequences (a truncated or non-continuation tail) are consumed one byte at a
+// time as U+FFFD: measurement must never walk off the end of a bad label, and
+// a width-1 approximation for each stray byte is the same treatment the old
+// byte-counting code effectively gave them.
+inline char32_t Utf8Decode(std::string_view text, std::size_t& i) {
+    const unsigned char lead = static_cast<unsigned char>(text[i]);
+    std::size_t length = 0;
+    char32_t cp = 0;
+    if (lead < 0x80) {
+        length = 1;
+        cp = lead;
+    } else if ((lead & 0xE0) == 0xC0) {
+        length = 2;
+        cp = lead & 0x1F;
+    } else if ((lead & 0xF0) == 0xE0) {
+        length = 3;
+        cp = lead & 0x0F;
+    } else if ((lead & 0xF8) == 0xF0) {
+        length = 4;
+        cp = lead & 0x07;
+    } else {
+        ++i;   // stray continuation byte
+        return 0xFFFD;
+    }
+    if (i + length > text.size()) {
+        ++i;
+        return 0xFFFD;
+    }
+    for (std::size_t k = 1; k < length; ++k) {
+        const unsigned char cont = static_cast<unsigned char>(text[i + k]);
+        if ((cont & 0xC0) != 0x80) {
+            ++i;
+            return 0xFFFD;
+        }
+        cp = (cp << 6) | (cont & 0x3F);
+    }
+    i += length;
+    return cp;
+}
+
+// Counts DISPLAY COLUMNS, not raw bytes and not codepoints: a wide CJK/emoji
+// code point is 2 columns, a combining mark 0, everything else 1 (see
+// Utf8CharColumnWidth above).
+inline std::size_t Utf8ColumnWidth(std::string_view text) {
+    std::size_t columns = 0;
+    std::size_t i = 0;
+    while (i < text.size()) {
+        columns += Utf8CharColumnWidth(Utf8Decode(text, i));
+    }
+    return columns;
 }
 
 // Truncates to at most `max_columns` display columns (see Utf8ColumnWidth
 // above), appending an ellipsis when truncation happens. Never splits a
-// codepoint. One column of `max_columns` is reserved for the ellipsis itself,
-// so the result's own column width never exceeds `max_columns`.
+// codepoint: the cut lands on a lead byte, and because a wide character
+// contributes its full 2 columns atomically, one is never half-kept at the
+// limit. One column of `max_columns` is reserved for the ellipsis itself, so
+// the result's own column width never exceeds `max_columns`.
 inline std::string TruncateUtf8Columns(const std::string& text, std::size_t max_columns) {
     if (Utf8ColumnWidth(text) <= max_columns) return text;
     if (max_columns == 0) return "";
     const std::size_t keep = max_columns - 1;
     std::size_t seen = 0;
     std::size_t cut = text.size();
-    for (std::size_t i = 0; i < text.size(); ++i) {
-        if ((static_cast<unsigned char>(text[i]) & 0xC0) != 0x80) {
-            if (seen == keep) {
-                cut = i;
-                break;
-            }
-            ++seen;
+    std::size_t i = 0;
+    while (i < text.size()) {
+        const std::size_t start = i;
+        const std::size_t width = Utf8CharColumnWidth(Utf8Decode(text, i));
+        if (seen + width > keep) {
+            cut = start;
+            break;
         }
+        seen += width;
     }
     return text.substr(0, cut) + "\xE2\x80\xA6";  // U+2026 HORIZONTAL ELLIPSIS
 }

@@ -15,6 +15,10 @@ inline constexpr std::chrono::milliseconds kWriterWakeup = std::chrono::millisec
 // server must cost the editor a bounded pause, not the UI (this was the one
 // unary call with no deadline; every other caller bounds its fetches).
 inline constexpr std::chrono::milliseconds kSuggestPathsDeadline = std::chrono::milliseconds(250);
+// How long Detach() waits for its writer to flush the DETACH before issuing
+// the context cancel as a last resort (see Stream::Detach): long enough for
+// any healthy round trip, far short of hanging quit forever.
+inline constexpr std::chrono::seconds kDetachJoinTimeout = std::chrono::seconds(2);
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -28,9 +32,16 @@ SessionClient::SessionClient(std::string server_address)
 
 SessionClient::~SessionClient() {
     // Cancel any live PluginSubscribe readers so their Read()s return instead
-    // of racing this destruction.
-    std::lock_guard lk(subscribe_mtx_);
-    for (auto* context : active_subscribes_) context->TryCancel();
+    // of racing this destruction. The registry is shared with the subscribers
+    // (see SubscribeRegistry in the header): each subscriber holds its own
+    // reference, so a subscriber woken by this cancel can still run its
+    // erase AFTER this destructor body -- against a registry that is still
+    // alive. (The previous plain-member version raced that erase against
+    // the member set's own destruction: use-after-destroy.)
+    {
+        std::lock_guard lk(subscribes_->mtx);
+        for (auto* context : subscribes_->active) context->TryCancel();
+    }
 }
 
 bool SessionClient::WaitForConnected(std::chrono::milliseconds timeout) {
@@ -207,10 +218,15 @@ SubscribeOutcome SessionClient::PluginSubscribe(
     // escape hatch is on_payload returning false, which cancels the call.
     // Registered for teardown: a subscriber still blocked in Read() at client
     // destruction is unblocked by ~SessionClient's cancel sweep instead of
-    // racing destruction.
+    // racing destruction. `registry` is OUR reference to the shared registry
+    // (not `this->subscribes_` re-read each time): it keeps the mutex and set
+    // alive even if ~SessionClient finishes while this subscriber is still
+    // winding down -- every access below touches the shared_ptr's object,
+    // never a member that could already be destroyed.
+    const auto registry = subscribes_;
     {
-        std::lock_guard lk(subscribe_mtx_);
-        active_subscribes_.insert(&context);
+        std::lock_guard lk(registry->mtx);
+        registry->active.insert(&context);
     }
     v1::PluginCallRequest request;
     request.set_plugin_name(plugin_name);
@@ -222,16 +238,16 @@ SubscribeOutcome SessionClient::PluginSubscribe(
         if (on_payload && !on_payload(response.json_payload())) {
             context.TryCancel();
             {
-                std::lock_guard lk(subscribe_mtx_);
-                active_subscribes_.erase(&context);
+                std::lock_guard lk(registry->mtx);
+                registry->active.erase(&context);
             }
             return SubscribeOutcome::kCancelled;
         }
     }
     const grpc::Status final_status = reader->Finish();
     {
-        std::lock_guard lk(subscribe_mtx_);
-        active_subscribes_.erase(&context);
+        std::lock_guard lk(registry->mtx);
+        registry->active.erase(&context);
     }
     if (status != nullptr) *status = final_status;
     return final_status.ok() ? SubscribeOutcome::kEnded : SubscribeOutcome::kError;
@@ -282,6 +298,11 @@ grpc::Status SessionClient::RunTurn(
     {
         std::lock_guard<std::mutex> lock(control->mu);
         control->stream = stream.get();
+        // Deferred-cancel handoff: a Cancel published by on_handle (above)
+        // ran before the stream was stored and latched cancel_pending
+        // instead of no-op'ing. Deliver it now, BEFORE the first Read(), so
+        // the interrupt cannot be lost to the publication window.
+        if (control->cancel_pending) stream->Write(control->cancel_event);
     }
 
     v1::ServerEvent event;
@@ -545,11 +566,29 @@ void SessionClient::Stream::Close() {
     // hard-won lesson: Finish() before the reader drains deadlocks both sides.
     // The reader thread itself Finish()es the call when Read() returns false.
     if (reader_.joinable()) {
-        reader_.join();
+        JoinReaderOrDetachSelf();
     } else if (bidi_) {
         // Threads never started (Open/Attach failed, or an abandoned
         // duplicate): nothing can race us; reap the call directly.
         SetStatus(bidi_->Finish());
+    }
+}
+
+void SessionClient::Stream::JoinReaderOrDetachSelf() {
+    if (!reader_.joinable()) return;
+    if (reader_.get_id() == std::this_thread::get_id()) {
+        // We ARE the reader thread: ~Stream is running here because the
+        // on_closed_ callback dropped the last Stream reference. Joining
+        // the current thread throws (and ~Stream would then std::terminate
+        // on the still-joinable member it destroys), so detach instead.
+        // Safe ONLY in this configuration -- the reader lambda's tail after
+        // on_closed_ is empty (the self-join invariant on Close() in the
+        // header), so this thread touches no member again before it
+        // finishes -- and the detach keeps ~Stream's destruction of the
+        // std::thread member legal.
+        reader_.detach();
+    } else {
+        reader_.join();
     }
 }
 
@@ -569,13 +608,36 @@ void SessionClient::Stream::Detach() {
     }
     send_cv_.notify_all();
 
-    // No TryCancel: see the header. The writer flushes DETACH (and anything
-    // queued ahead of it) and calls WritesDone() on its own; the server reads
-    // DETACH, unsubscribes this stream, and returns -- ending the RPC without
-    // needing to be cancelled.
-    if (writer_.joinable()) writer_.join();
+    // No TryCancel up front: see the header. The writer flushes DETACH (and
+    // anything queued ahead of it) and calls WritesDone() on its own; the
+    // server reads DETACH, unsubscribes this stream, and returns -- ending
+    // the RPC without needing to be cancelled.
+    //
+    // BOUNDED join, though: a server wedged mid-turn leaves the writer
+    // blocked in a flow-control-stalled Write() where no amount of waiting
+    // helps, and Detach runs at quit -- a plain join hung the whole client.
+    // Past the bound the cancel IS issued (teardown; a cancelled status is
+    // acceptable there, and any unsent tail is lost the same way Close()
+    // would lose it). writer_exited_ -- latched under qmtx_ just before the
+    // writer's final WritesDone -- is the timed wait's predicate; the
+    // join() below only reaps an already-finishing thread.
+    if (writer_.joinable()) {
+        const auto deadline = std::chrono::steady_clock::now() + kDetachJoinTimeout;
+        {
+            std::unique_lock lk(qmtx_);
+            if (!writer_cv_.wait_until(lk, deadline, [this] { return writer_exited_; })) {
+                context_.TryCancel();
+                // After the cancel a blocked Write() returns false, the
+                // writer breaks out, and the flag lands; no further timeout
+                // is needed (a second one could only paper over a genuine
+                // gRPC bug worth surfacing as a hang).
+                writer_cv_.wait(lk, [this] { return writer_exited_; });
+            }
+        }
+        writer_.join();
+    }
     if (reader_.joinable()) {
-        reader_.join();
+        JoinReaderOrDetachSelf();
     } else if (bidi_) {
         SetStatus(bidi_->Finish());
     }
@@ -680,6 +742,16 @@ void SessionClient::Stream::LaunchWriterThread() {
         // Half-close our send side now that we have stopped writing. The reader continues
         // consuming the server's final output until Read()==false, then Finish().
         if (bidi_) bidi_->WritesDone();
+        // Latch the exit for Detach()'s bounded join (see there): the wait
+        // predicate needs a signal under qmtx_, since a thread blocked in
+        // Write() gives a plain join() no timeout handle. Latched AFTER the
+        // WritesDone -- once the flag is set, Detach may proceed to destroy
+        // the stream, so nothing may touch `this` below it.
+        {
+            std::lock_guard lk(qmtx_);
+            writer_exited_ = true;
+        }
+        writer_cv_.notify_all();
     });
 }
 

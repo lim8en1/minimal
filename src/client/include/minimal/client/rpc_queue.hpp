@@ -52,7 +52,19 @@ public:
     // Enqueues `job` for the worker thread. Never blocks. A no-op after
     // Stop() (or during ~RpcQueue), so a straggling Submit from a callback
     // mid-teardown is silently dropped rather than resurrecting the worker.
-    void Submit(Job job);
+    //
+    // `must_run` marks a job the drop-oldest eviction may NEVER drop. Jobs
+    // that resolve a latch -- a scrollback refresh (clears the refresh
+    // machine's refresh_pending via its refresh_seq bump), an older-page
+    // fetch (clears older_fetch_pending_ inside the job), an EnsureSession
+    // or sessionless command (resolves queued user actions) -- strand that
+    // latch forever when evicted: the setter already fired and the job was
+    // the only clearer. Keystroke-class jobs (@-mention suggestions) carry
+    // no latch and stay droppable (the default). A queue full of must-run
+    // jobs cannot be evicted into; it is allowed to overrun capacity
+    // rather than strand one -- bounded in practice by the handful of
+    // per-tab latches that exist.
+    void Submit(Job job, bool must_run = false);
 
     // Wakes the worker with no more work coming and joins it. Idempotent.
     // Jobs still queued when Stop() runs are DISCARDED, not drained -- the
@@ -64,10 +76,18 @@ public:
 private:
     void WorkerMain();
 
+    // A queued job plus its eviction class (see Submit). must_run jobs are
+    // skipped by drop-oldest: they resolve latches whose only clearer is
+    // the job itself.
+    struct Item {
+        Job job;
+        bool must_run;
+    };
+
     std::size_t capacity_;
     std::mutex mtx_;
     std::condition_variable cv_;
-    std::deque<Job> queue_;
+    std::deque<Item> queue_;
     bool stopping_ = false;
     std::thread worker_;
 };

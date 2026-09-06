@@ -102,29 +102,44 @@ public:
         // reading) -- the caller should surface that rather than retry blindly.
         bool Send(const v1::ClientEvent& event);
 
-        // Half-close our send side, drain remaining server output, then Finish(). Safe from
-        // any thread (idempotent via closed_ latch). Closing the last stream of a session
-        // terminates it server-side; closing one tab leaves others running.
-        //
-        // The bidi context is CANCELLED before the joins: a writer blocked in
-        // Write() (server stopped reading) or a reader blocked in Read() (wedged
-        // connection) would otherwise hang Close() -- which runs on the UI
-        // thread from CloseTab/quit -- forever. Cancel costs queued-but-unsent
-        // events, which is consistent with Close's documented destructiveness:
-        // the session is being torn down regardless.
-        void Close();
+    // Half-close our send side, drain remaining server output, then Finish(). Safe from
+    // any thread (idempotent via closed_ latch). Closing the last stream of a session
+    // terminates it server-side; closing one tab leaves others running.
+    //
+    // The bidi context is CANCELLED before the joins: a writer blocked in
+    // Write() (server stopped reading) or a reader blocked in Read() (wedged
+    // connection) would otherwise hang Close() -- which runs on the UI
+    // thread from CloseTab/quit -- forever. Cancel costs queued-but-unsent
+    // events, which is consistent with Close's documented destructiveness:
+    // the session is being torn down regardless.
+    //
+    // SELF-JOIN INVARIANT: ~Stream runs Close(), and ~Stream can itself run
+    // ON the reader thread (the on_closed_ callback dropping the last
+    // Stream reference). Close() detects that case and detaches the reader
+    // instead of joining it -- joining the current thread throws, and an
+    // unjoined joinable std::thread destroyed in ~Stream terminates. This
+    // is safe only because the reader lambda's tail after on_closed_ is
+    // empty: the thread never touches members again.
+    void Close();
 
-        // S5.4: the graceful sibling of Close(). Sends EndSession{DETACH}
-        // (queued ahead of closing_, so anything already pending flushes
-        // first), then half-closes and joins WITHOUT the TryCancel() Close()
-        // uses -- the point of detaching is to let the writer actually
-        // deliver that message rather than possibly losing it to a cancel
-        // race, and the server ends this stream's RPC normally once it reads
-        // the DETACH (Dispatch's read loop, session_service.cpp), so there is
-        // nothing here for a cancel to rescue. The SESSION keeps running;
-        // only this stream ends. Safe from any thread, idempotent (shares
-        // Close()'s closed_ latch -- whichever of the two runs first wins).
-        void Detach();
+    // S5.4: the graceful sibling of Close(). Sends EndSession{DETACH}
+    // (queued ahead of closing_, so anything already pending flushes
+    // first), then half-closes and joins WITHOUT the TryCancel() Close()
+    // uses -- the point of detaching is to let the writer actually
+    // deliver that message rather than possibly losing it to a cancel
+    // race, and the server ends this stream's RPC normally once it reads
+    // the DETACH (Dispatch's read loop, session_service.cpp), so there is
+    // nothing here for a cancel to rescue -- NORMALLY. The writer's join
+    // is still bounded (2 s): a server that wedged mid-turn leaves the
+    // writer blocked in a flow-control-stalled Write(), and a plain join
+    // would hang the whole client at quit. Past the bound the context IS
+    // cancelled: the client is quitting (Detach runs only from
+    // DetachAllTabs at teardown), so losing the unsent tail and ending
+    // the RPC with a CANCELLED status is acceptable there. The SESSION
+    // keeps running; only this stream ends. Safe from any thread,
+    // idempotent (shares Close()'s closed_ latch -- whichever of the two
+    // runs first wins).
+    void Detach();
 
         // Unblocks the underlying call without the full Close() discipline
         // (joins, Finish). For streams being discarded without ever having
@@ -155,6 +170,10 @@ public:
     void LaunchWriterThread();
     void OpenBidi();             // constructs the gRPC bidi once (lazy); threads start in Resume()
     void EnqueueNamingEvent();   // queue an empty ClientEvent that names the stream
+    // Joins the reader thread, EXCEPT on the reader thread itself (see
+    // Close()'s self-join invariant): there it detaches instead -- joining
+    // the current thread throws and would std::terminate via ~Stream.
+    void JoinReaderOrDetachSelf();
 
         std::shared_ptr<grpc::Channel> channel_;
         std::unique_ptr<v1::SessionService::Stub> stub_;
@@ -192,17 +211,19 @@ public:
 
         std::thread writer_;
         std::thread reader_;
+        // Bounded-join support for Detach(): a plain join() has no timeout,
+        // and a writer blocked in a flow-control-stalled Write() (wedged
+        // server) would hang quit forever. The writer latches writer_exited_
+        // under qmtx_ just before returning; Detach waits with a timeout on
+        // writer_cv_, cancels past the bound, waits again.
+        std::condition_variable writer_cv_;
+        bool writer_exited_ = false;   // guarded by qmtx_; set once, near the writer's end
         std::atomic<bool> resumed_{false};   // threads started at most once
         std::atomic<bool> closed_{false};    // Close() called
     };
 
     explicit SessionClient(std::string server_address);
     ~SessionClient();
-
-    // Cancels live PluginSubscribe calls at teardown: a subscriber still
-    // blocked in Read() when the client dies would otherwise race destruction.
-    std::mutex subscribe_mtx_;
-    std::unordered_set<grpc::ClientContext*> active_subscribes_;
 
     SessionClient(const SessionClient&) = delete;
     SessionClient& operator=(const SessionClient&) = delete;
@@ -401,16 +422,26 @@ private:
     // every write on the stream -- RunTurn's permission answers included --
     // takes mu. stream is null before the turn is sent and after RunTurn
     // returns, which is what makes a late Cancel a harmless no-op.
+    //
+    // cancel_pending closes the publication race: the handle is published
+    // (on_handle) BEFORE RunTurn stores `stream`, so a Cancel arriving in
+    // that window used to find stream == nullptr and silently no-op -- the
+    // interrupt was lost. It latches here instead, and RunTurn delivers the
+    // cancel right after storing the stream, before its first Read().
     struct TurnControl {
         std::mutex mu;
         v1::ClientEvent cancel_event;
         grpc::ClientReaderWriter<v1::ClientEvent, v1::ServerEvent>* stream = nullptr;
+        bool cancel_pending = false;
     };
 
 public:
     // Cancels the turn of the RunTurn call that produced this handle. The
     // server ends the turn with a TurnCompletedEvent carrying
-    // STOP_REASON_CANCELLED; RunTurn keeps reading until it arrives.
+    // STOP_REASON_CANCELLED; RunTurn keeps reading until it arrives. Safe to
+    // call before the turn's stream exists (the cancel is remembered and
+    // delivered by RunTurn the moment it stores the stream) and a no-op once
+    // the stream has closed.
     class TurnHandle {
     private:
         // Pass-key: Token is private, so only SessionClient (a friend) can
@@ -423,7 +454,15 @@ public:
             const auto control = control_;
             if (!control) return;
             std::lock_guard<std::mutex> lock(control->mu);
-            if (control->stream != nullptr) control->stream->Write(control->cancel_event);
+            if (control->stream != nullptr) {
+                control->stream->Write(control->cancel_event);
+            } else {
+                // Published before RunTurn stored the stream (the on_handle
+                // window): remember it -- RunTurn delivers the cancel right
+                // after storing -- rather than silently dropping the
+                // interrupt.
+                control->cancel_pending = true;
+            }
         }
 
         explicit TurnHandle(std::shared_ptr<TurnControl> control, Token)
@@ -438,6 +477,20 @@ private:
     std::string server_address_;
     std::shared_ptr<grpc::Channel> channel_;
     std::unique_ptr<v1::SessionService::Stub> stub_;
+
+    // Teardown registry for live PluginSubscribe calls. SHARED with each
+    // subscriber (shared_ptr): ~SessionClient's cancel sweep and the
+    // subscriber's own erase (PluginSubscribe's exit paths) both touch this
+    // set, and a woken subscriber can run AFTER ~SessionClient's body --
+    // with the set as a plain member its erase raced the member's own
+    // destruction (use-after-destroy). The registry dies with the LAST
+    // holder instead, so the erase is always on a live object.
+    struct SubscribeRegistry {
+        std::mutex mtx;
+        std::unordered_set<grpc::ClientContext*> active;
+    };
+    std::shared_ptr<SubscribeRegistry> subscribes_ = std::make_shared<SubscribeRegistry>();
+
     // Monotonic command request ids; the server echoes them verbatim.
     // ATOMIC, because its own comment describes the racy case as the reason it
     // exists: "two commands on different streams of the same client would

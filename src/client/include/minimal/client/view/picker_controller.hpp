@@ -131,6 +131,14 @@ private:
 
     Dependencies deps_;
     PickerData picker_data_;
+    // "Load more" in-flight latch (loop-thread state, like picker_data_):
+    // FetchPickerPage(false) refuses to queue a second same-cursor fetch
+    // while one is outstanding, and the fetch's apply closure (or its
+    // failure path) releases it. Without it, key-repeat on arrow-down-at-end
+    // queued several identical ListSessions calls whose arrivals each
+    // appended the SAME page -- duplicated rows -- and each arrival rebuilt
+    // the picker component, resetting its filter/selection per rebuild.
+    bool picker_fetch_in_flight_ = false;
     // The agent picker's list: fetched whole on each open (no pagination,
     // no sort -- agents/*.md is small and has no "recent" axis).
     std::vector<v1::AgentPresetSummary> agent_picker_presets_;

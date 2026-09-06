@@ -1,5 +1,6 @@
 #include "minimal/client/rpc_queue.hpp"
 
+#include <algorithm>
 #include <utility>
 
 namespace minimal::client {
@@ -10,15 +11,26 @@ RpcQueue::RpcQueue(std::size_t capacity) : capacity_(capacity) {
 
 RpcQueue::~RpcQueue() { Stop(); }
 
-void RpcQueue::Submit(Job job) {
+void RpcQueue::Submit(Job job, const bool must_run) {
     if (!job) return;
     {
         std::lock_guard lk(mtx_);
         if (stopping_) return;   // dropped: no worker left to run it
         if (queue_.size() >= capacity_) {
-            queue_.pop_front();   // oldest job is the stalest -- see header
+            // Drop-oldest, but never a must-run job: it resolves a latch whose
+            // setter has already fired and whose only clearer is the job itself
+            // -- evicting it latched refresh_pending / older_fetch_pending_
+            // forever (refresh_seq is only bumped by a run, never by a drop).
+            const auto droppable = std::find_if(queue_.begin(), queue_.end(),
+                                                [](const Item& item) { return !item.must_run; });
+            if (droppable != queue_.end()) {
+                queue_.erase(droppable);   // oldest droppable job is the stalest -- see header
+            }
+            // Every queued job is must-run: push anyway (transient overrun --
+            // see Submit's comment) rather than strand a latch. The queue
+            // drains as soon as the worker's current job returns.
         }
-        queue_.push_back(std::move(job));
+        queue_.push_back(Item{std::move(job), must_run});
     }
     cv_.notify_one();
 }
@@ -41,7 +53,7 @@ void RpcQueue::WorkerMain() {
             std::unique_lock lk(mtx_);
             cv_.wait(lk, [this] { return stopping_ || !queue_.empty(); });
             if (stopping_) return;   // Stop() already cleared queue_; nothing left to run
-            job = std::move(queue_.front());
+            job = std::move(queue_.front().job);
             queue_.pop_front();
         }
         job();   // off the loop thread; the job publishes its own result

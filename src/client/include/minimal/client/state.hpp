@@ -1,6 +1,7 @@
 #pragma once
 
 #include <chrono>
+#include <cstddef>
 #include <functional>
 #include <map>
 #include <memory>
@@ -84,6 +85,12 @@ struct LiveTurnSegment {
     // Kind::Text: this segment's OWN accumulated text (one content block's
     // worth) -- NOT the whole turn's text, unlike Snapshot::streaming_text.
     std::string text;
+    // True once `text` hit SessionState::kStreamingTextCapBytes: further
+    // deltas for THIS segment are dropped (the truncation marker inside
+    // `text` was appended once). The transcript itself is authoritative --
+    // the turn-end refresh re-fetches the full persisted text -- so the
+    // truncation is presentation-only.
+    bool text_truncated = false;
     // Kind::Tool: which tool -- cross-referenced against Snapshot::tools by
     // id at render time; this struct carries no tool state of its own so
     // ToolExecutionState stays the single source of truth for it.
@@ -140,6 +147,15 @@ public:
     // right after construction, before any event can arrive.
     static constexpr int kDefaultScrollbackWindowMaxMessages = 2000;
     static constexpr int kDefaultToolOutputBufferBytes = 64 * 1024;
+
+    // Streaming caps (see the members below). 2 MiB of live text is far past
+    // what a human reads mid-turn; the transcript is authoritative -- the
+    // turn-end refresh re-fetches the full persisted text.
+    static constexpr std::size_t kStreamingTextCapBytes = 2 * 1024 * 1024;
+    // Live-segment count cap: the NEWEST segments are kept; on first
+    // overflow a single "[...truncated]" marker segment is left at the
+    // oldest position so the cut is visible, never silent.
+    static constexpr std::size_t kMaxLiveSegments = 100;
     void SetBounds(int scrollback_max_messages, int tool_output_buffer_bytes);
 
     // Renderable copy taken under a short lock held minimally (no blocking I/O).
@@ -215,6 +231,15 @@ public:
         // newest message, so the view renders a boundary marker instead of a
         // silent gap. Cleared by the newest-slice refresh at turn end.
         bool scrollback_trimmed = false;
+
+        // True when an older-page apply could not be stitched contiguously
+        // onto the window (a server-side hole between the fetched rows and
+        // what we already held -- e.g. rows deleted or lost across a rewind):
+        // there are seq values missing INSIDE the window, which no boundary
+        // marker at either end can account for. The view can render a gap
+        // marker for it the way it does scrollback_trimmed. Cleared by the
+        // newest-slice refresh (the same reset scrollback_trimmed gets).
+        bool scrollback_gap = false;
 
         // Increments once per streaming turn (new stream start). The frame's
         // maintain pass keys stream recreation on this instead of the old
@@ -379,7 +404,12 @@ public:
     // --- Pending interactions ---
     void SetPermissionRequest(std::unique_ptr<PendingPermission> req);
     void SetConfirmationRequest(std::unique_ptr<PendingConfirmation> req);
-    void ClearPendingFor(std::string_view request_id);
+    // Clears any pending modal matching `request_id`. Returns TRUE when
+    // something was actually cleared -- callers that must re-derive the tab
+    // state afterwards (the worker was parked on that prompt) use the return
+    // value so a no-op clear (the request was never ours, or already
+    // answered) does not fire the re-derive spuriously.
+    bool ClearPendingFor(std::string_view request_id);
 
     // A pending prompt was just answered. The server worker was BLOCKED on
     // this answer, so no further event is guaranteed to re-derive the tab
@@ -465,6 +495,7 @@ private:
     uint64_t refresh_seq_ = 0;   // see Snapshot::refresh_seq
     bool refresh_succeeded_ = false;   // outcome of the attempt that bumped refresh_seq_
     bool scrollback_trimmed_ = false;
+    bool scrollback_gap_ = false;   // see Snapshot::scrollback_gap
     int scrollback_max_messages_ = kDefaultScrollbackWindowMaxMessages;
     int tool_output_buffer_bytes_ = kDefaultToolOutputBufferBytes;
 
@@ -496,7 +527,17 @@ private:
     int64_t context_window_tokens_ = 0;
 
     // Streaming assistant text
+    // CAPPED (track R2): a runaway turn must not grow client memory (or the
+    // per-frame deep snapshot, which copies both members) without limit.
+    // streaming_accumulated_ stops at kStreamingTextCapBytes -- further
+    // deltas are dropped once a truncation marker has been appended; the
+    // count of live_segments_ stops at kMaxLiveSegments (newest kept, a
+    // single "[...truncated]" marker left at the oldest position). The
+    // transcript itself is authoritative: the post-turn refresh re-fetches
+    // the full persisted text (scrollback_refresh.hpp).
     std::string streaming_accumulated_;
+    bool streaming_truncated_ = false;      // streaming_accumulated_ hit its cap
+    bool live_segments_truncated_ = false;  // the marker segment is in place
     bool is_streaming_ = false;
     uint64_t turn_seq_ = 0;    // increments when a NEW TURN's stream starts
     bool turn_ended_ = true;   // armed by OnTurnCompleted/OnError; disarmed by the next delta
@@ -828,7 +869,15 @@ public:
     // synchronous contract is load-bearing for the existing E2E
     // test suite (app_state_test.cpp) and for callers that legitimately
     // need it immediately (headless mode, tests).
-    void RunOnRpcQueue(std::function<void()> job) { rpc_queue_.Submit(std::move(job)); }
+    //
+    // `must_run` defaults to TRUE: everything routed through this hatch
+    // today resolves a latch or a user action (EnsureSession's queued
+    // sends, the picker's DeleteSession) and must never be dropped by the
+    // queue's eviction (rpc_queue.hpp). A genuinely droppable keystroke-
+    // class job (RequestSuggestPaths) submits directly with must_run=false.
+    void RunOnRpcQueue(std::function<void()> job, bool must_run = true) {
+        rpc_queue_.Submit(std::move(job), must_run);
+    }
 
 private:
     struct TabEntry {
@@ -903,6 +952,14 @@ private:
     // EffectiveChatSurface -- a plain bool here was an unsynchronized
     // read/write race across threads (TSan-visible).
     std::atomic<bool> chat_surface_broken_{false};
+
+    // Teardown latch (fix for "subagent attached concurrently with quit is
+    // never detached"): set as the FIRST act of CloseAllTabs/DetachAllTabs,
+    // BEFORE tabs_ is drained. OnSubagentSpawned checks it and refuses to
+    // attach, so a SubagentStartedEvent landing on a reader thread during
+    // quit can neither open a stream that no teardown will ever detach, nor
+    // touch tabs_/SetFocusedTab mid-destruction.
+    std::atomic<bool> shutting_down_{false};
 
     void FocusWithWrap(bool forward);       // shared logic for the two cycle methods
     // Unlocked, mutex held by caller. Tab-keyed (the UI's primary axis).

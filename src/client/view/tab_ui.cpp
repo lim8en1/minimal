@@ -181,22 +181,31 @@ void TabMaintenance::MaintainModals(const SessionState::Snapshot& snap) {
     if (snap.pending_permission.has_value()) {
         const auto& request = *snap.pending_permission;
         if (ui.grants_for_request != request.request_id) {
-            ui.grants = std::make_unique<GrantToggles>();
             ui.grants_for_request = request.request_id;
+            // ONE shared_ptr shared by the modal component and the answer
+            // closure. The old code captured a raw `&toggles` (pointee of
+            // ui.grants) in the closure, which stayed valid only through the
+            // implicit invariant that ui.grants is never reset while its
+            // modal lives -- and the modal's checkboxes bind raw bool* into
+            // the toggles deque, so the component and the closure must agree
+            // on the SAME object anyway. Ownership inside the modal/closure
+            // pair makes the lifetime explicit: the toggles live exactly as
+            // long as the component that displays and answers them, even if
+            // the next request replaces this modal wholesale.
+            const auto toggles = std::make_shared<GrantToggles>();
             // AnswerPermission is SESSION-keyed; a modal can only exist on a
             // sessioned tab, so the snapshot's session id is the right key.
             const auto session_id = snap.session_id;
-            GrantToggles& toggles = *ui.grants;
             AppState& app = deps_.app;
             *deps_.permission_child = MakePermissionModal(
-                request, toggles, deps_.theme,
-                [&app, session_id, request, &toggles](bool allow) {
+                request, *toggles, deps_.theme,
+                [&app, session_id, request, toggles](bool allow) {
                     // granted_keys FILTERED to what this request offered
                     // (GrantToggles reads the request's own offers).
                     app.AnswerPermission(session_id, request.request_id,
                                          allow ? v1::PERMISSION_DECISION_ALLOW
                                                : v1::PERMISSION_DECISION_DENY,
-                                         allow ? toggles.GrantedKeys(request)
+                                         allow ? toggles->GrantedKeys(request)
                                                : std::vector<std::string>{});
                 });
         }

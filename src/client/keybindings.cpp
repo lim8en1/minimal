@@ -6,6 +6,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "minimal/client/key_event_parser.hpp"
 #include "minimal/common/logger.hpp"
 
 namespace minimal::client {
@@ -85,13 +86,19 @@ Keybindings Keybindings::Parse(std::string_view json) {
         const std::string key = it.value().get<std::string>();
         // Two actions on one key are silently ordered by source iteration today
         // -- warn, so a rebinding that shadows another is visible at startup.
-        const auto collision = key_to_action.find(key);
+        // The comparison runs on NormalizeKeySpec's COLLISION IDENTITY, not the
+        // raw string: "ctrl+j" and "enter" (or "ctrl+i" and "tab") are the same
+        // physical key to FTXUI even though their specs differ, and a user who
+        // binds ctrl+j while another action owns Enter otherwise gets a binding
+        // that silently never fires.
+        const std::string identity = NormalizeKeySpec(key);
+        const auto collision = key_to_action.find(identity);
         if (collision != key_to_action.end()) {
             common::DefaultLogger().warn(
-                "keybindings.json: '{}' is bound to both '{}' and '{}' -- the first wins",
-                key, collision->second, it.key());
+                "keybindings.json: '{}' ({}) is bound to both '{}' and '{}' -- the first wins",
+                key, identity, collision->second, it.key());
         } else {
-            key_to_action.emplace(key, it.key());
+            key_to_action.emplace(identity, it.key());
         }
         // Unknown action names are KEPT: a client plugin (E5) registers views
         // addressable from here by runtime-chosen ids, and this file may predate
@@ -126,6 +133,20 @@ void Keybindings::ApplyDefaults() {
     // emplace, not assignment: the user's own binding always wins over the
     // default for the same action.
     for (const auto& [action, key] : DefaultBindings()) {
+        // CROSS-SOURCE collision warning: Parse only sees the user's file, so
+        // a user key that fights a DEFAULT over the same physical key was
+        // invisible -- the dispatch order (user table built first, defaults
+        // emplaced into it) decides silently, exactly like the in-file case
+        // above. Warning-only: the winning binding is unchanged.
+        const std::string identity = NormalizeKeySpec(key);
+        for (const auto& [existing_action, existing_key] : bindings_) {
+            if (existing_action != action && NormalizeKeySpec(existing_key) == identity) {
+                common::DefaultLogger().warn(
+                    "keybindings.json: default '{}' for '{}' collides with user binding for "
+                    "'{}' on the same key -- the user binding wins",
+                    key, action, existing_action);
+            }
+        }
         bindings_.emplace(action, key);
     }
 }

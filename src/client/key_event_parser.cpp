@@ -80,7 +80,37 @@ const std::array<Event, 12>& FunctionKeys() {
     return table;
 }
 
+// The C0 control-code aliases: a bare ctrl+letter shares its encoding byte
+// with another key's whole event (FTXUI uniformizes \r and 0x08 on input, so
+// every row below is byte-identical to its target, not merely similar). The
+// ctrl+letter MAPPINGS themselves must stay -- real terminals send these
+// bytes and removing them breaks working bindings -- but a user who binds
+// "ctrl+j" while something else owns Enter gets a binding that silently
+// never fires: the alias table is what keybindings.cpp's collision warning
+// consults to make that visible at startup.
+const std::unordered_map<std::string, std::string>& CtrlLetterAliases() {
+    static const std::unordered_map<std::string, std::string> table = {
+        {"j", "enter"},      // 0x0A == Event::Return
+        {"m", "enter"},      // 0x0D, uniformized to \n == Event::Return
+        {"i", "tab"},        // 0x09 == Event::Tab
+        {"h", "backspace"},  // 0x08, uniformized to DEL == Event::Backspace
+    };
+    return table;
+}
+
 }  // namespace
+
+std::string NormalizeKeySpec(const std::string& spec) {
+    const std::string lower = ToLower(spec);
+    const std::vector<std::string> parts = Split(lower, '+');
+    if (parts.size() == 2 && parts[0] == "ctrl") {
+        if (const auto it = CtrlLetterAliases().find(parts[1]);
+            it != CtrlLetterAliases().end()) {
+            return it->second;
+        }
+    }
+    return lower;
+}
 
 std::vector<Event> ParseKeySpec(const std::string& spec) {
     const std::string lower = ToLower(spec);
@@ -152,8 +182,18 @@ std::vector<Event> ParseKeySpec(const std::string& spec) {
     // F1..F12.
     if (!ctrl && !alt && !shift && base.size() >= 2 && base.front() == 'f' &&
         std::all_of(base.begin() + 1, base.end(),
-                   [](unsigned char c) { return std::isdigit(c) != 0; })) {
-        const int n = std::stoi(base.substr(1));
+                    [](unsigned char c) { return std::isdigit(c) != 0; })) {
+        int n = 0;
+        try {
+            n = std::stoi(base.substr(1));
+        } catch (const std::exception&) {
+            // The digit check above only proves DECIMAL DIGITS, not range:
+            // "f99999999999999" reached std::stoi and threw out_of_range --
+            // straight out of a user's keybindings.json to a startup crash.
+            // Out of range is just "no mapping", like every other unparsable
+            // spec here.
+            return {};
+        }
         if (n >= 1 && n <= 12) return {FunctionKeys()[static_cast<std::size_t>(n - 1)]};
     }
 
