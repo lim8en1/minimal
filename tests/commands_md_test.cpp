@@ -371,7 +371,8 @@ TEST_CASE("commands-md: a failing source errors and submits nothing", "[commands
     CHECK(fixture.submitted_turns().empty());
 }
 
-TEST_CASE("commands-md: an unknown placeholder errors instead of submitting a hole",
+TEST_CASE("commands-md: an identifier-shaped unknown placeholder passes through literally "
+          "and still submits",
           "[commands_md]") {
     testing::CommandFixture fixture;
     commands::CommandRegistry registry;
@@ -379,10 +380,55 @@ TEST_CASE("commands-md: an unknown placeholder errors instead of submitting a ho
     auto commands = WriteAndLoad(files.path(), "typo.md", "---\n---\nUse {temperatur}.\n");
     for (auto& command : commands) registry.Register(std::move(command));
 
+    // Known-names only: an unknown token is literal text, not an error (the
+    // strict predecessor made brace-bearing prose unusable). A typo survives
+    // visibly in the prompt and names itself in the log.
     const auto result = DispatchOne(registry, fixture, "typo", {});
-    CHECK(result.status == commands::CommandResult::Status::kError);
-    CHECK(result.message.find("{temperatur}") != std::string::npos);
-    CHECK(fixture.submitted_turns().empty());
+    CHECK(result.status == commands::CommandResult::Status::kOk);
+    REQUIRE_FALSE(fixture.submitted_turns().empty());
+    // The body's own trailing newline is prompt content.
+    CHECK(fixture.submitted_turns().front() == "Use {temperatur}.\n");
+}
+
+TEST_CASE("commands-md: brace-bearing prose (JSON, awk) renders verbatim",
+          "[commands_md]") {
+    testing::CommandFixture fixture;
+    commands::CommandRegistry registry;
+    testing::TempDir files;
+    // `$2` in the body desugars to {2} at parse time (existing behavior); with
+    // only one positional supplied, {2} names nothing fillable and stays
+    // literal -- exactly what the known-names-only render guarantees for
+    // brace-bearing prose like JSON and awk programs.
+    auto commands = WriteAndLoad(
+        files.path(), "prose.md",
+        "---\nargs: [name]\n---\n"
+        "Send {name} this JSON: {\"type\": \"object\", \"n\": {print $2}}.\n");
+    for (auto& command : commands) registry.Register(std::move(command));
+
+    const auto result = DispatchOne(registry, fixture, "prose", {"ada"});
+    CHECK(result.status == commands::CommandResult::Status::kOk);
+    REQUIRE_FALSE(fixture.submitted_turns().empty());
+    CHECK(fixture.submitted_turns().front() ==
+          "Send ada this JSON: {\"type\": \"object\", \"n\": {print {2}}}.\n");
+}
+
+TEST_CASE("commands-md: positional tokens inside a shell injection desugar into the script",
+          "[commands_md]") {
+    testing::CommandFixture fixture;
+    commands::CommandRegistry registry;
+    testing::TempDir files;
+    // $1 inside !`...` addresses the command's own first argument, exactly as
+    // it would in the body. The desugarer must rewrite the EXTRACTED script,
+    // or /bin/sh would expand $1 to empty and the prompt would lose the value.
+    auto commands = WriteAndLoad(
+        files.path(), "inject.md",
+        "---\n---\nCurrent user: !`/usr/bin/id -un; echo extra:$1`.\n");
+    for (auto& command : commands) registry.Register(std::move(command));
+
+    const auto result = DispatchOne(registry, fixture, "inject", {"argone"});
+    CHECK(result.status == commands::CommandResult::Status::kOk);
+    REQUIRE_FALSE(fixture.submitted_turns().empty());
+    CHECK(fixture.submitted_turns().front().find("extra:argone") != std::string::npos);
 }
 
 TEST_CASE("commands-md: no body means the sole text source's stdout IS the prompt",

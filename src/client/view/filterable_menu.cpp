@@ -22,10 +22,22 @@ std::optional<ftxui::Color> RowColor(const std::string& value) {
         if (c >= 'A' && c <= 'F') return c - 'A' + 10;
         return -1;
     };
-    const int hi = nibble(value[1]) * 16 + nibble(value[2]);
-    const int mid = nibble(value[3]) * 16 + nibble(value[4]);
-    const int lo = nibble(value[5]) * 16 + nibble(value[6]);
-    if (hi < 0 || mid < 0 || lo < 0) return std::nullopt;
+    // Each nibble is checked BEFORE combining: with only the combined results
+    // guarded, a valid high nibble and an invalid low one (nibble(hi)*16 +
+    // nibble(lo) == hi*16 - 1) could produce a small plausible value -- e.g.
+    // "#1g0000" would decode as 0x0f rather than being rejected.
+    const int hi_hi = nibble(value[1]);
+    const int hi_lo = nibble(value[2]);
+    const int mid_hi = nibble(value[3]);
+    const int mid_lo = nibble(value[4]);
+    const int lo_hi = nibble(value[5]);
+    const int lo_lo = nibble(value[6]);
+    if (hi_hi < 0 || hi_lo < 0 || mid_hi < 0 || mid_lo < 0 || lo_hi < 0 || lo_lo < 0) {
+        return std::nullopt;
+    }
+    const int hi = hi_hi * 16 + hi_lo;
+    const int mid = mid_hi * 16 + mid_lo;
+    const int lo = lo_hi * 16 + lo_lo;
     return ftxui::Color(static_cast<std::uint8_t>(hi), static_cast<std::uint8_t>(mid),
                         static_cast<std::uint8_t>(lo));
 }

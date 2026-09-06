@@ -97,6 +97,7 @@ std::vector<CheckResult> StartupSanityCheck::RunAll() {
     append(check_advisor());
     append(check_subagent_limit());
     append(check_compaction_strategy());
+    append(check_small_model());
     return results;
 }
 
@@ -819,6 +820,33 @@ std::vector<CheckResult> StartupSanityCheck::check_compaction_strategy() {
                                        "' but no loaded plugin registered it (typo, or the "
                                        "providing plugin is disabled); compaction falls back to "
                                        "the built-in 'summarize' strategy"));
+    }
+    return results;
+}
+
+std::vector<CheckResult> StartupSanityCheck::check_small_model() {
+    std::vector<CheckResult> results;
+    if (!settings_loaded_) return results;  // already Fatal under config_parse
+
+    const std::string& ref_text = settings_.small_model;
+    if (ref_text.empty()) return results;  // compact on the session's own model: normal
+
+    // Same shape check SessionRegistry::set_small_model applies at session
+    // creation -- run here so the misconfiguration surfaces at startup with
+    // the rest, not on the first compaction of the first long session.
+    const auto ref = common::ParseModelRef(ref_text);
+    if (!ref) {
+        results.push_back(
+            Warning("small_model", "settings.json small_model is '" + ref_text +
+                                       "'; not a <provider>/<model> reference -- compaction "
+                                       "behaves as if it were unset"));
+        return results;
+    }
+    if (!providers_loaded_) return results;  // providers.json already Fatal under config_parse
+    if (providers_.Resolve(*ref) == nullptr) {
+        results.push_back(Warning("small_model", "settings.json small_model '" + ref_text +
+                                      "' resolves to nothing in providers.json; compaction "
+                                      "behaves as if it were unset"));
     }
     return results;
 }

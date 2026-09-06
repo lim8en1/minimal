@@ -28,6 +28,10 @@ bool IsPrivateOrLocalIPv4(const in_addr& addr) {
     // cloud internal networks route on it; a fetch to it targets
     // infrastructure the user was never meant to reach.
     if ((ip & 0xFFC00000u) == 0x64400000u) return true;
+    // 192.0.0.0/24 (RFC 7335) -- IETF protocol assignments; the not-locally-
+    // connected address an attacker can name to probe special-purpose
+    // infrastructure, and nowhere near a legitimate fetch target.
+    if ((ip & 0xFFFFFF00u) == 0xC0000000u) return true;
     if ((ip & 0xFF000000u) == 0x00000000u) return true;  // 0.0.0.0/8 "this network"
     return false;
 }

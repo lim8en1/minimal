@@ -1,0 +1,54 @@
+# tools-search
+
+Search tools: `grep` and `glob`. Bundled and enabled by default — searching a
+tree through `bash` round-trips results through the context window with no
+structure and no ignore rules; a dedicated search tool is the token-efficiency
+point of the harness.
+
+## What it adds
+
+- **Tools**: `grep` (RE2, linear time — a pathological model-authored pattern
+  cannot wedge the session worker), `glob` (full tree listing, bounded the same
+  way).
+- Path safety is centralized in ToolExecutor, exactly as for tools-fs.
+- The `grep` timeout bounds the directory WALK; RE2 already guarantees the
+  regex itself cannot hang. Partial results are reported on expiry.
+
+## Configuration
+
+The plugin's own `config` object in its `plugins.json` entry, one sub-object
+per tool. Every field is optional; non-positive values fall back to defaults.
+
+```json
+{
+  "file": "tools-search.so",
+  "enabled": true,
+  "config": {
+    "grep": {
+      "default_head_limit": 250,
+      "max_results": 1000,
+      "max_file_bytes": 1048576,
+      "timeout_ms": 10000,
+      "max_context_lines": 10,
+      "max_line_length": 2000
+    },
+    "glob": {
+      "default_limit": 200,
+      "max_results": 2000,
+      "timeout_ms": 10000
+    }
+  }
+}
+```
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `grep.default_head_limit` | `250` | Result count the model sees when it supplies no `head_limit`. |
+| `grep.max_results` | `1000` | Absolute ceiling on collected results. |
+| `grep.max_file_bytes` | `1048576` (1 MiB) | Files larger than this are skipped. |
+| `grep.timeout_ms` | `10000` | Hard wall-clock bound on one invocation. |
+| `grep.max_context_lines` | `10` | Context lines shown around a match. |
+| `grep.max_line_length` | `2000` | Per-line truncation length. |
+| `glob.default_limit` | `200` | Result count the model sees when it supplies no limit. |
+| `glob.max_results` | `2000` | Absolute ceiling on collected results. |
+| `glob.timeout_ms` | `10000` | Hard wall-clock bound on one invocation. |

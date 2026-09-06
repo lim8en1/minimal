@@ -306,6 +306,42 @@ TEST_CASE("a default_model naming no configured model warns", "[sanity_check][us
     CHECK(hits[0]->message.find("ghost") != std::string::npos);
 }
 
+TEST_CASE("small_model is shape- and resolution-checked at startup",
+          "[sanity_check][usable_provider][small_model]") {
+    Fixture f;
+    WriteGoodConfig(f.config_dir);
+    ScopedEnv data("XDG_DATA_HOME", f.xdg_data.string().c_str());
+    f.RegisterTool("tools-bash", "bash");
+
+    // A resolvable reference is silent.
+    {
+        f.Write("settings.json",
+                R"({"default_agent_preset":"build","small_model":"fixture-main/test-model"})");
+        const auto results = RunChecks(f);
+        CHECK(ByCheck(results, "small_model").empty());
+    }
+    // A malformed reference warns.
+    {
+        f.Write("settings.json",
+                R"({"default_agent_preset":"build","small_model":"no-slash-at-all"})");
+        const auto results = RunChecks(f);
+        const auto hits = ByCheck(results, "small_model");
+        REQUIRE(hits.size() == 1);
+        CHECK(hits[0]->severity == CheckSeverity::Warning);
+        CHECK(hits[0]->message.find("no-slash-at-all") != std::string::npos);
+    }
+    // A well-shaped reference to nothing in providers.json warns.
+    {
+        f.Write("settings.json",
+                R"({"default_agent_preset":"build","small_model":"fixture-main/ghost"})");
+        const auto results = RunChecks(f);
+        const auto hits = ByCheck(results, "small_model");
+        REQUIRE(hits.size() == 1);
+        CHECK(hits[0]->severity == CheckSeverity::Warning);
+        CHECK(hits[0]->message.find("fixture-main/ghost") != std::string::npos);
+    }
+}
+
 TEST_CASE("two plugins registering one provider kind warns", "[sanity_check][provider_kinds]") {
     Fixture f;
     WriteGoodConfig(f.config_dir);

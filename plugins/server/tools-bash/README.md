@@ -1,0 +1,68 @@
+# tools-bash
+
+The `bash` tool (synchronous and background), the `/restart-shell` and `/tasks`
+commands, the per-session shell-state service, and a session-lifecycle
+observer. Split from tools-fs because it has a distinct security profile and is
+the one tool with a plausible alternate implementation (container / remote
+executor) someone would actually swap: disable this plugin and ship one
+registering `bash`.
+
+## What it adds
+
+- **Tool**: `bash` — commands run through `/bin/sh -c` (operator-swappable via
+  `shell`). Category Execute, Ask by default: the permission gate IS the
+  boundary; there is no allowlist. Invocations disclose the binaries they name,
+  by resolved path, and the operator may grant them for the session.
+- **Background bash**: the same command string through the same gate, but the
+  call returns immediately. Tasks are killable (`kill -- -PID` from a later
+  call) and killed when the session ends; a process-global SIGKILL sweep at
+  server exit is the last-resort backstop.
+- **Commands**: `/restart-shell` (resets the session's cwd/env), `/tasks`
+  (lists background tasks).
+- **Hook point**: `tools-bash.before_command` — a veto-capable point fired
+  before the shell spawns, filterable by `program`; a Block means this plugin
+  refuses the invocation.
+- **Service**: `BashSessionStateService`, the sanctioned channel other plugins
+  use to reach the per-session cwd/env store.
+
+## Configuration
+
+The plugin's own `config` object in its `plugins.json` entry, flat keys. Every
+field is optional; non-positive values fall back to defaults.
+
+```json
+{
+  "file": "tools-bash.so",
+  "enabled": true,
+  "config": {
+    "timeout_ms": 120000,
+    "max_timeout_ms": 600000,
+    "background_max_timeout_ms": 600000,
+    "max_background_tasks": 4,
+    "max_output_bytes": 1048576,
+    "max_file_size_bytes": 1073741824,
+    "shell": "/bin/sh",
+    "inherit_env": "allowlist"
+  }
+}
+```
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `timeout_ms` | `120000` | Wall-clock cap per invocation; the whole process group is killed at the deadline. |
+| `max_timeout_ms` | `600000` | Ceiling on the model-supplied `timeout_ms`. A model may ask for longer than the default (a build is not `ls`) but not without bound. |
+| `background_max_timeout_ms` | `600000` | Background tasks' own ceiling — generous, because a long-running build is the point of the mode. A task with no `timeout_ms` gets this ceiling itself. |
+| `max_background_tasks` | `4` | Per-session cap on live background tasks; over the limit is an error result, not a queue. |
+| `max_output_bytes` | `1048576` (1 MiB) | Bounds the PERSISTED result. Live streaming is uncapped (lossy by design); this is the record. |
+| `max_file_size_bytes` | `1073741824` (1 GiB) | RLIMIT_FSIZE backstop for written files. |
+| `shell` | `/bin/sh` | A different POSIX shell, or a wrapper that enters a container, needs no code change. |
+| `inherit_env` | `allowlist` | How the session's shell environment is seeded. `allowlist` filters to `$HOME`, `$PATH`, `$TMPDIR`, ... (the server process env carries provider API keys; seeding all of it let `env` persist credentials into the transcript). `all` restores the full seed as an explicit operator choice. Any other value is a named startup error. |
+
+`max_timeout_ms` below `timeout_ms` (and `background_max_timeout_ms` below
+`timeout_ms`) is raised to `timeout_ms`: configuring a *maximum* must not
+silently shorten every command that did not ask for a timeout.
+
+## Notes
+
+- Per-session cwd/env maps and the background registry live INSIDE this plugin
+  (core holds no bash state) and are released on session end.

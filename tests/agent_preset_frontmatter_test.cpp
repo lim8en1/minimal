@@ -245,6 +245,46 @@ TEST_CASE("ParseAgentPresetFrontmatter: the deprecated tools map folds into over
     CHECK(preset.permission_mode.per_tool_overrides.at("read") == PermissionMode::AlwaysAllow);
 }
 
+TEST_CASE("ParseAgentPresetFrontmatter: a native permission_mode override wins over the "
+          "tools alias",
+          "[agent_preset_frontmatter][compat]") {
+    // The stated contract: native beats alias. Applying the tools alias AFTER
+    // the permission_mode block used to invert this -- tools.write re-allowed
+    // what the native file denied.
+    auto preset = Parse(
+        "---\n"
+        "name: build\n"
+        "permission_mode:\n"
+        "  overrides:\n"
+        "    write: deny\n"
+        "tools:\n"
+        "  write: true\n"
+        "---\n"
+        "body\n");
+    REQUIRE(preset.permission_mode.per_tool_overrides.count("write") == 1);
+    CHECK(preset.permission_mode.per_tool_overrides.at("write") == PermissionMode::AlwaysDeny);
+}
+
+TEST_CASE("ParseAgentPresetFrontmatter: alias keys collapsing onto one category keep the "
+          "most restrictive",
+          "[agent_preset_frontmatter][compat]") {
+    // read/glob/grep/list all feed read_only, applied in YAML document order;
+    // a later permissive key must not overwrite an earlier deny and WIDEN what
+    // the author asked for.
+    auto preset = Parse(
+        "---\n"
+        "name: review\n"
+        "permission:\n"
+        "  read: deny\n"
+        "  glob: allow\n"
+        "  grep: deny\n"
+        "  list: ask\n"
+        "---\n"
+        "body\n");
+    REQUIRE(preset.permission_mode.read_only.has_value());
+    CHECK(*preset.permission_mode.read_only == PermissionMode::AlwaysDeny);
+}
+
 TEST_CASE("ParseAgentPresetFrontmatter: mode decodes and validates",
           "[agent_preset_frontmatter][compat]") {
     CHECK(Parse("---\nname: a\nmode: subagent\n---\nb\n").mode == AgentMode::Subagent);

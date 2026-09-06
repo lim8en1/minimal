@@ -564,10 +564,14 @@ std::optional<std::size_t> AgentLoop::Compact(std::string_view trigger) {
 
     // small_model, when configured: the summarizer ALONE runs on the alternate
     // provider -- its model name, parameters and cap; the session's own model
-    // still answers every turn.
-    llm::LlmProvider& summarizer = provider_.get();
+    // still answers every turn. A POINTER, not a reference: re-seating a
+    // reference is impossible, and an assignment through one would run the
+    // small provider's copy-assignment against the session's own provider --
+    // corrupting it for every later turn -- rather than switching which
+    // provider the summarizer call uses.
+    llm::LlmProvider* summarizer = &provider_.get();
     if (config_.small_model.has_value() && config_.small_model->provider != nullptr) {
-        summarizer = *config_.small_model->provider;
+        summarizer = config_.small_model->provider.get();
         params.model_name = config_.small_model->model_name;
         params.parameters = config_.small_model->parameters;
         params.max_tokens = config_.small_model->max_tokens;
@@ -586,7 +590,7 @@ std::optional<std::size_t> AgentLoop::Compact(std::string_view trigger) {
                                                 {"occupancy_tokens", tokens_.last_occupancy()}});
     }
 
-    const auto result = compactor_(to_compact, summarizer, params);
+    const auto result = compactor_(to_compact, *summarizer, params);
     if (!result) {
         // No compaction this cycle; do not retry on every tool cycle of this turn.
         compaction_failed_this_turn_ = true;

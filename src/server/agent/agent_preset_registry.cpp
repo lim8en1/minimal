@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <fstream>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <system_error>
@@ -190,7 +191,19 @@ std::vector<AgentPresetSummary> AgentPresetRegistry::ListAvailable(
     // name, matching Resolve()'s lookup order.
     std::map<std::string, AgentPresetSummary> merged;
 
-    auto scan_dir = [&merged](const std::filesystem::path& agents_dir) {
+    // Names the PROJECT declared, whatever their visibility. A project preset
+    // that is disabled/hidden/subagent is still the preset Resolve() picks for
+    // its name -- it just must not appear in a picker. Reserving the name here
+    // (not merely skipping the insert) is what keeps the global scan from
+    // listing a DIFFERENT preset under that name: the picker would offer a
+    // global preset that Resolve() can never reach, because the project file
+    // shadows it by name in every lookup.
+    std::set<std::string> project_declared;
+
+    // `record` collects every parseable name (project scans); `skip` suppresses
+    // names owned elsewhere (the global scan skips project-owned names).
+    auto scan_dir = [&merged](const std::filesystem::path& agents_dir,
+                              std::set<std::string>* record, const std::set<std::string>* skip) {
         std::error_code ec;
         if (!std::filesystem::exists(agents_dir, ec)) return;
 
@@ -199,10 +212,12 @@ std::vector<AgentPresetSummary> AgentPresetRegistry::ListAvailable(
             if (!entry.is_regular_file() || entry.path().extension() != ".md") continue;
             try {
                 const AgentPresetFrontmatter raw = LoadAgentPresetFrontmatter(entry.path());
+                if (record != nullptr) record->insert(raw.name);
                 // Picker-visibility rules: disabled presets cannot run at all;
                 // `hidden` and `mode: subagent` presets are spawnable but not
                 // switchable from the picker (spawn accepts them regardless).
                 if (raw.disable || raw.hidden || raw.mode == AgentMode::Subagent) continue;
+                if (skip != nullptr && skip->count(raw.name) != 0) continue;
                 merged.try_emplace(raw.name,
                                    AgentPresetSummary{raw.name, raw.description, raw.color});
             } catch (const std::exception& error) {
@@ -218,10 +233,10 @@ std::vector<AgentPresetSummary> AgentPresetRegistry::ListAvailable(
         // range-for over a temporary's member dangles.
         const config::ProjectDirs project_dirs(project_root);
         for (const auto& dir : project_dirs.dirs()) {
-            scan_dir(dir / "agents");
+            scan_dir(dir / "agents", &project_declared, nullptr);
         }
     }
-    scan_dir(config_dir_ / "agents");
+    scan_dir(config_dir_ / "agents", nullptr, &project_declared);
 
     std::vector<AgentPresetSummary> out;
     out.reserve(merged.size());

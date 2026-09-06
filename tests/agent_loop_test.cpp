@@ -1044,6 +1044,52 @@ TEST_CASE("the preset's compression_prompt reaches the summarization request",
     CHECK(*h.provider.requests()[1].system == "OVERRIDE PROMPT");
 }
 
+TEST_CASE("small_model: the summarizer alone runs on the alternate provider, and the "
+          "session's own provider is left untouched",
+          "[agent_loop][compaction][small_model]") {
+    Harness h;
+    h.AddTool("read");
+    agent::AgentPreset preset;
+    preset.compression_prompt = "DEFAULT PROMPT";
+    agent::LoopConfig config{.auto_compact = true, .compaction_trigger = FixedTrigger(12)};
+    auto small_storage = std::make_shared<FakeLlmProvider>();
+    FakeLlmProvider* small = small_storage.get();
+    config.small_model = agent::LoopConfig::SmallModel{small_storage, "small-model"};
+
+    // Iteration 1's tool call pushes occupancy past the trigger; iteration 2's
+    // compaction must go to the SMALL provider, the main call to the main one.
+    h.provider.PushResponse(ToolUseResponse("tu1", "read"));
+    small->PushResponse(TextResponse("TINY SUMMARY"));  // compaction, iter 2
+    h.provider.PushResponse(SmallTextResponse("done"));
+
+    h.Build(std::move(preset), config, &agent::compact_messages);
+    const auto result = h.loop->RunTurn(UserText("go"));
+
+    CHECK(result.stop_reason == llm::StopReason::EndTurn);
+    // The summarization call (identified by its system prompt) happened
+    // exactly once, on the small provider, under the small model's name.
+    CHECK(CountCompactionRequests(*small) == 1);
+    REQUIRE(small->requests().size() == 1);
+    CHECK(small->requests()[0].model == "small-model");
+    CHECK(*small->requests()[0].system == "DEFAULT PROMPT");
+    // The session's own provider answered every turn and never saw a
+    // compaction request. Under the reference-assignment predecessor, this
+    // call ran the small provider's copy-assignment THROUGH the main
+    // provider's reference -- corrupting the session's own provider state.
+    REQUIRE(h.provider.requests().size() == 2);
+    for (const auto& request : h.provider.requests()) {
+        CHECK_FALSE(request.system.has_value());
+        CHECK(request.model != "small-model");
+    }
+    // The turn still compacted with the small provider's output.
+    const auto& history = h.loop->history();
+    REQUIRE_FALSE(history.empty());
+    const auto* summary_text =
+        std::get_if<llm::TextBlock>(&history.front().content.front());
+    REQUIRE(summary_text != nullptr);
+    CHECK(summary_text->text.find("TINY SUMMARY") != std::string::npos);
+}
+
 TEST_CASE("a queued subagent result lands at a turn boundary", "[agent_loop][subagent]") {
     // Injecting out-of-band could place a user message between a tool_use and
     // its tool_result, which is a hard 400 on both wire formats.

@@ -135,7 +135,15 @@ tools::PermissionOverrideLayer DecodePermissionAlias(const YAML::Node& node) {
                 "agent preset: permission key '{}' has no minimal category; ignored", key);
             continue;
         }
-        if (const auto mode = CollapsePermissionValue(entry.second, key)) *it->second = mode;
+        // Several alias keys collapse onto one category (read/glob/grep/list ->
+        // read_only), and YAML document order is otherwise arbitrary: applying
+        // the keys in sequence would let a later permissive key overwrite an
+        // earlier deny and WIDEN what the author asked for. Most restrictive
+        // wins (AlwaysDeny < Ask < AlwaysAllow), matching the collapse of a
+        // pattern list inside one value.
+        if (const auto mode = CollapsePermissionValue(entry.second, key)) {
+            if (!*it->second || mode < *it->second) *it->second = mode;
+        }
     }
     return layer;
 }
@@ -329,11 +337,15 @@ AgentPresetFrontmatter ParseAgentPresetFrontmatter(const config::ParsedFrontmatt
     result.allowed_tools = OptionalStringList(node, "allowed_tools");
     result.allowed_skills = DecodeAllowedSkills(node);
     result.allowed_mcp_servers = OptionalStringList(node, "allowed_mcp_servers");
-    // Alias first, native second: `permission_mode` always wins over an alias
-    // encoding of the same intent.
+    // Alias first, native second: `permission_mode` -- categories AND per-tool
+    // overrides -- always wins over an alias encoding of the same intent. Both
+    // aliases feed the layer BEFORE the native block decodes into it, so a
+    // native field or override replaces what an alias wrote; running the
+    // `tools` alias after the block would let it overwrite a native
+    // permission_mode.overrides entry, inverting this contract.
     result.permission_mode = DecodePermissionAlias(node);
-    result.permission_mode = DecodePermissionModeBlock(node, std::move(result.permission_mode));
     ApplyToolsAlias(node, result.permission_mode);
+    result.permission_mode = DecodePermissionModeBlock(node, std::move(result.permission_mode));
     result.mcp_permissions = DecodeMcpPermissionsBlock(node);
     result.compression_prompt = OptionalString(node, "compression_prompt");
 

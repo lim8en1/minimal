@@ -1,0 +1,48 @@
+diff --git a/src/server/agent/agent_loop.cpp b/src/server/agent/agent_loop.cpp
+index 73a09a3..6753d21 100644
+--- a/src/server/agent/agent_loop.cpp
++++ b/src/server/agent/agent_loop.cpp
+@@ -896,26 +900,29 @@ void AgentLoop::RunTurnLoop(TurnResult& result, bool flush_first) {
+                 }
+             }
+             if (!denied_for_input) {
++                // Per-preset plugin config, resolved BEFORE Prepare: Disclose()
++                // and grant checks run inside it, so the disclosure (Ask prompt,
++                // grant keys) must already see the slice the tool's
++                // config_namespace() claims in the active preset's tool_config.
++                // Points into preset_, which is stable for the turn -- preset
++                // swaps land on this worker between turns (Session::ApplyPreset),
++                // never inside one. The Find is the same lookup PrepareGuarded
++                // performs; AliasedTool forwards config_namespace().
++                if (const auto tool = registry_.Find(use->name)) {
++                    const std::string_view ns = tool->config_namespace();
++                    if (!ns.empty()) {
++                        if (auto it = preset_.tool_config.find(std::string(ns));
++                            it != preset_.tool_config.end()) {
++                            call.ctx.tool_config = &it.value();
++                        }
++                    }
++                }
+                 prepared = executor_.Prepare(use->id, use->name, use->input, call.ctx);
+             }
+             // Unknown tools arrive here with no resolved tool; they execute as
+             // their denial result and have no exclusivity to protect.
+             call.to_pool = !denied_for_input && prepared.tool &&
+                            prepared.tool->parallel_safe();
+-            // Per-preset plugin config, resolved now that Prepare holds the
+-            // tool object: the slice this tool's config_namespace() claims in
+-            // the active preset's tool_config. Points into preset_, which is
+-            // stable for the turn -- preset swaps land on this worker between
+-            // turns (Session::ApplyPreset), never inside one.
+-            if (prepared.tool) {
+-                const std::string_view ns = prepared.tool->config_namespace();
+-                if (!ns.empty()) {
+-                    if (auto it = preset_.tool_config.find(std::string(ns));
+-                        it != preset_.tool_config.end()) {
+-                        call.ctx.tool_config = &it.value();
+-                    }
+-                }
+-            }
+             call.prepared = std::move(prepared);
+             calls.push_back(std::move(call));
+         }

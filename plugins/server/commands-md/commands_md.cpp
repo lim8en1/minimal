@@ -1,6 +1,7 @@
 #include "commands_md.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cerrno>
 #include <cstring>
 #include <set>
@@ -357,13 +358,33 @@ RunOutcome RunProcess(const std::vector<std::string>& argv, const std::string& s
 
 // --- template rendering --------------------------------------------------------
 
-// Single pass, values inserted verbatim, never re-scanned. Unknown placeholders
-// are errors: a silent empty would submit a prompt missing exactly the piece
-// the author meant to include.
+// Single pass, values inserted verbatim, never re-scanned. KNOWN-NAMES ONLY:
+// a {token} that matches a fillable name (positional, declared argument,
+// source name, output field) substitutes; ANYTHING else -- JSON examples, awk
+// programs, shell parameter expansion in the prompt's own prose -- passes
+// through verbatim. The strict predecessor threw on every unknown token,
+// which made brace-bearing prose unusable: a body that merely SHOWED the
+// model a JSON example could never run at all. Typo detection survives for
+// what typos actually look like: an identifier-shaped unknown token warns
+// once per render ({agr} names no argument -- almost certainly a mistyped
+// {arg}), while prose shapes ({"type": ...}, {print $1}) stay quiet.
+bool LooksLikePlaceholder(const std::string& token) {
+    if (token.empty()) return false;
+    if (!std::isalnum(static_cast<unsigned char>(token.front())) &&
+        token.front() != '_') {
+        return false;
+    }
+    return std::all_of(token.begin(), token.end(), [](char c) {
+        return std::isalnum(static_cast<unsigned char>(c)) != 0 || c == '_' || c == '.' ||
+               c == ':' || c == '-';
+    });
+}
+
 std::string RenderTemplate(const std::string& body,
                            const std::map<std::string, std::string>& values) {
     std::string out;
     out.reserve(body.size());
+    std::set<std::string> warned;
     std::size_t i = 0;
     while (i < body.size()) {
         if (body[i] != '{') {
@@ -378,7 +399,19 @@ std::string RenderTemplate(const std::string& body,
         const std::string token = body.substr(i + 1, close - i - 1);
         const auto it = values.find(token);
         if (it == values.end()) {
-            throw std::runtime_error("unknown placeholder {" + token + "} in command body");
+            // Literal, not a mistake -- unless the token is shaped like a
+            // placeholder name, in which case warn (once per render) and pass
+            // it through anyway. A deliberate unknown must not kill the
+            // command; a silent one must not vanish from the log.
+            if (LooksLikePlaceholder(token) && warned.insert(token).second) {
+                common::DefaultLogger().warn(
+                    "command body: '{{{}}}' matches no argument or source name; left as "
+                    "literal text",
+                    token);
+            }
+            out += body.substr(i, close - i + 1);
+            i = close + 1;
+            continue;
         }
         out += it->second;
         i = close + 1;

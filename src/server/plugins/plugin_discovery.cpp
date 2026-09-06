@@ -198,8 +198,15 @@ std::vector<PluginCandidate> DiscoverPlugins(const std::filesystem::path& bundle
         // guaranteed fatal name collision the user cannot see coming from
         // plugins.json alone. Say so at discovery time; the documented
         // replacement flow is disabling one of the two entries.
+        //
+        // Scanned over `found`, not config.plugins: the persisted list keeps
+        // entries for files that have since been deleted (it is never pruned),
+        // so a stale entry would warn forever about a collision that no longer
+        // exists -- and `found` is sorted with both provenances present, so
+        // each side of a real collision sees the other regardless of loop
+        // order.
         const bool also_from_other_provenance = std::any_of(
-            config.plugins.begin(), config.plugins.end(), [&](const PluginConfig::Entry& e) {
+            found.begin(), found.end(), [&](const Found& e) {
                 return e.file == item.file && e.provenance != item.provenance;
             });
         if (also_from_other_provenance) {

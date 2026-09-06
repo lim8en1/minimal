@@ -1,0 +1,72 @@
+diff --git a/tests/agent_loop_test.cpp b/tests/agent_loop_test.cpp
+index f5f901e..baeed1e 100644
+--- a/tests/agent_loop_test.cpp
++++ b/tests/agent_loop_test.cpp
+@@ -1862,8 +1908,10 @@ TEST_CASE("no safe boundary AND nothing worth eliding falls back to the genuine
+ 
+ // --- tool_config delivery --------------------------------------------------------
+ 
+-// Records what ctx.tool_config pointed at during execute(), copying the slice
+-// (the pointer itself is per-invocation and gone by the time the test reads).
++// Records what ctx.tool_config pointed at during execute() AND during
++// Disclose() (the Ask gate), copying the slice -- the pointer itself is
++// per-invocation and gone by the time the test reads. Disclose sees the slice
++// too: disclosure and grant keys are computed from it inside Prepare.
+ class ConfigProbeTool : public tools::Tool {
+ public:
+     ConfigProbeTool(std::string name, std::string ns)
+@@ -1882,9 +1930,19 @@ public:
+         return {false, name_};
+     }
+ 
++    tools::PermissionDisclosure Disclose(const nlohmann::json&,
++                                         const tools::ToolContext& ctx) const override {
++        disclosed_slices.push_back(ctx.tool_config ? *ctx.tool_config : nlohmann::json());
++        tools::PermissionDisclosure disclosure;
++        disclosure.summary = name_;
++        disclosure.complete = true;
++        return disclosure;
++    }
++
+     std::string_view config_namespace() const override { return ns_; }
+ 
+     std::vector<nlohmann::json> seen_slices;
++    mutable std::vector<nlohmann::json> disclosed_slices;
+ 
+ private:
+     tools::ToolSpec spec_;
+@@ -1913,6 +1971,34 @@ TEST_CASE("a tool receives its tool_config slice from the active preset", "[agen
+     CHECK(owner->seen_slices[0] == nlohmann::json{{"venv", ".venv"}});
+ }
+ 
++TEST_CASE("Disclose sees the tool_config slice: disclosure is computed from the same resolution "
++          "execute uses",
++          "[agent_loop][tool_config]") {
++    Harness h;
++    h.checker_override = std::make_unique<GrantingPermissionChecker>();
++    // Ask for the probe's category so the gate calls Disclose inside Prepare.
++    h.executor_policy.read_only = tools::PermissionMode::Ask;
++    h.registry.Register(std::make_unique<ConfigProbeTool>("probe", "python"));
++
++    agent::AgentPreset preset;
++    preset.tool_config = nlohmann::json{{"python", {{"venv", ".venv"}}}};
++    h.provider.PushResponse(ToolUseResponse("tu1", "probe"));
++    h.provider.PushResponse(TextResponse("done"));
++    h.Build(preset);
++
++    h.loop->RunTurn(UserText("go"));
++
++    const auto* owner = dynamic_cast<ConfigProbeTool*>(h.registry.Find("probe").get());
++    REQUIRE(owner != nullptr);
++    // Disclose ran exactly once (the Ask gate) and saw the SAME slice execute
++    // sees -- not a null (the pre-fix behavior: the slice was resolved only
++    // after Prepare returned).
++    REQUIRE(owner->disclosed_slices.size() == 1);
++    REQUIRE(owner->seen_slices.size() == 1);
++    CHECK(owner->disclosed_slices[0] == owner->seen_slices[0]);
++    CHECK(owner->disclosed_slices[0] == nlohmann::json{{"venv", ".venv"}});
++}
++
+ TEST_CASE("a tool whose namespace the preset does not declare gets a null tool_config",
+           "[agent_loop][tool_config]") {
+     Harness h;

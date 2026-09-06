@@ -281,7 +281,7 @@ std::vector<SkillMeta> BuildOverlay(const ProjectDirs& dirs) {
 const std::vector<SkillMeta>& SkillRegistry::MergedFor(
     const std::filesystem::path& project_root) const {
     std::lock_guard<std::mutex> lock(cache_->mu);
-    auto [it, inserted] = cache_->merged.try_emplace(CanonicalPath(project_root));
+    auto [it, inserted] = cache_->merged.try_emplace(CanonicalPath(project_root).string());
     if (inserted) {
         std::vector<SkillMeta> merged = skills_;
         for (auto& meta : BuildOverlay(ProjectDirs(project_root))) {

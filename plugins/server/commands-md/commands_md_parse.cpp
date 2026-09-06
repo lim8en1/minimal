@@ -49,8 +49,10 @@ std::string DesugarPositionalTokens(const std::string& body) {
 }
 
 // !`cmd` -> an anonymous `sh` source appended to `into`, and the token becomes
-// {cmdN}. The command text is taken LITERALLY: it cannot reference other
-// sources (that composition is what the frontmatter sources block is for).
+// {cmdN}. The command text is taken literally except for the positional
+// desugaring below: it cannot reference other sources (that composition is
+// what the frontmatter sources block is for), but `$1`/`$ARGUMENTS` inside it
+// are the command's own arguments and desugar like anywhere else in the body.
 std::string DesugarShellInjections(const std::string& body, std::vector<Source>& into,
                                    bool& injected_any) {
     std::string out;
@@ -68,7 +70,15 @@ std::string DesugarShellInjections(const std::string& body, std::vector<Source>&
             Source source;
             source.name = "cmd" + std::to_string(++count);
             source.use_shell = true;
-            source.script = body.substr(i + 2, close - i - 2);
+            // Desugar positionals INSIDE the script too: `$1`/`$ARGUMENTS` in a
+            // shell injection are the author addressing the command's own
+            // arguments, exactly as in the body. The token was extracted from
+            // the raw body here, so without this the script would carry `$1`
+            // literally and /bin/sh would expand it to empty -- silently
+            // dropping the argument the invocation supplied. Desugaring yields
+            // {1}/{args}, which the use_shell substitute path fills from the
+            // user-supplied arg values (and only those) at run time.
+            source.script = DesugarPositionalTokens(body.substr(i + 2, close - i - 2));
             into.push_back(std::move(source));
             out += "{" + into.back().name + "}";
             injected_any = true;

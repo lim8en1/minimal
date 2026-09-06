@@ -2,6 +2,7 @@
 
 #include <filesystem>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -95,7 +96,11 @@ private:
     // nor copyable, so a direct member would delete the move Load() needs.
     struct OverlayCache {
         std::mutex mu;
-        std::unordered_map<std::filesystem::path, std::vector<SkillMeta>> merged;
+        // Keyed on the canonical root's STRING, not the path: hashing a
+        // std::filesystem::path relies on the std::hash<path> specialization
+        // added by LWG 3657, which not every standard library shipped when
+        // marked; a string key needs nothing beyond the base standard.
+        std::unordered_map<std::string, std::vector<SkillMeta>> merged;
     };
     const std::vector<SkillMeta>& MergedFor(const std::filesystem::path& project_root) const;
 

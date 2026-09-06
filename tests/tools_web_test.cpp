@@ -147,6 +147,12 @@ TEST_CASE("CheckUrl: loopback and private literal addresses are refused by defau
     // The single most common real-world SSRF target: cloud instance metadata.
     CHECK_FALSE(CheckUrl("http://169.254.169.254/", false).ok);
     CHECK_FALSE(CheckUrl("http://[::1]/", false).ok);
+    // CGNAT (RFC 6598) and the IETF protocol-assignment block (RFC 7335).
+    CHECK_FALSE(CheckUrl("http://100.64.0.1/", false).ok);
+    CHECK_FALSE(CheckUrl("http://100.127.255.254/", false).ok);
+    CHECK_FALSE(CheckUrl("http://192.0.0.9/", false).ok);
+    // Just outside 100.64.0.0/10: still a public unicast address.
+    CHECK(CheckUrl("http://100.128.0.1/", true).ok);
 }
 
 TEST_CASE("CheckUrl: a public literal address is allowed by default",

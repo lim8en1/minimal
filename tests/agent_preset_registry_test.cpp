@@ -919,6 +919,35 @@ TEST_CASE("AgentPresetRegistry: ListAvailable merges project presets, project sh
     CHECK(global.front().description.empty());  // global build.md has no description
 }
 
+TEST_CASE("AgentPresetRegistry: an invisible project preset still shadows a global of the "
+          "same name in the listing",
+          "[agent_preset_registry][project][list]") {
+    // A project `hidden` preset is spawnable but not listed -- yet Resolve()
+    // still picks the PROJECT file for that name. The listing must therefore
+    // not resurrect the global preset under the same name: the picker would
+    // offer a preset no lookup can reach.
+    TempConfigDir config;
+    config.WriteDefaults();  // global "build"
+    config.Write("proj/.git/HEAD", "ref: refs/heads/main\n");
+    config.Write("proj/agents/build.md",
+                 "---\nname: build\nmodel: openai-main/gpt-4o-mini\nhidden: true\n"
+                 "description: hidden variant.\n---\nbody\n");
+
+    config::SkillRegistry skills = config::SkillRegistry::Load(config.dir);
+    AgentPresetRegistry registry(config.dir, skills,
+                                  config::LoadSettingsConfig(config.dir / "settings.json"));
+    const auto project_root = config.dir / "proj";
+
+    const auto summaries = registry.ListAvailable(project_root);
+    CHECK(summaries.empty());
+
+    // Spawn still reaches the project file (hidden presets are spawnable).
+    CHECK(registry.Resolve("build", project_root).system_prompt == "body\n");
+
+    // Without project scope the global build stays listed.
+    CHECK(registry.ListAvailable().size() == 1);
+}
+
 // --- opencode-compat preset surface -----------------------------------------------
 
 TEST_CASE("AgentPresetRegistry: a disabled preset refuses to resolve and is not listed",
