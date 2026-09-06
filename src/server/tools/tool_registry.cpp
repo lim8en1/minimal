@@ -4,6 +4,7 @@
 #include <set>
 #include <utility>
 
+#include "minimal/common/logger.hpp"
 #include "minimal/mcp/naming.hpp"
 #include "minimal/tools/aliased_tool.hpp"
 
@@ -12,17 +13,37 @@ namespace minimal::tools {
 void ToolRegistry::Register(std::unique_ptr<Tool> tool) {
     if (!tool) return;
     const std::string name = tool->spec().name;
-    // Recorded even when the name is a duplicate: collision detection needs both
-    // sides to name them in its diagnostic.
-    attributions_.push_back(Attribution{attribution_, name});
-    owners_.push_back(tool.get());
+    // The mcp__ namespace belongs to the MCP manager: ReplaceMcpTools is its
+    // only writer, and the executor routes every mcp__-prefixed name through
+    // the server-scoped permission chain (tools::mcp_server_of()). A PLUGIN
+    // registering such a name -- "mcp__shell" -- would ride that chain and
+    // inherit permission decisions for a server that does not exist, so
+    // attributed registrations are refused. Core built-ins (and the test
+    // harness, which registers fake MCP tools with empty attribution) keep
+    // access: they are the process's own code, not loadable input.
+    // DefinitionsFor()'s skip below stays as defense in depth.
+    if (!attribution_.empty() && name.rfind(mcp::kMcpPrefix, 0) == 0) {
+        common::DefaultLogger().warn(
+            "plugin '{}': tool '{}' registration refused -- the '{}' prefix is reserved for "
+            "MCP tools",
+            attribution_, name, mcp::kMcpPrefix);
+        return;
+    }
+    std::shared_ptr<Tool> shared = std::move(tool);
     // First registration owns the map slot, always -- before AND after alias
     // application. The post-alias branch once used insert_or_assign, which made
     // a late-registered duplicate (spawn_subagent registered at serve stage)
     // silently shadowed or been shadowed; first-wins matches the pre-alias rule
     // and parks the loser where the collision diagnostics can still see it.
-    std::shared_ptr<Tool> shared = std::move(tool);
+    //
+    // The attribution/owner parallel arrays are recorded under the same lock as
+    // the map: push_backs outside it raced a concurrent Register's resize, and
+    // every other access to these arrays already goes through mutex_.
     const std::lock_guard<std::shared_mutex> lock(mutex_);
+    // Recorded even when the name is a duplicate: collision detection needs both
+    // sides to name them in its diagnostic.
+    attributions_.push_back(Attribution{attribution_, name});
+    owners_.push_back(shared.get());
     if (tools_.count(name)) {
         shadowed_.push_back(Pending{attributions_.back(), std::move(shared)});
     } else {

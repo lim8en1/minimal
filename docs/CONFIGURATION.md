@@ -337,6 +337,12 @@ only; reason = first non-empty output line). Anything else **fails open** and
 logs — a broken hook never widens what the permission substrate allowed and
 never wedges the session.
 
+**Environment:** hook commands run with the server process's full environment
+(no allowlist — unlike the `tools-bash` tool, which allowlists by default).
+They also run as the server user with the server's working directory, so a
+hook can read anything the server can; treat hook commands with the same care
+as the server binary itself.
+
 ---
 
 ## mcps.json

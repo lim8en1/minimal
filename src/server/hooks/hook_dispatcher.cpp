@@ -54,7 +54,14 @@ HookDispatcher::HookDispatcher(common::Logger& logger)
 }
 
 HookDispatcher::~HookDispatcher() {
+    // Close, then DISCARD the backlog. Each queued task is a shell action
+    // whose runtime is bounded only by its timeout (and the 60 s uncancellable
+    // floor), so letting the worker drain them all made process exit take up
+    // to N x timeout -- for hook results nobody can consume anymore. The
+    // in-flight task (at most one) still runs to completion, which bounds
+    // shutdown by a single action's timeout instead of the queue's.
     tasks_.Close();
+    tasks_.DiscardPending();
     if (dispatcher_thread_.joinable()) dispatcher_thread_.join();
 }
 

@@ -152,6 +152,20 @@ TEST_CASE("ParseSettingsConfig: legacy context_compaction_trigger_tokens still p
               CompactionTriggerSettings::Kind::PercentOfWindow);
         CHECK(config.memory.context_compaction_trigger.percent == 80);
     }
+    SECTION("negative legacy value is fatal, not a silent never") {
+        // A negative value used to fall out as Kind::Never -- the one
+        // misconfiguration whose symptom is a context that quietly grows
+        // until the backend starts rejecting requests. It must fail loudly
+        // like the new-object path does.
+        CHECK_THROWS_AS(ParseSettingsConfig(
+                            {{"memory", {{"context_compaction_trigger_tokens", -1}}}}),
+                        std::runtime_error);
+    }
+    SECTION("wrong-typed legacy value is fatal") {
+        CHECK_THROWS_AS(ParseSettingsConfig(
+                            {{"memory", {{"context_compaction_trigger_tokens", "big"}}}}),
+                        std::runtime_error);
+    }
 }
 
 TEST_CASE("ParseSettingsConfig: tools settings pass through as raw JSON", "[settings_config]") {

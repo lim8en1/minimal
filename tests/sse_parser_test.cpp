@@ -138,3 +138,53 @@ TEST_CASE("an empty event value is the spec's message, and event names reach the
     REQUIRE(frames.size() == 1);
     CHECK(frames[0].event == "message");
 }
+
+TEST_CASE("a BOM split across short chunks is still stripped", "[sse][invariant]") {
+    // The old latch burned on the first Feed regardless of its size: a 1-2
+    // byte first chunk set bom_checked_ with an insufficient prefix, and the
+    // split BOM then survived into the first field name (unknown field,
+    // silently dropped -- the first OpenAI chunk vanished).
+    const std::string body = "data: {\"first\":true}\n\ndata: {\"second\":true}\n\n";
+    for (std::size_t bom_split = 1; bom_split <= 2; ++bom_split) {
+        SseParser parser;
+        auto frames = parser.Feed(std::string("\xEF\xBB\xBF", 3).substr(0, bom_split));
+        CHECK(frames.empty());  // latched, not consumed
+        auto rest = parser.Feed(std::string("\xEF\xBB\xBF", 3).substr(bom_split) + body);
+        REQUIRE(rest.size() == 2);
+        CHECK(rest[0].data == "{\"first\":true}");
+        CHECK(rest[1].data == "{\"second\":true}");
+    }
+}
+
+TEST_CASE("one chunk carrying many complete lines does not trip the line cap", "[sse]") {
+    // The old guard measured buffered TOTALS before appending, so a single
+    // chunk holding many small complete lines -- ordinary traffic from a
+    // fast server -- was refused as "a line exceeded 1 MiB".
+    SseParser parser;
+    std::string chunk;
+    for (int i = 0; i < 4096; ++i) chunk += "data: {\"i\":" + std::to_string(i) + "}\n\n";
+    REQUIRE_NOTHROW(parser.Feed(chunk));
+    // The cap now bounds the UNTERMINATED tail: complete lines were consumed,
+    // so a subsequent feed whose bytes never terminate still fails.
+    CHECK_THROWS_AS(parser.Feed(std::string((1ull << 20) + 2, 'x')), std::runtime_error);
+}
+
+TEST_CASE("the last-event-id buffer persists across frames and NUL ids are ignored",
+          "[sse][invariant]") {
+    // Spec: the buffer changes only when an event carries its own id field;
+    // clearing at dispatch lost the id on every later frame. And an id field
+    // containing U+0000 is ignored outright (it cannot ride a
+    // Last-Event-ID header).
+    SseParser parser;
+    auto frames = parser.Feed("id: evt-1\ndata: a\n\ndata: b\n\n");
+    REQUIRE(frames.size() == 2);
+    CHECK(frames[0].id == "evt-1");
+    CHECK(frames[1].id == "evt-1");  // persisted, not cleared
+
+    std::string nul_id_frame = "id: bad";
+    nul_id_frame += '\0';
+    nul_id_frame += "id\ndata: c\n\n";
+    frames = parser.Feed(nul_id_frame);
+    REQUIRE(frames.size() == 1);
+    CHECK(frames[0].id == "evt-1");  // NUL id ignored, buffer unchanged
+}

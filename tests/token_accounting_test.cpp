@@ -1,5 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <limits>
+
 #include "minimal/llm/token_accounting.hpp"
 
 using namespace minimal::llm;
@@ -67,4 +69,31 @@ TEST_CASE("SeedOccupancy sets the trigger input without touching cumulative tota
     CHECK(acc.last_occupancy() == 5100);
     CHECK(acc.cumulative().total_input_tokens == 5000);
     CHECK(acc.cumulative().total_output_tokens == 100);
+}
+
+TEST_CASE("SeedOccupancy saturates instead of truncating", "[token_accounting][invariant]") {
+    // The comment long claimed a clamp while the bare static_cast<int> WRAPPED:
+    // an estimate past INT_MAX re-entered as a small (or negative) number and
+    // mis-seeded the compaction trigger. No real context window approaches
+    // INT_MAX tokens, so saturation loses nothing -- and never lies.
+    TokenAccumulator acc;
+    const std::int64_t huge = static_cast<std::int64_t>(std::numeric_limits<int>::max()) + 1234;
+    acc.SeedOccupancy(huge);
+
+    CHECK(acc.last_input_tokens() == std::numeric_limits<int>::max());
+    CHECK(acc.last_occupancy() == std::numeric_limits<int>::max());
+}
+
+TEST_CASE("negative usage cannot suppress the compaction trigger", "[token_accounting][invariant]") {
+    // The trigger compares occupancy < threshold, so a provider reporting a
+    // negative value (sentinel, misparse, hostile gateway) would silently
+    // disable compaction for the whole session. Fields clamp at zero in the
+    // occupancy sum; the raw fields stay untouched for the status bar.
+    const Usage negative{-500, -10, -1000, -5};
+    CHECK(context_occupancy(negative) == 0);
+
+    TokenAccumulator acc;
+    acc.RecordTurn(negative);
+    CHECK(acc.last_occupancy() == 0);
+    CHECK(acc.last_input_tokens() == -500);  // raw field preserved
 }

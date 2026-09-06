@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -10,7 +11,10 @@ struct FileWindow {
     std::vector<std::string> lines;
     int start_line = 0;  // 1-based, inclusive; 0 when nothing was returned
     int end_line = 0;    // 1-based, inclusive
-    int total_lines = 0;
+    // Counting is 64-bit: total_lines walks every line of the file, and an
+    // int overflows (UB) past 2^31 lines -- a large generated/minified file
+    // is exactly the input a user points `read` at.
+    std::int64_t total_lines = 0;
     bool truncated = false;  // content exists past end_line
     bool is_binary = false;
     bool ok = false;

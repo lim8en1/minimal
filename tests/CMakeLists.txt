@@ -61,6 +61,7 @@ add_executable(minimal_tests
     sanity_check_test.cpp
     fd_hygiene_test.cpp
     settings_config_test.cpp
+    parse_util_test.cpp
     permissions_config_test.cpp
     agent_preset_frontmatter_test.cpp
     permission_resolution_test.cpp
@@ -72,6 +73,7 @@ add_executable(minimal_tests
     tools_search_test.cpp
     tools_bash_test.cpp
     tool_pool_test.cpp
+    tool_registry_test.cpp
     skill_registry_test.cpp
     project_dirs_test.cpp
     project_context_test.cpp

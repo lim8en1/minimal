@@ -2,6 +2,7 @@
 
 #include <algorithm>
 
+#include <fcntl.h>
 #include <unistd.h>
 
 #include <atomic>
@@ -204,7 +205,11 @@ grpc::Status SessionServiceImpl::CreateSession(grpc::ServerContext* context,
                                 "project_root is not an existing directory: " +
                                     params.project_root.string());
         }
-        if (::access(params.project_root.c_str(), W_OK) != 0) {
+        // faccessat with AT_EACCESS, not access(2): the check must answer for
+        // the server's EFFECTIVE uid -- access(2) tests the real one, which
+        // diverges under setuid/gid deployments and then lies in either
+        // direction.
+        if (::faccessat(AT_FDCWD, params.project_root.c_str(), W_OK, AT_EACCESS) != 0) {
             return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION,
                                 "project_root is not writable: " +
                                     params.project_root.string());
@@ -415,6 +420,13 @@ grpc::Status SessionServiceImpl::ResumeSession(const v1::CreateSessionRequest* r
         // Loads the stored transcript, repairs a torn tool-call tail if there
         // is one, and starts the session.
         resumed = sessions_.Create(std::move(params));
+    } catch (const agent::SessionAlreadyOpen& e) {
+        // The pre-check above refused with ALREADY_EXISTS for the session
+        // being open, but the loser of a RACE (two resumes in flight) landed
+        // here as FAILED_PRECONDITION -- the same condition, two statuses,
+        // depending on timing. Match the pre-check.
+        logger_.warn("resume of session {} lost the open race", stored->session_id);
+        return grpc::Status(grpc::StatusCode::ALREADY_EXISTS, e.what());
     } catch (const std::exception& e) {
         // NO ROLLBACK here, unlike fresh creation: the row is the user's
         // existing session, not one this call just minted. A failure (the
@@ -654,15 +666,15 @@ grpc::Status SessionServiceImpl::OpenSession(
     // was provably attached but not yet counted, so another stream's
     // ReleaseClientSlot could fetch_sub from 1 to 0 -- firing
     // on_last_client_detached_, i.e. requesting process shutdown, while a
-    // client was attached. Counting first (and releasing on every refused
-    // path below) closes it: the count is accurate from the moment the stream
-    // is committed to serving this session.
-    attached_.fetch_add(1, std::memory_order_acq_rel);
+    // client was attached. Counted here via RAII (and released on every exit
+    // path below, including the unwind paths): the count is accurate from the
+    // moment the stream is committed to serving this session, and no throw
+    // between here and `finish` can leak it anymore.
+    const AttachedClientSlot client_slot(this);
     // A session the reaper or another stream is already tearing down must not be
     // attached to at all: its broadcaster is closing, and the client would see an
     // immediately-empty stream with no error explaining why.
     if (session->terminated()) {
-        ReleaseClientSlot();
         return grpc::Status(grpc::StatusCode::NOT_FOUND,
                             "session '" + first.session_id() + "' is already terminated");
     }
@@ -714,7 +726,9 @@ grpc::Status SessionServiceImpl::OpenSession(
         Transport(*session).queue().Unsubscribe(subscriber);
         session->NotifyDetached();
         if (writer.joinable()) writer.join();
-        ReleaseClientSlot();
+        // The attached_ slot is released by client_slot's destructor, after
+        // this lambda returns -- the decrement (and, at zero, the last-client
+        // callback) still precede the RPC handler's return.
         return status;
     };
     try {
@@ -732,6 +746,19 @@ grpc::Status SessionServiceImpl::OpenSession(
         // around it) and this stream would then sit reading for a session it
         // already asked to leave.
         if (first.has_end_session()) {
+            // The mode is REQUIRED, not defaulted: MODE_UNSPECIFIED fell
+            // through `!= DETACH` into TERMINATE, so a client that sent
+            // end_session{} without a mode (a proto3 zero-value slip) stopped
+            // the session and destroyed its in-flight turn. A bare stream
+            // drop already detaches; the one destructive outcome must be
+            // spelled.
+            if (first.end_session().mode() == v1::EndSession::MODE_UNSPECIFIED) {
+                return finish(
+                    /*terminate=*/false,
+                    grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
+                                 "end_session.mode is required (TERMINATE or DETACH); refusing "
+                                 "to guess the destructive default"));
+            }
             terminate_requested = first.end_session().mode() != v1::EndSession::DETACH;
         } else {
             Dispatch(first, *session);
@@ -743,9 +770,26 @@ grpc::Status SessionServiceImpl::OpenSession(
                     // stream's read loop, and only the handler knows how to
                     // unwind around it. TERMINATE stops the session; DETACH is
                     // the graceful form of a drop.
+                    if (event.end_session().mode() == v1::EndSession::MODE_UNSPECIFIED) {
+                        return finish(
+                            /*terminate=*/false,
+                            grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
+                                         "end_session.mode is required (TERMINATE or DETACH); "
+                                         "refusing to guess the destructive default"));
+                    }
                     terminate_requested =
                         event.end_session().mode() != v1::EndSession::DETACH;
                     break;
+                }
+                // The stream is bound to the session `first` named. A later
+                // event naming a DIFFERENT session is a client routing bug;
+                // the field is redundant by design ("self-describing
+                // messages"), so it is tolerated -- but never silently, or a
+                // misrouted event would be undiagnosable.
+                if (!event.session_id().empty() && event.session_id() != first.session_id()) {
+                    logger_.warn("session {}: stream received an event naming session '{}'; "
+                                 "routing bug on the client",
+                                 first.session_id(), event.session_id());
                 }
                 Dispatch(event, *session);
             }
@@ -1312,6 +1356,15 @@ grpc::Status SessionServiceImpl::PluginSubscribe(grpc::ServerContext* context,
     // explicit Close (the condition variable), and otherwise wakes only every
     // 500ms to check IsCancelled() -- the one client-disconnect signal the
     // sync API offers that nothing else can push a wakeup for.
+    //
+    // A live plugin subscription IS an attached client: attached_clients() is
+    // what the idle-exit reaper consults, and a checklist or cost-tracker view
+    // holding a stream open for a session's whole duration used to be
+    // invisible to it -- the process could conclude it was idle and shut down
+    // under a live stream. Counted only while the stream is actually live
+    // (every refusal path above already returned), and released on every exit
+    // of the scope, exceptions included.
+    const AttachedClientSlot subscription_slot(this);
     while (!sink->closed() && !context->IsCancelled()) {
         sink->WaitUntilClosed(std::chrono::milliseconds(500));
     }

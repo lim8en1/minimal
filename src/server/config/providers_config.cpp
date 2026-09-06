@@ -213,7 +213,22 @@ nlohmann::json NormalizeOpencodeProvider(const nlohmann::json& provider,
     if (out.contains("headers") && out.at("headers").is_object()) {
         nlohmann::json flat = nlohmann::json::array();
         for (const auto& [name, value] : out.at("headers").items()) {
-            if (value.is_string()) flat.push_back(nlohmann::json::array({name, value}));
+            if (value.is_string()) {
+                flat.push_back(nlohmann::json::array({name, value}));
+            } else if (value.is_number_integer() || value.is_number_float() ||
+                       value.is_boolean()) {
+                // Coerce scalars, don't drop them: opencode-shaped configs
+                // carry numeric/boolean header values, and a silent drop
+                // turns "unusual but working" into a discovery or auth
+                // failure with no trace in any log.
+                flat.push_back(
+                    nlohmann::json::array({name, value.is_boolean()
+                                                    ? std::string(value.get<bool>() ? "true" : "false")
+                                                    : value.dump()}));
+            } else {
+                common::DefaultLogger().warn(
+                    "providers.json: header '{}' has a non-scalar value and was dropped", name);
+            }
         }
         out["headers"] = std::move(flat);
     }
@@ -386,7 +401,17 @@ std::shared_ptr<const ResolvedModel> ProvidersConfig::ResolveDiscovered(
 
 DiscoveryOutcome ProvidersConfig::FetchOutcome(const ProviderEntry& entry) const {
     DiscoveryOutcome outcome;
-    if (!cache_.hook_) {
+    // Snapshot the hook under cache_.mutex_ (lock order gate -> mutex_, per
+    // DiscoveryCacheState) rather than reading it bare: SetDiscoveryHook
+    // writes it under that mutex, and a bare read of a std::function mid-assign
+    // is UB, however unlikely the overlap. The copy is released before the
+    // hook runs -- the network I/O must not hold any config lock.
+    DiscoveryHook hook;
+    {
+        std::lock_guard<std::mutex> lock(cache_.mutex_);
+        hook = cache_.hook_;
+    }
+    if (!hook) {
         // Uninjected (a test or an unhosted config): report rather than treat
         // as success-with-zero-models, which would read as "backend serves
         // nothing".
@@ -394,7 +419,7 @@ DiscoveryOutcome ProvidersConfig::FetchOutcome(const ProviderEntry& entry) const
         outcome.error = "no discovery hook set";
         return outcome;
     }
-    return cache_.hook_(entry.backend, entry.connection);
+    return hook(entry.backend, entry.connection);
 }
 
 void ProvidersConfig::PublishLocked(const ProviderEntry& entry, const DiscoveryOutcome& outcome,

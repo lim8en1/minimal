@@ -84,7 +84,7 @@ FileWindow read_window(const std::filesystem::path& confined_abs_path, int offse
     std::vector<char> buffer(keep + 2);  // room for the delimiter slot getline needs
 
     std::string line;
-    int line_number = 0;
+    std::int64_t line_number = 0;  // 64-bit: counts every line of the file (see FileWindow)
     while (true) {
         in.getline(buffer.data(), static_cast<std::streamsize>(buffer.size()));
         const auto extracted = in.gcount();

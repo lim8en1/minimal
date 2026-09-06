@@ -18,14 +18,17 @@ using EnvLookup = std::function<std::optional<std::string>(std::string_view name
 using BareVarWarning = std::function<void(std::string_view name)>;
 
 // Resolves `${NAME}` and `${NAME:-default}` markers against `lookup`.
-// Everything else -- `$` not followed by `{`, empty variables, text around
-// markers -- passes through literally (a bare `$NAME`-shaped reference fires
-// `on_bare_var` when given, since that shape is a plausible copy-paste of
-// shell syntax this interpolator does not expand).
+// Everything else -- `$` not followed by `{`, text around markers -- passes
+// through literally (a bare `$NAME`-shaped reference fires `on_bare_var` when
+// given, since that shape is a plausible copy-paste of shell syntax this
+// interpolator does not expand).
 //
 // std::nullopt means a marker could not be resolved: the variable (the part
-// before `:-`, if present) is unset with no default, the name is empty, or a
-// `${` never closes. When `failed_marker` is given it receives the offending
+// before `:-`, if present) is unset with no default, the name is empty (a
+// bare `${}` or `${:-x}` is a typo, not an empty substitution), a `${` never
+// closes, or the variable is set-but-EMPTY -- common::LookupEnv treats
+// set-but-empty as unset, so `${VAR:-default}` is the way to spell "empty is
+// legitimate". When `failed_marker` is given it receives the offending
 // NAME, so a diagnostic can name the variable without ever printing a
 // resolved value. The caller treats failure as a connection error naming the
 // entry -- silently sending an empty string (or the raw marker) to a server

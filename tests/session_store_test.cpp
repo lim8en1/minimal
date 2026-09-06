@@ -913,10 +913,11 @@ TEST_CASE("the checkpoint runs on the reaper's threshold, not the append's",
     for (int i = 0; i < SessionDatabase::kCheckpointAppends - 1; ++i) {
         db.AppendMessage(id, UserMsg(std::string(64, 'x')), 0);
     }
-    CHECK_FALSE(db.MaybeRunPassiveCheckpoint());  // below the threshold: no-op
+    using CheckpointOutcome = SessionDatabase::CheckpointOutcome;
+    CHECK(db.MaybeRunPassiveCheckpoint() == CheckpointOutcome::kNotDue);  // below the threshold: no-op
 
     db.AppendMessage(id, UserMsg("threshold"), 0);
-    CHECK(db.MaybeRunPassiveCheckpoint());  // at the threshold: runs
+    CHECK(db.MaybeRunPassiveCheckpoint() == CheckpointOutcome::kCompleted);  // at the threshold: runs
 
     // The log reset RESTART sets up takes effect on the NEXT writer
     // transaction: the WAL restarts from its head, so a fresh reader finds

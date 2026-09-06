@@ -240,10 +240,13 @@ SubagentOutcome SubagentManager::Spawn(const SubagentRequest& request,
             logger.info("subagent {} finished ({}); result queued for its parent", child_id,
                         child_result.is_error ? "error" : "ok");
         } else {
-            // The parent is already terminating; the result goes nowhere. Saying
-            // "queued" here sent the next reader of this log chasing a message
-            // that was dropped.
-            logger.warn("subagent {} finished ({}); parent already terminating, result dropped",
+            // QueueInjectedMessage refuses for two reasons: the parent is
+            // terminating, or its injection staging queue (64) is full. Either
+            // way the result goes nowhere; saying "queued" sent the next reader
+            // of this log chasing a message that was dropped, and naming only
+            // "terminating" misread a queue-full drop the same way.
+            logger.warn("subagent {} finished ({}); parent refused injection "
+                        "(terminating or queue full), result dropped",
                         child_id, child_result.is_error ? "error" : "ok");
         }
     };

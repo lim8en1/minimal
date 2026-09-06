@@ -132,9 +132,10 @@ struct OpenOptions {
 // the JSON decode of a read happens after it is released -- holding mu_ through
 // a multi-hundred-KB tool result's encode stalled every other session for the
 // whole conversion. Each AppendMessage is one transaction: the insert, the
-// default-name set, and the updated_at touch commit together or not at all. A
-// crash or a failed write therefore leaves an exact prefix of the transcript --
-// never a torn row.
+// discarded-tail reclaim on the fork path, the message_count bump, and the
+// updated_at touch commit together or not at all. A crash or a failed write
+// therefore leaves an exact prefix of the transcript -- never a torn row.
+// (Default naming is NOT part of the append transaction; see SetDefaultName.)
 class SessionDatabase {
 public:
     static constexpr int kSchemaVersion = 6;
@@ -153,8 +154,9 @@ public:
                                  std::string project_root, std::string agent_preset);
 
     // One durable transcript row. Assigns the next per-session seq over the
-    // ACTIVE transcript and returns it; sets the default name (truncated first
-    // user text) when the session still has none; touches updated_at.
+    // ACTIVE transcript and returns it; bumps message_count; touches
+    // updated_at. (The default name is set by SetDefaultName from the Session
+    // layer, outside the append transaction.)
     // token_count is the assistant output count, 0 otherwise.
     //
     // THE FORK: the first append after a rewind reclaims the discarded tail --
@@ -207,10 +209,21 @@ public:
     // MaybeRunPassiveCheckpoint() on the tick it already runs; a RESTART
     // checkpoint (PASSIVE never resets the log, which would grow without
     // bound) executes only once kCheckpointAppends appends have accumulated,
-    // and a busy checkpoint loses nothing -- the frames stay; the next attempt
-    // picks them up. Returns whether a checkpoint actually ran.
+    // and a busy checkpoint loses nothing -- the frames stay; a later attempt
+    // picks them up. A FAILED attempt also waits for another
+    // kCheckpointAppends appends before retrying (retrying every tick would
+    // hold mu_ behind a busy-timeout-bounded RESTART each time), so failures
+    // are counted: checkpoint_failures() lets the wiring log a persistently
+    // pinned WAL instead of the failure being silent.
     static constexpr int kCheckpointAppends = 200;
-    bool MaybeRunPassiveCheckpoint();
+    enum class CheckpointOutcome { kNotDue, kCompleted, kFailed };
+    CheckpointOutcome MaybeRunPassiveCheckpoint();
+
+    // Consecutive failed checkpoint attempts; reset to zero on success. The
+    // reaper wiring logs these (with backoff) -- see MaybeRunPassiveCheckpoint.
+    std::uint64_t checkpoint_failures() const {
+        return checkpoint_failures_.load(std::memory_order_relaxed);
+    }
 
     // The wal_autocheckpoint value this connection runs with (0 = the write
     // path never self-checkpoints; the reaper owns it, see above). The pragma
@@ -330,6 +343,7 @@ private:
     // by AppendMessage's callers, read by the reaper; the counter alone must
     // not need mu_.
     std::atomic<int> appends_since_checkpoint_{0};
+    std::atomic<std::uint64_t> checkpoint_failures_{0};
     // Cached prepared statements for the hot paths (appends, paging). Every
     // public method holds mu_, so the cache needs no lock of its own, and it is
     // mutable because the read paths (GetMessagesPage, GetSession) prepare on

@@ -16,9 +16,12 @@
 namespace minimal::tools {
 
 // Tool-source-agnostic by construction: built-in, plugin-registered, and
-// MCP-discovered tools all arrive through Register() and are indistinguishable
-// afterwards. MCP tools are namespaced `mcp__<server>__<tool>` at registration,
-// which is also how ToolExecutor routes their permission decision.
+// MCP-discovered tools all end up here indistinguishably. Register() takes
+// built-ins and plugin tools; MCP tools are namespaced `mcp__<server>__<tool>`
+// and arrive ONLY through ReplaceMcpTools(), which is also how ToolExecutor
+// routes their server-scoped permission decision. Register() refuses
+// mcp__-prefixed names carrying a PLUGIN attribution for that reason (core
+// and the test harness register unattributed).
 //
 // Concurrency: startup registration (Register/ApplyAliases/SetPermissionKeys)
 // is single-threaded and completes before any session exists. Once MCP tools

@@ -113,6 +113,10 @@ WriteOutcome write_file(const std::filesystem::path& confined_abs_path, std::str
         // implementation detail of mkstemp to keep meaning what it means here.
         std::filesystem::permissions(temp.path(), *create_perms,
                                      std::filesystem::perm_options::replace, ec);
+        if (ec) {
+            outcome.error = "cannot set requested file mode: " + ec.message();
+            return outcome;
+        }
     } else {
         // mkstemp creates 0600; match what a normal file would get instead.
         std::filesystem::permissions(temp.path(),
@@ -121,6 +125,13 @@ WriteOutcome write_file(const std::filesystem::path& confined_abs_path, std::str
                                          std::filesystem::perms::group_read |
                                          std::filesystem::perms::others_read,
                                      std::filesystem::perm_options::replace, ec);
+        if (ec) {
+            // Fail the write rather than rename silently-wrong modes in: a
+            // permissions() failure here would otherwise publish 0600 where
+            // 0644 was intended (or vice versa after a umask change).
+            outcome.error = "cannot set default file mode: " + ec.message();
+            return outcome;
+        }
     }
 
     // Durability before visibility: fsync the contents (with the mode already
@@ -143,7 +154,8 @@ WriteOutcome write_file(const std::filesystem::path& confined_abs_path, std::str
     // The rename is only durable once the DIRECTORY entry naming the new file
     // is. Best-effort: some filesystems do not support directory fsync, and the
     // write itself is already safe at that point.
-    const int dir_fd = ::open(parent.empty() ? "." : parent.c_str(), O_RDONLY | O_DIRECTORY);
+    const int dir_fd =
+        ::open(parent.empty() ? "." : parent.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     if (dir_fd >= 0) {
         (void)::fsync(dir_fd);
         (void)::close(dir_fd);
