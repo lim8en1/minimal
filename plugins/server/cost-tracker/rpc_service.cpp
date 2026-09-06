@@ -1,5 +1,6 @@
 #include "rpc_service.hpp"
 
+#include "minimal/common/logger.hpp"
 #include "rates_fetch.hpp"
 
 namespace minimal::cost_tracker {
@@ -96,19 +97,24 @@ plugins::PluginRpcHandler::Reply CostRpcService::Handle(const std::string& metho
     }
 
     if (method == "list") {
-        try {
-            nlohmann::json sessions = nlohmann::json::array();
-            for (const auto& session_id : store_.SessionIds()) {
+        // The try lives INSIDE the loop: one corrupt blob used to abort the
+        // whole listing, while the /cost all text path skips per-session --
+        // the RPC surface now follows the same rule. Skips are logged; the
+        // response shape carries no error channel for a partial listing.
+        nlohmann::json sessions = nlohmann::json::array();
+        for (const auto& session_id : store_.SessionIds()) {
+            try {
                 const auto history = store_.Load(session_id);
                 sessions.push_back(TotalsAsJson(Aggregate(
                     session_id, history.parent_session_id, history.turns,
                     [this](const std::string& model) { return rates_.Resolve(model); })));
+            } catch (const std::exception& error) {
+                minimal::common::DefaultLogger().warn(
+                    "cost-tracker: skipping unreadable cost history for session {}: {}",
+                    session_id, error.what());
             }
-            reply.payload = nlohmann::json{{"sessions", std::move(sessions)}}.dump();
-        } catch (const std::exception& error) {
-            reply.ok = false;
-            reply.error = error.what();
         }
+        reply.payload = nlohmann::json{{"sessions", std::move(sessions)}}.dump();
         return reply;
     }
 

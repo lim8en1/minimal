@@ -452,7 +452,8 @@ TEST_CASE("commands-md: over-cap output asks the operator; cancel submits nothin
     CHECK(result.message.find("cap") != std::string::npos);
     CHECK(fixture.submitted_turns().empty());
 
-    // Submitting re-runs the source without the cap and ships the whole output.
+    // Submitting ships the output CACHED from the capped first run -- it does
+    // not re-execute the generator (side effects would fire twice, uncapped).
     result = DispatchOne(registry, fixture, "big", {}, /*answer=*/"submit");
     CHECK(result.status == commands::CommandResult::Status::kOk);
     REQUIRE_FALSE(fixture.submitted_turns().empty());

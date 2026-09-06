@@ -21,6 +21,24 @@ void Accumulate(std::size_t& total, std::size_t bytes) {
     }
 }
 
+// The content_block index comes straight off the wire, so it is
+// attacker-influenced -- and blocks_.resize(index + 1) trusted it: an index
+// of SIZE_MAX overflowed the addition, and even a "modest" 5,000,000
+// allocated ~700 MB of Blocks in one step, bypassing the 64 MiB budget
+// Accumulate() enforces on delta CONTENT (the Block vector itself is not
+// content). No real message approaches this many blocks, so anything at or
+// beyond the ceiling is a malformed stream, reported on the same
+// AnthropicParseError channel as bad frame JSON.
+constexpr std::size_t kMaxBlocks = 4096;
+
+std::size_t CheckedBlockIndex(std::size_t index) {
+    if (index + 1 < index || index >= kMaxBlocks) {
+        throw AnthropicParseError("stream event named an implausible content_block index (" +
+                                  std::to_string(index) + ")");
+    }
+    return index;
+}
+
 }  // namespace
 
 bool AnthropicStreamReassembler::FeedFrame(std::string_view data, const llm::StreamEventSink& sink) {
@@ -47,7 +65,7 @@ bool AnthropicStreamReassembler::FeedFrame(std::string_view data, const llm::Str
     }
 
     if (type == "content_block_start") {
-        const std::size_t index = event.value("index", static_cast<std::size_t>(0));
+        const std::size_t index = CheckedBlockIndex(event.value("index", static_cast<std::size_t>(0)));
         const auto& content_block = event.at("content_block");
         const std::string block_type = content_block.value("type", "");
         if (index >= blocks_.size()) blocks_.resize(index + 1);
@@ -73,7 +91,7 @@ bool AnthropicStreamReassembler::FeedFrame(std::string_view data, const llm::Str
     }
 
     if (type == "content_block_delta") {
-        const std::size_t index = event.value("index", static_cast<std::size_t>(0));
+        const std::size_t index = CheckedBlockIndex(event.value("index", static_cast<std::size_t>(0)));
         if (index >= blocks_.size()) blocks_.resize(index + 1);
         const auto& delta = event.at("delta");
         const std::string delta_type = delta.value("type", "");

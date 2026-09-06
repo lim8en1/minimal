@@ -12,11 +12,15 @@
 // extracted and namespaced. "A plugin must call these, never reimplement" is
 // the same rule that put path_confinement on the ABI surface.
 //
-// THE NAMESPACE IS THE BOUNDARY. `plugin` is part of the primary key and every
-// method takes it as its first argument, so one plugin cannot read or write
-// another's rows -- structurally, not by convention. A plugin that wants
-// another plugin's data goes through the service channel (ServiceRegistry, the
-// sanctioned pull path), not around this class.
+// THE NAMESPACE IS THE KEY, NOT A GUARANTEE. `plugin` is part of the primary
+// key and every method takes it as its first argument, but it is a
+// caller-supplied string -- the host hands each plugin its own name and trusts
+// it to pass that name back. Isolation therefore holds by convention and
+// discipline, not structurally: a buggy (or hostile) plugin that passes
+// another plugin's name can read and overwrite its rows. The host does not
+// mediate per-call, so a plugin that wants another plugin's data goes through
+// the service channel (ServiceRegistry, the sanctioned pull path), not around
+// this class.
 //
 // VALUES ARE OPAQUE STRINGS. Plugins serialize their own JSON (everything else
 // in this tree does); core defines neither schema nor semantics. A plugin

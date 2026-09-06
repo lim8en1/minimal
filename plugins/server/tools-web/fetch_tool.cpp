@@ -73,6 +73,11 @@ public:
             net::HttpRequest request;
             request.url = url;
             request.request_timeout = std::chrono::milliseconds(settings_.fetch_timeout_ms);
+            // The check just resolved this hop's host; pin the connection to
+            // the addresses it vetted so libcurl's connect-time resolution
+            // cannot pick a different one (rebinding TOCTOU). Empty when the
+            // check skipped resolution (allow_private_hosts).
+            request.pinned_resolves = check.resolve_entries;
 
             net::HttpResponse response;
             try {

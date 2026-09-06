@@ -6,6 +6,8 @@
 
 #include <nlohmann/json.hpp>
 
+#include "minimal/common/logger.hpp"
+
 namespace minimal::checklist {
 namespace {
 
@@ -44,7 +46,13 @@ plugins::PluginRpcHandler::Reply ChecklistRpcService::Handle(const std::string& 
             return Reply{false, "", "checklist: get requires a non-empty string 'session_id'"};
         }
         const auto session_id = body.at("session_id").get<std::string>();
-        const auto items = store_->Load(session_id);
+        std::vector<Item> items;
+        try {
+            // Load decodes the stored blob strictly; a corrupt row throws.
+            items = store_->Load(session_id);
+        } catch (const std::exception& error) {
+            return Reply{false, "", std::string("checklist: ") + error.what()};
+        }
         return Reply{true,
                      nlohmann::json({{"session_id", session_id}, {"items", ItemsJson(items)}})
                          .dump(),
@@ -54,7 +62,17 @@ plugins::PluginRpcHandler::Reply ChecklistRpcService::Handle(const std::string& 
     if (method == "list") {
         std::vector<std::pair<std::string, std::vector<Item>>> checklists;
         for (const auto& session_id : store_->SessionIds()) {
-            checklists.emplace_back(session_id, store_->Load(session_id));
+            // Per-session, not around the loop: one corrupt blob must not
+            // abort the whole enumeration, the same rule /cost all follows.
+            // The skip is logged; the response shape stays {"checklists":
+            // [...]} and carries no error channel for a partial listing.
+            try {
+                checklists.emplace_back(session_id, store_->Load(session_id));
+            } catch (const std::exception& error) {
+                minimal::common::DefaultLogger().warn(
+                    "checklist: skipping unreadable stored list for session {}: {}",
+                    session_id, error.what());
+            }
         }
         auto entries = nlohmann::json::array();
         for (auto& [session_id, items] : checklists) {

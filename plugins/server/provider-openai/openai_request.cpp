@@ -5,6 +5,8 @@
 #include <string_view>
 #include <variant>
 
+#include "minimal/llm/provider.hpp"
+
 namespace minimal::provider_openai {
 
 namespace {
@@ -132,6 +134,20 @@ std::string BuildRequestBody(const llm::ChatRequest& request, bool stream) {
     // the request's own serialized size is not knowable cheaply, so this is a
     // floor, not a prediction.
     out.reserve(4096);
+
+    // `n` (parallel sampling) would pass through to the wire verbatim, but the
+    // response parser reads only choices[0] -- choices[1..n-1] would be
+    // generated AND BILLED, then silently dropped. That silent data loss is
+    // worse than a hard failure, so n > 1 is rejected up front; n absent or
+    // n == 1 behaves exactly as before (it passes through unstripped).
+    if (request.parameters.is_object()) {
+        const auto n = request.parameters.find("n");
+        if (n != request.parameters.end() && n->is_number() && n->get<double>() > 1.0) {
+            throw llm::LlmError(llm::LlmErrorCategory::RequestError,
+                                "parallel sampling (n > 1) is not supported: only the first "
+                                "choice would be read");
+        }
+    }
 
     out += '{';
     bool first_key = true;

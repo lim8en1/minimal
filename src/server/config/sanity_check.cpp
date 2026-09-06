@@ -523,6 +523,26 @@ std::vector<CheckResult> StartupSanityCheck::check_session_db() {
 
 std::vector<CheckResult> StartupSanityCheck::check_plugins() {
     std::vector<CheckResult> results;
+    // Two .so files declaring the same minimal_plugin_name are one plugin
+    // twice as far as everything downstream is concerned: the data dir under
+    // plugin_data_root, the storage namespace, and every attribution key are
+    // all keyed by the declared name, so the second load silently shares (and
+    // corrupts) the first's state, and collision diagnostics blame one plugin
+    // for both. NameRegistry cannot see this -- it receives already-loaded
+    // attributions -- so it is checked here, against the records, naming both
+    // files the way the provider-kind fatal below names both claimants.
+    std::unordered_map<std::string, std::string> name_owner;
+    for (const auto& record : inputs_.plugin_records) {
+        if (record.status != plugins::LoadStatus::Loaded || record.name.empty()) continue;
+        const auto [it, inserted] = name_owner.try_emplace(record.name, record.file.string());
+        if (!inserted) {
+            results.push_back(Fatal(
+                "plugins", "plugin name '" + record.name + "' is declared by both " + it->second +
+                               " and " + record.file.string() +
+                               " -- they would share one data dir and storage namespace; "
+                               "rename one of them (minimal_plugin_name)"));
+        }
+    }
     for (const auto& record : inputs_.plugin_records) {
         // Loaded is fine. Disabled is a DELIBERATE choice -- the documented
         // tool-replacement flow -- and its practical impact (no provider kind,

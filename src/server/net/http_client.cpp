@@ -268,6 +268,18 @@ HttpResponse ConfigureAndPerform(CURL* handle, const HttpRequest& request, Mode 
     }
     if (headers_guard.list) curl_easy_setopt(handle, CURLOPT_HTTPHEADER, headers_guard.list);
 
+    // Address pinning -- see HttpRequest::pinned_resolves. The list must stay
+    // alive for the whole transfer, hence the guard's scope.
+    SListGuard resolves_guard;
+    for (const auto& entry : request.pinned_resolves) {
+        auto* appended = curl_slist_append(resolves_guard.list, entry.c_str());
+        if (appended == nullptr) {
+            throw HttpError(HttpErrorKind::Other, "out of memory building resolve entries");
+        }
+        resolves_guard.list = appended;
+    }
+    if (resolves_guard.list) curl_easy_setopt(handle, CURLOPT_RESOLVE, resolves_guard.list);
+
     curl_easy_setopt(handle, CURLOPT_HEADERFUNCTION, &HeaderCallback);
     curl_easy_setopt(handle, CURLOPT_HEADERDATA, &state);
     curl_easy_setopt(handle, CURLOPT_WRITEFUNCTION, &WriteCallback);

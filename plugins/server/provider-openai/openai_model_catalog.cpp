@@ -91,6 +91,12 @@ std::vector<llm::DiscoveredModel> OpenAiModelCatalog::List(const llm::ProviderCo
     if (!config.api_key.empty()) {
         request.headers.push_back({"Authorization", "Bearer " + config.api_key});
     }
+    // Same headers the chat path sends (see OpenAiProvider::BuildHttpRequest):
+    // a header-auth gateway (tenant id, routing tags) 401s every discovery
+    // call that carries only the bearer token.
+    for (const auto& [name, value] : config.headers) {
+        request.headers.push_back({name, value});
+    }
 
     const net::HttpResponse response = http_.Get(request);
     if (response.status < 200 || response.status >= 300) {

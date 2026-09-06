@@ -41,6 +41,15 @@ FileWindow read_window(const std::filesystem::path& confined_abs_path, int offse
         window.error = "is a directory: " + confined_abs_path.string();
         return window;
     }
+    // Everything here runs on the session worker, and std::ifstream on a FIFO
+    // (or a device) never reaches EOF: the worker parks forever on one tool
+    // call. is_regular_file follows symlinks, so a link pointing at a real
+    // file still reads; anything the kernel serves without a size -- FIFO,
+    // socket, device node -- is refused up front.
+    if (!std::filesystem::is_regular_file(confined_abs_path, ec)) {
+        window.error = "not a regular file: " + confined_abs_path.string();
+        return window;
+    }
 
     std::ifstream in(confined_abs_path, std::ios::binary);
     if (!in) {

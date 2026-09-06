@@ -140,6 +140,15 @@ TitlerObserver::TitlerObserver(TitlerConfig config, plugins::ServiceRegistry* se
     state_->logger = &logger;
 }
 
+TitlerObserver::~TitlerObserver() {
+    // Join-and-stop for the detached workers (see the class comment): the
+    // registry destroying this observer is the host's only teardown point for
+    // the titler, and a worker still running here would dereference the
+    // borrowed support pointer into teardown.
+    std::unique_lock<std::mutex> lock(state_->workers_mu);
+    state_->workers_cv.wait(lock, [this] { return state_->workers == 0; });
+}
+
 void TitlerObserver::OnTurnCompleted(const agent::SessionInfo& info,
                                      const agent::TurnSummary& summary) {
     // Subagents are named by their task; the parent's model already wrote that
@@ -161,10 +170,15 @@ void TitlerObserver::OnTurnCompleted(const agent::SessionInfo& info,
     // call itself, which nothing here can bound, goes to the detached thread.
     std::string first_text;
     std::optional<agent::SessionLlm> llm;
+    // Resolved HERE and handed to the worker as a captured pointer: the worker
+    // must never dereference the ServiceRegistry itself, whose lifetime the
+    // worker cannot see (the observer thread's resolution is the pattern every
+    // other observer-side service access follows).
+    agent::SessionSupportService* support = nullptr;
     if (state_->services != nullptr) {
         void* raw = state_->services->Find(agent::kSessionSupportServiceName);
         if (raw != nullptr) {
-            auto* support = static_cast<agent::SessionSupportService*>(raw);
+            support = static_cast<agent::SessionSupportService*>(raw);
             if (auto reader = support->HistoryFor(info.session_id); reader != nullptr) {
                 first_text =
                     FirstUserText(info.session_id, *reader, state_->config.input_char_budget);
@@ -189,23 +203,40 @@ void TitlerObserver::OnTurnCompleted(const agent::SessionInfo& info,
                               info.session_id);
         return;
     }
+    if (support == nullptr) {
+        // The service vanished between the two finds above -- unreachable in
+        // a sealed registry, but the rename needs the service, so there is
+        // nothing to spawn.
+        return;
+    }
 
-    // The detached worker holds the State shared_ptr and the RESOLVED provider
-    // -- never `this`, and never a session lookup: the observer may be
-    // destroyed with the registry while a straggler call is still in flight,
-    // and the session may be long gone from the registry by the time the
-    // response lands. The rename degrades correctly either way.
+    // The worker holds ONLY owned captures plus the two pointers resolved on
+    // the observer thread above: the State shared_ptr (never `this` -- the
+    // observer may be destroyed with the registry while a straggler call is
+    // still in flight), the resolved provider shared_ptr, and a Logger BY
+    // VALUE (stateless handle; resolving spdlog's current default per call
+    // makes the copy equivalent without holding a raw pointer). It is counted
+    // on State so ~TitlerObserver can drain it -- an untracked detached thread
+    // used to outlive teardown entirely.
     auto state = state_;
     auto provider = llm->provider;
     std::string model = llm->model;
     std::string session_id = info.session_id;
+    common::Logger logger_copy = *state_->logger;  // by value; see above
+    {
+        std::lock_guard<std::mutex> lock(state->workers_mu);
+        state->workers += 1;
+    }
     std::thread([state, provider = std::move(provider), model = std::move(model),
-                 session_id = std::move(session_id), text = std::move(first_text)]() mutable {
-        void* raw = state->services->Find(agent::kSessionSupportServiceName);
-        if (raw == nullptr) return;
-        auto* support = static_cast<agent::SessionSupportService*>(raw);
-        TitlerObserver::GenerateTitle(state->config, *state->logger, *provider, model,
-                                      session_id, text, *support);
+                 session_id = std::move(session_id), text = std::move(first_text), support,
+                 logger = std::move(logger_copy)]() mutable {
+        TitlerObserver::GenerateTitle(state->config, logger, *provider, model, session_id,
+                                      text, *support);
+        {
+            std::lock_guard<std::mutex> lock(state->workers_mu);
+            state->workers -= 1;
+        }
+        state->workers_cv.notify_all();
     }).detach();
 }
 

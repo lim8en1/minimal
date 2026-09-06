@@ -47,7 +47,11 @@ struct RegistrationNames {
 //
 // Each key in `aliases` is routed to the kind that actually claims it, so a
 // command alias is not reported dangling merely because no tool answers to it.
-// A key no registration of either kind claims lands in dangling_aliases once.
+// A key claimed by BOTH a tool and a command is recorded in both namespaces --
+// ToolRegistry::ApplyAliases renames the tool onto the surface regardless of
+// the command's claim, so the tool's side of the surface must be visible to
+// the collision scan too. A key no registration of either kind claims lands in
+// dangling_aliases once.
 //
 // Collision and dangling lists are sorted: NameRegistry iterates unordered
 // maps, and startup diagnostics must be stable run to run.

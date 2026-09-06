@@ -229,11 +229,13 @@ PluginRecord PluginLoader::LoadOne(const PluginCandidate& candidate) {
     // any hook throws, everything the plugin registered in the removal-safe
     // registries is stripped: a user plugin's failure is only a warning, so a
     // partially-initialized plugin must not leave live, attributed artifacts
-    // behind. The four registries below carry attribution (observers via a
-    // count snapshot taken here); the REST do not -- hook points, provider
+    // behind. Four registries here have a removal seam (observers via a count
+    // snapshot taken here); the REST do not -- hook points, provider
     // factories, model catalogs, compaction strategies, permission advisors,
-    // mention resolvers and auth providers have no removal seam and stay live,
-    // which the warning says loudly. Removal is unaffected by aliasing:
+    // mention resolvers and auth providers stay live, which the warning says
+    // loudly. Hook points and permission advisors still carry ATTRIBUTION
+    // windows below -- they simply cannot be rolled back. Removal is
+    // unaffected by aliasing:
     // ApplyAliases runs after ALL plugin loading (main.cpp), so the tool and
     // command maps are still keyed by original attribution names here.
     const std::size_t observers_before =
@@ -381,9 +383,12 @@ PluginRecord PluginLoader::LoadOne(const PluginCandidate& candidate) {
     }
 
     if (model_catalogs_ != nullptr) {
-        // Same attribution window as tools and commands: a kind two plugins
-        // both register must be diagnosable down to both, which the
-        // attributions feed the sanity check for.
+        // Attribution-FREE, unlike tools and commands: ModelCatalogRegistry
+        // has no attribution window at all (its Register bool return is the
+        // whole seam). The kinds the plugin actually added are diffed
+        // before/after and recorded on the PluginRecord, which is what feeds
+        // the sanity check's "registered by both ...; the first wins" report
+        // for a duplicate kind.
         const auto kinds_before = model_catalogs_->kinds();
         if (auto register_catalogs = Lookup<RegisterModelCatalogsFn>(
                 handle, "minimal_plugin_register_model_catalogs")) {

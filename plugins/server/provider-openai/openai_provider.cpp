@@ -95,31 +95,48 @@ llm::ChatResponse OpenAiProvider::StreamComplete(const llm::ChatRequest& request
     bool error_body_capped = false;
     std::exception_ptr pending_error;
 
+    // Both callbacks run inside libcurl's C call stack: an exception escaping
+    // either is undefined behavior. on_headers has no false-returning sink
+    // contract, so it stashes the exception (cheap, allocation-free
+    // assignments run first, keeping the error-status bookkeeping consistent
+    // even if the header-vector copy throws) for rethrow_pending_if_any()
+    // once StreamPost unwinds.
     auto on_headers = [&](int status, const std::vector<net::HttpHeader>& headers) {
-        response_status = status;
-        response_headers = headers;
         is_error_status = status < 200 || status >= 300;
+        response_status = status;
+        try {
+            response_headers = headers;  // vector copy -- allocation can throw
+        } catch (...) {
+            pending_error = std::current_exception();
+        }
     };
 
     // Exceptions must never escape into libcurl's C call stack (undefined
     // behavior) -- caught here, stashed, and rethrown once StreamPost unwinds.
     auto on_chunk = [&](std::string_view chunk) -> bool {
         if (is_error_status) {
-            // For classification and the error message only -- never parsed as
-            // a completion. The cap is a CLASSIFICATION BUDGET, not a reading
-            // commitment: 64 KiB is far more than any error message needs, and
-            // a drip-feeding proxy would otherwise hold the transfer open
-            // forever (the body cap used to stop accumulating but keep
-            // reading). Aborting lands in the catch below, which classifies by
-            // the STATUS -- the one fact that matters -- with the body we
-            // already hold.
-            constexpr std::size_t kMaxErrorBody = 64 * 1024;
-            if (error_body.size() < kMaxErrorBody) {
-                error_body.append(chunk.substr(0, kMaxErrorBody - error_body.size()));
-                return true;
+            // The append allocates too -- the barrier covers the whole
+            // error-body branch, not just the parse path below.
+            try {
+                // For classification and the error message only -- never parsed as
+                // a completion. The cap is a CLASSIFICATION BUDGET, not a reading
+                // commitment: 64 KiB is far more than any error message needs, and
+                // a drip-feeding proxy would otherwise hold the transfer open
+                // forever (the body cap used to stop accumulating but keep
+                // reading). Aborting lands in the catch below, which classifies by
+                // the STATUS -- the one fact that matters -- with the body we
+                // already hold.
+                constexpr std::size_t kMaxErrorBody = 64 * 1024;
+                if (error_body.size() < kMaxErrorBody) {
+                    error_body.append(chunk.substr(0, kMaxErrorBody - error_body.size()));
+                    return true;
+                }
+                error_body_capped = true;
+                return false;
+            } catch (...) {
+                pending_error = std::current_exception();
+                return false;
             }
-            error_body_capped = true;
-            return false;
         }
         try {
             for (const auto& frame : sse_parser.Feed(chunk)) {
@@ -132,6 +149,15 @@ llm::ChatResponse OpenAiProvider::StreamComplete(const llm::ChatRequest& request
                 // stack and is rethrown unchanged below.
                 if (frame.event == "error") {
                     throw ClassifyErrorEventData(frame.data);
+                }
+                // Keepalives and other non-data frames: `event: ping` with no
+                // data, or a bare empty `data:` line. json::parse("") throws,
+                // and the resulting ParseError is NON-retryable -- a proxy
+                // that pings between chunks turned the whole turn into a hard
+                // failure. An empty payload carries nothing to reassemble;
+                // skip it before parsing.
+                if (frame.data.find_first_not_of(" \t\r\n") == std::string::npos) {
+                    continue;
                 }
                 if (!reassembler.FeedFrame(frame.data, sink)) {
                     cancelled_by_sink = true;
@@ -196,6 +222,21 @@ llm::ChatResponse OpenAiProvider::StreamComplete(const llm::ChatRequest& request
                     reassembler.Finalize(/*tolerate_malformed_tool_calls=*/true);
                 response.stop_reason = llm::StopReason::Cancelled;
                 return response;
+            } catch (const OpenAiParseError& parse_error) {
+                RethrowParseErrorAsLlmError(parse_error);
+            }
+        }
+        // The connection dropped AFTER the message completed (finish_reason
+        // processed or [DONE] arrived) but BEFORE the socket closed tidily:
+        // the response is whole -- finalizing it as a Transport failure threw
+        // away a complete answer the user was already billed for and re-billed
+        // them on retry. Return it as a success instead, exactly as the
+        // clean-close path below would have. CloseOpenBlocks is idempotent
+        // when finish_reason already closed every block.
+        if (reassembler.completed()) {
+            try {
+                reassembler.CloseOpenBlocks(sink);
+                return reassembler.Finalize();
             } catch (const OpenAiParseError& parse_error) {
                 RethrowParseErrorAsLlmError(parse_error);
             }

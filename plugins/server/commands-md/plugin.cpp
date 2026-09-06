@@ -38,6 +38,13 @@ namespace {
 // there did not ask the operator to trust (see MdCommandSpec::trusted).
 std::vector<minimal::commands_md::CommandDir> CommandDirs() {
     std::vector<minimal::commands_md::CommandDir> dirs;
+    // LIMITATION, stated precisely: the anchor is the SERVER process's cwd,
+    // not any session's project root. PluginRegistrationContext carries no
+    // project root (commands register once, at startup, before any session
+    // exists -- and the server serves many project roots), so project-local
+    // command files are discovered only under the directory the server was
+    // launched from. A session whose project_root differs sees only the
+    // global (trusted) commands from this plugin.
     const std::filesystem::path cwd = std::filesystem::current_path();
     if (!cwd.empty()) {
         const minimal::config::ProjectDirs project(cwd);

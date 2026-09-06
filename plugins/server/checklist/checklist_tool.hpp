@@ -13,6 +13,7 @@
 // would only train the operator to click through.
 
 #include <memory>
+#include <mutex>
 
 #include "checklist_store.hpp"
 #include "minimal/plugins/plugin_abi.h"

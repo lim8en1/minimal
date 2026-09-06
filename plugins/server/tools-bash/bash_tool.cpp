@@ -49,6 +49,9 @@ struct RunOutcome {
     std::string io_error_message;
     bool timed_out = false;
     bool cancelled = false;
+    // waitpid returned -1 (ECHILD): the pid was reaped out from under us, so
+    // wait_status is meaningless and must not be read as "exit 0".
+    bool reap_error = false;
     int wait_status = 0;   // valid unless the spawn itself failed
     std::string output;    // the capped, rendered stdout+stderr captured so far
     std::string state_payload;
@@ -140,7 +143,13 @@ RunOutcome RunProcess(const LaunchedProcess& proc, const BashSettings& settings,
             break;
         }
         if (rc < 0 && errno == EINTR) continue;
-        if (rc < 0) break;  // ECHILD: nothing left to reap
+        if (rc < 0) {
+            // ECHILD: nothing left to reap, and that is the problem -- status
+            // still holds 0, which would read as a clean exit below. Flagged
+            // so the caller reports an undeterminable status instead.
+            outcome.reap_error = true;
+            break;
+        }
         if (cancelled()) {
             outcome.cancelled = true;
             break;
@@ -396,14 +405,6 @@ public:
         const auto outcome = RunProcess(proc, settings_, timeout_ms, ctx);
         const auto duration_ms = ElapsedMs(started);
 
-        if (outcome.state_overflow) {
-            ctx.logger.warn("bash[{}] fd-9 state payload exceeded {} bytes; cwd and environment "
-                            "left unchanged",
-                            ctx.session_id, kMaxStatePayloadBytes);
-        } else {
-            AdoptShellState(ctx, outcome.state_payload);
-        }
-
         if (outcome.io_error) {
             ctx.logger.warn("bash[{}] io error running '{}': {} ({} ms)", ctx.session_id, command,
                             outcome.io_error_message, duration_ms);
@@ -426,6 +427,31 @@ public:
                             duration_ms);
             return Error(with_output("[timed out after " + std::to_string(timeout_ms) +
                                      " ms; process group killed]"));
+        }
+
+        // Adoption happens only AFTER the failure returns above, and that
+        // ordering is load-bearing: a cancelled or timed-out command was
+        // killed mid-drain, so a payload that still parses is a truncated
+        // prefix of the real trailer -- adopting it wholesale-replaces the
+        // session env with a partial one (a dropped PATH strands every later
+        // call). Same all-or-nothing rule as the overflow latch in
+        // RunProcess; the all-or-nothing PARSE (ParseStatePayload) cannot see
+        // this case, because a valid prefix is indistinguishable from a
+        // complete state.
+        if (outcome.state_overflow) {
+            ctx.logger.warn("bash[{}] fd-9 state payload exceeded {} bytes; cwd and environment "
+                            "left unchanged",
+                            ctx.session_id, kMaxStatePayloadBytes);
+        } else {
+            AdoptShellState(ctx, outcome.state_payload);
+        }
+
+        if (outcome.reap_error) {
+            // ECHILD: the pid was reaped out from under us, so the status in
+            // wait_status is meaningless. Reporting it (0 would mean success)
+            // instead of silently calling the command a clean exit.
+            return Error(with_output(
+                "[could not determine exit status (process already reaped)]"));
         }
         if (WIFSIGNALED(outcome.wait_status)) {
             const int sig = WTERMSIG(outcome.wait_status);

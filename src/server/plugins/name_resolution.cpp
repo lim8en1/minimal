@@ -67,12 +67,24 @@ RegistrationNames ResolveRegistrationNames(const tools::ToolRegistry& registry,
     }
 
     for (const auto& [qualified_key, alias] : aliases) {
-        if (command_identities.count(qualified_key) != 0) {
+        const bool claimed_by_command = command_identities.count(qualified_key) != 0;
+        const bool claimed_by_tool = tool_identities.count(qualified_key) != 0;
+        if (claimed_by_command) {
             name_registry.SetAlias(NameKind::Command, qualified_key, alias);
-        } else {
-            // Tool kind covers both "a tool claims it" and "nothing claims it" --
-            // the latter is what makes NameRegistry report it dangling, and one
-            // kind reporting it once is what keeps the diagnostic honest.
+        }
+        // Tool kind covers "a tool claims it" AND "nothing claims it" -- the
+        // latter is what makes NameRegistry report it dangling, and one kind
+        // reporting it once keeps the diagnostic honest. It is deliberately
+        // NOT skipped for the both-claimed case: ToolRegistry::ApplyAliases
+        // renames the tool onto the alias surface regardless of the command's
+        // claim, so the tool's side of that surface must be visible to the
+        // collision scan too. Recording a both-claimed alias as Command-only
+        // modeled a surface the tool in fact occupied: a second plugin
+        // claiming it collided blind, and the tool's permission key diverged
+        // from its own rename. A command-only claim records no Tool alias --
+        // the tool registry holds nothing under that key, and a Tool entry
+        // naming nothing would be reported dangling.
+        if (claimed_by_tool || !claimed_by_command) {
             name_registry.SetAlias(NameKind::Tool, qualified_key, alias);
         }
     }

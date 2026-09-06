@@ -9,6 +9,7 @@
 
 #include "minimal/commands/command_context.hpp"
 #include "minimal/common/config_paths.hpp"
+#include "minimal/common/file_lock.hpp"
 #include "minimal/commands/command_registry.hpp"
 #include "minimal/tools/atomic_write.hpp"
 #include "minimal/tools/permission.hpp"
@@ -294,6 +295,24 @@ public:
         }
 
         const auto path = common::DataDir() / "auth.json";
+        // The whole read-modify-write runs under a cross-process exclusive
+        // lock: two sessions running /connect concurrently would otherwise
+        // race (both read, both merge, last writer wins) and one provider's
+        // entry would silently vanish. ExclusiveFileLock throws when the lock
+        // is held -- the command surface has no exception handler, so the
+        // refusal is converted to a command error below.
+        try {
+            const common::ExclusiveFileLock lock(path);
+            return SaveCredential(path, provider, key);
+        } catch (const std::exception& e) {
+            return CommandResult::Error("could not lock " + path.string() +
+                                        " for update: " + e.what());
+        }
+    }
+
+private:
+    static CommandResult SaveCredential(const std::filesystem::path& path,
+                                        const std::string& provider, const std::string& key) {
         nlohmann::json doc = nlohmann::json::object();
         {   // merge into whatever is already stored
             std::ifstream in(path);
@@ -316,15 +335,27 @@ public:
         if (!doc[provider].is_object()) doc[provider] = nlohmann::json::object();
         doc[provider]["key"] = key;
         std::filesystem::create_directories(path.parent_path());
-        // 0600, not the default 0644: this file holds a live API key. Every
-        // other local account (and, on a shared box, every other tenant) can
-        // otherwise read it straight off disk.
         const tools::WriteOutcome written = tools::write_file(
             path, doc.dump() + "\n",
             std::filesystem::perms::owner_read | std::filesystem::perms::owner_write);
         if (!written.ok) {
             return CommandResult::Error("could not write " + path.string() + ": " +
                                         written.error);
+        }
+        // 0600, enforced EXPLICITLY and only after the write: this file holds
+        // a live API key, but write_file preserves an existing file's mode
+        // (the atomic rename swaps inodes wholesale, so create_perms only
+        // applies to a fresh file) -- a pre-existing auth.json created with
+        // wider permissions would stay wide no matter what was passed above.
+        // Failing closed: reporting an error is better than silently leaving
+        // a credential group/other-readable.
+        std::error_code ec;
+        std::filesystem::permissions(path, std::filesystem::perms::owner_read |
+                                               std::filesystem::perms::owner_write,
+                                     std::filesystem::perm_options::replace, ec);
+        if (ec) {
+            return CommandResult::Error("stored the credential but could not restrict " +
+                                        path.string() + " to owner-only: " + ec.message());
         }
         return CommandResult::Ok("stored credential for '" + provider + "' in " + path.string() +
                                  " -- restart the server for it to take effect");

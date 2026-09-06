@@ -226,6 +226,15 @@ int main(int argc, char** argv) {
                              plugins_json_before);
     }
 
+    // Per-plugin persistent KV storage. DECLARED BEFORE every registry that can
+    // hold plugin-registered objects (tools, commands, services, ...) on
+    // purpose: reverse-order destruction frees later declarations FIRST, so
+    // from here it is destroyed LAST -- after the registries' own destructors
+    // (flushes, observer drains) are done with anything that references
+    // plugin-owned state. Declared after the registries, it was freed before
+    // them -- the one teardown ordering the "process lifetime, like the
+    // registries" contract got backwards.
+    std::unique_ptr<minimal::plugins::PluginStorage> plugin_storage;
     minimal::tools::ToolRegistry tools;
     minimal::llm::ProviderFactoryRegistry providers;
     minimal::commands::CommandRegistry commands;
@@ -281,12 +290,12 @@ int main(int argc, char** argv) {
 
     // Per-plugin persistent KV storage, constructed BEFORE plugin load: the
     // pointer rides PluginRegistrationContext into every registration hook.
-    // Owned here for the process lifetime, like the registries. Open failure
+    // Declared above, before the registries -- see the destruction-ordering
+    // note there. Open failure
     // is fatal -- a plugin store a newer binary wrote must not be silently
     // rebuilt over -- and there is no degraded harness to serve anyway, since
     // bundled plugins may depend on the seam.
     const auto plugin_data_root = minimal::common::DataDir() / "plugins";
-    std::unique_ptr<minimal::plugins::PluginStorage> plugin_storage;
     try {
         plugin_storage =
             std::make_unique<minimal::plugins::PluginStorage>(minimal::common::DataDir() /

@@ -215,16 +215,33 @@ LaunchedProcess LaunchProcess(const std::string& wrapped, const SessionShellStat
         _exit(child_die("failed to exec shell"));
     }
 
-    // Parent.
-    out_write.reset();
-    state_write.reset();
-    devnull.reset();
+    // Parent. The fd resets and the release() calls cannot throw, but
+    // TrackPgid can (a std::set insert, plus the first-use atexit
+    // registration) -- and a throw past this point abandons a forked, live
+    // child with its pgid registered in the sweep set. Contained: kill the
+    // group and reap before propagating, so no caller ever inherits a
+    // LaunchedProcess that is half-built or a child nobody owns.
+    try {
+        out_write.reset();
+        state_write.reset();
+        devnull.reset();
 
-    proc.ok = true;
-    proc.pid = pid;
-    proc.out_fd = out_read.release();
-    proc.state_fd = state_read.release();
-    TrackPgid(pid);
+        proc.ok = true;
+        proc.pid = pid;
+        proc.out_fd = out_read.release();
+        proc.state_fd = state_read.release();
+        TrackPgid(pid);
+    } catch (...) {
+        // Syscalls, not the RAII helpers: nothing here may throw from inside
+        // a catch that is already cleaning up after a throw.
+        ::killpg(pid, SIGKILL);
+        ::kill(pid, SIGKILL);
+        int status = 0;
+        while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {
+        }
+        ForgetPgid(pid);
+        throw;
+    }
     return proc;
 }
 

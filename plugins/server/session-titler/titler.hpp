@@ -15,6 +15,7 @@
 // spend the user's tokens on its own initiative. Enable it with one
 // plugins.json edit.
 
+#include <condition_variable>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -68,10 +69,24 @@ std::string CleanTitle(std::string_view text);
 // provider call runs detached. A rename AFTER termination still works: the
 // database write does not need a live session, and the event push degrades to
 // a no-op.
+//
+// THE DETACHED WORKERS ARE NOT UNTRACKED. Each one is counted on the shared
+// State block, and ~TitlerObserver -- the observer registry is the last
+// holder of this object -- DRAINS them before the observer's own state dies:
+// the shutdown-time alternative was detached threads still dereferencing
+// borrowed host pointers (the support service, resolved on the observer
+// thread precisely so the worker never touches the ServiceRegistry again)
+// into teardown. Everything else the worker touches is owned by the capture:
+// the State shared_ptr, the resolved provider shared_ptr, a Logger BY VALUE
+// (the handle is stateless and resolves spdlog's current default per call,
+// so a copy is the same logger without the raw pointer).
 class TitlerObserver final : public agent::SessionObserver {
 public:
     TitlerObserver(TitlerConfig config, plugins::ServiceRegistry* services,
                    common::Logger& logger);
+    // Joins-and-stops: waits for every outstanding detached worker. Runs at
+    // observer-registry teardown; see the class comment.
+    ~TitlerObserver() override;
 
     void OnTurnCompleted(const agent::SessionInfo& info,
                          const agent::TurnSummary& summary) override;
@@ -101,6 +116,13 @@ private:
         common::Logger* logger = nullptr;
         std::mutex mu;
         std::unordered_set<std::string> titled;
+        // Outstanding detached workers -- the drain target of the destructor.
+        // A separate mutex from `mu`: the worker decrements at EXIT, long
+        // after it last touched `titled`, and the two critical sections must
+        // not serialize each other.
+        std::mutex workers_mu;
+        std::condition_variable workers_cv;
+        std::size_t workers = 0;
     };
 
     std::shared_ptr<State> state_;

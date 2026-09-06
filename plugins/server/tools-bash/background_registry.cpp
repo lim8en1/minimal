@@ -63,6 +63,7 @@ void WatchTaskImpl(std::shared_ptr<BackgroundTaskRegistry::TaskState> task,
     bool out_open = true, state_open = true;
     auto exit = BackgroundTaskEvent::State::kStarted;  // kStarted == still running
     bool io_error = false;
+    bool reap_error = false;
 
     while ((out_open || state_open) && exit == BackgroundTaskEvent::State::kStarted) {
         if (session_gone()) {
@@ -126,7 +127,14 @@ void WatchTaskImpl(std::shared_ptr<BackgroundTaskRegistry::TaskState> task,
                 reaped = true;
                 break;
             }
-            if (rc < 0) break;  // ECHILD: nothing left to reap
+            if (rc < 0) {
+                if (errno == EINTR) continue;
+                // ECHILD: the pid was reaped out from under us, so
+                // wait_status is meaningless -- leaving it at 0 would
+                // classify this task as a clean exit below. Flagged instead.
+                reap_error = true;
+                break;
+            }
             if (session_gone()) {
                 exit = BackgroundTaskEvent::State::kKilled;
                 break;
@@ -138,12 +146,16 @@ void WatchTaskImpl(std::shared_ptr<BackgroundTaskRegistry::TaskState> task,
             poll(nullptr, 0, kReapSliceMs);
         }
     }
-    if (!reaped) wait_status = ReapAfterKill(proc.pid);
+    // An ECHILD reap is the one not-killed path where the group must not be
+    // killed either: the pid is already gone, and the status is unknowable.
+    if (!reaped && !reap_error) wait_status = ReapAfterKill(proc.pid);
     // Reaped (or killed and reaped): the pgid is dead and leaves the sweep set.
     ForgetPgid(proc.pid);
 
     if (exit == BackgroundTaskEvent::State::kStarted) {
         if (io_error) {
+            exit = BackgroundTaskEvent::State::kFailed;
+        } else if (reap_error) {
             exit = BackgroundTaskEvent::State::kFailed;
         } else if (WIFSIGNALED(wait_status)) {
             exit = BackgroundTaskEvent::State::kFailed;
@@ -216,7 +228,9 @@ void WatchTaskImpl(std::shared_ptr<BackgroundTaskRegistry::TaskState> task,
             break;
         case BackgroundTaskEvent::State::kFailed: {
             is_error = true;
-            if (WIFSIGNALED(wait_status)) {
+            if (reap_error) {
+                text = "[could not determine exit status (process already reaped)]";
+            } else if (WIFSIGNALED(wait_status)) {
                 text = with_output("[terminated by signal " +
                                    std::to_string(WTERMSIG(wait_status)) + "]");
             } else if (io_error) {
@@ -276,6 +290,25 @@ void MarkFailedQuietly(const std::shared_ptr<BackgroundTaskRegistry::TaskState>&
                       std::memory_order_release);
 }
 
+// Containment for the containment wrapper: the normal exit of WatchTaskImpl
+// always kills-or-reaps and calls ForgetPgid (leaving nothing live in the
+// atexit sweep set), but a throw out of the body skips all of that -- a live
+// process group plus a stale pgid registration, which pid reuse turns into a
+// wrong-target kill at process exit. Best-effort throughout: the first
+// exception already means something is broken, and a second must not escape a
+// detached thread. Both halves are idempotent, so an exception AFTER the body
+// reaped normally (e.g. out of the result injection) lands here as no-ops.
+void ContainOrphanedTask(pid_t pid) {
+    try {
+        ReapAfterKill(pid);  // SIGKILLs the group, reaps bounded
+    } catch (...) {
+    }
+    try {
+        ForgetPgid(pid);
+    } catch (...) {
+    }
+}
+
 // The containment wrapper. Every other plugin seam in the tree runs under a
 // guard because plugin code is arbitrary; this thread was the one exception,
 // and it is the one that must OUTLIVE its invocation -- an exception escaping
@@ -291,12 +324,16 @@ void WatchTask(std::shared_ptr<BackgroundTaskRegistry::TaskState> task,
     } catch (const std::exception& e) {
         common::Logger& logger =
             handles.logger ? *handles.logger : common::DefaultLogger();
+        // pid_t survives the move (only the ScopedFds are drained), so the
+        // group is still reachable here.
+        ContainOrphanedTask(proc.pid);
         logger.error("bash[{}] background {}: watcher failed: {}", task->session_id, task->id,
                      e.what());
         MarkFailedQuietly(task, handles);
     } catch (...) {
         common::Logger& logger =
             handles.logger ? *handles.logger : common::DefaultLogger();
+        ContainOrphanedTask(proc.pid);
         logger.error("bash[{}] background {}: watcher failed (unknown exception)",
                      task->session_id, task->id);
         MarkFailedQuietly(task, handles);
@@ -356,7 +393,50 @@ std::optional<BackgroundTaskRegistry::StartedTask> BackgroundTaskRegistry::Start
     // teardown path can strand it on freed memory. The registry itself is a
     // process-lifetime static inside this .so.
     const StartedTask started{task->id, proc.pid};
-    std::thread(WatchTask, task, proc, settings, timeout_ms, std::move(handles)).detach();
+    // Captured before the move: if thread construction throws, the moved-from
+    // handles are the only things that could report the failure, and they are
+    // gone by then.
+    common::Logger* logger =
+        handles.logger ? handles.logger : &common::DefaultLogger();
+    auto emit_task_event = handles.emit_task_event;
+    const std::string tool_use_id = handles.tool_use_id;
+    // std::thread's constructor allocates and can throw (resource exhaustion)
+    // -- and by this point the child is already forked, setsid'd, announced as
+    // STARTED, and registered in the sweep set. Contained here rather than in
+    // the watcher's guard, because the watcher thread is precisely what failed
+    // to come into existence: kill the group, reap, forget the pgid, and mark
+    // the task terminal so CountRunning never wedges the session at its task
+    // limit on a task that will never report.
+    try {
+        std::thread(WatchTask, task, proc, settings, timeout_ms, std::move(handles)).detach();
+    } catch (...) {
+        try {
+            ReapAfterKill(proc.pid);  // SIGKILLs the group, reaps bounded
+        } catch (...) {
+        }
+        try {
+            ForgetPgid(proc.pid);
+        } catch (...) {
+        }
+        task->state.store(static_cast<int>(BackgroundTaskEvent::State::kFailed),
+                          std::memory_order_release);
+        if (emit_task_event) {
+            try {
+                BackgroundTaskEvent event;
+                event.task_id = task->id;
+                event.tool_use_id = tool_use_id;
+                event.command = task->command;
+                event.pid = task->pid;
+                event.state = BackgroundTaskEvent::State::kFailed;
+                emit_task_event(event);
+            } catch (...) {
+            }
+        }
+        logger->error("bash[{}] background {}: watcher thread could not start; task killed",
+                      task->session_id, task->id);
+        *error = "failed to start background task (could not create watcher thread)";
+        return std::nullopt;
+    }
 
     return started;
 }

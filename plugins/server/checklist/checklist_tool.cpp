@@ -67,6 +67,13 @@ public:
     const tools::ToolSpec& spec() const override { return spec_; }
 
     tools::ToolResult execute(const nlohmann::json& input, tools::ToolContext& ctx) override {
+        // The tool is parallel-dispatched (no parallel_safe override), and
+        // op=update is a Load -> modify -> Save sequence over shared
+        // per-session state: two concurrent updates would read the same list
+        // and one would overwrite the other's change. Serializing the whole
+        // execute (not just the store calls, which are individually atomic)
+        // is what makes the sequence atomic; the RPC path only reads.
+        std::lock_guard<std::mutex> lock(mutex_);
         const auto& body = RequireObject(input);
         if (!body.contains("op") || !body.at("op").is_string()) {
             return Error("checklist: 'op' must be one of \"set\", \"update\", \"view\"");
@@ -195,6 +202,8 @@ private:
 
     tools::ToolSpec spec_;
     std::shared_ptr<ChecklistStore> store_;
+    // Serializes execute() -- see the comment at the top of it.
+    std::mutex mutex_;
 };
 
 }  // namespace

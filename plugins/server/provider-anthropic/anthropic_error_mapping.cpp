@@ -35,17 +35,23 @@ ParsedError ParseErrorBody(const std::string& body) {
     return parsed;
 }
 
-llm::LlmErrorCategory CategoryForErrorType(const std::string& type) {
+// nullopt = the type is not in Anthropic's documented set. The caller must
+// then fall back to the HTTP status rather than the conservative
+// non-retryable default this used to return: a gateway that answers 503 with
+// a body we do not recognize was downgraded from retryable ServerError to
+// RequestError purely because its error shape was unfamiliar, and the retry
+// loop stopped retrying an outage that was clearly retryable by status.
+std::optional<llm::LlmErrorCategory> CategoryForErrorType(const std::string& type) {
     if (type == "rate_limit_error") return llm::LlmErrorCategory::RateLimit;
     if (type == "authentication_error" || type == "permission_error") {
         return llm::LlmErrorCategory::AuthError;
     }
     if (type == "overloaded_error" || type == "api_error") return llm::LlmErrorCategory::ServerError;
-    // "invalid_request_error", "not_found_error", "request_too_large", and
-    // anything not yet documented: conservative default, non-retryable --
-    // hammering an endpoint that already said the request itself is bad
-    // helps nobody.
-    return llm::LlmErrorCategory::RequestError;
+    if (type == "invalid_request_error" || type == "not_found_error" ||
+        type == "request_too_large") {
+        return llm::LlmErrorCategory::RequestError;
+    }
+    return std::nullopt;
 }
 
 llm::LlmErrorCategory CategoryForStatus(int status) {
@@ -83,8 +89,11 @@ llm::LlmError ClassifyHttpFailure(int status, const std::string& body,
     const ParsedError parsed = ParseErrorBody(body);
     const std::optional<std::chrono::milliseconds> retry_after = ParseRetryAfter(headers);
 
-    const llm::LlmErrorCategory category =
-        parsed.ok && !parsed.type.empty() ? CategoryForErrorType(parsed.type) : CategoryForStatus(status);
+    // A parsed-but-unrecognized type defers to the status; only a recognized
+    // type overrides it (retryable 408/429/5xx stay retryable either way).
+    const auto by_type =
+        parsed.ok && !parsed.type.empty() ? CategoryForErrorType(parsed.type) : std::nullopt;
+    const llm::LlmErrorCategory category = by_type.value_or(CategoryForStatus(status));
     const std::string message =
         parsed.ok && !parsed.message.empty() ? parsed.message : ("HTTP " + std::to_string(status));
     return llm::LlmError(category, message, status, retry_after);
@@ -95,9 +104,14 @@ llm::LlmError ClassifyErrorEventData(std::string_view data) {
     // mid-stream failure (most commonly overloaded_error). No HTTP status or
     // headers travel with it, so there is no Retry-After to parse here.
     const ParsedError parsed = ParseErrorBody(std::string(data));
+    // No HTTP status travels with an SSE error frame, so an unrecognized type
+    // falls back to ServerError (retryable) -- the mid-stream analogue of the
+    // status-based fallback above, and the same default the no-type case
+    // always used.
+    const auto by_type =
+        parsed.ok && !parsed.type.empty() ? CategoryForErrorType(parsed.type) : std::nullopt;
     const llm::LlmErrorCategory category =
-        parsed.ok && !parsed.type.empty() ? CategoryForErrorType(parsed.type)
-                                          : llm::LlmErrorCategory::ServerError;
+        by_type.value_or(llm::LlmErrorCategory::ServerError);
     const std::string message = parsed.ok && !parsed.message.empty() ? parsed.message : std::string(data);
     return llm::LlmError(category, message);
 }

@@ -19,6 +19,12 @@ bool DeadlineExceeded(const WalkOptions& options,
 constexpr int kMaxWalkDepth = 1024;
 constexpr int kMaxDirEntries = 10000;
 
+// .gitignore read bound. The read used to be an unbounded
+// istreambuf_iterator slurp: a generated ignore file of arbitrary size was
+// materialized whole before parsing. Rules past the cap simply do not apply
+// (the same degradation as one untranslatable line), never a walk failure.
+constexpr std::streamoff kMaxGitignoreBytes = 1024 * 1024;
+
 // The walk state. Three conditions stop a walk -- cancellation, timeout, and
 // the callback's own "I have enough" -- and they are kept apart only so the
 // stats can report WHICH one fired; every one of them means "stop and unwind
@@ -52,6 +58,50 @@ struct State {
         return false;
     }
 
+    // Reads and parses `dir`'s .gitignore, pushing it onto the stack at the
+    // depth of `rel` ("" is the walk root itself, depth 0). Returns true when
+    // a set was pushed -- the caller owns the matching Pop via Frame::pushed.
+    // Each .gitignore is pushed exactly ONCE by this path: an earlier shape
+    // also pushed the root's from WalkTree, and the duplicate (recorded at
+    // depth 1 vs. this depth 0) made an anchored `/build` match `sub/build`.
+    // Cancel/deadline are checked BEFORE the read, like every other
+    // per-directory step -- ignore-file parsing must not be an
+    // uninterruptible island inside the walk -- and the read is bounded by
+    // kMaxGitignoreBytes.
+    bool PushGitignore(const std::filesystem::path& dir, const std::string& rel) {
+        if (options.is_cancelled && options.is_cancelled()) {
+            stop = Stop::kCancelled;
+            return false;
+        }
+        if (DeadlineExceeded(options, start)) {
+            stop = Stop::kTimedOut;
+            return false;
+        }
+        std::error_code gi_ec;
+        const auto gitignore = dir / ".gitignore";
+        if (!std::filesystem::is_regular_file(gitignore, gi_ec) || gi_ec) return false;
+        std::ifstream in(gitignore, std::ios::binary);
+        if (!in) return false;
+        // Size first, then a bounded read: seek-and-tell is what keeps the
+        // cap honest -- reading through the iterator first and trimming after
+        // would still allocate for the whole file.
+        in.seekg(0, std::ios::end);
+        const auto end_pos = in.tellg();
+        std::string content;
+        if (end_pos > 0) {
+            const auto capped = std::min<std::streamoff>(end_pos, kMaxGitignoreBytes);
+            content.resize(static_cast<std::size_t>(capped));
+            in.seekg(0, std::ios::beg);
+            in.read(content.data(), capped);
+            content.resize(static_cast<std::size_t>(in.gcount()));
+        }
+        const int depth =
+            rel.empty() ? 0
+                        : static_cast<int>(std::count(rel.begin(), rel.end(), '/')) + 1;
+        ignore_stack.Push(depth, GitignoreSet::Parse(content));
+        return true;
+    }
+
     // One stack frame: a directory whose children are listed up-front, with
     // its own .gitignore already pushed.
     struct Frame {
@@ -74,20 +124,10 @@ struct State {
 
         // This directory's .gitignore is pushed BEFORE anything under it is
         // reported or listed against, exactly as the recursive shape ordered
-        // it: a directory's rules govern its own report too.
-        std::error_code gi_ec;
-        const auto gitignore = abs / ".gitignore";
-        if (std::filesystem::is_regular_file(gitignore, gi_ec) && !gi_ec) {
-            std::ifstream in(gitignore, std::ios::binary);
-            if (in) {
-                std::string content((std::istreambuf_iterator<char>(in)),
-                                    std::istreambuf_iterator<char>());
-                const auto depth =
-                    static_cast<int>(std::count(rel.begin(), rel.end(), '/')) + 1;
-                ignore_stack.Push(depth, GitignoreSet::Parse(content));
-                frame.pushed = true;
-            }
-        }
+        // it: a directory's rules govern its own report too. The root lands
+        // here at depth 0 (PushGitignore's rel=="" branch) -- the same path
+        // every other directory takes, so the depth semantics have one home.
+        frame.pushed = PushGitignore(abs, rel);
 
         std::error_code iter_ec;
         std::filesystem::directory_iterator it(abs, iter_ec), end;
@@ -230,17 +270,10 @@ WalkStats WalkTree(const std::filesystem::path& root, const WalkOptions& options
     }
 
     if (status.type() == std::filesystem::file_type::directory) {
-        // The root's .gitignore sits at depth 0 and governs everything below.
-        std::error_code gi_ec;
-        const auto gitignore = root / ".gitignore";
-        if (std::filesystem::is_regular_file(gitignore, gi_ec) && !gi_ec) {
-            std::ifstream in(gitignore, std::ios::binary);
-            if (in) {
-                std::string content((std::istreambuf_iterator<char>(in)),
-                                    std::istreambuf_iterator<char>());
-                state.ignore_stack.Push(0, GitignoreSet::Parse(content));
-            }
-        }
+        // The root's .gitignore is pushed by MakeFrame (via PushGitignore) at
+        // depth 0, along with every other directory's -- pushing it here as
+        // well recorded the same file twice, and the depth-1 duplicate made
+        // anchored root patterns leak into subdirectories.
         state.Walk(root, "");
     } else if (status.type() == std::filesystem::file_type::regular) {
         // The root is itself a file: report it and nothing else.

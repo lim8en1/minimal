@@ -6,6 +6,9 @@
 #include <optional>
 #include <vector>
 
+#include <fcntl.h>
+#include <unistd.h>
+
 #include <re2/re2.h>
 
 #include "glob_matcher.hpp"
@@ -309,8 +312,13 @@ public:
             const auto glob = input.at("glob").get<std::string>();
             if (glob.empty()) return Error("glob must not be empty");
             const bool anchored = glob.find('/') != std::string::npos;
-            const auto source = GlobToRegex(
-                glob, anchored ? GlobFlags::kForceAnchored : GlobFlags::kNone);
+            // kBraceAlternation: the schema advertises `src/**/*.{h,cpp}`, and
+            // gitignore deliberately does NOT get this flag (braces are literal
+            // there) -- the two callers must not silently agree to differ.
+            const auto flags =
+                anchored ? (GlobFlags::kForceAnchored | GlobFlags::kBraceAlternation)
+                         : GlobFlags::kBraceAlternation;
+            const auto source = GlobToRegex(glob, flags);
             if (!source) return Error("invalid glob: " + glob);
             file_filter.emplace(anchored ? "^" + *source + "$"
                                          : "(?:.*/)?" + *source + "$");
@@ -349,9 +357,14 @@ public:
         // matched -- "no matches" presented without the reason it saw only
         // part of the tree would be a false negative.
         if (run.out.empty() && stats.skipped_oversize == 0 && stats.skipped_entries == 0 &&
-            stats.skipped_deep == 0 && !stats.timed_out && !stats.cancelled) {
+            stats.skipped_deep == 0 && stats.skipped_errors == 0 && !stats.timed_out &&
+            !stats.cancelled) {
             return ToolResult{false, "No matches found"};
         }
+        // Entries the walker could not read are disclosed even when something
+        // DID match -- and when nothing did, they keep the empty result from
+        // reading as a complete answer: "no matches" over a tree part of which
+        // was never read would be a false negative stated as fact.
 
         // --- footer. The model has no structured channel, so the truncation
         // affordance must live in the text -- read's footer, same rule. A
@@ -389,6 +402,10 @@ public:
             run.Append("(" + std::to_string(stats.skipped_deep) +
                        " director(ies) skipped: deeper than the walk depth cap)\n");
         }
+        if (stats.skipped_errors > 0) {
+            run.Append("(" + std::to_string(stats.skipped_errors) +
+                       " file(s)/director(ies) could not be read and were skipped)\n");
+        }
         return ToolResult{false, std::move(run.out)};
     }
 
@@ -415,9 +432,22 @@ private:
     // over max_file_bytes, so this is bounded per file), matches per line,
     // and reports into `run`. Returns false to stop the walk.
     bool ScanFile(const WalkEntry& entry, const re2::RE2& matcher, GrepRun& run) const {
-        std::ifstream in(entry.absolute_path, std::ios::binary);
-        if (!in) return true;  // unreadable mid-walk (racy delete): skip quietly
-        std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        // O_NOFOLLOW closes the walk-vs-open race: the walker vetoes symlinks
+        // with symlink_status, but a symlink swapped in between that check and
+        // this open would make a plain ifstream follow it outside the search
+        // root. The veto is re-checked AT open time; ELOOP reads as "it is a
+        // symlink now" and the file is skipped like any other unreadable
+        // candidate.
+        const int fd = ::open(entry.absolute_path.c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+        if (fd < 0) return true;  // unreadable mid-walk / symlinked: skip quietly
+        std::string text;
+        char chunk[65536];
+        for (;;) {
+            const ssize_t got = ::read(fd, chunk, sizeof(chunk));
+            if (got <= 0) break;
+            text.append(chunk, static_cast<std::size_t>(got));
+        }
+        ::close(fd);
         if (LooksBinary(text)) return true;
 
         std::vector<std::string_view> lines;

@@ -97,24 +97,40 @@ llm::ChatResponse AnthropicProvider::StreamComplete(const llm::ChatRequest& requ
     bool error_body_capped = false;
     std::exception_ptr pending_error;
 
+    // Both callbacks run inside libcurl's C call stack: an exception escaping
+    // either is undefined behavior. on_headers has no false-returning sink
+    // contract, so it stashes the exception (cheap, allocation-free
+    // assignments run first, keeping the error-status bookkeeping consistent
+    // even if the header-vector copy throws) for rethrow_pending_if_any()
+    // once StreamPost unwinds.
     auto on_headers = [&](int status, const std::vector<net::HttpHeader>& headers) {
-        response_status = status;
-        response_headers = headers;
         is_error_status = status < 200 || status >= 300;
+        response_status = status;
+        try {
+            response_headers = headers;  // vector copy -- allocation can throw
+        } catch (...) {
+            pending_error = std::current_exception();
+        }
     };
 
-    // Exceptions must never escape into libcurl's C call stack (undefined
-    // behavior) -- caught here, stashed, and rethrown once StreamPost unwinds.
-    // Identical shape to provider-openai's on_chunk.
+    // Same no-throw boundary: caught here, stashed, and rethrown once
+    // StreamPost unwinds. Identical shape to provider-openai's on_chunk.
     auto on_chunk = [&](std::string_view chunk) -> bool {
         if (is_error_status) {
-            constexpr std::size_t kMaxErrorBody = 64 * 1024;
-            if (error_body.size() < kMaxErrorBody) {
-                error_body.append(chunk.substr(0, kMaxErrorBody - error_body.size()));
-                return true;
+            // The append allocates too -- the barrier covers the whole
+            // error-body branch, not just the parse path below.
+            try {
+                constexpr std::size_t kMaxErrorBody = 64 * 1024;
+                if (error_body.size() < kMaxErrorBody) {
+                    error_body.append(chunk.substr(0, kMaxErrorBody - error_body.size()));
+                    return true;
+                }
+                error_body_capped = true;
+                return false;
+            } catch (...) {
+                pending_error = std::current_exception();
+                return false;
             }
-            error_body_capped = true;
-            return false;
         }
         try {
             for (const auto& frame : sse_parser.Feed(chunk)) {

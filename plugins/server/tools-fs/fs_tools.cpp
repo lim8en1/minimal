@@ -178,7 +178,6 @@ private:
 class WriteTool : public tools::Tool {
 public:
     explicit WriteTool(FsSettings settings) : settings_(settings) {
-        (void)settings_;
         spec_.name = "write";
         spec_.category = ToolCategory::FileWrite;
         spec_.definition.name = spec_.name;
@@ -229,6 +228,19 @@ public:
             return Error("missing required string field: content");
         }
         const auto content = input.at("content").get<std::string>();
+
+        // The same ceiling edit enforces (edit_max_editable_file_bytes), not a
+        // separate knob: write is the one mutating path left uncapped, and an
+        // uncapped write is just edit-with-larger-blast-radius -- the model
+        // hands over megabytes and the whole payload sits in memory twice
+        // (input JSON plus the string) before a single byte lands. Named in
+        // the error so the model can adapt rather than retry blind.
+        if (static_cast<std::int64_t>(content.size()) > settings_.edit_max_editable_file_bytes) {
+            return Error("content is " + std::to_string(content.size()) +
+                         " bytes, over the " +
+                         std::to_string(settings_.edit_max_editable_file_bytes) +
+                         "-byte write limit; build the file with a shell command instead");
+        }
 
         const auto outcome = tools::write_file(resolved.absolute_path, content);
         if (!outcome.ok) return Error(outcome.error);

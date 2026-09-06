@@ -103,7 +103,7 @@ std::vector<std::string> ExecCandidates(const std::string& argv0, const std::str
 
 struct RunOutcome {
     bool ok = false;
-    std::string output;       // stdout (empty when exceeded)
+    std::string output;       // stdout (partial, cap-bounded when exceeded_cap)
     std::string error;        // reason when !ok, stderr tail included
     bool exceeded_cap = false;
 };
@@ -322,7 +322,12 @@ RunOutcome RunProcess(const std::vector<std::string>& argv, const std::string& s
         return outcome;
     }
     if (killed_for_cap) {
+        // Keep the capped stdout: it is the cached artifact the confirm flow
+        // submits when the operator opts in -- re-running the generator
+        // uncapped would execute its side effects a second time and produce
+        // output no cap ever bounded.
         outcome.exceeded_cap = true;
+        outcome.output = std::move(out_buf);
         return outcome;
     }
     // poll_failed: outcome.error is already set above. Falling through to the
@@ -631,12 +636,16 @@ public:
                         return CommandResult::Error("output cap confirmed nothing; nothing was "
                                                     "submitted");
                     }
-                    // Re-run without the cap: the process was killed at the cap,
-                    // so its output must be produced whole before submission.
-                    run = RunProcess(argv, script, source.timeout_seconds, 0);
-                    if (!run.ok) {
-                        return CommandResult::Error("source '" + source.name + "': " + run.error);
-                    }
+                    // Submit the FIRST run's output, already bounded by the
+                    // cap and kept by RunProcess on the cap path: a second,
+                    // uncapped execution would fire the generator's side
+                    // effects again (it was killed mid-run, so "run it once
+                    // more" is not idempotent) with nothing bounding the
+                    // result. The confirmation was asked about the capped
+                    // artifact, so the capped artifact is what ships. The
+                    // capped run reports !ok (it was killed), but with the
+                    // operator's opt-in this cached output is the success.
+                    run.ok = true;
                 }
                 if (!run.ok) {
                     return CommandResult::Error("source '" + source.name + "': " + run.error);
