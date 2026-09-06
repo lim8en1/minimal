@@ -1,0 +1,9 @@
+minimal_add_plugin(tools-python
+    plugin.cpp
+    python_tools.cpp
+    python_interpreter.cpp
+    python_process.cpp
+    python_env.cpp
+    python_settings.cpp
+    python_store.cpp
+    python_command.cpp)

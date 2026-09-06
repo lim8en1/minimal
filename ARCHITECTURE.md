@@ -27,7 +27,8 @@ minimal/
   docs/                       # design notes beyond this file
   proto/minimal/v1/{common,session_service}.proto
   plugins/                    # bundled plugin IMPLEMENTATIONS -- what the harness loads
-    server/                       # tools-fs, tools-search, tools-bash, provider-openai,
+    server/                       # tools-fs, tools-search, tools-bash, tools-web,
+                                  #   tools-python, provider-openai,
                                   #   commands-core, checklist, signals-message,
                                   #   session-titler (shipped disabled -- see naming),
                                   #   cost-tracker
@@ -453,6 +454,11 @@ struct ToolContext {
     std::function<bool(llm::Message)> schedule_injection;
     std::weak_ptr<const void> session_lifetime;
     std::function<void(const BackgroundTaskEvent&)> emit_task_event;
+    // The active preset's `tool_config` slice for THIS tool (its declared
+    // config_namespace()), as plain data -- the per-preset plugin-config
+    // delivery, the same pattern as allowed_skills below. Null when the
+    // preset declares nothing; a /agent switch takes effect at the next call.
+    const nlohmann::json* tool_config;
 };
 
 class Tool {
@@ -563,6 +569,26 @@ The injection queue itself lives in `SessionChannels` — the `shared_ptr` block
 **`web_search` is one configurable JSON backend, not a per-vendor integration.** `search.api_url` is queried as `GET <url>?q=<query>&count=<n>` (optionally `Authorization: Bearer <key>`, resolved once from `search.api_key_env` the same way `providers.json` resolves a provider's key) and must answer `{"results": [{"title","url","snippet"}, ...]}` — SearXNG's own JSON API is close to this shape; any other vendor needs a thin adapter in front of it. An unconfigured `search.api_url` is not an error: the tool still registers (so its absence is discoverable, not a silent gap) and its own result names the missing config key.
 
 **No result-size cap of its own.** The agent loop's tool-result ceiling (S1, `agent_loop.cpp`) applies to every tool's output at one chokepoint regardless of source, including these — a page far larger than that ceiling is truncated centrally with the same visible marker every other tool's oversized result gets.
+
+## The tools-python plugin — persistent interpreters
+
+**`python_exec`** and **`python_interrupt`** are one bundled plugin, plus `/python` and a `SessionObserver`. The tool deliberately reintroduces the long-lived interpreter bash's design avoids ("no long-lived interpreter to hang, corrupt, or leak"): that is its entire value — a session-persistent Python state (globals, imports, live connections) — scoped to a session and killed on its end. The permission gate is the boundary, same as bash: category `Execute`, `parallel_safe() == false` (per-session state; the serialized queue is the semantics), disclosure names the resolved interpreter binary.
+
+**State is per-session; the environment is per-project.** One interpreter process per session (its own globals, its own lifetime); ONE venv per `project_root` (`<project_root>/.venv`, created on demand: `uv venv`, else `python -m venv`), shared by every agent, tab, and subagent in that project. No per-preset venv override in v1 — the declared-contract machinery below makes the genuine collision case (pinned versions) loud instead of isolated, and an override is a purely additive v2 escape hatch.
+
+**The declared contract rides `tool_config.python` frontmatter** — `packages` (pip specs) and `requirements` (project-relative paths) — delivered per-invocation on `ToolContext::tool_config` (§ Core tools). The interpreter records what it was started under, and EVERY call diffs the current resolution against it:
+
+- purely **additive** entries are auto-installed into the shared venv (per-project install mutex; additive only) and are immediately importable by the running interpreter — a preset switch that merely adds packages needs no restart and loses nothing;
+- a same-name **different-spec** declaration (`foo==2` vs the running session's `foo==1`) is a one-time rejection: the shared environment is never silently re-versioned under other agents. Declared conflicts are loud; undeclared ones (hand-run pip) are unfixable by any venv scheme and are today's bash status quo;
+- a **bare interpreter** (started when no venv existed) whose resolution now lands on a venv gets a one-time notice — auto-ensure cannot help a running system-python interpreter; `clean: true` moves into it.
+
+The diff is over DECLARED sets, never `pip freeze` — what the agent installed by hand mid-session is legitimately invisible to the contract.
+
+**Timeouts demote, never destroy** — the deliberate deviation from background bash's `background_max_timeout_ms`. A bash task is a stateless process, so a timer may kill it; the interpreter is shared session state, so killing it costs everything, and a timer whose failure mode is "redo all your work" has no business existing. Hence: `python_exec(code, timeout=0)` is async — the ack returns immediately and the result is injected at a turn boundary whenever it completes; **there is no async deadline**. `timeout > 0` waits synchronously (bounded by the configured ceiling); at the deadline — or on `CancelTurn` — the request DEMOTES to async delivery. "The agent sent a long-running command and came back late" ends with the result waiting in the injection queue, not with a wiped session. The interpreter's clock is the session's clock: killed by session terminate (the reader thread's `session_lifetime` expiry poll — the same mechanism background bash uses, because `OnSessionEnded` is fire-and-forget), the atexit pgid sweep at server exit, or an EXPLICIT kill.
+
+**Explicit kills, two granularities.** `python_interrupt(kill=false)` sends SIGINT out-of-band (never through the queue — a stuck driver cannot read one): the running request fails with `KeyboardInterrupt` and the interpreter survives with its state; the tool waits a grace period and reports honestly — "interrupted" (a response arrived), "nothing was running" (the driver reports spending the signal), or "no reaction" (a non-interruptible C extension). `python_interrupt(kill=true)` / `clean: true` / `/python restart` SIGKILL the group: pending async requests get injected error results (the session is still alive and must learn), and the next `python_exec` auto-restarts.
+
+**The driver, not `python -i`.** The line REPL is unusable over pipes (prompt echo, stderr interleaving, no framing). The plugin launches `<venv>/bin/python -I -c <embedded driver>` speaking one-JSON-line-per-request over fds 0/3; the child's REAL stdout/stderr go to a diagnostics pipe, so executed code writing to "the real stdout" cannot corrupt the protocol. The loop is a serialized FIFO — a blocking MSRPC call queues everything behind it (the chosen semantics; the `pending` count in each reply is the starvation signal). Sabotage hardening (model error, not malice): `sys.stdin` neutralized in executed code (`input()` → `EOFError` instead of eating a protocol frame), per-stream capture caps driver-side, `KeyboardInterrupt` caught per request, and anything that corrupts the channels ends as EOF on the reader — dead, injected errors, auto-restart on the next call. The reader thread is the liveness source of truth, and it is JOINED by the destructor after a HardKill: a detached self-owning reader would leak one python process per session that ended without an explicit kill.
 
 ## Permission model — `src/server/tools/`
 
@@ -1484,7 +1510,7 @@ variable the install rule uses, so overriding one moves both.
 
 **File format**: agents, skills, and prompts are Markdown with YAML frontmatter — the same convention Claude Code and opencode use: frontmatter for structured metadata, Markdown body for prompt text, loaded verbatim. `src/server/config/frontmatter.{hpp,cpp}` provides `parse_frontmatter_markdown(contents) -> {YAML::Node frontmatter, std::string body}` (split on `---` delimiters, frontmatter to **yaml-cpp**, remainder as body). The `.json` files stay plain JSON — harness config, not prompt content, with no body to split.
 
-- **`agents/*.md`** — presets: frontmatter `name, description, model, allowed_tools, allowed_skills, allowed_mcp_servers, permission_mode: {read_only, file_write, execute, out_of_workdir, network, overrides}, mcp_permissions: {<server>: allow|ask|deny}, compression_prompt?`; **body is the system prompt directly**. `model` is a `<provider>/<model>` reference, or absent to take `settings.default_model`. `plan.md` and `build.md` ship in `bundled/agents/` and are seeded like everything else there.
+- **`agents/*.md`** — presets: frontmatter `name, description, model, allowed_tools, allowed_skills, allowed_mcp_servers, permission_mode: {read_only, file_write, execute, out_of_workdir, network, overrides}, mcp_permissions: {<server>: allow|ask|deny}, compression_prompt?, tool_config?: {<namespace>: {...}}`; **body is the system prompt directly**. `model` is a `<provider>/<model>` reference, or absent to take `settings.default_model`. `tool_config` carries per-tool/per-plugin configuration VERBATIM ({namespace: {...}}), structural (never provider passthrough), delivered to each tool per-invocation as its own `config_namespace()` slice on `ToolContext` (§ Core tools; the collision/typo discipline mirrors permission keys: unclaimed namespace warns, cross-plugin claim is fatal). `plan.md` and `build.md` ship in `bundled/agents/` and are seeded like everything else there.
 - **`prompts/subagent.md`** — plain Markdown, no frontmatter. Prepended to the resolved preset's body whenever `parent_session_id` is non-null. Also seeded.
 - **`prompts/compression.md`** — default compaction prompt; a preset's `compression_prompt` overrides it, resolved relative to this directory. **Seeded from `bundled/prompts/` by `cmake --install` and never overwritten after** — see *Bundled assets* below.
 - **`skills/<name>/SKILL.md`** (+ supporting files) — lazy-loaded: frontmatter (`name`, `description`) resident in the registry; body loads only on invocation.

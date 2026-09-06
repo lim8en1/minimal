@@ -201,6 +201,16 @@ add_executable(minimal_tests
     "${CMAKE_SOURCE_DIR}/plugins/server/tools-web/fetch_tool.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/tools-web/search_tool.cpp"
     tools_web_test.cpp
+    # Same pattern for tools-python. The interpreter tests fork real python
+    # processes, so they need the actual spawn code, not a seam around it.
+    "${CMAKE_SOURCE_DIR}/plugins/server/tools-python/python_tools.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/tools-python/python_interpreter.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/tools-python/python_process.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/tools-python/python_env.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/tools-python/python_settings.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/tools-python/python_store.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/tools-python/python_command.cpp"
+    tools_python_test.cpp
     cost_tracker_test.cpp
     hooks_config_test.cpp
     hook_dispatcher_test.cpp
@@ -229,6 +239,7 @@ target_include_directories(minimal_tests PRIVATE
 
 target_include_directories(minimal_tests PRIVATE
     "${CMAKE_SOURCE_DIR}/plugins/server/tools-web"
+    "${CMAKE_SOURCE_DIR}/plugins/server/tools-python"
     "${CMAKE_SOURCE_DIR}/plugins/client/logo")
 
 # minimal::test_support is the test-dependency bundle: it carries server_core,

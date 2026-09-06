@@ -1,0 +1,71 @@
+#pragma once
+
+#include <cstdint>
+#include <string>
+#include <vector>
+
+#include <nlohmann/json.hpp>
+
+namespace minimal::tools_python {
+
+// This plugin's config, the "config" object on its plugins.json entry. Core
+// keeps it raw precisely so each plugin owns its schema -- this is that schema.
+// ALL times are SECONDS (this plugin's schema contract; interpreter interaction
+// is second-scale -- bash's timeout_ms stays as-is).
+struct PythonSettings {
+    // Fallback interpreter (used for the bare-python path and for venv
+    // creation). Resolved on PATH at use time.
+    std::string python = "python3";
+    // Ceiling on a model-supplied sync `timeout` (seconds). 0 = unlimited. A
+    // sync wait that reaches the ceiling DEMOTES to async -- it never kills
+    // anything -- so the ceiling bounds the session worker without ever
+    // destroying state.
+    std::int64_t sync_wait_ceiling = 300;
+    // Bounded spawn+handshake window for a new interpreter (a broken venv is
+    // caught here, not mid-use).
+    std::int64_t startup_timeout = 10;
+    // Bounded venv creation / package installation.
+    std::int64_t install_timeout = 300;
+    // How long python_interrupt waits for evidence the SIGINT landed before
+    // reporting "no reaction".
+    std::int64_t grace_seconds = 2;
+    // Bounds the PERSISTED result text per request (the transcript's copy).
+    std::int64_t max_output_bytes = 1024 * 1024;
+    // Driver-side per-stream capture cap (stdout/stderr inside the
+    // interpreter), communicated via _MINIMAL_PY_CAPTURE at spawn. Bounds the
+    // protocol line size; max_output_bytes bounds what is persisted.
+    std::int64_t max_capture_bytes = 1024 * 1024;
+    // RLIMIT_CPU backstop for the interpreter process, seconds. 0 = disabled:
+    // the interpreter's clock is the session's clock, and a CPU-spinning live
+    // session is the model's/user's to interrupt -- the default stance is
+    // "timeouts demote, never destroy".
+    std::int64_t rlimit_cpu_seconds = 0;
+    // RLIMIT_FSIZE backstop for files the executed code writes.
+    std::int64_t max_file_size_bytes = 1024LL * 1024 * 1024;
+};
+
+// Every field optional; missing values keep the struct defaults. A negative
+// sync_wait_ceiling is not clamped to the default but to 0 (unlimited): the
+// only value a "smaller is stricter" edit can produce is "no ceiling", and
+// that is safe because demotion never destroys.
+PythonSettings ParsePythonSettings(const nlohmann::json& config);
+
+// The preset's `tool_config.python` slice -- the per-preset DECLARED package
+// contract. Merged per-key over the plugin config would conflate two different
+// things: the slice carries the DECLARED SET (packages/requirements) and the
+// plugin config carries operator knobs (timeouts, binaries). They do not share
+// keys, so there is nothing to merge -- the slice is read per invocation from
+// ToolContext::tool_config, the knobs are parsed once at registration.
+struct PythonSlice {
+    // Package specs, verbatim ("impacket", "pefile==2023.2.7").
+    std::vector<std::string> packages;
+    // Requirements files, project_root-relative paths.
+    std::vector<std::string> requirements;
+
+    bool empty() const { return packages.empty() && requirements.empty(); }
+};
+
+// Null-safe: a preset that declares no slice yields an empty contract.
+PythonSlice ParseSlice(const nlohmann::json* tool_config);
+
+}  // namespace minimal::tools_python

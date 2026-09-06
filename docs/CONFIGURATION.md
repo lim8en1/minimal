@@ -139,6 +139,26 @@ settings struct, but nothing consumes them — put tool settings in
 | `shell` | string | `"/bin/sh"` |
 | `inherit_env` | string | `"allowlist"` — or `"all"`; anything else is a named parse error |
 
+**`tools-python`** — flat object (every field optional; ALL times in SECONDS):
+
+| Key | Type | Default |
+|---|---|---|
+| `python` | string | `"python3"` — fallback interpreter (bare path + venv creation) |
+| `sync_wait_ceiling` | int | `300` — ceiling on a model-supplied sync `timeout`; `0` = unlimited; expiring DEMOTES to async, never kills |
+| `startup_timeout` | int | `10` — spawn + ready-handshake window (a broken venv is caught here) |
+| `install_timeout` | int | `300` — venv creation / package installation |
+| `grace_seconds` | int | `2` — how long `python_interrupt` waits for evidence the SIGINT landed |
+| `max_output_bytes` | int | `1048576` (1 MiB) — persisted result cap per request |
+| `max_capture_bytes` | int | `1048576` (1 MiB) — driver-side per-stream stdout/stderr capture cap |
+| `rlimit_cpu_seconds` | int | `0` (= disabled) — RLIMIT_CPU backstop for the interpreter process |
+| `max_file_size_bytes` | int | `1073741824` (1 GiB) — RLIMIT_FSIZE backstop |
+
+The per-preset DECLARED package contract is NOT plugin config — it lives in
+`agents/<name>.md` frontmatter under `tool_config.python`
+(`packages`: list of pip specs, `requirements`: list of project-relative
+requirements paths), delivered to the tools per invocation. See
+[agents/](#agents-and-prompts) and the `tools-python` description below.
+
 ### `tools_view.*`
 
 | Field | Type | Default |
@@ -409,10 +429,17 @@ Shape: `{ "name": ..., "colors": { ... } }` — hex color roles as in
   opencode `tools:` map (`name: true|false` → per-tool allow/deny overrides),
   and a `permission:` block (`read/glob/grep/list`→read_only, `edit`/`write`→
   file_write, `bash`→execute, `webfetch`/`websearch`→network,
-  `external_directory`→out_of_workdir; a native `permission_mode` field wins
-  over the alias). Any OTHER frontmatter key is passed through to the provider
-  as a request parameter (`temperature`, `top_p`, `reasoningEffort`, ...),
-  overriding the model config's value.
+   `external_directory`→out_of_workdir; a native `permission_mode` field wins
+   over the alias). Any OTHER frontmatter key is passed through to the provider
+   as a request parameter (`temperature`, `top_p`, `reasoningEffort`, ...),
+   overriding the model config's value.
+- **`tool_config:`** — per-tool/per-plugin configuration, a map of
+  `{<namespace>: {...}}` addressed by the namespace a plugin's tools declare
+  (`Tool::config_namespace()`; currently `python` for the tools-python
+  plugin). Structural: never passed through to the provider. A namespace no
+  registered tool claims warns at startup (typo, or the providing plugin is
+  disabled); two plugins claiming one namespace is fatal. The plugin owns its
+  slice's schema — see the tools-python section below for the `python` slice.
 - **Project-local presets** — a session's project root (walked up to the
   enclosing git worktree root, `ProjectDirs`) is searched for
   `<dir>/agents/<name>.md` BEFORE the config dir; the nearest declaration wins
@@ -489,17 +516,72 @@ Deploy {env} from {branch} per {output:summary.plan}.
 
 ---
 
+## tools-python (persistent Python interpreter)
+
+A bundled plugin giving the model a persistent per-session Python interpreter
+(`python_exec`, `python_interrupt`) and `/python [restart]` for the operator.
+
+**The environment is per-project; the state is per-session.** Every session,
+tab, and subagent working in one `project_root` shares ONE venv at
+`<project_root>/.venv` (created on demand with `uv venv`, else
+`python3 -m venv`); each session gets its OWN interpreter process, so globals
+and live connections never collide. The interpreter binary is
+`<venv>/bin/python` when the venv exists, else the bare `python` fallback from
+plugin config.
+
+**Declaring the environment** — in an agent preset:
+
+```markdown
+---
+name: rev
+tool_config:
+  python:
+    packages: [impacket, pefile==2023.2.7]
+    requirements: [requirements.txt]
+---
+```
+
+The declared set is ensured additively at every interpreter start
+(`uv pip install --python ...`, else the venv's own pip; `requirements:` paths
+are passed with `-r`, resolved against the project root). The declared contract
+is diffed against the running interpreter on EVERY call:
+
+- **new package names / requirement paths** → auto-installed into the shared
+  venv (immediately importable by the running interpreter) and noted in the
+  result;
+- **a same-name different-spec declaration** (`pefile==2024.1.1` while the
+  session runs `2023.2.7`) → a one-time rejection naming the conflict — the
+  shared environment is never silently re-versioned; install manually or
+  restart with `clean: true`;
+- a venv appearing under a bare (system-python) interpreter → a one-time
+  notice; `clean: true` moves into it.
+
+**Timeouts demote, never destroy.** `python_exec(code, timeout=0)` runs
+async — the result is injected at a turn boundary whenever it finishes; there
+is no deadline. `timeout > 0` waits synchronously; at the deadline (or on
+turn cancel) the request CONVERTS to async — the interpreter and its state are
+untouched. The interpreter itself is killed only explicitly
+(`python_interrupt(kill=true)`, `clean: true`, `/python restart`) or
+structurally (session terminate, server exit). A soft interrupt
+(`python_interrupt`, SIGINT) fails the running request with
+`KeyboardInterrupt` and preserves everything; the tool reports whether the
+interrupt demonstrably landed.
+
+---
+
 ## Fatal vs warning at startup
 
 **Fatal:** `settings.json` / `providers.json` / `permissions.json` /
 `hooks.json` parse errors; no usable provider; no agent preset or unresolvable
 `default_agent_preset`; config/data dir missing or unwritable; session DB
 failure; a **bundled** plugin failing to load; service/tool/command name
-collisions; duplicate provider-kind registration.
+collisions; duplicate provider-kind registration; two plugins claiming one
+`tool_config` namespace.
 
 **Warning (startup continues):** malformed `plugins.json` / `mcps.json` /
 `channels.json`; unregistered `backend` kind; `default_model` typo; broken
 non-default presets; missing `prompts/compression.md`; MCP command/url and
 channel command problems; unknown permission advisor; unknown
 `compaction_strategy`; `max_concurrent_subagents` out of range; unknown
-`per_tool_overrides` keys; dangling aliases; a **user** plugin failing to load.
+`per_tool_overrides` keys; unclaimed `tool_config` namespaces; dangling
+aliases; a **user** plugin failing to load.

@@ -103,6 +103,34 @@ no manifest.
 - `minimal_plugin_register_compaction_strategies`
 - `minimal_plugin_register_hook_points` — new veto-capable hook events
 
+**Per-preset tool config** — a tool can receive configuration from the active
+agent preset:
+
+```markdown
+---
+name: rev
+tool_config:
+  python:            # the namespace the tool declares
+    packages: [impacket]
+---
+```
+
+The pattern ("per-preset tool config", the `allowed_skills` delivery shape):
+
+1. Declare the namespace: override `Tool::config_namespace()` (default empty =
+   reads nothing). Several tools of ONE plugin may share a namespace; two
+   plugins claiming one namespace is a **fatal** startup collision (it cannot
+   be aliased), and an unclaimed namespace in any preset is a **warning** —
+   both via the startup sanity check.
+2. Read the slice per invocation: `ctx.tool_config` on `ToolContext` points at
+   THIS tool's namespace slice (null when the preset declares none). It is
+   resolved fresh each call from the active preset, so `/agent` switches take
+   effect at the next tool call.
+3. Own your schema and merge: core never interprets a slice; the plugin decides
+   how it combines with its own `plugins.json` `config` object (tools-python
+   merges per-key, preset wins). Bundled example: `tools-python` keys the
+   declared package contract under `python`.
+
 **Optional client registration hooks** (`src/client/plugins/include/minimal/client/plugins/client_plugin_abi.h`):
 views, start views, per-tool renderers, message renderers, status-bar
 segments, syntax grammars, chat surface (exclusive), markdown engine
