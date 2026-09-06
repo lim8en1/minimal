@@ -65,6 +65,7 @@ ToolRegistry::ConfigNamespaceReport ToolRegistry::ConfigNamespaces() const {
     // arrays goes through mutex_.
     std::shared_lock<std::shared_mutex> lock(mutex_);
     ConfigNamespaceReport report;
+    std::set<std::pair<std::string, std::string>> seen_collisions;  // {ns, second_plugin}
     for (std::size_t i = 0; i < attributions_.size(); ++i) {
         const Tool* owner = owners_[i];
         if (!owner) continue;
@@ -75,9 +76,13 @@ ToolRegistry::ConfigNamespaceReport ToolRegistry::ConfigNamespaces() const {
         if (!inserted.second && inserted.first->second != attributions_[i].plugin_name) {
             // Same-plugin duplicates are normal (one plugin, several tools, one
             // namespace); only a CROSS-plugin claim is a collision, and the
-            // first two claimants name the diagnostic.
-            report.collisions.push_back(
-                {std::string(ns), inserted.first->second, attributions_[i].plugin_name});
+            // first two claimants name the diagnostic. Several tools of the
+            // second plugin claiming the same namespace must not produce
+            // duplicate findings.
+            if (seen_collisions.emplace(std::string(ns), attributions_[i].plugin_name).second) {
+                report.collisions.push_back(
+                    {std::string(ns), inserted.first->second, attributions_[i].plugin_name});
+            }
         }
     }
     return report;

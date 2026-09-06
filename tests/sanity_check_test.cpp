@@ -837,6 +837,21 @@ TEST_CASE("two plugins claiming one tool_config namespace is fatal", "[sanity_ch
     CHECK(hits[0]->message.find("other-plugin") != std::string::npos);
 }
 
+TEST_CASE("several tools of the second plugin claiming the namespace yield ONE fatal finding",
+          "[sanity_check][tool_config]") {
+    Fixture f;
+    WriteGoodConfig(f.config_dir);
+    ScopedEnv data("XDG_DATA_HOME", f.xdg_data.string().c_str());
+    f.RegisterNsTool("tools-python", "python_exec", "python");
+    f.RegisterNsTool("other-plugin", "other_tool", "python");
+    f.RegisterNsTool("other-plugin", "other_tool_2", "python");  // duplicate claim, same plugin
+
+    const auto results = RunChecks(f);
+    const auto hits = ByCheck(results, "name_collisions");
+    REQUIRE(hits.size() == 1);
+    CHECK(hits[0]->message.find("other_tool_2") == std::string::npos);
+}
+
 // --- subagent limit ------------------------------------------------------------------------
 
 TEST_CASE("max_concurrent_subagents out of range warns", "[sanity_check][subagent_limit]") {
