@@ -404,9 +404,43 @@ TEST_CASE("AgentPresetRegistry: compression_prompt loads the named prompts/<x>.m
     CHECK(registry.Resolve("build").compression_prompt == "Custom compaction prompt.\n");
 }
 
-TEST_CASE("AgentPresetRegistry: compression_prompt falls back to prompts/compression.md when omitted",
+TEST_CASE("AgentPresetRegistry: compression_prompt refuses path traversal",
           "[agent_preset_registry]") {
+    // The frontmatter string becomes a path into prompts/. Repo-shipped
+    // presets are untrusted content: a traversal or absolute name must not
+    // read arbitrary *.md into the summarization prompt.
     TempConfigDir config;
+    config.WriteDefaults();
+    config.Write("prompts/custom.md", "Custom compaction prompt.\n");
+    config.Write("prompts/evil.md", "Evil compaction prompt.\n");
+    config::SkillRegistry skills = config::SkillRegistry::Load(config.dir);
+
+    for (const auto* bad : {"../../prompts/evil", "/etc/evil", "custom\\evil", "..", "."}) {
+        config.Write("agents/build.md",
+                     std::string("---\n"
+                                 "name: build\n"
+                                 "model: openai-main/gpt-4o-mini\n"
+                                 "compression_prompt: ") +
+                         bad + "\n---\nbody\n");
+        AgentPresetRegistry registry(config.dir, skills,
+                                     config::LoadSettingsConfig(config.dir / "settings.json"));
+        CHECK_THROWS(registry.Resolve("build"));
+    }
+    // The honest prompt file still resolves; nothing else was disturbed.
+    config.Write("agents/build.md",
+                 "---\n"
+                 "name: build\n"
+                 "model: openai-main/gpt-4o-mini\n"
+                 "compression_prompt: custom\n"
+                 "---\n"
+                 "body\n");
+    AgentPresetRegistry registry(config.dir, skills,
+                                 config::LoadSettingsConfig(config.dir / "settings.json"));
+    CHECK(registry.Resolve("build").compression_prompt == "Custom compaction prompt.\n");
+}
+
+TEST_CASE("AgentPresetRegistry: compression_prompt falls back to prompts/compression.md when omitted",
+          "[agent_preset_registry]") {    TempConfigDir config;
     config.WriteDefaults();
     config.Write("prompts/compression.md", "Default compaction prompt.\n");
     config::SkillRegistry skills = config::SkillRegistry::Load(config.dir);

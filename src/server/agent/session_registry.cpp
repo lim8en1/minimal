@@ -382,6 +382,11 @@ void SessionRegistry::Terminate(const std::string& session_id) {
         if (it == sessions_.end()) return;
         session = it->second;
         sessions_.erase(it);
+        // The session is leaving the registry for good: without this, its
+        // quiescent_since_ entry would outlive it forever -- the map grows
+        // once per explicitly terminated session and is only otherwise
+        // pruned for sessions the reaper itself collects.
+        quiescent_since_.erase(session_id);
     }
     // Terminate() joins the worker, so it runs OUTSIDE the lock: a worker
     // blocked on a permission prompt takes a moment to unwind, and holding the
@@ -395,6 +400,7 @@ void SessionRegistry::TerminateAll() {
         std::lock_guard<std::mutex> lock(mutex_);
         for (auto& [id, session] : sessions_) doomed.push_back(session);
         sessions_.clear();
+        quiescent_since_.clear();
     }
     for (auto& session : doomed) session->Terminate();
 }

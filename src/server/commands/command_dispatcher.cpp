@@ -42,6 +42,12 @@ CommandResult ExecuteAndShape(Command& command, const std::string& name,
         // reason.
         context.logger().warn("session {}: /{} threw: {}", session_label, name, error.what());
         return CommandResult::Error("/" + name + " failed: " + error.what());
+    } catch (...) {
+        // Plugin commands can throw anything. Non-standard exceptions would
+        // otherwise escape into the session worker and terminate the process.
+        context.logger().warn("session {}: /{} threw a non-standard exception", session_label,
+                              name);
+        return CommandResult::Error("/" + name + " failed: non-standard exception");
     }
 }
 

@@ -21,6 +21,16 @@
 #     otherwise logs and drops them), plus get_instructions() to retain the
 #     initialize result's instructions string. The seam signal channels need
 #     to hear from MCP channel servers -- see mcp_stdio_shim.hpp.
+#   - cpp-mcp-unbounded-stdio-hardening.patch: the read loop caps the
+#     unterminated-line buffer (a hostile or broken child previously grew it
+#     without bound -- OOM), response matching ignores messages carrying a
+#     "method" (a server-originated request with a colliding id used to be
+#     consumed as an empty success), ping() treats any RESULT as alive (an
+#     empty-object result was the only healthy shape it accepted), and
+#     stop_server_process probes with waitpid before signalling (an exited,
+#     reaped child's pid may be recycled -- kill() would hit an innocent
+#     process). Sorts after cpp-mcp-stop-server-race.patch, whose stop-path
+#     output this patch's context depends on.
 #
 # Runs AFTER FetchContent_MakeAvailable, so ${cpp_mcp_SOURCE_DIR} is defined.
 # Idempotent because `git apply --check` fails on an already-patched tree

@@ -25,8 +25,18 @@ public:
 
     Command* Find(std::string_view name) const;
 
-    // Every registered command, sorted by surface name -- what /help renders.
-    std::vector<const Command*> All() const;
+    // A command and the SURFACE name it is dispatchable under. The surface key
+    // is what the user types and what Find() resolves; Name() is only what the
+    // command called itself. Advertising Name() for an aliased command would
+    // list a name every invocation of which answers "unknown command".
+    struct Entry {
+        std::string surface;
+        const Command* command;
+    };
+
+    // Every registered command with its surface name, sorted by surface -- what
+    // /help renders and what ListCommands advertises.
+    std::vector<Entry> All() const;
 
     std::size_t size() const { return commands_.size(); }
 

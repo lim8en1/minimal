@@ -368,7 +368,19 @@ AgentPreset AgentPresetRegistry::ResolveUncached(
     preset.is_subagent = false;
 
     if (!raw.compression_prompt.empty()) {
-        const std::filesystem::path prompt_path = config_dir_ / "prompts" / (raw.compression_prompt + ".md");
+        // The frontmatter string is used to build a path below, and presets are
+        // often repo-shipped (untrusted) content: '/' or '\\' would climb into
+        // or replace the prompts directory and read an arbitrary *.md into the
+        // summarization prompt. A valid value is a bare file name; anything
+        // else is the same kind of mistake as an invalid preset name above.
+        const std::string& name = raw.compression_prompt;
+        if (name.find('/') != std::string::npos || name.find('\\') != std::string::npos ||
+            name == ".." || name == ".") {
+            throw std::runtime_error("agent preset '" + preset_name +
+                                     "': compression_prompt must be a file name, got '" + name +
+                                     "'");
+        }
+        const std::filesystem::path prompt_path = config_dir_ / "prompts" / (name + ".md");
         preset.compression_prompt =
             config::parse_frontmatter_markdown(ReadFileRequired(prompt_path, "compression prompt")).body;
     } else {

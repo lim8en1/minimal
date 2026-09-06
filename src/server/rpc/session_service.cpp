@@ -699,6 +699,17 @@ grpc::Status SessionServiceImpl::OpenSession(
         //    and unwinds from Pop; the join below cannot hang.
         //  * DETACH (and every bare drop): only THIS stream's queue closes,
         //    which is what unwinds a writer parked in Pop.
+        //
+        // Why no TryCancel before the join despite the wedge risk: a writer
+        // can sit in a flow-control-blocked Write to a client that stopped
+        // reading, and sync gRPC's Write has no deadline -- only
+        // context->TryCancel() unblocks it, and TryCancel REPLACES whatever
+        // status this handler returns with CANCELLED on the wire. That would
+        // turn every graceful bare-drop close (client half-closes, then
+        // waits on Finish for OK) into an error, breaking the ordinary
+        // client. The wedge therefore stays a known trade: it requires a
+        // connected-but-deaf client, and the queue close above unwinds the
+        // writer in every well-behaved case.
         if (terminate) sessions_.Terminate(session->info().session_id);
         Transport(*session).queue().Unsubscribe(subscriber);
         session->NotifyDetached();
@@ -796,8 +807,18 @@ grpc::Status SessionServiceImpl::GetMessages(grpc::ServerContext* context,
     }
     // Existence is checked separately because an unknown session and a session
     // with no messages both page as empty, and the client needs to tell them
-    // apart -- one is a bug, the other is a brand-new tab.
-    if (!db_.SessionExists(request->session_id())) {
+    // apart -- one is a bug, the other is a brand-new tab. Guarded like every
+    // sibling: a store fault (locked database, I/O error) must not leave the
+    // handler via an exception (UB).
+    bool exists = false;
+    try {
+        exists = db_.SessionExists(request->session_id());
+    } catch (const std::exception& e) {
+        logger_.warn("GetMessages({}): existence check failed: {}", request->session_id(),
+                     e.what());
+        return grpc::Status(grpc::StatusCode::INTERNAL, e.what());
+    }
+    if (!exists) {
         return grpc::Status(grpc::StatusCode::NOT_FOUND,
                             "no such session: " + request->session_id());
     }
@@ -956,7 +977,11 @@ grpc::Status SessionServiceImpl::SuggestPaths(grpc::ServerContext* context,
 
     const agent::MentionResolver& resolver =
         mention_resolvers_ != nullptr ? mention_resolvers_->Active() : DefaultMentionResolver();
-    for (auto& path : resolver.Suggest(request->prefix(), project_root, request->limit())) {
+    // Client-supplied page size, clamped like every other paged RPC: an
+    // unclamped limit makes one keystroke enumerate a directory at arbitrary
+    // depth of the response.
+    const int limit = ClampPageSize(request->limit(), /*fallback=*/50);
+    for (auto& path : resolver.Suggest(request->prefix(), project_root, limit)) {
         response->add_paths(std::move(path));
     }
     return grpc::Status::OK;
@@ -1044,9 +1069,13 @@ grpc::Status SessionServiceImpl::ListCommands(grpc::ServerContext* context,
     // Fetched once at connect and never again: plugins load at startup and
     // config is read once, so the list cannot change mid-connection -- which is
     // why there is no invalidation machinery, not merely none yet.
-    for (const commands::Command* command : commands_->All()) {
+    for (const auto& entry : commands_->All()) {
+        const commands::Command* command = entry.command;
+        // The SURFACE name -- the alias applied, the key Find() resolves --
+        // not the command's own Name(): an aliased command advertised under
+        // its original name would be undispatchable from the client.
         v1::CommandInfo* info = response->add_commands();
-        info->set_name(std::string(command->Name()));
+        info->set_name(entry.surface);
         info->set_summary(std::string(command->Summary()));
         info->set_usage(std::string(command->Usage()));
         info->set_read_only(command->ReadOnly());
@@ -1159,18 +1188,20 @@ grpc::Status SessionServiceImpl::DeleteSession(grpc::ServerContext* context,
 
 void SessionServiceImpl::EmitSessionMetadata(
     agent::Session& session, const rpc::EventBroadcaster::Handle& subscriber) {
-    // preset_snapshot(), never preset(): this runs on the RPC thread. The copy
-    // carries the resolved model reference and the window the compactor's
-    // strategies resolve against -- the `max` half of the status bar's {tokens}.
+    // Snapshots, never the live refs: this runs on the RPC thread while the
+    // worker mutates preset_ and SetName/ApplyPreset mutate info_ fields
+    // (name, agent_preset) under the session mutex -- an unlocked info() read
+    // here raced a concurrent std::string write (torn read, UB).
+    const auto info = session.info_snapshot();
     const auto preset = session.preset_snapshot();
     v1::ServerEvent event;
-    event.set_session_id(session.info().session_id);
+    event.set_session_id(info.session_id);
     auto* metadata = event.mutable_session_metadata();
     // Redundant with the envelope on purpose, like the message's own field
     // comment says: events are self-describing on their own.
-    metadata->set_session_id(session.info().session_id);
-    metadata->set_name(session.info().name);
-    metadata->set_agent_preset(session.info().agent_preset);
+    metadata->set_session_id(info.session_id);
+    metadata->set_name(info.name);
+    metadata->set_agent_preset(info.agent_preset);
     metadata->set_model(preset.model_ref.str());
     metadata->set_permission_mode(config::ToString(session.run_mode()));
     metadata->set_context_window_tokens(preset.context_window_tokens.value_or(0));
@@ -1179,7 +1210,7 @@ void SessionServiceImpl::EmitSessionMetadata(
     // attach, which the handler unwind below handles.
     if (!Transport(session).queue().PublishTo(subscriber, std::move(event))) {
         logger_.warn("session {}: stream closed during attach; SessionMetadataEvent dropped",
-                     session.info().session_id);
+                     info.session_id);
     }
 }
 

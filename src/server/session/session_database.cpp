@@ -189,7 +189,19 @@ void ApplyMigrations(sqlite3* db, int target_version, const std::vector<Migratio
         if (sqlite3_prepare_v2(db, "PRAGMA user_version;", -1, &stmt, nullptr) != SQLITE_OK) {
             ThrowSqliteError(db, "failed to read schema version");
         }
-        if (sqlite3_step(stmt) == SQLITE_ROW) current = sqlite3_column_int(stmt, 0);
+        // A step ERROR is not "version 0": silently treating it as 0 would
+        // re-run every migration and die on the first CREATE TABLE with a
+        // "table already exists" that names the wrong disease. PRAGMA
+        // user_version yields exactly one row, so SQLITE_DONE is the only
+        // non-row success.
+        const int step_rc = sqlite3_step(stmt);
+        if (step_rc == SQLITE_ROW) {
+            current = sqlite3_column_int(stmt, 0);
+        } else if (step_rc != SQLITE_DONE) {
+            const std::string message = sqlite3_errmsg(db);
+            sqlite3_finalize(stmt);
+            throw std::runtime_error("failed to read schema version: " + message);
+        }
         sqlite3_finalize(stmt);
 
         if (current > target_version) {

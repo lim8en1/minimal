@@ -3,11 +3,26 @@
 #include <algorithm>
 #include <utility>
 
+#include "minimal/common/logger.hpp"
+
 namespace minimal::commands {
 
 void CommandRegistry::Register(std::unique_ptr<Command> command) {
     if (!command) return;
     const std::string original(command->Name());
+
+    // Enforced at the door, because nothing at the dispatch site can: a
+    // read-only command runs on the bounded RPC pool beside live turns, while
+    // RequiresConfirmation blocks on a round-trip to a human. The combination
+    // deadlocks one pool slot per invocation (and the pool is bounded), so the
+    // registration is refused rather than tolerated.
+    if (command->ReadOnly() && command->RequiresConfirmation()) {
+        common::DefaultLogger().warn(
+            "command '{}' is read-only AND requires confirmation; refused -- a confirming "
+            "read-only command would deadlock the bounded command pool",
+            original);
+        return;
+    }
 
     // The alias is keyed by stable identity -- "plugin.original_name" -- which is
     // why it can be written before anyone knows whether a collision exists.
@@ -33,14 +48,15 @@ Command* CommandRegistry::Find(std::string_view name) const {
     return it == commands_.end() ? nullptr : it->second.get();
 }
 
-std::vector<const Command*> CommandRegistry::All() const {
-    std::vector<const Command*> out;
+std::vector<CommandRegistry::Entry> CommandRegistry::All() const {
+    std::vector<Entry> out;
     out.reserve(commands_.size());
-    for (const auto& [name, command] : commands_) out.push_back(command.get());
+    for (const auto& [name, command] : commands_) out.push_back(Entry{name, command.get()});
     // Unordered_map iteration order is unspecified, so /help would otherwise
-    // list differently run to run.
+    // list differently run to run. Sorted by SURFACE name, not Name(): the
+    // surface key is what the user can actually type.
     std::sort(out.begin(), out.end(),
-              [](const Command* a, const Command* b) { return a->Name() < b->Name(); });
+              [](const Entry& a, const Entry& b) { return a.surface < b.surface; });
     return out;
 }
 

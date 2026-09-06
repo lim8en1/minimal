@@ -148,7 +148,7 @@ PermissionMode ToolExecutor::ResolveMode(const Tool& tool, const nlohmann::json&
     // 3. Run mode wraps whatever the policy decided.
     if (confinement_checked != nullptr) *confinement_checked = checked;
     if (was_inside_project_root != nullptr) *was_inside_project_root = checked && inside;
-    return apply_run_mode(mode, run_mode_);
+    return apply_run_mode(mode, run_mode_.load(std::memory_order_relaxed));
 }
 
 llm::ToolResultBlock ToolExecutor::Run(const std::string& tool_use_id,
@@ -298,7 +298,10 @@ PreparedInvocation ToolExecutor::PrepareGuarded(const std::string& tool_use_id,
             }
             // Only keys this invocation actually disclosed may be remembered: a
             // checker must not be able to grant something the operator was never
-            // shown.
+            // shown. This is the AUTHORITY for the rule -- it runs for every
+            // checker kind, wire responses (already filtered at the boundary,
+            // see proto_convert.hpp) and plugin advisors alike -- and is why a
+            // hostile client or a runaway advisor can mint nothing.
             for (const auto& key : response.granted_keys) {
                 const bool disclosed = std::any_of(
                     disclosure.grants.begin(), disclosure.grants.end(),

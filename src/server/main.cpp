@@ -11,12 +11,16 @@
 #include <cstdio>
 #include <cstring>
 #include <exception>
+#include <fcntl.h>
 #include <fstream>
 #include <memory>
 #include <optional>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <unordered_set>
+
+#include <unistd.h>
 
 #include "minimal/agent/agent_preset_registry.hpp"
 #include "minimal/agent/session_observer_registry.hpp"
@@ -78,6 +82,22 @@ void WriteConfigIfChanged(const std::filesystem::path& path, const std::string& 
     }
 }
 
+// The self-pipe behind SIGINT/SIGTERM (see main): the handler writes a byte,
+// the watcher thread turns it into a graceful RequestShutdown. The write end's
+// fd lives in a file-scope volatile so the handler needs no process state
+// beyond it; both ends are O_CLOEXEC.
+int shutdown_pipe_fds[2] = {-1, -1};
+volatile sig_atomic_t shutdown_signal_fd = -1;
+
+void OnShutdownSignal(int) {
+    const char byte = 1;
+    const int fd = shutdown_signal_fd;
+    if (fd >= 0) {
+        const ssize_t ignored = ::write(fd, &byte, 1);
+        (void)ignored;  // a full pipe means a shutdown is already queued
+    }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -90,6 +110,26 @@ int main(int argc, char** argv) {
     // documents that as the hosted-runtime trade); a script that wants
     // SIGPIPE semantics back can trap it.
     std::signal(SIGPIPE, SIG_IGN);
+
+    // SIGINT/SIGTERM route through the same graceful shutdown the idle reaper
+    // uses (RequestShutdown), so `kill` and Ctrl+C run TerminateAll, the
+    // session_ended hooks and a clean database close instead of skipping all
+    // of them. The handler itself does the only async-signal-safe thing --
+    // write one byte to a self-pipe; a watcher thread reads it and drives the
+    // shutdown machinery, which takes locks and must never run IN a handler.
+    // (Caught dispositions reset to default on exec, so children are
+    // unaffected -- unlike a process-wide blocked mask, which they would
+    // inherit.) The pipe is close-on-exec for the same reason.
+    if (::pipe(shutdown_pipe_fds) != 0) {
+        std::perror("pipe");
+        return 1;
+    }
+    for (int fd : shutdown_pipe_fds) {
+        ::fcntl(fd, F_SETFD, ::fcntl(fd, F_GETFD) | FD_CLOEXEC);
+    }
+    std::signal(SIGINT, OnShutdownSignal);
+    std::signal(SIGTERM, OnShutdownSignal);
+    shutdown_signal_fd = shutdown_pipe_fds[1];
 
     std::filesystem::path socket_path = minimal::rpc::DefaultSocketPath();
     for (int i = 1; i < argc; ++i) {
@@ -617,15 +657,6 @@ int main(int argc, char** argv) {
     service.set_mcp_manager(&mcp);
     service.set_presets(presets.get());
     service.set_signal_router(&signal_router);
-    // Every long-lived descriptor this process will ever own is open by now
-    // (logging, the session database, gRPC's sockets, plugin storage): mark
-    // them all close-on-exec so a bash command, MCP stdio server or hook
-    // action inherits only what its spawner explicitly dups. Retires the §7
-    // fd-hygiene gap structurally instead of chasing each spawner's fds.
-    const auto cloexec_marked = minimal::common::MarkInheritedFdsCloseOnExec();
-    if (cloexec_marked != 0) {
-        std::printf("  fd hygiene: %zu descriptor(s) marked close-on-exec\n", cloexec_marked);
-    }
 
     minimal::rpc::Server server(service, socket_path);
 
@@ -633,6 +664,20 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "\ncannot listen on %s (is a server already running?)\n",
                      socket_path.c_str());
         return 1;
+    }
+
+    // Every long-lived descriptor this process will ever own is open by NOW
+    // (logging, the session database, plugin storage, the signal pipe, and --
+    // since the line above -- gRPC's listen socket): mark them all
+    // close-on-exec so a bash command, MCP stdio server or hook action
+    // inherits only what its spawner explicitly dups. The sweep used to run
+    // BEFORE Server construction, so gRPC's socket escaped it -- the exact
+    // descriptor class the sweep exists for. Retires the §7 fd-hygiene gap
+    // structurally instead of chasing each spawner's fds. (Accepted
+    // connections and post-sweep opens remain per-spawner obligations.)
+    const auto cloexec_marked = minimal::common::MarkInheritedFdsCloseOnExec();
+    if (cloexec_marked != 0) {
+        std::printf("  fd hygiene: %zu descriptor(s) marked close-on-exec\n", cloexec_marked);
     }
 
     // S5: a session now outlives the client that opened it (detach, not just
@@ -660,7 +705,28 @@ int main(int argc, char** argv) {
 
     std::printf("\nlistening on %s\n", server.target().c_str());
     std::fflush(stdout);
+
+    // The signal watcher turns the self-pipe byte (written by the signal
+    // handler, which must stay async-signal-safe) into the same graceful
+    // RequestShutdown the idle reaper drives. Joined right after Wait()
+    // returns, so it cannot touch `server` during teardown; its one blocking
+    // read happens outside any lock, and its RequestShutdown call happens
+    // before Wait() can return -- `server` is alive throughout.
+    std::thread signal_watcher([&server] {
+        char byte = 0;
+        while (::read(shutdown_pipe_fds[0], &byte, 1) < 0 && errno == EINTR) {
+        }
+        std::fprintf(stderr, "\nshutting down (signal received)\n");
+        server.RequestShutdown();
+    });
+
     server.Wait();
+    // Wake the watcher: a normal idle exit produces no signal byte, and the
+    // pipe's write end stays open for the process's whole life. The
+    // RequestShutdown the watcher then issues is idempotent.
+    const char wake = 1;
+    (void)!::write(shutdown_pipe_fds[1], &wake, 1);
+    signal_watcher.join();
 
     // Stop the reaper BEFORE the exit cascade destroys what its callbacks
     // capture by reference: attached_clients/client_idle_for capture `service`

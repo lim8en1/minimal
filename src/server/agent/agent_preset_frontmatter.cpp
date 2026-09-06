@@ -88,9 +88,11 @@ std::optional<tools::PermissionMode> CollapsePermissionValue(const YAML::Node& v
                                                              const std::string& key) {
     if (value.IsScalar()) return config::ParsePermissionMode(value.as<std::string>());
     if (value.IsMap()) {
-        if (value["*"] && value["*"].IsScalar()) {
-            return config::ParsePermissionMode(value["*"].as<std::string>());
-        }
+        // "*" participates in the same most-restrictive scan as every other
+        // pattern -- the loop below already reads it. An early return here
+        // would let `{"*": allow, "sudo *": deny}` collapse to allow,
+        // contradicting this function's own contract: a listed deny is an
+        // author's intent, and collapsing it away silently widens it.
         // Most restrictive wins: AlwaysDeny < Ask < AlwaysAllow, so the MINIMUM
         // is the safest collapse of a pattern list.
         std::optional<tools::PermissionMode> most_restrictive;

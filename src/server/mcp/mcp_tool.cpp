@@ -30,7 +30,12 @@ tools::ToolResult McpResultToToolResult(const nlohmann::json& call_result) {
     }
 
     tools::ToolResult result;
-    const bool is_error = call_result.value("isError", false);
+    // Checked, not value(): "isError" of the wrong type is server-authored
+    // protocol abuse. A non-boolean degrades to false -- the content is
+    // rendered as text either way, so no throw and no lost signal channel.
+    const bool is_error =
+        call_result.contains("isError") && call_result.at("isError").is_boolean() &&
+        call_result.at("isError").get<bool>();
     result.is_error = is_error;
 
     if (!call_result.contains("content") || !call_result.at("content").is_array()) {

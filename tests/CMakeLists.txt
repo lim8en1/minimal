@@ -243,7 +243,8 @@ add_dependencies(minimal_tests
 target_compile_definitions(minimal_tests PRIVATE
     MINIMAL_FIXTURE_DIR="${CMAKE_CURRENT_BINARY_DIR}/fixtures"
     MINIMAL_BUNDLED_DIR="${CMAKE_SOURCE_DIR}/bundled"
-    MINIMAL_LOGO_PLUGIN="$<TARGET_FILE:minimal_logo>")
+    MINIMAL_LOGO_PLUGIN="$<TARGET_FILE:minimal_logo>"
+    MINIMAL_PROTO_DIR="${CMAKE_SOURCE_DIR}/proto")
 
 # The headless client is exercised as a real client here, so the test binary
 # links it -- the E2E tier is the whole point of building -p first.

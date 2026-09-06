@@ -113,6 +113,12 @@ private:
     std::unique_ptr<PermissionChecker> inner_;
     std::shared_ptr<AdvisorCancelSource> cancel_source_;
     std::chrono::milliseconds timeout_;
+    // Advisor threads abandoned mid-flight (cancelled or timed out, detached,
+    // still running). Shared with each task lambda so the thread can decrement
+    // it on completion, however long it outlives the checker. See
+    // kMaxAbandonedAdvisors in permission_advisor.cpp.
+    std::shared_ptr<std::atomic<int>> abandoned_count_ =
+        std::make_shared<std::atomic<int>>(0);
 };
 
 // Keyed by plugin name; permissions.json's "advisor" field selects one by that

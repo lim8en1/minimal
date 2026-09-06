@@ -56,8 +56,8 @@ public:
         }
 
         std::ostringstream out;
-        for (const Command* command : registry_.All()) {
-            out << "/" << command->Name() << "  -  " << command->Summary() << "\n";
+        for (const auto& entry : registry_.All()) {
+            out << "/" << entry.surface << "  -  " << entry.command->Summary() << "\n";
         }
         return CommandResult::Ok(out.str());
     }

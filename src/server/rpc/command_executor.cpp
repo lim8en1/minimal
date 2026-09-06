@@ -1,5 +1,7 @@
 #include "minimal/rpc/command_executor.hpp"
 
+#include "minimal/common/logger.hpp"
+
 namespace minimal::rpc {
 
 CommandExecutor::CommandExecutor(std::size_t threads, std::size_t max_backlog)
@@ -40,7 +42,17 @@ void CommandExecutor::WorkerMain() {
             task = std::move(tasks_.front());
             tasks_.pop_front();
         }
-        task();
+        // Catch-all, not just std::exception: a task that throws a
+        // plugin-originated non-standard exception must not terminate the
+        // executor's thread -- the pool outlives any single task.
+        try {
+            task();
+        } catch (const std::exception& e) {
+            // Reaching here means the task's own containment missed something.
+            common::DefaultLogger().warn("command pool task threw: {}", e.what());
+        } catch (...) {
+            common::DefaultLogger().warn("command pool task threw a non-standard exception");
+        }
     }
 }
 

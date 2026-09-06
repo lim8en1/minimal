@@ -135,7 +135,7 @@ TEST_CASE("a binary file stays verbatim", "[mention_expansion]") {
     CHECK(BlockText(message, 0) == "@blob.bin");
 }
 
-TEST_CASE("a path reaching outside project_root is expanded anyway", "[mention_expansion]") {
+TEST_CASE("a path reaching outside project_root stays verbatim", "[mention_expansion]") {
     TempDir project;
     TempDir outside;
     WriteFile(outside, "secret.txt", "typed by the human");
@@ -144,10 +144,32 @@ TEST_CASE("a path reaching outside project_root is expanded anyway", "[mention_e
         "look at @../" + outside.path().filename().string() + "/secret.txt", project.path(),
         common::DefaultLogger());
 
-    // NOT permission-gated: the human typed it, exactly as if they had pasted
-    // it. Only paths the filesystem cannot safely resolve fail.
-    REQUIRE(message.content.size() == 2);
-    CHECK(BlockText(message, 1).find("typed by the human") != std::string::npos);
+    // The read tool would raise an Ask for the same path, so inlining it
+    // silently would make a mention a side channel around the permission
+    // system: the model can request the out-of-root read through the gated
+    // tool, where it belongs. Left verbatim, nothing is disclosed.
+    REQUIRE(message.content.size() == 1);
+    CHECK(BlockText(message, 0).find("secret.txt") != std::string::npos);
+}
+
+TEST_CASE("mentions beyond the per-message cap stay verbatim", "[mention_expansion]") {
+    TempDir dir;
+    std::string text;
+    for (int i = 0; i < 40; ++i) {
+        WriteFile(dir, "f" + std::to_string(i) + ".txt", "content " + std::to_string(i));
+        text += (i == 0 ? "" : " and ") + std::string("@f") + std::to_string(i) + ".txt";
+    }
+
+    const auto message = agent::ExpandMentions(text, dir.path(), common::DefaultLogger());
+
+    // 1 original text block + one framed block per expanded mention, capped:
+    // the rest stay verbatim inside the original block instead of N x ~2 MiB
+    // of unbounded prompt growth.
+    REQUIRE(message.content.size() == 33);
+    for (std::size_t i = 0; i < message.content.size(); ++i) {
+        (void)i;
+    }
+    CHECK(BlockText(message, 32) == "<file path=\"f31.txt\">\ncontent 31\n</file>");
 }
 
 TEST_CASE("a mid-word @ is prose, not a mention", "[mention_expansion]") {

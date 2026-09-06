@@ -1,0 +1,153 @@
+From: minimal vendored-patch series <patches@minimal.invalid>
+Subject: [PATCH] stdio_client: harden the read loop, ping and stop path
+
+minimal-mcp patch. Four hardening fixes to the stdio transport, all in the
+same file:
+
+- The read loop caps the unterminated-line buffer (16 MiB) in both platform
+  branches. A child that never emits a newline -- misbehaving or hostile --
+  previously grew data_buffer without bound, an OOM at the hands of the
+  server process. Overflow breaks out to the fail-all-pending block the
+  closed-pipe path already uses.
+
+- Response matching requires the message to have no "method" field. A
+  server-originated REQUEST carries a non-null id too; matching on id alone
+  let such a request consume a pending client request with a colliding id,
+  answering its waiter with an empty success.
+
+- ping() reports liveness on any RESULT. The spec's ping answers with an
+  empty object, so the original `result.empty()` check declared healthy
+  servers that echo richer ping state dead.
+
+- stop_server_process probes with waitpid(WNOHANG) BEFORE signalling. An
+  already-exited and reaped child answers ECHILD, and its pid may by then
+  have been recycled: kill() would signal an innocent process. Only a
+  "still running" probe result earns the SIGTERM/SIGKILL ladder.
+
+Applies after cpp-mcp-stop-server-race.patch (this file sorts after it; the
+stop-path hunk's context is that patch's output).
+
+---
+ src/mcp_stdio_client.cpp | 121 +++++++++++++++++++++++++++++++++++++-------
+ 1 file changed, 99 insertions(+), 22 deletions(-)
+
+diff --git a/src/mcp_stdio_client.cpp b/src/mcp_stdio_client.cpp
+--- a/src/mcp_stdio_client.cpp
++++ b/src/mcp_stdio_client.cpp
+@@ -90,8 +90,15 @@ bool stdio_client::ping() {
+     request req = request::create("ping", {});
+     
+     try {
++        // (minimal-mcp patch) Presence of a RESULT is the liveness signal.
++        // The spec's ping answers with an empty object, so the original
++        // `return result.empty()` worked for conforming servers -- but a
++        // healthy server that echoes richer state was declared dead. Only a
++        // thrown mcp_exception (JSON-RPC error, dead pipe) reports
++        // unhealthy, as the catch below does.
+         json result = send_jsonrpc(req);
+-        return result.empty();
++        (void)result;
++        return true;
+     } catch (...) {
+         return false;
+     }
+@@ -555,13 +562,22 @@ void stdio_client::stop_server_process() {
+     // with the fd still valid; the fd is closed only after the join.
+     // Terminate process
+     if (process_id_ > 0) {
+-        LOG_INFO("Sending SIGTERM to process: ", process_id_);
+-        kill(process_id_, SIGTERM);
+-        
+-        // Wait for process to finish
+-        int status;
++        // (minimal-mcp patch) Probe before signalling: an already-exited AND
++        // reaped child answers waitpid with ECHILD, and its pid may by then
++        // have been recycled -- kill() would signal an innocent process. Only
++        // a WNOHANG result of 0 ("still running") earns the SIGTERM ladder;
++        // result > 0 means this call reaped the exit, -1 means it is gone.
++        int status = 0;
+         pid_t result = waitpid(process_id_, &status, WNOHANG);
+         
++        if (result == -1) {
++            LOG_WARNING("Child process ", process_id_, " is no longer ours; skipping termination");
++            result = 1;  // treat as exited: the kill ladder below is skipped
++        } else if (result == 0) {
++            LOG_INFO("Sending SIGTERM to process: ", process_id_);
++            kill(process_id_, SIGTERM);
++        }
++        
+         if (result == 0) {
+             // Process is still running, wait for a while
+             std::this_thread::sleep_for(std::chrono::seconds(2));
+@@ -606,6 +622,13 @@ void stdio_client::read_thread_func() {
+     char buffer[buffer_size];
+     std::string data_buffer;
+     
++    // (minimal-mcp patch) An unterminated line can only be a misbehaving or
++    // hostile child: a conforming JSON-RPC message is newline-framed. Without
++    // a cap, such a child grows data_buffer without bound -- an OOM in this
++    // process. Breaking out routes to the fail-all-pending block below the
++    // loop, the same path a closed pipe takes.
++    constexpr std::size_t kMaxReadBufferBytes = 16 * 1024 * 1024;
++    
+ #if defined(_WIN32)
+     // Windows implementation
+     DWORD bytes_read;
+@@ -624,6 +647,13 @@ void stdio_client::read_thread_func() {
+             buffer[bytes_read] = '\0';
+             data_buffer.append(buffer, bytes_read);
+             
++            // (minimal-mcp patch) See kMaxReadBufferBytes above.
++            if (data_buffer.size() > kMaxReadBufferBytes) {
++                LOG_ERROR("Unterminated MCP line exceeded ", kMaxReadBufferBytes,
++                          " bytes; dropping the connection");
++                break;
++            }
++            
+             // Process complete JSON-RPC message
+             size_t pos = 0;
+             while ((pos = data_buffer.find('\n')) != std::string::npos) {
+@@ -635,7 +665,11 @@ void stdio_client::read_thread_func() {
+                         json message = json::parse(line);
+                         
+                         if (message.contains("jsonrpc") && message["jsonrpc"] == "2.0") {
+-                            if (message.contains("id") && !message["id"].is_null()) {
++                            // (minimal-mcp patch) See the POSIX branch: a
++                            // server-originated REQUEST carries an id too and
++                            // must not be matched as a response.
++                            if (message.contains("id") && !message["id"].is_null() &&
++                                !message.contains("method")) {
+                                 // This is a response
+                                 json id = message["id"];
+                                 
+@@ -751,6 +785,13 @@ void stdio_client::read_thread_func() {
+             buffer[bytes_read] = '\0';
+             data_buffer.append(buffer, bytes_read);
+             
++            // (minimal-mcp patch) See kMaxReadBufferBytes above.
++            if (data_buffer.size() > kMaxReadBufferBytes) {
++                LOG_ERROR("Unterminated MCP line exceeded ", kMaxReadBufferBytes,
++                          " bytes; dropping the connection");
++                break;
++            }
++            
+             // Process complete JSON-RPC message
+             size_t pos = 0;
+             while ((pos = data_buffer.find('\n')) != std::string::npos) {
+@@ -762,7 +803,15 @@ void stdio_client::read_thread_func() {
+                         json message = json::parse(line);
+                         
+                         if (message.contains("jsonrpc") && message["jsonrpc"] == "2.0") {
+-                            if (message.contains("id") && !message["id"].is_null()) {
++                            // (minimal-mcp patch) A server-originated REQUEST
++                            // also carries a non-null id. Matching on id alone
++                            // let such a request consume a pending client
++                            // request with a colliding id -- a well-timed
++                            // server message would answer its own consumer
++                            // with an empty success. A RESPONSE has no
++                            // "method"; anything with one is server-side.
++                            if (message.contains("id") && !message["id"].is_null() &&
++                                !message.contains("method")) {
+                                 // This is a response
+                                 json id = message["id"];
+                                 

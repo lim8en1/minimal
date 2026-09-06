@@ -110,11 +110,15 @@ public:
 
     std::size_t granted_count() const { return session_grants_.size(); }
 
-    // shift+tab's run-mode switch (SetRunModeEvent). Worker-thread only:
-    // the change is queued to the session worker, so it runs between turns
-    // rather than beside one -- which is what makes this safe without a
-    // lock while a tool dispatch reads it.
-    void SetRunMode(PermissionRunMode mode) { run_mode_ = mode; }
+    // shift+tab's run-mode switch (SetRunModeEvent). The change is queued to
+    // the session worker, so it runs between turns rather than beside one --
+    // which is what makes a tool dispatch safe without a lock while reading
+    // it. The write stays worker-side; the ATOMIC exists because reads are
+    // not: EmitSessionMetadata reports it from the RPC pool, and a spawner
+    // clamps its child's ceiling against it (clamp_run_mode).
+    void SetRunMode(PermissionRunMode mode) {
+        run_mode_.store(mode, std::memory_order_relaxed);
+    }
 
     // Session grants are copied into a subagent at spawn -- re-prompting for
     // every binary the parent already approved would make subagents unusable --
@@ -124,7 +128,7 @@ public:
     // The parent's run mode is the ceiling a child's is clamped against
     // (clamp_run_mode), which a spawner cannot do without reading it. Also
     // what the client's {permission_mode} status segment reflects.
-    PermissionRunMode run_mode() const { return run_mode_; }
+    PermissionRunMode run_mode() const { return run_mode_.load(std::memory_order_relaxed); }
 
     // The policies a spawner hands DOWN as its child's ceilings -- the
     // per-category half of "a child is never more permissive than its parent".
@@ -152,7 +156,7 @@ private:
     PermissionChecker& checker_;
     PermissionPolicy policy_;
     McpPermissionPolicy mcp_policy_;
-    PermissionRunMode run_mode_;
+    std::atomic<PermissionRunMode> run_mode_;  // atomic: see SetRunMode's comment
     std::optional<PermissionPolicy> policy_ceiling_;
     std::optional<McpPermissionPolicy> mcp_ceiling_;
 

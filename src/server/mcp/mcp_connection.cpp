@@ -282,14 +282,30 @@ public:
                 return;
             }
             for (const auto& tool : result.at("tools")) {
+                // Checked, not value(): a hostile server answering
+                // {"name": 42} must fail the LISTING with a visible error,
+                // not throw nlohmann's type_error on the MCP worker thread
+                // -- an uncontained throw there stalls every waiter for the
+                // full request deadline.
+                if (!tool.is_object() || !tool.contains("name") || !tool.at("name").is_string()) {
+                    slot.Complete(std::nullopt, "MCP tools/list entry has no string 'name'");
+                    return;
+                }
                 McpConnection::ToolListing listing;
-                listing.name = tool.value("name", "");
-                listing.description = tool.value("description", "");
+                listing.name = tool.at("name").get<std::string>();
+                listing.description =
+                    tool.contains("description") && tool.at("description").is_string()
+                        ? tool.at("description").get<std::string>()
+                        : std::string();
                 listing.input_schema =
                     tool.contains("inputSchema") ? tool.at("inputSchema") : nlohmann::json::object();
                 listings.push_back(std::move(listing));
             }
-            cursor = result.value("nextCursor", std::string());
+            // Same checked-not-valued rule: nextCursor of the wrong type
+            // means "no cursor", never a throw.
+            cursor = result.contains("nextCursor") && result.at("nextCursor").is_string()
+                         ? result.at("nextCursor").get<std::string>()
+                         : std::string();
             if (cursor.empty()) break;
         }
         slot.Complete(std::move(listings), {});
@@ -464,7 +480,15 @@ private:
         }
 
         if (message.contains("error")) {
-            *error = "MCP server error: " + message.at("error").value("message", "unknown");
+            // Checked, not value(): the error OBJECT's shape is server-
+            // authored; a non-string "message" must degrade to "unknown",
+            // not throw on the worker thread.
+            const auto& error_obj = message.at("error");
+            *error = "MCP server error: " +
+                     (error_obj.is_object() && error_obj.contains("message") &&
+                              error_obj.at("message").is_string()
+                          ? error_obj.at("message").get<std::string>()
+                          : "unknown");
             return false;
         }
         *result = message.contains("result") ? message.at("result") : nlohmann::json::object();

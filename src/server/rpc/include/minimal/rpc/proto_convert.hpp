@@ -121,8 +121,12 @@ v1::ServerEvent ToProto(const std::string& session_id, const agent::SessionEvent
 v1::PermissionRequest ToProto(const tools::PermissionRequest& request);
 
 // `granted_keys` is filtered against `offered`: a client may only confirm grants
-// the server actually offered. This is the one place that rule can be enforced,
-// since ToolExecutor sees only the resulting response.
+// the server actually offered. The AUTHORITY for that rule is ToolExecutor,
+// which re-filters every response it receives -- wire answers AND plugin
+// advisor answers -- before remembering any key, and is the one place the rule
+// is enforced for all checker kinds. The filter here is the wire's
+// defense-in-depth: it drops minted keys at the boundary and logs them, so a
+// hostile or buggy client is visible instead of silently tolerated.
 tools::PermissionResponse FromProto(const v1::PermissionResponse& response,
                                     const tools::PermissionDisclosure& offered);
 

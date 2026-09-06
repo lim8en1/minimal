@@ -45,6 +45,21 @@ std::optional<std::string> ExtractPathField(const nlohmann::json& input) {
     return input.at("path").get<std::string>();
 }
 
+// The Ask prompt shows the path AS THE MODEL TYPED it, but a symlink planted
+// by an earlier round (or a ".." segment) hides where the operation actually
+// lands: the operator would consent to a name, not a destination. When the
+// canonical resolution differs from the naive join, append it so the
+// disclosure names the place too.
+std::string DisclosedPath(const ToolContext& ctx, const std::string& typed) {
+    std::error_code ec;
+    const std::filesystem::path root = std::filesystem::weakly_canonical(ctx.project_root, ec);
+    if (ec) return typed;
+    const std::filesystem::path direct = root / std::filesystem::path(typed);
+    const std::filesystem::path canonical = std::filesystem::weakly_canonical(direct, ec);
+    if (ec || canonical == direct) return typed;
+    return typed + " (resolves to " + canonical.string() + ")";
+}
+
 // THE MODEL-INPUT ALLOCATION CEILING for read windows, shared by read and
 // edit's view. "Memory proportional to `limit`, not file size" is hollow when
 // `limit` is model-controlled: `{"limit": 0}` meant the WHOLE FILE, and a
@@ -105,7 +120,7 @@ public:
     // authorize reading a file without saying which one, though the very
     // next transcript row (post-approval) named it. Named here instead, at
     // the moment that actually matters.
-    PermissionDisclosure Disclose(const nlohmann::json& input, const ToolContext&) const override {
+    PermissionDisclosure Disclose(const nlohmann::json& input, const ToolContext& ctx) const override {
         PermissionDisclosure disclosure;
         const auto path = ExtractPathField(input);
         if (!path) {
@@ -113,7 +128,7 @@ public:
             disclosure.complete = false;
             return disclosure;
         }
-        disclosure.summary = "read: " + *path;
+        disclosure.summary = "read: " + DisclosedPath(ctx, *path);
         return disclosure;
     }
 
@@ -187,7 +202,7 @@ public:
     // See ReadTool::Disclose: the base default named only the tool, never
     // the file this MUTATES -- the least informative case for the tool
     // category with the most consequence.
-    PermissionDisclosure Disclose(const nlohmann::json& input, const ToolContext&) const override {
+    PermissionDisclosure Disclose(const nlohmann::json& input, const ToolContext& ctx) const override {
         PermissionDisclosure disclosure;
         const auto path = ExtractPathField(input);
         if (!path) {
@@ -199,7 +214,8 @@ public:
         if (const auto it = input.find("content"); it != input.end() && it->is_string()) {
             size_note = " (" + std::to_string(it->get<std::string>().size()) + " bytes)";
         }
-        disclosure.summary = "write: " + *path + size_note + " -- creates or overwrites this file";
+        disclosure.summary =
+            "write: " + DisclosedPath(ctx, *path) + size_note + " -- creates or overwrites this file";
         return disclosure;
     }
 
@@ -278,7 +294,7 @@ public:
     // See ReadTool::Disclose. `command` is named alongside the path: "edit"
     // alone doesn't say whether this views, creates, or overwrites part of a
     // file, and those are different questions to authorize.
-    PermissionDisclosure Disclose(const nlohmann::json& input, const ToolContext&) const override {
+    PermissionDisclosure Disclose(const nlohmann::json& input, const ToolContext& ctx) const override {
         PermissionDisclosure disclosure;
         const auto path = ExtractPathField(input);
         const auto command = CommandOf(input);
@@ -291,7 +307,7 @@ public:
         if (command == "create") note = " -- creates this file";
         else if (command == "str_replace") note = " -- replaces text in this file";
         else if (command == "insert") note = " -- inserts text into this file";
-        disclosure.summary = "edit (" + command + "): " + *path + note;
+        disclosure.summary = "edit (" + command + "): " + DisclosedPath(ctx, *path) + note;
         return disclosure;
     }
 

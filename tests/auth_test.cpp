@@ -8,11 +8,14 @@
 #include <grpcpp/server_builder.h>
 #include <grpcpp/server_context.h>
 
+#include <algorithm>
 #include <atomic>
+#include <array>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
-#include <memory>
+#include <map>
+#include <regex>
 #include <string>
 #include <thread>
 
@@ -101,6 +104,43 @@ TEST_CASE("provider() is safe to read while Register() writes concurrently", "[a
     reader.join();
 
     CHECK(registry.provider() != nullptr);
+}
+
+TEST_CASE("every RPC in the service descriptor is on the guarded list", "[auth][invariant]") {
+    // The guard is a convention -- `EnsureAuthenticated` at the head of each
+    // service method -- and sync handlers run no interceptor that could enforce
+    // it for us, and protobuf's generated pool does not even register service
+    // descriptors under this gencode. What a test CAN enforce mechanically is
+    // that the list below tracks the WIRE CONTRACT: the .proto file is parsed
+    // for `rpc` declarations and every one of them must appear here. Adding a
+    // 14th RPC without adding it to this list fails this case, and the same
+    // commit must then show the guard in the new handler. The two wire cases
+    // below spot-check that the listed methods really do carry it.
+    static const std::array<std::string_view, 13> kGuardedMethods = {
+        "OpenSession",       "GetMessages",      "ListSessions",
+        "ListAgentPresets",  "ListModels",       "CreateSession",
+        "SuggestPaths",      "ListCommands",     "RunSessionlessCommand",
+        "DeleteSession",     "Ping",             "PluginCall",
+        "PluginSubscribe",
+    };
+
+    std::ifstream proto_file(std::string(MINIMAL_PROTO_DIR) +
+                             "/minimal/v1/session_service.proto");
+    REQUIRE(proto_file.is_open());
+    const std::string body((std::istreambuf_iterator<char>(proto_file)),
+                           std::istreambuf_iterator<char>());
+
+    static const std::regex rpc_re(R"re(\brpc\s+([A-Za-z_][A-Za-z0-9_]*)\s*\()re");
+    std::map<std::string, int> wire_methods;
+    for (std::sregex_iterator it(body.begin(), body.end(), rpc_re);
+         it != std::sregex_iterator{}; ++it) {
+        ++wire_methods[(*it)[1].str()];
+    }
+
+    REQUIRE(wire_methods.size() == kGuardedMethods.size());
+    for (const auto& name : kGuardedMethods) {
+        CHECK(wire_methods.count(std::string(name)) == 1);
+    }
 }
 
 TEST_CASE("the guard runs on the wire: a denying provider rejects OpenSession",

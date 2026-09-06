@@ -385,6 +385,13 @@ public:
     std::shared_ptr<void> transport() const { return transport_; }
 
     const SessionInfo& info() const { return info_; }
+    // Locked copy of info(), for any reader OFF the session worker that needs
+    // a field SetName or ApplyPreset can mutate (name, agent_preset) -- an
+    // unlocked info() read of those fields races the writer's std::string
+    // assignment. info() itself remains valid for the truly immutable fields
+    // (session_id, parent_session_id, project_root) and for worker-side
+    // callers that already synchronize with the writers.
+    SessionInfo info_snapshot() const { return InfoSnapshot(); }
 
     // The titler path (a SessionObserver plugin, reached through
     // SessionSupportService::RenameSession): updates the in-memory name and
@@ -395,11 +402,11 @@ public:
     // thread); after Terminate the event is simply lost -- a dropped metadata
     // refresh is display-only, the persisted name is the authoritative record.
     //
-    // Safe from any thread. This is the ONLY mutation info_ ever takes after
-    // construction, and it synchronizes on mutex_; the internal Notify* sites
-    // snapshot info_ under that same mutex, and info() itself stays a plain
-    // const-ref for the immutable fields (session_id, parent_session_id,
-    // agent_preset, project_root) that are everything external callers read.
+    // Safe from any thread. This is the ONLY mutation of info_.name after
+    // construction, and it synchronizes on mutex_; ApplyPreset similarly
+    // updates info_.agent_preset under that same mutex. Unlocked readers must
+    // use info_snapshot(); info() stays a plain const-ref for the truly
+    // immutable fields (session_id, parent_session_id, project_root).
     void SetName(std::string name);
 
     // The provider this session is currently running, shared (instances are

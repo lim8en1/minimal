@@ -921,16 +921,27 @@ void Session::WorkerMain() {
         // set only when it ENDS, and it was popped while the flag was still
         // false.
         if (!subagent_finished_.load(std::memory_order_acquire)) {
-            if (wake_turn) {
-                RunOneTurn(std::nullopt);
-            } else if (auto* text = std::get_if<std::string>(&item)) {
-                RunOneTurn(std::move(*text));
-            } else if (auto* rewind = std::get_if<QueuedRewind>(&item)) {
-                RunOneRewind(*rewind);
-            } else if (auto* run_mode = std::get_if<QueuedRunMode>(&item)) {
-                RunOneRunMode(*run_mode);
-            } else {
-                RunOneCommand(std::get<QueuedCommand>(item));
+            // Catch-all, not just std::exception: a plugin command throwing a
+            // non-standard exception out of RunOneCommand must not terminate
+            // the worker thread -- every other queue drain in the process
+            // contains, and this one is the heart of the session.
+            try {
+                if (wake_turn) {
+                    RunOneTurn(std::nullopt);
+                } else if (auto* text = std::get_if<std::string>(&item)) {
+                    RunOneTurn(std::move(*text));
+                } else if (auto* rewind = std::get_if<QueuedRewind>(&item)) {
+                    RunOneRewind(*rewind);
+                } else if (auto* run_mode = std::get_if<QueuedRunMode>(&item)) {
+                    RunOneRunMode(*run_mode);
+                } else {
+                    RunOneCommand(std::get<QueuedCommand>(item));
+                }
+            } catch (const std::exception& e) {
+                logger_.error("session {}: worker item threw: {}", params_.session_id, e.what());
+            } catch (...) {
+                logger_.error("session {}: worker item threw a non-standard exception",
+                              params_.session_id);
             }
         }
         // else: dropped silently -- the session is finished and collected;

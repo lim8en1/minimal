@@ -351,6 +351,30 @@ TEST_CASE("edit create's disclosure says it creates the file", "[tools_fs][edit]
     CHECK(disclosure.summary.find("creates this file") != std::string::npos);
 }
 
+TEST_CASE("disclosure names the destination a symlink hides", "[tools_fs][disclosure]") {
+    // The Ask prompt shows the path as the model typed it; a symlink planted
+    // in an earlier round must not let the operator consent to "notes" while
+    // the write lands in ~/.ssh. The canonical destination is appended
+    // whenever it differs from the typed form -- and ONLY then, so ordinary
+    // prompts stay clean.
+    Fixture f;
+    f.Write("real.txt", "x");
+    std::error_code ec;
+    std::filesystem::create_symlink("real.txt", f.dir.path() / "link.txt", ec);
+    REQUIRE_FALSE(ec);
+
+    auto tool = tools_fs::MakeReadTool(f.settings);
+    auto ctx = f.Context();
+
+    const auto disclosed = tool->Disclose({{"path", "link.txt"}}, ctx);
+    CHECK(disclosed.summary.find("link.txt") != std::string::npos);
+    CHECK(disclosed.summary.find("resolves to") != std::string::npos);
+    CHECK(disclosed.summary.find("real.txt") != std::string::npos);
+
+    const auto plain = tool->Disclose({{"path", "real.txt"}}, ctx);
+    CHECK(plain.summary.find("resolves to") == std::string::npos);
+}
+
 // --- integration with the permission gate ------------------------------------
 
 TEST_CASE("out-of-workdir access is refused by the executor, not by the tool",

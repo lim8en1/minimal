@@ -22,6 +22,12 @@ constexpr int kMentionMaxLines = 1000;
 constexpr int kMentionMaxLineLength = 2000;
 constexpr int kTreeMaxDepth = 3;  // levels BELOW the mentioned directory
 constexpr std::size_t kTreeMaxEntries = 500;
+// Expansion is bounded per mention AND per message: without the count cap,
+// a message of N mentions reads N ~2 MiB windows into the provider prompt
+// in one turn. Both ceilings leave the mention verbatim -- the model can
+// still read the file itself through the gated read tool.
+constexpr int kMaxMentionsPerMessage = 32;
+constexpr std::size_t kMaxMentionBytesPerMessage = 8u << 20;  // 8 MiB of blocks
 
 bool IsWhitespace(char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r'; }
 
@@ -114,10 +120,17 @@ llm::Message ExpandMentions(std::string_view text, const std::filesystem::path& 
 
     int expanded = 0;
     int unresolved = 0;
+    std::size_t expanded_bytes = 0;
     std::size_t search_from = 0;
     while (const auto token = NextToken(text, search_from)) {
         search_from = token->end;
         const std::string path_text(text.substr(token->begin + 1, token->end - token->begin - 1));
+
+        if (expanded >= kMaxMentionsPerMessage ||
+            expanded_bytes >= kMaxMentionBytesPerMessage) {
+            ++unresolved;
+            continue;
+        }
 
         const auto resolved = tools::confine(project_root, path_text, /*must_exist=*/true);
         if (!resolved.ok) {
@@ -125,10 +138,25 @@ llm::Message ExpandMentions(std::string_view text, const std::filesystem::path& 
             logger.debug("mention '@{}' could not be resolved: {}", path_text, resolved.error);
             continue;
         }
+        // confine() merely CLASSIFIES an out-of-root path; the flag is advisory.
+        // A mention must never inline material from outside the project: the
+        // read tool would gate the same path, so the mention path gates here.
+        if (resolved.outside_project_root) {
+            ++unresolved;
+            logger.debug("mention '@{}' left verbatim: resolves outside the project root",
+                         path_text);
+            continue;
+        }
 
         std::error_code ec;
         if (std::filesystem::is_directory(resolved.absolute_path, ec)) {
-            blocks.push_back(llm::TextBlock{FrameTree(path_text, resolved.absolute_path)});
+            std::string framed = FrameTree(path_text, resolved.absolute_path);
+            if (expanded_bytes + framed.size() > kMaxMentionBytesPerMessage) {
+                ++unresolved;
+                continue;
+            }
+            expanded_bytes += framed.size();
+            blocks.push_back(llm::TextBlock{std::move(framed)});
             ++expanded;
             continue;
         }
@@ -147,7 +175,13 @@ llm::Message ExpandMentions(std::string_view text, const std::filesystem::path& 
                          window.is_binary ? "binary file" : window.error);
             continue;
         }
-        blocks.push_back(llm::TextBlock{FrameFile(path_text, window)});
+        std::string framed = FrameFile(path_text, window);
+        if (expanded_bytes + framed.size() > kMaxMentionBytesPerMessage) {
+            ++unresolved;
+            continue;
+        }
+        expanded_bytes += framed.size();
+        blocks.push_back(llm::TextBlock{std::move(framed)});
         ++expanded;
     }
 

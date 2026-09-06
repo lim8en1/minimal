@@ -113,6 +113,18 @@ ShellActionResult RunShellAction(const std::string& command, std::string_view st
     std::string script = command;
     char* argv_ptrs[] = {shell.data(), dash_c.data(), script.data(), nullptr};
 
+    // A zero timeout means "no budget", which a CANCELLABLE sync emission may
+    // ask for -- its caller can still abandon the wait. The async path passes
+    // a null canceller, though, and the hook worker is a single thread: zero
+    // budget plus no cancellation means one wedged script blocks every later
+    // hook, forever. Uncancellable runs therefore get a floor budget, which is
+    // also what the child's RLIMIT_CPU backstop below is floored with.
+    static constexpr std::chrono::milliseconds kUncancellableFloor{60000};
+    const bool cancellable = is_cancelled != nullptr;
+    const std::chrono::milliseconds effective =
+        timeout.count() > 0 ? timeout : (cancellable ? std::chrono::milliseconds::zero()
+                                                     : kUncancellableFloor);
+
     const pid_t pid = fork();
     if (pid < 0) {
         result.outcome = ShellActionOutcome::kFailOpen;
@@ -125,10 +137,10 @@ ShellActionResult RunShellAction(const std::string& command, std::string_view st
         // async-signal-safe calls only, every failure is _exit.
         setsid();  // pgid == pid: killpg reaches the whole tree.
 
-        if (timeout.count() > 0) {
+        if (effective.count() > 0) {
             // CPU backstop behind the wall-clock deadline, like the bash tool.
             rlimit cpu{};
-            cpu.rlim_cur = cpu.rlim_max = static_cast<rlim_t>(timeout.count() / 1000) + 5;
+            cpu.rlim_cur = cpu.rlim_max = static_cast<rlim_t>(effective.count() / 1000) + 5;
             setrlimit(RLIMIT_CPU, &cpu);
 
             // Filesize backstop, matching the bash tool: a runaway script
@@ -154,9 +166,9 @@ ShellActionResult RunShellAction(const std::string& command, std::string_view st
     in_read.reset();
     out_write.reset();
 
-    const bool budgeted = timeout.count() > 0;
+    const bool budgeted = effective.count() > 0;
     const auto deadline =
-        std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout.count());
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(effective.count());
     const auto expired = [&] {
         return budgeted && std::chrono::steady_clock::now() >= deadline;
     };
@@ -278,7 +290,7 @@ ShellActionResult RunShellAction(const std::string& command, std::string_view st
             result.fail_reason = "cancelled";
         } else {
             result.fail_reason = budgeted
-                                     ? "timed out after " + std::to_string(timeout.count()) +
+                                     ? "timed out after " + std::to_string(effective.count()) +
                                            " ms"
                                      : "abandoned while reaping";
         }
