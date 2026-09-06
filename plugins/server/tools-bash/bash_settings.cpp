@@ -20,10 +20,14 @@ BashSettings ParseBashSettings(const nlohmann::json& config) {
 
     // The plugin's own plugins.json "config" object, verbatim -- keys are flat
     // because every knob in this schema belongs to this one tool.
-    settings.timeout_ms = ValueOr(config, "timeout_ms", settings.timeout_ms);
-    settings.max_timeout_ms = ValueOr(config, "max_timeout_ms", settings.max_timeout_ms);
-    settings.background_max_timeout_ms =
-        ValueOr(config, "background_max_timeout_ms", settings.background_max_timeout_ms);
+    // Timeouts are configured in SECONDS and stored in ms, the plumbing's unit.
+    const std::int64_t timeout_s = ValueOr(config, "timeout_s", 120);
+    const std::int64_t max_timeout_s = ValueOr(config, "max_timeout_s", 600);
+    const std::int64_t background_max_timeout_s =
+        ValueOr(config, "background_max_timeout_s", 600);
+    settings.timeout_ms = timeout_s * 1000;
+    settings.max_timeout_ms = max_timeout_s * 1000;
+    settings.background_max_timeout_ms = background_max_timeout_s * 1000;
     settings.max_output_bytes = ValueOr(config, "max_output_bytes", settings.max_output_bytes);
     settings.max_file_size_bytes =
         ValueOr(config, "max_file_size_bytes", settings.max_file_size_bytes);

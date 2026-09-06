@@ -462,7 +462,7 @@ A plugin answers `Ask`-gated tool calls automatically and abstains to the wire c
 **What.** `ToolRegistrationContext` (`plugin_abi.h:51-56`) generalizes to `PluginRegistrationContext`: it keeps the verbatim `tools` object from `settings.json` and gains `config` — the plugin's own slice from its `plugins.json` entry:
 
 ```json
-{"plugins": [{"file": "tools-bash.so", "enabled": true, "config": {"timeout_ms": 30000}}]}
+{"plugins": [{"file": "tools-bash.so", "enabled": true, "config": {"timeout_s": 30}}]}
 ```
 
 Core imposes no schema — the same rule as `tools_settings` today. Every `register_*` symbol takes the context: tools, provider factories, session observers, commands, and auth (unwired, but swept for uniformity). Today only tool-registering plugins receive anything, and only the whole `tools` blob (`main.cpp:115-125`); a provider, observer, or command plugin has no sanctioned way to read its own settings.

@@ -47,6 +47,14 @@ WebSettings ParseWebSettings(const nlohmann::json& config) {
     settings.fetch_timeout_ms = PositiveOr(config, "fetch", "timeout_ms", settings.fetch_timeout_ms);
     settings.fetch_max_redirects =
         PositiveOr(config, "fetch", "max_redirects", settings.fetch_max_redirects);
+    settings.fetch_default_max_bytes =
+        PositiveOr(config, "fetch", "default_max_bytes", settings.fetch_default_max_bytes);
+    settings.fetch_max_bytes = PositiveOr(config, "fetch", "max_bytes", settings.fetch_max_bytes);
+    // A ceiling below the default would clamp every fetch that supplied no
+    // max_bytes, which is not what configuring a maximum means.
+    if (settings.fetch_max_bytes < settings.fetch_default_max_bytes) {
+        settings.fetch_max_bytes = settings.fetch_default_max_bytes;
+    }
     settings.fetch_allow_private_hosts =
         BoolOr(config, "fetch", "allow_private_hosts", settings.fetch_allow_private_hosts);
 

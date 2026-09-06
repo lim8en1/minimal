@@ -179,7 +179,7 @@ TEST_CASE("codec round-trips every content block variant", "[session][codec]") {
         llm::ThinkingBlock{"reasoning here", std::string("sig-abc")});
     message.content.push_back(
         llm::ToolUseBlock{"toolu_1", "bash",
-                          {{"command", "make 2>&1 | tail -50"}, {"timeout_ms", 30000}}});
+                          {{"command", "make 2>&1 | tail -50"}, {"timeout", 30}}});
     llm::ToolResultBlock result;
     result.tool_use_id = "toolu_1";
     result.content.push_back(llm::TextBlock{"target.cpp"});

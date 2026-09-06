@@ -12,6 +12,8 @@
 #include <unistd.h>
 
 #include <cstring>
+#include <fstream>
+#include <filesystem>
 #include <string>
 #include <thread>
 
@@ -316,6 +318,103 @@ TEST_CASE("web_fetch: 'url' is required", "[tools_web][fetch]") {
     CHECK(result.is_error);
 }
 
+// The spill tests get a project root of their own so the file lands somewhere
+// observable and contained, not in the shared temp root Context() uses.
+TEST_CASE("web_fetch: an oversized response is truncated, and the full text is spilled",
+          "[tools_web][fetch]") {
+    const std::string body(10000, 'x');
+    LoopbackServer server({HttpResponseOf(200, "OK", "text/plain", body)});
+    WebSettings settings = LocalSettings();
+    settings.fetch_default_max_bytes = 1000;
+    auto tool = MakeWebFetchTool(settings, net::HttpClient{});
+
+    const auto root = std::filesystem::temp_directory_path() / "minimal-webfetch-spill-test";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root);
+    auto ctx = Context();
+    ctx.project_root = root;
+
+    const auto result = tool->execute({{"url", server.url()}}, ctx);
+    CHECK_FALSE(result.is_error);
+    CHECK(result.content_text.substr(0, 1000) == std::string(1000, 'x'));
+    CHECK(result.content_text.find("the first 1000 of 10000 bytes") != std::string::npos);
+
+    // The footer names a project-relative path, and that file holds the FULL
+    // text -- exactly what `read` would page into.
+    const auto start = result.content_text.find(".minimal/web-fetch/");
+    REQUIRE(start != std::string::npos);
+    const auto end = result.content_text.find(" --", start);
+    REQUIRE(end != std::string::npos);
+    std::ifstream spill(root / result.content_text.substr(start, end - start));
+    const std::string spilled((std::istreambuf_iterator<char>(spill)),
+                              std::istreambuf_iterator<char>());
+    CHECK(spilled == body);
+
+    std::filesystem::remove_all(root);
+}
+
+TEST_CASE("web_fetch: a response under the cap is returned whole, with no spill",
+          "[tools_web][fetch]") {
+    LoopbackServer server({HttpResponseOf(200, "OK", "text/plain", "hello world")});
+    WebSettings settings = LocalSettings();
+    settings.fetch_default_max_bytes = 100000;
+    auto tool = MakeWebFetchTool(settings, net::HttpClient{});
+
+    const auto root = std::filesystem::temp_directory_path() / "minimal-webfetch-nospill-test";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root);
+    auto ctx = Context();
+    ctx.project_root = root;
+
+    const auto result = tool->execute({{"url", server.url()}}, ctx);
+    CHECK_FALSE(result.is_error);
+    CHECK(result.content_text == "hello world");
+    CHECK_FALSE(std::filesystem::exists(root / ".minimal"));
+
+    std::filesystem::remove_all(root);
+}
+
+TEST_CASE("web_fetch: max_bytes is honoured, clamped, and type-checked",
+          "[tools_web][fetch]") {
+    const std::string body(10000, 'y');
+    LoopbackServer server({HttpResponseOf(200, "OK", "text/plain", body)});
+
+    const auto root = std::filesystem::temp_directory_path() / "minimal-webfetch-clamp-test";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root);
+    auto ctx = Context();
+    ctx.project_root = root;
+
+    WebSettings settings = LocalSettings();
+    settings.fetch_default_max_bytes = 400;
+    settings.fetch_max_bytes = 500;
+    auto tool = MakeWebFetchTool(settings, net::HttpClient{});
+
+    SECTION("a smaller value wins over the default") {
+        const auto result = tool->execute({{"url", server.url()}, {"max_bytes", 200}}, ctx);
+        CHECK_FALSE(result.is_error);
+        CHECK(result.content_text.substr(0, 200) == std::string(200, 'y'));
+        CHECK(result.content_text.find("the first 200 of 10000 bytes") != std::string::npos);
+    }
+    SECTION("zero means the ceiling, not everything") {
+        const auto result = tool->execute({{"url", server.url()}, {"max_bytes", 0}}, ctx);
+        CHECK_FALSE(result.is_error);
+        CHECK(result.content_text.find("the first 500 of 10000 bytes") != std::string::npos);
+    }
+    SECTION("a value past the ceiling is clamped, not honoured") {
+        const auto result = tool->execute({{"url", server.url()}, {"max_bytes", 99999}}, ctx);
+        CHECK_FALSE(result.is_error);
+        CHECK(result.content_text.find("the first 500 of 10000 bytes") != std::string::npos);
+    }
+    SECTION("a non-integer is a named error") {
+        const auto result = tool->execute({{"url", server.url()}, {"max_bytes", "lots"}}, ctx);
+        CHECK(result.is_error);
+        CHECK(result.content_text.find("'max_bytes' must be an integer") != std::string::npos);
+    }
+
+    std::filesystem::remove_all(root);
+}
+
 TEST_CASE("web_fetch: declares network_access_required", "[tools_web][fetch]") {
     auto tool = MakeWebFetchTool(WebSettings{}, net::HttpClient{});
     CHECK(tool->network_access_required());
@@ -379,7 +478,17 @@ TEST_CASE("ParseWebSettings: defaults with an empty config", "[tools_web][settin
     const auto settings = ParseWebSettings(nlohmann::json::object());
     CHECK(settings.fetch_timeout_ms == 15000);
     CHECK(settings.fetch_allow_private_hosts == false);
+    CHECK(settings.fetch_default_max_bytes == 262144);
+    CHECK(settings.fetch_max_bytes == 2097152);
     CHECK(settings.search_api_url.empty());
+}
+
+TEST_CASE("ParseWebSettings: a fetch.max_bytes below the default is raised, not honoured",
+          "[tools_web][settings]") {
+    const nlohmann::json config = {{"fetch", {{"default_max_bytes", 1024}, {"max_bytes", 512}}}};
+    const auto settings = ParseWebSettings(config);
+    CHECK(settings.fetch_default_max_bytes == 1024);
+    CHECK(settings.fetch_max_bytes == 1024);
 }
 
 TEST_CASE("ParseWebSettings: reads fetch.* and search.*", "[tools_web][settings]") {

@@ -55,7 +55,10 @@ public:
                       {"enum", {"pending", "in_progress", "completed"}},
                       {"description", "Defaults to pending"}}}}},
                   {"required", nlohmann::json::array({"text"})}}}}},
-              {"id", {{"type", "integer"}, {"description", "op=update: the item's id"}}},
+              {"id",
+               {{"type", "integer"},
+                {"description", "op=update: the item's id (ids run 1..N in list order; "
+                                "op=set renumbers from 1)"}}},
               {"status",
                {{"type", "string"},
                 {"enum", {"pending", "in_progress", "completed"}},

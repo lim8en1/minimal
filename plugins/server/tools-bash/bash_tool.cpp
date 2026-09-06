@@ -248,11 +248,11 @@ public:
             {"type", "object"},
             {"properties",
              {{"command", {{"type", "string"}, {"description", "The shell command to run"}}},
-              {"timeout_ms",
+              {"timeout",
                {{"type", "integer"},
-                {"description", "Wall-clock limit; defaults to " +
-                                    std::to_string(settings_.timeout_ms) + ", capped at " +
-                                    std::to_string(settings_.max_timeout_ms)}}},
+                {"description", "Wall-clock limit in seconds; defaults to " +
+                                    std::to_string(settings_.timeout_ms / 1000) + ", capped at " +
+                                    std::to_string(settings_.max_timeout_ms / 1000)}}},
               {"restart",
                {{"type", "boolean"},
                 {"description", "Reset cwd and environment to their defaults before running"}}},
@@ -342,14 +342,15 @@ public:
 
         std::int64_t timeout_ms = settings_.timeout_ms;
         bool timeout_supplied = false;
-        if (input.contains("timeout_ms")) {
-            if (!input.at("timeout_ms").is_number_integer()) {
-                return Reject(ctx, started, "timeout_ms must be an integer", command);
+        if (input.contains("timeout")) {
+            if (!input.at("timeout").is_number_integer()) {
+                return Reject(ctx, started, "timeout must be an integer", command);
             }
-            timeout_ms = input.at("timeout_ms").get<std::int64_t>();
-            if (timeout_ms <= 0) {
-                return Reject(ctx, started, "timeout_ms must be positive", command);
+            const auto seconds = input.at("timeout").get<std::int64_t>();
+            if (seconds <= 0) {
+                return Reject(ctx, started, "timeout must be positive", command);
             }
+            timeout_ms = seconds * 1000;
             timeout_supplied = true;
         }
 

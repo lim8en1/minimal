@@ -13,18 +13,21 @@ namespace minimal::tools_bash {
 struct BashSettings {
     // Wall-clock cap per invocation; the whole process group is killed at the
     // deadline. The RLIMIT_CPU backstop derives from this (see bash_tool.cpp).
+    // Configured in SECONDS (`timeout_s`) -- the unit the model-facing tool
+    // input uses too -- and stored in ms, the unit the process plumbing
+    // (deadlines, RLIMIT_CPU, logs) already speaks.
     std::int64_t timeout_ms = 120000;
-    // Ceiling on the model-supplied `timeout_ms`. The model may ask for longer
-    // than the default (a build is not `ls`) but not without bound: the deadline
-    // is the only hard limit on a session worker thread.
+    // Ceiling on the model-supplied `timeout` (seconds). The model may ask for
+    // longer than the default (a build is not `ls`) but not without bound: the
+    // deadline is the only hard limit on a session worker thread.
     std::int64_t max_timeout_ms = 600000;
     // Background tasks have their OWN ceiling, and it exists for a different
     // reason: a background task never holds the session worker, so the sync
     // rationale ("the deadline is the only hard bound on a session worker
     // thread") does not apply. What applies is that nothing may run forever on
     // the operator's machine -- bounded, but separately, and generous. A model
-    // that supplies no timeout_ms gets the ceiling itself: a long-running build
-    // is the entire point of the mode. Still killable at any time (kill -- -PID
+    // that supplies no timeout gets the ceiling itself: a long-running build is
+    // the entire point of the mode. Still killable at any time (kill -- -PID
     // from a later call) and killed when the session ends.
     std::int64_t background_max_timeout_ms = 600000;
     // Per-session cap on LIVE background tasks. Over the limit is an error

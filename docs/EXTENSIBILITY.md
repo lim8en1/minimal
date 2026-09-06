@@ -114,7 +114,7 @@ The first consumer justifies the pattern: `/restart-shell` lives in `tools-bash`
 struct PluginRegistrationContext {
     // This plugin's own config, verbatim. Source: an optional "config" object
     // on the plugin's plugins.json entry:
-    //   {"plugins": [{"file": "tools-bash.so", "config": {"timeout_ms": 30000}}]}
+    //   {"plugins": [{"file": "tools-bash.so", "config": {"timeout_s": 30}}]}
     // Core imposes no schema -- the same rule as tools_settings today.
     nlohmann::json config = nlohmann::json::object();
 };

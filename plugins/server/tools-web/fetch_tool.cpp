@@ -1,8 +1,13 @@
 #include "fetch_tool.hpp"
 
+#include <algorithm>
 #include <chrono>
+#include <cstdint>
+#include <cstdio>
+#include <limits>
 
 #include "html_text.hpp"
+#include "minimal/tools/atomic_write.hpp"
 #include "url_policy.hpp"
 
 namespace minimal::tools_web {
@@ -14,6 +19,20 @@ using tools::ToolResult;
 using tools::ToolSpec;
 
 ToolResult Error(std::string message) { return ToolResult{true, std::move(message)}; }
+
+// FNV-1a 64, hex-encoded. The spill FILENAME is a cache key, not a security
+// boundary: it only has to be deterministic so the same URL overwrites its
+// file instead of accumulating one per fetch.
+std::string SpillName(const std::string& url) {
+    std::uint64_t hash = 1469598103934665603ULL;
+    for (const unsigned char c : url) {
+        hash ^= c;
+        hash *= 1099511628211ULL;
+    }
+    char buffer[17];
+    std::snprintf(buffer, sizeof(buffer), "%016llx", static_cast<unsigned long long>(hash));
+    return std::string(buffer) + ".txt";
+}
 
 bool ContentTypeIsHtml(const std::vector<net::HttpHeader>& headers) {
     const auto content_type = net::FindHeaderCI(headers, "Content-Type");
@@ -48,10 +67,20 @@ public:
         spec_.definition.description =
             "Fetch a URL over HTTP(S) and return its content as text. HTML pages are converted "
             "to readable text; other content types are returned as-is. Loopback, private, and "
-            "link-local addresses are refused by default.";
+            "link-local addresses are refused by default. Oversized responses are truncated "
+            "and the full text is saved to a file the read tool can page through.";
         spec_.definition.input_schema = {
             {"type", "object"},
-            {"properties", {{"url", {{"type", "string"}, {"description", "The URL to fetch"}}}}},
+            {"properties",
+             {{"url", {{"type", "string"}, {"description", "The URL to fetch"}}},
+              {"max_bytes",
+               {{"type", "integer"},
+                {"description",
+                 "Maximum bytes of text to return; default " +
+                     std::to_string(settings_.fetch_default_max_bytes) + ", capped at " +
+                     std::to_string(settings_.fetch_max_bytes) + ". Anything over the limit is "
+                     "saved to a file you can read with the read tool -- the result footer "
+                     "names it."}}}}},
             {"required", nlohmann::json::array({"url"})}};
     }
 
@@ -63,6 +92,23 @@ public:
             return Error("web_fetch: 'url' is required");
         }
         std::string url = input.at("url").get<std::string>();
+
+        // Clamped like read's window: 0 and over-the-ceiling both mean the
+        // ceiling (disclosed in the footer), an out-of-range value is the
+        // model's mistake to see, not a silent wrap.
+        int max_bytes = settings_.fetch_default_max_bytes;
+        if (input.contains("max_bytes")) {
+            if (!input.at("max_bytes").is_number_integer()) {
+                return Error("web_fetch: 'max_bytes' must be an integer");
+            }
+            const auto raw = input.at("max_bytes").get<std::int64_t>();
+            if (raw < 0 || raw > std::numeric_limits<int>::max()) {
+                return Error("web_fetch: 'max_bytes' is out of range");
+            }
+            max_bytes = raw == 0 ? settings_.fetch_max_bytes
+                                 : static_cast<int>(std::min<std::int64_t>(
+                                       raw, settings_.fetch_max_bytes));
+        }
 
         for (int hop = 0; hop <= settings_.fetch_max_redirects; ++hop) {
             if (ctx.is_cancelled && ctx.is_cancelled()) return Error("web_fetch: cancelled");
@@ -100,16 +146,52 @@ public:
                 return Error("web_fetch: HTTP " + std::to_string(response.status));
             }
 
-            if (ContentTypeIsHtml(response.headers)) {
-                return ToolResult{false, HtmlToText(response.body)};
-            }
-            return ToolResult{false, response.body};
+            return Finish(ctx, url, ContentTypeIsHtml(response.headers)
+                                        ? HtmlToText(response.body)
+                                        : response.body,
+                          max_bytes);
         }
         return Error("web_fetch: too many redirects (" +
                      std::to_string(settings_.fetch_max_redirects) + ")");
     }
 
 private:
+    // Bounds the returned text. The overflow is spilled to a project-local
+    // file: the model reads only text, so "there is more" has to be a PATH it
+    // can hand to the read tool (which confines to the project root), not a
+    // structured handle. The spill name is server-named (URL hash), never
+    // model-named, and the same URL overwrites its file instead of
+    // accumulating one per fetch.
+    ToolResult Finish(const ToolContext& ctx, const std::string& url, std::string text,
+                      int max_bytes) {
+        if (text.size() <= static_cast<std::size_t>(max_bytes)) {
+            return ToolResult{false, std::move(text)};
+        }
+        const auto total = text.size();
+        std::error_code ec;
+        const auto dir = ctx.project_root / ".minimal" / "web-fetch";
+        std::filesystem::create_directories(dir, ec);
+        const std::string name = SpillName(url);
+        const auto outcome = ec ? tools::WriteOutcome{} : tools::write_file(dir / name, text);
+        if (outcome.ok) {
+            text.resize(static_cast<std::size_t>(max_bytes));
+            return ToolResult{false,
+                              std::move(text) + "\n[Showing the first " +
+                                  std::to_string(max_bytes) + " of " + std::to_string(total) +
+                                  " bytes. The full response is saved at .minimal/web-fetch/" +
+                                  name + " -- use the read tool (offset/limit) to page through "
+                                  "the rest.]"};
+        }
+        // The spill failed: truncate anyway, and say the pointer is missing
+        // rather than returning one that leads nowhere.
+        text.resize(static_cast<std::size_t>(max_bytes));
+        return ToolResult{false,
+                          std::move(text) + "\n[Truncated to the first " +
+                              std::to_string(max_bytes) + " of " + std::to_string(total) +
+                              " bytes; saving the full response failed (" + outcome.error +
+                              ") -- re-fetch with a larger max_bytes if you need more.]"};
+    }
+
     ToolSpec spec_;
     WebSettings settings_;
     net::HttpClient http_;  // stateless -- see HttpClient's own contract

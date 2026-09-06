@@ -11,6 +11,8 @@ third-party plugin uses; the tools are not structurally privileged.
   ToolExecutor classifies out-of-workdir access, so the rule cannot drift per tool.
 - `read` windows are clamped to a hard ceiling (disclosed in the result footer);
   `limit: 0` means the ceiling, not "the whole file".
+- `write` and `edit create` create missing parent directories (the confined path
+  is already inside the project root, so this cannot escape it).
 
 ## Configuration
 

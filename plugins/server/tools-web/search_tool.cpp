@@ -49,8 +49,13 @@ public:
         spec_.definition.input_schema = {
             {"type", "object"},
             {"properties",
-             {{"query", {{"type", "string"}, {"description", "The search query"}}},
-              {"max_results", {{"type", "integer"}, {"description", "How many results to return"}}}}},
+              {{"query", {{"type", "string"}, {"description", "The search query"}}},
+               {"max_results",
+                {{"type", "integer"},
+                 {"description", "How many results to return (default " +
+                                     std::to_string(settings_.search_default_max_results) +
+                                     ", capped at " + std::to_string(settings_.search_max_results) +
+                                     ")"}}}}},
             {"required", nlohmann::json::array({"query"})}};
     }
 

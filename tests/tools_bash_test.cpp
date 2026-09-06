@@ -309,20 +309,20 @@ TEST_CASE("bash settings take defaults when absent or nonsensical", "[tools_bash
     // The plugin's own plugins.json "config" object, verbatim -- flat keys,
     // every one of them belonging to this tool.
     const nlohmann::json configured = {
-        {"timeout_ms", 5000}, {"max_output_bytes", 64}, {"shell", "/bin/dash"}};
+        {"timeout_s", 5}, {"max_output_bytes", 64}, {"shell", "/bin/dash"}};
     const auto settings = tools_bash::ParseBashSettings(configured);
     CHECK(settings.timeout_ms == 5000);
     CHECK(settings.max_output_bytes == 64);
     CHECK(settings.shell == "/bin/dash");
 
-    const nlohmann::json nonsense = {{"timeout_ms", 0}, {"max_output_bytes", -1}};
+    const nlohmann::json nonsense = {{"timeout_s", 0}, {"max_output_bytes", -1}};
     const auto fallback = tools_bash::ParseBashSettings(nonsense);
     CHECK(fallback.timeout_ms == 120000);
     CHECK(fallback.max_output_bytes == 1024 * 1024);
 
     // A ceiling below the default would silently shorten every command that did
     // not ask for a timeout, which is not what configuring a maximum means.
-    const nlohmann::json inverted = {{"timeout_ms", 90000}, {"max_timeout_ms", 1000}};
+    const nlohmann::json inverted = {{"timeout_s", 90}, {"max_timeout_s", 1}};
     CHECK(tools_bash::ParseBashSettings(inverted).max_timeout_ms == 90000);
 }
 
@@ -530,22 +530,22 @@ TEST_CASE("closing stdout does not escape the deadline", "[tools_bash][timeout]"
     CHECK(out.elapsed_ms < 4000);
 }
 
-TEST_CASE("timeout_ms is honoured and clamped to the ceiling", "[tools_bash][timeout]") {
+TEST_CASE("timeout is honoured and clamped to the ceiling", "[tools_bash][timeout]") {
     Fixture f;
     f.settings.timeout_ms = 30000;
-    f.settings.max_timeout_ms = 400;
+    f.settings.max_timeout_ms = 2000;
 
     SECTION("the model's shorter value wins") {
-        const auto out = f.Run({{"command", "sleep 8"}, {"timeout_ms", 300}});
-        CHECK(out.result.content_text.find("timed out after 300 ms") != std::string::npos);
+        const auto out = f.Run({{"command", "sleep 8"}, {"timeout", 1}});
+        CHECK(out.result.content_text.find("timed out after 1000 ms") != std::string::npos);
     }
     SECTION("a value past the ceiling is clamped, not honoured") {
-        const auto out = f.Run({{"command", "sleep 8"}, {"timeout_ms", 60000}});
-        CHECK(out.result.content_text.find("timed out after 400 ms") != std::string::npos);
+        const auto out = f.Run({{"command", "sleep 8"}, {"timeout", 10}});
+        CHECK(out.result.content_text.find("timed out after 2000 ms") != std::string::npos);
         CHECK(out.elapsed_ms < 4000);
     }
     SECTION("a non-positive value is rejected rather than silently clamped") {
-        const auto out = f.Run({{"command", "echo x"}, {"timeout_ms", 0}});
+        const auto out = f.Run({{"command", "echo x"}, {"timeout", 0}});
         CHECK(out.result.is_error);
         CHECK(out.result.content_text.find("must be positive") != std::string::npos);
     }
@@ -591,7 +591,7 @@ TEST_CASE("a rejected invocation does not reset state on its way out",
     REQUIRE_FALSE(f.Run({{"command", "cd sub"}}).result.is_error);
     const auto after_cd = f.Cwd();
 
-    const auto out = f.Run({{"command", "echo x"}, {"restart", true}, {"timeout_ms", "nope"}});
+    const auto out = f.Run({{"command", "echo x"}, {"restart", true}, {"timeout", "nope"}});
 
     CHECK(out.result.is_error);
     CHECK(f.Cwd() == after_cd);
@@ -823,7 +823,7 @@ TEST_CASE("a flooded fd-9 payload is discarded wholesale, not truncated into ado
     REQUIRE_FALSE(f.Run({{"command", "export KEEP_ME=1"}}).result.is_error);
 
     const auto out = f.Run(
-        {{"command", "yes 'junk' >&9 & true"}, {{"timeout_ms", "1500"}}});
+        {{"command", "yes 'junk' >&9 & true"}, {{"timeout", "1500"}}});
 
     CHECK(f.Cwd() == before);  // no state adopted from the flood
     // Previous state survived whole -- not merged away, not partially replaced.

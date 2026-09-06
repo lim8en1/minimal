@@ -45,6 +45,22 @@ std::optional<std::string> ExtractPathField(const nlohmann::json& input) {
     return input.at("path").get<std::string>();
 }
 
+// `write` and `edit create` make the directories the file needs, so the model
+// never has to detour through bash just to `mkdir -p`. The path is already
+// confined (canonicalized inside the project root, no ".." surviving), so the
+// components are literal names and creation cannot escape the root. Core
+// write_file keeps its refusal -- this is a tool-layer behavior, not a
+// primitive one.
+ToolResult CreateParents(const std::filesystem::path& absolute_path) {
+    const auto parent = absolute_path.parent_path();
+    if (parent.empty()) return ToolResult{false, ""};
+    std::error_code ec;
+    std::filesystem::create_directories(parent, ec);
+    if (ec) return ToolResult{true, "cannot create parent directory " + parent.string() + ": " +
+                                        ec.message()};
+    return ToolResult{false, ""};
+}
+
 // The Ask prompt shows the path AS THE MODEL TYPED it, but a symlink planted
 // by an earlier round (or a ".." segment) hides where the operation actually
 // lands: the operator would consent to a name, not a destination. When the
@@ -182,8 +198,8 @@ public:
         spec_.category = ToolCategory::FileWrite;
         spec_.definition.name = spec_.name;
         spec_.definition.description =
-            "Create or overwrite a file with the given content. The parent directory must already "
-            "exist.";
+            "Create or overwrite a file with the given content; missing parent directories "
+            "are created. For changing part of an existing file, use edit.";
         spec_.definition.input_schema = {
             {"type", "object"},
             {"properties",
@@ -227,6 +243,10 @@ public:
         if (!input.contains("content") || !input.at("content").is_string()) {
             return Error("missing required string field: content");
         }
+
+        const auto parents = CreateParents(resolved.absolute_path);
+        if (parents.is_error) return Error(parents.content_text);
+
         const auto content = input.at("content").get<std::string>();
 
         // The same ceiling edit enforces (edit_max_editable_file_bytes), not a
@@ -265,7 +285,8 @@ public:
         spec_.definition.name = spec_.name;
         spec_.definition.description =
             "View or modify a file. Commands: view (show lines), create (write a new file), "
-            "str_replace (replace one unique string), insert (insert text after a line).";
+            "str_replace (replace one unique string), insert (insert text after a line). "
+            "For plain reading prefer read; for whole-file replacement prefer write.";
         spec_.definition.input_schema = {
             {"type", "object"},
             {"properties",
@@ -336,7 +357,11 @@ public:
         if (!error.empty()) return Error(error);
 
         if (command == "view") return View(input, resolved.absolute_path);
-        if (command == "create") return Create(input, resolved.absolute_path);
+        if (command == "create") {
+            const auto parents = CreateParents(resolved.absolute_path);
+            if (parents.is_error) return Error(parents.content_text);
+            return Create(input, resolved.absolute_path);
+        }
         if (command == "str_replace") return StrReplace(input, resolved.absolute_path);
         if (command == "insert") return Insert(input, resolved.absolute_path);
         return Error("unknown command: " + command);

@@ -35,9 +35,9 @@ field is optional; non-positive values fall back to defaults.
   "file": "tools-bash.so",
   "enabled": true,
   "config": {
-    "timeout_ms": 120000,
-    "max_timeout_ms": 600000,
-    "background_max_timeout_ms": 600000,
+    "timeout_s": 120,
+    "max_timeout_s": 600,
+    "background_max_timeout_s": 600,
     "max_background_tasks": 4,
     "max_output_bytes": 1048576,
     "max_file_size_bytes": 1073741824,
@@ -49,17 +49,17 @@ field is optional; non-positive values fall back to defaults.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `timeout_ms` | `120000` | Wall-clock cap per invocation; the whole process group is killed at the deadline. |
-| `max_timeout_ms` | `600000` | Ceiling on the model-supplied `timeout_ms`. A model may ask for longer than the default (a build is not `ls`) but not without bound. |
-| `background_max_timeout_ms` | `600000` | Background tasks' own ceiling — generous, because a long-running build is the point of the mode. A task with no `timeout_ms` gets this ceiling itself. |
+| `timeout_s` | `120` | Wall-clock cap per invocation, seconds; the whole process group is killed at the deadline. The model-facing `timeout` tool input uses the same unit. |
+| `max_timeout_s` | `600` | Ceiling on the model-supplied `timeout`. A model may ask for longer than the default (a build is not `ls`) but not without bound. |
+| `background_max_timeout_s` | `600` | Background tasks' own ceiling — generous, because a long-running build is the point of the mode. A task with no `timeout` gets this ceiling itself. |
 | `max_background_tasks` | `4` | Per-session cap on live background tasks; over the limit is an error result, not a queue. |
 | `max_output_bytes` | `1048576` (1 MiB) | Bounds the PERSISTED result. Live streaming is uncapped (lossy by design); this is the record. |
 | `max_file_size_bytes` | `1073741824` (1 GiB) | RLIMIT_FSIZE backstop for written files. |
 | `shell` | `/bin/sh` | A different POSIX shell, or a wrapper that enters a container, needs no code change. |
 | `inherit_env` | `allowlist` | How the session's shell environment is seeded. `allowlist` filters to `$HOME`, `$PATH`, `$TMPDIR`, ... (the server process env carries provider API keys; seeding all of it let `env` persist credentials into the transcript). `all` restores the full seed as an explicit operator choice. Any other value is a named startup error. |
 
-`max_timeout_ms` below `timeout_ms` (and `background_max_timeout_ms` below
-`timeout_ms`) is raised to `timeout_ms`: configuring a *maximum* must not
+`max_timeout_s` below `timeout_s` (and `background_max_timeout_s` below
+`timeout_s`) is raised to `timeout_s`: configuring a *maximum* must not
 silently shorten every command that did not ask for a timeout.
 
 ## Notes

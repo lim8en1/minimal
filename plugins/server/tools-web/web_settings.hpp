@@ -15,6 +15,12 @@ struct WebSettings {
     // web_fetch.
     int fetch_timeout_ms = 15000;
     int fetch_max_redirects = 5;
+    // The text returned to the model is bounded: without a model-supplied
+    // max_bytes, the first `fetch_default_max_bytes` bytes; a supplied value is
+    // clamped to `fetch_max_bytes`. The overflow is spilled to a project-local
+    // file the `read` tool can page through -- see fetch_tool.cpp.
+    int fetch_default_max_bytes = 262144;  // 256 KiB
+    int fetch_max_bytes = 2097152;         // 2 MiB
     // Loopback/private/link-local hosts (including the cloud-metadata address
     // 169.254.169.254) are refused by default -- this tool takes a URL from
     // the MODEL. An operator running against a trusted internal network sets

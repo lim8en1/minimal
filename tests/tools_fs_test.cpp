@@ -110,15 +110,27 @@ TEST_CASE("write creates and overwrites", "[tools_fs][write]") {
     CHECK(f.Read("out.txt") == "second");
 }
 
-TEST_CASE("write refuses a missing parent directory", "[tools_fs][write]") {
+TEST_CASE("write creates missing parent directories", "[tools_fs][write]") {
     Fixture f;
     auto tool = tools_fs::MakeWriteTool(f.settings);
     auto ctx = f.Context();
 
     const auto result = tool->execute({{"path", "sub/dir/out.txt"}, {"content", "x"}}, ctx);
 
-    CHECK(result.is_error);
-    CHECK_FALSE(std::filesystem::exists(f.dir.path() / "sub"));
+    CHECK_FALSE(result.is_error);
+    CHECK(f.Read("sub/dir/out.txt") == "x");
+}
+
+TEST_CASE("edit create also creates missing parent directories", "[tools_fs][edit]") {
+    Fixture f;
+    auto tool = tools_fs::MakeEditTool(f.settings);
+    auto ctx = f.Context();
+
+    const auto result = tool->execute(
+        {{"command", "create"}, {"path", "a/b/c.txt"}, {"file_text", "hello"}}, ctx);
+
+    CHECK_FALSE(result.is_error);
+    CHECK(f.Read("a/b/c.txt") == "hello");
 }
 
 // --- edit --------------------------------------------------------------------

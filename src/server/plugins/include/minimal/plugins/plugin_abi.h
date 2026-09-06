@@ -81,7 +81,7 @@ struct PluginRegistrationContext {
 
     // This plugin's own configuration, verbatim: the optional "config" object
     // on the plugin's plugins.json entry --
-    //   {"plugins": [{"file": "tools-bash.so", "config": {"timeout_ms": 30000}}]}
+    //   {"plugins": [{"file": "tools-bash.so", "config": {"timeout_s": 30}}]}
     // -- and only this plugin's. Core imposes no schema here either; the same
     // rule as tools_settings. Empty when the entry carries none (a runtime
     // condition, not an error). Configure a plugin where you enable it:

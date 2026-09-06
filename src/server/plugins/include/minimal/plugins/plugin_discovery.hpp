@@ -34,7 +34,7 @@ struct PluginConfig {
         // This plugin's own configuration, verbatim. Source: the optional
         // "config" object on the entry:
         //   {"plugins": [{"file": "tools-bash.so", "enabled": true,
-        //                 "config": {"timeout_ms": 30000}}]}
+        //                 "config": {"timeout_s": 30}}]}
         // Core imposes no schema -- each plugin owns the shape of its own
         // slice, the same rule as tools_settings. A non-object value degrades
         // to an empty object with a startup warning.
