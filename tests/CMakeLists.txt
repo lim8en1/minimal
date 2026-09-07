@@ -131,6 +131,9 @@ add_executable(minimal_tests
     # like the server plugins' logic (logo_plugin.cpp itself stays out).
     "${CMAKE_SOURCE_DIR}/plugins/client/logo/logo_generator.cpp"
     logo_generator_test.cpp
+    # The cost-view segment's pure formatters: header-only, so only the
+    # include dir is needed (the plugin TU itself stays out).
+    cost_view_format_test.cpp
     mention_resolver_test.cpp
     mention_expansion_test.cpp
     # provider-openai's pure translation logic, compiled directly into the test
@@ -237,7 +240,8 @@ target_include_directories(minimal_tests PRIVATE
     "${CMAKE_SOURCE_DIR}/plugins/server/signals-message"
     "${CMAKE_SOURCE_DIR}/plugins/server/tools-search"
     "${CMAKE_SOURCE_DIR}/plugins/server/session-titler"
-    "${CMAKE_SOURCE_DIR}/plugins/server/cost-tracker")
+    "${CMAKE_SOURCE_DIR}/plugins/server/cost-tracker"
+    "${CMAKE_SOURCE_DIR}/plugins/client/cost-view")
 
 target_include_directories(minimal_tests PRIVATE
     "${CMAKE_SOURCE_DIR}/plugins/server/tools-web"

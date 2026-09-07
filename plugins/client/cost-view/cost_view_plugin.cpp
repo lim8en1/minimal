@@ -27,64 +27,17 @@
 
 #include "minimal/client/plugins/client_plugin_abi.h"
 #include "minimal/common/abi_tag.hpp"
+#include "cost_view_format.hpp"
 
 namespace {
 
 namespace plugins = minimal::client::plugins;
+using minimal::client::cost_view::FormatTotals;   // pure formatters, see cost_view_format.hpp
 
-// "1234567" -> "1.2M", "12345" -> "12.3k", "123" -> "123". Tokens only; cost
-// gets its own formatter below (different precision rules, and $0.00 must
-// never stand in for "unknown" -- see FormatCost).
-std::string FormatTokens(std::int64_t tokens) {
-    if (tokens >= 1'000'000) {
-        char buf[16];
-        std::snprintf(buf, sizeof(buf), "%.1fM", static_cast<double>(tokens) / 1'000'000.0);
-        return buf;
-    }
-    if (tokens >= 1'000) {
-        char buf[16];
-        std::snprintf(buf, sizeof(buf), "%.1fk", static_cast<double>(tokens) / 1'000.0);
-        return buf;
-    }
-    return std::to_string(tokens);
-}
+// The formatters live in cost_view_format.hpp (pure, header-only) so they
+// are testable -- the logo plugin's pure-extraction pattern. This TU only
+// wires them into the status segment.
 
-std::string FormatCost(double usd) {
-    char buf[32];
-    // Sub-cent totals are common early in a session; four decimals avoids
-    // "$0.00" reading as free when it is actually just small.
-    std::snprintf(buf, sizeof(buf), usd < 0.01 ? "$%.4f" : "$%.2f", usd);
-    return buf;
-}
-
-// nullopt: no usable totals yet for this session (a fresh session with zero
-// turns, a parse failure, a refused/unreachable call) -- Render() shows
-// nothing for those, same as any other unfilled segment.
-std::optional<std::string> FormatTotals(const nlohmann::json& totals) {
-    if (!totals.is_object()) return std::nullopt;
-    const auto turns = totals.value("turns", 0);
-    if (turns <= 0) return std::nullopt;   // nothing spent yet -- not "$0.00"
-
-    std::int64_t input_tokens = 0, output_tokens = 0;
-    if (const auto models = totals.find("models"); models != totals.end() && models->is_array()) {
-        for (const auto& model : *models) {
-            input_tokens += model.value("input_tokens", 0LL);
-            output_tokens += model.value("output_tokens", 0LL);
-        }
-    }
-
-    std::string text;
-    // A missing price is not a price of zero (cost_model.hpp's own rule) --
-    // an unknown total renders as "?", never as a wrong dollar figure.
-    if (totals.value("total_cost_known", true)) {
-        text = FormatCost(totals.value("total_cost", 0.0));
-    } else {
-        text = "cost?";
-    }
-    text += " · " + FormatTokens(input_tokens) + "/" + FormatTokens(output_tokens) + " tok";
-    if (totals.value("unpriced_turns", 0) > 0) text += " (+unpriced)";
-    return text;
-}
 
 class CostStatusSegment final : public plugins::StatusSegment {
 public:
@@ -98,6 +51,11 @@ public:
             stop_ = true;
         }
         cv_.notify_all();
+        // The join can wait out one in-flight fetch, bounded by
+        // SessionClient::PluginCall's 5 s deadline. Deliberate: a detached
+        // worker would keep calling into the ClientApi (and the
+        // SessionClient behind it) while this destructor tears the object
+        // down -- a shutdown UAF is strictly worse than a bounded stall.
         if (worker_.joinable()) worker_.join();
     }
 

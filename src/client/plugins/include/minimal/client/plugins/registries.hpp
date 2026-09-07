@@ -17,11 +17,11 @@
 //     (SetAttribution / ClearAttribution / attributions) so a collision can
 //     name both culprits and a PluginRecord can say what one plugin registered.
 //
-// CONTRACT: registration-time-only. The registries handed to a plugin's
-// register_* hook are single-threaded, unsealed objects; a plugin that stashes
-// the reference and registers AFTER startup bypasses the collision rule, the
-// attribution windows, and (for exclusive slots) the core default entirely.
-// No synchronization exists because nothing concurrent ever registers.
+// CONTRACT: registration-time-only, now ENFORCED -- every registry is sealed
+// once loading finishes (TuiEnvironment::SealRegistries), and a later
+// Register warns and is ignored instead of silently bypassing the collision
+// rule, the attribution windows, and (for exclusive slots) the core default.
+// Still single-threaded: nothing concurrent ever registers.
 //
 // Render-time inputs travel with the call -- including `const Theme&`. Plugins
 // load BEFORE the theme does (theme `sections` need to know which plugins are
@@ -102,6 +102,11 @@ private:
 // vs. expanded LOOKS like for its own kind, never whether a row is collapsed.
 struct RowRenderContext {
     bool collapsed = false;
+    // The CURRENT binding for chat.toggle_collapse, composed by the host
+    // (ChatView) from the resolved keymap. Renderers have no keymap access,
+    // so hints used to hardcode "alt+c" -- which lied the moment the user
+    // remapped the action.
+    std::string toggle_collapse_hint = "alt+c";
 };
 
 // --- Tool-result renderers (keyed by tool name) -----------------------------
@@ -373,6 +378,20 @@ public:
 
 // --- Registries -------------------------------------------------------------
 
+// Registration-time-only enforcement, the server's Seal ported: after the
+// loader has run every plugin's register_* hook, the host seals each
+// registry. A plugin that stashed its registry reference and registered
+// LATER used to bypass the collision rule, the attribution windows and (for
+// exclusive slots) the core default entirely, silently; a sealed Register
+// warns and is ignored instead.
+class RegistrationWindow {
+public:
+    void Seal() { sealed_ = true; }
+
+protected:
+    bool sealed_ = false;
+};
+
 // Common attribution mechanics, identical to the server's registries: the
 // loader opens a window around each plugin's registration callback and
 // everything arriving inside it is attributed to that plugin.
@@ -381,7 +400,7 @@ struct Attribution {
     std::string original_name;  // the key as registered
 };
 
-class ViewRegistry {
+class ViewRegistry : public RegistrationWindow {
 public:
     // Registry owns the view. Returns the attribution recorded; a duplicate id
     // is NOT silently replaced -- it is recorded for the fatal-collision scan
@@ -400,7 +419,7 @@ private:
     std::vector<Attribution> attributions_;
 };
 
-class StartViewRegistry {
+class StartViewRegistry : public RegistrationWindow {
 public:
     void Register(std::unique_ptr<StartView> view);
     const std::vector<std::unique_ptr<StartView>>& views() const { return views_; }
@@ -416,7 +435,7 @@ private:
     std::vector<Attribution> attributions_;
 };
 
-class ToolResultRendererRegistry {
+class ToolResultRendererRegistry : public RegistrationWindow {
 public:
     void Register(std::unique_ptr<ToolResultRenderer> renderer);
     const ToolResultRenderer* Find(std::string_view tool_name) const;
@@ -431,7 +450,7 @@ private:
     std::vector<Attribution> attributions_;
 };
 
-class MessageRendererRegistry {
+class MessageRendererRegistry : public RegistrationWindow {
 public:
     // Claims `kind`. The FIRST claimant for a kind stays; a second claim (from
     // another plugin) is recorded -- the loader turns it into the same fatal
@@ -452,7 +471,7 @@ private:
     std::vector<std::pair<ChatRowKind, Attribution>> claims_;
 };
 
-class StatusSegmentRegistry {
+class StatusSegmentRegistry : public RegistrationWindow {
 public:
     void Register(std::unique_ptr<StatusSegment> segment);
     const std::vector<std::unique_ptr<StatusSegment>>& segments() const { return segments_; }
@@ -468,7 +487,7 @@ private:
     std::vector<Attribution> attributions_;
 };
 
-class SyntaxGrammarRegistry {
+class SyntaxGrammarRegistry : public RegistrationWindow {
 public:
     void Register(std::unique_ptr<SyntaxGrammar> grammar);
     // The language table the highlighter consults, in registration order.
@@ -495,7 +514,7 @@ struct ExclusiveRecord {
     bool Claim(std::string_view claimant);
 };
 
-class ChatSurfaceRegistry {
+class ChatSurfaceRegistry : public RegistrationWindow {
 public:
     std::unique_ptr<ChatSurface> surface;  // null when core's chat view stands
     ExclusiveRecord record;
@@ -510,7 +529,7 @@ private:
     std::vector<Attribution> attributions_;
 };
 
-class MarkdownEngineRegistry {
+class MarkdownEngineRegistry : public RegistrationWindow {
 public:
     std::unique_ptr<MarkdownEngine> engine;  // null: host uses the core default
     ExclusiveRecord record;

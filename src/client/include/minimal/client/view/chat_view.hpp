@@ -46,7 +46,8 @@ class ChatView {
 public:
     ChatView(const Theme& theme,
              const plugins::MessageRendererRegistry& message_renderers,
-             const plugins::ToolResultRendererRegistry& tool_renderers);
+             const plugins::ToolResultRendererRegistry& tool_renderers,
+             std::string toggle_collapse_hint = "alt+c");
 
     // `live_text_streams` is the tab's own per-segment views, index-aligned
     // with snapshot.live_segments (TabMaintenance::Maintain builds and feeds
@@ -113,6 +114,9 @@ private:
     const Theme& theme_;
     const plugins::MessageRendererRegistry& message_renderers_;
     const plugins::ToolResultRendererRegistry& tool_renderers_;
+    // The host-resolved chat.toggle_collapse binding, surfaced to row
+    // renderers through RowRenderContext (they have no keymap access).
+    std::string toggle_collapse_hint_ = "alt+c";
     uint64_t rendered_version_ = 0;   // transcript_version these rows came from
     std::string rendered_session_id_; // which tab they came from (see Render)
     // ChatRowsFromMessages' own output, cached on scrollback_page's pointer

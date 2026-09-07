@@ -155,7 +155,11 @@ public:
         // too narrow for the art plus margins gets the plain title block
         // instead of wrapped glyphs.
         const auto terminal = ftxui::Terminal::Size();
-        if (terminal.dimx > 0 && ArtWidth(art) > static_cast<std::size_t>(terminal.dimx) - 2) {
+        // dimx must clear the 2-column margin ARITHMETICALLY, not just be
+        // positive: at dimx == 1 the old `dimx - 2` wrapped to SIZE_MAX and
+        // the width guard never fired -- full-width art on a 1-column
+        // terminal.
+        if (terminal.dimx <= 2 || ArtWidth(art) > static_cast<std::size_t>(terminal.dimx) - 2) {
             return Fallback(theme);
         }
 
@@ -175,7 +179,11 @@ public:
     }
 
 private:
-    const std::vector<std::string>& ArtFor(const std::string& session_id) const {
+    // BY VALUE, not reference: the old reference pointed into the
+    // mutex-protected cache_ map, and the FIFO eviction could erase the
+    // entry while a caller was still rendering it -- a latent dangling
+    // reference. The art is a handful of short lines; the copy is nothing.
+    std::vector<std::string> ArtFor(const std::string& session_id) const {
         std::lock_guard<std::mutex> lock(mtx_);
         // A random seed per key: process start for the app-level banner (the
         // empty session id), and one per session when regenerating. With
@@ -235,11 +243,14 @@ private:
     // byline is fixed: like the version, it is NOT configurable. hcenter on
     // each line independently -- see the art-line comment in Render().
     ftxui::Element Title(const Theme& theme) const {
+        // paragraph(), not text(): the same symmetric-crop bug Hint's
+        // comment documents -- text() fixed-width on a narrow terminal
+        // cropped from BOTH edges, losing the title's own FRONT ("NIMAL v…").
         return ftxui::vbox(
-            {ftxui::text("MINIMAL v" + std::string(minimal::common::Version())) | ftxui::bold |
-                 ftxui::color(theme.ColorFor("banner_art")) | ftxui::hcenter,
-             ftxui::text(std::string("   by ") + kAuthor) | ftxui::color(theme.ColorFor("banner_hint")) |
-                 ftxui::hcenter});
+            {ftxui::paragraph("MINIMAL v" + std::string(minimal::common::Version())) |
+                 ftxui::bold | ftxui::color(theme.ColorFor("banner_art")) | ftxui::hcenter,
+             ftxui::paragraph(std::string("   by ") + kAuthor) |
+                 ftxui::color(theme.ColorFor("banner_hint")) | ftxui::hcenter});
     }
 
     // paragraph(), not text(): text() reports its full length as a fixed

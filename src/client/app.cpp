@@ -1198,7 +1198,10 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         *app, theme, focused, focused_details, tab_ui, start_view_registry, message_registry,
         renderer_registry, status_registry, engine, show_panel, panel_height,
         env.ui.tools_panel_stdout_buffer_lines > 0 ? env.ui.tools_panel_stdout_buffer_lines : 100,
-        editor, status_format, plugin_views});
+        editor, status_format, plugin_views,
+        // Row-renderer collapse hints follow the user's keymap, not a
+        // hardcoded alt+c.
+        env.keybindings.KeyFor("chat.toggle_collapse", "alt+c")});
     auto session_view = Renderer(editor, [&] { return frame_renderer.Render(); });
 
     // --- global keybindings -----------------------------------------------------
