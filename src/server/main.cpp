@@ -184,10 +184,11 @@ int main(int argc, char** argv) {
     } catch (const std::exception&) {
     }
 
-    // LOGGING FIRST, before anything logs. DefaultLogger() caches spdlog's
-    // default on first use for the process lifetime, so this has to land ahead
-    // of it -- and ahead of plugin load, which is the first thing with anything
-    // to say.
+    // LOGGING FIRST, before anything logs -- ahead of plugin load, which is
+    // the first thing with anything to say. (DefaultLogger() no longer
+    // caches: it resolves spdlog's default per call, so ConfigureLogging's
+    // swap is picked up by every later call. Ordering still matters for
+    // "nothing logs before the sinks exist", not for caching.)
     {
         minimal::common::LoggingOptions logging;
         if (settings_preload) {
@@ -200,6 +201,11 @@ int main(int argc, char** argv) {
             // The documented home is the DATA dir, beside session_db_path --
             // not the config dir, which is for things the user edits.
             logging.path = (minimal::common::DataDir() / "minimal.log").string();
+        } else if (std::filesystem::path(logging.path).is_relative()) {
+            // A relative logging.path resolved against the cwd -- which for
+            // an auto-spawned server is "/" (SpawnDetached chdir's there),
+            // landing the log at /<name>. Anchor it to the data dir instead.
+            logging.path = (minimal::common::DataDir() / logging.path).string();
         }
         if (const auto problem = minimal::common::ConfigureLogging(logging); !problem.empty()) {
             std::fprintf(stderr, "warning: %s\n", problem.c_str());

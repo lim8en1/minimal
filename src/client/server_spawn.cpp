@@ -130,9 +130,9 @@ bool IsSpawnableTarget(const std::string& target) {
 std::string SpawnedServerLogPath() { return (common::DataDir() / "server-spawn.log").string(); }
 
 std::string LocateServerBinary() {
-    if (const char* override_bin = std::getenv("MINIMAL_SERVER_BIN");
-        override_bin != nullptr && *override_bin != '\0') {
-        return override_bin;
+    // LookupEnv, not raw getenv: set-but-empty must not resolve to "".
+    if (const auto override_bin = common::LookupEnv("MINIMAL_SERVER_BIN")) {
+        return *override_bin;
     }
 
     // Installed layout: <prefix>/bin holds both binaries side by side.

@@ -21,9 +21,10 @@ bool LooksLikeFlag(std::string_view token) { return token.size() > 1 && token.fr
 std::string ExpandTilde(std::string_view path) {
     if (path.empty() || path.front() != '~') return std::string(path);
     if (path.size() > 1 && path[1] != '/') return std::string(path);  // ~user is not handled
-    const char* home = std::getenv("HOME");
-    if (home == nullptr || *home == '\0') return std::string(path);
-    return std::string(home) + std::string(path.substr(1));
+    // LookupEnv, not raw getenv: an empty HOME is unset, not a resolved value.
+    const auto home = common::LookupEnv("HOME");
+    if (!home) return std::string(path);
+    return *home + std::string(path.substr(1));
 }
 
 }  // namespace

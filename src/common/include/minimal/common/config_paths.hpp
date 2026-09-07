@@ -20,12 +20,17 @@ std::optional<std::string> LookupEnv(std::string_view name);
 //   3. $HOME/.config/minimal -- terminal-tool convention (git/gh/rg), deliberately
 //      not macOS's GUI ~/Library/Application Support
 //
-// Shared by server and client: the client reads themes/ and keybindings.json from
-// the same directory the server resolves.
+// A relative XDG value is rejected (the spec requires absolute); it used to
+// resolve against the cwd -- which for a spawned server (chdir'd to /) meant
+// a different directory than the client's. Shared by server and client: the
+// client reads themes/ and keybindings.json from the same directory the
+// server resolves.
 std::filesystem::path ConfigDir();
 
 // Mutable runtime state (SQLite session store, logs) lives here, NOT under the
-// config dir: $XDG_DATA_HOME/minimal, else $HOME/.local/share/minimal.
+// config dir: $MINIMAL_DATA_DIR (the same escape hatch MINIMAL_CONFIG_DIR is),
+// else $XDG_DATA_HOME/minimal, else $HOME/.local/share/minimal. Relative XDG
+// values rejected, as above.
 std::filesystem::path DataDir();
 
 }  // namespace minimal::common

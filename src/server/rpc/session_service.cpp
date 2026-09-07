@@ -564,6 +564,19 @@ void SessionServiceImpl::Dispatch(const v1::ClientEvent& event, agent::Session& 
         case v1::ClientEvent::PAYLOAD_NOT_SET:
             logger_.warn("session {}: client event with no payload", session.info().session_id);
             return;
+
+        default:
+            // An UNKNOWN future payload case (a NEWER client against this
+            // binary). The old exhaustive-but-closed switch let it fall
+            // through silently -- backwards versus the unset case, which
+            // warns: a warning on "nothing sent" but silence on "something
+            // we cannot understand" is exactly wrong for wire evolution.
+            // Warn-and-ignore keeps the server alive with an older schema;
+            // the client should upgrade.
+            logger_.warn("session {}: client event with unknown payload case {} (newer client?)",
+                         session.info().session_id,
+                         static_cast<int>(event.payload_case()));
+            return;
     }
 }
 

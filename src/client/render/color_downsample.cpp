@@ -1,8 +1,9 @@
 #include "minimal/client/render/color_downsample.hpp"
 
 #include <algorithm>
-#include <cstdlib>
 #include <string_view>
+
+#include "minimal/common/config_paths.hpp"
 
 namespace minimal::client {
 
@@ -88,8 +89,13 @@ ColorDepth ColorDepthFromEnv(const char* colorterm, const char* term,
 }
 
 ColorDepth DetectColorDepth() {
-    return ColorDepthFromEnv(std::getenv("COLORTERM"), std::getenv("TERM"),
-                             std::getenv("NO_COLOR"));
+    // LookupEnv, not raw getenv: set-but-empty is unset (NO_COLOR= especially).
+    const auto colorterm = common::LookupEnv("COLORTERM");
+    const auto term = common::LookupEnv("TERM");
+    const auto no_color = common::LookupEnv("NO_COLOR");
+    return ColorDepthFromEnv(colorterm ? colorterm->c_str() : nullptr,
+                             term ? term->c_str() : nullptr,
+                             no_color ? no_color->c_str() : nullptr);
 }
 
 ftxui::Color Downsample(uint8_t r, uint8_t g, uint8_t b, ColorDepth depth) {

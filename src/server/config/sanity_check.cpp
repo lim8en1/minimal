@@ -55,9 +55,9 @@ bool CommandResolves(const std::string& command) {
     if (command.find('/') != std::string::npos) {
         return executable(command);
     }
-    const char* path_env = std::getenv("PATH");
+    const auto path_env = common::LookupEnv("PATH");
     if (!path_env) return false;
-    std::stringstream streams(path_env);
+    std::stringstream streams(*path_env);
     std::string dir;
     while (std::getline(streams, dir, ':')) {
         if (dir.empty()) continue;

@@ -23,6 +23,19 @@ TEST_CASE("ParseModelRef: exactly one '/' separating two non-empty halves") {
         CHECK_FALSE(ParseModelRef("/qwen4").has_value());    // empty provider
         CHECK_FALSE(ParseModelRef("a/b/c").has_value());     // ambiguous split
     }
+
+    SECTION("surrounding whitespace is trimmed, not parsed into ids") {
+        // A ref copied from a doc with a trailing space produced provider
+        // " gpt-4o" that matched no catalog entry.
+        const auto padded = ParseModelRef("  local/qwen4  ");
+        REQUIRE(padded.has_value());
+        CHECK(padded->provider == "local");
+        CHECK(padded->model == "qwen4");
+        const auto inner = SplitModelRef("local / qwen4");
+        REQUIRE(inner.has_value());
+        CHECK(inner->provider == "local");
+        CHECK(inner->model == "qwen4");
+    }
 }
 
 TEST_CASE("SplitModelRef: the first '/' splits, later segments stay the model",

@@ -62,6 +62,7 @@ add_executable(minimal_tests
     fd_hygiene_test.cpp
     settings_config_test.cpp
     parse_util_test.cpp
+    read_file_test.cpp
     permissions_config_test.cpp
     agent_preset_frontmatter_test.cpp
     permission_resolution_test.cpp

@@ -1,5 +1,7 @@
 #include "minimal/plugins/name_registry.hpp"
 
+#include "minimal/common/logger.hpp"
+
 namespace minimal::plugins {
 namespace {
 
@@ -10,6 +12,16 @@ std::string StableIdentity(const std::string& plugin_name, const std::string& or
 }  // namespace
 
 void NameRegistry::Register(NameKind kind, std::string plugin_name, std::string original_name) {
+    // The dot is the qualified-key separator ("plugin.item"): a plugin NAMED
+    // with a literal dot makes ("a.b", "c") and ("a", "b.c") compose the
+    // same stable identity, and an alias written for one silently matches
+    // the other. Nothing escapes dots today, so this stays AMBIGUOUS-by-
+    // convention -- visible here instead of invisible everywhere.
+    if (plugin_name.find('.') != std::string::npos) {
+        common::DefaultLogger().warn(
+            "plugin name '{}' contains a dot, which is the qualified-key separator -- "
+            "alias and collision identity for its names is ambiguous", plugin_name);
+    }
     entries_[static_cast<int>(kind)].push_back({std::move(plugin_name), std::move(original_name)});
 }
 

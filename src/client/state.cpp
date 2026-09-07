@@ -1363,6 +1363,16 @@ void AppState::DispatchToTab(const std::string& session_id, const v1::ServerEven
         std::lock_guard lk(mtx_);   // append only; deferred spawn happens after unlock below
         pending_subagents_.emplace_back(session_id, event.subagent_started());
         has_pending_subagents_.store(true, std::memory_order_release);
+    } else {
+        // No final else used to exist: an UNSET payload and an UNKNOWN future
+        // case (a NEWER server against this client) both fell through
+        // silently. Warn at least, so wire evolution leaves a trace.
+        minimal::common::DefaultLogger().warn(
+            "session {}: server event with {} payload (case {})",
+            session_id, event.payload_case() == v1::ServerEvent::PAYLOAD_NOT_SET
+                            ? "no"
+                            : "unknown",
+            static_cast<int>(event.payload_case()));
     }
     // command_result is stored as the tab's transient notice above (routed by
     // its display mode in RunTui); PluginCall data is a plugin's own path.

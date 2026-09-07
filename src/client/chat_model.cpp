@@ -1,9 +1,11 @@
 #include "minimal/client/chat_model.hpp"
 
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <cstdio>
 #include <ctime>
+#include <limits>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -40,35 +42,59 @@ std::string JoinResultText(const v1::ToolResultBlock& block) {
 }
 
 // google.protobuf.Struct -> JSON, for the tool_input a renderer renders FROM.
-// The server has the same conversion in proto_convert.cpp; the client cannot
-// link server core, and the shape is fixed by protobuf's Struct, so this is a
-// twin rather than a drift risk.
+// The server has the same conversion in proto_convert.cpp (ValueToJson); the
+// client cannot link server core, and the shape is fixed by protobuf's
+// Struct, so this is a twin. ALIGNED with the server's, verbatim semantics:
+// faithful recursion into lists (the old ShortDebugString degradation made
+// nested list items render as protobuf debug text), and integral doubles
+// narrowed back to integers so a `3` sent as 3.0 renders as `3`, not "3.0".
+namespace {
+
+bool IsExactInteger(double value) {
+    if (!std::isfinite(value)) return false;
+    if (value != std::trunc(value)) return false;
+    // STRICTLY LESS at the top: static_cast<double>(INT64_MAX) rounds UP to
+    // 2^63, and a `<=` against it admits a value whose cast to int64_t is UB.
+    constexpr double kTwoToThe63 = 9223372036854775808.0;
+    return value >= static_cast<double>(std::numeric_limits<std::int64_t>::min()) &&
+           value < kTwoToThe63;
+}
+
+nlohmann::json ValueToJson(const google::protobuf::Value& value) {
+    switch (value.kind_case()) {
+        case google::protobuf::Value::kNullValue: return nullptr;
+        case google::protobuf::Value::kNumberValue: {
+            const double number = value.number_value();
+            if (IsExactInteger(number)) return static_cast<std::int64_t>(number);
+            return number;
+        }
+        case google::protobuf::Value::kStringValue: return value.string_value();
+        case google::protobuf::Value::kBoolValue: return value.bool_value();
+        case google::protobuf::Value::kStructValue: {
+            nlohmann::json out = nlohmann::json::object();
+            for (const auto& [key, field] : value.struct_value().fields()) {
+                out[key] = ValueToJson(field);
+            }
+            return out;
+        }
+        case google::protobuf::Value::kListValue: {
+            nlohmann::json out = nlohmann::json::array();
+            for (const auto& element : value.list_value().values()) {
+                out.push_back(ValueToJson(element));
+            }
+            return out;
+        }
+        case google::protobuf::Value::KIND_NOT_SET: break;
+    }
+    return nullptr;
+}
+
+}  // namespace
+
 nlohmann::json StructToJson(const google::protobuf::Struct& value) {
     nlohmann::json out = nlohmann::json::object();
     for (const auto& [key, field] : value.fields()) {
-        switch (field.kind_case()) {
-            case google::protobuf::Value::kNullValue: out[key] = nullptr; break;
-            case google::protobuf::Value::kNumberValue: out[key] = field.number_value(); break;
-            case google::protobuf::Value::kStringValue: out[key] = field.string_value(); break;
-            case google::protobuf::Value::kBoolValue: out[key] = field.bool_value(); break;
-            case google::protobuf::Value::kListValue: {
-                nlohmann::json list = nlohmann::json::array();
-                for (const auto& item : field.list_value().values()) {
-                    // One level of nesting is all real tool inputs use; deeper
-                    // structures degrade to their string form rather than
-                    // recursing here -- the authoritative record is persisted,
-                    // and the renderer is a view, not a codec.
-                    (void)item;
-                    list.push_back(item.ShortDebugString());
-                }
-                out[key] = std::move(list);
-                break;
-            }
-            case google::protobuf::Value::kStructValue:
-                out[key] = StructToJson(field.struct_value());
-                break;
-            case google::protobuf::Value::KIND_NOT_SET: break;
-        }
+        out[key] = ValueToJson(field);
     }
     return out;
 }

@@ -17,11 +17,13 @@
 // terminal; the moment a client auto-spawns it (which main() already anticipates
 // -- "NO DAEMON: refcounted by attached clients") they go nowhere at all.
 //
-// MUST BE CALLED BEFORE THE FIRST DefaultLogger(), which caches spdlog's default
-// logger on first use for the process lifetime. That ordering is why this is a
-// free function called explicitly from main rather than something DefaultLogger
-// discovers for itself: config lives a layer above common/, and inverting the
-// dependency to hide the ordering would be worse than stating it.
+// Called before anything LOGS (an earlier comment claimed DefaultLogger()
+// caches the logger on first use and made this an ordering requirement
+// against caching -- stale: DefaultLogger() resolves spdlog's default per
+// call, so a later ConfigureLogging is picked up everywhere). The ordering
+// still matters for the simpler reason that nothing should log before the
+// sinks exist: config lives a layer above common/, so this stays a free
+// function main calls explicitly.
 
 #include <cstdint>
 #include <string>

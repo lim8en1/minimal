@@ -4,6 +4,7 @@
 #include <utility>
 
 #include <grpcpp/create_channel.h>
+#include <grpcpp/support/channel_arguments.h>
 
 namespace minimal::client {
 
@@ -19,6 +20,19 @@ inline constexpr std::chrono::milliseconds kSuggestPathsDeadline = std::chrono::
 // the context cancel as a last resort (see Stream::Detach): long enough for
 // any healthy round trip, far short of hanging quit forever.
 inline constexpr std::chrono::seconds kDetachJoinTimeout = std::chrono::seconds(2);
+
+// Symmetric with the server's explicit limit (server.cpp): the gRPC default
+// capped RECEIVE at 4 MB -- a large tool result streamed into the client's
+// GetMessages/attach path failed with an opaque RESOURCE_EXHAUSTED -- while
+// leaving send unlimited. Both directions pinned at 64 MiB, matching the
+// tool-output cap every producer applies.
+std::shared_ptr<grpc::Channel> MakeChannel(const std::string& target) {
+    grpc::ChannelArguments args;
+    constexpr int kMaxMessageBytes = 64 * 1024 * 1024;
+    args.SetMaxReceiveMessageSize(kMaxMessageBytes);
+    args.SetMaxSendMessageSize(kMaxMessageBytes);
+    return grpc::CreateCustomChannel(target, grpc::InsecureChannelCredentials(), args);
+}
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -27,7 +41,7 @@ inline constexpr std::chrono::seconds kDetachJoinTimeout = std::chrono::seconds(
 
 SessionClient::SessionClient(std::string server_address)
     : server_address_(std::move(server_address)),
-      channel_(grpc::CreateChannel(server_address_, grpc::InsecureChannelCredentials())),
+      channel_(MakeChannel(server_address_)),
       stub_(v1::SessionService::NewStub(channel_)) {}
 
 SessionClient::~SessionClient() {

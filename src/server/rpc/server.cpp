@@ -61,6 +61,14 @@ Server::Server(SessionServiceImpl& service, std::filesystem::path socket_path,
     }
 
     grpc::ServerBuilder builder;
+    // EXPLICIT message limits, symmetric at 64 MiB to match the tool-output
+    // cap every producer already applies. The gRPC defaults were asymmetric
+    // and implicit: receive capped at 4 MB (a large tool_use input or a fat
+    // rewind payload failed with an opaque RESOURCE_EXHAUSTED), send
+    // unlimited (a runaway response was bounded by nothing on the wire).
+    constexpr int kMaxMessageBytes = 64 * 1024 * 1024;
+    builder.SetMaxReceiveMessageSize(kMaxMessageBytes);
+    builder.SetMaxSendMessageSize(kMaxMessageBytes);
     int selected_port = 0;
     builder.AddListeningPort(SocketTarget(socket_path_), grpc::InsecureServerCredentials(),
                              &selected_port);
