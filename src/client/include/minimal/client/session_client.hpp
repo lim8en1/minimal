@@ -13,6 +13,8 @@
 #include <string>
 #include <thread>
 
+#include "minimal/common/logger.hpp"
+
 #include <grpcpp/grpcpp.h>
 
 #include "minimal/client/subscribe_outcome.hpp"
@@ -466,7 +468,14 @@ public:
             if (!control) return;
             std::lock_guard<std::mutex> lock(control->mu);
             if (control->stream != nullptr) {
-                control->stream->Write(control->cancel_event);
+                // A failed Write means the interrupt never left -- gRPC sync
+                // Write returns false when the stream is dead/cancelled. The
+                // reader's Finish will surface the transport death, but say
+                // so here instead of dropping the press silently.
+                if (!control->stream->Write(control->cancel_event)) {
+                    common::DefaultLogger().warn("turn cancel could not be written "
+                                                 "(stream already dead)");
+                }
             } else {
                 // Published before RunTurn stored the stream (the on_handle
                 // window): remember it -- RunTurn delivers the cancel right

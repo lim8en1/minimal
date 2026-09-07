@@ -45,4 +45,14 @@ TEST_CASE("Downsample to 16 colors picks the nearest palette entry") {
           ftxui::Color(ftxui::Color::Blue));  // (0,0,170) beats (85,85,255)
 }
 
+    TEST_CASE("NO_COLOR and TERM=dumb disable color entirely") {
+        // The de-facto NO_COLOR standard and TERM=dumb were both ignored: colors
+        // were emitted regardless, so a piped/monochrome terminal got SGR noise.
+        CHECK(ColorDepthFromEnv("truecolor", "xterm-256color", "1") == ColorDepth::None);
+        CHECK(ColorDepthFromEnv(nullptr, "dumb") == ColorDepth::None);
+        // NO_COLOR set but EMPTY is "unset" per the standard.
+        CHECK(ColorDepthFromEnv("truecolor", "xterm", "") == ColorDepth::Truecolor);
+        // And the old two-arg call sites keep their behavior.
+        CHECK(ColorDepthFromEnv("truecolor", "xterm") == ColorDepth::Truecolor);
+    }
 }  // namespace minimal::client

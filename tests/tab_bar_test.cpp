@@ -79,10 +79,12 @@ TEST_CASE("even the focused tab plus both markers doesn't fit: degrade to just i
                                             /*focused_index=*/2, /*marker_width=*/5);
     CHECK(window.visible_start == 2);
     CHECK(window.visible_end == 3);
-    // hidden_before/hidden_after still report the true counts (for a
-    // caller that wants them), even though no marker fits to display them.
-    CHECK(window.hidden_before == 2);
-    CHECK(window.hidden_after == 2);
+    // hidden counts are ZEROED in the degenerate branch: at this width the
+    // markers themselves would eat the one visible cell, and the old true
+    // counts made RenderTabBar draw them anyway, contradicting the documented
+    // "no markers" degradation.
+    CHECK(window.hidden_before == 0);
+    CHECK(window.hidden_after == 0);
 }
 
 TEST_CASE("an out-of-range focused_index is clamped, not undefined behavior",

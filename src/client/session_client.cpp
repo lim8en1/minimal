@@ -62,6 +62,10 @@ std::shared_ptr<SessionClient::Stream> SessionClient::MakeStream(EventCallback c
 
 SessionClient::CreateResult SessionClient::CreateSession(const CreateOptions& options) {
     grpc::ClientContext context;
+    // Deadline like every other unary call: a wedged (or still-spawning)
+    // server must surface as DEADLINE_EXCEEDED, not hang headless startup
+    // forever. Generous -- session creation touches the DB -- but bounded.
+    context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(5));
     v1::CreateSessionRequest request;
     if (!options.resume_session_id.empty()) {
         // Resume: the stored session keeps its name, preset, and project_root.
@@ -88,6 +92,9 @@ SessionClient::GetMessagesResult SessionClient::GetMessages(const std::string& s
                                                              std::optional<int64_t> before_seq,
                                                              int32_t limit) {
     grpc::ClientContext context;
+    // Deadline like the other unary calls: an unbounded GetMessages on a
+    // wedged server blocked headless startup indefinitely.
+    context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(2));
     v1::GetMessagesRequest request;
     request.set_session_id(session_id);
     if (before_seq) request.set_before_seq(*before_seq);
@@ -306,7 +313,10 @@ grpc::Status SessionClient::RunTurn(
         // ran before the stream was stored and latched cancel_pending
         // instead of no-op'ing. Deliver it now, BEFORE the first Read(), so
         // the interrupt cannot be lost to the publication window.
-        if (control->cancel_pending) stream->Write(control->cancel_event);
+        if (control->cancel_pending && !stream->Write(control->cancel_event)) {
+            minimal::common::DefaultLogger().warn(
+                "deferred turn cancel could not be written (stream already dead)");
+        }
     }
 
     v1::ServerEvent event;

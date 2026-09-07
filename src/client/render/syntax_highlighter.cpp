@@ -278,14 +278,12 @@ Language BashLanguage() {
                 {"+", HighlightCategory::Operator},   {"-", HighlightCategory::Operator},
                 {"*", HighlightCategory::Operator},   {"/", HighlightCategory::Operator},
                 {"%", HighlightCategory::Operator},   {"=", HighlightCategory::Operator},
-                {"==", HighlightCategory::Operator},  {"===", HighlightCategory::Operator},
-                {"!=", HighlightCategory::Operator},  {"!==", HighlightCategory::Operator},
+                {"==", HighlightCategory::Operator},  {"!=", HighlightCategory::Operator},
                 {"<", HighlightCategory::Operator},   {">", HighlightCategory::Operator},
                 {"<=", HighlightCategory::Operator},  {">=", HighlightCategory::Operator},
                 {"&&", HighlightCategory::Operator},  {"||", HighlightCategory::Operator},
-                {"!", HighlightCategory::Operator},   {"?", HighlightCategory::Operator},
-                {":", HighlightCategory::Operator},   {".", HighlightCategory::Operator},
-                {"=>", HighlightCategory::Operator},
+                {"!", HighlightCategory::Operator},   {":", HighlightCategory::Operator},
+                {".", HighlightCategory::Operator},
 
                 {"=", HighlightCategory::Operator},
                 {"==", HighlightCategory::Operator},  {"!=", HighlightCategory::Operator},
@@ -468,13 +466,6 @@ const Language& FindLanguage(std::string_view language) {
     return kUnsupported;
 }
 
-HighlightCategory Categorize(const Language& language, const char* node_type) {
-    for (const SyntaxRule& rule : language.rules) {
-        if (node_type == rule.node_type) return rule.category;
-    }
-    return HighlightCategory::Plain;
-}
-
 const char* ThemeRoleFor(HighlightCategory category) {
     switch (category) {
         case HighlightCategory::Keyword:
@@ -543,16 +534,19 @@ std::string CanonicalLanguage(std::string_view language,
     lower.assign(language);
     std::transform(lower.begin(), lower.end(), lower.begin(),
                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    for (const Alias& alias : kAliases) {
-        if (lower == alias.alias) return alias.canonical;
-    }
-    if (languages != nullptr) {
-        // A registered language resolves EXACTLY -- no aliases unless it
-        // supplies them; a plugin grammar's key is its own.
+    if (languages != nullptr && !languages->empty()) {
+        // A plugin-registered language resolves EXACTLY and FIRST: a plugin
+        // grammar's key is its own. (The alias table used to run first, so a
+        // plugin registering "shell", "node" or "cc" was silently shadowed
+        // into a vendored name that then resolved to nothing.) Anything NOT
+        // registered falls through to the vendored aliases below, so the
+        // default highlighting for "js" etc. is unchanged.
         for (const LanguageDefinition& entry : *languages) {
             if (lower == entry.name) return lower;
         }
-        return "";
+    }
+    for (const Alias& alias : kAliases) {
+        if (lower == alias.alias) return alias.canonical;
     }
     if (FindLanguage(lower).language_fn != nullptr) return lower;
     return "";

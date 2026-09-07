@@ -1,12 +1,14 @@
 #include "minimal/client/view/commands_help.hpp"
 
+#include "minimal/client/utf8.hpp"
 #include "minimal/client/view/filterable_menu.hpp"
 
 namespace minimal::client {
 
 ftxui::Component MakeCommandsHelpView(const std::vector<CommandCatalogEntry>& catalog,
                                       const Theme& theme, std::function<void()> on_close,
-                                      std::function<bool()> session_available) {
+                                      std::function<bool()> session_available,
+                                      std::function<void()>* reset_state) {
     // BY VALUE, not by reference: `catalog` is this factory's OWN parameter,
     // and the returned Component (and its closures) outlive this call -- the
     // exact "closures outlive the factory" trap keymap_help.cpp documents for
@@ -23,9 +25,11 @@ ftxui::Component MakeCommandsHelpView(const std::vector<CommandCatalogEntry>& ca
             std::string label = "/" + entry.name + "  -  " + entry.summary;
             if (entry.submits_prompt) label += "  (submits a prompt as your turn)";
             if (entry.read_only) label += "  (read-only)";
-            // Case-insensitive enough: the filter matches against the whole
-            // label, so both names and summaries are searchable.
-            if (filter.empty() || label.find(filter) != std::string::npos) {
+            // Case-insensitive, like every other picker (picker_model,
+            // agent/model pickers, keymap help): lowered needle, lowered
+            // haystack.
+            if (filter.empty() ||
+                ToLower(label).find(ToLower(filter)) != std::string::npos) {
                 rows.push_back({std::move(label), entry.name});
             }
         }
@@ -38,6 +42,7 @@ ftxui::Component MakeCommandsHelpView(const std::vector<CommandCatalogEntry>& ca
         .status_suffix = nullptr,
         .empty_message = " (no commands match)",
         .empty_threshold = 0,
+        .reset_state = reset_state,
     };
 
     // Nothing to select: Enter closes the overlay exactly like Escape --

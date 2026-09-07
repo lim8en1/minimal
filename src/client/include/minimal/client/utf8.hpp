@@ -105,6 +105,43 @@ inline char32_t Utf8Decode(std::string_view text, std::size_t& i) {
     return cp;
 }
 
+// Decodes the LAST code point of text and returns the byte length of its
+// UTF-8 sequence (0 when text is empty). Used by Utf8PopGrapheme.
+inline std::size_t Utf8LastCodepointBytes(std::string_view text) {
+    if (text.empty()) return 0;
+    std::size_t end = text.size() - 1;
+    // Back up over continuation bytes to the lead byte.
+    while (end > 0 && (static_cast<unsigned char>(text[end]) & 0xC0) == 0x80) --end;
+    return text.size() - end;
+}
+
+// Pops one USER-PERCEIVED character for backspace: a code point, plus any
+// glue it was part of. A plain code-point pop splits emoji composed with a
+// zero-width joiner (families, skin-tone thumbs-up) or a variation selector
+// into visible fragments -- the delete key then needs several presses per
+// glyph and the intermediate states render as bare components. Heuristic,
+// not full UAX #29: handles ZWJ sequences, U+FE0E/U+FE0F selectors, and
+// combining marks (which contribute no column -- see Utf8CharColumnWidth).
+inline std::string_view Utf8PopGrapheme(std::string_view text) {
+    std::size_t len = Utf8LastCodepointBytes(text);
+    while (len > 0) {
+        text.remove_suffix(len);
+        // Continue popping while the new tail is glue that bound what we
+        // just removed to what precedes it.
+        const std::size_t prev = Utf8LastCodepointBytes(text);
+        if (prev == 0) break;
+        const std::size_t at = text.size() - prev;
+        char32_t cp = 0;
+        std::size_t i = at;
+        cp = Utf8Decode(text, i);
+        const bool is_glue = cp == 0x200D /* ZWJ */ || cp == 0xFE0E || cp == 0xFE0F ||
+                             (cp >= 0x0300 && cp <= 0x036F) /* combining marks */;
+        if (!is_glue) break;
+        len = prev;
+    }
+    return text;
+}
+
 // Counts DISPLAY COLUMNS, not raw bytes and not codepoints: a wide CJK/emoji
 // code point is 2 columns, a combining mark 0, everything else 1 (see
 // Utf8CharColumnWidth above).

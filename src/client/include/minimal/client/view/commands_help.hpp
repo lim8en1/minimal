@@ -25,6 +25,7 @@ namespace minimal::client {
 
 ftxui::Component MakeCommandsHelpView(const std::vector<CommandCatalogEntry>& catalog,
                                       const Theme& theme, std::function<void()> on_close,
-                                      std::function<bool()> session_available = nullptr);
+                                      std::function<bool()> session_available = nullptr,
+                                      std::function<void()>* reset_state = nullptr);
 
 }  // namespace minimal::client

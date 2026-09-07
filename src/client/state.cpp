@@ -234,6 +234,15 @@ void SessionState::AppendStreamingText(std::string_view text) {
     if (turn_ended_) {
         ++turn_seq_;
         turn_ended_ = false;
+        // The turn-end REFRESH (async) owns clearing the previous turn's
+        // accumulated tail via ClearStreamingIfCurrentTurn. If this delta is
+        // the FIRST of the new turn and wins that race, appending onto the
+        // old tail fused the two turns into one document with no separator
+        // -- markdown from the old turn eats this one whole. Clear now: the
+        // old tail reappears from the store when the refresh lands, which is
+        // authoritative anyway.
+        streaming_accumulated_.clear();
+        streaming_truncated_ = false;
     }
     // Flat accumulation cap: further deltas are DROPPED once the truncation
     // marker is in place (appending them past the cap would make the cap
@@ -292,6 +301,11 @@ void SessionState::AppendStreamingThinking(std::string_view text) {
     if (turn_ended_) {
         ++turn_seq_;
         turn_ended_ = false;
+        // Same new-turn race as AppendStreamingText: a first thinking delta
+        // must not append onto the previous turn's thinking tail before the
+        // async refresh clears it.
+        thinking_accumulated_.clear();
+        thinking_truncated_ = false;
     }
     thinking_turn_seq_ = turn_seq_;
     is_streaming_ = true;
@@ -629,6 +643,13 @@ void SessionState::OnPendingResolved() {
 
 void SessionState::OnToolStarted(const v1::ToolExecutionEvent& evt) {
     std::lock_guard lk(mtx_);
+    // A duplicate started (a redelivery from a stream replay) must not open a
+    // second row and a second live segment: the reverse-scan finisher would
+    // resolve only the copy, stranding the original in "running" forever --
+    // and MaybeGoIdleLocked would wait on it. Ignore the redelivery.
+    for (const auto& existing : tools_) {
+        if (existing.tool_use_id == evt.tool_use_id() && existing.started) return;
+    }
     ToolExecutionState tool;
     tool.tool_use_id = evt.tool_use_id();
     tool.tool_name = evt.tool_name();
@@ -1863,7 +1884,15 @@ void AppState::SendCancel(const std::string& session_id) {
     v1::ClientEvent ev;
     ev.set_session_id(session_id);
     ev.mutable_cancel();
-    stream->Send(ev);
+    if (!stream->Send(ev)) {
+        // Same ruling as SendCommand/SendChatTurn: an explicit user action
+        // must not vanish silently on a stalled stream. (The BumpUiVersion
+        // above covered the hint; this surfaces WHY it will never clear.)
+        if (auto state = GetState(session_id)) {
+            state->OnError("cannot cancel: the stream refused the event");
+            BumpUiVersion();
+        }
+    }
 }
 
 void AppState::SendSetRunMode(const std::string& session_id, v1::PermissionRunMode mode) {
@@ -1871,6 +1900,7 @@ void AppState::SendSetRunMode(const std::string& session_id, v1::PermissionRunMo
     if (!stream) {
         if (auto state = GetState(session_id)) {
             state->OnError("cannot switch permission mode: this session is not attached");
+            BumpUiVersion();
         }
         return;
     }
@@ -1879,7 +1909,12 @@ void AppState::SendSetRunMode(const std::string& session_id, v1::PermissionRunMo
     v1::ClientEvent ev;
     ev.set_session_id(session_id);
     ev.mutable_set_run_mode()->set_run_mode(mode);
-    stream->Send(ev);
+    if (!stream->Send(ev)) {
+        if (auto state = GetState(session_id)) {
+            state->OnError("cannot switch permission mode: the stream refused the event");
+            BumpUiVersion();
+        }
+    }
 }
 
 void AppState::SendRewind(const std::string& session_id, std::optional<int64_t> target_seq,

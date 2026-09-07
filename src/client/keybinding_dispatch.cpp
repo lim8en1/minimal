@@ -69,7 +69,8 @@ ResolvedKeymap ResolvedKeymap::Build(const Keybindings& keys) {
 }
 
 bool ResolvedKeymap::Matches(std::string_view action, const ftxui::Event& event) const {
-    const auto it = table_.find(std::string(action));
+    // Transparent hash: no std::string materialized per probe.
+    const auto it = table_.find(action);
     if (it == table_.end()) return false;   // never bound, or bound to an unparseable key
     for (const auto& candidate : it->second) {
         if (event == candidate) return true;
@@ -286,8 +287,11 @@ bool HandleGlobalKey(KeyContext& ctx, const ftxui::Event& event) {
     }
     if (ctx.keymap.Matches("tab.close", event)) {
         if (!sid.empty()) {
-            // Closing a ROOT tab terminates its group: stage children first,
-            // the root last (TabsToClose, above). ONE confirmation if any of
+            // Closing a ROOT tab terminates its group: TabsToClose stages the
+            // group in render order -- root FIRST, children after (the old
+            // "children first" claim inverted the actual order; either works,
+            // since the root's close terminates the children's sessions and
+            // their closes degrade to no-ops). ONE confirmation if any of
             // it is in flight; app.cpp's confirm_close owns staging that
             // (PendingClose, show_quit_confirm) -- this function stays
             // ignorant of both types.

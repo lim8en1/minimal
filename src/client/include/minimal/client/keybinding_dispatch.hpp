@@ -98,7 +98,23 @@ public:
     }
 
 private:
-    std::unordered_map<std::string, std::vector<ftxui::Event>> table_;
+    // Transparent lookup: Matches takes a string_view and runs ~20 times per
+    // key event -- the materialized std::string per probe was allocation
+    // churn on the hot input path for zero benefit.
+    struct StringViewHash {
+        using is_transparent = void;
+        std::size_t operator()(std::string_view s) const noexcept {
+            return std::hash<std::string_view>{}(s);
+        }
+    };
+    struct StringViewEqual {
+        using is_transparent = void;
+        bool operator()(std::string_view a, std::string_view b) const noexcept {
+            return a == b;
+        }
+    };
+    std::unordered_map<std::string, std::vector<ftxui::Event>, StringViewHash, StringViewEqual>
+        table_;
     std::vector<std::pair<std::string, std::string>> unmapped_;
 };
 

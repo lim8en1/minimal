@@ -4,6 +4,7 @@
 #include <iterator>
 #include <utility>
 
+#include "minimal/common/logger.hpp"
 #include "minimal/client/view/agent_picker.hpp"
 #include "minimal/client/view/model_picker.hpp"
 #include "minimal/client/view/session_picker.hpp"
@@ -98,10 +99,12 @@ void PickerController::FetchPickerPage(bool reset) {
     deps_.app.RunOnRpcQueue([this, opts] {
         const auto result = deps_.client.ListSessions(opts);
         if (!result.status.ok()) {
-            // Silent no-op on failure, matching the old behavior -- but the
-            // latch must still release, or every later load-more is dropped
-            // forever. It is loop-thread state, so the release itself goes
-            // through QueueApply rather than being written from this worker.
+            // Still a no-op for the LIST (the latch must release, or every
+            // later load-more is dropped forever -- loop-thread state, so
+            // the release goes through QueueApply), but no longer silent:
+            // an operator debugging a dead server gets one line per fetch.
+            minimal::common::DefaultLogger().warn("session picker fetch failed: {}",
+                                                  result.status.error_message());
             QueueApply([this] { picker_fetch_in_flight_ = false; });
             return;
         }
@@ -237,7 +240,11 @@ void PickerController::OpenAgentPicker() {
         // SESSION's root, and the resolved preset is what runs.
         const auto result =
             deps_.client.ListAgentPresets(std::filesystem::current_path().string());
-        if (!result.status.ok()) return;
+        if (!result.status.ok()) {
+            minimal::common::DefaultLogger().warn("agent picker fetch failed: {}",
+                                                  result.status.error_message());
+            return;
+        }
         std::vector<v1::AgentPresetSummary> presets(result.response.presets().begin(),
                                                      result.response.presets().end());
         QueueApply([this, presets = std::move(presets)]() mutable {
@@ -263,7 +270,11 @@ void PickerController::OpenModelPicker(bool refresh) {
     opts.refresh_discovery = refresh;
     deps_.app.RunOnRpcQueue([this, opts] {
         const auto result = deps_.client.ListModels(opts);
-        if (!result.status.ok()) return;
+        if (!result.status.ok()) {
+            minimal::common::DefaultLogger().warn("model picker fetch failed: {}",
+                                                  result.status.error_message());
+            return;
+        }
         std::vector<v1::ModelSummary> models(result.response.models().begin(),
                                              result.response.models().end());
         QueueApply([this, models = std::move(models)]() mutable {

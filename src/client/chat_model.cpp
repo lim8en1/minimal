@@ -113,8 +113,11 @@ std::vector<ChatRow> ChatRowsFromMessages(const std::vector<v1::StoredMessage>& 
     // Walk ascending (reverse of the input), remembering tool names and inputs
     // by id so a result row can carry the name of -- and the input JSON behind
     // -- the call that produced it. unordered_map for the same O(n^2)->O(n)
-    // reason as spawn_ids above; emplace (not operator[]) preserves the
-    // original vector scan's "first match wins" semantics for a duplicate id.
+    // reason as spawn_ids above. Duplicate ids: LAST wins (insert_or_assign) --
+    // OpenAI-shaped tool-call fragments are index/id-keyed and the LATER
+    // chunks complete the arguments JSON, so the final state is the
+    // authoritative one. (An older comment claimed first-wins here; that
+    // contradicted the code below and misread the delta semantics.)
     std::vector<ChatRow> rows;
     struct ToolCall {
         std::string name;

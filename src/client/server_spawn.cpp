@@ -27,7 +27,13 @@ std::optional<std::filesystem::path> SocketPathOf(const std::string& target) {
     if (target.rfind(scheme, 0) != 0) return std::nullopt;
     const std::string path = target.substr(scheme.size());
     if (path.empty()) return std::nullopt;
-    return std::filesystem::path(path);
+    std::filesystem::path socket(path);
+    // The spawned child chdir's to "/" before exec: a RELATIVE socket path
+    // would bind under / while the client probes the same string resolved
+    // against its own cwd -- the two could never meet. Anchor relative paths
+    // to the client's cwd here, once, so spawn and probe agree.
+    if (socket.is_relative()) socket = std::filesystem::absolute(socket);
+    return socket;
 }
 
 bool ExecutableFile(const std::filesystem::path& path) {
@@ -75,7 +81,28 @@ bool SpawnDetached(const std::filesystem::path& binary,
             ::chdir("/");
             ::execl(binary.c_str(), binary.filename().c_str(), "--listen",
                     socket_path.c_str(), static_cast<char*>(nullptr));
-            _exit(127);  // execl failed; the probe timeout reports it
+            // execl failed. stderr IS the log (redirected above), so one
+            // line here turns "25 s of silence, empty log" into a diagnosis.
+            // Plain write() + manual formatting only: post-fork in a
+            // multithreaded process, malloc (std::string) can deadlock on a
+            // lock another thread held at fork time.
+            char buf[64];
+            std::size_t len = 0;
+            for (const char c : std::string_view{"minimal-server: failed to exec (errno="}) {
+                buf[len++] = c;
+            }
+            int err = errno;
+            char digits[12];
+            int dlen = 0;
+            do {
+                digits[dlen++] = static_cast<char>('0' + err % 10);
+                err /= 10;
+            } while (err > 0 && dlen < 11);
+            while (dlen > 0 && len < sizeof(buf) - 2) buf[len++] = digits[--dlen];
+            buf[len++] = ')';
+            buf[len++] = '\n';
+            (void)::write(STDERR_FILENO, buf, len);
+            _exit(127);
         }
         _exit(0);
     }

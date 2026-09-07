@@ -528,7 +528,13 @@ using minimal::client::Theme;
 // What a quit / tab-close confirmation will destroy, when confirmed.
 struct PendingClose {
     bool quit = false;
-    std::vector<std::string> session_ids;   // ordered children-first
+    // STAGING ORDER: render order -- the root FIRST, its children directly
+    // after (TabsToClose walks the tab list, where children follow their
+    // parent). Closing the root terminates the whole group, so the child
+    // closes below land on already-terminated sessions and are no-ops; the
+    // order is therefore safe either way, but these comments used to claim
+    // children-first, which is not what the staging produces.
+    std::vector<std::string> session_ids;
     bool any = false;
 };
 
@@ -795,11 +801,21 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         }
         const std::string sid = app->FocusedSessionId();
         const bool has_session = !sid.empty();
-        if (line == "/redo") {
-            app->SendRewind(sid, std::nullopt, /*redo=*/true);
-            return;
-        }
-        if (line == "/rewind" || line.rfind("/rewind ", 0) == 0) {
+        if (line == "/redo" || line == "/rewind" || line.rfind("/rewind ", 0) == 0) {
+            // Refused VISIBLY on a sessionless tab: SendRewind with an empty
+            // sid hits GetState("") == null and silently returns -- the user
+            // pressed a key and nothing at all happened.
+            if (!has_session) {
+                if (const std::string tab = app->FocusedTabId(); !tab.empty()) {
+                    app->TabNotice(tab, "/" + line.substr(1, 6) +
+                                            " needs a session; send a message to start one first");
+                }
+                return;
+            }
+            if (line == "/redo") {
+                app->SendRewind(sid, std::nullopt, /*redo=*/true);
+                return;
+            }
             int n = 1;   // default: undo the most recent user turn
             if (line.size() > 8) {
                 try {
@@ -946,7 +962,9 @@ int RunTui(const minimal::client::ParsedArgs& args) {
                 pending_close = PendingClose{};
                 return;
             }
-            // Children first, root last (pending_close was staged that way).
+            // Root first, children after (the staging order -- see
+            // PendingClose): closing the root terminates the group, so the
+            // child closes are no-ops on terminated sessions.
             for (const auto& id : pending_close.session_ids) close_tab(id);
             if (pending_close.quit) quit();
             show_quit_confirm = false;
@@ -997,7 +1015,15 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     open_picker_fn = open_picker;
     open_agent_picker_fn = open_agent_picker;
     open_model_picker_fn = open_model_picker;
-    auto open_keymap_help = [&] { show_keymap_help = true; };
+    // Reset slots for the two help overlays: they are built once, so without
+    // these the typed filter survived across opens -- reopening the help
+    // presented the previous needle as if it were a fresh search.
+    std::function<void()> keymap_help_reset;
+    std::function<void()> commands_help_reset;
+    auto open_keymap_help = [&] {
+        if (keymap_help_reset) keymap_help_reset();
+        show_keymap_help = true;
+    };
 
     // Built once, unlike the pickers above: env.keybindings is already final
     // by the time RunTui runs (BuildTuiEnvironment folds in the user's file
@@ -1005,7 +1031,8 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     // none of PickerController's async-rebind machinery -- same reasoning as
     // confirm_modal/delete_modal below.
     auto keymap_help_view = minimal::client::MakeKeymapHelpView(
-        env.keybindings.all(), theme, [&] { show_keymap_help = false; });
+        env.keybindings.all(), theme, [&] { show_keymap_help = false; },
+        &keymap_help_reset);
 
     // Built once, like keymap_help_view: the catalog was fetched once at
     // connect and never changes (see its comment), and `theme` is a RunTui
@@ -1018,7 +1045,8 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         // focused tab has no session, the overlay lists only sessionless
         // commands (the overlay rebuilds its rows on every open, so the probe
         // is fresh each time).
-        [&app]() { return !app->FocusedSessionId().empty(); });
+        [&app]() { return !app->FocusedSessionId().empty(); },
+        &commands_help_reset);
 
     // --- plugin views (panel region + modal layer) -----------------------------
     // Panels: rendered in the frame beside the tools panel; one shared

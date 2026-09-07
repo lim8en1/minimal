@@ -112,6 +112,15 @@ Keybindings Keybindings::Load(const std::filesystem::path& config_dir) {
     const auto path = config_dir / "keybindings.json";
     std::error_code ec;
     if (!std::filesystem::exists(path, ec)) {
+        if (ec) {
+            // NOT the same as "no file": a stat error (permission denied on
+            // the config dir, a dangling symlink loop) silently falling into
+            // the fresh-dir path hid the real problem behind a working-
+            // looking default setup.
+            common::DefaultLogger().warn(
+                "could not stat keybindings.json ({}); using default keybindings",
+                ec.message());
+        }
         // A fresh config dir is the normal first-run state: the defaults stand.
         Keybindings out;
         out.bindings_ = DefaultBindings();

@@ -6,7 +6,8 @@
 namespace minimal::client {
 
 ftxui::Component MakeKeymapHelpView(const std::unordered_map<std::string, std::string>& bindings,
-                                    const Theme& theme, std::function<void()> on_close) {
+                                    const Theme& theme, std::function<void()> on_close,
+                                    std::function<void()>* reset_state) {
     // BY VALUE, not by reference: `bindings` is this factory's OWN
     // parameter, and the returned Component (and its closures) outlive this
     // call -- the exact "closures outlive the factory" trap agent_picker.cpp
@@ -25,6 +26,7 @@ ftxui::Component MakeKeymapHelpView(const std::unordered_map<std::string, std::s
         .status_suffix = nullptr,
         .empty_message = " (no bindings match)",
         .empty_threshold = 0,
+        .reset_state = reset_state,
     };
 
     // Nothing to select: Enter closes the overlay exactly like Escape --
@@ -34,7 +36,6 @@ ftxui::Component MakeKeymapHelpView(const std::unordered_map<std::string, std::s
         .on_close = on_close,
         .on_extra_key = nullptr,
     };
-
     return MakeFilterableMenuModal(build_rows, spec, callbacks, theme);
 }
 
