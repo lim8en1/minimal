@@ -36,6 +36,16 @@ const std::unordered_set<std::string>& BlockTags() {
 }
 
 void AppendUtf8(std::string& out, std::uint32_t codepoint) {
+    // Surrogates (UTF-16 code units with no Unicode scalar value) and C0
+    // control characters never belong in the text: a numeric entity naming
+    // them produced INVALID UTF-8 (D800-DFFF as 3-byte sequences) or a raw
+    // NUL byte (&#0;) -- the first corrupts every downstream UTF-8 consumer,
+    // the second truncates C-string handling. Both are dropped; the model
+    // loses nothing it could have used.
+    if (codepoint >= 0xD800 && codepoint <= 0xDFFF) return;
+    if (codepoint < 0x20 && codepoint != '\t' && codepoint != '\n' && codepoint != '\r') {
+        return;
+    }
     if (codepoint <= 0x7F) {
         out += static_cast<char>(codepoint);
     } else if (codepoint <= 0x7FF) {

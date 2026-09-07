@@ -3,6 +3,7 @@
 #include <nlohmann/json.hpp>
 
 #include "openai_response.hpp"
+#include "minimal/llm/json_depth.hpp"
 
 namespace minimal::provider_openai {
 namespace {
@@ -41,6 +42,9 @@ bool OpenAiStreamReassembler::FeedFrame(std::string_view data, const llm::Stream
 
     nlohmann::json chunk;
     try {
+        if (!llm::JsonDepthWithinLimit(data)) {
+            throw OpenAiParseError("stream chunk exceeds the JSON nesting limit");
+        }
         chunk = nlohmann::json::parse(data);
     } catch (const nlohmann::json::exception& error) {
         throw OpenAiParseError(std::string("malformed stream chunk: ") + error.what());
@@ -69,52 +73,87 @@ bool OpenAiStreamReassembler::FeedFrame(std::string_view data, const llm::Stream
 
         if (delta.contains("content") && !delta.at("content").is_null()) {
             std::string text = delta.at("content").get<std::string>();
-            // Text arriving AFTER tool calls started opens a NEW text block
-            // instead of appending to the first: the single text_block_index_
-            // reordered content on backends that narrate between calls, and
-            // re-emitted a TextDelta for a block the client had already seen
-            // closed. The unified model carries multi-block content natively.
-            if (!text_block_index_ || blocks_.back().kind != Block::Kind::Text) {
-                text_block_index_ = blocks_.size();
-                blocks_.push_back(Block{Block::Kind::Text, {}, {}, {}, {}, false});
+            // An empty delta carries nothing: opening (or appending to) a
+            // block for it produced a phantom empty TextBlock in the response,
+            // unlike anthropic's !text.empty() guard.
+            if (!text.empty()) {
+                // Text arriving AFTER tool calls started opens a NEW text block
+                // instead of appending to the first: the single text_block_index_
+                // reordered content on backends that narrate between calls, and
+                // re-emitted a TextDelta for a block the client had already seen
+                // closed. The unified model carries multi-block content natively.
+                if (!text_block_index_ || blocks_.back().kind != Block::Kind::Text) {
+                    text_block_index_ = blocks_.size();
+                    blocks_.push_back(Block{Block::Kind::Text, {}, {}, {}, {}, {}, false});
+                }
+                Accumulate(accumulated_bytes_, text.size());
+                blocks_[*text_block_index_].text += text;
+                if (sink && !sink(llm::TextDeltaEvent{static_cast<int>(*text_block_index_), text}))
+                    return false;
             }
-            Accumulate(accumulated_bytes_, text.size());
-            blocks_[*text_block_index_].text += text;
-            if (sink && !sink(llm::TextDeltaEvent{static_cast<int>(*text_block_index_), text})) return false;
         }
 
         if (delta.contains("tool_calls")) {
             for (const auto& tool_call_delta : delta.at("tool_calls")) {
-                int openai_index = tool_call_delta.value("index", 0);
+                // Present-but-NULL fields must be tolerated exactly like
+                // absent ones: a proxy emitting `"index": null` (or null
+                // id/name/arguments) is a keepalive-shaped quirk, not a
+                // malformed chunk -- and the resulting ParseError is
+                // NON-retryable, so null-tolerance here is the difference
+                // between a dropped keepalive and a failed turn.
+                int openai_index = 0;
+                if (tool_call_delta.contains("index") && tool_call_delta.at("index").is_number()) {
+                    openai_index = tool_call_delta.at("index").get<int>();
+                }
                 auto it = tool_call_indices_.find(openai_index);
                 if (it == tool_call_indices_.end()) {
                     std::size_t block_index = blocks_.size();
-                    blocks_.push_back(Block{Block::Kind::ToolCall, {}, {}, {}, {}, false});
+                    blocks_.push_back(Block{Block::Kind::ToolCall, {}, {}, {}, {}, {}, false});
                     it = tool_call_indices_.emplace(openai_index, block_index).first;
                 }
                 Block& block = blocks_[it->second];
 
-                if (tool_call_delta.contains("id")) block.id = tool_call_delta.at("id").get<std::string>();
+                if (tool_call_delta.contains("id") && tool_call_delta.at("id").is_string()) {
+                    block.id = tool_call_delta.at("id").get<std::string>();
+                }
                 std::string arguments_fragment;
                 if (tool_call_delta.contains("function")) {
                     const auto& function = tool_call_delta.at("function");
-                    if (function.contains("name")) block.name = function.at("name").get<std::string>();
-                    if (function.contains("arguments")) {
+                    if (function.contains("name") && function.at("name").is_string()) {
+                        block.name = function.at("name").get<std::string>();
+                    }
+                    if (function.contains("arguments") &&
+                        function.at("arguments").is_string()) {
                         arguments_fragment = function.at("arguments").get<std::string>();
                         Accumulate(accumulated_bytes_, arguments_fragment.size());
                         block.arguments_json += arguments_fragment;
                     }
                 }
 
-                if (!block.started && !block.id.empty() && !block.name.empty()) {
+                const bool just_started =
+                    !block.started && !block.id.empty() && !block.name.empty();
+                if (just_started) {
                     block.started = true;
                     if (sink &&
                         !sink(llm::ToolUseStartEvent{static_cast<int>(it->second), block.id, block.name}))
                         return false;
                 }
-                if (block.started && !arguments_fragment.empty()) {
-                    if (sink && !sink(llm::ToolUseInputDeltaEvent{static_cast<int>(it->second), arguments_fragment}))
+                if (block.started) {
+                    // Fragments that arrived BEFORE the startable delta were
+                    // buffered (the sink had no block to attach them to);
+                    // flush them ahead of this delta's own fragment so the
+                    // streamed tool input is the complete arguments text.
+                    std::string to_emit;
+                    if (just_started) {
+                        to_emit = std::move(block.pre_start_arguments);
+                        block.pre_start_arguments.clear();
+                    }
+                    if (!arguments_fragment.empty()) to_emit += arguments_fragment;
+                    if (!to_emit.empty() && sink &&
+                        !sink(llm::ToolUseInputDeltaEvent{static_cast<int>(it->second), to_emit}))
                         return false;
+                } else if (!arguments_fragment.empty()) {
+                    block.pre_start_arguments += arguments_fragment;
                 }
             }
         }
@@ -168,7 +207,9 @@ llm::ChatResponse OpenAiStreamReassembler::Finalize(bool tolerate_malformed_tool
 
     for (const auto& block : blocks_) {
         if (block.kind == Block::Kind::Text) {
-            response.content.push_back(llm::TextBlock{block.text});
+            // Same guard anthropic's Finalize has: no phantom empty TextBlock
+            // in the response even if one slipped past the delta-side filter.
+            if (!block.text.empty()) response.content.push_back(llm::TextBlock{block.text});
         } else {
             // A tool call whose id or name never arrived cannot be run: it
             // reached ToolExecutor as `unknown tool: ` -- an error attributed to
@@ -182,6 +223,10 @@ llm::ChatResponse OpenAiStreamReassembler::Finalize(bool tolerate_malformed_tool
             tool_use.id = block.id;
             tool_use.name = block.name;
             try {
+                if (!block.arguments_json.empty() &&
+                    !llm::JsonDepthWithinLimit(block.arguments_json)) {
+                    throw OpenAiParseError("tool-call arguments exceed the JSON nesting limit");
+                }
                 tool_use.input =
                     block.arguments_json.empty() ? nlohmann::json::object() : nlohmann::json::parse(block.arguments_json);
             } catch (const nlohmann::json::exception& error) {

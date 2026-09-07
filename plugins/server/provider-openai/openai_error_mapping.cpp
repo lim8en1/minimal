@@ -10,14 +10,37 @@ namespace minimal::provider_openai {
 
 namespace {
 
+// Only the head of an error body is ever parsed for a message. The body can
+// be as large as the HTTP client's 64 MiB cap; handing all of it to nlohmann
+// to extract one string is a self-inflicted stall on a hostile (or merely
+// absurd) error body. 64 KiB is the same bound the streaming path applies.
+constexpr std::size_t kMaxErrorBodyParse = 64 * 1024;
+// And no extracted/embedded message grows beyond this either.
+constexpr std::size_t kMaxErrorMessage = 2000;
+
+std::string_view HeadOf(const std::string& body) {
+    std::string_view slice(body);
+    if (slice.size() > kMaxErrorBodyParse) slice = slice.substr(0, kMaxErrorBodyParse);
+    return slice;
+}
+
+std::string CapMessage(std::string message) {
+    if (message.size() > kMaxErrorMessage) {
+        message.resize(kMaxErrorMessage);
+        message += " …[truncated]";
+    }
+    return message;
+}
+
 std::string ExtractMessage(const std::string& body, int status) {
     try {
-        auto json = nlohmann::json::parse(body);
+        auto json = nlohmann::json::parse(HeadOf(body));
         if (json.contains("error") && json.at("error").contains("message")) {
-            return json.at("error").at("message").get<std::string>();
+            return CapMessage(json.at("error").at("message").get<std::string>());
         }
     } catch (const nlohmann::json::exception&) {
-        // Not JSON, or not the expected shape -- fall through to a generic message.
+        // Not JSON, or not the expected shape (including a slice truncated
+        // mid-document) -- fall through to a generic message.
     }
     return "HTTP " + std::to_string(status);
 }
@@ -84,7 +107,7 @@ llm::LlmError ClassifyErrorEventData(std::string_view data) {
     std::string message(data);
     llm::LlmErrorCategory category = llm::LlmErrorCategory::ServerError;
     try {
-        auto json = nlohmann::json::parse(data);
+        auto json = nlohmann::json::parse(HeadOf(std::string(data)));
         if (json.contains("error") && json.at("error").contains("message") &&
             json.at("error").at("message").is_string()) {
             message = json.at("error").at("message").get<std::string>();
@@ -102,7 +125,7 @@ llm::LlmError ClassifyErrorEventData(std::string_view data) {
     } catch (const nlohmann::json::exception&) {
         // Not JSON: the raw data is the best message there is.
     }
-    return llm::LlmError(category, message);
+    return llm::LlmError(category, CapMessage(std::move(message)));
 }
 
 llm::LlmError ClassifyTransportFailure(const net::HttpError& error) {

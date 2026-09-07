@@ -2,6 +2,7 @@
 
 #include <exception>
 
+#include "minimal/llm/json_depth.hpp"
 #include "minimal/net/sse_parser.hpp"
 #include "openai_error_mapping.hpp"
 #include "openai_request.hpp"
@@ -72,6 +73,9 @@ llm::ChatResponse OpenAiProvider::Complete(const llm::ChatRequest& request) {
     }
 
     try {
+        if (!llm::JsonDepthWithinLimit(http_response.body)) {
+            throw OpenAiParseError("response exceeds the JSON nesting limit");
+        }
         return ParseNonStreamingResponse(nlohmann::json::parse(http_response.body));
     } catch (const OpenAiParseError& error) {
         RethrowParseErrorAsLlmError(error);

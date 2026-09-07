@@ -24,6 +24,29 @@ void EmitEscaped(std::string& out, char c) {
 
 // Translates one brace-free stretch of pattern. `out` accumulates. Returns
 // false on an unterminated `[`.
+// Returns the index of the `]` that terminates the class starting at
+// glob[i] == '[', honoring POSIX first-position literals and backslash
+// escapes; npos when unterminated. Shared by TranslateBody and the outer
+// segment scanner -- the scanner must not split a segment at a backslash
+// that lives INSIDE a class.
+std::size_t FindClassClose(std::string_view glob, std::size_t i) {
+    const std::size_t n = glob.size();
+    std::size_t j = i + 1;
+    if (j < n && glob[j] == ']') {
+        j += 1;  // `[]...` -- literal first
+    } else if (j + 1 < n && glob[j] == '!' && glob[j + 1] == ']') {
+        j += 2;  // `[!]...` -- literal first after negation
+    }
+    for (; j < n; ++j) {
+        if (glob[j] == '\\' && j + 1 < n) {
+            ++j;
+            continue;
+        }
+        if (glob[j] == ']') return j;
+    }
+    return std::string_view::npos;
+}
+
 bool TranslateBody(std::string_view glob, std::string& out) {
     const std::size_t n = glob.size();
     std::size_t i = 0;
@@ -65,15 +88,12 @@ bool TranslateBody(std::string_view glob, std::string& out) {
             continue;
         }
         if (c == '[') {
-            // Find the terminator. A `]` immediately after `[` or `[!` is a
-            // literal member (POSIX glob / regex rule), so scan from index 2.
-            std::size_t close = std::string_view::npos;
-            for (std::size_t j = i + 2; j < n; ++j) {
-                if (glob[j] == ']') {
-                    close = j;
-                    break;
-                }
-            }
+            // POSIX rules: a `]` in FIRST position (or right after a `!`
+            // negation) is a literal member, not the terminator. A backslash
+            // escapes the next character anywhere in the class: `\]` is a
+            // literal member, not the terminator (the body is copied
+            // verbatim, so RE2 still sees the escape).
+            const std::size_t close = FindClassClose(glob, i);
             if (close == std::string_view::npos) return false;
             out += '[';
             std::size_t body = i + 1;
@@ -174,7 +194,20 @@ bool GlobToRegexImpl(std::string_view glob, GlobFlags flags, int depth, std::str
             continue;
         }
         const std::size_t seg_start = i;
-        while (i < n && glob[i] != '{' && glob[i] != '}' && glob[i] != '\\') i += 1;
+        while (i < n && glob[i] != '{' && glob[i] != '}' && glob[i] != '\\') {
+            if (glob[i] == '[') {
+                // A character class is consumed WHOLE, escapes included: the
+                // old scanner broke at any backslash, so a class containing
+                // `\]` was split and the pattern failed outright. An
+                // unterminated class stays a failed pattern (the gitignore
+                // rule "unterminated constructs fail"), never a literal.
+                const std::size_t close = FindClassClose(glob, i);
+                if (close == std::string_view::npos) return false;
+                i = close + 1;
+                continue;
+            }
+            i += 1;
+        }
         if (i == seg_start) {
             // A brace metacharacter in literal mode (gitignore): the segment
             // scanner stopped without advancing, so consume it here or the

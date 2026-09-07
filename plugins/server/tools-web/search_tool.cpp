@@ -74,7 +74,14 @@ public:
         const std::string query = input.at("query").get<std::string>();
 
         int max_results = settings_.search_default_max_results;
-        if (input.contains("max_results") && input.at("max_results").is_number_integer()) {
+        if (input.contains("max_results") && !input.at("max_results").is_number_integer()) {
+            // Rejected, not silently defaulted: a model that passed a string
+            // ("5") would otherwise get the default count believing its
+            // request had taken effect. Same posture as web_fetch's
+            // max_bytes type check.
+            return Error("web_search: 'max_results' must be an integer");
+        }
+        if (input.contains("max_results")) {
             max_results = input.at("max_results").get<int>();
         }
         max_results = std::clamp(max_results, 1, settings_.search_max_results);
@@ -125,6 +132,11 @@ public:
         int count = 0;
         for (const auto& result : body.at("results")) {
             if (count >= max_results) break;
+            // Non-object elements are skipped, not fatal: the nlohmann
+            // value() calls below would throw out of the tool and fail the
+            // whole search over one malformed row, taking every good result
+            // down with it.
+            if (!result.is_object()) continue;
             const std::string title = result.value("title", "");
             const std::string result_url = result.value("url", "");
             const std::string snippet = result.value("snippet", "");

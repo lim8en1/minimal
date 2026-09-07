@@ -57,16 +57,16 @@ TurnRecord DecodeTurn(const nlohmann::json& entry, const std::string& session_id
         turn.at_unix_ms = it->get<std::int64_t>();
     }
     if (const auto it = entry.find(kInKey); it != entry.end() && it->is_number_integer()) {
-        turn.usage.input_tokens = it->get<std::int64_t>();
+        turn.usage.input_tokens = std::max<std::int64_t>(it->get<std::int64_t>(), 0);
     }
     if (const auto it = entry.find(kOutKey); it != entry.end() && it->is_number_integer()) {
-        turn.usage.output_tokens = it->get<std::int64_t>();
+        turn.usage.output_tokens = std::max<std::int64_t>(it->get<std::int64_t>(), 0);
     }
     if (const auto it = entry.find(kCacheReadKey); it != entry.end() && it->is_number_integer()) {
-        turn.usage.cache_read_tokens = it->get<std::int64_t>();
+        turn.usage.cache_read_tokens = std::max<std::int64_t>(it->get<std::int64_t>(), 0);
     }
     if (const auto it = entry.find(kCacheWriteKey); it != entry.end() && it->is_number_integer()) {
-        turn.usage.cache_write_tokens = it->get<std::int64_t>();
+        turn.usage.cache_write_tokens = std::max<std::int64_t>(it->get<std::int64_t>(), 0);
     }
     if (const auto it = entry.find(kReportedKey); it != entry.end() && it->is_boolean()) {
         turn.usage.usage_reported = it->get<bool>();
@@ -90,6 +90,12 @@ CostStore::CostStore(plugins::PluginStorage* storage) : storage_(storage) {}
 void CostStore::AppendTurn(const std::string& session_id, const std::string& parent_session_id,
                            const TurnRecord& turn) {
     if (storage_ == nullptr) return;  // degraded: no storage seam, no history
+    if (session_id.empty()) {
+        // An empty id would store under the degenerate key "session:" --
+        // visible to every enumeration and shared by every caller that
+        // forgot its id. Same guard checklist_store applies.
+        throw std::runtime_error("cost-tracker: no session to record the turn under");
+    }
     SessionHistory history;
     if (const auto existing = storage_->Get(kStorageNamespace, kSessionKeyPrefix + session_id)) {
         const nlohmann::json document = ParseOrThrow(*existing, session_id);

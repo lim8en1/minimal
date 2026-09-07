@@ -161,6 +161,15 @@ std::optional<std::string> PluginStorage::Get(std::string_view plugin, std::stri
 
 void PluginStorage::Set(std::string_view plugin, std::string_view key, std::string_view value) {
     RequireNonEmpty(plugin, key);
+    // A per-value quota: the KV seam is the plugin's persistence, not an
+    // unbounded scratch space -- one buggy or hostile plugin could otherwise
+    // grow the host's plugin database without limit. 1 MiB per value is far
+    // above any legitimate state blob (checklist/cost rows are kilobytes).
+    constexpr std::size_t kMaxValueBytes = 1u << 20;
+    if (value.size() > kMaxValueBytes) {
+        throw std::runtime_error("plugin storage: value exceeds the 1 MiB quota (plugin '" +
+                                 std::string(plugin) + "', key '" + std::string(key) + "')");
+    }
     std::lock_guard<std::mutex> lock(mu_);
     Stmt stmt(db_,
               "INSERT INTO plugin_kv (plugin, key, value, updated_at) VALUES (?, ?, ?, ?) "

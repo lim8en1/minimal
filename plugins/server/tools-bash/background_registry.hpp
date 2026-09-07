@@ -115,6 +115,11 @@ public:
 
 private:
     std::mutex mutex_;
+    // Serializes Start()'s check-then-act: the cap check and the task push
+    // span a fork(), and two concurrent Starts could both pass the check
+    // before either pushed, overshooting max_background_tasks. Held only for
+    // the start sequence -- never across watcher callbacks.
+    std::mutex start_mutex_;
     std::unordered_map<std::string, std::vector<std::shared_ptr<TaskState>>> tasks_;
     std::atomic<std::uint64_t> next_id_{1};
 };

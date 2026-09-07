@@ -21,6 +21,26 @@ const char* kDefaultPrompt =
     "message below. Reply with the title ONLY: 3-6 words, no quotes, no trailing period, "
     "no explanation.";
 
+// Cap at code-point granularity -- a byte cut would split a UTF-8 sequence
+// and render as U+FFFD downstream (tab bar, titling request).
+std::string_view TruncateCodePoints(std::string_view text, std::size_t max_chars) {
+    std::size_t chars = 0;
+    std::size_t i = 0;
+    while (i < text.size() && chars < max_chars) {
+        const unsigned char c = static_cast<unsigned char>(text[i]);
+        std::size_t len;
+        if (c < 0x80) len = 1;
+        else if ((c & 0xE0) == 0xC0) len = 2;
+        else if ((c & 0xF0) == 0xE0) len = 3;
+        else if ((c & 0xF8) == 0xF0) len = 4;
+        else len = 1;
+        if (i + len > text.size()) len = text.size() - i;
+        i += len;
+        ++chars;
+    }
+    return text.substr(0, i);
+}
+
 std::string FirstUserText(const std::string& session_id, const session::SessionReader& reader,
                           int char_budget) {
     // A fresh session's first turn has just produced its first rows; this load
@@ -31,7 +51,11 @@ std::string FirstUserText(const std::string& session_id, const session::SessionR
         for (const auto& block : stored.message.content) {
             if (const auto* text = std::get_if<llm::TextBlock>(&block)) {
                 if (text->text.empty()) continue;
-                return text->text.substr(0, static_cast<std::size_t>(char_budget));
+                // Code-point truncation, not substr: the budget counts
+                // characters, and a byte cut could split a UTF-8 sequence
+                // inside the titling REQUEST.
+                return std::string(TruncateCodePoints(text->text,
+                                                      static_cast<std::size_t>(char_budget)));
             }
         }
         // A tool-result-only user message is not a name; keep looking, exactly
@@ -94,14 +118,19 @@ std::string CleanTitle(std::string_view text) {
         if (wrapped) out = out.substr(1, out.size() - 2);
     }
 
-    // Collapse any internal newline run to a space: a multi-line reply is one
-    // label, not several.
+    // Collapse any internal newline run to a space, and DROP other C0 control
+    // bytes: only \n/\r/\t were handled, so a model reply containing an ESC
+    // sequence (or any other control byte) carried it verbatim into the
+    // session name and from there into the tab bar -- ANSI escapes in the UI,
+    // courtesy of the provider.
     std::string collapsed;
     collapsed.reserve(out.size());
     bool pending_space = false;
     for (const unsigned char c : out) {
         if (c == '\n' || c == '\r' || c == '\t') {
             pending_space = !collapsed.empty();
+        } else if (c < 0x20 || c == 0x7F) {
+            continue;  // control byte: dropped, not rendered
         } else {
             if (pending_space) {
                 collapsed += ' ';
@@ -113,21 +142,7 @@ std::string CleanTitle(std::string_view text) {
 
     // Cap at code-point granularity -- a byte cut would split a UTF-8 sequence
     // and render as U+FFFD in the tab bar.
-    std::size_t chars = 0;
-    std::size_t i = 0;
-    while (i < collapsed.size() && chars < static_cast<std::size_t>(kTitleMaxCodePoints)) {
-        const unsigned char c = static_cast<unsigned char>(collapsed[i]);
-        std::size_t len;
-        if (c < 0x80) len = 1;
-        else if ((c & 0xE0) == 0xC0) len = 2;
-        else if ((c & 0xF0) == 0xE0) len = 3;
-        else if ((c & 0xF8) == 0xF0) len = 4;
-        else len = 1;
-        if (i + len > collapsed.size()) len = collapsed.size() - i;
-        i += len;
-        ++chars;
-    }
-    return collapsed.substr(0, i);
+    return std::string(TruncateCodePoints(collapsed, static_cast<std::size_t>(kTitleMaxCodePoints)));
 }
 
 TitlerObserver::TitlerObserver(TitlerConfig config, plugins::ServiceRegistry* services,

@@ -49,7 +49,15 @@ std::string JoinResultContent(const std::vector<llm::ToolResultContentBlock>& co
 std::string CacheTtl(const nlohmann::json& parameters) {
     if (parameters.is_object() && parameters.contains("cache_ttl") &&
         parameters.at("cache_ttl").is_string()) {
-        return parameters.at("cache_ttl").get<std::string>();
+        const std::string ttl = parameters.at("cache_ttl").get<std::string>();
+        // The API accepts exactly two values (README documents both); anything
+        // else reaches the wire verbatim and fails there as an opaque 400.
+        // Fail here with a name instead.
+        if (ttl != "5m" && ttl != "1h") {
+            throw std::invalid_argument(
+                "cache_ttl must be \"5m\" or \"1h\" (got \"" + ttl + "\")");
+        }
+        return ttl;
     }
     return "";  // "" means the default 5-minute TTL: omit the "ttl" key entirely
 }
@@ -141,6 +149,11 @@ std::string BuildRequestBody(const llm::ChatRequest& request, bool stream) {
     // Anthropic message (see the header comment: strict alternation is
     // enforced server-side, unlike OpenAI). One open "logical message" is
     // tracked at a time; role changes (or running out of messages) close it.
+    // A message whose every block was dropped (an assistant turn consisting
+    // only of thinking blocks, or a zero-block message) is SKIPPED ENTIRELY --
+    // emitting "content":[] is an outright API rejection, and closing the run
+    // around it would split its neighbors into consecutive same-role wire
+    // messages.
     bool first_wire_message = true;
     bool has_open_message = false;
     llm::Role open_role = llm::Role::User;
@@ -160,20 +173,19 @@ std::string BuildRequestBody(const llm::ChatRequest& request, bool stream) {
         open_content.clear();
         first_block_in_open = true;
     };
-    const auto open_or_continue = [&](llm::Role role) {
-        if (has_open_message && open_role == role) return;
-        close_open_message();
-        has_open_message = true;
-        open_role = role;
-    };
-    const auto append_block = [&](std::string block_json) {
-        if (!first_block_in_open) open_content += ',';
-        first_block_in_open = false;
-        open_content += std::move(block_json);
-    };
 
     for (const auto& message : request.messages) {
-        open_or_continue(message.role);
+        // Render THIS message's blocks into a local buffer first: only a
+        // non-empty result joins (or opens) a logical run, so a fully-dropped
+        // message is invisible to the folding and can never split a run or
+        // emit an empty content array.
+        std::string message_content;
+        bool first_block_of_message = true;
+        const auto append_block = [&](std::string block_json) {
+            if (!first_block_of_message) message_content += ',';
+            first_block_of_message = false;
+            message_content += std::move(block_json);
+        };
         for (const auto& block : message.content) {
             if (const auto* text = std::get_if<llm::TextBlock>(&block)) {
                 std::string item = R"({"type":"text","text":)";
@@ -203,6 +215,16 @@ std::string BuildRequestBody(const llm::ChatRequest& request, bool stream) {
             }
             // ThinkingBlock: dropped on replay -- see the header comment.
         }
+        if (message_content.empty()) continue;
+        if (!has_open_message || open_role != message.role) {
+            close_open_message();
+            has_open_message = true;
+            open_role = message.role;
+            first_block_in_open = true;
+        }
+        if (!first_block_in_open) open_content += ',';
+        first_block_in_open = false;
+        open_content += message_content;
     }
     close_open_message();
     out += ']';
@@ -219,11 +241,12 @@ std::string BuildRequestBody(const llm::ChatRequest& request, bool stream) {
 
     // Top-level automatic caching for the growing conversation tail: the API
     // places this on the last cacheable block and moves it forward as
-    // `messages` grows, which is the documented pairing with the explicit
-    // system-block breakpoint above for agent loops (shared/prompt-caching.md
-    // "Automatic vs explicit breakpoints"). Two of the four allowed
-    // breakpoints per request; harmless (and simply unused) on the very
-    // first turn, when there is nothing yet worth caching here.
+    // `messages` grows, which pairs with the explicit system-block breakpoint
+    // above for agent loops (two of the four allowed breakpoints per request);
+    // harmless (and simply unused) on the very first turn, when there is
+    // nothing yet worth caching here. NOTE: this field's acceptance by the
+    // live API is unverified from this repo -- if a gateway rejects it, this
+    // is the line to remove.
     out += R"(,"cache_control":{"type":"ephemeral"})";
 
     out += '}';

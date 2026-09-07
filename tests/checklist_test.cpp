@@ -123,6 +123,39 @@ TEST_CASE("set replaces the whole list, including back to empty", "[checklist][t
     CHECK(f.store->Load("s1").empty());
 }
 
+TEST_CASE("a cleared list is removed from enumeration, not stored as an empty blob",
+          "[checklist][tool][invariant]") {
+    Fixture f;
+    auto ctx = f.Context();
+    (void)f.tool->execute(Fixture::SetInput({{{"text", "one"}}}), ctx);
+    REQUIRE_FALSE(f.store->SessionIds().empty());
+
+    (void)f.tool->execute(Fixture::SetInput({}), ctx);
+    // The empty row used to linger under its key, so the `list` RPC kept
+    // reporting a session whose checklist was gone.
+    CHECK(f.store->SessionIds().empty());
+}
+
+TEST_CASE("item count and text length are capped", "[checklist][tool]") {
+    Fixture f;
+    auto ctx = f.Context();
+
+    std::vector<nlohmann::json> too_many;
+    for (int i = 0; i < 201; ++i) too_many.push_back({{"text", "item"}});
+    const auto many = f.tool->execute(Fixture::SetInput(std::move(too_many)), ctx);
+    CHECK(many.is_error);
+
+    const auto huge = f.tool->execute(Fixture::SetInput({{{"text", std::string(5000, 'x')}}}), ctx);
+    CHECK(huge.is_error);
+
+    // Over-cap text on an update: real item, real text-length refusal.
+    (void)f.tool->execute(Fixture::SetInput({{{"text", "real"}}}), ctx);
+    const auto updated = f.tool->execute(
+        nlohmann::json{{"op", "update"}, {"id", 1}, {"text", std::string(5000, 'x')}}, ctx);
+    CHECK(updated.is_error);
+    CHECK(f.store->Load("s1")[0].text == "real");
+}
+
 TEST_CASE("checklists are per session", "[checklist][tool]") {
     Fixture f;
     auto ctx1 = f.Context("s1");

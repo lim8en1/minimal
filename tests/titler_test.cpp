@@ -152,6 +152,16 @@ TEST_CASE("CleanTitle produces a tab-label-shaped title", "[titler]") {
     CHECK(CleanTitle(std::string(70, 'a')).size() == 60);
 }
 
+TEST_CASE("CleanTitle drops control bytes instead of rendering them", "[titler][invariant]") {
+    using session_titler::CleanTitle;
+    // An ESC (ANSI escape) and other C0 controls in a model reply used to
+    // reach the tab bar verbatim.
+    CHECK(CleanTitle("\x1B" "[31mred bug") == "[31mred bug");
+    CHECK(CleanTitle("fix\x01" "the\x7F" "bug") == "fixthebug");
+    // Whitespace semantics unchanged.
+    CHECK(CleanTitle("fix\tthe\r\nbug") == "fix the bug");
+}
+
 TEST_CASE("RunJobNow titles from the session's own model by default", "[titler]") {
     plugins::ServiceRegistry services;
     FakeSupportService support;

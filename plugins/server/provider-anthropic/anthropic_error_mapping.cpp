@@ -21,6 +21,11 @@ struct ParsedError {
 };
 
 ParsedError ParseErrorBody(const std::string& body) {
+    // The extracted message is server-authored; cap it so no classification
+    // path can embed more than this into an exception (the HTTP path is
+    // additionally bounded by the provider's 64 KiB body cap, the SSE path
+    // only by the parser's 1 MiB line cap).
+    constexpr std::size_t kMaxMessage = 2000;
     ParsedError parsed;
     try {
         auto json = nlohmann::json::parse(body);
@@ -28,6 +33,10 @@ ParsedError ParseErrorBody(const std::string& body) {
         const auto& error = json.at("error");
         parsed.type = error.value("type", "");
         parsed.message = error.value("message", "");
+        if (parsed.message.size() > kMaxMessage) {
+            parsed.message.resize(kMaxMessage);
+            parsed.message += " …[truncated]";
+        }
         parsed.ok = true;
     } catch (const nlohmann::json::exception&) {
         // Not JSON, or not the expected shape -- caller falls back to status.
@@ -112,7 +121,16 @@ llm::LlmError ClassifyErrorEventData(std::string_view data) {
         parsed.ok && !parsed.type.empty() ? CategoryForErrorType(parsed.type) : std::nullopt;
     const llm::LlmErrorCategory category =
         by_type.value_or(llm::LlmErrorCategory::ServerError);
-    const std::string message = parsed.ok && !parsed.message.empty() ? parsed.message : std::string(data);
+    // The raw-frame fallback is capped: the frame is server/gateway-authored
+    // and bounded only by the SSE parser's 1 MiB line cap, so an unbounded
+    // embed would put a mebibyte of remote text into the exception message
+    // -- and through it, into the session error the model and user see.
+    constexpr std::size_t kMaxEmbeddedError = 2000;
+    std::string message = parsed.ok && !parsed.message.empty() ? parsed.message : std::string(data);
+    if (message.size() > kMaxEmbeddedError) {
+        message.resize(kMaxEmbeddedError);
+        message += " …[truncated]";
+    }
     return llm::LlmError(category, message);
 }
 

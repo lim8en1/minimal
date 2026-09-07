@@ -117,6 +117,14 @@ private:
         if (!entries.is_array()) {
             return Error("checklist: 'items' must be an array");
         }
+        // The list is one KV row: without a cap, a runaway model could store
+        // an unbounded blob under its own session key.
+        constexpr std::size_t kMaxItems = 200;
+        constexpr std::size_t kMaxItemTextBytes = 4000;
+        if (entries.size() > kMaxItems) {
+            return Error("checklist: 'items' is capped at " + std::to_string(kMaxItems) +
+                         " entries");
+        }
 
         std::vector<Item> items;
         items.reserve(entries.size());
@@ -130,6 +138,10 @@ private:
             item.text = entry.at("text").get<std::string>();
             if (item.text.empty()) {
                 return Error("checklist: item text must not be empty");
+            }
+            if (item.text.size() > kMaxItemTextBytes) {
+                return Error("checklist: item text is capped at " +
+                             std::to_string(kMaxItemTextBytes) + " bytes");
             }
             item.status = ItemStatus::Pending;
             if (entry.contains("status")) {
@@ -190,7 +202,12 @@ private:
                          " -- use op=view to see the current ids");
         }
         if (has_status) item->status = status;
-        if (has_text) item->text = body.at("text").get<std::string>();
+        if (has_text) {
+            item->text = body.at("text").get<std::string>();
+            if (item->text.size() > 4000) {
+                return Error("checklist: item text is capped at 4000 bytes");
+            }
+        }
 
         store_->Save(ctx.session_id, items);
         return Reply(items);

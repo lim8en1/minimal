@@ -126,6 +126,20 @@ TEST_CASE("glob translation: character classes and escapes",
     CHECK_FALSE(tools_search::IsLiteralGlob("*.md"));
 }
 
+TEST_CASE("glob translation: backslash escapes work inside character classes",
+          "[tools_search][glob_matcher][invariant]") {
+    // `\]` inside a class is a literal member, not the terminator: the old
+    // scan took the first `]` as the close, truncating the class (and
+    // mangling everything after it).
+    CHECK(Matches(*tools_search::GlobToRegex(R"([\]a].h)", GlobFlags::kNone), "].h"));
+    CHECK(Matches(*tools_search::GlobToRegex(R"([\]a].h)", GlobFlags::kNone), "a.h"));
+    CHECK_FALSE(Matches(*tools_search::GlobToRegex(R"([\]a].h)", GlobFlags::kNone), "b.h"));
+    // POSIX first-position literals still hold.
+    CHECK(Matches(*tools_search::GlobToRegex(R"([a\]b].h)", GlobFlags::kNone), "b.h"));
+    // And a plain unterminated class still fails.
+    CHECK_FALSE(tools_search::GlobToRegex(R"([a\])", GlobFlags::kNone).has_value());
+}
+
 // --- gitignore rules ---------------------------------------------------------
 
 TEST_CASE("gitignore: basename patterns match at any depth", "[tools_search][gitignore]") {

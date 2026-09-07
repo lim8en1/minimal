@@ -212,6 +212,26 @@ TEST_CASE("HtmlToText: numeric entities decode to UTF-8", "[tools_web][html_text
     CHECK(text.find("\xE2\x80\x94""dash") != std::string::npos);
 }
 
+TEST_CASE("HtmlToText: surrogates, NUL, and control entities are dropped, not emitted",
+          "[tools_web][html_text][invariant]") {
+    // A surrogate codepoint encoded as 3 raw bytes is INVALID UTF-8 (it
+    // corrupts every downstream consumer); &#0; emitted a literal NUL, which
+    // truncates C-string handling; other C0 controls have no business in the
+    // model's text. All dropped.
+    const auto surrogate = HtmlToText("&#xD800;after");
+    CHECK(surrogate.find("after") != std::string::npos);
+    CHECK(surrogate.find("\xED\xA0\x80") == std::string::npos);
+
+    const auto nul = HtmlToText("before&#0;after");
+    CHECK(nul.find("before") != std::string::npos);
+    CHECK(nul.find("after") != std::string::npos);
+    CHECK(nul.find('\0') == std::string::npos);
+
+    const auto esc = HtmlToText("&#27;[31mred");
+    CHECK(esc.find("[31mred") != std::string::npos);
+    CHECK(esc.find('\x1B') == std::string::npos);
+}
+
 TEST_CASE("HtmlToText: malformed markup does not hang or crash", "[tools_web][html_text]") {
     CHECK_NOTHROW(HtmlToText("<div><p>unterminated"));
     CHECK_NOTHROW(HtmlToText("<script>never closed"));

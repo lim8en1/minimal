@@ -223,3 +223,34 @@ TEST_CASE("ToAnthropicToolChoice: Specific without a tool_name throws", "[anthro
     llm::ToolChoiceSpec specific{llm::ToolChoiceKind::Specific, std::nullopt};
     CHECK_THROWS_AS(ToAnthropicToolChoice(specific), std::invalid_argument);
 }
+
+TEST_CASE("BuildRequestBody: a message whose content is entirely dropped is skipped",
+          "[anthropic_request][invariant]") {
+    // An assistant turn consisting only of thinking blocks (dropped on
+    // replay) serialized as "content":[] -- which the API rejects outright.
+    Fixture fixture({llm::Message{llm::Role::User, {llm::TextBlock{"hi"}}},
+                     llm::Message{llm::Role::Assistant, {llm::ThinkingBlock{"hmm", "sig"}}},
+                     llm::Message{llm::Role::User, {llm::TextBlock{"continue"}}}});
+    fixture.request.model = "claude-opus-5";
+    fixture.request.max_tokens = 1024;
+
+    const nlohmann::json body = ParseBody(fixture.request);
+    REQUIRE(body["messages"].is_array());
+    // The empty assistant message vanishes; the two user messages merge.
+    REQUIRE(body["messages"].size() == 1);
+    CHECK(body["messages"][0]["role"] == "user");
+    CHECK(body["messages"][0]["content"].size() == 2);
+}
+
+TEST_CASE("BuildRequestBody: cache_ttl rejects values the API would refuse",
+          "[anthropic_request]") {
+    Fixture fixture = BaseRequest();
+    fixture.request.system = "sys";
+    fixture.request.parameters = {{"cache_ttl", "7d"}};
+    CHECK_THROWS_AS(BuildRequestBody(fixture.request, false), std::invalid_argument);
+
+    Fixture ok = BaseRequest();
+    ok.request.system = "sys";
+    ok.request.parameters = {{"cache_ttl", "1h"}};
+    CHECK_NOTHROW(BuildRequestBody(ok.request, false));
+}

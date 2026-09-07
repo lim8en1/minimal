@@ -347,3 +347,77 @@ TEST_CASE("accumulated stream content is capped, however slowly it drips",
     }
     CHECK(threw);
 }
+
+TEST_CASE("explicit-null stream fields are tolerated like absent ones", "[openai_stream][invariant]") {
+    // value() on present-but-null throws type_error, and the resulting
+    // ParseError is NON-retryable: a proxy that emits `"index": null` (or
+    // null id/name/arguments) in a keepalive-shaped chunk would fail the
+    // whole turn instead of being ignored.
+    OpenAiStreamReassembler reassembler;
+    std::vector<llm::StreamEvent> events;
+    auto sink = CollectInto(events);
+
+    CHECK_NOTHROW(reassembler.FeedFrame(
+        R"({"id":"c","model":"m","choices":[{"delta":{"tool_calls":[)"
+        R"({"index":null,"id":null,"type":"function","function":{"name":null,"arguments":null}}]},)"
+        R"("finish_reason":null}]})",
+        sink));
+    // Nothing startable arrived: no tool-use events, no crash.
+    CHECK(events.size() == 1);  // MessageStart only
+    CHECK(reassembler.Finalize().content.empty());
+}
+
+TEST_CASE("an empty content delta does not create a phantom TextBlock", "[openai_stream]") {
+    OpenAiStreamReassembler reassembler;
+    std::vector<llm::StreamEvent> events;
+    auto sink = CollectInto(events);
+
+    REQUIRE(reassembler.FeedFrame(
+        R"({"id":"c","model":"m","choices":[{"delta":{"content":""},"finish_reason":null}]})",
+        sink));
+    // MessageStart only -- no TextDelta, no empty block.
+    CHECK(events.size() == 1);
+    CHECK(reassembler.Finalize().content.empty());
+}
+
+TEST_CASE("argument fragments that arrive before id+name are streamed at start",
+          "[openai_stream][invariant]") {
+    // They always accumulated into the final response, but the sink never saw
+    // them: the streamed tool input missed its head until the next fragment.
+    OpenAiStreamReassembler reassembler;
+    std::vector<llm::StreamEvent> events;
+    auto sink = CollectInto(events);
+
+    // Fragment FIRST (no id/name yet), then the startable delta.
+    REQUIRE(reassembler.FeedFrame(
+        R"({"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"a\":1}"}}]},"finish_reason":null}]})",
+        sink));
+    REQUIRE(reassembler.FeedFrame(
+        R"({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"read"}}]},"finish_reason":null}]})",
+        sink));
+    REQUIRE(reassembler.FeedFrame(R"({"choices":[{"delta":{},"finish_reason":"tool_calls"}]})", sink));
+
+    // MessageStart, ToolUseStart, then the buffered fragment, then stop.
+    REQUIRE(events.size() >= 4);
+    CHECK(Has<llm::ToolUseStartEvent>(events, 1));
+    CHECK(As<llm::ToolUseInputDeltaEvent>(events, 2).partial_json == R"({"a":1})");
+
+    llm::ChatResponse response = reassembler.Finalize();
+    REQUIRE(response.content.size() == 1);
+    CHECK(std::get<llm::ToolUseBlock>(response.content[0]).input == nlohmann::json{{"a", 1}});
+}
+
+TEST_CASE("a deeply nested stream chunk is refused as a parse error, not a crash",
+          "[openai_stream][invariant]") {
+    // nlohmann's parse is recursive descent with no depth limit: a hostile
+    // gateway's 1 MiB of '[' overflows the call stack. The guard refuses
+    // first.
+    OpenAiStreamReassembler reassembler;
+    std::vector<llm::StreamEvent> events;
+    auto sink = CollectInto(events);
+    const std::string deep(600, '[');
+    CHECK_THROWS_AS(reassembler.FeedFrame(deep, sink), OpenAiParseError);
+    // A legitimate deep-ish payload passes.
+    OpenAiStreamReassembler sane;
+    CHECK_NOTHROW(sane.FeedFrame(R"({"a":[[{"b":[1,2,[3]]}]]})", sink));
+}

@@ -26,17 +26,22 @@ std::string ModelsUrl(const std::string& base_url) {
 
 // The first numeric field present, in per-server precedence order. All three
 // names mean the same thing; the winner is whichever the backend serves.
+// A non-POSITIVE value is treated as absent: a negative context window is a
+// misparse or a hostile entry, and storing it would make the compaction
+// trigger fire on every turn (occupancy < negative threshold is never true).
 std::optional<std::int64_t> ContextWindow(const json& entry) {
     static const char* kFields[] = {"context_length", "max_model_len"};
     for (const char* field : kFields) {
         if (entry.contains(field) && entry.at(field).is_number()) {
-            return entry.at(field).get<std::int64_t>();
+            const std::int64_t value = entry.at(field).get<std::int64_t>();
+            if (value > 0) return value;
         }
     }
     if (entry.contains("meta") && entry.at("meta").is_object()) {
         const json& meta = entry.at("meta");
         if (meta.contains("n_ctx_train") && meta.at("n_ctx_train").is_number()) {
-            return meta.at("n_ctx_train").get<std::int64_t>();
+            const std::int64_t value = meta.at("n_ctx_train").get<std::int64_t>();
+            if (value > 0) return value;
         }
     }
     return std::nullopt;
