@@ -379,20 +379,29 @@ private:
     ToolResult View(const nlohmann::json& input, const std::filesystem::path& path) {
         std::int64_t raw_offset = 1;
         std::int64_t raw_limit = settings_.read_default_limit_lines;
-        if (auto it = input.find("view_range");
-            it != input.end() && it->is_array() && it->size() == 2) {
-            // The shape is checked but the ELEMENTS were not, so
-            // `view_range: ["a", "b"]` threw type_error straight out of the
-            // tool. Reported instead: a malformed range is the model's mistake
-            // to see and correct. The arithmetic is int64: `end - offset + 1`
-            // in int was signed-overflow UB for far-apart values, and the
-            // wrapped negative landed in read_window as "unlimited".
-            if (!(*it)[0].is_number_integer() || !(*it)[1].is_number_integer()) {
-                return Error("view_range must be two integers");
+        if (auto it = input.find("view_range"); it != input.end()) {
+            // The SHAPE is checked too, not just the elements: a non-array or
+            // wrong-length view_range used to be silently ignored, and the
+            // model read the default window believing it had controlled the
+            // range. A malformed range is the model's mistake to see and
+            // correct. The arithmetic is int64: `end - offset + 1` in int was
+            // signed-overflow UB for far-apart values, and the wrapped
+            // negative landed in read_window as "unlimited".
+            if (!it->is_array() || it->size() != 2 || !(*it)[0].is_number_integer() ||
+                !(*it)[1].is_number_integer()) {
+                return Error("view_range must be an array of exactly two integers [start, end]");
             }
             raw_offset = (*it)[0].get<std::int64_t>();
             const std::int64_t end = (*it)[1].get<std::int64_t>();
-            raw_limit = (end < raw_offset) ? 0 : end - raw_offset + 1;
+            if (end < raw_offset) {
+                // An inverted range is an error, not "unlimited": the old
+                // mapping through raw_limit = 0 produced a full read_max_lines
+                // window starting at `start` -- a huge read the model had not
+                // asked for, reported as an ordinary clamped read.
+                return Error("view_range end (" + std::to_string(end) +
+                             ") is before start (" + std::to_string(raw_offset) + ")");
+            }
+            raw_limit = end - raw_offset + 1;
         }
         int offset = 1;
         int limit = settings_.read_default_limit_lines;
@@ -428,7 +437,13 @@ private:
             return Error("missing required string field: old_str");
         }
         const auto old_str = input.at("old_str").get<std::string>();
-        const auto new_str = input.value("new_str", std::string{});
+        // Checked, not value(): a present-but-wrong-typed new_str (a number,
+        // an object) threw nlohmann's type_error out of the tool instead of
+        // reaching the model as a correctable field error.
+        if (!input.contains("new_str") || !input.at("new_str").is_string()) {
+            return Error("new_str must be a string (use \"\" to delete old_str)");
+        }
+        const auto new_str = input.at("new_str").get<std::string>();
         const auto outcome =
             FileEditor::StrReplace(path, old_str, new_str, settings_.edit_max_editable_file_bytes);
         if (!outcome.ok) return Error(outcome.error);
@@ -442,8 +457,17 @@ private:
         if (!input.contains("insert_text") || !input.at("insert_text").is_string()) {
             return Error("missing required string field: insert_text");
         }
+        // Read as int64 and range-checked BEFORE narrowing: a value beyond int
+        // range truncated/wrapped in get<int>(), and a wrapped line number
+        // could pass FileEditor::Insert's own bounds check as a VALID-looking
+        // line.
+        const std::int64_t insert_line = input.at("insert_line").get<std::int64_t>();
+        if (insert_line < 0 ||
+            insert_line > static_cast<std::int64_t>(std::numeric_limits<int>::max())) {
+            return Error("insert_line is out of range");
+        }
         const auto outcome =
-            FileEditor::Insert(path, input.at("insert_line").get<int>(),
+            FileEditor::Insert(path, static_cast<int>(insert_line),
                                 input.at("insert_text").get<std::string>(),
                                 settings_.edit_max_editable_file_bytes);
         if (!outcome.ok) return Error(outcome.error);

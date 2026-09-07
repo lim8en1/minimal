@@ -16,6 +16,7 @@
 namespace minimal::client {
 
 ftxui::Component MakeKeymapHelpView(const std::unordered_map<std::string, std::string>& bindings,
-                                    const Theme& theme, std::function<void()> on_close);
+                                    const Theme& theme, std::function<void()> on_close,
+                                    std::function<void()>* reset_state = nullptr);
 
 }  // namespace minimal::client

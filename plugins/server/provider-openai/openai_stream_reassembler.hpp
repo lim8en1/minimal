@@ -52,6 +52,11 @@ private:
         enum class Kind { Text, ToolCall } kind;
         std::string text;                       // Kind::Text
         std::string id, name, arguments_json;   // Kind::ToolCall
+        // Kind::ToolCall: argument fragments that arrived BEFORE id+name made
+        // the call startable. They accumulate into arguments_json regardless,
+        // but the sink only sees ToolUseInputDelta after ToolUseStart -- these
+        // are flushed as one delta at start so streamed output is complete.
+        std::string pre_start_arguments;
         bool started = false;                   // Kind::ToolCall: ToolUseStartEvent already emitted
     };
 

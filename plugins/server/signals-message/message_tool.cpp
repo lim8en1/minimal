@@ -92,14 +92,18 @@ public:
                                " does not exist, is not running, or did not subscribe to "
                                "\"sessions\" when it started (it is not accepting signals)"};
             case agent::SignalDelivery::kInvalid:
-                // The self-address case is the reachable one; say why it is a
-                // refusal, not a failure.
+                // The router refuses for: empty sender/target/content, or
+                // self-address. This tool has already validated its own
+                // inputs (non-empty target and content), so the reachable
+                // causes here are an empty CALLER id or self-address -- the
+                // old fallback message ("needs a target and content")
+                // described inputs this tool had already checked.
                 return target == ctx.session_id
                            ? Error("message_session cannot target the calling session "
                                    "itself -- self-reminders are a timer's job, not a "
                                    "signal")
-                           : Error("message_session needs a target session id and "
-                                   "non-empty content");
+                           : Error("message_session could not identify the calling session "
+                                   "(empty caller id) -- the signal was refused");
             case agent::SignalDelivery::kDropped:
                 return Error("session " + target +
                              " is terminating; the signal was not staged");

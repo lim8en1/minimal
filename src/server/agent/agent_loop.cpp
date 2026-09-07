@@ -67,6 +67,14 @@ void CapToolResult(llm::ToolResultBlock& block, std::int64_t max_bytes) {
 // a structural cut impossible in the first place. Returns false when nothing
 // large enough to be worth eliding remains (every result is already small),
 // which is the caller's signal to fall back to the genuine last resort.
+//
+// DIVERGENCE NOTE: unlike the structural path, elision mutates only the
+// working history_ -- the persisted transcript keeps the full bytes (there is
+// no message-rewrite API, and no summary to anchor a checkpoint to). A resume
+// therefore regrows the elided content. That self-heals: the resume re-seeds
+// occupancy from the regrown context, the trigger re-fires, and this path
+// runs again -- the cost is one oversized request between resume and the next
+// compaction cycle, not unbounded growth.
 constexpr std::int64_t kElisionMinSizeToBother = 1000;  // below this, eliding buys nothing
 constexpr std::int64_t kElisionTargetBytes = 500;
 
@@ -148,7 +156,11 @@ bool AgentLoop::SleepForBackoff(int attempt,
     // full jitter (drawing from [0, ceiling]) can legally return zero, which
     // makes "the retry waited" unassertable in a single run and leaves a real
     // 429 answered immediately every so often. Half the ceiling is the floor.
-    const auto ceiling = std::min(config_.retry_base_delay * (1 << attempt), config_.retry_max_delay);
+    // `attempt` tracks retries for a configured max_retries that could exceed
+    // 31; shifting that far is UB. Anything past 2^30 ms is already far beyond
+    // retry_max_delay, so the min() below clamps it regardless.
+    const auto ceiling =
+        std::min(config_.retry_base_delay * (1 << std::min(attempt, 30)), config_.retry_max_delay);
     const std::int64_t half = ceiling.count() / 2;
     std::uniform_int_distribution<std::int64_t> pick(0, ceiling.count() - half);
     std::chrono::milliseconds delay{half + pick(jitter_)};

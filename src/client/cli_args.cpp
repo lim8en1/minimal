@@ -21,9 +21,10 @@ bool LooksLikeFlag(std::string_view token) { return token.size() > 1 && token.fr
 std::string ExpandTilde(std::string_view path) {
     if (path.empty() || path.front() != '~') return std::string(path);
     if (path.size() > 1 && path[1] != '/') return std::string(path);  // ~user is not handled
-    const char* home = std::getenv("HOME");
-    if (home == nullptr || *home == '\0') return std::string(path);
-    return std::string(home) + std::string(path.substr(1));
+    // LookupEnv, not raw getenv: an empty HOME is unset, not a resolved value.
+    const auto home = common::LookupEnv("HOME");
+    if (!home) return std::string(path);
+    return *home + std::string(path.substr(1));
 }
 
 }  // namespace
@@ -69,7 +70,15 @@ std::string ResolveServerTarget(std::string_view value) {
                              expanded.rfind("../", 0) == 0 ||
                              (expanded.size() >= 5 && expanded.compare(expanded.size() - 5, 5,
                                                                        ".sock") == 0);
-    if (!path_shaped) return expanded;
+    if (!path_shaped) {
+        // A bare word ("myserver") is NOT connectable: handed to gRPC as-is
+        // it resolves as DNS and can never reach a local socket. Fail here
+        // with the shape that works, rather than after a mysterious timeout.
+        throw std::runtime_error(
+            "'" + std::string(value) +
+            "' is not a usable --server target: use a socket path (absolute, ./x, "
+            "../x or *.sock), a unix://path target, or host:port");
+    }
 
     // Relative paths are resolved here rather than handed to gRPC, which would
     // interpret them against its own notion of the cwd rather than the user's.
@@ -245,10 +254,28 @@ ParsedArgs ParseArgs(int argc, const char* const* argv) {
                 if (comma == std::string_view::npos) break;
                 rest = rest.substr(comma + 1);
             }
-        } else if (name == "--dangerously-bypass") {
-            parsed.headless.bypass = true;
-        } else if (name == "--no-autospawn") {
-            parsed.headless.autospawn = false;
+        } else if (name == "--dangerously-bypass" || name == "--no-autospawn") {
+            // Boolean flags honor the inline form too: `--dangerously-bypass=false`
+            // used to DISCARD the inline value and enable the bypass anyway --
+            // the one direction where silence is dangerous.
+            bool flag_value = true;
+            if (has_inline) {
+                if (inline_value == "true") {
+                    flag_value = true;
+                } else if (inline_value == "false") {
+                    flag_value = false;
+                } else {
+                    parsed.action = ParsedArgs::Action::Error;
+                    parsed.error = std::string(name) + "= expects true or false, got '" +
+                                   std::string(inline_value) + "'";
+                    return parsed;
+                }
+            }
+            if (name == "--dangerously-bypass") {
+                parsed.headless.bypass = flag_value;
+            } else {
+                parsed.headless.autospawn = !flag_value;
+            }
         } else {
             // NOT IGNORED. Dropping unrecognised arguments is what let the -p bug
             // above stay quiet: the swallowed target and the real prompt both

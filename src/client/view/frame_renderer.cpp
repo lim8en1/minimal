@@ -108,7 +108,13 @@ ftxui::Element FrameRenderer::Render() {
     // the light TabSnapshot.tools; nothing renders other tabs' heavy data.)
     if (!focused_details.session_id.empty() || !focused.empty()) {
         const auto& snap = focused_details;
-        TabUi& ui = deps_.tab_ui[focused];
+        // find(), not operator[]: Render() is documented side-effect-free, and
+        // operator[] would default-create a TabUi for any focused id Maintain
+        // has not seen yet -- a silent mutation of shared state from the
+        // render path.
+        const auto ui_it = deps_.tab_ui.find(focused);
+        if (ui_it == deps_.tab_ui.end()) return emptyElement();
+        TabUi& ui = ui_it->second;
 
         // The tab body: the exclusive chat surface when a plugin claimed
         // the slot, the core chat view otherwise. The surface's component
@@ -191,7 +197,8 @@ ftxui::Element FrameRenderer::Render() {
                 // right for this same race, not a null-deref risk.
                 if (!ui.chat) {
                     ui.chat = std::make_unique<ChatView>(deps_.theme, deps_.message_registry,
-                                                         deps_.renderer_registry);
+                                                         deps_.renderer_registry,
+                                                         deps_.toggle_collapse_hint);
                 }
                 rows.push_back(ui.chat->Render(snap, ui.live_text_streams) | yframe |
                                vscroll_indicator | flex);

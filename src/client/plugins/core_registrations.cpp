@@ -109,7 +109,8 @@ Element RenderThinking(const ChatRow& row, const Theme& theme, const RowRenderCo
     if (ctx.collapsed) {
         return hbox({text("▎thinking ") | color(theme.ColorFor("thinking")) | dim,
                      text("(" + std::to_string(static_cast<int>(row.text.size())) +
-                          " chars, collapsed -- alt+c to expand)") |
+                          " chars, collapsed -- " + ctx.toggle_collapse_hint +
+                          " to expand)") |
                          color(theme.ColorFor("thinking")) | dim});
     }
     return vbox({
@@ -157,7 +158,8 @@ Element RenderToolActivity(const ChatRow& row, const Theme& theme, const RowRend
         // read as a broken render, not as "running").
         line.push_back(text(" ·") | color(theme.ColorFor("system_message")) | dim);
     }
-    if (ctx.collapsed) line.push_back(text(" (collapsed -- alt+c to expand)") | dim);
+    if (ctx.collapsed)
+        line.push_back(text(" (collapsed -- " + ctx.toggle_collapse_hint + " to expand)") | dim);
     Elements parts;
     parts.push_back(hbox(std::move(line)));
 

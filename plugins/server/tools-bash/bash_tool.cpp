@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cerrno>
 #include <chrono>
+
 #include <cstring>
 #include <filesystem>
 #include <map>
@@ -30,6 +31,12 @@ using tools::ToolResult;
 using tools::ToolSpec;
 
 ToolResult Error(std::string message) { return ToolResult{true, std::move(message)}; }
+
+// Ceiling on the post-kill reap wait. SIGKILL lands in milliseconds for any
+// runnable process; the ceiling exists for the D-state corner (see below),
+// where no duration would ever be long enough -- so it is generous, not
+// exhaustive.
+constexpr int kPostKillReapMs = 5000;
 
 std::int64_t ElapsedMs(std::chrono::steady_clock::time_point started) {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -162,11 +169,35 @@ RunOutcome RunProcess(const LaunchedProcess& proc, const BashSettings& settings,
     }
 
     if (!reaped) KillProcessGroup(proc.pid);
-    // Blocking waitpid after SIGKILL is bounded: the target is dead or dying.
-    // A cancelled run that never reaped still needs the child gone before the
-    // worker moves on -- a leaked zombie holds a slot in the process table
-    // forever.
-    while (waitpid(proc.pid, &status, 0) < 0 && errno == EINTR) {
+    // "Bounded by SIGKILL" (the old blocking waitpid's justification) does not
+    // hold for a process stuck in uninterruptible disk sleep (D state): the
+    // signal stays pending and the blocking call would park the session worker
+    // forever. Poll WNOHANG with a generous ceiling instead -- the goal (no
+    // leaked zombie) survives, the unbounded hang does not. An already-reaped
+    // child skips this entirely (waitpid would only report ECHILD).
+    if (!reaped) {
+        const auto kill_deadline =
+            std::chrono::steady_clock::now() + std::chrono::milliseconds(kPostKillReapMs);
+        while (std::chrono::steady_clock::now() < kill_deadline) {
+            const pid_t rc = waitpid(proc.pid, &status, WNOHANG);
+            if (rc == proc.pid) {
+                reaped = true;
+                break;
+            }
+            if (rc < 0 && errno == EINTR) continue;
+            if (rc < 0) {
+                // ECHILD etc: nothing left to reap; status is meaningless.
+                outcome.reap_error = true;
+                break;
+            }
+            poll(nullptr, 0, 10);
+        }
+        if (!reaped && !outcome.reap_error) {
+            // Kill did not land within the ceiling (D state): report the
+            // status as undetermined instead of hanging, and instead of
+            // reading the zeroed status as a clean exit.
+            outcome.reap_error = true;
+        }
     }
     ForgetPgid(proc.pid);
 

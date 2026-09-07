@@ -184,10 +184,11 @@ int main(int argc, char** argv) {
     } catch (const std::exception&) {
     }
 
-    // LOGGING FIRST, before anything logs. DefaultLogger() caches spdlog's
-    // default on first use for the process lifetime, so this has to land ahead
-    // of it -- and ahead of plugin load, which is the first thing with anything
-    // to say.
+    // LOGGING FIRST, before anything logs -- ahead of plugin load, which is
+    // the first thing with anything to say. (DefaultLogger() no longer
+    // caches: it resolves spdlog's default per call, so ConfigureLogging's
+    // swap is picked up by every later call. Ordering still matters for
+    // "nothing logs before the sinks exist", not for caching.)
     {
         minimal::common::LoggingOptions logging;
         if (settings_preload) {
@@ -200,6 +201,11 @@ int main(int argc, char** argv) {
             // The documented home is the DATA dir, beside session_db_path --
             // not the config dir, which is for things the user edits.
             logging.path = (minimal::common::DataDir() / "minimal.log").string();
+        } else if (std::filesystem::path(logging.path).is_relative()) {
+            // A relative logging.path resolved against the cwd -- which for
+            // an auto-spawned server is "/" (SpawnDetached chdir's there),
+            // landing the log at /<name>. Anchor it to the data dir instead.
+            logging.path = (minimal::common::DataDir() / logging.path).string();
         }
         if (const auto problem = minimal::common::ConfigureLogging(logging); !problem.empty()) {
             std::fprintf(stderr, "warning: %s\n", problem.c_str());
@@ -255,11 +261,16 @@ int main(int argc, char** argv) {
     // already-destroyed dispatcher.
     minimal::hooks::HookDispatcher hook_dispatcher(minimal::common::DefaultLogger());
     minimal::agent::SessionObserverRegistry observers(minimal::common::DefaultLogger());
-    // The observer-to-hook bridge, registered FIRST so a user's hook action on
-    // a lifecycle point runs before plugin observers reacting to the same
-    // event. It converts session_created/session_ended/post_tool_use/stop onto
-    // their EmitAsync points -- the observe-only hook points need no dispatch
-    // machinery of their own, by design.
+    // The observer-to-hook bridge. NOTE on ordering: the old comment claimed
+    // "registered FIRST so a user's hook action runs before plugin observers"
+    // -- but the bridge converts events onto EmitAsync, which only ENQUEUES
+    // onto the dispatcher's own thread, while plugin observers run inline in
+    // the registry. No registration order can guarantee script execution
+    // lands first; a full hook queue drops the emission entirely. The
+    // registration order is therefore merely conventional. It converts
+    // session_created/session_ended/post_tool_use/stop onto their EmitAsync
+    // points -- the observe-only hook points need no dispatch machinery of
+    // their own, by design.
     observers.Register(std::make_shared<minimal::hooks::HookObserverBridge>(hook_dispatcher));
     // Exclusive: at most one plugin provides the connection policy. An empty
     // registry is the pass-through default -- no authentication, matching the
@@ -708,7 +719,19 @@ int main(int argc, char** argv) {
     reaper_config.client_idle_for = [&service] { return service.client_idle_for(); };
     reaper_config.on_idle_expired = [&server] { server.RequestShutdown(); };
     reaper_config.periodic_checkpoint = [&session_db] {
-        (void)session_db->MaybeRunPassiveCheckpoint();
+        using CheckpointOutcome = minimal::session::SessionDatabase::CheckpointOutcome;
+        const CheckpointOutcome outcome = session_db->MaybeRunPassiveCheckpoint();
+        if (outcome != CheckpointOutcome::kFailed) return;
+        // A checkpoint failure used to be silent; the only durable symptom was
+        // a WAL that never shrank. Log at 1 then every doubling (1, 2, 4, 8...)
+        // so a persistently pinned WAL is visible without a line per tick.
+        const auto failures = session_db->checkpoint_failures();
+        if ((failures & (failures - 1)) == 0) {
+            minimal::common::DefaultLogger().warn(
+                "session database: WAL checkpoint failed ({} consecutive); the WAL keeps "
+                "growing until one succeeds -- an out-of-process reader may be pinning it",
+                failures);
+        }
     };
     sessions.set_reaper_config(std::move(reaper_config));
 

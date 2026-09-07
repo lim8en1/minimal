@@ -28,10 +28,27 @@ CompactionTriggerSettings ParseCompactionTrigger(const nlohmann::json& memory) {
         // Still honoured so an existing settings.json does not silently stop
         // compacting; 0 keeps its old meaning of "never". The new object wins
         // when both are present.
-        const std::int64_t legacy = memory.value("context_compaction_trigger_tokens", 0);
-        if (legacy > 0) {
-            result.kind = CompactionTriggerSettings::Kind::FixedTokens;
-            result.tokens = legacy;
+        if (memory.contains("context_compaction_trigger_tokens")) {
+            // Explicit reads, not value()-with-default: a wrong-typed or
+            // negative legacy value must fail loudly like the new-object path
+            // does, not silently fall out as Kind::Never ("never compact")
+            // -- the one misconfiguration whose symptom is a context that
+            // quietly grows until the backend starts rejecting requests.
+            const auto& legacy_value = memory.at("context_compaction_trigger_tokens");
+            if (!legacy_value.is_number_integer()) {
+                throw std::runtime_error(
+                    "settings.json: memory.context_compaction_trigger_tokens must be an integer");
+            }
+            const std::int64_t legacy = legacy_value.get<std::int64_t>();
+            if (legacy < 0) {
+                throw std::runtime_error(
+                    "settings.json: memory.context_compaction_trigger_tokens must not be "
+                    "negative");
+            }
+            if (legacy > 0) {
+                result.kind = CompactionTriggerSettings::Kind::FixedTokens;
+                result.tokens = legacy;
+            }
         }
         return result;
     }

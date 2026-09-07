@@ -206,7 +206,11 @@ struct State {
             const bool is_dir = type == std::filesystem::file_type::directory;
 
             const auto filename = path.filename();
-            if (is_dir && (filename == ".git" || filename == ".hg")) continue;
+            // `.git` is skipped whatever it is: a DIRECTORY in a normal
+            // checkout, but a plain FILE in a git worktree (containing
+            // "gitdir: ...") -- walking it as a regular file reported
+            // internal bookkeeping as a search result.
+            if (filename == ".git" || filename == ".hg") continue;
 
             const std::string child_rel =
                 frame.rel.empty() ? filename.generic_string()

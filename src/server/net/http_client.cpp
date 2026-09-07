@@ -197,6 +197,13 @@ int XferInfoCallback(void* clientp, curl_off_t /*dltotal*/, curl_off_t dlnow, cu
             throw HttpError(HttpErrorKind::Timeout, "stream idle timeout exceeded");
         case CURLE_OPERATION_TIMEDOUT:
             throw HttpError(HttpErrorKind::Timeout, curl_easy_strerror(code));
+        case CURLE_FILESIZE_EXCEEDED:
+            // MAXFILESIZE_LARGE's abort carried no message of its own: it fell
+            // to the generic curl_easy_strerror ("Exceeded the maximum amount
+            // of..."), unrecognizable next to Get's named limit error and
+            // unclassifiable for retry decisions. Name it.
+            throw HttpError(HttpErrorKind::Other,
+                            "response body exceeded 64 MiB (MAXFILESIZE abort)");
         case CURLE_COULDNT_CONNECT:
         case CURLE_COULDNT_RESOLVE_HOST:
         case CURLE_COULDNT_RESOLVE_PROXY:
@@ -256,6 +263,16 @@ HttpResponse ConfigureAndPerform(CURL* handle, const HttpRequest& request, Mode 
 
     SListGuard headers_guard;
     for (const auto& header : request.headers) {
+        // CR/LF in a header name or value is request smuggling by another
+        // name: curl_slist entries are raw "name: value" lines, so an embedded
+        // newline would inject an extra request line or header. Headers come
+        // from config and provider code -- this is defense in depth, the same
+        // screening the response side applies to Set-Cookie/session ids.
+        if (header.name.find_first_of("\r\n") != std::string::npos ||
+            header.value.find_first_of("\r\n") != std::string::npos) {
+            throw HttpError(HttpErrorKind::Other,
+                            "request header '" + header.name + "' contains CR or LF");
+        }
         // curl_slist_append returns NULL on allocation failure; assigning it
         // into the guard would free nothing (the old list leaks) and the
         // transfer would run header-less. Named failure instead.

@@ -6,6 +6,7 @@
 #include "anthropic_request.hpp"
 #include "anthropic_response.hpp"
 #include "anthropic_stream_reassembler.hpp"
+#include "minimal/llm/json_depth.hpp"
 #include "minimal/net/sse_parser.hpp"
 
 namespace minimal::provider_anthropic {
@@ -73,6 +74,9 @@ llm::ChatResponse AnthropicProvider::Complete(const llm::ChatRequest& request) {
     }
 
     try {
+        if (!llm::JsonDepthWithinLimit(http_response.body)) {
+            throw AnthropicParseError("response exceeds the JSON nesting limit");
+        }
         return ParseNonStreamingResponse(nlohmann::json::parse(http_response.body));
     } catch (const AnthropicParseError& error) {
         RethrowParseErrorAsLlmError(error);
@@ -141,6 +145,15 @@ llm::ChatResponse AnthropicProvider::StreamComplete(const llm::ChatRequest& requ
                 // reassembler's job is the happy path).
                 if (frame.event == "error") {
                     throw ClassifyErrorEventData(frame.data);
+                }
+                // Keepalives and other non-data frames: a bare empty `data:`
+                // line. json::parse("") throws, and the resulting ParseError
+                // is NON-retryable -- a proxy that pings between chunks would
+                // turn the whole turn into a hard failure. An empty payload
+                // carries nothing to reassemble; skip it before parsing. (The
+                // exact guard provider-openai has always had.)
+                if (frame.data.find_first_not_of(" \t\r\n") == std::string::npos) {
+                    continue;
                 }
                 if (!reassembler.FeedFrame(frame.data, sink)) {
                     cancelled_by_sink = true;

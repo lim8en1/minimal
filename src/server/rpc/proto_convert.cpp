@@ -386,7 +386,12 @@ llm::Message FromProto(const v1::Message& message) {
         if (auto converted = FromProto(block)) {
             out.content.push_back(std::move(*converted));
         } else {
-            common::DefaultLogger().warn("proto_convert: dropped content block with unset oneof");
+            // nullopt here covers BOTH the unset case and an UNKNOWN future
+            // block case (the inner switch matches neither); the old message
+            // claimed "unset" for every drop.
+            common::DefaultLogger().warn(
+                "proto_convert: dropped content block (unset or unknown oneof case {})",
+                static_cast<int>(block.block_case()));
         }
     }
     return out;

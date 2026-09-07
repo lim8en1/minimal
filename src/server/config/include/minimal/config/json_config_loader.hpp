@@ -6,6 +6,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <system_error>
 
 #include <nlohmann/json.hpp>
 
@@ -38,7 +39,13 @@ T LoadJsonConfig(const std::filesystem::path& path, const std::string& label,
     std::ifstream in(path);
     if (!in) {
         if (absence == AbsencePolicy::kThrow) {
-            throw std::runtime_error(label + ".json not found: " + path.string());
+            // Distinguish the failure: errno says whether the file is truly
+            // absent or present-but-unopenable (permission denied, a
+            // directory, ...). Reporting every open failure as "not found"
+            // sent the operator chasing a missing file that existed.
+            const std::error_code ec(errno, std::generic_category());
+            throw std::runtime_error(label + ".json could not be opened (" + ec.message() +
+                                     "): " + path.string());
         }
         return T{};
     }

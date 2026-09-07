@@ -68,6 +68,11 @@ public:
 
         const std::vector<StatusSegment>& status_format;
         std::vector<plugins::PluginViewEntry>& plugin_views;
+
+        // The resolved chat.toggle_collapse binding spec, passed through to
+        // ChatView so row-renderer hints follow the user's keymap instead of
+        // a hardcoded "alt+c".
+        std::string toggle_collapse_hint = "alt+c";
     };
 
     explicit FrameRenderer(Dependencies deps);

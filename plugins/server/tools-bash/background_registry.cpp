@@ -23,18 +23,62 @@ constexpr int kPollSliceMs = 100;
 // blocked; the watcher is not, and a slower slice changes nothing observable.
 constexpr int kReapSliceMs = 25;
 
-// Kills the group on expiry or deadline, then reaps blocking -- bounded, since
-// the target has SIGKILL pending.
-int ReapAfterKill(pid_t pid) {
+// Kills the group, then reaps with a BOUND. "Bounded by SIGKILL" (the old
+// blocking waitpid's justification) does not hold for a process stuck in
+// uninterruptible disk sleep (D state): SIGKILL stays pending indefinitely
+// and the blocking call would park the watcher thread forever. Poll WNOHANG
+// with a generous ceiling instead; past it, `reaped` stays false and the
+// caller reports the status as undetermined rather than hanging.
+constexpr int kPostKillReapMs = 5000;
+int ReapAfterKill(pid_t pid, bool& reaped) {
     KillProcessGroup(pid);
     int status = 0;
-    while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(kPostKillReapMs);
+    while (std::chrono::steady_clock::now() < deadline) {
+        const pid_t rc = waitpid(pid, &status, WNOHANG);
+        if (rc == pid) {
+            reaped = true;
+            break;
+        }
+        if (rc < 0 && errno == EINTR) continue;
+        if (rc < 0) break;  // ECHILD: nothing to reap; caller flags it
+        poll(nullptr, 0, kReapSliceMs);
     }
     return status;
 }
 
 bool StateIsRunning(BackgroundTaskEvent::State state) {
     return state == BackgroundTaskEvent::State::kStarted;
+}
+
+// Finished records are retained for /tasks visibility, but unboundedly: a
+// long-lived session that runs thousands of background tasks kept every record
+// forever (the only removal was whole-session teardown). Cap them, dropping
+// the OLDEST finished records first; running records are never touched.
+constexpr std::size_t kMaxFinishedRecordsPerSession = 32;
+
+bool StateIsRunningLocked(const std::shared_ptr<BackgroundTaskRegistry::TaskState>& task) {
+    return StateIsRunning(
+        static_cast<BackgroundTaskEvent::State>(task->state.load(std::memory_order_acquire)));
+}
+
+void PruneFinishedLocked(std::vector<std::shared_ptr<BackgroundTaskRegistry::TaskState>>& tasks) {
+    std::size_t finished = 0;
+    for (const auto& task : tasks) {
+        if (!StateIsRunningLocked(task)) ++finished;
+    }
+    std::size_t excess = finished > kMaxFinishedRecordsPerSession
+                             ? finished - kMaxFinishedRecordsPerSession
+                             : 0;
+    if (excess == 0) return;
+    tasks.erase(std::remove_if(tasks.begin(), tasks.end(),
+                               [&excess](const std::shared_ptr<BackgroundTaskRegistry::TaskState>& task) {
+                                   if (excess == 0 || StateIsRunningLocked(task)) return false;
+                                   --excess;
+                                   return true;
+                               }),
+                tasks.end());
 }
 
 // The watcher. Detached; owns its state through shared_ptr/owned copies, so a
@@ -148,7 +192,14 @@ void WatchTaskImpl(std::shared_ptr<BackgroundTaskRegistry::TaskState> task,
     }
     // An ECHILD reap is the one not-killed path where the group must not be
     // killed either: the pid is already gone, and the status is unknowable.
-    if (!reaped && !reap_error) wait_status = ReapAfterKill(proc.pid);
+    bool killed_and_reaped = false;
+    if (!reaped && !reap_error) wait_status = ReapAfterKill(proc.pid, killed_and_reaped);
+    if (!reaped && !reap_error && !killed_and_reaped) {
+        // The kill did not land within the post-kill reap ceiling (D state).
+        // wait_status is meaningless; classify as failed rather than reading
+        // 0 as a clean exit -- and the watcher still ends, bounded.
+        reap_error = true;
+    }
     // Reaped (or killed and reaped): the pgid is dead and leaves the sweep set.
     ForgetPgid(proc.pid);
 
@@ -300,7 +351,8 @@ void MarkFailedQuietly(const std::shared_ptr<BackgroundTaskRegistry::TaskState>&
 // reaped normally (e.g. out of the result injection) lands here as no-ops.
 void ContainOrphanedTask(pid_t pid) {
     try {
-        ReapAfterKill(pid);  // SIGKILLs the group, reaps bounded
+        bool reaped = false;
+        ReapAfterKill(pid, reaped);  // SIGKILLs the group, reaps bounded
     } catch (...) {
     }
     try {
@@ -349,6 +401,12 @@ std::optional<BackgroundTaskRegistry::StartedTask> BackgroundTaskRegistry::Start
     // Over the limit is an ERROR THE MODEL ADAPTS TO, not a queue it blocks
     // in -- the same ruling as max_concurrent_subagents. A tool that hangs is
     // a turn that never ends.
+    //
+    // start_mutex_ closes the check-then-act gap: the check and the push
+    // below span a fork(), and two concurrent Starts could both pass the
+    // check before either pushed. (A task FINISHING between the two only
+    // lowers the count -- the safe direction -- so this lock is sufficient.)
+    std::lock_guard<std::mutex> start_lock(start_mutex_);
     const std::size_t running = CountRunning(session_id);
     if (running >= static_cast<std::size_t>(settings.max_background_tasks)) {
         *error = "background task limit reached (" + std::to_string(settings.max_background_tasks) +
@@ -372,6 +430,7 @@ std::optional<BackgroundTaskRegistry::StartedTask> BackgroundTaskRegistry::Start
     {
         std::lock_guard<std::mutex> lock(mutex_);
         tasks_[session_id].push_back(task);
+        PruneFinishedLocked(tasks_[session_id]);
     }
 
     // STARTED goes out before any output delta can (the watcher does not exist
@@ -411,7 +470,8 @@ std::optional<BackgroundTaskRegistry::StartedTask> BackgroundTaskRegistry::Start
         std::thread(WatchTask, task, proc, settings, timeout_ms, std::move(handles)).detach();
     } catch (...) {
         try {
-            ReapAfterKill(proc.pid);  // SIGKILLs the group, reaps bounded
+            bool reaped = false;
+            ReapAfterKill(proc.pid, reaped);  // SIGKILLs the group, reaps bounded
         } catch (...) {
         }
         try {

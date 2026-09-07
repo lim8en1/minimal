@@ -61,6 +61,14 @@ Server::Server(SessionServiceImpl& service, std::filesystem::path socket_path,
     }
 
     grpc::ServerBuilder builder;
+    // EXPLICIT message limits, symmetric at 64 MiB to match the tool-output
+    // cap every producer already applies. The gRPC defaults were asymmetric
+    // and implicit: receive capped at 4 MB (a large tool_use input or a fat
+    // rewind payload failed with an opaque RESOURCE_EXHAUSTED), send
+    // unlimited (a runaway response was bounded by nothing on the wire).
+    constexpr int kMaxMessageBytes = 64 * 1024 * 1024;
+    builder.SetMaxReceiveMessageSize(kMaxMessageBytes);
+    builder.SetMaxSendMessageSize(kMaxMessageBytes);
     int selected_port = 0;
     builder.AddListeningPort(SocketTarget(socket_path_), grpc::InsecureServerCredentials(),
                              &selected_port);
@@ -145,7 +153,16 @@ void Server::RequestShutdown() {
 
 void Server::Shutdown() {
     RequestShutdown();
-    if (server_ != nullptr) server_->Shutdown();
+    if (server_ != nullptr) {
+        // Deadline-bounded even here. The deadline-free overload waits for
+        // EVERY in-flight RPC to drain, and this runs from ~Server(): a
+        // flow-control-blocked Write to a deaf client -- the same wedge the
+        // Wait() path guards against with a grace deadline -- would hang the
+        // destructor (and therefore process exit) indefinitely. In-flight
+        // work gets the same grace it gets on the Wait() path; past it, the
+        // cancellation fires.
+        server_->Shutdown(std::chrono::system_clock::now() + shutdown_grace_);
+    }
 }
 
 }  // namespace minimal::rpc

@@ -9,8 +9,10 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <chrono>
 #include <cstring>
 #include <string>
+#include <thread>
 
 namespace minimal::hooks {
 namespace {
@@ -134,25 +136,29 @@ ShellActionResult RunShellAction(const std::string& command, std::string_view st
 
     if (pid == 0) {
         // Child. Plain C only: post-fork child of a multithreaded process,
-        // async-signal-safe calls only, every failure is _exit.
-        setsid();  // pgid == pid: killpg reaches the whole tree.
+        // async-signal-safe calls only, every failure is _exit -- checked,
+        // not assumed: a silently failed setsid left killpg aimed at the
+        // WRONG process group, and a failed dup2 meant a hook reading the
+        // server's stdin or writing over its stderr.
+        if (setsid() == -1) _exit(127);  // pgid == pid: killpg reaches the whole tree.
 
         if (effective.count() > 0) {
             // CPU backstop behind the wall-clock deadline, like the bash tool.
             rlimit cpu{};
             cpu.rlim_cur = cpu.rlim_max = static_cast<rlim_t>(effective.count() / 1000) + 5;
-            setrlimit(RLIMIT_CPU, &cpu);
+            if (setrlimit(RLIMIT_CPU, &cpu) != 0) _exit(127);
 
             // Filesize backstop, matching the bash tool: a runaway script
             // redirecting to a file must not fill the disk unbounded.
             rlimit fsize{};
             fsize.rlim_cur = fsize.rlim_max = kMaxHookFileSizeBytes;
-            setrlimit(RLIMIT_FSIZE, &fsize);
+            if (setrlimit(RLIMIT_FSIZE, &fsize) != 0) _exit(127);
         }
 
-        dup2(in_read.get(), STDIN_FILENO);
-        dup2(out_write.get(), STDOUT_FILENO);
-        dup2(out_write.get(), STDERR_FILENO);  // merged: one stream, in order
+        if (dup2(in_read.get(), STDIN_FILENO) == -1) _exit(127);
+        if (dup2(out_write.get(), STDOUT_FILENO) == -1) _exit(127);
+        if (dup2(out_write.get(), STDERR_FILENO) == -1)
+            _exit(127);  // merged: one stream, in order
 
         execv(shell.c_str(), argv_ptrs);
 
@@ -177,6 +183,13 @@ ShellActionResult RunShellAction(const std::string& command, std::string_view st
     std::string captured;
     std::size_t written = 0;
     bool in_open = !stdin_payload.empty();
+    if (!in_open) {
+        // No payload: close the parent's write end NOW. in_open is false, so
+        // the loop below never touches the pipe -- but the held-open write end
+        // also means a hook that reads stdin never sees EOF; it blocked until
+        // its deadline instead of reading "empty payload, end of input".
+        in_write.reset();
+    }
     bool out_open = true;
     bool abandoned = false;  // deadline or cancellation fired mid-flight
 
@@ -202,7 +215,12 @@ ShellActionResult RunShellAction(const std::string& command, std::string_view st
         const int rc = poll(fds, static_cast<nfds_t>(nfds), 50);
         if (rc < 0) {
             if (errno == EINTR) continue;
-            // Unexpected poll failure: stop writing, keep draining what we can.
+            // Unexpected poll failure: stop writing, keep draining what we
+            // can. A persistently failing poll returns IMMEDIATELY -- and an
+            // uncancellable emission has no deadline -- so without a pause
+            // this path spun the single hook worker thread at 100% CPU
+            // indefinitely instead of degrading to the failure below.
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
             in_open = false;
             if (!out_open) {
                 result.outcome = ShellActionOutcome::kFailOpen;

@@ -202,3 +202,16 @@ TEST_CASE("empty plugin or key names are rejected", "[plugin_storage]") {
     CHECK(storage.Keys("p").empty());
     CHECK_THROWS_AS(storage.Keys("", "x"), std::invalid_argument);
 }
+
+TEST_CASE("a value over the KV quota is refused, not stored", "[plugin_storage][invariant]") {
+    // One buggy plugin could otherwise grow the host's plugin database
+    // without limit -- the KV seam is persistence, not scratch space.
+    TempDir dir;
+    plugins::PluginStorage storage(dir.path() / "plugins.db");
+    const std::string huge(1u << 20 | 1, 'x');  // 1 MiB + 1
+    CHECK_THROWS_AS(storage.Set("p", "k", huge), std::runtime_error);
+    CHECK_FALSE(storage.Get("p", "k").has_value());
+    // A value AT the quota is fine.
+    const std::string at_limit(1u << 20, 'y');
+    CHECK_NOTHROW(storage.Set("p", "k2", at_limit));
+}

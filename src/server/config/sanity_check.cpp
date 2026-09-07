@@ -1,5 +1,6 @@
 #include "minimal/config/sanity_check.hpp"
 
+#include <fcntl.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -44,14 +45,19 @@ bool CommandResolves(const std::string& command) {
     // the call reported was never read. Written correctly at bash_tool.cpp:439
     // and again below in this same file -- three copies, one inert.
     const bool regular = std::filesystem::is_regular_file(path, ec);
-    return regular && !ec && ::access(path.c_str(), X_OK) == 0;
+    // faccessat with AT_EACCESS, not access(2): access tests the REAL uid,
+    // but the server's actual authority is its EFFECTIVE uid (a setuid-gid
+    // deployment or a privileged helper would pass access and still fail
+    // execve -- or vice versa).
+    return regular && !ec &&
+           ::faccessat(AT_FDCWD, path.c_str(), X_OK, AT_EACCESS) == 0;
     };
     if (command.find('/') != std::string::npos) {
         return executable(command);
     }
-    const char* path_env = std::getenv("PATH");
+    const auto path_env = common::LookupEnv("PATH");
     if (!path_env) return false;
-    std::stringstream streams(path_env);
+    std::stringstream streams(*path_env);
     std::string dir;
     while (std::getline(streams, dir, ':')) {
         if (dir.empty()) continue;
@@ -486,7 +492,7 @@ std::vector<CheckResult> StartupSanityCheck::check_directories() {
         if (!std::filesystem::is_directory(path, ec) || ec) {
             return std::string(what) + " '" + path.string() + "' does not exist or is not a directory";
         }
-        if (::access(path.c_str(), W_OK) != 0) {
+        if (::faccessat(AT_FDCWD, path.c_str(), W_OK, AT_EACCESS) != 0) {
             return std::string(what) + " '" + path.string() + "' is not writable";
         }
         return std::nullopt;

@@ -24,17 +24,23 @@ std::vector<SseFrame> SseParser::Feed(std::string_view chunk) {
     // The spec strips one leading UTF-8 BOM from the stream. Without this, the
     // first data line's field name became "\xEF\xBB\xBFdata" -- unknown field,
     // silently ignored -- and the first OpenAI chunk (id/model/role) was
-    // dropped from every BOM-prefixed stream.
+    // dropped from every BOM-prefixed stream. The latch does NOT burn on a
+    // short first chunk: a 1-2 byte write (a dribbling server, a split prologue)
+    // used to set bom_checked_ with an insufficient prefix, and the split BOM
+    // then survived into the first field name. Bytes are latched until three
+    // are available, then fed through the normal path (one recursion level
+    // deep -- bom_checked_ is set, so this branch is not re-entered).
     if (!bom_checked_) {
+        bom_prefix_.append(chunk);
+        if (bom_prefix_.size() < 3) return {};
         bom_checked_ = true;
-        if (chunk.size() >= 3 && static_cast<unsigned char>(chunk[0]) == 0xEF &&
-            static_cast<unsigned char>(chunk[1]) == 0xBB &&
-            static_cast<unsigned char>(chunk[2]) == 0xBF) {
-            chunk.remove_prefix(3);
+        if (static_cast<unsigned char>(bom_prefix_[0]) == 0xEF &&
+            static_cast<unsigned char>(bom_prefix_[1]) == 0xBB &&
+            static_cast<unsigned char>(bom_prefix_[2]) == 0xBF) {
+            bom_prefix_.erase(0, 3);
         }
-    }
-    if (line_buffer_.size() + chunk.size() > kMaxPendingBytes) {
-        throw std::runtime_error("SSE line exceeded 1 MiB without a newline");
+        const std::string latched = std::move(bom_prefix_);
+        return Feed(latched);
     }
     line_buffer_.append(chunk);
 
@@ -69,6 +75,10 @@ std::vector<SseFrame> SseParser::Feed(std::string_view chunk) {
             if (pending_has_data_) {
                 SseFrame frame;
                 frame.event = pending_event_;
+                // Spec: the last-event-id buffer PERSISTS across dispatches --
+                // it changes only when an event carries its own `id` field.
+                // Clearing here deviated: an event stream that sets the id
+                // once and then omits it lost the id on every later frame.
                 frame.id = pending_id_;
                 frame.data = pending_data_;
                 if (!frame.data.empty() && frame.data.back() == '\n') frame.data.pop_back();
@@ -76,7 +86,6 @@ std::vector<SseFrame> SseParser::Feed(std::string_view chunk) {
             }
             pending_event_ = "message";
             pending_data_.clear();
-            pending_id_.clear();
             pending_has_data_ = false;
             continue;
         }
@@ -104,11 +113,22 @@ std::vector<SseFrame> SseParser::Feed(std::string_view chunk) {
             pending_data_.push_back('\n');
             pending_has_data_ = true;
         } else if (field == "id") {
-            pending_id_.assign(value);
+            // Spec: an id field containing U+0000 is ignored (it cannot be
+            // transmitted in Last-Event-ID headers anyway); any other value
+            // replaces the last-event-id buffer.
+            if (value.find('\0') == std::string_view::npos) pending_id_.assign(value);
         }
         // Unknown fields (e.g. "retry") are ignored per the SSE spec.
     }
     line_buffer_.erase(0, start);
+    // The cap bounds the UNTERMINATED line: after consuming every complete
+    // line above, whatever remains in line_buffer_ has no terminator yet.
+    // (The old pre-append check measured buffered TOTALS, so one chunk
+    // carrying many complete lines tripped the "1 MiB line" error on
+    // legitimate traffic.)
+    if (line_buffer_.size() > kMaxPendingBytes) {
+        throw std::runtime_error("SSE line exceeded 1 MiB without a newline");
+    }
     return frames;
 }
 

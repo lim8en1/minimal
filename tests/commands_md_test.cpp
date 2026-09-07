@@ -126,6 +126,26 @@ TEST_CASE("ParseCommandFile: opencode constructs desugar into the same flat sour
     CHECK(std::string(command->Name()) == "review");
 }
 
+TEST_CASE("ParseCommandFile: $ARGUMENTS desugars only on a token boundary",
+          "[commands_md][compat][invariant]") {
+    // The header long claimed whole-token semantics, but only $1..$9 checked
+    // the next character: `$ARGUMENTSX` silently became "{args}X".
+    testing::CommandFixture fixture;
+    testing::TempDir files;
+    commands::CommandRegistry registry;
+    auto commands = WriteAndLoad(
+        files.path(), "tok.md",
+        "A=$ARGUMENTS B=$ARGUMENTSX C=$ARGUMENTS. D=$ARGUMENT\n");
+    for (auto& command : commands) registry.Register(std::move(command));
+
+    const auto result = DispatchOne(registry, fixture, "tok", {"T"});
+    CHECK(result.status == commands::CommandResult::Status::kOk);
+    REQUIRE_FALSE(fixture.submitted_turns().empty());
+    // Boundary tokens desugar; a word-character suffix or a shorter `$NAME`
+    // prefix stays literal.
+    CHECK(fixture.submitted_turns().front() == "A=T B=$ARGUMENTSX C=T. D=$ARGUMENT\n");
+}
+
 // --- execution --------------------------------------------------------------------
 
 TEST_CASE("commands-md: sources run, the body renders, and the composed text is the turn",

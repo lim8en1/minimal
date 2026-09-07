@@ -480,15 +480,26 @@ private:
         }
 
         if (message.contains("error")) {
+            const auto& error_obj = message.at("error");
             // Checked, not value(): the error OBJECT's shape is server-
             // authored; a non-string "message" must degrade to "unknown",
-            // not throw on the worker thread.
-            const auto& error_obj = message.at("error");
-            *error = "MCP server error: " +
-                     (error_obj.is_object() && error_obj.contains("message") &&
-                              error_obj.at("message").is_string()
-                          ? error_obj.at("message").get<std::string>()
-                          : "unknown");
+            // not throw on the worker thread. The text is capped at the
+            // source: it is server-authored and flows verbatim into logs
+            // (the per-invocation audit line, the manager's liveness log)
+            // and the model-visible tool result, so an unbounded message
+            // is an unbounded log/context line from a remote we do not
+            // control.
+            std::string server_message =
+                error_obj.is_object() && error_obj.contains("message") &&
+                        error_obj.at("message").is_string()
+                    ? error_obj.at("message").get<std::string>()
+                    : "unknown";
+            constexpr std::size_t kMaxErrorMessage = 2000;
+            if (server_message.size() > kMaxErrorMessage) {
+                server_message.resize(kMaxErrorMessage);
+                server_message += " …[truncated]";
+            }
+            *error = "MCP server error: " + server_message;
             return false;
         }
         *result = message.contains("result") ? message.at("result") : nlohmann::json::object();
@@ -540,13 +551,14 @@ struct McpConnection::WorkerState {
     // JOIN the thread rather than detach (see McpConnection::Teardown).
     bool exited = false;
 
-    void Push(std::function<void()> job) {
+    bool Push(std::function<void()> job) {
         {
             std::lock_guard<std::mutex> lock(mu);
-            if (stopped) return;  // teardown: the job's slot times out instead
+            if (stopped) return false;  // teardown: the caller completes its slot instead
             jobs.push_back(std::move(job));
         }
         cv.notify_all();
+        return true;
     }
 
     // The thread lambda holds the shared_ptrs to this state and to the
@@ -582,6 +594,20 @@ struct McpConnection::WorkerState {
         cv.notify_all();
     }
 };
+
+// Submits the job to the worker. When the worker is already stopped (teardown
+// won the race), the job will never run -- so complete the slot with `error`
+// immediately instead of leaving the caller to burn its full deadline waiting
+// on a completion that cannot happen. The Notify wakes the WaitSlot loop, and
+// the usual lock discipline holds: the slot mutex is released before the
+// token's cv is notified.
+template <typename Worker, typename T>
+void PushOrComplete(Worker& worker, std::function<void()> job, Slot<T>& slot,
+                    const tools::CancelTokenPtr& cancel, std::string error) {
+    if (worker.Push(std::move(job))) return;
+    slot.Complete(std::nullopt, std::move(error));
+    TokenFor(cancel).Notify();
+}
 
 // --- McpConnection ----------------------------------------------------------
 
@@ -674,10 +700,12 @@ std::unique_ptr<McpConnection> McpConnection::Open(const McpEndpoint& endpoint,
     // the handshake has no cancellation path, only the deadline.
     auto slot = std::make_shared<Slot<bool>>();
     auto token = std::make_shared<tools::CancelToken>();
-    connection->worker_->Push([transport, slot, token] {
-        transport->Initialize(*slot);
-        TokenFor(token).Notify();
-    });
+    PushOrComplete(*connection->worker_,
+                   [transport, slot, token] {
+                       transport->Initialize(*slot);
+                       TokenFor(token).Notify();
+                   },
+                   *slot, token, "MCP connection is shutting down");
     if (!WaitSlot(*slot, token, std::chrono::steady_clock::now() + limits.connect,
                   error.message)) {
         if (error.message.empty()) error.message = "MCP initialize timed out";
@@ -695,10 +723,12 @@ std::string McpConnection::Instructions() const { return transport_->Instruction
 
 bool McpConnection::Ping(const tools::CancelTokenPtr& cancel, Failure& error) {
     auto slot = std::make_shared<Slot<bool>>();
-    worker_->Push([transport = transport_, slot, cancel] {
-        transport->Ping(*slot);
-        TokenFor(cancel).Notify();
-    });
+    PushOrComplete(*worker_,
+                   [transport = transport_, slot, cancel] {
+                       transport->Ping(*slot);
+                       TokenFor(cancel).Notify();
+                   },
+                   *slot, cancel, "MCP connection is shutting down");
     const bool completed =
         WaitSlot(*slot, cancel, std::chrono::steady_clock::now() + request_timeout_, error.message);
     if (!completed) return false;
@@ -709,10 +739,12 @@ bool McpConnection::Ping(const tools::CancelTokenPtr& cancel, Failure& error) {
 std::optional<std::vector<McpConnection::ToolListing>> McpConnection::ListTools(
         const tools::CancelTokenPtr& cancel, Failure& error) {
     auto slot = std::make_shared<Slot<std::vector<ToolListing>>>();
-    worker_->Push([transport = transport_, slot, cancel] {
-        transport->ListTools(*slot);
-        TokenFor(cancel).Notify();
-    });
+    PushOrComplete(*worker_,
+                   [transport = transport_, slot, cancel] {
+                       transport->ListTools(*slot);
+                       TokenFor(cancel).Notify();
+                   },
+                   *slot, cancel, "MCP connection is shutting down");
     if (!WaitSlot(*slot, cancel, std::chrono::steady_clock::now() + request_timeout_,
                   error.message)) {
         return std::nullopt;
@@ -725,11 +757,13 @@ McpCallOutcome McpConnection::CallTool(std::string_view tool_name, const nlohman
                                        const tools::CancelTokenPtr& cancel) {
     McpCallOutcome outcome;
     auto slot = std::make_shared<Slot<nlohmann::json>>();
-    worker_->Push([transport = transport_, slot, cancel, name = std::string(tool_name),
-                   arguments] {
-        transport->CallTool(name, arguments, *slot);
-        TokenFor(cancel).Notify();
-    });
+    PushOrComplete(*worker_,
+                   [transport = transport_, slot, cancel, name = std::string(tool_name),
+                    arguments] {
+                       transport->CallTool(name, arguments, *slot);
+                       TokenFor(cancel).Notify();
+                   },
+                   *slot, cancel, "MCP connection is shutting down");
     std::string error;
     if (!WaitSlot(*slot, cancel, std::chrono::steady_clock::now() + request_timeout_, error)) {
         outcome.error = std::move(error);

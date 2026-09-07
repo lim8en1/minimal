@@ -21,20 +21,27 @@ namespace {
 // --- opencode desugaring (parse-time; one engine at runtime) --------------------
 
 // $ARGUMENTS -> {args}; $1..$9 -> {1}..{9}. Whole-token only (the next
-// character must be a non-alnum boundary), so `$10x` never becomes "{1}0x".
+// character must be a non-word boundary), so `$10x` never becomes "{1}0x"
+// and `$ARGUMENTSX` never becomes "{args}X".
 std::string DesugarPositionalTokens(const std::string& body) {
+    const auto word_char = [](char c) {
+        return std::isalnum(static_cast<unsigned char>(c)) || c == '_';
+    };
     std::string out;
     out.reserve(body.size());
     for (std::size_t i = 0; i < body.size();) {
         if (body[i] == '$' && body.compare(i, 10, "$ARGUMENTS") == 0) {
-            out += "{args}";
-            i += 10;
-            continue;
+            const std::size_t after = i + 10;
+            const bool boundary = after >= body.size() || !word_char(body[after]);
+            if (boundary) {
+                out += "{args}";
+                i = after;
+                continue;
+            }
         }
         if (body[i] == '$' && i + 1 < body.size() && body[i + 1] >= '1' && body[i + 1] <= '9') {
             const std::size_t after = i + 2;
-            const bool boundary =
-                after >= body.size() || !std::isalnum(static_cast<unsigned char>(body[after]));
+            const bool boundary = after >= body.size() || !word_char(body[after]);
             if (boundary) {
                 out += '{';
                 out += body[i + 1];
@@ -237,10 +244,23 @@ MdCommandSpec DecodeSpec(const std::string& stem, const config::ParsedFrontmatte
 }  // namespace
 
 MdCommandSpec ParseCommandFile(const std::filesystem::path& path, bool trusted) {
+    // Unbounded read: the command dirs include PROJECT-LOCAL content (a
+    // cloned repo), and a multi-gigabyte `.md` would be slurped whole at
+    // every startup and listing. Anything past the cap is a broken command
+    // file, skipped with a warning like any other.
+    constexpr std::size_t kMaxCommandFileBytes = 1u << 20;  // 1 MiB
+    std::error_code ec;
+    const auto size = std::filesystem::file_size(path, ec);
+    if (!ec && size > kMaxCommandFileBytes) {
+        throw std::runtime_error("command file exceeds 1 MiB; refusing to load");
+    }
     std::ifstream in(path);
     if (!in) throw std::runtime_error("command file not found: " + path.string());
     std::ostringstream buffer;
     buffer << in.rdbuf();
+    if (buffer.str().size() > kMaxCommandFileBytes) {
+        throw std::runtime_error("command file exceeds 1 MiB; refusing to load");
+    }
 
     const std::string stem = path.stem().string();
     if (stem.empty() || stem.front() == '.') {

@@ -88,6 +88,12 @@ void ChecklistStore::Save(const std::string& session_id, const std::vector<Item>
     if (session_id.empty()) {
         throw std::runtime_error("checklist: no session to store the list under");
     }
+    if (items.empty()) {
+        // A CLEARED list removes the row: keeping an empty {"items":[]} blob
+        // left the session lingering in the `list` RPC's enumeration forever.
+        storage_->Delete(kStorageNamespace, session_id);
+        return;
+    }
     storage_->Set(kStorageNamespace, session_id, EncodeItems(items));
 }
 

@@ -34,13 +34,15 @@ TabBarWindow ComputeTabBarWindow(const std::vector<int>& cell_widths, int availa
     std::size_t end = focused_index + 1;
     if (!fits(start, end)) {
         // Not even the focused tab plus both markers fits -- degrade to
-        // just the focused tab with no markers (an undercount is better
-        // than an empty bar, and this is already a terminal narrower than
-        // one tab cell plus two markers, an extreme case).
+        // just the focused tab, with the hidden counts ZEROED so the
+        // markers stay suppressed as documented: at this width the
+        // markers themselves would eat the one visible cell, and the
+        // non-zero counts (an old leftover) made RenderTabBar draw them
+        // anyway, contradicting this comment.
         result.visible_start = start;
         result.visible_end = end;
-        result.hidden_before = start;
-        result.hidden_after = n - end;
+        result.hidden_before = 0;
+        result.hidden_after = 0;
         return result;
     }
     // Grow alternately -- right (what's next) then left -- one tab at a

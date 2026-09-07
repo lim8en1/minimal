@@ -184,6 +184,20 @@ public:
         space_cv_.notify_all();
     }
 
+    // Drops every queued event; open/closed state and blocked producers are
+    // untouched. For teardown paths that must not spend unbounded time
+    // draining work whose results nobody can consume anymore (the hook
+    // dispatcher's destructor: N queued hooks x up to a 60 s uncancellable
+    // floor each). Blocked producers wake with the queue roomy.
+    void DiscardPending() {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            events_.clear();
+        }
+        cv_.notify_all();
+        space_cv_.notify_all();
+    }
+
     // Latches drop-mode: until the consumer next drains (Pop/TryPop), Push
     // REFUSES over-bounds events instead of blocking on them. Cancel's
     // unwedge: a worker parked on a full queue -- a stalled-but-connected

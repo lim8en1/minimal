@@ -115,7 +115,13 @@ ftxui::Component MakeFilterableMenuModal(
         }
         if (event == Event::Backspace) {
             if (!state->filter.empty()) {
-                state->filter = TruncateUtf8(state->filter, state->filter.size() - 1);
+                // Grapheme-aware: one press removes one user-perceived
+                // character, so a ZWJ-emoji filter entry deletes as one
+                // glyph instead of shedding components one keypress at a
+                // time.
+                const std::string_view popped =
+                    Utf8PopGrapheme(state->filter);
+                state->filter.assign(popped);
                 rebuild();
             }
             return true;
@@ -131,6 +137,16 @@ ftxui::Component MakeFilterableMenuModal(
         }
         return false;   // arrow keys go to Menu
     });
+
+    // Exposed to the caller (see FilterableMenuSpec::reset_state): the help
+    // overlays call it on open so a stale filter never survives a close.
+    if (spec.reset_state != nullptr) {
+        *spec.reset_state = [state, rebuild] {
+            state->filter.clear();
+            state->selected = 0;
+            rebuild();
+        };
+    }
 
     return Renderer(interactive, [interactive, state, spec, theme] {
         using namespace ftxui;

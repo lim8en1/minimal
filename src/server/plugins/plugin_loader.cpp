@@ -176,12 +176,13 @@ PluginRecord PluginLoader::LoadOne(const PluginCandidate& candidate) {
         return record;
     }
 
-    // A corrupt .so can return null here; a null char* into std::string is UB
-    // before the ABI check ever runs.
+    // ABI tag is verified BEFORE any other plugin code runs. The old order
+    // called name_fn()/version_fn() alongside the tag fetch -- both are
+    // plugin-executed functions, and running them from a .so built against a
+    // different toolchain/ABI is exactly what the ABI gate exists to prevent.
+    // A mismatch report therefore names the FILE, not the plugin's own name
+    // (which we no longer read).
     if (const char* tag = abi_tag_fn(); tag != nullptr) record.abi_tag = tag;
-    if (const char* name = name_fn(); name != nullptr) record.name = name;
-    if (const char* version = version_fn(); version != nullptr) record.version = version;
-
     // Checked before any registration callback runs: a plugin built against a
     // different toolchain must never get to execute against our types.
     if (record.abi_tag != std::string(common::AbiTag())) {
@@ -190,6 +191,10 @@ PluginRecord PluginLoader::LoadOne(const PluginCandidate& candidate) {
                         std::string(common::AbiTag()) + "' -- rebuild the plugin";
         return record;
     }
+
+    // Safe now: the ABI matched, so these run against compatible types.
+    if (const char* name = name_fn(); name != nullptr) record.name = name;
+    if (const char* version = version_fn(); version != nullptr) record.version = version;
 
     // Everything the registration hooks see: the shared settings.json `tools`
     // object plus THIS plugin's own plugins.json `config` slice. Built once per

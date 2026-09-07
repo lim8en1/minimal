@@ -199,6 +199,27 @@ private:
     // zero the callback never observed is exactly the leak this split once was.
     void ReleaseClientSlot();
 
+    // RAII for one attached_ client slot: the count leads the claim (see
+    // OpenSession's comment), and the DECREMENT must be as unconditional as
+    // the increment. A bare fetch_add left the fallible stretch between it
+    // and the finish lambda unprotected -- an exception from Subscribe() or
+    // EmitSessionMetadata() unwound past every restore and leaked the slot,
+    // after which the refcounted process would never believe it has zero
+    // clients. Every scope that holds a slot constructs this; every exit,
+    // exception or not, runs the decrement.
+    class AttachedClientSlot {
+    public:
+        explicit AttachedClientSlot(SessionServiceImpl* self) : self_(self) {
+            self_->attached_.fetch_add(1, std::memory_order_acq_rel);
+        }
+        AttachedClientSlot(const AttachedClientSlot&) = delete;
+        AttachedClientSlot& operator=(const AttachedClientSlot&) = delete;
+        ~AttachedClientSlot() { self_->ReleaseClientSlot(); }
+
+    private:
+        SessionServiceImpl* self_;
+    };
+
     // The metadata event a freshly attached stream opens with: name,
     // agent_preset, model, permission_mode and the resolved context window --
     // the wire source for the status bar's {model}/{agent}/{permission_mode}

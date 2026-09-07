@@ -67,6 +67,16 @@ bool ExclusiveRecord::Claim(std::string_view claimant) {
 // --- Additive registries ------------------------------------------------------
 
 void ViewRegistry::Register(std::unique_ptr<View> view) {
+    if (sealed_) {
+        common::DefaultLogger().warn(
+            "client plugin '{}': registration ignored -- the registries were sealed after "
+            "startup (registration-time-only contract)",
+            attribution_.empty() ? "<core>" : attribution_);
+        return;
+    }
+    // Same null guard the exclusive registries have: Register(nullptr)
+    // compiles at every plugin call site and dereferencing spec() segfaults.
+    if (view == nullptr) return;
     attributions_.push_back({attribution_, view->spec().id});
     views_.push_back(std::move(view));
 }
@@ -79,6 +89,14 @@ View* ViewRegistry::Find(std::string_view id) const {
 }
 
 void StartViewRegistry::Register(std::unique_ptr<StartView> view) {
+    if (sealed_) {
+        common::DefaultLogger().warn(
+            "client plugin '{}': registration ignored -- the registries were sealed after "
+            "startup (registration-time-only contract)",
+            attribution_.empty() ? "<core>" : attribution_);
+        return;
+    }
+    if (view == nullptr) return;
     attributions_.push_back({attribution_, view->spec().id});
     views_.push_back(std::move(view));
 }
@@ -91,6 +109,14 @@ StartView* StartViewRegistry::Find(std::string_view id) const {
 }
 
 void ToolResultRendererRegistry::Register(std::unique_ptr<ToolResultRenderer> renderer) {
+    if (sealed_) {
+        common::DefaultLogger().warn(
+            "client plugin '{}': registration ignored -- the registries were sealed after "
+            "startup (registration-time-only contract)",
+            attribution_.empty() ? "<core>" : attribution_);
+        return;
+    }
+    if (renderer == nullptr) return;
     attributions_.push_back({attribution_, std::string(renderer->tool_name())});
     renderers_.push_back(std::move(renderer));
 }
@@ -103,6 +129,14 @@ const ToolResultRenderer* ToolResultRendererRegistry::Find(std::string_view tool
 }
 
 void MessageRendererRegistry::Register(ChatRowKind kind, std::unique_ptr<MessageRenderer> renderer) {
+    if (sealed_) {
+        common::DefaultLogger().warn(
+            "client plugin '{}': registration ignored -- the registries were sealed after "
+            "startup (registration-time-only contract)",
+            attribution_.empty() ? "<core>" : attribution_);
+        return;
+    }
+    if (renderer == nullptr) return;   // a stored null would Find() as null and silently disable the kind
     claims_.emplace_back(kind, Attribution{attribution_, std::string(ToString(kind))});
     // First claimant stays active; the duplicate is visible in claims() and the
     // loader turns it fatal. Silently replacing would make presentation depend
@@ -123,6 +157,14 @@ const MessageRenderer* MessageRendererRegistry::Find(ChatRowKind kind) const {
 }
 
 void StatusSegmentRegistry::Register(std::unique_ptr<StatusSegment> segment) {
+    if (sealed_) {
+        common::DefaultLogger().warn(
+            "client plugin '{}': registration ignored -- the registries were sealed after "
+            "startup (registration-time-only contract)",
+            attribution_.empty() ? "<core>" : attribution_);
+        return;
+    }
+    if (segment == nullptr) return;
     attributions_.push_back({attribution_, std::string(segment->id())});
     segments_.push_back(std::move(segment));
 }
@@ -135,6 +177,14 @@ const StatusSegment* StatusSegmentRegistry::Find(std::string_view id) const {
 }
 
 void SyntaxGrammarRegistry::Register(std::unique_ptr<SyntaxGrammar> grammar) {
+    if (sealed_) {
+        common::DefaultLogger().warn(
+            "client plugin '{}': registration ignored -- the registries were sealed after "
+            "startup (registration-time-only contract)",
+            attribution_.empty() ? "<core>" : attribution_);
+        return;
+    }
+    if (grammar == nullptr) return;
     attributions_.push_back({attribution_, std::string(grammar->Language())});
     grammars_.push_back(std::move(grammar));
 }
@@ -142,6 +192,13 @@ void SyntaxGrammarRegistry::Register(std::unique_ptr<SyntaxGrammar> grammar) {
 // --- Exclusive registries -----------------------------------------------------
 
 void ChatSurfaceRegistry::Register(std::unique_ptr<ChatSurface> candidate) {
+    if (sealed_) {
+        common::DefaultLogger().warn(
+            "client plugin '{}': registration ignored -- the registries were sealed after "
+            "startup (registration-time-only contract)",
+            attribution_.empty() ? "<core>" : attribution_);
+        return;
+    }
     if (candidate == nullptr) return;  // a plugin passing nothing claims nothing
     attributions_.push_back({attribution_, candidate->spec().id});
     if (!record.Claim(attribution_)) return;
@@ -149,6 +206,13 @@ void ChatSurfaceRegistry::Register(std::unique_ptr<ChatSurface> candidate) {
 }
 
 void MarkdownEngineRegistry::Register(std::unique_ptr<MarkdownEngine> candidate) {
+    if (sealed_) {
+        common::DefaultLogger().warn(
+            "client plugin '{}': registration ignored -- the registries were sealed after "
+            "startup (registration-time-only contract)",
+            attribution_.empty() ? "<core>" : attribution_);
+        return;
+    }
     if (candidate == nullptr) return;
     attributions_.push_back({attribution_, "markdown_engine"});
     if (!record.Claim(attribution_)) return;

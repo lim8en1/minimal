@@ -1,8 +1,9 @@
 #include "minimal/client/render/color_downsample.hpp"
 
 #include <algorithm>
-#include <cstdlib>
 #include <string_view>
+
+#include "minimal/common/config_paths.hpp"
 
 namespace minimal::client {
 
@@ -70,7 +71,13 @@ ftxui::Color Downsample16(uint8_t r, uint8_t g, uint8_t b) {
 
 }  // namespace
 
-ColorDepth ColorDepthFromEnv(const char* colorterm, const char* term) {
+ColorDepth ColorDepthFromEnv(const char* colorterm, const char* term,
+                             const char* no_color) {
+    // NO_COLOR: set to any non-empty value disables color (https://no-color.org
+    // de-facto standard). TERM=dumb means the terminal renders no SGR at all.
+    // Both used to be ignored and colors were emitted regardless.
+    if (no_color != nullptr && *no_color != '\0') return ColorDepth::None;
+    if (term != nullptr && std::string_view(term) == "dumb") return ColorDepth::None;
     if (colorterm != nullptr) {
         const std::string_view value(colorterm);
         if (value == "truecolor" || value == "24bit") return ColorDepth::Truecolor;
@@ -82,11 +89,25 @@ ColorDepth ColorDepthFromEnv(const char* colorterm, const char* term) {
 }
 
 ColorDepth DetectColorDepth() {
-    return ColorDepthFromEnv(std::getenv("COLORTERM"), std::getenv("TERM"));
+    // LookupEnv, not raw getenv: set-but-empty is unset (NO_COLOR= especially).
+    const auto colorterm = common::LookupEnv("COLORTERM");
+    const auto term = common::LookupEnv("TERM");
+    const auto no_color = common::LookupEnv("NO_COLOR");
+    return ColorDepthFromEnv(colorterm ? colorterm->c_str() : nullptr,
+                             term ? term->c_str() : nullptr,
+                             no_color ? no_color->c_str() : nullptr);
 }
 
 ftxui::Color Downsample(uint8_t r, uint8_t g, uint8_t b, ColorDepth depth) {
     switch (depth) {
+        case ColorDepth::None:
+            // Grayscale fallback rather than SGR suppression: the call sites
+            // render with ftxui colors, so "no color" here means the nearest
+            // gray for every requested RGB -- nothing ANSI is distinguishable
+            // on a dumb terminal anyway, and this keeps one code path.
+            return ftxui::Color(std::min(255, (r + g + b) / 3),
+                                std::min(255, (r + g + b) / 3),
+                                std::min(255, (r + g + b) / 3));
         case ColorDepth::Truecolor:
             return ftxui::Color(r, g, b);
         case ColorDepth::Palette256:

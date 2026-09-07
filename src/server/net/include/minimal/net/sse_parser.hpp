@@ -23,6 +23,7 @@ public:
 private:
     std::string line_buffer_;         // partial last line, carried across Feed() calls
     bool bom_checked_ = false;        // one leading UTF-8 BOM stripped per stream
+    std::string bom_prefix_;          // bytes latched until a BOM-sized prefix exists
     std::string pending_event_ = "message";
     std::string pending_data_;
     std::string pending_id_;

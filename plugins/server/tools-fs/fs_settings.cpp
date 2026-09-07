@@ -8,7 +8,10 @@ T ValueOr(const nlohmann::json& parent, const char* section, const char* key, T 
     auto section_it = parent.find(section);
     if (section_it == parent.end() || !section_it->is_object()) return fallback;
     auto key_it = section_it->find(key);
-    if (key_it == section_it->end() || !key_it->is_number()) return fallback;
+    // is_number_INTEGER, not is_number: `2000.7` for a line limit would be
+    // silently truncated by get<T>() -- config that reads as valid but means
+    // something slightly different from what it says.
+    if (key_it == section_it->end() || !key_it->is_number_integer()) return fallback;
     return key_it->get<T>();
 }
 

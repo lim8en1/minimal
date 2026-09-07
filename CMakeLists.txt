@@ -73,7 +73,7 @@ install(SCRIPT "${CMAKE_CURRENT_BINARY_DIR}/SeedConfig.cmake")
 # rebuilt without a commit, which is why plugin_loader.cpp additionally
 # compares minimal_plugin_version() against the host's own version.
 find_package(Git QUIET)
-set(MINIMAL_GIT_REVISION "unknown")
+set(MINIMAL_GIT_REVISION "nogit")
 if(Git_FOUND)
     execute_process(
         COMMAND ${GIT_EXECUTABLE} rev-parse --short=12 HEAD
@@ -83,7 +83,11 @@ if(Git_FOUND)
         ERROR_QUIET
         RESULT_VARIABLE MINIMAL_GIT_REVISION_RESULT)
     if(NOT MINIMAL_GIT_REVISION_RESULT EQUAL 0 OR MINIMAL_GIT_REVISION STREQUAL "")
-        set(MINIMAL_GIT_REVISION "unknown")
+        # NOT a shared "unknown": two builds from different sources would
+        # both tag "unknown", and a stale plugin from one tree would load
+        # into the other. A configure timestamp makes every build tree
+        # distinct -- the fail-closed direction (plugins rebuild, always).
+        string(TIMESTAMP MINIMAL_GIT_REVISION "nogit-%Y%m%d%H%M%S")
     endif()
     # A checkout/commit changes .git/HEAD (and, on a branch, the ref file it
     # points at) without touching any CMakeLists.txt -- without this, ninja
@@ -118,7 +122,7 @@ if(Git_FOUND)
     endif()
 endif()
 set(MINIMAL_ABI_TAG
-    "${CMAKE_CXX_COMPILER_ID}-${CMAKE_CXX_COMPILER_VERSION}-cxx${CMAKE_CXX_STANDARD}-${CMAKE_SYSTEM_NAME}-${MINIMAL_GIT_REVISION}")
+    "${CMAKE_CXX_COMPILER_ID}-${CMAKE_CXX_COMPILER_VERSION}-cxx${CMAKE_CXX_STANDARD}-${CMAKE_SYSTEM_NAME}-${CMAKE_SYSTEM_PROCESSOR}-${CMAKE_BUILD_TYPE}-${MINIMAL_GIT_REVISION}")
 message(STATUS "minimal plugin ABI tag: ${MINIMAL_ABI_TAG}")
 
 # --- Dependencies ------------------------------------------------------------

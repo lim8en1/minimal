@@ -973,7 +973,10 @@ void Session::RunOneTurn(std::optional<std::string> text) {
     // out of `text` -- a tab label reflects what the user typed, not inlined
     // @file contents. Empty for a seedless wake turn (no candidate) and
     // harmless to compute even for a vetoed or failed turn: the post-turn
-    // write is guarded by "still unnamed" either way.
+    // write is guarded by "still unnamed" either way. The EMIT below is
+    // veto-gated though: a prompt the user_prompt_submit hook rejected must
+    // never name the session, even one that is still unnamed with prior
+    // content -- the rejected text was never persisted.
     const std::string default_name_candidate = text ? DefaultSessionName(*text) : std::string();
 
     // --- core.user_prompt_submit: the prompt veto seam -------------------------
@@ -1076,7 +1079,7 @@ void Session::RunOneTurn(std::optional<std::string> text) {
     // records, from the server side). Bookkeeping events ride BEFORE the
     // terminator, never after.
     try {
-        EmitDefaultNameIfComputed(default_name_candidate);
+        if (!vetoed) EmitDefaultNameIfComputed(default_name_candidate);
     } catch (...) {
         logger_.warn("session {}: setting the default name failed", params_.session_id);
     }
@@ -1089,6 +1092,13 @@ void Session::RunOneTurn(std::optional<std::string> text) {
         TurnSummary summary;
         summary.first_seq = first_seq;
         summary.last_seq = store_->last_appended_seq();
+        if (vetoed) {
+            // Nothing was appended, but first_seq kept its 0 initializer while
+            // last_seq tracks the real transcript end -- reporting [0, last]
+            // claims a turn over rows it never wrote. Report the empty shape a
+            // failed turn reports: first past last.
+            summary.first_seq = summary.last_seq + 1;
+        }
         summary.stop_reason = result.stop_reason;
         summary.usage = result.last_usage;
         // Specified by ARCHITECTURE.md since track I and shipped permanently

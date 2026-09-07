@@ -3,6 +3,7 @@
 #include <nlohmann/json.hpp>
 
 #include "anthropic_response.hpp"
+#include "minimal/llm/json_depth.hpp"
 
 namespace minimal::provider_anthropic {
 namespace {
@@ -44,6 +45,9 @@ std::size_t CheckedBlockIndex(std::size_t index) {
 bool AnthropicStreamReassembler::FeedFrame(std::string_view data, const llm::StreamEventSink& sink) {
     nlohmann::json event;
     try {
+        if (!llm::JsonDepthWithinLimit(data)) {
+            throw AnthropicParseError("stream event exceeds the JSON nesting limit");
+        }
         event = nlohmann::json::parse(data);
     } catch (const nlohmann::json::exception& error) {
         throw AnthropicParseError(std::string("malformed stream event: ") + error.what());
@@ -131,6 +135,12 @@ bool AnthropicStreamReassembler::FeedFrame(std::string_view data, const llm::Str
             const auto& delta = event.at("delta");
             if (delta.contains("stop_reason") && !delta.at("stop_reason").is_null()) {
                 stop_reason_ = MapStopReason(delta.at("stop_reason").get<std::string>());
+                // Some servers never send content_block_stop and end the
+                // message directly. The sink must not keep dangling open
+                // blocks past the end-of-message signal, so emit the missing
+                // stops BEFORE MessageDeltaEvent (blocks close, then the
+                // message ends -- the same order a well-formed stream uses).
+                EmitStopsForOpenBlocks(sink);
                 finished_ = true;
                 completed_ = true;
                 if (sink && !sink(llm::MessageDeltaEvent{stop_reason_})) return false;
@@ -167,17 +177,21 @@ bool AnthropicStreamReassembler::FeedFrame(std::string_view data, const llm::Str
     return true;
 }
 
-void AnthropicStreamReassembler::CloseOpenBlocks(const llm::StreamEventSink& sink) {
-    // Idempotent against the message_delta path via finished_, same as
-    // provider-openai's CloseOpenBlocks.
-    if (finished_) return;
-    finished_ = true;
+void AnthropicStreamReassembler::EmitStopsForOpenBlocks(const llm::StreamEventSink& sink) {
     for (std::size_t i = 0; i < blocks_.size(); ++i) {
         if (!blocks_[i].stopped) {
             blocks_[i].stopped = true;
             if (sink && !sink(llm::ContentBlockStopEvent{static_cast<int>(i)})) return;
         }
     }
+}
+
+void AnthropicStreamReassembler::CloseOpenBlocks(const llm::StreamEventSink& sink) {
+    // Idempotent against the message_delta path via finished_, same as
+    // provider-openai's CloseOpenBlocks.
+    if (finished_) return;
+    finished_ = true;
+    EmitStopsForOpenBlocks(sink);
 }
 
 llm::ChatResponse AnthropicStreamReassembler::Finalize(bool tolerate_malformed_tool_calls) const {
@@ -196,6 +210,10 @@ llm::ChatResponse AnthropicStreamReassembler::Finalize(bool tolerate_malformed_t
             tool_use.id = block.id;
             tool_use.name = block.name;
             try {
+                if (!block.input_json.empty() &&
+                    !llm::JsonDepthWithinLimit(block.input_json)) {
+                    throw AnthropicParseError("tool-use input exceeds the JSON nesting limit");
+                }
                 tool_use.input = block.input_json.empty() ? nlohmann::json::object()
                                                           : nlohmann::json::parse(block.input_json);
             } catch (const nlohmann::json::exception& error) {

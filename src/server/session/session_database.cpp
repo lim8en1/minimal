@@ -23,6 +23,7 @@
 namespace minimal::session {
 namespace {
 
+using common::BestEffortRollback;
 using common::ExecChecked;
 using common::NowMillis;
 using common::Stmt;
@@ -614,12 +615,16 @@ std::int64_t SessionDatabase::AppendMessage(const std::string& session_id,
     return assigned_seq;
 }
 
-bool SessionDatabase::MaybeRunPassiveCheckpoint() {
+SessionDatabase::CheckpointOutcome SessionDatabase::MaybeRunPassiveCheckpoint() {
     if (appends_since_checkpoint_.load(std::memory_order_acquire) < kCheckpointAppends) {
-        return false;
+        return CheckpointOutcome::kNotDue;
     }
     // Claim the accumulated appends BEFORE deciding the checkpoint is due, so
     // appends landing during the checkpoint are counted toward the next one.
+    // (A failed attempt below therefore also waits for kCheckpointAppends more
+    // appends before retrying -- that throttle is deliberate: retrying every
+    // reaper tick would hold mu_ behind a busy-timeout-bounded RESTART each
+    // time. The failure is surfaced through checkpoint_failures() instead.)
     appends_since_checkpoint_.store(0, std::memory_order_relaxed);
     std::lock_guard lock(mu_);
     // RESTART, not PASSIVE -- a measured correction to the plan's wording.
@@ -633,11 +638,17 @@ bool SessionDatabase::MaybeRunPassiveCheckpoint() {
     // busy_timeout (5 s), rare (the startup sanity check, a future CLI), and
     // amortized: once per kCheckpointAppends appends instead of inside every
     // committing append. A busy result loses nothing; the frames remain and
-    // the next attempt picks them up. Failures are deliberately not thrown:
+    // a later attempt picks them up. Failures are deliberately not thrown:
     // the reaper is the caller, and a failed best-effort optimization must not
-    // take the tick down.
-    (void)sqlite3_wal_checkpoint_v2(db_, nullptr, SQLITE_CHECKPOINT_RESTART, nullptr, nullptr);
-    return true;
+    // take the tick down -- but they are counted and returned, so the wiring
+    // can make a persistently pinned WAL visible instead of swallowing it.
+    const int rc = sqlite3_wal_checkpoint_v2(db_, nullptr, SQLITE_CHECKPOINT_RESTART, nullptr, nullptr);
+    if (rc == SQLITE_OK) {
+        checkpoint_failures_.store(0, std::memory_order_relaxed);
+        return CheckpointOutcome::kCompleted;
+    }
+    checkpoint_failures_.fetch_add(1, std::memory_order_relaxed);
+    return CheckpointOutcome::kFailed;
 }
 
 int SessionDatabase::wal_autocheckpoint() const {
@@ -730,12 +741,17 @@ bool SessionDatabase::DeleteSession(const std::string& session_id) {
     // whole-transcript to one chunk. The tradeoff, deliberate: a crash
     // mid-delete leaves the session row (and a PARTIAL transcript) behind
     // rather than all-or-nothing -- the operator deletes again, and the
-    // startup orphan sweep cleans what a crash can orphan.
+    // startup orphan sweep cleans what a crash can orphan. message_count is
+    // decremented inside each chunk's transaction, so even the partial state
+    // keeps the count consistent with the rows that survive.
     constexpr int kChunk = 500;
     {
         Stmt chunk(db_, "DELETE FROM messages WHERE id IN"
                         " (SELECT id FROM messages WHERE session_id = ?1 LIMIT ?2);",
                    "failed to delete message chunk");
+        Stmt count(db_, "UPDATE sessions SET message_count = MAX(0, message_count - ?1)"
+                        " WHERE id = ?2;",
+                  "failed to update session message_count for delete chunk");
         for (const auto& id : doomed) {
             std::size_t removed = 0;
             do {
@@ -745,10 +761,27 @@ bool SessionDatabase::DeleteSession(const std::string& session_id) {
                 sqlite3_bind_text(chunk.stmt, 1, id.c_str(), -1, SQLITE_TRANSIENT);
                 sqlite3_bind_int(chunk.stmt, 2, kChunk);
                 if (sqlite3_step(chunk.stmt) != SQLITE_DONE) {
-                    ExecChecked(db_, "ROLLBACK;", "failed to roll back delete chunk");
-                    ThrowSqliteError(db_, "failed to delete message chunk");
+                    // Capture the original error BEFORE rolling back: a failed
+                    // rollback overwrites sqlite3_errmsg and would mask the
+                    // real cause behind a rollback message.
+                    const std::string original = sqlite3_errmsg(db_);
+                    BestEffortRollback(db_);
+                    throw std::runtime_error("failed to delete message chunk: " + original);
                 }
                 removed = static_cast<std::size_t>(sqlite3_changes(db_));
+                if (removed > 0) {
+                    sqlite3_reset(count.stmt);
+                    sqlite3_clear_bindings(count.stmt);
+                    sqlite3_bind_int64(count.stmt, 1, static_cast<sqlite3_int64>(removed));
+                    sqlite3_bind_text(count.stmt, 2, id.c_str(), -1, SQLITE_TRANSIENT);
+                    if (sqlite3_step(count.stmt) != SQLITE_DONE) {
+                        const std::string original = sqlite3_errmsg(db_);
+                        BestEffortRollback(db_);
+                        throw std::runtime_error(
+                            "failed to update session message_count for delete chunk: " +
+                            original);
+                    }
+                }
                 ExecChecked(db_, "COMMIT;", "failed to commit delete chunk");
             } while (removed == static_cast<std::size_t>(kChunk));
         }
@@ -1104,29 +1137,46 @@ std::vector<StoredMessage> SessionDatabase::LoadMessagesFrom(const std::string& 
 
 std::optional<StoredMessage> SessionDatabase::LoadMessage(const std::string& session_id,
                                                           std::int64_t seq) const {
-    std::lock_guard lock(mu_);
-    // discarded = 0 in the predicate: a discarded seq IS found by this query
-    // as "absent", which is exactly what the rewind path's validation wants --
-    // a rewound-away position is not a rewindable one. Strict decode, same
-    // contract as every other read path.
-    CachedStmt query(db_, prepared_,
-                     "SELECT content_json, token_count, created_at FROM messages"
-                     " WHERE session_id = ?1 AND seq = ?2 AND discarded = 0;",
-                     "failed to load message");
-    sqlite3_bind_text(query.stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_int64(query.stmt, 2, seq);
-    const int rc = sqlite3_step(query.stmt);
-    if (rc == SQLITE_DONE) return std::nullopt;
-    if (rc != SQLITE_ROW) ThrowSqliteError(db_, "failed to load message");
+    // Raw row collected under mu_, decoded OUTSIDE it -- the same discipline
+    // every other read path follows (DecodeRows after the lock). This was the
+    // one read that ran the JSON conversion under mu_, stalling every other
+    // session behind a multi-hundred-KB tool result's parse.
+    struct RawRow {
+        std::string json;
+        int token_count = 0;
+        std::int64_t created_at = 0;
+    };
+    std::optional<RawRow> raw;
+    {
+        std::lock_guard lock(mu_);
+        // discarded = 0 in the predicate: a discarded seq IS found by this query
+        // as "absent", which is exactly what the rewind path's validation wants --
+        // a rewound-away position is not a rewindable one. Strict decode, same
+        // contract as every other read path.
+        CachedStmt query(db_, prepared_,
+                         "SELECT content_json, token_count, created_at FROM messages"
+                         " WHERE session_id = ?1 AND seq = ?2 AND discarded = 0;",
+                         "failed to load message");
+        sqlite3_bind_text(query.stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int64(query.stmt, 2, seq);
+        const int rc = sqlite3_step(query.stmt);
+        if (rc == SQLITE_DONE) return std::nullopt;
+        if (rc != SQLITE_ROW) ThrowSqliteError(db_, "failed to load message");
+        raw = RawRow{};
+        const char* json_text = reinterpret_cast<const char*>(sqlite3_column_text(query.stmt, 0));
+        raw->json = json_text != nullptr ? json_text : "";
+        raw->token_count = sqlite3_column_int(query.stmt, 1);
+        raw->created_at = sqlite3_column_int64(query.stmt, 2);
+        // PRIMARY KEY is (id), UNIQUE is (session_id, seq): confirm the scan is
+        // over rather than trusting that one row was all there was.
+        CheckRowLoopEnd(db_, sqlite3_step(query.stmt), "failed to load message");
+    }
+
     StoredMessage stored;
     stored.seq = seq;
-    const char* json_text = reinterpret_cast<const char*>(sqlite3_column_text(query.stmt, 0));
-    stored.message = JsonToMessage(nlohmann::json::parse(json_text));
-    stored.token_count = sqlite3_column_int(query.stmt, 1);
-    stored.created_at_unix_ms = sqlite3_column_int64(query.stmt, 2);
-    // PRIMARY KEY is (id), UNIQUE is (session_id, seq): confirm the scan is
-    // over rather than trusting that one row was all there was.
-    CheckRowLoopEnd(db_, sqlite3_step(query.stmt), "failed to load message");
+    stored.message = JsonToMessage(nlohmann::json::parse(raw->json));
+    stored.token_count = raw->token_count;
+    stored.created_at_unix_ms = raw->created_at;
     return stored;
 }
 

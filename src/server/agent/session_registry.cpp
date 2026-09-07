@@ -416,6 +416,11 @@ void SessionRegistry::set_reaper_config(ReaperConfig config) {
 void SessionRegistry::ReaperMain() {
     while (true) {
         std::vector<std::shared_ptr<Session>> doomed;
+        // Log lines are composed under the lock but emitted after it: the
+        // logger sink can block on I/O, and every other registry operation
+        // would queue behind the sweep while a rotation/hung stderr drains.
+        std::vector<std::string> guard_expired_logs;
+        std::vector<std::string> reaped_logs;
         bool fire_idle_exit = false;
         {
             std::unique_lock<std::mutex> lock(mutex_);
@@ -435,9 +440,9 @@ void SessionRegistry::ReaperMain() {
                 const bool guard_expired = !session->ever_attached() &&
                                            (now - session->created_at()) > initial_attach_guard_;
                 if (guard_expired) {
-                    logger_.warn(
-                        "session {}: no client attached within the guard period; terminating",
-                        it->first);
+                    guard_expired_logs.push_back(
+                        "session " + it->first +
+                        ": no client attached within the guard period; terminating");
                     doomed.push_back(session);
                     it = sessions_.erase(it);
                     quiescent_since_.erase(doomed.back()->info().session_id);
@@ -473,8 +478,9 @@ void SessionRegistry::ReaperMain() {
                 }
                 if (reaper_config_.detached_idle_ttl.count() > 0 &&
                     now - since->second >= reaper_config_.detached_idle_ttl) {
-                    logger_.warn("session {}: detached and quiescent for {}s; terminating",
-                                 it->first, reaper_config_.detached_idle_ttl.count());
+                    reaped_logs.push_back("session " + it->first + ": detached and quiescent for " +
+                                          std::to_string(reaper_config_.detached_idle_ttl.count()) +
+                                          "s; terminating");
                     doomed.push_back(session);
                     it = sessions_.erase(it);
                     quiescent_since_.erase(doomed.back()->info().session_id);
@@ -507,6 +513,8 @@ void SessionRegistry::ReaperMain() {
                 }
             }
         }
+        for (const auto& message : guard_expired_logs) logger_.warn("{}", message);
+        for (const auto& message : reaped_logs) logger_.warn("{}", message);
         for (auto& session : doomed) session->Terminate();
         // OUTSIDE the lock: RequestShutdown must not run while the registry
         // mutex is held (it joins RPC handlers that may be inside the

@@ -289,6 +289,19 @@ ftxui::Component MakePromptEditor(
                 return true;
             }
         }
+        // Escape with the suggestion list open DISMISSES the list, rather
+        // than falling through to whatever the raw Input does with the
+        // keystroke: the list previously could not be put away without
+        // editing the text (changing the prefix was the only close). Only
+        // consumed while the list is open -- an idle Escape with the list
+        // closed still reaches the global handler (turn.cancel and friends).
+        if (state.list_open && event == Event::Escape) {
+            state.list_open = false;
+            state.suggestions.clear();
+            state.completions.clear();
+            state.suggestion_selected = 0;
+            return true;   // consumed
+        }
         if (event == Event::Return) {
             std::string line = state.content;
             while (!line.empty() && std::isspace(static_cast<unsigned char>(line.back()))) {
@@ -301,6 +314,16 @@ ftxui::Component MakePromptEditor(
             // just brought back, should not grow the list every time.
             if (state.history.empty() || state.history.back() != line) {
                 state.history.push_back(line);
+                // Bounded: a long-lived TUI session otherwise kept every
+                // submitted line for the process's whole life. 500 recent
+                // entries is far past what arrow-up recall is used for.
+                constexpr std::size_t kMaxHistoryEntries = 500;
+                if (state.history.size() > kMaxHistoryEntries) {
+                    state.history.erase(state.history.begin(),
+                                        state.history.begin() +
+                                            static_cast<long>(state.history.size() -
+                                                              kMaxHistoryEntries));
+                }
             }
             state.history_cursor.reset();
             if (line.front() == '/') {

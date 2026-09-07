@@ -33,10 +33,9 @@ namespace minimal::provider_anthropic {
 // `cache_control` is also always attached to the request body, which
 // Anthropic auto-places on the last cacheable block of the growing message
 // tail -- the documented "robust combination for agent loops" (two of the
-// four allowed breakpoints; see shared/prompt-caching.md). `cache_ttl`
-// ("5m", the default, or "1h") is read from `parameters.cache_ttl` and
-// consumed there: it is not a real Anthropic request field, so it never
-// reaches the output verbatim.
+// four allowed breakpoints). `cache_ttl` ("5m", the default, or "1h") is
+// read from `parameters.cache_ttl` and consumed there: it is not a real
+// Anthropic request field, so it never reaches the output verbatim.
 //
 // `max_tokens` is REQUIRED by the Anthropic API, unlike ChatRequest's
 // optional member. providers.json already lets an operator default it per

@@ -44,6 +44,12 @@ public:
     bool completed() const { return completed_; }
 
 private:
+    // Emits ContentBlockStopEvent for every announced-but-not-stopped block
+    // and marks them stopped. Shared by CloseOpenBlocks and the message_delta
+    // path: a server that ends the message without stopping its blocks must
+    // not leave the SINK with dangling open blocks either.
+    void EmitStopsForOpenBlocks(const llm::StreamEventSink& sink);
+
     struct Block {
         enum class Kind { Text, ToolUse, Thinking } kind;
         std::string text;                      // Kind::Text / Kind::Thinking (Thinking dropped at Finalize)

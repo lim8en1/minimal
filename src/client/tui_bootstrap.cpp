@@ -356,6 +356,19 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
         }
     }
 
+    // Registration window closes here: every plugin's register_* hook (and
+    // core's own registrations) has run. A stashed registry reference that
+    // registers after this point warns and is ignored instead of silently
+    // bypassing the collision and attribution rules.
+    out.view_registry.Seal();
+    out.start_view_registry.Seal();
+    out.renderer_registry.Seal();
+    out.message_registry.Seal();
+    out.status_registry.Seal();
+    out.grammar_registry.Seal();
+    out.surface_registry.Seal();
+    out.engine_registry.Seal();
+
     return true;
 }
 

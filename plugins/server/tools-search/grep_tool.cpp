@@ -359,6 +359,16 @@ public:
         if (run.out.empty() && stats.skipped_oversize == 0 && stats.skipped_entries == 0 &&
             stats.skipped_deep == 0 && stats.skipped_errors == 0 && !stats.timed_out &&
             !stats.cancelled) {
+            // "No matches found" is only honest when the tree had nothing:
+            // an offset past the match count consumes matches silently, and
+            // reporting that as "no matches" reads as a complete negative
+            // over a tree that DID match.
+            if (run.total_matches > 0) {
+                return ToolResult{
+                    false, "no matches at offset " + std::to_string(offset) + " (" +
+                               std::to_string(run.total_matches) +
+                               " total -- lower the offset to see them)"};
+            }
             return ToolResult{false, "No matches found"};
         }
         // Entries the walker could not read are disclosed even when something

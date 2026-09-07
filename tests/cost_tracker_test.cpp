@@ -216,6 +216,29 @@ TEST_CASE("the store degrades with null storage and throws on corruption",
     CHECK_THROWS_AS(harness.store.Load("s1"), std::runtime_error);
 }
 
+TEST_CASE("negative token counts in a stored blob clamp to zero on decode",
+          "[cost_tracker][invariant]") {
+    // DecodeTurn accepted any integer: a corrupt (or hostile) blob with
+    // negative tokens poisoned the totals. Fields clamp at zero on decode.
+    Harness harness;
+    harness.storage.Set(
+        "cost-tracker", "sessions/s1",
+        R"({"turns":[{"model":"m","in":-500,"out":-10,"cr":-1,"cw":-1,"reported":true}]})");
+    const auto history = harness.store.Load("s1");
+    REQUIRE(history.turns.size() == 1);
+    CHECK(history.turns[0].usage.input_tokens == 0);
+    CHECK(history.turns[0].usage.output_tokens == 0);
+    CHECK(history.turns[0].usage.cache_read_tokens == 0);
+    CHECK(history.turns[0].usage.cache_write_tokens == 0);
+}
+
+TEST_CASE("AppendTurn refuses an empty session id instead of storing under a degenerate key",
+          "[cost_tracker][invariant]") {
+    Harness harness;
+    CHECK_THROWS_AS(harness.store.AppendTurn("", "", Turn("m", 1, 1)), std::runtime_error);
+    CHECK(harness.store.SessionIds().empty());
+}
+
 TEST_CASE("the observer records turns with zero-usage honesty", "[cost_tracker]") {
     Harness harness;
     CostSessionObserver observer(harness.store);

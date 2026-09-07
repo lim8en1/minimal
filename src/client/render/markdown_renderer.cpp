@@ -43,7 +43,8 @@ struct Block {
     unsigned heading_level = 0;
     std::string code_language;  // fence info string, already canonicalized
     std::string code_text;      // raw; highlighted at leave
-    unsigned ordered_index = 0; // 0 = unordered bullet
+    unsigned ordered_index = 0; // item number on an OL (0 is a legal start=)
+    bool is_ordered = false;    // parent list is MD_BLOCK_OL -- the marker test
     unsigned li_counter = 0;    // next ordered item number (on a parent OL)
     bool is_task = false;
     char task_mark = ' ';
@@ -210,7 +211,14 @@ public:
                 block.is_task = d->is_task != 0;
                 block.task_mark = d->task_mark;
                 Block& list = stack_.top();
-                if (list.type == MD_BLOCK_OL) block.ordered_index = list.li_counter++;
+                if (list.type == MD_BLOCK_OL) {
+                    // is_ordered is the marker test, NOT index!=0: an OL with
+                    // start="0" (legal CommonMark) numbered its first item 0,
+                    // which the old ordered_index!=0 test rendered as an
+                    // unordered bullet.
+                    block.is_ordered = true;
+                    block.ordered_index = list.li_counter++;
+                }
                 break;
             }
             default:
@@ -537,7 +545,7 @@ private:
         std::string marker;
         if (block.is_task) {
             marker = std::string("[") + (block.task_mark == ' ' ? " " : "x") + "] ";
-        } else if (block.ordered_index != 0) {
+        } else if (block.is_ordered) {
             marker = std::to_string(block.ordered_index) + ". ";
         } else {
             marker = "- ";

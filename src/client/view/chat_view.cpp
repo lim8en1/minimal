@@ -8,10 +8,12 @@ namespace minimal::client {
 
 ChatView::ChatView(const Theme& theme,
                    const plugins::MessageRendererRegistry& message_renderers,
-                   const plugins::ToolResultRendererRegistry& tool_renderers)
+                   const plugins::ToolResultRendererRegistry& tool_renderers,
+                   std::string toggle_collapse_hint)
     : theme_(theme),
       message_renderers_(message_renderers),
-      tool_renderers_(tool_renderers) {}
+      tool_renderers_(tool_renderers),
+      toggle_collapse_hint_(std::move(toggle_collapse_hint)) {}
 
 bool ChatView::IsCollapsed(const RowKey& key, const ChatRow& row) const {
     if (const auto it = collapse_overrides_.find(key); it != collapse_overrides_.end()) {
@@ -75,7 +77,8 @@ void ChatView::RebuildRows(const SessionState::Snapshot& snapshot) {
         row_timestamps_.push_back(row.created_at_unix_ms);
         const bool collapsed = IsCollapsed(row_key, row);
         fresh_resolved.emplace(row_key, collapsed);
-        const plugins::RowRenderContext ctx{.collapsed = collapsed};
+        const plugins::RowRenderContext ctx{.collapsed = collapsed,
+                                            .toggle_collapse_hint = toggle_collapse_hint_};
         const auto key = std::make_tuple(row.seq, occurrence, collapsed);
 
         ftxui::Elements parts;
@@ -273,7 +276,9 @@ ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
     if (!snapshot.pending_user_text.empty()) {
         ChatRow echo{.kind = ChatRowKind::UserText, .text = snapshot.pending_user_text};
         if (const auto* renderer = message_renderers_.Find(ChatRowKind::UserText)) {
-            column.push_back(renderer->Render(echo, theme_, plugins::RowRenderContext{}));
+            column.push_back(renderer->Render(
+                echo, theme_,
+                plugins::RowRenderContext{.toggle_collapse_hint = toggle_collapse_hint_}));
             column.push_back(text(" "));
         }
     }

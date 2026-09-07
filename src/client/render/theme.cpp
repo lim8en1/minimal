@@ -93,7 +93,11 @@ Theme Theme::Parse(std::string_view json, ColorDepth depth,
             for (const auto& [role, value] : roles.items()) {
                 if (!value.is_string()) continue;  // tolerate: plugin sections are not core config
                 const std::string full = section + "." + role;
-                if (theme.colors_.contains(role) || theme.colors_.contains(full)) continue;
+                // Only a FULL-key collision skips: the bare-role half of the
+                // old test dropped a plugin role whose NAME matched a core
+                // role -- even though it is stored under section.role and
+                // could never shadow the core entry it "collided" with.
+                if (theme.colors_.contains(full)) continue;
                 const auto [r, g, b] = ParseHexColor(value.get_ref<const std::string&>(), full);
                 theme.colors_.emplace(full, Downsample(r, g, b, depth));
             }

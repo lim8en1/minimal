@@ -1,6 +1,7 @@
 #include "cost_model.hpp"
 
 #include <algorithm>
+#include <cmath>
 
 namespace minimal::cost_tracker {
 namespace {
@@ -21,8 +22,11 @@ std::optional<double> PositiveNumber(const nlohmann::json& entry, const char* ke
     const auto it = entry.find(key);
     if (it == entry.end() || !it->is_number()) return std::nullopt;
     const double value = it->get<double>();
-    // Negative pricing is a hand-edit error, not a discount: treat as absent.
-    if (value < 0.0) return std::nullopt;
+    // Negative pricing is a hand-edit error, not a discount; a non-finite
+    // value (inf/nan from an out-of-range float literal) is corruption.
+    // Both are treated as absent -- CostFor would otherwise produce an
+    // infected total that renders as $inf or $nan.
+    if (!(value >= 0.0) || !std::isfinite(value)) return std::nullopt;
     return value;
 }
 

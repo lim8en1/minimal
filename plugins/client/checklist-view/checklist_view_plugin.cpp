@@ -25,6 +25,7 @@
 
 #include "minimal/client/plugins/client_plugin_abi.h"
 #include "minimal/common/abi_tag.hpp"
+#include "minimal/common/logger.hpp"
 
 namespace {
 
@@ -74,6 +75,11 @@ public:
             stop_ = true;
         }
         cv_.notify_all();
+        // The join can wait out one in-flight fetch, bounded by
+        // SessionClient::PluginCall's 5 s deadline. Deliberate: a detached
+        // worker would keep calling into the ClientApi (and the
+        // SessionClient behind it) while this destructor tears the object
+        // down -- a shutdown UAF is strictly worse than a bounded stall.
         if (worker_.joinable()) worker_.join();
     }
 
@@ -99,6 +105,7 @@ public:
 private:
     void RunLoop() {
         std::unique_lock<std::mutex> lock(mtx_);
+        int consecutive_failures = 0;
         while (!stop_) {
             const std::string session_id = focused_session_id_;
             lock.unlock();
@@ -110,6 +117,19 @@ private:
                 // new tab's cache.
                 if (session_id == focused_session_id_ && text.has_value()) {
                     cached_text_ = std::move(*text);
+                }
+                // Observability: every failure class (transport, plugin
+                // error, malformed payload) used to be the same silent
+                // nullopt, retried every 3 s forever with nothing in any
+                // log. Log the TRANSITION and then back off -- one line at
+                // the start of an outage, not one per poll.
+                if (text.has_value()) {
+                    consecutive_failures = 0;
+                } else if (++consecutive_failures == 1 ||
+                           consecutive_failures % 10 == 0) {
+                    minimal::common::DefaultLogger().warn(
+                        "checklist-view: fetch failed {} time(s) for session {}",
+                        consecutive_failures, session_id);
                 }
             } else {
                 lock.lock();

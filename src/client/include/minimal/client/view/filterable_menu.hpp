@@ -76,6 +76,13 @@ struct FilterableMenuSpec {
     // session picker always has its synthetic "+ new session" row, so it
     // sets this to 1; the agent picker (no synthetic row) leaves it 0.
     std::size_t empty_threshold = 0;
+    // If set, the factory stores a closure clearing the filter and the
+    // cursor selection. The help overlays are built ONCE (app.cpp), so
+    // without this the typed filter survived across opens -- reopening the
+    // help presented yesterday's needle as if it were a fresh search. The
+    // PICKERS deliberately do not reset (reopening with the filter intact
+    // is the feature there).
+    std::function<void()>* reset_state = nullptr;
 };
 
 // `build_rows` is called on every filter keystroke and whenever an

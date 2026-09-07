@@ -146,21 +146,26 @@ void TabMaintenance::HandleNotice(const SessionState::Snapshot& snap) {
             if (entry.view == view) entry.visible = true;
         }
         if (view->spec().placement == plugins::ViewPlacement::Modal) {
-            // component() is plugin code on the notice path: a throw here
-            // propagated out of Maintain and std::terminate'd the TUI.
-            // Contained, the modal simply never opens.
-            try {
-                *deps_.plugin_modal_child = view->component();
-                deps_.show_plugin_modal = true;
-            } catch (const std::exception& error) {
-                common::DefaultLogger().warn("plugin view '{}' threw building its modal: {}",
-                                             std::string(view->spec().id), error.what());
-                *deps_.plugin_modal_child = nullptr;
-            } catch (...) {
-                common::DefaultLogger().warn(
-                    "plugin view '{}' threw a non-standard exception building its modal",
-                    std::string(view->spec().id));
-                *deps_.plugin_modal_child = nullptr;
+            // REUSE the staged component (bootstrap built one instance per
+            // view; the keybinding path stages that same instance). Calling
+            // component() again here built a SECOND instance with its own
+            // internal state, so the modal shown via a notice was a
+            // different object than the one the keybinding toggles. The
+            // call is still plugin code and still contained: if the entry
+            // has no component (bootstrap's build threw), keep the modal
+            // closed rather than crash.
+            for (auto& entry : deps_.plugin_views) {
+                if (entry.view != view) continue;
+                if (entry.component) {
+                    *deps_.plugin_modal_child = entry.component;
+                    deps_.show_plugin_modal = true;
+                } else {
+                    common::DefaultLogger().warn(
+                        "plugin view '{}' has no component; modal not opened",
+                        std::string(view->spec().id));
+                    *deps_.plugin_modal_child = nullptr;
+                }
+                break;
             }
         }
     }
