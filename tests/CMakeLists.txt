@@ -31,6 +31,7 @@ add_executable(minimal_tests
     "${CMAKE_SOURCE_DIR}/plugins/server/signals-message/message_tool.cpp"
     token_accounting_test.cpp
     cancel_token_test.cpp
+    sidecar_test.cpp
     config_paths_test.cpp
     logger_test.cpp
     tool_executor_test.cpp
@@ -218,6 +219,14 @@ add_executable(minimal_tests
     "${CMAKE_SOURCE_DIR}/plugins/server/tools-python/python_store.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/tools-python/python_command.cpp"
     tools_python_test.cpp
+    tools_windbg_test.cpp
+    # Same pattern for tools-windbg: the client, session store and tools are
+    # pure plugin logic over core headers, so the test exercises the real
+    # wire layer against a loopback fake dbgd.
+    "${CMAKE_SOURCE_DIR}/plugins/server/tools-windbg/dbgd_client.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/tools-windbg/windbg_settings.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/tools-windbg/windbg_session.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/tools-windbg/windbg_tools.cpp"
     cost_tracker_test.cpp
     hooks_config_test.cpp
     hook_dispatcher_test.cpp
@@ -248,6 +257,7 @@ target_include_directories(minimal_tests PRIVATE
 target_include_directories(minimal_tests PRIVATE
     "${CMAKE_SOURCE_DIR}/plugins/server/tools-web"
     "${CMAKE_SOURCE_DIR}/plugins/server/tools-python"
+    "${CMAKE_SOURCE_DIR}/plugins/server/tools-windbg"
     "${CMAKE_SOURCE_DIR}/plugins/client/logo")
 
 # minimal::test_support is the test-dependency bundle: it carries server_core,

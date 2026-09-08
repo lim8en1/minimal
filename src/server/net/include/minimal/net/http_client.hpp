@@ -91,6 +91,11 @@ public:
     // HttpError{Other}). Used by model catalogs (track N).
     HttpResponse Get(const HttpRequest& request) const;
 
+    // DELETE with no body. Exists for method-exact remote routes (e.g. the
+    // windbg tool closing a dbgd session); same timeout semantics as
+    // Post()/Get().
+    HttpResponse Delete(const HttpRequest& request) const;
+
     HttpResponse StreamPost(const HttpRequest& request, const HttpHeadersReadySink& on_headers,
                             const HttpBodyChunkSink& on_chunk) const;
 };

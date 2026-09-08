@@ -27,6 +27,7 @@ Installed to `<libdir>/minimal/plugins/`. All enabled by default unless noted.
 | `checklist` | Tool `checklist` + cross-plugin RPC endpoint `checklist.rpc` |
 | `signals-message` | Tool `message_session` (cross-session messaging on the core `signals` service) |
 | `cost-tracker` | Commands `/cost`, `/cost-update-rates`; per-session cost accumulation; RPC endpoint `cost-tracker.rpc` |
+| `tools-windbg` | Tools `windbg`, `windbg_interrupt` — debugger commands against a remote **dbgd** server (dbg-cli). See [tools-windbg](#tools-windbg) below |
 | `session-titler` | Session observer that auto-titles sessions (~100 tokens/session spend). **Ships disabled** |
 
 ## Bundled client plugins (`plugins/client/`)
@@ -149,6 +150,57 @@ dir) plus a per-plugin scratch directory `<data>/plugins/<plugin_name>/`.
 Full API details and design notes: `docs/EXTENSIBILITY.md`. The test fakes in
 `tests/support/` (`minimal::test_support`) are an in-tree INTERFACE target for
 this repo's tests only — not installed or exported to plugin authors.
+
+## The sidecar core (`minimal/sidecar/`)
+
+`src/server/sidecar/` is the shared machinery behind every non-blocking
+tool — the parts tools-bash and tools-python used to each carry a private
+copy of, now one implementation in the shared core. New tools should build
+on it instead of forking process code again:
+
+| Header | What it gives you |
+|---|---|
+| `minimal/sidecar/process.hpp` | `fork`+`execve` launcher with pipe plans (which pipe end lands on which child fd, incl. `>2` passthrough fds), rlimits, `setsid` + `killpg`, the process-global pgid set with the atexit sweep |
+| `minimal/sidecar/drain.hpp` | `DrainAndReap`: sliced poll of the launched pipes into per-pipe sinks (`kCapped` head+tail with an optional live emit tap, `kBounded` all-or-nothing accumulate, `kDiscard`), deadline + cancellation, bounded post-kill reap |
+| `minimal/sidecar/capped_buffer.hpp` | The head+tail capped output buffer |
+| `minimal/sidecar/task_registry.hpp` | The generic background-task registry: id minting, per-session records/limits, `STARTED`-before-watch ordering, lifecycle events, result injection at a turn boundary, terminal-state-stored-last quiescence, watcher containment |
+| `minimal/sidecar/lifetime_watch.hpp` | `WatchLifetime`: fires a cleanup once when the session's lifetime expires (the mechanism for resources that live OUTSIDE this process) |
+
+The non-blocking contract a tool gets by combining the last two with the
+deferred-completion handles on `ToolContext` (`emit_output`,
+`schedule_injection`, `emit_task_event`, `session_lifetime`): the tool call
+acknowledges immediately, output streams to the operator live, the result
+reaches the model as an injected message at the next turn boundary, session
+death terminates the work, and cancelling the turn that started it does not.
+`tools-bash` (background tasks) and `tools-windbg` (remote debugger jobs)
+are the worked examples.
+
+### tools-windbg
+
+The `windbg`/`windbg_interrupt` tools are a **client of a dbgd server**
+(dbg-cli): the debugger engine — DbgEng via pybag, with dbg-cli's worker
+isolation and dbgsrv/KDNET remoting — lives in the dbgd process on the
+debugger host; this plugin only speaks its HTTP/JSON protocol
+(`/v1/sessions`, exec with the ack-within-grace → job pattern, job
+long-poll, the lease-free interrupt, `DELETE` on session end). Fast commands
+answer inside the grace window; slow ones become background tasks (above)
+whose watcher streams the job transcript and injects the verdict.
+
+Configure via the plugin's `config` object in `plugins.json`:
+
+```json
+{ "file": "tools-windbg.so", "enabled": true,
+  "config": {
+    "base_url": "http://debugger-host:8477",
+    "bearer_token": "<token from dbgd configure>",
+    "default_target": { "kind": "exec", "server": "tcp:server=10.0.0.9,port=5555" }
+  } }
+```
+
+`default_target` is a dbgd `TargetSpec` passed through verbatim (`exec`, `pid`,
+`dump`, or `kernel`); a call can also supply its own `target` object, which
+wins for that first connect. Closing a session on harness-session end uses
+the `on_session_end` disposition (`detach`, the default, or `kill`).
 
 ## Aliases
 

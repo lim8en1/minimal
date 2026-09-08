@@ -9,6 +9,11 @@
 # memory, one set of globals, and ordinary symbol resolution -- which is what
 # lets plugins link core directly instead of relying on export tricks.
 add_library(minimal_server_core SHARED
+    sidecar/process.cpp
+    sidecar/capped_buffer.cpp
+    sidecar/drain.cpp
+    sidecar/task_registry.cpp
+    sidecar/lifetime_watch.cpp
     tools/permission.cpp
     tools/permission_advisor.cpp
     tools/path_confinement.cpp
@@ -94,6 +99,7 @@ add_library(minimal::server_core ALIAS minimal_server_core)
 
 target_include_directories(minimal_server_core PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/tools/include"
+    "${CMAKE_CURRENT_SOURCE_DIR}/sidecar/include"
     "${CMAKE_CURRENT_SOURCE_DIR}/llm/include"
     "${CMAKE_CURRENT_SOURCE_DIR}/net/include"
     "${CMAKE_CURRENT_SOURCE_DIR}/config/include"

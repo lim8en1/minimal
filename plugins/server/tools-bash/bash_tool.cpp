@@ -1,11 +1,8 @@
 #include "bash_tool.hpp"
 
-#include <poll.h>
-#include <sys/wait.h>
 #include <unistd.h>
 
 #include <algorithm>
-#include <cerrno>
 #include <chrono>
 
 #include <cstring>
@@ -19,6 +16,7 @@
 #include "background_registry.hpp"
 #include "bash_process.hpp"
 #include "command_scanner.hpp"
+#include "minimal/sidecar/drain.hpp"
 
 namespace minimal::tools_bash {
 namespace {
@@ -32,12 +30,6 @@ using tools::ToolSpec;
 
 ToolResult Error(std::string message) { return ToolResult{true, std::move(message)}; }
 
-// Ceiling on the post-kill reap wait. SIGKILL lands in milliseconds for any
-// runnable process; the ceiling exists for the D-state corner (see below),
-// where no duration would ever be long enough -- so it is generous, not
-// exhaustive.
-constexpr int kPostKillReapMs = 5000;
-
 std::int64_t ElapsedMs(std::chrono::steady_clock::time_point started) {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
                std::chrono::steady_clock::now() - started)
@@ -47,9 +39,11 @@ std::int64_t ElapsedMs(std::chrono::steady_clock::time_point started) {
 // --- Synchronous execution ---------------------------------------------------------
 //
 // The whole process lifecycle on the CALLING thread -- the session worker,
-// which is the one thread permitted to block. The background runner shares
-// LaunchProcess/KillProcessGroup/CappedBuffer via bash_process.hpp but runs
-// its drain loop on its own watcher thread.
+// which is the one thread permitted to block. The drain-and-reap loop itself
+// is the SHARED sidecar runner (minimal/sidecar/drain.hpp) -- the same one
+// the background watcher and the python plugin's captured runs use; what
+// remains here is this tool's per-pipe policy (a capped output sink with a
+// live emit tap, a bounded fd-9 state sink) and the state adoption rules.
 
 struct RunOutcome {
     bool io_error = false;
@@ -67,143 +61,43 @@ struct RunOutcome {
 
 RunOutcome RunProcess(const LaunchedProcess& proc, const BashSettings& settings,
                       std::int64_t timeout_ms, ToolContext& ctx) {
+    // DrainAndReap takes the process handles by value and closes them; the
+    // LaunchedProcess struct carries raw ints, so they move into ScopedFds
+    // here -- the same ownership transfer the local wrappers used to express.
+    minimal::sidecar::Launched launched;
+    launched.ok = true;
+    launched.pid = proc.pid;
+    launched.parent_fds.push_back(ScopedFd(proc.out_fd));
+    launched.parent_fds.push_back(ScopedFd(proc.state_fd));
+
+    std::vector<minimal::sidecar::PipeSink> sinks(2);
+    sinks[0].mode = minimal::sidecar::PipeSink::Mode::kCapped;
+    sinks[0].cap = settings.max_output_bytes;
+    // Live channel to the operator, lossy by design; the capped record is
+    // the sink's rendered text below.
+    if (ctx.emit_output) sinks[0].emit = ctx.emit_output;
+    sinks[1].mode = minimal::sidecar::PipeSink::Mode::kBounded;
+    sinks[1].cap = kMaxStatePayloadBytes;
+
+    minimal::sidecar::DrainOptions options;
+    options.timeout_ms = timeout_ms;
+
+    // Sliced inside the runner so cancellation is noticed within a slice,
+    // not at the deadline.
+    const auto drained = minimal::sidecar::DrainAndReap(
+        std::move(launched), std::move(sinks), options,
+        [&] { return ctx.is_cancelled && ctx.is_cancelled(); });
+
     RunOutcome outcome;
-    ScopedFd out_read(proc.out_fd), state_read(proc.state_fd);
-
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
-    CappedBuffer buffer(settings.max_output_bytes);
-    std::string state_payload;
-    bool out_open = true, state_open = true;
-
-    const auto expired = [&] { return std::chrono::steady_clock::now() >= deadline; };
-    const auto cancelled = [&] { return ctx.is_cancelled && ctx.is_cancelled(); };
-
-    while (out_open || state_open) {
-        if (cancelled()) {
-            outcome.cancelled = true;
-            break;
-        }
-        if (expired()) {
-            outcome.timed_out = true;
-            break;
-        }
-
-        pollfd fds[2];
-        int nfds = 0;
-        const int out_slot = out_open ? nfds++ : -1;
-        if (out_open) fds[out_slot] = pollfd{out_read.get(), POLLIN, 0};
-        const int state_slot = state_open ? nfds++ : -1;
-        if (state_open) fds[state_slot] = pollfd{state_read.get(), POLLIN, 0};
-
-        // Sliced so cancellation is noticed within 50 ms, not at the deadline.
-        const int rc = poll(fds, static_cast<nfds_t>(nfds), 50);
-        if (rc < 0) {
-            if (errno == EINTR) continue;
-            outcome.io_error = true;
-            outcome.io_error_message = std::strerror(errno);
-            break;
-        }
-        if (rc == 0) continue;
-
-        char chunk[8192];
-        if (out_slot >= 0 && (fds[out_slot].revents & (POLLIN | POLLHUP | POLLERR))) {
-            const ssize_t n = read(out_read.get(), chunk, sizeof(chunk));
-            if (n > 0) {
-                const std::string_view view(chunk, static_cast<std::size_t>(n));
-                buffer.Append(view);
-                if (ctx.emit_output) ctx.emit_output(view);
-            } else if (n == 0 || errno != EINTR) {
-                out_open = false;
-            }
-        }
-        if (state_slot >= 0 && (fds[state_slot].revents & (POLLIN | POLLHUP | POLLERR))) {
-            const ssize_t n = read(state_read.get(), chunk, sizeof(chunk));
-            if (n > 0) {
-                if (!outcome.state_overflow &&
-                    state_payload.size() + static_cast<std::size_t>(n) <= kMaxStatePayloadBytes) {
-                    state_payload.append(chunk, static_cast<std::size_t>(n));
-                } else if (!outcome.state_overflow) {
-                    outcome.state_overflow = true;
-                    // Cleared AND latched: without the flag check on the next append the
-                    // payload simply started re-accumulating, so `yes >&9` refilled and
-                    // cleared 1 MiB over and over for the whole timeout. The payload is
-                    // discarded wholesale once overflow is set, so there is nothing to keep.
-                    state_payload.clear();
-                    state_payload.shrink_to_fit();  // discard wholesale: never adopt a prefix
-                }
-            } else if (n == 0 || errno != EINTR) {
-                state_open = false;
-            }
-        }
-    }
-
-    // Reaping, deadline-bounded. EOF on the pipes does NOT mean the child is
-    // gone -- it can close its stdio and keep running -- so an unconditional
-    // blocking waitpid here would park this thread for the command's natural
-    // life, well past timeout_ms.
-    int status = 0;
-    bool reaped = false;
-    while (!outcome.timed_out && !outcome.cancelled) {
-        const pid_t rc = waitpid(proc.pid, &status, WNOHANG);
-        if (rc == proc.pid) {
-            reaped = true;
-            break;
-        }
-        if (rc < 0 && errno == EINTR) continue;
-        if (rc < 0) {
-            // ECHILD: nothing left to reap, and that is the problem -- status
-            // still holds 0, which would read as a clean exit below. Flagged
-            // so the caller reports an undeterminable status instead.
-            outcome.reap_error = true;
-            break;
-        }
-        if (cancelled()) {
-            outcome.cancelled = true;
-            break;
-        }
-        if (expired()) {
-            outcome.timed_out = true;
-            break;
-        }
-        poll(nullptr, 0, 10);  // brief sleep; no fd to wait on
-    }
-
-    if (!reaped) KillProcessGroup(proc.pid);
-    // "Bounded by SIGKILL" (the old blocking waitpid's justification) does not
-    // hold for a process stuck in uninterruptible disk sleep (D state): the
-    // signal stays pending and the blocking call would park the session worker
-    // forever. Poll WNOHANG with a generous ceiling instead -- the goal (no
-    // leaked zombie) survives, the unbounded hang does not. An already-reaped
-    // child skips this entirely (waitpid would only report ECHILD).
-    if (!reaped) {
-        const auto kill_deadline =
-            std::chrono::steady_clock::now() + std::chrono::milliseconds(kPostKillReapMs);
-        while (std::chrono::steady_clock::now() < kill_deadline) {
-            const pid_t rc = waitpid(proc.pid, &status, WNOHANG);
-            if (rc == proc.pid) {
-                reaped = true;
-                break;
-            }
-            if (rc < 0 && errno == EINTR) continue;
-            if (rc < 0) {
-                // ECHILD etc: nothing left to reap; status is meaningless.
-                outcome.reap_error = true;
-                break;
-            }
-            poll(nullptr, 0, 10);
-        }
-        if (!reaped && !outcome.reap_error) {
-            // Kill did not land within the ceiling (D state): report the
-            // status as undetermined instead of hanging, and instead of
-            // reading the zeroed status as a clean exit.
-            outcome.reap_error = true;
-        }
-    }
-    ForgetPgid(proc.pid);
-
-    outcome.wait_status = status;
-    outcome.output = buffer.Render();
-    outcome.state_payload = std::move(state_payload);
+    outcome.io_error = drained.io_error;
+    outcome.io_error_message = drained.io_error_message;
+    outcome.timed_out = drained.timed_out;
+    outcome.cancelled = drained.cancelled;
+    outcome.reap_error = drained.reap_error;
+    outcome.wait_status = drained.wait_status;
+    outcome.output = std::move(drained.sinks[0].text);
+    outcome.state_payload = std::move(drained.sinks[1].text);
+    outcome.state_overflow = drained.sinks[1].overflow;
     return outcome;
 }
 

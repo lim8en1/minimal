@@ -57,7 +57,7 @@ bool ParseHeaderLine(std::string_view line, HttpHeader& out) {
     return true;
 }
 
-enum class Mode { Blocking, Streaming, Get };
+enum class Mode { Blocking, Streaming, Get, Delete };
 
 // The blocking path accumulates the whole response body in memory before
 // returning it, so an endpoint (typically a proxy) that streams an endless or
@@ -240,6 +240,15 @@ HttpResponse ConfigureAndPerform(CURL* handle, const HttpRequest& request, Mode 
         // A GET carries no body; everything else (headers, timeouts, callbacks)
         // is shared with the POST path below.
         curl_easy_setopt(handle, CURLOPT_HTTPGET, 1L);
+    } else if (mode == Mode::Delete) {
+        // A DELETE may still carry a JSON body (dbgd's session-close takes
+        // its on_exit disposition there). CUSTOMREQUEST (not CURLOPT_POST)
+        // sends the bare verb; the body rides POSTFIELDS with the correct
+        // Content-Length.
+        curl_easy_setopt(handle, CURLOPT_CUSTOMREQUEST, "DELETE");
+        curl_easy_setopt(handle, CURLOPT_POSTFIELDS, request.body.data());
+        curl_easy_setopt(handle, CURLOPT_POSTFIELDSIZE_LARGE,
+                         static_cast<curl_off_t>(request.body.size()));
     } else {
         curl_easy_setopt(handle, CURLOPT_POST, 1L);
         curl_easy_setopt(handle, CURLOPT_POSTFIELDS, request.body.data());
@@ -354,6 +363,12 @@ HttpResponse HttpClient::Post(const HttpRequest& request) const {
 // caller (a session worker or the command pool) for the chat-length timeout.
 HttpResponse HttpClient::Get(const HttpRequest& request) const {
     return PerformRequest(request, Mode::Get, nullptr, nullptr);
+}
+
+// DELETE with no body, for method-exact remote routes (the windbg tool's
+// dbgd session-close). Same timeout semantics as Post()/Get().
+HttpResponse HttpClient::Delete(const HttpRequest& request) const {
+    return PerformRequest(request, Mode::Delete, nullptr, nullptr);
 }
 
 HttpResponse HttpClient::StreamPost(const HttpRequest& request, const HttpHeadersReadySink& on_headers,

@@ -2,18 +2,16 @@
 
 // Background bash: tasks whose process OUTLIVES the tool call that started it.
 //
-// The shape mirrors a non-blocking subagent, one level down:
+// The accounting-and-delivery spine (id minting, per-session records, the
+// STARTED-before-watch ordering, event emission, result injection, the
+// terminal-state-stored-LAST quiescence guarantee, and the containment
+// wrapper around the detached watcher) is the SHARED sidecar TaskRegistry,
+// which any non-blocking tool uses. What remains here is bash's own watcher
+// body: drain the merged output (capped, streamed live), discard the state
+// channel, reap, classify, and report.
 //
-//   - the tool call returns an acknowledgment immediately (task id + pid);
-//   - the task runs on its own WATCHER thread -- one per task, detached,
-//     holding everything it touches by shared_ptr or lifetime-safe handle;
-//   - the result reaches the MODEL as an injected message at the session's
-//     next turn boundary (the subagent-completion mechanism, generalized:
-//     ToolContext::schedule_injection), never out-of-band;
-//   - live output streams to the OPERATOR through emit_output, keyed to the
-//     original tool_use_id, exactly as a synchronous command's would.
-//
-// CANCELLATION SEMANTICS, deliberately asymmetric:
+// CANCELLATION SEMANTICS, deliberately asymmetric (now enforced by the shared
+// registry's contract):
 //   - CancelTurn does NOT touch a background task. Outliving the turn that
 //     started it is the mode's entire purpose, and the watcher therefore
 //     holds NO turn CancelToken.
@@ -23,30 +21,16 @@
 //     is dispatched fire-and-forget -- so the expiry poll (one atomic load per
 //     100 ms slice) is the mechanism, and a killed task can lag termination by
 //     at most one slice. The same accepted asymmetry as the killpg window.
-//   - Server process exit is covered by the process-global pgid sweep in
-//     plugin.cpp (an atexit handler), since detached watchers die with the
+//   - Server process exit is covered by the process-global pgid sweep in the
+//     sidecar core (an atexit handler), since detached watchers die with the
 //     process and their setsid'd children would otherwise be orphaned.
-//
-// The registry itself is process-lifetime (a static inside tools-bash -- plugins
-// are never dlclosed), so the detached watchers may safely hold a raw pointer
-// back for nothing at all: they report completion through their captured
-// handles and mark their own shared TaskState. Nothing here outlives its
-// session in a way anything can observe except /tasks, which is the point.
 
-#include <atomic>
-#include <chrono>
 #include <cstdint>
-#include <functional>
-#include <memory>
-#include <mutex>
 #include <optional>
 #include <string>
-#include <unordered_map>
 #include <vector>
 
-#include "minimal/common/logger.hpp"
-#include "minimal/llm/message.hpp"
-#include "minimal/tools/tool.hpp"
+#include "minimal/sidecar/task_registry.hpp"
 
 #include "bash_process.hpp"
 #include "bash_session_state.hpp"
@@ -56,19 +40,9 @@ namespace minimal::tools_bash {
 
 class BackgroundTaskRegistry {
 public:
-    // The lifetime-safe handles a watcher needs, captured per invocation from
-    // the ToolContext. All of them are safe to hold past the session's death
-    // (see tools/tool.hpp): schedule_injection refuses, session_lifetime
-    // expires, emit_output/emit_task_event push into a closed queue and are
-    // dropped. `logger` is the process-lifetime logger.
-    struct WatchHandles {
-        std::function<void(std::string_view)> emit_output;
-        std::function<bool(llm::Message)> schedule_injection;
-        std::function<void(const tools::BackgroundTaskEvent&)> emit_task_event;
-        std::weak_ptr<const void> session_lifetime;
-        std::string tool_use_id;
-        common::Logger* logger = nullptr;
-    };
+    // The lifetime-safe handles a watcher needs (sidecar's, verbatim: the
+    // fields and their lifetime guarantees are the shared contract).
+    using WatchHandles = minimal::sidecar::TaskRegistry::WatchHandles;
 
     struct StartedTask {
         std::string id;
@@ -87,18 +61,9 @@ public:
     struct TaskInfo {
         std::string id, command;
         int pid = 0;
-        tools::BackgroundTaskEvent::State state = tools::BackgroundTaskEvent::State::kStarted;
+        minimal::tools::BackgroundTaskEvent::State state =
+            minimal::tools::BackgroundTaskEvent::State::kStarted;
         std::int64_t elapsed_ms = 0;
-    };
-
-    // Public because the watcher is a free function in the .cpp holding one of
-    // these by shared_ptr; nothing outside this .so can name the type.
-    struct TaskState {
-        std::string id, session_id, command;
-        int pid = 0;
-        std::chrono::steady_clock::time_point started_at;
-        std::atomic<int> state{
-            static_cast<int>(tools::BackgroundTaskEvent::State::kStarted)};
     };
 
     // Every task this session started, running ones first (they are the ones a
@@ -114,14 +79,7 @@ public:
     void EraseSession(const std::string& session_id);
 
 private:
-    std::mutex mutex_;
-    // Serializes Start()'s check-then-act: the cap check and the task push
-    // span a fork(), and two concurrent Starts could both pass the check
-    // before either pushed, overshooting max_background_tasks. Held only for
-    // the start sequence -- never across watcher callbacks.
-    std::mutex start_mutex_;
-    std::unordered_map<std::string, std::vector<std::shared_ptr<TaskState>>> tasks_;
-    std::atomic<std::uint64_t> next_id_{1};
+    minimal::sidecar::TaskRegistry registry_;
 };
 
 }  // namespace minimal::tools_bash
