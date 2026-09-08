@@ -138,6 +138,22 @@ public:
     }
     const std::vector<std::string>& submitted_turns() const { return submitted_turns_; }
 
+    // Records the per-turn overrides alongside the text: a command's
+    // frontmatter `model:`/`agent:` must reach the submission, and the
+    // session's sticky state is untouched by construction here.
+    bool SubmitTurnWithOverrides(std::string text, const std::optional<common::ModelRef>& model,
+                                 const std::string& agent_preset) override {
+        submitted_models_.push_back(model ? model->str() : "");
+        submitted_agents_.push_back(agent_preset);
+        return SubmitTurn(std::move(text));
+    }
+    const std::vector<std::string>& submitted_override_models() const {
+        return submitted_models_;
+    }
+    const std::vector<std::string>& submitted_override_agents() const {
+        return submitted_agents_;
+    }
+
     // Replaces providers.json wholesale -- for tests that exercise discover
     // entries beside the static fixture. Call ReloadPresets() afterwards.
     void WriteProviders(const std::string& contents) {
@@ -187,6 +203,8 @@ private:
     std::unique_ptr<agent::AgentLoop> loop_;
     std::optional<common::ModelRef> override_;
     std::vector<std::string> submitted_turns_;
+    std::vector<std::string> submitted_models_;
+    std::vector<std::string> submitted_agents_;
 };
 
 }  // namespace minimal::testing

@@ -99,3 +99,73 @@ TEST_CASE("BuildMcpPermissionPolicy: an untrusted preset may still narrow", "[pe
                                            PermissionMode::AlwaysAllow, false);
     CHECK(policy.mode_for("search") == PermissionMode::AlwaysDeny);
 }
+
+// --- pattern rules -----------------------------------------------------------------
+
+TEST_CASE("BuildPermissionPolicy: the built-in dotenv defaults fill in only where config is silent",
+          "[permission_resolution][patterns]") {
+    auto policy = BuildPermissionPolicy({}, {});
+    REQUIRE(policy.pattern_overrides.count("read") == 1);
+    REQUIRE(policy.pattern_overrides.count("write") == 1);
+    REQUIRE(policy.pattern_overrides.count("edit") == 1);
+    CHECK(policy.pattern_overrides.count("bash") == 0);
+
+    // Operator patterns for a tool replace its defaults wholesale: config
+    // intent, not a floor to fight.
+    PermissionOverrideLayer global;
+    global.pattern_overrides["read"].push_back({"**/scratch", PermissionMode::AlwaysAllow});
+    auto customized = BuildPermissionPolicy({}, global);
+    REQUIRE(customized.pattern_overrides.count("read") == 1);
+    CHECK(customized.pattern_overrides["read"].size() == 1);
+    CHECK(customized.pattern_overrides["read"][0].glob == "**/scratch");
+    // The other file tools keep their defaults.
+    CHECK(customized.pattern_overrides.count("write") == 1);
+}
+
+TEST_CASE("BuildPermissionPolicy: trusted preset patterns replace global per glob",
+          "[permission_resolution][patterns]") {
+    PermissionOverrideLayer global;
+    global.pattern_overrides["bash"].push_back({"git *", PermissionMode::AlwaysAllow});
+    global.pattern_overrides["bash"].push_back({"rm *", PermissionMode::AlwaysDeny});
+    PermissionOverrideLayer preset;
+    preset.pattern_overrides["bash"].push_back({"git *", PermissionMode::Ask});
+
+    auto policy = BuildPermissionPolicy(preset, global, /*preset_is_trusted=*/true);
+    const auto& rules = policy.pattern_overrides["bash"];
+    REQUIRE(rules.size() == 2);
+    bool git_is_ask = false, rm_is_deny = false;
+    for (const auto& rule : rules) {
+        if (rule.glob == "git *") git_is_ask = rule.mode == PermissionMode::Ask;
+        if (rule.glob == "rm *") rm_is_deny = rule.mode == PermissionMode::AlwaysDeny;
+    }
+    CHECK(git_is_ask);   // the preset replaced the global entry for the same glob
+    CHECK(rm_is_deny);   // ...and left the distinct global rule alone
+}
+
+TEST_CASE("BuildPermissionPolicy: an untrusted preset contributes no pattern rules",
+          "[permission_resolution][patterns][invariant]") {
+    // A pattern's effect depends on what it matches at resolve time, so "it
+    // only narrowed" cannot be established statically -- a repo-shipped
+    // {"git *": "allow"} would be a widening the trust clamp never sees.
+    // The only safe rule: project-local presets contribute nothing.
+    PermissionOverrideLayer global;
+    global.pattern_overrides["bash"].push_back({"git status", PermissionMode::Ask});
+    PermissionOverrideLayer preset;
+    preset.pattern_overrides["bash"].push_back({"git *", PermissionMode::AlwaysAllow});
+
+    auto policy = BuildPermissionPolicy(preset, global, /*preset_is_trusted=*/false);
+    REQUIRE(policy.pattern_overrides.count("bash") == 1);
+    CHECK(policy.pattern_overrides["bash"].size() == 1);
+    CHECK(policy.pattern_overrides["bash"][0].glob == "git status");
+}
+
+TEST_CASE("BuildPermissionPolicy: external_directory patterns merge per glob",
+          "[permission_resolution][patterns]") {
+    PermissionOverrideLayer global;
+    global.out_of_workdir_patterns.push_back({"/tmp/**", PermissionMode::Ask});
+    PermissionOverrideLayer preset;
+    preset.out_of_workdir_patterns.push_back({"/var/**", PermissionMode::AlwaysAllow});
+
+    auto policy = BuildPermissionPolicy(preset, global, /*preset_is_trusted=*/true);
+    REQUIRE(policy.out_of_workdir_patterns.size() == 2);
+}

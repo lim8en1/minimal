@@ -95,6 +95,16 @@ TEST_CASE("every ContentBlock alternative round-trips", "[proto_convert]") {
         CHECK_FALSE(std::get<llm::ThinkingBlock>(RoundTrip(without)).signature.has_value());
     }
 
+    SECTION("thinking, redacted data round-trips") {
+        const llm::ContentBlock redacted{llm::ThinkingBlock{"", std::nullopt, "encrypted-blob"}};
+        const auto out = RoundTrip(redacted);
+        REQUIRE(std::holds_alternative<llm::ThinkingBlock>(out));
+        const auto& thinking = std::get<llm::ThinkingBlock>(out);
+        CHECK_FALSE(thinking.signature.has_value());
+        REQUIRE(thinking.redacted_data.has_value());
+        CHECK(*thinking.redacted_data == "encrypted-blob");
+    }
+
     SECTION("tool_use with nested-object input") {
         const nlohmann::json input = {{"path", "src/main.cpp"}, {"opts", {{"offset", 10}}}};
         const llm::ContentBlock block{llm::ToolUseBlock{"call_1", "read", input}};
@@ -407,10 +417,16 @@ TEST_CASE("every SessionEvent alternative lands on its ServerEvent oneof", "[pro
     turn.stop_reason = llm::StopReason::ToolUse;
     turn.usage = llm::Usage{1, 2, 3, 4};
     turn.hit_max_turns = true;
+    turn.usage_estimated = true;
     const auto turn_out = trip(turn).turn_completed();
     CHECK(turn_out.stop_reason() == v1::STOP_REASON_TOOL_USE);
     CHECK(turn_out.usage().input_tokens() == 1);
     CHECK(turn_out.hit_max_turns());
+    CHECK(turn_out.usage_estimated());
+
+    agent::TurnCompleted reported;
+    reported.usage = llm::Usage{1, 1, 0, 0};
+    CHECK_FALSE(trip(reported).turn_completed().usage_estimated());
 
     const auto error_out = trip(agent::SessionError{"backlog full"}).error();
     CHECK(error_out.category() == v1::LLM_ERROR_CATEGORY_UNSPECIFIED);

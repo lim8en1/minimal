@@ -60,6 +60,47 @@ std::shared_ptr<Session> SessionRegistry::Create(SessionParams params) {
     return CreateResolved(std::move(params), std::move(preset));
 }
 
+std::shared_ptr<Session> SessionRegistry::ForkSession(
+    const std::string& source_session_id, std::int64_t target_seq, const std::string& name,
+    const std::optional<config::ModelRef>& model, const std::optional<std::string>& agent_preset,
+    std::optional<tools::PermissionRunMode> run_mode) {
+    // The store mints the child row and copies the transcript prefix in one
+    // transaction -- the same "the DATABASE mints the id" ordering every other
+    // creation path follows.
+    session::SessionSummary row = db_.ForkSession(source_session_id, target_seq, name,
+                                                  agent_preset);
+
+    SessionParams params;
+    params.session_id = row.session_id;
+    params.name = name;  // empty rides through: default naming from the first user text
+    params.agent_preset = row.agent_preset;  // the row already carries the effective one
+    params.project_root = row.project_root;
+    params.run_mode_override = run_mode;
+    params.model_override = model;
+    // The fork's store already holds the copied prefix; params.resume routes
+    // creation through LoadResumeSeed exactly like a reopened session --
+    // [summary + tail] from a copied checkpoint, occupancy reseeding, and the
+    // pre-first-call compact all come for free.
+    params.resume = true;
+
+    try {
+        return Create(std::move(params));
+    } catch (...) {
+        // The fork transaction committed, but the session could not be built
+        // (unresolvable preset/model). A failed fork leaves nothing behind --
+        // the same rollback obligation SubagentManager::Spawn carries.
+        try {
+            db_.DeleteSession(row.session_id);
+        } catch (...) {
+            // DeleteSession throwing here would mask the real failure; the
+            // orphan row is inert (no messages beyond what the next
+            // DeleteSession of the source would cascade... it has none -- it
+            // is simply a stub row) and the original error is rethrown below.
+        }
+        throw;
+    }
+}
+
 std::shared_ptr<Session> SessionRegistry::CreateResolved(SessionParams params,
                                                            AgentPreset preset,
                                                            std::optional<int> max_turns_override) {

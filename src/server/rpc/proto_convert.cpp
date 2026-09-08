@@ -298,6 +298,7 @@ v1::ContentBlock ToProto(const llm::ContentBlock& block) {
                 auto* thinking = out.mutable_thinking();
                 thinking->set_text(value.text);
                 if (value.signature) thinking->set_signature(*value.signature);
+                if (value.redacted_data) thinking->set_data(*value.redacted_data);
             } else if constexpr (std::is_same_v<T, llm::ToolUseBlock>) {
                 auto* tool_use = out.mutable_tool_use();
                 tool_use->set_id(value.id);
@@ -339,6 +340,7 @@ std::optional<llm::ContentBlock> FromProto(const v1::ContentBlock& block) {
             llm::ThinkingBlock thinking;
             thinking.text = block.thinking().text();
             if (block.thinking().has_signature()) thinking.signature = block.thinking().signature();
+            if (block.thinking().has_data()) thinking.redacted_data = block.thinking().data();
             return llm::ContentBlock{std::move(thinking)};
         }
         case v1::ContentBlock::kToolUse:
@@ -573,6 +575,7 @@ v1::ServerEvent ToProto(const std::string& session_id, const agent::SessionEvent
                 completed->set_stop_reason(ToProto(value.stop_reason));
                 *completed->mutable_usage() = ToProto(value.usage);
                 completed->set_hit_max_turns(value.hit_max_turns);
+                completed->set_usage_estimated(value.usage_estimated);
             } else if constexpr (std::is_same_v<T, agent::SessionError>) {
                 auto* error = out.mutable_error();
                 error->set_category(v1::LLM_ERROR_CATEGORY_UNSPECIFIED);
@@ -651,6 +654,7 @@ v1::SessionSummary ToProto(const session::SessionSummary& summary) {
     out.set_created_at_unix_ms(summary.created_at_unix_ms);
     out.set_updated_at_unix_ms(summary.updated_at_unix_ms);
     out.set_message_count(summary.message_count);
+    out.set_forked_from_session_id(summary.forked_from_session_id);
     return out;
 }
 

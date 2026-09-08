@@ -82,6 +82,10 @@ struct TurnCompleted {
     llm::StopReason stop_reason = llm::StopReason::Unknown;
     llm::Usage usage;
     bool hit_max_turns = false;
+    // True when `usage` is the request's bytes/4 estimate rather than a
+    // backend-reported count (the zero-usage proxy gap). Clients render it;
+    // nobody prices it.
+    bool usage_estimated = false;
 };
 
 // The ad-hoc refusal/error sites (backlog full, malformed rewind, hook veto,

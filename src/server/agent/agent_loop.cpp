@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <limits>
 #include <thread>
 #include <utility>
 #include <variant>
@@ -794,7 +795,12 @@ void AgentLoop::RunTurnLoop(TurnResult& result, bool flush_first) {
 
         ++result.provider_calls;
         result.last_usage = response.usage;
-        tokens_.RecordTurn(response.usage);
+        result.usage_estimated = config_.estimate_zero_usage && !llm::ReportedUsage(response.usage);
+        // Zero-usage turns record nothing here (RecordTurn of an all-zero
+        // Usage would only add zeros to the cumulative totals); the
+        // occupancy seed below replaces last_turn_ once the assistant
+        // message is actually in history_ and the estimate can cover it.
+        if (!result.usage_estimated) tokens_.RecordTurn(response.usage);
         result.stop_reason = response.stop_reason;
 
         // MOVED, not copied. `response` is loop-local and dead after this point
@@ -808,6 +814,21 @@ void AgentLoop::RunTurnLoop(TurnResult& result, bool flush_first) {
         const auto tool_uses = ToolUsesOf(assistant);
         // The only per-message token count that exists: this response's output.
         AppendAndPersist(std::move(assistant), response.usage.output_tokens);
+
+        if (result.usage_estimated) {
+            // Zero-usage proxy gap: the request is fully assembled now
+            // (history_ carries this round's assistant message), so the same
+            // bytes/4 estimate resume and the compactor use describes the
+            // context honestly enough to arm the trigger. SeedOccupancy
+            // deliberately touches no cumulative totals, and the estimate is
+            // mirrored into last_usage so the status bar renders -- the wire
+            // flag and cost-tracker's unpriced rule keep it honest.
+            const std::int64_t estimate = EstimateContextTokens();
+            tokens_.SeedOccupancy(estimate);
+            result.last_usage.input_tokens =
+                static_cast<int>(std::min<std::int64_t>(std::max<std::int64_t>(estimate, 0),
+                                                        std::numeric_limits<int>::max()));
+        }
 
         if (response.stop_reason == llm::StopReason::Cancelled) {
             RepairOrphanedToolUses(tool_uses);

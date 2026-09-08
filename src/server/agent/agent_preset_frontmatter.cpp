@@ -71,6 +71,32 @@ tools::PermissionOverrideLayer DecodePermissionModeBlock(const YAML::Node& node,
             layer.per_tool_overrides[tool_name] = config::ParsePermissionMode(entry.second.as<std::string>());
         }
     }
+
+    // The native pattern surface, shaped like permissions.json's
+    // pattern_overrides: {tool: {glob: mode}}. The alias block above is the
+    // opencode spelling of the same layer.
+    const YAML::Node patterns = block["patterns"];
+    if (patterns && patterns.IsMap()) {
+        for (const auto& entry : patterns) {
+            const std::string tool_name = entry.first.as<std::string>();
+            if (tool_name.empty()) {
+                throw std::runtime_error("agent preset: permission_mode.patterns has an empty-string key");
+            }
+            if (!entry.second.IsMap()) {
+                throw std::runtime_error("agent preset: permission_mode.patterns." + tool_name +
+                                         " must be a map of {glob: mode}");
+            }
+            auto& rules = layer.pattern_overrides[tool_name];
+            for (const auto& rule : entry.second) {
+                const std::string glob = rule.first.as<std::string>();
+                if (glob.empty()) {
+                    throw std::runtime_error("agent preset: permission_mode.patterns." +
+                                             tool_name + " has an empty glob");
+                }
+                rules.push_back({glob, config::ParsePermissionMode(rule.second.as<std::string>())});
+            }
+        }
+    }
     return layer;
 }
 
@@ -80,10 +106,14 @@ tools::PermissionOverrideLayer DecodePermissionModeBlock(const YAML::Node& node,
 //
 // Keys map onto minimal's categories: edit/write -> file_write, bash ->
 // execute, webfetch/websearch -> network, external_directory -> out_of_workdir,
-// read/glob/grep/list -> read_only. Pattern-object values collapse: the "*"
-// entry when present, otherwise the MOST RESTRICTIVE of the listed actions --
-// collapsing `{"git *": allow, "rm *": deny}` to allow would silently widen
-// what the author denied, and the pattern layer itself is not built yet.
+// read/glob/grep/list -> read_only. A SCALAR value lands on the category as
+// before. A MAP value under a tool-keyed alias (bash, read, write, edit, glob,
+// grep) is now the real pattern layer: each entry becomes a PermissionPattern
+// Rule on that tool's permission key, matched against the tool's subject at
+// resolve time (glob-shaped or literal alike -- GlobMatch treats a literal as
+// an exact-match pattern). A map under a category-only key (webfetch,
+// websearch, list) still collapses to the most restrictive mode: those keys
+// name no subject to match against.
 std::optional<tools::PermissionMode> CollapsePermissionValue(const YAML::Node& value,
                                                              const std::string& key) {
     if (value.IsScalar()) return config::ParsePermissionMode(value.as<std::string>());
@@ -106,6 +136,25 @@ std::optional<tools::PermissionMode> CollapsePermissionValue(const YAML::Node& v
     common::DefaultLogger().warn(
         "agent preset: permission.{} is not a mode or a pattern map; ignored", key);
     return std::nullopt;
+}
+
+// True for alias keys that are also minimal TOOL names, so a map value has a
+// subject to match against and becomes real pattern rules.
+bool AliasKeyIsToolName(const std::string& key) {
+    return key == "bash" || key == "read" || key == "write" || key == "edit" ||
+           key == "glob" || key == "grep";
+}
+
+void DecodeToolPatternMap(const YAML::Node& value, const std::string& key,
+                          tools::PermissionOverrideLayer& layer) {
+    auto& rules = layer.pattern_overrides[key];
+    for (const auto& entry : value) {
+        const std::string glob = entry.first.as<std::string>();
+        if (glob.empty()) {
+            throw std::runtime_error("agent preset: permission." + key + " has an empty pattern");
+        }
+        rules.push_back({glob, config::ParsePermissionMode(entry.second.as<std::string>())});
+    }
 }
 
 tools::PermissionOverrideLayer DecodePermissionAlias(const YAML::Node& node) {
@@ -133,6 +182,25 @@ tools::PermissionOverrideLayer DecodePermissionAlias(const YAML::Node& node) {
             // WIDEN what they asked for, so it is named instead.
             common::DefaultLogger().warn(
                 "agent preset: permission key '{}' has no minimal category; ignored", key);
+            continue;
+        }
+        if (key == "external_directory" && entry.second.IsMap()) {
+            // Each entry is a path pattern on the out_of_workdir dimension:
+            // matched against the canonical absolute path of an invocation
+            // that resolved outside the project root.
+            for (const auto& rule : entry.second) {
+                const std::string glob = rule.first.as<std::string>();
+                if (glob.empty()) {
+                    throw std::runtime_error(
+                        "agent preset: permission.external_directory has an empty pattern");
+                }
+                layer.out_of_workdir_patterns.push_back(
+                    {glob, config::ParsePermissionMode(rule.second.as<std::string>())});
+            }
+            continue;
+        }
+        if (AliasKeyIsToolName(key) && entry.second.IsMap()) {
+            DecodeToolPatternMap(entry.second, key, layer);
             continue;
         }
         // Several alias keys collapse onto one category (read/glob/grep/list ->

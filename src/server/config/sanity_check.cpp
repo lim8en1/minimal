@@ -13,6 +13,7 @@
 #include "minimal/common/config_paths.hpp"
 #include "minimal/common/read_file.hpp"
 #include "minimal/hooks/hook_dispatcher.hpp"
+#include "minimal/tools/pattern_match.hpp"
 
 namespace minimal::config {
 namespace {
@@ -727,6 +728,39 @@ std::vector<CheckResult> StartupSanityCheck::check_naming_model() {
         for (const auto& [key, mode] : raw.permission_mode.per_tool_overrides) {
             check_override_key("agent preset '" + preset_name + "'", key);
         }
+    }
+
+    // Pattern rule keys reference permission keys exactly like per_tool_overrides
+    // keys do (a pattern is operator intent on one tool, not a category), and the
+    // globs are worth a budget warning: a huge rule list is quadratic-ish at
+    // resolve time and almost always a mis-paste. Pattern KEYS are never globs
+    // themselves -- a "git *" KEY is a tool-name typo, not a rule.
+    const auto check_pattern_rules = [&results, &valid_keys](
+                                         const std::string& where, const std::string& key,
+                                         const std::vector<tools::PermissionPatternRule>& rules) {
+        if (!valid_keys.count(key)) {
+            results.push_back(Warning("naming_model", where + " pattern_overrides key '" + key +
+                                  "' resolves to no registered tool (typo, or the providing plugin is disabled)"));
+        }
+        if (rules.size() > 200) {
+            results.push_back(Warning("naming_model", where + " pattern_overrides for '" + key +
+                                  "' carries " + std::to_string(rules.size()) +
+                                  " rules; resolve cost grows with the list"));
+        }
+    };
+    for (const auto& [key, rules] : permissions_.global_layer.pattern_overrides) {
+        check_pattern_rules("permissions.json", key, rules);
+    }
+    for (const auto& [preset_name, raw] : presets_) {
+        for (const auto& [key, rules] : raw.permission_mode.pattern_overrides) {
+            check_pattern_rules("agent preset '" + preset_name + "'", key, rules);
+        }
+    }
+    if (permissions_.global_layer.out_of_workdir_patterns.size() > 200) {
+        results.push_back(Warning("naming_model",
+                                  "permissions.json external_directory_patterns carries " +
+                                      std::to_string(permissions_.global_layer.out_of_workdir_patterns.size()) +
+                                      " rules; resolve cost grows with the list"));
     }
 
     // allowed_tools entries reference permission keys too -- never aliases.

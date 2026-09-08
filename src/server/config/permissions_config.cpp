@@ -34,6 +34,47 @@ void ParsePerToolOverrides(const nlohmann::json& doc, tools::PermissionOverrideL
     }
 }
 
+void ParsePatternOverrides(const nlohmann::json& doc, tools::PermissionOverrideLayer& layer) {
+    if (!doc.contains("pattern_overrides")) return;
+    const auto& patterns = doc.at("pattern_overrides");
+    if (!patterns.is_object()) {
+        throw std::runtime_error("permissions.json: pattern_overrides must be an object");
+    }
+    for (const auto& [tool, rules] : patterns.items()) {
+        if (tool.empty()) {
+            throw std::runtime_error("permissions.json: pattern_overrides has an empty-string key");
+        }
+        if (!rules.is_object()) {
+            throw std::runtime_error("permissions.json: pattern_overrides." + tool +
+                                     " must be an object of {glob: mode}");
+        }
+        auto& out = layer.pattern_overrides[tool];
+        for (const auto& [glob, mode] : rules.items()) {
+            if (glob.empty()) {
+                throw std::runtime_error("permissions.json: pattern_overrides." + tool +
+                                         " has an empty glob");
+            }
+            out.push_back({glob, ParsePermissionMode(mode.get<std::string>())});
+        }
+    }
+}
+
+void ParseExternalDirectoryPatterns(const nlohmann::json& doc,
+                                    tools::PermissionOverrideLayer& layer) {
+    if (!doc.contains("external_directory_patterns")) return;
+    const auto& patterns = doc.at("external_directory_patterns");
+    if (!patterns.is_object()) {
+        throw std::runtime_error(
+            "permissions.json: external_directory_patterns must be an object of {glob: mode}");
+    }
+    for (const auto& [glob, mode] : patterns.items()) {
+        if (glob.empty()) {
+            throw std::runtime_error("permissions.json: external_directory_patterns has an empty glob");
+        }
+        layer.out_of_workdir_patterns.push_back({glob, ParsePermissionMode(mode.get<std::string>())});
+    }
+}
+
 }  // namespace
 
 PermissionsConfig ParsePermissionsConfig(const nlohmann::json& doc) {
@@ -44,6 +85,8 @@ PermissionsConfig ParsePermissionsConfig(const nlohmann::json& doc) {
         }
         ParseFallback(doc, config.global_layer);
         ParsePerToolOverrides(doc, config.global_layer);
+        ParsePatternOverrides(doc, config.global_layer);
+        ParseExternalDirectoryPatterns(doc, config.global_layer);
         if (doc.contains("mcp_default_mode")) {
             config.mcp_default_mode = ParsePermissionMode(doc.at("mcp_default_mode").get<std::string>());
         }

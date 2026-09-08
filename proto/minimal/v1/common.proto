@@ -14,9 +14,12 @@ message TextBlock {
 
 message ThinkingBlock {
   string text = 1;
-  // Currently unconsumed by clients (producer-only): reserved for provider
-  // replay/verification round-trips; kept for wire compatibility.
+  // Populated by provider-anthropic (signature_delta); required to replay a
+  // thinking block to the API. Clients render only `text`.
   optional string signature = 2;
+  // Anthropic's redacted_thinking payload, replayed verbatim; carries no
+  // text and no signature.
+  optional string data = 3;
 }
 
 message ToolUseBlock {

@@ -51,6 +51,27 @@ tools::PermissionPolicy BuildPermissionPolicy(const tools::PermissionOverrideLay
             policy.per_tool_overrides[name] = mode;
         }
     }
+
+    // Pattern rules: an UNTRUSTED preset contributes NONE. Unlike a scalar
+    // mode, a pattern's effect depends on what it matches at resolve time, so
+    // "it only narrowed" cannot be established here -- a repo-shipped
+    // `{"git *": "allow"}` would be a widening the clamp never sees. Trusted
+    // presets merge over the global layer per (tool, glob).
+    if (preset_is_trusted) {
+        tools::merge_pattern_layers(preset, global, policy.pattern_overrides,
+                                    policy.out_of_workdir_patterns);
+    } else {
+        tools::merge_pattern_layers(tools::PermissionOverrideLayer{}, global,
+                                    policy.pattern_overrides, policy.out_of_workdir_patterns);
+    }
+    // The built-in defaults (dotenv denial for the file tools) fill in only
+    // where neither layer spoke: operator patterns replace them wholesale per
+    // tool, which is what makes them a default rather than a floor.
+    for (auto& [key, rules] : tools::default_pattern_rules()) {
+        if (policy.pattern_overrides.find(key) == policy.pattern_overrides.end()) {
+            policy.pattern_overrides.emplace(key, std::move(rules));
+        }
+    }
     return policy;
 }
 

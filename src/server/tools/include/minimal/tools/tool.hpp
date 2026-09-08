@@ -167,6 +167,17 @@ public:
         return std::nullopt;
     }
 
+    // The string permission PATTERN rules match against (GlobMatch; see
+    // PermissionPolicy::pattern_overrides). Default: the ExtractPath result
+    // for confinement-supported tools -- the executor canonicalizes it before
+    // matching. A tool whose subject is not a path overrides this; bash
+    // returns the command line (the glob flavor differs accordingly -- the
+    // executor knows which subject is a path). nullopt = no subject for this
+    // input, so no pattern can match.
+    virtual std::optional<std::string> PatternSubject(const nlohmann::json& input) const {
+        return path_confinement_supported() ? ExtractPath(input) : std::nullopt;
+    }
+
     // Declarative opt-in, same shape as path_confinement_supported(): a tool
     // that reaches the network (S3's web_fetch/web_search) sets this true so
     // ToolExecutor folds in PermissionPolicy::network via most_restrictive.

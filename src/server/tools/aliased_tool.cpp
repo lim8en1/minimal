@@ -29,6 +29,14 @@ std::optional<std::string> AliasedTool::ExtractPath(const nlohmann::json& input)
 // opt-out.
 bool AliasedTool::network_access_required() const { return inner_->network_access_required(); }
 
+// Pattern rules key on the PERMISSION key, but the subject comes from the
+// tool itself -- which is the wrapped one. Without this forward an aliased
+// bash would present no subject and every bash pattern would silently stop
+// matching.
+std::optional<std::string> AliasedTool::PatternSubject(const nlohmann::json& input) const {
+    return inner_->PatternSubject(input);
+}
+
 std::string_view AliasedTool::config_namespace() const { return inner_->config_namespace(); }
 
 bool AliasedTool::parallel_safe() const { return inner_->parallel_safe(); }

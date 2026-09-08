@@ -69,6 +69,10 @@ public:
                                const v1::CreateSessionRequest* request,
                                v1::CreateSessionResponse* response) override;
 
+    grpc::Status ForkSession(grpc::ServerContext* context,
+                             const v1::ForkSessionRequest* request,
+                             v1::ForkSessionResponse* response) override;
+
     grpc::Status OpenSession(
         grpc::ServerContext* context,
         grpc::ServerReaderWriter<v1::ServerEvent, v1::ClientEvent>* stream) override;

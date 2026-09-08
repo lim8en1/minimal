@@ -160,7 +160,10 @@ TEST_CASE("BuildRequestBody: tool_result carries is_error and joined text conten
     CHECK(block["is_error"] == true);
 }
 
-TEST_CASE("BuildRequestBody: thinking blocks are dropped on replay", "[anthropic_request]") {
+TEST_CASE("BuildRequestBody: unsigned thinking blocks are dropped on replay",
+          "[anthropic_request]") {
+    // An unsigned block cannot be replayed (the API rejects or silently
+    // mishandles a resynthesized signature), so it stays dropped.
     Fixture fixture({llm::Message{
         llm::Role::Assistant,
         {llm::ThinkingBlock{"reasoning...", std::nullopt}, llm::TextBlock{"answer"}}}});
@@ -170,6 +173,43 @@ TEST_CASE("BuildRequestBody: thinking blocks are dropped on replay", "[anthropic
     const nlohmann::json body = ParseBody(fixture.request);
     REQUIRE(body["messages"][0]["content"].size() == 1);
     CHECK(body["messages"][0]["content"][0]["type"] == "text");
+}
+
+TEST_CASE("BuildRequestBody: signed thinking blocks replay with their signature",
+          "[anthropic_request]") {
+    Fixture fixture({llm::Message{
+        llm::Role::Assistant,
+        {llm::ThinkingBlock{"reasoning...", std::string("sig-abc"), std::nullopt},
+         llm::TextBlock{"answer"}}}});
+    fixture.request.model = "claude-opus-5";
+    fixture.request.max_tokens = 1024;
+
+    const nlohmann::json body = ParseBody(fixture.request);
+    REQUIRE(body["messages"][0]["content"].size() == 2);
+    const auto& block = body["messages"][0]["content"][0];
+    CHECK(block["type"] == "thinking");
+    CHECK(block["thinking"] == "reasoning...");
+    CHECK(block["signature"] == "sig-abc");
+    // Thinking precedes the message's own text, as the API requires.
+    CHECK(body["messages"][0]["content"][1]["type"] == "text");
+}
+
+TEST_CASE("BuildRequestBody: redacted thinking replays its data verbatim",
+          "[anthropic_request]") {
+    Fixture fixture({llm::Message{
+        llm::Role::Assistant,
+        {llm::ThinkingBlock{"", std::nullopt, std::string("encrypted-blob")},
+         llm::TextBlock{"answer"}}}});
+    fixture.request.model = "claude-opus-5";
+    fixture.request.max_tokens = 1024;
+
+    const nlohmann::json body = ParseBody(fixture.request);
+    REQUIRE(body["messages"][0]["content"].size() == 2);
+    const auto& block = body["messages"][0]["content"][0];
+    CHECK(block["type"] == "redacted_thinking");
+    CHECK(block["data"] == "encrypted-blob");
+    CHECK_FALSE(block.contains("thinking"));
+    CHECK_FALSE(block.contains("signature"));
 }
 
 TEST_CASE("BuildRequestBody: invalid UTF-8 is replaced with U+FFFD, never thrown",
@@ -226,10 +266,11 @@ TEST_CASE("ToAnthropicToolChoice: Specific without a tool_name throws", "[anthro
 
 TEST_CASE("BuildRequestBody: a message whose content is entirely dropped is skipped",
           "[anthropic_request][invariant]") {
-    // An assistant turn consisting only of thinking blocks (dropped on
-    // replay) serialized as "content":[] -- which the API rejects outright.
+    // An assistant turn consisting only of UNSIGNED thinking blocks (not
+    // replayable, so dropped) would otherwise serialize as "content":[] --
+    // which the API rejects outright.
     Fixture fixture({llm::Message{llm::Role::User, {llm::TextBlock{"hi"}}},
-                     llm::Message{llm::Role::Assistant, {llm::ThinkingBlock{"hmm", "sig"}}},
+                     llm::Message{llm::Role::Assistant, {llm::ThinkingBlock{"hmm", std::nullopt}}},
                      llm::Message{llm::Role::User, {llm::TextBlock{"continue"}}}});
     fixture.request.model = "claude-opus-5";
     fixture.request.max_tokens = 1024;
@@ -240,6 +281,25 @@ TEST_CASE("BuildRequestBody: a message whose content is entirely dropped is skip
     REQUIRE(body["messages"].size() == 1);
     CHECK(body["messages"][0]["role"] == "user");
     CHECK(body["messages"][0]["content"].size() == 2);
+}
+
+TEST_CASE("BuildRequestBody: a signed thinking-only assistant turn renders as its own message",
+          "[anthropic_request]") {
+    // Replayable content must NOT be skipped -- dropping it would break the
+    // extended-thinking tool loop the signature exists to serve.
+    Fixture fixture({llm::Message{llm::Role::User, {llm::TextBlock{"hi"}}},
+                     llm::Message{llm::Role::Assistant,
+                                  {llm::ThinkingBlock{"hmm", std::string("sig"), std::nullopt}}},
+                     llm::Message{llm::Role::User, {llm::TextBlock{"continue"}}}});
+    fixture.request.model = "claude-opus-5";
+    fixture.request.max_tokens = 1024;
+
+    const nlohmann::json body = ParseBody(fixture.request);
+    REQUIRE(body["messages"].size() == 3);
+    CHECK(body["messages"][1]["role"] == "assistant");
+    REQUIRE(body["messages"][1]["content"].size() == 1);
+    CHECK(body["messages"][1]["content"][0]["type"] == "thinking");
+    CHECK(body["messages"][1]["content"][0]["signature"] == "sig");
 }
 
 TEST_CASE("BuildRequestBody: cache_ttl rejects values the API would refuse",

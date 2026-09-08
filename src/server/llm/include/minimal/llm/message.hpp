@@ -17,7 +17,14 @@ struct TextBlock {
 
 struct ThinkingBlock {
     std::string text;
-    std::optional<std::string> signature;  // reserved
+    // Populated end-to-end by provider-anthropic from the stream's
+    // signature_delta; REQUIRED to replay a thinking block to the API (an
+    // unsigned block is dropped at request-build time rather than sent).
+    std::optional<std::string> signature;
+    // Anthropic's redacted_thinking payload: replayed verbatim, carries no
+    // text and no signature. Mutually exclusive with signature by
+    // construction (one block kind on the wire).
+    std::optional<std::string> redacted_data;
 };
 
 struct ToolUseBlock {

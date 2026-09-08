@@ -2,6 +2,7 @@
 #include <catch2/generators/catch_generators.hpp>
 
 #include <filesystem>
+#include <fstream>
 #include <memory>
 
 #include "fakes.hpp"
@@ -783,4 +784,164 @@ TEST_CASE("a throwing tool is answered, not propagated", "[tool_executor][robust
     CHECK(block.is_error);
     CHECK_FALSE(block.content.empty());
     CHECK(TextOf(block).find("boom") != std::string::npos);
+}
+
+// --- pattern rules ---------------------------------------------------------------
+
+TEST_CASE("a matching bash command pattern replaces the category default",
+          "[tool_executor][patterns]") {
+    Fixture f;
+    auto& bash = f.AddTool("bash", ToolCategory::Execute);
+    bash.set_command_subject(true);
+    AlwaysAllowPermissionChecker checker;   // the unmatched case must reach it
+
+    tools::PermissionPolicy policy;  // execute defaults to Ask
+    policy.pattern_overrides["bash"].push_back({"git *", PermissionMode::AlwaysAllow});
+    tools::ToolExecutor executor(f.registry, checker, policy, {}, PermissionRunMode::Normal);
+    auto ctx = f.Context();
+
+    // "git status" matches "git *": allow, no prompt. The command flavor
+    // crosses '/' -- a command line is not a path.
+    CHECK_FALSE(executor.Run("t1", "bash", {{"command", "git status"}}, ctx).is_error);
+    CHECK(checker.seen.empty());
+    CHECK_FALSE(
+        executor.Run("t2", "bash", {{"command", "git commit -m src/x.cpp"}}, ctx).is_error);
+    CHECK(checker.seen.empty());
+
+    // "rm -rf /" matches nothing: the Ask default stands, the checker is asked.
+    CHECK(executor.Run("t3", "bash", {{"command", "rm -rf /"}}, ctx).is_error == false);
+    CHECK(checker.seen.size() == 1);
+}
+
+
+TEST_CASE("matching patterns fold most-restrictively: allow + ask is ask",
+          "[tool_executor][patterns][invariant]") {
+    Fixture f;
+    auto& bash = f.AddTool("bash", ToolCategory::Execute);
+    bash.set_command_subject(true);
+    AlwaysAllowPermissionChecker checker;
+
+    tools::PermissionPolicy policy;
+    auto& rules = policy.pattern_overrides["bash"];
+    rules.push_back({"git *", PermissionMode::AlwaysAllow});
+    rules.push_back({"git push --force *", PermissionMode::Ask});
+    tools::ToolExecutor executor(f.registry, checker, policy, {}, PermissionRunMode::Normal);
+    auto ctx = f.Context();
+
+    // Only "git *" matches: allow, no prompt.
+    CHECK_FALSE(executor.Run("t1", "bash", {{"command", "git status"}}, ctx).is_error);
+    CHECK(checker.seen.empty());
+    // Both match: the most restrictive (ask) wins -- the operator's tighter
+    // rule is not collapsed away by the looser one.
+    CHECK_FALSE(executor.Run("t2", "bash", {{"command", "git push --force origin"}}, ctx)
+                    .is_error);
+    REQUIRE(checker.seen.size() == 1);
+}
+
+TEST_CASE("an exact per_tool_overrides entry outranks the pattern layer",
+          "[tool_executor][patterns]") {
+    Fixture f;
+    auto& bash = f.AddTool("bash", ToolCategory::Execute);
+    bash.set_command_subject(true);
+    UnreachablePermissionChecker checker;
+
+    tools::PermissionPolicy policy;
+    policy.execute = PermissionMode::Ask;
+    policy.per_tool_overrides["bash"] = PermissionMode::AlwaysDeny;
+    policy.pattern_overrides["bash"].push_back({"git *", PermissionMode::AlwaysAllow});
+    tools::ToolExecutor executor(f.registry, checker, policy, {}, PermissionRunMode::Normal);
+    auto ctx = f.Context();
+
+    const auto block = executor.Run("t1", "bash", {{"command", "git status"}}, ctx);
+    CHECK(block.is_error);   // denied outright...
+    CHECK_FALSE(checker.called);  // ...and never prompted: exact beats pattern
+}
+
+TEST_CASE("path patterns anchor at the canonical path and deny dotenv reads",
+          "[tool_executor][patterns]") {
+    testing::TempDir dir;
+    std::filesystem::create_directories(dir.path() / "root" / "src");
+    std::filesystem::create_directories(dir.path() / "root" / ".config");
+    // Real files: the confinement canonicalization must resolve them.
+    std::ofstream(dir.path() / "root" / ".env") << "SECRET=1";
+    std::ofstream(dir.path() / "root" / ".config" / ".env.local") << "SECRET=1";
+    std::ofstream(dir.path() / "root" / "src" / "main.cpp") << "int main(){}";
+
+    Fixture f;
+    auto& read = f.AddTool("read", ToolCategory::ReadOnly);
+    read.set_path_key("path");
+    UnreachablePermissionChecker checker;
+
+    tools::PermissionPolicy policy;  // read_only defaults to Allow
+    auto& rules = policy.pattern_overrides["read"];
+    rules.push_back({"**/.env", PermissionMode::AlwaysDeny});
+    rules.push_back({"**/.env.*", PermissionMode::AlwaysDeny});
+    tools::ToolExecutor executor(f.registry, checker, policy, {}, PermissionRunMode::Normal);
+    auto ctx = f.Context(dir.path() / "root");
+
+    // Every depth matches "**/.env"; a suffix matches the ".env.*" rule.
+    CHECK(executor.Run("t1", "read", {{"path", ".env"}}, ctx).is_error);
+    CHECK(executor.Run("t2", "read", {{"path", ".config/.env.local"}}, ctx).is_error);
+    CHECK(checker.called == false);   // denied before any prompt could exist
+    // An ordinary source file matches nothing: the category default (allow).
+    CHECK_FALSE(executor.Run("t3", "read", {{"path", "src/main.cpp"}}, ctx).is_error);
+}
+
+TEST_CASE("external_directory patterns replace the scalar for matching paths",
+          "[tool_executor][patterns]") {
+    testing::TempDir dir;
+    std::filesystem::create_directories(dir.path() / "root");
+    std::filesystem::create_directories(dir.path() / "builds" / "a");
+    std::ofstream(dir.path() / "builds" / "a" / "out.txt") << "x";
+    std::ofstream(dir.path() / "builds" / "other.txt") << "x";
+    // macOS resolves /var -> /private/var: patterns and inputs must both be
+    // built from the CANONICAL base or the glob comparison silently misses.
+    const auto base = std::filesystem::canonical(dir.path());
+    std::filesystem::create_directories(base / "root");
+
+    Fixture f;
+    auto& read = f.AddTool("read", ToolCategory::ReadOnly);
+    read.set_path_key("path");
+    AlwaysAllowPermissionChecker checker;
+
+    tools::PermissionPolicy policy;
+    auto& patterns = policy.out_of_workdir_patterns;
+    patterns.push_back({(base / "builds" / "a" / "**").string(), PermissionMode::AlwaysAllow});
+    tools::ToolExecutor executor(f.registry, checker, policy, {}, PermissionRunMode::Normal);
+    auto ctx = f.Context(base / "root");
+
+    // Under the allowed subtree: the out_of_workdir Ask is REPLACED by allow.
+    CHECK_FALSE(
+        executor.Run("t1", "read", {{"path", (base / "builds" / "a" / "out.txt").string()}},
+                     ctx)
+            .is_error);
+    CHECK(checker.seen.empty());
+    // Outside the subtree but still outside the root: the scalar Ask stands.
+    CHECK_FALSE(
+        executor.Run("t2", "read", {{"path", (base / "builds" / "other.txt").string()}},
+                     ctx)
+            .is_error);
+    CHECK(checker.seen.size() == 1);
+}
+
+TEST_CASE("the ceiling's patterns tighten a child's pattern-allow",
+          "[tool_executor][patterns][invariant]") {
+    Fixture f;
+    auto& bash = f.AddTool("bash", ToolCategory::Execute);
+    bash.set_command_subject(true);
+    AlwaysAllowPermissionChecker checker;
+
+    tools::PermissionPolicy child_policy;  // the child's own allow
+    child_policy.pattern_overrides["bash"].push_back({"git *", PermissionMode::AlwaysAllow});
+    tools::PermissionPolicy ceiling;       // the parent's ask for the same commands
+    ceiling.execute = PermissionMode::Ask;
+    ceiling.pattern_overrides["bash"].push_back({"git *", PermissionMode::Ask});
+
+    tools::ToolExecutor executor(f.registry, checker, child_policy, {},
+                                 PermissionRunMode::Normal, ceiling);
+    auto ctx = f.Context();
+
+    // Child pattern says allow; ceiling pattern says ask; the fold keeps ask.
+    CHECK_FALSE(executor.Run("t1", "bash", {{"command", "git status"}}, ctx).is_error);
+    REQUIRE(checker.seen.size() == 1);
 }

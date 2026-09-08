@@ -40,6 +40,11 @@ struct TurnSummary {
     // switch mid-session, so the preset or provider entry alone underdetermines
     // the rate.
     std::string model;
+    // True when `usage` is the request's bytes/4 estimate rather than a
+    // backend-reported count (the zero-usage proxy gap). A pricing observer
+    // must treat an estimated turn as unreported -- an estimated token count
+    // is not a reported one.
+    bool usage_estimated = false;
 };
 
 struct ToolInvocation {

@@ -1,6 +1,25 @@
 #include "minimal/tools/permission.hpp"
 
+#include "minimal/tools/pattern_match.hpp"
+
 namespace minimal::tools {
+
+namespace {
+
+// The pattern half of mode_for: most_restrictive over every MATCHING rule for
+// this key. nullopt = no match (the caller keeps the category default).
+std::optional<PermissionMode> FoldPatterns(const std::vector<PermissionPatternRule>& rules,
+                                           const std::string& subject, bool slash_terminates) {
+    std::optional<PermissionMode> folded;
+    for (const auto& rule : rules) {
+        if (GlobMatch(rule.glob, subject, slash_terminates)) {
+            folded = folded ? most_restrictive(*folded, rule.mode) : rule.mode;
+        }
+    }
+    return folded;
+}
+
+}  // namespace
 
 PermissionMode PermissionPolicy::mode_for(std::string_view tool_name, ToolCategory category) const {
     if (auto it = per_tool_overrides.find(std::string(tool_name)); it != per_tool_overrides.end()) {
@@ -12,6 +31,25 @@ PermissionMode PermissionPolicy::mode_for(std::string_view tool_name, ToolCatego
         case ToolCategory::Execute:   return execute;
     }
     return PermissionMode::Ask;  // unreachable; fail closed rather than fall through
+}
+
+PermissionMode PermissionPolicy::mode_for(std::string_view tool_name, ToolCategory category,
+                                          const std::optional<std::string>& subject,
+                                          bool subject_is_path) const {
+    // Exact overrides keep the highest precedence they have always had; the
+    // pattern layer sits between them and the category default.
+    if (auto it = per_tool_overrides.find(std::string(tool_name)); it != per_tool_overrides.end()) {
+        return it->second;
+    }
+    if (subject) {
+        if (auto it = pattern_overrides.find(std::string(tool_name));
+            it != pattern_overrides.end()) {
+            if (auto mode = FoldPatterns(it->second, *subject, subject_is_path)) {
+                return *mode;  // at least one match: the patterns REPLACE the default
+            }
+        }
+    }
+    return mode_for(tool_name, category);
 }
 
 PermissionMode McpPermissionPolicy::mode_for(std::string_view server_name) const {
@@ -69,6 +107,50 @@ PermissionMode resolve_mcp_chain(const std::optional<PermissionMode>& preset_per
                                   PermissionMode global_default_mode) {
     if (preset_per_server) return *preset_per_server;
     return global_default_mode;
+}
+
+void merge_pattern_layers(
+    const PermissionOverrideLayer& preset, const PermissionOverrideLayer& global,
+    std::unordered_map<std::string, std::vector<PermissionPatternRule>>& out_patterns,
+    std::vector<PermissionPatternRule>& out_ood_patterns) {
+    out_patterns = global.pattern_overrides;
+    for (const auto& [key, rules] : preset.pattern_overrides) {
+        auto& out = out_patterns[key];  // absent key: the preset's rules are it
+        for (const auto& rule : rules) {
+            // Same glob: the preset (trusted by the time it gets here) wins.
+            bool replaced = false;
+            for (auto& existing : out) {
+                if (existing.glob == rule.glob) {
+                    existing = rule;
+                    replaced = true;
+                    break;
+                }
+            }
+            if (!replaced) out.push_back(rule);
+        }
+    }
+    out_ood_patterns = global.out_of_workdir_patterns;
+    for (const auto& rule : preset.out_of_workdir_patterns) {
+        bool replaced = false;
+        for (auto& existing : out_ood_patterns) {
+            if (existing.glob == rule.glob) {
+                existing = rule;
+                replaced = true;
+                break;
+            }
+        }
+        if (!replaced) out_ood_patterns.push_back(rule);
+    }
+}
+
+std::unordered_map<std::string, std::vector<PermissionPatternRule>> default_pattern_rules() {
+    // File-shaped tools deny dotenv files; matched against the canonical
+    // absolute path, so "**/" covers every depth including the project root.
+    const PermissionPatternRule dotenv_exact{"**/.env", PermissionMode::AlwaysDeny};
+    const PermissionPatternRule dotenv_suffix{"**/.env.*", PermissionMode::AlwaysDeny};
+    return {{"read", {dotenv_exact, dotenv_suffix}},
+            {"write", {dotenv_exact, dotenv_suffix}},
+            {"edit", {dotenv_exact, dotenv_suffix}}};
 }
 
 }  // namespace minimal::tools

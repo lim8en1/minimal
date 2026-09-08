@@ -70,6 +70,13 @@ struct MdCommandSpec {
     // config_dir/commands/) stays trusted and runs without that extra prompt,
     // matching every other command in the harness.
     bool trusted = true;
+    // PER-TURN overrides (opencode `model:`/`agent:` frontmatter): the turn
+    // this command submits runs on the given model and/or agent preset; the
+    // session's sticky choices are untouched. The model is kept in raw
+    // "<provider>/<model>" form (SplitModelRef-shaped; malformed refs fail
+    // the turn at pop with a named error). Empty = unset.
+    std::string model;
+    std::string agent;
 };
 
 // Parses one .md file into a spec. Throws std::runtime_error with the reason on

@@ -13,6 +13,13 @@ namespace minimal::llm {
 // quadratically and fire compaction far too early.
 std::int64_t context_occupancy(const Usage& last_turn);
 
+// True when the backend reported anything at all. Some OpenAI-compatible
+// proxies report an all-zero Usage; that is the known gap a caller-side
+// fallback estimate (bytes/4) exists to paper over -- this predicate is the
+// single place that decides "reported" so the estimate, the honesty rule in
+// cost accounting, and the wire flag cannot disagree about it.
+bool ReportedUsage(const Usage& usage);
+
 struct CumulativeTotals {
     std::int64_t total_output_tokens = 0;
     std::int64_t total_input_tokens = 0;

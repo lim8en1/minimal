@@ -297,6 +297,21 @@ bool Session::IsCancelled() const {
 }
 
 bool Session::SubmitTurn(std::string text) {
+    QueuedTurn turn;
+    turn.text = std::move(text);
+    return SubmitTurnWithOverrides(std::move(turn));
+}
+
+bool Session::SubmitTurnWithOverrides(std::string text, const std::optional<common::ModelRef>& model,
+                                      const std::string& agent_preset) {
+    QueuedTurn turn;
+    turn.text = std::move(text);
+    if (model) turn.model = model->str();
+    turn.agent_preset = agent_preset;
+    return SubmitTurnWithOverrides(std::move(turn));
+}
+
+bool Session::SubmitTurnWithOverrides(QueuedTurn turn) {
     bool refused = false;
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -307,7 +322,7 @@ bool Session::SubmitTurn(std::string text) {
         if (work_.size() >= kMaxWorkItems) {
             refused = true;
         } else {
-            work_.push_back(std::move(text));
+            work_.push_back(std::move(turn));
         }
     }
     if (refused) {
@@ -930,6 +945,8 @@ void Session::WorkerMain() {
                     RunOneTurn(std::nullopt);
                 } else if (auto* text = std::get_if<std::string>(&item)) {
                     RunOneTurn(std::move(*text));
+                } else if (auto* turn = std::get_if<QueuedTurn>(&item)) {
+                    RunOneTurn(std::move(turn->text), turn);
                 } else if (auto* rewind = std::get_if<QueuedRewind>(&item)) {
                     RunOneRewind(*rewind);
                 } else if (auto* run_mode = std::get_if<QueuedRunMode>(&item)) {
@@ -966,7 +983,7 @@ bool Session::ShouldWakeForInjections() const {
     return !channels_->injections.empty();
 }
 
-void Session::RunOneTurn(std::optional<std::string> text) {
+void Session::RunOneTurn(std::optional<std::string> text, const QueuedTurn* overrides) {
     const auto started = std::chrono::steady_clock::now();
 
     // Computed from the RAW text, before @-mention expansion below may move
@@ -1011,6 +1028,116 @@ void Session::RunOneTurn(std::optional<std::string> text) {
             logger_.warn("session {}: user_prompt_submit hook blocked the prompt: {}",
                          params_.session_id, *blocked);
             EmitEvent(SessionEvent{SessionError{"prompt rejected by hook: " + *blocked}});
+            vetoed = true;
+        }
+    }
+
+    // --- per-turn model/agent overrides ---------------------------------------
+    //
+    // Applied on the WORKER at turn pop -- the same boundary invariant that
+    // makes /model and /agent safe (the loop is provably not inside a
+    // provider call). The sticky state (preset_, model_override_, the
+    // metadata stream) is untouched: the turn borrows, the session keeps.
+    //
+    // Precedence: the turn's explicit model wins over the session's pinned
+    // model_override_, which wins over the (possibly overridden) preset's own
+    // model. The borrowed preset's run mode can only NARROW the sticky one
+    // (clamp_run_mode) -- a per-turn switch is a borrow, never an escalation.
+    // Restore is a scope guard so EVERY exit path -- LlmError, cancellation,
+    // a non-standard exception out of RunTurn -- puts back exactly what the
+    // loop held before; a leaked borrow would silently run every later turn
+    // on the wrong model. (A local class inside a member function sees the
+    // member's access.)
+    struct PresetRestore {
+        Session* session = nullptr;
+        bool active = false;
+        ~PresetRestore() {
+            if (!active || session == nullptr) return;
+            session->loop_->SetPreset(session->preset_);
+            session->executor_.SetRunMode(
+                session->params_.run_mode_override.value_or(session->preset_.run_mode));
+            // provider_ is what the loop held before the borrow by
+            // construction; rebind unconditionally so a borrowed provider can
+            // never leak into the next turn.
+            session->loop_->SetProvider(*session->provider_);
+        }
+    } preset_restore;
+    preset_restore.session = this;
+
+    if (overrides && (!overrides->model.empty() || !overrides->agent_preset.empty())) {
+        try {
+            AgentPreset transient = preset_;
+            if (!overrides->agent_preset.empty()) {
+                if (presets_ == nullptr) {
+                    throw std::runtime_error("no preset registry wired; cannot resolve agent '" +
+                                             overrides->agent_preset + "'");
+                }
+                transient = presets_->Resolve(overrides->agent_preset, params_.project_root);
+            }
+            // Model precedence: the turn's explicit ref wins over the session's
+            // pinned model_override_, which wins over the preset's own model.
+            // The ref is split here (pop time), so a malformed one fails the
+            // turn by name instead of being dropped reader-side.
+            std::optional<common::ModelRef> model;
+            if (!overrides->model.empty()) {
+                model = common::SplitModelRef(overrides->model);
+                if (!model) {
+                    throw std::runtime_error("malformed model '" + overrides->model +
+                                             "'; expected \"<provider>/<model>\"");
+                }
+            } else {
+                model = model_override_;
+            }
+            if (model) {
+                const std::shared_ptr<const config::ResolvedModel> resolved =
+                    presets_->providers().Resolve(*model);
+                if (resolved == nullptr) {
+                    throw std::runtime_error("unknown model '" + model->str() + "'");
+                }
+                ApplyModel(transient, *resolved);
+            }
+            executor_.SetRunMode(tools::clamp_run_mode(
+                params_.run_mode_override.value_or(preset_.run_mode), transient.run_mode));
+            loop_->SetPreset(transient);
+            // Rebind whenever the borrowed preset resolves through a different
+            // provider ENTRY or connection identity. The instance cache shares
+            // providers process-wide, so a borrow of a known entry is a hit
+            // and a restore is a no-op rebind of the same object. NOTE: a
+            // same-url different-entry borrow MUST rebind -- the instance owns
+            // the entry's resolved config (its default model included), and
+            // ChatRequest.model is built from the preset each call, so keeping
+            // the old instance would send the turn to the sticky model.
+            const bool provider_changed =
+                transient.model_ref.provider != preset_.model_ref.provider ||
+                transient.provider_kind != preset_.provider_kind ||
+                transient.provider.base_url != preset_.provider.base_url ||
+                transient.provider.api_key != preset_.provider.api_key;
+            if (provider_changed) {
+                std::shared_ptr<llm::LlmProvider> borrowed;
+                if (provider_instance_cache_ != nullptr) {
+                    borrowed = provider_instance_cache_->GetOrCreate(
+                        transient.model_ref.provider, transient.provider_kind,
+                        transient.provider);
+                } else if (provider_factories_ != nullptr) {
+                    borrowed = std::shared_ptr<llm::LlmProvider>(
+                        provider_factories_->Create(transient.provider_kind, transient.provider));
+                }
+                if (borrowed == nullptr) {
+                    throw std::runtime_error("provider kind '" + transient.provider_kind +
+                                             "' failed to construct for the per-turn override");
+                }
+                loop_->SetProvider(*borrowed);
+            }
+            preset_restore.active = true;
+        } catch (const std::exception& error) {
+            // A resolution failure fails the TURN with a named error -- nothing
+            // persisted, the session keeps its sticky choices -- the same
+            // fall-through shape the prompt veto uses below.
+            logger_.warn("session {}: per-turn override failed: {}", params_.session_id,
+                         error.what());
+            EmitEvent(
+                SessionEvent{SessionError{std::string("per-turn override failed: ") + error.what()}});
+            preset_restore.active = false;
             vetoed = true;
         }
     }
@@ -1084,7 +1211,8 @@ void Session::RunOneTurn(std::optional<std::string> text) {
         logger_.warn("session {}: setting the default name failed", params_.session_id);
     }
     try {
-        EmitTurnCompleted(result.stop_reason, result.last_usage, result.hit_max_turns);
+        EmitTurnCompleted(result.stop_reason, result.last_usage, result.hit_max_turns,
+                          result.usage_estimated);
     } catch (...) {
         logger_.warn("session {}: emitting TurnCompletedEvent failed", params_.session_id);
     }
@@ -1101,6 +1229,7 @@ void Session::RunOneTurn(std::optional<std::string> text) {
         }
         summary.stop_reason = result.stop_reason;
         summary.usage = result.last_usage;
+        summary.usage_estimated = result.usage_estimated;
         // Specified by ARCHITECTURE.md since track I and shipped permanently
         // empty, because the loop collected it nowhere and this never set it.
         summary.tool_names_invoked = std::move(result.tool_names_invoked);
@@ -1136,13 +1265,13 @@ void Session::RunOneTurn(std::optional<std::string> text) {
 }
 
 void Session::EmitTurnCompleted(llm::StopReason stop_reason, const llm::Usage& usage,
-                                bool hit_max_turns) {
+                                bool hit_max_turns, bool usage_estimated) {
     // This is the turn's exit signal, and a headless client detects the end
     // of a turn by it alone. The sink never blocks and never refuses for
     // capacity -- a full subscriber drops its oldest to make room -- so the
     // terminator always lands on every attached stream unless the
     // broadcaster is already closed.
-    EmitEvent(SessionEvent{TurnCompleted{stop_reason, usage, hit_max_turns}});
+    EmitEvent(SessionEvent{TurnCompleted{stop_reason, usage, hit_max_turns, usage_estimated}});
 }
 
 void Session::EmitDefaultNameIfComputed(const std::string& candidate) {

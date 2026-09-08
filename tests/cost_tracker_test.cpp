@@ -265,6 +265,34 @@ TEST_CASE("the observer records turns with zero-usage honesty", "[cost_tracker]"
     CHECK(!history.turns[1].usage.usage_reported);
 }
 
+TEST_CASE("the observer never prices an estimated turn", "[cost_tracker][invariant]") {
+    // The zero-usage fallback mirrors its bytes/4 estimate into the usage
+    // fields so the status bar can render; the estimated flag is what keeps
+    // that count OUT of cost pricing. Non-zero fields alone must not flip
+    // usage_reported once the flag is set.
+    Harness harness;
+    CostSessionObserver observer(harness.store);
+
+    agent::SessionInfo info;
+    info.session_id = "s1";
+
+    agent::TurnSummary estimated;
+    estimated.model = "gpt-4o";
+    estimated.usage = llm::Usage{1234, 0, 0, 0};  // the estimate, mirrored in
+    estimated.usage_estimated = true;
+    observer.OnTurnCompleted(info, estimated);
+
+    const auto history = harness.store.Load("s1");
+    REQUIRE(history.turns.size() == 1);
+    CHECK(!history.turns[0].usage.usage_reported);
+    const auto totals = Aggregate("s1", "", history.turns, [](const std::string&) {
+        return std::optional<Rate>{Rate{2.0, 8.0}};
+    });
+    CHECK(totals.models[0].unpriced_turns == 1);
+    CHECK(totals.models[0].cost == 0.0);
+    CHECK(!totals.models[0].cost_known);
+}
+
 TEST_CASE("turn records carry transcript seq bounds; old blobs decode with the sentinel",
           "[cost_tracker]") {
     Harness harness;

@@ -283,7 +283,20 @@ struct QueuedRunMode {
     tools::PermissionRunMode mode = tools::PermissionRunMode::Normal;
 };
 
-using WorkItem = std::variant<std::string, QueuedCommand, QueuedRewind, QueuedRunMode>;  // string = a user turn
+// A user turn carrying PER-TURN model/agent overrides. Applied for this turn
+// only, on the worker at turn pop -- the sticky session preset, the session's
+// model_override_, and every metadata event are untouched. The model rides as
+// its RAW "<provider>/<model>" string and is split and resolved at pop: an
+// unknown or malformed ref fails the turn with a named error, never a silent
+// fall-back, and the reader never blocks on resolution.
+struct QueuedTurn {
+    std::string text;
+    std::string model;         // raw "<provider>/<model>"; empty = keep the session's
+    std::string agent_preset;  // empty = keep the session's own
+};
+
+using WorkItem =
+    std::variant<std::string, QueuedTurn, QueuedCommand, QueuedRewind, QueuedRunMode>;  // string = a plain user turn
 
 class Session : public commands::SessionControl {
 public:
@@ -318,6 +331,17 @@ public:
     // 4.4). A shorthand runs on the worker, so its SubmitTurn queues behind
     // itself and runs at the next loop iteration.
     bool SubmitTurn(std::string text) override;
+
+    // SessionControl: SubmitTurn carrying PER-TURN overrides. The model is
+    // re-rendered to its raw "<provider>/<model>" form and everything is
+    // split/resolved at pop, on the worker; the session's sticky choices are
+    // untouched. Refusal contract identical to SubmitTurn.
+    bool SubmitTurnWithOverrides(std::string text, const std::optional<common::ModelRef>& model,
+                                 const std::string& agent_preset) override;
+
+    // The queue-level form the wire and the control path both converge on:
+    // raw ref strings, resolution entirely at pop. Exposed for tests.
+    bool SubmitTurnWithOverrides(QueuedTurn turn);
 
     // Reader thread. Queues a MUTATING command for the worker, which runs it at
     // a turn boundary -- never between a tool_use and its tool_result, because
@@ -534,7 +558,7 @@ private:
     SessionInfo InfoSnapshot() const;
     // nullopt = the wake path: a turn whose user content is the injected
     // messages themselves (see SessionParams::wake_on_injection).
-    void RunOneTurn(std::optional<std::string> text);
+    void RunOneTurn(std::optional<std::string> text, const QueuedTurn* overrides = nullptr);
     void RunOneCommand(const QueuedCommand& command);
     void RunOneRewind(const QueuedRewind& request);
     void RunOneRunMode(const QueuedRunMode& request);
@@ -563,7 +587,7 @@ private:
     // a client that learns a turn ended only by seeing it succeed hangs on
     // every error.
     void EmitTurnCompleted(llm::StopReason stop_reason, const llm::Usage& usage,
-                           bool hit_max_turns);
+                           bool hit_max_turns, bool usage_estimated = false);
     // A brand-new session is unnamed until its first user turn's text names it:
     // `candidate` (agent::DefaultSessionName of the turn's raw text, computed
     // by RunOneTurn before the turn runs) is stored via

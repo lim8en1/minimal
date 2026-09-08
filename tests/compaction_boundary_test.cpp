@@ -19,6 +19,18 @@ Message AssistantToolUse(std::vector<std::pair<std::string, std::string>> id_nam
     return m;
 }
 
+// Thinking rides INSIDE its assistant message, so a boundary snap that moves
+// the tool_use necessarily moves the thinking with it -- this helper exists to
+// pin that no cut can orphan thinking from the tool call it reasoned about.
+Message AssistantThinkingThenToolUse(std::string thinking, std::string id, std::string name) {
+    Message m{Role::Assistant, {}};
+    m.content.push_back(
+        ContentBlock{ThinkingBlock{std::move(thinking), std::nullopt, std::nullopt}});
+    m.content.push_back(ContentBlock{ToolUseBlock{std::move(id), std::move(name),
+                                                  nlohmann::json::object()}});
+    return m;
+}
+
 Message UserToolResult(std::string tool_use_id) {
     Message m{Role::User, {}};
     m.content.push_back(ContentBlock{ToolResultBlock{std::move(tool_use_id), {}, false}});
@@ -61,4 +73,19 @@ TEST_CASE("multiple tool calls in one turn snap past all of them together", "[co
     // Cutting at 3 (between the two results) must snap all the way back to 1, not
     // stop at 2, since both results belong to the same assistant turn.
     CHECK(snap_compaction_boundary(messages, 3) == 1);
+}
+
+TEST_CASE("a snap never separates thinking from the tool call it precedes", "[compaction]") {
+    // Extended thinking is the first block of the assistant message that also
+    // carries the tool_use. Cutting between them is impossible at message
+    // granularity -- this pins that the snap granularity stays the MESSAGE,
+    // not the block, as replayable-thinking support lands.
+    std::vector<Message> messages = {
+        UserText("hi"),                                        // 0
+        AssistantThinkingThenToolUse("why", "t1", "read"),     // 1
+        UserToolResult("t1"),                                   // 2
+        UserText("thanks"),                                     // 3
+    };
+    CHECK(snap_compaction_boundary(messages, 2) == 1);
+    CHECK(snap_compaction_boundary(messages, 3) == 3);
 }

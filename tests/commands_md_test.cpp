@@ -112,8 +112,53 @@ TEST_CASE("ParseCommandFile: declaring run and sh together throws, and so does a
     CHECK_THROWS_AS(write("bad3.md", "---\nargs: 42\n---\nb\n"), std::runtime_error);
 }
 
-TEST_CASE("ParseCommandFile: opencode constructs desugar into the same flat sources",
+TEST_CASE("ParseCommandFile: per-turn model/agent frontmatter is carried, malformed model "
+          "throws",
           "[commands_md][compat]") {
+    testing::TempDir dir;
+    std::filesystem::create_directories(dir.path());
+    auto write = [&dir](const std::string& name, const std::string& contents) {
+        std::ofstream(dir.path() / name) << contents;
+        return ParseCommandFile(dir.path() / name, /*trusted=*/true);
+    };
+
+    const auto good = write("good.md", "---\nmodel: cheap/m1\nagent: plan\n---\nbody\n");
+    REQUIRE(good.model == "cheap/m1");
+    REQUIRE(good.agent == "plan");
+
+    // A model that cannot be a "<provider>/<model>" ref is a broken file: it
+    // must not load as a command that fails at invocation with a mystery.
+    CHECK_THROWS_AS(write("bad-model.md", "---\nmodel: noslash\n---\nbody\n"),
+                    std::runtime_error);
+
+    // Absent fields stay empty -- the overwhelmingly common shape.
+    const auto plain = write("plain.md", "---\ndescription: d\n---\nbody\n");
+    CHECK(plain.model.empty());
+    CHECK(plain.agent.empty());
+}
+
+TEST_CASE("commands-md: frontmatter model/agent ride the per-turn submission",
+          "[commands_md][compat]") {
+    testing::CommandFixture fixture;
+    testing::TempDir files;
+    commands::CommandRegistry registry;
+    auto commands = WriteAndLoad(files.path(), "cheap.md",
+                                 "---\nmodel: other/m1\nagent: planner\n---\nRun cheap\n");
+    for (auto& command : commands) registry.Register(std::move(command));
+
+    const auto result = DispatchOne(registry, fixture, "cheap", {});
+    CAPTURE(result.message);
+    REQUIRE(result.status == commands::CommandResult::Status::kOk);
+    REQUIRE(fixture.submitted_turns().size() == 1);
+    CHECK(fixture.submitted_turns()[0] == "Run cheap\n");
+    // The overrides reached the submission; the sticky session state was
+    // never consulted on this path.
+    REQUIRE(fixture.submitted_override_models().size() == 1);
+    CHECK(fixture.submitted_override_models()[0] == "other/m1");
+    CHECK(fixture.submitted_override_agents()[0] == "planner");
+}
+
+TEST_CASE("ParseCommandFile: opencode constructs desugar into the same flat sources",          "[commands_md][compat]") {
     testing::TempDir dir;
     // One file in opencode's own layout and syntax: $ARGUMENTS, $1, !`cmd`.
     auto commands = WriteAndLoad(

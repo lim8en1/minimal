@@ -19,10 +19,17 @@ void CostSessionObserver::OnTurnCompleted(const agent::SessionInfo& info,
     record.usage.output_tokens = summary.usage.output_tokens;
     record.usage.cache_read_tokens = summary.usage.cache_read_input_tokens;
     record.usage.cache_write_tokens = summary.usage.cache_creation_input_tokens;
-    record.usage.usage_reported = (summary.usage.input_tokens > 0 ||
-                                   summary.usage.output_tokens > 0 ||
-                                   summary.usage.cache_read_input_tokens > 0 ||
-                                   summary.usage.cache_creation_input_tokens > 0);
+    record.usage.usage_reported =
+        // An estimated turn (the zero-usage proxy gap's bytes/4 fallback)
+        // carries non-zero fields but is NOT a reported count -- pricing it
+        // would break the honesty rule ("unknown", never a fabricated $0 or
+        // a fabricated $X). The estimate exists to arm the compaction
+        // trigger, nothing else.
+        !summary.usage_estimated &&
+        (summary.usage.input_tokens > 0 ||
+         summary.usage.output_tokens > 0 ||
+         summary.usage.cache_read_input_tokens > 0 ||
+         summary.usage.cache_creation_input_tokens > 0);
     record.first_seq = summary.first_seq;
     record.last_seq = summary.last_seq;
     try {

@@ -305,6 +305,22 @@ public:
     // result). Serialized per session by the agent loop; see Tool::parallel_safe.
     bool parallel_safe() const override { return false; }
 
+    // Pattern rules match the raw command line (trimmed): the one subject bash
+    // has. The executor matches with the command flavor -- '/' is an ordinary
+    // character, so "git *" covers "git status src/x".
+    std::optional<std::string> PatternSubject(const nlohmann::json& input) const override {
+        if (!input.is_object() || !input.contains("command") || !input.at("command").is_string()) {
+            return std::nullopt;
+        }
+        std::string command = input.at("command").get<std::string>();
+        const auto first = command.find_first_not_of(" \t\r\n");
+        if (first == std::string::npos) return std::nullopt;
+        command.erase(0, first);
+        const auto last = command.find_last_not_of(" \t\r\n");
+        command.erase(last + 1);
+        return command;
+    }
+
     // Bash keeps the interface default for path confinement: there is no sound
     // way to know which paths an arbitrary command touches. A background
     // command is the same command string through the same shell, so disclosure

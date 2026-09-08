@@ -46,7 +46,8 @@ bool BlocksEqual(const llm::ContentBlock& a, const llm::ContentBlock& b) {
             } else if constexpr (std::is_same_v<TX, llm::TextBlock>) {
                 return x.text == y.text;
             } else if constexpr (std::is_same_v<TX, llm::ThinkingBlock>) {
-                return x.text == y.text && x.signature == y.signature;
+                return x.text == y.text && x.signature == y.signature &&
+                       x.redacted_data == y.redacted_data;
             } else if constexpr (std::is_same_v<TX, llm::ToolUseBlock>) {
                 return x.id == y.id && x.name == y.name && x.input == y.input;
             } else {  // ToolResultBlock
@@ -192,6 +193,28 @@ TEST_CASE("codec round-trips every content block variant", "[session][codec]") {
 TEST_CASE("codec round-trips thinking without a signature", "[session][codec]") {
     const llm::Message message{llm::Role::Assistant, {llm::ThinkingBlock{"thought", std::nullopt}}};
     CHECK(MessagesEqual(RoundTrip(message), message));
+}
+
+TEST_CASE("codec round-trips redacted thinking data", "[session][codec]") {
+    const llm::Message message{llm::Role::Assistant,
+                               {llm::ThinkingBlock{"", std::nullopt, std::string("encrypted-blob")}}};
+    const llm::Message back = RoundTrip(message);
+    CHECK(MessagesEqual(back, message));
+    const auto* thinking = std::get_if<llm::ThinkingBlock>(&back.content[0]);
+    REQUIRE(thinking != nullptr);
+    REQUIRE(thinking->redacted_data.has_value());
+    CHECK(*thinking->redacted_data == "encrypted-blob");
+    CHECK_FALSE(thinking->signature.has_value());
+}
+
+TEST_CASE("codec rejects a thinking block whose data is not a string", "[session][codec]") {
+    const nlohmann::json doc = {
+        {"role", "assistant"},
+        {"content", nlohmann::json::array({
+            {{"type", "thinking"}, {"text", ""}, {"signature", nullptr}, {"data", 42}},
+        })},
+    };
+    CHECK_THROWS_AS(JsonToMessage(doc), std::runtime_error);
 }
 
 TEST_CASE("codec preserves arbitrary tool input JSON verbatim", "[session][codec]") {
@@ -1708,4 +1731,145 @@ TEST_CASE("GetSession and LastMessageSeq refuse to lie about a corrupted databas
     // -1 means "empty transcript"; this one holds 400 rows. A failed read
     // throws rather than producing the empty answer.
     CHECK((seq_threw || last_seq == 399));
+}
+
+// --- Session fork ---------------------------------------------------------------
+
+namespace {
+
+// A fork fixture with a small three-turn transcript:
+//   seq 0: user "first"
+//   seq 1: assistant "reply 1"
+//   seq 2: user "second"
+struct ForkFixture {
+    testing::TempDir dir;
+    SessionDatabase db{dir.path() / "sessions.db"};
+
+    std::string source;
+    ForkFixture() {
+        source = db.CreateSession("", std::nullopt, "/work/proj", "build").session_id;
+        db.AppendMessage(source, UserMsg("first"));
+        db.AppendMessage(source,
+                         llm::Message{llm::Role::Assistant, {llm::TextBlock{"reply 1"}}});
+        db.AppendMessage(source, UserMsg("second"));
+    }
+
+    // The whole ACTIVE transcript, oldest first.
+    std::vector<StoredMessage> All(const std::string& id) {
+        return db.LoadMessagesFrom(id, /*after_seq=*/-1);
+    }
+};
+
+}  // namespace
+
+TEST_CASE("ForkSession copies the active prefix verbatim and leaves the source untouched",
+          "[session][fork]") {
+    ForkFixture fx;
+    const auto row = fx.db.ForkSession(fx.source, /*target_seq=*/2, "the fork", std::nullopt);
+
+    CHECK(row.forked_from_session_id == fx.source);
+    CHECK(row.agent_preset == "build");
+    CHECK(row.project_root == "/work/proj");
+    CHECK(row.message_count == 2);  // seqs 0 and 1
+
+    const auto child = fx.All(row.session_id);
+    REQUIRE(child.size() == 2);
+    // SEQS VERBATIM: the child's transcript starts at the source's numbering.
+    CHECK(child[0].seq == 0);
+    CHECK(child[1].seq == 1);
+    CHECK(MessagesEqual(child[0].message, UserMsg("first")));
+    CHECK(MessagesEqual(child[1].message,
+                        llm::Message{llm::Role::Assistant, {llm::TextBlock{"reply 1"}}}));
+
+    // The source is read-only under a fork: every row still there, count same.
+    const auto original = fx.All(fx.source);
+    REQUIRE(original.size() == 3);
+    CHECK(fx.db.GetSession(fx.source)->message_count == 3);
+
+    // Appending to the child continues its own MAX(seq)+1 (seq 2, which is
+    // "second" in the source -- a genuinely diverging line).
+    fx.db.AppendMessage(row.session_id, UserMsg("diverged"));
+    const auto after = fx.All(row.session_id);
+    REQUIRE(after.size() == 3);
+    CHECK(after[2].seq == 2);
+    CHECK(MessagesEqual(after[2].message, UserMsg("diverged")));
+}
+
+TEST_CASE("ForkSession inherits the source's name_source rules", "[session][fork]") {
+    ForkFixture fx;
+    const auto named = fx.db.ForkSession(fx.source, 0, "chosen name", std::nullopt);
+    CHECK(named.name == "chosen name");
+    CHECK(named.name_source == "explicit");
+
+    const auto unnamed = fx.db.ForkSession(fx.source, 0, "", std::nullopt);
+    CHECK(unnamed.name.empty());
+    CHECK(unnamed.name_source == "");  // the free default-naming rule owns it later
+}
+
+TEST_CASE("ForkSession validates the target like a rewind would", "[session][fork]") {
+    ForkFixture fx;
+
+    // Not a message at all.
+    CHECK_THROWS_AS(fx.db.ForkSession(fx.source, 99, "", std::nullopt), std::runtime_error);
+    // An assistant message is not a fork point.
+    CHECK_THROWS_AS(fx.db.ForkSession(fx.source, 1, "", std::nullopt), std::runtime_error);
+    // A seq that does not exist.
+    CHECK_THROWS_AS(fx.db.ForkSession("no-such-session", 0, "", std::nullopt), std::runtime_error);
+}
+
+TEST_CASE("ForkSession refuses a subagent source", "[session][fork][invariant]") {
+    ForkFixture fx;
+    const auto child =
+        fx.db.CreateSession("", std::optional<std::string>(fx.source), "/work/proj", "build")
+            .session_id;
+    fx.db.AppendMessage(child, UserMsg("child task"));
+    CHECK_THROWS_AS(fx.db.ForkSession(child, 0, "", std::nullopt), std::runtime_error);
+}
+
+TEST_CASE("ForkSession copies the compaction checkpoint only when it covers the prefix",
+          "[session][fork]") {
+    ForkFixture fx;
+    const llm::Message summary =
+        llm::Message{llm::Role::User, {llm::TextBlock{"[summary of everything before seq 2]"}}};
+    fx.db.SaveCompactionCheckpoint(fx.source, /*boundary_seq=*/1, summary);
+
+    // boundary (1) < target (2): the checkpoint covers the copied prefix's
+    // head and the tail rows (boundary, target) -- ride it along verbatim.
+    const auto covering = fx.db.ForkSession(fx.source, 2, "", std::nullopt);
+    const auto covering_checkpoint = fx.db.LoadCompactionCheckpoint(covering.session_id);
+    REQUIRE(covering_checkpoint.has_value());
+    CHECK(covering_checkpoint->boundary_seq == 1);
+    CHECK(MessagesEqual(covering_checkpoint->summary, summary));
+
+    // boundary (2) >= target (2): the summary over-covers -- leave it behind.
+    fx.db.SaveCompactionCheckpoint(fx.source, /*boundary_seq=*/2, summary);
+    const auto over = fx.db.ForkSession(fx.source, 2, "", std::nullopt);
+    CHECK_FALSE(fx.db.LoadCompactionCheckpoint(over.session_id).has_value());
+}
+
+TEST_CASE("a forked session's discard state is its own: rewind in the fork leaves the "
+          "source alone",
+          "[session][fork][invariant]") {
+    ForkFixture fx;
+    const auto fork = fx.db.ForkSession(fx.source, 2, "", std::nullopt);
+    fx.db.AppendMessage(fork.session_id, UserMsg("diverged"));
+    fx.db.AppendMessage(fork.session_id, UserMsg("more"));
+    fx.db.SetDiscardedAfter(fork.session_id, 2);
+
+    // The fork rewound to seq 1; the source still holds all three rows active.
+    CHECK(fx.db.LastMessageSeq(fork.session_id) == 1);
+    CHECK(fx.db.LastMessageSeq(fx.source) == 2);
+    CHECK(fx.All(fx.source).size() == 3);
+}
+
+TEST_CASE("ForkSession with a negative target copies the whole active transcript",
+          "[session][fork]") {
+    ForkFixture fx;
+    const auto row = fx.db.ForkSession(fx.source, /*target_seq=*/-1, "whole thing", std::nullopt);
+    CHECK(row.message_count == 3);
+
+    const auto child = fx.All(row.session_id);
+    REQUIRE(child.size() == 3);
+    CHECK(child[2].seq == 2);
+    CHECK(MessagesEqual(child[2].message, UserMsg("second")));
 }

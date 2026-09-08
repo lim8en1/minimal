@@ -192,6 +192,24 @@ public:
 
     std::shared_ptr<Session> Create(SessionParams params);
 
+    // SESSION FORK: creates a new top-level session whose store was seeded by
+    // SessionDatabase::ForkSession (the caller or this method owns that call
+    // ordering -- here the fork transaction runs first, then the session is
+    // created through Create with resume=true, so the existing resume machinery
+    // seeds the working set: [summary + tail] via a copied compaction
+    // checkpoint, occupancy reseeding, and the pre-first-call compact).
+    //
+    // agent_preset / model / run_mode override the SOURCE's values when set;
+    // unset means the fork runs exactly what the source was running. Refuses a
+    // subagent source (the store does, atomically). Throws the same error
+    // families as Create; on a throw AFTER the fork transaction committed, the
+    // minted child row is deleted so a failed fork leaves nothing behind.
+    std::shared_ptr<Session> ForkSession(const std::string& source_session_id,
+                                         std::int64_t target_seq, const std::string& name,
+                                         const std::optional<config::ModelRef>& model,
+                                         const std::optional<std::string>& agent_preset,
+                                         std::optional<tools::PermissionRunMode> run_mode);
+
     // Same as Create(), but the caller supplies the ALREADY RESOLVED preset
     // instead of having it looked up by params.agent_preset. Subagent spawning
     // is the consumer: the spawner adapts the resolved preset first (is_subagent

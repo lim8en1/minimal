@@ -107,6 +107,13 @@ struct LoopConfig {
     };
     std::optional<SmallModel> small_model;
 
+    // memory.estimate_zero_usage: when a turn's backend usage is all-zero
+    // (the OpenAI-compatible proxy gap), seed occupancy from the request's
+    // bytes/4 estimate so the compaction trigger arms, and flag the turn's
+    // wire usage as estimated. Estimates never reach cumulative totals and
+    // never feed cost pricing.
+    bool estimate_zero_usage = true;
+
     // The producer-resolved summarizer: compaction_strategy's own when a
     // strategy set one, compact_messages (today's only behavior) otherwise.
     // Centralized here so the consumer (Session's ctor, building AgentLoop)
@@ -213,6 +220,11 @@ struct TurnResult {
     // first request is built, so a turn that failed or was cancelled before any
     // response still reports what it would have billed.
     std::string model;
+    // True when last_usage is the request's bytes/4 estimate rather than a
+    // backend-reported count (the zero-usage proxy gap). The wire mirrors it
+    // on TurnCompletedEvent and TurnSummary carries it to observers -- cost
+    // pricing keys off it to keep an estimated token count unpriced.
+    bool usage_estimated = false;
 };
 
 // RESUME: the stored transcript, loaded without being re-appended -- the

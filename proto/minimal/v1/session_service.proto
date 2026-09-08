@@ -9,6 +9,12 @@ import "google/protobuf/struct.proto";
 
 message UserChatTurn {
   string text = 1; // v1 is text-only; structured content (pasted images, etc.) is future scope
+  // PER-TURN overrides: this one turn runs on the given model
+  // ("<provider>/<model>") and/or agent preset, resolved at pop; the
+  // session's sticky choices are untouched. Unknown names fail the turn
+  // with a named error, never a silent fall-back.
+  optional string model = 2;
+  optional string agent_preset = 3;
 }
 
 message CommandArgs {
@@ -319,6 +325,10 @@ message TurnCompletedEvent {
   StopReason stop_reason = 1;
   Usage usage = 2;
   bool hit_max_turns = 3;
+  // True when `usage` is the server's bytes/4 estimate rather than a
+  // backend-reported count (some OpenAI-compatible proxies report zero
+  // usage). Render it, don't price it.
+  bool usage_estimated = 4;
 }
 
 // Lifecycle of a BACKGROUND task -- work (background bash) whose process
@@ -484,6 +494,9 @@ message SessionSummary {
   // its transcript may still be growing) instead of "resume" (load from the
   // stored transcript, the only option before S5) for the same session_id.
   bool is_live = 9;
+  // Session FORK provenance (v7 store): the source session this one forked
+  // from, empty otherwise. A fork is a top-level peer -- NOT a subagent.
+  string forked_from_session_id = 10;
 }
 
 message ListSessionsRequest {
@@ -614,6 +627,28 @@ message CreateSessionResponse {
   SessionSummary session = 1;
 }
 
+// SESSION FORK: a new top-level session seeded with the source's active
+// transcript below target_seq. The source is untouched -- the interesting
+// "try it on another model/plan" shape: fork at the current point with a
+// model override, experiment there, keep whichever line you like. Forking a
+// live mid-turn session is safe; forking a SUBAGENT session is refused.
+message ForkSessionRequest {
+  string source_session_id = 1;
+  // The fork point: everything strictly below it is copied. Must be an
+  // active, text-bearing user message -- the same shape a rewind demands.
+  int64 target_seq = 2;
+  string name = 3;         // empty = the free default-naming rule
+  // "<provider>/<model>", empty = the source's preset model.
+  string model = 4;
+  string agent_preset = 5; // empty = the source's preset
+  // UNSPECIFIED = the source's run mode.
+  PermissionRunMode run_mode = 6;
+}
+
+message ForkSessionResponse {
+  SessionSummary session = 1;
+}
+
 // --- Generic plugin channel ---
 //
 // A UI plugin is usually a pair: a server-side data source plus a client-side
@@ -657,6 +692,7 @@ service SessionService {
   // command). Server sorts refs ascending.
   rpc ListModels(ListModelsRequest) returns (ListModelsResponse);
   rpc CreateSession(CreateSessionRequest) returns (CreateSessionResponse);
+  rpc ForkSession(ForkSessionRequest) returns (ForkSessionResponse);
   rpc SuggestPaths(SuggestPathsRequest) returns (SuggestPathsResponse);
   // Unary, fetched once at connect: plugins load at startup and config is read
   // once, so the command list cannot change mid-connection -- no invalidation

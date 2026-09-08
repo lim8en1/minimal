@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -52,7 +53,9 @@ private:
 
     struct Block {
         enum class Kind { Text, ToolUse, Thinking } kind;
-        std::string text;                      // Kind::Text / Kind::Thinking (Thinking dropped at Finalize)
+        std::string text;                      // Kind::Text / Kind::Thinking
+        std::optional<std::string> signature;  // Kind::Thinking: signature_delta fragments, concatenated
+        std::optional<std::string> redacted_data;  // Kind::Thinking: redacted_thinking's data blob
         std::string id, name, input_json;      // Kind::ToolUse
         bool stopped = false;                  // content_block_stop already seen
     };

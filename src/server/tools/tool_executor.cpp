@@ -5,6 +5,7 @@
 
 #include "minimal/mcp/naming.hpp"
 #include "minimal/tools/path_confinement.hpp"
+#include "minimal/tools/pattern_match.hpp"
 
 namespace minimal::tools {
 namespace {
@@ -69,9 +70,30 @@ PermissionMode ToolExecutor::ResolveMode(const Tool& tool, const nlohmann::json&
     //    alias changes what the model sees. For unaliased tools the two agree.
     const std::string_view permission_key = registry_.PermissionKeyFor(name);
     const std::string mcp_server = mcp_server_of(name);
+
+    // The pattern-matching subject, computed only when the policy actually
+    // carries pattern rules (the confine() call below is filesystem work; a
+    // pattern-free policy must not pay it on every invocation). A canonical
+    // path anchors patterns like "**/.env" at "/" for confinement tools; the
+    // raw subject stands for everything else (bash's command line).
+    std::optional<std::string> pattern_subject;
+    bool subject_is_path = false;
+    if (!policy_.pattern_overrides.empty()) {
+        if (auto raw = tool.PatternSubject(input)) {
+            if (tool.path_confinement_supported()) {
+                const ConfineResult canonical = confine(ctx.project_root, *raw, false);
+                pattern_subject = canonical.ok ? canonical.absolute_path.string() : *raw;
+                subject_is_path = true;
+            } else {
+                pattern_subject = std::move(*raw);
+            }
+        }
+    }
+
     PermissionMode mode =
-        mcp_server.empty() ? policy_.mode_for(permission_key, category)
-                           : mcp_policy_.mode_for(mcp_server);
+        mcp_server.empty()
+            ? policy_.mode_for(permission_key, category, pattern_subject, subject_is_path)
+            : mcp_policy_.mode_for(mcp_server);
 
     // The confinement verdict of THIS invocation, consumed by the ceiling fold
     // below and surfaced to Prepare for the execute-time re-check.
@@ -81,7 +103,10 @@ PermissionMode ToolExecutor::ResolveMode(const Tool& tool, const nlohmann::json&
     // 2. Only if permitted, and only for path-bearing tools, fold in
     //    out_of_workdir. This is a FOLD, never a substitution: substituting
     //    would mean `file_write: deny` + `out_of_workdir: allow` permits writing
-    //    /etc/foo while denying ./foo.cpp -- exactly inverted.
+    //    /etc/foo while denying ./foo.cpp -- exactly inverted. The dimension's
+    //    PATTERN rules (out_of_workdir_patterns) replace the scalar for this
+    //    invocation when any of them matches the canonical path: the operator's
+    //    per-path intent is the more specific statement.
     if (mode != PermissionMode::AlwaysDeny && tool.path_confinement_supported()) {
         if (auto path = tool.ExtractPath(input)) {
             const ConfineResult resolved = confine(ctx.project_root, *path, /*must_exist=*/false);
@@ -91,7 +116,18 @@ PermissionMode ToolExecutor::ResolveMode(const Tool& tool, const nlohmann::json&
                 // An unresolvable path is treated as outside: fail closed rather
                 // than silently applying the in-workdir rule to something we
                 // could not place.
-                mode = most_restrictive(mode, policy_.out_of_workdir);
+                PermissionMode ood = policy_.out_of_workdir;
+                if (!policy_.out_of_workdir_patterns.empty() && resolved.ok) {
+                    std::optional<PermissionMode> folded;
+                    for (const auto& rule : policy_.out_of_workdir_patterns) {
+                        if (GlobMatch(rule.glob, resolved.absolute_path.string(),
+                                      /*slash_terminates=*/true)) {
+                            folded = folded ? most_restrictive(*folded, rule.mode) : rule.mode;
+                        }
+                    }
+                    if (folded) ood = *folded;
+                }
+                mode = most_restrictive(mode, ood);
             }
         }
     }
@@ -115,13 +151,33 @@ PermissionMode ToolExecutor::ResolveMode(const Tool& tool, const nlohmann::json&
     if (mode != PermissionMode::AlwaysDeny) {
         if (mcp_server.empty()) {
             if (policy_ceiling_) {
-                mode = most_restrictive(mode, policy_ceiling_->mode_for(permission_key, category));
+                // The ceiling's own pattern rules ride along: a parent's
+                // `{"git *": "ask"}` tightens the child's matching calls even
+                // when the child preset asked for allow. Folding
+                // most_restrictive keeps the ceiling one-directional -- its
+                // pattern-allows can never widen the child.
+                mode = most_restrictive(
+                    mode, policy_ceiling_->mode_for(permission_key, category, pattern_subject,
+                                                    subject_is_path));
                 // out_of_workdir and network are dimension FIELDS, not
                 // categories, so mode_for() never consults them: without this
                 // fold a child could exceed its parent on exactly those axes.
                 // Same conditions as this executor's own folds in 2/2a.
                 if (checked && !inside) {
-                    mode = most_restrictive(mode, policy_ceiling_->out_of_workdir);
+                    PermissionMode ceiling_ood = policy_ceiling_->out_of_workdir;
+                    if (!policy_ceiling_->out_of_workdir_patterns.empty() && pattern_subject &&
+                        subject_is_path) {
+                        std::optional<PermissionMode> folded;
+                        for (const auto& rule : policy_ceiling_->out_of_workdir_patterns) {
+                            if (GlobMatch(rule.glob, *pattern_subject,
+                                          /*slash_terminates=*/true)) {
+                                folded =
+                                    folded ? most_restrictive(*folded, rule.mode) : rule.mode;
+                            }
+                        }
+                        if (folded) ceiling_ood = *folded;
+                    }
+                    mode = most_restrictive(mode, ceiling_ood);
                 }
                 if (tool.network_access_required()) {
                     mode = most_restrictive(mode, policy_ceiling_->network);

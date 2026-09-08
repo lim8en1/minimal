@@ -56,19 +56,45 @@ TEST_CASE("ParseNonStreamingResponse: text and tool_use content", "[anthropic_re
     CHECK(tool_use.input["path"] == "a.txt");
 }
 
-TEST_CASE("ParseNonStreamingResponse: thinking blocks are dropped", "[anthropic_response]") {
+TEST_CASE("ParseNonStreamingResponse: thinking blocks are captured, not dropped",
+          "[anthropic_response]") {
     const auto body = nlohmann::json::parse(R"({
         "id": "msg_1", "model": "m",
         "content": [
             {"type": "thinking", "thinking": "reasoning...", "signature": "sig"},
+            {"type": "redacted_thinking", "data": "encrypted-blob"},
             {"type": "text", "text": "answer"}
         ],
         "stop_reason": "end_turn"
     })");
 
     const auto response = ParseNonStreamingResponse(body);
+    REQUIRE(response.content.size() == 3);
+    const auto& thinking = std::get<llm::ThinkingBlock>(response.content[0]);
+    CHECK(thinking.text == "reasoning...");
+    REQUIRE(thinking.signature.has_value());
+    CHECK(*thinking.signature == "sig");
+    const auto& redacted = std::get<llm::ThinkingBlock>(response.content[1]);
+    CHECK(redacted.text.empty());
+    REQUIRE(redacted.redacted_data.has_value());
+    CHECK(*redacted.redacted_data == "encrypted-blob");
+    CHECK(std::get<llm::TextBlock>(response.content[2]).text == "answer");
+}
+
+TEST_CASE("ParseNonStreamingResponse: unsigned thinking parses without a signature",
+          "[anthropic_response]") {
+    const auto body = nlohmann::json::parse(R"({
+        "id": "msg_1", "model": "m",
+        "content": [{"type": "thinking", "thinking": "reasoning..."}],
+        "stop_reason": "end_turn"
+    })");
+
+    const auto response = ParseNonStreamingResponse(body);
     REQUIRE(response.content.size() == 1);
-    CHECK(std::get<llm::TextBlock>(response.content[0]).text == "answer");
+    const auto& thinking = std::get<llm::ThinkingBlock>(response.content[0]);
+    CHECK(thinking.text == "reasoning...");
+    CHECK_FALSE(thinking.signature.has_value());
+    CHECK_FALSE(thinking.redacted_data.has_value());
 }
 
 TEST_CASE("ParseNonStreamingResponse: missing content array is a parse error",

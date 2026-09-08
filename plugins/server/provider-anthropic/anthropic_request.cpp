@@ -150,10 +150,11 @@ std::string BuildRequestBody(const llm::ChatRequest& request, bool stream) {
     // enforced server-side, unlike OpenAI). One open "logical message" is
     // tracked at a time; role changes (or running out of messages) close it.
     // A message whose every block was dropped (an assistant turn consisting
-    // only of thinking blocks, or a zero-block message) is SKIPPED ENTIRELY --
-    // emitting "content":[] is an outright API rejection, and closing the run
-    // around it would split its neighbors into consecutive same-role wire
-    // messages.
+    // only of UNSIGNED thinking blocks, or a zero-block message) is SKIPPED
+    // ENTIRELY -- emitting "content":[] is an outright API rejection, and
+    // closing the run around it would split its neighbors into consecutive
+    // same-role wire messages. A turn of SIGNED thinking renders normally:
+    // it is replayable content.
     bool first_wire_message = true;
     bool has_open_message = false;
     llm::Role open_role = llm::Role::User;
@@ -212,8 +213,25 @@ std::string BuildRequestBody(const llm::ChatRequest& request, bool stream) {
                 if (tool_result->is_error) item += R"(,"is_error":true)";
                 item += '}';
                 append_block(std::move(item));
+            } else if (const auto* thinking = std::get_if<llm::ThinkingBlock>(&block)) {
+                // Replayable forms only -- see the header comment. A redacted
+                // block carries its data verbatim; a signed block round-trips
+                // its signature; anything else stays dropped.
+                std::string item;
+                if (thinking->redacted_data) {
+                    item = R"({"type":"redacted_thinking","data":)";
+                    AppendStringValue(item, *thinking->redacted_data);
+                    item += '}';
+                    append_block(std::move(item));
+                } else if (thinking->signature && !thinking->signature->empty()) {
+                    item = R"({"type":"thinking","thinking":)";
+                    AppendStringValue(item, thinking->text);
+                    item += R"(,"signature":)";
+                    AppendStringValue(item, *thinking->signature);
+                    item += '}';
+                    append_block(std::move(item));
+                }
             }
-            // ThinkingBlock: dropped on replay -- see the header comment.
         }
         if (message_content.empty()) continue;
         if (!has_open_message || open_role != message.role) {

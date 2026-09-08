@@ -12,6 +12,7 @@
 #include <utility>
 
 #include "minimal/common/logger.hpp"
+#include "minimal/common/model_ref.hpp"
 #include "minimal/config/frontmatter.hpp"
 
 namespace minimal::commands_md {
@@ -208,14 +209,27 @@ MdCommandSpec DecodeSpec(const std::string& stem, const config::ParsedFrontmatte
         spec.args = ScalarList(node["args"], "args");
         spec.optional = ScalarList(node["optional"], "optional");
 
-        // opencode frontmatter minimal cannot honour without per-turn overrides:
-        // warn, do not silently ignore.
-        for (const char* unsupported : {"agent", "model", "subtask"}) {
-            if (node[unsupported]) {
-                common::DefaultLogger().warn(
-                    "command '{}' frontmatter field '{}' is not supported yet; ignored",
-                    spec.name, unsupported);
+        // opencode frontmatter minimal cannot honour without per-turn
+        // overrides: `model` and `agent` now ride the per-turn path; `subtask`
+        // (spawn-from-a-command) has no equivalent yet -- warn, do not
+        // silently ignore.
+        if (node["subtask"]) {
+            common::DefaultLogger().warn(
+                "command '{}' frontmatter field 'subtask' is not supported yet; ignored",
+                spec.name);
+        }
+        if (node["model"] && node["model"].IsScalar()) {
+            spec.model = node["model"].as<std::string>();
+            // Shape-checked here so a typo warns at load, not at invocation;
+            // the value still rides raw and is re-split (and resolved) at pop.
+            if (!common::SplitModelRef(spec.model)) {
+                throw std::runtime_error("command '" + spec.name +
+                                         "': frontmatter 'model' must be \"<provider>/<model>\" (got \"" +
+                                         spec.model + "\")");
             }
+        }
+        if (node["agent"] && node["agent"].IsScalar()) {
+            spec.agent = node["agent"].as<std::string>();
         }
 
         const YAML::Node sources = node["sources"];

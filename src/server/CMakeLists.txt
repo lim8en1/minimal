@@ -12,6 +12,7 @@ add_library(minimal_server_core SHARED
     tools/permission.cpp
     tools/permission_advisor.cpp
     tools/path_confinement.cpp
+    tools/pattern_match.cpp
     tools/file_access.cpp
     tools/atomic_write.cpp
     net/sse_parser.cpp

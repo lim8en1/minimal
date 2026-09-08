@@ -290,6 +290,8 @@ TEST_CASE("spawn_subagent validates its input before anything runs", "[subagent]
     CHECK(tool.execute({{"task", "x"}, {"max_turns", -1}}, ctx).is_error);
     CHECK(tool.execute({{"task", "x"}, {"max_turns", 1.5}}, ctx).is_error);
     CHECK(tool.execute({{"task", "x"}, {"agent_preset", 3}}, ctx).is_error);
+    CHECK(tool.execute({{"task", "x"}, {"model", 3}}, ctx).is_error);
+    CHECK(tool.execute({{"task", "x"}, {"model", "no-slash"}}, ctx).is_error);
     CHECK_FALSE(ran);
 
     CHECK(tool.spec().category == tools::ToolCategory::Execute);
@@ -326,6 +328,16 @@ TEST_CASE("spawn_subagent maps runner outcomes onto tool results", "[subagent][t
     CHECK(result.content_text.find("child-9") != std::string::npos);
     CHECK_FALSE(seen.blocking);
 
+    // The model rides as a split ref; a discovered-id shape (slashed model
+    // half) splits the same way /model accepts.
+    REQUIRE(tool.execute({{"task", "do it"}, {"model", "other/llama-3-70b-instruct"}}, ctx)
+                .is_error == false);
+    REQUIRE(seen.model.has_value());
+    CHECK(seen.model->provider == "other");
+    CHECK(seen.model->model == "llama-3-70b-instruct");
+    CHECK_FALSE(tool.execute({{"task", "do it"}}, ctx).is_error);
+    CHECK_FALSE(seen.model.has_value());   // absent = preset's own model
+
     scripted = agent::SubagentOutcome::Error("subagent limit reached (4 concurrent)");
     result = tool.execute({{"task", "do it"}}, ctx);
     CHECK(result.is_error);
@@ -340,6 +352,107 @@ TEST_CASE("spawn_subagent disclosure carries the task's first line", "[subagent]
     const auto disclosure = tool.Disclose({{"task", "refactor the parser\nand the tests"}}, ctx);
     CHECK(disclosure.summary.find("refactor the parser") != std::string::npos);
     CHECK(disclosure.summary.find('\n') == std::string::npos);
+}
+
+// --- per-turn model/agent overrides ---------------------------------------------
+
+TEST_CASE("a per-turn model override borrows another backend for exactly one turn",
+          "[subagent][override]") {
+    SubagentFixture fixture;
+    fixture.Build();
+    auto parent = fixture.CreateParent();
+    auto* parent_script = fixture.scripts["parent-script"].get();
+    auto* other_script = fixture.scripts["child-script"].get();
+
+    parent_script->Push(testing::TextResponse("sticky done"));
+    other_script->Push(testing::TextResponse("borrowed done"));
+
+    // Turn 1 borrows childmain/child-script; turn 2 is plain.
+    agent::QueuedTurn borrowed;
+    borrowed.text = "borrow";
+    borrowed.model = "childmain/child-script";
+    REQUIRE(parent->SubmitTurnWithOverrides(std::move(borrowed)));
+    REQUIRE(parent->WaitForIdleForTesting(10s));
+    REQUIRE(parent->SubmitTurn("plain"));
+    REQUIRE(parent->WaitForIdleForTesting(10s));
+
+    // The borrowed turn's request reached the OTHER script; the plain turn
+    // came back to the sticky one.
+    REQUIRE(other_script->requests.size() == 1);
+    REQUIRE(parent_script->requests.size() == 1);
+    CHECK(parent_script->requests[0].model == "parent-script");
+    CHECK(other_script->requests[0].model == "child-script");
+
+    // The session's sticky preset and model override are untouched.
+    CHECK(parent->preset().model_ref.str() == "main/parent-script");
+    CHECK_FALSE(parent->model_override().has_value());
+}
+
+TEST_CASE("a per-turn agent override runs one turn on the borrowed preset",
+          "[subagent][override]") {
+    SubagentFixture fixture;
+    fixture.Build();
+    auto parent = fixture.CreateParent();
+    auto* parent_script = fixture.scripts["parent-script"].get();
+    auto* other_script = fixture.scripts["child-script"].get();
+
+    other_script->Push(testing::TextResponse("planner done"));
+    parent_script->Push(testing::TextResponse("back home"));
+
+    agent::QueuedTurn borrowed;
+    borrowed.text = "plan it";
+    borrowed.agent_preset = "child";  // that preset's model is childmain/child-script
+    REQUIRE(parent->SubmitTurnWithOverrides(std::move(borrowed)));
+    REQUIRE(parent->WaitForIdleForTesting(10s));
+    REQUIRE(parent->SubmitTurn("plain"));
+    REQUIRE(parent->WaitForIdleForTesting(10s));
+
+    REQUIRE(other_script->requests.size() == 1);
+    REQUIRE(parent_script->requests.size() == 1);
+    CHECK(other_script->requests[0].model == "child-script");
+    CHECK(parent_script->requests[0].model == "parent-script");
+    CHECK(parent->preset().model_ref.str() == "main/parent-script");
+    CHECK(parent->info().agent_preset == "main");
+}
+
+TEST_CASE("a failing per-turn override fails the turn, not the session",
+          "[subagent][override][invariant]") {
+    SubagentFixture fixture;
+    fixture.Build();
+    auto parent = fixture.CreateParent();
+    auto* parent_script = fixture.scripts["parent-script"].get();
+    parent_script->Push(testing::TextResponse("still here"));
+
+    // Unknown model, malformed model, unknown preset -- each fails the turn
+    // with a named error on the wire, and the session keeps working.
+    for (const char* bad_model : {"childmain/nope", "noslash"}) {
+        agent::QueuedTurn turn;
+        turn.text = "borrow";
+        turn.model = bad_model;
+        REQUIRE(parent->SubmitTurnWithOverrides(std::move(turn)));
+        REQUIRE(parent->WaitForIdleForTesting(10s));
+        const auto events = fixture.DrainQueue(parent);
+        bool saw_named_error = false;
+        for (const auto& event : events) {
+            if (event.has_error() &&
+                event.error().message().find("per-turn override failed") != std::string::npos) {
+                saw_named_error = true;
+            }
+        }
+        CHECK(saw_named_error);
+    }
+    agent::QueuedTurn bad_agent;
+    bad_agent.text = "borrow";
+    bad_agent.agent_preset = "no-such-preset";
+    REQUIRE(parent->SubmitTurnWithOverrides(std::move(bad_agent)));
+    REQUIRE(parent->WaitForIdleForTesting(10s));
+
+    // And the next plain turn runs on the sticky model, untouched by the
+    // failed borrows (the restore guard fired on every exit path).
+    REQUIRE(parent->SubmitTurn("plain"));
+    REQUIRE(parent->WaitForIdleForTesting(10s));
+    REQUIRE(parent_script->requests.size() == 1);
+    CHECK(parent_script->requests[0].model == "parent-script");
 }
 
 // --- blocking spawn ---------------------------------------------------------------
@@ -1266,4 +1379,77 @@ TEST_CASE("advisor_inherit opts the child into the configured advisor",
     for (const auto& event : fixture.DrainQueue(child)) {
         CHECK_FALSE(event.has_permission_request());
     }
+}
+
+TEST_CASE("a fork borrows the transcript and runs as its own top-level session",
+          "[subagent][fork]") {
+    SubagentFixture fixture;
+    fixture.Build();
+    auto parent = fixture.CreateParent();
+    auto* parent_script = fixture.scripts["parent-script"].get();
+    auto* other_script = fixture.scripts["child-script"].get();
+
+    // One completed turn: seq 0 user, seq 1 assistant.
+    parent_script->Push(testing::TextResponse("answer one"));
+    parent->SubmitTurn("first question");
+    REQUIRE(parent->WaitForIdleForTesting(10s));
+    const auto source_before = fixture.db->GetMessagesPage(parent->info().session_id,
+                                                           std::nullopt, 50);
+
+    // Fork the WHOLE transcript onto another model.
+    auto fork = fixture.sessions->ForkSession(parent->info().session_id, /*target_seq=*/-1,
+                                              "try another way",
+                                              config::ModelRef{"childmain", "child-script"},
+                                              std::nullopt, std::nullopt);
+    REQUIRE(fork != nullptr);
+    CHECK(fork->info().parent_session_id.empty());  // a top-level peer, NOT a subagent
+    CHECK(fork->preset().model_ref.str() == "childmain/child-script");
+
+    // The fork runs its own turn on the borrowed model.
+    other_script->Push(testing::TextResponse("fork answer"));
+    REQUIRE(fork->SubmitTurn("do it differently"));
+    REQUIRE(fork->WaitForIdleForTesting(10s));
+    REQUIRE(other_script->requests.size() == 1);
+    // The fork's history carried the copied prefix INTO the request.
+    bool saw_copied = false;
+    for (const auto& message : other_script->requests[0].messages) {
+        for (const auto& block : message.content) {
+            if (const auto* text = std::get_if<llm::TextBlock>(&block)) {
+                if (text->text == "first question") saw_copied = true;
+            }
+        }
+    }
+    CHECK(saw_copied);
+
+    // The source is untouched: same rows, no fork on its side.
+    const auto source_after = fixture.db->GetMessagesPage(parent->info().session_id,
+                                                          std::nullopt, 50);
+    CHECK(source_after.messages.size() == source_before.messages.size());
+    CHECK(parent_script->requests.size() == 1);  // only its own original turn
+
+    // The fork is a real row with provenance, hidden from nothing.
+    const auto fork_row = fixture.db->GetSession(fork->info().session_id);
+    REQUIRE(fork_row.has_value());
+    CHECK(fork_row->forked_from_session_id == parent->info().session_id);
+    CHECK_FALSE(fork_row->parent_session_id.has_value());
+}
+
+TEST_CASE("a failed fork leaves nothing behind", "[subagent][fork][invariant]") {
+    SubagentFixture fixture;
+    fixture.Build();
+    auto parent = fixture.CreateParent();
+
+    // An unknown preset on the fork: the store fork commits, then the session
+    // construction fails -- the registry must roll the minted row back.
+    CHECK_THROWS_AS(fixture.sessions->ForkSession(parent->info().session_id, -1, "doomed",
+                                                  std::nullopt, std::string("no-such-preset"),
+                                                  std::nullopt),
+                    std::runtime_error);
+    // No row named "doomed" survives: the picker would never show the stub.
+    const auto remaining = fixture.db->ListSessions(session::ListSessionsFilter{});
+    bool found_doomed = false;
+    for (const auto& summary : remaining) {
+        if (summary.name == "doomed") found_doomed = true;
+    }
+    CHECK_FALSE(found_doomed);
 }

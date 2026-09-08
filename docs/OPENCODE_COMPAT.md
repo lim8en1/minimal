@@ -122,7 +122,7 @@ body: |
 2. **Unfilled optionals bind as empty for the template** (render nothing) and drive the argv-omission rule (the whole entry is dropped — what "optional" means on a command line). A shell script referencing an unfilled optional errors (a script cannot omit pieces).
 3. **Shadowing is decided by STEM before parsing** — a malformed project command does not fall back to the global command the author was overriding; it is skipped with a warning like any other broken file.
 
-`agent:`/`model:`/`subtask:` frontmatter warns-unsupported as planned (the per-turn override is deferred, §6). The opencode-desugared path ships with a lint warning when a file mixes declared sources with `!`cmd`` constructs.
+`model:`/`agent:` frontmatter now ride the per-turn override (below, §6 — landed); `subtask:` still warns-unsupported. The opencode-desugared path ships with a lint warning when a file mixes declared sources with `!`cmd`` constructs.
 
 ### Phase 5 — `checklist-view` TUI plugin — **DONE (segment first)**
 
@@ -161,11 +161,11 @@ Each phase ships with Catch2 tests beside the existing per-feature files (`agent
 
 | Item | Note |
 |---|---|
-| Permission glob-pattern rules (`bash: {"git *": "allow"}`, last-match-wins, `external_directory` patterns, `.env` read-denial defaults, `doom_loop`) | the disclosure/grant machinery maps naturally onto prefix patterns; biggest single substrate change |
-| Per-turn model/agent override on `SubmitTurn` | unlocks command frontmatter `agent: <primary>`/bare `model:`; opencode-faithful; a turn-path change |
+| ~~Permission glob-pattern rules~~ | **landed** as `pattern_overrides` / `external_directory_patterns` in permissions.json (plus the same maps in preset frontmatter): most-restrictive fold over matching rules replaces the category default — `{"git *": allow, "git push --force *": ask}` works, order-independently. `.env` read-denial ships as a built-in default pattern set. Deliberate deviation: no last-match-wins (the substrate folds `most_restrictive`; a strict-default-plus-specific-allow pair is inexpressible), and untrusted project-local presets contribute no pattern rules |
+| ~~Per-turn model/agent override on `SubmitTurn`~~ | **landed**: `UserChatTurn` carries optional `model`/`agent_preset`; the worker borrows for one turn (restore on every exit path; the borrowed preset's run mode may narrow, never widen), unlocking command frontmatter `agent:`/`model:`. `spawn_subagent` also gained a `model` parameter — a fresh child context is the cheap way to switch models, vs the full-history cache miss an in-session borrow pays. |
 | `.rpc`-addressable computed templates | md placeholders calling any plugin's `.rpc` op (`{{checklist list}}`); makes `.rpc` payloads a de-facto cross-plugin API — needs a stability note first |
 | Typed `TemplateDataSource` registry | new ABI symbol + NameRegistry kind; only if computed templates become an ecosystem pattern |
-| Session fork for commands | no opencode equivalent; fork machinery rewind half-has |
+| ~~Session fork for commands~~ | **landed (store + registry + wire)**: `ForkSession` RPC forks a session's active transcript (whole, or below a text-bearing user message) into a new top-level peer session, with optional model/preset/run-mode overrides and a `forked_from_session_id` lineage column (v7). Compaction checkpoints ride along when they cover the copied prefix; the source is untouched. Still open: md-command `fork:` frontmatter -- it needs a session→registry seam (a live forked session cannot be constructed from inside a session worker), deferred rather than forced |
 | MCP resources + prompts, McpObserver seam | designed in EXTENSIBILITY §2.4, waits there |
 | Edit snapshots / file-undo (`/undo` reverting tool effects) | conversation rewind/redo exists; snapshot journal is the missing half |
 | Share/export | local-first analogue: export-to-markdown/HTML command; share server is a bigger decision |

@@ -13,8 +13,11 @@
 // A child can never be more permissive than its parent (ARCHITECTURE.md,
 // "Subagents").
 
+#include <optional>
 #include <string>
 #include <vector>
+
+#include "minimal/common/model_ref.hpp"
 
 namespace minimal::agent {
 
@@ -33,6 +36,14 @@ struct SubagentRequest {
     std::string agent_preset;  // empty = the parent's own preset
     bool blocking = true;
     int max_turns = 0;  // 0 = unbounded; a subagent's life is one RunTurn
+    // Optional model override for the child, as "<provider>/<model>". Applied
+    // through SessionParams::model_override -- CreateResolved::ResolveModel
+    // already honors it for children -- so an unresolvable ref fails the spawn
+    // with a named error. A fresh child context is the CHEAP way to run a
+    // different model: no full-history cache miss, unlike an in-session
+    // switch. Note the parent's own session-level model override is NOT
+    // inherited; the child resolves its preset's model unless this is set.
+    std::optional<common::ModelRef> model;
 };
 
 // What the spawn produced, for the tool to turn into a ToolResultBlock.

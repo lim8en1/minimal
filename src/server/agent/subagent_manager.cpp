@@ -187,6 +187,11 @@ SubagentOutcome SubagentManager::Spawn(const SubagentRequest& request,
     params.policy_ceiling = parent->policy();
     params.mcp_policy_ceiling = parent->mcp_policy();
     params.mcp_manager = mcp_manager_;
+    // An explicit spawn-time model rides model_override: CreateResolved's
+    // ResolveModel honors it for children too, so an unresolvable ref fails
+    // the spawn with a named error before the child's first call. The
+    // parent's own session-level override is deliberately not consulted.
+    params.model_override = request.model;
 
     // Inheritance is OPT-IN for the advisor: the default child answers Ask
     // through its own wire checker -- the human -- even when the parent had an

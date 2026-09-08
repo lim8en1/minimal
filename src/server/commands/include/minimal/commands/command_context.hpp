@@ -88,6 +88,20 @@ public:
     // any other turn, never as a command result. Same queue and contract as a
     // client-submitted turn.
     virtual bool SubmitTurn(std::string text) = 0;
+
+    // SubmitTurn with PER-TURN model/agent overrides: the turn runs on the
+    // given model ("<provider>/<model>", already split by the caller) and/or
+    // agent preset, resolved at pop; the session's sticky choices are
+    // untouched. Default ignores the overrides and submits a plain turn, so a
+    // control surface that never grew the feature degrades rather than
+    // diverges; Session overrides it for real.
+    virtual bool SubmitTurnWithOverrides(std::string text,
+                                         const std::optional<common::ModelRef>& model,
+                                         const std::string& agent_preset) {
+        (void)model;
+        (void)agent_preset;
+        return SubmitTurn(std::move(text));
+    }
 };
 
 class CommandContext {

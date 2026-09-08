@@ -78,6 +78,11 @@ struct SessionSummary {
     std::int64_t created_at_unix_ms = 0;
     std::int64_t updated_at_unix_ms = 0;  // last activity; the picker's sort key
     int message_count = 0;
+    // Session FORK provenance (v7): the source session this one was forked
+    // from, empty for everything else. Deliberately NOT parent_session_id,
+    // which means "subagent" everywhere (picker hiding, refused resume/rewind)
+    // -- a fork is a top-level peer, and none of the subagent semantics apply.
+    std::string forked_from_session_id;
 };
 
 // The persisted compaction checkpoint: the current derived VIEW of a session's
@@ -138,7 +143,7 @@ struct OpenOptions {
 // (Default naming is NOT part of the append transaction; see SetDefaultName.)
 class SessionDatabase {
 public:
-    static constexpr int kSchemaVersion = 6;
+    static constexpr int kSchemaVersion = 7;
 
     // Opens (creating if needed) and migrates. Throws std::runtime_error on any
     // failure, including a database whose user_version is newer than this
@@ -289,6 +294,32 @@ public:
     // came back; zero means nothing to redo. The physical reclaim happens in
     // AppendMessage (see THE FORK above), so a zero here is final.
     std::int64_t UnmarkDiscarded(const std::string& session_id);
+
+    // --- Session fork ----------------------------------------------------------
+
+    // Creates a NEW top-level session seeded with a verbatim copy of the
+    // source's active transcript below target_seq (seqs carried over as-is --
+    // seq spaces are per-session, and every read/append path works from
+    // MAX(seq)+1 whatever the starting point). target_seq < 0 means THE WHOLE
+    // active transcript -- the "fork where we are now" shape, which has no
+    // trailing user message to point at. The source is untouched: a fork is
+    // read-only on it, and a fork of a LIVE mid-turn session is safe because
+    // its appends land at MAX(seq)+1 while the copy filters seq < target.
+    //
+    // One transaction: source validation (exists, NOT a subagent), target
+    // validation (unless forking everything: active, user role, non-empty text
+    // -- the same shape rewind's IsRewindTarget demands, so a fork lands where
+    // a rewind would), the child row, the message copy, and the
+    // compaction-checkpoint copy. The checkpoint rides along only when its
+    // boundary_seq is below the copy's upper bound (the summary then covers
+    // exactly the copied prefix's head); otherwise the child seeds from the
+    // full copied prefix and compacts on demand.
+    // name_source follows `name` exactly like CreateSession.
+    // agent_preset_override replaces the inherited source preset in the child's
+    // row when set, so the row always describes what the fork will run.
+    SessionSummary ForkSession(const std::string& source_session_id, std::int64_t target_seq,
+                               const std::string& name,
+                               const std::optional<std::string>& agent_preset_override);
 
     // --- Compaction checkpoints (see CompactionCheckpoint above) -------------
 

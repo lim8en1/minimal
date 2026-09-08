@@ -38,6 +38,33 @@ TEST_CASE("context_occupancy is a pure function of one Usage", "[token_accountin
     CHECK(context_occupancy(Usage{10, 5, 0, 0}) == 15);
 }
 
+TEST_CASE("ReportedUsage: all-zero is the proxy gap, any field is a report", "[token_accounting]") {
+    CHECK_FALSE(ReportedUsage(Usage{}));
+    CHECK_FALSE(ReportedUsage(Usage{0, 0, 0, 0}));
+    CHECK(ReportedUsage(Usage{1, 0, 0, 0}));
+    CHECK(ReportedUsage(Usage{0, 1, 0, 0}));
+    CHECK(ReportedUsage(Usage{0, 0, 1, 0}));
+    CHECK(ReportedUsage(Usage{0, 0, 0, 1}));
+}
+
+TEST_CASE("SeedOccupancy overwrites the last-turn occupancy without touching totals",
+          "[token_accounting]") {
+    // The zero-usage fallback's contract: occupancy describes the context
+    // (estimated), cumulative totals stay honestly zero for that turn.
+    TokenAccumulator acc;
+    acc.RecordTurn(Usage{100, 20, 0, 0});
+    acc.SeedOccupancy(5000);
+
+    CHECK(acc.last_occupancy() == 5000);
+    CHECK(acc.cumulative().total_output_tokens == 20);
+    CHECK(acc.cumulative().total_input_tokens == 100);
+
+    // A subsequent real report replaces the estimate wholesale.
+    acc.RecordTurn(Usage{900, 40, 0, 0});
+    CHECK(acc.last_occupancy() == 940);
+    CHECK(acc.cumulative().total_input_tokens == 1000);
+}
+
 TEST_CASE("context occupancy counts cache tokens, which are context too", "[token_accounting]") {
     // input_tokens is the UNCACHED portion (Anthropic's convention, which
     // provider-openai's ParseUsage now normalizes to). The context served from

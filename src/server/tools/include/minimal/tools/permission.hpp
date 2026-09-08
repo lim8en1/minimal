@@ -67,6 +67,13 @@ constexpr PermissionRunMode clamp_run_mode(PermissionRunMode parent, PermissionR
     return (static_cast<int>(child) < static_cast<int>(parent)) ? child : parent;
 }
 
+// One glob pattern rule on one subject. The glob grammar and the two subject
+// flavors (paths vs command lines) live in pattern_match.hpp.
+struct PermissionPatternRule {
+    std::string glob;
+    PermissionMode mode = PermissionMode::Ask;
+};
+
 struct PermissionPolicy {
     PermissionMode read_only = PermissionMode::AlwaysAllow;
     PermissionMode file_write = PermissionMode::Ask;
@@ -88,7 +95,37 @@ struct PermissionPolicy {
 
     std::unordered_map<std::string, PermissionMode> per_tool_overrides;
 
+    // Pattern rules, keyed by PERMISSION key (never an alias -- the same rule
+    // per_tool_overrides obeys). Semantics: an exact per_tool_overrides entry
+    // still wins; otherwise the most_restrictive MATCHING pattern for the
+    // tool's subject replaces the category default when at least one pattern
+    // matches (zero matches -> the category default, untouched). Patterns are
+    // operator intent at tool granularity, the same standing per_tool_overrides
+    // has -- everything downstream (out_of_workdir, network, ceilings, run
+    // modes) still folds on top, so a pattern can never bypass the substrate.
+    // The one shape most-restrictive folding cannot express: a strict default
+    // pattern plus a more-specific ALLOW ("git *": "ask" + "git status":
+    // "allow" stays ask). Escape hatches: an exact per_tool_overrides entry,
+    // or splitting the rule per tool.
+    std::unordered_map<std::string, std::vector<PermissionPatternRule>> pattern_overrides;
+
+    // Path patterns on the out_of_workdir dimension: when an invocation
+    // resolves outside project_root, the most_restrictive matching pattern
+    // replaces the scalar `out_of_workdir` for that invocation (no match ->
+    // the scalar). Matched against the canonical absolute path, so these are
+    // the one pattern set that is anchored at "/" by construction.
+    std::vector<PermissionPatternRule> out_of_workdir_patterns;
+
     PermissionMode mode_for(std::string_view tool_name, ToolCategory category) const;
+    // Subject-ful overload: `subject` is the tool's PatternSubject -- a
+    // canonical path for confinement tools, the raw command line for bash.
+    // nullopt = no subject for this input; patterns cannot match.
+    // `subject_is_path` selects the glob flavor: paths keep '*' and '?'
+    // within one component ('**' crosses); command lines are not paths, so
+    // '/' is ordinary there. The caller knows which it handed over.
+    PermissionMode mode_for(std::string_view tool_name, ToolCategory category,
+                            const std::optional<std::string>& subject,
+                            bool subject_is_path) const;
 };
 
 struct McpPermissionPolicy {
@@ -106,6 +143,10 @@ struct McpPermissionPolicy {
 struct PermissionOverrideLayer {
     std::optional<PermissionMode> read_only, file_write, execute, out_of_workdir, network;
     std::unordered_map<std::string, PermissionMode> per_tool_overrides;
+    // Pattern rules per permission key; a layer may carry none.
+    std::unordered_map<std::string, std::vector<PermissionPatternRule>> pattern_overrides;
+    // Pattern rules on the out_of_workdir dimension.
+    std::vector<PermissionPatternRule> out_of_workdir_patterns;
 };
 
 // preset per-tool override -> preset category -> global per_tool_overrides ->
@@ -128,5 +169,21 @@ PermissionMode resolve_network_chain(const PermissionOverrideLayer& preset,
 // preset mcp_permissions[server] -> permissions.json mcp_default_mode -> Ask.
 PermissionMode resolve_mcp_chain(const std::optional<PermissionMode>& preset_per_server,
                                   PermissionMode global_default_mode);
+
+// Merges the two config layers' pattern rules into one resolved set: the
+// preset entry REPLACES the global entry for an identical (tool, glob) pair --
+// the same preset-wins rule per_tool_overrides follows -- and distinct globs
+// from both layers coexist (evaluation folds them most-restrictively at
+// resolve time). Same shape for the out_of_workdir dimension's flat list.
+void merge_pattern_layers(
+    const PermissionOverrideLayer& preset, const PermissionOverrideLayer& global,
+    std::unordered_map<std::string, std::vector<PermissionPatternRule>>& out_patterns,
+    std::vector<PermissionPatternRule>& out_ood_patterns);
+
+// The built-in default pattern set, consulted only for tools neither config
+// layer gave patterns for: file-reading tools deny dotenv files, the opencode
+// default. Living in the DEFAULT layer (not a hard floor) is what keeps it
+// overridable -- config patterns replace it wholesale per tool.
+std::unordered_map<std::string, std::vector<PermissionPatternRule>> default_pattern_rules();
 
 }  // namespace minimal::tools

@@ -90,6 +90,7 @@ Full example (`bundled/settings.json`):
 | `context_compaction_trigger_tokens` | int | `0` | legacy flat key, honored only when the object form is absent; `0` = never |
 | `compaction_keep_recent_tokens` | int | `0` | |
 | `compaction_strategy` | string | `"summarize"` | name of a registered strategy (core built-in or plugin-registered); unknown name → warning, falls back |
+| `estimate_zero_usage` | bool | `true` | when a turn's backend usage is all zero (some OpenAI-compatible proxies), seed occupancy from the request's bytes/4 estimate so the compaction trigger arms, and flag the turn's wire usage `usage_estimated`. Estimates are never priced by cost tracking and never enter cumulative totals |
 | `scrollback_page_size` | int | `0` | |
 
 ### `tools.*`
@@ -275,13 +276,21 @@ Mode vocabulary:
 | `default_run_mode` | string | `"normal"` | one of the run modes |
 | `fallback` | object | harness defaults | five categories, each a permission mode: `read_only`, `file_write`, `execute`, `out_of_workdir`, `network`. Unset categories keep the harness default (bundled: `read_only=allow`, rest `ask`) |
 | `per_tool_overrides` | object | `{}` | tool permission key (bare tool name or `plugin.tool`) → permission mode. Keys that resolve to no registered tool → warning. Aliased tools keep their **original** name here (see docs/PLUGINS.md) |
+| `pattern_overrides` | object | `{}` | tool permission key → **glob → mode** rules matched against the tool's subject (bash: the command line; `read`/`write`/`edit`/`grep`/`glob`: the canonical path). Semantics: an exact `per_tool_overrides` entry still wins; otherwise the **most restrictive matching rule replaces the category default** when any rule matches, and zero matches leave the category default. Downstream folds (out-of-workdir, network, subagent ceilings, run modes) apply as always — a pattern can never bypass the substrate. What most-restrictive folding cannot express: a strict default rule plus a more-specific allow (`"git *": ask` + `"git status": allow` stays ask) — use an exact override instead |
+| `external_directory_patterns` | object | `{}` | glob → mode rules on the `out_of_workdir` dimension, matched against the canonical **absolute** path of an invocation that resolved outside the project root; the most restrictive matching rule replaces the scalar `out_of_workdir` for that invocation |
 | `mcp_default_mode` | string | `"ask"` | default permission mode for MCP tools |
 | `advisor` | string | — | plugin name of a permission advisor; unknown name → warning |
 | `advisor_inherit` | bool | `false` | |
 | `advisor_timeout_ms` | int | `30000` | ≥ 0; `0` disables the advisor budget |
 
-There are no glob/rule lists — only per-category fallbacks and per-tool
-overrides.
+Glob rules (`pattern_overrides` / `external_directory_patterns`): `*` and `?`
+stay within one path component, `**` crosses them, `\` escapes, and a pattern
+matches the whole subject. For bash command lines `/` is an ordinary character
+(so `git *` covers `git status src/x.cpp`); for paths it is a component
+boundary. **Built-in defaults**: `read`, `write` and `edit` deny `**/.env` and
+`**/.env.*` — living in the default layer, any operator `pattern_overrides`
+entry for that tool replaces them wholesale (write your own deny back in if
+you also allow something).
 
 ---
 
@@ -516,7 +525,11 @@ Deploy {env} from {branch} per {output:summary.plan}.
 - **opencode syntax desugars at load**: `$ARGUMENTS`→`{args}`, `$1`..`$9`→
   positionals, each `` !`cmd` ``→an anonymous `sh` source. Mixing desugared
   constructs with declared sources works and is lint-warned. Frontmatter
-  `agent:`/`model:`/`subtask:` warn as not-yet-supported.
+  `model: <provider>/<model>` and `agent: <preset>` ride as PER-TURN
+  overrides: the turn the command submits runs on the borrowed model/preset,
+  the session's sticky choices untouched; a malformed `model:` refuses to
+  load, an unresolvable one fails the turn with a named error. `subtask:`
+  still warns as not-yet-supported.
 - **Failures** (nonzero exit, timeout, missing JSON field, declined cap) surface
   as error status lines; nothing is submitted and nothing reaches the model.
 

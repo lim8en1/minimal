@@ -85,6 +85,13 @@ bool AnthropicStreamReassembler::FeedFrame(std::string_view data, const llm::Str
             }
         } else if (block_type == "thinking" || block_type == "redacted_thinking") {
             blocks_[index].kind = Block::Kind::Thinking;
+            // redacted_thinking carries its opaque data blob on the START
+            // event (it never deltas); ordinary thinking accumulates text via
+            // thinking_delta and its signature via signature_delta.
+            if (block_type == "redacted_thinking" && content_block.contains("data") &&
+                content_block.at("data").is_string()) {
+                blocks_[index].redacted_data = content_block.at("data").get<std::string>();
+            }
             // No dedicated "block started" event for text/thinking in
             // stream_event.hpp -- the first delta implies it, same as
             // provider-openai's text blocks.
@@ -117,9 +124,17 @@ bool AnthropicStreamReassembler::FeedFrame(std::string_view data, const llm::Str
             Accumulate(accumulated_bytes_, text.size());
             blocks_[index].text += text;
             if (sink && !sink(llm::ThinkingDeltaEvent{static_cast<int>(index), text})) return false;
+        } else if (delta_type == "signature_delta") {
+            // The thinking block's replay signature, delivered as fragments
+            // like every other delta -- concatenated, never overwritten.
+            // Counted against the same 64 MiB budget as content: it rides the
+            // same attacker-influenced channel and unbounded accumulation is
+            // unbounded accumulation.
+            std::string signature = delta.value("signature", "");
+            Accumulate(accumulated_bytes_, signature.size());
+            if (!blocks_[index].signature) blocks_[index].signature = std::string{};
+            *blocks_[index].signature += signature;
         }
-        // "signature_delta": the thinking block's signature -- irrelevant
-        // here since thinking is dropped at Finalize (never replayed).
         return true;
     }
 
@@ -226,9 +241,21 @@ llm::ChatResponse AnthropicStreamReassembler::Finalize(bool tolerate_malformed_t
                 throw AnthropicParseError(std::string("malformed tool-use input: ") + error.what());
             }
             response.content.push_back(std::move(tool_use));
+        } else if (block.kind == Block::Kind::Thinking) {
+            // Thinking is captured faithfully -- signed blocks with their
+            // signature, redacted blocks with their data blob, unsigned
+            // blocks with neither. Filtering happens at REPLAY time (the
+            // request builder drops what the API cannot accept), so unsigned
+            // thinking still reaches the transcript and the client's
+            // scrollback even though it can never be resent.
+            if (block.redacted_data) {
+                response.content.push_back(
+                    llm::ThinkingBlock{"", std::nullopt, std::move(*block.redacted_data)});
+            } else {
+                response.content.push_back(llm::ThinkingBlock{
+                    block.text, std::move(block.signature), std::nullopt});
+            }
         }
-        // Kind::Thinking: dropped -- see anthropic_request.hpp's header
-        // comment on why replay is unsafe without a populated signature.
     }
     return response;
 }

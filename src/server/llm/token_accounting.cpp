@@ -21,8 +21,12 @@ std::int64_t context_occupancy(const Usage& last_turn) {
            std::max<std::int64_t>(last_turn.cache_creation_input_tokens, 0);
 }
 
-void TokenAccumulator::RecordTurn(const Usage& turn) {
-    cumulative_.total_output_tokens += turn.output_tokens;
+bool ReportedUsage(const Usage& usage) {
+    return usage.input_tokens > 0 || usage.output_tokens > 0 ||
+           usage.cache_read_input_tokens > 0 || usage.cache_creation_input_tokens > 0;
+}
+
+void TokenAccumulator::RecordTurn(const Usage& turn) {    cumulative_.total_output_tokens += turn.output_tokens;
     cumulative_.total_input_tokens += turn.input_tokens;
     last_turn_ = turn;
 }

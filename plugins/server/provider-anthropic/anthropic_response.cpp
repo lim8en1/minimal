@@ -60,6 +60,22 @@ llm::ChatResponse ParseNonStreamingResponse(const nlohmann::json& body) {
             if (type == "text") {
                 std::string text = block.value("text", "");
                 if (!text.empty()) response.content.push_back(llm::TextBlock{text});
+            } else if (type == "thinking") {
+                // Signed thinking is replayable; an unsigned block would be
+                // dropped at request-build time, so it is emitted here with
+                // whatever signature the body carried.
+                llm::ThinkingBlock thinking;
+                thinking.text = block.value("thinking", "");
+                if (block.contains("signature") && block.at("signature").is_string()) {
+                    thinking.signature = block.at("signature").get<std::string>();
+                }
+                response.content.push_back(std::move(thinking));
+            } else if (type == "redacted_thinking") {
+                llm::ThinkingBlock thinking;
+                if (block.contains("data") && block.at("data").is_string()) {
+                    thinking.redacted_data = block.at("data").get<std::string>();
+                }
+                response.content.push_back(std::move(thinking));
             } else if (type == "tool_use") {
                 llm::ToolUseBlock tool_use;
                 tool_use.id = block.at("id").get<std::string>();
@@ -67,9 +83,6 @@ llm::ChatResponse ParseNonStreamingResponse(const nlohmann::json& body) {
                 tool_use.input = block.contains("input") ? block.at("input") : nlohmann::json::object();
                 response.content.push_back(std::move(tool_use));
             }
-            // "thinking"/"redacted_thinking": dropped -- see
-            // anthropic_request.hpp's header comment on why replay is unsafe
-            // without a populated signature.
         }
 
         response.stop_reason =

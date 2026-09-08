@@ -740,8 +740,13 @@ public:
             }
 
             // The ONE sanctioned path: the composed text becomes the turn itself,
-            // appended to history and answered like any user turn (§4.4).
-            if (!context.session().SubmitTurn(prompt)) {
+            // appended to history and answered like any user turn (§4.4). The
+            // frontmatter's per-turn model/agent ride along -- this turn only;
+            // the session's sticky choices are untouched.
+            if (!context.session().SubmitTurnWithOverrides(
+                    prompt, spec_.model.empty() ? std::nullopt
+                                                : common::SplitModelRef(spec_.model),
+                    spec_.agent)) {
                 return CommandResult::Error("could not submit the turn (session busy?)");
             }
             return CommandResult::Ok("submitted '" + spec_.name + "' (" +

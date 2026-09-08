@@ -38,11 +38,17 @@ tools::ToolSpec MakeSpec() {
              "this tool's result. false: return immediately; the result arrives "
              "later."}}},
           {"max_turns",
-           {{"type", "integer"},
-            {"description",
-             "Upper bound on the child's tool rounds. 0 (default) means no "
-             "bound."}}}}},
-        {"required", nlohmann::json::array({"task"})},
+            {{"type", "integer"},
+             {"description",
+              "Upper bound on the child's tool rounds. 0 (default) means no "
+              "bound."}}},
+           {"model",
+            {{"type", "string"},
+             {"description",
+              "Model for the child as \"<provider>/<model>\". Defaults to the "
+              "preset's model. A child starts with a fresh context, so this "
+              "switches models without re-reading your whole history."}}}}},
+         {"required", nlohmann::json::array({"task"})},
     };
     return spec;
 }
@@ -82,6 +88,19 @@ tools::ToolResult SpawnSubagentTool::execute(const nlohmann::json& input,
             return {true, "spawn_subagent \"max_turns\" must be a non-negative integer"};
         }
         request.max_turns = value.get<int>();
+    }
+    if (input.contains("model")) {
+        if (!input.at("model").is_string()) {
+            return {true, "spawn_subagent \"model\" must be a \"<provider>/<model>\" string"};
+        }
+        // SplitModelRef, not ParseModelRef: discovered ids can carry slashes,
+        // and the tolerant split is what /model accepts too.
+        auto model = common::SplitModelRef(input.at("model").get<std::string>());
+        if (!model) {
+            return {true, "spawn_subagent \"model\" must be \"<provider>/<model>\" (got \"" +
+                              input.at("model").get<std::string>() + "\")"};
+        }
+        request.model = std::move(*model);
     }
 
     const SubagentOutcome outcome = runner_(request, ctx);

@@ -38,6 +38,13 @@ struct MemorySettings {
     // registered strategy is a startup sanity-check warning, not a crash --
     // the session falls back to the built-in.
     std::string compaction_strategy = "summarize";
+    // Some OpenAI-compatible proxies report an all-zero Usage; without a
+    // fallback the compaction trigger never arms and the status bar reads
+    // 0/max forever. When set (the default), a zero-usage turn seeds
+    // occupancy from the request's bytes/4 estimate and flags the turn's
+    // wire usage as estimated. Never feeds cost pricing -- an estimated
+    // token count is not a reported one.
+    bool estimate_zero_usage = true;
 };
 
 // Kept as raw pass-through JSON: each plugin owns the schema of its own slice

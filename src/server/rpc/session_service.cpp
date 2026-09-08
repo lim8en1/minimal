@@ -274,6 +274,54 @@ grpc::Status SessionServiceImpl::CreateSession(grpc::ServerContext* context,
     return grpc::Status::OK;
 }
 
+grpc::Status SessionServiceImpl::ForkSession(grpc::ServerContext* context,
+                                             const v1::ForkSessionRequest* request,
+                                             v1::ForkSessionResponse* response) {
+    if (const auto auth = EnsureAuthenticated(auth_providers_, context); !auth.ok()) return auth;
+
+    if (request->source_session_id().empty()) {
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "source_session_id is required");
+    }
+
+    // The model ref is shape-checked HERE, not at pop: this path can answer
+    // INVALID_ARGUMENT directly, unlike a wire turn, so a malformed ref should
+    // not survive to the queue.
+    std::optional<config::ModelRef> model;
+    if (!request->model().empty()) {
+        model = config::SplitModelRef(request->model());
+        if (!model) {
+            return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
+                                "model must be \"<provider>/<model>\" (got \"" +
+                                    request->model() + "\")");
+        }
+    }
+
+    std::optional<std::string> agent_preset;
+    if (!request->agent_preset().empty()) agent_preset = request->agent_preset();
+
+    try {
+        std::shared_ptr<agent::Session> session = sessions_.ForkSession(
+            request->source_session_id(), request->target_seq(), request->name(), model,
+            agent_preset, FromProto(request->run_mode()));
+        // The registry returned the live session; read the persisted row back
+        // for the summary (it carries message_count and fork provenance the
+        // in-memory info does not).
+        const auto row = db_.GetSession(session->info().session_id);
+        if (!row) {
+            return grpc::Status(grpc::StatusCode::INTERNAL, "forked session row vanished");
+        }
+        *response->mutable_session() = ToProto(*row);
+        return grpc::Status::OK;
+    } catch (const std::exception& e) {
+        // Store refusals (no such top-level session, invalid target) are caller
+        // errors; preset/model resolution failures are configuration errors.
+        // Both come back with their reason; the registry rolled the minted row
+        // back on the latter already.
+        logger_.warn("ForkSession failed: {}", e.what());
+        return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, e.what());
+    }
+}
+
 grpc::Status SessionServiceImpl::ApplyModelOverride(const v1::CreateSessionRequest& request,
                                                     agent::SessionParams& params) const {    // Shape-checked here so a malformed reference is INVALID_ARGUMENT rather
     // than FAILED_PRECONDITION from deep inside session construction -- the
@@ -467,11 +515,23 @@ void SessionServiceImpl::PublishPromptResolved(agent::Session& session,
 
 void SessionServiceImpl::Dispatch(const v1::ClientEvent& event, agent::Session& session) {
     switch (event.payload_case()) {
-        case v1::ClientEvent::kChatTurn:
+        case v1::ClientEvent::kChatTurn: {
             // Queues and returns. Running the turn here would block the reader,
-            // which is the deadlock this whole topology exists to avoid.
-            session.SubmitTurn(event.chat_turn().text());
+            // which is the deadlock this whole topology exists to avoid. The
+            // raw ref strings ride as-is: splitting and resolution happen at
+            // pop, so a malformed or unknown name fails the TURN with a named
+            // error rather than being dropped reader-side.
+            if (event.chat_turn().has_model() || event.chat_turn().has_agent_preset()) {
+                agent::QueuedTurn turn;
+                turn.text = event.chat_turn().text();
+                turn.model = event.chat_turn().model();
+                turn.agent_preset = event.chat_turn().agent_preset();
+                session.SubmitTurnWithOverrides(std::move(turn));
+            } else {
+                session.SubmitTurn(event.chat_turn().text());
+            }
             return;
+        }
 
         case v1::ClientEvent::kPermissionResponse: {
             // Carried across as the typed variant, still unparsed: parsing

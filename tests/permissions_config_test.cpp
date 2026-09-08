@@ -114,3 +114,40 @@ TEST_CASE("ParsePermissionsConfig: advisor_inherit false does not enable the adv
     CHECK_FALSE(config.advisor.has_value());
     CHECK(config.advisor_inherit);
 }
+
+// --- pattern rules -----------------------------------------------------------------
+
+TEST_CASE("ParsePermissionsConfig: pattern_overrides and external_directory_patterns land in "
+          "global_layer",
+          "[permissions_config][patterns]") {
+    nlohmann::json doc = {
+        {"pattern_overrides",
+         {{"bash", {{"git *", "allow"}, {"git push --force *", "ask"}}},
+          {"read", {{"**/.env", "deny"}}}}},
+        {"external_directory_patterns", {{"/tmp/builds/**", "allow"}}}};
+
+    auto config = ParsePermissionsConfig(doc);
+    REQUIRE(config.global_layer.pattern_overrides.size() == 2);
+    const auto& bash_rules = config.global_layer.pattern_overrides.at("bash");
+    REQUIRE(bash_rules.size() == 2);
+    CHECK(bash_rules[0].glob == "git *");
+    CHECK(bash_rules[0].mode == PermissionMode::AlwaysAllow);
+    CHECK(bash_rules[1].mode == PermissionMode::Ask);
+    REQUIRE(config.global_layer.out_of_workdir_patterns.size() == 1);
+    CHECK(config.global_layer.out_of_workdir_patterns[0].glob == "/tmp/builds/**");
+}
+
+TEST_CASE("ParsePermissionsConfig: malformed pattern shapes throw", "[permissions_config][patterns]") {
+    CHECK_THROWS_AS(ParsePermissionsConfig(nlohmann::json{
+                        {"pattern_overrides", {{"bash", "allow"}}}}),   // value must be a map
+                    std::runtime_error);
+    CHECK_THROWS_AS(ParsePermissionsConfig(nlohmann::json{
+                        {"pattern_overrides", {{"", {{"x", "allow"}}}}}}),  // empty tool key
+                    std::runtime_error);
+    CHECK_THROWS_AS(ParsePermissionsConfig(nlohmann::json{
+                        {"external_directory_patterns", {{"", "allow"}}}}),  // empty glob
+                    std::runtime_error);
+    CHECK_THROWS_AS(ParsePermissionsConfig(nlohmann::json{
+                        {"pattern_overrides", {{"bash", {{"git *", "sometimes"}}}}}}),  // bad mode
+                    std::runtime_error);
+}

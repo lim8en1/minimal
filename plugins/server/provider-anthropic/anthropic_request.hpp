@@ -44,12 +44,19 @@ namespace minimal::provider_anthropic {
 // std::invalid_argument only when NEITHER is configured -- the same
 // validate-in-the-builder shape as provider-openai's ToOpenAiToolChoice.
 //
-// THINKING BLOCKS ARE DROPPED ON REPLAY. Populating them requires the
-// `signature` field llm::ThinkingBlock declares but never populates end to
-// end (message.hpp marks it "reserved") -- sending an unsigned or
-// resynthesized thinking block back to Anthropic is either rejected or, on
-// models with preserved-thinking history-editing checks, silently wrong.
-// This is cut 1's known limitation, not an oversight.
+// THINKING BLOCKS ARE REPLAYED WHEN REPLAYABLE. A block the provider signed
+// (signature captured from the stream's signature_delta) or a redacted block
+// (opaque data blob) goes back to the API exactly as it was stored -- both are
+// REQUIRED for extended-thinking tool loops: Anthropic rejects an assistant
+// history whose thinking blocks were dropped. An UNSIGNED, non-redacted
+// thinking block is still dropped: the API rejects or silently mishandles a
+// resynthesized signature, so there is nothing valid to send. Blocks render in
+// stored order, which puts thinking before the text/tool_use of its own
+// message as the API requires. (A pathological adjacent-assistant merge that
+// would place thinking AFTER text in one merged wire message cannot arise in
+// this harness: assistant messages alternate with user tool-result messages,
+// and thinking is always the first block of the model response that produced
+// it.)
 std::string BuildRequestBody(const llm::ChatRequest& request, bool stream);
 
 // Tool definitions and tool_choice are small and structured; nlohmann is the

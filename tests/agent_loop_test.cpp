@@ -639,8 +639,76 @@ TEST_CASE("compaction fires past the threshold and never touches the store",
     CHECK(h.store.messages.size() > store_after_first);
 }
 
-TEST_CASE("compaction re-seeds the occupancy estimate", "[agent_loop][compaction][invariant]") {
-    // The fold halves the working set, but the accumulator still described the
+TEST_CASE("a zero-usage turn seeds occupancy from the request estimate",
+          "[agent_loop][compaction]") {
+    // The OpenAI-compatible proxy gap: the backend reports usage 0, which
+    // used to zero the occupancy and silently disarm the compaction trigger
+    // for the whole session. With the fallback on, the turn is flagged and
+    // the request's bytes/4 estimate arms the trigger instead.
+    Harness h;
+    h.AddTool("read");
+
+    llm::ChatResponse zero_tool = ToolUseResponse("tu1", "read");
+    zero_tool.usage = llm::Usage{};
+    llm::ChatResponse zero_text = TextResponse("done");
+    zero_text.usage = llm::Usage{};
+
+    int compactions = 0;
+    auto compactor = [&compactions](std::span<const llm::Message>, llm::LlmProvider&,
+                                    const agent::CompactionRequest&) {
+        ++compactions;
+        return agent::CompactionResult{UserText("[summary]"), 0};
+    };
+    // The trigger is deliberately tiny: the estimate of this small context
+    // (system + tool schemas + history) crosses it, the all-zero report does
+    // not -- the test fails if the estimate never lands.
+    h.Build({}, agent::LoopConfig{.auto_compact = true,
+                                  .compaction_trigger = FixedTrigger(2),
+                                  .estimate_zero_usage = true},
+            compactor);
+    h.provider.PushResponse(zero_tool);
+    h.provider.PushResponse(zero_text);
+
+    const agent::TurnResult result = h.loop->RunTurn(UserText("go"));
+
+    CHECK(result.usage_estimated);
+    // The estimate is mirrored into the wire usage so the status bar can
+    // render; cost pricing keys off the flag, not the fields.
+    CHECK(result.last_usage.input_tokens > 0);
+    CHECK(compactions >= 1);
+}
+
+TEST_CASE("estimate_zero_usage = false keeps the old zeroing behavior",
+          "[agent_loop][compaction]") {
+    Harness h;
+    h.AddTool("read");
+
+    llm::ChatResponse zero_tool = ToolUseResponse("tu1", "read");
+    zero_tool.usage = llm::Usage{};
+    llm::ChatResponse zero_text = TextResponse("done");
+    zero_text.usage = llm::Usage{};
+
+    int compactions = 0;
+    auto compactor = [&compactions](std::span<const llm::Message>, llm::LlmProvider&,
+                                    const agent::CompactionRequest&) {
+        ++compactions;
+        return agent::CompactionResult{UserText("[summary]"), 0};
+    };
+    h.Build({}, agent::LoopConfig{.auto_compact = true,
+                                  .compaction_trigger = FixedTrigger(2),
+                                  .estimate_zero_usage = false},
+            compactor);
+    h.provider.PushResponse(zero_tool);
+    h.provider.PushResponse(zero_text);
+
+    const agent::TurnResult result = h.loop->RunTurn(UserText("go"));
+
+    CHECK_FALSE(result.usage_estimated);
+    CHECK(result.last_usage.input_tokens == 0);
+    CHECK(compactions == 0);   // occupancy stayed 0, below the trigger of 2
+}
+
+TEST_CASE("compaction re-seeds the occupancy estimate", "[agent_loop][compaction][invariant]") {    // The fold halves the working set, but the accumulator still described the
     // pre-fold context -- so the next MaybeCompact, the same turn's next tool
     // cycle, fired on a number that no longer existed: a manual /compact was
     // guaranteed one spurious second summarization on the turn after it.

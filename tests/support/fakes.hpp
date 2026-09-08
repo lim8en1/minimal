@@ -259,6 +259,16 @@ public:
         return input.at(*path_key_).get<std::string>();
     }
 
+    // Pattern-subject support, two flavors: command_subject_ mimics bash (the
+    // subject is input["command"], not a path); otherwise the base default
+    // applies (ExtractPath for confinement tools).
+    std::optional<std::string> PatternSubject(const nlohmann::json& input) const override {
+        if (!command_subject_) return tools::Tool::PatternSubject(input);
+        if (!input.contains("command")) return std::nullopt;
+        return input.at("command").get<std::string>();
+    }
+    void set_command_subject(bool value) { command_subject_ = value; }
+
     bool network_access_required() const override { return network_access_required_; }
 
     tools::PermissionDisclosure Disclose(const nlohmann::json& input,
@@ -280,6 +290,7 @@ private:
     tools::ToolSpec spec_;
     std::string result_text_;
     std::optional<std::string> path_key_;
+    bool command_subject_ = false;
     std::optional<tools::PermissionDisclosure> disclosure_;
     bool network_access_required_ = false;
     bool is_error_ = false;

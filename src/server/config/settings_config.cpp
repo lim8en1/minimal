@@ -90,6 +90,7 @@ MemorySettings ParseMemory(const nlohmann::json& doc) {
         memory.value("compaction_keep_recent_tokens", result.compaction_keep_recent_tokens);
     result.scrollback_page_size = memory.value("scrollback_page_size", result.scrollback_page_size);
     result.compaction_strategy = memory.value("compaction_strategy", result.compaction_strategy);
+    result.estimate_zero_usage = memory.value("estimate_zero_usage", result.estimate_zero_usage);
     return result;
 }
 

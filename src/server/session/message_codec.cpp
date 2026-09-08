@@ -22,6 +22,11 @@ nlohmann::json BlockToJson(const llm::ContentBlock& block) {
             } else if constexpr (std::is_same_v<T, llm::ThinkingBlock>) {
                 nlohmann::json j = {{"type", "thinking"}, {"text", b.text}};
                 j["signature"] = b.signature ? nlohmann::json(*b.signature) : nlohmann::json(nullptr);
+                // Redacted thinking carries no text and no signature -- only
+                // the opaque data blob the API hands back and expects verbatim
+                // on replay. Absent for ordinary thinking blocks, so existing
+                // rows decode unchanged.
+                if (b.redacted_data) j["data"] = *b.redacted_data;
                 return j;
             } else if constexpr (std::is_same_v<T, llm::ToolUseBlock>) {
                 // input is arbitrary JSON and is preserved verbatim.
@@ -66,6 +71,12 @@ llm::ContentBlock BlockFromJson(const nlohmann::json& j, const std::string& ctx)
                 throw std::runtime_error(ctx + ": thinking block 'signature' must be a string or null");
             }
             b.signature = j.at("signature").get<std::string>();
+        }
+        if (j.contains("data")) {
+            if (!j.at("data").is_string()) {
+                throw std::runtime_error(ctx + ": thinking block 'data' must be a string");
+            }
+            b.redacted_data = j.at("data").get<std::string>();
         }
         return b;
     }

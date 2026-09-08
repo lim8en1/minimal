@@ -185,11 +185,12 @@ TEST_CASE("ParseAgentPresetFrontmatter: the permission alias maps onto categorie
     CHECK(*preset.permission_mode.read_only == PermissionMode::AlwaysAllow);
 }
 
-TEST_CASE("ParseAgentPresetFrontmatter: a pattern-map permission value collapses to its "
-          "catch-all, or to the most restrictive rule",
-          "[agent_preset_frontmatter][compat]") {
-    // The pattern layer itself is not built; the alias must not silently WIDEN
-    // what the author wrote while collapsing.
+TEST_CASE("ParseAgentPresetFrontmatter: a pattern-map permission value becomes rules, not a "
+          "collapsed scalar",
+          "[agent_preset_frontmatter][patterns][compat]") {
+    // The pattern layer is real now: every entry lands as a rule matched
+    // against the command at resolve time, so the old most-restrictive
+    // collapse (which destroyed the author's granularity) no longer happens.
     auto catchall = Parse(
         "---\n"
         "name: review\n"
@@ -199,8 +200,14 @@ TEST_CASE("ParseAgentPresetFrontmatter: a pattern-map permission value collapses
         "    \"git *\": allow\n"
         "---\n"
         "body\n");
-    REQUIRE(catchall.permission_mode.execute.has_value());
-    CHECK(*catchall.permission_mode.execute == PermissionMode::Ask);
+    CHECK_FALSE(catchall.permission_mode.execute.has_value());
+    REQUIRE(catchall.permission_mode.pattern_overrides.count("bash") == 1);
+    const auto& catchall_rules = catchall.permission_mode.pattern_overrides.at("bash");
+    REQUIRE(catchall_rules.size() == 2);
+    CHECK(catchall_rules[0].glob == "*");
+    CHECK(catchall_rules[0].mode == PermissionMode::Ask);
+    CHECK(catchall_rules[1].glob == "git *");
+    CHECK(catchall_rules[1].mode == PermissionMode::AlwaysAllow);
 
     auto restrictive = Parse(
         "---\n"
@@ -211,8 +218,14 @@ TEST_CASE("ParseAgentPresetFrontmatter: a pattern-map permission value collapses
         "    \"rm *\": deny\n"
         "---\n"
         "body\n");
-    REQUIRE(restrictive.permission_mode.execute.has_value());
-    CHECK(*restrictive.permission_mode.execute == PermissionMode::AlwaysDeny);
+    CHECK_FALSE(restrictive.permission_mode.execute.has_value());
+    REQUIRE(restrictive.permission_mode.pattern_overrides.count("bash") == 1);
+    // The deny survives as a rule -- the old collapse-to-deny is now exact.
+    bool rm_is_deny = false;
+    for (const auto& rule : restrictive.permission_mode.pattern_overrides.at("bash")) {
+        if (rule.glob == "rm *") rm_is_deny = rule.mode == PermissionMode::AlwaysDeny;
+    }
+    CHECK(rm_is_deny);
 }
 
 TEST_CASE("ParseAgentPresetFrontmatter: a native permission_mode wins over the alias",
@@ -415,4 +428,80 @@ TEST_CASE("ParseAgentPresetFrontmatter: an invalid allowed_skills mode throws",
     CHECK_THROWS_AS(Parse("---\nname: a\nallowed_skills:\n  x: sometimes\n---\nb\n"),
                     std::runtime_error);
     CHECK_THROWS_AS(Parse("---\nname: a\nallowed_skills: 42\n---\nb\n"), std::runtime_error);
+}
+
+// --- pattern rules -----------------------------------------------------------------
+
+TEST_CASE("ParseAgentPresetFrontmatter: opencode permission maps become pattern rules",
+          "[agent_preset_frontmatter][patterns][compat]") {
+    auto preset = Parse(
+        "---\n"
+        "name: build\n"
+        "permission:\n"
+        "  bash:\n"
+        "    \"git *\": allow\n"
+        "    \"git push --force *\": ask\n"
+        "  read:\n"
+        "    \"**/.env\": deny\n"
+        "---\n"
+        "body\n");
+
+    REQUIRE(preset.permission_mode.pattern_overrides.count("bash") == 1);
+    const auto& bash_rules = preset.permission_mode.pattern_overrides.at("bash");
+    REQUIRE(bash_rules.size() == 2);
+    CHECK(bash_rules[0].glob == "git *");
+    CHECK(bash_rules[0].mode == PermissionMode::AlwaysAllow);
+    CHECK(bash_rules[1].mode == PermissionMode::Ask);
+    REQUIRE(preset.permission_mode.pattern_overrides.count("read") == 1);
+    CHECK(preset.permission_mode.pattern_overrides.at("read")[0].mode ==
+          PermissionMode::AlwaysDeny);
+    // No scalar collapsed onto the categories: the map was the pattern layer.
+    CHECK_FALSE(preset.permission_mode.execute.has_value());
+}
+
+TEST_CASE("ParseAgentPresetFrontmatter: scalar alias values still map to categories",
+          "[agent_preset_frontmatter][patterns][compat]") {
+    auto preset = Parse(
+        "---\n"
+        "name: build\n"
+        "permission:\n"
+        "  bash: ask\n"
+        "---\n"
+        "body\n");
+    REQUIRE(preset.permission_mode.execute.has_value());
+    CHECK(*preset.permission_mode.execute == PermissionMode::Ask);
+    CHECK(preset.permission_mode.pattern_overrides.empty());
+}
+
+TEST_CASE("ParseAgentPresetFrontmatter: external_directory map becomes out_of_workdir patterns",
+          "[agent_preset_frontmatter][patterns][compat]") {
+    auto preset = Parse(
+        "---\n"
+        "name: build\n"
+        "permission:\n"
+        "  external_directory:\n"
+        "    \"/tmp/builds/**\": allow\n"
+        "---\n"
+        "body\n");
+    REQUIRE(preset.permission_mode.out_of_workdir_patterns.size() == 1);
+    CHECK(preset.permission_mode.out_of_workdir_patterns[0].glob == "/tmp/builds/**");
+    CHECK(preset.permission_mode.out_of_workdir_patterns[0].mode == PermissionMode::AlwaysAllow);
+    CHECK_FALSE(preset.permission_mode.out_of_workdir.has_value());
+}
+
+TEST_CASE("ParseAgentPresetFrontmatter: native permission_mode.patterns decode",
+          "[agent_preset_frontmatter][patterns]") {
+    auto preset = Parse(
+        "---\n"
+        "name: build\n"
+        "permission_mode:\n"
+        "  patterns:\n"
+        "    bash:\n"
+        "      \"git *\": allow\n"
+        "---\n"
+        "body\n");
+    REQUIRE(preset.permission_mode.pattern_overrides.count("bash") == 1);
+    CHECK(preset.permission_mode.pattern_overrides.at("bash")[0].glob == "git *");
+    CHECK(preset.permission_mode.pattern_overrides.at("bash")[0].mode ==
+          PermissionMode::AlwaysAllow);
 }

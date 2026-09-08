@@ -119,8 +119,8 @@ TEST_CASE("AnthropicStreamReassembler: tool_use arrives with id/name upfront, no
     CHECK(block.input["path"] == "a.txt");
 }
 
-TEST_CASE("AnthropicStreamReassembler: thinking deltas stream live but are dropped at Finalize",
-         "[anthropic_stream]") {
+TEST_CASE("AnthropicStreamReassembler: thinking deltas stream live and survive Finalize",
+          "[anthropic_stream]") {
     AnthropicStreamReassembler reassembler;
     std::vector<llm::StreamEvent> events;
     auto sink = CollectInto(events);
@@ -152,8 +152,86 @@ TEST_CASE("AnthropicStreamReassembler: thinking deltas stream live but are dropp
     CHECK(saw_thinking_delta);   // the client still sees it live, for UI display
 
     const llm::ChatResponse response = reassembler.Finalize();
-    REQUIRE(response.content.size() == 1);   // but it never persists into history
-    CHECK(std::get<llm::TextBlock>(response.content[0]).text == "answer");
+    REQUIRE(response.content.size() == 2);
+    // Unsigned thinking is captured faithfully (scrollback shows it); the
+    // REQUEST builder is what drops it at replay time.
+    CHECK(std::get<llm::ThinkingBlock>(response.content[0]).text == "pondering");
+    CHECK_FALSE(std::get<llm::ThinkingBlock>(response.content[0]).signature.has_value());
+    CHECK(std::get<llm::TextBlock>(response.content[1]).text == "answer");
+}
+
+TEST_CASE("AnthropicStreamReassembler: signature_delta fragments concatenate into the block",
+          "[anthropic_stream]") {
+    AnthropicStreamReassembler reassembler;
+    std::vector<llm::StreamEvent> events;
+    auto sink = CollectInto(events);
+
+    REQUIRE(reassembler.FeedFrame(
+        R"({"type":"message_start","message":{"id":"msg_6","model":"m","usage":{}}})", sink));
+    REQUIRE(reassembler.FeedFrame(
+        R"({"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}})",
+        sink));
+    REQUIRE(reassembler.FeedFrame(
+        R"({"type":"content_block_delta","index":0,)"
+        R"("delta":{"type":"thinking_delta","thinking":"deep thought"}})",
+        sink));
+    REQUIRE(reassembler.FeedFrame(
+        R"({"type":"content_block_delta","index":0,)"
+        R"("delta":{"type":"signature_delta","signature":"sig-par"}})",
+        sink));
+    REQUIRE(reassembler.FeedFrame(
+        R"({"type":"content_block_delta","index":0,)"
+        R"("delta":{"type":"signature_delta","signature":"t-2"}})",
+        sink));
+    REQUIRE(reassembler.FeedFrame(R"({"type":"content_block_stop","index":0})", sink));
+    REQUIRE(reassembler.FeedFrame(
+        R"({"type":"message_delta","delta":{"stop_reason":"end_turn"}})", sink));
+
+    // signature_delta emits no stream event of its own -- the client needs
+    // only the thinking text; the signature is replay bookkeeping.
+    bool saw_non_delta_from_signature = false;
+    for (const auto& event : events) {
+        if (!std::holds_alternative<llm::ThinkingDeltaEvent>(event) &&
+            !std::holds_alternative<llm::MessageStartEvent>(event) &&
+            !std::holds_alternative<llm::UsageEvent>(event) &&
+            !std::holds_alternative<llm::ContentBlockStopEvent>(event) &&
+            !std::holds_alternative<llm::MessageDeltaEvent>(event)) {
+            saw_non_delta_from_signature = true;
+        }
+    }
+    CHECK_FALSE(saw_non_delta_from_signature);
+
+    const llm::ChatResponse response = reassembler.Finalize();
+    REQUIRE(response.content.size() == 1);
+    const auto& thinking = std::get<llm::ThinkingBlock>(response.content[0]);
+    CHECK(thinking.text == "deep thought");
+    REQUIRE(thinking.signature.has_value());
+    CHECK(*thinking.signature == "sig-part-2");   // concatenated, not overwritten
+}
+
+TEST_CASE("AnthropicStreamReassembler: redacted_thinking captures its data blob",
+          "[anthropic_stream]") {
+    AnthropicStreamReassembler reassembler;
+    std::vector<llm::StreamEvent> events;
+    auto sink = CollectInto(events);
+
+    REQUIRE(reassembler.FeedFrame(
+        R"({"type":"message_start","message":{"id":"msg_7","model":"m","usage":{}}})", sink));
+    REQUIRE(reassembler.FeedFrame(
+        R"({"type":"content_block_start","index":0,)"
+        R"("content_block":{"type":"redacted_thinking","data":"encrypted-blob"}})",
+        sink));
+    REQUIRE(reassembler.FeedFrame(R"({"type":"content_block_stop","index":0})", sink));
+    REQUIRE(reassembler.FeedFrame(
+        R"({"type":"message_delta","delta":{"stop_reason":"end_turn"}})", sink));
+
+    const llm::ChatResponse response = reassembler.Finalize();
+    REQUIRE(response.content.size() == 1);
+    const auto& thinking = std::get<llm::ThinkingBlock>(response.content[0]);
+    CHECK(thinking.text.empty());
+    CHECK_FALSE(thinking.signature.has_value());
+    REQUIRE(thinking.redacted_data.has_value());
+    CHECK(*thinking.redacted_data == "encrypted-blob");
 }
 
 TEST_CASE("AnthropicStreamReassembler: CloseOpenBlocks closes an announced but unstopped block",
