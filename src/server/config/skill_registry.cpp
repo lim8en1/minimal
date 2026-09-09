@@ -1,6 +1,7 @@
 #include "minimal/config/skill_registry.hpp"
 
 #include <algorithm>
+#include <filesystem>
 #include <fstream>
 #include <mutex>
 #include <sstream>
@@ -14,11 +15,24 @@
 namespace minimal::config {
 namespace {
 
+// A skill's frontmatter+body is prose, not a data file -- kilobytes, not
+// megabytes. Skills, like agent presets, are UNTRUSTED content (project-local
+// skills/ directories are walked the same way agents/ is), and a `preload`
+// skill's body is inlined verbatim into the system prompt on every session
+// start, so an oversized file is not just a slow parse -- it is unbounded
+// prompt-cache-busting content shipped to the model on every turn.
+constexpr std::uintmax_t kMaxSkillFileBytes = 1 << 20;  // 1 MiB
+
 // nullopt distinguishes "could not read" from "read an empty file". Collapsing
 // the two made an unreadable SKILL.md report "missing frontmatter block", which
 // sends the operator (and, via SkillTool, the model) to fix frontmatter that was
-// never the problem.
+// never the problem. An oversized file gets the same "could not read" nullopt --
+// every call site already has a skip-and-log (or demote-to-on-demand) path for
+// it, so this needs no new error shape.
 std::optional<std::string> ReadFile(const std::filesystem::path& path) {
+    std::error_code ec;
+    const auto size = std::filesystem::file_size(path, ec);
+    if (!ec && size > kMaxSkillFileBytes) return std::nullopt;
     std::ifstream in(path);
     if (!in) return std::nullopt;
     std::ostringstream buffer;

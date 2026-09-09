@@ -1,6 +1,10 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <fstream>
+#include <string>
+
 #include "minimal/agent/agent_preset_frontmatter.hpp"
+#include "temp_dir.hpp"
 
 using namespace minimal;
 using namespace minimal::agent;
@@ -504,4 +508,34 @@ TEST_CASE("ParseAgentPresetFrontmatter: native permission_mode.patterns decode",
     CHECK(preset.permission_mode.pattern_overrides.at("bash")[0].glob == "git *");
     CHECK(preset.permission_mode.pattern_overrides.at("bash")[0].mode ==
           PermissionMode::AlwaysAllow);
+}
+
+TEST_CASE("LoadAgentPresetFrontmatter: an oversized file is refused before the read runs",
+          "[agent_preset_frontmatter][invariant]") {
+    // agents/*.md is UNTRUSTED, project-local content (walked ahead of the
+    // operator's own config_dir -- see AgentPresetRegistry::ResolveUncached),
+    // and yaml-cpp's recursive-descent parser has no built-in size or depth
+    // limit. A file over the cap must be refused by NAME (not silently
+    // truncated, not attempted) before the read even opens the file.
+    testing::TempDir dir;
+    const auto path = dir.path() / "oversized.md";
+    {
+        std::ofstream out(path, std::ios::binary);
+        out << "---\nname: build\n---\n";
+        // Comfortably over the 1 MiB cap.
+        out << std::string(2 << 20, 'x');
+    }
+    CHECK_THROWS_AS(LoadAgentPresetFrontmatter(path), std::runtime_error);
+}
+
+TEST_CASE("LoadAgentPresetFrontmatter: a normally-sized file is unaffected by the cap",
+          "[agent_preset_frontmatter]") {
+    testing::TempDir dir;
+    const auto path = dir.path() / "normal.md";
+    {
+        std::ofstream out(path);
+        out << "---\nname: build\n---\nbody\n";
+    }
+    const auto preset = LoadAgentPresetFrontmatter(path);
+    CHECK(preset.name == "build");
 }

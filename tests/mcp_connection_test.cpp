@@ -223,6 +223,27 @@ TEST_CASE("McpConnection stdio: initialize, discovery, ping, tool call", "[mcp_c
     CHECK_FALSE(outcome.result.value("isError", true));
 }
 
+TEST_CASE("McpConnection stdio: teardown of an idle connection is fast, not the wedge grace",
+          "[mcp_connection]") {
+    // THE INVARIANT: Teardown's worker-join wait is a 250ms GRACE for a
+    // worker that is genuinely wedged inside a blocking call -- it must not
+    // be the common case's cost. An idle worker (parked in Loop()'s cv.wait
+    // with nothing queued, the ordinary state between calls) should join in
+    // microseconds. If Teardown notifies the worker's cv AFTER already
+    // waiting on it (the bug this guards against), the wait always times
+    // out, `joined` is always false, and every teardown -- including this
+    // one -- pays the full 250ms and takes the detach branch instead of the
+    // join branch.
+    auto connection = OpenStdio("normal");
+    McpConnection::Failure error;
+    CHECK(connection->Ping(nullptr, error));  // worker parks between calls
+
+    const auto started = std::chrono::steady_clock::now();
+    connection.reset();  // ~McpConnection -> Teardown
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+    CHECK(elapsed < std::chrono::milliseconds(200));
+}
+
 TEST_CASE("McpConnection stdio: a tool error surfaces as an isError result", "[mcp_connection]") {
     auto connection = OpenStdio("normal");
     const McpCallOutcome outcome = connection->CallTool("fail", nlohmann::json::object(), nullptr);

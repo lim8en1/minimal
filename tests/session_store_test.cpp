@@ -858,6 +858,34 @@ TEST_CASE("LoadMessages returns the whole transcript ascending", "[session][resu
     }
 }
 
+TEST_CASE("LoadMessages returns the complete transcript across internal chunk boundaries",
+          "[session][resume][invariant]") {
+    // LoadMessages releases the database mutex between internal chunks (so a
+    // large resume does not stall every other session's appends for the
+    // whole load) instead of running one unbounded SELECT under one lock
+    // acquisition. This is the regression bar for that change: the seam
+    // between chunks must not duplicate, drop, or reorder a single row.
+    // 1200 messages crosses two full chunks plus a partial third at the
+    // internal chunk size (500).
+    TempDir dir;
+    SessionDatabase db(dir.path() / "load_chunked.db");
+    const auto id = db.CreateSession("", std::nullopt, "/p", "build").session_id;
+
+    constexpr int kCount = 1200;
+    for (int i = 0; i < kCount; ++i) {
+        db.AppendMessage(id, UserMsg("m" + std::to_string(i)));
+    }
+
+    SessionReader reader(db);
+    const auto loaded = reader.LoadAll(id);
+    REQUIRE(loaded.size() == static_cast<std::size_t>(kCount));
+    for (std::size_t i = 0; i < loaded.size(); ++i) {
+        // Ascending and contiguous: no gap or duplicate at a chunk seam.
+        CHECK(loaded[i].seq == static_cast<std::int64_t>(i));
+        CHECK(MessagesEqual(loaded[i].message, UserMsg("m" + std::to_string(i))));
+    }
+}
+
 TEST_CASE("LoadMessages on an empty or unknown session is empty, not an error",
           "[session][resume]") {
     TempDir dir;

@@ -25,16 +25,19 @@ bool MatchFrom(std::string_view pattern, std::string_view text, bool slash_termi
                 if (!crosses && text[take] == '/') return false;
             }
         }
+        bool escaped = false;
         if (c == '\\') {
-            // Escape: the next character matches literally, whatever it is.
-            // Trailing escape matches nothing (fail closed), not the
+            // Escape: the next character matches literally, whatever it is --
+            // including '?', which must NOT fall into the wildcard branch
+            // below. Trailing escape matches nothing (fail closed), not the
             // backslash itself.
             if (pattern.size() < 2) return false;
             pattern.remove_prefix(1);
             c = pattern.front();
+            escaped = true;
         }
         if (text.empty()) return false;
-        if (c == '?') {
+        if (!escaped && c == '?') {
             if (slash_terminates && text.front() == '/') return false;
         } else if (text.front() != c) {
             return false;

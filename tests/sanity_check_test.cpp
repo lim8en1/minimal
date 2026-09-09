@@ -306,6 +306,46 @@ TEST_CASE("a default_model naming no configured model warns", "[sanity_check][us
     CHECK(hits[0]->message.find("ghost") != std::string::npos);
 }
 
+TEST_CASE("compaction_keep_recent_tokens at or above a fixed trigger warns",
+          "[sanity_check][compaction_keep_recent]") {
+    // THE BUG this guards against: keep_recent_tokens >= the resolved
+    // trigger makes the cut selector's own token-budget walk cover the
+    // whole working set every time it fires, degrading auto-compaction
+    // into silent per-turn tool-result elision (agent_loop_test.cpp covers
+    // the runtime half of the same fix). Only FixedTokens is checkable
+    // here -- PercentOfWindow/WindowBuffer resolve against a session's
+    // model, unknown at startup.
+    Fixture f;
+    WriteGoodConfig(f.config_dir);
+    ScopedEnv data("XDG_DATA_HOME", f.xdg_data.string().c_str());
+    f.RegisterTool("tools-bash", "bash");
+    f.Write("settings.json",
+            R"({"default_agent_preset":"build","memory":{)"
+            R"("context_compaction_trigger":{"tokens":1000},)"
+            R"("compaction_keep_recent_tokens":1000}})");
+
+    const auto results = RunChecks(f);
+
+    const auto keep_recent = ByCheck(results, "compaction_keep_recent_tokens");
+    REQUIRE(keep_recent.size() == 1);
+    CHECK(keep_recent.front()->severity == CheckSeverity::Warning);
+}
+
+TEST_CASE("compaction_keep_recent_tokens below a fixed trigger produces no finding",
+          "[sanity_check][compaction_keep_recent]") {
+    Fixture f;
+    WriteGoodConfig(f.config_dir);
+    ScopedEnv data("XDG_DATA_HOME", f.xdg_data.string().c_str());
+    f.RegisterTool("tools-bash", "bash");
+    f.Write("settings.json",
+            R"({"default_agent_preset":"build","memory":{)"
+            R"("context_compaction_trigger":{"tokens":10000},)"
+            R"("compaction_keep_recent_tokens":1000}})");
+
+    const auto results = RunChecks(f);
+    CHECK(ByCheck(results, "compaction_keep_recent_tokens").empty());
+}
+
 TEST_CASE("small_model is shape- and resolution-checked at startup",
           "[sanity_check][usable_provider][small_model]") {
     Fixture f;

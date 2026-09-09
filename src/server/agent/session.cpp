@@ -823,6 +823,15 @@ void Session::Terminate() {
     // exiting, and a session nobody is attached to loses its in-flight
     // injections by design.
     channels_->injections.Close();
+    // Empty locked section before the notify: the worker's wait predicate
+    // reads terminated_ under mutex_ (WorkerMain), and every write to the
+    // predicate above this point (terminated_.exchange, the two lines above)
+    // happened without that lock. Without this, the worker can evaluate the
+    // predicate (seeing terminated_ == false) strictly between the exchange
+    // and this notify, park on the condition variable having already missed
+    // it, and never wake -- the same lost-wakeup shape QueueInjectedMessage
+    // already guards against with an identical empty critical section.
+    { std::lock_guard<std::mutex> lock(mutex_); }
     turn_cv_.notify_all();
 
     // THE TERMINAL WIRE EVENT, published to every subscriber before closing
@@ -833,8 +842,25 @@ void Session::Terminate() {
     // distinguish "killed" from "finished quietly". The sink never blocks and
     // cannot refuse for capacity; the only refusal is a broadcaster that is
     // already closed.
-    if (!EmitEvent(SessionEvent{SessionEnded{}})) {
-        logger_.warn("session {}: SessionEnded dropped (queue full or closed)",
+    //
+    // GUARDED, individually, the same way RunOneTurn guards each of its
+    // post-turn stages separately rather than under one enclosing try: an
+    // exception leaving Terminate() is UB or worse everywhere it is called
+    // from (~Session() is implicitly noexcept, the reaper thread and
+    // TerminateAll() have no handler either -- an uncaught throw here is
+    // std::terminate on an ordinary session-lifetime path, not an exotic
+    // one). A single try wrapping everything below would trade that hazard
+    // for a different correctness bug: JoinWorkerOnce() below MUST run even
+    // if EmitEvent or close_transport_ throws, or the worker thread is never
+    // joined and this object is unsafe to destroy. Guarding each step lets an
+    // earlier failure skip only its own work, never the later steps'.
+    try {
+        if (!EmitEvent(SessionEvent{SessionEnded{}})) {
+            logger_.warn("session {}: SessionEnded dropped (queue full or closed)",
+                         params_.session_id);
+        }
+    } catch (...) {
+        logger_.warn("session {}: emitting SessionEnded threw during teardown",
                      params_.session_id);
     }
 
@@ -844,7 +870,11 @@ void Session::Terminate() {
     // the worker cannot be parked on a full queue any more (the sink never
     // blocks), so the join below cannot deadlock the way the old
     // blocking-Push design feared.
-    close_transport_();
+    try {
+        close_transport_();
+    } catch (...) {
+        logger_.warn("session {}: close_transport threw during teardown", params_.session_id);
+    }
 
     if (worker_.get_id() != std::this_thread::get_id()) JoinWorkerOnce();
 
@@ -863,7 +893,12 @@ void Session::Terminate() {
         }
     }
 
-    observers_.NotifySessionEnded(InfoSnapshot());
+    try {
+        observers_.NotifySessionEnded(InfoSnapshot());
+    } catch (...) {
+        logger_.warn("session {}: notifying session-ended observers threw during teardown",
+                     params_.session_id);
+    }
 }
 
 SessionInfo Session::InfoSnapshot() const {

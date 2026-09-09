@@ -473,6 +473,78 @@ TEST_CASE("terminating with a turn in flight joins cleanly", "[session]") {
     CHECK(fixture->session->terminated());
 }
 
+TEST_CASE("terminating an idle session returns instead of deadlocking on a lost wakeup",
+          "[session][invariant]") {
+    // THE INVARIANT: Terminate() must wake a worker that is ALREADY PARKED on
+    // turn_cv_ with an empty queue -- the ordinary idle state between turns,
+    // not a turn in flight (the prior test) or a wedged subscriber queue
+    // (the next one). Terminate mutates terminated_ (via exchange, outside
+    // mutex_) and then notifies; if the worker evaluates the wait predicate
+    // (reading terminated_ == false) in the window between that exchange and
+    // the notify, it parks having already missed the wakeup and never wakes.
+    // Sleeping past WaitForIdleForTesting before calling Terminate maximizes
+    // the chance the worker is genuinely parked in cv.wait when Terminate
+    // runs, rather than still unwinding its own turn-boundary bookkeeping.
+    SessionFixture fixture;
+    fixture.Script(testing::TextResponse("hi"));
+    fixture.Start();
+
+    fixture.session->SubmitTurn("hello");
+    REQUIRE(fixture.session->WaitForIdleForTesting(5s));
+    std::this_thread::sleep_for(20ms);
+
+    auto terminated = testing::RunInBackground([&fixture] {
+        fixture.session->Terminate();
+        return true;
+    });
+    REQUIRE(terminated.WaitFor(5s));
+    CHECK(fixture.session->terminated());
+}
+
+TEST_CASE("Session::Terminate survives a throwing event sink without aborting",
+          "[session][invariant]") {
+    // Terminate() is called from ~Session() (implicitly noexcept), from
+    // SessionRegistry::ReaperMain's thread body, and from TerminateAll() --
+    // none of which has a handler, so an uncaught throw ANYWHERE inside
+    // Terminate() is std::terminate on an ordinary session-lifetime path
+    // (a wedged event sink, an allocation failure), not an exotic one.
+    // Wraps the real wire event sink so it throws on the terminal
+    // SessionEnded event -- the exact call Terminate's own body used to
+    // leave unguarded -- and confirms Terminate() still returns and joins
+    // cleanly (if it did not, the whole test process would abort here, not
+    // just this assertion fail).
+    SessionFixture fixture;
+    fixture.Script(testing::TextResponse("hi"));
+
+    {
+        agent::SessionParams temp;
+        temp.session_id = "sess-throw-terminate";
+        rpc::FinishSessionWiring(temp);
+        agent::SessionEventSink real_sink = temp.event_sink;
+        fixture.injected_event_sink = [real_sink](const agent::SessionEvent& event) {
+            if (std::holds_alternative<agent::SessionEnded>(event)) {
+                throw std::runtime_error("event sink exploded on SessionEnded");
+            }
+            return real_sink(event);
+        };
+        fixture.injected_transport_handle = temp.transport_handle;
+        fixture.injected_cancel_pending_requests = temp.cancel_pending_requests;
+        fixture.injected_shutdown_pending_requests = temp.shutdown_pending_requests;
+        fixture.injected_close_transport = temp.close_transport;
+    }
+    fixture.Start("sess-throw-terminate");
+
+    fixture.session->SubmitTurn("hello");
+    REQUIRE(fixture.session->WaitForIdleForTesting(5s));
+
+    auto terminated = testing::RunInBackground([&fixture] {
+        fixture.session->Terminate();
+        return true;
+    });
+    REQUIRE(terminated.WaitFor(5s));
+    CHECK(fixture.session->terminated());
+}
+
 TEST_CASE("terminating a session whose subscriber never drains returns instead of deadlocking",
           "[session][invariant]") {
     // THE INVARIANT (S5): Publish is drop-oldest and never blocks, so NO

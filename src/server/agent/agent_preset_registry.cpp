@@ -200,8 +200,20 @@ std::vector<AgentPresetSummary> AgentPresetRegistry::ListAvailable(
     // shadows it by name in every lookup.
     std::set<std::string> project_declared;
 
-    // `record` collects every parseable name (project scans); `skip` suppresses
-    // names owned elsewhere (the global scan skips project-owned names).
+    // `record` collects every parseable id (project scans); `skip` suppresses
+    // ids owned elsewhere (the global scan skips project-owned ids).
+    //
+    // Keyed on the FILE STEM, not raw.name (the frontmatter display value):
+    // Resolve()/ResolveUncached() look presets up by filename, never by the
+    // frontmatter `name:` field, which need not match it. Keying the listing
+    // (and the shadowing set below) on raw.name meant a preset whose two
+    // diverged was offered in the picker under a name Resolve() could never
+    // find -- "unknown agent preset" on selection -- and, separately, that a
+    // project preset's frontmatter name (rather than its filename) decided
+    // whether it shadowed a global preset of the same FILENAME, which is not
+    // the rule Resolve() itself applies. The stem is what both picker
+    // selection and /agent <name> actually resolve against, so keying on it
+    // is what makes every listed entry selectable.
     auto scan_dir = [&merged](const std::filesystem::path& agents_dir,
                               std::set<std::string>* record, const std::set<std::string>* skip) {
         std::error_code ec;
@@ -210,16 +222,16 @@ std::vector<AgentPresetSummary> AgentPresetRegistry::ListAvailable(
         for (const auto& entry : std::filesystem::directory_iterator(agents_dir, ec)) {
             if (ec) break;
             if (!entry.is_regular_file() || entry.path().extension() != ".md") continue;
+            const std::string id = entry.path().stem().string();
             try {
                 const AgentPresetFrontmatter raw = LoadAgentPresetFrontmatter(entry.path());
-                if (record != nullptr) record->insert(raw.name);
+                if (record != nullptr) record->insert(id);
                 // Picker-visibility rules: disabled presets cannot run at all;
                 // `hidden` and `mode: subagent` presets are spawnable but not
                 // switchable from the picker (spawn accepts them regardless).
                 if (raw.disable || raw.hidden || raw.mode == AgentMode::Subagent) continue;
-                if (skip != nullptr && skip->count(raw.name) != 0) continue;
-                merged.try_emplace(raw.name,
-                                   AgentPresetSummary{raw.name, raw.description, raw.color});
+                if (skip != nullptr && skip->count(id) != 0) continue;
+                merged.try_emplace(id, AgentPresetSummary{id, raw.description, raw.color});
             } catch (const std::exception& error) {
                 // One malformed preset must not hide the rest from a picker.
                 common::DefaultLogger().warn("agent preset '{}' skipped in listing: {}",

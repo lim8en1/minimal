@@ -119,6 +119,26 @@ const llm::ToolResultBlock& ResultOf(const llm::Message& message, std::size_t in
     return std::get<llm::ToolResultBlock>(message.content[index]);
 }
 
+// Throws on the Nth call to Append (1-based); every other call behaves like
+// the base fake. Local to one test: Harness::store is a fixed
+// InMemoryHistoryStore value member many other tests depend on, so a
+// store-failure test builds its own AgentLoop rather than widening the
+// shared fixture for one case.
+class ThrowsOnAppendN : public testing::InMemoryHistoryStore {
+public:
+    explicit ThrowsOnAppendN(int throw_on_call) : throw_on_call_(throw_on_call) {}
+    void Append(const llm::Message& message, std::optional<int> output_tokens) override {
+        if (++calls_ == throw_on_call_) {
+            throw std::runtime_error("simulated store failure");
+        }
+        InMemoryHistoryStore::Append(message, output_tokens);
+    }
+
+private:
+    int throw_on_call_;
+    int calls_ = 0;
+};
+
 // Assembles the loop and everything it needs. Members are declared in
 // destruction-safe order: the loop refers to the others, so it is destroyed
 // first.
@@ -267,6 +287,71 @@ TEST_CASE("tool results are persisted before the next provider call", "[agent_lo
         }
     }
     CHECK(found);
+}
+
+TEST_CASE("a store failure appending tool results repairs history_ before rethrowing",
+          "[agent_loop][invariant]") {
+    // THE BUG: AppendAndPersist appends the assistant message (carrying
+    // tool_use blocks) BEFORE the tools run, then appends the paired
+    // results message AFTER. If the store fails on THAT second append,
+    // history_ was left ending in unanswered tool_use -- a hard 400 on both
+    // wire formats -- and the exception propagated past RunTurnLoop
+    // uncaught. Session::RunOneTurn catches it and keeps the session alive,
+    // but nothing repaired the in-memory working set, so every later turn
+    // 400'd on the orphaned call for the rest of the session's life (only a
+    // process restart's resume path repairs the identical shape). The fix
+    // repairs history_ the same way resume does (synthesize_missing_
+    // tool_results) before rethrowing the ORIGINAL exception.
+    testing::FakeLlmProvider provider;
+    provider.PushResponse(testing::ToolUseResponse("tu1", "read"));
+    tools::ToolRegistry registry;
+    registry.Register(std::make_unique<testing::FakeTool>("read", ToolCategory::ReadOnly));
+    testing::AlwaysAllowPermissionChecker checker;
+    tools::ToolExecutor executor(registry, checker, testing::AllowAllPolicy(),
+                                 tools::McpPermissionPolicy{}, PermissionRunMode::Normal);
+
+    // Append #1 is the seed user message ("go"); #2 is the assistant
+    // message carrying tool_use (both succeed); #3 is the results message
+    // this test targets (throws); #4, if reached, is the repair's own
+    // append (succeeds, proving the repair landed).
+    ThrowsOnAppendN store(/*throw_on_call=*/3);
+
+    agent::AgentPreset preset;
+    preset.allowed_tools = {"*"};
+    preset.provider.model_name = "test-model";
+    preset.permission_mode = testing::AllowAllPolicy();
+    agent::SessionContext session{common::DefaultLogger()};
+    session.session_id = "s1";
+    session.project_root = ".";
+
+    agent::AgentLoop loop(
+        provider, executor, registry, store, preset, agent::LoopConfig{}, std::move(session),
+        [] { return false; }, [](const llm::StreamEvent&) { return true; }, agent::Compactor{});
+
+    // Manual catch, not CHECK_THROWS_WITH: this must be the ORIGINAL
+    // exception, not one from the repair attempt's own store call, and
+    // asserting the exact message is what proves that.
+    bool threw = false;
+    try {
+        loop.RunTurn(testing::UserText("go"));
+    } catch (const std::runtime_error& error) {
+        threw = true;
+        CHECK(std::string(error.what()) == "simulated store failure");
+    }
+    REQUIRE(threw);
+
+    // history_ ends with the repair message, not the orphaned assistant
+    // turn: a User message carrying an error ToolResultBlock for "tu1" --
+    // exactly synthesize_missing_tool_results' shape, the same repair resume
+    // already applies to a torn transcript.
+    const auto& history = loop.history();
+    REQUIRE(history.size() == 3);  // seed, assistant (with tool_use), repair
+    const auto& repair = history.back();
+    CHECK(repair.role == llm::Role::User);
+    REQUIRE(repair.content.size() == 1);
+    const auto& result = std::get<llm::ToolResultBlock>(repair.content[0]);
+    CHECK(result.tool_use_id == "tu1");
+    CHECK(result.is_error);
 }
 
 TEST_CASE("a result over max_tool_result_bytes is truncated with a visible marker",
@@ -1900,6 +1985,57 @@ TEST_CASE("a proposed cut is still snapped to a safe tool-call boundary, never t
     const auto cut = h.loop->CompactNow();
     CHECK_FALSE(cut.has_value());
     CHECK_FALSE(summarizer_called);
+}
+
+TEST_CASE("a cut_selector declining to cut (candidate 0) is 'nothing to compact', not "
+         "'no safe boundary'",
+         "[agent_loop][compaction][invariant]") {
+    // THE BUG: compaction_keep_recent_tokens set at or above the resolved
+    // trigger makes the real cut_selector (ProposeSummarizeCut) return 0
+    // directly -- its own token-budget walk covers the whole working set --
+    // BEFORE the boundary snap ever runs. That used to fall into the SAME
+    // branch as "snap shrank a nonzero candidate to 0 because there is no
+    // safe tool-call boundary", which elides the largest tool result in
+    // place: a misconfiguration with nothing to do with message pairing
+    // silently truncated a tool result every turn the trigger stayed armed.
+    Harness h;
+    bool summarizer_called = false;
+    auto compactor = [&summarizer_called](std::span<const llm::Message>, llm::LlmProvider&,
+                                          const agent::CompactionRequest&)
+        -> std::optional<agent::CompactionResult> {
+        summarizer_called = true;
+        return agent::CompactionResult{UserText("[summary]"), 0};
+    };
+
+    // A large tool result -- big enough that, if elision ran, it would be
+    // visibly truncated (kElisionMinSizeToBother is 1000 bytes; this clears
+    // it comfortably). Its survival intact is what proves elision did NOT
+    // run.
+    llm::ToolResultBlock result;
+    result.tool_use_id = "call_1";
+    result.content = {llm::TextBlock{std::string(5000, 'x')}};
+    const llm::Message result_message{llm::Role::User, {result}};
+
+    agent::LoopConfig config;
+    // The exact shape ProposeSummarizeCut takes when keep_recent_tokens
+    // covers everything: 0, unconditionally, before any boundary reasoning.
+    config.compaction_strategy.cut_selector = [](const std::vector<llm::Message>&, std::int64_t) {
+        return std::size_t{0};
+    };
+    h.Build({}, config, compactor,
+            agent::ResumeSeed{.history = {UserText("a"), result_message, UserText("c")}});
+
+    const auto cut = h.loop->CompactNow();
+    CHECK_FALSE(cut.has_value());
+    CHECK_FALSE(summarizer_called);
+
+    // The tool result is byte-for-byte untouched -- elision never ran.
+    const auto& history = h.loop->history();
+    REQUIRE(history.size() == 3);
+    const auto& surviving = std::get<llm::ToolResultBlock>(history[1].content[0]);
+    REQUIRE(surviving.content.size() == 1);
+    const auto& text = std::get<llm::TextBlock>(surviving.content[0]);
+    CHECK(text.text == std::string(5000, 'x'));
 }
 
 TEST_CASE("no safe compaction boundary elides the largest tool result instead of accepting "
