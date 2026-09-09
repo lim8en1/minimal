@@ -1987,6 +1987,57 @@ TEST_CASE("a proposed cut is still snapped to a safe tool-call boundary, never t
     CHECK_FALSE(summarizer_called);
 }
 
+TEST_CASE("a cut_selector declining to cut (candidate 0) is 'nothing to compact', not "
+         "'no safe boundary'",
+         "[agent_loop][compaction][invariant]") {
+    // THE BUG: compaction_keep_recent_tokens set at or above the resolved
+    // trigger makes the real cut_selector (ProposeSummarizeCut) return 0
+    // directly -- its own token-budget walk covers the whole working set --
+    // BEFORE the boundary snap ever runs. That used to fall into the SAME
+    // branch as "snap shrank a nonzero candidate to 0 because there is no
+    // safe tool-call boundary", which elides the largest tool result in
+    // place: a misconfiguration with nothing to do with message pairing
+    // silently truncated a tool result every turn the trigger stayed armed.
+    Harness h;
+    bool summarizer_called = false;
+    auto compactor = [&summarizer_called](std::span<const llm::Message>, llm::LlmProvider&,
+                                          const agent::CompactionRequest&)
+        -> std::optional<agent::CompactionResult> {
+        summarizer_called = true;
+        return agent::CompactionResult{UserText("[summary]"), 0};
+    };
+
+    // A large tool result -- big enough that, if elision ran, it would be
+    // visibly truncated (kElisionMinSizeToBother is 1000 bytes; this clears
+    // it comfortably). Its survival intact is what proves elision did NOT
+    // run.
+    llm::ToolResultBlock result;
+    result.tool_use_id = "call_1";
+    result.content = {llm::TextBlock{std::string(5000, 'x')}};
+    const llm::Message result_message{llm::Role::User, {result}};
+
+    agent::LoopConfig config;
+    // The exact shape ProposeSummarizeCut takes when keep_recent_tokens
+    // covers everything: 0, unconditionally, before any boundary reasoning.
+    config.compaction_strategy.cut_selector = [](const std::vector<llm::Message>&, std::int64_t) {
+        return std::size_t{0};
+    };
+    h.Build({}, config, compactor,
+            agent::ResumeSeed{.history = {UserText("a"), result_message, UserText("c")}});
+
+    const auto cut = h.loop->CompactNow();
+    CHECK_FALSE(cut.has_value());
+    CHECK_FALSE(summarizer_called);
+
+    // The tool result is byte-for-byte untouched -- elision never ran.
+    const auto& history = h.loop->history();
+    REQUIRE(history.size() == 3);
+    const auto& surviving = std::get<llm::ToolResultBlock>(history[1].content[0]);
+    REQUIRE(surviving.content.size() == 1);
+    const auto& text = std::get<llm::TextBlock>(surviving.content[0]);
+    CHECK(text.text == std::string(5000, 'x'));
+}
+
 TEST_CASE("no safe compaction boundary elides the largest tool result instead of accepting "
          "unbounded growth",
          "[agent_loop][compaction]") {

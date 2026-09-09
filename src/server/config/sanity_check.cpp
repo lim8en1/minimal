@@ -104,6 +104,7 @@ std::vector<CheckResult> StartupSanityCheck::RunAll() {
     append(check_advisor());
     append(check_subagent_limit());
     append(check_compaction_strategy());
+    append(check_compaction_keep_recent());
     append(check_small_model());
     return results;
 }
@@ -861,6 +862,32 @@ std::vector<CheckResult> StartupSanityCheck::check_compaction_strategy() {
                                        "' but no loaded plugin registered it (typo, or the "
                                        "providing plugin is disabled); compaction falls back to "
                                        "the built-in 'summarize' strategy"));
+    }
+    return results;
+}
+
+std::vector<CheckResult> StartupSanityCheck::check_compaction_keep_recent() {
+    std::vector<CheckResult> results;
+    if (!settings_loaded_) return results;  // already Fatal under config_parse
+
+    const auto keep_recent = settings_.memory.compaction_keep_recent_tokens;
+    if (keep_recent <= 0) return results;  // 0 = legacy halving; nothing to compare
+
+    // Only FixedTokens has a value comparable without a session's resolved
+    // model: PercentOfWindow and WindowBuffer resolve against
+    // context_window_tokens, a property of whichever model a session ends
+    // up running -- not decidable from settings.json alone at startup.
+    const auto& trigger = settings_.memory.context_compaction_trigger;
+    if (trigger.kind == CompactionTriggerSettings::Kind::FixedTokens &&
+        keep_recent >= trigger.tokens) {
+        results.push_back(Warning(
+            "compaction_keep_recent_tokens",
+            "settings.json memory.compaction_keep_recent_tokens (" + std::to_string(keep_recent) +
+                ") is not smaller than the fixed compaction trigger (" +
+                std::to_string(trigger.tokens) +
+                " tokens); the compaction strategy's cut selector will cover the whole working "
+                "set every time it fires, degrading auto-compaction into per-turn tool-result "
+                "elision instead of an actual fold"));
     }
     return results;
 }

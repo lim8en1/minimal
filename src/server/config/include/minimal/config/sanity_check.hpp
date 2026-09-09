@@ -116,6 +116,7 @@ private:
     std::vector<CheckResult> check_subagent_limit();
     std::vector<CheckResult> check_hooks();
     std::vector<CheckResult> check_compaction_strategy();
+    std::vector<CheckResult> check_compaction_keep_recent();
     std::vector<CheckResult> check_small_model();
 
     SanityCheckInputs inputs_;

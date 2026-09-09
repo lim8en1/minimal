@@ -502,6 +502,34 @@ std::optional<std::size_t> AgentLoop::Compact(std::string_view trigger) {
                                       history_, config_.compaction_keep_recent_tokens)
                                 : history_.size() / 2;
 
+    // The STRATEGY declining to cut anything is a DIFFERENT situation from
+    // "no safe structural cut exists" below, and must not be handled by the
+    // same fallback. If compaction_keep_recent_tokens is set at or above the
+    // resolved trigger, the cut selector's own token-budget walk covers the
+    // whole working set and returns 0 here -- BEFORE the boundary snap even
+    // runs, so this has nothing to do with tool-call pairing. Falling
+    // through to the boundary-safety branch used to run the elision
+    // fallback on every turn (silently truncating a tool result) and log
+    // "no safe compaction boundary" for a misconfiguration that has no
+    // boundary problem at all.
+    if (candidate == 0) {
+        session_.logger.info(
+            "session {}: compaction_keep_recent_tokens covers the whole working set ({} "
+            "messages); nothing to compact",
+            session_.session_id, history_.size());
+        compaction_failed_this_turn_ = true;  // still don't retry every tool cycle
+        if (config_.hooks != nullptr) {
+            config_.hooks->EmitAsync(
+                hooks::kPostCompact,
+                nlohmann::json{{"session_id", session_.session_id},
+                              {"project_root", session_.project_root.string()},
+                              {"trigger", trigger},
+                              {"skipped", "compaction_keep_recent_tokens covers the whole "
+                                          "working set; nothing to compact"}});
+        }
+        return std::nullopt;
+    }
+
     // Snapping backward to a complete tool-call cycle is mandatory: cutting
     // between an assistant ToolUseBlock and its ToolResultBlock orphans the call,
     // which is a hard 400 on both OpenAI and Anthropic rather than a soft
