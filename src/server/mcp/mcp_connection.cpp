@@ -625,8 +625,19 @@ void McpConnection::Teardown() {
     const int child_pid = transport_->Abort();
     bool joined = false;
     {
-        std::unique_lock<std::mutex> lock(worker_->mu);
+        std::lock_guard<std::mutex> lock(worker_->mu);
         worker_->stopped = true;
+    }
+    // Notify BEFORE waiting: the worker's Loop() parks on this same cv with
+    // predicate (stopped || !jobs.empty()), and nothing else wakes it once
+    // Abort() has already run (Abort only kills the child; it does not touch
+    // this cv). Notifying after the wait_for below is a guaranteed miss, not
+    // a race -- the wait always times out, `joined` is always false, and
+    // every teardown takes the detach branch this grace window exists to
+    // avoid.
+    worker_->cv.notify_all();
+    {
+        std::unique_lock<std::mutex> lock(worker_->mu);
         // JOIN, never blind-detach, whenever the worker exits in time. A
         // detached worker that unwinds late -- or never -- deletes the
         // transport (last shared_ptr) on its own thread, and cpp-mcp's
@@ -644,7 +655,6 @@ void McpConnection::Teardown() {
         joined = worker_->cv.wait_for(lock, std::chrono::milliseconds(250),
                                       [this] { return worker_->exited; });
     }
-    worker_->cv.notify_all();
     if (loop_.joinable()) {
         if (joined) {
             loop_.join();
