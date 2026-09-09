@@ -334,9 +334,32 @@ ftxui::Element FrameRenderer::Render() {
                                    : std::to_string(used) + " tok";
         }
         // The metadata segments: empty = unknown = render nothing, the
-        // format string's unknown-or-unfilled rule.
-        if (!focused_details.model.empty()) values["model"] = focused_details.model;
-        if (!focused_details.agent_preset.empty()) values["agent"] = focused_details.agent_preset;
+        // format string's unknown-or-unfilled rule. The {model}/{agent}
+        // values show the DESIRED state when one is staged (the user's last
+        // word, per the desired-state convergence rule): equal to effective
+        // it renders identically, divergent it renders the fresh value with
+        // a pending marker until the confirming metadata event lands -- on
+        // a sessionless tab there is nothing to converge into, so no
+        // marker (the create simply carries the choice).
+        const bool model_pending = !focused_details.session_id.empty() &&
+                                   !focused_details.desired_model.empty() &&
+                                   focused_details.desired_model != focused_details.model;
+        const bool agent_pending =
+            !focused_details.session_id.empty() &&
+            !focused_details.desired_agent_preset.empty() &&
+            focused_details.desired_agent_preset != focused_details.agent_preset;
+        const std::string model_value =
+            !focused_details.desired_model.empty() ? focused_details.desired_model
+                                                   : focused_details.model;
+        const std::string agent_value = !focused_details.desired_agent_preset.empty()
+                                            ? focused_details.desired_agent_preset
+                                            : focused_details.agent_preset;
+        if (!model_value.empty()) {
+            values["model"] = model_value + (model_pending ? "~" : "");
+        }
+        if (!agent_value.empty()) {
+            values["agent"] = agent_value + (agent_pending ? "~" : "");
+        }
         if (!focused_details.permission_mode.empty()) {
             values["permission_mode"] = focused_details.permission_mode;
         }

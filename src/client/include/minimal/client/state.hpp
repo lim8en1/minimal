@@ -283,10 +283,21 @@ public:
         // The wire source for the status bar's {model} {agent}
         // {permission_mode} segments and the `max` half of {tokens}. Empty/0 =
         // unknown; the segment renders nothing, per the unknown-segment rule.
+        // model/agent_preset are the EFFECTIVE values (wire truth);
+        // desired_* below are the client-chosen ones still awaiting
+        // convergence.
         std::string model;
         std::string agent_preset;
         std::string permission_mode;
         int64_t context_window_tokens = 0;
+
+        // The tab's DESIRED agent/model (SetDesired*), when it differs from
+        // the effective metadata above the status bar shows THIS (the fresh
+        // value, the user's last word) with a pending marker until the
+        // confirming metadata event lands. Empty = no desired state / equal
+        // to effective.
+        std::string desired_model;
+        std::string desired_agent_preset;
 
         // True when the LAST turn ended (TurnCompleted / Error) and no new
         // turn has begun. The frame's maintain pass fetches the newest
@@ -341,12 +352,30 @@ public:
 
     // Sessionless-tab support. A tab's SessionState is constructed before its
     // session exists (session_id "" and no metadata), so EnsureSession tells
-    // the state its id once the create resolves, and the /agent //model
-    // staging paths seed the status-bar fields directly (the wire metadata
-    // event only arrives once a session exists).
+    // the state its id once the create resolves. The /agent //model desired
+    // state (SetDesired* below) seeds the status-bar fields directly -- the
+    // wire metadata event only arrives once a session exists.
     void SetSessionId(std::string session_id);
-    void StageDisplayModel(std::string model_ref);
-    void StageDisplayAgentPreset(std::string preset_name);
+    void SetDesiredModel(std::string model_ref);
+    void SetDesiredAgentPreset(std::string preset_name);
+
+    // The tab's desired agent/model (unresolved refs, client-chosen; empty =
+    // none). Read by EnsureSession (create-options overlay) under the state's
+    // own mutex.
+    std::string DesiredModel() const;
+    std::string DesiredAgentPreset() const;
+
+    // The /-command lines that would converge the session's EFFECTIVE
+    // agent/model to the desired state right now ("/agent x", "/model p/m"),
+    // in the order they must run (/agent first, so the user's model survives
+    // the switch -- the server's precedence rule), or empty when converged.
+    // Divergence is measured against the wire metadata's effective values:
+    // while none have arrived yet (fresh create, metadata in flight) nothing
+    // is sent -- the create already carried the desired state, and a later
+    // diff self-corrects. Idempotent: a redundant switch of an already-equal
+    // value is a server-side no-op, so a second turn fired before the
+    // confirming metadata event re-sending the same lines is harmless.
+    std::vector<std::string> ConvergenceCommands() const;
 
     // --- Streaming response ---
     void AppendStreamingText(std::string_view text);
@@ -551,9 +580,13 @@ private:
     // outside mtx_.
     bool older_fetch_pending_ = false;
 
-    // Session metadata (see Snapshot).
+    // Session metadata (see Snapshot). model_/agent_preset_ are EFFECTIVE
+    // (wire truth); the desired_* pair is the client-chosen state awaiting
+    // convergence (see ConvergenceCommands).
     std::string model_;
     std::string agent_preset_;
+    std::string desired_model_;
+    std::string desired_agent_;
     std::string permission_mode_;
     int64_t context_window_tokens_ = 0;
 
@@ -790,14 +823,22 @@ public:
     void CycleFocusBackward();
     void SetFocusedTab(const std::string& tab_id);
 
-    // --- Sessionless-tab staging (/agent, /model before the session exists) ---
+    // --- Desired agent/model state (/agent, /model on ANY tab) ---
 
-    // Stages a model/agent choice onto a tab WITHOUT a session (validated by
-    // the caller against the session-free ListModels/ListAgentPresets RPCs).
-    // The choice rides the tab's pending create-options when the session is
-    // eventually created, and seeds the tab's display metadata immediately so
-    // the status bar reflects it. Returns false (a no-op) when the tab already
-    // has a session -- callers send the real /model //agent command there.
+    // Sets the tab's desired agent/model (unresolved refs; validated by the
+    // caller -- /model refs are shape-checked client-side, preset names are
+    // validated server-side at create or at the turn-start convergence).
+    // The choice is the same state on every tab:
+    //   * sessionless tab: rides the CreateSessionRequest when EnsureSession
+    //     creates the session (the first message),
+    //   * sessioned tab: converges at the NEXT TURN START, where
+    //     SubmitChatTurn submits "/agent x" //"/model p/m" ahead of the turn
+    //     when the desired value differs from the wire metadata's effective
+    //     one -- selection never mutates a live session directly, so swapping
+    //     fifteen times costs zero server traffic until a message is sent.
+    // Either way the status bar reflects the choice immediately (the desired
+    // pair in SessionState::Snapshot). Returns false only when the tab does
+    // not exist.
     bool StageModel(const std::string& tab_id, const std::string& model_ref);
     bool StageAgentPreset(const std::string& tab_id, const std::string& preset_name);
 

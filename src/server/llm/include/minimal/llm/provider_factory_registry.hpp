@@ -54,7 +54,7 @@ public:
     // kind no plugin supplied is a startup sanity-check failure, not a crash.
     std::unique_ptr<LlmProvider> Create(std::string_view kind, const ProviderConfig& config) const;
 
-    // Sorted, for deterministic diagnostics and /providers output.
+    // Sorted, for deterministic diagnostics and the ListModels listing.
     std::vector<std::string> kinds() const;
 
 private:

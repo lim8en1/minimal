@@ -453,7 +453,11 @@ ftxui::Component MakePromptEditor(
                 std::vector<std::string> suggestions;
                 std::vector<std::string> completions;
                 for (const auto& entry : command_catalog()) {
-                    if (entry.requires_session && !session_ok) continue;
+                    // The sessionless gate (see UsableWithoutSession): a
+                    // session-bound command is offered only while a session
+                    // exists; /agent and /model always are (their forms
+                    // never refuse for want of one).
+                    if (!UsableWithoutSession(entry) && !session_ok) continue;
                     if (entry.name.rfind(command_prefix, 0) != 0) continue;
                     std::string display = "/" + entry.name + " -- " + entry.summary;
                     if (entry.submits_prompt) display += "  (submits a prompt as your turn)";

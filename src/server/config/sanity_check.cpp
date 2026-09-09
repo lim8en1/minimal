@@ -223,7 +223,8 @@ std::vector<CheckResult> StartupSanityCheck::check_providers() {
     // registered what -- never by probing, because discovery is fetched lazily
     // at first resolve, never at startup. A discover-entry with a registered
     // backend counts as usable: whether the catalog actually answers is a
-    // runtime condition, reported at first resolve and by /providers refresh.
+    // runtime condition, reported at first resolve and by ListModels'
+    // discovery refresh (the /model picker's ctrl+r).
     for (const auto& [name, entry] : providers_.provider_entries()) {
         if (!entry.discover) continue;
         const bool backend_registered =

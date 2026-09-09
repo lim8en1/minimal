@@ -72,6 +72,7 @@
 #include "minimal/common/config_paths.hpp"
 #include "minimal/common/logger.hpp"
 #include "minimal/common/logging_setup.hpp"
+#include "minimal/common/model_ref.hpp"
 
 namespace {
 
@@ -255,6 +256,15 @@ int RunHeadless(const HeadlessOptions& options) {
     create.run_mode = options.bypass ? minimal::v1::PERMISSION_RUN_MODE_BYPASS
                                      : minimal::v1::PERMISSION_RUN_MODE_ALLOW_ONLY;
     create.signals = options.signals;
+
+    // --agent on a RESUME rides the turn, not the create: the stored row's
+    // preset governs the session (the server refuses agent_preset on a
+    // resume request), but a per-turn override borrows the named preset for
+    // exactly this one turn -- which is all a one-shot headless run is.
+    minimal::client::SessionClient::TurnOverrides turn_overrides;
+    if (!options.resume_session_id.empty() && !options.agent_preset.empty()) {
+        turn_overrides.agent_preset = options.agent_preset;
+    }
 
     // SESSIONLESS COMMAND FAST PATH. A command the server catalog marks
     // requires_session=false runs via RunSessionlessCommand with NO session
@@ -454,7 +464,7 @@ int RunHeadless(const HeadlessOptions& options) {
             }
             return true;
         },
-        publish_turn_handle);
+        publish_turn_handle, turn_overrides);
 
     if (cancel_wired) {
         // Wake the watcher (it exits without cancelling on 'q') and take the
@@ -567,9 +577,11 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     // and config is read once, so the list cannot change mid-connection -- no
     // invalidation machinery). Feeds the prompt editor's /-autocomplete.
     std::vector<minimal::client::CommandCatalogEntry> command_catalog;
+    bool commands_listed = false;
     {
         const auto listed = client->ListCommands();
         if (listed.status.ok()) {
+            commands_listed = true;
             for (const auto& info : listed.response.commands()) {
                 command_catalog.push_back(
                     {info.name(), info.summary(), info.read_only(),
@@ -776,16 +788,16 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     // one. /new is a client tab operation (open + focus a fresh sessionless
     // tab, distinct from a subagent spawn) the server has no part in either.
     //
-    // SESSIONLESS TABS (no session yet): the command list the server catalog
-    // marks requires_session is EXCLUDED from autocomplete and the /help
-    // overlay, and an invocation typed anyway is answered client-side -- a
-    // session is never created for a command that cannot use one. The
-    // genuinely sessionless commands go over RunSessionlessCommand, and the
-    // picker-opening forms are answered outright client-side (the bare
-    // /sessions //agent //model results were only ever view_hints pointing at
-    // these same pickers -- the round trip minted the junk session and bought
-    // nothing).
-    auto submit_command = [app, &command_catalog, focused_or_new_tab, &show_commands_help,
+    // SESSIONLESS TABS (no session yet): the commands the server catalog
+    // marks requires_session are answered client-side -- a session is never
+    // created for a command that cannot use one. The genuinely sessionless
+    // commands go over RunSessionlessCommand, and /sessions' bare form is
+    // answered outright client-side (its server-side result was only ever a
+    // view_hint pointing at the same picker -- the round trip minted the
+    // junk session and bought nothing). /agent //model never reach this
+    // guard: they are the desired-state commands above, usable on any tab.
+    auto submit_command = [app, &command_catalog, commands_listed, focused_or_new_tab,
+                           &show_commands_help,
                            &open_picker_fn, &open_agent_picker_fn,
                            &open_model_picker_fn](const std::string& line) {
         // Bare /help is answered CLIENT-SIDE from the ListCommands catalog:
@@ -842,55 +854,76 @@ int RunTui(const minimal::client::ParsedArgs& args) {
             app->SetFocusedTab(app->OpenTab(DefaultCreateOptions()));
             return;
         }
+        // THE DESIRED-STATE COMMANDS. /agent and /model work identically on
+        // every tab -- sessionless or not -- which is what makes choosing
+        // what a session starts on discoverable at all:
+        //   * bare: opens the picker (client-owned UI, zero round trip; the
+        //     server's bare forms still exist for headless clients).
+        //   * named: sets the tab's DESIRED state (AppState::Stage*). On a
+        //     sessionless tab it rides CreateSessionRequest; on a sessioned
+        //     one it converges at the next turn start. It is never a direct
+        //     switch, so the status bar shows the fresh value immediately
+        //     (pending until the metadata event confirms).
+        const auto parsed = minimal::client::SplitCommand(line);
+        if (parsed.name == "agent" || parsed.name == "model") {
+            if (parsed.positional.empty()) {
+                if (parsed.name == "agent") {
+                    open_agent_picker_fn();
+                } else {
+                    open_model_picker_fn();
+                }
+                return;
+            }
+            const std::string& value = parsed.positional.front();
+            if (const std::string tab = focused_or_new_tab(); !tab.empty()) {
+                if (parsed.name == "model") {
+                    // Shape-check the ref here (SplitModelRef, the same
+                    // parser the headless --model flag uses) so a typo
+                    // stages nothing; whether it RESOLVES is still the
+                    // server's call, at create or at turn start.
+                    if (!minimal::common::SplitModelRef(value)) {
+                        app->TabNotice(tab, "'" + value +
+                                                "' must be <provider>/<model>, e.g. "
+                                                "local/qwen4 (or run /model with no "
+                                                "arguments)");
+                        return;
+                    }
+                    app->StageModel(tab, value);
+                } else {
+                    app->StageAgentPreset(tab, value);
+                }
+                app->TabNotice(tab, std::string(parsed.name == "agent" ? "agent '" : "model '") +
+                                        value + "' will be used on your next message");
+            }
+            return;
+        }
         if (!has_session) {
-            // Picker-opening bare forms: client-owned UI, zero round trip,
-            // zero session. (/sessions' server-side result is exactly
-            // view_hint="sessions"; /agent //model's bare forms map the same
-            // way -- see TabMaintenance::HandleNotice.)
             if (line == "/sessions") { open_picker_fn(); return; }
-            if (line == "/agent") { open_agent_picker_fn(); return; }
-            if (line == "/model") { open_model_picker_fn(); return; }
-            // Named /agent //model stage onto the tab's pending
-            // create-options: the choice rides CreateSessionRequest when the
-            // session is eventually created (the server validates it there),
-            // and the status bar reflects it immediately.
-            const auto parsed = minimal::client::SplitCommand(line);
-            if (parsed.name == "agent" && !parsed.positional.empty()) {
-                if (const std::string tab = focused_or_new_tab(); !tab.empty()) {
-                    app->StageAgentPreset(tab, parsed.positional.front());
-                    app->TabNotice(tab, "agent '" + parsed.positional.front() +
-                                            "' will be used when the session starts");
-                }
-                return;
-            }
-            if (parsed.name == "model" && !parsed.positional.empty()) {
-                if (const std::string tab = focused_or_new_tab(); !tab.empty()) {
-                    app->StageModel(tab, parsed.positional.front());
-                    app->TabNotice(tab, "model '" + parsed.positional.front() +
-                                            "' will be used when the session starts");
-                }
-                return;
-            }
             // Everything else the catalog marks requires_session is refused
-            // here, visibly, without creating a session. An unknown command
-            // rides the same notice (the server's sessionless path would
-            // answer identically; this just skips the round trip).
+            // here, visibly, without creating a session. A name ABSENT from
+            // the catalog is reported as what it is -- unknown -- rather
+            // than riding the session notice (a removed command reading as
+            // "start a session first" was exactly the /providers
+            // confusion). Only when the catalog actually arrived, though:
+            // after a failed ListCommands it is empty and knows nothing.
+            bool known = false;
             bool sessionless = false;
             for (const auto& entry : command_catalog) {
                 if (entry.name == parsed.name) {
+                    known = true;
                     sessionless = !entry.requires_session;
                     break;
                 }
             }
-            if (!sessionless) {
-                if (const std::string tab = app->FocusedTabId(); !tab.empty()) {
+            if (const std::string tab = focused_or_new_tab(); !tab.empty()) {
+                if (!known && commands_listed) {
+                    app->TabNotice(tab, "unknown command: /" + parsed.name + " (try /help)");
+                } else if (!sessionless) {
                     app->TabNotice(tab, "/" + parsed.name +
                                             " needs a session; send a message to start one first");
+                } else {
+                    app->RunSessionlessCommand(tab, line);
                 }
-                return;
-            }
-            if (const std::string tab = focused_or_new_tab(); !tab.empty()) {
-                app->RunSessionlessCommand(tab, line);
             }
             return;
         }

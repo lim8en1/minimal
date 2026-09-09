@@ -79,8 +79,8 @@ public:
     // that destroys work the user cannot get back.
     virtual bool RequiresConfirmation() const { return false; }
 
-    // True only if this touches NO session state -- /help and /providers, not
-    // /agent or /clear. A read-only command runs on a short-lived task so it can
+    // True only if this touches NO session state -- /help, not /agent or
+    // /clear. A read-only command runs on a short-lived task so it can
     // answer while a turn is in flight; everything else waits for a turn
     // boundary, which is what keeps a mutation from landing between a tool_use
     // and its tool_result.

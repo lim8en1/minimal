@@ -10,8 +10,8 @@ has never heard of.
 - **Provider factory**: `backend: "openai"` — the OpenAI `/v1/chat/completions`
   shape.
 - **Model catalog**: backends of this kind can list their own models, which
-  powers `"discover": true` in providers.json (lazy; `/providers` refresh
-  re-fetches on demand; never written back to the file).
+  powers `"discover": true` in providers.json (lazy; the `/model` picker's
+  ctrl+r re-fetches on demand; never written back to the file).
 
 Targets any OpenAI-compatible endpoint via `url`, including local llama.cpp /
 vLLM servers — which is why llama.cpp needs no dedicated provider.

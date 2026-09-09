@@ -245,12 +245,16 @@ TEST_CASE("resume without -p is an error", "[client_args][resume]") {
     CHECK(parsed.error.find("-p") != std::string::npos);
 }
 
-TEST_CASE("the resume and agent flags cannot be combined", "[client_args][resume]") {
-    // A resumed session keeps the preset it was stored with; accepting both
-    // would be a silent identity change of someone else's session.
+TEST_CASE("resume and agent flags combine: the agent borrows the resumed turn only", "[client_args][resume]") {
+    // Used to be an error ("a resumed session keeps the preset it was stored
+    // with"); the per-turn override path made --agent on a resume meaningful
+    // without an identity change: the stored row's preset still governs the
+    // session, and the named preset applies to the one turn a headless resume
+    // runs (RunTurn's TurnOverrides).
     const auto parsed = Parse({"-p", "hi", "--resume", "01ARZ3", "--agent", "plan"});
-    REQUIRE(parsed.action == ParsedArgs::Action::Error);
-    CHECK(parsed.error.find("--agent") != std::string::npos);
+    REQUIRE(parsed.action == ParsedArgs::Action::Headless);
+    CHECK(parsed.headless.resume_session_id == "01ARZ3");
+    CHECK(parsed.headless.agent_preset == "plan");
 }
 
 TEST_CASE("the usage text documents --resume", "[client_args][resume]") {

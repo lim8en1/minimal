@@ -938,3 +938,76 @@ TEST_CASE("OnPendingResolved does not clobber an active tool", "[session_state]"
     state.OnPendingResolved();   // nothing pending: the guard keeps Working
     CHECK(state.TakeSnapshot().state == SessionStateKind::Working);
 }
+
+// ---------------------------------------------------------------------------
+// Desired agent/model state (the pre/post-session unification): the client
+// owns what the user CHOSE; the wire metadata reports what the session RUNS.
+// ConvergenceCommands is the turn-start diff SubmitChatTurn submits.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("convergence commands: /agent before /model, guarded on unknown effective state",
+          "[session_state][desired]") {
+    SessionState state("s-1");
+    CHECK(state.ConvergenceCommands().empty());   // nothing desired, nothing effective
+
+    state.SetDesiredAgentPreset("alt");
+    state.SetDesiredModel("main/other-model");
+
+    // No effective metadata yet: the create may still be in flight carrying
+    // the desired state, so a blind switch would be pure noise (and on a
+    // sessionless tab there is nothing to converge into at all).
+    CHECK(state.ConvergenceCommands().empty());
+    auto snap = state.TakeSnapshot();
+    CHECK(snap.desired_agent_preset == "alt");
+    CHECK(snap.desired_model == "main/other-model");
+    CHECK(snap.agent_preset.empty());   // effective untouched by staging
+
+    v1::SessionMetadataEvent meta;
+    meta.set_agent_preset("main");
+    meta.set_model("main/test-model");
+    state.OnSessionMetadata(meta);
+
+    // THE ORDER IS THE PRECEDENCE RULE: the server has a user-chosen model
+    // survive an /agent switch, so the agent command must land FIRST.
+    const auto cmds = state.ConvergenceCommands();
+    REQUIRE(cmds.size() == 2);
+    CHECK(cmds[0] == "/agent alt");
+    CHECK(cmds[1] == "/model main/other-model");
+}
+
+TEST_CASE("convergence commands: a desired value equal to effective is a no-op",
+          "[session_state][desired]") {
+    SessionState state("s-1");
+    state.SetDesiredModel("main/test-model");
+
+    v1::SessionMetadataEvent meta;
+    meta.set_agent_preset("main");
+    meta.set_model("main/test-model");
+    state.OnSessionMetadata(meta);
+
+    CHECK(state.ConvergenceCommands().empty());   // already converged
+}
+
+TEST_CASE("convergence commands: the confirming metadata event silences the diff",
+          "[session_state][desired]") {
+    SessionState state("s-1");
+    state.SetDesiredAgentPreset("alt");
+
+    v1::SessionMetadataEvent before;
+    before.set_agent_preset("main");
+    before.set_model("main/test-model");
+    state.OnSessionMetadata(before);
+    REQUIRE(state.ConvergenceCommands().size() == 1);
+
+    // The switch ran server-side; the metadata event now reports the desired
+    // value as effective -- converged, nothing more to send.
+    v1::SessionMetadataEvent after;
+    after.set_agent_preset("alt");
+    after.set_model("main/test-model");
+    state.OnSessionMetadata(after);
+    CHECK(state.ConvergenceCommands().empty());
+
+    const auto snap = state.TakeSnapshot();
+    CHECK(snap.agent_preset == "alt");
+    CHECK(snap.desired_agent_preset == "alt");   // sticky: the user's choice stands
+}

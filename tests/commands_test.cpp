@@ -472,6 +472,35 @@ TEST_CASE("sessionless dispatch refuses session-bound commands with the shared w
     CHECK(commands::SessionRequiredMessage("x") == "/x needs a session; send a message to start one first");
 }
 
+TEST_CASE("sessionless dispatch executes /connect -- a Sessionless command must be "
+          "ReadOnly too, or the advertised command cannot run anywhere",
+          "[commands][sessionless][connect]") {
+    // THE /connect REGRESSION: ConnectCommand opted into Sessionless<> (the
+    // client catalog then offers it on sessionless tabs) but kept the default
+    // ReadOnly()=false, so DispatchSessionless refused it with the
+    // session-required wording -- the command advertised itself pre-session
+    // and then could only run on a sessioned tab, backwards for the one
+    // command whose whole purpose is bootstrapping a credential BEFORE any
+    // session exists.
+    CommandFixture fixture;
+    testing::TempDir data;
+    ScopedEnv data_env("XDG_DATA_HOME", data.path().string().c_str());
+    const auto auth_path = data.path() / "minimal" / "auth.json";
+    std::filesystem::create_directories(auth_path.parent_path());
+
+    minimal::commands::CommandArgs args;
+    args.positional = {"local", "sk-test-123"};
+    minimal::commands::CommandContext context(nullptr, fixture.registry_presets_for_test(),
+                                              fixture.registry_confirmations_for_test(),
+                                              common::DefaultLogger());
+
+    const auto connect = commands::DispatchSessionless(fixture.registry, "connect", args, context);
+    REQUIRE(connect.status == Status::kOk);
+    REQUIRE(std::filesystem::exists(auth_path));
+    const nlohmann::json stored = nlohmann::json::parse(std::ifstream(auth_path));
+    CHECK(stored.at("local").at("key") == "sk-test-123");
+}
+
 // --- /connect (opencode-compat credentials) ---------------------------------------
 
 TEST_CASE("/connect stores a credential in the data dir's auth.json and refuses junk",

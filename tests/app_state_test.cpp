@@ -1022,15 +1022,18 @@ TEST_CASE("staged /agent rides the eventual CreateSession", "[app_state][session
     const auto tab = app.OpenTab(opts);
     REQUIRE_FALSE(tab.empty());
 
-    // Visible notice + immediate display seeding (the status bar reflects the
-    // choice before any session exists). TabNotice is what the TUI's submit
-    // path pairs with the staging call, so mirror it here.
+    // Visible notice + immediate display seeding. The choice lands in the
+    // DESIRED layer (SessionState::desired_agent_preset -- the status bar
+    // renders it immediately); the EFFECTIVE metadata field stays empty
+    // until the wire metadata event proves what the session actually runs.
+    // TabNotice is what the TUI's submit path pairs with the staging call,
+    // so mirror it here.
     REQUIRE(app.StageAgentPreset(tab, "alt"));
-    app.TabNotice(tab, "agent 'alt' will be used when the session starts");
+    app.TabNotice(tab, "agent 'alt' will be used on your next message");
     REQUIRE(WaitForDetails(app, tab, [](const SessionState::Snapshot& s) {
         return s.latest_notice.has_value();
     }));
-    CHECK(app.GetDetails(tab).agent_preset == "alt");
+    CHECK(app.GetDetails(tab).desired_agent_preset == "alt");
 
     app.SubmitChatTurn(tab, "hi");
     REQUIRE(WaitForSession(app, tab));
@@ -1065,6 +1068,50 @@ TEST_CASE("staged /model rides the eventual CreateSession", "[app_state][session
     REQUIRE(WaitForAttached(app, tab));
     // THE POINT: the created session runs the STAGED model.
     CHECK(app.GetDetails(tab).model == "main/other-model");
+}
+
+// THE DESIRED-STATE CONVERGENCE: on a sessioned tab, /agent (typed or
+// picker-selected) no longer sends a command at all -- it sets the tab's
+// desired state, shown immediately in the snapshot, and the ACTUAL switch
+// happens at the next turn start where SubmitChatTurn submits "/agent <name>"
+// ahead of the turn. Selection never touches a live session directly: the
+// user can swap presets fifteen times between turns and the session sees
+// only the final value.
+TEST_CASE("a sessioned /agent selection converges at the next turn start, not before",
+          "[app_state][desired]") {
+    ClientFixture fixture;
+    // A SECOND preset distinct from the default ("main"), so the switch is
+    // provable from the metadata event.
+    fixture.Write("agents/alt.md",
+                  "---\nname: alt\nmodel: main/test-model\nallowed_tools: [\"*\"]\n---\nAlt.\n");
+    fixture.ScriptTwo("first reply", "second reply");
+    fixture.Start();
+
+    AppState app(fixture.client);
+    const auto tab = app.OpenTab(fixture.Options("converge"));
+    REQUIRE_FALSE(tab.empty());
+
+    // Turn one creates the session on the DEFAULT preset.
+    app.SubmitChatTurn(tab, "first");
+    REQUIRE(WaitForSession(app, tab));
+    REQUIRE(WaitForAttached(app, tab));
+    REQUIRE(app.GetDetails(tab).agent_preset == "main");
+
+    // The selection is DESIRED-ONLY: no command, no metadata change -- the
+    // effective preset stays "main" while the snapshot carries the choice.
+    REQUIRE(app.StageAgentPreset(tab, "alt"));
+    CHECK(app.GetDetails(tab).agent_preset == "main");
+    CHECK(app.GetDetails(tab).desired_agent_preset == "alt");
+
+    // Turn two converges: the /agent command runs ahead of the turn, and the
+    // metadata event confirms the session now RUNS the desired preset.
+    app.SubmitChatTurn(tab, "second");
+    REQUIRE(WaitForDetails(app, tab, [](const SessionState::Snapshot& s) {
+        return s.agent_preset == "alt";
+    }));
+    // Sticky: the user's choice stands after convergence (equal to effective
+    // now, so ConvergenceCommands has nothing more to send).
+    CHECK(app.GetDetails(tab).desired_agent_preset == "alt");
 }
 
 TEST_CASE("sends stacked before the create resolves land on ONE session",

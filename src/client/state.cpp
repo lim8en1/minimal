@@ -67,6 +67,8 @@ SessionState::Snapshot SessionState::TakeLightSnapshot(bool include_tool_output)
     s.cancel_requested = cancel_requested_;
     s.model = model_;
     s.agent_preset = agent_preset_;
+    s.desired_model = desired_model_;
+    s.desired_agent_preset = desired_agent_;
     s.permission_mode = permission_mode_;
     s.context_window_tokens = context_window_tokens_;
     // Deliberately NOT copied (heavy, and only the focused tab renders them):
@@ -121,6 +123,8 @@ SessionState::Snapshot SessionState::TakeSnapshot() {
     s.notice_seq = notice_seq_;
     s.model = model_;
     s.agent_preset = agent_preset_;
+    s.desired_model = desired_model_;
+    s.desired_agent_preset = desired_agent_;
     s.permission_mode = permission_mode_;
     s.context_window_tokens = context_window_tokens_;
     s.refresh_seq = refresh_seq_;
@@ -155,14 +159,45 @@ void SessionState::SetSessionId(std::string session_id) {
     session_id_ = std::move(session_id);
 }
 
-void SessionState::StageDisplayModel(std::string model_ref) {
+void SessionState::SetDesiredModel(std::string model_ref) {
     std::lock_guard lk(mtx_);
-    model_ = std::move(model_ref);
+    desired_model_ = std::move(model_ref);
 }
 
-void SessionState::StageDisplayAgentPreset(std::string preset_name) {
+void SessionState::SetDesiredAgentPreset(std::string preset_name) {
     std::lock_guard lk(mtx_);
-    agent_preset_ = std::move(preset_name);
+    desired_agent_ = std::move(preset_name);
+}
+
+std::string SessionState::DesiredModel() const {
+    std::lock_guard lk(mtx_);
+    return desired_model_;
+}
+
+std::string SessionState::DesiredAgentPreset() const {
+    std::lock_guard lk(mtx_);
+    return desired_agent_;
+}
+
+std::vector<std::string> SessionState::ConvergenceCommands() const {
+    std::lock_guard lk(mtx_);
+    std::vector<std::string> out;
+    // No effective metadata yet: either the session was just created with the
+    // desired state riding the request (the metadata event is in flight), or
+    // this is a sessionless tab (nothing to converge into). Sending blind
+    // switches against unknown effective state would be pure noise.
+    if (agent_preset_.empty() && model_.empty()) return out;
+    // /agent FIRST: the server's precedence rule has a user-chosen model
+    // survive a preset switch, so ordering agent-then-model lands the desired
+    // pair exactly. (The reverse order would let /agent re-resolve the
+    // preset's own model and drop the /model choice.)
+    if (!desired_agent_.empty() && desired_agent_ != agent_preset_) {
+        out.push_back("/agent " + desired_agent_);
+    }
+    if (!desired_model_.empty() && desired_model_ != model_) {
+        out.push_back("/model " + desired_model_);
+    }
+    return out;
 }
 
 void SessionState::AppendStreamingText(std::string_view text) {
@@ -1616,6 +1651,21 @@ void AppState::SubmitChatTurn(const std::string& tab_id, const std::string& text
         }
     }
     if (!sessioned.empty()) {
+        // DESIRED-STATE CONVERGENCE. The user's last /agent //model choice
+        // (or picker selection) is applied HERE, at the turn boundary, by
+        // submitting at most two commands ahead of the turn on the same
+        // stream -- FIFO ordering lands them at the server's turn boundary
+        // before the turn runs, never between a tool_use and its
+        // tool_result. Selection itself never touches a live session, so
+        // swapping models fifteen times between turns costs zero server
+        // traffic; only the final value is ever sent. A failed switch (an
+        // unknown ref) surfaces as its command-error notice while the turn
+        // proceeds on the model already in force.
+        if (const auto state = GetState(sessioned)) {
+            for (const auto& line : state->ConvergenceCommands()) {
+                SendCommand(sessioned, line);
+            }
+        }
         SendChatTurn(sessioned, text);
         return;
     }
@@ -1685,6 +1735,20 @@ std::string AppState::EnsureSession(const std::string& tab_id) {
         if (tab->ensuring) return "";   // this call is queued behind the in-flight one
         tab->ensuring = true;
         opts = tab->pending_create;
+        // DESIRED-STATE OVERLAY. The user's /agent //model choices (typed or
+        // picker-selected on this tab, whenever made before the create
+        // resolved) ride the CreateSessionRequest: the session is BORN on
+        // them instead of being created on defaults and switched afterwards.
+        // A model named on a RESUME is legal server-side too (an override is
+        // a property of this invocation, not of the stored row); a preset is
+        // not -- the stored row governs it, so a desired preset on a resumed
+        // session converges at the first turn instead (SubmitChatTurn).
+        const auto desired_model = tab->info.state->DesiredModel();
+        const auto desired_agent = tab->info.state->DesiredAgentPreset();
+        if (!desired_model.empty()) opts.model = desired_model;
+        if (!desired_agent.empty() && opts.resume_session_id.empty()) {
+            opts.agent_preset = desired_agent;
+        }
     }
 
     auto stream = client_->MakeStream(
@@ -1743,9 +1807,11 @@ std::string AppState::EnsureSession(const std::string& tab_id) {
 bool AppState::StageModel(const std::string& tab_id, const std::string& model_ref) {
     std::lock_guard lk(mtx_);
     TabEntry* tab = FindTab(tab_id);
-    if (tab == nullptr || tab->stream != nullptr) return false;
-    tab->pending_create.model = model_ref;
-    tab->info.state->StageDisplayModel(model_ref);
+    if (tab == nullptr) return false;
+    // The same desired state on every tab (see the header): EnsureSession
+    // overlays it onto the create request, and SubmitChatTurn converges a
+    // live session to it at the next turn boundary.
+    tab->info.state->SetDesiredModel(model_ref);
     BumpUiVersion();
     return true;
 }
@@ -1753,9 +1819,8 @@ bool AppState::StageModel(const std::string& tab_id, const std::string& model_re
 bool AppState::StageAgentPreset(const std::string& tab_id, const std::string& preset_name) {
     std::lock_guard lk(mtx_);
     TabEntry* tab = FindTab(tab_id);
-    if (tab == nullptr || tab->stream != nullptr) return false;
-    tab->pending_create.agent_preset = preset_name;
-    tab->info.state->StageDisplayAgentPreset(preset_name);
+    if (tab == nullptr) return false;
+    tab->info.state->SetDesiredAgentPreset(preset_name);
     BumpUiVersion();
     return true;
 }

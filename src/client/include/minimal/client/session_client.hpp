@@ -398,10 +398,21 @@ public:
     // a data race, while a callback lets the caller store the handle behind a
     // release-store flag the cancel thread acquires.
     class TurnHandle;
+    // Per-turn agent/model overrides ("the turn borrows, the session keeps",
+    // server-side): resolved at turn pop, a failed resolve fails the TURN
+    // with a named error and leaves the session's own state untouched. What
+    // the headless client uses to run one turn on a preset/model that is not
+    // the session's -- notably --resume, where the stored row's preset
+    // governs but --agent must still reach the turn.
+    struct TurnOverrides {
+        std::string model;          // "<provider>/<model>"
+        std::string agent_preset;   // preset name
+    };
     grpc::Status RunTurn(const std::string& session_id, const std::string& text,
                          const std::function<bool(const ServerEvent&)>& on_event,
                          const std::function<void(const std::shared_ptr<TurnHandle>&)>&
-                             on_handle = nullptr);
+                             on_handle = nullptr,
+                         const TurnOverrides& overrides = {});
 
     struct CommandOptions {
         std::string name;  // without the leading '/'

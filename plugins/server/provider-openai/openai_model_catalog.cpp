@@ -10,7 +10,8 @@ namespace {
 using nlohmann::json;
 
 // A listing is a bounded, latency-sensitive call made from paths that serve
-// users (--model resolution, /providers) -- not from the chat path. A hung
+// users (--model resolution, the /model picker's ListModels) -- not from the
+// chat path. A hung
 // backend must therefore not wedge a caller for the chat-length request
 // timeout; ten seconds bounds the worst case while local servers answer in
 // milliseconds.

@@ -201,22 +201,17 @@ void PickerController::RebuildAgentPickerComponent() {
         agent_picker_presets_, deps_.theme,
         {.on_select =
               [this](const std::string& name) {
-                  // Sessioned tab: re-sends "/agent <name>" over the exact
-                  // same path a typed command would take
-                  // (AppState::SubmitCommand) -- AgentCommand::Execute's
-                  // by-name branch, precedence rules and all, runs
-                  // unchanged. No new mutation code. Sessionless tab (no
-                  // session yet): the choice STAGES onto the tab's pending
-                  // create-options -- it rides CreateSessionRequest when
-                  // the first message creates the session -- instead of
-                  // minting a session just to switch presets on it.
+                  // The DESIRED-STATE path, identical on every tab: the
+                  // selection sets the tab's desired preset -- it rides
+                  // CreateSessionRequest on a sessionless tab (the first
+                  // message creates the session on it) and converges at the
+                  // next turn start on a sessioned one. No command is sent,
+                  // and no session is minted just to switch presets on it.
                   const std::string tab = deps_.app.FocusedTabId();
-                  if (!tab.empty() && deps_.app.FocusedSessionId().empty()) {
+                  if (!tab.empty()) {
                       deps_.app.StageAgentPreset(tab, name);
                       deps_.app.TabNotice(tab, "agent '" + name +
-                                                   "' will be used when the session starts");
-                  } else {
-                      deps_.app.SubmitCommand(tab, "/agent " + name);
+                                                   "' will be used on your next message");
                   }
                   deps_.show_agent_picker = false;
               },
@@ -289,21 +284,16 @@ void PickerController::RebuildModelPickerComponent() {
         model_picker_models_, deps_.theme,
         {.on_select =
               [this](const std::string& ref) {
-                  // Sessioned tab: re-sends "/model <ref>" over the exact
-                  // same path a typed command would take
-                  // (AppState::SubmitCommand) -- ModelCommand::Execute's
-                  // by-ref branch, precedence rules and all, runs
-                  // unchanged. No new mutation code. Sessionless tab: the
-                  // choice stages onto the tab's pending create-options
-                  // (validated by the server at CreateSession), exactly
-                  // like the agent picker above.
+                  // The DESIRED-STATE path, identical on every tab (see the
+                  // agent picker above): the selection sets the tab's
+                  // desired model -- it rides CreateSessionRequest on a
+                  // sessionless tab and converges at the next turn start on
+                  // a sessioned one. No command, no direct switch.
                   const std::string tab = deps_.app.FocusedTabId();
-                  if (!tab.empty() && deps_.app.FocusedSessionId().empty()) {
+                  if (!tab.empty()) {
                       deps_.app.StageModel(tab, ref);
                       deps_.app.TabNotice(tab, "model '" + ref +
-                                                   "' will be used when the session starts");
-                  } else {
-                      deps_.app.SubmitCommand(tab, "/model " + ref);
+                                                   "' will be used on your next message");
                   }
                   deps_.show_model_picker = false;
               },

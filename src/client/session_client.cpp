@@ -296,7 +296,8 @@ SessionClient::SuggestPathsResult SessionClient::SuggestPaths(const std::string&
 grpc::Status SessionClient::RunTurn(
     const std::string& session_id, const std::string& text,
     const std::function<bool(const ServerEvent&)>& on_event,
-    const std::function<void(const std::shared_ptr<TurnHandle>&)>& on_handle) {
+    const std::function<void(const std::shared_ptr<TurnHandle>&)>& on_handle,
+    const TurnOverrides& overrides) {
     grpc::ClientContext context;
     auto stream = stub_->OpenSession(&context);
 
@@ -304,7 +305,13 @@ grpc::Status SessionClient::RunTurn(
     // stream to it -- OpenSession carries no request message of its own.
     v1::ClientEvent turn;
     turn.set_session_id(session_id);
-    turn.mutable_chat_turn()->set_text(text);
+    auto* chat = turn.mutable_chat_turn();
+    chat->set_text(text);
+    // Per-turn overrides ride as raw refs: splitting and resolution happen
+    // server-side at turn pop (a malformed/unknown ref fails the TURN with a
+    // named error, never a silent fall-back).
+    if (!overrides.model.empty()) chat->set_model(overrides.model);
+    if (!overrides.agent_preset.empty()) chat->set_agent_preset(overrides.agent_preset);
     if (!stream->Write(turn)) {
         stream->WritesDone();
         return stream->Finish();

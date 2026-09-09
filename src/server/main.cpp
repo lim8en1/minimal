@@ -504,7 +504,8 @@ int main(int argc, char** argv) {
     // load and BEFORE any Resolve() -- presets resolve lazily, so this is the
     // last point at which the hook can be set before first use. The hook never
     // throws: a failed List is cached as a failed discovery and reported
-    // through the miss reporting and /providers refresh, not here.
+    // through the miss reporting and ListModels(refresh_discovery) -- the
+    // client model picker's ctrl+r -- not here.
     presets->SetDiscoveryHook(
         [&model_catalogs, &logger = minimal::common::DefaultLogger()](
             const std::string& kind,

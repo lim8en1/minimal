@@ -100,7 +100,8 @@ std::string UsageText() {
            "      --server TARGET       socket path or gRPC target\n"
            "                              (default: unix://<data dir>/server.sock;\n"
            "                               a bare path pairs with minimal-server --listen)\n"
-           "      --agent PRESET        agent preset (default: settings.json)\n"
+           "      --agent PRESET        agent preset (default: settings.json); with --resume it\n"
+          "                              applies to the resumed turn only\n"
            "      --model P/M           provider/model, overriding the preset's\n"
            "      --output-format FMT   text (default) or jsonl\n"
            "      --signals LIST        comma-separated signal subscriptions for this\n"
@@ -306,12 +307,9 @@ ParsedArgs ParseArgs(int argc, const char* const* argv) {
                        "subscriptions today";
         return parsed;
     }
-    if (!parsed.headless.resume_session_id.empty() && !parsed.headless.agent_preset.empty()) {
-        parsed.action = ParsedArgs::Action::Error;
-        parsed.error = "--resume and --agent cannot be combined: a resumed session keeps the "
-                       "preset it was stored with";
-        return parsed;
-    }
+    // --resume + --agent is legal: the stored row's preset still governs the
+    // session, but --agent borrows the named preset for the one turn a
+    // headless resume runs (SessionClient::TurnOverrides).
     parsed.action = headless ? ParsedArgs::Action::Headless : ParsedArgs::Action::Tui;
     return parsed;
 }

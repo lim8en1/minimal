@@ -443,7 +443,8 @@ void ProvidersConfig::PublishLocked(const ProviderEntry& entry, const DiscoveryO
         cache.models.insert_or_assign(model.id, std::move(model));
     }
     // Materialize every discovered model now: this is what puts them in
-    // ModelRefs() and /providers, and it means a later Resolve() of any of
+    // ModelRefs() and the /model picker's ListModels, and it means a later
+    // Resolve() of any of
     // them is a lookup, never a rebuild. Values are written here -- once,
     // under the mutex, before any snapshot escapes -- and never mutated after.
     for (const auto& [id, discovered] : cache.models) {

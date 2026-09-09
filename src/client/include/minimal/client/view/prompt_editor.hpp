@@ -95,6 +95,21 @@ struct CommandCatalogEntry {
     bool requires_session = true;
 };
 
+// True when the command is usable on a tab with NO session: either the
+// server marks it requires_session=false, or it is one of the two
+// desired-state commands (/agent, /model) whose bare form opens a
+// client-owned picker and whose named form sets the tab's desired state --
+// neither ever refuses for want of a session (app.cpp's submit_command
+// intercepts both before any dispatch). ONE rule gates the /-autocomplete,
+// the /help overlay, and the sessionless refusal, so a command offered on a
+// sessionless tab is never one that would only refuse there. The names are
+// necessarily hardcoded: the interception that makes them sessionless-safe
+// is client-side by design (the server's taxonomy is per-command, and these
+// two are per-invocation).
+inline bool UsableWithoutSession(const CommandCatalogEntry& entry) {
+    return !entry.requires_session || entry.name == "agent" || entry.name == "model";
+}
+
 // The @-mention query seam (T2: async). `nullopt` means "still waiting --
 // call again next frame"; a present (possibly empty) vector is the resolved
 // answer. The shipped implementation (RunTui's `suggest` lambda) submits

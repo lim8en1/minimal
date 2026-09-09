@@ -15,13 +15,16 @@ ftxui::Component MakeCommandsHelpView(const std::vector<CommandCatalogEntry>& ca
     // `bindings`.
     auto build_rows = [catalog, session_available](const std::string& filter) {
         std::vector<MenuRow> rows;
-        // Same exclusion the /-autocomplete applies: requires_session
-        // entries are hidden while the focused tab has no session, so the
-        // overlay never advertises a command the sessionless tab would
-        // only refuse.
+        // The sessionless gate shared with the /-autocomplete
+        // (UsableWithoutSession): a session-bound command is hidden while
+        // the focused tab has no session, so the overlay never advertises
+        // one the sessionless tab would only refuse. /agent and /model stay
+        // visible: their bare forms open pickers and their named forms set
+        // the tab's desired state -- choosing what a session starts on is
+        // exactly what a sessionless tab is FOR.
         const bool session_ok = !session_available || session_available();
         for (const auto& entry : catalog) {
-            if (entry.requires_session && !session_ok) continue;
+            if (!UsableWithoutSession(entry) && !session_ok) continue;
             std::string label = "/" + entry.name + "  -  " + entry.summary;
             if (entry.submits_prompt) label += "  (submits a prompt as your turn)";
             if (entry.read_only) label += "  (read-only)";

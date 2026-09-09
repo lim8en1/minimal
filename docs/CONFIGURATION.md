@@ -229,7 +229,7 @@ is a commented starting point.
 | `url` | **yes** | string | — | `openai` backend: includes `/v1`. `anthropic` backend: **without** `/v1` — the provider appends `/v1/messages` itself |
 | `api_key` | no | string | — | inline key. Mutually exclusive with `api_key_env`; prefer `api_key_env` |
 | `api_key_env` | no | string | — | name of an env var read at startup; naming an unset var → error. Mutually exclusive with `api_key` |
-| `discover` | no | bool | `false` | `true`: models are listed lazily from the backend (`GET <url>/models`) instead of a `models` object; never written back; failures fall back to any static entries; `/providers refresh` re-fetches |
+| `discover` | no | bool | `false` | `true`: models are listed lazily from the backend (`GET <url>/models`) instead of a `models` object; never written back; failures fall back to any static entries; the `/model` picker's refresh (ctrl+r) re-fetches |
 | `models` | yes (unless `discover`) | object | — | keyed by model name |
 | `parameters` | no | object | `{}` | arbitrary sampling/generation knobs passed through to the backend (e.g. `temperature`, `top_p`, `cache_ttl` for anthropic: `"5m"` or `"1h"`). Model-level `parameters` **replaces** (does not merge) the provider's |
 | `max_tokens` | no | int | — | required for the `anthropic` backend (here or per-model) or every request fails |

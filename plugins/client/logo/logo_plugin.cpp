@@ -260,7 +260,9 @@ private:
     // here"), not just its tail. paragraph() wraps to whatever width the
     // block actually gets instead of being cropped.
     ftxui::Element Hint(const Theme& theme) const {
-        return ftxui::paragraph("ctrl+o opens the session picker; typing starts a session") |
+        return ftxui::paragraph(
+                   "typing starts a session; ctrl+o opens the session picker;\n"
+                   "/model and /agent choose what a session starts with") |
                ftxui::dim | ftxui::color(theme.ColorFor("banner_hint")) | ftxui::hcenter;
     }
 

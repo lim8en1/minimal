@@ -273,6 +273,17 @@ public:
 // opencode-compat path, the same file) ResolveApiKey's credentials-file link
 // reads. Core never writes config; a command plugin writing a CREDENTIALS file
 // outside the seeded config dir is the sanctioned /connect shape.
+//
+// Sessionless AND ReadOnly: storing a credential is exactly the thing a user
+// does BEFORE any session exists (its whole purpose is bootstrapping a
+// provider connection), and ReadOnly here means what the dispatcher means by
+// it -- never touches the conversation path -- not "writes no files": the
+// auth.json merge runs inline on the RPC thread under its own cross-process
+// lock, the same shape any read-only catalog fetch on the RPC thread uses.
+// Without the ReadOnly answer, DispatchSessionless refused the command with
+// the session-required wording even though RequiresSession() was false --
+// the command advertised itself in autocomplete and then could not run
+// anywhere but a sessioned tab, backwards for a pre-session command.
 class ConnectCommand : public Sessionless<HarnessCommand> {
 public:
     std::string_view Name() const override { return "connect"; }
@@ -280,6 +291,7 @@ public:
         return "Store a provider API key (used when providers.json names none)";
     }
     std::string_view Usage() const override { return "/connect <provider> <api-key>"; }
+    bool ReadOnly() const override { return true; }
 
     CommandResult Execute(CommandContext& context, const CommandArgs& args) override {
         (void)context;
