@@ -71,7 +71,21 @@ struct Harness {
     std::mutex injected_mu;
     std::vector<BackgroundTaskEvent> events;
     std::mutex events_mu;
+    // The live output channel is written by watcher threads and read by the
+    // test thread -- an unsynchronized string here was a data race
+    // (TSan-visible) whenever the test thread read while a watcher appended.
     std::string streamed;
+    std::mutex streamed_mu;
+
+    void AppendStreamed(std::string_view chunk) {
+        std::lock_guard<std::mutex> lock(streamed_mu);
+        streamed += chunk;
+    }
+
+    std::string Streamed() {
+        std::lock_guard<std::mutex> lock(streamed_mu);
+        return streamed;
+    }
     // Simulates a plugin handle callback that throws on the terminal event --
     // the watcher's containment wrapper must turn that into a failed task,
     // never a std::terminate that takes the whole test binary (and in
@@ -113,7 +127,7 @@ struct Harness {
                 throw std::runtime_error("simulated plugin failure");
             }
         };
-        ctx.emit_output = [this](std::string_view chunk) { streamed += chunk; };
+        ctx.emit_output = [this](std::string_view chunk) { AppendStreamed(chunk); };
 
         const auto started = std::chrono::steady_clock::now();
         const auto result = tool->execute(input, ctx);
@@ -234,7 +248,7 @@ TEST_CASE("a background task streams output live and persists only the capped re
     REQUIRE(WaitFor([&] { return SingleCompletion(h).present; }));
     // The live channel is uncapped (lossy by design downstream): the watcher
     // pushed far more than the cap through emit_output.
-    CHECK(h.streamed.size() > 2048);
+    CHECK(h.Streamed().size() > 2048);
     // The injected record is the capped head+tail render, with the omission
     // marker -- identical semantics to a synchronous command's result block.
     const auto completion = SingleCompletion(h);

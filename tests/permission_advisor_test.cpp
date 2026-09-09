@@ -220,8 +220,12 @@ TEST_CASE("grants returned by an advisor are filtered against the disclosure",
 TEST_CASE("a wedged advisor does not outlive cancellation", "[permission_advisor][cancel]") {
     using namespace std::chrono_literals;
 
-    auto advisor = std::make_shared<ScriptedAdvisor>();
-    std::atomic<bool> cancelled{false};
+    // Both flags live on the heap on purpose: the checker's abandon path
+    // DETACHES the advisor thread (permission_advisor.cpp's poll loop), and a
+    // detached thread can still be inside ctx.is_cancelled() when this scope
+    // exits -- a stack atomic captured by reference would be a dangling read
+    // under exactly the starvation this test simulates.
+    auto cancelled = std::make_shared<std::atomic<bool>>(false);
     auto saw_cancel = std::make_shared<std::atomic<bool>>(false);
 
     // The advisor contract: poll is_cancelled and return. This one spins on the
@@ -244,20 +248,27 @@ TEST_CASE("a wedged advisor does not outlive cancellation", "[permission_advisor
     auto* inner_ptr = inner.get();
 
     tools::AdvisedPermissionChecker checker(polling, std::move(inner),
-                                            [&cancelled] { return cancelled.load(); });
+                                            [cancelled] { return cancelled->load(); });
 
     minimal::testing::BackgroundResult<PermissionResponse> call(
         [&] { return checker.check(tools::PermissionRequest{}); });
 
     // Blocked while nobody cancels -- but not forever once we do.
     CHECK_FALSE(call.WaitFor(50ms));
-    cancelled.store(true);
+    cancelled->store(true);
     // 10 s, not kDefaultDeadline's 2 s: the advisor's poll thread can be
     // starved past 2 s under an 8-way parallel ASan/TSan ctest on a loaded
     // machine -- the invariant under test is "returns once cancelled", not
     // "returns within 2 s". (Observed flaking exactly there.)
     CHECK(call.WaitFor(10s));
-    CHECK(saw_cancel->load());
+    // The checker's abandon path does not wait for the advisor to NOTICE the
+    // cancel -- it detaches the thread and falls through. That detached 1 ms
+    // poller races everything else in an 8-way parallel run, so whether it
+    // has reached `observed->store` by the time WaitFor returns is a coin
+    // flip. The invariant is "the cancel REACHES the advisor", not "reaches
+    // it before the checker returns" -- poll with a deadline instead of
+    // asserting a race outcome.
+    REQUIRE(minimal::testing::WaitForDeadline(10s, [&] { return saw_cancel->load(); }));
     // The abstention fell through to the inner checker rather than losing the turn.
     CHECK(call.Ready());
     CHECK(inner_ptr->seen.size() == 1);  // the advisor abstained; the fall-through answered

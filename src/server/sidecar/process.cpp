@@ -1,12 +1,14 @@
 #include "minimal/sidecar/process.hpp"
 
 #include <fcntl.h>
+#include <poll.h>
 #include <signal.h>
 #include <sys/resource.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
 #include <cerrno>
+#include <chrono>
 #include <csignal>
 #include <cstdlib>
 #include <cstring>
@@ -14,6 +16,11 @@
 #include <set>
 
 namespace minimal::sidecar {
+
+namespace {
+// Post-kill reap ceiling: how long a bounded waitpid polls before giving up.
+constexpr int kPostKillReapMs = 5000;
+}  // namespace
 
 // --- ScopedFd ------------------------------------------------------------------------
 
@@ -38,8 +45,15 @@ namespace {
 
 std::mutex g_pgids_mu;
 std::set<pid_t>& Pgids() {
-    static std::set<pid_t> pgids;
-    return pgids;
+    // Leaked deliberately: SweepProcessGroups is registered with atexit at
+    // first TrackPgid (during main), so it runs BEFORE the function-local
+    // static's destructor is reached -- destruction order is reverse
+    // registration. A translation-unit static (or function-local static) set
+    // would already be destroyed when the sweep runs: UB -- an exit hang, a
+    // crash, or killpg/kill firing at recycled pids. A set that is never
+    // freed keeps the sweep sound to the last instruction of the process.
+    static std::set<pid_t>* const pgids = new std::set<pid_t>;
+    return *pgids;
 }
 
 void SweepProcessGroups() {
@@ -81,11 +95,24 @@ void KillProcessGroup(pid_t pid) {
     kill(pid, SIGKILL);
 }
 
-void ReapAfterKill(pid_t pid) {
+bool ReapAfterKill(pid_t pid) {
     KillProcessGroup(pid);
     int status = 0;
-    while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {
+    // Bounded, not blocking: SIGKILL's "the process will die" does not hold
+    // for a D-state child, and a blocking waitpid there would park the
+    // caller (a session worker, at shutdown) forever. 5 s matches the bash
+    // plugin's post-kill reap ceiling; an unreaped child is a zombie at
+    // worst, never a hang.
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(kPostKillReapMs);
+    while (std::chrono::steady_clock::now() < deadline) {
+        const pid_t rc = waitpid(pid, &status, WNOHANG);
+        if (rc == pid) return true;
+        if (rc < 0 && errno == EINTR) continue;
+        if (rc < 0) return false;  // ECHILD: reaped elsewhere
+        poll(nullptr, 0, 25);
     }
+    return false;
 }
 
 std::string ResolveOnPath(const std::string& name) {
@@ -264,7 +291,12 @@ Launched Launch(const LaunchSpec& spec) {
         ::killpg(pid, SIGKILL);
         ::kill(pid, SIGKILL);
         int status = 0;
-        while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {
+        const auto deadline = std::chrono::steady_clock::now() +
+                              std::chrono::milliseconds(kPostKillReapMs);
+        while (std::chrono::steady_clock::now() < deadline) {
+            const pid_t rc = waitpid(pid, &status, WNOHANG);
+            if (rc != 0) break;  // reaped, or ECHILD
+            poll(nullptr, 0, 25);
         }
         ForgetPgid(pid);
         throw;

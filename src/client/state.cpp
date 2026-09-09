@@ -979,6 +979,14 @@ const char* ErrorCategoryName(v1::LlmErrorCategory category) {
 
 AppState::AppState(std::shared_ptr<SessionClient> client) : client_(std::move(client)) {}
 
+// The whole point of ~AppState running CloseAllTabs: leave NO stream alive
+// when member destruction begins. Every tab's reader thread is joined inside
+// stream->Close() (its on_closed_ callback still sees a fully-alive AppState
+// -- tabs_ cleared but valid), so by the time tabs_'s destructor runs no
+// callback can reach into this object. Detach would be wrong here: it leaves
+// the client threads running, exactly the half-destroyed-race this prevents.
+AppState::~AppState() { CloseAllTabs(); }
+
 void AppState::SetUiBounds(int scrollback_max_messages, int tool_output_buffer_bytes) {
     if (scrollback_max_messages > 0) scrollback_max_messages_ = scrollback_max_messages;
     if (tool_output_buffer_bytes > 0) tool_output_buffer_bytes_ = tool_output_buffer_bytes;
@@ -1082,6 +1090,7 @@ std::string AppState::AttachTab(const std::string& session_id, int64_t parent_or
     const auto attached = stream->Attach(session_id);   // names the stream (threads off)
     if (!attached) return "";
 
+    bool duplicate = false;
     {   // register under a lock, then drop it before starting the reader thread
         std::lock_guard lk(mtx_);
         if (FindTabBySession(session_id) != nullptr) {
@@ -1091,39 +1100,49 @@ std::string AppState::AttachTab(const std::string& session_id, int64_t parent_or
             // its naming event was never sent, so the server never attached
             // it and cancelling cannot terminate the real session the way
             // Finish()-without-cancel could wedge or a close could destroy.
-            stream->Cancel();
-            return "";
-        }
-        TabEntry entry;
-        entry.stream = stream;
-        entry.info.state = std::make_shared<SessionState>(session_id);
-        ApplyUiBounds(*entry.info.state);
-        entry.info.tab_id = "t" + std::to_string(++next_tab_seq_);
-        entry.info.session_id = session_id;
+            duplicate = true;
+        } else {
+            TabEntry entry;
+            entry.stream = stream;
+            entry.info.state = std::make_shared<SessionState>(session_id);
+            ApplyUiBounds(*entry.info.state);
+            entry.info.tab_id = "t" + std::to_string(++next_tab_seq_);
+            entry.info.session_id = session_id;
 
-        // Parent-of-group: locate the leader (root) of this group so subagents inherit its ordinal.
-        if (parent_ordinal >= 0) {
-            for (const auto& tab : tabs_) {
-                if (tab.info.root_ordinal == parent_ordinal && !tab.info.parent_session_id.has_value()) {
-                    entry.info.parent_session_id = tab.info.session_id;   // immediate parent
-                    entry.info.root_ordinal = parent_ordinal;             // inherit group id
-                    break;
+            // Parent-of-group: locate the leader (root) of this group so subagents inherit its ordinal.
+            if (parent_ordinal >= 0) {
+                for (const auto& tab : tabs_) {
+                    if (tab.info.root_ordinal == parent_ordinal && !tab.info.parent_session_id.has_value()) {
+                        entry.info.parent_session_id = tab.info.session_id;   // immediate parent
+                        entry.info.root_ordinal = parent_ordinal;             // inherit group id
+                        break;
+                    }
                 }
             }
-        }
-        if (!entry.info.parent_session_id.has_value()) {
-            entry.info.parent_session_id = std::nullopt;          // standalone root when no leader found
-            entry.info.root_ordinal = ++next_root_ordinal_;
-        }
+            if (!entry.info.parent_session_id.has_value()) {
+                entry.info.parent_session_id = std::nullopt;          // standalone root when no leader found
+                entry.info.root_ordinal = ++next_root_ordinal_;
+            }
 
-        entry.info.spawn_seq = next_spawn_seq_++;
-        // Focus an empty app on its first tab (OpenTab's rule): a picker
-        // resume into a fresh session-less TUI must show the session, not the
-        // welcome placeholder.
-        if (focused_id_.empty()) focused_id_ = entry.info.tab_id;
-        registered = entry.info.tab_id;
-        tabs_.push_back(std::move(entry));
+            entry.info.spawn_seq = next_spawn_seq_++;
+            // Focus an empty app on its first tab (OpenTab's rule): a picker
+            // resume into a fresh session-less TUI must show the session, not
+            // the welcome placeholder.
+            if (focused_id_.empty()) focused_id_ = entry.info.tab_id;
+            registered = entry.info.tab_id;
+            tabs_.push_back(std::move(entry));
+        }
     }   // lock released here, before the reader thread can dispatch back into us
+
+    if (duplicate) {
+        // Cancel and drop OUTSIDE mtx_: the stream's destructor runs Close(),
+        // whose Finish() plucks the gRPC completion queue -- a blocking call.
+        // Under mtx_ this is the one way an app-state lock holder blocks
+        // forever (a wedged call never unwinds), parking every sender and
+        // every reader callback behind it.
+        stream->Cancel();
+        return "";
+    }
 
     WireOnClosed(*stream, session_id);
     stream->Resume();   // start threads AFTER unlock — same guard as OpenTab
@@ -1170,6 +1189,7 @@ std::string AppState::ResumeTab(const std::string& session_id) {
     const bool live = opened.has_value();
     std::string registered;   // the new tab's tab_id, set once registration commits
 
+    bool duplicate = false;
     {   // register under a lock, then drop it before starting the reader thread
         std::lock_guard lk(mtx_);
         if (FindTabBySession(session_id) != nullptr) {
@@ -1177,30 +1197,38 @@ std::string AppState::ResumeTab(const std::string& session_id) {
             // ResumeTab calls): same rule as AttachTab's -- the naming event
             // was never sent (threads off), so cancelling the call cannot
             // disturb the session the winning caller is resuming.
-            stream->Cancel();
+            duplicate = true;
             if (const TabEntry* found = FindTabBySession(session_id);
                 found != nullptr) {
                 registered = found->info.tab_id;
             }
-            return registered;
+        } else {
+            TabEntry entry;
+            entry.stream = live ? stream : nullptr;   // copy: `stream` is used below
+            entry.info.state = std::make_shared<SessionState>(session_id);
+            ApplyUiBounds(*entry.info.state);
+            entry.info.tab_id = "t" + std::to_string(++next_tab_seq_);
+            entry.info.session_id = session_id;
+            entry.info.parent_session_id = std::nullopt;   // a resumed past session is its own root
+            entry.info.root_ordinal = ++next_root_ordinal_;
+            entry.info.spawn_seq = next_spawn_seq_++;
+            // Focus an empty app on its first tab (OpenTab's rule).
+            if (focused_id_.empty()) focused_id_ = entry.info.tab_id;
+            if (!live) {
+                entry.info.state->OnError("resume failed: " + stream->status().error_message());
+            }
+            registered = entry.info.tab_id;
+            tabs_.push_back(std::move(entry));
         }
-        TabEntry entry;
-        entry.stream = live ? stream : nullptr;   // copy: `stream` is used below
-        entry.info.state = std::make_shared<SessionState>(session_id);
-        ApplyUiBounds(*entry.info.state);
-        entry.info.tab_id = "t" + std::to_string(++next_tab_seq_);
-        entry.info.session_id = session_id;
-        entry.info.parent_session_id = std::nullopt;   // a resumed past session is its own root
-        entry.info.root_ordinal = ++next_root_ordinal_;
-        entry.info.spawn_seq = next_spawn_seq_++;
-        // Focus an empty app on its first tab (OpenTab's rule).
-        if (focused_id_.empty()) focused_id_ = entry.info.tab_id;
-        if (!live) {
-            entry.info.state->OnError("resume failed: " + stream->status().error_message());
-        }
-        registered = entry.info.tab_id;
-        tabs_.push_back(std::move(entry));
     }   // lock released here, before the reader thread can dispatch back into us
+
+    if (duplicate) {
+        // Cancel OUTSIDE mtx_ (see AttachTab): the stream destructor's
+        // Finish() plucks the completion queue and must never run under the
+        // app-state lock.
+        stream->Cancel();
+        return registered;
+    }
     BumpUiVersion();
 
     if (live) {
@@ -1663,6 +1691,8 @@ std::string AppState::EnsureSession(const std::string& tab_id) {
         [this](const v1::ServerEvent& e) { DispatchToTab(e.session_id(), e); });
     const auto sid = stream->Open(opts);   // creates session, names bidi (threads off)
 
+    bool tab_gone = false;      // closed while the create was in flight
+    bool create_failed = false; // the create was refused (or no server reachable)
     std::vector<std::function<void(const std::string&)>> drained;
     {
         std::lock_guard lk(mtx_);
@@ -1673,27 +1703,36 @@ std::string AppState::EnsureSession(const std::string& tab_id) {
             // thread to read or write more) -- cancelling ends the call
             // without touching the session the server just minted beyond
             // what the reaper's never-attached guard already collects.
-            stream->Cancel();
-            return "";
+            tab_gone = true;
+        } else {
+            tab->ensuring = false;
+            if (!sid) {
+                // The create was refused (or no server reachable). The tab
+                // STAYS -- a sessionless tab is a real tab -- with the
+                // refusal visible, and everything queued behind the create
+                // is dropped: their senders see this notice, the same
+                // visible outcome a failed synchronous create always had.
+                tab->info.state->OnError("could not start a session: " +
+                                         stream->status().error_message());
+                create_failed = true;
+            } else {
+                tab->stream = stream;
+                tab->info.session_id = *sid;
+                tab->info.state->SetSessionId(*sid);
+                drained.swap(tab->pending);
+            }
         }
-        tab->ensuring = false;
-        if (!sid) {
-            // The create was refused (or no server reachable). The tab STAYS
-            // -- a sessionless tab is a real tab -- with the refusal visible,
-            // and everything queued behind the create is dropped: their
-            // senders see this notice, the same visible outcome a failed
-            // synchronous create always had.
-            tab->info.state->OnError("could not start a session: " +
-                                     stream->status().error_message());
-            BumpUiVersion();
-            return "";
-        }
-        tab->stream = stream;
-        tab->info.session_id = *sid;
-        tab->info.state->SetSessionId(*sid);
-        drained.swap(tab->pending);
     }
     BumpUiVersion();
+
+    if (tab_gone) {
+        // Cancel OUTSIDE mtx_ (see AttachTab): the stream destructor's
+        // Finish() plucks the completion queue and must never run under the
+        // app-state lock.
+        stream->Cancel();
+        return "";
+    }
+    if (create_failed) return "";
 
     WireOnClosed(*stream, *sid);
     stream->Resume();   // start threads AFTER unlock — a dispatched event must find this entry

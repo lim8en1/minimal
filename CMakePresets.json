@@ -71,7 +71,13 @@
     {
       "name": "default",
       "configurePreset": "default",
-      "output": { "outputOnFailure": true }
+      "output": { "outputOnFailure": true },
+      "execution": {
+        "jobs": 8,
+        "timeout": 120,
+        "noTestsAction": "default",
+        "stopOnFailure": false
+      }
     },
     {
       "name": "asan",

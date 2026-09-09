@@ -93,23 +93,44 @@ void TaskRegistry::PruneFinishedLocked(std::vector<std::shared_ptr<TaskState>>& 
 std::optional<std::string> TaskRegistry::Start(StartArgs args, std::string* error) {
     // Over the limit is an ERROR THE MODEL ADAPTS TO, not a queue it blocks
     // in. start_mutex_ closes the check-then-act gap: the check and the push
-    // below span the watcher's creation, and two concurrent Starts could both
-    // pass the check before either pushed. (A task FINISHING between the two
-    // only lowers the count -- the safe direction -- so this lock suffices.)
-    std::lock_guard<std::mutex> start_lock(start_mutex_);
-    if (args.max_running > 0 && CountRunning(args.session_id) >= args.max_running) {
-        *error = "background task limit reached (" + std::to_string(args.max_running) +
-                 " running); wait for one to finish";
-        return std::nullopt;
-    }
-
-    auto task = std::make_shared<TaskState>();
-    task->id = args.id_prefix + "-" + std::to_string(next_id_.fetch_add(1, std::memory_order_relaxed));
-    task->session_id = args.session_id;
-    task->label = args.label;
-    task->pid = args.pid;
-    task->started_at = std::chrono::steady_clock::now();
+    // below span the registration, and two concurrent Starts could both pass
+    // the check before either pushed. (A task FINISHING between the two only
+    // lowers the count -- the safe direction -- so this lock suffices.)
+    //
+    // The lock covers ONLY the check + registration. The STARTED emission and
+    // the watcher's creation run outside it: both are plugin-seam or
+    // allocation work that can block or take real time, and holding a
+    // process-wide start gate across them would wedge every other session's
+    // Start -- including its refusals -- behind one slow callback.
+    std::shared_ptr<TaskState> task;
     {
+        std::lock_guard<std::mutex> start_lock(start_mutex_);
+        if (args.max_running > 0 && CountRunning(args.session_id) >= args.max_running) {
+            *error = "background task limit reached (" + std::to_string(args.max_running) +
+                     " running); wait for one to finish";
+            // The caller launches the real process BEFORE this cap check (the
+            // check must be authoritative, so the fork precedes it). On
+            // refusal `args` dies here with its body never run -- nobody
+            // would drain, kill, reap, or forget that child: a live orphan
+            // group, a zombie at exit, and a stale pgid in the atexit sweep
+            // set that pid reuse turns into a wrong-target kill. Run the
+            // containment cleanup now.
+            if (args.cleanup) {
+                try {
+                    args.cleanup();
+                } catch (...) {
+                }
+            }
+            return std::nullopt;
+        }
+
+        task = std::make_shared<TaskState>();
+        task->id = args.id_prefix + "-" +
+                   std::to_string(next_id_.fetch_add(1, std::memory_order_relaxed));
+        task->session_id = args.session_id;
+        task->label = args.label;
+        task->pid = args.pid;
+        task->started_at = std::chrono::steady_clock::now();
         std::lock_guard<std::mutex> lock(mutex_);
         tasks_[args.session_id].push_back(task);
         PruneFinishedLocked(tasks_[args.session_id]);

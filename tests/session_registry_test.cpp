@@ -241,8 +241,15 @@ TEST_CASE("a never-attached session is reaped by the initial-attach guard",
     auto session = fixture.registry->Create(Params("s1"));
     CHECK(fixture.registry->size() == 1);
 
+    // size() drops to 0 as soon as a doomed session is erased from the
+    // registry's map, but Terminate() (which sets terminated()) runs
+    // afterward, outside the registry lock -- so the deadline loop must wait
+    // on terminated() too, not just size(), or this races against Terminate()
+    // completing (visible under asan/tsan's slower execution). Same shape the
+    // detached-TTL test below uses.
     const auto deadline = std::chrono::steady_clock::now() + 5s;
-    while (fixture.registry->size() > 0 && std::chrono::steady_clock::now() < deadline) {
+    while ((fixture.registry->size() > 0 || !session->terminated()) &&
+           std::chrono::steady_clock::now() < deadline) {
         std::this_thread::sleep_for(10ms);
     }
     CHECK(fixture.registry->size() == 0);

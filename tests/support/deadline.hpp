@@ -69,4 +69,21 @@ auto RunInBackground(F body) {
     return BackgroundResult<decltype(body())>(std::move(body));
 }
 
+// Poll `done` until it flips or the budget expires. For asserting something a
+// DETACHED thread does: that thread races the test (it can be descheduled for
+// seconds under a parallel ctest), so its effect must be waited for, never
+// asserted synchronously after some other wait happens to return. One final
+// check runs after the loop so a `done` that flipped between the last sleep
+// and the deadline check is still observed.
+template <typename Done>
+bool WaitForDeadline(std::chrono::milliseconds budget, Done&& done,
+                     std::chrono::milliseconds slice = std::chrono::milliseconds(5)) {
+    const auto deadline = std::chrono::steady_clock::now() + budget;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (done()) return true;
+        std::this_thread::sleep_for(slice);
+    }
+    return done();
+}
+
 }  // namespace minimal::testing

@@ -75,7 +75,7 @@ CapturedRun RunCaptured(const std::vector<std::string>& argv, const std::filesys
 // Group kill / pgid tracking / PATH resolution: the sidecar core's one
 // implementation (and one sweep, shared with every other spawning plugin).
 inline void KillProcessGroup(pid_t pid) { return minimal::sidecar::KillProcessGroup(pid); }
-inline void ReapAfterKill(pid_t pid) { return minimal::sidecar::ReapAfterKill(pid); }
+inline bool ReapAfterKill(pid_t pid) { return minimal::sidecar::ReapAfterKill(pid); }
 inline void TrackPgid(pid_t pid) { return minimal::sidecar::TrackPgid(pid); }
 inline void ForgetPgid(pid_t pid) { return minimal::sidecar::ForgetPgid(pid); }
 inline std::string ResolveOnPath(const std::string& name) {

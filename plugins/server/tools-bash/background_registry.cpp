@@ -197,6 +197,23 @@ std::optional<BackgroundTaskRegistry::StartedTask> BackgroundTaskRegistry::Start
     args.pid = pid;
     args.id_prefix = "bg";
     args.max_running = static_cast<std::size_t>(settings.max_background_tasks);
+    // On refusal, `args` is destroyed with its body never run: nobody drains,
+    // kills, reaps, or forgets the pgid -- a live orphan group for up to the
+    // command's own lifetime, an unreaped zombie at process exit, and a
+    // stale pgid in the atexit sweep set, which pid reuse turns into a
+    // wrong-target kill. The refusal is the answer; the child it already
+    // bought is not. Tear it down here, before returning.
+    args.cleanup = [pid] {
+        try {
+            bool reaped = false;
+            BoundedReapAfterKill(pid, reaped);
+        } catch (...) {
+        }
+        try {
+            ForgetPgid(pid);
+        } catch (...) {
+        }
+    };
     // The watcher's process handles are non-copyable (ScopedFd members), and
     // the registry's Body is a std::function (copyable callable). Wrap them:
     // the shared_ptr IS the watcher's ownership of the process handles, the

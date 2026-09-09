@@ -283,10 +283,11 @@ target_compile_definitions(minimal_tests PRIVATE
 # (a hand-crafted newer-version database) and assert on internals
 # (integrity_check, journal_mode, sqlite_master) that SessionDatabase
 # deliberately does not expose.
+target_sources(minimal_tests PRIVATE support/test_main.cpp)
 target_link_libraries(minimal_tests PRIVATE
     minimal::test_support
     minimal::client_core
-    Catch2::Catch2WithMain
+    Catch2::Catch2
     SQLite3::SQLite3
     # tools-search sources are compiled directly into the test binary (see the
     # sources list above), so RE2 comes with them -- same linkage as the plugin.
@@ -340,9 +341,10 @@ option(MINIMAL_ENABLE_LIVE_MCP_TESTS
        "Build the live MCP smoke test (needs 'gateway' on PATH or MINIMAL_MCP_LIVE_SERVER)" OFF)
 if(MINIMAL_ENABLE_LIVE_MCP_TESTS)
     add_executable(minimal_mcp_live_test mcp_live_test.cpp)
+    target_sources(minimal_mcp_live_test PRIVATE support/test_main.cpp)
     target_link_libraries(minimal_mcp_live_test PRIVATE
         minimal::test_support
-        Catch2::Catch2WithMain)
+        Catch2::Catch2)
     target_compile_options(minimal_mcp_live_test PRIVATE ${MINIMAL_WARNING_FLAGS})
     catch_discover_tests(minimal_mcp_live_test)
 endif()

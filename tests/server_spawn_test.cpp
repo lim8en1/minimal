@@ -157,8 +157,26 @@ TEST_CASE("a client with no server spawns one, uses it, and the server exits on 
 
     std::vector<std::string> progress;
     SpawnOptions options;
-    REQUIRE(EnsureServerRunning(target, options,
-                                [&](const std::string& line) { progress.push_back(line); }));
+    // Surface every progress line with the failure: a spawn probe that times
+    // out is diagnosed by the LINES IT PRINTED (which startup step stalled),
+    // and the test's TempDir -- with the server's own spawn log -- is already
+    // gone by the time the failure is read.
+    const bool up = EnsureServerRunning(target, options,
+                                        [&](const std::string& line) { progress.push_back(line); });
+    for (const auto& line : progress) UNSCOPED_INFO("progress: " << line);
+    if (!up) {
+        // The spawned server's own diagnostics: it logs startup, bind and
+        // sanity-check failures to server-spawn.log under the data dir. Copy
+        // the tail into the report before the TempDir's destructor deletes it.
+        std::ifstream spawn_log(minimal::client::SpawnedServerLogPath());
+        if (spawn_log) {
+            std::string line;
+            while (std::getline(spawn_log, line)) UNSCOPED_INFO("server: " << line);
+        } else {
+            UNSCOPED_INFO("no server-spawn log at " << minimal::client::SpawnedServerLogPath());
+        }
+    }
+    REQUIRE(up);
 
     // Listening: a real client reaches it. (The socket file alone would not
     // prove serving -- it exists exactly once the bind happened, but the probe

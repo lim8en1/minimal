@@ -165,8 +165,10 @@ private:
     // Serializes Start()'s check-then-act: the cap check and the record push
     // span work the body will redo concurrently, and two concurrent Starts
     // could both pass the check before either pushed, overshooting
-    // max_running. Held only for the start sequence -- never across watcher
-    // callbacks.
+    // max_running. Held ONLY for the cap check + registration -- never
+    // across the STARTED emission, the watcher-thread creation, or any other
+    // plugin-seam/allocating work, which would wedge every session's Start
+    // behind one slow callback.
     std::mutex start_mutex_;
     std::unordered_map<std::string, std::vector<std::shared_ptr<TaskState>>> tasks_;
     std::atomic<std::uint64_t> next_id_{1};

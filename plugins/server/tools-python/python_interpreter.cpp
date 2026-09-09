@@ -443,8 +443,13 @@ void Interpreter::MarkDead(std::string reason, bool session_dead) {
 
 void Interpreter::HardKill(const char* reason) {
     MarkDead(reason, config_.session_lifetime.expired());
-    KillProcessGroup(pid_);
-    ReapAfterKill(pid_);
+    // ReapAfterKill includes the group kill (plus the fork-to-setsid window
+    // via the plain kill). An unreaped child (D state) is logged, never
+    // waited on forever.
+    if (!ReapAfterKill(pid_)) {
+        logger_.warn("python[{}]: child not reaped within the post-kill budget ({})",
+                     pid_, reason);
+    }
     ForgetPgid(pid_);
     // The reader exits on its next slice (dead_ is set). It holds a
     // shared_ptr, so this object outlives it however the store disposes of us.

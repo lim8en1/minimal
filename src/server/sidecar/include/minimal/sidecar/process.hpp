@@ -105,8 +105,12 @@ Launched Launch(const LaunchSpec& spec);
 // such group). Does NOT reap; the caller waitpids.
 void KillProcessGroup(pid_t pid);
 
-// Blocking reap bounded by the SIGKILL already pending on the target.
-void ReapAfterKill(pid_t pid);
+// SIGKILL the process group, then bounded-reap: WNOHANG polling for up to
+// 5 s (a D-state child never becomes reapable, and a blocking waitpid would
+// park a session worker forever). Returns false when the child was not
+// reaped within the budget -- the caller decides whether that is worth
+// logging; the child is a zombie at worst, never a hang.
+bool ReapAfterKill(pid_t pid);
 
 // The process-global pgid set + atexit sweep. THE SWEEP IS A BACKSTOP FOR
 // PROCESS EXIT, not a teardown mechanism: only process exit orphans setsid'd

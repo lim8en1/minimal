@@ -619,6 +619,14 @@ struct TabInfo {
 class AppState {
 public:
     explicit AppState(std::shared_ptr<SessionClient> client);
+    // Closes every tab BEFORE member destruction begins. The gRPC reader
+    // threads call back into GetState under mtx_ (via each stream's
+    // on_closed_), and tabs_ is destroyed BEFORE mtx_ (reverse declaration
+    // order) -- an open stream at scope exit therefore races a half-destroyed
+    // AppState: a corrupted mutex word reads as an eternal lock, a freed
+    // session_id as a SEGV. (The close itself runs outside mtx_ -- see
+    // CloseAllTabs.)
+    ~AppState();
 
     struct TabSnapshot {
         std::string tab_id;            // the UI's tab handle (focus/close/map keys)

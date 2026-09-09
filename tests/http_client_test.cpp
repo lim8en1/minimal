@@ -247,7 +247,13 @@ private:
             ssize_t n = ::recv(fd, buffer, sizeof(buffer), 0);
             if (n <= 0) break;
             received += static_cast<std::size_t>(n);
-            std::this_thread::sleep_for(std::chrono::milliseconds(30));
+            // 60 ms, not 30: the drain must stay ABOVE the idle timeout for
+            // the old code (progress never moved anything) to still fail,
+            // and the margin below assumes a loaded 8-way ctest can stall
+            // the client thread between progress callbacks. 60 ms slices
+            // stretch the drain past the widened 3 s idle without letting
+            // any single legitimate slice gap approach it.
+            std::this_thread::sleep_for(std::chrono::milliseconds(60));
         }
         const std::string response = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
         (void)!::send(fd, response.data(), response.size(), 0);
@@ -266,11 +272,13 @@ TEST_CASE("upload progress counts toward the streaming idle timeout", "[http_cli
     // phase of a streaming POST, dlnow == 0 -- so a multi-MB serialized request
     // (the 512k-1M-token shape) on a modest uplink was killed at the idle
     // timeout as "stalled", classified retryable, and failed identically until
-    // the retries ran out. The server here drains the upload steadily for ~4 s
-    // against a 2 s idle timeout: comfortably under the drain for the OLD code
-    // (which aborts at its first callback past the timeout -- upload progress
-    // never moved anything), comfortably above any scheduler stall a loaded
-    // run inflicts on the new one.
+    // the retries ran out. The server here drains the upload steadily for
+    // ~4 s against a 3 s idle timeout: comfortably under the drain for the
+    // OLD code (which aborts at its first callback past the timeout -- upload
+    // progress never moved anything), and the 3 s idle is the stall an
+    // 8-way parallel ctest may inflict on the client thread between progress
+    // callbacks before this test reports a starvation flake instead of the
+    // invariant it exists to prove.
     SlowReadServer server;
     HttpClient http;
     HttpRequest request;
@@ -278,7 +286,7 @@ TEST_CASE("upload progress counts toward the streaming idle timeout", "[http_cli
     request.body = std::string(2ull << 20, 'x');  // 2 MiB: ~64 read slices
     request.connect_timeout = std::chrono::milliseconds(2000);
     request.request_timeout = std::chrono::milliseconds(0);  // streaming shape: idle-only
-    request.idle_timeout = std::chrono::milliseconds(2000);
+    request.idle_timeout = std::chrono::milliseconds(3000);
 
     // Streaming mode hands the body to the sink -- response.body stays empty.
     std::string body;
