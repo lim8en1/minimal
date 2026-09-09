@@ -417,6 +417,17 @@ private:
     };
     SystemAndTools BuildSystemAndTools() const;
 
+    // The estimate's real body, taking an already-built system/tools pair
+    // instead of calling BuildSystemAndTools() itself. The public
+    // EstimateContextTokens() delegates to this after building its own pair;
+    // the zero-usage-estimate call inside RunTurnLoop calls it directly with
+    // the SAME chat_request.system/chat_request.tools BuildChatRequest just
+    // built a few lines earlier in the same tool round, instead of paying a
+    // second DefinitionsFor/DefinitionsForMcpServers materialization and sort
+    // for values it already has.
+    std::int64_t EstimateContextTokens(const std::optional<std::string>& system,
+                                       const std::vector<llm::ToolDefinition>& tools) const;
+
     void AppendAndPersist(llm::Message message, std::optional<int> output_tokens = std::nullopt);
     // Break-path repair: a turn that ends on Cancelled/MaxTokens/ContentFilter/
     // Refusal/StopSequence with the response's tool_use blocks already appended

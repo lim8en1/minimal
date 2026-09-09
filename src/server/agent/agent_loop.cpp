@@ -309,10 +309,13 @@ llm::ChatRequest AgentLoop::BuildChatRequest() const {
 // backend's ground truth anyway.
 std::int64_t AgentLoop::EstimateContextTokens() const {
     const SystemAndTools system_and_tools = BuildSystemAndTools();
-    std::int64_t bytes = system_and_tools.system
-                             ? static_cast<std::int64_t>(system_and_tools.system->size())
-                             : 0;
-    for (const auto& def : system_and_tools.tools) {
+    return EstimateContextTokens(system_and_tools.system, system_and_tools.tools);
+}
+
+std::int64_t AgentLoop::EstimateContextTokens(const std::optional<std::string>& system,
+                                              const std::vector<llm::ToolDefinition>& tools) const {
+    std::int64_t bytes = system ? static_cast<std::int64_t>(system->size()) : 0;
+    for (const auto& def : tools) {
         bytes += static_cast<std::int64_t>(def.name.size() + def.description.size());
         bytes += JsonSizeEstimate(def.input_schema);
     }
@@ -851,7 +854,16 @@ void AgentLoop::RunTurnLoop(TurnResult& result, bool flush_first) {
             // deliberately touches no cumulative totals, and the estimate is
             // mirrored into last_usage so the status bar renders -- the wire
             // flag and cost-tracker's unpriced rule keep it honest.
-            const std::int64_t estimate = EstimateContextTokens();
+            //
+            // Reuses chat_request.system/chat_request.tools -- BuildChatRequest
+            // (a few lines above, this same tool round) already built them --
+            // instead of the zero-arg overload, which would call
+            // BuildSystemAndTools() a second time: a redundant
+            // DefinitionsFor/DefinitionsForMcpServers materialization and sort
+            // on every zero-usage round, which is every round against any
+            // OpenAI-compatible proxy that does not report usage.
+            const std::int64_t estimate =
+                EstimateContextTokens(chat_request.system, chat_request.tools);
             tokens_.SeedOccupancy(estimate);
             result.last_usage.input_tokens =
                 static_cast<int>(std::min<std::int64_t>(std::max<std::int64_t>(estimate, 0),
