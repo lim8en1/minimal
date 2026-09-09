@@ -632,6 +632,64 @@ TEST_CASE("an opencode-shaped provider entry normalizes onto minimal's fields",
     CHECK(model->provider.headers[0].second == "hot");
 }
 
+TEST_CASE("an opencode-shaped model's options fold into parameters, native keys winning "
+          "per-key",
+          "[providers][compat]") {
+    // opencode's AI SDK spreads a model's `options` into the request body;
+    // `parameters` is minimal's verbatim passthrough, so the fold makes an
+    // opencode providers.json (e.g. OpenRouter's provider routing:
+    // {"options": {"provider": {"only": ["z-ai/fp8"]}}}) work verbatim.
+    testing::TempDir dir;
+    std::ofstream(dir.path() / "providers.json") << R"json({
+      "providers": {
+        "openrouter": {
+          "backend": "openai",
+          "url": "https://openrouter.ai/api/v1",
+          "models": {
+            "glm": {"options": {"provider": {"only": ["z-ai/fp8"]}}},
+            "kimi": {"options": {"provider": {"only": ["deepinfra/fp8"]}, "temperature": 0.1},
+                     "parameters": {"temperature": 0.7}}
+          }
+        }
+      }
+    })json";
+
+    const auto config = LoadProvidersConfig(dir.path() / "providers.json");
+
+    // Options only: folded over verbatim.
+    const auto glm = config.Resolve(ModelRef{"openrouter", "glm"});
+    REQUIRE(glm != nullptr);
+    CHECK(glm->parameters == nlohmann::json{{"provider", {{"only", {"z-ai/fp8"}}}}});
+
+    // Both: the native parameters keys win, the non-conflicting option stays.
+    const auto kimi = config.Resolve(ModelRef{"openrouter", "kimi"});
+    REQUIRE(kimi != nullptr);
+    CHECK(kimi->parameters ==
+          nlohmann::json{{"provider", {{"only", {"deepinfra/fp8"}}}}, {"temperature", 0.7}});
+}
+
+TEST_CASE("a model's non-object options is dropped with a warning, not a parse failure",
+          "[providers][compat]") {
+    testing::TempDir dir;
+    std::ofstream(dir.path() / "providers.json") << R"({
+      "providers": {
+        "openrouter": {
+          "backend": "openai",
+          "url": "https://openrouter.ai/api/v1",
+          "models": {"glm": {"options": "bogus"}}
+        }
+      }
+    })json";
+
+    // The warning itself rides the process logger; the OBSERVABLE contract is
+    // that the malformed entry degrades to a parseable model with no
+    // parameters instead of failing the whole config.
+    const auto config = LoadProvidersConfig(dir.path() / "providers.json");
+    const auto glm = config.Resolve(ModelRef{"openrouter", "glm"});
+    REQUIRE(glm != nullptr);
+    CHECK(glm->parameters.empty());
+}
+
 TEST_CASE("ModelRefs honors blacklist and whitelist as a listing filter only",
           "[providers][compat]") {
     testing::TempDir dir;
@@ -749,6 +807,79 @@ TEST_CASE("without the credentials: auth-file opt-in, a keyless entry resolves a
     const auto model = config.Resolve(ModelRef{"anthropic", "m"});
     REQUIRE(model != nullptr);
     CHECK(model->provider.api_key.empty());
+}
+
+TEST_CASE("api-key resolution records its source on the entry without carrying the key",
+          "[providers][compat]") {
+    // The startup log reads this origin (key material never reaches it), and
+    // an auth-file opt-in that finds nothing is a DISTINCT recorded state --
+    // a key written after the server started (e.g. via /connect) must be
+    // visible here, not only as a 401 on the first request.
+    testing::TempDir dir;
+    testing::TempDir data;
+    testing::TempDir home;
+    ScopedEnv data_env("XDG_DATA_HOME", data.path().string().c_str());
+    ScopedEnv home_env("HOME", home.path().string().c_str());
+
+    // 1. Opt-in, key present in <data dir>/auth.json: the origin names the
+    //    file, never the key.
+    {
+        const auto auth_dir = data.path() / "minimal";
+        std::filesystem::create_directories(auth_dir);
+        std::ofstream(auth_dir / "auth.json") << R"({"local": {"key": "minimal-stored"}})";
+        std::ofstream(dir.path() / "providers.json") << R"({
+          "providers": {"local": {"backend": "openai", "url": "http://x/v1",
+                                   "credentials": "auth-file", "models": {"m": {}}}}
+        })";
+        const auto config = LoadProvidersConfig(dir.path() / "providers.json");
+        const auto& entry = config.provider_entries().at("local");
+        CHECK(entry.connection.api_key == "minimal-stored");
+        CHECK(entry.api_key_origin.find((auth_dir / "auth.json").string()) != std::string::npos);
+        CHECK(entry.api_key_origin.find("minimal-stored") == std::string::npos);
+        const auto model = config.Resolve(ModelRef{"local", "m"});
+        REQUIRE(model != nullptr);
+        CHECK(model->provider.api_key == "minimal-stored");
+    }
+
+    // 2. Inline key: named as inline, the value itself never carried.
+    {
+        std::ofstream(dir.path() / "providers.json") << R"({
+          "providers": {"local": {"backend": "openai", "url": "http://x/v1",
+                                   "api_key": "sekrit-inline", "models": {"m": {}}}}
+        })";
+        const auto config = LoadProvidersConfig(dir.path() / "providers.json");
+        const auto& entry = config.provider_entries().at("local");
+        CHECK(entry.connection.api_key == "sekrit-inline");
+        CHECK(entry.api_key_origin == "inline api_key");
+    }
+
+    // 3. Opt-in, nothing found anywhere: the recorded miss, not a silent empty.
+    {
+        std::ofstream(dir.path() / "providers.json") << R"({
+          "providers": {"openrouter": {"backend": "openai", "url": "https://openrouter.ai/api/v1",
+                                        "credentials": "auth-file", "models": {"m": {}}}}
+        })";
+        const auto config = LoadProvidersConfig(dir.path() / "providers.json");
+        const auto& entry = config.provider_entries().at("openrouter");
+        CHECK(entry.connection.api_key.empty());
+        CHECK(entry.api_key_origin == "auth-file (no key found)");
+        const auto model = config.Resolve(ModelRef{"openrouter", "m"});
+        REQUIRE(model != nullptr);
+        CHECK(model->provider.api_key.empty());
+    }
+
+    // 4. No credential configured at all: the normal keyless local server --
+    //    empty origin, and NOT the miss state.
+    {
+        std::ofstream(dir.path() / "providers.json") << R"({
+          "providers": {"local": {"backend": "openai", "url": "http://x/v1",
+                                   "models": {"m": {}}}}
+        })";
+        const auto config = LoadProvidersConfig(dir.path() / "providers.json");
+        const auto& entry = config.provider_entries().at("local");
+        CHECK(entry.connection.api_key.empty());
+        CHECK(entry.api_key_origin.empty());
+    }
 }
 
 TEST_CASE("small_model parses from settings.json", "[settings][compat]") {

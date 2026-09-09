@@ -25,10 +25,23 @@ std::string RequireString(const nlohmann::json& node, const std::string& key,
 // api_key or api_key_env, never both. Resolved once here so nothing downstream
 // touches the environment -- and so an unset variable fails at startup rather
 // than on the first request.
-std::optional<std::string> LookupCredentialsFile(const std::string& provider_name);
 
-std::string ResolveApiKey(const nlohmann::json& provider, const std::string& where,
-                          const std::string& provider_name) {
+// How an entry's api key came to be. Carries where the key came from, never
+// the key itself, so it can be logged verbatim: credentials resolve ONCE at
+// parse time, so a key written after the server started (e.g. via /connect)
+// is invisible to the running process until restart -- the startup line is
+// the only trace of that freeze.
+struct ApiKeyResolution {
+    std::string key;
+    std::string origin;  // "" when no key resolved and none was expected
+    bool auth_file_opt_in = false;  // the entry set "credentials": "auth-file"
+};
+
+std::optional<std::string> LookupCredentialsFile(const std::string& provider_name,
+                                                 std::filesystem::path* found_in);
+
+ApiKeyResolution ResolveApiKey(const nlohmann::json& provider, const std::string& where,
+                               const std::string& provider_name) {
     const bool has_key = provider.contains("api_key") && provider.at("api_key").is_string() &&
                          !provider.at("api_key").get<std::string>().empty();
     const bool has_env = provider.contains("api_key_env") &&
@@ -37,7 +50,9 @@ std::string ResolveApiKey(const nlohmann::json& provider, const std::string& whe
     if (has_key && has_env) {
         throw std::runtime_error("providers.json: " + where + " sets both api_key and api_key_env");
     }
-    if (has_key) return provider.at("api_key").get<std::string>();
+    if (has_key) {
+        return {provider.at("api_key").get<std::string>(), "inline api_key"};
+    }
     if (!has_env) {
         // No inline key, no env: the credentials file is the last link -- but
         // ONLY when this entry explicitly opts in with `"credentials":
@@ -55,8 +70,19 @@ std::string ResolveApiKey(const nlohmann::json& provider, const std::string& whe
         const bool opt_in = provider.contains("credentials") &&
                             provider.at("credentials").is_string() &&
                             provider.at("credentials").get<std::string>() == "auth-file";
-        if (!opt_in) return "";
-        return LookupCredentialsFile(provider_name).value_or("");
+        ApiKeyResolution resolved;
+        resolved.auth_file_opt_in = opt_in;
+        if (!opt_in) return resolved;
+        std::filesystem::path found_in;
+        if (auto key = LookupCredentialsFile(provider_name, &found_in)) {
+            resolved.key = std::move(*key);
+            resolved.origin = "auth-file (" + found_in.string() + ")";
+        } else {
+            // The explicit miss state: distinguishable from "configured no
+            // credential" on the entry, and the input to the startup warning.
+            resolved.origin = "auth-file (no key found)";
+        }
+        return resolved;
     }
 
     const std::string name = provider.at("api_key_env").get<std::string>();
@@ -65,7 +91,7 @@ std::string ResolveApiKey(const nlohmann::json& provider, const std::string& whe
         throw std::runtime_error("providers.json: " + where + " names api_key_env '" + name +
                                  "' which is unset");
     }
-    return *value;
+    return {*value, "api_key_env '" + name + "'"};
 }
 
 // Last link of the api-key chain: a credentials file. {"<provider>": {"key":
@@ -104,14 +130,20 @@ std::optional<std::string> LookupAuthFile(const std::filesystem::path& path,
     }
 }
 
-std::optional<std::string> LookupCredentialsFile(const std::string& provider_name) {
-    if (auto key = LookupAuthFile(common::DataDir() / "auth.json", provider_name)) return key;
+std::optional<std::string> LookupCredentialsFile(const std::string& provider_name,
+                                                 std::filesystem::path* found_in) {
+    const auto auth_path = common::DataDir() / "auth.json";
+    if (auto key = LookupAuthFile(auth_path, provider_name)) {
+        if (found_in) *found_in = auth_path;
+        return key;
+    }
     // opencode-compat: its own auth store. Windows uses APPDATA, POSIX the
     // XDG-ish path opencode documents.
     if (const auto home = common::LookupEnv("HOME")) {
-        if (auto key = LookupAuthFile(std::filesystem::path(*home) / ".local" / "share" /
-                                          "opencode" / "auth.json",
-                                      provider_name)) {
+        const auto oc_path = std::filesystem::path(*home) / ".local" / "share" / "opencode" /
+                             "auth.json";
+        if (auto key = LookupAuthFile(oc_path, provider_name)) {
+            if (found_in) *found_in = oc_path;
             return key;
         }
     }
@@ -167,6 +199,10 @@ std::optional<T> OwnNumber(const nlohmann::json& node, const char* key) {
 //   options.headers / headers -> connection headers (additive, both shapes)
 //   models.<id>.limit.context  -> context_window_tokens
 //   models.<id>.limit.output   -> max_tokens
+//   models.<id>.options -> parameters  (opencode's AI SDK spreads a model's
+//          `options` into the request body; `parameters` is minimal's verbatim
+//          passthrough. Keys already present in a native `parameters` object
+//          win, same precedence rule as the provider-level fields above.)
 //   models.<id>.name -> dropped (the picker shows the ref id; no display name)
 //   npm -> consumed: the AI-SDK package selector maps to a backend kind, and
 //          the one package that names a wire shape (@ai-sdk/openai-compatible)
@@ -248,6 +284,33 @@ nlohmann::json NormalizeOpencodeProvider(const nlohmann::json& provider,
                     normalized["max_tokens"] = limit.at("output");
                 }
                 normalized.erase("limit");
+            }
+            if (normalized.contains("options")) {
+                // opencode spreads a model's `options` into the request body
+                // (the AI SDK does the spreading); minimal's equivalent is
+                // `parameters`, which the provider builders emit verbatim
+                // before the structural fields. Fold the object over with
+                // native `parameters` keys winning per-key -- the same
+                // "native keys always win" rule the provider-level fields
+                // follow. Anything else (a string, an array) is dropped with
+                // a trace: a silent ignore turns "unusual but working" into
+                // an unexplained routing/sampling failure at request time.
+                if (normalized.at("options").is_object()) {
+                    nlohmann::json folded = normalized.at("options");
+                    if (normalized.contains("parameters") &&
+                        normalized.at("parameters").is_object()) {
+                        for (const auto& [key, value] : normalized.at("parameters").items()) {
+                            folded[key] = value;
+                        }
+                    }
+                    normalized["parameters"] = std::move(folded);
+                } else {
+                    common::DefaultLogger().warn(
+                        "providers.json: {} model '{}' field \"options\" must be an object and "
+                        "was dropped",
+                        where, id);
+                }
+                normalized.erase("options");
             }
             normalized.erase("name");
             models[id] = std::move(normalized);
@@ -615,7 +678,22 @@ ProvidersConfig ParseProvidersConfigUnwrapped(const nlohmann::json& doc) {
 
         const std::string backend = RequireString(provider_normalized, "backend", where);
         const std::string url = RequireString(provider_normalized, "url", where);
-        const std::string api_key = ResolveApiKey(provider_normalized, where, provider_name);
+        const ApiKeyResolution api_key = ResolveApiKey(provider_normalized, where, provider_name);
+        // One line per entry, naming the source but never the key: this is
+        // the moment the key is frozen in for the process's lifetime, so an
+        // empty resolution must be visible HERE, not only as a 401 on the
+        // first request.
+        if (!api_key.key.empty()) {
+            common::DefaultLogger().info("providers.json: {} -- api key from {}",
+                                         where, api_key.origin);
+        } else if (api_key.auth_file_opt_in) {
+            common::DefaultLogger().warn(
+                "providers.json: {} -- opted into \"credentials\": \"auth-file\" but no key was "
+                "found in {} or ~/.local/share/opencode/auth.json. Credentials resolve once at "
+                "startup: if the key was written after the server started (e.g. via /connect), "
+                "restart the server.",
+                where, (common::DataDir() / "auth.json").string());
+        }
 
         bool discover = false;
         if (provider_normalized.contains("discover")) {
@@ -645,7 +723,8 @@ ProvidersConfig ParseProvidersConfigUnwrapped(const nlohmann::json& doc) {
         entry.name = provider_name;
         entry.backend = backend;
         entry.connection.base_url = url;
-        entry.connection.api_key = api_key;
+        entry.connection.api_key = api_key.key;
+        entry.api_key_origin = api_key.origin;
         entry.discover = discover;
         if (provider_normalized.contains("parameters") &&
             provider_normalized.at("parameters").is_object()) {
@@ -692,7 +771,7 @@ ProvidersConfig ParseProvidersConfigUnwrapped(const nlohmann::json& doc) {
             resolved.ref = ModelRef{provider_name, model_name};
             resolved.backend = backend;
             resolved.provider.base_url = url;
-            resolved.provider.api_key = api_key;
+            resolved.provider.api_key = api_key.key;
             resolved.provider.model_name = model_name;
             resolved.provider.headers = entry.connection.headers;
             resolved.parameters = InheritParameters(provider, model);
