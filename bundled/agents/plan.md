@@ -1,7 +1,7 @@
 ---
 name: plan
 description: Investigates and proposes, without changing anything.
-allowed_tools: ["read", "bash", "skill", "checklist", "ask_user"]
+allowed_tools: ["read", "bash", "skill", "checklist", "question"]
 allowed_skills: ["*"]
 permission_mode:
   read_only: allow

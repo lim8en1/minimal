@@ -360,7 +360,7 @@ grpc::Status SessionClient::RunTurn(
         }
         if (!half_closed && event.has_ask_request()) {
             // A model question has no headless answer. Unlike the permission
-            // case above this is EXPECTED here (ask_user is ReadOnly, so no
+            // case above this is EXPECTED here (question is ReadOnly, so no
             // run mode gates it), and the decline is a real outcome: the
             // broker maps answered=false onto "the user did not answer", a
             // tool result the model adapts to. Never hang waiting for input

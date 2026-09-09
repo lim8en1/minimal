@@ -12,20 +12,20 @@ constexpr std::size_t kMaxOptions = 5;
 
 tools::ToolSpec MakeSpec() {
     tools::ToolSpec spec;
-    spec.name = "ask_user";
+    spec.name = "question";
     // The tool IS the prompt: its only effect is the question it raises, so
     // it must not itself sit behind a permission gate. ReadOnly is
     // pre-allowed for exactly this kind of self-describing tool (the skill
     // tool precedent).
     spec.category = tools::ToolCategory::ReadOnly;
-    spec.definition.name = "ask_user";
+    spec.definition.name = "question";
     spec.definition.description =
         "Ask the user 1-4 multiple-choice questions and wait for their "
         "answers. Use when a decision is genuinely the user's to make -- "
         "ambiguous instructions, competing approaches, a destructive choice "
         "-- not for facts you can look up or choices you can reasonably "
         "make yourself. Each question offers 1-5 labeled options; the user "
-        "may also type a custom answer unless you disallow it.";
+        "may also type a custom answer.";
     spec.definition.input_schema = nlohmann::json{
         {"type", "object"},
         {"properties",
@@ -51,18 +51,13 @@ tools::ToolSpec MakeSpec() {
                                   "The choice, returned to you verbatim if picked."}}},
                       {"description", {{"type", "string"},
                                        {"description",
-                                        "One line on what choosing it means. May be empty."}}}}},
-                    {"required", nlohmann::json::array({"label"})}}}}},
+                                        "One line on what choosing it means."}}}}},
+                    {"required", nlohmann::json::array({"label", "description"})}}}}},
                 {"multiple",
                  {{"type", "boolean"},
                   {"description",
-                   "true: several options may be selected. Default false."}}},
-                {"allow_other",
-                 {{"type", "boolean"},
-                  {"description",
-                   "false: the user must pick one of your options. Default "
-                   "true: they may also type a custom answer."}}}}},
-              {"required", nlohmann::json::array({"question", "options"})}}}}}},
+                   "true: several options may be selected. Default false."}}}}},
+              {"required", nlohmann::json::array({"question", "header", "options"})}}}}}},
          {"required", nlohmann::json::array({"questions"})}},
     };
     return spec;
@@ -79,25 +74,26 @@ bool NonEmptyString(const nlohmann::json& value) {
 std::optional<std::string> ParseQuestions(const nlohmann::json& input,
                                           tools::AskRequest& request) {
     if (!input.is_object() || !input.contains("questions") || !input.at("questions").is_array()) {
-        return std::string("ask_user requires \"questions\" as an array");
+        return std::string("question requires \"questions\" as an array");
     }
     const auto& questions = input.at("questions");
     if (questions.empty()) {
-        return std::string("ask_user requires at least one question");
+        return std::string("question requires at least one question");
     }
     if (questions.size() > kMaxQuestions) {
-        return "ask_user accepts at most " + std::to_string(kMaxQuestions) +
+        return "question accepts at most " + std::to_string(kMaxQuestions) +
                " questions per call (got " + std::to_string(questions.size()) + ")";
     }
     for (const auto& item : questions) {
         if (!item.is_object() || !NonEmptyString(item.value("question", nlohmann::json{}))) {
             return std::string("each question requires a non-empty \"question\" string");
         }
+        if (!NonEmptyString(item.value("header", nlohmann::json{}))) {
+            return std::string("each question requires a non-empty \"header\" string");
+        }
         tools::AskQuestion question;
         question.question = item.at("question").get<std::string>();
-        if (item.contains("header") && item.at("header").is_string()) {
-            question.header = item.at("header").get<std::string>();
-        }
+        question.header = item.at("header").get<std::string>();
         if (!item.contains("options") || !item.at("options").is_array() ||
             item.at("options").empty()) {
             return std::string("each question requires a non-empty \"options\" array");
@@ -110,24 +106,19 @@ std::optional<std::string> ParseQuestions(const nlohmann::json& input,
             if (!option.is_object() || !NonEmptyString(option.value("label", nlohmann::json{}))) {
                 return std::string("each option requires a non-empty \"label\" string");
             }
+            if (!NonEmptyString(option.value("description", nlohmann::json{}))) {
+                return std::string("each option requires a non-empty \"description\" string");
+            }
             tools::AskOption parsed;
             parsed.label = option.at("label").get<std::string>();
-            if (option.contains("description") && option.at("description").is_string()) {
-                parsed.description = option.at("description").get<std::string>();
-            }
+            parsed.description = option.at("description").get<std::string>();
             question.options.push_back(std::move(parsed));
         }
         if (item.contains("multiple")) {
             if (!item.at("multiple").is_boolean()) {
-                return std::string("ask_user \"multiple\" must be a boolean");
+                return std::string("question \"multiple\" must be a boolean");
             }
             question.multiple = item.at("multiple").get<bool>();
-        }
-        if (item.contains("allow_other")) {
-            if (!item.at("allow_other").is_boolean()) {
-                return std::string("ask_user \"allow_other\" must be a boolean");
-            }
-            question.allow_other = item.at("allow_other").get<bool>();
         }
         request.questions.push_back(std::move(question));
     }
@@ -178,7 +169,7 @@ public:
             return {true, *error};
         }
         if (!ctx.ask_user) {
-            return {true, "ask_user is not available in this session (no interactive user is "
+            return {true, "question is not available in this session (no interactive user is "
                           "attached); decide without asking"};
         }
 

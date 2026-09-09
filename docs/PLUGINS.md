@@ -12,13 +12,13 @@ not binary-compatible: rebuild them with the harness.
 
 ## Bundled server plugins (`plugins/server/`)
 
-Installed to `<libdir>/minimal/plugins/`. All enabled by default unless noted.
+Installed to `<libdir>/minimal/plugins/server/`. All enabled by default unless noted.
 
 | Plugin | Provides |
 |---|---|
 | `tools-fs` | Tools `read`, `write`, `edit` |
 | `tools-search` | Tools `grep`, `glob` (RE2-backed, linear-time regex) |
-| `tool-ask` | Tool `ask_user` — structured model→operator questions (up to 4, options with descriptions, multi-select, optional free text), answered through a client modal; see ARCHITECTURE.md "Asking the user" |
+| `tool-ask` | Tool `question` — structured model→operator questions (up to 4, options with descriptions, multi-select, always-available free text), answered through a client modal; see ARCHITECTURE.md "Asking the user" |
 | `tools-bash` | Tool `bash`; commands `/restart-shell`, `/tasks`; hook point `before_command`; per-session cwd/env retention |
 | `tools-web` | Tools `web_fetch`, `web_search` |
 | `provider-openai` | Provider kind `openai` (chat-completions shape) + model catalog for it |

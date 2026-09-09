@@ -1,6 +1,6 @@
 #pragma once
 
-// The `ask_user` tool: ask the human 1..4 structured questions and return
+// The `question` tool: ask the human 1..4 structured questions and return
 // their answers. See plugin.cpp for the posture rationale and ask.hpp for
 // the data shapes.
 

@@ -1,4 +1,4 @@
-// tool-ask -- the `ask_user` tool.
+// tool-ask -- the `question` tool.
 //
 // One tool. It turns a structured model request ("ask the operator which of
 // these approaches to take") into a blocking round-trip to the human via
@@ -23,9 +23,7 @@
 
 extern "C" {
 
-const char* minimal_plugin_abi_tag() { return minimal::common::AbiTag(); }
-const char* minimal_plugin_name() { return "tool-ask"; }
-const char* minimal_plugin_version() { return minimal::common::Version(); }
+MINIMAL_PLUGIN_ABI_SYMBOLS("tool-ask")
 
 void minimal_plugin_register_tools(
     minimal::tools::ToolRegistry& registry,
