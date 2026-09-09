@@ -23,6 +23,11 @@ vcpkg_installed/
 # vcpkg checkout auto-bootstrapped by ./configure
 /.vcpkg/
 
+# User plugin registrations (see PLUGINS.md "User plugins"): symlinks into
+# your own plugin repos, clones, or scaffolded experiments. Machine-local
+# wiring, never harness content.
+/user-plugins/
+
 # Generated protobuf/gRPC sources
 *.pb.cc
 *.pb.h

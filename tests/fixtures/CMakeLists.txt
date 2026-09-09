@@ -33,3 +33,19 @@ minimal_add_fixture_plugin(fixture-endpoint   fixture_endpoint.cpp)
 
 minimal_add_client_fixture_plugin(fixture-client           fixture_client_good.cpp)
 minimal_add_client_fixture_plugin(fixture-client-exclusive fixture_client_exclusive.cpp)
+
+# The USER-plugin path: the same well-formed fixture source, built through
+# minimal_add_user_plugin -- the function user plugin trees register with --
+# with the deploy dir pointed INSIDE the build tree, so the suite never writes
+# into a developer's real config dir. Proves the user function produces a
+# loadable artifact from a config-dir-shaped location (plugin_loader_test
+# loads the deployed copy), and that the POST_BUILD deploy step fires on a
+# normal build.
+set(MINIMAL_USER_PLUGIN_KIND server)
+# CMAKE_CURRENT_BINARY_DIR here is <build>/tests/fixtures; the deployed copy
+# is asserted (and loaded) at <build>/tests/fixtures-deployed by
+# plugin_loader_test, so anchor to the top build dir.
+minimal_add_user_plugin(fixture-user
+    DEPLOY_DIR "${CMAKE_BINARY_DIR}/tests/fixtures-deployed"
+    fixture_good.cpp)
+unset(MINIMAL_USER_PLUGIN_KIND)

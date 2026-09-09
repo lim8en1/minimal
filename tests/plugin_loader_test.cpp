@@ -85,6 +85,28 @@ TEST_CASE("a well-formed plugin loads and contributes its registrations", "[plug
     CHECK(listed[0].id == "fixture-model");
 }
 
+TEST_CASE("a DEPLOYED user plugin loads from its config-dir-shaped location",
+          "[plugin_loader][user_plugins]") {
+    // fixture-user is fixture_good.cpp built through minimal_add_user_plugin,
+    // the function user plugin trees register with; its POST_BUILD deploy step
+    // copies the artifact into fixtures-deployed/ -- a flat directory shaped
+    // like <config>/plugins/, the location user plugins actually load from.
+    // User provenance here too: same basename would be a bundled/user
+    // collision in a real tree, so the candidate mirrors a real user entry.
+    Harness h;
+    const PluginCandidate deployed{
+        std::filesystem::path(MINIMAL_USER_FIXTURE_DIR) / SharedLibName("fixture-user"),
+        Provenance::User, /*enabled=*/true};
+    const auto records = h.loader.LoadAll({deployed});
+
+    REQUIRE(records.size() == 1);
+    const auto& record = records.front();
+    CHECK(record.status == LoadStatus::Loaded);
+    CHECK(record.name == "fixture-good");  // the plugin's own name, not the file stem
+    CHECK(record.error.empty());
+    CHECK(h.tool_registry.Find("fixture_tool") != nullptr);
+}
+
 TEST_CASE("the loader dlsyms the mention-resolver seam into a real registry",
           "[plugin_loader][mention]") {
     tools::ToolRegistry tool_registry;

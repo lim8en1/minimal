@@ -148,3 +148,21 @@ together with the harness, and both host and plugin bake the same ABI tag
 to load — after pulling a new revision, rebuild rather than reusing plugin
 artifacts from an old build tree. Bundled plugins fail the server's startup
 sanity check if they do not load; user plugins only warn.
+
+## User plugins
+
+Plugins developed outside this repo (your own, or cloned third-party ones)
+are registered under `user-plugins/{server,client}/<name>` — a gitignored
+tree of plugin directories, symlinks into your own plugin repos, or clones.
+The harness build compiles them with the same toolchain and ABI tag and
+deploys every rebuild into the config dir (`<config>/plugins/`,
+`<config>/client-plugins/`); they start disabled and are enabled in
+`plugins.json` / `client-plugins.json`.
+
+```sh
+scripts/new-plugin.sh my-plugin        # scaffold (add --client for client side)
+scripts/new-plugin.sh --link ../my-plugins/server/my-plugin   # register an existing dir
+```
+
+See `docs/PLUGINS.md`, section "User plugins", for the full story, including
+the `MINIMAL_USER_PLUGIN_DEPLOY_DIR` override for CI.

@@ -268,9 +268,11 @@ add_subdirectory(fixtures)
 add_dependencies(minimal_tests
     fixture-good fixture-collision fixture-bad-abi fixture-minimal fixture-not-a-plugin
     fixture-throws fixture-advisor fixture-service fixture-service-b fixture-hook
-    fixture-client fixture-client-exclusive fixture-endpoint)
+    fixture-client fixture-client-exclusive fixture-endpoint
+    fixture-user)
 target_compile_definitions(minimal_tests PRIVATE
     MINIMAL_FIXTURE_DIR="${CMAKE_CURRENT_BINARY_DIR}/fixtures"
+    MINIMAL_USER_FIXTURE_DIR="${CMAKE_CURRENT_BINARY_DIR}/fixtures-deployed"
     MINIMAL_BUNDLED_DIR="${CMAKE_SOURCE_DIR}/bundled"
     MINIMAL_LOGO_PLUGIN="$<TARGET_FILE:minimal_logo>"
     MINIMAL_PROTO_DIR="${CMAKE_SOURCE_DIR}/proto")
@@ -358,3 +360,11 @@ add_test(NAME seed_config
                  -DBUNDLED_DIR=${CMAKE_SOURCE_DIR}/bundled
                  -DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/seed_config_work
                  -P "${CMAKE_CURRENT_SOURCE_DIR}/seed_config_test.cmake")
+
+# Same arrangement for the user-plugin deploy step (cmake/DeployUserPlugin.cmake):
+# its logic is CMake, so its test is CMake.
+add_test(NAME deploy_user_plugin
+         COMMAND "${CMAKE_COMMAND}"
+                 -DDEPLOY_SCRIPT=${CMAKE_SOURCE_DIR}/cmake/DeployUserPlugin.cmake
+                 -DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/deploy_user_plugin_work
+                 -P "${CMAKE_CURRENT_SOURCE_DIR}/deploy_user_plugin_test.cmake")

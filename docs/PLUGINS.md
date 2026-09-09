@@ -40,6 +40,75 @@ Installed to `<libdir>/minimal/plugins/client/`.
 | `cost-view` | The `{cost}` status-bar segment (polls `cost-tracker.rpc`, renders cumulative $ / tokens) |
 | `checklist-view` | The `{todo}` status-bar segment (polls `checklist.rpc` for the focused session) |
 
+## User plugins (`user-plugins/`)
+
+Plugins that live outside this repo — your own, or third-party ones — are
+developed against the harness build itself and deploy into the config dir.
+Because the ABI tag pins plugins to the exact harness tree (source-compatible,
+not binary-compatible), the plugin sources are *built by* the harness build:
+`make build` compiles them with the same compiler, flags, and ABI tag, then
+deploys them. There is no SDK to install and nothing to re-point after a pull.
+
+### Registering a plugin
+
+Each plugin is one directory under `user-plugins/server/` or
+`user-plugins/client/` (both gitignored). The subtree is the plugin's **kind**;
+a plugin's `CMakeLists.txt` is the same one-liner on either side:
+
+```cmake
+minimal_add_user_plugin(my-plugin plugin.cpp)
+```
+
+Entries can be:
+
+- a **symlink** into your own plugin repo — how a repo holding both server and
+  client plugins registers (one link per plugin, in the matching subtree):
+
+  ```sh
+  ln -s ../../my-plugins/server/my-plugin user-plugins/server/my-plugin
+  ```
+
+- a **git clone** of a third-party plugin repo (cloned directly into the tree;
+  works identically),
+- a **real directory** — what the scaffold creates.
+
+New entries are picked up by the next `make build` (the glob re-runs on
+configure).
+
+### Creating one
+
+```sh
+scripts/new-plugin.sh my-plugin            # server; add --client for the client side
+scripts/new-plugin.sh --link ../my-plugins/server/my-plugin
+```
+
+The scaffold writes `user-plugins/server/my-plugin/{CMakeLists.txt, plugin.cpp}`
+— a working minimal plugin (one tool, or one status segment) with commented
+pointers to every other registration hook. In-repo sources are unversioned
+(the directory is gitignored); move a plugin into its own repo and re-register
+with `--link` once it earns its keep.
+
+### Deploy and enablement
+
+Every `make build` deploys rebuilt user plugins into `<config>/plugins/`
+(server) or `<config>/client-plugins/` (client) — an atomic copy+rename, so a
+rebuild cannot truncate the artifact under a running server or client. The
+deploy **overwrites the previous build but never prunes**: the user dir is also
+the by-hand drop location, so retiring a plugin means deleting its `.so` there
+yourself.
+
+User plugins default **disabled** (a trust boundary, not friction): run the
+server once so discovery records the entry, then set `"enabled": true` in
+`plugins.json` / `client-plugins.json`. A failed user plugin warns instead of
+aborting startup, and the basename-collision rule is the designed way to
+replace a bundled plugin with your own version of the same name (see
+"Discovery, enablement, replacement" below).
+
+The deploy destination resolves at configure time, in the same order the
+server resolves the config dir: `MINIMAL_CONFIG_DIR` → `XDG_CONFIG_HOME/minimal`
+→ `~/.config/minimal`. Override it (e.g. for CI) with the CMake cache variable
+`MINIMAL_USER_PLUGIN_DEPLOY_DIR`.
+
 ## Discovery, enablement, replacement
 
 Two directories are scanned at startup:
@@ -77,6 +146,10 @@ Enablement is recorded in `<config>/plugins.json` (client:
   registrations with one name are fatal).
 
 ## Writing a third-party plugin
+
+See ["User plugins"](#user-plugins-user-plugins) for the build-and-deploy
+workflow (`user-plugins/`, `scripts/new-plugin.sh`); this section is the API
+itself.
 
 A plugin is a module that links the shared core (`minimal::server_core` or
 `minimal::client_core` — one copy in memory, ordinary symbol resolution) and

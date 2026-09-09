@@ -50,6 +50,12 @@ set(MINIMAL_PLUGIN_INSTALL_DIR "${CMAKE_INSTALL_LIBDIR}/minimal/plugins"
 set(MINIMAL_CLIENT_PLUGIN_INSTALL_DIR "${CMAKE_INSTALL_LIBDIR}/minimal/plugins/client"
     CACHE STRING "Install location for bundled client plugins")
 
+# Bundled + user plugin construction helpers (minimal_add_plugin,
+# minimal_add_client_plugin, minimal_add_user_plugin). Included here so the
+# functions are visible to every add_subdirectory below, including the
+# user-plugins/ tree registered at the bottom of this file.
+include(cmake/MinimalPlugins.cmake)
+
 # bundled/ is copied into the USER'S CONFIG DIR at install time, not installed
 # under the prefix and read from there. Everything in it -- prompts, presets,
 # settings -- is a file the user owns and edits; a copy sitting in the install
@@ -230,4 +236,41 @@ add_subdirectory(plugins)
 
 if(MINIMAL_BUILD_TESTS)
     add_subdirectory(tests)
+endif()
+
+# --- User plugins -------------------------------------------------------------
+#
+# user-plugins/{server,client}/<name> -- one plugin directory per entry: a
+# real directory, a symlink into your own plugin repo, or a git clone. The
+# directory is gitignored: this is machine-local wiring, not harness content.
+#
+# The server/client SPLIT is the subtree the entry sits in, never anything the
+# plugin itself declares -- a plugin's CMakeLists.txt is the same one-liner on
+# both sides (minimal_add_user_plugin), and a repo holding both kinds
+# registers one symlink per plugin. Missing dir or empty glob: fine; new
+# entries are picked up by the next build (CONFIGURE_DEPENDS re-globs).
+#
+# After add_subdirectory(tests) so a user plugin's own tests can link
+# minimal::test_support when it exists.
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/user-plugins")
+    foreach(_kind IN ITEMS server client)
+        file(GLOB _user_plugin_entries LIST_DIRECTORIES true CONFIGURE_DEPENDS
+             "${CMAKE_CURRENT_SOURCE_DIR}/user-plugins/${_kind}/*")
+        if(_kind STREQUAL "client" AND NOT MINIMAL_BUILD_CLIENT AND _user_plugin_entries)
+            message(STATUS
+                "minimal: MINIMAL_BUILD_CLIENT=OFF; skipping user client plugins "
+                "under user-plugins/client/")
+        elseif(_user_plugin_entries)
+            foreach(_entry IN LISTS _user_plugin_entries)
+                if(NOT EXISTS "${_entry}/CMakeLists.txt")
+                    continue()  # a stray file, or a repo root that is not a plugin
+                endif()
+                cmake_path(GET _entry FILENAME _entry_name)
+                set(MINIMAL_USER_PLUGIN_KIND "${_kind}")
+                add_subdirectory("${_entry}" "user-plugins/${_kind}/${_entry_name}")
+                unset(MINIMAL_USER_PLUGIN_KIND)
+            endforeach()
+        endif()
+        unset(_user_plugin_entries)
+    endforeach()
 endif()
