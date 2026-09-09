@@ -907,6 +907,66 @@ TEST_CASE("live_segments clears alongside streaming_text, not before",
     CHECK(state.TakeSnapshot().streaming_text.empty());
 }
 
+// Thinking deltas are live segments too (the OpenAI-compatible backends
+// dropped them outright before provider capture existed; the TUI then never
+// rendered the accumulation). Reasoning typically OPENS a turn, so its
+// segment must carry the same turn_seq the following text segments do.
+TEST_CASE("thinking deltas become Thinking live segments in arrival order",
+          "[session_state][live_segments]") {
+    using Kind = LiveTurnSegment::Kind;
+    SessionState state("s-1");
+
+    state.AppendStreamingThinking("pondering");
+    state.AppendStreamingThinking(" more");
+    // Text resumes: a NEW segment, after the thinking one.
+    state.AppendStreamingText("the answer");
+    state.FinalizeStreamingText();
+    // A second reasoning stretch: its own segment, after the text's.
+    state.AppendStreamingThinking("second thought");
+
+    const auto snap = state.TakeSnapshot();
+    REQUIRE(snap.live_segments.size() == 3);
+    CHECK(snap.live_segments[0].kind == Kind::Thinking);
+    CHECK(snap.live_segments[0].text == "pondering more");
+    CHECK(snap.live_segments[1].kind == Kind::Text);
+    CHECK(snap.live_segments[1].text == "the answer");
+    CHECK(snap.live_segments[2].kind == Kind::Thinking);
+    CHECK(snap.live_segments[2].text == "second thought");
+    // Same turn stamp as everything else in the turn.
+    CHECK(snap.live_segments[0].turn_seq == snap.turn_seq);
+
+    // The flat convenience accumulation still carries everything.
+    CHECK(snap.streaming_thinking_text == "pondering moresecond thought");
+}
+
+TEST_CASE("thinking segments follow the shared live_segments lifecycle",
+          "[session_state][live_segments]") {
+    SessionState state("s-1");
+
+    state.AppendStreamingThinking("turn one reasoning");
+    REQUIRE(state.TakeSnapshot().live_segments.size() == 1);
+
+    v1::TurnCompletedEvent done;
+    state.OnTurnCompleted(done);
+    // The turn ending alone does NOT clear it -- same as text segments.
+    CHECK(state.TakeSnapshot().live_segments.size() == 1);
+
+    // A new turn opens with thinking: turn_seq bumps, the new segment stamps
+    // with the NEW turn. The turn-1 segment lingers (the turn ending alone
+    // does not clear anything) until the turn-aware clear retires BOTH.
+    state.AppendStreamingThinking("turn two reasoning");
+    CHECK(state.TakeSnapshot().turn_seq == 2);
+    REQUIRE(state.TakeSnapshot().live_segments.size() == 2);
+    CHECK(state.TakeSnapshot().live_segments[0].turn_seq == 1);
+    CHECK(state.TakeSnapshot().live_segments[1].turn_seq == 2);
+    CHECK(state.TakeSnapshot().live_segments[1].text == "turn two reasoning");
+
+    // The turn-aware clear retires them like any other segment.
+    state.ClearStreamingIfCurrentTurn(2);
+    CHECK(state.TakeSnapshot().live_segments.empty());
+    CHECK(state.TakeSnapshot().streaming_thinking_text.empty());
+}
+
 // THE STALE-CLEAR REGRESSION: the newest refresh applied its page then cleared
 // streaming UNCONDITIONALLY -- if the user's next turn had already started
 // streaming (a submit raced the fetch), its opening deltas were wiped until

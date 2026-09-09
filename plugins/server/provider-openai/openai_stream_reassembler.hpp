@@ -49,8 +49,8 @@ public:
 
 private:
     struct Block {
-        enum class Kind { Text, ToolCall } kind;
-        std::string text;                       // Kind::Text
+        enum class Kind { Text, ToolCall, Thinking } kind;
+        std::string text;                       // Kind::Text, Kind::Thinking
         std::string id, name, arguments_json;   // Kind::ToolCall
         // Kind::ToolCall: argument fragments that arrived BEFORE id+name made
         // the call startable. They accumulate into arguments_json regardless,

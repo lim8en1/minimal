@@ -71,6 +71,36 @@ bool OpenAiStreamReassembler::FeedFrame(std::string_view data, const llm::Stream
         const auto& choice = chunk.at("choices").at(0);
         nlohmann::json delta = choice.value("delta", nlohmann::json::object());
 
+        // Reasoning deltas, two wire spellings: "reasoning_content"
+        // (DeepSeek/GLM and most OpenAI-compatible proxies) and "reasoning"
+        // (OpenRouter's normalized field). Both are plain strings when
+        // present; present-but-null is tolerated like every other delta
+        // field. Captured as a Thinking block so the transcript and TUI get
+        // the same treatment provider-anthropic gives thinking -- the
+        // request builder drops ThinkingBlocks on replay (no signature
+        // exists to replay), which is correct for chat-completions.
+        const auto reasoning_fragment = [&]() -> std::string {
+            for (const char* key : {"reasoning_content", "reasoning"}) {
+                if (delta.contains(key) && delta.at(key).is_string()) {
+                    return delta.at(key).get<std::string>();
+                }
+            }
+            return {};
+        };
+        std::string reasoning = reasoning_fragment();
+        if (!reasoning.empty()) {
+            // Same open-a-new-block rule as text after tool calls: reasoning
+            // -> text -> reasoning must stay three blocks in arrival order,
+            // not fuse into one.
+            if (blocks_.empty() || blocks_.back().kind != Block::Kind::Thinking) {
+                blocks_.push_back(Block{Block::Kind::Thinking, {}, {}, {}, {}, {}, false});
+            }
+            Accumulate(accumulated_bytes_, reasoning.size());
+            blocks_.back().text += reasoning;
+            const int block_index = static_cast<int>(blocks_.size()) - 1;
+            if (sink && !sink(llm::ThinkingDeltaEvent{block_index, reasoning})) return false;
+        }
+
         if (delta.contains("content") && !delta.at("content").is_null()) {
             std::string text = delta.at("content").get<std::string>();
             // An empty delta carries nothing: opening (or appending to) a
@@ -162,7 +192,10 @@ bool OpenAiStreamReassembler::FeedFrame(std::string_view data, const llm::Stream
             finished_ = true;
             completed_ = true;
             for (std::size_t i = 0; i < blocks_.size(); ++i) {
-                if (blocks_[i].kind == Block::Kind::Text || blocks_[i].started) {
+                // Thinking blocks open only on a non-empty fragment (like
+                // Text), so they are always closable content.
+                if (blocks_[i].kind == Block::Kind::Text ||
+                    blocks_[i].kind == Block::Kind::Thinking || blocks_[i].started) {
                     if (sink && !sink(llm::ContentBlockStopEvent{static_cast<int>(i)})) return false;
                 }
             }
@@ -192,7 +225,8 @@ void OpenAiStreamReassembler::CloseOpenBlocks(const llm::StreamEventSink& sink) 
     if (finished_) return;
     finished_ = true;
     for (std::size_t i = 0; i < blocks_.size(); ++i) {
-        if (blocks_[i].kind == Block::Kind::Text || blocks_[i].started) {
+        if (blocks_[i].kind == Block::Kind::Text ||
+            blocks_[i].kind == Block::Kind::Thinking || blocks_[i].started) {
             if (sink && !sink(llm::ContentBlockStopEvent{static_cast<int>(i)})) return;
         }
     }
@@ -210,6 +244,14 @@ llm::ChatResponse OpenAiStreamReassembler::Finalize(bool tolerate_malformed_tool
             // Same guard anthropic's Finalize has: no phantom empty TextBlock
             // in the response even if one slipped past the delta-side filter.
             if (!block.text.empty()) response.content.push_back(llm::TextBlock{block.text});
+        } else if (block.kind == Block::Kind::Thinking) {
+            // Unsigned by construction: chat-completions carries no signature.
+            // OpenAiRequestBuilder drops it from replay history, matching
+            // provider-anthropic's posture on unsigned thinking.
+            if (!block.text.empty()) {
+                response.content.push_back(
+                    llm::ThinkingBlock{block.text, std::nullopt, std::nullopt});
+            }
         } else {
             // A tool call whose id or name never arrived cannot be run: it
             // reached ToolExecutor as `unknown tool: ` -- an error attributed to

@@ -75,15 +75,16 @@ struct ToolExecutionState {
 // ============================================================================
 
 struct LiveTurnSegment {
-    enum class Kind { Text, Tool };
+    enum class Kind { Text, Tool, Thinking };
     Kind kind = Kind::Text;
     // Which turn this segment belongs to (SessionState::turn_seq_ at the time
     // the segment was created). The newest-page clear retires segments of the
     // turn the persisted page covers while leaving a newer turn's live text
     // alone -- without the stamp there is no way to tell them apart.
     uint64_t turn_seq = 0;
-    // Kind::Text: this segment's OWN accumulated text (one content block's
-    // worth) -- NOT the whole turn's text, unlike Snapshot::streaming_text.
+    // Kind::Text, Kind::Thinking: this segment's OWN accumulated text (one
+    // content block's worth) -- NOT the whole turn's text, unlike
+    // Snapshot::streaming_text.
     std::string text;
     // True once `text` hit SessionState::kStreamingTextCapBytes: further
     // deltas for THIS segment are dropped (the truncation marker inside
@@ -208,12 +209,14 @@ public:
         // ordering relative to tool calls that happened between its blocks.
         std::string streaming_text;          // empty when not streaming
         // Live thinking content (ThinkingDeltaEvent deltas, flat like
-        // streaming_text). Accumulated here so a thinking turn loses NOTHING
+        // streaming_text). Accumulated so a thinking turn loses NOTHING
         // on the live path -- before this field existed, thinking deltas were
         // dropped client-side and materialized only in the turn-end refetch,
-        // a visible content jump. Cleared at exactly the same sites as
-        // streaming_text (ClearStreaming / ClearStreamingIfCurrentTurn /
-        // OnResyncRequired / OnSessionRewound).
+        // a visible content jump. The ORDERED live view of the same deltas
+        // is the Thinking entries of live_segments below; this flat string
+        // stays for status/wording consumers. Cleared at exactly the same
+        // sites as streaming_text (ClearStreaming / ClearStreamingIfCurrentTurn
+        // / OnResyncRequired / OnSessionRewound).
         std::string streaming_thinking_text;  // empty when not streaming
         bool is_streaming_finalized = false;
         // This turn's live content in arrival order (LiveTurnSegment above).
@@ -389,10 +392,11 @@ public:
     // --- Streaming response ---
     void AppendStreamingText(std::string_view text);
     // Thinking deltas, the mirror of AppendStreamingText for the model's
-    // thinking blocks: same cap-and-truncate budget, same turn arming, but a
-    // dedicated accumulation (live_segments_ model only Text and Tool
-    // segments, matching how the persisted turn records are rendered) so the
-    // view layer can present thinking separately from text.
+    // thinking blocks: same cap-and-truncate budget, same turn arming, a
+    // dedicated flat accumulation AND its own Thinking LiveTurnSegment, so
+    // reasoning renders in arrival order among text and tool segments
+    // (typically as the turn's opening block) rather than as one
+    // out-of-position lump.
     void AppendStreamingThinking(std::string_view text);
     void FinalizeStreamingText();
 

@@ -38,6 +38,57 @@ TEST_CASE("ParseNonStreamingResponse: tool-call completion", "[openai_response]"
     CHECK(block.input == nlohmann::json{{"path", "a.txt"}});
 }
 
+TEST_CASE("ParseNonStreamingResponse: reasoning_content becomes a ThinkingBlock before the text",
+          "[openai_response]") {
+    // DeepSeek/GLM-style backends report reasoning on the message itself.
+    // Without capture the reasoning was dropped outright in the non-streaming
+    // path -- nothing persisted, nothing to show in the client.
+    auto body = nlohmann::json::parse(R"({
+        "id": "chatcmpl-r1", "model": "deepseek-r1",
+        "choices": [{"finish_reason": "stop", "message": {"role": "assistant",
+            "reasoning_content": "let me think", "content": "the answer"}}]
+    })");
+
+    llm::ChatResponse response = ParseNonStreamingResponse(body);
+
+    REQUIRE(response.content.size() == 2);
+    const auto& thinking = std::get<llm::ThinkingBlock>(response.content[0]);
+    CHECK(thinking.text == "let me think");
+    CHECK_FALSE(thinking.signature.has_value());
+    CHECK(std::get<llm::TextBlock>(response.content[1]).text == "the answer");
+}
+
+TEST_CASE("ParseNonStreamingResponse: OpenRouter's reasoning spelling; empty and null tolerated",
+          "[openai_response]") {
+    auto openrouter = nlohmann::json::parse(R"({
+        "id": "c", "model": "m",
+        "choices": [{"finish_reason": "stop", "message": {"role": "assistant",
+            "reasoning": "hmm", "content": "ok"}}]
+    })");
+    llm::ChatResponse response = ParseNonStreamingResponse(openrouter);
+    REQUIRE(response.content.size() == 2);
+    CHECK(std::get<llm::ThinkingBlock>(response.content[0]).text == "hmm");
+
+    // Empty reasoning: no phantom block.
+    auto empty = nlohmann::json::parse(R"({
+        "id": "c", "model": "m",
+        "choices": [{"finish_reason": "stop", "message": {"role": "assistant",
+            "reasoning_content": "", "content": "ok"}}]
+    })");
+    response = ParseNonStreamingResponse(empty);
+    REQUIRE(response.content.size() == 1);
+    CHECK(std::get<llm::TextBlock>(response.content[0]).text == "ok");
+
+    // Null reasoning: absent-equivalent, no crash.
+    auto nulled = nlohmann::json::parse(R"({
+        "id": "c", "model": "m",
+        "choices": [{"finish_reason": "stop", "message": {"role": "assistant",
+            "reasoning_content": null, "content": "ok"}}]
+    })");
+    response = ParseNonStreamingResponse(nulled);
+    REQUIRE(response.content.size() == 1);
+}
+
 TEST_CASE("MapFinishReason", "[openai_response]") {
     CHECK(MapFinishReason("stop") == llm::StopReason::EndTurn);
     CHECK(MapFinishReason("length") == llm::StopReason::MaxTokens);

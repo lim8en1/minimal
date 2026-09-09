@@ -290,7 +290,9 @@ ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
     // more text) rendered as if it happened at the very end, with the text
     // before and after it fused into one block underneath it. Each
     // live_segments entry is either a TEXT segment (fed its own debounced
-    // view, live_text_streams[i]) or a TOOL marker (looked up by id in
+    // view, live_text_streams[i]), a THINKING segment (rendered verbatim,
+    // dim -- reasoning is plain text, no markdown reparse), or a TOOL
+    // marker (looked up by id in
     // snapshot.tools -- RenderLiveToolRow renders whatever that tool's
     // CURRENT state is). A completed turn's page apply replaces this whole
     // section with the persisted rows above, which decompose a tool-calling
@@ -306,7 +308,18 @@ ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
                              bold);
             column.push_back(live_text_streams[i].view->Render(theme_));
             column.push_back(text(" "));
-        } else {
+        } else if (segment.kind == LiveTurnSegment::Kind::Thinking) {
+            // Reasoning streams as plain dim text, same look as the persisted
+            // expanded thinking row (core_registrations.cpp's
+            // RenderThinking). No LiveTextStreamSlot and no markdown engine:
+            // thinking renders verbatim, so a debounced reparse view would
+            // only add latency -- this reads the segment text directly, the
+            // same way RenderLiveToolRow reads its state.
+            if (segment.text.empty()) continue;
+            column.push_back(text("▎thinking") | color(theme_.ColorFor("thinking")) | dim);
+            column.push_back(paragraph(segment.text) | color(theme_.ColorFor("thinking")) | dim);
+            column.push_back(text(" "));
+        } else if (segment.kind == LiveTurnSegment::Kind::Tool) {
             const ToolExecutionState* tool = nullptr;
             for (const auto& candidate : snapshot.tools) {
                 if (candidate.tool_use_id == segment.tool_use_id) {

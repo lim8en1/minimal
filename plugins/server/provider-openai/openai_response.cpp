@@ -80,6 +80,22 @@ llm::ChatResponse ParseNonStreamingResponse(const nlohmann::json& body) {
         const auto& choice = choices.at(0);
         const auto& message = choice.at("message");
 
+        // Reasoning, two wire spellings -- "reasoning_content" (DeepSeek/GLM
+        // and most OpenAI-compatible proxies) and "reasoning" (OpenRouter).
+        // Captured as a ThinkingBlock ahead of the text, the position the
+        // streaming path's blocks arrive in; unsigned, so the request
+        // builder drops it from replay history.
+        for (const char* key : {"reasoning_content", "reasoning"}) {
+            if (message.contains(key) && message.at(key).is_string()) {
+                std::string reasoning = message.at(key).get<std::string>();
+                if (!reasoning.empty()) {
+                    response.content.push_back(
+                        llm::ThinkingBlock{std::move(reasoning), std::nullopt, std::nullopt});
+                }
+                break;   // first spelling present wins; never both
+            }
+        }
+
         if (message.contains("content") && !message.at("content").is_null()) {
             std::string text = message.at("content").get<std::string>();
             if (!text.empty()) response.content.push_back(llm::TextBlock{text});

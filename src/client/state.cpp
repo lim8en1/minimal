@@ -316,27 +316,22 @@ void SessionState::FinalizeStreamingText() {
 }
 
 // Thinking deltas (ThinkingDeltaEvent) get the same budget and turn arming
-// text deltas get, but a SEPARATE flat accumulation: live_segments_ model
-// only Text and Tool segments (that is what the persisted rows render as),
-// and the view layer needs thinking available independently anyway. Without
-// this the deltas were dropped outright -- thinking materialized only in the
-// turn-end refetch, a visible content jump mid-conversation.
+// text deltas get, but a SEPARATE flat accumulation, AND their own
+// LiveTurnSegment kind: live_segments_ records the turn's blocks in arrival
+// order, and reasoning is one of them (typically the FIRST, before the first
+// text delta) -- without a segment the ChatView could only show the flat
+// string out of position or not at all. The flat accumulation stays for
+// Snapshot::streaming_thinking_text consumers; the segment is what renders.
 void SessionState::AppendStreamingThinking(std::string_view text) {
     std::lock_guard lk(mtx_);
-    // Flat cap, same shape as streaming_accumulated_: truncate once, append
-    // the marker, drop further deltas -- the transcript is authoritative.
-    if (thinking_truncated_) return;
-    thinking_accumulated_.append(text);
-    if (thinking_accumulated_.size() > kStreamingTextCapBytes) {
-        thinking_accumulated_.resize(kStreamingTextCapBytes);
-        thinking_accumulated_.append(kStreamingTruncationMarker);
-        thinking_truncated_ = true;
-    }
     // Turn arming mirrors AppendStreamingText exactly: thinking typically
     // opens the turn (before the first text delta), so it must bump turn_seq_
     // and stamp itself with the SAME value text's later segments will carry,
     // or ClearStreamingIfCurrentTurn would retire (or keep) the two halves
-    // inconsistently.
+    // inconsistently. ARMING RUNS BEFORE THE APPENDS: the clear inside the
+    // arming branch would otherwise wipe this very delta when it is the
+    // turn's first (AppendStreamingText has the same ordering for the same
+    // reason).
     if (turn_ended_) {
         ++turn_seq_;
         turn_ended_ = false;
@@ -347,6 +342,53 @@ void SessionState::AppendStreamingThinking(std::string_view text) {
         thinking_truncated_ = false;
     }
     thinking_turn_seq_ = turn_seq_;
+    // Flat cap, same shape as streaming_accumulated_: truncate once, append
+    // the marker, drop further deltas -- the transcript is authoritative.
+    if (thinking_truncated_) return;
+    thinking_accumulated_.append(text);
+    if (thinking_accumulated_.size() > kStreamingTextCapBytes) {
+        thinking_accumulated_.resize(kStreamingTextCapBytes);
+        thinking_accumulated_.append(kStreamingTruncationMarker);
+        thinking_truncated_ = true;
+    }
+    // Segment tracking mirrors AppendStreamingText: a NEW Thinking segment
+    // opens on a fresh turn (live_segments_ empty), a block boundary
+    // (is_streaming_ false), or whenever the most recent segment is not
+    // Thinking (text resumed between two reasoning stretches, or a tool
+    // round landed in between). reasoning -> text -> reasoning stays three
+    // segments in arrival order.
+    const bool new_segment = live_segments_.empty() || !is_streaming_ ||
+                             live_segments_.back().kind != LiveTurnSegment::Kind::Thinking;
+    if (new_segment) {
+        // Turn arming above already consumed turn_ended_, so turn_seq_ IS
+        // the segment's turn.
+        live_segments_.push_back(
+            LiveTurnSegment{.kind = LiveTurnSegment::Kind::Thinking, .turn_seq = turn_seq_});
+    }
+    // Per-segment cap, same 2 MiB budget and shape as text segments:
+    // truncate once, append the marker.
+    live_segments_.back().text.append(text);
+    if (!live_segments_.back().text_truncated &&
+        live_segments_.back().text.size() > kStreamingTextCapBytes) {
+        live_segments_.back().text.resize(kStreamingTextCapBytes);
+        live_segments_.back().text.append(kStreamingTruncationMarker);
+        live_segments_.back().text_truncated = true;
+    }
+    // Segment-COUNT cap: same shared trimming as AppendStreamingText -- keep
+    // the NEWEST segments, leave one turn_seq-0 marker at the oldest
+    // position on first overflow so the cut is visible.
+    if (live_segments_.size() > kMaxLiveSegments) {
+        const auto keep_from = live_segments_.begin() +
+                               static_cast<std::ptrdiff_t>(live_segments_.size() - kMaxLiveSegments);
+        live_segments_.erase(live_segments_.begin(), keep_from);
+        if (!live_segments_truncated_) {
+            live_segments_.insert(live_segments_.begin(),
+                                  LiveTurnSegment{.kind = LiveTurnSegment::Kind::Text,
+                                                  .turn_seq = 0,
+                                                  .text = "[...truncated]"});
+            live_segments_truncated_ = true;
+        }
+    }
     is_streaming_ = true;
     if (state_ != SessionStateKind::Error) {
         state_ = SessionStateKind::Thinking;

@@ -367,6 +367,118 @@ TEST_CASE("explicit-null stream fields are tolerated like absent ones", "[openai
     CHECK(reassembler.Finalize().content.empty());
 }
 
+TEST_CASE("reasoning_content deltas stream live and survive Finalize as a ThinkingBlock",
+          "[openai_stream]") {
+    // DeepSeek/GLM-style OpenAI-compatible backends carry reasoning in
+    // delta.reasoning_content. Without capture it was dropped outright --
+    // no live delta, nothing persisted, nothing to show in the client.
+    OpenAiStreamReassembler reassembler;
+    std::vector<llm::StreamEvent> events;
+    auto sink = CollectInto(events);
+
+    REQUIRE(reassembler.FeedFrame(
+        R"({"id":"c1","model":"m","choices":[{"delta":{"reasoning_content":"pondering"}}]})", sink));
+    REQUIRE(reassembler.FeedFrame(
+        R"({"choices":[{"delta":{"reasoning_content":" deeply"}}]})", sink));
+    REQUIRE(reassembler.FeedFrame(
+        R"({"choices":[{"delta":{"content":"The answer."}}]})", sink));
+    REQUIRE(reassembler.FeedFrame(
+        R"({"choices":[{"delta":{},"finish_reason":"stop"}]})", sink));
+
+    REQUIRE(events.size() == 7);
+    CHECK(Has<llm::MessageStartEvent>(events, 0));
+    CHECK(As<llm::ThinkingDeltaEvent>(events, 1).text == "pondering");
+    CHECK(As<llm::ThinkingDeltaEvent>(events, 2).text == " deeply");
+    CHECK(As<llm::TextDeltaEvent>(events, 3).text == "The answer.");
+    // Blocks close in index order at finish_reason: thinking (0), text (1).
+    CHECK(As<llm::ContentBlockStopEvent>(events, 4).block_index == 0);
+    CHECK(As<llm::ContentBlockStopEvent>(events, 5).block_index == 1);
+
+    const llm::ChatResponse response = reassembler.Finalize();
+    REQUIRE(response.content.size() == 2);
+    const auto& thinking = std::get<llm::ThinkingBlock>(response.content[0]);
+    CHECK(thinking.text == "pondering deeply");
+    CHECK_FALSE(thinking.signature.has_value());
+    CHECK(std::get<llm::TextBlock>(response.content[1]).text == "The answer.");
+}
+
+TEST_CASE("OpenRouter's reasoning spelling is captured the same way; present-but-null tolerated",
+          "[openai_stream]") {
+    OpenAiStreamReassembler reassembler;
+    std::vector<llm::StreamEvent> events;
+    auto sink = CollectInto(events);
+
+    CHECK_NOTHROW(reassembler.FeedFrame(
+        R"({"id":"c","model":"m","choices":[{"delta":{"reasoning_content":null,"reasoning":null}}]})",
+        sink));
+    REQUIRE(reassembler.FeedFrame(
+        R"({"choices":[{"delta":{"reasoning":"hmm"}}]})", sink));
+    REQUIRE(reassembler.FeedFrame(
+        R"({"choices":[{"delta":{},"finish_reason":"stop"}]})", sink));
+
+    const llm::ChatResponse response = reassembler.Finalize();
+    REQUIRE(response.content.size() == 1);
+    CHECK(std::get<llm::ThinkingBlock>(response.content[0]).text == "hmm");
+}
+
+TEST_CASE("reasoning -> text -> reasoning stays three blocks in arrival order",
+          "[openai_stream][invariant]") {
+    // The same open-a-new-block rule text-after-tool-calls follows: a second
+    // reasoning stretch after content must not append onto the first one's
+    // block, which would reorder it before the text in the persisted
+    // transcript.
+    OpenAiStreamReassembler reassembler;
+    std::vector<llm::StreamEvent> events;
+    auto sink = CollectInto(events);
+
+    REQUIRE(reassembler.FeedFrame(
+        R"({"id":"c1","model":"m","choices":[{"delta":{"reasoning_content":"first thought"}}]})", sink));
+    REQUIRE(reassembler.FeedFrame(
+        R"({"choices":[{"delta":{"content":"middle answer"}}]})", sink));
+    REQUIRE(reassembler.FeedFrame(
+        R"({"choices":[{"delta":{"reasoning_content":"second thought"}}]})", sink));
+    REQUIRE(reassembler.FeedFrame(
+        R"({"choices":[{"delta":{},"finish_reason":"stop"}]})", sink));
+
+    const llm::ChatResponse response = reassembler.Finalize();
+    REQUIRE(response.content.size() == 3);
+    CHECK(std::get<llm::ThinkingBlock>(response.content[0]).text == "first thought");
+    CHECK(std::get<llm::TextBlock>(response.content[1]).text == "middle answer");
+    CHECK(std::get<llm::ThinkingBlock>(response.content[2]).text == "second thought");
+}
+
+TEST_CASE("an empty reasoning delta does not create a phantom ThinkingBlock", "[openai_stream]") {
+    OpenAiStreamReassembler reassembler;
+    std::vector<llm::StreamEvent> events;
+    auto sink = CollectInto(events);
+
+    REQUIRE(reassembler.FeedFrame(
+        R"({"id":"c","model":"m","choices":[{"delta":{"reasoning_content":""}}]})", sink));
+    CHECK(events.size() == 1);  // MessageStart only
+    CHECK(reassembler.Finalize().content.empty());
+}
+
+TEST_CASE("a stream cut before finish_reason closes an open thinking block too",
+          "[openai_stream][invariant]") {
+    OpenAiStreamReassembler reassembler;
+    std::vector<llm::StreamEvent> events;
+    auto sink = CollectInto(events);
+
+    REQUIRE(reassembler.FeedFrame(
+        R"({"id":"c1","model":"m","choices":[{"delta":{"reasoning_content":"cut mid-thought"}}]})",
+        sink));
+    const std::size_t before = events.size();
+    reassembler.CloseOpenBlocks(sink);
+
+    REQUIRE(events.size() == before + 1);
+    CHECK(Has<llm::ContentBlockStopEvent>(events, before));
+    CHECK(As<llm::ContentBlockStopEvent>(events, before).block_index == 0);
+
+    const llm::ChatResponse response = reassembler.Finalize();
+    REQUIRE(response.content.size() == 1);
+    CHECK(std::get<llm::ThinkingBlock>(response.content[0]).text == "cut mid-thought");
+}
+
 TEST_CASE("an empty content delta does not create a phantom TextBlock", "[openai_stream]") {
     OpenAiStreamReassembler reassembler;
     std::vector<llm::StreamEvent> events;
