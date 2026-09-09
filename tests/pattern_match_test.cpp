@@ -49,6 +49,14 @@ TEST_CASE("GlobMatch: escapes match literally; a trailing escape fails closed",
     CHECK_FALSE(GlobMatch(R"(weird\*.md)", "weirdX.md", false));
     CHECK_FALSE(GlobMatch(R"(trailing\)", "trailing\\", false));
     CHECK_FALSE(GlobMatch(R"(trailing\)", "trailing", false));
+
+    // An escaped '?' must match the literal character, never the '?'
+    // wildcard -- a rule like {"q\?.csv": "allow"} means the one file named
+    // "q?.csv", not "any single character after q". Regression for a bug
+    // where the escape branch unescaped the character but the wildcard check
+    // below it re-interpreted the result, so \? matched anything.
+    CHECK(GlobMatch(R"(a\?c)", "a?c", false));
+    CHECK_FALSE(GlobMatch(R"(a\?c)", "abc", false));
 }
 
 TEST_CASE("GlobMatch: a pattern matches the whole subject, never a substring",
