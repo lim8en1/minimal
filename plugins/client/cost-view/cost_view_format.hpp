@@ -81,4 +81,42 @@ inline std::optional<std::string> FormatTotals(const nlohmann::json& totals) {
     return text;
 }
 
+// Cumulative token breakdown for the {token_detail} status segment -- the
+// same "totals" payload FormatTotals reads, but the four token sums the
+// cost-tracker already aggregates per model (input/output plus the cache
+// read/write fields its totals RPC has always carried) rendered raw, without
+// the dollar figure. Zero fields render NOTHING, not "cw 0": an OpenAI-shaped
+// backend has no cache-write concept, so cw is always 0 there and the field
+// is pure noise (cache_view rules: unknown/unfilled renders nothing). An
+// all-zero aggregate -- a fresh session, or a backend that reported nothing
+// -- renders nothing at all. nullopt for a non-object payload, the same
+// malformed-input contract as FormatTotals.
+inline std::optional<std::string> FormatTokenDetail(const nlohmann::json& totals) {
+    if (!totals.is_object()) return std::nullopt;
+    std::int64_t input_tokens = 0, output_tokens = 0;
+    std::int64_t cache_read = 0, cache_write = 0;
+    if (const auto models = totals.find("models"); models != totals.end() && models->is_array()) {
+        for (const auto& model : *models) {
+            input_tokens += model.value("input_tokens", 0LL);
+            output_tokens += model.value("output_tokens", 0LL);
+            cache_read += model.value("cache_read_tokens", 0LL);
+            cache_write += model.value("cache_write_tokens", 0LL);
+        }
+    }
+    std::string text;
+    const auto append = [&text](const char* label, std::int64_t tokens) {
+        if (tokens <= 0) return;   // suppressed -- and negatives are corruption, not a refund
+        if (!text.empty()) text += " · ";
+        text += label;
+        text += ' ';
+        text += FormatTokens(tokens);
+    };
+    append("i", input_tokens);
+    append("o", output_tokens);
+    append("cr", cache_read);
+    append("cw", cache_write);
+    if (text.empty()) return std::nullopt;
+    return text;
+}
+
 }  // namespace minimal::client::cost_view

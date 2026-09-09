@@ -21,7 +21,8 @@ namespace minimal::client {
 namespace {
 
 constexpr const char* kDefaultStatusFormat =
-    "{version} | {session} | {activity} | {tokens} | {model} | {agent} | {permission_mode}";
+    "{version} | {session} | {activity} | {tokens} | {token_detail} | {model} | {agent} | "
+    "{permission_mode}";
 
 }  // namespace
 

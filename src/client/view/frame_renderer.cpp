@@ -316,7 +316,16 @@ ftxui::Element FrameRenderer::Render() {
         }
         // {tokens} is used/max now that the metadata emission carries the
         // window (E5a); max unknown (0) renders used-only, the E4 behavior.
-        const int64_t used = focused_details.input_tokens + focused_details.output_tokens;
+        // Cache tokens ARE occupancy: providers report input_tokens as the
+        // UNCACHED portion (Anthropic's semantics, which provider-openai's
+        // ParseUsage normalizes to), so summing input+output alone made the
+        // bar under-count heavily cached sessions -- the exact gap
+        // llm::context_occupancy (server/llm/token_accounting.cpp) fixed for
+        // the compaction trigger. Same four-field sum here, so the bar's
+        // used/max and the server's trigger agree.
+        const int64_t used = focused_details.input_tokens + focused_details.output_tokens +
+                             focused_details.cache_read_tokens +
+                             focused_details.cache_write_tokens;
         if (used > 0) {
             values["tokens"] = focused_details.context_window_tokens > 0
                                    ? std::to_string(used) + "/" +

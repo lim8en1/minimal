@@ -8,6 +8,7 @@
 #include <limits>
 
 using minimal::client::cost_view::FormatCost;
+using minimal::client::cost_view::FormatTokenDetail;
 using minimal::client::cost_view::FormatTokens;
 using minimal::client::cost_view::FormatTotals;
 
@@ -55,4 +56,71 @@ TEST_CASE("known totals format normally") {
 TEST_CASE("a fresh session with no turns shows nothing, not $0.00") {
     CHECK(FormatTotals(nlohmann::json{{"turns", 0}, {"total_cost_known", true},
                                       {"total_cost", 0.0}}) == std::nullopt);
+}
+
+TEST_CASE("FormatTokenDetail renders the four sums with i/o/cr/cw labels") {
+    // An Anthropic-shaped session: all four fields reported, cumulative
+    // across models.
+    const nlohmann::json totals{{"turns", 3},
+                                {"models", nlohmann::json::array({
+                                     nlohmann::json{{"input_tokens", 3'100},
+                                                    {"output_tokens", 812},
+                                                    {"cache_read_tokens", 34'000},
+                                                    {"cache_write_tokens", 240}},
+                                 })}};
+    CHECK(FormatTokenDetail(totals).value_or("") ==
+          "i 3.1k · o 812 · cr 34.0k · cw 240");
+}
+
+TEST_CASE("FormatTokenDetail aggregates across models") {
+    // A session that switched models mid-way: the totals payload carries one
+    // entry PER MODEL, so the breakdown must sum -- the /cost table's
+    // "total" row made the same choice.
+    const nlohmann::json totals{{"turns", 5},
+                                {"models", nlohmann::json::array({
+                                     nlohmann::json{{"input_tokens", 1'000},
+                                                    {"output_tokens", 100},
+                                                    {"cache_read_tokens", 10'000},
+                                                    {"cache_write_tokens", 200}},
+                                     nlohmann::json{{"input_tokens", 2'000},
+                                                    {"output_tokens", 50},
+                                                    {"cache_read_tokens", 5'000},
+                                                    {"cache_write_tokens", 0}},
+                                 })}};
+    CHECK(FormatTokenDetail(totals).value_or("") ==
+          "i 3.0k · o 150 · cr 15.0k · cw 200");
+}
+
+TEST_CASE("FormatTokenDetail suppresses zero fields (OpenAI never reports cw)") {
+    // OpenAI-shaped backends have no cache-write concept; "cw 0" is noise,
+    // and so is "cr 0" for a backend that reported nothing cached at all.
+    const nlohmann::json totals{{"turns", 2},
+                                {"models", nlohmann::json::array({
+                                     nlohmann::json{{"input_tokens", 45'100},
+                                                    {"output_tokens", 3'200},
+                                                    {"cache_read_tokens", 0},
+                                                    {"cache_write_tokens", 0}},
+                                 })}};
+    CHECK(FormatTokenDetail(totals).value_or("") == "i 45.1k · o 3.2k");
+}
+
+TEST_CASE("FormatTokenDetail renders nothing for an all-zero or malformed payload") {
+    // All four sums zero (nothing reported at all): the status bar's
+    // unknown-segment rule -- nothing, never "i 0 · o 0".
+    CHECK(FormatTokenDetail(nlohmann::json{{"turns", 4},
+                                           {"models", nlohmann::json::array({
+                                                nlohmann::json{{"input_tokens", 0},
+                                                               {"output_tokens", 0},
+                                                               {"cache_read_tokens", 0},
+                                                               {"cache_write_tokens", 0}},
+                                            })}}) == std::nullopt);
+    // No models array at all.
+    CHECK(FormatTokenDetail(nlohmann::json{{"turns", 4}}) == std::nullopt);
+    // A non-object payload: the same malformed-input contract as FormatTotals.
+    CHECK(FormatTokenDetail(nlohmann::json::array({1, 2})) == std::nullopt);
+    // A negative count is corruption, not a refund: suppressed like zero.
+    CHECK(FormatTokenDetail(nlohmann::json{{"models", nlohmann::json::array({
+                                               nlohmann::json{{"input_tokens", -5},
+                                                              {"output_tokens", 10}},
+                                           })}}).value_or("") == "o 10");
 }
