@@ -174,13 +174,28 @@ void SignalRouter::OnMcpNotification(const std::string& channel, const std::stri
     const std::map<std::string, std::string> meta =
         meta_it == params->end() ? std::map<std::string, std::string>{} : SanitizeMeta(*meta_it);
     const std::string wrapped = WrapSignal(channel, signal, meta, content);
-    if (Deliver(channel, signal, wrapped) == Delivery::kNoSubscriber) {
-        // Every other drop path above logs a line; a well-formed, allowlisted
-        // signal with no live subscriber must too, or this specific (likely
-        // common) case is invisible to an operator debugging "why didn't my
-        // signal fire".
-        minimal::common::DefaultLogger().warn(
-            "signal channel '{}': signal '{}' has no subscriber; dropped", channel, signal);
+    // Every other drop path above logs a line; a well-formed, allowlisted
+    // signal that never reaches a session must too, or these specific (and
+    // likely common) cases are invisible to an operator debugging "why
+    // didn't my signal fire". kNoSubscriber and kDropped are different
+    // causes -- no matching subscription at all, versus a subscribed
+    // session whose InjectionQueue refused every delivery attempt (it is
+    // terminating, or already staged kMaxPending messages) -- so they get
+    // distinct messages rather than one that fits neither.
+    switch (Deliver(channel, signal, wrapped)) {
+        case Delivery::kNoSubscriber:
+            minimal::common::DefaultLogger().warn(
+                "signal channel '{}': signal '{}' has no subscriber; dropped", channel, signal);
+            break;
+        case Delivery::kDropped:
+            minimal::common::DefaultLogger().warn(
+                "signal channel '{}': signal '{}' had a subscriber but delivery was refused "
+                "(terminating, or its injection queue is full); dropped",
+                channel, signal);
+            break;
+        case Delivery::kDelivered:
+        case Delivery::kInvalid:
+            break;
     }
 }
 

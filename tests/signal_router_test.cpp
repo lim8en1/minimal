@@ -276,6 +276,48 @@ TEST_CASE("OnMcpNotification: wire contract, allowlist, meta sanitization", "[si
     CHECK(signal_turns == 1);
 }
 
+TEST_CASE("OnMcpNotification: a full injection queue refuses delivery without crashing",
+          "[signals][router]") {
+    // THE kDropped PATH: a subscribed, LIVE session whose InjectionQueue is
+    // already at kMaxPending is a different outcome from "no subscriber at
+    // all" (kNoSubscriber) -- Deliver() -> Session::QueueInjectedMessage
+    // refuses every target, and SignalRouter::OnMcpNotification's switch
+    // must handle Delivery::kDropped without throwing (it previously fell
+    // through silently; this test exercises the branch added alongside the
+    // fix). No log-capturing harness exists in this test tree, so this
+    // confirms behavior (no crash, no phantom delivery) rather than the log
+    // line's exact text.
+    agent::SignalRouter router;
+    router.RegisterChannel(CiChannel());
+    RouterSessionFixture gina;
+    gina.wake_on_injection = false;  // keep injections staged, never auto-flushed
+    gina.Start("gina");
+    std::string error;
+    REQUIRE(router.Subscribe(gina.session, "ci/build.completed", error));
+
+    // Fill the queue to exactly kMaxPending via the same entry point a
+    // subagent completion or background task uses -- ground truth for "the
+    // queue is genuinely full", not an internals assumption.
+    for (std::size_t i = 0; i < agent::InjectionQueue::kMaxPending; ++i) {
+        REQUIRE(gina.session->QueueInjectedMessage(
+            llm::Message{llm::Role::User, {llm::TextBlock{"filler"}}}));
+    }
+    REQUIRE_FALSE(gina.session->QueueInjectedMessage(
+        llm::Message{llm::Role::User, {llm::TextBlock{"one too many"}}}));
+
+    // The notification itself must not throw, and must not silently make
+    // room -- the queue is still exactly full afterward (a probe push still
+    // refuses), confirming the signal's content never entered.
+    REQUIRE_NOTHROW(router.OnMcpNotification(
+        "ci", nlohmann::json{{"jsonrpc", "2.0"},
+                            {"method", "notifications/minimal/signal"},
+                            {"params",
+                             {{"signal", "build.completed"}, {"content", "should be dropped"}}}}
+                       .dump()));
+    CHECK_FALSE(gina.session->QueueInjectedMessage(
+        llm::Message{llm::Role::User, {llm::TextBlock{"still full"}}}));
+}
+
 TEST_CASE("restricted channel: undeclared signals are loud drops, extended pass everything",
           "[signals][router]") {
     agent::SignalRouter router;
