@@ -1308,6 +1308,14 @@ int RunTui(const minimal::client::ParsedArgs& args) {
                 it->second.chat->ToggleCollapseAll();
             }
         },
+        // Mouse-click collapse: ToggleCollapseAt consumes the click only
+        // when it landed on a collapsible row; a miss falls through.
+        [&](const std::string& session_id, int screen_y) -> bool {
+            if (auto it = tab_ui.find(session_id); it != tab_ui.end() && it->second.chat) {
+                return it->second.chat->ToggleCollapseAt(screen_y);
+            }
+            return false;
+        },
         [&](const std::string& session_id) {
             if (auto it = tab_ui.find(session_id); it != tab_ui.end() && it->second.chat) {
                 it->second.chat->ToggleTimestamps();

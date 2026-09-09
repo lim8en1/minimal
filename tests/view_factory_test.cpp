@@ -844,6 +844,145 @@ TEST_CASE("chat view: ScrollToBottom resets the anchor directly, not just relati
 }
 
 // ---------------------------------------------------------------------------
+// Mouse-click collapse (ChatView::ToggleCollapseAt)
+// ---------------------------------------------------------------------------
+
+v1::StoredMessage StoredThinking(int64_t seq, const std::string& text) {
+    v1::StoredMessage stored;
+    stored.set_seq(seq);
+    stored.mutable_message()->set_role(v1::ROLE_ASSISTANT);
+    stored.mutable_message()->add_content()->mutable_thinking()->set_text(text);
+    return stored;
+}
+
+// The 0-based screen row carrying `needle`, or -1.
+int ScreenLineOf(std::string_view frame, std::string_view needle) {
+    int y = 0;
+    for (std::size_t pos = 0; pos < frame.size();) {
+        const std::size_t end = frame.find('\n', pos);
+        const std::size_t len = end == std::string_view::npos ? frame.size() - pos
+                                                              : end - pos;
+        if (frame.substr(pos, len).find(needle) != std::string_view::npos) return y;
+        pos = end == std::string_view::npos ? frame.size() : end + 1;
+        ++y;
+    }
+    return -1;
+}
+
+TEST_CASE("chat view: clicking a thinking row toggles its collapse", "[chat_view][click_collapse]") {
+    const auto theme = TestTheme();
+    minimal::client::MarkdownRenderer renderer(&theme, nullptr);
+    plugins::MarkdownEngineRegistry engine_registry;
+    plugins::RegisterDefaultMarkdownEngine(engine_registry, renderer);
+    plugins::MessageRendererRegistry messages;
+    plugins::ToolResultRendererRegistry tool_renderers;
+    plugins::RegisterCoreMessageRenderers(messages);
+    plugins::RegisterCoreAgentMarkdownRenderer(messages, *engine_registry.engine);
+
+    ChatView view(theme, messages, tool_renderers);
+
+    // One user text row (seq 1) and one thinking row (seq 2, the newest --
+    // pages are DESCENDING by seq). Thinking collapses BY DEFAULT.
+    SessionState::Snapshot snap;
+    snap.session_id = "clicky";
+    snap.transcript_version = 1;
+    snap.scrollback_page =
+        std::make_shared<const std::vector<v1::StoredMessage>>(std::vector<v1::StoredMessage>{
+            StoredThinking(2, "pondering deeply"), StoredUserText(1, "hello human"),
+        });
+
+    const auto collapsed =
+        RenderElement(view.Render(snap) | ftx::yframe, /*width=*/60, /*height=*/24);
+    CHECK(collapsed.find("collapsed") != std::string::npos);
+    CHECK(collapsed.find("pondering deeply") == std::string::npos);
+    // The click affordance marks the collapsed header.
+    CHECK(collapsed.find("[+]") != std::string::npos);
+
+    // Click the thinking header's screen row: the row expands.
+    const int header_y = ScreenLineOf(collapsed, "▎thinking");
+    REQUIRE(header_y >= 0);
+    CHECK(view.ToggleCollapseAt(header_y));
+
+    const auto expanded =
+        RenderElement(view.Render(snap) | ftx::yframe, /*width=*/60, /*height=*/24);
+    CHECK(expanded.find("pondering deeply") != std::string::npos);
+    CHECK(expanded.find("[+]") == std::string::npos);
+    // The affordance flips with the state.
+    CHECK(expanded.find("[-]") != std::string::npos);
+
+    // Clicking again -- re-located, the expanded body moved the header --
+    // collapses it back.
+    const int header_y2 = ScreenLineOf(expanded, "▎thinking");
+    REQUIRE(header_y2 >= 0);
+    CHECK(view.ToggleCollapseAt(header_y2));
+    const auto recollapsed =
+        RenderElement(view.Render(snap) | ftx::yframe, /*width=*/60, /*height=*/24);
+    CHECK(recollapsed.find("pondering deeply") == std::string::npos);
+    CHECK(recollapsed.find("collapsed") != std::string::npos);
+}
+
+TEST_CASE("chat view: clicks that miss a collapsible row are not consumed",
+          "[chat_view][click_collapse]") {
+    const auto theme = TestTheme();
+    minimal::client::MarkdownRenderer renderer(&theme, nullptr);
+    plugins::MarkdownEngineRegistry engine_registry;
+    plugins::RegisterDefaultMarkdownEngine(engine_registry, renderer);
+    plugins::MessageRendererRegistry messages;
+    plugins::ToolResultRendererRegistry tool_renderers;
+    plugins::RegisterCoreMessageRenderers(messages);
+    plugins::RegisterCoreAgentMarkdownRenderer(messages, *engine_registry.engine);
+
+    ChatView view(theme, messages, tool_renderers);
+
+    // A user text row is NOT click-collapsible; the filler above the
+    // bottom-aligned short transcript belongs to no row at all.
+    const auto snap = SnapshotWithText("missy", 1, "hello human");
+    const auto frame =
+        RenderElement(view.Render(snap) | ftx::yframe, /*width=*/60, /*height=*/24);
+
+    const int row_y = ScreenLineOf(frame, "hello human");
+    REQUIRE(row_y >= 0);
+    CHECK_FALSE(view.ToggleCollapseAt(row_y));
+    CHECK_FALSE(view.ToggleCollapseAt(0));   // the filler: no row under it
+    CHECK_FALSE(view.ToggleCollapseAt(-5));  // off-screen: nothing to hit
+}
+
+TEST_CASE("chat view: clicking a tool-activity row toggles its collapse",
+          "[chat_view][click_collapse]") {
+    const auto theme = TestTheme();
+    minimal::client::MarkdownRenderer renderer(&theme, nullptr);
+    plugins::MarkdownEngineRegistry engine_registry;
+    plugins::RegisterDefaultMarkdownEngine(engine_registry, renderer);
+    plugins::MessageRendererRegistry messages;
+    plugins::ToolResultRendererRegistry tool_renderers;
+    plugins::RegisterCoreMessageRenderers(messages);
+    plugins::RegisterCoreAgentMarkdownRenderer(messages, *engine_registry.engine);
+
+    ChatView view(theme, messages, tool_renderers);
+
+    SessionState::Snapshot snap;
+    snap.session_id = "clicky-tool";
+    snap.transcript_version = 1;
+    snap.scrollback_page = std::make_shared<const std::vector<v1::StoredMessage>>(
+        StoredToolCallAndResult(1, "bash", "ls output line"));
+
+    // Tool rows collapse BY DEFAULT (CollapsedByDefault).
+    const auto collapsed =
+        RenderElement(view.Render(snap) | ftx::yframe, /*width=*/60, /*height=*/24);
+    CHECK(collapsed.find("ls output line") == std::string::npos);
+    CHECK(collapsed.find("[+]") != std::string::npos);
+
+    const int header_y = ScreenLineOf(collapsed, "▎tool bash");
+    REQUIRE(header_y >= 0);
+    CHECK(view.ToggleCollapseAt(header_y));
+
+    const auto expanded =
+        RenderElement(view.Render(snap) | ftx::yframe, /*width=*/60, /*height=*/24);
+    CHECK(expanded.find("ls output line") != std::string::npos);
+    CHECK(expanded.find("[-]") != std::string::npos);
+}
+
+// ---------------------------------------------------------------------------
 // @-mention completion (R5)
 // ---------------------------------------------------------------------------
 

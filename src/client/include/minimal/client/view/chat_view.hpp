@@ -16,6 +16,7 @@
 // fallback, not an error).
 
 #include <ftxui/dom/elements.hpp>
+#include <ftxui/screen/box.hpp>
 
 #include <map>
 #include <memory>
@@ -96,6 +97,17 @@ public:
     void ToggleCollapseFocused();
     void ToggleCollapseAll();
 
+    // Mouse-click collapse: maps a screen y (the click row) to the rendered
+    // row under it and flips that row's collapse state, exactly as
+    // ToggleCollapseFocused would for a focused row. Limited to the
+    // COLLAPSIBLE kinds (thinking / tool activity / user attachment -- the
+    // ones whose renderers draw a collapsed form): a click on a user-text or
+    // markdown row returns false and the event falls through, so text
+    // selection is never hijacked. The hit test runs against the boxes the
+    // LAST Render() recorded (see row_boxes_); a click before the first
+    // render hits nothing. True when a row was toggled.
+    bool ToggleCollapseAt(int screen_y);
+
 private:
     void RebuildRows(const SessionState::Snapshot& snapshot);
     // ONE tool's live status row (the transcript's tool rows only reach a
@@ -163,6 +175,16 @@ private:
     // without needing the row's own ChatRow (RebuildRows is the only place
     // that has one; Elements are all that survive past it).
     std::map<RowKey, bool> resolved_collapsed_;
+    // Parallel to row_keys_ (and to rendered_rows_): one rendered-position
+    // box per PART of each row, recorded by the RowBoxSpy nodes Render()
+    // wraps every part in. FTXUI assigns each Node its final box during the
+    // screen's layout pass -- AFTER yframe's scroll offset has been applied
+    // to the subtree's coordinate space -- so these are true screen
+    // coordinates and a mouse y maps straight onto a row. Rebuilt every
+    // Render(); a row whose parts rendered empty holds an empty inner vector
+    // (nothing to hit). The slots are shared with the (replaced-each-frame)
+    // element tree, so no lifetime beyond the current frame is implied.
+    std::vector<std::vector<std::shared_ptr<ftxui::Box>>> row_boxes_;
 };
 
 }  // namespace minimal::client

@@ -252,6 +252,17 @@ bool HandleGlobalKey(KeyContext& ctx, const ftxui::Event& event) {
             }
             return true;
         }
+        // Left-press collapse toggle: only consumed when the click actually
+        // landed on a collapsible row (thinking / tool activity / user
+        // attachment). Everything else -- a miss, empty space, the editor --
+        // falls through to the components below, so normal clicking behavior
+        // (text selection, the editor's own mouse handling) is untouched.
+        if (mouse.button == Mouse::Left && mouse.motion == Mouse::Pressed) {
+            if (!sid.empty() && ctx.toggle_collapse_at &&
+                ctx.toggle_collapse_at(sid, mouse.y)) {
+                return true;
+            }
+        }
     }
     if (ctx.keymap.Matches("chat.scroll_up", event)) {
         if (!sid.empty()) ctx.scroll_chat(sid, 1);   // toward older

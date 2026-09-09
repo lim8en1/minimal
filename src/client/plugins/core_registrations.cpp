@@ -87,7 +87,8 @@ Element RenderUserAttachment(const ChatRow& row, const Theme& theme,
     const int lines = static_cast<int>(std::count(row.text.begin(), row.text.end(), '\n')) + 1;
     parts.push_back(hbox({text("▎@") | color(theme.ColorFor("user_message")),
                           text(row.attachment_path) | color(theme.ColorFor("user_message")),
-                          text(" (attached, " + std::to_string(lines) + " lines)") | dim}));
+                          text(" (attached, " + std::to_string(lines) + " lines)") | dim,
+                          text(std::string(ctx.collapse_marker)) | dim}));
     if (!ctx.collapsed) {
         std::string body = row.text;
         bool truncated = false;
@@ -111,10 +112,13 @@ Element RenderThinking(const ChatRow& row, const Theme& theme, const RowRenderCo
                      text("(" + std::to_string(static_cast<int>(row.text.size())) +
                           " chars, collapsed -- " + ctx.toggle_collapse_hint +
                           " to expand)") |
+                         color(theme.ColorFor("thinking")) | dim,
+                     text(std::string(ctx.collapse_marker)) |
                          color(theme.ColorFor("thinking")) | dim});
     }
     return vbox({
-        text("▎thinking") | color(theme.ColorFor("thinking")) | dim,
+        hbox({text("▎thinking") | color(theme.ColorFor("thinking")) | dim,
+              text(std::string(ctx.collapse_marker)) | color(theme.ColorFor("thinking")) | dim}),
         paragraph(row.text) | color(theme.ColorFor("thinking")) | dim,
     });
 }
@@ -160,6 +164,8 @@ Element RenderToolActivity(const ChatRow& row, const Theme& theme, const RowRend
     }
     if (ctx.collapsed)
         line.push_back(text(" (collapsed -- " + ctx.toggle_collapse_hint + " to expand)") | dim);
+    if (!ctx.collapse_marker.empty())
+        line.push_back(text(std::string(ctx.collapse_marker)) | dim);
     Elements parts;
     parts.push_back(hbox(std::move(line)));
 

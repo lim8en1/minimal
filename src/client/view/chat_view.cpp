@@ -6,6 +6,55 @@
 
 namespace minimal::client {
 
+namespace {
+
+// Records where one row PART renders, in screen coordinates, so a mouse
+// click can be mapped back onto the row under it (ToggleCollapseAt). FTXUI
+// assigns every Node its final box during the screen's layout pass -- for a
+// subtree under yframe, the Frame's SetBox has already shifted the children's
+// boxes by the scroll offset, so the box a Node receives here is exactly the
+// screen row it will draw at (viewport-clipped only visually). A plain Node
+// subclass with a SetBox override: everything else (requirement, rendering)
+// is Node's pass-through default, so the DOM is unchanged. The slot is
+// shared with ChatView::row_boxes_ and overwritten on every layout pass
+// (last write wins, matching what is actually drawn).
+class RowBoxSpy : public ftxui::Node {
+public:
+    RowBoxSpy(std::shared_ptr<ftxui::Box> slot, ftxui::Element child)
+        : ftxui::Node(ftxui::unpack(std::move(child))), slot_(std::move(slot)) {}
+
+    void SetBox(ftxui::Box box) override {
+        ftxui::Node::SetBox(box);
+        *slot_ = box;
+        // Node::SetBox does NOT propagate to children (that is
+        // NodeDecorator's behavior); without this the wrapped row is never
+        // assigned its box and renders nothing.
+        children_[0]->SetBox(box);
+    }
+
+private:
+    std::shared_ptr<ftxui::Box> slot_;
+};
+
+// The row kinds a click may collapse: exactly those whose core renderers
+// draw a distinct collapsed form (ctx.collapsed is otherwise ignored, so a
+// toggle would be an invisible no-op that only hijacks the click).
+bool ClickCollapsible(ChatRowKind kind) {
+    switch (kind) {
+        case ChatRowKind::Thinking:
+        case ChatRowKind::ToolActivity:
+        case ChatRowKind::UserAttachment:
+            return true;
+        case ChatRowKind::UserText:
+        case ChatRowKind::AgentMarkdown:
+        case ChatRowKind::System:
+            return false;
+    }
+    return false;
+}
+
+}  // namespace
+
 ChatView::ChatView(const Theme& theme,
                    const plugins::MessageRendererRegistry& message_renderers,
                    const plugins::ToolResultRendererRegistry& tool_renderers,
@@ -77,8 +126,15 @@ void ChatView::RebuildRows(const SessionState::Snapshot& snapshot) {
         row_timestamps_.push_back(row.created_at_unix_ms);
         const bool collapsed = IsCollapsed(row_key, row);
         fresh_resolved.emplace(row_key, collapsed);
-        const plugins::RowRenderContext ctx{.collapsed = collapsed,
-                                            .toggle_collapse_hint = toggle_collapse_hint_};
+        // The click affordance rides the SAME ctx.collapsed resolution the
+        // renderer draws from, and only for click-collapsible kinds -- a
+        // plugin renderer for user text must never see a marker for a click
+        // that would not do anything.
+        const plugins::RowRenderContext ctx{
+            .collapsed = collapsed,
+            .toggle_collapse_hint = toggle_collapse_hint_,
+            .collapse_marker = ClickCollapsible(row.kind) ? (collapsed ? " [+]" : " [-]")
+                                                          : std::string_view("")};
         const auto key = std::make_tuple(row.seq, occurrence, collapsed);
 
         ftxui::Elements parts;
@@ -236,11 +292,18 @@ ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
     // number.
     std::vector<std::size_t> row_start_index;
     row_start_index.reserve(rendered_rows_.size());
+    // One box slot per row part; ToggleCollapseAt hit-tests these against a
+    // click's screen y. Cleared with the frame: the spies that fill them die
+    // with the previous frame's element tree.
+    row_boxes_.clear();
+    row_boxes_.reserve(rendered_rows_.size());
     for (std::size_t i = 0; i < rendered_rows_.size(); ++i) {
         row_start_index.push_back(column.size());
         auto& parts = rendered_rows_[i];
         const bool is_focused = focused_row_.has_value() && i < row_keys_.size() &&
                                 row_keys_[i] == *focused_row_;
+        std::vector<std::shared_ptr<ftxui::Box>> boxes;
+        boxes.reserve(parts.size());
         for (std::size_t p = 0; p < parts.size(); ++p) {
             Element part = parts[p];
             // The row cursor: a left-edge marker on the row's FIRST element
@@ -262,9 +325,17 @@ ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
                                 text(stamp) | dim | color(theme_.ColorFor("system_message"))});
                 }
             }
-            column.push_back(std::move(part));
+            // Outermost wrap, after the focus/timestamp decoration: the spy
+            // records the box of exactly what is pushed into the column (the
+            // layout-visible position), whatever the decorations did to the
+            // width. Baked in at ASSEMBLY time, never into the cached
+            // Elements -- a cache hit must not accumulate one spy per frame.
+            auto slot = std::make_shared<ftxui::Box>();
+            boxes.push_back(slot);
+            column.push_back(std::make_shared<RowBoxSpy>(std::move(slot), std::move(part)));
         }
         column.push_back(text(" "));  // breathing room between rows
+        row_boxes_.push_back(std::move(boxes));
     }
 
     // The turn the user JUST submitted, echoed optimistically (state.cpp's
@@ -433,6 +504,40 @@ void ChatView::ToggleCollapseAll() {
     global_collapse_ = !global_collapse_.value_or(false);
     collapse_overrides_.clear();
     ++collapse_epoch_;
+}
+
+bool ChatView::ToggleCollapseAt(int screen_y) {
+    // row_boxes_ is parallel to row_keys_ AND materialized_rows_ (RebuildRows
+    // fills all three together; Render() only fills row_boxes_ when it walks
+    // the same rows), so the kind gate can index materialized_rows_ directly.
+    // A Render() that has not run since a session switch holds the PREVIOUS
+    // session's boxes; Render()'s session check clears row_keys_ there too,
+    // so sizes disagree and nothing is hit.
+    for (std::size_t i = 0; i < row_boxes_.size() && i < row_keys_.size() &&
+                            i < materialized_rows_.size();
+         ++i) {
+        const auto& boxes = row_boxes_[i];
+        if (boxes.empty()) continue;   // a row that rendered nothing: nothing to hit
+        // The row's full vertical extent: its first part's top to its last
+        // part's bottom (parts are stacked by the column's vbox, never
+        // overlapping). A click anywhere on the row -- body included --
+        // toggles, not just the header line.
+        int y_min = boxes.front()->y_min;
+        int y_max = boxes.front()->y_max;
+        for (const auto& box : boxes) {
+            y_min = std::min(y_min, box->y_min);
+            y_max = std::max(y_max, box->y_max);
+        }
+        if (screen_y < y_min || screen_y > y_max) continue;
+        if (!ClickCollapsible(materialized_rows_[i].kind)) return false;
+        const RowKey& key = row_keys_[i];
+        const auto resolved = resolved_collapsed_.find(key);
+        const bool current = resolved != resolved_collapsed_.end() ? resolved->second : false;
+        collapse_overrides_[key] = !current;
+        ++collapse_epoch_;
+        return true;
+    }
+    return false;
 }
 
 }  // namespace minimal::client

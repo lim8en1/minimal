@@ -107,6 +107,11 @@ struct RowRenderContext {
     // so hints used to hardcode "alt+c" -- which lied the moment the user
     // remapped the action.
     std::string toggle_collapse_hint = "alt+c";
+    // The click affordance for collapsible rows: " [+]" while collapsed,
+    // " [-]" while expanded, "" for kinds a click never collapses. Appended
+    // to the row's HEADER line; a renderer for a collapsible kind that
+    // ignores it simply forgoes the visual hint (clicking still works).
+    std::string_view collapse_marker = "";
 };
 
 // --- Tool-result renderers (keyed by tool name) -----------------------------

@@ -180,6 +180,12 @@ struct KeyContext {
     std::function<void(const std::string& session_id)> toggle_collapse_focused;
     // chat.toggle_collapse_all: ChatView::ToggleCollapseAll.
     std::function<void(const std::string& session_id)> toggle_collapse_all;
+    // Mouse-click collapse: maps a left-press's screen y onto the focused
+    // tab's ChatView (ToggleCollapseAt). True when a collapsible row was
+    // under the click and its state was flipped -- the event is consumed
+    // ONLY then; a miss (empty space, a non-collapsible row, a sessionless
+    // tab) returns false so the click keeps falling through.
+    std::function<bool(const std::string& session_id, int screen_y)> toggle_collapse_at;
     // chat.toggle_timestamps: ChatView::ToggleTimestamps.
     std::function<void(const std::string& session_id)> toggle_timestamps;
 };
