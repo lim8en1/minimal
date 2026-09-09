@@ -52,13 +52,16 @@ tools::ToolSpec MakeSpec() {
                       {"description", {{"type", "string"},
                                        {"description",
                                         "One line on what choosing it means."}}}}},
-                    {"required", nlohmann::json::array({"label", "description"})}}}}},
+                    {"required", nlohmann::json::array({"label", "description"})},
+                    {"additionalProperties", false}}}}},
                 {"multiple",
                  {{"type", "boolean"},
                   {"description",
                    "true: several options may be selected. Default false."}}}}},
-              {"required", nlohmann::json::array({"question", "header", "options"})}}}}}},
-         {"required", nlohmann::json::array({"questions"})}},
+              {"required", nlohmann::json::array({"question", "header", "options"})},
+              {"additionalProperties", false}}}}}},
+         {"required", nlohmann::json::array({"questions"})},
+         {"additionalProperties", false}},
     };
     return spec;
 }
