@@ -473,6 +473,34 @@ TEST_CASE("terminating with a turn in flight joins cleanly", "[session]") {
     CHECK(fixture->session->terminated());
 }
 
+TEST_CASE("terminating an idle session returns instead of deadlocking on a lost wakeup",
+          "[session][invariant]") {
+    // THE INVARIANT: Terminate() must wake a worker that is ALREADY PARKED on
+    // turn_cv_ with an empty queue -- the ordinary idle state between turns,
+    // not a turn in flight (the prior test) or a wedged subscriber queue
+    // (the next one). Terminate mutates terminated_ (via exchange, outside
+    // mutex_) and then notifies; if the worker evaluates the wait predicate
+    // (reading terminated_ == false) in the window between that exchange and
+    // the notify, it parks having already missed the wakeup and never wakes.
+    // Sleeping past WaitForIdleForTesting before calling Terminate maximizes
+    // the chance the worker is genuinely parked in cv.wait when Terminate
+    // runs, rather than still unwinding its own turn-boundary bookkeeping.
+    SessionFixture fixture;
+    fixture.Script(testing::TextResponse("hi"));
+    fixture.Start();
+
+    fixture.session->SubmitTurn("hello");
+    REQUIRE(fixture.session->WaitForIdleForTesting(5s));
+    std::this_thread::sleep_for(20ms);
+
+    auto terminated = testing::RunInBackground([&fixture] {
+        fixture.session->Terminate();
+        return true;
+    });
+    REQUIRE(terminated.WaitFor(5s));
+    CHECK(fixture.session->terminated());
+}
+
 TEST_CASE("terminating a session whose subscriber never drains returns instead of deadlocking",
           "[session][invariant]") {
     // THE INVARIANT (S5): Publish is drop-oldest and never blocks, so NO

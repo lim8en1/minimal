@@ -823,6 +823,15 @@ void Session::Terminate() {
     // exiting, and a session nobody is attached to loses its in-flight
     // injections by design.
     channels_->injections.Close();
+    // Empty locked section before the notify: the worker's wait predicate
+    // reads terminated_ under mutex_ (WorkerMain), and every write to the
+    // predicate above this point (terminated_.exchange, the two lines above)
+    // happened without that lock. Without this, the worker can evaluate the
+    // predicate (seeing terminated_ == false) strictly between the exchange
+    // and this notify, park on the condition variable having already missed
+    // it, and never wake -- the same lost-wakeup shape QueueInjectedMessage
+    // already guards against with an identical empty critical section.
+    { std::lock_guard<std::mutex> lock(mutex_); }
     turn_cv_.notify_all();
 
     // THE TERMINAL WIRE EVENT, published to every subscriber before closing
