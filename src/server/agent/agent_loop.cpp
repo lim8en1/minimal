@@ -1073,7 +1073,36 @@ void AgentLoop::RunTurnLoop(TurnResult& result, bool flush_first) {
         }
         pool_.Wait();
 
-        AppendAndPersist(llm::Message{llm::Role::User, std::move(results)});
+        try {
+            AppendAndPersist(llm::Message{llm::Role::User, std::move(results)});
+        } catch (...) {
+            // The assistant message carrying these tool_use blocks was
+            // already appended (and persisted) above. If persisting the
+            // paired results now fails (a store fault -- locked/full/corrupt
+            // database), history_ is left ending in unanswered tool_use: a
+            // hard 400 on both wire formats, on EVERY later turn, forever --
+            // this exception propagates past RunTurnLoop uncaught, and
+            // nothing else repairs the in-memory working set (only resume's
+            // LoadResumeSeed does, which requires a process restart).
+            //
+            // Best-effort in-memory repair, mirroring what the resume path
+            // already does for the identical shape (synthesize_missing_
+            // tool_results): synthesize error results so a live session
+            // survives to its NEXT turn instead of being poisoned by this
+            // one's store failure for the rest of its life. Guarded
+            // separately: RepairOrphanedToolUses itself calls
+            // AppendAndPersist, which can throw again if the store is still
+            // down -- that must not replace the ORIGINAL exception (the
+            // caller needs to know the store failed, not that the repair
+            // attempt also failed), and if the store call happens to
+            // succeed this time, the repair genuinely lands.
+            try {
+                RepairOrphanedToolUses(tool_uses);
+            } catch (...) {
+                // The store is what's failing; nothing more to do in memory.
+            }
+            throw;
+        }
 
         // Turn boundary: safe to splice in anything a background subagent
         // finished while this turn was running.
