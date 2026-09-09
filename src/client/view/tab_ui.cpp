@@ -220,8 +220,8 @@ void TabMaintenance::MaintainModals(const SessionState::Snapshot& snap) {
     }
 
     // The wire confirmation modal: same rebuild-on-new-request-id rule as
-    // the permission modal above. Both are never set at once (each Set
-    // clears the other in SessionState).
+    // the permission modal above. All three pending modals are never set at
+    // once (each Set clears the others in SessionState).
     if (snap.pending_confirmation.has_value()) {
         const auto& request = *snap.pending_confirmation;
         if (ui.confirmation_for_request != request.request_id) {
@@ -238,6 +238,27 @@ void TabMaintenance::MaintainModals(const SessionState::Snapshot& snap) {
         deps_.show_confirmation = true;
     } else {
         deps_.show_confirmation = false;
+    }
+
+    // The model's structured ask (tool-ask plugin): same rule again. The
+    // modal builds the whole AskUserResponse itself (it owns the per-question
+    // UI state the answers come from); Escape hands back an answered=false
+    // response, which AnswerAsk sends unchanged.
+    if (snap.pending_ask.has_value()) {
+        const auto& request = *snap.pending_ask;
+        if (ui.ask_for_request != request.request_id) {
+            ui.ask_for_request = request.request_id;
+            const auto session_id = snap.session_id;
+            const auto request_copy = request;
+            AppState& app = deps_.app;
+            *deps_.ask_child = MakeAskModal(request_copy, deps_.theme,
+                                            [&app, session_id](v1::AskUserResponse response) {
+                                                app.AnswerAsk(session_id, response);
+                                            });
+        }
+        deps_.show_ask = true;
+    } else {
+        deps_.show_ask = false;
     }
 }
 
@@ -262,6 +283,7 @@ void TabMaintenance::Run() {
         focused_details_ = SessionState::Snapshot{};
         deps_.show_permission = false;
         deps_.show_confirmation = false;
+        deps_.show_ask = false;
         return;
     }
     // ONE deep snapshot per pass: GetDetails is a full protobuf copy of the

@@ -41,4 +41,14 @@ ftxui::Component MakePermissionModal(const PendingPermission& request, GrantTogg
 ftxui::Component MakeConfirmationModal(const PendingConfirmation& request, const Theme& theme,
                                        std::function<void(std::string chosen)> on_answer);
 
+// The model's structured questions (tool-ask plugin): one modal, up to four
+// question blocks. `multiple` questions render checkboxes, single-pick
+// questions a radio list; `allow_other` questions get a "Type your own
+// answer" toggle with an input line. Enter submits whatever was answered (a
+// question left blank is simply not answered); Escape dismisses -- the
+// on_answer callback receives an `answered == false` response, which the
+// server turns into "user dismissed", never into a selection.
+ftxui::Component MakeAskModal(const PendingAsk& request, const Theme& theme,
+                              std::function<void(v1::AskUserResponse response)> on_answer);
+
 }  // namespace minimal::client

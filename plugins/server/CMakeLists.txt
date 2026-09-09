@@ -2,6 +2,7 @@
 
 add_subdirectory(tools-fs)
 add_subdirectory(tools-search)
+add_subdirectory(tool-ask)
 add_subdirectory(tools-bash)
 add_subdirectory(tools-web)
 add_subdirectory(tools-python)

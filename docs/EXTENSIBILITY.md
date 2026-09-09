@@ -59,6 +59,8 @@ Constraints that keep it safe:
 
 **Cost.** Low — one member, one producer, tests against an in-memory or SQLite reader.
 
+**Postscript — the pattern held.** This section's "optional member, filled per invocation by the agent loop, null when unavailable" became the template for every later `ToolContext` growth: background bash's three lifetime-safe handles (`schedule_injection` / `session_lifetime` / `emit_task_event` — DEVELOPMENT_PLAN §14), and now `ask_user` — the interactive ask the `tool-ask` plugin blocks on (ARCHITECTURE.md, "Asking the user"). Same three properties each time: plain-data types cross no agent-layer boundary, the handle is produced in the ctx-builder from session-owned wiring, and null is a degrade path the tool surfaces, never a hang.
+
 ### 2.2 No sanctioned cross-plugin channel
 
 **Status: landed as track L.** Implemented as specified, with the interface shaped as below and three implementation findings:

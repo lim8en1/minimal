@@ -36,6 +36,7 @@ TEST_CASE("FinishSessionWiring builds every default when no advisor is selected"
     REQUIRE(params.event_sink != nullptr);
     REQUIRE(params.permission_checker != nullptr);
     REQUIRE(params.confirmation_broker != nullptr);
+    REQUIRE(params.ask_broker != nullptr);
     REQUIRE(params.cancel_pending_requests != nullptr);
     REQUIRE(params.shutdown_pending_requests != nullptr);
     REQUIRE(params.close_transport != nullptr);

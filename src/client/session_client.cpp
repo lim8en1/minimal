@@ -351,6 +351,23 @@ grpc::Status SessionClient::RunTurn(
             std::lock_guard<std::mutex> lock(control->mu);
             stream->Write(answer);
         }
+        if (!half_closed && event.has_ask_request()) {
+            // A model question has no headless answer. Unlike the permission
+            // case above this is EXPECTED here (ask_user is ReadOnly, so no
+            // run mode gates it), and the decline is a real outcome: the
+            // broker maps answered=false onto "the user did not answer", a
+            // tool result the model adapts to. Never hang waiting for input
+            // that cannot come, and never invent a selection -- bypass's
+            // blind first-option answer is for destructive-command
+            // confirmations, not for putting opinions in the user's mouth.
+            v1::ClientEvent answer;
+            answer.set_session_id(session_id);
+            auto* response = answer.mutable_ask_response();
+            response->set_request_id(event.ask_request().request_id());
+            response->set_answered(false);
+            std::lock_guard<std::mutex> lock(control->mu);
+            stream->Write(answer);
+        }
         bool done = false;
         if (!half_closed) {
             // TurnCompletedEvent is the ONLY reliable end-of-turn signal. A
@@ -465,6 +482,19 @@ grpc::Status SessionClient::Attach(const std::string& session_id,
     v1::ServerEvent event;
     bool half_closed = false;
     while (stream->Read(&event)) {
+        if (!half_closed && event.has_ask_request()) {
+            // Same headless rule as RunTurn's: a model question has no
+            // headless answer, and a subagent asking on its own stream would
+            // block this whole run's teardown on input that cannot come.
+            // answered=false is a real outcome the model adapts to ("the
+            // user did not answer"), never an invented selection.
+            v1::ClientEvent answer;
+            answer.set_session_id(session_id);
+            auto* response = answer.mutable_ask_response();
+            response->set_request_id(event.ask_request().request_id());
+            response->set_answered(false);
+            stream->Write(answer);
+        }
         if (!half_closed && !on_event(event)) {
             // Consumer is done (a subagent's turn_completed is the ordinary
             // signal). Half-close, then keep reading to end of stream --

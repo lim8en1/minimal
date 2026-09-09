@@ -1,5 +1,7 @@
 #include "minimal/client/view/prompt_modal.hpp"
 
+#include <deque>
+
 #include <ftxui/component/event.hpp>
 #include <ftxui/dom/elements.hpp>
 #include <ftxui/screen/terminal.hpp>
@@ -239,6 +241,159 @@ ftxui::Component MakeConfirmationModal(const PendingConfirmation& request, const
                 return true;
             }
             return false;   // no cancel option: Escape is not an answer
+        }
+        return false;
+    });
+}
+
+// --- Ask modal (tool-ask plugin) --------------------------------------------
+
+namespace {
+
+// Ephemeral per-question UI state, owned by the component itself (shared_ptr,
+// captured by every closure): the modal is rebuilt only when request_id
+// changes, and RunTui passes per-frame snapshot members -- so, exactly like
+// the permission modal's request copy, the state must outlive the factory
+// call that built the checkboxes pointing into it.
+struct AskModalState {
+    struct QuestionState {
+        // Entry strings for the checkbox/radio labels: "label" or
+        // "label -- description". Stored here (not built per frame) because
+        // ftxui's ConstStringRef/ConstStringListRef borrow the storage.
+        std::vector<std::string> entries;
+        // multiple: one stable bool per option (deque, not vector<bool>:
+        // the checkboxes need stable bool* -- same rule as GrantToggles).
+        std::deque<bool> boxes;
+        // single: the radiobox's selected index, -1 = nothing picked.
+        int radio = -1;
+        bool use_other = false;
+        std::string other_text;
+    };
+    std::vector<QuestionState> questions;
+};
+
+v1::AskUserResponse CollectAnswer(const PendingAsk& request, const AskModalState& state) {
+    v1::AskUserResponse response;
+    response.set_request_id(request.request_id);
+    response.set_answered(true);
+    for (int i = 0; i < request.request.questions_size(); ++i) {
+        const auto& question = request.request.questions(i);
+        const auto& qs = state.questions[i];
+        auto* slot = response.add_answers();
+        if (qs.use_other && !qs.other_text.empty()) {
+            slot->set_other(qs.other_text);
+            continue;
+        }
+        if (question.multiple()) {
+            for (int j = 0; j < question.options_size(); ++j) {
+                if (qs.boxes[j]) slot->add_selected(question.options(j).label());
+            }
+        } else if (qs.radio >= 0 && qs.radio < question.options_size()) {
+            slot->add_selected(question.options(qs.radio).label());
+        }
+    }
+    return response;
+}
+
+v1::AskUserResponse DismissedAnswer(const PendingAsk& request) {
+    v1::AskUserResponse response;
+    response.set_request_id(request.request_id);
+    response.set_answered(false);
+    return response;
+}
+
+}  // namespace
+
+ftxui::Component MakeAskModal(const PendingAsk& request, const Theme& theme,
+                              std::function<void(v1::AskUserResponse response)> on_answer) {
+    using namespace ftxui;
+
+    // Same rule as the other two modals: the request is COPIED, the callback
+    // captured by value -- both are per-frame snapshot members.
+    const auto request_state = std::make_shared<PendingAsk>(request);
+    const auto state = std::make_shared<AskModalState>();
+    state->questions.resize(request_state->request.questions_size());
+
+    Components question_components;
+    for (int i = 0; i < request_state->request.questions_size(); ++i) {
+        const auto& question = request_state->request.questions(i);
+        auto& qs = state->questions[i];
+
+        if (question.multiple()) {
+            for (const auto& option : question.options()) {
+                std::string entry = option.label();
+                if (!option.description().empty()) entry += "  --  " + option.description();
+                qs.entries.push_back(entry);
+                qs.boxes.push_back(false);
+            }
+            Components boxes;
+            for (std::size_t j = 0; j < qs.entries.size(); ++j) {
+                CheckboxOption option_state;
+                option_state.label = ConstStringRef(qs.entries[j]);
+                option_state.checked = Ref<bool>(&qs.boxes[j]);
+                boxes.push_back(Checkbox(std::move(option_state)));
+            }
+            question_components.push_back(Container::Vertical(std::move(boxes)));
+        } else {
+            // Radiobox is the single-pick control: one stable index, no
+            // manual "uncheck the others" bookkeeping.
+            std::vector<std::string> entries;
+            for (const auto& option : question.options()) {
+                std::string entry = option.label();
+                if (!option.description().empty()) entry += "  --  " + option.description();
+                entries.push_back(entry);
+            }
+            qs.entries = std::move(entries);
+            RadioboxOption radio_state;
+            radio_state.entries = ConstStringListRef(&qs.entries);
+            radio_state.selected = &qs.radio;
+            question_components.push_back(Radiobox(std::move(radio_state)));
+        }
+
+        if (question.allow_other()) {
+            question_components.push_back(
+                Container::Vertical({Checkbox("Type your own answer", &qs.use_other),
+                                     Input(&qs.other_text, "your answer")}));
+        }
+    }
+    auto all = Container::Vertical(std::move(question_components));
+    const auto all_val = all;   // outlives the factory: by value
+    const auto interacted = std::make_shared<bool>(false);
+
+    auto body = Renderer(all, [all_val, request_state, state, &theme, interacted] {
+        const PendingAsk& ask = *request_state;
+        Elements rows;
+        rows.push_back(text("the assistant asks") | bold | color(theme.ColorFor("attention")));
+        for (int i = 0; i < ask.request.questions_size(); ++i) {
+            const auto& question = ask.request.questions(i);
+            if (i > 0) rows.push_back(separator());
+            if (!question.header().empty()) {
+                rows.push_back(text(question.header()) | bold);
+            }
+            rows.push_back(paragraph(question.question()));
+            rows.push_back(all_val->ChildAt(i)->Render());
+        }
+        if (!(*interacted)) {
+            rows[0] |= focus;   // the title anchors the viewport until first key
+        }
+        return window(text(" question "),
+                      PadHorizontal(vbox({
+                          vbox(std::move(rows)) | yframe | vscroll_indicator |
+                              size(HEIGHT, LESS_THAN, ModalBodyHeightBudget()),
+                          separator(),
+                          paragraph("enter: submit  ·  esc: dismiss  ·  tab/arrow: move") | dim,
+                      }))) |
+               size(WIDTH, LESS_THAN, 82) | color(theme.ColorFor("attention"));
+    });
+    return CatchEvent(body, [on_answer, request_state, state, interacted](const Event& event) {
+        *interacted = true;
+        if (event == Event::Return) {
+            on_answer(CollectAnswer(*request_state, *state));
+            return true;
+        }
+        if (event == Event::Escape) {
+            on_answer(DismissedAnswer(*request_state));
+            return true;
         }
         return false;
     });

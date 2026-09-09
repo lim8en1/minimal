@@ -81,6 +81,7 @@ add_library(minimal_server_core SHARED
     rpc/auth_interceptor.cpp
     rpc/wire_permission_checker.cpp
     rpc/wire_confirmation_broker.cpp
+    rpc/wire_ask_broker.cpp
     rpc/session_wiring.cpp
     rpc/session_service.cpp
     rpc/server.cpp

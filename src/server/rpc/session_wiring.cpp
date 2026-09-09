@@ -5,6 +5,7 @@
 #include "minimal/rpc/event_translator.hpp"
 #include "minimal/rpc/transport_channels.hpp"
 #include "minimal/rpc/wire_confirmation_broker.hpp"
+#include "minimal/rpc/wire_ask_broker.hpp"
 #include "minimal/rpc/wire_permission_checker.hpp"
 
 namespace minimal::rpc {
@@ -63,6 +64,9 @@ void FinishSessionWiring(agent::SessionParams& params) {
     params.confirmation_broker = std::make_unique<WireConfirmationBroker>(
         params.session_id, translator->queue(), translator->pending(),
         params.unattended_prompt_timeout);
+    params.ask_broker = std::make_unique<WireAskBroker>(params.session_id, translator->queue(),
+                                                        translator->pending(),
+                                                        params.unattended_prompt_timeout);
 }
 
 }  // namespace minimal::rpc

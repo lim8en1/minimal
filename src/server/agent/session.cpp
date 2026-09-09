@@ -76,6 +76,7 @@ Session::Session(SessionParams params, AgentPreset preset,
       // rpc::FinishSessionWiring for who builds the wire defaults.
       checker_(std::move(params_.permission_checker)),
       confirmations_(std::move(params_.confirmation_broker)),
+      ask_broker_(std::move(params_.ask_broker)),
       event_sink_(std::move(params_.event_sink)),
       transport_(std::move(params_.transport_handle)),
       shutdown_pending_requests_(std::move(params_.shutdown_pending_requests)),
@@ -138,6 +139,16 @@ Session::Session(SessionParams params, AgentPreset preset,
 
     context.injections = std::shared_ptr<InjectionQueue>(channels, &channels_->injections);
     context.session_lifetime = channels_;
+
+    // The interactive ask: the loop copies this into every ToolContext (see
+    // SessionContext::ask_user). Null broker leaves it null -- the tool
+    // degrades -- rather than wiring a call that would dereference nothing.
+    if (ask_broker_) {
+        tools::AskBroker& broker = *ask_broker_;
+        context.ask_user = [&broker](const tools::AskRequest& request) {
+            return broker.Ask(request);
+        };
+    }
 
     context.tool_output_sink = [sink = event_sink_](std::string_view tool_use_id,
                                                     std::string_view chunk) {
