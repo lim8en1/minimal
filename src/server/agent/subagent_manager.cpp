@@ -273,8 +273,19 @@ SubagentOutcome SubagentManager::Spawn(const SubagentRequest& request,
     } catch (const std::exception& e) {
         // Inserting first is what makes the database the id authority, but it
         // also means a construction failure would leave a message-less session
-        // in the picker forever. Same rollback as SessionServiceImpl.
-        db_.DeleteSession(row.session_id);
+        // in the picker forever. Same rollback as SessionServiceImpl -- guarded
+        // the same way: a delete failure here (locked/corrupt store) must not
+        // replace the real construction error with the rollback's own, and
+        // must not throw past this catch block into the tool-execution guard,
+        // which would report "failed unexpectedly" instead of the actual
+        // reason the spawn refused. The orphan stub row left behind on a
+        // failed delete is inert (no messages, nothing else references it).
+        try {
+            db_.DeleteSession(row.session_id);
+        } catch (const std::exception& rollback_error) {
+            logger_.warn("session {}: spawn rollback delete failed: {}", row.session_id,
+                         rollback_error.what());
+        }
         return SubagentOutcome::Error(e.what());
     }
     // The child is countable in ChildCount from here; give the ticket's place

@@ -1235,6 +1235,47 @@ TEST_CASE("an unknown preset refuses the spawn without creating anything",
     CHECK(TextOf(block).find("nonexistent") != std::string::npos);
 }
 
+TEST_CASE("an unresolvable spawn-time model rolls back the minted row without masking the error",
+          "[subagent][preset][invariant]") {
+    // Distinct from the "unknown preset" case above: an unresolvable PRESET
+    // fails before db_.CreateSession ever runs, so nothing exists to roll
+    // back. An unresolvable MODEL override fails inside
+    // SessionRegistry::CreateResolved, which SubagentManager::Spawn calls
+    // AFTER the row is already minted -- exercising the rollback
+    // db_.DeleteSession() call in Spawn's catch block. The guard around that
+    // call (added alongside this test) must not change what a caller sees:
+    // the ORIGINAL "unknown model" error, not a rollback-failure message, and
+    // no orphan row left behind.
+    SubagentFixture fixture;
+    fixture.Build();
+    auto parent = fixture.CreateParent();
+
+    auto* script = fixture.scripts["parent-script"].get();
+    script->Push(testing::ToolUseResponse(
+        "call-spawn", "spawn_subagent",
+        {{"task", "doomed"}, {"model", "main/nonexistent-model"}}));
+    script->Push(testing::TextResponse("parent done"));
+
+    parent->SubmitTurn("go");
+    REQUIRE(parent->WaitForIdleForTesting(10s));
+
+    CHECK(fixture.sessions->ChildCount(parent->info().session_id) == 0);
+    const auto page = fixture.db->GetMessagesPage(parent->info().session_id, std::nullopt, 50);
+    const auto& block =
+        std::get<llm::ToolResultBlock>(page.messages[1].message.content.front());
+    CHECK(block.is_error);
+    CHECK(TextOf(block).find("unknown model") != std::string::npos);
+
+    // No orphan child row survives the failed spawn.
+    session::ListSessionsFilter filter;
+    filter.include_subagents = true;
+    for (const auto& summary : fixture.db->ListSessions(filter)) {
+        if (summary.parent_session_id == parent->info().session_id) {
+            FAIL("an orphan child row survived a rolled-back spawn: " + summary.session_id);
+        }
+    }
+}
+
 TEST_CASE("a subagent gets no /-command surface", "[subagent][commands][invariant]") {
     // CROSS-FEATURE, and neither branch could have seen it: subagents and the
     // command system were built in parallel, and a child is constructed through
