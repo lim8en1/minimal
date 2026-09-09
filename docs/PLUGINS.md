@@ -27,7 +27,6 @@ Installed to `<libdir>/minimal/plugins/`. All enabled by default unless noted.
 | `checklist` | Tool `checklist` + cross-plugin RPC endpoint `checklist.rpc` |
 | `signals-message` | Tool `message_session` (cross-session messaging on the core `signals` service) |
 | `cost-tracker` | Commands `/cost`, `/cost-update-rates`; per-session cost accumulation; RPC endpoint `cost-tracker.rpc` |
-| `tools-windbg` | Tools `windbg`, `windbg_interrupt` — debugger commands against a remote **dbgd** server (dbg-cli). See [tools-windbg](#tools-windbg) below |
 | `session-titler` | Session observer that auto-titles sessions (~100 tokens/session spend). **Ships disabled** |
 
 ## Bundled client plugins (`plugins/client/`)
@@ -62,10 +61,11 @@ minimal_add_user_plugin(my-plugin plugin.cpp)
 Entries can be:
 
 - a **symlink** into your own plugin repo — how a repo holding both server and
-  client plugins registers (one link per plugin, in the matching subtree):
+  client plugins registers (one link per plugin, in the matching subtree).
+  `tools-windbg` is the worked example:
 
   ```sh
-  ln -s ../../my-plugins/server/my-plugin user-plugins/server/my-plugin
+  scripts/new-plugin.sh --link ../minimal-for-vulnerability-research/server/tools-windbg
   ```
 
 - a **git clone** of a third-party plugin repo (cloned directly into the tree;
@@ -245,21 +245,26 @@ deferred-completion handles on `ToolContext` (`emit_output`,
 acknowledges immediately, output streams to the operator live, the result
 reaches the model as an injected message at the next turn boundary, session
 death terminates the work, and cancelling the turn that started it does not.
-`tools-bash` (background tasks) and `tools-windbg` (remote debugger jobs)
-are the worked examples.
+`tools-bash` (background tasks) and `tools-windbg` (remote debugger jobs) are
+the worked examples — the latter lives in a user plugin repo (below), not the
+bundled set.
 
-### tools-windbg
+### tools-windbg (user plugin)
 
 The `windbg`/`windbg_interrupt` tools are a **client of a dbgd server**
 (dbg-cli): the debugger engine — DbgEng via pybag, with dbg-cli's worker
 isolation and dbgsrv/KDNET remoting — lives in the dbgd process on the
-debugger host; this plugin only speaks its HTTP/JSON protocol
+debugger host; the plugin only speaks its HTTP/JSON protocol
 (`/v1/sessions`, exec with the ack-within-grace → job pattern, job
 long-poll, the lease-free interrupt, `DELETE` on session end). Fast commands
 answer inside the grace window; slow ones become background tasks (above)
 whose watcher streams the job transcript and injects the verdict.
 
-Configure via the plugin's `config` object in `plugins.json`:
+It used to be bundled; it now lives in its own user plugin repo, registered
+through the `user-plugins/` tree (see "User plugins" above) — the reference
+example of the user plugin workflow, tests included. Configure via the
+plugin's `config` object in `plugins.json` (provenance `user`, so enable the
+entry once discovery records it):
 
 ```json
 { "file": "tools-windbg.so", "enabled": true,
