@@ -28,15 +28,13 @@ public:
         spec_.category = tools::ToolCategory::FileWrite;
         spec_.definition.name = spec_.name;
         spec_.definition.description =
-            "Send one signal to another session running on this server. The recipient "
-            "receives it at its next turn boundary as a <signal source=\"sessions\"> "
-            "message -- or, if it is idle and wakes on signals, immediately. The target "
-            "session id is required (children learn their parent's id at spawn; the "
-            "user can supply any other id). Only a session that subscribed to "
-            "\"sessions\" when it started will accept signals; delivery to one that "
-            "did not is dropped, and you will be told. Use this for coordination "
-            "between agents -- not for reminders to yourself: a signal to your own id "
-            "is refused, and a delayed self-nudge is a timer's job anyway.";
+            "Signal another session on this server. Delivery: at the recipient's next turn "
+            "boundary, or immediately if it is idle and wakes on signals. A session that "
+            "did not subscribe to signals at startup drops the message; you are told. "
+            "target_session is a session id, not a name (children learn their parent's id "
+            "at spawn). A signal to your own id is refused -- delayed self-reminders are a "
+            "timer's job. In content, say what happened and what, if anything, the "
+            "recipient should do.";
         spec_.definition.input_schema = {
             {"type", "object"},
             {"properties",

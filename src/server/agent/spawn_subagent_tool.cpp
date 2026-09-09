@@ -15,10 +15,10 @@ tools::ToolSpec MakeSpec() {
     spec.category = tools::ToolCategory::Execute;
     spec.definition.name = kSpawnSubagentToolName;
     spec.definition.description =
-        "Run a task in a child agent session. The child works with its own tools "
-        "and conversation; only its final message comes back to you. Use blocking "
-        "when you need the result to continue, non-blocking to keep working while "
-        "it runs (you are told when it finishes).";
+        "Run a task in a child agent session with its own context; only its final "
+        "message comes back to you. Use blocking when you need the result to "
+        "continue, non-blocking to keep working while it runs (you are told when it "
+        "finishes).";
     spec.definition.input_schema = nlohmann::json{
         {"type", "object"},
         {"properties",

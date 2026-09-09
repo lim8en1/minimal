@@ -496,7 +496,16 @@ public:
 
 **Write**: `{path, content}` → full create/overwrite; requires parent dir to exist (no silent mkdir).
 
-**Edit**: matches Anthropic's built-in `text_editor_20250728` vocabulary — `view` / `create` / `str_replace` (exact match, error unless exactly one occurrence) / `insert` — so an Anthropic provider can later be handed the native schema-less tool without changing file-mutation semantics.
+**Edit**: matches Anthropic's built-in `text_editor_20250728` vocabulary — `view` / `create` / `str_replace` (exact match, error unless exactly one occurrence) / `insert` — so an Anthropic provider can later be handed the native schema-less tool without changing file-mutation semantics. `view` is kept despite overlapping `read` (and despite the tool description steering plain reads toward `read`): it is part of that vocabulary — models are post-trained on it, so removing it pushes their behavior out-of-distribution and breaks the native-tool handoff plan — and `category_for` reports it ReadOnly, so it costs no permission friction. The overlap is rendered harmless by the steering clause, not resolved by deletion.
+
+**Tool descriptions follow a four-category discipline** — every clause in a tool prompt must be one of these, and clauses that are not are filler:
+
+1. **In-distribution mechanics** — what models already know from post-training (bash semantics, what grep does, the text_editor vocabulary, "a subagent has its own context"). Say nothing here unless the sentence is ≤1 line of hedging; teaching the concept is wasted tokens re-sent on every request.
+2. **Project-specific semantics** — training cannot know these (cwd/env persist across bash calls, background results arrive at a turn boundary, `write` creates parent dirs, `search` needs a configured backend, `max_turns 0` = unbounded). This is the irreplaceable core; must be explicit.
+3. **Known-but-violated** — models know the rule in the abstract but violate it under load (subagent `task` must be self-contained, prefer piping over dumping logs, `ask_user` is not for facts you can look up). Keep despite being "taught": the failure is drift, not ignorance.
+4. **Contracts and numbers** — exact syntax (RE2's no-backreference limit), defaults, caps (1–4 questions, `head_limit` 200). Must be explicit; cheaper than the error round-trip.
+
+A corollary the descriptions honor: a fact lives in **one** place — the tool description or the parameter description, not both. Where a behavior has a dedicated parameter (`run_in_background`, `timeout`, `clean`), the parameter description is the sole home for its narrative and the tool description keeps only the routing hook. Where a behavior has a dedicated companion tool (`python_output`, `python_input`), it is not restated in `python_exec` at all. When a prompt and an error message could carry a fact, the error wins when the fact only matters after a failure (write's byte ceiling: "build the file with a shell command instead" teaches it adaptively), and the prompt wins when the model should route around the failure before paying for an attempt.
 
 **Bash**: **commands run through `/bin/sh -c`.** Pipes, redirection, `&&`, `||`, globs and `$VAR` all work, and that is load-bearing rather than a convenience: without a pipe, `convert_to_json.py big.csv | jq '.rows[0]'` has to round-trip the entire CSV through the context window, so forbidding pipes makes the harness *less* token-efficient — the one thing it exists to be.
 

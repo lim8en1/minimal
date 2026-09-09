@@ -69,27 +69,12 @@ public:
         spec_.category = tools::ToolCategory::Execute;
         spec_.definition.name = "python_exec";
         spec_.definition.description =
-            "Run code in this session's persistent Python interpreter (state survives across "
-            "calls and turns: globals, imports, live connections).\n"
-            "timeout (seconds, default 0): 0 runs ASYNC -- returns 'py-N started' immediately "
-            "and the result arrives as a tool result before your next reply. timeout > 0 waits "
-            "synchronously up to that many seconds; if the code is still running at the "
-            "deadline, the wait converts to async and the result still arrives later -- a "
-            "sync wait never kills anything.\n"
-            "max_runtime (seconds, default unlimited): the request's own deadline, counted "
-            "from when it starts running (queue time excluded). On expiry the request is "
-            "interrupted; if it ignores the interrupt, the whole interpreter is hard-killed "
-            "and its state is LOST -- the only timer that destroys anything.\n"
-            "clean (default false): kill the current interpreter and run in a fresh one. The "
-            "other way state is lost (your explicit choice), and the recovery for a wedged "
-            "interpreter (e.g. a stuck non-interruptible C call).\n"
-            "stdin: a blocking input() parks the code until python_input feeds it; interrupt "
-            "with python_interrupt.\n"
-            "A long-running async request occupies the interpreter: later requests queue "
-            "behind it (reported as 'queued behind N'). Use python_output to poll progress "
-            "and partial stdout, python_interrupt to stop one.\n"
-            "The environment is shared per-project: <project_root>/.venv, created on demand "
-            "when the agent preset declares packages. All times are SECONDS.";
+            "Run code in this session's persistent Python interpreter: state (globals, "
+            "imports, live connections) survives across calls and turns. Companions: "
+            "python_output (poll background work), python_interrupt (stop one), "
+            "python_input (feed stdin). Environment is shared per-project: "
+            "<project_root>/.venv, created on demand when the agent preset declares "
+            "packages. All times are SECONDS.";
         spec_.definition.input_schema = nlohmann::json{
             {"type", "object"},
             {"properties",
@@ -100,19 +85,25 @@ public:
               {"timeout",
                {{"type", "integer"},
                 {"description",
-                 "Seconds to wait for a result. 0 (default) = async: return immediately, "
-                 "result delivered before your next reply. >0 = wait up to N seconds, then "
-                 "convert to async."}}},
+                 "Seconds to wait for a result. 0 (default) = async: returns 'py-N started' "
+                 "immediately; the result arrives as a tool result before your next reply. "
+                 ">0 = wait synchronously up to N seconds; if the code is still running at "
+                 "the deadline, the wait converts to async -- a sync wait never kills "
+                 "anything."}}},
               {"max_runtime",
                {{"type", "integer"},
                 {"description",
-                 "Deadline for the request itself, from run start (0 or omitted = "
-                 "unlimited). On expiry: interrupt, then hard-kill the interpreter if the "
-                 "code ignores it -- state is lost."}}},
+                 "Deadline for the request itself, counted from when it starts running "
+                 "(queue time excluded; 0 or omitted = unlimited). On expiry the request is "
+                 "interrupted; if it ignores the interrupt, the whole interpreter is "
+                 "hard-killed and its state is LOST -- the only timer that destroys "
+                 "anything."}}},
               {"clean",
                {{"type", "boolean"},
-                {"description", "Restart the interpreter before running: all previous state is "
-                                "discarded (explicit, and the only way state is lost)."}}}}},
+                {"description", "Restart the interpreter before running: all previous state "
+                                "is discarded (your explicit choice -- the recovery for a "
+                                "wedged interpreter, e.g. a stuck non-interruptible C "
+                                "call)."}}}}},
             {"required", {"code"}}};
     }
 

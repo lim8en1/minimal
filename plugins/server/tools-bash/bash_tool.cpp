@@ -160,15 +160,12 @@ public:
         spec_.category = ToolCategory::Execute;
         spec_.definition.name = spec_.name;
         spec_.definition.description =
-            "Run a shell command. Pipes, redirection, &&, ||, ;, globs and $VAR all work -- "
-            "prefer piping to a filter (`| tail -50`, `| grep -i error`) over returning a huge "
-            "log, since everything returned enters the context. The working directory and "
-            "environment PERSIST across calls: use `cd` and `export` normally, and pass "
-            "restart=true to reset both. stdout and stderr are returned together; very long "
-            "output is truncated in the middle; a non-zero exit status is an error. Set "
-            "run_in_background=true for long-running commands: the call returns immediately "
-            "with a task id, the result is reported automatically at a later turn boundary, "
-            "and the process is killed when the session ends.";
+            "Run a shell command. Prefer piping to a filter (`| tail -50`, `| grep -i error`) "
+            "over returning a huge log, since everything returned enters the context. The "
+            "working directory and environment PERSIST across calls: use `cd` and `export` "
+            "normally, and pass restart=true to reset both. stdout and stderr are returned "
+            "together; very long output is truncated in the middle; a non-zero exit status is "
+            "an error. Set run_in_background=true for long-running commands.";
         spec_.definition.input_schema = {
             {"type", "object"},
             {"properties",
@@ -184,10 +181,11 @@ public:
               {"run_in_background",
                {{"type", "boolean"},
                 {"description",
-                 "Run without waiting. Returns a task id and pid immediately; the output "
-                 "arrives at a turn boundary when the command finishes. To read output "
-                 "mid-run, redirect it to a file in the command itself. Kill the whole "
-                 "process group with: kill -- -PID"}}}}},
+                 "Run without waiting. Returns a task id and pid immediately; the result is "
+                 "reported automatically at a turn boundary when the command finishes, and "
+                 "the task is killed when the session ends. To read output mid-run, redirect "
+                 "it to a file in the command itself. Kill the whole process group with: "
+                 "kill -- -PID"}}}}},
             {"required", nlohmann::json::array({"command"})}};
     }
 
