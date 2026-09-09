@@ -1006,29 +1006,58 @@ MessagePage SessionDatabase::GetMessagesPage(const std::string& session_id,
 }
 
 std::vector<StoredMessage> SessionDatabase::LoadMessages(const std::string& session_id) const {
-    // Ascending, no limit: the caller (resume) needs the whole working history
-    // in order. Same strict decode as the paging path -- an undecodable row is
-    // corruption or a newer binary's work, and must surface as an error rather
-    // than as a silently truncated history that would then be re-persisted.
-    std::vector<RawRow> rows;
-    {
-        std::lock_guard lock(mu_);
-        CachedStmt query(db_, prepared_,
-                         "SELECT seq, content_json, token_count, created_at FROM messages"
-                         " WHERE session_id = ?1 AND discarded = 0 ORDER BY seq ASC;",
-                         "failed to load messages");
-        sqlite3_bind_text(query.stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
-        // THE RESUME PATH, and the most damaging place to return short: a
-        // partial read becomes the loop's working history while
-        // SqliteHistoryStore keeps appending at MAX(seq) + 1, so the session
-        // runs on a transcript with a hole in it and nothing ever says so.
-        rows = CollectRows(query.stmt, db_, "failed to load messages");
-    }
+    // Ascending, no limit on the RESULT: the caller (resume) needs the whole
+    // working history in order. Same strict decode as the paging path -- an
+    // undecodable row is corruption or a newer binary's work, and must
+    // surface as an error rather than as a silently truncated history that
+    // would then be re-persisted.
+    //
+    // CHUNKED, not one unbounded SELECT: mu_ is the one lock every session's
+    // appends and reads serialize on. A never-compacted session resuming at
+    // this project's stated 512k-1M-token scale is exactly the load whose
+    // single-query form held that lock -- and stalled every OTHER session's
+    // in-flight turn -- for the time it took to walk and collect the entire
+    // transcript. Releasing the lock between chunks lets a long resume
+    // interleave with other sessions' appends instead of blocking them for
+    // its whole duration; each chunk still collects its rows under the lock
+    // (CollectRows is a caller-holds-mu_ contract), and only the JSON decode
+    // -- the expensive half -- runs outside it, exactly as the unchunked
+    // version already did.
+    constexpr std::int64_t kChunkRows = 500;
+    std::vector<StoredMessage> out;
+    std::int64_t after_seq = -1;  // exclusive cursor; -1 selects from the start
+    while (true) {
+        std::vector<RawRow> rows;
+        {
+            std::lock_guard lock(mu_);
+            CachedStmt query(db_, prepared_,
+                             "SELECT seq, content_json, token_count, created_at FROM messages"
+                             " WHERE session_id = ?1 AND discarded = 0 AND seq > ?2"
+                             " ORDER BY seq ASC LIMIT ?3;",
+                             "failed to load messages");
+            sqlite3_bind_text(query.stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_int64(query.stmt, 2, after_seq);
+            sqlite3_bind_int64(query.stmt, 3, kChunkRows);
+            // THE RESUME PATH, and the most damaging place to return short: a
+            // partial read becomes the loop's working history while
+            // SqliteHistoryStore keeps appending at MAX(seq) + 1, so the
+            // session runs on a transcript with a hole in it and nothing
+            // ever says so.
+            rows = CollectRows(query.stmt, db_, "failed to load messages");
+        }
+        if (rows.empty()) break;
+        after_seq = rows.back().seq;
+        const bool full_chunk = static_cast<std::int64_t>(rows.size()) == kChunkRows;
 
-    // Decode OUTSIDE the lock. The JSON parse is the expensive part of a large
-    // resume, and holding the one database mutex through it would stall every
-    // other session's appends and reads for the whole load.
-    return DecodeRows(std::move(rows));
+        // Decode OUTSIDE the lock. The JSON parse is the expensive part of a
+        // large resume, and holding the one database mutex through it would
+        // stall every other session's appends and reads for the whole load.
+        auto decoded = DecodeRows(std::move(rows));
+        out.insert(out.end(), std::make_move_iterator(decoded.begin()),
+                  std::make_move_iterator(decoded.end()));
+        if (!full_chunk) break;  // a short chunk is the last one
+    }
+    return out;
 }
 
 std::int64_t SessionDatabase::LastMessageSeq(const std::string& session_id) const {
