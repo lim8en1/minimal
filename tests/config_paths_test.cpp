@@ -1,6 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <cstdlib>
+#include <stdexcept>
 #include <string>
 
 #include "minimal/common/config_paths.hpp"
@@ -87,4 +88,50 @@ TEST_CASE("a RELATIVE XDG value is rejected, not resolved against the cwd",
     ScopedEnv home("HOME", "/tmp/home");
     CHECK(ConfigDir() == "/tmp/home/.config/minimal");
     CHECK(DataDir() == "/tmp/home/.local/share/minimal");
+}
+
+TEST_CASE("a RELATIVE override is rejected too, the same as a relative XDG value",
+          "[config_paths][invariant]") {
+    // MINIMAL_CONFIG_DIR/MINIMAL_DATA_DIR are resolved by both the client and a
+    // spawned server (chdir'd to /), so a relative override reproduces exactly
+    // the two-directories problem the XDG guard above exists to prevent.
+    ScopedEnv override_config("MINIMAL_CONFIG_DIR", "relative/config");
+    ScopedEnv override_data("MINIMAL_DATA_DIR", "relative/data");
+    ScopedEnv xdg_config("XDG_CONFIG_HOME", nullptr);
+    ScopedEnv xdg_data("XDG_DATA_HOME", nullptr);
+    ScopedEnv home("HOME", "/tmp/home");
+    CHECK(ConfigDir() == "/tmp/home/.config/minimal");
+    CHECK(DataDir() == "/tmp/home/.local/share/minimal");
+}
+
+TEST_CASE("HOME unset does not stop an absolute XDG_CONFIG_HOME from answering",
+          "[config_paths][invariant]") {
+    // The home-based fallback used to be built EAGERLY (HomeOrThrow() / ".config"
+    // computed as XdgDirOr's argument, before XdgDirOr got a chance to look at
+    // the env var), so a $HOME-less environment (a systemd unit with no User=,
+    // a scratch container) threw "$HOME is unset" even when XDG_CONFIG_HOME
+    // fully answered the question. main() calls ConfigDir() with no try/catch,
+    // so this used to be an uncaught std::terminate.
+    ScopedEnv override_dir("MINIMAL_CONFIG_DIR", nullptr);
+    ScopedEnv xdg("XDG_CONFIG_HOME", "/tmp/xdg-no-home");
+    ScopedEnv home("HOME", nullptr);
+    CHECK(ConfigDir() == "/tmp/xdg-no-home/minimal");
+}
+
+TEST_CASE("HOME unset does not stop an absolute XDG_DATA_HOME from answering",
+          "[config_paths][invariant]") {
+    ScopedEnv override_dir("MINIMAL_DATA_DIR", nullptr);
+    ScopedEnv xdg("XDG_DATA_HOME", "/tmp/xdg-data-no-home");
+    ScopedEnv home("HOME", nullptr);
+    CHECK(DataDir() == "/tmp/xdg-data-no-home/minimal");
+}
+
+TEST_CASE("HOME unset still throws when nothing else answers", "[config_paths][invariant]") {
+    // The lazy fallback only defers evaluating $HOME; it must still throw
+    // once every other candidate (the override, an absolute XDG value) has
+    // been tried and failed to answer.
+    ScopedEnv override_dir("MINIMAL_CONFIG_DIR", nullptr);
+    ScopedEnv xdg("XDG_CONFIG_HOME", nullptr);
+    ScopedEnv home("HOME", nullptr);
+    CHECK_THROWS_AS(ConfigDir(), std::runtime_error);
 }

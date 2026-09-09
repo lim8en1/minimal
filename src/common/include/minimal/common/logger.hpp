@@ -38,7 +38,17 @@ public:
     }
 
 private:
-    static std::shared_ptr<spdlog::logger> current() { return spdlog::default_logger(); }
+    // default_logger_raw(), not default_logger(): the latter takes spdlog's
+    // registry-wide mutex and copies a shared_ptr on every single call, ahead
+    // of the level check inside logger->debug() -- so a filtered-out debug()
+    // at a hot call site (the agent loop, tool executors, stream readers)
+    // still serializes every thread in the process on one lock for output
+    // that is then discarded. default_logger_raw() is what spdlog's own free
+    // functions (spdlog::info, etc.) use, and is exactly as safe here: nothing
+    // is meant to log before ConfigureLogging installs the real logger (see
+    // logging_setup.hpp), so there is no "resolve before the swap" window to
+    // race.
+    static spdlog::logger* current() { return spdlog::default_logger_raw(); }
 };
 
 // The process-wide instance. Stateless: what it logs TO follows whatever

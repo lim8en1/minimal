@@ -55,12 +55,30 @@ extern "C" {
 
 // REQUIRED. A plugin missing any of these is skipped, not loaded.
 //
-// Implement abi_tag by returning minimal::common::AbiTag() -- returning a
-// literal defeats the guard, since the point is to report the toolchain this
-// binary was actually built with.
+// Implement these with MINIMAL_CLIENT_PLUGIN_ABI_SYMBOLS below, not by hand --
+// see the server twin's identical comment (plugin_abi.h) for why a handwritten
+// `return minimal::common::AbiTag();` is silently wrong: minimal_common is
+// STATIC, linked PUBLIC into the SHARED minimal_client_core, so a plugin's
+// undefined reference to AbiTag() binds at dlopen time to the running host's
+// copy, not to anything baked into the plugin. The macro instead expands the
+// compile-time MINIMAL_ABI_TAG/MINIMAL_VERSION macros, which the compiler
+// bakes into the plugin's own object code.
 const char* minimal_client_plugin_abi_tag();
 const char* minimal_client_plugin_name();
 const char* minimal_client_plugin_version();
+
+}  // extern "C"
+
+// Defines the three REQUIRED symbols above. Every client plugin should use
+// this instead of writing them by hand. Invoke once, at file scope, in the
+// plugin's .cpp (the three declarations above already gave these C linkage,
+// so no `extern "C"` is needed at the call site).
+#define MINIMAL_CLIENT_PLUGIN_ABI_SYMBOLS(plugin_name_literal)                          \
+    const char* minimal_client_plugin_abi_tag() { return MINIMAL_ABI_TAG; }             \
+    const char* minimal_client_plugin_name() { return (plugin_name_literal); }          \
+    const char* minimal_client_plugin_version() { return MINIMAL_VERSION; }
+
+extern "C" {
 
 // OPTIONAL, additive: self-contained views (panel or modal).
 void minimal_client_plugin_register_views(

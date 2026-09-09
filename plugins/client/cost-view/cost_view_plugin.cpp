@@ -191,9 +191,7 @@ private:
 
 extern "C" {
 
-const char* minimal_client_plugin_abi_tag() { return minimal::common::AbiTag(); }
-const char* minimal_client_plugin_name() { return "cost-view"; }
-const char* minimal_client_plugin_version() { return minimal::common::Version(); }
+MINIMAL_CLIENT_PLUGIN_ABI_SYMBOLS("cost-view")
 
 void minimal_client_plugin_register_status_segments(
     plugins::StatusSegmentRegistry& registry,

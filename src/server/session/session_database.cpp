@@ -361,7 +361,11 @@ SessionDatabase::SessionDatabase(const std::filesystem::path& db_path, const Ope
     // the umask (0644&~umask); sqlite3_open then finds the existing inode. A
     // failure here falls through to sqlite3_open's own error handling below
     // rather than masking it. The -wal/-shm sidecars inherit this mode.
-    if (const int fd = ::open(path_.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0600); fd >= 0) {
+    // O_NOFOLLOW: a symlink planted at path_ before this runs must not cause an
+    // 0600-owner-only create to land on some other file the caller does not
+    // control -- the same reasoning behind ExclusiveFileLock's O_NOFOLLOW.
+    if (const int fd = ::open(path_.c_str(), O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
+        fd >= 0) {
         ::close(fd);
     }
 

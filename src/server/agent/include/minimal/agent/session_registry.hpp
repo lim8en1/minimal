@@ -146,7 +146,10 @@ public:
     // warning, never fatal: losing the cheap summarizer is a cost regression,
     // not a broken harness).
     void set_small_model(const std::string& provider_model) {
-        const auto ref = common::ParseModelRef(provider_model);
+        // SplitModelRef: small_model is a user-facing settings.json field like
+        // default_model, and must accept a discovered catalog's slash-bearing
+        // model id the same way --model/`/model` do.
+        const auto ref = common::SplitModelRef(provider_model);
         if (!ref) {
             common::DefaultLogger().warn("settings.small_model '{}' is not a <provider>/<model> "
                                          "reference; compaction uses each session's own model",

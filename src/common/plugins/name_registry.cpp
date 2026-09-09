@@ -37,28 +37,60 @@ NameRegistry::Result NameRegistry::Resolve() const {
         const std::unordered_map<std::string, std::string>* kind_aliases =
             (alias_it != aliases_.end()) ? &alias_it->second : nullptr;
 
-        std::unordered_map<std::string, int> original_name_counts;
-        for (const auto& e : kind_entries) ++original_name_counts[e.original_name];
+        // First pass: resolve each entry's alias (if any). permission_key
+        // ambiguity is judged on UNALIASED original_name counts, not raw ones
+        // -- an entry that keeps its original_name as its surface is still
+        // addressed by that bare name, but one that has been aliased away
+        // already has a distinct identity (its alias, or failing that its
+        // stable identity) and no longer needs to reserve the bare name for
+        // itself. Without this split, aliasing away one half of a collision
+        // (the documented remedy -- see SetAlias) permanently qualified the
+        // OTHER half's permission_key too, because both entries still share
+        // the same literal original_name: a pre-existing `permissions:
+        // {"read": "deny"}` rule for a built-in "read" tool stopped matching
+        // the moment an unrelated plugin registered a colliding "read" and the
+        // operator aliased the plugin's copy away, even though only one tool
+        // still answers to "read" at all afterward.
+        struct Resolved {
+            std::string stable_identity;
+            std::string surface_name;
+            bool aliased;
+        };
+        std::vector<Resolved> resolved;
+        resolved.reserve(kind_entries.size());
+        std::unordered_map<std::string, int> unaliased_name_counts;
+        for (const auto& e : kind_entries) {
+            std::string stable_identity = StableIdentity(e.plugin_name, e.original_name);
+            std::string surface_name = e.original_name;
+            bool aliased = false;
+            if (kind_aliases) {
+                if (auto it = kind_aliases->find(stable_identity); it != kind_aliases->end()) {
+                    surface_name = it->second;
+                    aliased = true;
+                }
+            }
+            if (!aliased) ++unaliased_name_counts[e.original_name];
+            resolved.push_back({std::move(stable_identity), std::move(surface_name), aliased});
+        }
 
         std::unordered_map<std::string, int> surface_name_counts;
         std::vector<ResolvedEntry> kind_resolved;
         kind_resolved.reserve(kind_entries.size());
 
-        for (const auto& e : kind_entries) {
-            const std::string stable_identity = StableIdentity(e.plugin_name, e.original_name);
+        for (std::size_t i = 0; i < kind_entries.size(); ++i) {
+            const auto& e = kind_entries[i];
+            const auto& r = resolved[i];
 
-            std::string surface_name = e.original_name;
-            if (kind_aliases) {
-                if (auto it = kind_aliases->find(stable_identity); it != kind_aliases->end()) {
-                    surface_name = it->second;
-                }
-            }
-
+            // Bare only when this entry both kept its original_name as its
+            // surface AND no other unaliased entry claims the same
+            // original_name; an aliased entry, or one still colliding with
+            // another unaliased entry, gets its stable identity instead.
             const std::string permission_key =
-                (original_name_counts[e.original_name] > 1) ? stable_identity : e.original_name;
+                (!r.aliased && unaliased_name_counts[e.original_name] <= 1) ? e.original_name
+                                                                            : r.stable_identity;
 
-            ++surface_name_counts[surface_name];
-            kind_resolved.push_back({stable_identity, surface_name, permission_key});
+            ++surface_name_counts[r.surface_name];
+            kind_resolved.push_back({r.stable_identity, r.surface_name, permission_key});
         }
 
         for (const auto& [surface, count] : surface_name_counts) {

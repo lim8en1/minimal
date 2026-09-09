@@ -15,16 +15,20 @@ namespace minimal::common {
 // on an open fd for the lifetime of this object; the holder's pid is recorded
 // in the file for diagnostics. fcntl locks die with the process, so a crash
 // leaves no staleness to clean up. O_CLOEXEC keeps the fd out of every child
-// (the bash tool, hook shells, MCP servers). After acquiring, the lock's
-// identity is verified against the path -- fstat(open fd) vs stat(path), inode
-// and device -- because a lock file unlinked and recreated mid-acquire would
-// otherwise yield two processes locking two different inodes (two writers, one
-// database); a mismatch releases and retries, bounded.
+// (the bash tool, hook shells, MCP servers), and O_NOFOLLOW keeps the
+// truncating write off the far end of a symlink someone else planted. After
+// acquiring, the lock's identity is verified against the path -- fstat(open fd)
+// vs lstat(path), inode and device -- because a lock file unlinked and
+// recreated mid-acquire would otherwise yield two processes locking two
+// different inodes (two writers, one database); a mismatch releases and
+// retries, bounded.
 //
 // Refusal names the holder: construction throws when the lock is held --
-// either by another process (fcntl refuses; the pid is read from the lock
-// file, best-effort) or by this process itself (an in-process registry, since
-// fcntl locks do not conflict with themselves across fds).
+// either by another process (fcntl refuses with EACCES/EAGAIN; the pid is read
+// from the lock file, best-effort) or by this process itself (an in-process
+// registry, since fcntl locks do not conflict with themselves across fds). Any
+// OTHER fcntl errno is a filesystem that cannot lock (ENOLCK on NFS, and so
+// on) and is reported as itself, not as contention.
 class ExclusiveFileLock {
 public:
     // Throws std::runtime_error when the lock is held. db_path is the

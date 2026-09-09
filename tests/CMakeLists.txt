@@ -33,7 +33,9 @@ add_executable(minimal_tests
     cancel_token_test.cpp
     sidecar_test.cpp
     config_paths_test.cpp
+    file_lock_test.cpp
     logger_test.cpp
+    sqlite_util_test.cpp
     tool_executor_test.cpp
     agent_loop_test.cpp
     http_client_test.cpp

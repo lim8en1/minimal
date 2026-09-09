@@ -176,12 +176,36 @@ extern "C" {
 
 // REQUIRED. A plugin missing any of these is skipped with MissingRequiredSymbol.
 //
-// Implement abi_tag by returning minimal::common::AbiTag() -- returning a
-// literal defeats the guard, since the point is to report the toolchain this
-// binary was actually built with.
+// Implement these with MINIMAL_PLUGIN_ABI_SYMBOLS below, not by hand: a
+// handwritten `return minimal::common::AbiTag();` LOOKS like it reports the
+// toolchain the plugin was built with, but does not. minimal_common is a
+// STATIC library linked PUBLIC into the SHARED server/client core, which
+// re-exports minimal::common::AbiTag(); a plugin's undefined reference to it
+// binds at dlopen time to the ALREADY-RUNNING HOST's copy, not to anything
+// baked into the plugin -- so the guard compares the host's tag against
+// itself and always passes, even for a plugin built against a since-changed
+// harness revision whose stale .so sits in the plugin dir. The macro instead
+// expands the compile-time MINIMAL_ABI_TAG/MINIMAL_VERSION macros (PUBLIC
+// compile definitions on minimal_common, see src/common/CMakeLists.txt),
+// which the compiler bakes into the plugin's own object code, so the reported
+// tag is the plugin's, not the host's.
 const char* minimal_plugin_abi_tag();
 const char* minimal_plugin_name();
 const char* minimal_plugin_version();
+
+}  // extern "C"
+
+// Defines the three REQUIRED symbols above. Every server plugin should use
+// this instead of writing them by hand -- see the comment above for why a
+// handwritten abi_tag is silently wrong. Invoke once, at file scope, in the
+// plugin's .cpp (the three declarations above already gave these C linkage,
+// so no `extern "C"` is needed at the call site).
+#define MINIMAL_PLUGIN_ABI_SYMBOLS(plugin_name_literal)                                 \
+    const char* minimal_plugin_abi_tag() { return MINIMAL_ABI_TAG; }                    \
+    const char* minimal_plugin_name() { return (plugin_name_literal); }                 \
+    const char* minimal_plugin_version() { return MINIMAL_VERSION; }
+
+extern "C" {
 
 // OPTIONAL, additive: many plugins may each contribute tools. The context
 // carries the verbatim `tools` object from settings.json AND this plugin's own

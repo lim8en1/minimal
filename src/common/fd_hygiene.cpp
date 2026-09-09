@@ -28,7 +28,10 @@ std::size_t MarkInheritedFdsCloseOnExec() {
         const int flags = ::fcntl(static_cast<int>(fd), F_GETFD);
         if (flags < 0) continue;  // closed between the listing and now
         if ((flags & FD_CLOEXEC) != 0) continue;
-        ::fcntl(static_cast<int>(fd), F_SETFD, flags | FD_CLOEXEC);
+        // Only counted on success: a failed F_SETFD leaves the descriptor
+        // exactly as inheritable as before, and the count feeds a startup log
+        // line callers read as "this many descriptors are now secured".
+        if (::fcntl(static_cast<int>(fd), F_SETFD, flags | FD_CLOEXEC) != 0) continue;
         ++marked;
     }
     ::closedir(dir);

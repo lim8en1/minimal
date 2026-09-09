@@ -146,14 +146,24 @@ std::vector<CheckResult> StartupSanityCheck::check_config_files() {
     }
 
     // plugins.json degrades to empty BY DESIGN -- but a silently degraded file
-    // is exactly what this check exists to make loud.
-    const auto plugins_text = common::ReadFileOrEmpty(dir / "plugins.json");
-    if (!plugins_text.empty()) {
-        const auto probe = nlohmann::json::parse(plugins_text, nullptr, /*allow_exceptions=*/false);
-        if (probe.is_discarded() || !probe.is_object()) {
-            results.push_back(Warning("config_parse", "plugins.json is malformed; treating it as empty "
-                                                       "(discovered plugins keep their provenance defaults)"));
+    // is exactly what this check exists to make loud. ReadFileOrEmpty can
+    // throw now too (an oversize or unreadable file), and this call used to
+    // sit outside a try: uncaught, that propagates out of RunAll() to
+    // std::terminate, skipping every check still queued below it -- the same
+    // regression shape the hooks.json handler above already guards against.
+    try {
+        const auto plugins_text = common::ReadFileOrEmpty(dir / "plugins.json");
+        if (!plugins_text.empty()) {
+            const auto probe =
+                nlohmann::json::parse(plugins_text, nullptr, /*allow_exceptions=*/false);
+            if (probe.is_discarded() || !probe.is_object()) {
+                results.push_back(
+                    Warning("config_parse", "plugins.json is malformed; treating it as empty "
+                                            "(discovered plugins keep their provenance defaults)"));
+            }
         }
+    } catch (const std::exception& e) {
+        results.push_back(Fatal("config_parse", std::string("plugins.json: ") + e.what()));
     }
 
     // A broken mcps.json degrades to "no MCP servers" plus a warning: MCP is an
@@ -197,8 +207,15 @@ std::vector<CheckResult> StartupSanityCheck::check_providers() {
     std::unordered_map<std::string, bool> backend_reported;
 
     for (const auto& ref_text : refs) {
-        const auto ref = common::ParseModelRef(ref_text);
-        if (!ref) continue;  // ParseProvidersConfig rejects these already
+        // SplitModelRef, not ParseModelRef: ref_text is ModelRef::str() of an
+        // entry from providers_.ModelRefs(), which includes discovered models
+        // whose id can itself contain a slash (e.g. an OpenRouter model under
+        // provider "openrouter") -- ParseModelRef rejected those outright, so
+        // this check silently skipped validating every backend-registration
+        // for a discovered slash-bearing model instead of the "already
+        // rejected by ParseProvidersConfig" case the old comment claimed.
+        const auto ref = common::SplitModelRef(ref_text);
+        if (!ref) continue;  // truly malformed; ParseProvidersConfig rejects those
         const auto model = providers_.Resolve(*ref);
         if (model == nullptr) continue;
 
@@ -272,7 +289,10 @@ std::vector<CheckResult> StartupSanityCheck::check_providers() {
     // The default has to name something, or every session that does not override
     // it fails at creation with the same message.
     if (settings_loaded_ && !settings_.default_model.empty()) {
-        const auto ref = common::ParseModelRef(settings_.default_model);
+        // SplitModelRef: default_model is the same user-facing surface as
+        // --model/`/model` and an agent preset's `model:`, and must accept
+        // whatever a discovered catalog's slash-bearing model id those do.
+        const auto ref = common::SplitModelRef(settings_.default_model);
         if (!ref) {
             results.push_back(Warning("usable_provider",
                                       "settings.json default_model '" + settings_.default_model +
@@ -375,7 +395,9 @@ std::vector<CheckResult> StartupSanityCheck::check_presets() {
                 return "declares no model and settings.json sets no default_model";
             }
         }
-        const auto ref = common::ParseModelRef(model_text);
+        // SplitModelRef, matching AgentPresetRegistry::Resolve and
+        // ParseAgentPresetFrontmatter's own shape check (see their comments).
+        const auto ref = common::SplitModelRef(model_text);
         if (!ref) return "model '" + model_text + "' is not <provider>/<model>";
         // A discover-entry's backend kind can be checked without the model
         // resolving -- the model list is a runtime answer the check never
@@ -900,9 +922,11 @@ std::vector<CheckResult> StartupSanityCheck::check_small_model() {
     if (ref_text.empty()) return results;  // compact on the session's own model: normal
 
     // Same shape check SessionRegistry::set_small_model applies at session
-    // creation -- run here so the misconfiguration surfaces at startup with
-    // the rest, not on the first compaction of the first long session.
-    const auto ref = common::ParseModelRef(ref_text);
+    // creation (SplitModelRef, so a discovered catalog's slash-bearing model
+    // id is accepted here too) -- run here so the misconfiguration surfaces at
+    // startup with the rest, not on the first compaction of the first long
+    // session.
+    const auto ref = common::SplitModelRef(ref_text);
     if (!ref) {
         results.push_back(
             Warning("small_model", "settings.json small_model is '" + ref_text +

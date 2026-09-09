@@ -3,6 +3,8 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <chrono>
+#include <filesystem>
 #include <fstream>
 #include <stdexcept>
 
@@ -35,4 +37,30 @@ TEST_CASE("ReadFileOrEmpty throws past the size cap instead of truncating") {
     CHECK_THROWS_AS(ReadFileOrEmpty(path, 64), std::runtime_error);
     // Under the cap: fine.
     CHECK(ReadFileOrEmpty(path, 128) == std::string(128, 'x'));
+}
+
+TEST_CASE("ReadFileOrEmpty rejects an over-cap file without reading it whole") {
+    // The cap used to be checked AFTER `buffer << in.rdbuf()` had already
+    // slurped the entire file, so it bounded nothing: a huge (or hostile)
+    // file was fully allocated before the throw. A sparse multi-gigabyte file
+    // costs no real disk space to create, and the fix reads in bounded chunks
+    // and stops one byte past the cap -- so this must throw near-instantly,
+    // not after however long it takes to read gigabytes.
+    minimal::testing::TempDir dir;
+    const auto path = dir.path() / "huge.bin";
+    {
+        std::ofstream out(path, std::ios::binary);
+        out << "x";
+    }
+    std::error_code ec;
+    std::filesystem::resize_file(path, 4ull << 30, ec);  // 4 GiB, sparse
+    REQUIRE_FALSE(ec);
+
+    const auto start = std::chrono::steady_clock::now();
+    CHECK_THROWS_AS(ReadFileOrEmpty(path, 1024), std::runtime_error);
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+    // Generous bound: bounded-chunk reading rejects this in well under a
+    // second; slurping 4 GiB first would take far longer (or fail with
+    // bad_alloc) on any machine this suite runs on.
+    CHECK(elapsed < std::chrono::seconds(5));
 }

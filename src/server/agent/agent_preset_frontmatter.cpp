@@ -422,7 +422,15 @@ AgentPresetFrontmatter ParseAgentPresetFrontmatter(const config::ParsedFrontmatt
     // Shape-checked here, existence-checked by AgentPresetRegistry: this file
     // deliberately makes no cross-file lookups, but "local/qwen4" vs "qwen4" is
     // decidable without one, and catching it at load names the preset.
-    if (!result.model.empty() && !config::ParseModelRef(result.model)) {
+    //
+    // SplitModelRef, not ParseModelRef: a discovered catalog can legitimately
+    // serve a model id that itself contains a slash (OpenRouter's
+    // "anthropic/claude-opus-5" under provider "openrouter"), and a preset
+    // naming one of those must not be rejected here just because --model and
+    // /model already accept it via SplitModelRef -- this file existing to
+    // reject exactly what those interactive paths accept would be the client/
+    // server split model_ref.hpp says one parser exists to prevent.
+    if (!result.model.empty() && !config::SplitModelRef(result.model)) {
         throw std::runtime_error("agent preset '" + result.name + "': model '" + result.model +
                                  "' must be <provider>/<model>, e.g. local/qwen4");
     }

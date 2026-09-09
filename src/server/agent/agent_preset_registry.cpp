@@ -323,7 +323,11 @@ AgentPreset AgentPresetRegistry::ResolveUncached(
         throw std::runtime_error("agent preset '" + preset_name +
                                  "' declares no model and settings.json has no default_model");
     }
-    const auto ref = config::ParseModelRef(model_text);
+    // SplitModelRef, matching ParseAgentPresetFrontmatter's own shape check (see
+    // its comment) and settings.json default_model's own client/server-shared
+    // parser: a discovered catalog can serve slash-bearing model ids, and this
+    // resolve step must accept whatever the frontmatter parser already accepted.
+    const auto ref = config::SplitModelRef(model_text);
     if (!ref) {
         throw std::runtime_error("agent preset '" + preset_name + "': model '" + model_text +
                                  "' must be <provider>/<model>, e.g. local/qwen4");

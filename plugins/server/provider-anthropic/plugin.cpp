@@ -20,9 +20,7 @@
 
 extern "C" {
 
-const char* minimal_plugin_abi_tag() { return minimal::common::AbiTag(); }
-const char* minimal_plugin_name() { return "provider-anthropic"; }
-const char* minimal_plugin_version() { return minimal::common::Version(); }
+MINIMAL_PLUGIN_ABI_SYMBOLS("provider-anthropic")
 
 void minimal_plugin_register_provider_factories(
     minimal::llm::ProviderFactoryRegistry& registry,

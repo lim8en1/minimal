@@ -489,14 +489,17 @@ TEST_CASE("an alias resolves a collision: both implementations survive",
     CHECK(good.content_text == "fixture ok");
     CHECK(aliased.content_text == "collision ok");
 
-    // Name resolution agrees with the registry: no fatal collision, and the
-    // shared original name makes BOTH permission keys qualified.
+    // Name resolution agrees with the registry: no fatal collision. The
+    // ALIASED entry (fixture-collision, renamed to ftool2) gets a qualified
+    // permission key -- it already has its own distinct surface identity, so
+    // it no longer needs the bare "fixture_tool" name -- which frees that bare
+    // name back up for the untouched fixture-good entry, letting a
+    // pre-existing `permissions: {"fixture_tool": ...}` rule keep matching it.
     const auto resolution = plugins::ResolveRegistrationNames(h.tool_registry, h.aliases);
     CHECK(resolution.result.fatal_collisions.empty());
     CHECK(resolution.result.dangling_aliases.empty());
     h.tool_registry.SetPermissionKeys(resolution.permission_keys);
-    CHECK(std::string(h.tool_registry.PermissionKeyFor("fixture_tool")) ==
-          "fixture-good.fixture_tool");
+    CHECK(std::string(h.tool_registry.PermissionKeyFor("fixture_tool")) == "fixture_tool");
     CHECK(std::string(h.tool_registry.PermissionKeyFor("ftool2")) ==
           "fixture-collision.fixture_tool");
 
@@ -504,7 +507,7 @@ TEST_CASE("an alias resolves a collision: both implementations survive",
     const auto only_aliased = h.tool_registry.DefinitionsFor({"fixture-collision.fixture_tool"});
     REQUIRE(only_aliased.size() == 1);
     CHECK(only_aliased[0].name == "ftool2");
-    const auto only_good = h.tool_registry.DefinitionsFor({"fixture-good.fixture_tool"});
+    const auto only_good = h.tool_registry.DefinitionsFor({"fixture_tool"});
     REQUIRE(only_good.size() == 1);
     CHECK(only_good[0].name == "fixture_tool");
 }

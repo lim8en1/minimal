@@ -63,9 +63,11 @@ std::filesystem::path BundledPluginDir() {
 
 std::filesystem::path BundledClientPluginDir() {
     // The client twin of the probe above; MINIMAL_CLIENT_PLUGIN_DIR is baked
-    // into the client core by CMake (src/client/CMakeLists.txt) with the same
-    // value the install uses, so overriding MINIMAL_CLIENT_PLUGIN_INSTALL_DIR
-    // moves both halves together.
+    // in as a PRIVATE compile definition on minimal_common itself
+    // (src/common/CMakeLists.txt, fed from the MINIMAL_CLIENT_PLUGIN_INSTALL_DIR
+    // cache variable in the root CMakeLists.txt), not by the client's own
+    // CMakeLists.txt -- so overriding that cache variable moves both halves
+    // together regardless of which target is being built.
     const auto exe = ExecutablePath();
     if (exe.empty()) return {};
     const auto bin_dir = exe.parent_path();

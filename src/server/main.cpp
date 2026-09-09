@@ -153,8 +153,23 @@ int main(int argc, char** argv) {
     // cmake/SeedConfig.cmake); by the time the server runs, those files are the
     // user's and this process only reads them.
     const auto plugins_json = config_dir / "plugins.json";
-    const auto plugins_json_before = minimal::common::ReadFileOrEmpty(plugins_json);
-    auto plugin_config = minimal::plugins::ParsePluginConfig(plugins_json_before);
+    // ReadFileOrEmpty can throw (an oversize or unreadable file) ahead of the
+    // first try/catch in this function -- uncaught here, that aborts the
+    // process with no diagnostic at all, before even the version banner
+    // above's config/data dir lines print. Folded into the same malformed-file
+    // path ParsePluginConfig already has: both are "plugins.json could not be
+    // used as written", and the existing warning plus skip-the-rewrite
+    // discipline below is the right response to either.
+    minimal::plugins::PluginConfig plugin_config;
+    std::string plugins_json_before;
+    try {
+        plugins_json_before = minimal::common::ReadFileOrEmpty(plugins_json);
+        plugin_config = minimal::plugins::ParsePluginConfig(plugins_json_before);
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "minimal: warning: cannot read %s: %s\n", plugins_json.c_str(),
+                     e.what());
+        plugin_config.malformed = true;
+    }
     // A malformed file degrades to an empty config; silently rewriting the
     // user's bytes over that default at stage 2 would destroy every enablement
     // decision and per-plugin config in a file they are explicitly invited to

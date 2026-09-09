@@ -8,8 +8,18 @@
 // client from accepting something the server will reject, or from inventing a
 // second, subtly different idea of what a valid reference looks like.
 //
-// This is the same syntax in four positions — agents/*.md `model:`,
-// settings.json `default_model`, `/model`, `--model` — so there is one parser.
+// This is the same syntax in five positions — agents/*.md `model:`,
+// settings.json `default_model`/`small_model`, `/model`, `--model`, and a
+// plugin config's model override (session-titler) — and all five go through
+// SplitModelRef, below, so a model discoverable through any one of them is
+// never rejected by another. ParseModelRef (the strict form) has no
+// production caller as of this writing: every surface that used to reject
+// slash-bearing discovered model ids (e.g. an OpenRouter model addressed as
+// "openrouter/anthropic/claude-opus-5") was that asymmetry, and has been
+// moved onto SplitModelRef. It stays here, tested directly by
+// tests/model_ref_test.cpp and tests/providers_config_test.cpp, as the
+// stricter primitive for a future caller that genuinely needs to reject a
+// name with more than one '/' rather than resolve it to "unknown model".
 
 #include <optional>
 #include <string>

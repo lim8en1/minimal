@@ -58,7 +58,10 @@ std::optional<SessionLlm> SessionSupport::LlmForSession(const std::string& sessi
 
 std::optional<SessionLlm> SessionSupport::ResolveModelRef(const std::string& provider_model) {
     if (sessions_ == nullptr || presets_ == nullptr) return std::nullopt;
-    const auto ref = common::ParseModelRef(provider_model);
+    // SplitModelRef: this resolves a plugin config's user-facing model override
+    // (session-titler's `model`), the same surface as default_model, and must
+    // accept a discovered catalog's slash-bearing model id the same way.
+    const auto ref = common::SplitModelRef(provider_model);
     if (!ref) {
         logger_.warn("session titler model override '{}' is not a <provider>/<model> reference",
                      provider_model);

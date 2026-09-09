@@ -25,14 +25,15 @@ function(minimal_add_plugin name)
     target_compile_options(${name} PRIVATE ${MINIMAL_WARNING_FLAGS})
     set_target_properties(${name} PROPERTIES PREFIX "" OUTPUT_NAME "${name}")
 
-    # Plugins are installed one directory deeper than the server, so the hop up to
-    # the library dir is correspondingly longer.
+    # Plugins install to <libdir>/minimal/plugins/server -- two directories
+    # deeper than the server binary at <prefix>/bin, so the hop up to the
+    # library dir needs four "..", matching minimal_add_client_plugin below.
     if(APPLE)
         set_target_properties(${name} PROPERTIES
-            INSTALL_RPATH "@loader_path/../../../${CMAKE_INSTALL_LIBDIR}")
+            INSTALL_RPATH "@loader_path/../../../../${CMAKE_INSTALL_LIBDIR}")
     else()
         set_target_properties(${name} PROPERTIES
-            INSTALL_RPATH "$ORIGIN/../../../${CMAKE_INSTALL_LIBDIR}")
+            INSTALL_RPATH "$ORIGIN/../../../../${CMAKE_INSTALL_LIBDIR}")
     endif()
 
     install(TARGETS ${name} LIBRARY DESTINATION "${MINIMAL_PLUGIN_INSTALL_DIR}")
@@ -40,8 +41,9 @@ endfunction()
 
 # The client twin: MODULE, links the SHARED minimal::client_core (one copy in
 # memory, ordinary symbol resolution -- see the linkage history in
-# plugins/CMakeLists.txt), installs one directory deeper still, into the
-# client plugin tree.
+# plugins/CMakeLists.txt), installs into the client plugin tree -- a SIBLING of
+# the server's above (plugins/client vs plugins/server), same depth, same
+# RPATH hop count.
 function(minimal_add_client_plugin name)
     add_library(${name} MODULE ${ARGN})
     target_link_libraries(${name} PRIVATE minimal::client_core)

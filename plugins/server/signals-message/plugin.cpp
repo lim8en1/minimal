@@ -13,9 +13,7 @@
 
 extern "C" {
 
-const char* minimal_plugin_abi_tag() { return minimal::common::AbiTag(); }
-const char* minimal_plugin_name() { return "signals-message"; }
-const char* minimal_plugin_version() { return minimal::common::Version(); }
+MINIMAL_PLUGIN_ABI_SYMBOLS("signals-message")
 
 void minimal_plugin_register_tools(minimal::tools::ToolRegistry& registry,
                                    const minimal::plugins::PluginRegistrationContext& context) {

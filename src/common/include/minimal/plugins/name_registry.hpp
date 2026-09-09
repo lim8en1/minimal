@@ -33,8 +33,13 @@ enum class NameKind {
 // Models the three-naming-levels rule independent of the actual
 // ToolRegistry/CommandRegistry/plugin loader: stable identity never changes,
 // surface name is what the model/user sees (alias if set, else the original
-// name) and must be unique, permission key is the non-alias -- bare when
-// unambiguous, qualified when two plugins provide the same original name.
+// name) and must be unique, permission key is the non-alias -- bare when this
+// entry is the only one still claiming its original_name (i.e. it has no
+// alias, and no OTHER un-aliased entry shares that name), qualified
+// (stable_identity) otherwise. Aliasing away one half of a same-name
+// collision therefore lets the other half keep its bare permission key: the
+// aliased entry already has its own distinct surface identity and no longer
+// needs to reserve the bare name.
 class NameRegistry {
 public:
     void Register(NameKind kind, std::string plugin_name, std::string original_name);
@@ -46,7 +51,7 @@ public:
     struct ResolvedEntry {
         std::string stable_identity;  // "plugin.original_name", never changes
         std::string surface_name;     // alias if any, else original_name
-        std::string permission_key;   // bare original_name, or stable_identity if ambiguous
+        std::string permission_key;   // bare original_name, or stable_identity if aliased/ambiguous
     };
 
     struct Result {

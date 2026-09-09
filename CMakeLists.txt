@@ -41,8 +41,17 @@ include(FetchContent)
 
 # Where bundled plugins are installed, and where the server looks for them
 # relative to its own executable. Both halves must agree.
-set(MINIMAL_PLUGIN_INSTALL_DIR "${CMAKE_INSTALL_LIBDIR}/minimal/plugins"
-    CACHE STRING "Install location for bundled plugins")
+#
+# .../plugins/server, a SIBLING of the client tree below, not its parent: the
+# server's bundled scan (plugin_discovery.cpp) recurses into MINIMAL_PLUGIN_DIR
+# to support the build tree's one-subdirectory-per-plugin layout, so an
+# installed server whose plugin dir CONTAINED plugins/client/ would walk into
+# it, find client plugins missing the server's required ABI symbols, and abort
+# startup with them reported Fatal (bundled provenance). Only the build tree
+# (where the two are already siblings under build/plugins/) escaped this,
+# which is why no test caught it.
+set(MINIMAL_PLUGIN_INSTALL_DIR "${CMAKE_INSTALL_LIBDIR}/minimal/plugins/server"
+    CACHE STRING "Install location for bundled server plugins")
 
 # The client plugin tree, separate from the server's for the same reason the
 # loaders are separate: different ABI symbols, different discovery file. The

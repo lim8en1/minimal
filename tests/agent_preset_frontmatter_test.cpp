@@ -55,7 +55,17 @@ TEST_CASE("ParseAgentPresetFrontmatter: a malformed model ref throws here, not a
     // preset forward will actually make.
     CHECK_THROWS_AS(Parse("---\nname: build\nmodel: qwen4\n---\nbody\n"), std::runtime_error);
     CHECK_THROWS_AS(Parse("---\nname: build\nmodel: local/\n---\nbody\n"), std::runtime_error);
-    CHECK_THROWS_AS(Parse("---\nname: build\nmodel: a/b/c\n---\nbody\n"), std::runtime_error);
+    CHECK_THROWS_AS(Parse("---\nname: build\nmodel: /qwen4\n---\nbody\n"), std::runtime_error);
+}
+
+TEST_CASE("ParseAgentPresetFrontmatter: a discovered model id may itself contain a slash",
+          "[agent_preset_frontmatter]") {
+    // SplitModelRef, not ParseModelRef (see its comment in model_ref.hpp): a
+    // preset naming an OpenRouter-shaped model under provider "openrouter"
+    // must not be rejected here just because it has two slashes -- the FIRST
+    // slash is the provider boundary, same as --model/`/model`.
+    auto preset = Parse("---\nname: build\nmodel: openrouter/anthropic/claude-opus-5\n---\nbody\n");
+    CHECK(preset.model == "openrouter/anthropic/claude-opus-5");
 }
 
 TEST_CASE("ParseAgentPresetFrontmatter: allowed_* lists decode", "[agent_preset_frontmatter]") {

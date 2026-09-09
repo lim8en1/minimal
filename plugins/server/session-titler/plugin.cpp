@@ -11,9 +11,7 @@
 
 extern "C" {
 
-const char* minimal_plugin_abi_tag() { return minimal::common::AbiTag(); }
-const char* minimal_plugin_name() { return "session-titler"; }
-const char* minimal_plugin_version() { return minimal::common::Version(); }
+MINIMAL_PLUGIN_ABI_SYMBOLS("session-titler")
 
 void minimal_plugin_register_session_observer(
     minimal::agent::SessionObserverRegistry& registry,

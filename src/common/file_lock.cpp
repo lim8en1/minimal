@@ -7,6 +7,7 @@
 
 #include <cerrno>
 #include <cstdio>
+#include <cstring>
 #include <mutex>
 #include <stdexcept>
 #include <string>
@@ -76,22 +77,43 @@ ExclusiveFileLock::ExclusiveFileLock(const std::filesystem::path& db_path)
     constexpr int kMaxIdentityAttempts = 3;
     int fd = -1;
     for (int attempt = 0;; ++attempt) {
-        fd = ::open(lock_path_.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0644);
+        // O_NOFOLLOW because of the ftruncate below: without it, anyone who can
+        // create <db_path>.lock (the MINIMAL_DATA_DIR escape hatch can point at
+        // a shared directory) can point it at a file they cannot write and have
+        // this process truncate the target to zero for them.
+        fd = ::open(lock_path_.c_str(), O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0644);
         if (fd < 0) {
+            // Snapshotted first: taking the mutex and erasing from the set are
+            // both allowed to clobber errno, and used to, so the message could
+            // name an unrelated error.
+            const int open_errno = errno;
             std::lock_guard lock(RegistryMutex());
             HeldLocks().erase(lock_path_.string());
             throw std::runtime_error("cannot open lock file " + lock_path_.string() + ": " +
-                                     std::strerror(errno));
+                                     std::strerror(open_errno));
         }
 
         struct flock fl {};
         fl.l_type = F_WRLCK;
         fl.l_whence = SEEK_SET;
         if (::fcntl(fd, F_SETLK, &fl) != 0) {
-            const std::string holder = ReadHolderPid(lock_path_);
+            // Snapshotted before ReadHolderPid, whose stdio calls clobber it.
+            const int lock_errno = errno;
+            // Only EACCES/EAGAIN mean "someone else holds it" -- POSIX allows
+            // either. Everything else (ENOLCK on NFS, EINVAL/EOPNOTSUPP on some
+            // FUSE mounts) used to be reported as contention too, which sent
+            // the operator hunting a second instance that does not exist.
+            const bool contended = lock_errno == EACCES || lock_errno == EAGAIN;
+            const std::string holder = contended ? ReadHolderPid(lock_path_) : std::string();
             ::close(fd);
             std::lock_guard lock(RegistryMutex());
             HeldLocks().erase(lock_path_.string());
+            if (!contended) {
+                throw std::runtime_error("cannot lock " + lock_path_.string() + ": " +
+                                         std::strerror(lock_errno) +
+                                         " -- this filesystem may not support fcntl locks; "
+                                         "put the database on local storage");
+            }
             throw std::runtime_error("database " + db_path.string() +
                                      " is already in use by process " + holder +
                                      " (lock file " + lock_path_.string() +
@@ -100,8 +122,12 @@ ExclusiveFileLock::ExclusiveFileLock(const std::filesystem::path& db_path)
 
         struct stat locked_st {};
         struct stat path_st {};
+        // lstat, not stat, to pair with the O_NOFOLLOW above: if a symlink has
+        // been swapped in at the path since our open, the honest answer is
+        // "not the file we locked" -- following it would compare against the
+        // target and call the swap a match.
         const bool same_file = ::fstat(fd, &locked_st) == 0 &&
-                               ::stat(lock_path_.c_str(), &path_st) == 0 &&
+                               ::lstat(lock_path_.c_str(), &path_st) == 0 &&
                                locked_st.st_dev == path_st.st_dev &&
                                locked_st.st_ino == path_st.st_ino;
         if (same_file) break;

@@ -299,3 +299,104 @@ TEST_CASE("PushTerminal opts out of drop-mode, not out of backpressure", "[event
     REQUIRE(terminal.WaitFor(2s));
     CHECK(terminal.Get());
 }
+
+TEST_CASE("DiscardPending resets the byte total, not just the event count",
+          "[event_queue][invariant]") {
+    // events_.clear() alone left bytes_total_ pointing at bytes that no longer
+    // exist, and nothing could ever subtract them back out (Pop/TryPop
+    // subtract per-event, and there are no events left to pop) -- Fits()'s
+    // only escape for an over-bounds queue is an EMPTY deque, so the queue
+    // degraded to holding exactly one event at a time for the rest of its
+    // life.
+    EventQueue<Sized> queue(16, /*max_bytes=*/100, PayloadBytes);
+    REQUIRE(queue.TryPush(Sized{std::string(100, 'x')}));
+    REQUIRE(queue.buffered_bytes() == 100);
+
+    queue.DiscardPending();
+    CHECK(queue.size() == 0);
+    CHECK(queue.buffered_bytes() == 0);
+
+    // Proof the degradation is gone: TWO events now fit, not just one.
+    CHECK(queue.TryPush(Sized{std::string(40, 'y')}));
+    CHECK(queue.TryPush(Sized{std::string(40, 'z')}));
+    CHECK(queue.buffered_bytes() == 80);
+}
+
+TEST_CASE("DiscardPending clears the drop latch too", "[event_queue][invariant]") {
+    // The self-heal (see "drop-mode self-heals at the next drain" above) lived
+    // only in Pop/TryPop; DiscardPending is a drain that frees MAXIMUM room
+    // (the whole queue empties) and must clear the latch for the same reason
+    // -- otherwise a teardown that discards pending work (DiscardPending's own
+    // documented use) leaves drops_ permanently latched, since no Pop is
+    // coming afterward to clear it.
+    EventQueue<int> queue(2);
+    queue.Push(1);
+    queue.Push(2);
+    queue.AbortWaitingProducers();
+    CHECK_FALSE(queue.Push(3));  // drop-mode latched, refuses immediately
+
+    queue.DiscardPending();
+    CHECK(queue.size() == 0);
+
+    // Ordinary backpressure is back: a push now blocks for room instead of
+    // being refused outright.
+    queue.Push(4);
+    queue.Push(5);
+    auto producer = RunInBackground([&queue] { return queue.Push(6); });
+    std::this_thread::sleep_for(50ms);
+    CHECK_FALSE(producer.Ready());
+    (void)queue.Pop();
+    REQUIRE(producer.WaitFor(2s));
+    CHECK(producer.Get());
+}
+
+TEST_CASE("a nonzero byte bound without a SizeOf is refused at construction",
+          "[event_queue][invariant]") {
+    // Without a SizeOf every event costs 0 by convention (see Fits/Accept), so
+    // the byte cap would never trip and buffered_bytes() would always read 0
+    // -- a caller who thinks they configured a byte bound and, in production,
+    // do not have one. Caught here instead of silently at runtime.
+    CHECK_THROWS_AS((EventQueue<int>(16, /*max_bytes=*/100)), std::invalid_argument);
+    // max_bytes == 0 (the default) needs no SizeOf -- there is no bound to
+    // silently fail to enforce.
+    CHECK_NOTHROW(EventQueue<int>(16));
+}
+
+TEST_CASE("a drain wakes every parked producer, not just one", "[event_queue][invariant]") {
+    // notify_one on space_cv_ could wake a waiter whose OWN event still does
+    // not fit while a different waiter's would -- the woken one re-parks
+    // without re-notifying, and the other starves until some later drain
+    // happens to pick it. Two producers with different-sized pending events,
+    // one Pop that frees room for only the smaller one: both must be woken
+    // (and re-check their own predicate), so the small one is not left parked
+    // with room actually available for it.
+    //
+    // Queue at the 100-byte cap (95 + 5): NEITHER producer's event fits yet.
+    // Popping the 95-byte item leaves 5 bytes buffered, so the small
+    // producer's 5-byte push now fits (5+5<=100) but the big producer's
+    // 96-byte push still does not (5+96>100) -- exactly the asymmetric-room
+    // case notify_one could get wrong.
+    auto queue = std::make_shared<EventQueue<Sized>>(16, /*max_bytes=*/100, PayloadBytes);
+    REQUIRE(queue->TryPush(Sized{std::string(95, 'a')}));
+    REQUIRE(queue->TryPush(Sized{std::string(5, 'b')}));
+
+    auto big = RunInBackground([queue] { return queue->Push(Sized{std::string(96, 'c')}); });
+    auto small = RunInBackground([queue] { return queue->Push(Sized{std::string(5, 'd')}); });
+    std::this_thread::sleep_for(50ms);
+    CHECK_FALSE(big.Ready());
+    CHECK_FALSE(small.Ready());
+
+    // Frees exactly the 95-byte item: only `small`'s event can possibly fit now.
+    const auto popped = queue->Pop();
+    REQUIRE(popped->payload.size() == 95);
+    CHECK(small.WaitFor(2s));
+    CHECK(small.Get());
+    CHECK_FALSE(big.Ready());  // still correctly parked; not starved, not wrongly woken-and-accepted
+
+    // Clean up the still-parked big producer: its 96-byte event only fits an
+    // EMPTY queue (Fits' oversized-event escape hatch), so drain everything.
+    (void)queue->Pop();  // the original 5-byte item
+    (void)queue->Pop();  // small's 5-byte item
+    CHECK(big.WaitFor(2s));
+    CHECK(big.Get());
+}

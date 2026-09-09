@@ -78,7 +78,7 @@ Every preset inherits `default`, so all of them need a vcpkg checkout — via
 |---|---|---|
 | `MINIMAL_BUILD_CLIENT` | `ON` | Build the FTXUI TUI client (`minimal`) |
 | `MINIMAL_BUILD_TESTS` | `ON` | Build the Catch2 test suite |
-| `MINIMAL_PLUGIN_INSTALL_DIR` | `<libdir>/minimal/plugins` | Install location for bundled server plugins |
+| `MINIMAL_PLUGIN_INSTALL_DIR` | `<libdir>/minimal/plugins/server` | Install location for bundled server plugins |
 | `MINIMAL_CLIENT_PLUGIN_INSTALL_DIR` | `<libdir>/minimal/plugins/client` | Install location for bundled client plugins |
 
 ## Tests
@@ -111,7 +111,7 @@ Seed on the target machine by running the server once, or by hand.
 <prefix>/bin/minimal-server                       the server
 <prefix>/lib/libminimal_server_core.0.dylib|.so.0   shared core, plugins link it
 <prefix>/lib/libminimal_client_core.0.dylib|.so.0
-<prefix>/lib/minimal/plugins/                     bundled server plugins (*.so|*.dylib)
+<prefix>/lib/minimal/plugins/server/                bundled server plugins (*.so|*.dylib)
 <prefix>/lib/minimal/plugins/client/              bundled client plugins
 ```
 

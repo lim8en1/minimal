@@ -13,9 +13,7 @@
 
 extern "C" {
 
-const char* minimal_plugin_abi_tag() { return minimal::common::AbiTag(); }
-const char* minimal_plugin_name() { return "commands-core"; }
-const char* minimal_plugin_version() { return minimal::common::Version(); }
+MINIMAL_PLUGIN_ABI_SYMBOLS("commands-core")
 
 void minimal_plugin_register_commands(
     minimal::commands::CommandRegistry& registry,
