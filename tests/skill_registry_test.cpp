@@ -101,6 +101,26 @@ TEST_CASE("a stray file directly under skills/ is recorded as not loaded", "[ski
     CHECK(meta->load_error == "expected a skill directory containing SKILL.md, found a file");
 }
 
+TEST_CASE("an oversized SKILL.md is recorded as not loaded, never parsed",
+          "[skill_registry][invariant]") {
+    // skills/ is UNTRUSTED, project-local content walked the same way
+    // agents/ is, and a `preload` skill's body is inlined verbatim into
+    // the system prompt on every session start -- an oversized file is not
+    // just a slow parse, it is unbounded prompt content. Refused by size
+    // before the frontmatter parser ever runs, same "could not be read"
+    // shape as a permissions failure so no new error path is needed.
+    TempConfigDir config;
+    config.Write("skills/huge/SKILL.md",
+                 "---\nname: huge\ndescription: d.\n---\n" + std::string(2 << 20, 'x'));
+
+    const SkillRegistry registry = SkillRegistry::Load(config.dir);
+
+    const SkillMeta* meta = FindSkill(registry, "huge");
+    REQUIRE(meta != nullptr);
+    CHECK_FALSE(meta->loaded);
+    CHECK(meta->load_error == "SKILL.md could not be read (check permissions)");
+}
+
 TEST_CASE("an unterminated frontmatter block is recorded with the parse error", "[skill_registry]") {
     TempConfigDir config;
     config.Write("skills/broken/SKILL.md", "---\nname: broken\ndescription: d.\n");

@@ -2,9 +2,11 @@
 
 #include "minimal/config/providers_config.hpp"
 
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
+#include <system_error>
 
 #include "minimal/common/logger.hpp"
 #include "minimal/config/permission_codec.hpp"
@@ -12,6 +14,28 @@
 namespace minimal::agent {
 
 namespace {
+
+// A preset is prose plus a handful of frontmatter keys -- kilobytes, not
+// megabytes. This is the cap, not a tuning knob: agents/*.md is UNTRUSTED
+// content (a project-local file the current repo shipped, walked before the
+// operator's own config_dir -- see AgentPresetRegistry::ResolveUncached),
+// and yaml-cpp's recursive-descent parser has no built-in depth or size
+// limit. An oversized file is refused before the read even runs, rather
+// than after paying for a multi-hundred-KB (or worse) load and parse of
+// attacker-adjacent content on every ListAvailable() scan and every
+// Resolve().
+constexpr std::uintmax_t kMaxPresetFileBytes = 1 << 20;  // 1 MiB
+
+void CheckPresetFileSize(const std::filesystem::path& path) {
+    std::error_code ec;
+    const auto size = std::filesystem::file_size(path, ec);
+    if (ec) return;  // let the read below report the real error
+    if (size > kMaxPresetFileBytes) {
+        throw std::runtime_error("agent preset " + path.string() + " is " +
+                                 std::to_string(size) + " bytes, over the " +
+                                 std::to_string(kMaxPresetFileBytes) + "-byte limit");
+    }
+}
 
 std::string RequireString(const YAML::Node& node, const std::string& key) {
     const YAML::Node value = node[key];
@@ -438,6 +462,7 @@ AgentPresetFrontmatter ParseAgentPresetFrontmatter(const config::ParsedFrontmatt
 }
 
 AgentPresetFrontmatter LoadAgentPresetFrontmatter(const std::filesystem::path& path) {
+    CheckPresetFileSize(path);
     std::ifstream in(path);
     if (!in) throw std::runtime_error("agent preset not found: " + path.string());
     std::ostringstream buffer;
