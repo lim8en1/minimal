@@ -1,5 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <atomic>
 #include <fstream>
 #include <string>
@@ -691,6 +692,37 @@ TEST_CASE("AgentPresetRegistry: ListAvailable lists every agents/*.md by name, s
     CHECK(summaries[0].name == "build");
     CHECK(summaries[1].name == "plan");
     CHECK(summaries[1].description == "Plans work.");
+}
+
+TEST_CASE("AgentPresetRegistry: ListAvailable keys on the filename, not the frontmatter "
+          "display name, so every listed entry is selectable",
+          "[agent_preset_registry][list][invariant]") {
+    // THE BUG: Resolve()/ResolveUncached() look a preset up by FILENAME
+    // (agents/<name>.md), never by the frontmatter `name:` field -- but
+    // ListAvailable used to key its summaries on raw.name. A preset whose two
+    // diverge (a real, encouraged case: "Builder" reads better in a picker
+    // than "build") was listed under a name Resolve() could never find --
+    // picking it from the client would fail with "unknown agent preset".
+    TempConfigDir config;
+    config.WriteDefaults();  // agents/build.md, name "build"
+    config.Write("agents/senior-reviewer.md",
+                 "---\nname: Senior Reviewer\ndescription: Reviews PRs.\nmodel: "
+                 "openai-main/gpt-4o-mini\n---\nbody\n");
+    config::SkillRegistry skills = config::SkillRegistry::Load(config.dir);
+    AgentPresetRegistry registry(config.dir, skills,
+                                  config::LoadSettingsConfig(config.dir / "settings.json"));
+
+    const auto summaries = registry.ListAvailable();
+    REQUIRE(summaries.size() == 2);
+    const auto it = std::find_if(summaries.begin(), summaries.end(), [](const auto& summary) {
+        return summary.description == "Reviews PRs.";
+    });
+    REQUIRE(it != summaries.end());
+    // The listed name is the FILE STEM ("senior-reviewer"), not the
+    // frontmatter display value ("Senior Reviewer") -- and Resolve() of
+    // exactly that string succeeds.
+    CHECK(it->name == "senior-reviewer");
+    CHECK_NOTHROW(registry.Resolve(it->name));
 }
 
 TEST_CASE("AgentPresetRegistry: ListAvailable does not resolve a model, so a bad provider "
