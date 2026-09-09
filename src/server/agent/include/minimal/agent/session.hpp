@@ -45,6 +45,7 @@
 #include "minimal/commands/command_dispatcher.hpp"
 #include "minimal/commands/command_registry.hpp"
 #include "minimal/commands/confirmation_broker.hpp"
+#include "minimal/tools/ask.hpp"
 #include "minimal/common/logger.hpp"
 #include "minimal/config/providers_config.hpp"
 #include "minimal/hooks/hook_dispatcher.hpp"
@@ -125,6 +126,12 @@ struct SessionParams {
     // decorate. A test injects any fake. Required, same reasoning as
     // event_sink.
     std::unique_ptr<commands::ConfirmationBroker> confirmation_broker;
+    // Always the wire default (rpc::WireAskBroker) in production. OPTIONAL,
+    // unlike confirmation_broker: a session without it simply exposes no
+    // interactive ask -- ToolContext::ask_user stays null and the tool-ask
+    // plugin's tool degrades to an error result. Null keeps test fixtures
+    // that care nothing about asks from having to build one.
+    std::unique_ptr<tools::AskBroker> ask_broker;
     // Opaque handle to whatever rpc::EventTranslator backs event_sink, kept
     // alive here so callers that need the underlying rpc::EventBroadcaster/
     // PendingRequests (SessionServiceImpl's Subscribe/Unsubscribe/Resolve) can
@@ -639,6 +646,8 @@ private:
     // SessionParams::permission_checker.
     std::unique_ptr<tools::PermissionChecker> checker_;
     std::unique_ptr<commands::ConfirmationBroker> confirmations_;
+    // May be null (see SessionParams::ask_broker).
+    std::unique_ptr<tools::AskBroker> ask_broker_;
     // Where every SessionEvent this class emits goes. See EmitEvent() and
     // SessionParams::event_sink.
     SessionEventSink event_sink_;

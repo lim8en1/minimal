@@ -90,6 +90,7 @@ add_executable(minimal_tests
     auth_test.cpp
     wire_permission_checker_test.cpp
     wire_confirmation_broker_test.cpp
+    wire_ask_broker_test.cpp
     session_wiring_test.cpp
     session_observer_test.cpp
     session_store_test.cpp
@@ -201,6 +202,9 @@ add_executable(minimal_tests
     "${CMAKE_SOURCE_DIR}/plugins/server/tools-search/tree_walker.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/tools-search/glob_tool.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/tools-search/grep_tool.cpp"
+    # tool-ask: the tool is pure plugin logic over ToolContext's ask seam.
+    "${CMAKE_SOURCE_DIR}/plugins/server/tool-ask/ask_tool.cpp"
+    tool_ask_test.cpp
     # Same pattern for tools-web: pure logic plus a real loopback HTTP server
     # in the test itself (no fake to paper over the transport layer).
     "${CMAKE_SOURCE_DIR}/plugins/server/tools-web/web_settings.cpp"
@@ -245,6 +249,7 @@ target_include_directories(minimal_tests PRIVATE
     "${CMAKE_SOURCE_DIR}/plugins/server/checklist"
     "${CMAKE_SOURCE_DIR}/plugins/server/signals-message"
     "${CMAKE_SOURCE_DIR}/plugins/server/tools-search"
+    "${CMAKE_SOURCE_DIR}/plugins/server/tool-ask"
     "${CMAKE_SOURCE_DIR}/plugins/server/session-titler"
     "${CMAKE_SOURCE_DIR}/plugins/server/cost-tracker"
     "${CMAKE_SOURCE_DIR}/plugins/client/cost-view")

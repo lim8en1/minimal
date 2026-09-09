@@ -13,6 +13,7 @@
 #include "minimal/common/logger.hpp"
 #include "minimal/llm/chat.hpp"
 #include "minimal/session/history_window.hpp"
+#include "minimal/tools/ask.hpp"
 #include "minimal/tools/cancel_token.hpp"
 #include "minimal/tools/permission.hpp"
 
@@ -142,6 +143,18 @@ struct ToolContext {
     // Task lifecycle events (started/completed/failed/timed out/killed).
     // Optional -- a session may wire none -- and safe to call from any thread.
     std::function<void(const BackgroundTaskEvent&)> emit_task_event;
+
+    // --- Interactive ask (the tool-ask plugin's `ask_user`; see ask.hpp) ---
+    //
+    // Blocks until a human answers, then returns the structured answer.
+    // Optional -- a session may wire no ask broker (headless fixtures, tests)
+    // -- and null means "host offers no interactive ask", which the tool
+    // surfaces as an error result rather than a hang. Not safe to call from a
+    // detached thread: it parks on the session's PendingRequests, so it must
+    // run where blocking is allowed, exactly like a permission prompt. The
+    // answer's lifetime discipline is the session's channels block, like the
+    // handles above.
+    std::function<AskAnswer(const AskRequest&)> ask_user;
 
     // Per-invocation audit logging (bash logs command, resolved argv or
     // rejection reason, exit code, duration). One process-wide instance for now.

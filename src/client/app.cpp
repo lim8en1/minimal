@@ -192,6 +192,13 @@ nlohmann::json ServerEventToJsonLine(const minimal::v1::ServerEvent& event) {
     } else if (event.has_subagent_started()) {
         line["type"] = "subagent_started";
         line["child_session_id"] = event.subagent_started().child_session_id();
+    } else if (event.has_ask_request()) {
+        // The headless client auto-declines these (SessionClient); the JSONL
+        // line says what was asked so a script's transcript shows why the
+        // model reported an unanswered question.
+        line["type"] = "ask_request";
+        line["request_id"] = event.ask_request().request_id();
+        line["questions"] = event.ask_request().questions_size();
     } else if (event.has_turn_completed()) {
         line["type"] = "turn_completed";
         line["hit_max_turns"] = event.turn_completed().hit_max_turns();
@@ -973,6 +980,15 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     auto confirmation_host_interactive =
         minimal::client::MakeModalHost(confirmation_child, show_confirmation);
 
+    // The model's ask modal (tool-ask plugin): same stable-host pattern. A
+    // question can only arrive while its session's worker is parked inside
+    // the ask tool, so like the confirmation modal it nests below the
+    // security prompts -- the three pending modal kinds are mutually
+    // exclusive in SessionState.
+    bool show_ask = false;
+    auto ask_child = std::make_shared<Component>();
+    auto ask_host_interactive = minimal::client::MakeModalHost(ask_child, show_ask);
+
     // Tab close, for every caller (keybinding, quit confirmation, quit): the
     // per-tab UI caches must die WITH the tab -- tab_ui entries were never
     // erased, leaking each closed tab's streaming buffer, grants and surface
@@ -1138,7 +1154,7 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         show_plugin_modal, open_picker, open_agent_picker, open_model_picker,
         [&picker_controller] { picker_controller.Poll(); }, tab_ui, theme,
         message_registry, renderer_registry, permission_child, show_permission,
-        confirmation_child, show_confirmation});
+        confirmation_child, show_confirmation, ask_child, show_ask});
     // Same names the inline code declared directly -- every lambda below
     // this point (with_keys' KeyContext, the still-inline render body)
     // captures `[&]`, i.e. by ordinary lexical scoping.
@@ -1325,7 +1341,11 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     tree = Modal(tree, keymap_help_view, &show_keymap_help);
     tree = Modal(tree, commands_help_view, &show_commands_help);
     auto with_quit_confirm = Modal(tree, confirm_modal, &show_quit_confirm);
-    auto with_confirmation = Modal(with_quit_confirm, confirmation_host_interactive,
+    // The ask host sits with the confirmation host -- below the security
+    // prompts, above the pickers (the security modals must always be able to
+    // take the top layer; the pending kinds are mutually exclusive anyway).
+    auto with_ask = Modal(with_quit_confirm, ask_host_interactive, &show_ask);
+    auto with_confirmation = Modal(with_ask, confirmation_host_interactive,
                                    &show_confirmation);
     auto with_permission = Modal(with_confirmation, permission_host_interactive, &show_permission);
 

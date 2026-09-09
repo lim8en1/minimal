@@ -53,6 +53,8 @@ struct TabUi {
     // The wire confirmation modal's rebuild key, like grants_for_request:
     // the inner modal is rebuilt only when a NEW request_id arrives.
     std::string confirmation_for_request;
+    // The model's ask modal (tool-ask plugin), same rebuild keying.
+    std::string ask_for_request;
     ftxui::Component surface_body;          // the chat surface's tab body (when slotted)
     plugins::ChatSurface* surface_for = nullptr;   // which surface instance built it
     // Per-tab ChatView: its row cache is keyed by transcript_version, a
@@ -132,6 +134,8 @@ public:
         bool& show_permission;
         std::shared_ptr<ftxui::Component>& confirmation_child;
         bool& show_confirmation;
+        std::shared_ptr<ftxui::Component>& ask_child;
+        bool& show_ask;
     };
 
     explicit TabMaintenance(Dependencies deps);

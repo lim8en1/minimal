@@ -51,6 +51,56 @@ message ConfirmationResponse {
   string chosen_option = 2;
 }
 
+// --- Model-initiated user questions ("tool-ask" plugin; ARCHITECTURE.md
+// "Asking the user") ---
+//
+// A tool parks the session worker on an AskUserRequest and the model's tool
+// result carries the answer. Structured on purpose: up to four questions per
+// call, each with labeled options (plus one human-facing description each)
+// and optional multi-select, so a client renders real choices rather than
+// making the model parse a rephrased question.
+
+message AskOption {
+  string label = 1;       // what the model receives back verbatim
+  string description = 2; // human-facing elaboration; may be empty
+}
+
+message AskQuestion {
+  string question = 1;
+  string header = 2; // short label for the question, e.g. "Approach"
+  repeated AskOption options = 3;
+  // Multiple answers may be chosen from `options` (checkboxes instead of a
+  // single pick).
+  bool multiple = 4;
+  // The client offers a free-text answer ("Type your own answer") alongside
+  // `options`. False = a strict pick from the offered choices.
+  bool allow_other = 5;
+}
+
+message AskUserRequest {
+  // Server-generated, same correlation rationale as PermissionRequest.
+  string request_id = 1;
+  repeated AskQuestion questions = 2;
+}
+
+// One answer slot per AskQuestion, aligned by index. A dismissed/timeout
+// request answers with answered=false and empty slots.
+message AskUserAnswer {
+  // Exact labels chosen from that question's options (<=1 unless multiple).
+  repeated string selected = 1;
+  // The free-text answer when the user typed their own. Empty unless
+  // AskQuestion.allow_other was set.
+  string other = 2;
+}
+
+message AskUserResponse {
+  string request_id = 1; // echoes the server-generated id from AskUserRequest
+  repeated AskUserAnswer answers = 2;
+  // False when the user dismissed the questions (Escape) -- the server turns
+  // that, and an unattended timeout, into an unanswered AskAnswer.
+  bool answered = 3;
+}
+
 message CancelTurn {} // interrupts the in-flight LLM turn for this session, if any
 
 // Names the stream without submitting any work. This is how a client ATTACHES
@@ -114,6 +164,7 @@ message ClientEvent {
     CommandInvocation command = 3;
     PermissionResponse permission_response = 4;
     ConfirmationResponse confirmation_response = 5;
+    AskUserResponse ask_response = 11;
     CancelTurn cancel = 6;
     Attach attach = 7;
     RewindRequest rewind = 8;
@@ -400,11 +451,12 @@ message ResyncRequiredEvent {
   string reason = 1;
 }
 
-// S5.3: a permission_request or confirmation_request this session broadcast
-// to every subscriber has been answered by ONE of them (first answer wins).
-// Delivered to every subscriber, including the one that answered -- clearing
-// an already-cleared prompt is a no-op there -- so every OTHER client's modal
-// for this request_id dismisses instead of sitting on a dead question.
+// S5.3: a permission_request, confirmation_request, or ask_request this
+// session broadcast to every subscriber has been answered by ONE of them
+// (first answer wins). Delivered to every subscriber, including the one that
+// answered -- clearing an already-cleared prompt is a no-op there -- so every
+// OTHER client's modal for this request_id dismisses instead of sitting on a
+// dead question.
 message PromptResolvedEvent {
   string request_id = 1;
 }
@@ -429,6 +481,7 @@ message ServerEvent {
     SessionEndedEvent session_ended = 14;
     ResyncRequiredEvent resync_required = 15;
     PromptResolvedEvent prompt_resolved = 16;
+    AskUserRequest ask_request = 17;                // blocks server-side until answered
   }
 }
 

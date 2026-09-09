@@ -121,6 +121,14 @@ struct PendingConfirmation {
     std::vector<std::string> options;
 };
 
+// A model-initiated ask (the server tool-ask plugin): 1-4 structured
+// questions rendered as one modal. The request is kept verbatim -- the modal
+// needs every question, option, description, and flag.
+struct PendingAsk {
+    std::string request_id;
+    v1::AskUserRequest request;
+};
+
 // ============================================================================
 // Session state kinds (derived from wire events, per ARCHITECTURE.md)
 // ============================================================================
@@ -216,6 +224,7 @@ public:
         // Pending modals
         std::optional<PendingPermission> pending_permission;
         std::optional<PendingConfirmation> pending_confirmation;
+        std::optional<PendingAsk> pending_ask;
 
         // Active tools in gate order (the order the model asked for them);
         // several may be RUNNING at once (parallel dispatch, width 4 by
@@ -452,6 +461,7 @@ public:
     // --- Pending interactions ---
     void SetPermissionRequest(std::unique_ptr<PendingPermission> req);
     void SetConfirmationRequest(std::unique_ptr<PendingConfirmation> req);
+    void SetAskRequest(std::unique_ptr<PendingAsk> req);
     // Clears any pending modal matching `request_id`. Returns TRUE when
     // something was actually cleared -- callers that must re-derive the tab
     // state afterwards (the worker was parked on that prompt) use the return
@@ -619,6 +629,7 @@ private:
     // Pending modals
     std::optional<PendingPermission> pending_permission_;
     std::optional<PendingConfirmation> pending_confirmation_;
+    std::optional<PendingAsk> pending_ask_;
 
     // Tool executions (parallel dispatch; keyed by tool_use_id, not position)
     std::vector<ToolExecutionState> tools_;
@@ -816,7 +827,8 @@ public:
                          v1::PermissionDecision decision, std::vector<std::string> granted_keys);
 
     void AnswerConfirmation(const std::string& session_id, const std::string& request_id,
-                           const std::string& chosen_option);
+                            const std::string& chosen_option);
+    void AnswerAsk(const std::string& session_id, const v1::AskUserResponse& response);
 
     // --- Focus (keybindings cycle forward/back through tabs in render order) ---
     void CycleFocusForward();

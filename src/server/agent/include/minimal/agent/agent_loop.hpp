@@ -194,6 +194,14 @@ struct SessionContext {
     // BackgroundTaskEvent lifecycle, mapped onto a wire event by the session.
     std::function<void(const tools::BackgroundTaskEvent&)> task_event_sink;
 
+    // The interactive ask (ToolContext::ask_user), forwarded from the
+    // session's AskBroker wiring. Null when the session has no ask broker
+    // (see SessionParams::ask_broker) -- the tool-ask plugin's tool then
+    // degrades to an error result instead of parking a worker nobody can
+    // answer. Unlike the handles above this BLOCKS for a human, so it must
+    // only run where tool execution already allows blocking.
+    std::function<tools::AskAnswer(const tools::AskRequest&)> ask_user;
+
     // The session's tool-facing history window (see ToolContext::history). Owned
     // by the Session, which outlives this loop; null when the session's store is
     // not SQLite-backed (test fakes), which makes ctx.history null -- the

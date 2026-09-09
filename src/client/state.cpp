@@ -103,6 +103,9 @@ SessionState::Snapshot SessionState::TakeSnapshot() {
     if (pending_confirmation_) {
         s.pending_confirmation = *pending_confirmation_;
     }
+    if (pending_ask_) {
+        s.pending_ask = *pending_ask_;
+    }
     // LIGHT tool copy: ChatView::RenderLiveToolRow (the only deep-snapshot
     // tool reader) never reads buffered_output -- the running-tools panel is what
     // renders that, off TakeLightSnapshot(true) instead. This used to copy
@@ -303,6 +306,7 @@ void SessionState::AppendStreamingText(std::string_view text) {
     }
     pending_permission_.reset();
     pending_confirmation_.reset();
+    pending_ask_.reset();
 }
 
 void SessionState::FinalizeStreamingText() {
@@ -367,7 +371,7 @@ void SessionState::MaybeGoIdleLocked() {
         std::any_of(tools_.begin(), tools_.end(), [](const ToolExecutionState& t) {
             return t.started;
         });
-    if (!tool_active && !pending_permission_ && !pending_confirmation_) {
+    if (!tool_active && !pending_permission_ && !pending_confirmation_ && !pending_ask_) {
         state_ = SessionStateKind::Idle;
     }
 }
@@ -523,6 +527,7 @@ void SessionState::OnError(const std::string& error_message) {
     cancel_requested_ = false;   // a cancel can BE the error path (dead stream)
     pending_permission_.reset();
     pending_confirmation_.reset();
+    pending_ask_.reset();
     // The turn failed before any page apply could retire the echo; nothing
     // will, so drop it here rather than leaving a ghost of an unacknowledged
     // message above the error.
@@ -549,6 +554,7 @@ void SessionState::OnSessionEnded() {
     cancel_requested_ = false;
     pending_permission_.reset();
     pending_confirmation_.reset();
+    pending_ask_.reset();
     pending_user_text_.clear();   // same rule as OnError: nothing will retire it
     state_ = SessionStateKind::Done;
 }
@@ -628,6 +634,7 @@ void SessionState::SetPermissionRequest(std::unique_ptr<PendingPermission> req) 
     std::lock_guard lk(mtx_);
     pending_permission_ = std::move(*req);
     pending_confirmation_.reset();
+    pending_ask_.reset();
     // Waiting from ANY active-turn state: mid-turn prompts used to arrive
     // with the tab in Working/Thinking (a tool row, or streamed text, had
     // already moved it off Idle) and left it there -- the modal still showed,
@@ -642,6 +649,17 @@ void SessionState::SetConfirmationRequest(std::unique_ptr<PendingConfirmation> r
     std::lock_guard lk(mtx_);
     pending_confirmation_ = std::move(*req);
     pending_permission_.reset();
+    pending_ask_.reset();
+    if (state_ != SessionStateKind::Error) {
+        state_ = SessionStateKind::Waiting;
+    }
+}
+
+void SessionState::SetAskRequest(std::unique_ptr<PendingAsk> req) {
+    std::lock_guard lk(mtx_);
+    pending_ask_ = std::move(*req);
+    pending_permission_.reset();
+    pending_confirmation_.reset();
     if (state_ != SessionStateKind::Error) {
         state_ = SessionStateKind::Waiting;
     }
@@ -656,6 +674,10 @@ bool SessionState::ClearPendingFor(std::string_view request_id) {
     }
     if (pending_confirmation_ && pending_confirmation_->request_id == request_id) {
         pending_confirmation_.reset();
+        cleared = true;
+    }
+    if (pending_ask_ && pending_ask_->request_id == request_id) {
+        pending_ask_.reset();
         cleared = true;
     }
     return cleared;
@@ -1408,6 +1430,11 @@ void AppState::DispatchToTab(const std::string& session_id, const v1::ServerEven
         cp->detail = cr.detail();
         cp->options.assign(cr.options().begin(), cr.options().end());
         target->SetConfirmationRequest(std::move(cp));
+    } else if (event.has_ask_request()) {
+        auto ap = std::make_unique<PendingAsk>();
+        ap->request_id = event.ask_request().request_id();
+        ap->request = event.ask_request();
+        target->SetAskRequest(std::move(ap));
     } else if (event.has_tool_execution()) {
         const auto& te = event.tool_execution();
             if (te.started()) {
@@ -1938,6 +1965,38 @@ void AppState::AnswerConfirmation(const std::string& session_id, const std::stri
         // No tool events or message stops follow a command confirmation: the
         // worker was parked on THIS answer, so the tab must re-derive its
         // state here or it stays stranded in Waiting forever.
+        state->OnPendingResolved();
+    }
+}
+
+void AppState::AnswerAsk(const std::string& session_id, const v1::AskUserResponse& response) {
+    auto stream = GetStream(session_id);
+    if (!stream) {
+        if (auto state = GetState(session_id)) {
+            state->OnError("cannot answer: this session is not attached");
+        }
+        return;
+    }
+    if (RefuseIfEnded(session_id, "answer")) return;
+
+    v1::ClientEvent ev;
+    ev.set_session_id(session_id);
+    *ev.mutable_ask_response() = response;
+    // Same refusal rule as AnswerPermission/AnswerConfirmation: keep the
+    // modal up on a stalled stream rather than pretending the answer went
+    // out.
+    if (!stream->Send(ev)) {
+        if (auto state = GetState(session_id)) {
+            state->OnError("cannot answer: the stream is closing or stalled");
+            BumpUiVersion();
+        }
+        return;
+    }
+
+    if (auto state = GetState(session_id)) {
+        state->ClearPendingFor(response.request_id());
+        // Same re-derive as the confirmation path: the worker was parked on
+        // THIS answer, and nothing else will move the tab off Waiting.
         state->OnPendingResolved();
     }
 }

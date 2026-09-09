@@ -179,6 +179,85 @@ TEST_CASE("ClearPendingFor only clears the matching request id", "[session_state
     REQUIRE_FALSE(state.TakeSnapshot().pending_permission.has_value());
 }
 
+TEST_CASE("an ask sets Waiting, supersedes the other pending modals, and is superseded by them",
+          "[session_state]") {
+    SessionState state("s-1");
+
+    auto ask = std::make_unique<PendingAsk>();
+    ask->request_id = "ask-1";
+    state.SetAskRequest(std::move(ask));
+    {
+        auto snap = state.TakeSnapshot();
+        REQUIRE(snap.state == SessionStateKind::Waiting);
+        REQUIRE(snap.pending_ask.has_value());
+        REQUIRE(snap.pending_ask->request.questions().empty());  // verbatim request storage
+        REQUIRE_FALSE(snap.pending_permission.has_value());
+        REQUIRE_FALSE(snap.pending_confirmation.has_value());
+    }
+
+    auto pp = std::make_unique<PendingPermission>();
+    pp->request_id = "perm-1";
+    state.SetPermissionRequest(std::move(pp));
+    REQUIRE_FALSE(state.TakeSnapshot().pending_ask.has_value());
+
+    auto ask2 = std::make_unique<PendingAsk>();
+    ask2->request_id = "ask-2";
+    state.SetAskRequest(std::move(ask2));
+    REQUIRE_FALSE(state.TakeSnapshot().pending_permission.has_value());
+    REQUIRE(state.TakeSnapshot().pending_ask.has_value());
+
+    auto cp = std::make_unique<PendingConfirmation>();
+    cp->request_id = "conf-1";
+    state.SetConfirmationRequest(std::move(cp));
+    REQUIRE_FALSE(state.TakeSnapshot().pending_ask.has_value());
+    REQUIRE(state.TakeSnapshot().pending_confirmation.has_value());
+}
+
+TEST_CASE("ClearPendingFor matches an ask by request id and MaybeGoIdle resets Waiting",
+          "[session_state]") {
+    SessionState state("s-1");
+    auto ask = std::make_unique<PendingAsk>();
+    ask->request_id = "ask-1";
+    state.SetAskRequest(std::move(ask));
+
+    state.ClearPendingFor("ask-other");
+    REQUIRE(state.TakeSnapshot().pending_ask.has_value());
+    REQUIRE(state.TakeSnapshot().state == SessionStateKind::Waiting);
+
+    state.ClearPendingFor("ask-1");
+    REQUIRE_FALSE(state.TakeSnapshot().pending_ask.has_value());
+
+    state.OnPendingResolved();
+    REQUIRE(state.TakeSnapshot().state == SessionStateKind::Idle);
+}
+
+TEST_CASE("a fresh assistant turn and terminal events clear a pending ask", "[session_state]") {
+    SECTION("new turn") {
+        SessionState state("s-1");
+        auto ask = std::make_unique<PendingAsk>();
+        ask->request_id = "ask-1";
+        state.SetAskRequest(std::move(ask));
+        state.AppendStreamingText("moving on");
+        REQUIRE_FALSE(state.TakeSnapshot().pending_ask.has_value());
+    }
+    SECTION("error") {
+        SessionState state("s-1");
+        auto ask = std::make_unique<PendingAsk>();
+        ask->request_id = "ask-1";
+        state.SetAskRequest(std::move(ask));
+        state.OnError("dead");
+        REQUIRE_FALSE(state.TakeSnapshot().pending_ask.has_value());
+    }
+    SECTION("session ended") {
+        SessionState state("s-1");
+        auto ask = std::make_unique<PendingAsk>();
+        ask->request_id = "ask-1";
+        state.SetAskRequest(std::move(ask));
+        state.OnSessionEnded();
+        REQUIRE_FALSE(state.TakeSnapshot().pending_ask.has_value());
+    }
+}
+
 TEST_CASE("tool tracking: start -> deltas -> finish, keyed by tool_use_id", "[session_state]") {
     SessionState state("s-1");
     state.OnToolStarted(StartTool("t-1"));
