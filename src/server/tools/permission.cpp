@@ -36,19 +36,30 @@ PermissionMode PermissionPolicy::mode_for(std::string_view tool_name, ToolCatego
 PermissionMode PermissionPolicy::mode_for(std::string_view tool_name, ToolCategory category,
                                           const std::optional<std::string>& subject,
                                           bool subject_is_path) const {
-    // Exact overrides keep the highest precedence they have always had; the
-    // pattern layer sits between them and the category default.
+    // Exact overrides keep the highest precedence they have always had -- but
+    // FOLDED against a matching pattern, never short-circuited past it. A
+    // short-circuit let an AlwaysAllow exact override (native
+    // permission_mode.overrides, or the opencode tools:{name:true} alias,
+    // which is meant to be a plain availability toggle) silently defeat a
+    // built-in pattern denial (default_pattern_rules' dotenv rule) for every
+    // input, since the pattern layer was never even consulted. most_restrictive
+    // keeps the documented "exact wins" behavior on the common no-pattern-match
+    // path (folding with nullopt is a no-op) while making a matching deny
+    // pattern undefeatable by a scalar allow.
+    std::optional<PermissionMode> exact;
     if (auto it = per_tool_overrides.find(std::string(tool_name)); it != per_tool_overrides.end()) {
-        return it->second;
+        exact = it->second;
     }
+    std::optional<PermissionMode> pattern;
     if (subject) {
         if (auto it = pattern_overrides.find(std::string(tool_name));
             it != pattern_overrides.end()) {
-            if (auto mode = FoldPatterns(it->second, *subject, subject_is_path)) {
-                return *mode;  // at least one match: the patterns REPLACE the default
-            }
+            pattern = FoldPatterns(it->second, *subject, subject_is_path);
         }
     }
+    if (exact && pattern) return most_restrictive(*exact, *pattern);
+    if (exact) return *exact;
+    if (pattern) return *pattern;
     return mode_for(tool_name, category);
 }
 

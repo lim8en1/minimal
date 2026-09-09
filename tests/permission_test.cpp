@@ -80,6 +80,41 @@ TEST_CASE("per-tool override beats the category default", "[permission]") {
     CHECK(policy.mode_for("other", ToolCategory::Execute) == PermissionMode::Ask);
 }
 
+TEST_CASE("a per-tool exact override still wins when no pattern matches",
+          "[permission][pattern]") {
+    // The 4-arg (subject-aware) overload's common path -- no regression from
+    // folding the exact override against the pattern layer instead of
+    // short-circuiting past it.
+    PermissionPolicy policy;
+    policy.read_only = PermissionMode::Ask;
+    policy.per_tool_overrides["read"] = PermissionMode::AlwaysAllow;
+
+    CHECK(policy.mode_for("read", ToolCategory::ReadOnly, std::string("/proj/main.cpp"),
+                          /*subject_is_path=*/true) == PermissionMode::AlwaysAllow);
+}
+
+TEST_CASE("a matching deny pattern survives an AlwaysAllow exact override",
+          "[permission][pattern][invariant]") {
+    // THE BUG: per_tool_overrides used to return immediately, before the
+    // pattern layer -- where the built-in dotenv denial lives
+    // (default_pattern_rules) -- was ever consulted. An operator-set exact
+    // AlwaysAllow (native permission_mode.overrides, or the opencode
+    // tools:{read:true} alias, which is documented as a plain availability
+    // toggle rather than a permission grant) silently bypassed the dotenv
+    // protection for every path. most_restrictive folding closes it: the
+    // pattern layer can still narrow what an exact override widened.
+    PermissionPolicy policy;
+    policy.read_only = PermissionMode::Ask;
+    policy.per_tool_overrides["read"] = PermissionMode::AlwaysAllow;
+    for (auto& [key, rules] : default_pattern_rules()) policy.pattern_overrides[key] = rules;
+
+    CHECK(policy.mode_for("read", ToolCategory::ReadOnly, std::string("/proj/.env"),
+                          /*subject_is_path=*/true) == PermissionMode::AlwaysDeny);
+    // A non-matching path is unaffected: the exact override still applies.
+    CHECK(policy.mode_for("read", ToolCategory::ReadOnly, std::string("/proj/main.cpp"),
+                          /*subject_is_path=*/true) == PermissionMode::AlwaysAllow);
+}
+
 TEST_CASE("MCP permission is server-scoped", "[permission][mcp]") {
     McpPermissionPolicy policy;
     policy.default_mode = PermissionMode::Ask;
