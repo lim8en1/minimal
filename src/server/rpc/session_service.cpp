@@ -784,14 +784,21 @@ grpc::Status SessionServiceImpl::OpenSession(
     // Subscribe/Unsubscribe directly: it keeps ever_attached()/
     // has_subscribers() (the reaper's initial-attach guard and detached-idle
     // rule) accurate now that Session itself cannot see subscriber_count().
-    const auto subscriber = Transport(*session).queue().Subscribe();
-    session->NotifyAttached();
-
-    // First on the stream, before anything the client's first event produces:
-    // a freshly attached tab has everything its status bar renders from frame
-    // one. Targeted at THIS subscriber -- the other streams attached already
-    // have their metadata. This is the RPC thread: PublishTo never blocks.
-    EmitSessionMetadata(*session, subscriber);
+    //
+    // Declared here (not `const auto` inline) and populated inside the try
+    // below: Subscribe()/EmitSessionMetadata() are not the trivial calls they
+    // look like -- EmitSessionMetadata's preset_snapshot() copies the whole
+    // resolved preset (system prompt, tool_config, permission maps) under the
+    // session lock, and Subscribe() allocates a queue -- so both can throw
+    // (OOM, a lock-order surprise). `attached` records whether NotifyAttached
+    // actually ran, so finish()'s cleanup below never fires NotifyDetached
+    // without a matching attach: that pairing is what keeps
+    // has_subscribers()/the detached-idle reaper accurate, and an unguarded
+    // NotifyDetached on a Subscribe-throws path would leave a session
+    // permanently unreapable (has_subscribers() reads underflowed-nonzero)
+    // instead of merely failing this one RPC.
+    rpc::EventBroadcaster::Handle subscriber;
+    bool attached = false;
 
     // The one and only Write() caller for this stream. It drains THIS stream's
     // subscriber queue, not a shared one, so concurrent streams never split
@@ -819,8 +826,10 @@ grpc::Status SessionServiceImpl::OpenSession(
         // connected-but-deaf client, and the queue close above unwinds the
         // writer in every well-behaved case.
         if (terminate) sessions_.Terminate(session->info().session_id);
-        Transport(*session).queue().Unsubscribe(subscriber);
-        session->NotifyDetached();
+        if (attached) {
+            Transport(*session).queue().Unsubscribe(subscriber);
+            session->NotifyDetached();
+        }
         if (writer.joinable()) writer.join();
         // The attached_ slot is released by client_slot's destructor, after
         // this lambda returns -- the decrement (and, at zero, the last-client
@@ -828,6 +837,17 @@ grpc::Status SessionServiceImpl::OpenSession(
         return status;
     };
     try {
+        subscriber = Transport(*session).queue().Subscribe();
+        session->NotifyAttached();
+        attached = true;
+
+        // First on the stream, before anything the client's first event
+        // produces: a freshly attached tab has everything its status bar
+        // renders from frame one. Targeted at THIS subscriber -- the other
+        // streams attached already have their metadata. This is the RPC
+        // thread: PublishTo never blocks.
+        EmitSessionMetadata(*session, subscriber);
+
         writer = std::thread([stream, session, subscriber] {
             while (auto event = Transport(*session).queue().Pop(subscriber)) {
                 if (!stream->Write(*event)) break;  // client went away
