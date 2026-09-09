@@ -2,6 +2,10 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdint>
+#include <iomanip>
+#include <regex>
+#include <sstream>
 #include <string>
 
 #include "minimal/common/logger.hpp"
@@ -32,6 +36,7 @@ RequestHandles BuildHandles(const std::string& tool_use_id, const std::string& c
     handles.label = FirstLine(code, 80);
     handles.schedule_injection = ctx.schedule_injection;
     handles.emit_task_event = ctx.emit_task_event;
+    handles.emit_output = ctx.emit_output;
     handles.session_lifetime = ctx.session_lifetime;
     return handles;
 }
@@ -66,20 +71,25 @@ public:
         spec_.definition.description =
             "Run code in this session's persistent Python interpreter (state survives across "
             "calls and turns: globals, imports, live connections).\n"
-            "timeout (seconds, default 0): 0 runs ASYNC -- returns 'py-N (pid P)' immediately and "
-            "the result is delivered later; there is no deadline, so this is the mode for "
-            "long-running or fire-and-forget code. timeout > 0 waits synchronously up to that "
-            "many seconds; if the code is still running at the deadline, the wait converts to "
-            "async and the result still arrives later -- the interpreter is never killed by a "
-            "timeout.\n"
-            "clean (default false): kill the current interpreter and run in a fresh one. This is "
-            "the only way state is lost, and it is your explicit choice. Also the recovery for a "
-            "wedged interpreter (e.g. a stuck non-interruptible C call): pair it with "
-            "python_interrupt(kill=true) knowledge.\n"
-            "A long-running async request occupies the interpreter: later requests queue behind "
-            "it (reported as 'queued behind N'). Use python_interrupt to stop one.\n"
-            "The environment is shared per-project: <project_root>/.venv, created on demand when "
-            "the agent preset declares packages. All times are SECONDS.";
+            "timeout (seconds, default 0): 0 runs ASYNC -- returns 'py-N started' immediately "
+            "and the result arrives as a tool result before your next reply. timeout > 0 waits "
+            "synchronously up to that many seconds; if the code is still running at the "
+            "deadline, the wait converts to async and the result still arrives later -- a "
+            "sync wait never kills anything.\n"
+            "max_runtime (seconds, default unlimited): the request's own deadline, counted "
+            "from when it starts running (queue time excluded). On expiry the request is "
+            "interrupted; if it ignores the interrupt, the whole interpreter is hard-killed "
+            "and its state is LOST -- the only timer that destroys anything.\n"
+            "clean (default false): kill the current interpreter and run in a fresh one. The "
+            "other way state is lost (your explicit choice), and the recovery for a wedged "
+            "interpreter (e.g. a stuck non-interruptible C call).\n"
+            "stdin: a blocking input() parks the code until python_input feeds it; interrupt "
+            "with python_interrupt.\n"
+            "A long-running async request occupies the interpreter: later requests queue "
+            "behind it (reported as 'queued behind N'). Use python_output to poll progress "
+            "and partial stdout, python_interrupt to stop one.\n"
+            "The environment is shared per-project: <project_root>/.venv, created on demand "
+            "when the agent preset declares packages. All times are SECONDS.";
         spec_.definition.input_schema = nlohmann::json{
             {"type", "object"},
             {"properties",
@@ -91,7 +101,14 @@ public:
                {{"type", "integer"},
                 {"description",
                  "Seconds to wait for a result. 0 (default) = async: return immediately, "
-                 "result delivered later. >0 = wait up to N seconds, then convert to async."}}},
+                 "result delivered before your next reply. >0 = wait up to N seconds, then "
+                 "convert to async."}}},
+              {"max_runtime",
+               {{"type", "integer"},
+                {"description",
+                 "Deadline for the request itself, from run start (0 or omitted = "
+                 "unlimited). On expiry: interrupt, then hard-kill the interpreter if the "
+                 "code ignores it -- state is lost."}}},
               {"clean",
                {{"type", "boolean"},
                 {"description", "Restart the interpreter before running: all previous state is "
@@ -132,6 +149,13 @@ public:
         if (auto it = input.find("timeout"); it != input.end() && it->is_number_integer() &&
                                                 it->get<std::int64_t>() >= 0) {
             timeout = it->get<std::int64_t>();
+        }
+        // The request's own kill deadline: absent -> the operator's setting
+        // (default unlimited); explicit 0 = unlimited; negative is ignored.
+        std::int64_t max_runtime = settings_.background_max_runtime;
+        if (auto it = input.find("max_runtime"); it != input.end() && it->is_number_integer() &&
+                                                       it->get<std::int64_t>() >= 0) {
+            max_runtime = it->get<std::int64_t>();
         }
         const bool clean = input.value("clean", false);
 
@@ -177,7 +201,7 @@ public:
         RequestHandles handles = BuildHandles(ctx.tool_use_id, code, ctx);
         const bool async = timeout == 0;
         std::string submit_error;
-        const auto id = interp->Submit(code, async, std::move(handles), &submit_error);
+        const auto id = interp->Submit(code, async, std::move(handles), &submit_error, max_runtime);
         if (!id) {
             return Error(submit_error +
                          "\nThe interpreter is gone; the next python_exec starts a fresh one.");
@@ -185,9 +209,11 @@ public:
 
         if (async) {
             EmitStarted(BuildHandles(ctx.tool_use_id, code, ctx), *id, interp->pid());
-            return Ok(*id + " started in the background (pid " + std::to_string(interp->pid()) +
-                      "); the result will be delivered when it completes. python_interrupt stops "
-                      "it." + advisory);
+            std::string ack =
+                *id + " started; its result arrives as a tool result before your next reply. "
+                      "python_output polls progress; python_interrupt stops it.";
+            if (max_runtime > 0) ack += " Deadline: " + std::to_string(max_runtime) + "s.";
+            return Ok(ack + advisory);
         }
 
         std::int64_t wait = timeout;
@@ -207,11 +233,13 @@ public:
             }
             case Interpreter::WaitOutcome::kDemoted:
                 return Ok(*id + " is still running after " + std::to_string(wait) +
-                          "s; it continues in the interpreter and its result will be delivered "
-                          "when it completes. python_interrupt stops it." + advisory);
+                          "s; its result arrives as a tool result before your next reply. "
+                          "python_output polls progress; python_interrupt stops it." +
+                          advisory);
             case Interpreter::WaitOutcome::kCancelled:
                 return Ok(*id + " was cancelled while waiting; it continues in the interpreter "
-                                "and its result will be delivered when it completes." +
+                                "and its result arrives as a tool result before your next "
+                                "reply. python_output polls progress." +
                           advisory);
             case Interpreter::WaitOutcome::kDead:
             default:
@@ -358,6 +386,314 @@ private:
 
 std::unique_ptr<tools::Tool> MakePythonExecTool(PythonSettings settings, InterpreterStore& store) {
     return std::make_unique<PythonExecTool>(std::move(settings), store);
+}
+
+// --- python_output -----------------------------------------------------------------
+
+namespace {
+
+class PythonOutputTool : public tools::Tool {
+public:
+    PythonOutputTool(PythonSettings settings, InterpreterStore& store)
+        : settings_(std::move(settings)), store_(store) {
+        spec_.name = "python_output";
+        spec_.category = tools::ToolCategory::Execute;
+        spec_.definition.name = "python_output";
+        spec_.definition.description =
+            "Poll background work in this session's Python interpreter without blocking.\n"
+            "No arguments (or scope='all'): one status line per task -- running (age, live "
+            "output size), queued behind N, or finished (ok/failed, runtime; its result "
+            "arrives with the next turn if not already delivered).\n"
+            "task_id + scope: that task's output. scope is 'top:N', 'tail:N', or 'read:N:M' "
+            " -- byte-offset slices of the task's output stream (a running task's live ring; "
+            "a finished task's final capture). Responses carry the stream total and "
+            "next_offset for paging; output that fell out of a running task's ring comes "
+            "back as an explicit '[... N bytes lost ...]' marker.\n"
+            "grep (optional regex): filters the sliced text line-by-line; matches report "
+            "their byte offsets within the slice.";
+        spec_.definition.input_schema = nlohmann::json{
+            {"type", "object"},
+            {"properties",
+             {{"task_id",
+               {{"type", "string"},
+                {"description", "A py-N id from python_exec's acknowledgment. Omit to list "
+                                "all tasks."}}},
+              {"scope",
+               {{"type", "string"},
+                {"description", "'all' (list tasks), or with task_id: 'top:N', 'tail:N' "
+                                "(default: 8192), 'read:N,M' (byte offset N, length M)."}}},
+              {"grep",
+               {{"type", "string"},
+                {"description", "Regex applied to the sliced output's lines after scoping; "
+                                "matches report byte offsets within the slice."}}}}}};
+    }
+
+    const tools::ToolSpec& spec() const override { return spec_; }
+    std::string_view config_namespace() const override { return "python"; }
+    bool parallel_safe() const override { return false; }
+
+    ToolResult execute(const nlohmann::json& input, tools::ToolContext& ctx) override {
+        const nlohmann::json args =
+            input.is_object() ? input : nlohmann::json::object();
+        auto interp = store_.Find(ctx.session_id);
+        if (!interp || !interp->alive()) {
+            return Error("no python interpreter is running in this session");
+        }
+        const auto task_id = args.value("task_id", std::string());
+        const auto scope = args.value("scope", std::string());
+        const auto grep = args.value("grep", std::string());
+
+        // Listing: every task, one line each (plus the running task's tail --
+        // the thing a poll is usually for).
+        if (task_id.empty() && (scope.empty() || scope == "all")) {
+            const auto tasks = interp->TaskStatuses();
+            if (tasks.empty()) {
+                return Ok("no python tasks in this session");
+            }
+            std::string text;
+            for (const auto& t : tasks) {
+                if (!text.empty()) text += "\n";
+                switch (t.state) {
+                    case TaskStatus::State::kRunning:
+                        text += t.id + " -- running " + Seconds(t.seconds) + ", " +
+                                Bytes(t.stream_total) + " output so far";
+                        if (t.max_runtime > 0) text += ", deadline " + std::to_string(t.max_runtime) + "s";
+                        break;
+                    case TaskStatus::State::kQueued:
+                        text += t.id + " -- queued behind " + std::to_string(t.queued_behind) +
+                                " request(s)";
+                        break;
+                    case TaskStatus::State::kFinished:
+                        text += t.id + " -- finished (" + (t.ok ? "ok" : "failed") + ") in " +
+                                Seconds(t.seconds) +
+                                "; its result arrives with the next turn if not already "
+                                "delivered";
+                        break;
+                }
+            }
+            // The running task's tail: live progress without a second call.
+            for (const auto& t : tasks) {
+                if (t.state != TaskStatus::State::kRunning) continue;
+                const auto tail = interp->ReadTaskOutput(
+                    t.id, t.stream_total > kListTailBytes ? t.stream_total - kListTailBytes : 0,
+                    kListTailBytes);
+                if (!tail.slice.text.empty()) {
+                    text += "\n--- " + t.id + " output (tail) ---\n" + tail.slice.text;
+                }
+                break;
+            }
+            return Ok(text);
+        }
+
+        if (task_id.empty()) {
+            return Error("scope '" + scope + "' needs a task_id (or omit scope to list tasks)");
+        }
+
+        // One task's output, sliced by absolute byte offset.
+        std::uint64_t offset = 0;
+        std::size_t length = kDefaultTailBytes;
+        std::string scope_note = "tail 8192";
+        if (scope.empty() || scope.rfind("tail:", 0) == 0) {
+            const auto total = interp->ReadTaskOutput(task_id, 0, 0).slice.total;
+            const auto n = ParseCount(scope, kDefaultTailBytes);
+            const auto begin = total > n ? total - n : 0;
+            offset = begin;
+            length = static_cast<std::size_t>(total - begin);
+            scope_note = "tail " + std::to_string(n);
+        } else if (scope.rfind("top:", 0) == 0) {
+            length = static_cast<std::size_t>(ParseCount(scope, kDefaultTailBytes));
+            scope_note = "top " + std::to_string(length);
+        } else if (scope.rfind("read:", 0) == 0) {
+            const auto colon = scope.find(':');
+            const auto comma = scope.find(',', colon + 1);
+            if (comma == std::string::npos) {
+                return Error("scope 'read:N:M' takes 'read:<offset>,<length>'");
+            }
+            offset = ParseCount(scope.substr(colon + 1, comma - colon - 1), 0);
+            length = static_cast<std::size_t>(ParseCount(scope.substr(comma + 1), 0));
+            scope_note = "read " + std::to_string(offset) + "+" + std::to_string(length);
+        } else {
+            return Error("unknown scope '" + scope +
+                         "' (expected 'all', 'top:N', 'tail:N', or 'read:N,M')");
+        }
+
+        const auto read = interp->ReadTaskOutput(task_id, offset, length);
+        if (!read.found) {
+            return Error("no such task: " + task_id +
+                         " (it may be older than the last few completions; python_output with "
+                         "no arguments lists what is tracked)");
+        }
+
+        std::string text;
+        // The task's state line comes free from the listing scan.
+        for (const auto& t : interp->TaskStatuses()) {
+            if (t.id == task_id) {
+                switch (t.state) {
+                    case TaskStatus::State::kRunning:
+                        text = task_id + " -- running " + Seconds(t.seconds);
+                        break;
+                    case TaskStatus::State::kQueued:
+                        text = task_id + " -- queued behind " + std::to_string(t.queued_behind) +
+                               " request(s); no output yet";
+                        break;
+                    case TaskStatus::State::kFinished:
+                        text = task_id + " -- finished (" + (t.ok ? "ok" : "failed") + ") in " +
+                               Seconds(t.seconds);
+                        break;
+                }
+                break;
+            }
+        }
+        if (text.empty()) text = task_id;
+        text += "\n[scope " + scope_note + "; stream " + std::to_string(read.slice.total) +
+                " bytes; showing " + std::to_string(offset) + ".." +
+                std::to_string(read.slice.next) + (read.finished ? " of the final capture" : "") +
+                "]";
+        if (read.slice.lost > 0) {
+            text += "\n[" + std::to_string(read.slice.lost) +
+                    " bytes inside this range are no longer retained]";
+        }
+
+        std::string body = read.slice.text;
+        if (!grep.empty()) {
+            std::string filtered;
+            try {
+                const std::regex pattern(grep);
+                std::size_t pos = 0;
+                while (pos < body.size()) {
+                    const auto nl = body.find('\n', pos);
+                    const auto line_end = nl == std::string::npos ? body.size() : nl + 1;
+                    const std::string_view line(body.data() + pos, line_end - pos);
+                    if (std::regex_search(line.begin(), line.end(), pattern)) {
+                        filtered += "[" + std::to_string(pos) + "] " + std::string(line);
+                        if (!filtered.empty() && filtered.back() != '\n') filtered += "\n";
+                    }
+                    pos = line_end;
+                }
+            } catch (const std::regex_error& e) {
+                return Error("bad grep regex: " + std::string(e.what()));
+            }
+            body = filtered.empty() ? "(no matches)" : filtered;
+        }
+        if (body.empty()) body = "(no output in this range)";
+        text += "\n" + body;
+        if (read.slice.next < read.slice.total) {
+            text += "\n[next: read:" + std::to_string(read.slice.next) + "," +
+                    std::to_string(std::min<std::size_t>(kDefaultTailBytes, 65536)) + "]";
+        }
+        return Ok(text);
+    }
+
+private:
+    static ToolResult Ok(std::string text) { return ToolResult{false, std::move(text)}; }
+    static ToolResult Error(std::string text) { return ToolResult{true, std::move(text)}; }
+    static std::string Seconds(double s) {
+        std::ostringstream out;
+        out << std::fixed << std::setprecision(1) << s << "s";
+        return out.str();
+    }
+    static std::string Bytes(std::uint64_t n) {
+        std::ostringstream out;
+        if (n >= 1024 * 1024) {
+            out << std::fixed << std::setprecision(1) << (n / (1024.0 * 1024.0)) << " MiB";
+        } else if (n >= 1024) {
+            out << std::fixed << std::setprecision(1) << (n / 1024.0) << " KiB";
+        } else {
+            out << n << " B";
+        }
+        return out.str();
+    }
+    static std::uint64_t ParseCount(const std::string& text, std::uint64_t fallback) {
+        auto first = text.find_first_of("0123456789");
+        if (first == std::string::npos) return fallback;
+        auto last = text.find_first_not_of("0123456789", first);
+        try {
+            return static_cast<std::uint64_t>(std::stoull(text.substr(first, last)));
+        } catch (...) {
+            return fallback;
+        }
+    }
+
+    static constexpr std::size_t kDefaultTailBytes = 8192;
+    static constexpr std::size_t kListTailBytes = 2048;
+    PythonSettings settings_;
+    InterpreterStore& store_;
+    tools::ToolSpec spec_;
+};
+
+}  // namespace
+
+// --- python_input ------------------------------------------------------------------
+
+namespace {
+
+class PythonInputTool : public tools::Tool {
+public:
+    PythonInputTool(PythonSettings settings, InterpreterStore& store)
+        : settings_(std::move(settings)), store_(store) {
+        spec_.name = "python_input";
+        spec_.category = tools::ToolCategory::Execute;
+        spec_.definition.name = "python_input";
+        spec_.definition.description =
+            "Feed stdin of the code running in this session's Python interpreter. A blocking "
+            "input() (or sys.stdin read) parks the interpreter until you call this; a newline "
+            "is appended when the text lacks one. The write is non-blocking: a full pipe (the "
+            "code is not consuming) is reported, never parked on.";
+        spec_.definition.input_schema = nlohmann::json{
+            {"type", "object"},
+            {"properties",
+             {{"text",
+               {{"type", "string"},
+                {"description", "The stdin payload (a line is appended when absent)."}}}}},
+            {"required", {"text"}}};
+    }
+
+    const tools::ToolSpec& spec() const override { return spec_; }
+    std::string_view config_namespace() const override { return "python"; }
+    bool parallel_safe() const override { return false; }
+
+    ToolResult execute(const nlohmann::json& input, tools::ToolContext& ctx) override {
+        const auto it = input.find("text");
+        if (it == input.end() || !it->is_string()) {
+            return Error("python_input requires a 'text' string");
+        }
+        auto text = it->get<std::string>();
+        if (text.empty() || text.back() != '\n') text += "\n";
+
+        auto interp = store_.Find(ctx.session_id);
+        if (!interp || !interp->alive()) {
+            return Error("no python interpreter is running in this session");
+        }
+        std::string error;
+        const auto accepted = interp->WriteStdin(text, &error);
+        if (accepted == 0 && !error.empty()) {
+            return Error(error);
+        }
+        if (!error.empty()) {
+            return Error(std::to_string(accepted) + " of " + std::to_string(text.size()) +
+                         " bytes delivered; " + error);
+        }
+        return Ok(std::to_string(accepted) + " bytes delivered to the interpreter's stdin");
+    }
+
+private:
+    static ToolResult Ok(std::string text) { return ToolResult{false, std::move(text)}; }
+    static ToolResult Error(std::string text) { return ToolResult{true, std::move(text)}; }
+    PythonSettings settings_;
+    InterpreterStore& store_;
+    tools::ToolSpec spec_;
+};
+
+}  // namespace
+
+std::unique_ptr<tools::Tool> MakePythonOutputTool(PythonSettings settings,
+                                                  InterpreterStore& store) {
+    return std::make_unique<PythonOutputTool>(std::move(settings), store);
+}
+
+std::unique_ptr<tools::Tool> MakePythonInputTool(PythonSettings settings,
+                                                 InterpreterStore& store) {
+    return std::make_unique<PythonInputTool>(std::move(settings), store);
 }
 
 std::unique_ptr<tools::Tool> MakePythonInterruptTool(PythonSettings settings,

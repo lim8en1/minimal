@@ -48,7 +48,7 @@ std::vector<InterpreterStore::Listing> InterpreterStore::List(
         row.version = interpreter->version();
         row.declared_count = interpreter->Declared().size();
         row.venved = !interpreter->config().venv.empty();
-        row.pending = interpreter->PendingIds();
+        row.pending = interpreter->PendingRows();
         out.push_back(std::move(row));
     }
     return out;

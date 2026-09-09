@@ -33,7 +33,11 @@ minimal::commands::CommandResult PythonCommand::Execute(
             << ", declared entries: " << row.declared_count << '\n';
         if (!row.pending.empty()) {
             out << "  pending:";
-            for (const auto& id : row.pending) out << ' ' << id;
+            for (const auto& task : row.pending) {
+                out << ' ' << task.id;
+                if (task.max_runtime > 0) out << "(deadline " << task.max_runtime << "s)";
+                if (task.stream_bytes > 0) out << "(" << task.stream_bytes << "B streamed)";
+            }
             out << '\n';
         }
     }

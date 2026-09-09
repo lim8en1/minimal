@@ -44,6 +44,10 @@ PythonSettings ParsePythonSettings(const nlohmann::json& config) {
     settings.rlimit_cpu_seconds = ValueOr(config, "rlimit_cpu_seconds", settings.rlimit_cpu_seconds);
     settings.max_file_size_bytes =
         ValueOr(config, "max_file_size_bytes", settings.max_file_size_bytes);
+    settings.stream_head_bytes = ValueOr(config, "stream_head_bytes", settings.stream_head_bytes);
+    settings.stream_tail_bytes = ValueOr(config, "stream_tail_bytes", settings.stream_tail_bytes);
+    settings.background_max_runtime =
+        ValueOr(config, "background_max_runtime", settings.background_max_runtime);
 
     if (settings.python.empty()) settings.python = "python3";
     if (settings.sync_wait_ceiling < 0) settings.sync_wait_ceiling = 0;
@@ -54,6 +58,9 @@ PythonSettings ParsePythonSettings(const nlohmann::json& config) {
     if (settings.max_capture_bytes <= 0) settings.max_capture_bytes = 1024 * 1024;
     if (settings.rlimit_cpu_seconds < 0) settings.rlimit_cpu_seconds = 0;
     if (settings.max_file_size_bytes <= 0) settings.max_file_size_bytes = 1024LL * 1024 * 1024;
+    if (settings.stream_head_bytes <= 0) settings.stream_head_bytes = 256 * 1024;
+    if (settings.stream_tail_bytes <= 0) settings.stream_tail_bytes = 768 * 1024;
+    if (settings.background_max_runtime < 0) settings.background_max_runtime = 0;
     return settings;
 }
 

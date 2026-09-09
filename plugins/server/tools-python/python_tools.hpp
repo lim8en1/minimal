@@ -11,16 +11,19 @@ namespace minimal::tools_python {
 
 // python_exec -- run code in this session's persistent interpreter.
 //
-//   timeout = 0 (default): async. Acknowledges immediately ("py-N (pid P)");
+//   timeout = 0 (default): async. Acknowledges immediately ("py-N started");
 //     the result is INJECTED at a turn boundary keyed to the original
-//     tool_use_id when it completes. There is NO async deadline: the request
-//     finishes when it finishes, and the injection waits. This is the mode
-//     for long-running work (a blocked MSRPC call, a long download) and for
-//     fire-and-forget setup.
+//     tool_use_id -- it arrives as a tool result before the model's next
+//     reply. python_output polls progress and partial stdout meanwhile.
 //   timeout > 0: sync. Blocks up to min(timeout, sync_wait_ceiling); on
 //     expiry (or CancelTurn) the request DEMOTES to async -- the interpreter
 //     and its state are untouched, and the result still arrives by injection.
 //     Timeouts demote, never destroy.
+//   max_runtime (seconds, default unlimited): the request's own deadline,
+//     counted from when it starts RUNNING (queue time excluded). On expiry
+//     the request is soft-interrupted; if it ignores SIGINT for
+//     grace_seconds, the interpreter is hard-killed (state LOST). The one
+//     destructive timer, and it is opt-in.
 //   clean = true: SIGKILL the current interpreter first, then run in a fresh
 //     one (also the recovery path for a wedged interpreter: state is lost as
 //     an explicit choice).
@@ -33,6 +36,30 @@ namespace minimal::tools_python {
 // once, and left to the model.
 std::unique_ptr<tools::Tool> MakePythonExecTool(PythonSettings settings,
                                                 InterpreterStore& store);
+
+// python_output -- poll background work without blocking.
+//
+//   No arguments (or scope="all"): one status line per task -- running (with
+//     age and live-stream size), queued behind N, or finished (ok/failed,
+//     total runtime; the result arrives with the next turn if not already
+//     delivered).
+//   task_id + scope: that task's output. "top:N" / "tail:N" / "read:N:M"
+//     slice the LOGICAL stream by absolute byte offsets (a running task's
+//     live ring; a finished task's capped capture). Responses carry the
+//     stream total and next_offset for paging; bytes that fell out of the
+//     running ring come back as explicit gap markers.
+//   grep (optional regex): filters the scoped slice's lines, matches
+//     carrying their byte offsets within the slice.
+std::unique_ptr<tools::Tool> MakePythonOutputTool(PythonSettings settings,
+                                                  InterpreterStore& store);
+
+// python_input -- feed the stdin channel of the running code.
+//
+// Executed code's sys.stdin reads a dedicated pipe: a blocking input() parks
+// the interpreter until python_input feeds a line (a newline is appended when
+// absent). Interruptible like any blocking call (python_interrupt).
+std::unique_ptr<tools::Tool> MakePythonInputTool(PythonSettings settings,
+                                                 InterpreterStore& store);
 
 // python_interrupt -- stop the currently-running request, or the interpreter.
 //

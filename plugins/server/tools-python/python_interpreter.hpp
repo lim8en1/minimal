@@ -4,6 +4,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -19,6 +20,7 @@
 
 #include "python_process.hpp"
 #include "python_settings.hpp"
+#include "stream_ring.hpp"
 
 namespace minimal::tools_python {
 
@@ -42,6 +44,15 @@ struct RequestOutcome {
     std::string stdout_text;  // captured, already capped driver-side
     std::string stderr_text;  // tracebacks land here
     std::string error;        // transport-level failure description when !ok
+    // Structured-return fields from the driver: the exception class + message
+    // on a failed request, and the JSON rendering of a serializable trailing
+    // expression on a successful one (empty when the value did not serialize).
+    std::string exc_type;
+    std::string exc_msg;
+    std::string result_json;
+    // Set when the request's max_runtime fired mid-run: the SIGINT did not
+    // prevent completion, so the result is real but the deadline was felt.
+    bool deadline_interrupted = false;
 };
 
 // The lifetime-safe handles a request needs to deliver a completion that
@@ -54,15 +65,45 @@ struct RequestHandles {
     std::string label;  // short code snippet for logs and panel rows
     std::function<bool(llm::Message)> schedule_injection;
     std::function<void(const tools::BackgroundTaskEvent&)> emit_task_event;
+    // Incremental stdout of the RUNNING request (lossy, tail-only downstream --
+    // the operator's panel; the authoritative record is the response capture).
+    std::function<void(std::string_view)> emit_output;
     std::weak_ptr<const void> session_lifetime;
+};
+
+// One row of `python_output`'s task listing (no output text; call
+// ReadTaskOutput for that). `seconds` is the running request's age since its
+// run started, or a finished request's total runtime.
+struct TaskStatus {
+    enum class State { kRunning, kQueued, kFinished };
+    std::string id;
+    State state = State::kQueued;
+    bool ok = false;                 // finished only
+    double seconds = 0;
+    std::uint64_t queued_behind = 0;  // queued only: requests ahead of it
+    std::int64_t max_runtime = 0;     // armed deadline in seconds (0 = none)
+    std::uint64_t stream_total = 0;   // running only: logical stream size so far
+};
+
+// One read of a task's output. Running tasks read from the live ring
+// (absolute offsets over the logical stream, gap markers inline); finished
+// tasks read from the authoritative capped capture (offsets over it; `lost`
+// is always 0 there -- its own truncation marker rides inside the text).
+struct OutputRead {
+    bool found = false;
+    bool finished = false;
+    StreamRing::ReadResult slice;
 };
 
 // One persistent interpreter: the process, its reader thread, and the request
 // queue. THE lifetime contract (deliberate deviation from background bash's
 // background_max_timeout_ms): a bash task is a stateless process, so a timer
-// may kill it; an interpreter is SHARED SESSION STATE, so nothing here kills
-// it on a deadline. Timeouts DEMOTE a sync wait to async -- they never
-// destroy. The interpreter's clock is the session's clock: killed when the
+// may kill it; an interpreter is SHARED SESSION STATE, so no SYNCHRONOUS
+// wait ever destroys it -- timeouts demote a sync wait to async. The ONE
+// destructive timer is the request's own opt-in max_runtime: on expiry the
+// reader soft-interrupts and, if the request ignores SIGINT for
+// grace_seconds, hard-kills the interpreter (the caller's explicit deadline).
+// Otherwise the interpreter's clock is the session's clock: killed when the
 // session terminates (reader polls session_lifetime), when the server exits
 // (the atexit pgid sweep), or by an EXPLICIT kill (python_interrupt(kill=true)
 // / clean=true / /python restart).
@@ -98,9 +139,12 @@ public:
     //   sync:  WaitSync fulfills it (until DEMOTED, after which the reader
     //          takes over delivery exactly like an async request).
     // nullopt with *error set when the interpreter is dead or the pipe
-    // refuses the write.
+    // refuses the write. `max_runtime_seconds` arms the request's own kill
+    // deadline, counted from when it starts RUNNING (queue time excluded);
+    // 0 = unlimited.
     std::optional<std::string> Submit(const std::string& code, bool async,
-                                      RequestHandles handles, std::string* error);
+                                      RequestHandles handles, std::string* error,
+                                      std::int64_t max_runtime_seconds = 0);
 
     enum class WaitOutcome { kCompleted, kDemoted, kDead, kCancelled };
 
@@ -130,6 +174,12 @@ public:
     InterruptOutcome WaitForInterrupt(std::chrono::milliseconds grace,
                                       const tools::CancelTokenPtr& cancel);
 
+    // Feeds the user-stdin pipe (the driver's sys.stdin reads it; python_input
+    // is the tool surface). Non-blocking: returns the bytes accepted -- a full
+    // pipe (the script is not consuming) yields a partial write and *error
+    // set, never a parked session worker.
+    std::size_t WriteStdin(const std::string& text, std::string* error);
+
     // Hard kill: SIGKILL + reap, idempotent. Every pending request fails
     // (async ones get injected error results when the session is still alive;
     // sync waits are woken with a dead outcome). The reader thread notices
@@ -148,6 +198,10 @@ public:
     std::vector<std::string> Declared();
     void AdoptDeclared(const std::vector<std::string>& added);
 
+    // python_output's data plane: the task listing, and one task's output.
+    std::vector<TaskStatus> TaskStatuses();
+    OutputRead ReadTaskOutput(const std::string& id, std::uint64_t offset, std::size_t length);
+
     bool alive() const { return !dead_.load(std::memory_order_acquire); }
     pid_t pid() const { return pid_; }
     const std::string& version() const { return version_; }
@@ -156,6 +210,15 @@ public:
     // Requests queued or running (for the tools' `pending` reporting and
     // /python). Oldest first; the first is the one currently running.
     std::vector<std::string> PendingIds();
+
+    // The same rows with the /python-visible extras (armed deadline, live
+    // stream size).
+    struct PendingRow {
+        std::string id;
+        std::int64_t max_runtime = 0;
+        std::uint64_t stream_bytes = 0;
+    };
+    std::vector<PendingRow> PendingRows();
 
 private:
     struct Pending;  // defined below; method declarations reference it by pointer
@@ -171,6 +234,7 @@ private:
 
     struct Pending {
         std::string id;
+        std::uint64_t seq = 0;  // submission order (the map itself is keyed, not FIFO)
         bool async = false;
         RequestHandles handles;
         // Fulfilled by the reader under mu_ before done=true. The waiter
@@ -178,20 +242,49 @@ private:
         // while a wait is parked on this object.
         RequestOutcome outcome;
         bool done = false;
+        // Live-output ring (running request only in practice; queued ones
+        // have produced no output) + the deadline machinery.
+        StreamRing ring;
+        std::int64_t max_runtime_seconds = 0;  // armed at run start (Submit's argument)
+        std::optional<std::chrono::steady_clock::time_point> running_since;
+        std::optional<std::chrono::steady_clock::time_point> deadline;
+        bool deadline_fired = false;
+        std::optional<std::chrono::steady_clock::time_point> deadline_fired_at;
+
+        Pending(std::size_t head_cap, std::size_t tail_cap) : ring(head_cap, tail_cap) {}
     };
+
+    // The not-done pending with the smallest seq -- the one whose code is
+    // running (or about to run) in the driver. Caller holds mu_.
+    std::shared_ptr<Pending> RunningPendingLocked();
+    // Arms/refreshes running_since lazily (call sites: stream attribution,
+    // deadline checks). Caller holds mu_.
+    void StampRunningLocked(const std::shared_ptr<Pending>& p,
+                            std::chrono::steady_clock::time_point now);
 
     InterpreterConfig config_;
     PythonSettings settings_;
     common::Logger& logger_;
 
     pid_t pid_ = -1;
-    ScopedFd in_fd_;   // parent -> child (requests)
-    ScopedFd out_fd_;  // child -> parent (responses)
-    ScopedFd diag_fd_; // child's real stdout/stderr, drained + kept for the death report
+    ScopedFd in_fd_;      // parent -> child (requests)
+    ScopedFd out_fd_;     // child -> parent (responses)
+    ScopedFd diag_fd_;    // child's real stdout/stderr, drained + kept for the death report
+    ScopedFd stream_fd_;  // child -> parent (live stdout of the running request)
+    ScopedFd user_in_fd_; // parent -> child (user stdin for executed code)
 
     mutable std::mutex mu_;
     std::condition_variable cv_;
     std::map<std::string, std::shared_ptr<Pending>> pending_;
+    // The last kFinishedRing completions (any delivery path), so
+    // python_output can see a task through the completion->injection gap.
+    struct FinishedEntry {
+        std::string id;
+        RequestOutcome outcome;
+        double seconds = 0;  // total runtime
+    };
+    std::deque<FinishedEntry> finished_;
+    std::uint64_t next_seq_ = 0;   // submission-order source, guarded by mu_
     std::uint64_t progress_{0};        // bumped per delivered response or idle-interrupt
     std::uint64_t idle_interrupts_{0};  // monotonically bumped when the driver spends a SIGINT
                                         // with nothing running (counter, not a flag: a flag
@@ -206,6 +299,13 @@ private:
     // JOINED in the destructor; holds no reference to the interpreter.
     std::thread reader_;
 };
+
+// The finished-completions ring depth: how far back `python_output` can see a
+// completed task before its entry is forgotten. Completion records are tiny
+// (the capped capture already rode the response line), so this bounds only
+// metadata, not the output text.
+inline constexpr std::size_t kFinishedRing = 8;
+
 // Formats one completed request into the text the model sees (shared by the
 // sync result and the async injection, so both audiences read the same shape).
 std::string FormatOutcome(const std::string& id, const RequestOutcome& outcome,

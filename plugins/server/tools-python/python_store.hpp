@@ -38,7 +38,7 @@ public:
         std::string version;
         std::size_t declared_count;
         bool venved;
-        std::vector<std::string> pending;
+        std::vector<Interpreter::PendingRow> pending;
     };
     std::vector<Listing> List(const std::string& session_id) const;
 

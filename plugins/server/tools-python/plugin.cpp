@@ -1,5 +1,6 @@
-// tools-python -- the persistent python interpreter (python_exec), the
-// interrupt surface (python_interrupt), /python, and a SessionObserver.
+// tools-python -- the persistent python interpreter (python_exec), its
+// polling/input surfaces (python_output, python_input), the interrupt surface
+// (python_interrupt), /python, and a SessionObserver.
 //
 // All of these live together deliberately: the per-session interpreter registry
 // lives INSIDE this plugin (core holds no python state), so /python is
@@ -10,10 +11,12 @@
 //
 // THE LIFETIME CONTRACT (the deliberate deviation from background bash):
 // bash's background tasks are stateless processes, so a timer may kill them;
-// the interpreter is SHARED SESSION STATE, so nothing kills it on a deadline.
-// Timeouts demote a sync wait to async; kills are always explicit
+// the interpreter is SHARED SESSION STATE, so no SYNCHRONOUS wait ever
+// destroys it -- timeouts demote a sync wait to async. Kills are explicit
 // (python_interrupt(kill=true), clean=true, /python restart) or structural
-// (session terminate, server exit). The reader thread polls
+// (session terminate, server exit). The one destructive timer is a request's
+// own opt-in max_runtime: interrupt on expiry, hard-kill only if the request
+// ignores SIGINT for the grace period. The reader thread polls
 // ToolContext::session_lifetime and killpg's on expiry -- the same mechanism
 // background bash uses, because SessionObserver::OnSessionEnded is
 // fire-and-forget and cannot be a kill path.
@@ -82,6 +85,10 @@ void minimal_plugin_register_tools(
     const auto settings = minimal::tools_python::ParsePythonSettings(context.config);
     registry.Register(
         minimal::tools_python::MakePythonExecTool(settings, Interpreters()));
+    registry.Register(
+        minimal::tools_python::MakePythonOutputTool(settings, Interpreters()));
+    registry.Register(
+        minimal::tools_python::MakePythonInputTool(settings, Interpreters()));
     registry.Register(
         minimal::tools_python::MakePythonInterruptTool(settings, Interpreters()));
 }

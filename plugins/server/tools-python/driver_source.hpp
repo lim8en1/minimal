@@ -7,10 +7,28 @@
 // PROTOCOL (one JSON value per line, ASCII-escaped by json.dumps):
 //   parent -> child, fd 0:      {"id": "py-N", "code": "..."}
 //   child -> parent, fd 3:      {"id": "...", "ok": bool, "result": "repr or ''",
-//                                "stdout": "...", "stderr": "..."}
+//                                "stdout": "...", "stderr": "...",
+//                                "result_json": "..." (serializable results only),
+//                                "exc": "ValueError", "exc_msg": "..." (failures only)}
 //   startup, once:              {"ready": true, "version": "...", "executable": "..."}
 //   malformed request:          {"bad_request": "..."}  (no id; logged, skipped)
 //   SIGINT with nothing running: {"idle_interrupted": true}  (see below)
+//
+// LIVE STREAM (fd 4, unframed raw bytes): every chunk written to the RUNNING
+// request's stdout capture is ALSO written through to fd 4 immediately -- no
+// buffering, no threads, no framing. At most one request runs at a time (the
+// strict FIFO below), so the parent knows which request owns the stream
+// without any framing protocol; the parent bounds its own retention. Bounded
+// by nothing here BY DESIGN: a print storm streams through, the parent's
+// capped ring is the backpressure boundary, and the completion capture below
+// stays the authoritative record. stderr is NOT streamed: it carries only the
+// final traceback, which arrives with the response anyway.
+//
+// USER STDIN (fd 5): sys.stdin reads here, set ONCE globally (not per
+// request). A blocking input() parks the driver's single thread until the
+// parent feeds a line -- the intended semantics, interruptible like any
+// other blocking call (SIGINT raises KeyboardInterrupt out of the read).
+// There is no EOF: the parent holds its write end for the process's life.
 //
 // SIGINT SEMANTICS: the parent's soft interrupt targets the RUNNING request
 // (its per-request catch turns the KeyboardInterrupt into a failed response).
@@ -28,9 +46,9 @@
 //     private name at startup; the child's REAL fd 1/2 point at a diagnostics
 //     pipe. Executed code writing to "the real stdout" cannot corrupt
 //     responses.
-//   - executed code runs with sys.stdin replaced by an object whose every
-//     read raises EOFError, so `input()` fails immediately instead of eating
-//     the next request frame.
+//   - executed code runs with sys.stdin reading the user-stdin pipe (fd 5):
+//     `input()` blocks until the parent feeds a line (python_input) instead
+//     of eating the next request frame -- see USER STDIN above.
 //   - stdout/stderr are captured per request into capped buffers
 //     (_MINIMAL_PY_CAPTURE env), so a print-storm bounds the pipe line size
 //     instead of growing memory without limit.
@@ -48,10 +66,14 @@ _MAX = int(os.environ.get("_MINIMAL_PY_CAPTURE", str(1 << 20)))
 
 
 class _Cap(io.TextIOBase):
-    def __init__(self):
+    def __init__(self, stream_fd=None):
         self._parts = []
         self._len = 0
         self.dropped = 0
+        # Non-None on the stdout cap: every chunk also streams through fd 4,
+        # synchronously with the write call. A dead/absent reader degrades to
+        # dropped bytes, never an exception in user code.
+        self._fd = stream_fd
 
     def writable(self):
         return True
@@ -65,6 +87,11 @@ class _Cap(io.TextIOBase):
                 self.dropped += len(s) - take
         else:
             self.dropped += len(s)
+        if self._fd is not None and s:
+            try:
+                os.write(self._fd, s.encode("utf-8", "replace"))
+            except OSError:
+                pass
         return len(s)
 
     def flush(self):
@@ -77,27 +104,18 @@ class _Cap(io.TextIOBase):
         return text
 
 
-class _NoStdin:
-    def _dead(self, *args, **kwargs):
-        raise EOFError("stdin is reserved by the python tool protocol")
-
-    read = readline = readlines = __iter__ = _dead
-    __next__ = _dead
-
-    def fileno(self):
-        raise EOFError("stdin is reserved by the python tool protocol")
-
-
 def _main():
     proto_in = os.fdopen(os.dup(0), "r", encoding="utf-8", errors="replace")
     proto_out = os.fdopen(3, "w", encoding="utf-8")
+    stream_out = 4
+    user_stdin = os.fdopen(5, "r", encoding="utf-8", errors="replace")
 
     def emit(obj):
         proto_out.write(json.dumps(obj))
         proto_out.write("\n")
         proto_out.flush()
 
-    sys.stdin = _NoStdin()
+    sys.stdin = user_stdin
     sys.path.insert(0, os.getcwd())
 
     G = {"__name__": "__main__"}
@@ -129,11 +147,15 @@ def _main():
         if not isinstance(code, str):
             emit({"bad_request": "missing 'code'"})
             continue
-        out, err = _Cap(), _Cap()
+        out, err = _Cap(stream_out), _Cap()
         old = (sys.stdout, sys.stderr, sys.stdin)
-        sys.stdout, sys.stderr, sys.stdin = out, err, _NoStdin()
+        sys.stdout, sys.stderr = out, err
         ok = True
         result = ""
+        value = None
+        has_value = False
+        exc_type = None
+        exc_msg = None
         try:
             # A trailing expression's value is the result -- even when it
             # follows statements (which a plain eval-compile rejects). Split on
@@ -146,16 +168,33 @@ def _main():
             if tree.body:
                 exec(compile(tree, "<python-tool>", "exec"), G)
             if trailing is not None:
-                result = repr(eval(compile(ast.Expression(trailing), "<python-tool>", "eval"), G))
-        except BaseException:
+                value = eval(compile(ast.Expression(trailing), "<python-tool>", "eval"), G)
+                has_value = True
+                result = repr(value)
+        except BaseException as e:
             # KeyboardInterrupt included: a soft interrupt fails THIS request
             # only -- the interpreter and its state survive.
             ok = False
+            exc_type = type(e).__name__
+            exc_msg = str(e)
             err.write(traceback.format_exc())
         finally:
             sys.stdout, sys.stderr, sys.stdin = old
-        emit({"id": req.get("id"), "ok": ok, "result": result,
-              "stdout": out.value(), "stderr": err.value()})
+        response = {"id": req.get("id"), "ok": ok, "result": result,
+                    "stdout": out.value(), "stderr": err.value()}
+        if exc_type is not None:
+            response["exc"] = exc_type
+            response["exc_msg"] = exc_msg
+        if has_value:
+            # The structured return: JSON when the value serializes cheaply,
+            # absent otherwise (the repr above is the fallback display).
+            try:
+                rendered = json.dumps(value)
+                if len(rendered) <= _MAX:
+                    response["result_json"] = rendered
+            except Exception:
+                pass
+        emit(response)
 
 
 try:

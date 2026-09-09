@@ -36,6 +36,8 @@ using tools_python::RequestHandles;
 using tools_python::RequestOutcome;
 using tools_python::ResolveOnPath;
 using tools_python::SpecName;
+using tools_python::TaskStatus;
+using tools_python::FormatOutcome;
 
 namespace {
 
@@ -157,6 +159,9 @@ TEST_CASE("python settings parse with defaults and clamps", "[tools_python][sett
     CHECK(defaults.sync_wait_ceiling == 300);
     CHECK(defaults.startup_timeout == 10);
     CHECK(defaults.max_output_bytes > 0);
+    CHECK(defaults.background_max_runtime == 0);
+    CHECK(defaults.stream_head_bytes == 256 * 1024);
+    CHECK(defaults.stream_tail_bytes == 768 * 1024);
 
     const auto configured = ParsePythonSettings(nlohmann::json{
         {"python", "python3.12"}, {"sync_wait_ceiling", 5}, {"startup_timeout", 2}});
@@ -167,6 +172,15 @@ TEST_CASE("python settings parse with defaults and clamps", "[tools_python][sett
     // value whose job is to bound a NON-destructive wait.
     CHECK(ParsePythonSettings(nlohmann::json{{"sync_wait_ceiling", -3}}).sync_wait_ceiling == 0);
     CHECK(ParsePythonSettings(nlohmann::json{{"python", ""}}).python == "python3");
+
+    // The stream windows and the one destructive timer parse with clamps.
+    const auto tuned = ParsePythonSettings(nlohmann::json{
+        {"stream_head_bytes", 4096}, {"stream_tail_bytes", 8192}, {"background_max_runtime", 60}});
+    CHECK(tuned.stream_head_bytes == 4096);
+    CHECK(tuned.stream_tail_bytes == 8192);
+    CHECK(tuned.background_max_runtime == 60);
+    CHECK(ParsePythonSettings(nlohmann::json{{"background_max_runtime", -5}})
+              .background_max_runtime == 0);
 }
 
 TEST_CASE("python slice: null-safe parse of packages and requirements", "[tools_python][slice]") {
@@ -417,7 +431,245 @@ TEST_CASE("a failing request reports the traceback and the interpreter survives"
     CHECK(outcome.result == "'still here'");
 }
 
-TEST_CASE("input() hits the neutralized stdin instead of eating a protocol frame",
+TEST_CASE("input() parks until the stdin channel is fed, then the protocol survives",
+          "[tools_python][interpreter][stdin]") {
+    if (!HavePython3()) SKIP("python3 not available");
+    TempDir dir;
+    PythonSettings settings;
+    settings.startup_timeout = 15;
+    InterpreterConfig config;
+    config.python_path = ResolveOnPath("python3");
+    config.cwd = dir.path();
+    config.env = {{"PATH", "/usr/bin:/bin:/usr/local/bin"}, {"HOME", dir.path().string()},
+                  {"PYTHONUNBUFFERED", "1"}};
+    config.session_lifetime = kLifetimeToken;
+    std::string error;
+    auto interp = Interpreter::Spawn(config, settings, common::DefaultLogger(), &error);
+    REQUIRE(interp != nullptr);
+
+    auto injected = std::make_shared<Injected>();
+    RequestHandles handles;
+    handles.session_lifetime = kLifetimeToken;
+    handles.schedule_injection = [injected](llm::Message message) {
+        std::lock_guard<std::mutex> lock(injected->mu);
+        injected->messages.push_back(std::move(message));
+        return true;
+    };
+    std::string submit_error;
+    const auto id = interp->Submit("input()", false, handles, &submit_error);
+    REQUIRE(id.has_value());
+
+    // The read PARKS (no EOF sentinel): a short sync wait demotes instead of
+    // the request failing.
+    RequestOutcome outcome;
+    REQUIRE(interp->WaitSync(*id, nullptr, std::chrono::steady_clock::now() +
+                                                     std::chrono::milliseconds(800),
+                             &outcome) == Interpreter::WaitOutcome::kDemoted);
+    CHECK(interp->alive());
+
+    // Feeding the channel completes the parked request.
+    std::string write_error;
+    // Raw bytes only -- the python_input TOOL appends the newline.
+    CHECK(interp->WriteStdin("hello\n", &write_error) == 6);
+    CHECK(write_error.empty());
+    WaitFor([&] { return injected->Has("hello"); }, std::chrono::seconds(10));
+
+    // The protocol is intact: a later request still routes correctly.
+    RequestHandles plain;
+    plain.session_lifetime = kLifetimeToken;
+    const auto id2 = interp->Submit("2 * 21", false, plain, &submit_error);
+    REQUIRE(id2.has_value());
+    REQUIRE(interp->WaitSync(*id2, nullptr, std::chrono::steady_clock::now() +
+                                                  std::chrono::seconds(10),
+                             &outcome) == Interpreter::WaitOutcome::kCompleted);
+    CHECK(outcome.result == "42");
+
+    // A blocked read is interruptible like any blocking call.
+    auto killed = std::make_shared<Injected>();
+    RequestHandles killer;
+    killer.session_lifetime = kLifetimeToken;
+    killer.schedule_injection = [killed](llm::Message message) {
+        std::lock_guard<std::mutex> lock(killed->mu);
+        killed->messages.push_back(std::move(message));
+        return true;
+    };
+    const auto id3 = interp->Submit("input()", true, killer, &submit_error);
+    REQUIRE(id3.has_value());
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    interp->SoftInterrupt();
+    CHECK(interp->WaitForInterrupt(std::chrono::seconds(5), nullptr) ==
+          Interpreter::InterruptOutcome::kResponse);
+    WaitFor([&] { return killed->Has("KeyboardInterrupt"); }, std::chrono::seconds(10));
+    CHECK(interp->alive());
+}
+
+TEST_CASE("live stdout streams to the ring and to emit_output while running",
+          "[tools_python][interpreter][stream]") {
+    if (!HavePython3()) SKIP("python3 not available");
+    TempDir dir;
+    PythonSettings settings;
+    settings.startup_timeout = 15;
+    InterpreterConfig config;
+    config.python_path = ResolveOnPath("python3");
+    config.cwd = dir.path();
+    config.env = {{"PATH", "/usr/bin:/bin:/usr/local/bin"}, {"HOME", dir.path().string()},
+                  {"PYTHONUNBUFFERED", "1"}};
+    config.session_lifetime = kLifetimeToken;
+    std::string error;
+    auto interp = Interpreter::Spawn(config, settings, common::DefaultLogger(), &error);
+    REQUIRE(interp != nullptr);
+
+    std::mutex emit_mu;
+    std::string emitted;
+    RequestHandles handles;
+    handles.session_lifetime = kLifetimeToken;
+    handles.emit_output = [&](std::string_view chunk) {
+        std::lock_guard<std::mutex> lock(emit_mu);
+        emitted.append(chunk);
+    };
+    std::string submit_error;
+    const auto id =
+        interp->Submit("print('streamed-line'); import time; time.sleep(30)", true, handles,
+                       &submit_error);
+    REQUIRE(id.has_value());
+
+    // The delta lands in the ring (and on the operator channel) while the
+    // request is still running.
+    WaitFor([&] {
+        return interp->ReadTaskOutput(*id, 0, 0).slice.total >= 13;
+    }, std::chrono::seconds(10));
+    {
+        std::lock_guard<std::mutex> lock(emit_mu);
+        CHECK(emitted.find("streamed-line") != std::string::npos);
+    }
+    const auto read = interp->ReadTaskOutput(*id, 0, 1000);
+    CHECK(read.found);
+    CHECK_FALSE(read.finished);
+    CHECK(read.slice.text.find("streamed-line") != std::string::npos);
+
+    interp->HardKill("test cleanup");
+}
+
+TEST_CASE("the stream ring bounds retention: gap markers, tail reads, paging",
+          "[tools_python][interpreter][stream]") {
+    if (!HavePython3()) SKIP("python3 not available");
+    TempDir dir;
+    PythonSettings settings;
+    settings.startup_timeout = 15;
+    settings.stream_head_bytes = 16;
+    settings.stream_tail_bytes = 16;
+    InterpreterConfig config;
+    config.python_path = ResolveOnPath("python3");
+    config.cwd = dir.path();
+    config.env = {{"PATH", "/usr/bin:/bin:/usr/local/bin"}, {"HOME", dir.path().string()},
+                  {"PYTHONUNBUFFERED", "1"}};
+    config.session_lifetime = kLifetimeToken;
+    std::string error;
+    auto interp = Interpreter::Spawn(config, settings, common::DefaultLogger(), &error);
+    REQUIRE(interp != nullptr);
+
+    RequestHandles handles;
+    handles.session_lifetime = kLifetimeToken;
+    std::string submit_error;
+    const auto id =
+        interp->Submit("print('0123456789' * 10); import time; time.sleep(30)", true, handles,
+                       &submit_error);
+    REQUIRE(id.has_value());
+
+    WaitFor([&] { return interp->ReadTaskOutput(*id, 0, 0).slice.total >= 101; },
+            std::chrono::seconds(10));
+
+    // Full read: head window + gap + tail window.
+    const auto full = interp->ReadTaskOutput(*id, 0, 1000);
+    CHECK(full.slice.total >= 101);
+    CHECK(full.slice.lost > 0);
+    CHECK(full.slice.text.find("bytes lost") != std::string::npos);
+    CHECK(full.slice.text.substr(0, 16) == "0123456789012345");
+
+    // tail:N lands on the newest bytes.
+    const auto total = full.slice.total;
+    const auto tail = interp->ReadTaskOutput(*id, total - 5, 5);
+    CHECK(tail.slice.text == "6789\n");
+
+    // Paging: next_offset continues where the previous read stopped.
+    const auto head = interp->ReadTaskOutput(*id, 0, 4);
+    CHECK(head.slice.text == "0123");
+    const auto paged = interp->ReadTaskOutput(*id, head.slice.next, 4);
+    CHECK(paged.slice.text == "4567");
+
+    // Completion folds to the authoritative capture: no gaps there.
+    interp->SoftInterrupt();
+    REQUIRE(interp->WaitForInterrupt(std::chrono::seconds(5), nullptr) ==
+            Interpreter::InterruptOutcome::kResponse);
+    WaitFor([&] {
+        const auto r = interp->ReadTaskOutput(*id, 0, 0);
+        return r.found && r.finished;
+    }, std::chrono::seconds(10));
+    const auto final_read = interp->ReadTaskOutput(*id, 0, 1000);
+    CHECK(final_read.finished);
+    CHECK(final_read.slice.lost == 0);
+    CHECK(final_read.slice.text.find("0123456789") != std::string::npos);
+    CHECK(interp->alive());
+}
+
+TEST_CASE("StreamRing: head+tail retention, offsets, gap markers, clamping",
+          "[tools_python][ring]") {
+    // Small stream: fits entirely.
+    {
+        tools_python::StreamRing r(10, 10);
+        r.Append("abcdefgh");
+        const auto x = r.Read(0, 100);
+        CHECK(x.text == "abcdefgh");
+        CHECK(x.total == 8);
+        CHECK(x.next == 8);
+        CHECK(x.lost == 0);
+    }
+    // Single chunk bigger than the tail window: genuine gap.
+    {
+        tools_python::StreamRing r(4, 4);
+        r.Append("abcdefghij");  // head "abcd", tail "ghij"
+        const auto x = r.Read(0, 100);
+        CHECK(x.text == "abcd\n[..., 2 bytes lost ...]\nghij");
+        CHECK(x.lost == 2);
+        const auto y = r.Read(2, 4);  // [2,6): "cd", then "ef" dropped
+        CHECK(y.text == "cd\n[..., 2 bytes lost ...]\n");
+        // Contiguous union when the post-head bytes fit the tail window.
+        tools_python::StreamRing r2(6, 6);
+        r2.Append("abcdefghij");
+        CHECK(r2.Read(0, 100).text == "abcdefghij");
+    }
+    // Many small chunks: head + gap + tail.
+    {
+        std::string digits;
+        for (int i = 0; i < 20; ++i) digits += char('0' + i % 10);
+        tools_python::StreamRing r(4, 4);
+        r.Append(digits);
+        const auto x = r.Read(0, 20);
+        CHECK(x.text == "0123\n[..., 12 bytes lost ...]\n6789");
+        CHECK(x.lost == 12);
+        CHECK(r.Read(16, 4).text == "6789");
+        CHECK(r.Read(0, 4).text == "0123");
+    }
+    // Read past total / empty ring / clamping.
+    {
+        tools_python::StreamRing r(4, 4);
+        CHECK(r.Read(0, 10).next == 0);
+        r.Append("abc");
+        CHECK(r.Read(5, 10).next == 3);
+        const auto z = r.Read(1, 100);
+        CHECK(z.text == "bc");
+        CHECK(z.next == 3);
+    }
+    // Chunks that split across the head boundary.
+    {
+        tools_python::StreamRing r(5, 5);
+        r.Append("ab");
+        r.Append("cdefghij");
+        CHECK(r.Read(0, 10).text == "abcdefghij");
+    }
+}
+
+TEST_CASE("structured returns: exc fields on failure, result_json on success",
           "[tools_python][interpreter]") {
     if (!HavePython3()) SKIP("python3 not available");
     TempDir dir;
@@ -436,21 +688,82 @@ TEST_CASE("input() hits the neutralized stdin instead of eating a protocol frame
     RequestHandles handles;
     handles.session_lifetime = kLifetimeToken;
     std::string submit_error;
-    const auto id = interp->Submit("input()", false, handles, &submit_error);
-    REQUIRE(id.has_value());
     RequestOutcome outcome;
-    REQUIRE(interp->WaitSync(*id, nullptr, std::chrono::steady_clock::now() + std::chrono::seconds(10),
-                             &outcome) == Interpreter::WaitOutcome::kCompleted);
-    CHECK_FALSE(outcome.ok);
-    CHECK(outcome.stderr_text.find("EOFError") != std::string::npos);
-    CHECK(interp->alive());
 
-    // The protocol is intact: a later request still routes correctly.
-    const auto id2 = interp->Submit("2 * 21", false, handles, &submit_error);
-    REQUIRE(id2.has_value());
-    REQUIRE(interp->WaitSync(*id2, nullptr, std::chrono::steady_clock::now() + std::chrono::seconds(10),
+    const auto id = interp->Submit("raise ValueError('boom')", false, handles, &submit_error);
+    REQUIRE(id.has_value());
+    REQUIRE(interp->WaitSync(*id, nullptr, std::chrono::steady_clock::now() +
+                                                  std::chrono::seconds(10),
                              &outcome) == Interpreter::WaitOutcome::kCompleted);
-    CHECK(outcome.result == "42");
+    CHECK(outcome.exc_type == "ValueError");
+    CHECK(outcome.exc_msg == "boom");
+    CHECK(outcome.stderr_text.find("ValueError: boom") != std::string::npos);
+    // The formatted text names the exception class instead of a bare "failed".
+    const auto text = FormatOutcome(*id, outcome, 0, 1 << 20);
+    CHECK(text.find("exception: ValueError: boom") != std::string::npos);
+
+    const auto id2 = interp->Submit("{'a': 1, 'b': [1, 2]}", false, handles, &submit_error);
+    REQUIRE(id2.has_value());
+    REQUIRE(interp->WaitSync(*id2, nullptr, std::chrono::steady_clock::now() +
+                                                  std::chrono::seconds(10),
+                             &outcome) == Interpreter::WaitOutcome::kCompleted);
+    CHECK(outcome.ok);
+    CHECK(outcome.result_json == "{\"a\": 1, \"b\": [1, 2]}");
+    const auto text2 = FormatOutcome(*id2, outcome, 0, 1 << 20);
+    // JSON-preferred display: the dict renders as JSON, not as Python repr.
+    CHECK(text2.find("ok: {\"a\": 1, \"b\": [1, 2]}") != std::string::npos);
+    CHECK(text2.find("{'a': 1}") == std::string::npos);
+
+    // A non-serializable value falls back to repr, no result_json.
+    const auto id3 = interp->Submit("object()", false, handles, &submit_error);
+    REQUIRE(id3.has_value());
+    REQUIRE(interp->WaitSync(*id3, nullptr, std::chrono::steady_clock::now() +
+                                                  std::chrono::seconds(10),
+                             &outcome) == Interpreter::WaitOutcome::kCompleted);
+    CHECK(outcome.ok);
+    CHECK(outcome.result_json.empty());
+    CHECK(outcome.result.find("<object object at") != std::string::npos);
+}
+
+TEST_CASE("finished tasks stay visible through the completion->injection gap",
+          "[tools_python][interpreter][stream]") {
+    if (!HavePython3()) SKIP("python3 not available");
+    TempDir dir;
+    PythonSettings settings;
+    settings.startup_timeout = 15;
+    InterpreterConfig config;
+    config.python_path = ResolveOnPath("python3");
+    config.cwd = dir.path();
+    config.env = {{"PATH", "/usr/bin:/bin:/usr/local/bin"}, {"HOME", dir.path().string()},
+                  {"PYTHONUNBUFFERED", "1"}};
+    config.session_lifetime = kLifetimeToken;
+    std::string error;
+    auto interp = Interpreter::Spawn(config, settings, common::DefaultLogger(), &error);
+    REQUIRE(interp != nullptr);
+
+    auto injected = std::make_shared<Injected>();
+    RequestHandles handles;
+    handles.session_lifetime = kLifetimeToken;
+    handles.schedule_injection = [injected](llm::Message message) {
+        std::lock_guard<std::mutex> lock(injected->mu);
+        injected->messages.push_back(std::move(message));
+        return true;
+    };
+    std::string submit_error;
+    const auto id = interp->Submit("'quick'", true, handles, &submit_error);
+    REQUIRE(id.has_value());
+    WaitFor([&] { return injected->Has("completed"); }, std::chrono::seconds(10));
+
+    // Delivered-and-erased under the old registry -- now the finished ring
+    // keeps the task answerable for python_output.
+    bool listed_finished = false;
+    for (const auto& t : interp->TaskStatuses()) {
+        if (t.id == *id && t.state == TaskStatus::State::kFinished) listed_finished = true;
+    }
+    CHECK(listed_finished);
+    const auto read = interp->ReadTaskOutput(*id, 0, 100);
+    CHECK(read.found);
+    CHECK(read.finished);
 }
 
 TEST_CASE("an async request injects its result keyed to the original tool_use_id",
@@ -794,6 +1107,24 @@ struct ToolFixture {
         run.result = tool->execute(input, builder.ctx);
         return run;
     }
+
+    Run Output(const nlohmann::json& input, const std::string& session_id = "s1") {
+        auto tool = tools_python::MakePythonOutputTool(settings, store);
+        Run run;
+        CtxBuilder builder(dir.path(), session_id);
+        run.injected = builder.injected;
+        run.result = tool->execute(input, builder.ctx);
+        return run;
+    }
+
+    Run Input(const nlohmann::json& input, const std::string& session_id = "s1") {
+        auto tool = tools_python::MakePythonInputTool(settings, store);
+        Run run;
+        CtxBuilder builder(dir.path(), session_id);
+        run.injected = builder.injected;
+        run.result = tool->execute(input, builder.ctx);
+        return run;
+    }
 };
 
 const nlohmann::json& EmptySlice() {
@@ -844,7 +1175,9 @@ TEST_CASE("python_exec timeout=0 acknowledges and injects later", "[tools_python
     const auto run = f.Exec(builder,
                             nlohmann::json{{"code", "import time; time.sleep(1); 'bg done'"}});
     REQUIRE_FALSE(run.result.is_error);
-    CHECK(run.result.content_text.find("started in the background") != std::string::npos);
+    CHECK(run.result.content_text.find(
+              "started; its result arrives as a tool result before your next reply") !=
+          std::string::npos);
     CHECK_FALSE(run.events.empty());
     CHECK(run.events.front().state == tools::BackgroundTaskEvent::State::kStarted);
 
@@ -936,4 +1269,138 @@ TEST_CASE("a bare interpreter drifts onto the venv with a one-time notice, not a
     run = f.Exec(builder, nlohmann::json{{"code", "2 + 2"}, {"timeout", 15}});
     REQUIRE_FALSE(run.result.is_error);
     CHECK(run.result.content_text.find("project venv now exists") == std::string::npos);
+}
+
+TEST_CASE("max_runtime interrupts, then hard-kills a request that ignores the interrupt",
+          "[tools_python][tool][max_runtime]") {
+    if (!HavePython3()) SKIP("python3 not available");
+    ToolFixture f;
+    f.settings.grace_seconds = 1;
+    CtxBuilder builder(f.dir.path());
+
+    auto run = f.Exec(builder,
+                      nlohmann::json{{"code",
+                                      // Block SIGINT: the deadline's interrupt can
+                                      // never land, so the grace must expire into the
+                                      // hard kill (the one deterministic non-reaction
+                                      // pure Python offers).
+                                      "import signal, time\n"
+                                      "signal.pthread_sigmask(signal.SIG_BLOCK, "
+                                      "{signal.SIGINT})\n"
+                                      "time.sleep(30)"},
+                                     {"max_runtime", 1}});
+    REQUIRE_FALSE(run.result.is_error);
+    CHECK(run.result.content_text.find("Deadline: 1s.") != std::string::npos);
+
+    // Expiry soft-interrupts; the spin never yields, so after the grace the
+    // reader hard-kills the interpreter and every pending gets the reason.
+    WaitFor([&] { return builder.injected->Has("exceeded its max_runtime"); },
+            std::chrono::seconds(15));
+    CHECK(builder.injected->Has("state lost"));
+
+    bool timed_out_event = false;
+    {
+        std::lock_guard<std::mutex> lock(*builder.events_mu);
+        for (const auto& e : builder.events) {
+            if (e.state == tools::BackgroundTaskEvent::State::kTimedOut) timed_out_event = true;
+        }
+    }
+    CHECK(timed_out_event);
+
+    // The next exec starts a fresh interpreter and serves normally.
+    run = f.Exec(builder, nlohmann::json{{"code", "6 * 7"}, {"timeout", 15}});
+    REQUIRE_FALSE(run.result.is_error);
+    CHECK(run.result.content_text.find("42") != std::string::npos);
+}
+
+TEST_CASE("max_runtime that lands but does not stop the code still delivers the result",
+          "[tools_python][tool][max_runtime]") {
+    if (!HavePython3()) SKIP("python3 not available");
+    ToolFixture f;
+    f.settings.grace_seconds = 2;
+    CtxBuilder builder(f.dir.path());
+
+    // The interrupt lands (KeyboardInterrupt) but the code catches it and
+    // finishes: the result is real, the deadline note rides along.
+    auto run = f.Exec(builder,
+                      nlohmann::json{{"code",
+                                      "import time\n"
+                                      "try:\n"
+                                      "    time.sleep(30)\n"
+                                      "except KeyboardInterrupt:\n"
+                                      "    pass\n"
+                                      "'survived'"},
+                                     {"max_runtime", 1}});
+    REQUIRE_FALSE(run.result.is_error);
+    WaitFor([&] { return builder.injected->Has("survived"); }, std::chrono::seconds(15));
+    CHECK(builder.injected->Has("[max_runtime hit"));
+}
+
+TEST_CASE("python_output lists tasks, slices output, and greps",
+          "[tools_python][tool][output]") {
+    if (!HavePython3()) SKIP("python3 not available");
+    ToolFixture f;
+    CtxBuilder builder(f.dir.path());
+
+    const auto run =
+        f.Exec(builder, nlohmann::json{{"code",
+                                        "print('progress-line'); print('error-line'); "
+                                        "import time; time.sleep(30)"}});
+    REQUIRE_FALSE(run.result.is_error);
+    const std::string ack = run.result.content_text;
+    const auto id = ack.substr(0, ack.find(' '));
+    CHECK(id.rfind("py-", 0) == 0);
+
+    // Listing: the running task, with its live tail. The tail needs the
+    // print to have run AND drained, so poll briefly.
+    decltype(f.Output(nlohmann::json::object())) listing = f.Output(nlohmann::json::object());
+    WaitFor([&] {
+        listing = f.Output(nlohmann::json::object());
+        return listing.result.content_text.find("progress-line") != std::string::npos;
+    }, std::chrono::seconds(10));
+    REQUIRE_FALSE(listing.result.is_error);
+    CHECK(listing.result.content_text.find(id + " -- running") != std::string::npos);
+    CHECK(listing.result.content_text.find("progress-line") != std::string::npos);
+
+    // top:N reads the very first bytes.
+    auto top = f.Output(nlohmann::json{{"task_id", id}, {"scope", "top:8"}});
+    REQUIRE_FALSE(top.result.is_error);
+    CHECK(top.result.content_text.find("progress") != std::string::npos);
+
+    // grep after scoping: matches carry offsets, non-matches stay out.
+    auto grep = f.Output(
+        nlohmann::json{{"task_id", id}, {"scope", "top:64"}, {"grep", "error-.*"}});
+    REQUIRE_FALSE(grep.result.is_error);
+    CHECK(grep.result.content_text.find("error-line") != std::string::npos);
+    CHECK(grep.result.content_text.find("progress-line") == std::string::npos);
+    CHECK(grep.result.content_text.find("[14] error-line") != std::string::npos);
+
+    // A bad regex is an error, not a crash.
+    auto bad = f.Output(nlohmann::json{{"task_id", id}, {"grep", "(unclosed"}});
+    CHECK(bad.result.is_error);
+
+    f.Interrupt(nlohmann::json{{"kill", true}});
+}
+
+TEST_CASE("python_input feeds a parked input() and the result arrives",
+          "[tools_python][tool][stdin]") {
+    if (!HavePython3()) SKIP("python3 not available");
+    ToolFixture f;
+    CtxBuilder builder(f.dir.path());
+
+    auto run = f.Exec(builder, nlohmann::json{{"code", "name = input(); 'hello ' + name"}});
+    REQUIRE_FALSE(run.result.is_error);
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));  // let input() park
+
+    auto fed = f.Input(nlohmann::json{{"text", "world"}});
+    REQUIRE_FALSE(fed.result.is_error);
+    CHECK(fed.result.content_text.find("bytes delivered") != std::string::npos);
+
+    WaitFor([&] { return builder.injected->Has("hello world"); }, std::chrono::seconds(10));
+
+    // No interpreter -> an honest error, not a crash.
+    f.Interrupt(nlohmann::json{{"kill", true}});
+    fed = f.Input(nlohmann::json{{"text", "x"}});
+    CHECK(fed.result.is_error);
+    CHECK(fed.result.content_text.find("no python interpreter") != std::string::npos);
 }

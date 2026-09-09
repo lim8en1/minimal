@@ -5,6 +5,8 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <fcntl.h>
+
 #include <algorithm>
 #include <cerrno>
 #include <cstring>
@@ -33,6 +35,14 @@ constexpr std::size_t kMaxDiagBytes = 64 * 1024;
 // registration mechanism).
 constexpr auto kCancelSlice = std::chrono::milliseconds(50);
 
+// Poll timeout bounded by the nearest armed request deadline, clamped to the
+// slice: deadline enforcement never waits longer than one slice past expiry.
+int BoundedSlice(int slice_ms, std::chrono::steady_clock::duration until) {
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(until).count();
+    if (ms <= 0) return 0;
+    return static_cast<int>(std::min<std::int64_t>(slice_ms, ms));
+}
+
 }  // namespace
 
 Interpreter::Interpreter(LaunchedInterpreter proc, InterpreterConfig config,
@@ -44,7 +54,16 @@ Interpreter::Interpreter(LaunchedInterpreter proc, InterpreterConfig config,
       in_fd_(proc.in_fd),
       out_fd_(proc.out_fd),
       diag_fd_(proc.diag_fd),
-      declared_(config_.declared) {}
+      stream_fd_(proc.stream_fd),
+      user_in_fd_(proc.user_in_fd),
+      declared_(config_.declared) {
+    // python_input never parks the session worker: a full pipe (the script is
+    // not consuming) must surface as a partial write, not a blocked write.
+    if (user_in_fd_.get() >= 0) {
+        const int flags = ::fcntl(user_in_fd_.get(), F_GETFL, 0);
+        if (flags >= 0) ::fcntl(user_in_fd_.get(), F_SETFL, flags | O_NONBLOCK);
+    }
+}
 
 Interpreter::~Interpreter() {
     HardKill("interpreter destroyed");
@@ -97,8 +116,8 @@ void Interpreter::StartReader() {
 
 void Interpreter::ReaderLoop() {
     std::string line;
-    bool out_open = true, diag_open = true;
-    while (out_open || diag_open) {
+    bool out_open = true, diag_open = true, stream_open = true;
+    while (out_open || diag_open || stream_open) {
         if (dead_.load(std::memory_order_acquire)) return;  // HardKill cleaned up already
         if (config_.session_lifetime.expired()) {
             // Session terminate: the kill path. There is no synchronous plugin
@@ -108,22 +127,98 @@ void Interpreter::ReaderLoop() {
             return;
         }
 
-        pollfd fds[2];
+        // The request-deadline scan (max_runtime). The deadline is armed at
+        // RUN start (queue time excluded); expiry first soft-interrupts --
+        // the request may still finish and deliver a real result -- and a
+        // request that ignores SIGINT for grace_seconds is hard-killed. This
+        // is the plugin's ONE destructive timer, and only for requests that
+        // asked for it.
+        const auto now = std::chrono::steady_clock::now();
+        int timeout = kPollSliceMs;
+        std::shared_ptr<Pending> fire, kill;
+        {
+            std::lock_guard<std::mutex> lock(mu_);
+            if (auto p = RunningPendingLocked()) {
+                StampRunningLocked(p, now);
+                if (p->deadline) {
+                    if (!p->deadline_fired && now >= *p->deadline) {
+                        p->deadline_fired = true;
+                        p->deadline_fired_at = now;
+                        fire = p;
+                    } else if (p->deadline_fired) {
+                        const auto grace_end =
+                            *p->deadline_fired_at + std::chrono::seconds(settings_.grace_seconds);
+                        if (now >= grace_end) {
+                            kill = p;
+                        } else {
+                            timeout = BoundedSlice(timeout, grace_end - now);
+                        }
+                    } else {
+                        timeout = BoundedSlice(timeout, *p->deadline - now);
+                    }
+                }
+            }
+        }
+        if (kill) {
+            HardKill(("request " + kill->id + " exceeded its max_runtime deadline and did not " +
+                      "react to the interrupt within " + std::to_string(settings_.grace_seconds) +
+                      "s; the interpreter was killed (state lost) to stop it")
+                         .c_str());
+            return;
+        }
+        if (fire) {
+            if (fire->handles.emit_task_event) {
+                try {
+                    BackgroundTaskEvent event;
+                    event.task_id = fire->id;
+                    event.tool_use_id = fire->handles.tool_use_id;
+                    event.command = fire->handles.label;
+                    event.pid = pid_;
+                    event.state = BackgroundTaskEvent::State::kTimedOut;
+                    fire->handles.emit_task_event(event);
+                } catch (...) {
+                }
+            }
+            SoftInterrupt();
+        }
+
+        pollfd fds[3];
         int nfds = 0;
         const int out_slot = out_open ? nfds++ : -1;
         if (out_open) fds[out_slot] = pollfd{out_fd_.get(), POLLIN, 0};
         const int diag_slot = diag_open ? nfds++ : -1;
         if (diag_open) fds[diag_slot] = pollfd{diag_fd_.get(), POLLIN, 0};
+        const int stream_slot = stream_open ? nfds++ : -1;
+        if (stream_open) fds[stream_slot] = pollfd{stream_fd_.get(), POLLIN, 0};
 
-        const int rc = poll(fds, static_cast<nfds_t>(nfds), kPollSliceMs);
+        const int rc = poll(fds, static_cast<nfds_t>(nfds), timeout);
         if (rc < 0) {
             if (errno == EINTR) continue;
             MarkDead("interpreter pipe error", false);
             return;
         }
-        if (rc == 0) continue;
 
         char chunk[8192];
+        if (stream_slot >= 0 && (fds[stream_slot].revents & (POLLIN | POLLHUP | POLLERR))) {
+            const ssize_t n = read(stream_fd_.get(), chunk, sizeof(chunk));
+            if (n > 0) {
+                // Attribute to the running request (FIFO: at most one). An
+                // idle interpreter producing stream bytes is corruption from
+                // a previous life -- drained and dropped.
+                const std::lock_guard<std::mutex> lock(mu_);
+                if (auto p = RunningPendingLocked(); p && !p->done) {
+                    p->ring.Append(std::string_view(chunk, static_cast<std::size_t>(n)));
+                    if (p->handles.emit_output) {
+                        try {
+                            p->handles.emit_output(std::string_view(chunk, static_cast<std::size_t>(n)));
+                        } catch (...) {
+                        }
+                    }
+                }
+            } else if (n == 0 || errno != EINTR) {
+                stream_open = false;
+            }
+        }
         if (out_slot >= 0 && (fds[out_slot].revents & (POLLIN | POLLHUP | POLLERR))) {
             const ssize_t n = read(out_fd_.get(), chunk, sizeof(chunk));
             if (n > 0) {
@@ -201,13 +296,17 @@ void Interpreter::DrainLine(std::string_view line) {
     }
     RequestOutcome outcome;
     outcome.ok = body.value("ok", false);
+    // stdout rides BOTH response kinds: a request that ran and then failed
+    // keeps everything it printed before the exception.
+    outcome.stdout_text = body.value("stdout", std::string());
+    outcome.stderr_text = body.value("stderr", std::string());
     if (outcome.ok) {
         outcome.result = body.value("result", std::string());
-        outcome.stdout_text = body.value("stdout", std::string());
-        outcome.stderr_text = body.value("stderr", std::string());
+        outcome.result_json = body.value("result_json", std::string());
     } else {
-        outcome.stderr_text = body.value("stderr", std::string());
         outcome.error = body.value("error", std::string("request failed"));
+        outcome.exc_type = body.value("exc", std::string());
+        outcome.exc_msg = body.value("exc_msg", std::string());
     }
     DeliverResponse(id_it->get<std::string>(), std::move(outcome));
 }
@@ -223,6 +322,9 @@ void Interpreter::DeliverResponse(const std::string& id, RequestOutcome outcome)
         }
         p = it->second;
         p->outcome = std::move(outcome);
+        // The deadline flag rides the outcome: a result that landed despite
+        // the SIGINT is real, but the model must know the deadline was felt.
+        p->outcome.deadline_interrupted = p->deadline_fired;
         p->done = true;
         ++progress_;
         cv_.notify_all();
@@ -232,6 +334,13 @@ void Interpreter::DeliverResponse(const std::string& id, RequestOutcome outcome)
         // for a request that completed. Async entries are consumed here and
         // now (the reader is their only consumer after the injection).
         if (p->async) pending_.erase(it);
+        // The completion record (any delivery path): python_output's window
+        // onto the completion->injection gap. Bounded metadata ring.
+        const auto now = std::chrono::steady_clock::now();
+        const double seconds =
+            p->running_since ? std::chrono::duration<double>(now - *p->running_since).count() : 0.0;
+        finished_.push_back(FinishedEntry{p->id, p->outcome, seconds});
+        if (finished_.size() > kFinishedRing) finished_.pop_front();
     }
 
     const bool session_dead = p->handles.session_lifetime.expired();
@@ -270,7 +379,8 @@ void Interpreter::InjectAsync(const Pending& p) {
 }
 
 std::optional<std::string> Interpreter::Submit(const std::string& code, bool async,
-                                               RequestHandles handles, std::string* error) {
+                                               RequestHandles handles, std::string* error,
+                                               std::int64_t max_runtime_seconds) {
     if (dead_.load(std::memory_order_acquire)) {
         *error = "interpreter is not running";
         return std::nullopt;
@@ -282,10 +392,13 @@ std::optional<std::string> Interpreter::Submit(const std::string& code, bool asy
 
     {
         std::lock_guard<std::mutex> lock(mu_);
-        auto p = std::make_shared<Pending>();
+        auto p = std::make_shared<Pending>(static_cast<std::size_t>(settings_.stream_head_bytes),
+                                           static_cast<std::size_t>(settings_.stream_tail_bytes));
         p->id = id;
+        p->seq = next_seq_++;
         p->async = async;
         p->handles = std::move(handles);
+        p->max_runtime_seconds = max_runtime_seconds > 0 ? max_runtime_seconds : 0;
         pending_.emplace(id, std::move(p));
     }
 
@@ -357,6 +470,122 @@ Interpreter::WaitOutcome Interpreter::WaitSync(const std::string& id,
 }
 
 void Interpreter::SoftInterrupt() { killpg(pid_, SIGINT); }
+
+std::shared_ptr<Interpreter::Pending> Interpreter::RunningPendingLocked() {
+    // The not-done pending with the smallest submission seq: the driver is
+    // strict FIFO, so its code is running (or is next to run). The map is
+    // keyed, not ordered -- "py-10" sorts before "py-9" -- hence the seq scan.
+    std::shared_ptr<Pending> best;
+    for (auto& [id, p] : pending_) {
+        if (p->done) continue;
+        if (!best || p->seq < best->seq) best = p;
+    }
+    return best;
+}
+
+void Interpreter::StampRunningLocked(const std::shared_ptr<Pending>& p,
+                                     std::chrono::steady_clock::time_point now) {
+    if (p->running_since) return;
+    p->running_since = now;
+    if (p->max_runtime_seconds > 0) {
+        p->deadline = now + std::chrono::seconds(p->max_runtime_seconds);
+    }
+}
+
+std::size_t Interpreter::WriteStdin(const std::string& text, std::string* error) {
+    if (text.empty()) return 0;
+    if (dead_.load(std::memory_order_acquire)) {
+        *error = "interpreter is not running";
+        return 0;
+    }
+    std::size_t written = 0;
+    while (written < text.size()) {
+        const ssize_t n =
+            ::write(user_in_fd_.get(), text.data() + written, text.size() - written);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                *error = "stdin pipe full; the running code is not consuming input (" +
+                         std::to_string(written) + " of " + std::to_string(text.size()) +
+                         " bytes delivered)";
+                return written;
+            }
+            *error = std::string("failed to write to the interpreter stdin: ") + std::strerror(errno);
+            return written;
+        }
+        written += static_cast<std::size_t>(n);
+    }
+    return written;
+}
+
+std::vector<TaskStatus> Interpreter::TaskStatuses() {
+    const auto now = std::chrono::steady_clock::now();
+    std::lock_guard<std::mutex> lock(mu_);
+    std::vector<TaskStatus> out;
+    // Running + queued, in true submission order.
+    std::vector<std::shared_ptr<Pending>> live;
+    for (auto& [id, p] : pending_) {
+        if (!p->done) live.push_back(p);
+    }
+    std::sort(live.begin(), live.end(),
+              [](const auto& a, const auto& b) { return a->seq < b->seq; });
+    for (std::size_t i = 0; i < live.size(); ++i) {
+        const auto& p = live[i];
+        TaskStatus ts;
+        ts.id = p->id;
+        ts.max_runtime = p->max_runtime_seconds;
+        if (i == 0) {
+            ts.state = TaskStatus::State::kRunning;
+            StampRunningLocked(p, now);
+            ts.seconds = p->running_since
+                             ? std::chrono::duration<double>(now - *p->running_since).count()
+                             : 0.0;
+            ts.stream_total = p->ring.total();
+        } else {
+            ts.state = TaskStatus::State::kQueued;
+            ts.queued_behind = i;
+        }
+        out.push_back(std::move(ts));
+    }
+    // Finished (the completion->injection window; bounded ring).
+    for (const auto& f : finished_) {
+        TaskStatus ts;
+        ts.id = f.id;
+        ts.state = TaskStatus::State::kFinished;
+        ts.ok = f.outcome.ok;
+        ts.seconds = f.seconds;
+        out.push_back(std::move(ts));
+    }
+    return out;
+}
+
+OutputRead Interpreter::ReadTaskOutput(const std::string& id, std::uint64_t offset,
+                                       std::size_t length) {
+    std::lock_guard<std::mutex> lock(mu_);
+    OutputRead out;
+    if (auto it = pending_.find(id); it != pending_.end() && !it->second->done) {
+        out.found = true;
+        out.slice = it->second->ring.Read(offset, length);
+        return out;
+    }
+    for (const auto& f : finished_) {
+        if (f.id != id) continue;
+        out.found = true;
+        out.finished = true;
+        auto& s = out.slice;
+        s.total = f.outcome.stdout_text.size();
+        if (offset < s.total) {
+            const auto end = std::min(offset + static_cast<std::uint64_t>(length), s.total);
+            s.text = f.outcome.stdout_text.substr(static_cast<std::size_t>(offset),
+                                                  static_cast<std::size_t>(end - offset));
+            s.next = end;
+        } else {
+            s.next = s.total;
+        }
+        return out;
+    }
+    return out;
+}
 
 Interpreter::InterruptOutcome Interpreter::WaitForInterrupt(
     std::chrono::milliseconds grace, const tools::CancelTokenPtr& cancel) {
@@ -457,21 +686,56 @@ void Interpreter::HardKill(const char* reason) {
 
 std::vector<std::string> Interpreter::PendingIds() {
     std::lock_guard<std::mutex> lock(mu_);
-    std::vector<std::string> ids;
+    // Submission order, not map order ("py-10" sorts before "py-9").
+    std::vector<std::pair<std::uint64_t, std::string>> ordered;
     for (const auto& [id, p] : pending_) {
         // Done-but-unclaimed sync results are not "pending" work.
-        if (!p->done) ids.push_back(id);
+        if (!p->done) ordered.emplace_back(p->seq, id);
     }
+    std::sort(ordered.begin(), ordered.end());
+    std::vector<std::string> ids;
+    ids.reserve(ordered.size());
+    for (auto& [seq, id] : ordered) ids.push_back(std::move(id));
     return ids;
+}
+
+std::vector<Interpreter::PendingRow> Interpreter::PendingRows() {
+    std::lock_guard<std::mutex> lock(mu_);
+    std::vector<std::pair<std::uint64_t, const Pending*>> ordered;
+    for (const auto& [id, p] : pending_) {
+        if (!p->done) ordered.emplace_back(p->seq, p.get());
+    }
+    std::sort(ordered.begin(), ordered.end());
+    std::vector<PendingRow> rows;
+    rows.reserve(ordered.size());
+    for (const auto& [seq, p] : ordered) {
+        rows.push_back(PendingRow{p->id, p->max_runtime_seconds, p->ring.total()});
+    }
+    return rows;
 }
 
 std::string FormatOutcome(const std::string& id, const RequestOutcome& outcome,
                           std::size_t queued_behind, std::int64_t max_bytes) {
     std::string text;
     if (outcome.ok) {
-        text = id + (outcome.result.empty() ? " ok" : " ok: " + outcome.result);
+        // JSON-preferred: a serializable trailing expression is displayed as
+        // its JSON rendering; the repr stays the fallback for rich objects.
+        const std::string& value =
+            outcome.result_json.empty() ? outcome.result : outcome.result_json;
+        text = id + (value.empty() ? " ok" : " ok: " + value);
     } else {
         text = id + " failed";
+        if (!outcome.exc_type.empty()) {
+            text = id + " exception: " + outcome.exc_type;
+            if (!outcome.exc_msg.empty()) {
+                // First line only -- the traceback lives under --- stderr ---.
+                text += ": " + outcome.exc_msg.substr(0, outcome.exc_msg.find('\n'));
+            }
+        }
+    }
+    if (outcome.deadline_interrupted) {
+        text += "\n[max_runtime hit: the deadline fired mid-run; the request was interrupted "
+                "but still finished]";
     }
     if (!outcome.stdout_text.empty()) text += "\n--- stdout ---\n" + outcome.stdout_text;
     if (!outcome.stderr_text.empty()) text += "\n--- stderr ---\n" + outcome.stderr_text;

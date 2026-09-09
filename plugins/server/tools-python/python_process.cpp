@@ -12,12 +12,13 @@ LaunchedInterpreter LaunchInterpreter(const std::vector<std::string>& argv,
                                       const std::filesystem::path& cwd,
                                       const std::map<std::string, std::string>& env,
                                       std::int64_t cpu_seconds, std::int64_t file_size_bytes) {
-    // The launch shape, over the sidecar core's generic launcher. Three
-    // pipes: the protocol stdin (parent keeps the write end), the
-    // diagnostics pipe (the child's REAL stdout+stderr -- executed code
-    // writing to fd 1/2 lands there instead of corrupting the protocol
-    // stream), and the protocol stdout on fd 3 -- a passthrough fd, so its
-    // CLOEXEC must be cleared explicitly or exec closes it. Protocol stdin
+    // The launch shape, over the sidecar core's generic launcher. Five pipes:
+    // the protocol stdin (parent keeps the write end), the diagnostics pipe
+    // (the child's REAL stdout+stderr -- executed code writing to fd 1/2 lands
+    // there instead of corrupting the protocol stream), the protocol stdout on
+    // fd 3 -- a passthrough fd, so its CLOEXEC must be cleared explicitly or
+    // exec closes it -- the live stdout stream on fd 4 (same passthrough
+    // shape), and the user stdin read end on fd 5 (likewise). Protocol stdin
     // covers fd 0, so the launcher's /dev/null fallback does not apply.
     minimal::sidecar::LaunchSpec spec;
     spec.argv = argv;
@@ -30,6 +31,10 @@ LaunchedInterpreter LaunchInterpreter(const std::vector<std::string>& argv,
                                    {{STDOUT_FILENO, false}, {STDERR_FILENO, false}}},
         minimal::sidecar::PipePlan{minimal::sidecar::PipePlan::ChildEnd::kWrite,
                                    {{kProtoStdoutFd, true}}},
+        minimal::sidecar::PipePlan{minimal::sidecar::PipePlan::ChildEnd::kWrite,
+                                   {{kStreamFd, true}}},
+        minimal::sidecar::PipePlan{minimal::sidecar::PipePlan::ChildEnd::kRead,
+                                   {{kUserStdinFd, true}}},
     };
     spec.cpu_seconds = cpu_seconds;
     spec.file_size_bytes = file_size_bytes;
@@ -39,10 +44,12 @@ LaunchedInterpreter LaunchInterpreter(const std::vector<std::string>& argv,
     proc.ok = launched.ok;
     proc.spawn_error = std::move(launched.spawn_error);
     proc.pid = launched.pid;
-    if (launched.ok && launched.parent_fds.size() == 3) {
+    if (launched.ok && launched.parent_fds.size() == 5) {
         proc.in_fd = launched.parent_fds[0].release();
         proc.diag_fd = launched.parent_fds[1].release();
         proc.out_fd = launched.parent_fds[2].release();
+        proc.stream_fd = launched.parent_fds[3].release();
+        proc.user_in_fd = launched.parent_fds[4].release();
     }
     return proc;
 }

@@ -42,6 +42,18 @@ struct PythonSettings {
     std::int64_t rlimit_cpu_seconds = 0;
     // RLIMIT_FSIZE backstop for files the executed code writes.
     std::int64_t max_file_size_bytes = 1024LL * 1024 * 1024;
+    // The live-output ring for python_output polling (head+tail windows over
+    // the running request's stdout stream; see stream_ring.hpp). The ring
+    // exists only while a request is running and is discarded on completion.
+    std::int64_t stream_head_bytes = 256 * 1024;
+    std::int64_t stream_tail_bytes = 768 * 1024;
+    // Default deadline for background requests (seconds; 0 = unlimited, the
+    // stance "timeouts demote, never destroy"). A per-call python_exec
+    // max_runtime overrides it; on expiry the reader soft-interrupts and --
+    // if the request ignores SIGINT for grace_seconds -- hard-kills the
+    // interpreter (state loss, the caller's explicit deadline). This is the
+    // ONE destructive timer in the plugin, and it is opt-in.
+    std::int64_t background_max_runtime = 0;
 };
 
 // Every field optional; missing values keep the struct defaults. A negative
