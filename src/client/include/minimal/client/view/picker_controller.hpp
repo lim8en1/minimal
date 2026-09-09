@@ -71,6 +71,16 @@ public:
         // method here) because it belongs to session-lifecycle code this
         // class has no other reason to know about.
         std::function<void()> open_new_session;
+
+        // The desired-state pickers (/agent, /model) stage onto the FOCUSED
+        // tab -- which may not EXIST: a bare /agent typed on the empty
+        // startup app opens this picker with zero tabs, and staging onto
+        // FocusedTabId() then silently dropped both selections, so the
+        // first message created the session on the configured default
+        // instead. Same action typing takes: the focused tab, or a fresh
+        // sessionless one (OpenTab focuses an empty app on its first tab).
+        // Callback for the same reason open_new_session is.
+        std::function<std::string()> focused_or_new_tab;
     };
 
     explicit PickerController(Dependencies deps);

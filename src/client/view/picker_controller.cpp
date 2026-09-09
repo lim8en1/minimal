@@ -207,7 +207,11 @@ void PickerController::RebuildAgentPickerComponent() {
                   // message creates the session on it) and converges at the
                   // next turn start on a sessioned one. No command is sent,
                   // and no session is minted just to switch presets on it.
-                  const std::string tab = deps_.app.FocusedTabId();
+                  // focused_or_new_tab, not FocusedTabId: on the empty
+                  // startup app (zero tabs -- how a bare /agent gets here)
+                  // there is nothing focused, and the choice must land on
+                  // the tab the user's first message will create.
+                  const std::string tab = deps_.focused_or_new_tab();
                   if (!tab.empty()) {
                       deps_.app.StageAgentPreset(tab, name);
                       deps_.app.TabNotice(tab, "agent '" + name +
@@ -289,7 +293,9 @@ void PickerController::RebuildModelPickerComponent() {
                   // desired model -- it rides CreateSessionRequest on a
                   // sessionless tab and converges at the next turn start on
                   // a sessioned one. No command, no direct switch.
-                  const std::string tab = deps_.app.FocusedTabId();
+                  // focused_or_new_tab for the same empty-startup-app
+                  // reason the agent picker stages through it.
+                  const std::string tab = deps_.focused_or_new_tab();
                   if (!tab.empty()) {
                       deps_.app.StageModel(tab, ref);
                       deps_.app.TabNotice(tab, "model '" + ref +

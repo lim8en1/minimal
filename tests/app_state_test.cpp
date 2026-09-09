@@ -1114,6 +1114,40 @@ TEST_CASE("a sessioned /agent selection converges at the next turn start, not be
     CHECK(app.GetDetails(tab).desired_agent_preset == "alt");
 }
 
+// THE STARTUP-FLOW REGRESSION: a fresh client has ZERO tabs; a bare /agent
+// (or /model) opens its picker before any tab exists, and the selection must
+// land on the tab the first message will create -- not be silently dropped
+// because FocusedTabId() is empty (the session then started on the configured
+// default preset instead). This exercises the data path that lands the
+// staged PAIR (agent + model, as the pickers stage them) on that tab.
+TEST_CASE("agent and model staged on the first tab both reach the created session",
+          "[app_state][desired]") {
+    ClientFixture fixture;
+    fixture.Write("agents/alt.md",
+                  "---\nname: alt\nmodel: main/test-model\nallowed_tools: [\"*\"]\n---\nAlt.\n");
+    fixture.Script("hi");
+    fixture.Start();
+
+    AppState app(fixture.client);
+    // The empty-startup sequence: no tab exists until one is created on
+    // demand (what focused_or_new_tab does for the pickers).
+    REQUIRE(app.FocusedTabId().empty());
+    const auto tab = app.OpenTab(fixture.Options("pair"));
+    REQUIRE(app.FocusedTabId() == tab);   // OpenTab focuses an empty app's first tab
+
+    REQUIRE(app.StageAgentPreset(tab, "alt"));
+    REQUIRE(app.StageModel(tab, "main/other-model"));
+
+    app.SubmitChatTurn(tab, "hi");
+    REQUIRE(WaitForSession(app, tab));
+    REQUIRE(WaitForAttached(app, tab));
+    // THE POINT: the session was BORN on both staged choices -- the agent
+    // AND the model (the /agent-then-/model ordering keeps the model from
+    // being re-resolved away by the preset switch).
+    CHECK(app.GetDetails(tab).agent_preset == "alt");
+    CHECK(app.GetDetails(tab).model == "main/other-model");
+}
+
 TEST_CASE("sends stacked before the create resolves land on ONE session",
           "[app_state][sessionless]") {
     // The single-flight guarantee the TUI leans on: typing a message and

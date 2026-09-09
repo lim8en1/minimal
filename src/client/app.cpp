@@ -1039,7 +1039,12 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         minimal::client::PickerController::Dependencies{
             *client, *app, theme, picker_child, agent_picker_child, model_picker_child,
             show_picker, show_agent_picker, show_model_picker, staged_delete_id,
-            show_delete_confirm, open_new_session});
+            show_delete_confirm, open_new_session,
+            // The desired-state pickers stage onto this -- the focused tab,
+            // or (the empty startup app, zero tabs) a fresh sessionless one,
+            // so a /agent //model choice made before any tab exists lands on
+            // the tab the first message will use.
+            focused_or_new_tab});
     auto open_picker = [&] { picker_controller.OpenSessionPicker(); };
     auto open_agent_picker = [&] { picker_controller.OpenAgentPicker(); };
     auto open_model_picker = [&] { picker_controller.OpenModelPicker(/*refresh=*/false); };
