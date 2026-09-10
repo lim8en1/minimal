@@ -436,6 +436,34 @@ Shape: `{ "name": ..., "colors": { ... } }` — hex color roles as in
   preset is **required**; a broken *non-default* preset only warns. A preset may
   name its own `model: <provider>/<model>`, overriding `default_model`
   (`--model` / `/model` override both).
+- **`allowed_tools`** — the allow-list of core/plugin tools the preset runs
+  with. **Fail-closed: omitted or empty means NO core tools.** `permission_mode`
+  only decides what happens when an admitted tool is called (allow/ask/deny);
+  it never admits one — a preset with `permission_mode` but no `allowed_tools`
+  serves zero core tools. `["*"]` means "all registered tools" and must be
+  written explicitly. Entries reference permission keys, never surface aliases
+  (see `Aliases` under the `plugins.json` docs in `docs/PLUGINS.md`); an
+  unknown entry warns at startup ("matches no registered tool" — a typo, or
+  the providing plugin is disabled). MCP tools are never governed by
+  `allowed_tools` — not even by `["*"]` — they follow `allowed_mcp_servers` /
+  `mcp_permissions`. Two names are conditional: `skill` only surfaces when
+  `allowed_skills` is non-empty, and `spawn_subagent` is stripped from
+  subagent sessions (no recursion is a hard rule, not preset config). The
+  valid set is whatever is registered under `plugins.json`'s enablement; with
+  every bundled plugin enabled:
+
+  | Source | Names |
+  |---|---|
+  | core (always registered) | `spawn_subagent`, `skill` |
+  | tools-bash | `bash` |
+  | tools-fs | `read`, `write`, `edit` |
+  | tools-search | `grep`, `glob` |
+  | tools-web | `web_fetch`, `web_search` |
+  | tools-python | `python_exec`, `python_interrupt`, `python_output`, `python_input` |
+  | checklist | `checklist` |
+  | signals-message | `message_session` |
+  | tool-ask | `ask_user` |
+
 - **opencode-compat preset fields** — also accepted in the frontmatter:
   `mode: all|primary|subagent` (subagent = spawnable but hidden from the agent
   picker; never gates spawnability), `disable: true` (refuses to resolve, not
@@ -446,7 +474,9 @@ Shape: `{ "name": ..., "colors": { ... } }` — hex color roles as in
   and a `permission:` block (`read/glob/grep/list`→read_only, `edit`/`write`→
   file_write, `bash`→execute, `webfetch`/`websearch`→network,
    `external_directory`→out_of_workdir; a native `permission_mode` field wins
-   over the alias). Any OTHER frontmatter key is passed through to the provider
+   over the alias). Note that `permission_mode` (native or aliased) only sets
+   ask/allow/deny for tools the preset already admits — see `allowed_tools`
+   above. Any OTHER frontmatter key is passed through to the provider
    as a request parameter (`temperature`, `top_p`, `reasoningEffort`, ...),
    overriding the model config's value.
 - **`tool_config:`** — per-tool/per-plugin configuration, a map of
