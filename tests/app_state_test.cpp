@@ -20,6 +20,8 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <ftxui/dom/elements.hpp>
+
 #include "../plugins/server/commands-core/core_commands.hpp"
 #include "deadline.hpp"
 #include "fakes.hpp"
@@ -176,6 +178,37 @@ struct ClientFixture {
     std::shared_ptr<SessionClient> client;
     std::chrono::milliseconds attach_guard = std::chrono::seconds(10);
 };
+
+// A minimal panel view stub for the HandleGlobalKey test below: the tests
+// need only spec() (placement=Panel) and a component that unconditionally
+// consumes events, to prove the suggestions_open carve-out keeps it from
+// ever being reached -- same shape as keybinding_dispatch_test.cpp's own
+// PanelStubView, but with a REAL (event-consuming) component: that file
+// never drives HandleGlobalKey itself, so its stub leaves component() null.
+class ConsumingPanelStubView final : public client::plugins::View {
+public:
+    explicit ConsumingPanelStubView(std::string id)
+        : spec_{std::move(id), "", client::plugins::ViewPlacement::Panel, ""} {}
+    const client::plugins::ViewSpec& spec() const override { return spec_; }
+    ftxui::Component component() override {
+        return ftxui::CatchEvent(ftxui::Renderer([] { return ftxui::text(""); }),
+                                 [](const ftxui::Event&) { return true; });
+    }
+
+private:
+    client::plugins::ViewSpec spec_;
+};
+
+client::plugins::PluginViewEntry ConsumingPanel(const std::string& id, bool visible, bool focused) {
+    static std::vector<std::unique_ptr<client::plugins::View>> store;
+    store.push_back(std::make_unique<ConsumingPanelStubView>(id));
+    // HandleGlobalKey dispatches through PluginViewEntry::component directly
+    // (not View::component()) -- bootstrap populates that field once at
+    // startup, so the test must too, or the dispatch loop calls OnEvent on a
+    // null Component.
+    return client::plugins::PluginViewEntry{store.back().get(), store.back()->component(), visible,
+                                            focused};
+}
 
 // The tab's SESSION id ("" while the tab is sessionless -- OpenTab mints a
 // tab only, the session appears with the first submitted message).
@@ -1395,4 +1428,56 @@ TEST_CASE("HandleGlobalKey: an open suggestion list gets Escape before "
     // different reason, proving the new guard only fires when it should.
     suggestions_open_value = false;
     CHECK_FALSE(minimal::client::HandleGlobalKey(ctx, ftxui::Event::Escape));
+}
+
+TEST_CASE("HandleGlobalKey: an open suggestion list gets Tab before a "
+          "focused plugin panel claims it",
+          "[app_state][keybinding_dispatch]") {
+    // Regression: opening a panel auto-focuses it (FocusPanelOnOpen), and a
+    // focused panel's OnEvent used to run BEFORE the event ever reached the
+    // editor -- with a panel open, Tab-completion for the editor's own
+    // suggestion list was unreachable. suggestions_open generalizes the
+    // Escape carve-out above to Tab/arrows/Return, checked ahead of the
+    // panel dispatch too.
+    ClientFixture fixture;
+    fixture.Script("hi");
+    fixture.Start();
+
+    AppState app(fixture.client);
+    const auto tab = app.OpenTab(fixture.Options("first"));
+
+    const auto keys = minimal::client::Keybindings::Parse("{}");
+    const auto keymap = minimal::client::ResolvedKeymap::Build(keys);
+
+    bool show_panel = false;
+    bool show_plugin_modal = false;
+    std::vector<minimal::client::plugins::PluginViewEntry> plugin_views;
+    plugin_views.push_back(ConsumingPanel("test.panel", /*visible=*/true, /*focused=*/true));
+    std::shared_ptr<ftxui::Component> plugin_modal_child;
+    bool pasting = false;
+    bool suggestions_open_value = true;
+
+    minimal::client::KeyContext ctx{
+        app, keymap, tab,
+        show_panel, show_plugin_modal,
+        plugin_views, plugin_modal_child,
+        [] {}, [] {}, [] {}, [] {}, [] {},
+        [](const std::string&) {},
+        [](const std::string&, int) {},
+        [](const std::string&) {},
+        [](std::vector<std::string>) {},
+        [](const std::string&, int) {},
+        [](const std::string&) {},
+        [](const std::string&) {},
+        [](const std::string&, int) -> bool { return false; },
+        [](const std::string&) {},
+        pasting,
+        [&] { return suggestions_open_value; }};
+
+    // The focused panel's component consumes every event -- proven below,
+    // once the carve-out is disabled, so the fixture itself is trustworthy.
+    CHECK_FALSE(minimal::client::HandleGlobalKey(ctx, ftxui::Event::Tab));
+
+    suggestions_open_value = false;
+    CHECK(minimal::client::HandleGlobalKey(ctx, ftxui::Event::Tab));   // the panel claims it
 }

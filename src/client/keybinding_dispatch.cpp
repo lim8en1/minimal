@@ -195,6 +195,24 @@ bool HandleGlobalKey(KeyContext& ctx, const ftxui::Event& event) {
         return false;
     }
 
+    // The prompt editor's own OPEN @/-suggestion list claims its
+    // navigation/accept/dismiss keys ahead of EVERYTHING below -- both the
+    // busy-turn-cancel branch (Escape) and a focused plugin panel
+    // (Tab/arrows/Return, keybinding_dispatch.cpp's panel-focus block
+    // further down), which would otherwise eat them first (opening a panel
+    // auto-focuses it, so e.g. Tab-completion went dead behind one). None of
+    // these five are bound to a core action by default (DefaultBindings():
+    // tab.next/previous are alt+down/up, permission.cycle is shift+tab,
+    // which parses to the distinct Event::TabReverse) -- same reasoning
+    // keybindings.cpp's own "Not 'end'" comment documents for why a plain
+    // key the editor needs is left unclaimed here. A closed list makes this
+    // whole check a no-op: every key below behaves exactly as before.
+    if (ctx.suggestions_open && ctx.suggestions_open() &&
+        (event == Event::Tab || event == Event::ArrowUp || event == Event::ArrowDown ||
+         event == Event::Escape || event == Event::Return)) {
+        return false;
+    }
+
     const std::string& sid = ctx.focused;
 
     if (ctx.keymap.Matches("tab.next", event)) {
@@ -239,14 +257,6 @@ bool HandleGlobalKey(KeyContext& ctx, const ftxui::Event& event) {
     // two keys actually arrived, never per keystroke.
     const bool cancel_pressed = event == Event::CtrlC || ctx.keymap.Matches("turn.cancel", event);
     if (cancel_pressed) {
-        // An open @/-suggestion list takes Escape first: closing it is the
-        // smaller, expected action, and the editor's own CatchEvent (which
-        // would otherwise dismiss it) never runs when this branch claims
-        // the key ahead of it. Ctrl+C is unaffected -- it was never the
-        // suggestion list's key.
-        if (event == Event::Escape && ctx.suggestions_open && ctx.suggestions_open()) {
-            return false;
-        }
         bool busy = false;
         if (!sid.empty()) {
             for (const auto& tab : ctx.app.GetAllTabs()) {

@@ -1770,6 +1770,24 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     // observation point. This is what keeps side-effects out of Render().
     Component final_tree = CatchEvent(with_permission, [&](const Event&) {
         tab_maintenance.Run();
+        // A paste can only be IN PROGRESS while the editor is the stack's
+        // active leaf; any modal grabbing exclusive routing (FTXUI Modal()'s
+        // own contract) swallows the rest of the paste, including its own
+        // end marker, before the editor's CatchEvent (prompt_editor.cpp)
+        // ever sees it to clear this itself. Self-heal here, the one place
+        // that watches every event above the whole stack: the first event
+        // after a modal opens mid-paste clears the flag, rather than
+        // leaving it stuck true (every later Return silently inserting a
+        // newline instead of submitting). tab_maintenance.Run() above
+        // already applied this tick's snapshot, so a permission/
+        // confirmation/ask modal that just became due is reflected in its
+        // show_* flag by the time this check runs.
+        if (*pasting && (show_plugin_modal || show_delete_confirm || show_picker ||
+                         show_agent_picker || show_model_picker || show_theme_picker ||
+                         show_keymap_help || show_commands_help || show_quit_confirm ||
+                         show_ask || show_confirmation || show_permission)) {
+            *pasting = false;
+        }
         return false;
     });
     tab_maintenance.Run();   // the first frame must not render an empty snapshot
