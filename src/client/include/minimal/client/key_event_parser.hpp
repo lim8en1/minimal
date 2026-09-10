@@ -45,4 +45,13 @@ std::vector<ftxui::Event> ParseKeySpec(const std::string& spec);
 // warnings, never for event matching (ParseKeySpec above owns that).
 std::string NormalizeKeySpec(const std::string& spec);
 
+// True iff `event` is byte-identical to one of the macOS Option-glyph
+// candidates ParseKeySpec adds for an alt+letter/alt+digit spec (see the
+// .cpp) -- i.e. a paste of that literal glyph is indistinguishable from the
+// key actually being pressed. Always false on non-Apple builds. Used by
+// HandleGlobalKey (keybinding_dispatch.cpp) to defer to the prompt editor
+// while a bracketed paste is in progress, rather than firing the bound
+// action mid-paste.
+bool IsOptionGlyphEvent(const ftxui::Event& event);
+
 }  // namespace minimal::client

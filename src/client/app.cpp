@@ -1071,9 +1071,13 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         // Bare /keymap opens the same overlay the help.overlay binding
         // (F1) opens: the full action -> key listing lives client-side
         // (defaults + the user's keybindings.json + plugin folds), so the
-        // server has nothing to answer with. Exact match only -- there is
-        // no per-argument detail to show.
-        if (line == "/keymap") {
+        // server has nothing to answer with. Any arguments are accepted and
+        // ignored -- there is no per-argument detail to show -- rather than
+        // falling through to RunSessionlessCommand/SubmitCommand below,
+        // which would round-trip "/keymap <arg>" to a server that never
+        // registered an argument form for it (command_catalog's "keymap"
+        // entry only exists to make bare /keymap autocomplete-discoverable).
+        if (line == "/keymap" || line.rfind("/keymap ", 0) == 0) {
             open_keymap_help_fn();
             return;
         }
@@ -1232,6 +1236,12 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         }
         app->SubmitCommand(app->FocusedTabId(), line);
     };
+    // Bracketed-paste flag, shared with HandleGlobalKey (keybinding_dispatch.cpp)
+    // via KeyContext::pasting: a macOS Option-glyph byte pasted verbatim
+    // (key_event_parser.cpp's IsOptionGlyphEvent) is byte-identical to the
+    // key it would otherwise bind, so HandleGlobalKey needs to know a paste
+    // is in progress to defer to the editor instead of firing the action.
+    const auto pasting = std::make_shared<bool>(false);
     auto editor = minimal::client::MakePromptEditor(
         theme, prompt_state,
         submit_chat,
@@ -1249,7 +1259,8 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         // The requires_session filter's probe (cheap: one locked read in
         // AppState). An empty FocusedSessionId means no tab, or a tab whose
         // session does not exist yet -- both hide the session-bound entries.
-        [&app]() { return !app->FocusedSessionId().empty(); });
+        [&app]() { return !app->FocusedSessionId().empty(); },
+        pasting);
 
     // --- permission modal (inner swapped per outstanding request) -------------
     // The host is a STABLE component in the tree; its inner component is
@@ -1653,7 +1664,8 @@ int RunTui(const minimal::client::ParsedArgs& args) {
             if (auto it = tab_ui.find(session_id); it != tab_ui.end() && it->second.chat) {
                 it->second.chat->ToggleTimestamps();
             }
-        }};
+        },
+        *pasting};
     auto with_keys = CatchEvent(session_view, [&](const Event& event) {
         return minimal::client::HandleGlobalKey(key_ctx, event);
     });

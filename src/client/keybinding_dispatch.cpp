@@ -165,6 +165,17 @@ bool HandleGlobalKey(KeyContext& ctx, const ftxui::Event& event) {
     using ftxui::Event;
     using ftxui::Mouse;
 
+    // Mid-paste, a macOS Option-glyph byte (key_event_parser.cpp) is
+    // byte-identical to the same key actually being pressed -- pasting "ç"
+    // and pressing Option+C produce the SAME Event. Defer to the editor
+    // (treat it as literal text) rather than firing the bound action. The
+    // real ESC-prefixed alt encoding is a structurally different (Special,
+    // not Character) Event that never arrives mid-paste, so a genuine
+    // alt+key press still matches normally even while ctx.pasting is true.
+    if (ctx.pasting && IsOptionGlyphEvent(event)) {
+        return false;
+    }
+
     const std::string& sid = ctx.focused;
 
     if (ctx.keymap.Matches("tab.next", event)) {

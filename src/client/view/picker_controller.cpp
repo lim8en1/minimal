@@ -94,10 +94,16 @@ void PickerController::FetchPickerPage(bool reset) {
         // the identical page and duplicate every row. The latch is released
         // when the outstanding fetch's apply (or failure) lands; a RESET
         // fetch is exempt -- it clears the model synchronously and carries a
-        // different cursor, so blocking it would strand the picker.
+        // different cursor, so blocking it would strand the picker. Exempting
+        // it is safe: picker_fetch_generation_ (bumped below) supersedes
+        // whatever this latch was guarding the moment the reset proceeds.
         return;
     }
     picker_fetch_in_flight_ = true;
+    // Captured by value below: identifies THIS fetch so a reset that starts
+    // a second, concurrent RunOnRpcQueue job (reset is exempt from the latch
+    // above) can supersede it -- see picker_fetch_generation_'s doc comment.
+    const uint64_t generation = ++picker_fetch_generation_;
     SessionClient::ListSessionsOptions opts;
     opts.project_root = std::filesystem::current_path().string();
     opts.include_all_dirs = picker_data_.include_all_dirs;
@@ -107,7 +113,7 @@ void PickerController::FetchPickerPage(bool reset) {
         opts.before_updated_at = last.updated_at_unix_ms();
         opts.before_id = last.session_id();
     }
-    deps_.app.RunOnRpcQueue([this, opts] {
+    deps_.app.RunOnRpcQueue([this, opts, generation] {
         const auto result = deps_.client.ListSessions(opts);
         if (!result.status.ok()) {
             // Still a no-op for the LIST (the latch must release, or every
@@ -116,7 +122,14 @@ void PickerController::FetchPickerPage(bool reset) {
             // an operator debugging a dead server gets one line per fetch.
             minimal::common::DefaultLogger().warn("session picker fetch failed: {}",
                                                   result.status.error_message());
-            QueueApply([this] { picker_fetch_in_flight_ = false; });
+            QueueApply([this, generation] {
+                // A newer fetch (e.g. a reset that fired while this one was
+                // outstanding) already owns the latch/model -- releasing it
+                // here would be releasing state that isn't this fetch's to
+                // release.
+                if (generation != picker_fetch_generation_) return;
+                picker_fetch_in_flight_ = false;
+            });
             return;
         }
         const auto& page = result.response.sessions();
@@ -124,7 +137,12 @@ void PickerController::FetchPickerPage(bool reset) {
         const bool has_more = fetched > kPickerPageSize;
         const int64_t take = has_more ? kPickerPageSize : fetched;
         std::vector<v1::SessionSummary> rows(page.begin(), page.begin() + take);
-        QueueApply([this, rows = std::move(rows), has_more]() mutable {
+        QueueApply([this, rows = std::move(rows), has_more, generation]() mutable {
+            // Superseded by a later fetch (typically a reset that fired
+            // while this load-more was outstanding): applying these rows
+            // now would append a stale, differently-paginated page onto a
+            // list a newer fetch has already reset and is repopulating.
+            if (generation != picker_fetch_generation_) return;
             picker_fetch_in_flight_ = false;
             picker_data_.has_more = has_more;
             picker_data_.sessions.insert(picker_data_.sessions.end(),

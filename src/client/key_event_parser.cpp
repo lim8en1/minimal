@@ -177,6 +177,20 @@ std::string NormalizeKeySpec(const std::string& spec) {
             return lower;   // unknown token: keep the raw spelling visible
         }
     }
+    // A modified LETTER's shift-case survives as a DISTINCT Event only in
+    // the plain (no ctrl, no alt) path below (ParseKeySpec's toupper).
+    // Combined with ctrl and/or alt, CtrlLetter/AltCandidates/CtrlAltLetter
+    // never consult shift at all -- "alt+shift+c" and "alt+c" (also
+    // "ctrl+shift+c" and "ctrl+c") already parse to the identical Event.
+    // Drop shift from the identity in exactly that case so the collision
+    // detector sees them as the one physical key they really are, instead
+    // of two, and warns.
+    if (parts.back().size() == 1 && std::isalpha(static_cast<unsigned char>(parts.back()[0])) &&
+        (std::find(modifiers.begin(), modifiers.end(), "ctrl") != modifiers.end() ||
+         std::find(modifiers.begin(), modifiers.end(), "alt") != modifiers.end())) {
+        modifiers.erase(std::remove(modifiers.begin(), modifiers.end(), "shift"),
+                        modifiers.end());
+    }
     std::sort(modifiers.begin(), modifiers.end());
     std::string out;
     for (const auto& m : modifiers) {
@@ -301,5 +315,24 @@ std::vector<Event> ParseKeySpec(const std::string& spec) {
 
     return {};
 }
+
+// True iff `event` is byte-identical to one of AltCandidates' macOS
+// Option-glyph candidates (OptionGlyphs above) -- i.e. a paste of that
+// literal glyph is indistinguishable from the key actually being pressed.
+// Always false on non-Apple builds, where AltCandidates never adds a glyph
+// candidate. Used only to gate HandleGlobalKey mid-paste
+// (keybinding_dispatch.cpp); never consulted by ParseKeySpec/event matching
+// itself.
+#if defined(__APPLE__)
+bool IsOptionGlyphEvent(const Event& event) {
+    for (const auto& [letter, glyph] : OptionGlyphs()) {
+        (void)letter;
+        if (event == Event::Character(glyph)) return true;
+    }
+    return false;
+}
+#else
+bool IsOptionGlyphEvent(const Event&) { return false; }
+#endif
 
 }  // namespace minimal::client

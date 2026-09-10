@@ -91,7 +91,8 @@ ftxui::Component MakePromptEditor(
     std::function<void(const std::string&)> on_command,
     const MentionSuggestor& suggest,
     CommandCatalogSource command_catalog,
-    std::function<bool()> session_available) {
+    std::function<bool()> session_available,
+    std::shared_ptr<bool> pasting) {
     using namespace ftxui;
 
     // Multiline ON: Return-as-newline is the Input's default, so the submit
@@ -159,8 +160,11 @@ ftxui::Component MakePromptEditor(
     // Bracketed-paste mode (DECSET 2004) tracking -- see the handler's
     // comment. LIVES ON THE COMPONENT (a shared_ptr the handler owns a copy
     // of), not in PromptEditorState: it is input MODE, not per-tab content,
-    // and the state is copied into snapshots.
-    const auto pasting = std::make_shared<bool>(false);
+    // and the state is copied into snapshots. Caller-supplied so
+    // HandleGlobalKey (keybinding_dispatch.cpp) can share it -- see the
+    // `pasting` parameter's doc comment in the header. Null (every existing
+    // test call site) falls back to a private flag, exactly as before.
+    if (!pasting) pasting = std::make_shared<bool>(false);
 
     // accept_suggestion, on_text, on_command and command_catalog captured BY
     // VALUE (copies), not by reference: `[&]` here would bind references to

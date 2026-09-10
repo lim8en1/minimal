@@ -188,6 +188,15 @@ struct KeyContext {
     std::function<bool(const std::string& session_id, int screen_y)> toggle_collapse_at;
     // chat.toggle_timestamps: ChatView::ToggleTimestamps.
     std::function<void(const std::string& session_id)> toggle_timestamps;
+
+    // True while a bracketed paste (DECSET 2004) is in progress -- kept live
+    // by the prompt editor's own CatchEvent (prompt_editor.cpp), shared here
+    // (RunTui passes the same shared_ptr<bool>'s target to both) so
+    // HandleGlobalKey can defer to the editor instead of firing a bound
+    // action when a macOS Option-glyph byte (key_event_parser.cpp's
+    // IsOptionGlyphEvent) arrives mid-paste, byte-identical to a real
+    // alt+key press.
+    bool& pasting;
 };
 
 // The global-keybinding CatchEvent body (app.cpp's with_keys), as a function

@@ -31,6 +31,7 @@
 // queue and runs each closure here on the loop thread -- that is the only
 // place picker_data_ or a modal slot is written from a fetch's result.
 
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -158,7 +159,23 @@ private:
     // queued several identical ListSessions calls whose arrivals each
     // appended the SAME page -- duplicated rows -- and each arrival rebuilt
     // the picker component, resetting its filter/selection per rebuild.
+    // Alongside picker_fetch_generation_ below, not instead of it: this
+    // latch only ever stops a SECOND same-cursor call from being SENT; it
+    // says nothing about whether an already-sent fetch's result is still
+    // wanted by the time it lands.
     bool picker_fetch_in_flight_ = false;
+    // Fetch supersession counter (loop-thread state, like the fields above):
+    // bumped every time FetchPickerPage actually sends a request (both
+    // reset and load-more -- reset is exempt from picker_fetch_in_flight_
+    // above, so it can start a second RunOnRpcQueue job while an older one
+    // is still outstanding, e.g. a delete confirmed while a load-more is in
+    // flight). Each RunOnRpcQueue job captures its own generation by value;
+    // its QueueApply closure(s) compare that captured value against this
+    // field's CURRENT value before touching anything -- a mismatch means a
+    // later fetch has already superseded this one (the reset already
+    // cleared and re-paginated picker_data_), so the closure no-ops rather
+    // than appending stale rows or releasing a latch a newer fetch now owns.
+    uint64_t picker_fetch_generation_ = 0;
     // The agent picker's list: fetched whole on each open (no pagination,
     // no sort -- agents/*.md is small and has no "recent" axis).
     std::vector<v1::AgentPresetSummary> agent_picker_presets_;

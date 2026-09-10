@@ -29,6 +29,7 @@
 #include <chrono>
 #include <cstddef>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -137,6 +138,13 @@ ftxui::Component MakePromptEditor(
     // entries with requires_session are offered only while this returns
     // true (a sessionless tab never offers a command that cannot run on
     // one). Null = always available.
-    std::function<bool()> session_available = nullptr);
+    std::function<bool()> session_available = nullptr,
+    // Bracketed-paste (DECSET 2004) in-progress flag: null (the default)
+    // makes the factory own a private one, exactly as before. RunTui passes
+    // its own so HandleGlobalKey (keybinding_dispatch.cpp) can read the
+    // same flag and defer to this editor -- rather than firing a bound
+    // action -- while a macOS Option-glyph byte arrives mid-paste (see
+    // key_event_parser.cpp's IsOptionGlyphEvent).
+    std::shared_ptr<bool> pasting = nullptr);
 
 }  // namespace minimal::client
