@@ -4,9 +4,10 @@
 #include <chrono>
 #include <cstdint>
 #include <iomanip>
-#include <regex>
 #include <sstream>
 #include <string>
+
+#include <re2/re2.h>
 
 #include "minimal/common/logger.hpp"
 
@@ -27,6 +28,23 @@ std::string FirstLine(const std::string& text, std::size_t max) {
     std::string line = text.substr(0, end == std::string::npos ? text.size() : end);
     if (line.size() > max) line = line.substr(0, max) + "...";
     return line;
+}
+
+// nlohmann's value() throws type_error on a present-but-wrong-typed key --
+// fine for our own JSON, wrong for MODEL input: `{"clean": "yes"}` is an
+// ordinary mistake to report as a field error, not an exception to escape
+// through Disclose/execute. These never throw: wrong-typed reads as absent.
+std::string StringField(const nlohmann::json& body, const char* key,
+                        std::string fallback = {}) {
+    const auto it = body.find(key);
+    if (it == body.end() || !it->is_string()) return fallback;
+    return it->get<std::string>();
+}
+
+bool BoolField(const nlohmann::json& body, const char* key, bool fallback = false) {
+    const auto it = body.find(key);
+    if (it == body.end() || !it->is_boolean()) return fallback;
+    return it->get<bool>();
 }
 
 RequestHandles BuildHandles(const std::string& tool_use_id, const std::string& code,
@@ -114,7 +132,7 @@ public:
     PermissionDisclosure Disclose(const nlohmann::json& input,
                                   const tools::ToolContext& ctx) const override {
         PermissionDisclosure disclosure;
-        disclosure.summary = "python_exec: " + FirstLine(input.value("code", std::string()), 100);
+        disclosure.summary = "python_exec: " + FirstLine(StringField(input, "code"), 100);
         // The interpreter the invocation would run in, resolved without I/O
         // side effects beyond an exists() probe -- the same lower-bound rule
         // as bash's disclosure: it names what will run.
@@ -148,7 +166,7 @@ public:
                                                        it->get<std::int64_t>() >= 0) {
             max_runtime = it->get<std::int64_t>();
         }
-        const bool clean = input.value("clean", false);
+        const bool clean = BoolField(input, "clean");
 
         const auto slice = ParseSlice(ctx.tool_config);
         const auto plan = MakeEnvPlan(ctx.project_root, slice, settings_);
@@ -335,7 +353,7 @@ public:
     bool parallel_safe() const override { return false; }
 
     ToolResult execute(const nlohmann::json& input, tools::ToolContext& ctx) override {
-        const bool kill = input.value("kill", false);
+        const bool kill = BoolField(input, "kill");
         auto interp = store_.Find(ctx.session_id);
         if (!interp || !interp->alive()) {
             return ToolResult{true, "no python interpreter is running in this session"};
@@ -430,9 +448,9 @@ public:
         if (!interp || !interp->alive()) {
             return Error("no python interpreter is running in this session");
         }
-        const auto task_id = args.value("task_id", std::string());
-        const auto scope = args.value("scope", std::string());
-        const auto grep = args.value("grep", std::string());
+        const auto task_id = StringField(args, "task_id");
+        const auto scope = StringField(args, "scope");
+        const auto grep = StringField(args, "grep");
 
         // Listing: every task, one line each (plus the running task's tail --
         // the thing a poll is usually for).
@@ -547,22 +565,28 @@ public:
 
         std::string body = read.slice.text;
         if (!grep.empty()) {
+            // RE2, not std::regex: `grep` is model-authored, and RE2 is the
+            // linear-time guarantee that decision rests on (see
+            // tools-search/CMakeLists.txt). std::regex offers neither a
+            // linear-time bound (catastrophic backtracking on a pattern like
+            // `(a+)+$`) nor a bounded call stack (both libstdc++ and libc++
+            // implement matching recursively), and this method's own
+            // try/catch only ever caught regex_error -- it caught neither.
+            const re2::RE2 matcher(grep);
+            if (!matcher.ok()) {
+                return Error("bad grep regex: " + matcher.error());
+            }
             std::string filtered;
-            try {
-                const std::regex pattern(grep);
-                std::size_t pos = 0;
-                while (pos < body.size()) {
-                    const auto nl = body.find('\n', pos);
-                    const auto line_end = nl == std::string::npos ? body.size() : nl + 1;
-                    const std::string_view line(body.data() + pos, line_end - pos);
-                    if (std::regex_search(line.begin(), line.end(), pattern)) {
-                        filtered += "[" + std::to_string(pos) + "] " + std::string(line);
-                        if (!filtered.empty() && filtered.back() != '\n') filtered += "\n";
-                    }
-                    pos = line_end;
+            std::size_t pos = 0;
+            while (pos < body.size()) {
+                const auto nl = body.find('\n', pos);
+                const auto line_end = nl == std::string::npos ? body.size() : nl + 1;
+                const std::string_view line(body.data() + pos, line_end - pos);
+                if (re2::RE2::PartialMatch(re2::StringPiece(line.data(), line.size()), matcher)) {
+                    filtered += "[" + std::to_string(pos) + "] " + std::string(line);
+                    if (!filtered.empty() && filtered.back() != '\n') filtered += "\n";
                 }
-            } catch (const std::regex_error& e) {
-                return Error("bad grep regex: " + std::string(e.what()));
+                pos = line_end;
             }
             body = filtered.empty() ? "(no matches)" : filtered;
         }

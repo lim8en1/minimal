@@ -106,7 +106,13 @@ class _Cap(io.TextIOBase):
 
 def _main():
     proto_in = os.fdopen(os.dup(0), "r", encoding="utf-8", errors="replace")
-    proto_out = os.fdopen(3, "w", encoding="utf-8")
+    # Dup'd to a private fd and the original closed -- see the SABOTAGE
+    # HARDENING note above. Leaving fd 3 itself open under proto_out let
+    # executed code (os.write(3, ...)) inject its own protocol lines
+    # directly, bypassing the response channel's only author being this
+    # driver.
+    proto_out = os.fdopen(os.dup(3), "w", encoding="utf-8")
+    os.close(3)
     stream_out = 4
     user_stdin = os.fdopen(5, "r", encoding="utf-8", errors="replace")
 

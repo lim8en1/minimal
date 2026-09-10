@@ -197,23 +197,6 @@ std::optional<BackgroundTaskRegistry::StartedTask> BackgroundTaskRegistry::Start
     args.pid = pid;
     args.id_prefix = "bg";
     args.max_running = static_cast<std::size_t>(settings.max_background_tasks);
-    // On refusal, `args` is destroyed with its body never run: nobody drains,
-    // kills, reaps, or forgets the pgid -- a live orphan group for up to the
-    // command's own lifetime, an unreaped zombie at process exit, and a
-    // stale pgid in the atexit sweep set, which pid reuse turns into a
-    // wrong-target kill. The refusal is the answer; the child it already
-    // bought is not. Tear it down here, before returning.
-    args.cleanup = [pid] {
-        try {
-            bool reaped = false;
-            BoundedReapAfterKill(pid, reaped);
-        } catch (...) {
-        }
-        try {
-            ForgetPgid(pid);
-        } catch (...) {
-        }
-    };
     // The watcher's process handles are non-copyable (ScopedFd members), and
     // the registry's Body is a std::function (copyable callable). Wrap them:
     // the shared_ptr IS the watcher's ownership of the process handles, the
@@ -225,11 +208,14 @@ std::optional<BackgroundTaskRegistry::StartedTask> BackgroundTaskRegistry::Start
         WatchBackgroundTask(task, std::move(*handles_box), settings, timeout_ms,
                             watch_handles);
     };
-    // Containment for an abnormal watcher exit: the drain-and-reap normally
-    // leaves nothing live (it reaps and forgets the pgid), but a throw out of
-    // the body skips all of that -- a live process group plus a stale pgid
-    // registration, which pid reuse turns into a wrong-target kill at process
-    // exit. Best-effort kill + bounded reap; idempotent.
+    // Covers two teardown paths that never reach the body: a REFUSAL, where
+    // `args` is destroyed with its body never run (nobody drains, kills,
+    // reaps, or forgets the pgid -- the refusal is the answer, the child it
+    // already bought is not), and an ABNORMAL WATCHER EXIT, where a throw out
+    // of the body skips the drain-and-reap's own kill+reap+forget. Both leave
+    // the same residue -- a live process group plus a stale pgid registration,
+    // which pid reuse turns into a wrong-target kill at process exit -- so one
+    // best-effort, idempotent cleanup covers both.
     args.cleanup = [pid] {
         try {
             bool reaped = false;

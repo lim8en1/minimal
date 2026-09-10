@@ -22,6 +22,19 @@ void Accumulate(std::size_t& total, std::size_t bytes) {
     }
 }
 
+// tool_calls[].index comes straight off the wire, so it is
+// attacker-influenced. A new Block is pushed for every unseen index with no
+// bound of its own -- unlike delta CONTENT, which Accumulate() meters, the
+// Block vector itself is not content, so a stream of bare
+// {"tool_calls":[{"index":N}]} frames (no arguments fragment to advance the
+// 64 MiB budget) grew blocks_ and tool_call_indices_ by one entry per frame,
+// unbounded. Same reasoning and same ceiling as provider-anthropic's
+// CheckedBlockIndex (anthropic_stream_reassembler.cpp) -- no real response
+// approaches this many tool calls, so anything at or beyond it is a
+// malformed stream, reported on the same OpenAiParseError channel as bad
+// frame JSON.
+constexpr std::size_t kMaxBlocks = 4096;
+
 std::string_view TrimTrailing(std::string_view s) {
     while (!s.empty() && (s.back() == ' ' || s.back() == '\t' || s.back() == '\r' ||
                           s.back() == '\n')) {
@@ -137,6 +150,11 @@ bool OpenAiStreamReassembler::FeedFrame(std::string_view data, const llm::Stream
                 }
                 auto it = tool_call_indices_.find(openai_index);
                 if (it == tool_call_indices_.end()) {
+                    if (blocks_.size() >= kMaxBlocks) {
+                        throw OpenAiParseError(
+                            "stream event named an implausible tool_call index (" +
+                            std::to_string(openai_index) + ")");
+                    }
                     std::size_t block_index = blocks_.size();
                     blocks_.push_back(Block{Block::Kind::ToolCall, {}, {}, {}, {}, {}, false});
                     it = tool_call_indices_.emplace(openai_index, block_index).first;

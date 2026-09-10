@@ -533,3 +533,29 @@ TEST_CASE("a deeply nested stream chunk is refused as a parse error, not a crash
     OpenAiStreamReassembler sane;
     CHECK_NOTHROW(sane.FeedFrame(R"({"a":[[{"b":[1,2,[3]]}]]})", sink));
 }
+
+TEST_CASE("a flood of distinct tool_call indices is refused, not accumulated without bound",
+          "[openai_stream][invariant]") {
+    // A new Block is pushed for every unseen tool_calls[].index with no
+    // accompanying content -- unlike text/thinking deltas, a bare
+    // {"index":N} frame advances none of the 64 MiB Accumulate() budget, so
+    // that budget alone does not bound how many of these a stream can send.
+    OpenAiStreamReassembler reassembler;
+    std::vector<llm::StreamEvent> events;
+    auto sink = CollectInto(events);
+    REQUIRE_NOTHROW(reassembler.FeedFrame(
+        R"({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_0","function":{"name":"f"}}]}}]})",
+        sink));
+
+    bool threw = false;
+    try {
+        for (int i = 1; i <= 5000; ++i) {
+            const std::string frame =
+                R"({"choices":[{"delta":{"tool_calls":[{"index":)" + std::to_string(i) + "}]}}]}";
+            reassembler.FeedFrame(frame, sink);
+        }
+    } catch (const OpenAiParseError&) {
+        threw = true;
+    }
+    CHECK(threw);
+}

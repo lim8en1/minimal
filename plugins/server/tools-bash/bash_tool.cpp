@@ -7,6 +7,7 @@
 
 #include <cstring>
 #include <filesystem>
+#include <limits>
 #include <map>
 #include <optional>
 #include <string>
@@ -288,6 +289,15 @@ public:
             const auto seconds = input.at("timeout").get<std::int64_t>();
             if (seconds <= 0) {
                 return Reject(ctx, started, "timeout must be positive", command);
+            }
+            // Range-checked before the *1000 widening, not after: an
+            // unchecked `seconds` near INT64_MAX overflowed the multiply
+            // (UB), and a wrapped negative timeout_ms passed both
+            // std::min(timeout_ms, max_timeout_ms) below and the
+            // background path's std::min, reaching DrainAndReap as a
+            // negative deadline.
+            if (seconds > std::numeric_limits<std::int64_t>::max() / 1000) {
+                return Reject(ctx, started, "timeout is out of range", command);
             }
             timeout_ms = seconds * 1000;
             timeout_supplied = true;

@@ -141,14 +141,18 @@ void GitignoreStack::Push(int depth, GitignoreSet set) {
 void GitignoreStack::Pop() { entries_.pop_back(); }
 
 bool GitignoreStack::IsIgnored(std::string_view rel, bool is_dir) const {
+    // Depends only on `rel`, not on the entry being checked -- hoisted out of
+    // the loop below so a path is scanned once per call, not once per
+    // gitignore level on the stack.
+    int components = 0;
+    for (const char c : rel) {
+        if (c == '/') components += 1;
+    }
+
     std::optional<GitignoreSet::Verdict> verdict;
     for (const auto& entry : entries_) {
         // Each set sees only the slice of the path below its own directory;
         // a path shallower than the set's depth cannot match it.
-        int components = 0;
-        for (const char c : rel) {
-            if (c == '/') components += 1;
-        }
         if (components < entry.depth) continue;
         std::string_view slice = rel;
         for (int skips = 0; skips < entry.depth && !slice.empty(); ++skips) {

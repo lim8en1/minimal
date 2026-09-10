@@ -1,6 +1,7 @@
 #include "file_editor.hpp"
 
 #include <fstream>
+#include <optional>
 #include <sstream>
 #include <vector>
 
@@ -58,6 +59,21 @@ std::size_t CountOccurrences(const std::string& haystack, std::string_view needl
     return count;
 }
 
+// LoadWholeFile bounds the EXISTING file against max_bytes; it says nothing
+// about new_str/insert_text, which are model-controlled and unbounded. A 1 KB
+// file with a 200 MB new_str sailed past the cap this checks for on the way
+// in and wrote 200 MB on the way out -- the same ceiling the header describes
+// as bounding "worst-case memory for the mutating edit commands" applies to
+// the result, not just the input.
+std::optional<std::string> CheckResultSize(const std::string& updated, std::int64_t max_bytes) {
+    if (static_cast<std::int64_t>(updated.size()) > max_bytes) {
+        return "the edit would produce a file of " + std::to_string(updated.size()) +
+               " bytes, over the " + std::to_string(max_bytes) +
+               " byte edit limit -- use a different approach for files this large";
+    }
+    return std::nullopt;
+}
+
 }  // namespace
 
 EditOutcome FileEditor::StrReplace(const std::filesystem::path& path, std::string_view old_str,
@@ -91,6 +107,11 @@ EditOutcome FileEditor::StrReplace(const std::filesystem::path& path, std::strin
     const std::size_t pos = loaded.content.find(old_str);
     std::string updated = loaded.content;
     updated.replace(pos, old_str.size(), new_str);
+
+    if (auto size_error = CheckResultSize(updated, max_bytes)) {
+        outcome.error = std::move(*size_error);
+        return outcome;
+    }
 
     const auto written = tools::write_file(path, updated);
     if (!written.ok) {
@@ -152,6 +173,11 @@ EditOutcome FileEditor::Insert(const std::filesystem::path& path, int insert_lin
         // Every line except the last keeps its terminator; the last only if the
         // file had one before the edit.
         if (i + 1 < lines.size() || ends_with_newline) updated += '\n';
+    }
+
+    if (auto size_error = CheckResultSize(updated, max_bytes)) {
+        outcome.error = std::move(*size_error);
+        return outcome;
     }
 
     const auto written = tools::write_file(path, updated);

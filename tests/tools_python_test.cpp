@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -1377,6 +1378,34 @@ TEST_CASE("python_output lists tasks, slices output, and greps",
     f.Interrupt(nlohmann::json{{"kill", true}});
 }
 
+TEST_CASE("python_output's grep is RE2, immune to catastrophic backtracking",
+          "[tools_python][tool][output]") {
+    if (!HavePython3()) SKIP("python3 not available");
+    ToolFixture f;
+    CtxBuilder builder(f.dir.path());
+
+    // A long run with no match where "(a+)+$" demands one: the textbook
+    // input a BACKTRACKING engine (std::regex) blows up on, exponential in
+    // the run length -- a few thousand 'a's already puts libstdc++/libc++'s
+    // regex well past any reasonable test timeout. RE2 is a linear-time
+    // automaton, not backtracking (the property tools-search's RE2 choice
+    // rests on -- see tools-search/CMakeLists.txt -- now shared by this
+    // grep), so this returns promptly regardless of input length.
+    const std::string adversarial_line(4000, 'a');
+    const auto run =
+        f.Exec(builder, nlohmann::json{{"code", "print('" + adversarial_line + "' + 'b')"}});
+    REQUIRE_FALSE(run.result.is_error);
+    const std::string ack = run.result.content_text;
+    const auto id = ack.substr(0, ack.find(' '));
+    REQUIRE(id.rfind("py-", 0) == 0);
+
+    const auto started = std::chrono::steady_clock::now();
+    auto grep = f.Output(nlohmann::json{{"task_id", id}, {"grep", "(a+)+$"}});
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+    CHECK_FALSE(grep.result.is_error);
+    CHECK(elapsed < std::chrono::seconds(5));
+}
+
 TEST_CASE("python_input feeds a parked input() and the result arrives",
           "[tools_python][tool][stdin]") {
     if (!HavePython3()) SKIP("python3 not available");
@@ -1398,4 +1427,56 @@ TEST_CASE("python_input feeds a parked input() and the result arrives",
     fed = f.Input(nlohmann::json{{"text", "x"}});
     CHECK(fed.result.is_error);
     CHECK(fed.result.content_text.find("no python interpreter") != std::string::npos);
+}
+
+// A fake "interpreter" that never completes the ready handshake, so Spawn
+// always hits its startup_timeout, and busy-writes to its own stderr (the
+// diag channel) the whole time -- the reader thread's diag_tail_ append
+// (ReaderLoop) is exactly what races Spawn's post-timeout read of it unless
+// both are under the interpreter's mutex (see the "Locked:" comment on the
+// diag_slot branch in python_interpreter.cpp, and the unique_lock scope in
+// Spawn). Repeated below because it is a timing window, not a guaranteed
+// hit: this exercises it functionally (the diag content must still arrive
+// intact) on every build, and is the reproduction to point ThreadSanitizer
+// at when chasing this class of bug specifically.
+std::filesystem::path WriteFakeBrokenInterpreter(const std::filesystem::path& dir) {
+    const auto path = dir / "fake-python.sh";
+    std::ofstream out(path);
+    out << "#!/bin/sh\n"
+        << "while true; do printf 'not really python, still starting up\\n' 1>&2; done\n";
+    out.close();
+    std::filesystem::permissions(path,
+                                 std::filesystem::perms::owner_all |
+                                     std::filesystem::perms::group_read |
+                                     std::filesystem::perms::group_exec |
+                                     std::filesystem::perms::others_read |
+                                     std::filesystem::perms::others_exec);
+    return path;
+}
+
+TEST_CASE("a startup timeout reads the diag tail without racing the reader thread",
+          "[tools_python][interpreter][startup]") {
+    // Repeated: the race this guards against is a timing window, so one
+    // Spawn is not a reliable probe. Cheap enough (~1s/trial, startup_timeout
+    // below) to repeat a handful of times in-process.
+    for (int trial = 0; trial < 5; ++trial) {
+        TempDir dir;
+        PythonSettings settings;
+        settings.startup_timeout = 1;  // seconds; the fake interpreter never becomes ready
+        InterpreterConfig config;
+        config.python_path = WriteFakeBrokenInterpreter(dir.path()).string();
+        config.cwd = dir.path();
+        config.env = {{"PATH", "/usr/bin:/bin:/usr/local/bin"}, {"HOME", dir.path().string()}};
+        config.session_lifetime = kLifetimeToken;
+
+        std::string error;
+        auto interp = Interpreter::Spawn(config, settings, common::DefaultLogger(), &error);
+        CHECK(interp == nullptr);
+        CHECK(error.find("did not become ready") != std::string::npos);
+        // The diag tail rode into the error message -- proof Spawn actually
+        // read diag_tail_ (under lock) while the reader thread was still
+        // appending to it, not that the race window was simply never
+        // exercised.
+        CHECK(error.find("not really python") != std::string::npos);
+    }
 }

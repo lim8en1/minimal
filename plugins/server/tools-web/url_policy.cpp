@@ -164,15 +164,33 @@ UrlCheck CheckUrl(const std::string& url, bool allow_private_hosts) {
                         parsed->host};
     }
 
-    // Pin the connection to the addresses just vetted (see UrlCheck's comment
-    // for the why). Entries need a numeric port: an explicit one only counts
-    // if it is all digits, otherwise the scheme default -- and if the URL's
-    // port is garbage, no pinning (libcurl will reject the URL itself).
+    // The addresses just vetted are what gets PINNED below (see UrlCheck's
+    // comment for the why) -- ok=true with an empty resolve_entries reads to
+    // the caller as "pinning not needed" (fetch_tool.cpp's allow_private_hosts
+    // case), so every path from here on that cannot produce a pin must fail
+    // closed instead, or the caller forwards the request unpinned believing
+    // it is vetted.
+    if (resolved_addresses.empty()) {
+        // Every AF_INET/AF_INET6 answer was private (and already returned
+        // above via private_hit) or none survived inet_ntop -- either way,
+        // there is nothing left to pin the connection to.
+        return UrlCheck{false,
+                        "could not resolve a usable address for host '" + parsed->host + "'",
+                        parsed->host};
+    }
+
+    // Entries need a numeric port: an explicit one only counts if it is all
+    // digits, otherwise the scheme default.
     std::string port = parsed->port;
     if (port.empty()) {
         port = (scheme == "https") ? "443" : "80";
     } else if (port.find_first_not_of("0123456789") != std::string::npos) {
-        return UrlCheck{true, "", parsed->host};
+        // A garbage port cannot be pinned into a resolve entry either --
+        // this used to fall back to an unpinned allow ("libcurl will reject
+        // the URL itself"), but that reasoning only covers the request
+        // actually failing; it does not cover the DNS-rebinding window the
+        // pin exists to close.
+        return UrlCheck{false, "URL has a malformed port '" + parsed->port + "'", parsed->host};
     }
     UrlCheck out{true, "", parsed->host};
     // A host that is itself an IPv6 literal needs the same bracketing in the

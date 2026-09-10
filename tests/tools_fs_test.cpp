@@ -297,6 +297,65 @@ TEST_CASE("edit refuses a file over the byte cap", "[tools_fs][edit]") {
     CHECK(result.content_text.find("limit") != std::string::npos);
 }
 
+TEST_CASE("str_replace refuses when the REPLACEMENT would push the file over the cap",
+         "[tools_fs][edit]") {
+    // The existing-file cap above bounds LoadWholeFile's input; new_str is
+    // model-controlled and unbounded on its own. A small file plus a huge
+    // new_str used to sail through -- the ceiling only checked what was
+    // already on disk, not what execute() was about to write.
+    Fixture f;
+    f.settings.edit_max_editable_file_bytes = 16;
+    f.Write("small.txt", "x");
+    auto tool = tools_fs::MakeEditTool(f.settings);
+    auto ctx = f.Context();
+
+    const auto result = tool->execute({{"command", "str_replace"},
+                                       {"path", "small.txt"},
+                                       {"old_str", "x"},
+                                       {"new_str", std::string(100, 'y')}},
+                                      ctx);
+
+    CHECK(result.is_error);
+    CHECK(result.content_text.find("limit") != std::string::npos);
+    CHECK(f.Read("small.txt") == "x");  // rejected before the write, not after
+}
+
+TEST_CASE("insert refuses when the INSERTED text would push the file over the cap",
+         "[tools_fs][edit]") {
+    Fixture f;
+    f.settings.edit_max_editable_file_bytes = 16;
+    f.Write("small.txt", "one\n");
+    auto tool = tools_fs::MakeEditTool(f.settings);
+    auto ctx = f.Context();
+
+    const auto result = tool->execute({{"command", "insert"},
+                                       {"path", "small.txt"},
+                                       {"insert_line", 1},
+                                       {"insert_text", std::string(100, 'y')}},
+                                      ctx);
+
+    CHECK(result.is_error);
+    CHECK(result.content_text.find("limit") != std::string::npos);
+    CHECK(f.Read("small.txt") == "one\n");
+}
+
+TEST_CASE("edit create refuses file_text over the byte cap, same as write",
+         "[tools_fs][edit]") {
+    // edit create is the OTHER whole-file-write path, alongside `write`
+    // itself; it used to bypass edit_max_editable_file_bytes entirely.
+    Fixture f;
+    f.settings.edit_max_editable_file_bytes = 16;
+    auto tool = tools_fs::MakeEditTool(f.settings);
+    auto ctx = f.Context();
+
+    const auto result = tool->execute(
+        {{"command", "create"}, {"path", "new.txt"}, {"file_text", std::string(100, 'z')}}, ctx);
+
+    CHECK(result.is_error);
+    CHECK(result.content_text.find("limit") != std::string::npos);
+    CHECK_FALSE(std::filesystem::exists(f.dir.path() / "new.txt"));
+}
+
 TEST_CASE("edit rejects an unknown command", "[tools_fs][edit]") {
     Fixture f;
     f.Write("a.txt", "x\n");

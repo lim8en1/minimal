@@ -178,6 +178,29 @@ TEST_CASE("CheckUrl: an unparseable URL is refused with a reason", "[tools_web][
     CHECK_FALSE(check.reason.empty());
 }
 
+TEST_CASE("CheckUrl: a public literal address is allowed WITH a pin entry",
+         "[tools_web][url_policy]") {
+    // The companion to the malformed-port case below: the normal path must
+    // still produce a non-empty resolve_entries, or the fail-closed check
+    // there would also reject every legitimate request.
+    const auto check = CheckUrl("https://93.184.216.34/", false);
+    REQUIRE(check.ok);
+    CHECK_FALSE(check.resolve_entries.empty());
+}
+
+TEST_CASE("CheckUrl: a malformed port is refused, not allowed unpinned",
+         "[tools_web][url_policy]") {
+    // A garbage port cannot be turned into a CURLOPT_RESOLVE pin entry.
+    // This used to fall back to an unpinned ok=true (reasoning: "libcurl
+    // will reject the URL itself"), which left the DNS-rebinding window the
+    // pin exists to close wide open for however long the connection attempt
+    // took to fail.
+    const auto check = CheckUrl("https://93.184.216.34:notaport/", false);
+    CHECK_FALSE(check.ok);
+    CHECK(check.resolve_entries.empty());
+    CHECK_FALSE(check.reason.empty());
+}
+
 // ---------------------------------------------------------------------------
 // html_text
 // ---------------------------------------------------------------------------

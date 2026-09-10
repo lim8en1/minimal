@@ -43,6 +43,25 @@ int BoundedSlice(int slice_ms, std::chrono::steady_clock::duration until) {
     return static_cast<int>(std::min<std::int64_t>(slice_ms, ms));
 }
 
+// nlohmann's value() throws type_error when the key is present with the
+// wrong type -- fine for a JSON payload we authored ourselves, wrong for a
+// protocol line whose author is the driver process, which a corrupted or
+// hostile child (executed code writing to fd 3 -- see driver_source.hpp) can
+// shape however it likes. These never throw: a present-but-wrong-typed field
+// reads as absent, same as a missing one.
+std::string StringField(const nlohmann::json& body, const char* key,
+                        std::string fallback = {}) {
+    const auto it = body.find(key);
+    if (it == body.end() || !it->is_string()) return fallback;
+    return it->get<std::string>();
+}
+
+bool BoolField(const nlohmann::json& body, const char* key, bool fallback = false) {
+    const auto it = body.find(key);
+    if (it == body.end() || !it->is_boolean()) return fallback;
+    return it->get<bool>();
+}
+
 }  // namespace
 
 Interpreter::Interpreter(LaunchedInterpreter proc, InterpreterConfig config,
@@ -92,15 +111,22 @@ std::shared_ptr<Interpreter> Interpreter::Spawn(const InterpreterConfig& config,
 
     const auto deadline =
         std::chrono::steady_clock::now() + std::chrono::seconds(settings.startup_timeout);
+    bool ready = false;
+    std::string diag;
     {
         std::unique_lock<std::mutex> lock(self->mu_);
         while (!self->ready_ && !self->dead_.load(std::memory_order_acquire)) {
             if (std::chrono::steady_clock::now() >= deadline) break;
             self->cv_.wait_until(lock, deadline);
         }
+        // Read under the same lock the reader thread writes both fields
+        // under (ready_ at DrainLine's "ready" branch, diag_tail_ on every
+        // diagnostics chunk): the reader is still running here regardless of
+        // which way the wait ended, so an unlocked read races it.
+        ready = self->ready_;
+        diag = self->diag_tail_;
     }
-    if (!self->ready_) {
-        const std::string diag = self->diag_tail_;
+    if (!ready) {
         self->HardKill("startup handshake timed out");
         *error = "interpreter did not become ready within " +
                  std::to_string(settings.startup_timeout) + "s (broken venv or interpreter?)" +
@@ -227,7 +253,19 @@ void Interpreter::ReaderLoop() {
                 while (true) {
                     const auto pos = line.find('\n', start);
                     if (pos == std::string::npos) break;
-                    DrainLine(std::string_view(line).substr(start, pos - start));
+                    // DrainLine reads through StringField/BoolField, which
+                    // never throw -- this guard is a second line of defense,
+                    // not the mechanism: the reader thread has nowhere to
+                    // send an exception (it runs detached from any caller's
+                    // stack), so an uncaught throw here would std::terminate
+                    // the whole server over one malformed protocol line.
+                    try {
+                        DrainLine(std::string_view(line).substr(start, pos - start));
+                    } catch (const std::exception& error) {
+                        logger_.warn("python[{}]: DrainLine threw: {}", pid_, error.what());
+                        MarkDead("protocol corruption", config_.session_lifetime.expired());
+                        return;
+                    }
                     if (dead_.load(std::memory_order_acquire)) return;
                     start = pos + 1;
                 }
@@ -247,6 +285,10 @@ void Interpreter::ReaderLoop() {
         if (diag_slot >= 0 && (fds[diag_slot].revents & (POLLIN | POLLHUP | POLLERR))) {
             const ssize_t n = read(diag_fd_.get(), chunk, sizeof(chunk));
             if (n > 0) {
+                // Locked: Spawn's startup wait (and any future cross-thread
+                // reader) reads diag_tail_ under mu_, so the append must be
+                // under it too -- this was previously unsynchronized.
+                std::lock_guard<std::mutex> lock(mu_);
                 diag_tail_.append(chunk, static_cast<std::size_t>(n));
                 if (diag_tail_.size() > kMaxDiagBytes) {
                     diag_tail_.erase(0, diag_tail_.size() - kMaxDiagBytes);
@@ -268,7 +310,7 @@ void Interpreter::DrainLine(std::string_view line) {
     }
     if (body.contains("ready")) {
         std::lock_guard<std::mutex> lock(mu_);
-        version_ = body.value("version", std::string("unknown"));
+        version_ = StringField(body, "version", "unknown");
         ready_ = true;
         cv_.notify_all();
         return;
@@ -286,7 +328,7 @@ void Interpreter::DrainLine(std::string_view line) {
     }
     if (body.contains("bad_request")) {
         logger_.warn("python[{}]: driver rejected a request: {}", pid_,
-                     body.value("bad_request", std::string()));
+                     StringField(body, "bad_request"));
         return;
     }
     const auto id_it = body.find("id");
@@ -295,18 +337,18 @@ void Interpreter::DrainLine(std::string_view line) {
         return;
     }
     RequestOutcome outcome;
-    outcome.ok = body.value("ok", false);
+    outcome.ok = BoolField(body, "ok");
     // stdout rides BOTH response kinds: a request that ran and then failed
     // keeps everything it printed before the exception.
-    outcome.stdout_text = body.value("stdout", std::string());
-    outcome.stderr_text = body.value("stderr", std::string());
+    outcome.stdout_text = StringField(body, "stdout");
+    outcome.stderr_text = StringField(body, "stderr");
     if (outcome.ok) {
-        outcome.result = body.value("result", std::string());
-        outcome.result_json = body.value("result_json", std::string());
+        outcome.result = StringField(body, "result");
+        outcome.result_json = StringField(body, "result_json");
     } else {
-        outcome.error = body.value("error", std::string("request failed"));
-        outcome.exc_type = body.value("exc", std::string());
-        outcome.exc_msg = body.value("exc_msg", std::string());
+        outcome.error = StringField(body, "error", "request failed");
+        outcome.exc_type = StringField(body, "exc");
+        outcome.exc_msg = StringField(body, "exc_msg");
     }
     DeliverResponse(id_it->get<std::string>(), std::move(outcome));
 }
@@ -680,8 +722,11 @@ void Interpreter::HardKill(const char* reason) {
                      pid_, reason);
     }
     ForgetPgid(pid_);
-    // The reader exits on its next slice (dead_ is set). It holds a
-    // shared_ptr, so this object outlives it however the store disposes of us.
+    // The reader exits on its next slice (dead_ is set). It holds NO
+    // shared_ptr -- it captures raw `this` (StartReader) -- so it is safe
+    // only because ~Interpreter joins it before any member is torn down
+    // (see the class comment's THREAD/OWNERSHIP CONTRACT). Do not drop that
+    // join.
 }
 
 std::vector<std::string> Interpreter::PendingIds() {

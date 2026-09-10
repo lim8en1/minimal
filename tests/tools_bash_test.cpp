@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <sstream>
 #include <thread>
 #include <vector>
@@ -548,6 +549,16 @@ TEST_CASE("timeout is honoured and clamped to the ceiling", "[tools_bash][timeou
         const auto out = f.Run({{"command", "echo x"}, {"timeout", 0}});
         CHECK(out.result.is_error);
         CHECK(out.result.content_text.find("must be positive") != std::string::npos);
+    }
+    SECTION("a value near INT64_MAX is rejected, not overflowed into a negative deadline") {
+        // seconds * 1000 on an unchecked value near INT64_MAX wraps (signed
+        // overflow, UB); the wrapped result used to sail past both
+        // std::min(timeout_ms, max_timeout_ms) here and the background
+        // path's equivalent, reaching the drain loop as a negative deadline.
+        const auto out = f.Run(
+            {{"command", "echo x"}, {"timeout", std::numeric_limits<std::int64_t>::max()}});
+        CHECK(out.result.is_error);
+        CHECK(out.result.content_text.find("out of range") != std::string::npos);
     }
 }
 

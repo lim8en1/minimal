@@ -393,6 +393,19 @@ private:
             }
             raw_offset = (*it)[0].get<std::int64_t>();
             const std::int64_t end = (*it)[1].get<std::int64_t>();
+            // Bounded to int range BEFORE the subtraction below, not after:
+            // ClampReadWindow rejects an out-of-[1, INT_MAX] offset anyway,
+            // but it never sees raw_limit until AFTER `end - raw_offset + 1`
+            // has already run. [start, end] = [INT64_MIN, INT64_MAX] passed
+            // the old `end < raw_offset` check and then overflowed that
+            // subtraction (UB). Checking both endpoints here first means the
+            // difference below can never exceed 2^32, nowhere near int64
+            // overflow.
+            if (raw_offset < 1 || raw_offset > std::numeric_limits<int>::max() || end < 1 ||
+                end > std::numeric_limits<int>::max()) {
+                return Error("view_range values must be line numbers between 1 and " +
+                             std::to_string(std::numeric_limits<int>::max()));
+            }
             if (end < raw_offset) {
                 // An inverted range is an error, not "unlimited": the old
                 // mapping through raw_limit = 0 produced a full read_max_lines
@@ -424,10 +437,21 @@ private:
         if (!input.contains("file_text") || !input.at("file_text").is_string()) {
             return Error("missing required string field: file_text");
         }
+        const auto file_text = input.at("file_text").get<std::string>();
+        // Same ceiling as WriteTool::execute (edit_max_editable_file_bytes):
+        // `edit create` is the other whole-file-write path, and leaving it
+        // uncapped let the model bypass `write`'s limit by naming the same
+        // operation through this command instead.
+        if (static_cast<std::int64_t>(file_text.size()) > settings_.edit_max_editable_file_bytes) {
+            return Error("file_text is " + std::to_string(file_text.size()) +
+                         " bytes, over the " +
+                         std::to_string(settings_.edit_max_editable_file_bytes) +
+                         "-byte write limit; build the file with a shell command instead");
+        }
         // Overwrites, matching text_editor_20250728's `create`. Diverging would
         // defeat the point of adopting that vocabulary, and it is FileWrite-gated
         // either way.
-        const auto outcome = tools::write_file(path, input.at("file_text").get<std::string>());
+        const auto outcome = tools::write_file(path, file_text);
         if (!outcome.ok) return Error(outcome.error);
         return ToolResult{false, (outcome.created ? "Created " : "Overwrote ") + path.string()};
     }

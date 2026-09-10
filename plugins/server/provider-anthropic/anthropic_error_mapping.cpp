@@ -20,15 +20,28 @@ struct ParsedError {
     std::string message;
 };
 
+// Only the head of an error body is ever parsed. The body can be as large as
+// the HTTP client's actual caps (kMaxResponseBodyBytes: 8 MiB for a GET,
+// kMaxBodyBytes: 64 MiB for a completion -- see src/server/net/http_client.cpp;
+// there is no 64 KiB cap anywhere on this path, unlike what an earlier
+// version of this comment claimed), so handing all of it to nlohmann to
+// extract one string is a self-inflicted stall on a hostile (or merely
+// absurd) error body. Same bound as provider-openai's HeadOf.
+constexpr std::size_t kMaxErrorBodyParse = 64 * 1024;
+
+std::string_view HeadOf(const std::string& body) {
+    std::string_view slice(body);
+    if (slice.size() > kMaxErrorBodyParse) slice = slice.substr(0, kMaxErrorBodyParse);
+    return slice;
+}
+
 ParsedError ParseErrorBody(const std::string& body) {
-    // The extracted message is server-authored; cap it so no classification
-    // path can embed more than this into an exception (the HTTP path is
-    // additionally bounded by the provider's 64 KiB body cap, the SSE path
-    // only by the parser's 1 MiB line cap).
+    // The extracted message is server-authored; cap it too so no
+    // classification path can embed more than this into an exception.
     constexpr std::size_t kMaxMessage = 2000;
     ParsedError parsed;
     try {
-        auto json = nlohmann::json::parse(body);
+        auto json = nlohmann::json::parse(HeadOf(body));
         if (!json.contains("error")) return parsed;
         const auto& error = json.at("error");
         parsed.type = error.value("type", "");
@@ -39,7 +52,8 @@ ParsedError ParseErrorBody(const std::string& body) {
         }
         parsed.ok = true;
     } catch (const nlohmann::json::exception&) {
-        // Not JSON, or not the expected shape -- caller falls back to status.
+        // Not JSON, or not the expected shape (including a slice truncated
+        // mid-document) -- caller falls back to status.
     }
     return parsed;
 }
