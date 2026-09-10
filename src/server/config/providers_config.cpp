@@ -759,12 +759,26 @@ ProvidersConfig ParseProvidersConfigUnwrapped(const nlohmann::json& doc) {
             if (!model.is_object()) {
                 throw std::runtime_error("providers.json: " + model_where + " must be an object");
             }
-            if (model_name.find('/') != std::string::npos ||
-                provider_name.find('/') != std::string::npos) {
+            if (provider_name.find('/') != std::string::npos) {
                 // Otherwise the reference cannot be parsed back apart.
-                throw std::runtime_error("providers.json: '" + provider_name + "/" + model_name +
-                                         "' contains a '/' in a name, which makes the reference "
-                                         "ambiguous");
+                throw std::runtime_error("providers.json: provider '" + provider_name +
+                                         "' contains a '/', which makes the reference ambiguous");
+            }
+            // A model KEY may contain '/', split at the FIRST one -- the same
+            // rule SplitModelRef applies to interactive refs and the
+            // ModelRefs() picker filter applies to catalog keys. This is what
+            // makes static entries express OpenRouter ids ("anthropic/
+            // claude-opus-5" under provider "openrouter" resolves as
+            // openrouter/anthropic/claude-opus-5 and is sent on the wire
+            // verbatim, exactly as discovery's slash-bearing ids are). Empty
+            // halves are still refused: a name with a dangling slash is a
+            // typo, and "a/" as a wire model id would 400 with no hint why.
+            if (const auto slash = model_name.find('/'); slash == 0 || slash + 1 == model_name.size()) {
+                throw std::runtime_error(
+                    "providers.json: model '" + provider_name + "/" + model_name +
+                    "' has an empty half -- a model key may contain '/' (OpenRouter ids like "
+                    "\"anthropic/claude-opus-5\"), but it must not be empty, and both sides of its "
+                    "first '/' must be non-empty");
             }
 
             ResolvedModel resolved;

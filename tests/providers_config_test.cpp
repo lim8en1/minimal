@@ -207,11 +207,109 @@ TEST_CASE("a missing backend or url is refused", "[providers]") {
                     std::runtime_error);
 }
 
-TEST_CASE("a slash inside a name is refused", "[providers]") {
-    // Otherwise "a/b/c" could not be parsed back into a provider and a model.
+TEST_CASE("slashes in names: the provider half is refused, the model half splits at the first one",
+          "[providers]") {
+    // A provider name containing '/' would make "a/b/c" unparseable back into
+    // a provider and a model, so it is refused outright. A MODEL key containing
+    // '/' is legal and splits at the FIRST '/' -- the same rule SplitModelRef
+    // applies to interactive refs -- so OpenRouter ids are expressible as
+    // static entries (see the OpenRouter-shaped case below).
     CHECK_THROWS_AS(ParseProvidersConfig(nlohmann::json::parse(
-                        R"({"providers":{"p":{"backend":"o","url":"u","models":{"a/b":{}}}}})")),
+                        R"({"providers":{"a/b":{"backend":"o","url":"u","models":{"m":{}}}}})")),
                     std::runtime_error);
+    CHECK_THROWS_AS(ParseProvidersConfig(nlohmann::json::parse(
+                        R"({"providers":{"p":{"backend":"o","url":"u","models":{"x/":{}}}}})")),
+                    std::runtime_error);
+    CHECK_THROWS_AS(ParseProvidersConfig(nlohmann::json::parse(
+                        R"({"providers":{"p":{"backend":"o","url":"u","models":{"/x":{}}}}})")),
+                    std::runtime_error);
+
+    // The key after the first '/' is the model whole -- including any further
+    // slashes -- and is sent on the wire verbatim.
+    const auto config = ParseProvidersConfig(nlohmann::json::parse(
+        R"({"providers":{"p":{"backend":"openai","url":"http://x",
+            "models":{"vendor/model-slug":{}}}}})"));
+    const auto model = config.Resolve(ModelRef{"p", "vendor/model-slug"});
+    REQUIRE(model != nullptr);
+    CHECK(model->ref.provider == "p");
+    CHECK(model->ref.model == "vendor/model-slug");
+    CHECK(model->provider.model_name == "vendor/model-slug");
+    const auto refs = config.ModelRefs();
+    REQUIRE(refs.size() == 1);
+    CHECK(refs[0] == "p/vendor/model-slug");
+}
+
+TEST_CASE("a static OpenRouter-shaped entry resolves with its id verbatim and routes its "
+          "parameters through",
+          "[providers][compat]") {
+    // The point of slash-bearing static model keys: OpenRouter ids are
+    // vendor/model, the key is the wire "model" verbatim, and per-model
+    // "parameters" carry OpenRouter's provider-routing body field. The
+    // full ref is three segments and addressable from every surface that
+    // names a model interactively (SplitModelRef).
+    const ScopedEnv api_key("OPENROUTER_API_KEY", "test-key");
+    const auto config = ParseProvidersConfig(nlohmann::json::parse(R"({
+      "providers": {
+        "openrouter": {
+          "backend": "openai",
+          "url": "https://openrouter.ai/api/v1",
+          "api_key_env": "OPENROUTER_API_KEY",
+          "max_tokens": 8192,
+          "models": {
+            "anthropic/claude-opus-5": {
+              "context_window_tokens": 200000,
+              "parameters": {"provider": {"only": ["anthropic"]}}
+            },
+            "z-ai/glm-5.3": {}
+          }
+        }
+      }
+    })"));
+
+    const auto opus = config.Resolve(ModelRef{"openrouter", "anthropic/claude-opus-5"});
+    REQUIRE(opus != nullptr);
+    CHECK(opus->provider.model_name == "anthropic/claude-opus-5");
+    CHECK(opus->context_window_tokens == 200000);
+    // The model with no own limits inherits the provider-level default.
+    CHECK(opus->max_tokens == 8192);
+    CHECK(opus->parameters == nlohmann::json{{"provider", {{"only", {"anthropic"}}}}});
+
+    const auto glm = config.Resolve(ModelRef{"openrouter", "z-ai/glm-5.3"});
+    REQUIRE(glm != nullptr);
+    CHECK(glm->provider.model_name == "z-ai/glm-5.3");
+    CHECK(glm->parameters.empty());
+
+    const auto refs = config.ModelRefs();
+    REQUIRE(refs.size() == 2);
+    CHECK(refs[0] == "openrouter/anthropic/claude-opus-5");
+    CHECK(refs[1] == "openrouter/z-ai/glm-5.3");
+}
+
+TEST_CASE("whitelist filters a slash-bearing static model id by its full key",
+          "[providers][compat]") {
+    // The ModelRefs() picker filter splits each catalog key at the FIRST '/',
+    // so provider "openrouter" must keep matching a key like
+    // "openrouter/anthropic/claude-opus-5" whose model half itself contains
+    // '/' -- the filter and the parser must agree on the split rule.
+    const auto config = ParseProvidersConfig(nlohmann::json::parse(R"({
+      "providers": {
+        "openrouter": {
+          "backend": "openai",
+          "url": "https://openrouter.ai/api/v1",
+          "whitelist": ["anthropic/claude-opus-5"],
+          "models": {
+            "anthropic/claude-opus-5": {},
+            "z-ai/glm-5.3": {}
+          }
+        }
+      }
+    })"));
+
+    const auto refs = config.ModelRefs();
+    REQUIRE(refs.size() == 1);
+    CHECK(refs[0] == "openrouter/anthropic/claude-opus-5");
+    // Filtering is a listing concern; resolution is untouched.
+    CHECK(config.Resolve(ModelRef{"openrouter", "z-ai/glm-5.3"}) != nullptr);
 }
 
 TEST_CASE("a fractional numeric field is refused by name, not truncated", "[providers][invariant]") {
