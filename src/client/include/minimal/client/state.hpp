@@ -291,6 +291,19 @@ public:
         // stands, so the press is never silent.
         bool cancel_requested = false;
 
+        // A turn is (or may be) running on this session, from the CLIENT's
+        // point of view: armed by OnChatSubmitted and by the first delta of a
+        // new turn (injected turns -- a subagent completion -- never go
+        // through OnChatSubmitted), cleared by the same terminal events as
+        // cancel_requested. This is the interrupt probe's signal, NOT a
+        // display state: the derived `state` deliberately reads Idle in the
+        // windows between message stops and the next provider event
+        // (MaybeGoIdleLocked), during which a turn can still be alive --
+        // treating that Idle as "nothing to cancel" made ESC dead and
+        // ctrl+c lethal (idle-quit) for exactly as long as the provider
+        // stayed silent.
+        bool turn_in_flight = false;
+
         // --- Session metadata (the E5 emission, one per attach + on change) ---
         // The wire source for the status bar's {model} {agent}
         // {permission_mode} segments and the `max` half of {tokens}. Empty/0 =
@@ -626,6 +639,12 @@ private:
     bool is_streaming_ = false;
     uint64_t turn_seq_ = 0;    // increments when a NEW TURN's stream starts
     bool turn_ended_ = true;   // armed by OnTurnCompleted/OnError; disarmed by the next delta
+    // The interrupt probe's turn-liveness signal (Snapshot::turn_in_flight):
+    // armed by OnChatSubmitted and by both delta arming branches (the same
+    // places turn_ended_ is disarmed), cleared ONLY by the turn-terminal
+    // events. Never disarmed mid-turn -- unlike turn_ended_, which flips at
+    // every block boundary.
+    bool turn_in_flight_ = false;
     // This turn's live content in arrival order (track C4) -- see
     // Snapshot::live_segments. Same clear sites as streaming_accumulated_.
     std::vector<LiveTurnSegment> live_segments_;
@@ -697,6 +716,12 @@ public:
 
         // The focused tab's interrupt request still awaiting its turn end.
         bool cancel_requested = false;
+
+        // The interrupt probe's turn-liveness signal (SessionState's
+        // turn_in_flight, copied through GetAllTabs): the display state above
+        // reads Idle in the silent windows between message stops, so the
+        // busy verdicts (TabBusyForInterrupt, AnyWorkInFlight) consult this.
+        bool turn_in_flight = false;
     };
 
     // --- Tab management (all thread-safe) ---

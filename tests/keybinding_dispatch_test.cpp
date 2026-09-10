@@ -32,12 +32,14 @@ using minimal::client::NextRootGroup;
 using minimal::client::ResolvedKeymap;
 using minimal::client::SessionStateKind;
 using minimal::client::TabsToClose;
+using minimal::client::TabBusyForInterrupt;
 
 namespace {
 
 AppState::TabSnapshot Tab(std::string id, bool is_subagent = false, int64_t root_ordinal = 0,
                           char attention_glyph = '\0',
-                          SessionStateKind state = SessionStateKind::Idle) {
+                          SessionStateKind state = SessionStateKind::Idle,
+                          bool turn_in_flight = false) {
     AppState::TabSnapshot tab;
     // The dispatch functions key on the TAB id (the UI's handle, valid for
     // sessionless tabs too), not the session id.
@@ -46,6 +48,7 @@ AppState::TabSnapshot Tab(std::string id, bool is_subagent = false, int64_t root
     tab.root_ordinal = root_ordinal;
     tab.attention_glyph = attention_glyph;
     tab.state = state;
+    tab.turn_in_flight = turn_in_flight;
     return tab;
 }
 
@@ -134,6 +137,46 @@ TEST_CASE("AnyWorkInFlight is true iff a named tab is Thinking, Working, or Wait
     CHECK(AnyWorkInFlight(tabs, {"idle", "done", "working"}));
     CHECK_FALSE(AnyWorkInFlight(tabs, {}));
     CHECK_FALSE(AnyWorkInFlight(tabs, {"no-such-id"}));
+}
+
+// Regression (the ESC-interrupt probe): the busy verdict used to be the
+// display state alone. A turn silent between message stops -- the local-model
+// providers stretch that window into minutes -- read as Idle, so ESC did
+// nothing and ctrl+c hit the idle-quit path and killed the app the user was
+// trying to interrupt. turn_in_flight now outranks the display state.
+TEST_CASE("TabBusyForInterrupt: turn_in_flight outranks the display state",
+          "[keybinding_dispatch][interrupt]") {
+    // The busy display states are busy regardless of the flag.
+    CHECK(TabBusyForInterrupt(false, SessionStateKind::Thinking));
+    CHECK(TabBusyForInterrupt(false, SessionStateKind::Working));
+    CHECK(TabBusyForInterrupt(false, SessionStateKind::Waiting));
+
+    // Idle + flag armed: the silent-provider window. The case that killed
+    // the old probe.
+    CHECK(TabBusyForInterrupt(true, SessionStateKind::Idle));
+
+    // Done/Error display with the flag standing: the ensure-session window
+    // (a submit the server has not acked with any wire event yet).
+    CHECK(TabBusyForInterrupt(true, SessionStateKind::Done));
+    CHECK(TabBusyForInterrupt(true, SessionStateKind::Error));
+
+    // Genuinely idle: nothing to cancel -- ctrl+c may quit.
+    CHECK_FALSE(TabBusyForInterrupt(false, SessionStateKind::Idle));
+    CHECK_FALSE(TabBusyForInterrupt(false, SessionStateKind::Done));
+    CHECK_FALSE(TabBusyForInterrupt(false, SessionStateKind::Error));
+}
+
+TEST_CASE("AnyWorkInFlight counts a silent in-flight turn, so closing its tab confirms",
+          "[keybinding_dispatch][interrupt]") {
+    // Idle display, flag armed: the old check saw nothing in flight and the
+    // close (or quit) went through without a confirmation, terminating a
+    // live turn.
+    const std::vector<AppState::TabSnapshot> tabs = {
+        Tab("silent", false, 0, '\0', SessionStateKind::Idle, /*turn_in_flight=*/true),
+        Tab("idle", false, 0, '\0', SessionStateKind::Idle),
+    };
+    CHECK(AnyWorkInFlight(tabs, {"silent"}));
+    CHECK_FALSE(AnyWorkInFlight(tabs, {"idle"}));
 }
 
 TEST_CASE("TabsToClose on a subagent closes only itself", "[keybinding_dispatch]") {

@@ -53,12 +53,25 @@ TEST_CASE("TextDelta moves Idle -> Thinking", "[session_state]") {
     REQUIRE(state.TakeSnapshot().streaming_text == "hello");
 }
 
-TEST_CASE("message_stop with nothing pending returns to Idle", "[session_state]") {
+// Regression (the ESC-interrupt probe): a message stop with nothing pending
+// used to resolve to Idle, but the TURN has not ended -- the next provider
+// event (tool round, next text block) can be minutes away when the provider
+// goes silent (long prefill, reasoning without deltas). The interrupt probe
+// read that Idle as "nothing to cancel": ESC did nothing and ctrl+c quit the
+// app. turn_in_flight now outranks the display state until a terminal event.
+TEST_CASE("message_stop with nothing pending holds Working while the turn is in flight",
+          "[session_state][regression]") {
     SessionState state("s-1");
     state.AppendStreamingText("hi");
     REQUIRE(state.TakeSnapshot().state == SessionStateKind::Thinking);
+    REQUIRE(state.TakeSnapshot().turn_in_flight);   // armed by the turn's first delta
     state.FinalizeStreamingText();   // fired on content_block_stop / message_stop
+    REQUIRE(state.TakeSnapshot().state == SessionStateKind::Working);   // NOT Idle
+    REQUIRE(state.TakeSnapshot().turn_in_flight);
+
+    state.OnTurnCompleted(v1::TurnCompletedEvent{});   // the real turn terminator
     REQUIRE(state.TakeSnapshot().state == SessionStateKind::Idle);
+    REQUIRE_FALSE(state.TakeSnapshot().turn_in_flight);
 }
 
 TEST_CASE("message_stop with an active tool stays Working, not Idle", "[session_state]") {
@@ -116,6 +129,91 @@ TEST_CASE("ToolExecutionEvent{started:true} moves to Working", "[session_state]"
     REQUIRE(snap.tools.size() == 1);
     REQUIRE(snap.tools[0].tool_use_id == "t-1");
     REQUIRE(snap.tools[0].started);
+}
+
+// --- turn_in_flight: the interrupt probe's signal (Snapshot::turn_in_flight) -
+
+TEST_CASE("turn_in_flight arms on submit and survives silent provider windows",
+          "[session_state][regression]") {
+    SessionState state("s-1");
+    REQUIRE_FALSE(state.TakeSnapshot().turn_in_flight);
+
+    // Armed unconditionally at submit -- before ANY wire event, so the
+    // submit-to-first-event gap is covered too.
+    state.OnChatSubmitted("interrupt me later");
+    REQUIRE(state.TakeSnapshot().turn_in_flight);
+
+    // The silent window: message stop with nothing pending. The DISPLAY
+    // holds Working now (MaybeGoIdleLocked), and the probe stays armed --
+    // the turn is alive until a terminal event says otherwise.
+    state.FinalizeStreamingText();
+    {
+        const auto snap = state.TakeSnapshot();
+        REQUIRE(snap.turn_in_flight);
+        REQUIRE(snap.state == SessionStateKind::Working);
+    }
+
+    state.OnTurnCompleted(v1::TurnCompletedEvent{});
+    REQUIRE_FALSE(state.TakeSnapshot().turn_in_flight);
+    REQUIRE(state.TakeSnapshot().state == SessionStateKind::Idle);
+}
+
+TEST_CASE("turn_in_flight: a first delta arms it without a submit (injected turns)",
+          "[session_state]") {
+    SessionState state("s-1");
+    // A seedless turn triggered by a subagent completion never goes through
+    // OnChatSubmitted -- the delta arming branch is its only arm site.
+    state.AppendStreamingText("injected turn output");
+    REQUIRE(state.TakeSnapshot().turn_in_flight);
+
+    state.OnError("stream died");
+    REQUIRE_FALSE(state.TakeSnapshot().turn_in_flight);   // cleared by the error
+}
+
+TEST_CASE("turn_in_flight: thinking-first turns arm it too, cleared by session end",
+          "[session_state]") {
+    SessionState state("s-1");
+    state.AppendStreamingThinking("reasoning");
+    REQUIRE(state.TakeSnapshot().turn_in_flight);
+
+    state.OnSessionEnded();
+    {
+        const auto snap = state.TakeSnapshot();
+        REQUIRE_FALSE(snap.turn_in_flight);   // terminal -- never survives the session
+        REQUIRE(snap.state == SessionStateKind::Done);
+    }
+}
+
+TEST_CASE("turn_in_flight: submit after a Done session still arms the probe",
+          "[session_state][regression]") {
+    SessionState state("s-1");
+    state.OnSessionEnded();
+    REQUIRE(state.TakeSnapshot().state == SessionStateKind::Done);
+    REQUIRE_FALSE(state.TakeSnapshot().turn_in_flight);
+
+    // OnChatSubmitted's display transition is Idle-only, but the PROBE must
+    // arm regardless: the submit was accepted onto the wire, and a tab that
+    // still reads Done is exactly where idle-ctrl+c used to kill the app.
+    state.OnChatSubmitted("again");
+    {
+        const auto snap = state.TakeSnapshot();
+        REQUIRE(snap.turn_in_flight);
+        REQUIRE(snap.state == SessionStateKind::Done);   // display unchanged
+    }
+
+    state.OnTurnCompleted(v1::TurnCompletedEvent{});
+    REQUIRE_FALSE(state.TakeSnapshot().turn_in_flight);
+}
+
+TEST_CASE("turn_in_flight rides both the light and deep snapshots", "[session_state]") {
+    SessionState state("s-1");
+    state.OnChatSubmitted("snapshot me");
+    REQUIRE(state.TakeLightSnapshot().turn_in_flight);
+    REQUIRE(state.TakeSnapshot().turn_in_flight);
+
+    state.OnTurnCompleted(v1::TurnCompletedEvent{});
+    REQUIRE_FALSE(state.TakeLightSnapshot().turn_in_flight);
+    REQUIRE_FALSE(state.TakeSnapshot().turn_in_flight);
 }
 
 TEST_CASE("permission/confirmation requests set Waiting and are mutually exclusive",

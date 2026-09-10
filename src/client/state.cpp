@@ -65,6 +65,7 @@ SessionState::Snapshot SessionState::TakeLightSnapshot(bool include_tool_output)
     s.cache_read_tokens = cache_read_tokens_;
     s.cache_write_tokens = cache_write_tokens_;
     s.cancel_requested = cancel_requested_;
+    s.turn_in_flight = turn_in_flight_;
     s.model = model_;
     s.agent_preset = agent_preset_;
     s.desired_model = desired_model_;
@@ -117,6 +118,7 @@ SessionState::Snapshot SessionState::TakeSnapshot() {
     s.cache_read_tokens = cache_read_tokens_;
     s.cache_write_tokens = cache_write_tokens_;
     s.cancel_requested = cancel_requested_;
+    s.turn_in_flight = turn_in_flight_;
     s.transcript_version = transcript_version_;
     s.turn_ended = turn_ended_;
     s.scrollback_trimmed = scrollback_trimmed_;
@@ -272,6 +274,11 @@ void SessionState::AppendStreamingText(std::string_view text) {
     if (turn_ended_) {
         ++turn_seq_;
         turn_ended_ = false;
+        // First delta of a NEW turn: arm the interrupt probe. This is the
+        // only arming site an INJECTED turn gets (a subagent completion
+        // triggers a seedless turn without OnChatSubmitted), so both delta
+        // paths carry it.
+        turn_in_flight_ = true;
         // The turn-end REFRESH (async) owns clearing the previous turn's
         // accumulated tail via ClearStreamingIfCurrentTurn. If this delta is
         // the FIRST of the new turn and wins that race, appending onto the
@@ -335,6 +342,9 @@ void SessionState::AppendStreamingThinking(std::string_view text) {
     if (turn_ended_) {
         ++turn_seq_;
         turn_ended_ = false;
+        // Same new-turn arming as AppendStreamingText: thinking typically
+        // OPENS the turn, so the interrupt probe is armed here first.
+        turn_in_flight_ = true;
         // Same new-turn race as AppendStreamingText: a first thinking delta
         // must not append onto the previous turn's thinking tail before the
         // async refresh clears it.
@@ -397,24 +407,29 @@ void SessionState::AppendStreamingThinking(std::string_view text) {
 
 // "Idle | MessageStopEvent, nothing pending" (ARCHITECTURE.md, Tab states and
 // attention). A tool-using turn emits several message_stops before the turn is
-// actually done -- this fires between tool cycles too, which is correct: the
-// tab really is briefly idle there.
+// actually done -- this fires between tool cycles too, which used to resolve
+// the tab to Idle there. Now the turn-in-flight signal outranks that: a turn
+// whose provider went silent between a message stop and the next event (a
+// long prefill, reasoning without deltas) sat Idle for MINUTES while the turn
+// was very much alive -- the interrupt probe read it as idle, ESC did
+// nothing, and ctrl+c hit the idle-quit path. While turn_in_flight_ stands,
+// the tab holds Working (the spinner persists between cycles, which is the
+// honest display anyway).
 void SessionState::MaybeGoIdleLocked() {
     if (state_ == SessionStateKind::Error || state_ == SessionStateKind::Done) return;
     // ANY tool still running, not just the LAST-started one: ARCHITECTURE.md
     // "Tool dispatch is parallel" makes several tools in flight at once the
     // COMMON case (width 4 by default), and results arrive in COMPLETION
-    // order, not gate order -- tools_.back() is the last one the model asked
-    // for, not the last one still running. `tools_.back().started` alone
-    // flipped the tab to Idle (spinner gone, "Working" lost) the moment the
-    // last-STARTED tool finished, even with earlier calls of the same round
-    // still executing on the pool.
+    // order, not gate order -- tools_.back().started alone flipped the tab to
+    // Idle (spinner gone, "Working" lost) the moment the last-STARTED tool
+    // finished, even with earlier calls of the same round still executing on
+    // the pool.
     const bool tool_active =
         std::any_of(tools_.begin(), tools_.end(), [](const ToolExecutionState& t) {
             return t.started;
         });
     if (!tool_active && !pending_permission_ && !pending_confirmation_ && !pending_ask_) {
-        state_ = SessionStateKind::Idle;
+        state_ = turn_in_flight_ ? SessionStateKind::Working : SessionStateKind::Idle;
     }
 }
 
@@ -422,6 +437,7 @@ void SessionState::OnTurnCompleted(const v1::TurnCompletedEvent& evt) {
     std::lock_guard lk(mtx_);
     is_streaming_ = false;
     turn_ended_ = true;
+    turn_in_flight_ = false;   // the turn ended, whatever the stop reason
     cancel_requested_ = false;   // the interrupted turn ended -- whatever the stop reason
     input_tokens_ = evt.usage().input_tokens();
     output_tokens_ = evt.usage().output_tokens();
@@ -566,6 +582,7 @@ void SessionState::OnError(const std::string& error_message) {
     std::lock_guard lk(mtx_);
     is_streaming_ = false;
     turn_ended_ = true;   // the errored turn is over; the next stream is a new one
+    turn_in_flight_ = false;   // dead streams end turns too -- the probe must not latch
     cancel_requested_ = false;   // a cancel can BE the error path (dead stream)
     pending_permission_.reset();
     pending_confirmation_.reset();
@@ -593,6 +610,7 @@ void SessionState::OnSessionEnded() {
     std::lock_guard lk(mtx_);
     is_streaming_ = false;
     turn_ended_ = true;   // terminal: a final newest-fetch may still swap the partial stream
+    turn_in_flight_ = false;   // terminal -- the probe must not survive the session
     cancel_requested_ = false;
     pending_permission_.reset();
     pending_confirmation_.reset();
@@ -965,6 +983,12 @@ void SessionState::OnChatSubmitted(const std::string& text) {
     // The page's NEWEST seq (descending window: front, not back/back).
     pending_user_baseline_seq_ =
         scrollback_page_.empty() ? -1 : scrollback_page_.front().seq();
+    // The turn is in flight from this instant, whatever the display state
+    // does -- UNCONDITIONALLY, not only from Idle: a submit right after a
+    // Done/Error session must still be interruptible before the first wire
+    // event arrives. (The state transition below stays conditional; it is a
+    // display choice, and Done/Error mean something to the renderer.)
+    turn_in_flight_ = true;
     // Immediate state feedback, too: the turn was ACCEPTED onto the wire, so
     // the tab is no longer Idle even before the server says anything.
     if (state_ == SessionStateKind::Idle) state_ = SessionStateKind::Working;
@@ -2297,6 +2321,7 @@ std::vector<AppState::TabSnapshot> AppState::GetAllTabs(bool include_tool_output
         snap.root_ordinal = tab.info.root_ordinal;
         snap.spawn_seq = tab.info.spawn_seq;
         snap.cancel_requested = ss.cancel_requested;
+        snap.turn_in_flight = ss.turn_in_flight;
         // The glyph merge (docs/EXTENSIBILITY.md 4.2, "Attention sink"): core
         // event derivation is the default source; a plugin raise wins until
         // cleared. '!' stays the only color-independent signal whatever raised

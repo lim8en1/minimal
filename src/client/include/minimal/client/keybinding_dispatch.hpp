@@ -221,4 +221,14 @@ void FocusPanelOnClose(std::vector<plugins::PluginViewEntry>& views,
                        plugins::PluginViewEntry& entry);
 void CyclePanelFocus(std::vector<plugins::PluginViewEntry>& views, bool forward);
 
+// The interrupt probe's per-tab busy verdict (turn.cancel / ctrl+c): the
+// derived display state PLUS Snapshot::turn_in_flight, which OUTRANKS it.
+// MaybeGoIdleLocked resolves the tab to Idle in the windows between message
+// stops and the next provider event -- a window the local-model providers
+// stretch into minutes (silent prefill, reasoning without deltas) -- while
+// the turn is still alive. Trusting the display state alone made ESC dead
+// and ctrl+c lethal (idle-quit) exactly there. Pure over one snapshot field
+// pair so the verdict is testable without AppState's gRPC fixture.
+bool TabBusyForInterrupt(bool turn_in_flight, SessionStateKind state);
+
 }  // namespace minimal::client

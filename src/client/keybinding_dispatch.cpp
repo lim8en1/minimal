@@ -65,6 +65,21 @@ void CyclePanelFocus(std::vector<plugins::PluginViewEntry>& views, bool forward)
     visible[next]->focused = true;
 }
 
+bool TabBusyForInterrupt(const bool turn_in_flight, const SessionStateKind state) {
+    switch (state) {
+        case SessionStateKind::Thinking:
+        case SessionStateKind::Working:
+        case SessionStateKind::Waiting:
+            return true;
+        default:
+            // Idle (and Done/Error): only an armed turn-in-flight makes this
+            // tab interruptible. Done/Error with the flag standing is the
+            // ensure-session window -- a submit the server has not acked
+            // with any wire event yet.
+            return turn_in_flight;
+    }
+}
+
 std::string NextAttentionTab(const std::vector<AppState::TabSnapshot>& tabs,
                              const std::string& focused) {
     std::size_t start = 0;
@@ -86,12 +101,16 @@ bool AnyWorkInFlight(const std::vector<AppState::TabSnapshot>& tabs,
     for (const auto& id : ids) {
         for (const auto& tab : tabs) {
             if (tab.tab_id != id) continue;
+            // Same probe rule as TabBusyForInterrupt: a turn silent between
+            // message stops is still live, and closing its tab must confirm
+            // rather than terminate it silently.
             switch (tab.state) {
                 case SessionStateKind::Thinking:
                 case SessionStateKind::Working:
                 case SessionStateKind::Waiting:
                     return true;
                 default:
+                    if (tab.turn_in_flight) return true;
                     break;
             }
             break;
@@ -194,24 +213,29 @@ bool HandleGlobalKey(KeyContext& ctx, const ftxui::Event& event) {
         if (!sid.empty()) {
             for (const auto& tab : ctx.app.GetAllTabs()) {
                 if (tab.tab_id != sid) continue;
-                switch (tab.state) {
-                    case SessionStateKind::Thinking:
-                    case SessionStateKind::Working:
-                    case SessionStateKind::Waiting:
-                        busy = true;
-                        break;
-                    default:
-                        break;
-                }
+                // The probe outranks the display state: see
+                // TabBusyForInterrupt. The old inline switch trusted the
+                // state alone, so a turn silent between message stops read
+                // as idle -- ESC did nothing and ctrl+c quit the app.
+                busy = TabBusyForInterrupt(tab.turn_in_flight, tab.state);
                 break;
             }
         }
         if (busy) {
             // Busy implies sessioned (a sessionless tab has no turn to be in
             // flight), so the SESSION-keyed cancel takes the focused tab's
-            // session id, not its tab handle.
+            // session id, not its tab handle. EXCEPT the ensure-session
+            // window: a submit on a sessionless tab arms turn_in_flight while
+            // the single-flight create is still on the async RPC worker, so
+            // busy with no session id is REACHABLE -- surface it on the tab's
+            // notice line instead of silently eating the press (the old
+            // shape: consumed, no hint, no effect, no explanation).
             const std::string session = ctx.app.FocusedSessionId();
-            if (!session.empty()) ctx.app.SendCancel(session);
+            if (!session.empty()) {
+                ctx.app.SendCancel(session);
+            } else {
+                ctx.app.TabNotice(sid, "cannot cancel: this tab has no attached session yet");
+            }
             return true;
         }
         // Idle ctrl+c means quit: the universal exit reflex, otherwise DEAD
