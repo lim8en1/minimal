@@ -159,7 +159,17 @@ no manifest.
 
 **Required (both hosts):** `minimal_plugin_abi_tag()` /
 `minimal_client_plugin_abi_tag()`, `minimal_plugin_name()` (client twin), and
-`minimal_plugin_version()` (client twin).
+`minimal_plugin_version()` (client twin). Define these with the
+`MINIMAL_PLUGIN_ABI_SYMBOLS(plugin_name_literal)` macro (server) /
+`MINIMAL_CLIENT_PLUGIN_ABI_SYMBOLS(plugin_name_literal)` macro (client) from
+`plugin_abi.h`, invoked once at file scope — not by hand. A handwritten
+`return minimal::common::AbiTag();` compiles and looks right, but
+`minimal_common` is a static library re-exported by the shared core, so the
+call binds at `dlopen` time to the *host's* copy, not anything baked into the
+plugin: the "you forgot to rebuild" guard then compares the host against
+itself and always passes, even for a stale plugin. The macro instead bakes
+the compile-time `MINIMAL_ABI_TAG`/`MINIMAL_VERSION` into the plugin's own
+object code.
 
 **Optional server registration hooks** (`src/server/plugins/include/minimal/plugins/plugin_abi.h`):
 

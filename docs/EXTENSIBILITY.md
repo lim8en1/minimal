@@ -8,7 +8,7 @@ Companion to `ARCHITECTURE.md`, which remains the single source of truth for *de
 
 | Symbol | Status | What it grants |
 |---|---|---|
-| `minimal_plugin_abi_tag` / `_name` / `_version` | required | load gate |
+| `minimal_plugin_abi_tag` / `_name` / `_version` | required | load gate -- define via `MINIMAL_PLUGIN_ABI_SYMBOLS(name)`, not by hand: a handwritten `minimal::common::AbiTag()` call binds to the host's copy at `dlopen` time, not the plugin's own build, so the rebuild guard always passes |
 | `minimal_plugin_register_tools(ToolRegistry&, const PluginRegistrationContext&)` | live | concrete tools; the context carries the verbatim `tools.*` JSON from `settings.json` plus the plugin's own `config` from `plugins.json` |
 | `minimal_plugin_register_provider_factories(ProviderFactoryRegistry&)` | live | provider kinds addressable from `providers.json` |
 | `minimal_plugin_register_session_observer(SessionObserverRegistry&)` | live | fire-and-forget lifecycle reactions; cannot veto anything |

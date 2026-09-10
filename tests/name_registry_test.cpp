@@ -107,6 +107,21 @@ TEST_CASE("aliasing away one half of a collision lets the other keep its bare pe
     CHECK(found_ssh);
 }
 
+TEST_CASE("aliasing a single, non-colliding tool keeps its bare permission key",
+          "[name_registry]") {
+    // No other plugin ever claimed "bash" here -- the alias is purely for
+    // typing convenience, not collision resolution. It must not detach the
+    // existing per-tool rule keyed on the bare original name.
+    NameRegistry reg;
+    reg.Register(NameKind::Tool, "tools-bash", "bash");
+    reg.SetAlias(NameKind::Tool, "tools-bash.bash", "sh");
+
+    auto result = reg.Resolve();
+    REQUIRE(result.entries.size() == 1);
+    CHECK(result.entries[0].surface_name == "sh");
+    CHECK(result.entries[0].permission_key == "bash");
+}
+
 TEST_CASE("permission key qualifies both sides when neither is aliased away", "[name_registry]") {
     // The collision itself is still fatal here (both surface as "bash"), but
     // permission_key ambiguity is judged independently -- this pins that an

@@ -17,6 +17,27 @@ include_guard(GLOBAL)
 
 set(MINIMAL_DEPLOY_SCRIPT "${CMAKE_CURRENT_LIST_DIR}/DeployUserPlugin.cmake")
 
+# RPATH from each bundled plugin's install location back to the shared
+# library directory holding the core it links against, computed rather than a
+# hardcoded "../../../../" hop count: that assumes CMAKE_INSTALL_LIBDIR is a
+# single path component, which GNUInstallDirs violates on Debian/Ubuntu
+# multiarch (lib/x86_64-linux-gnu) and any other multi-segment libdir --
+# file(RELATIVE_PATH) stays correct regardless of how many components either
+# side has.
+function(_minimal_plugin_rpath_to_libdir install_dir_var out_var)
+    if(IS_ABSOLUTE "${${install_dir_var}}")
+        set(_from "${${install_dir_var}}")
+    else()
+        set(_from "${CMAKE_INSTALL_PREFIX}/${${install_dir_var}}")
+    endif()
+    file(RELATIVE_PATH _rel "${_from}" "${CMAKE_INSTALL_FULL_LIBDIR}")
+    set(${out_var} "${_rel}" PARENT_SCOPE)
+endfunction()
+
+_minimal_plugin_rpath_to_libdir(MINIMAL_PLUGIN_INSTALL_DIR MINIMAL_PLUGIN_RPATH_TO_LIBDIR)
+_minimal_plugin_rpath_to_libdir(MINIMAL_CLIENT_PLUGIN_INSTALL_DIR
+                                 MINIMAL_CLIENT_PLUGIN_RPATH_TO_LIBDIR)
+
 # --- Bundled -----------------------------------------------------------------
 
 function(minimal_add_plugin name)
@@ -25,15 +46,12 @@ function(minimal_add_plugin name)
     target_compile_options(${name} PRIVATE ${MINIMAL_WARNING_FLAGS})
     set_target_properties(${name} PROPERTIES PREFIX "" OUTPUT_NAME "${name}")
 
-    # Plugins install to <libdir>/minimal/plugins/server -- two directories
-    # deeper than the server binary at <prefix>/bin, so the hop up to the
-    # library dir needs four "..", matching minimal_add_client_plugin below.
     if(APPLE)
         set_target_properties(${name} PROPERTIES
-            INSTALL_RPATH "@loader_path/../../../../${CMAKE_INSTALL_LIBDIR}")
+            INSTALL_RPATH "@loader_path/${MINIMAL_PLUGIN_RPATH_TO_LIBDIR}")
     else()
         set_target_properties(${name} PROPERTIES
-            INSTALL_RPATH "$ORIGIN/../../../../${CMAKE_INSTALL_LIBDIR}")
+            INSTALL_RPATH "$ORIGIN/${MINIMAL_PLUGIN_RPATH_TO_LIBDIR}")
     endif()
 
     install(TARGETS ${name} LIBRARY DESTINATION "${MINIMAL_PLUGIN_INSTALL_DIR}")
@@ -52,10 +70,10 @@ function(minimal_add_client_plugin name)
 
     if(APPLE)
         set_target_properties(${name} PROPERTIES
-            INSTALL_RPATH "@loader_path/../../../../${CMAKE_INSTALL_LIBDIR}")
+            INSTALL_RPATH "@loader_path/${MINIMAL_CLIENT_PLUGIN_RPATH_TO_LIBDIR}")
     else()
         set_target_properties(${name} PROPERTIES
-            INSTALL_RPATH "$ORIGIN/../../../../${CMAKE_INSTALL_LIBDIR}")
+            INSTALL_RPATH "$ORIGIN/${MINIMAL_CLIENT_PLUGIN_RPATH_TO_LIBDIR}")
     endif()
 
     install(TARGETS ${name} LIBRARY DESTINATION "${MINIMAL_CLIENT_PLUGIN_INSTALL_DIR}")

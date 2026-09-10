@@ -50,6 +50,18 @@ include(FetchContent)
 # startup with them reported Fatal (bundled provenance). Only the build tree
 # (where the two are already siblings under build/plugins/) escaped this,
 # which is why no test caught it.
+# A build tree configured before the server/client split above cached the
+# old, pre-split default (no /server suffix). A plain reconfigure of that
+# tree would otherwise keep serving the stale value forever -- CACHE STRING
+# only takes the new default when nothing is already cached -- reproducing
+# the exact bundled-scan-walks-into-client-plugins startup abort this split
+# exists to fix. Force it back onto the new default in that one case; a
+# value the operator set to anything else is left untouched.
+if(DEFINED MINIMAL_PLUGIN_INSTALL_DIR AND
+   MINIMAL_PLUGIN_INSTALL_DIR STREQUAL "${CMAKE_INSTALL_LIBDIR}/minimal/plugins")
+    set(MINIMAL_PLUGIN_INSTALL_DIR "${CMAKE_INSTALL_LIBDIR}/minimal/plugins/server"
+        CACHE STRING "Install location for bundled server plugins" FORCE)
+endif()
 set(MINIMAL_PLUGIN_INSTALL_DIR "${CMAKE_INSTALL_LIBDIR}/minimal/plugins/server"
     CACHE STRING "Install location for bundled server plugins")
 

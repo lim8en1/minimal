@@ -59,6 +59,7 @@ NameRegistry::Result NameRegistry::Resolve() const {
         std::vector<Resolved> resolved;
         resolved.reserve(kind_entries.size());
         std::unordered_map<std::string, int> unaliased_name_counts;
+        std::unordered_map<std::string, int> total_name_counts;
         for (const auto& e : kind_entries) {
             std::string stable_identity = StableIdentity(e.plugin_name, e.original_name);
             std::string surface_name = e.original_name;
@@ -70,6 +71,7 @@ NameRegistry::Result NameRegistry::Resolve() const {
                 }
             }
             if (!aliased) ++unaliased_name_counts[e.original_name];
+            ++total_name_counts[e.original_name];
             resolved.push_back({std::move(stable_identity), std::move(surface_name), aliased});
         }
 
@@ -81,13 +83,26 @@ NameRegistry::Result NameRegistry::Resolve() const {
             const auto& e = kind_entries[i];
             const auto& r = resolved[i];
 
-            // Bare only when this entry both kept its original_name as its
-            // surface AND no other unaliased entry claims the same
-            // original_name; an aliased entry, or one still colliding with
-            // another unaliased entry, gets its stable identity instead.
-            const std::string permission_key =
-                (!r.aliased && unaliased_name_counts[e.original_name] <= 1) ? e.original_name
-                                                                            : r.stable_identity;
+            // Bare in two disjoint cases:
+            //  - no other entry, aliased or not, ever claimed this
+            //    original_name -- there was never any ambiguity to resolve, so
+            //    aliasing a single tool for typing convenience must not detach
+            //    its existing per-tool rule (docs/CONFIGURATION.md: "aliased
+            //    tools keep their original name" in permission config); or
+            //  - this entry kept its original_name as its surface AND no other
+            //    unaliased entry still claims that name -- the collision was
+            //    resolved by moving every other claimant away.
+            // An entry that itself moved away, while another original_name
+            // claimant remains (aliased or not), keeps its stable identity:
+            // it and that claimant are still two distinct tools that once
+            // shared a name, so a rule keyed on the bare name must not
+            // silently govern both.
+            const bool never_contested = total_name_counts[e.original_name] <= 1;
+            const bool collision_resolved_here =
+                !r.aliased && unaliased_name_counts[e.original_name] <= 1;
+            const std::string permission_key = (never_contested || collision_resolved_here)
+                                                    ? e.original_name
+                                                    : r.stable_identity;
 
             ++surface_name_counts[r.surface_name];
             kind_resolved.push_back({r.stable_identity, r.surface_name, permission_key});
