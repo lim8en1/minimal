@@ -141,6 +141,14 @@ set_target_properties(minimal_server_core PROPERTIES
     VERSION "${PROJECT_VERSION}"
     SOVERSION "${PROJECT_VERSION_MAJOR}")
 
+# Same treatment as minimal_client_core: the core's own @rpath dependency on
+# libminimal_proto resolves against this dylib's rpaths, not the executable's.
+if(APPLE)
+    set_property(TARGET minimal_server_core PROPERTY INSTALL_RPATH "@loader_path")
+else()
+    set_property(TARGET minimal_server_core PROPERTY INSTALL_RPATH "$ORIGIN")
+endif()
+
 add_executable(minimal-server main.cpp)
 target_link_libraries(minimal-server PRIVATE minimal::server_core)
 

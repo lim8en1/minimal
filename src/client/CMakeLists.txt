@@ -88,6 +88,15 @@ set_target_properties(minimal_client_core PROPERTIES
     VERSION "${PROJECT_VERSION}"
     SOVERSION "${PROJECT_VERSION_MAJOR}")
 
+# The core itself depends on @rpath/libminimal_proto.0.dylib, and a dylib's
+# @rpath deps resolve with the DYLIB's rpaths, not the executable's. It lives
+# in lib/ next to libminimal_proto, so its own directory suffices.
+if(APPLE)
+    set_property(TARGET minimal_client_core PROPERTY INSTALL_RPATH "@loader_path")
+else()
+    set_property(TARGET minimal_client_core PROPERTY INSTALL_RPATH "$ORIGIN")
+endif()
+
 # The TUI client and the headless -p mode are one binary: `minimal` dispatches on
 # argv. -p is the smallest real client and doubles as the end-to-end test harness.
 add_executable(minimal app.cpp)

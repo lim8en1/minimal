@@ -22,6 +22,17 @@ set_target_properties(minimal_proto PROPERTIES
     VERSION "${PROJECT_VERSION}"
     SOVERSION "${PROJECT_VERSION_MAJOR}")
 
+# The cores (and anything else linking minimal::proto) reference it as
+# @rpath/libminimal_proto.0.dylib; once installed, that resolves against THIS
+# dylib's own LC_RPATH, not the loading executable's (macOS rpaths are not
+# inherited). Proto sits in lib/ next to them, so its own directory is the
+# answer; proto's other deps (grpc/protobuf) are static, nothing further needed.
+if(APPLE)
+    set_property(TARGET minimal_proto PROPERTY INSTALL_RPATH "@loader_path")
+else()
+    set_property(TARGET minimal_proto PROPERTY INSTALL_RPATH "$ORIGIN")
+endif()
+
 # Generated headers are included as "minimal/v1/....pb.h", so the generation root
 # must be on the include path for anything that links this target.
 target_include_directories(minimal_proto PUBLIC "${CMAKE_CURRENT_BINARY_DIR}")
@@ -38,3 +49,9 @@ protobuf_generate(
     PLUGIN "protoc-gen-grpc=$<TARGET_FILE:gRPC::grpc_cpp_plugin>"
     IMPORT_DIRS "${CMAKE_CURRENT_SOURCE_DIR}"
     PROTOC_OUT_DIR "${CMAKE_CURRENT_BINARY_DIR}")
+
+# The cores are installed shared libraries (E5b), so this must be installed
+# beside them -- without it, the installed binaries abort with
+# "Library not loaded: @rpath/libminimal_proto.0.dylib".
+install(TARGETS minimal_proto
+    LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}")
