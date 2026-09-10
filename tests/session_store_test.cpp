@@ -1136,6 +1136,110 @@ TEST_CASE("UpdateSessionName renames and reports unknown ids", "[session][naming
     CHECK(db.GetSession(id)->name == "new");
     CHECK_FALSE(db.UpdateSessionName("no-such-session", "x"));
 }
+
+TEST_CASE("the model override is persisted with the session row", "[session][model]") {
+    TempDir dir;
+    SessionDatabase db(dir.path() / "model.db");
+
+    // Created without a model: absence is nullopt, never "" -- absence means
+    // "the preset decides", and "" would read as a (malformed) override.
+    const auto plain = db.CreateSession("", std::nullopt, "/p", "build");
+    CHECK_FALSE(plain.model.has_value());
+    CHECK_FALSE(db.GetSession(plain.session_id)->model.has_value());
+
+    // Created WITH a model (--model at creation): stored with the row.
+    const auto modeled =
+        db.CreateSession("m", std::nullopt, "/p", "build", std::string("local/big-model"));
+    REQUIRE(modeled.model.has_value());
+    CHECK(*modeled.model == "local/big-model");
+    REQUIRE(db.GetSession(modeled.session_id)->model.has_value());
+    CHECK(*db.GetSession(modeled.session_id)->model == "local/big-model");
+
+    // A runtime switch (/model) lands in the row -- and is not transcript
+    // activity, so it must not touch the picker's sort key.
+    const auto activity_before = db.GetSession(modeled.session_id)->updated_at_unix_ms;
+    CHECK(db.UpdateSessionModel(modeled.session_id, std::string("main/other-model")));
+    REQUIRE(db.GetSession(modeled.session_id)->model.has_value());
+    CHECK(*db.GetSession(modeled.session_id)->model == "main/other-model");
+    CHECK(db.GetSession(modeled.session_id)->updated_at_unix_ms == activity_before);
+
+    // Clearing (nullopt) removes it; an unknown id reports false.
+    CHECK(db.UpdateSessionModel(modeled.session_id, std::nullopt));
+    CHECK_FALSE(db.GetSession(modeled.session_id)->model.has_value());
+    CHECK_FALSE(db.UpdateSessionModel("no-such-session", std::string("main/x")));
+}
+
+TEST_CASE("migration to model upgrades a v7 database in place", "[session][migrations]") {
+    // A v7 database predates the model column -- every session ever created
+    // under it had a memory-only override, i.e. none stored. The ALTER adds
+    // the column with NULL, which reads as "no override": the old sessions
+    // genuinely never had one, and the store keeps working over it.
+    TempDir dir;
+    const auto path = dir.path() / "v7.db";
+    {
+        sqlite3* raw = RawOpen(path);
+        REQUIRE(sqlite3_exec(raw,
+                             "CREATE TABLE sessions ("
+                             "  id TEXT PRIMARY KEY,"
+                             "  parent_session_id TEXT REFERENCES sessions(id) ON DELETE CASCADE,"
+                             "  name TEXT NOT NULL DEFAULT '',"
+                             "  project_root TEXT NOT NULL,"
+                             "  agent_preset TEXT NOT NULL,"
+                             "  created_at INTEGER NOT NULL,"
+                             "  updated_at INTEGER NOT NULL,"
+                             "  message_count INTEGER NOT NULL DEFAULT 0,"
+                             "  name_source TEXT NOT NULL DEFAULT '',"
+                             "  forked_from_session_id TEXT"
+                             "   REFERENCES sessions(id) ON DELETE SET NULL"
+                             ");",
+                             nullptr, nullptr, nullptr) == SQLITE_OK);
+        REQUIRE(sqlite3_exec(raw,
+                             "CREATE TABLE messages ("
+                             "  id INTEGER PRIMARY KEY,"
+                             "  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,"
+                             "  seq INTEGER NOT NULL,"
+                             "  role TEXT NOT NULL,"
+                             "  content_json TEXT NOT NULL,"
+                             "  token_count INTEGER NOT NULL DEFAULT 0,"
+                             "  created_at INTEGER NOT NULL,"
+                             "  discarded INTEGER NOT NULL DEFAULT 0,"
+                             "  UNIQUE (session_id, seq)"
+                             ");",
+                             nullptr, nullptr, nullptr) == SQLITE_OK);
+        REQUIRE(sqlite3_exec(raw,
+                             "CREATE TABLE compactions ("
+                             "  session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE"
+                             " CASCADE,"
+                             "  boundary_seq INTEGER NOT NULL,"
+                             "  summary_content_json TEXT NOT NULL,"
+                             "  created_at INTEGER NOT NULL"
+                             ");",
+                             nullptr, nullptr, nullptr) == SQLITE_OK);
+        REQUIRE(sqlite3_exec(raw, "PRAGMA user_version = 7;", nullptr, nullptr, nullptr) ==
+                SQLITE_OK);
+        const std::string session_id = GenerateUlid();
+        char sql[512];
+        std::snprintf(sql, sizeof(sql),
+                      "INSERT INTO sessions (id, name, project_root, agent_preset, created_at,"
+                      " updated_at) VALUES ('%s', 'old session', '/p', 'build', 1, 1);",
+                      session_id.c_str());
+        REQUIRE(sqlite3_exec(raw, sql, nullptr, nullptr, nullptr) == SQLITE_OK);
+        sqlite3_close(raw);
+    }
+    REQUIRE(RawScalar(path, "PRAGMA user_version;") == "7");
+
+    SessionDatabase db(path);
+    REQUIRE(RawScalar(path, "PRAGMA user_version;") ==
+            std::to_string(SessionDatabase::kSchemaVersion));
+    const auto sessions = db.ListSessions({});
+    REQUIRE(sessions.size() == 1);
+    // Backfilled rows read as "no override" -- the preset decides, which is
+    // what they did before the column existed.
+    CHECK_FALSE(db.GetSession(sessions[0].session_id)->model.has_value());
+    // The store keeps working over the upgraded schema.
+    CHECK(db.UpdateSessionModel(sessions[0].session_id, std::string("local/big-model")));
+    CHECK(*db.GetSession(sessions[0].session_id)->model == "local/big-model");
+}
 TEST_CASE("name_source records where a name came from", "[session][naming]") {
     // NOTE: the name_source column is asserted through the SessionDatabase's
     // own GetSession, never through a second in-process connection. The test

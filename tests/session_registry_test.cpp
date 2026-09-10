@@ -162,6 +162,37 @@ TEST_CASE("a user-chosen model outranks the preset's", "[session_registry][invar
     CHECK(*session->preset().max_tokens == 512);
 }
 
+TEST_CASE("a runtime model override is persisted to the session row",
+          "[session_registry][invariant]") {
+    // THE DURABLE HALF of the precedence rule above: /model records the choice
+    // on the session AND in the row, so a resume after a server restart
+    // re-resolves with it instead of falling back to the preset default. The
+    // registry wires the persistence hook in the one funnel every session
+    // passes through, so a plain Create carries it.
+    RegistryFixture fixture;
+    fixture.config.WriteDefaults();
+    fixture.Build();
+
+    // The row must exist for the UPDATE to land: the registry never mints
+    // rows itself (the service does), so this test mints one like the
+    // service's CreateSession would.
+    const auto row = fixture.db->CreateSession(
+        "", std::nullopt, std::filesystem::temp_directory_path().string(), "build");
+    auto session = fixture.registry->Create(Params(row.session_id));
+    REQUIRE(session != nullptr);
+
+    // /model's path: the decision lands in the row as the full reference.
+    session->set_model_override(minimal::common::ModelRef{"main", "test-model"});
+    const auto stored = fixture.db->GetSession(row.session_id);
+    REQUIRE(stored.has_value());
+    REQUIRE(stored->model.has_value());
+    CHECK(*stored->model == "main/test-model");
+
+    // Clearing persists as absence -- a later resume goes back to the preset.
+    session->set_model_override(std::nullopt);
+    CHECK_FALSE(fixture.db->GetSession(row.session_id)->model.has_value());
+}
+
 TEST_CASE("an unknown model override is named, with what is available",
           "[session_registry]") {
     RegistryFixture fixture;

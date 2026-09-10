@@ -139,6 +139,18 @@ const std::vector<Migration>& DefaultMigrationsImpl() {
              "ALTER TABLE sessions ADD COLUMN forked_from_session_id TEXT"
              " REFERENCES sessions(id) ON DELETE SET NULL;",
          }},
+        // The session's model override, as the full "<provider>/<model>"
+        // reference the user chose (NULL when they never did -- the preset
+        // then decides, which is what absence must mean on resume too).
+        // Before v8 the override lived only in server memory, so a /model
+        // choice was silently dropped by a server restart: resume
+        // re-resolved the preset and its default model won. Pre-v8 rows
+        // backfill NULL, which reads as "no override" -- the old sessions
+        // genuinely never had one.
+        {8,
+         {
+             "ALTER TABLE sessions ADD COLUMN model TEXT;",
+         }},
     }};
     // The invariant the version arithmetic depends on, checked where the list
     // is built: kSchemaVersion is the TARGET of ApplyMigrations, so it must
@@ -461,7 +473,8 @@ std::int64_t SessionDatabase::NextTimestamp() {
 
 SessionSummary SessionDatabase::CreateSession(std::string name,
                                               std::optional<std::string> parent_session_id,
-                                              std::string project_root, std::string agent_preset) {
+                                              std::string project_root, std::string agent_preset,
+                                              std::optional<std::string> model) {
     std::lock_guard lock(mu_);
     const std::int64_t now = NextTimestamp();
 
@@ -481,7 +494,7 @@ SessionSummary SessionDatabase::CreateSession(std::string name,
     Stmt insert(
         db_,
         "INSERT INTO sessions (id, parent_session_id, name, name_source, project_root,"
-        " agent_preset, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?);",
+        " agent_preset, created_at, updated_at, model) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);",
         "failed to create session");
     sqlite3_bind_text(insert.stmt, 1, id.c_str(), -1, SQLITE_TRANSIENT);
     if (parent_session_id) {
@@ -495,6 +508,11 @@ SessionSummary SessionDatabase::CreateSession(std::string name,
     sqlite3_bind_text(insert.stmt, 6, agent_preset.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_int64(insert.stmt, 7, now);
     sqlite3_bind_int64(insert.stmt, 8, now);
+    if (model) {
+        sqlite3_bind_text(insert.stmt, 9, model->c_str(), -1, SQLITE_TRANSIENT);
+    } else {
+        sqlite3_bind_null(insert.stmt, 9);
+    }
     if (sqlite3_step(insert.stmt) != SQLITE_DONE) {
         ThrowSqliteError(db_, "failed to create session");
     }
@@ -503,7 +521,8 @@ SessionSummary SessionDatabase::CreateSession(std::string name,
                           std::move(name),        name_source,
                           std::move(project_root), std::move(agent_preset),
                           now,                    now,
-                          0};
+                          0,                      {},
+                          std::move(model)};
 }
 
 std::int64_t SessionDatabase::AppendMessage(const std::string& session_id,
@@ -707,6 +726,25 @@ bool SessionDatabase::UpdateSessionName(const std::string& session_id, const std
     return sqlite3_changes(db_) == 1;
 }
 
+bool SessionDatabase::UpdateSessionModel(const std::string& session_id,
+                                         const std::optional<std::string>& model) {
+    std::lock_guard lock(mu_);
+    // No updated_at touch: a model switch is not transcript activity, and
+    // updated_at is the picker's sort key -- /model must not reorder the list.
+    Stmt update(db_, "UPDATE sessions SET model = ? WHERE id = ?;",
+                "failed to update session model");
+    if (model) {
+        sqlite3_bind_text(update.stmt, 1, model->c_str(), -1, SQLITE_TRANSIENT);
+    } else {
+        sqlite3_bind_null(update.stmt, 1);
+    }
+    sqlite3_bind_text(update.stmt, 2, session_id.c_str(), -1, SQLITE_TRANSIENT);
+    if (sqlite3_step(update.stmt) != SQLITE_DONE) {
+        ThrowSqliteError(db_, "failed to update session model");
+    }
+    return sqlite3_changes(db_) == 1;
+}
+
 bool SessionDatabase::IsExplicitlyNamed(const std::string& session_id) const {
     std::lock_guard lock(mu_);
     CachedStmt query(db_, prepared_,
@@ -832,7 +870,7 @@ std::optional<SessionSummary> SessionDatabase::GetSession(const std::string& ses
     CachedStmt query(db_, prepared_,
                      "SELECT s.id, s.parent_session_id, s.name, s.name_source, s.project_root,"
                      " s.agent_preset, s.created_at, s.updated_at, s.message_count,"
-                     " s.forked_from_session_id"
+                     " s.forked_from_session_id, s.model"
                      " FROM sessions s WHERE s.id = ?;",
                      "failed to load session");
     sqlite3_bind_text(query.stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
@@ -864,6 +902,9 @@ std::optional<SessionSummary> SessionDatabase::GetSession(const std::string& ses
     if (sqlite3_column_type(query.stmt, 9) == SQLITE_TEXT) {
         summary.forked_from_session_id =
             reinterpret_cast<const char*>(sqlite3_column_text(query.stmt, 9));
+    }
+    if (sqlite3_column_type(query.stmt, 10) == SQLITE_TEXT) {
+        summary.model = reinterpret_cast<const char*>(sqlite3_column_text(query.stmt, 10));
     }
     return summary;
 }

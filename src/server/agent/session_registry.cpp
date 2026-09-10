@@ -70,6 +70,18 @@ std::shared_ptr<Session> SessionRegistry::ForkSession(
     session::SessionSummary row = db_.ForkSession(source_session_id, target_seq, name,
                                                   agent_preset);
 
+    // The fork's model override rides the row the same way a creation's does
+    // (the fork transaction itself carries no model column -- this is the
+    // same best-effort write the runtime hook performs).
+    if (model) {
+        try {
+            db_.UpdateSessionModel(row.session_id, model->str());
+        } catch (const std::exception& e) {
+            logger_.warn("session {}: persisting fork model override failed: {}",
+                         row.session_id, e.what());
+        }
+    }
+
     SessionParams params;
     params.session_id = row.session_id;
     params.name = name;  // empty rides through: default naming from the first user text
@@ -182,6 +194,25 @@ std::shared_ptr<Session> SessionRegistry::CreateResolved(SessionParams params,
     // fake stores) leave it null, and ctx.history is null with it. The SAME
     // registry-lifetime reader every session shares -- see history_reader_.
     params.history_reader = history_reader_;
+
+    // Durable half of the model override (see SessionParams::model_override):
+    // every funnel path gets the hook, so a runtime /model switch lands in the
+    // row and a later resume re-resolves with the user's choice instead of the
+    // preset default. The registry outlives every session, so capturing `this`
+    // and the (already read) id by value is safe.
+    params.model_override_persist =
+        [this, session_id](const std::optional<config::ModelRef>& ref) {
+            try {
+                db_.UpdateSessionModel(session_id,
+                                       ref ? std::optional<std::string>(ref->str())
+                                           : std::nullopt);
+            } catch (const std::exception& e) {
+                // Best effort: the running session keeps its override; the
+                // cost of a failed write is only a resume losing the choice.
+                logger_.warn("session {}: persisting model override failed: {}", session_id,
+                             e.what());
+            }
+        };
 
     // Constructor-injected (Phase 5 step 3): presets/commands/provider
     // factories/instance cache reach Session's ctor on `params`, closing the

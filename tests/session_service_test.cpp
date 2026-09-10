@@ -2510,6 +2510,74 @@ TEST_CASE("the model flag applies on resume, and a malformed one is refused ther
     }
 }
 
+TEST_CASE("a resumed session restores the model persisted with it",
+          "[session_service][resume][invariant]") {
+    // THE RESTART BUG: the model override used to live only in server memory,
+    // so create-with---model, close, restart, resume re-resolved the bare
+    // preset and its default model won -- the user's choice silently undone.
+    // The choice now rides the session row, and a model-LESS resume restores
+    // it. (The TUI's picker resume sends no model; this is its exact shape.)
+    ServiceFixture fixture;
+    fixture.Write("providers.json",
+                  nlohmann::json{{"providers",
+                                  {{"main",
+                                    {{"backend", "fake"},
+                                     {"url", "http://localhost/v1"},
+                                     {"models",
+                                      {{"test-model", nlohmann::json::object()},
+                                       {"other-model", {{"max_tokens", 512}}}}}}}}}}
+                      .dump());
+    fixture.Script(testing::TextResponse("first"));
+    fixture.Start();
+
+    // Created WITH --model, one turn, then terminated -- the transcript and
+    // the model choice both survive in SQLite.
+    grpc::ClientContext create_context;
+    v1::CreateSessionRequest create_request;
+    create_request.set_project_root((fixture.dir / "work").string());
+    create_request.set_agent_preset("main");
+    create_request.set_model("main/other-model");
+    v1::CreateSessionResponse created;
+    REQUIRE(fixture.stub->CreateSession(&create_context, create_request, &created).ok());
+    const std::string session_id = created.session().session_id();
+    // The row already carries the choice at creation time.
+    REQUIRE(fixture.db->GetSession(session_id).has_value());
+    CHECK(*fixture.db->GetSession(session_id)->model == "main/other-model");
+    {
+        grpc::ClientContext context;
+        auto stream = fixture.stub->OpenSession(&context);
+        REQUIRE(stream->Write(ChatTurn(session_id, "hello")));
+        REQUIRE(WaitForTurnCompleted(*stream));
+        REQUIRE(stream->Write(EndSession(session_id, v1::EndSession::TERMINATE)));
+        (void)DrainAndFinish(stream);
+    }
+    WaitForTerminated(*fixture.sessions, session_id);
+
+    SECTION("a model-less resume restores the stored choice") {
+        v1::CreateSessionResponse resumed;
+        REQUIRE(ResumeOverWire(*fixture.stub, session_id, &resumed).ok());
+
+        auto session = fixture.sessions->Find(session_id);
+        REQUIRE(session != nullptr);
+        CHECK(session->preset().model_ref.str() == "main/other-model");
+        REQUIRE(session->preset().max_tokens.has_value());
+        CHECK(*session->preset().max_tokens == 512);
+    }
+
+    SECTION("a resume with its own model rewrites the stored choice") {
+        // "Continue this conversation, but on the other model": the request
+        // outranks the row, and the row is brought up to date -- the NEXT
+        // model-less resume keeps THIS choice, not the superseded one.
+        v1::CreateSessionResponse resumed;
+        REQUIRE(ResumeOverWire(*fixture.stub, session_id, &resumed, "main/test-model").ok());
+
+        auto session = fixture.sessions->Find(session_id);
+        REQUIRE(session != nullptr);
+        CHECK(session->preset().model_ref.str() == "main/test-model");
+        CHECK(*fixture.db->GetSession(session_id)->model == "main/test-model");
+    }
+}
+
 TEST_CASE("a client-supplied page limit is clamped, not trusted",
           "[session_service][scrollback]") {
     // `limit` is a wire int32 with a floor and, until this, no ceiling.

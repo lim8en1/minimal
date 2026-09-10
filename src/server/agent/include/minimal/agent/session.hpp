@@ -157,6 +157,11 @@ struct SessionParams {
     // over whatever the preset resolves to, and is re-applied after a preset
     // switch -- the preset is where a default comes from, not a decision.
     std::optional<config::ModelRef> model_override;
+    // Persistence hook for model_override, wired by the registry (which owns
+    // the database) with the session_id bound. Fired by set_model_override so
+    // a runtime /model switch survives a server restart; null (test sessions,
+    // spawners that persist the override themselves) means memory-only.
+    std::function<void(const std::optional<config::ModelRef>&)> model_override_persist;
     // The rendered project-context section (AGENTS.md/CLAUDE.md), loaded by the
     // registry from project_root -- a SESSION property, not a preset one, so a
     // mid-session /agent switch cannot drop the project's instructions. The
@@ -487,6 +492,9 @@ public:
     }
     void set_model_override(std::optional<common::ModelRef> ref) override {
         model_override_ = std::move(ref);
+        // Durable record of the decision, best-effort: the in-memory state is
+        // what this session runs on; the hook is what a later resume reads.
+        if (params_.model_override_persist) params_.model_override_persist(model_override_);
     }
 
 

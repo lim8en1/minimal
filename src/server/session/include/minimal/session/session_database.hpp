@@ -83,6 +83,13 @@ struct SessionSummary {
     // which means "subagent" everywhere (picker hiding, refused resume/rewind)
     // -- a fork is a top-level peer, and none of the subagent semantics apply.
     std::string forked_from_session_id = {};
+    // The session's model override (v8), as a full "<provider>/<model>"
+    // reference, empty (nullopt) when the user never named one -- a session
+    // without an override runs whatever its preset resolves to, which is why
+    // absence is stored as NULL rather than "". Written at creation
+    // (--model) and by UpdateSessionModel (/model); read back on resume so
+    // the choice survives a server restart.
+    std::optional<std::string> model;
 };
 
 // The persisted compaction checkpoint: the current derived VIEW of a session's
@@ -143,7 +150,7 @@ struct OpenOptions {
 // (Default naming is NOT part of the append transaction; see SetDefaultName.)
 class SessionDatabase {
 public:
-    static constexpr int kSchemaVersion = 7;
+    static constexpr int kSchemaVersion = 8;
 
     // Opens (creating if needed) and migrates. Throws std::runtime_error on any
     // failure, including a database whose user_version is newer than this
@@ -155,8 +162,11 @@ public:
     SessionDatabase& operator=(const SessionDatabase&) = delete;
 
     // Generates the session id (ULID). An unknown parent_session_id is an error.
+    // model is the session's model override ("<provider>/<model>"), if the user
+    // named one at creation -- persisted with the row so a resume keeps it.
     SessionSummary CreateSession(std::string name, std::optional<std::string> parent_session_id,
-                                 std::string project_root, std::string agent_preset);
+                                 std::string project_root, std::string agent_preset,
+                                 std::optional<std::string> model = std::nullopt);
 
     // One durable transcript row. Assigns the next per-session seq over the
     // ACTIVE transcript and returns it; bumps message_count; touches
@@ -188,6 +198,14 @@ public:
     bool SetDefaultName(const std::string& session_id, const std::string& name);
 
     bool UpdateSessionName(const std::string& session_id, const std::string& name);
+
+    // Persists (or, with nullopt, clears) the session's model override. The
+    // runtime half of the same record creation writes: /model goes through
+    // here, resume reads the column back. Not part of any append transaction
+    // -- a model switch is not transcript activity and must not touch
+    // updated_at (the picker's sort key). Returns false for an unknown id.
+    bool UpdateSessionModel(const std::string& session_id,
+                            const std::optional<std::string>& model);
 
     // True when the session was created WITH an explicit name
     // (CreateSessionRequest.name) rather than receiving the free default or a

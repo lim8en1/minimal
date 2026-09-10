@@ -254,9 +254,10 @@ int RunHeadless(const HeadlessOptions& options) {
         create.agent_preset = options.agent_preset;
         create.name = TruncateUtf8(options.prompt, 60);
     }
-    // OUTSIDE the branch, like run_mode: a model the user names is a property of
-    // this invocation, not of the stored session -- and the override is in-memory
-    // only, so a resumed session has none of its own to keep.
+    // OUTSIDE the branch, like run_mode: a model named on THIS invocation
+    // outranks whatever the stored session was created with. Omitting it (the
+    // normal resume) keeps the model the row persisted -- no override here is
+    // not "back to the preset default".
     create.model = options.model;
     // ALLOW_ONLY unless explicitly overridden. There is no human attached, so an
     // Ask-gated tool must auto-deny rather than block forever on a prompt nobody

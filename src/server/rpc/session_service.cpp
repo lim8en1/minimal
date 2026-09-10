@@ -222,7 +222,10 @@ grpc::Status SessionServiceImpl::CreateSession(grpc::ServerContext* context,
     session::SessionSummary row;
     try {
         row = db_.CreateSession(params.name, std::nullopt, params.project_root.string(),
-                                params.agent_preset);
+                                params.agent_preset,
+                                params.model_override
+                                    ? std::optional<std::string>(params.model_override->str())
+                                    : std::nullopt);
     } catch (const std::exception& e) {
         logger_.warn("CreateSession: could not record session: {}", e.what());
         return grpc::Status(grpc::StatusCode::INTERNAL, e.what());
@@ -452,16 +455,27 @@ grpc::Status SessionServiceImpl::ResumeSession(const v1::CreateSessionRequest* r
     // property of the deployment, not of the stored row.
     params.wake_on_injection = settings_.background_wake;
     ApplyAdvisor(permissions_, permission_advisors_, params);
-    // APPLIES ON RESUME TOO, like run_mode and for the same reason: a model the
-    // user names is a property of this invocation, not of the stored session --
-    // and the override is in-memory only, so a resumed session has none of its
-    // own to preserve. "Continue this conversation, but on the big model" is the
-    // obvious thing to want. Silently dropping it would be exactly the failure
-    // the field checks above refuse to make for name/preset/project_root.
+    // APPLIES ON RESUME TOO, like run_mode and for the same reason: a model
+    // named on THIS request outranks anything stored. Silently dropping it
+    // would be exactly the failure the field checks above refuse to make for
+    // name/preset/project_root.
     if (const auto status = ApplyModelOverride(*request, params); !status.ok()) return status;
+    // No model on the request: restore the one the session was created (or
+    // last /model-ed) with, persisted in the row (v8). Without this a resume
+    // re-resolves the bare preset and its default model wins -- silently
+    // undoing the user's earlier choice across a server restart. A request
+    // model ("continue this conversation, but on the big model") takes
+    // precedence by arriving through ApplyModelOverride above.
+    if (!params.model_override && stored->model) {
+        params.model_override = config::SplitModelRef(*stored->model);
+    }
     // Signals on resume, same rules as fresh creation: validated and warmed
     // before the session starts, never persisted from the previous stream.
     if (const auto status = ApplySignals(*request, params); !status.ok()) return status;
+
+    // Read before params is moved from: a model the REQUEST named must outlive
+    // the move, to be written into the row once the session exists.
+    const auto request_model = params.model_override;
 
     std::shared_ptr<agent::Session> resumed;
     try {
@@ -482,6 +496,20 @@ grpc::Status SessionServiceImpl::ResumeSession(const v1::CreateSessionRequest* r
         // registered) is reported with its reason and the transcript survives.
         logger_.warn("resume of session {} failed: {}", stored->session_id, e.what());
         return grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, e.what());
+    }
+
+    // The request's model outranked the stored one; make the row describe
+    // what the session now runs, so the NEXT model-less resume keeps THIS
+    // choice instead of silently restoring the superseded one. Written only
+    // after construction succeeded (a failed resume must not rewrite the
+    // row), best-effort like the runtime hook.
+    if (request_model) {
+        try {
+            db_.UpdateSessionModel(stored->session_id, request_model->str());
+        } catch (const std::exception& e) {
+            logger_.warn("resume of session {}: persisting model override failed: {}",
+                         stored->session_id, e.what());
+        }
     }
 
     // Re-read rather than reuse `stored`: resume may have appended a repair
