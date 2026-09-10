@@ -404,6 +404,13 @@ register runtime ids. Bundled actions (see `bundled/keybindings.json`):
 `chat.scroll_up`, `chat.scroll_down`, `chat.scroll_bottom`, `chat.row_up`,
 `chat.row_down`, `chat.toggle_collapse`, `chat.toggle_collapse_all`,
 `chat.toggle_timestamps`, `turn.cancel`, `app.quit`.
+
+Modifiers: `ctrl` (or `control`), `alt` (or `option`/`opt`/`meta` — the
+macOS key's spelling), `shift`, joined by `+` in any order. macOS caveat:
+Option only produces Alt events when the terminal is configured to send
+them — Terminal.app: Settings → Profiles → Keyboard → "Use Option as Meta
+Key"; iTerm2: Left/Right Option → "Esc+". Without that, Option+letter sends
+a Unicode glyph (e.g. `∆`) no binding can match.
 The `/keymap` command opens the same overlay as the `help.overlay` binding:
 a filterable listing of every configured action → key pair.
 

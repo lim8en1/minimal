@@ -100,16 +100,55 @@ const std::unordered_map<std::string, std::string>& CtrlLetterAliases() {
 
 }  // namespace
 
+// The collision identity of a key spec: modifiers are canonicalized
+// ("control" -> "ctrl", "option"/"opt"/"meta" -> "alt" -- the same aliases
+// ParseKeySpec accepts) and sorted, so spellings that parse to identical
+// events -- "alt+down" vs "option+down", "shift+ctrl+tab" vs
+// "ctrl+shift+tab" -- share one identity and keybindings.cpp's collision
+// warnings see them as the fight over one physical key that they are. On
+// top of that, a bare "ctrl+<letter>" whose C0
+// control byte doubles as another key's WHOLE event (ctrl+j/m -> enter,
+// ctrl+i -> tab, ctrl+h -> backspace; FTXUI uniformizes \r and 0x08 to \n
+// and DEL on input, so these are byte-identical matches, not near misses)
+// normalizes to that key's name. Everything informational only: used for
+// startup warnings, never for event matching (ParseKeySpec above owns
+// that).
 std::string NormalizeKeySpec(const std::string& spec) {
     const std::string lower = ToLower(spec);
     const std::vector<std::string> parts = Split(lower, '+');
-    if (parts.size() == 2 && parts[0] == "ctrl") {
-        if (const auto it = CtrlLetterAliases().find(parts[1]);
+    if (parts.empty()) return lower;
+
+    // Canonical modifier spellings, sorted so the identity is
+    // order-insensitive the way ParseKeySpec is.
+    std::vector<std::string> modifiers;
+    modifiers.reserve(parts.size() - 1);
+    for (std::size_t i = 0; i + 1 < parts.size(); ++i) {
+        const std::string& m = parts[i];
+        if (m == "ctrl" || m == "control") {
+            modifiers.push_back("ctrl");
+        } else if (m == "alt" || m == "option" || m == "opt" || m == "meta") {
+            modifiers.push_back("alt");
+        } else if (m == "shift") {
+            modifiers.push_back("shift");
+        } else {
+            return lower;   // unknown token: keep the raw spelling visible
+        }
+    }
+    std::sort(modifiers.begin(), modifiers.end());
+    std::string out;
+    for (const auto& m : modifiers) {
+        out += m;
+        out += '+';
+    }
+    out += parts.back();
+
+    if (modifiers.size() == 1 && modifiers.front() == "ctrl") {
+        if (const auto it = CtrlLetterAliases().find(parts.back());
             it != CtrlLetterAliases().end()) {
             return it->second;
         }
     }
-    return lower;
+    return out;
 }
 
 std::vector<Event> ParseKeySpec(const std::string& spec) {
@@ -139,7 +178,8 @@ std::vector<Event> ParseKeySpec(const std::string& spec) {
     for (const auto& modifier : parts) {
         if (modifier == "ctrl" || modifier == "control") {
             ctrl = true;
-        } else if (modifier == "alt" || modifier == "option" || modifier == "meta") {
+        } else if (modifier == "alt" || modifier == "option" || modifier == "opt" ||
+                   modifier == "meta") {
             alt = true;
         } else if (modifier == "shift") {
             shift = true;

@@ -15,6 +15,7 @@
 #include "minimal/client/key_event_parser.hpp"
 
 using ftxui::Event;
+using minimal::client::NormalizeKeySpec;
 using minimal::client::ParseKeySpec;
 
 namespace {
@@ -117,8 +118,38 @@ TEST_CASE("ParseKeySpec: arrow keys generalize alt+ to all four directions",
     CHECK(Has(ParseKeySpec("ctrl+up"), Event::ArrowUpCtrl));
 }
 
+TEST_CASE("ParseKeySpec: option/opt/meta are aliases for alt (the macOS key)",
+          "[key_event_parser]") {
+    // Every spelling parses to the same events -- a user who writes
+    // "option+down" in keybindings.json gets exactly what "alt+down" gives.
+    for (const std::string& spec : {"alt+down", "option+down", "opt+down", "meta+down"}) {
+        CAPTURE(spec);
+        CHECK(Has(ParseKeySpec(spec), Event::Special("\x1b[1;3B")));
+        CHECK(Has(ParseKeySpec(spec), Event::Special("\x1b\x1b[B")));
+    }
+    CHECK(Has(ParseKeySpec("option+j"), Event::AltJ));
+    CHECK(Has(ParseKeySpec("meta+j"), Event::AltJ));
+    CHECK(Has(ParseKeySpec("control+a"), Event::CtrlA));   // control -> ctrl
+    CHECK(ParseKeySpec("hyper+j").empty());                // unknown stays unknown
+}
+
+TEST_CASE("NormalizeKeySpec: alias spellings share one collision identity",
+          "[key_event_parser]") {
+    // keybindings.cpp's collision warnings compare these, so "option+down"
+    // vs the default "alt+down" must be seen as the same physical key.
+    CHECK(NormalizeKeySpec("alt+down") == "alt+down");
+    CHECK(NormalizeKeySpec("option+down") == "alt+down");
+    CHECK(NormalizeKeySpec("OPT+Down") == "alt+down");
+    CHECK(NormalizeKeySpec("meta+a") == "alt+a");
+    CHECK(NormalizeKeySpec("control+a") == "ctrl+a");
+    CHECK(NormalizeKeySpec("shift+ctrl+tab") == "ctrl+shift+tab");   // order-insensitive
+    CHECK(NormalizeKeySpec("ctrl+j") == "enter");                    // C0 alias, kept
+    CHECK(NormalizeKeySpec("control+j") == "enter");                 // ...via the alias too
+    CHECK(NormalizeKeySpec("hyper+q") == "hyper+q");                 // unknown: raw spelling
+}
+
 TEST_CASE("ParseKeySpec: unrecognized specs return empty, never a guess",
-         "[key_event_parser]") {
+          "[key_event_parser]") {
     CHECK(ParseKeySpec("").empty());
     CHECK(ParseKeySpec("banana").empty());
     CHECK(ParseKeySpec("hyper+q").empty());     // unknown modifier

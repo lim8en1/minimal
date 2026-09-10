@@ -12,8 +12,9 @@
 // 'action' -> 'key'") was honest about the gap but did not close it.
 //
 // grammar: key := modifier* base
-//   modifier := "ctrl" | "alt" | "shift", joined by '+', any order, repeats
-//               ignored
+//   modifier := "ctrl" (or "control") | "alt" (or "option"/"opt"/"meta" --
+//               the macOS key's spelling) | "shift", joined by '+', any
+//               order, repeats ignored
 //   base     := a single a-z/0-9 character, an F-key ("f1".."f12"), or a
 //               named key (see the .cpp for the full table)
 //
@@ -33,14 +34,14 @@ namespace minimal::client {
 
 std::vector<ftxui::Event> ParseKeySpec(const std::string& spec);
 
-// The collision identity of a key spec: a bare "ctrl+<letter>" whose C0
+// The collision identity of a key spec: modifier spellings are canonicalized
+// and sorted (see the .cpp), and a bare "ctrl+<letter>" whose C0
 // control byte doubles as another key's WHOLE event (ctrl+j/m -> enter,
 // ctrl+i -> tab, ctrl+h -> backspace; FTXUI uniformizes \r and 0x08 to \n
 // and DEL on input, so these are byte-identical matches, not near misses)
 // normalizes to that key's name, so keybindings.cpp can warn when two
 // bindings -- or a user binding and a default -- fight over the same
-// physical key despite spelling differently. Everything else returns its
-// lowercased form unchanged. Informational only: used for startup
+// physical key despite spelling differently. Informational only: used for startup
 // warnings, never for event matching (ParseKeySpec above owns that).
 std::string NormalizeKeySpec(const std::string& spec);
 
