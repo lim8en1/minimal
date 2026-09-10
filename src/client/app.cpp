@@ -64,6 +64,7 @@
 #include "minimal/client/view/status_bar.hpp"
 #include "minimal/client/view/tab_bar.hpp"
 #include "minimal/client/view/tab_ui.hpp"
+#include "minimal/client/view/theme_picker.hpp"
 #include "minimal/client/view/tools_panel.hpp"
 #include "minimal/client/render/color_downsample.hpp"
 #include "minimal/client/render/streaming_markdown_view.hpp"
@@ -612,6 +613,13 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     command_catalog.push_back({"redo", "restore the most recently rewound turn",
                                /*read_only=*/false, /*submits_prompt=*/false,
                                /*requires_session=*/true});
+    // /theme is intercepted client-side like /new (it swaps the in-memory
+    // Theme and re-pushes it to plugins; the server has no part in it), so it
+    // has no CommandInfo -- added by hand for /-autocomplete. Works on a
+    // sessionless tab: decoration, not session state.
+    command_catalog.push_back({"theme", "switch the UI theme",
+                               /*read_only=*/true, /*submits_prompt=*/false,
+                               /*requires_session=*/false});
 
     // --- config + client plugins --------------------------------------------
     // ORDER MATTERS -- see tui_bootstrap.hpp/.cpp for the full sequence
@@ -674,6 +682,7 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     bool show_picker = false;
     bool show_agent_picker = false;
     bool show_model_picker = false;
+    bool show_theme_picker = false;
     bool show_keymap_help = false;
     bool show_commands_help = false;
     bool show_quit_confirm = false;
@@ -700,6 +709,7 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     std::function<void()> open_picker_fn = [] {};
     std::function<void()> open_agent_picker_fn = [] {};
     std::function<void()> open_model_picker_fn = [] {};
+    std::function<void()> open_theme_picker_fn = [] {};
 
     // `focused`/`focused_details` become aliases into TabMaintenance once it
     // exists (below, after open_picker/plugin_modal_child) -- see the
@@ -792,6 +802,51 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         }
         app->SubmitChatTurn(tab, text);
     };
+    // --- theme switching -------------------------------------------------------
+    // THE SWAP PATH, shared by "/theme <name>" and the picker's Enter: replace
+    // `theme`'s CONTENTS in place (the object keeps its address -- every view,
+    // the syntax highlighter and the markdown renderer hold references/pointers
+    // to it and re-read ColorFor per frame, so the next paint is already the new
+    // palette), drop the highlighter's color-baked cache, re-push OnTheme to the
+    // theme-aware plugins, and record the choice in ui.json for the next launch.
+    // A failed load changes nothing and reports the error through the tab
+    // notice -- a typo'd name must not blank the UI.
+    auto apply_theme = [app, &env, &theme](const std::string& name) {
+        Theme loaded;
+        try {
+            loaded = Theme::Load(env.config_dir / "themes", name, env.depth);
+        } catch (const std::exception& error) {
+            if (const std::string tab = app->FocusedTabId(); !tab.empty()) {
+                app->TabNotice(tab, "theme: " + std::string(error.what()));
+            }
+            return;
+        }
+        theme = std::move(loaded);
+        env.highlighter->OnThemeChanged();
+        minimal::client::PushThemeToPlugins(env);
+        minimal::client::SaveThemePreference(env.config_dir, name);
+        if (const std::string tab = app->FocusedTabId(); !tab.empty()) {
+            app->TabNotice(tab, "theme switched to '" + name + "'");
+        }
+    };
+    // The picker's row set: the stems of <config_dir>/themes/*.json. Sorted so
+    // the menu is stable across opens; a missing/unreadable dir yields an empty
+    // list (the picker's empty_message covers it -- same degrade rule as every
+    // other decoration read).
+    auto list_theme_names = [&env]() -> std::vector<std::string> {
+        std::vector<std::string> names;
+        std::error_code ec;
+        for (const auto& entry : std::filesystem::directory_iterator(env.config_dir / "themes",
+                                                                     ec)) {
+            std::error_code entry_ec;
+            if (!entry.is_regular_file(entry_ec) || entry.path().extension() != ".json") {
+                continue;
+            }
+            names.push_back(entry.path().stem().string());
+        }
+        std::sort(names.begin(), names.end());
+        return names;
+    };
     // /rewind, /redo and /new are intercepted here rather than routed through
     // SendCommand: /rewind and /redo are client-native ClientEvents (a oneof
     // sibling of cancel/attach), not server-side Commands, so there is no
@@ -811,7 +866,8 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     auto submit_command = [app, &command_catalog, commands_listed, focused_or_new_tab,
                            &show_commands_help,
                            &open_picker_fn, &open_agent_picker_fn,
-                           &open_model_picker_fn](const std::string& line) {
+                           &open_model_picker_fn, &open_theme_picker_fn,
+                           &apply_theme](const std::string& line) {
         // Bare /help is answered CLIENT-SIDE from the ListCommands catalog:
         // the server's listing reached the transient notice line, whose
         // viewport caps at a handful of rows -- with more commands than that,
@@ -877,6 +933,17 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         //     switch, so the status bar shows the fresh value immediately
         //     (pending until the metadata event confirms).
         const auto parsed = minimal::client::SplitCommand(line);
+        // THEME (see apply_theme above): bare opens the picker, named swaps
+        // directly. Deliberately BEFORE the sessionless guard below -- a theme
+        // switch is decoration, not session state, and works on any tab.
+        if (parsed.name == "theme") {
+            if (parsed.positional.empty()) {
+                open_theme_picker_fn();
+            } else {
+                apply_theme(parsed.positional.front());
+            }
+            return;
+        }
         if (parsed.name == "agent" || parsed.name == "model") {
             if (parsed.positional.empty()) {
                 if (parsed.name == "agent") {
@@ -1039,6 +1106,14 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     auto model_picker_host_interactive =
         minimal::client::MakeModalHost(model_picker_child, show_model_picker);
 
+    // --- theme picker ------------------------------------------------------------
+    // Like the pickers above: a stable host whose inner component is rebuilt
+    // on each open (open_theme_picker, below) -- themes are read from disk per
+    // open, so a theme dropped into the themes dir shows up without a restart.
+    auto theme_picker_child = std::make_shared<Component>();
+    auto theme_picker_host_interactive =
+        minimal::client::MakeModalHost(theme_picker_child, show_theme_picker);
+
     // T8: typing on an empty app already starts a session directly
     // (submit_chat, above); the picker's "+ new session" row is the same
     // action reached from inside the modal, with no text to send yet. The
@@ -1074,6 +1149,18 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     open_picker_fn = open_picker;
     open_agent_picker_fn = open_agent_picker;
     open_model_picker_fn = open_model_picker;
+    auto open_theme_picker = [&] {
+        *theme_picker_child = minimal::client::MakeThemePicker(
+            list_theme_names(), theme.name(), theme,
+            minimal::client::ThemePickerCallbacks{
+                [&](const std::string& name) {
+                    show_theme_picker = false;
+                    apply_theme(name);
+                },
+                [&] { show_theme_picker = false; }});
+        show_theme_picker = true;
+    };
+    open_theme_picker_fn = open_theme_picker;
     // Reset slots for the two help overlays: they are built once, so without
     // these the typed filter survived across opens -- reopening the help
     // presented the previous needle as if it were a fresh search.
@@ -1351,6 +1438,7 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     tree = Modal(tree, picker_host_interactive, &show_picker);
     tree = Modal(tree, agent_picker_host_interactive, &show_agent_picker);
     tree = Modal(tree, model_picker_host_interactive, &show_model_picker);
+    tree = Modal(tree, theme_picker_host_interactive, &show_theme_picker);
     tree = Modal(tree, keymap_help_view, &show_keymap_help);
     tree = Modal(tree, commands_help_view, &show_commands_help);
     auto with_quit_confirm = Modal(tree, confirm_modal, &show_quit_confirm);

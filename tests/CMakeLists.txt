@@ -120,6 +120,7 @@ add_executable(minimal_tests
     checklist_view_test.cpp
     color_downsample_test.cpp
     theme_test.cpp
+    ui_config_test.cpp
     streaming_markdown_view_test.cpp
     syntax_highlighter_test.cpp
     session_state_test.cpp

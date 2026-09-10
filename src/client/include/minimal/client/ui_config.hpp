@@ -32,6 +32,12 @@
 //     "dark" or "light". A name Theme::Load cannot find falls back to the
 //     terminal-default theme with a startup warning, the same degrade rule
 //     as everything else here.
+//
+// THE ONE MANAGED WRITE. ui.json is otherwise user-owned and never rewritten
+// by the client -- the single exception is SaveThemePreference below, which
+// /theme uses to persist a runtime switch. It round-trips the whole document
+// (every other key survives verbatim) and refuses to touch a file it cannot
+// parse, the same rule client-plugins.json's writer follows.
 
 #include <filesystem>
 #include <string>
@@ -54,5 +60,12 @@ struct UiConfig {
 };
 
 UiConfig LoadUiConfig(const std::filesystem::path& config_dir);
+
+// Sets the "theme" key in <config_dir>/ui.json to `name`, preserving every
+// other key. Best-effort: a malformed ui.json, an unwritable config dir or a
+// failed rename is warned about through the logger and otherwise ignored --
+// the in-session theme switch has already applied, this only records it for
+// the next launch. Creates the config dir when missing.
+void SaveThemePreference(const std::filesystem::path& config_dir, const std::string& name);
 
 }  // namespace minimal::client

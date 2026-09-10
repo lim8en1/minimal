@@ -1,6 +1,7 @@
 #include "minimal/client/render/syntax_highlighter.hpp"
 
 #include <algorithm>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -154,6 +155,46 @@ TEST_CASE("Highlight caches by (language, code) without cross-contaminating entr
     // Same code, different language key: must not collide on `code` alone.
     const std::string as_python = ToText(highlighter.Highlight(code_a, "python"));
     CHECK_FALSE(as_python.empty());
+}
+
+// The /theme swap path replaces the referenced Theme's CONTENTS in place and
+// calls OnThemeChanged(); highlight_cache_ bakes the old colors into its
+// cached Elements, so without the clear, every cached block would keep the
+// previous theme's palette. First cell's foreground is a robust proxy: "int"
+// is a Keyword span, colored when the theme supplies syntax_keyword.
+TEST_CASE("OnThemeChanged drops color-baked cache entries after a theme swap") {
+    const auto fg_at = [](const ftxui::Elements& lines) -> std::optional<ftxui::Color> {
+        ftxui::Screen screen(80, 1);
+        ftxui::Render(screen, lines.at(0));
+        return screen.PixelAt(0, 0).foreground_color;
+    };
+
+    Theme swapped = Theme::Parse(R"({"name": "a", "colors": {"syntax_keyword": "#ff0000"}})",
+                                 ColorDepth::Truecolor);
+    SyntaxHighlighter highlighter(swapped);
+    // "return" is a Keyword node in the vendored C++ grammar ("int" would be
+    // a Type, a different role); the theme below supplies only
+    // syntax_keyword, so an uncategorized cell would read as Default here --
+    // which is the failure mode this assertion exists to catch.
+    const std::string code = "return a;\n";
+
+    const auto before = fg_at(highlighter.Highlight(code, "cpp"));
+    REQUIRE(before.has_value());
+    CHECK(*before == ftxui::Color(255, 0, 0));
+
+    // The swap itself: same object (the reference the highlighter holds stays
+    // valid), new contents. Until OnThemeChanged runs, the cache must still
+    // serve the OLD color -- that is exactly what the clear fixes.
+    swapped = Theme::Parse(R"({"name": "b", "colors": {"syntax_keyword": "#00ff00"}})",
+                           ColorDepth::Truecolor);
+    const auto stale = fg_at(highlighter.Highlight(code, "cpp"));
+    REQUIRE(stale.has_value());
+    CHECK(*stale == ftxui::Color(255, 0, 0));
+
+    highlighter.OnThemeChanged();
+    const auto fresh = fg_at(highlighter.Highlight(code, "cpp"));
+    REQUIRE(fresh.has_value());
+    CHECK(*fresh == ftxui::Color(0, 255, 0));
 }
 
 }  // namespace minimal::client

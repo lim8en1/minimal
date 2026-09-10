@@ -565,6 +565,9 @@ SyntaxHighlighter::SyntaxHighlighter(const Theme& theme,
 
 SyntaxHighlighter::~SyntaxHighlighter() = default;
 
+void SyntaxHighlighter::OnThemeChanged() { highlight_cache_.clear(); }
+
+
 // One TSParser per language, kept alive for the highlighter's lifetime (track
 // R3): the first draft ran ts_parser_new/set_language/delete PER HIGHLIGHT
 // CALL, which the streaming path pays every 120 ms tick for every code block.
@@ -787,9 +790,10 @@ ftxui::Elements SyntaxHighlighter::Highlight(std::string_view code,
     // MRU-ordered linear scan: kHighlightCacheCap (64) is small enough that a
     // handful of string compares is cheaper than the hashing/bucketing this
     // would need to be an unordered_map, and simple enough that it needs no
-    // custom hasher for a (language, code) pair. theme_ is fixed for this
-    // instance's whole lifetime (bound at construction), so it is not part of
-    // the key.
+    // custom hasher for a (language, code) pair. theme_ is FIXED FOR THE
+    // OBJECT's lifetime (bound at construction) even though its CONTENTS may
+    // be swapped in place (/theme); a swap calls OnThemeChanged(), which
+    // clears this cache precisely because the entries bake the old colors in.
     for (auto it = highlight_cache_.begin(); it != highlight_cache_.end(); ++it) {
         if (it->language == language && it->code == code) {
             if (it != highlight_cache_.begin()) {

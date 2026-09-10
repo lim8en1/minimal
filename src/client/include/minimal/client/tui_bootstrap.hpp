@@ -130,6 +130,17 @@ struct TuiEnvironment {
 // `return kUnavailable` did at each of these points.
 bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out);
 
+// Re-delivers the current theme to every theme-aware plugin: the exclusive
+// chat surface first, then the view plugins. Called once by
+// BuildTuiEnvironment at startup, and again by RunTui's /theme swap AFTER
+// `env.theme`'s contents have been replaced in place (the object keeps its
+// address -- every reference holder sees the new colors -- but plugins that
+// CACHED colors at OnTheme time need the push to re-read them). Same throw
+// containment as the inline code this replaces: a throwing chat surface is
+// disabled (the core chat view takes over), a throwing view is logged and
+// kept.
+void PushThemeToPlugins(TuiEnvironment& out);
+
 // One kind's attribution list, for MatchAliasKind below. `attributions`
 // points into a registry's own storage (stable for BuildTuiEnvironment's
 // whole call), never owned here.
