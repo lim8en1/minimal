@@ -1637,7 +1637,8 @@ TEST_CASE("ListModels lists static refs cold and discovered refs after refresh",
     fixture.presets->SetDiscoveryHook([](const std::string&, const llm::ProviderConfig&) {
         return config::DiscoveryOutcome{
             /*catalog_present=*/true, /*ok=*/true, {},
-            {llm::DiscoveredModel{"discovered-model", 12345, nlohmann::json::object()}}};
+            {llm::DiscoveredModel{"discovered-model", 12345, nlohmann::json::object(),
+                                  std::nullopt}}};
     });
 
     // Cold, the discover-entry contributes nothing (a listing never triggers

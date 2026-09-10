@@ -45,7 +45,7 @@ class FixtureCatalog : public minimal::llm::ModelCatalog {
 public:
     std::vector<minimal::llm::DiscoveredModel> List(
         const minimal::llm::ProviderConfig&) const override {
-        return {{"fixture-model", 4321, nlohmann::json::object()}};
+        return {{"fixture-model", 4321, nlohmann::json::object(), std::nullopt}};
     }
 };
 

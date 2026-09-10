@@ -22,7 +22,7 @@ namespace {
 
 struct FakeCatalog : minimal::llm::ModelCatalog {
     std::vector<DiscoveredModel> List(const minimal::llm::ProviderConfig&) const override {
-        return {{"fake", 1234, nlohmann::json::object()}};
+        return {{"fake", 1234, nlohmann::json::object(), std::nullopt}};
     }
 };
 
@@ -59,6 +59,8 @@ TEST_CASE("ParseModelList reads OpenRouter's context_length and keeps metadata",
           "[model_catalog]") {
     const auto models = ParseModelList(R"({"data":[
         {"id": "deepseek/deepseek-r1", "context_length": 163840,
+         "top_provider": {"max_completion_tokens": 65536, "context_length": 163840,
+                          "is_moderated": true},
          "pricing": {"prompt": "0.0000005"}, "quantization": "fp8"}
     ]})");
 
@@ -66,10 +68,32 @@ TEST_CASE("ParseModelList reads OpenRouter's context_length and keeps metadata",
     CHECK(models[0].id == "deepseek/deepseek-r1");
     REQUIRE(models[0].context_window_tokens.has_value());
     CHECK(*models[0].context_window_tokens == 163840);
+    // The backend's own output cap, where it reports one.
+    REQUIRE(models[0].max_tokens.has_value());
+    CHECK(*models[0].max_tokens == 65536);
     // Opaque to core, free for a future consumer: everything but the id.
     CHECK(models[0].metadata.at("pricing").at("prompt") == "0.0000005");
     CHECK(models[0].metadata.at("quantization") == "fp8");
     CHECK_FALSE(models[0].metadata.contains("id"));
+}
+
+TEST_CASE("ParseModelList degrades a missing output cap to nullopt", "[model_catalog]") {
+    // top_provider is OpenRouter-shaped; a plain OpenAI-shape /models body (and
+    // an OpenRouter entry without the field, or with a non-positive one) must
+    // yield no cap rather than a fabricated or poisoned one.
+    const auto models = ParseModelList(R"({"data":[
+        {"id": "no-top-provider", "context_length": 8192},
+        {"id": "empty-top-provider", "top_provider": {}, "context_length": 8192},
+        {"id": "no-cap-field", "top_provider": {"is_moderated": false}},
+        {"id": "garbage-cap", "top_provider": {"max_completion_tokens": "lots"}},
+        {"id": "zero-cap", "top_provider": {"max_completion_tokens": 0}},
+        {"id": "negative-cap", "top_provider": {"max_completion_tokens": -5}}
+    ]})");
+
+    REQUIRE(models.size() == 6);
+    for (const auto& model : models) {
+        CHECK_FALSE(model.max_tokens.has_value());
+    }
 }
 
 // --- ParseModelList: llama.cpp shape -----------------------------------------

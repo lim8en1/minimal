@@ -492,8 +492,8 @@ TEST_CASE("a non-discover provider with no models is still refused", "[providers
 
 TEST_CASE("a discover-only model resolves lazily, once", "[providers][discover]") {
     CountingHook hook;
-    hook.models = {{"big", 131072, nlohmann::json::object()},
-                   {"small", std::nullopt, nlohmann::json::object()}};
+    hook.models = {{"big", 131072, nlohmann::json::object(), 32768},
+                   {"small", std::nullopt, nlohmann::json::object(), std::nullopt}};
     auto config = DiscoverConfig();
     config.SetDiscoveryHook([&hook](const std::string& kind, const llm::ProviderConfig& c) {
         return hook.AsHook(kind, c);
@@ -510,9 +510,15 @@ TEST_CASE("a discover-only model resolves lazily, once", "[providers][discover]"
     CHECK(big->backend == "openai");
     CHECK(big->provider.model_name == "big");
     REQUIRE(big->max_tokens.has_value());
-    CHECK(*big->max_tokens == 4096);  // provider-level default, inherited
+    CHECK(*big->max_tokens == 32768);  // the backend's cap beats the provider default
     REQUIRE(big->context_window_tokens.has_value());
     CHECK(*big->context_window_tokens == 131072);
+
+    // A model the backend caps nothing: the provider-level default stands.
+    const auto small = config.Resolve(ModelRef{"local", "small"});
+    REQUIRE(small != nullptr);
+    REQUIRE(small->max_tokens.has_value());
+    CHECK(*small->max_tokens == 4096);
 
     // Warm: a second resolve of the same ref -- and a miss on a model the
     // catalog does not serve -- hit the cache, never the network.
@@ -546,7 +552,7 @@ TEST_CASE("a failed discovery is negative-cached and reported", "[providers][dis
 
 TEST_CASE("ModelRefs unions static and cached-discovered entries", "[providers][discover]") {
     CountingHook hook;
-    hook.models = {{"zdisc", 4096, nlohmann::json::object()}};
+    hook.models = {{"zdisc", 4096, nlohmann::json::object(), std::nullopt}};
     auto config = DiscoverConfig();
     config.SetDiscoveryHook([&hook](const std::string& kind, const llm::ProviderConfig& c) {
         return hook.AsHook(kind, c);
@@ -572,7 +578,7 @@ TEST_CASE("a static model with an omitted window is enriched from discovery",
     // number someone typed (or omitted, silently disabling compaction).
     // Resolving this window from the static entry alone fails this test.
     CountingHook hook;
-    hook.models = {{"static1", 999999, nlohmann::json::object()}};
+    hook.models = {{"static1", 999999, nlohmann::json::object(), std::nullopt}};
     auto config = DiscoverConfig();
     config.SetDiscoveryHook([&hook](const std::string& kind, const llm::ProviderConfig& c) {
         return hook.AsHook(kind, c);
@@ -598,7 +604,7 @@ TEST_CASE("a discovered window falls back to the provider-level default",
     // context_window_tokens is the inheritance base, exactly as it is for a
     // static model.
     CountingHook hook;
-    hook.models = {{"small", std::nullopt, nlohmann::json::object()}};
+    hook.models = {{"small", std::nullopt, nlohmann::json::object(), std::nullopt}};
     auto config = ParseProvidersConfig(nlohmann::json::parse(R"({
       "providers": {"p": {"backend": "openai", "url": "http://x/v1", "discover": true,
                           "context_window_tokens": 8192}}
@@ -613,20 +619,105 @@ TEST_CASE("a discovered window falls back to the provider-level default",
     CHECK(*model->context_window_tokens == 8192);
 }
 
+TEST_CASE("a static model's output cap is gap-filled from discovery, its own value standing",
+          "[providers][discover][invariant]") {
+    // The max_tokens twin of the window-enrichment case: a static entry that
+    // omits the cap gets the backend's; one that declares its own keeps it --
+    // and a window is no longer the only field that can trigger enrichment,
+    // so this also pins that the two fills are independent.
+    CountingHook hook;
+    hook.models = {{"windowed", std::nullopt, nlohmann::json::object(), 4096},
+                   {"capped", 999999, nlohmann::json::object(), 2048},
+                   {"plain", std::nullopt, nlohmann::json::object(), std::nullopt}};
+    // No provider-level defaults: a static model's INHERITED default counts as
+    // its own value (the same rule the window enrichment follows), so a
+    // default here would close the gap the backend cap is meant to fill.
+    auto config = ParseProvidersConfig(nlohmann::json::parse(R"({
+      "providers": {"p": {"backend": "openai", "url": "http://x/v1", "discover": true,
+                          "models": {
+                            "windowed": {"context_window_tokens": 16384},
+                            "capped": {"max_tokens": 999},
+                            "plain": {}
+                          }}}
+    })"));
+    config.SetDiscoveryHook([&hook](const std::string& kind, const llm::ProviderConfig& c) {
+        return hook.AsHook(kind, c);
+    });
+
+    // Own window stands; the missing cap comes from the backend.
+    const auto windowed = config.Resolve(ModelRef{"p", "windowed"});
+    REQUIRE(windowed != nullptr);
+    CHECK(*windowed->context_window_tokens == 16384);
+    REQUIRE(windowed->max_tokens.has_value());
+    CHECK(*windowed->max_tokens == 4096);
+
+    // Own cap stands; the missing window comes from the backend.
+    const auto capped = config.Resolve(ModelRef{"p", "capped"});
+    REQUIRE(capped != nullptr);
+    CHECK(*capped->context_window_tokens == 999999);
+    REQUIRE(capped->max_tokens.has_value());
+    CHECK(*capped->max_tokens == 999);
+
+    // Neither own value, and the backend reports neither: nothing is
+    // fabricated -- the resolution just has no limits, as configured.
+    const auto plain = config.Resolve(ModelRef{"p", "plain"});
+    REQUIRE(plain != nullptr);
+    CHECK_FALSE(plain->context_window_tokens.has_value());
+    CHECK_FALSE(plain->max_tokens.has_value());
+}
+
+TEST_CASE("a failed discovery degrades a static hit to its parsed self",
+          "[providers][discover]") {
+    // A dead backend must not take a hand-written model down with it. This
+    // matters more now that a static model missing only the output cap reaches
+    // discovery (a windowed one used to resolve without consulting the catalog
+    // at all) -- but the degradation is the rule for every static hit: the
+    // negative-cached failure is reported via discovery_status, not by
+    // unresolving models the config itself declares.
+    CountingHook hook;
+    hook.ok = false;
+    hook.error = "connection refused";
+    auto config = ParseProvidersConfig(nlohmann::json::parse(R"({
+      "providers": {"p": {"backend": "openai", "url": "http://x/v1", "discover": true,
+                          "max_tokens": 4096,
+                          "models": {"windowed": {"context_window_tokens": 16384},
+                                     "bare": {}}}}
+    })"));
+    config.SetDiscoveryHook([&hook](const std::string& kind, const llm::ProviderConfig& c) {
+        return hook.AsHook(kind, c);
+    });
+
+    const auto windowed = config.Resolve(ModelRef{"p", "windowed"});
+    REQUIRE(windowed != nullptr);
+    CHECK(*windowed->context_window_tokens == 16384);
+    CHECK(*windowed->max_tokens == 4096);
+
+    const auto bare = config.Resolve(ModelRef{"p", "bare"});
+    REQUIRE(bare != nullptr);
+    CHECK(*bare->max_tokens == 4096);
+    CHECK_FALSE(bare->context_window_tokens.has_value());
+
+    // The failure is still reported, and still only fetched once.
+    CHECK(hook.calls == 1);
+    const auto status = config.discovery_status("p");
+    CHECK(status.attempted);
+    CHECK_FALSE(status.ok);
+}
+
 TEST_CASE("RefreshDiscovery evicts and refetches, reporting per provider",
           "[providers][discover]") {
     // The mid-process drift case: the backend restarts serving a different
     // model set while the server stays up. Refresh makes the new set visible
     // without a server restart.
     CountingHook hook;
-    hook.models = {{"old", 4096, nlohmann::json::object()}};
+    hook.models = {{"old", 4096, nlohmann::json::object(), std::nullopt}};
     auto config = DiscoverConfig();
     config.SetDiscoveryHook([&hook](const std::string& kind, const llm::ProviderConfig& c) {
         return hook.AsHook(kind, c);
     });
     REQUIRE(config.Resolve(ModelRef{"local", "old"}) != nullptr);
 
-    hook.models = {{"new", 8192, nlohmann::json::object()}};
+    hook.models = {{"new", 8192, nlohmann::json::object(), std::nullopt}};
     const auto outcomes = config.RefreshDiscovery();
     REQUIRE(outcomes.size() == 2);  // both discover-entries
     CHECK(outcomes[0].provider == "local");
@@ -675,7 +766,7 @@ TEST_CASE("concurrent Resolve is safe and fetches once", "[providers][discover]"
     // The mutex is the mechanism; the assertions are timing-independent: every
     // thread must resolve, and the fetch must have happened exactly once.
     CountingHook hook;
-    hook.models = {{"big", 131072, nlohmann::json::object()}};
+    hook.models = {{"big", 131072, nlohmann::json::object(), std::nullopt}};
     auto config = DiscoverConfig();
     config.SetDiscoveryHook([&hook](const std::string& kind, const llm::ProviderConfig& c) {
         return hook.AsHook(kind, c);
