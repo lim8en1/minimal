@@ -309,7 +309,12 @@ bool CollapsedByDefault(const ChatRow& row) {
         case ChatRowKind::Thinking:
             return true;
         case ChatRowKind::ToolActivity:
-            return true;
+            // ask_user's result body is the user's recorded choices ("the
+            // user selected: ...") -- the only durable confirmation of what
+            // they answered, since the modal closes the moment they submit.
+            // It renders expanded by default; the collapse toggle still
+            // works on it.
+            return row.tool_name != kAskUserToolName;
         case ChatRowKind::UserAttachment:
             return row.text.size() > kAttachmentCollapseThresholdChars;
         case ChatRowKind::UserText:

@@ -148,6 +148,24 @@ std::optional<std::string> BashCommandOf(const ChatRow& row) {
     return it->get<std::string>();
 }
 
+// ask_user's input shape (tool-ask plugin): {"questions": [{"question":
+// ..., ...}]}. The question text is the row's orientation ("what was I
+// asked") -- the same job bash's $command does for its row -- and the raw
+// JSON dump of a full ask request is noise next to it.
+std::optional<std::string> AskQuestionOf(const ChatRow& row) {
+    if (row.tool_name != kAskUserToolName) return std::nullopt;
+    const auto questions = row.tool_input.find("questions");
+    if (questions == row.tool_input.end() || !questions->is_array() || questions->empty() ||
+        !(*questions)[0].is_object()) {
+        return std::nullopt;
+    }
+    std::string question = (*questions)[0].value("question", std::string{});
+    if (question.empty()) return std::nullopt;
+    constexpr std::size_t kMaxQuestion = 120;
+    if (question.size() > kMaxQuestion) question = question.substr(0, kMaxQuestion) + "…";
+    return question;
+}
+
 Element RenderToolActivity(const ChatRow& row, const Theme& theme, const RowRenderContext& ctx) {
     using namespace ftxui;
     const std::string name = row.tool_name.empty() ? std::string("tool") : row.tool_name;
@@ -170,11 +188,19 @@ Element RenderToolActivity(const ChatRow& row, const Theme& theme, const RowRend
     parts.push_back(hbox(std::move(line)));
 
     const auto bash_command = BashCommandOf(row);
+    const auto ask_question = AskQuestionOf(row);
     if (bash_command.has_value()) {
         // bash's real command, not a JSON dump of it -- the header IS the
         // orientation for the most common tool call.
         parts.push_back(paragraph("$ " + *bash_command) |
                         color(theme.ColorFor("syntax_function")));
+    } else if (ask_question.has_value()) {
+        // ask_user's real question, not a JSON dump of it. Non-dim: this
+        // row is the durable record of a human decision (expanded by
+        // default -- CollapsedByDefault), and the answers below it are the
+        // point of the whole transcript entry.
+        parts.push_back(paragraph(*ask_question) |
+                        color(theme.ColorFor("system_message")));
     } else {
         // The input summary rides the header of every OTHER tool row
         // (pending and result alike): it is what makes "tool <name>" say

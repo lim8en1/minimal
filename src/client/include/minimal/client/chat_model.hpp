@@ -78,10 +78,19 @@ std::string FormatClockTime(int64_t unix_ms);
 // tiers). Shared between ChatView (which resolves the state) and core's
 // renderers (which render collapsed vs. expanded from it), so the threshold
 // cannot drift between "starts collapsed" and "looks collapsed". Thinking is
-// always collapsed by default; ToolActivity and UserAttachment collapse only
-// once their content passes a small size threshold -- most tool calls and
-// most mentions are short enough to just read.
+// always collapsed by default; ToolActivity collapses unless the row is an
+// ask_user result -- its body IS the user's recorded choices, their only
+// durable confirmation of what they answered (the modal closes the moment
+// they submit); UserAttachment collapses only once its content passes a
+// small size threshold -- most tool calls and most mentions are short
+// enough to just read.
 bool CollapsedByDefault(const ChatRow& row);
+
+// The tool-ask plugin's tool name, as the transcript's tool_use blocks carry
+// it. Shared by the collapse default and the row renderer so the two
+// special cases cannot drift apart (the plugin lives server-side; the client
+// has only the literal).
+inline constexpr std::string_view kAskUserToolName = "ask_user";
 
 // Rows in DISPLAY order (oldest first) from a DESCENDING-seq scrollback page --
 // exactly what GetMessages returns, so no caller re-sorts. User messages that

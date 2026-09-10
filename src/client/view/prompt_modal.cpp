@@ -270,6 +270,9 @@ struct AskModalState {
         std::string other_text;
     };
     std::vector<QuestionState> questions;
+    // The two-phase submit: false is editing (widgets live); true is the
+    // frozen review list -- Enter confirms, Escape goes back to editing.
+    bool reviewing = false;
 };
 
 v1::AskUserResponse CollectAnswer(const PendingAsk& request, const AskModalState& state) {
@@ -302,6 +305,31 @@ v1::AskUserResponse DismissedAnswer(const PendingAsk& request) {
     return response;
 }
 
+// One review-screen line for ONE question, mirroring CollectAnswer's slot
+// logic exactly -- whatever the review shows is what submission will send,
+// so a drift between the two would display one thing and answer another.
+std::string ReviewLine(const v1::AskQuestion& question,
+                       const AskModalState::QuestionState& qs) {
+    if (qs.use_other && !qs.other_text.empty()) {
+        return "-> your answer: " + qs.other_text;
+    }
+    if (question.multiple()) {
+        std::string joined;
+        for (int j = 0; j < question.options_size() &&
+                        j < static_cast<int>(qs.boxes.size());
+             ++j) {
+            if (!qs.boxes[j]) continue;
+            if (!joined.empty()) joined += ", ";
+            joined += question.options(j).label();
+        }
+        return joined.empty() ? "(not answered)" : "-> " + joined;
+    }
+    if (qs.radio >= 0 && qs.radio < question.options_size()) {
+        return "-> " + question.options(qs.radio).label();
+    }
+    return "(not answered)";
+}
+
 }  // namespace
 
 ftxui::Component MakeAskModal(const PendingAsk& request, const Theme& theme,
@@ -319,6 +347,15 @@ ftxui::Component MakeAskModal(const PendingAsk& request, const Theme& theme,
         const auto& question = request_state->request.questions(i);
         auto& qs = state->questions[i];
 
+        // ONE container child per question (this block): the renderer below
+        // addresses children as ChildAt(question index). The first draft
+        // pushed the allow_other rows as SEPARATE children of `all`, so with
+        // allow_other set -- which is always, it is not model-facing -- every
+        // question after the first rendered the PREVIOUS question's other
+        // block: questions 2..n existed in the container (focusable, so Tab
+        // kept landing somewhere) but never rendered.
+        Components block;
+
         if (question.multiple()) {
             for (const auto& option : question.options()) {
                 std::string entry = option.label();
@@ -333,7 +370,7 @@ ftxui::Component MakeAskModal(const PendingAsk& request, const Theme& theme,
                 option_state.checked = Ref<bool>(&qs.boxes[j]);
                 boxes.push_back(Checkbox(std::move(option_state)));
             }
-            question_components.push_back(Container::Vertical(std::move(boxes)));
+            block.push_back(Container::Vertical(std::move(boxes)));
         } else {
             // Radiobox is the single-pick control: one stable index, no
             // manual "uncheck the others" bookkeeping.
@@ -347,14 +384,43 @@ ftxui::Component MakeAskModal(const PendingAsk& request, const Theme& theme,
             RadioboxOption radio_state;
             radio_state.entries = ConstStringListRef(&qs.entries);
             radio_state.selected = &qs.radio;
-            question_components.push_back(Radiobox(std::move(radio_state)));
+            block.push_back(Radiobox(std::move(radio_state)));
         }
 
         if (question.allow_other()) {
-            question_components.push_back(
-                Container::Vertical({Checkbox("Type your own answer", &qs.use_other),
-                                     Input(&qs.other_text, "your answer")}));
+            // The free-text Input is a focusable child ONLY while "Type your
+            // own answer" is checked: an invisible-but-focusable component is
+            // the exact "hidden choice" bug class (Tab lands on a row that
+            // renders nothing), and the always-on input spent a modal row
+            // most asks never use. The checkbox stays attached throughout --
+            // DetachAllChildren clears the container, so the sync re-adds
+            // box first, then input only when checked. The checkbox is built
+            // after the closure that syncs it, so it rides a shared holder
+            // read at fire time (ftxui flips *checked, then runs on_change
+            // inline or posts it to the app loop -- either way the components
+            // are alive).
+            auto other = Container::Vertical({});
+            auto input = Input(&qs.other_text, "your answer");
+            struct OtherParts {
+                Component box;
+            };
+            const auto parts = std::make_shared<OtherParts>();
+            const auto state_ref = state;   // shared_ptr copy: outlives the closure
+            const int index = i;
+            CheckboxOption box_opt;
+            box_opt.label = ConstStringRef("Type your own answer");
+            box_opt.checked = Ref<bool>(&qs.use_other);
+            box_opt.on_change = [other, input, parts, state_ref, index] {
+                other->DetachAllChildren();
+                other->Add(parts->box);
+                if (state_ref->questions[index].use_other) other->Add(input);
+            };
+            parts->box = Checkbox(std::move(box_opt));
+            other->Add(parts->box);
+            block.push_back(other);
         }
+
+        question_components.push_back(Container::Vertical(std::move(block)));
     }
     auto all = Container::Vertical(std::move(question_components));
     const auto all_val = all;   // outlives the factory: by value
@@ -364,6 +430,35 @@ ftxui::Component MakeAskModal(const PendingAsk& request, const Theme& theme,
         const PendingAsk& ask = *request_state;
         Elements rows;
         rows.push_back(text("the assistant asks") | bold | color(theme.ColorFor("attention")));
+        if (state->reviewing) {
+            // The frozen review list: one line per question, wording shared
+            // with CollectAnswer (see ReviewLine). Nothing here is editable
+            // -- the CatchEvent below freezes input -- so Enter is a genuine
+            // confirmation of what will be sent, not another way to type.
+            int first_line = -1;
+            for (int i = 0; i < ask.request.questions_size(); ++i) {
+                const auto& question = ask.request.questions(i);
+                if (i > 0) rows.push_back(separator());
+                const std::string name =
+                    question.header().empty()
+                        ? "Question " + std::to_string(i + 1)
+                        : question.header();
+                rows.push_back(text(name) | bold);
+                rows.push_back(text(ReviewLine(question, state->questions[i])));
+                if (first_line < 0) first_line = static_cast<int>(rows.size()) - 1;
+            }
+            if (!(*interacted) && first_line >= 0) {
+                rows[first_line] |= focus;   // the viewport follows the review list
+            }
+            return window(text(" question "),
+                          PadHorizontal(vbox({
+                              vbox(std::move(rows)) | yframe | vscroll_indicator |
+                                  size(HEIGHT, LESS_THAN, ModalBodyHeightBudget()),
+                              separator(),
+                              paragraph("enter: submit  ·  esc: edit answers") | dim,
+                          }))) |
+                   size(WIDTH, LESS_THAN, 82) | color(theme.ColorFor("attention"));
+        }
         for (int i = 0; i < ask.request.questions_size(); ++i) {
             const auto& question = ask.request.questions(i);
             if (i > 0) rows.push_back(separator());
@@ -381,18 +476,44 @@ ftxui::Component MakeAskModal(const PendingAsk& request, const Theme& theme,
                           vbox(std::move(rows)) | yframe | vscroll_indicator |
                               size(HEIGHT, LESS_THAN, ModalBodyHeightBudget()),
                           separator(),
-                          paragraph("enter: submit  ·  esc: dismiss  ·  tab/arrow: move") | dim,
+                          paragraph("enter: review  ·  esc: dismiss  ·  tab/arrow: move") | dim,
                       }))) |
                size(WIDTH, LESS_THAN, 82) | color(theme.ColorFor("attention"));
     });
     return CatchEvent(body, [on_answer, request_state, state, interacted](const Event& event) {
         *interacted = true;
         if (event == Event::Return) {
-            on_answer(CollectAnswer(*request_state, *state));
+            if (state->reviewing) {
+                on_answer(CollectAnswer(*request_state, *state));
+            } else {
+                state->reviewing = true;   // first Enter: freeze into the review list
+            }
             return true;
         }
         if (event == Event::Escape) {
+            // Escape peels ONE level: review back to editing, editing to
+            // dismissal -- never review straight to dismissal, and never a
+            // level the footer does not name. While editing this is exactly
+            // the pre-review modal's contract (dismiss = answered=false,
+            // "user dismissed", never a selection).
+            if (state->reviewing) {
+                state->reviewing = false;
+                return true;
+            }
             on_answer(DismissedAnswer(*request_state));
+            return true;
+        }
+        if (state->reviewing) {
+            // Review mode freezes the picks: swallow everything the editing
+            // widgets could mutate with (arrows/tab/space/characters reach
+            // the live container even while nothing of it renders) so the
+            // list cannot change invisibly behind the review -- but return
+            // false for the rest, so Ctrl+C still falls through to the root
+            // dispatch's interrupt branch (turn.cancel's hardcoded second
+            // key in keybinding_dispatch). A turn.cancel REMAPPED onto a
+            // character key is eaten here -- known gap, same class the other
+            // modal factories accept by hardcoding Escape.
+            if (event == Event::CtrlC) return false;
             return true;
         }
         return false;

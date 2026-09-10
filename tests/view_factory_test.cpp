@@ -16,10 +16,14 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <chrono>
+#include <optional>
 #include <thread>
+
+#include <nlohmann/json.hpp>
 
 #include "ftxui_harness.hpp"
 
+#include "minimal/client/chat_model.hpp"
 #include "minimal/client/plugins/core_registrations.hpp"
 #include "minimal/client/plugins/registries.hpp"
 #include "minimal/client/render/markdown_renderer.hpp"
@@ -409,6 +413,150 @@ TEST_CASE("confirmation modal: renders the ask and answers the focused option") 
 }
 
 // ---------------------------------------------------------------------------
+// Ask modal (tool-ask plugin)
+// ---------------------------------------------------------------------------
+
+namespace {
+
+v1::AskQuestion MakeAskQuestion(const std::string& header, const std::string& question,
+                                const std::vector<std::string>& labels) {
+    v1::AskQuestion q;
+    q.set_header(header);
+    q.set_question(question);
+    for (const auto& label : labels) q.add_options()->set_label(label);
+    q.set_allow_other(true);   // the wire default: the server always sends it on
+    return q;
+}
+
+PendingAsk MakeAskRequest(std::vector<v1::AskQuestion> questions) {
+    PendingAsk ask;
+    ask.request_id = "ask-1";
+    for (auto& q : questions) *ask.request.add_questions() = std::move(q);
+    return ask;
+}
+
+}  // namespace
+
+TEST_CASE("ask modal: every question renders") {
+    // Regression: the allow_other rows used to be pushed as SEPARATE children
+    // of the question container, so the renderer's ChildAt(question index)
+    // misaligned and every question after the first rendered the PREVIOUS
+    // question's other-block -- questions 2..n existed (focusable) but never
+    // rendered.
+    const auto theme = TestTheme();
+    const auto request = MakeAskRequest({MakeAskQuestion("Approach", "which approach?",
+                                                         {"one", "two"}),
+                                         MakeAskQuestion("Scope", "how much scope?",
+                                                         {"small", "large"})});
+    auto modal = MakeAskModal(request, theme, [](v1::AskUserResponse) {});
+
+    const auto frame = RenderFrame(modal);
+    CHECK(frame.find("Approach") != std::string::npos);
+    CHECK(frame.find("which approach?") != std::string::npos);
+    CHECK(frame.find("Scope") != std::string::npos);
+    CHECK(frame.find("how much scope?") != std::string::npos);
+    CHECK(frame.find("small") != std::string::npos);
+    CHECK(frame.find("large") != std::string::npos);
+}
+
+TEST_CASE("ask modal: the free-text input exists only while its toggle is checked") {
+    const auto theme = TestTheme();
+    const auto request = MakeAskRequest(
+        {MakeAskQuestion("Approach", "which approach?", {"one", "two"})});
+    std::optional<v1::AskUserResponse> submitted;
+    auto modal = MakeAskModal(
+        request, theme, [&](v1::AskUserResponse r) { submitted = std::move(r); });
+
+    // Unchecked: no input row at all -- an invisible-but-focusable input is
+    // the "hidden choice" bug class, and the always-on input spent a modal
+    // row most asks never use.
+    CHECK(RenderFrame(modal).find("your answer") == std::string::npos);
+
+    // Navigation notes (ftxui v7 semantics, worth writing down because the
+    // test is the contract): the radiobox CONSUMES arrows to move its hover
+    // and commits on space/Return -- Return is the modal's review key, so
+    // space commits; Tab is eaten by the radiobox too, so widget traversal
+    // happens with arrows when the widget does not consume them (the last
+    // ArrowDown bubbles out of the radiobox to the container).
+    REQUIRE(SendEvent(modal, ftx::Event::ArrowDown));    // hover option 2
+    REQUIRE(SendEvent(modal, ftx::Event::ArrowDown));    // hover is last: bubbles to the toggle
+    REQUIRE(SendEvent(modal, ftx::Event::Character(" ")));   // check "Type your own answer"
+    CHECK(RenderFrame(modal).find("your answer") != std::string::npos);
+    REQUIRE(SendEvent(modal, ftx::Event::ArrowDown));    // the toggle: bubbles to the input
+    REQUIRE(SendEvent(modal, ftx::Event::Character("h")));
+    REQUIRE(SendEvent(modal, ftx::Event::Character("i")));
+    CHECK(RenderFrame(modal).find("hi") != std::string::npos);
+
+    // And the typed answer is what submission sends.
+    REQUIRE(SendEvent(modal, ftx::Event::Return));   // -> review
+    CHECK(RenderFrame(modal).find("your answer: hi") != std::string::npos);
+    REQUIRE(SendEvent(modal, ftx::Event::Return));   // -> submit
+    REQUIRE(submitted.has_value());
+    REQUIRE(submitted->answers_size() == 1);
+    CHECK(submitted->answers(0).other() == "hi");
+}
+
+TEST_CASE("ask modal: Enter reviews before submitting; Escape peels one level") {
+    const auto theme = TestTheme();
+    const auto request = MakeAskRequest({MakeAskQuestion("Approach", "which approach?",
+                                                         {"one", "two"}),
+                                         MakeAskQuestion("Scope", "how much scope?",
+                                                         {"small", "large"})});
+    std::vector<v1::AskUserResponse> submitted;
+    auto modal = MakeAskModal(request, theme,
+                              [&](v1::AskUserResponse r) { submitted.push_back(std::move(r)); });
+
+    // Hover, then commit, the second option of question 1 (space commits a
+    // radiobox hover -- see the navigation notes above).
+    REQUIRE(SendEvent(modal, ftx::Event::ArrowDown));
+    REQUIRE(SendEvent(modal, ftx::Event::Character(" ")));
+
+    // First Enter: the review list, not a submission.
+    REQUIRE(SendEvent(modal, ftx::Event::Return));
+    CHECK(submitted.empty());
+    const auto review = RenderFrame(modal);
+    CHECK(review.find("-> two") != std::string::npos);          // the pick
+    CHECK(review.find("(not answered)") != std::string::npos);  // question 2
+    CHECK(review.find("enter: submit") != std::string::npos);
+    CHECK(review.find("small") == std::string::npos);           // widgets frozen away
+
+    // Arrows in review change nothing invisible: the picks stay frozen.
+    SendEvent(modal, ftx::Event::ArrowDown);
+    REQUIRE(SendEvent(modal, ftx::Event::Return));
+    REQUIRE(submitted.size() == 1);
+    CHECK(submitted[0].answers(0).selected(0) == "two");
+    CHECK(submitted[0].answers(1).selected_size() == 0);   // unanswered stays unanswered
+
+    // Escape in review goes back to EDITING, not dismissal; Escape while
+    // editing dismisses (the pre-review contract).
+    auto modal2 = MakeAskModal(request, theme,
+                               [&](v1::AskUserResponse r) { submitted.push_back(std::move(r)); });
+    REQUIRE(SendEvent(modal2, ftx::Event::Return));   // -> review
+    REQUIRE(SendEvent(modal2, ftx::Event::Escape));   // -> editing, nothing sent
+    CHECK(submitted.size() == 1);
+    CHECK(RenderFrame(modal2).find("enter: review") != std::string::npos);
+    REQUIRE(SendEvent(modal2, ftx::Event::Escape));   // -> dismissed
+    REQUIRE(submitted.size() == 2);
+    CHECK_FALSE(submitted[1].answered());
+}
+
+TEST_CASE("ask modal: review mode swallows widget keys but passes Ctrl+C through") {
+    // The pass-through discipline: review freezing eats only what could
+    // mutate the frozen picks. Ctrl+C is the root dispatch's hardcoded
+    // interrupt (turn.cancel's second key) and must still reach it.
+    const auto theme = TestTheme();
+    const auto request = MakeAskRequest(
+        {MakeAskQuestion("Approach", "which approach?", {"one", "two"})});
+    auto modal = MakeAskModal(request, theme, [](v1::AskUserResponse) {});
+
+    CHECK_FALSE(SendEvent(modal, ftx::Event::CtrlC));   // editing passes through too
+    REQUIRE(SendEvent(modal, ftx::Event::Return));      // -> review
+    CHECK_FALSE(SendEvent(modal, ftx::Event::CtrlC));   // still passes through
+    CHECK(SendEvent(modal, ftx::Event::Character("x")));   // frozen: consumed
+    CHECK(SendEvent(modal, ftx::Event::ArrowDown));        // frozen: consumed
+}
+
+// ---------------------------------------------------------------------------
 // Prompt editor
 // ---------------------------------------------------------------------------
 
@@ -765,6 +913,73 @@ TEST_CASE("chat view: a completed tool call with no name-specific renderer still
     view.ToggleCollapseFocused();
     const auto expanded = RenderElement(view.Render(snap));
     CHECK(expanded.find("total 0") != std::string::npos);
+}
+
+// An ask_user call+result pair: the tool_use carries a real questions input
+// (the proto Struct the model sent) and the result the "user selected: ..."
+// prose the tool formats from the client's response.
+std::vector<v1::StoredMessage> StoredAskCallAndResult(int64_t seq) {
+    v1::StoredMessage call;
+    call.set_seq(seq);
+    call.mutable_message()->set_role(v1::ROLE_ASSISTANT);
+    auto* use = call.mutable_message()->add_content()->mutable_tool_use();
+    use->set_id("call-ask-1");
+    use->set_name(std::string(kAskUserToolName));
+    auto* question = (*use->mutable_input()
+                           ->mutable_fields())["questions"]
+                        .mutable_list_value()
+                        ->add_values()
+                        ->mutable_struct_value();
+    (*question->mutable_fields())["question"].set_string_value("which approach?");
+
+    v1::StoredMessage result;
+    result.set_seq(seq + 1);
+    result.mutable_message()->set_role(v1::ROLE_USER);
+    auto* tool_result = result.mutable_message()->add_content()->mutable_tool_result();
+    tool_result->set_tool_use_id("call-ask-1");
+    tool_result->add_content()->mutable_text()->set_text(
+        "Approach: the user selected: one");
+
+    return {std::move(result), std::move(call)};   // descending, like a real page
+}
+
+TEST_CASE("chat view: ask_user result rows render expanded by default, with the "
+          "question as the header") {
+    // The row body is the user's recorded choices -- the only durable
+    // confirmation of what they answered (the modal closes on submit), so it
+    // must not start hidden behind the tool-row collapse, and the header
+    // orientation is the question, not a JSON dump.
+    const auto theme = TestTheme();
+    minimal::client::MarkdownRenderer renderer(&theme, nullptr);
+    plugins::MarkdownEngineRegistry engine_registry;
+    plugins::RegisterDefaultMarkdownEngine(engine_registry, renderer);
+    auto& engine = *engine_registry.engine;
+    plugins::MessageRendererRegistry messages;
+    plugins::ToolResultRendererRegistry tool_renderers;
+    plugins::RegisterCoreMessageRenderers(messages);
+    plugins::RegisterCoreAgentMarkdownRenderer(messages, engine);
+
+    ChatRow row;
+    row.kind = ChatRowKind::ToolActivity;
+    row.tool_name = std::string(kAskUserToolName);
+    row.tool_input = nlohmann::json::parse(R"({"questions":[{"question":"which approach?"}]} )");
+    row.text = "Approach: the user selected: one";
+    CHECK_FALSE(CollapsedByDefault(row));
+    row.tool_name = "bash";
+    CHECK(CollapsedByDefault(row));   // every other tool keeps the default
+
+    ChatView view(theme, messages, tool_renderers);
+    SessionState::Snapshot snap;
+    snap.session_id = "session-ask";
+    snap.transcript_version = 1;
+    snap.scrollback_page = std::make_shared<const std::vector<v1::StoredMessage>>(
+        StoredAskCallAndResult(1));
+
+    // No expand toggle: the choices and the question are visible as rendered.
+    const auto frame = RenderElement(view.Render(snap));
+    CHECK(frame.find("which approach?") != std::string::npos);
+    CHECK(frame.find("the user selected: one") != std::string::npos);
+    CHECK(frame.find("(collapsed") == std::string::npos);
 }
 
 TEST_CASE("chat view: ScrollBy moves the viewport off the pinned-to-newest default") {

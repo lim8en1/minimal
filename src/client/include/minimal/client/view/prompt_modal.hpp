@@ -44,10 +44,15 @@ ftxui::Component MakeConfirmationModal(const PendingConfirmation& request, const
 // The model's structured questions (tool-ask plugin): one modal, up to four
 // question blocks. `multiple` questions render checkboxes, single-pick
 // questions a radio list; `allow_other` questions get a "Type your own
-// answer" toggle with an input line. Enter submits whatever was answered (a
-// question left blank is simply not answered); Escape dismisses -- the
-// on_answer callback receives an `answered == false` response, which the
-// server turns into "user dismissed", never into a selection.
+// answer" toggle whose input line exists (and is focusable) only while
+// checked. Enter first freezes the answers into a review list (one line per
+// question); Enter again submits whatever was answered (a question left
+// blank is simply not answered), Escape from review goes back to editing,
+// and Escape while editing dismisses -- the on_answer callback receives an
+// `answered == false` response, which the server turns into "user
+// dismissed", never into a selection. Unhandled keys fall through: Ctrl+C
+// still reaches the root dispatch's turn-cancel branch while the modal (or
+// its review list) is up.
 ftxui::Component MakeAskModal(const PendingAsk& request, const Theme& theme,
                               std::function<void(v1::AskUserResponse response)> on_answer);
 
