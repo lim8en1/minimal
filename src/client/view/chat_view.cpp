@@ -347,10 +347,21 @@ ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
     if (!snapshot.pending_user_text.empty()) {
         ChatRow echo{.kind = ChatRowKind::UserText, .text = snapshot.pending_user_text};
         if (const auto* renderer = message_renderers_.Find(ChatRowKind::UserText)) {
-            column.push_back(renderer->Render(
-                echo, theme_,
-                plugins::RowRenderContext{.toggle_collapse_hint = toggle_collapse_hint_}));
-            column.push_back(text(" "));
+            // A separate call from RebuildRows' own try/catch (this is the
+            // live echo, not a persisted row) -- plugin code is not trusted
+            // to return normally here either.
+            try {
+                column.push_back(renderer->Render(
+                    echo, theme_,
+                    plugins::RowRenderContext{.toggle_collapse_hint = toggle_collapse_hint_}));
+                column.push_back(text(" "));
+            } catch (const std::exception& error) {
+                common::DefaultLogger().warn("message renderer for UserText threw: {}",
+                                             error.what());
+            } catch (...) {
+                common::DefaultLogger().warn(
+                    "message renderer for UserText threw a non-standard exception");
+            }
         }
     }
 
@@ -377,7 +388,20 @@ ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
             if (i >= live_text_streams.size() || !live_text_streams[i].view) continue;
             column.push_back(text("assistant") | color(theme_.ColorFor("assistant_message")) |
                              bold);
-            column.push_back(live_text_streams[i].view->Render(theme_));
+            // A throwing stream must not collapse the whole turn's layout --
+            // a short fallback line stands in so the row is still visibly
+            // present, matching tab_ui.cpp's AppendDelta/Finalize containment
+            // for the same plugin-owned stream object.
+            try {
+                column.push_back(live_text_streams[i].view->Render(theme_));
+            } catch (const std::exception& error) {
+                common::DefaultLogger().warn("markdown stream Render threw: {}", error.what());
+                column.push_back(text("(render failed)") | dim);
+            } catch (...) {
+                common::DefaultLogger().warn(
+                    "markdown stream Render threw a non-standard exception");
+                column.push_back(text("(render failed)") | dim);
+            }
             column.push_back(text(" "));
         } else if (segment.kind == LiveTurnSegment::Kind::Thinking) {
             // Reasoning streams as plain quiet text, same look as the persisted

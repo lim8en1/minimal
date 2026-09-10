@@ -1055,7 +1055,18 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         }
         theme = std::move(loaded);
         env.highlighter->OnThemeChanged();
+        // PushThemeToPlugins disables a throwing chat surface only in `env`
+        // (correct for the FIRST call, during BuildTuiEnvironment, before
+        // AppState exists -- RunTui reads env.chat_surface into AppState
+        // right after). This is a LATER call, after AppState already has its
+        // own cached pointer and sticky broken-flag (EffectiveChatSurface) --
+        // without this sync, a surface that throws on a SWITCH (not the
+        // first load) stays the effective surface, still receiving events.
+        const bool surface_was_live = env.chat_surface != nullptr;
         minimal::client::PushThemeToPlugins(env);
+        if (surface_was_live && env.chat_surface == nullptr) {
+            app->DisableChatSurface("threw on theme switch");
+        }
         minimal::client::SaveThemePreference(env.config_dir, name);
         if (const std::string tab = app->FocusedTabId(); !tab.empty()) {
             app->TabNotice(tab, "theme switched to '" + name + "'");

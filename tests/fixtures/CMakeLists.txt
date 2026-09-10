@@ -33,6 +33,7 @@ minimal_add_fixture_plugin(fixture-endpoint   fixture_endpoint.cpp)
 
 minimal_add_client_fixture_plugin(fixture-client           fixture_client_good.cpp)
 minimal_add_client_fixture_plugin(fixture-client-exclusive fixture_client_exclusive.cpp)
+minimal_add_client_fixture_plugin(fixture-client-partial-throw fixture_client_partial_throw.cpp)
 
 # The USER-plugin path: the same well-formed fixture source, built through
 # minimal_add_user_plugin -- the function user plugin trees register with --

@@ -79,16 +79,47 @@ SessionState::Snapshot TabMaintenance::Maintain(const std::string& tab_id,
         if (snap.live_segments[i].kind != LiveTurnSegment::Kind::Text) continue;
         LiveTextStreamSlot& slot = ui.live_text_streams[i];
         const std::string& text = snap.live_segments[i].text;
-        if (!slot.view) slot.view = make_stream();
-        if (text.size() > slot.seen) {
-            slot.view->AppendDelta(std::string_view(text).substr(slot.seen));
-            slot.seen = text.size();
-            // New text on an ALREADY-finalized segment means a re-arm at
-            // the engine level (StreamingMarkdownView::AppendDelta, track
-            // A1) -- mirror that here too, so this segment gets its own
-            // fresh authoritative reparse when it next finalizes, exactly
-            // like the engine's own re-arm.
-            slot.finalized_for_turn = false;
+        // A plugin MarkdownEngine is not trusted to return normally: a
+        // throw here used to kill the whole TUI mid-turn. MakeStream()
+        // throwing leaves slot.view null -- the guard above naturally
+        // retries next pass, since nothing below has consumed `text` yet.
+        if (!slot.view) {
+            try {
+                slot.view = make_stream();
+            } catch (const std::exception& error) {
+                common::DefaultLogger().warn("markdown engine MakeStream threw: {}",
+                                             error.what());
+            } catch (...) {
+                common::DefaultLogger().warn(
+                    "markdown engine MakeStream threw a non-standard exception");
+            }
+        }
+        if (slot.view && text.size() > slot.seen) {
+            try {
+                slot.view->AppendDelta(std::string_view(text).substr(slot.seen));
+                slot.seen = text.size();
+                // New text on an ALREADY-finalized segment means a re-arm at
+                // the engine level (StreamingMarkdownView::AppendDelta, track
+                // A1) -- mirror that here too, so this segment gets its own
+                // fresh authoritative reparse when it next finalizes, exactly
+                // like the engine's own re-arm.
+                slot.finalized_for_turn = false;
+            } catch (const std::exception& error) {
+                common::DefaultLogger().warn("markdown stream AppendDelta threw: {}",
+                                             error.what());
+                // Discard the (possibly now-corrupted) stream rather than
+                // keep feeding it every frame; slot.seen resets too, so the
+                // fresh stream MakeStream() builds next pass replays the
+                // FULL accumulated text from scratch instead of missing the
+                // span this call was trying to append.
+                slot.view.reset();
+                slot.seen = 0;
+            } catch (...) {
+                common::DefaultLogger().warn(
+                    "markdown stream AppendDelta threw a non-standard exception");
+                slot.view.reset();
+                slot.seen = 0;
+            }
         }
     }
     // The MOST RECENT text segment's authoritative reparse (the engine
@@ -103,8 +134,20 @@ SessionState::Snapshot TabMaintenance::Maintain(const std::string& tab_id,
             if (snap.live_segments[i].kind != LiveTurnSegment::Kind::Text) continue;
             LiveTextStreamSlot& slot = ui.live_text_streams[i];
             if (slot.view && !slot.finalized_for_turn) {
-                slot.view->Finalize();
-                slot.finalized_for_turn = true;
+                try {
+                    slot.view->Finalize();
+                    slot.finalized_for_turn = true;
+                } catch (const std::exception& error) {
+                    common::DefaultLogger().warn("markdown stream Finalize threw: {}",
+                                                 error.what());
+                    slot.view.reset();
+                    slot.seen = 0;
+                } catch (...) {
+                    common::DefaultLogger().warn(
+                        "markdown stream Finalize threw a non-standard exception");
+                    slot.view.reset();
+                    slot.seen = 0;
+                }
             }
             break;
         }

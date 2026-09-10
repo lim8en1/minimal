@@ -88,6 +88,23 @@ View* ViewRegistry::Find(std::string_view id) const {
     return nullptr;
 }
 
+void ViewRegistry::RemoveByAttribution(const std::string& plugin_name) {
+    // views_ and attributions_ are index-aligned (Register pushes to both in
+    // lockstep) -- compact both together rather than via std::remove_if on
+    // either alone, which would desync them.
+    std::size_t write = 0;
+    for (std::size_t read = 0; read < attributions_.size(); ++read) {
+        if (attributions_[read].plugin_name == plugin_name) continue;
+        if (write != read) {
+            attributions_[write] = std::move(attributions_[read]);
+            views_[write] = std::move(views_[read]);
+        }
+        ++write;
+    }
+    attributions_.resize(write);
+    views_.resize(write);
+}
+
 void StartViewRegistry::Register(std::unique_ptr<StartView> view) {
     if (sealed_) {
         common::DefaultLogger().warn(
@@ -108,6 +125,20 @@ StartView* StartViewRegistry::Find(std::string_view id) const {
     return nullptr;
 }
 
+void StartViewRegistry::RemoveByAttribution(const std::string& plugin_name) {
+    std::size_t write = 0;
+    for (std::size_t read = 0; read < attributions_.size(); ++read) {
+        if (attributions_[read].plugin_name == plugin_name) continue;
+        if (write != read) {
+            attributions_[write] = std::move(attributions_[read]);
+            views_[write] = std::move(views_[read]);
+        }
+        ++write;
+    }
+    attributions_.resize(write);
+    views_.resize(write);
+}
+
 void ToolResultRendererRegistry::Register(std::unique_ptr<ToolResultRenderer> renderer) {
     if (sealed_) {
         common::DefaultLogger().warn(
@@ -126,6 +157,20 @@ const ToolResultRenderer* ToolResultRendererRegistry::Find(std::string_view tool
         if (renderer->tool_name() == tool_name) return renderer.get();
     }
     return nullptr;
+}
+
+void ToolResultRendererRegistry::RemoveByAttribution(const std::string& plugin_name) {
+    std::size_t write = 0;
+    for (std::size_t read = 0; read < attributions_.size(); ++read) {
+        if (attributions_[read].plugin_name == plugin_name) continue;
+        if (write != read) {
+            attributions_[write] = std::move(attributions_[read]);
+            renderers_[write] = std::move(renderers_[read]);
+        }
+        ++write;
+    }
+    attributions_.resize(write);
+    renderers_.resize(write);
 }
 
 void MessageRendererRegistry::Register(ChatRowKind kind, std::unique_ptr<MessageRenderer> renderer) {
@@ -156,6 +201,26 @@ const MessageRenderer* MessageRendererRegistry::Find(ChatRowKind kind) const {
     return it == renderers_.end() ? nullptr : it->second.get();
 }
 
+void MessageRendererRegistry::RemoveByAttribution(const std::string& plugin_name) {
+    // claims_ records EVERY claim attempt in order, but only the FIRST claim
+    // for a given kind actually won the registry slot (Register(): first
+    // claimant stays, a later duplicate is recorded here but never reaches
+    // renderers_) -- erase renderers_[kind] only when THIS plugin is that
+    // first claimant, never for a losing duplicate that happens to name a
+    // kind some earlier plugin still owns.
+    std::map<ChatRowKind, bool> owner_decided;
+    for (const auto& [kind, attribution] : claims_) {
+        if (owner_decided[kind]) continue;
+        owner_decided[kind] = true;
+        if (attribution.plugin_name == plugin_name) renderers_.erase(kind);
+    }
+    claims_.erase(std::remove_if(claims_.begin(), claims_.end(),
+                                 [&](const auto& claim) {
+                                     return claim.second.plugin_name == plugin_name;
+                                 }),
+                  claims_.end());
+}
+
 void StatusSegmentRegistry::Register(std::unique_ptr<StatusSegment> segment) {
     if (sealed_) {
         common::DefaultLogger().warn(
@@ -176,6 +241,20 @@ const StatusSegment* StatusSegmentRegistry::Find(std::string_view id) const {
     return nullptr;
 }
 
+void StatusSegmentRegistry::RemoveByAttribution(const std::string& plugin_name) {
+    std::size_t write = 0;
+    for (std::size_t read = 0; read < attributions_.size(); ++read) {
+        if (attributions_[read].plugin_name == plugin_name) continue;
+        if (write != read) {
+            attributions_[write] = std::move(attributions_[read]);
+            segments_[write] = std::move(segments_[read]);
+        }
+        ++write;
+    }
+    attributions_.resize(write);
+    segments_.resize(write);
+}
+
 void SyntaxGrammarRegistry::Register(std::unique_ptr<SyntaxGrammar> grammar) {
     if (sealed_) {
         common::DefaultLogger().warn(
@@ -187,6 +266,20 @@ void SyntaxGrammarRegistry::Register(std::unique_ptr<SyntaxGrammar> grammar) {
     if (grammar == nullptr) return;
     attributions_.push_back({attribution_, std::string(grammar->Language())});
     grammars_.push_back(std::move(grammar));
+}
+
+void SyntaxGrammarRegistry::RemoveByAttribution(const std::string& plugin_name) {
+    std::size_t write = 0;
+    for (std::size_t read = 0; read < attributions_.size(); ++read) {
+        if (attributions_[read].plugin_name == plugin_name) continue;
+        if (write != read) {
+            attributions_[write] = std::move(attributions_[read]);
+            grammars_[write] = std::move(grammars_[read]);
+        }
+        ++write;
+    }
+    attributions_.resize(write);
+    grammars_.resize(write);
 }
 
 // --- Exclusive registries -----------------------------------------------------
@@ -205,6 +298,17 @@ void ChatSurfaceRegistry::Register(std::unique_ptr<ChatSurface> candidate) {
     surface = std::move(candidate);
 }
 
+void ChatSurfaceRegistry::RemoveByAttribution(const std::string& plugin_name) {
+    if (!record.registered || record.plugin_name != plugin_name) return;
+    surface.reset();
+    record = ExclusiveRecord{};
+    attributions_.erase(std::remove_if(attributions_.begin(), attributions_.end(),
+                                       [&](const Attribution& a) {
+                                           return a.plugin_name == plugin_name;
+                                       }),
+                        attributions_.end());
+}
+
 void MarkdownEngineRegistry::Register(std::unique_ptr<MarkdownEngine> candidate) {
     if (sealed_) {
         common::DefaultLogger().warn(
@@ -217,6 +321,17 @@ void MarkdownEngineRegistry::Register(std::unique_ptr<MarkdownEngine> candidate)
     attributions_.push_back({attribution_, "markdown_engine"});
     if (!record.Claim(attribution_)) return;
     engine = std::move(candidate);
+}
+
+void MarkdownEngineRegistry::RemoveByAttribution(const std::string& plugin_name) {
+    if (!record.registered || record.plugin_name != plugin_name) return;
+    engine.reset();
+    record = ExclusiveRecord{};
+    attributions_.erase(std::remove_if(attributions_.begin(), attributions_.end(),
+                                       [&](const Attribution& a) {
+                                           return a.plugin_name == plugin_name;
+                                       }),
+                        attributions_.end());
 }
 
 }  // namespace minimal::client::plugins

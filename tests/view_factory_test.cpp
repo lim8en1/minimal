@@ -17,6 +17,7 @@
 
 #include <chrono>
 #include <optional>
+#include <stdexcept>
 #include <thread>
 
 #include <nlohmann/json.hpp>
@@ -986,6 +987,67 @@ TEST_CASE("chat view: live text and tool activity render interleaved, "
     // after, "search_the_archives".
     CHECK(opening_pos < tool_pos);
     CHECK(tool_pos < closing_pos);
+}
+
+namespace {
+class ThrowingUserTextRenderer final : public plugins::MessageRenderer {
+public:
+    ftxui::Element Render(const ChatRow&, const Theme&,
+                          const plugins::RowRenderContext&) const override {
+        throw std::runtime_error("boom");
+    }
+};
+
+class ThrowingStream final : public plugins::MarkdownEngine::Stream {
+public:
+    void AppendDelta(std::string_view) override {}
+    void Finalize() override {}
+    ftxui::Element Render(const Theme&) const override { throw std::runtime_error("boom"); }
+};
+}  // namespace
+
+TEST_CASE("chat view: a throwing UserText renderer does not crash the echo row") {
+    // Regression: the pending-turn echo is a SEPARATE call from RebuildRows'
+    // own try/catch (this is the live echo, not a persisted row) -- it had
+    // no containment of its own.
+    const auto theme = TestTheme();
+    plugins::MessageRendererRegistry messages;
+    messages.SetAttribution("test");
+    messages.Register(ChatRowKind::UserText, std::make_unique<ThrowingUserTextRenderer>());
+    messages.ClearAttribution();
+    plugins::ToolResultRendererRegistry tool_renderers;
+
+    ChatView view(theme, messages, tool_renderers);
+
+    SessionState::Snapshot snap;
+    snap.session_id = "session-echo-throws";
+    snap.transcript_version = 1;
+    snap.pending_user_text = "hello";
+
+    // The point: this must not crash or propagate.
+    const auto frame = RenderElement(view.Render(snap));
+    CHECK(frame.find("hello") == std::string::npos);   // the throwing echo just didn't render
+}
+
+TEST_CASE("chat view: a throwing live markdown stream renders a fallback, not a crash") {
+    const auto theme = TestTheme();
+    plugins::MessageRendererRegistry messages;
+    plugins::RegisterCoreMessageRenderers(messages);
+    plugins::ToolResultRendererRegistry tool_renderers;
+
+    ChatView view(theme, messages, tool_renderers);
+
+    SessionState::Snapshot snap;
+    snap.session_id = "session-stream-throws";
+    snap.transcript_version = 1;
+    snap.live_segments = {
+        LiveTurnSegment{.kind = LiveTurnSegment::Kind::Text, .text = "partial"},
+    };
+    std::vector<LiveTextStreamSlot> streams(1);
+    streams[0].view = std::make_unique<ThrowingStream>();
+
+    const auto frame = RenderElement(view.Render(snap, streams));
+    CHECK(frame.find("render failed") != std::string::npos);
 }
 
 TEST_CASE("chat view: a completed tool call with no name-specific renderer still renders "

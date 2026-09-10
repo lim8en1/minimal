@@ -279,7 +279,7 @@ add_subdirectory(fixtures)
 add_dependencies(minimal_tests
     fixture-good fixture-collision fixture-bad-abi fixture-minimal fixture-not-a-plugin
     fixture-throws fixture-advisor fixture-service fixture-service-b fixture-hook
-    fixture-client fixture-client-exclusive fixture-endpoint
+    fixture-client fixture-client-exclusive fixture-client-partial-throw fixture-endpoint
     fixture-user)
 target_compile_definitions(minimal_tests PRIVATE
     MINIMAL_FIXTURE_DIR="${CMAKE_CURRENT_BINARY_DIR}/fixtures"

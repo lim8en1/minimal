@@ -281,6 +281,12 @@ ftxui::Element FrameRenderer::Render() {
     // the status segments below.
     for (auto& entry : deps_.plugin_views) {
         if (entry.view->spec().placement == plugins::ViewPlacement::Panel && entry.visible) {
+            // A view whose component() factory returned null without
+            // throwing (bootstrap's own guard only catches a THROWING
+            // component()) would otherwise dereference a null Component here
+            // -- a segfault, not a catchable exception, so the try below
+            // cannot protect against it.
+            if (entry.component == nullptr) continue;
             Element body;
             try {
                 body = entry.component->Render();

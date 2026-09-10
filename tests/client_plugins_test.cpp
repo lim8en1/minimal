@@ -311,6 +311,44 @@ TEST_CASE("the exclusive slots ignore a second registration and keep the first",
     fixtures->chat_surface.surface->OnEvent(event);
 }
 
+TEST_CASE("a partial registration is rolled back, and a later plugin reusing "
+          "the same view id loads clean",
+          "[client_plugins][loader]") {
+    // fixture-client-partial-throw: register_views succeeds (claims
+    // "fixture.panel"), register_renderers throws. Without rollback, the
+    // view would stay live and the SECOND candidate below (fixture-client,
+    // which also claims "fixture.panel") would collide against a plugin that
+    // never actually loaded.
+    const auto fixtures = LoadedFixtures::Load(
+        {Candidate("fixture-client-partial-throw.so"), Candidate("fixture-client.so")});
+
+    REQUIRE(fixtures->records.size() == 2);
+    CHECK_FALSE(fixtures->records[0].ok());
+    CHECK(fixtures->records[0].name == "fixture-client-partial-throw");
+    CHECK(fixtures->records[1].ok());
+    CHECK(fixtures->records[1].name == "fixture-client");
+
+    // Exactly ONE "fixture.panel" attribution survives, and it belongs to
+    // the plugin that actually loaded -- the failed plugin's own claim was
+    // stripped, not left to collide.
+    int panel_attributions = 0;
+    std::string owner;
+    for (const auto& attribution : fixtures->views.attributions()) {
+        if (attribution.original_name == "fixture.panel") {
+            ++panel_attributions;
+            owner = attribution.plugin_name;
+        }
+    }
+    CHECK(panel_attributions == 1);
+    CHECK(owner == "fixture-client");
+
+    // Find() resolves to the healthy plugin's component, not a dangling
+    // pointer into whatever the failed plugin registered.
+    REQUIRE(fixtures->views.Find("fixture.panel") != nullptr);
+    CHECK(ToText(fixtures->views.Find("fixture.panel")->component()->Render()) ==
+          "fixture panel");
+}
+
 TEST_CASE("the md4c default engine carries the streaming contract", "[client_plugins]") {
     Theme theme = Theme::Parse(R"({"name":"t","colors":{}})", ColorDepth::Truecolor);
     MarkdownRenderer renderer(&theme, nullptr);

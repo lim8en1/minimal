@@ -350,17 +350,26 @@ void PushThemeToPlugins(TuiEnvironment& out) {
     // surface is disabled, not fatal (catch + disable, track R2): OnTheme
     // runs before any event flows, so a throw here is the plugin's first
     // chance to kill the process unguarded.
+    //
+    // Logged, not fprintf'd: this function also runs from RunTui's /theme
+    // SWAP path (app.cpp), while the alt screen is live -- a raw
+    // fprintf(stderr) there garbles the running display. The logger is safe
+    // here too, on the very first (pre-TUI) call: it's the same sink every
+    // other plugin-facing guard in this bootstrap window already uses (e.g.
+    // registries.cpp's GuardedRegistration warnings).
     if (out.chat_surface != nullptr) {
         try {
             out.chat_surface->OnTheme(*out.theme);
         } catch (const std::exception& error) {
-            std::fprintf(stderr, "minimal: chat surface plugin threw on theme (%s) -- "
-                                 "disabled; the core chat view takes over\n",
-                         error.what());
+            common::DefaultLogger().error(
+                "chat surface plugin threw on theme ({}) -- disabled; the core chat view "
+                "takes over",
+                error.what());
             out.chat_surface = nullptr;
         } catch (...) {
-            std::fprintf(stderr, "minimal: chat surface plugin threw on theme (non-standard "
-                                 "exception) -- disabled; the core chat view takes over\n");
+            common::DefaultLogger().error(
+                "chat surface plugin threw on theme (non-standard exception) -- disabled; "
+                "the core chat view takes over");
             out.chat_surface = nullptr;
         }
     }
@@ -373,13 +382,11 @@ void PushThemeToPlugins(TuiEnvironment& out) {
         try {
             view->OnTheme(*out.theme);
         } catch (const std::exception& error) {
-            std::fprintf(stderr, "minimal: view plugin '%s' threw on theme: %s\n",
-                         view->spec().id.c_str(), error.what());
+            common::DefaultLogger().warn("view plugin '{}' threw on theme: {}",
+                                         view->spec().id, error.what());
         } catch (...) {
-            std::fprintf(stderr,
-                         "minimal: view plugin '%s' threw on theme (non-standard "
-                         "exception)\n",
-                         view->spec().id.c_str());
+            common::DefaultLogger().warn(
+                "view plugin '{}' threw on theme (non-standard exception)", view->spec().id);
         }
     }
 }

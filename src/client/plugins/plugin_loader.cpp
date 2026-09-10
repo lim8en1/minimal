@@ -6,8 +6,9 @@
 #include <cstring>
 #include <utility>
 
-#include "minimal/common/abi_tag.hpp"
 #include "minimal/client/plugins/client_plugin_abi.h"
+#include "minimal/common/abi_tag.hpp"
+#include "minimal/common/logger.hpp"
 
 namespace minimal::client::plugins {
 namespace {
@@ -52,19 +53,28 @@ Fn Lookup(void* handle, const char* symbol) {
 // CLOSE runs on both exit paths. The first client draft closed it inside the
 // body lambda -- on a throwing plugin the window stayed open, and every later
 // registration was mis-attributed to the plugin that had already failed.
-template <typename Open, typename Body, typename Close>
+//
+// `rollback` runs after `close`, on a throw only (ported from the server
+// loader, plugin_loader.cpp:54-88): without it, whatever this plugin
+// registered in an EARLIER hook this same LoadOne call stayed live even
+// though the plugin as a whole failed to load -- a later, healthy plugin
+// reusing one of those ids got a fatal collision naming a plugin that never
+// actually loaded.
+template <typename Open, typename Body, typename Close, typename Rollback>
 bool GuardedRegistration(PluginRecord& record, const char* what, Open&& open, Body&& body,
-                          Close&& close) {
+                          Close&& close, Rollback&& rollback) {
     open();
     try {
         body();
     } catch (const std::exception& error) {
         close();
+        rollback();
         record.status = LoadStatus::RegistrationThrew;
         record.error = std::string(what) + " threw: " + error.what();
         return false;
     } catch (...) {
         close();
+        rollback();
         record.status = LoadStatus::RegistrationThrew;
         record.error = std::string(what) + " threw a non-standard exception";
         return false;
@@ -168,12 +178,31 @@ PluginRecord ClientPluginLoader::LoadOne(const PluginCandidate& candidate) {
     context.client_api = client_api_;
     context.focus = focus_;
 
+    // Partial-registration rollback, captured BEFORE the first hook runs
+    // (ported from the server loader, plugin_loader.cpp:233-260). Every
+    // client registry has a removal seam -- unlike the server's partial
+    // coverage, there is no "stays live" caveat to log here.
+    auto rollback = [this, &record] {
+        views_.RemoveByAttribution(record.name);
+        start_views_.RemoveByAttribution(record.name);
+        renderers_.RemoveByAttribution(record.name);
+        message_renderers_.RemoveByAttribution(record.name);
+        status_segments_.RemoveByAttribution(record.name);
+        grammars_.RemoveByAttribution(record.name);
+        chat_surface_.RemoveByAttribution(record.name);
+        markdown_engine_.RemoveByAttribution(record.name);
+        common::DefaultLogger().warn(
+            "client plugin '{}': registration threw; rolled back -- nothing it registered "
+            "stayed live",
+            record.name);
+    };
+
     if (auto register_views = Lookup<RegisterViewsFn>(handle, "minimal_client_plugin_register_views")) {
         const std::size_t before = views_.attributions().size();
         if (!GuardedRegistration(record, "minimal_client_plugin_register_views",
                 [&] { views_.SetAttribution(record.name); },
                 [&] { register_views(views_, context); },
-                [&] { views_.ClearAttribution(); })) {
+                [&] { views_.ClearAttribution(); }, rollback)) {
             return record;
         }
         for (std::size_t i = before; i < views_.attributions().size(); ++i) {
@@ -187,7 +216,7 @@ PluginRecord ClientPluginLoader::LoadOne(const PluginCandidate& candidate) {
         if (!GuardedRegistration(record, "minimal_client_plugin_register_start_views",
                 [&] { start_views_.SetAttribution(record.name); },
                 [&] { register_start_views(start_views_, context); },
-                [&] { start_views_.ClearAttribution(); })) {
+                [&] { start_views_.ClearAttribution(); }, rollback)) {
             return record;
         }
         for (std::size_t i = before; i < start_views_.attributions().size(); ++i) {
@@ -202,7 +231,7 @@ PluginRecord ClientPluginLoader::LoadOne(const PluginCandidate& candidate) {
         if (!GuardedRegistration(record, "minimal_client_plugin_register_renderers",
                 [&] { renderers_.SetAttribution(record.name); },
                 [&] { register_renderers(renderers_, context); },
-                [&] { renderers_.ClearAttribution(); })) {
+                [&] { renderers_.ClearAttribution(); }, rollback)) {
             return record;
         }
         for (std::size_t i = before; i < renderers_.attributions().size(); ++i) {
@@ -216,7 +245,7 @@ PluginRecord ClientPluginLoader::LoadOne(const PluginCandidate& candidate) {
         if (!GuardedRegistration(record, "minimal_client_plugin_register_message_renderers",
                 [&] { message_renderers_.SetAttribution(record.name); },
                 [&] { register_message_renderers(message_renderers_, context); },
-                [&] { message_renderers_.ClearAttribution(); })) {
+                [&] { message_renderers_.ClearAttribution(); }, rollback)) {
             return record;
         }
         for (std::size_t i = before; i < message_renderers_.claims().size(); ++i) {
@@ -230,7 +259,7 @@ PluginRecord ClientPluginLoader::LoadOne(const PluginCandidate& candidate) {
         if (!GuardedRegistration(record, "minimal_client_plugin_register_status_segments",
                 [&] { status_segments_.SetAttribution(record.name); },
                 [&] { register_status_segments(status_segments_, context); },
-                [&] { status_segments_.ClearAttribution(); })) {
+                [&] { status_segments_.ClearAttribution(); }, rollback)) {
             return record;
         }
         for (std::size_t i = before; i < status_segments_.attributions().size(); ++i) {
@@ -245,7 +274,7 @@ PluginRecord ClientPluginLoader::LoadOne(const PluginCandidate& candidate) {
         if (!GuardedRegistration(record, "minimal_client_plugin_register_syntax_grammars",
                 [&] { grammars_.SetAttribution(record.name); },
                 [&] { register_grammars(grammars_, context); },
-                [&] { grammars_.ClearAttribution(); })) {
+                [&] { grammars_.ClearAttribution(); }, rollback)) {
             return record;
         }
         for (std::size_t i = before; i < grammars_.attributions().size(); ++i) {
@@ -258,7 +287,7 @@ PluginRecord ClientPluginLoader::LoadOne(const PluginCandidate& candidate) {
         if (!GuardedRegistration(record, "minimal_client_plugin_register_chat_surface",
                 [&] { chat_surface_.SetAttribution(record.name); },
                 [&] { register_chat_surface(chat_surface_, context); },
-                [&] { chat_surface_.ClearAttribution(); })) {
+                [&] { chat_surface_.ClearAttribution(); }, rollback)) {
             return record;
         }
         record.registered_chat_surface = chat_surface_.record.registered &&
@@ -270,7 +299,7 @@ PluginRecord ClientPluginLoader::LoadOne(const PluginCandidate& candidate) {
         if (!GuardedRegistration(record, "minimal_client_plugin_register_markdown_engine",
                 [&] { markdown_engine_.SetAttribution(record.name); },
                 [&] { register_markdown_engine(markdown_engine_, context); },
-                [&] { markdown_engine_.ClearAttribution(); })) {
+                [&] { markdown_engine_.ClearAttribution(); }, rollback)) {
             return record;
         }
         record.registered_markdown_engine = markdown_engine_.record.registered &&

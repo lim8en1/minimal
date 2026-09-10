@@ -459,6 +459,12 @@ public:
     void ClearAttribution() { attribution_.clear(); }
     const std::vector<Attribution>& attributions() const { return attributions_; }
 
+    // Partial-registration rollback (ClientPluginLoader::LoadOne): strips
+    // everything `plugin_name` registered here, so a plugin whose LATER hook
+    // throws does not leave an earlier hook's registrations live to collide
+    // with a later, healthy plugin.
+    void RemoveByAttribution(const std::string& plugin_name);
+
 private:
     std::vector<std::unique_ptr<View>> views_;
     std::string attribution_;
@@ -474,6 +480,7 @@ public:
     void SetAttribution(std::string plugin_name) { attribution_ = std::move(plugin_name); }
     void ClearAttribution() { attribution_.clear(); }
     const std::vector<Attribution>& attributions() const { return attributions_; }
+    void RemoveByAttribution(const std::string& plugin_name);
 
 private:
     std::vector<std::unique_ptr<StartView>> views_;
@@ -489,6 +496,7 @@ public:
 
     void SetAttribution(std::string plugin_name) { attribution_ = std::move(plugin_name); }
     void ClearAttribution() { attribution_.clear(); }
+    void RemoveByAttribution(const std::string& plugin_name);
 
 private:
     std::vector<std::unique_ptr<ToolResultRenderer>> renderers_;
@@ -510,6 +518,7 @@ public:
 
     void SetAttribution(std::string plugin_name) { attribution_ = std::move(plugin_name); }
     void ClearAttribution() { attribution_.clear(); }
+    void RemoveByAttribution(const std::string& plugin_name);
 
 private:
     std::map<ChatRowKind, std::unique_ptr<MessageRenderer>> renderers_;
@@ -526,6 +535,7 @@ public:
 
     void SetAttribution(std::string plugin_name) { attribution_ = std::move(plugin_name); }
     void ClearAttribution() { attribution_.clear(); }
+    void RemoveByAttribution(const std::string& plugin_name);
 
 private:
     std::vector<std::unique_ptr<StatusSegment>> segments_;
@@ -542,6 +552,7 @@ public:
 
     void SetAttribution(std::string plugin_name) { attribution_ = std::move(plugin_name); }
     void ClearAttribution() { attribution_.clear(); }
+    void RemoveByAttribution(const std::string& plugin_name);
 
 private:
     std::vector<std::unique_ptr<SyntaxGrammar>> grammars_;
@@ -569,6 +580,10 @@ public:
     void ClearAttribution() { attribution_.clear(); }
     // Takes ownership; warns and ignores when the slot is already claimed.
     void Register(std::unique_ptr<ChatSurface> surface);
+    // Releases the slot IF `plugin_name` holds it (a no-op otherwise -- a
+    // plugin that failed a LATER hook without ever claiming this slot must
+    // not release someone else's).
+    void RemoveByAttribution(const std::string& plugin_name);
 
 private:
     std::string attribution_;
@@ -583,6 +598,7 @@ public:
     void SetAttribution(std::string plugin_name) { attribution_ = std::move(plugin_name); }
     void ClearAttribution() { attribution_.clear(); }
     void Register(std::unique_ptr<MarkdownEngine> engine);
+    void RemoveByAttribution(const std::string& plugin_name);
 
 private:
     std::string attribution_;
