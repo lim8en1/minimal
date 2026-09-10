@@ -570,6 +570,19 @@ public:
 private:
     void MaybeGoIdleLocked();   // mtx_ held by caller
 
+    // Shared by every live_segments_ append path (text/thinking deltas,
+    // OnToolStarted, OnBackgroundTask): enforces kMaxLiveSegments, keeping the
+    // NEWEST segments. Once the one-shot "[...truncated]" marker is inserted
+    // at the oldest position (live_segments_truncated_ latches true), it is a
+    // PERMANENT sentinel at index 0 -- later overflows trim only the real
+    // segments after it, never re-erasing or re-inserting it. The trim used
+    // to re-run the SAME begin()-relative erase every time regardless of
+    // whether the marker was already there, which could erase the marker
+    // itself on a later overflow -- silently losing it forever, since the
+    // "already truncated" guard then permanently blocked reinserting it.
+    // mtx_ held by caller.
+    void TrimLiveSegmentsLocked();
+
     // Shared by TakeSnapshot/TakeLightSnapshot(include_tool_output=false):
     // `buffered_output` can hold up to tool_output_buffer_bytes_ (64 KiB
     // default) per tool, and ChatView::RenderLiveToolRow -- the deep snapshot's

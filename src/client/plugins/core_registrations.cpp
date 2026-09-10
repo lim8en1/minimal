@@ -217,16 +217,17 @@ Element RenderToolActivity(const ChatRow& row, const Theme& theme, const RowRend
         // authoritative record; this is orientation, not an archive.
         std::string body = row.text;
         if (body.size() > 4000) {
-            const auto last_newline = body.rfind('\n', body.size() - 4000);
-            // A newline within the tail window: keep from there, as before.
-            // No newline at all (a megabyte of single-line JSON/base64, say)
-            // used to fall through and render the FULL body -- rfind returns
-            // npos both when the tail has no '\n' and (via the ternary this
-            // replaced) when body was short enough to skip the search
-            // entirely, and the old code treated both as "render everything"
-            // instead of "hard-truncate the tail".
-            body = "... " + (last_newline != std::string::npos ? body.substr(last_newline)
-                                                                : body.substr(body.size() - 4000));
+            // FORWARD from the tail window's start, not backward from it:
+            // rfind(pos) searches toward index 0 and returns the nearest '\n'
+            // at-or-before pos, which can sit anywhere earlier in the string
+            // (e.g. "exit\n" + a 1 MB line -- the sole '\n' at index 4 kept
+            // ~1 MB, not ~4000 bytes). find(pos) only ever returns an index
+            // >= pos, so the kept slice is bounded no matter where newlines
+            // fall; no newline inside the window hard-truncates, as before.
+            const std::size_t tail_start = body.size() - 4000;
+            const auto newline = body.find('\n', tail_start);
+            body = "... " + (newline != std::string::npos ? body.substr(newline + 1)
+                                                            : body.substr(tail_start));
         }
         parts.push_back(paragraph(body) | color(theme.ColorFor("system_message")) | dim);
     }

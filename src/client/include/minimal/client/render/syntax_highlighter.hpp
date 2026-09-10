@@ -101,6 +101,13 @@ public:
     // keeps rendering the previous theme's palette. The parser cache is
     // theme-independent (parsers outlive color assignments) and survives.
     void OnThemeChanged();
+
+    // The number of cached (language, code) entries right now. Render-thread-
+    // only, same as Highlight() itself -- exists for regression tests that
+    // assert the cache stays bounded across a streaming block's growth
+    // instead of accumulating one near-duplicate prefix entry per tick.
+    std::size_t CacheSizeForTesting() const { return highlight_cache_.size(); }
+
 private:
     const Theme& theme_;
     const std::vector<LanguageDefinition>* languages_ = nullptr;  // null = vendored

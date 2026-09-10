@@ -91,6 +91,14 @@ ftxui::Element RenderToolsPanel(const std::vector<AppState::TabSnapshot>& tabs,
         }
     }
     if (!any) rows.push_back(text(" (no tool activity)") | dim);
+    // Pin the view to the newest row: the caller wraps this in yframe
+    // (frame_renderer.cpp), which only auto-scrolls to a descendant marked
+    // via focus() -- without one it stays pinned at offset 0 forever (the
+    // header and the first tool's earliest tail lines), so later tools and
+    // newer output never show. rows is append-only, newest last, so the
+    // last row is always the newest activity; no persisted scroll state is
+    // needed, unlike ChatView's RowKey anchor.
+    if (!rows.empty()) rows.back() = focus(std::move(rows.back()));
     return vbox(std::move(rows));
 }
 

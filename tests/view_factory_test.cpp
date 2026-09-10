@@ -35,6 +35,7 @@
 #include "minimal/client/view/prompt_editor.hpp"
 #include "minimal/client/view/prompt_modal.hpp"
 #include "minimal/client/view/session_picker.hpp"
+#include "minimal/client/view/tools_panel.hpp"
 
 using namespace minimal::client;
 using namespace minimal_test;
@@ -1102,6 +1103,49 @@ TEST_CASE("chat view: a completed tool call with no name-specific renderer still
     CHECK(expanded.find("total 0") != std::string::npos);
 }
 
+TEST_CASE("chat view: a tool result with one early newline and a long single-line tail "
+         "is capped from the END, not the START") {
+    // The bug: the tail cap searched BACKWARD from the 4000-byte window's
+    // start for a newline to resume from -- "exit\n" + a long single-line
+    // tail has its only '\n' at index 4, so the backward search found it and
+    // kept almost the WHOLE body (thousands of bytes), not ~4000. A forward
+    // search from the window's start only ever lands AT OR AFTER it, so the
+    // kept tail must end at END_MARKER and must NOT reach back to
+    // START_MARKER, which sits right after the one early newline.
+    const auto theme = TestTheme();
+    minimal::client::MarkdownRenderer renderer(&theme, nullptr);
+    plugins::MarkdownEngineRegistry engine_registry;
+    plugins::RegisterDefaultMarkdownEngine(engine_registry, renderer);
+    auto& engine = *engine_registry.engine;
+    plugins::MessageRendererRegistry messages;
+    plugins::ToolResultRendererRegistry tool_renderers;
+    plugins::RegisterCoreMessageRenderers(messages);
+    plugins::RegisterCoreAgentMarkdownRenderer(messages, engine);
+
+    ChatView view(theme, messages, tool_renderers);
+
+    // Space-separated filler, not one giant unbroken token: paragraph() wraps
+    // at word boundaries, so a single 6000-byte word would render as one
+    // over-wide line clipped by the screen rather than wrapping down to
+    // where END_MARKER could be asserted on.
+    std::string filler;
+    for (int i = 0; i < 1200; ++i) filler += "aaaaa ";
+    const std::string result_text = "exit\nSTART_MARKER " + filler + "END_MARKER";
+
+    SessionState::Snapshot snap;
+    snap.session_id = "session-tool-tail";
+    snap.transcript_version = 1;
+    snap.scrollback_page = std::make_shared<const std::vector<v1::StoredMessage>>(
+        StoredToolCallAndResult(1, "bash", result_text));
+
+    RenderElement(view.Render(snap));   // first pass: builds the row cache MoveRowFocus needs
+    view.MoveRowFocus(0);
+    view.ToggleCollapseFocused();
+    const auto expanded = RenderElement(view.Render(snap), /*width=*/100, /*height=*/80);
+    CHECK(expanded.find("END_MARKER") != std::string::npos);
+    CHECK(expanded.find("START_MARKER") == std::string::npos);
+}
+
 // An ask_user call+result pair: the tool_use carries a real questions input
 // (the proto Struct the model sent) and the result the "user selected: ..."
 // prose the tool formats from the client's response.
@@ -1916,4 +1960,36 @@ TEST_CASE("commands help overlay lists the whole catalog and closes on Escape",
 
     REQUIRE(SendEvent(view, ftx::Event::Escape));
     CHECK(closed);
+}
+
+// ---------------------------------------------------------------------------
+// Running-tools panel
+// ---------------------------------------------------------------------------
+
+TEST_CASE("tools panel: the yframe scrolls to the newest tool, not stuck at the top",
+          "[tools_panel]") {
+    // The bug: RenderToolsPanel never called focus() on anything, so the
+    // yframe frame_renderer.cpp wraps it in had no descendant to auto-scroll
+    // to -- it stayed pinned at offset 0 (the header and the first tool)
+    // forever, and later tools never became visible.
+    const auto theme = TestTheme();
+    AppState::TabSnapshot tab;
+    tab.tab_id = "tab-1";
+    tab.display_name = "session";
+    for (int i = 0; i < 10; ++i) {
+        ToolExecutionState tool;
+        tool.tool_use_id = "t-" + std::to_string(i);
+        tool.tool_name = "tool" + std::to_string(i);
+        tool.started = true;
+        tab.tools.push_back(std::move(tool));
+    }
+    const std::vector<AppState::TabSnapshot> tabs = {tab};
+
+    // A viewport far shorter than the 11 rows (1 header + 10 tools) this
+    // produces.
+    const auto frame = RenderElement(
+        RenderToolsPanel(tabs, /*stdout_buffer_lines=*/5, theme) | ftx::yframe,
+        /*width=*/40, /*height=*/6);
+    CHECK(frame.find("tool9") != std::string::npos);
+    CHECK(frame.find("tool0") == std::string::npos);
 }

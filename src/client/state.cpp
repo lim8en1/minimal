@@ -226,35 +226,28 @@ void SessionState::AppendStreamingText(std::string_view text) {
         live_segments_.push_back(
             LiveTurnSegment{.kind = LiveTurnSegment::Kind::Text, .turn_seq = segment_turn});
     }
-    live_segments_.back().text.append(text);
     // Per-segment cap: same 2 MiB budget as the flat accumulation, same
     // shape (truncate once, append the marker, drop further deltas -- the
-    // transcript is authoritative, the turn-end refresh re-fetches).
-    if (!live_segments_.back().text_truncated &&
-        live_segments_.back().text.size() > kStreamingTextCapBytes) {
-        live_segments_.back().text.resize(kStreamingTextCapBytes);
-        live_segments_.back().text.append(kStreamingTruncationMarker);
-        live_segments_.back().text_truncated = true;
+    // transcript is authoritative, the turn-end refresh re-fetches). The
+    // append itself is guarded, not just the resize: once text_truncated is
+    // set, further deltas for THIS segment must be dropped entirely, or the
+    // string keeps growing past the cap (a 20+ MB segment, deep-copied every
+    // frame via Snapshot) even though it can never grow the VISIBLE text.
+    if (!live_segments_.back().text_truncated) {
+        live_segments_.back().text.append(text);
+        if (live_segments_.back().text.size() > kStreamingTextCapBytes) {
+            live_segments_.back().text.resize(kStreamingTextCapBytes);
+            live_segments_.back().text.append(kStreamingTruncationMarker);
+            live_segments_.back().text_truncated = true;
+        }
     }
     // Segment-COUNT cap: a turn with hundreds of tool round trips would
     // otherwise grow live_segments_ (and the per-frame deep snapshot)
-    // without limit. Keep the NEWEST segments; on first overflow leave one
-    // marker segment at the oldest position so the cut is visible. A marker
-    // stamped turn_seq 0 is retired first by ClearStreamingIfCurrentTurn
-    // (0 <= any captured turn), which is exactly right: the refresh that
-    // covers the turn replaces it with persisted rows.
-    if (live_segments_.size() > kMaxLiveSegments) {
-        const auto keep_from = live_segments_.begin() +
-                               static_cast<std::ptrdiff_t>(live_segments_.size() - kMaxLiveSegments);
-        live_segments_.erase(live_segments_.begin(), keep_from);
-        if (!live_segments_truncated_) {
-            live_segments_.insert(live_segments_.begin(),
-                                  LiveTurnSegment{.kind = LiveTurnSegment::Kind::Text,
-                                                  .turn_seq = 0,
-                                                  .text = "[...truncated]"});
-            live_segments_truncated_ = true;
-        }
-    }
+    // without limit. A marker stamped turn_seq 0 is retired first by
+    // ClearStreamingIfCurrentTurn (0 <= any captured turn), which is exactly
+    // right: the refresh that covers the turn replaces it with persisted
+    // rows.
+    TrimLiveSegmentsLocked();
 
     // A NEW TURN begins only after the previous one ENDED (TurnCompleted/Error)
     // -- message stops fire between tool cycles WITHIN one turn, so arming on
@@ -391,29 +384,19 @@ void SessionState::AppendStreamingThinking(std::string_view text) {
             LiveTurnSegment{.kind = LiveTurnSegment::Kind::Thinking, .turn_seq = turn_seq_});
     }
     // Per-segment cap, same 2 MiB budget and shape as text segments:
-    // truncate once, append the marker.
-    live_segments_.back().text.append(text);
-    if (!live_segments_.back().text_truncated &&
-        live_segments_.back().text.size() > kStreamingTextCapBytes) {
-        live_segments_.back().text.resize(kStreamingTextCapBytes);
-        live_segments_.back().text.append(kStreamingTruncationMarker);
-        live_segments_.back().text_truncated = true;
-    }
-    // Segment-COUNT cap: same shared trimming as AppendStreamingText -- keep
-    // the NEWEST segments, leave one turn_seq-0 marker at the oldest
-    // position on first overflow so the cut is visible.
-    if (live_segments_.size() > kMaxLiveSegments) {
-        const auto keep_from = live_segments_.begin() +
-                               static_cast<std::ptrdiff_t>(live_segments_.size() - kMaxLiveSegments);
-        live_segments_.erase(live_segments_.begin(), keep_from);
-        if (!live_segments_truncated_) {
-            live_segments_.insert(live_segments_.begin(),
-                                  LiveTurnSegment{.kind = LiveTurnSegment::Kind::Text,
-                                                  .turn_seq = 0,
-                                                  .text = "[...truncated]"});
-            live_segments_truncated_ = true;
+    // truncate once, append the marker, and -- same fix as text segments --
+    // drop further deltas once truncated instead of letting the string keep
+    // growing past the cap.
+    if (!live_segments_.back().text_truncated) {
+        live_segments_.back().text.append(text);
+        if (live_segments_.back().text.size() > kStreamingTextCapBytes) {
+            live_segments_.back().text.resize(kStreamingTextCapBytes);
+            live_segments_.back().text.append(kStreamingTruncationMarker);
+            live_segments_.back().text_truncated = true;
         }
     }
+    // Segment-COUNT cap: same shared trimming as AppendStreamingText.
+    TrimLiveSegmentsLocked();
     is_streaming_ = true;
     // See AppendStreamingText's identical guard: Error stays sticky within a
     // turn, but must not outlive it.
@@ -454,6 +437,31 @@ void SessionState::MaybeGoIdleLocked() {
         });
     if (!tool_active && !pending_permission_ && !pending_confirmation_ && !pending_ask_) {
         state_ = turn_in_flight_ ? SessionStateKind::Working : SessionStateKind::Idle;
+    }
+}
+
+// Shared by every live_segments_ append path -- see the header comment.
+void SessionState::TrimLiveSegmentsLocked() {
+    if (live_segments_truncated_) {
+        // The marker is a permanent sentinel at index 0 once present: trim
+        // only the real segments after it, so it can never itself be erased.
+        if (live_segments_.size() > kMaxLiveSegments) {
+            const auto keep_from =
+                live_segments_.begin() + 1 +
+                static_cast<std::ptrdiff_t>(live_segments_.size() - 1 - (kMaxLiveSegments - 1));
+            live_segments_.erase(live_segments_.begin() + 1, keep_from);
+        }
+        return;
+    }
+    if (live_segments_.size() > kMaxLiveSegments) {
+        const auto keep_from = live_segments_.begin() +
+                               static_cast<std::ptrdiff_t>(live_segments_.size() - kMaxLiveSegments);
+        live_segments_.erase(live_segments_.begin(), keep_from);
+        live_segments_.insert(live_segments_.begin(),
+                              LiveTurnSegment{.kind = LiveTurnSegment::Kind::Text,
+                                              .turn_seq = 0,
+                                              .text = "[...truncated]"});
+        live_segments_truncated_ = true;
     }
 }
 
@@ -877,6 +885,11 @@ void SessionState::OnToolStarted(const v1::ToolExecutionEvent& evt) {
     live_segments_.push_back(LiveTurnSegment{.kind = LiveTurnSegment::Kind::Tool,
                                              .turn_seq = turn_seq_,
                                              .tool_use_id = evt.tool_use_id()});
+    // Same count cap the text/thinking delta paths enforce right after their
+    // own push_back -- without it, a tool-only run (no text/thinking deltas
+    // ever call AppendStreamingText/AppendStreamingThinking) grows
+    // live_segments_ by one Tool entry per call with no upper bound.
+    TrimLiveSegmentsLocked();
 
     auto& live = tools_.back();   // the row just pushed, regardless of how many precede it
     live.started = true;
@@ -1001,6 +1014,8 @@ void SessionState::OnBackgroundTask(const v1::BackgroundTaskEvent& evt) {
     live_segments_.push_back(LiveTurnSegment{.kind = LiveTurnSegment::Kind::Tool,
                                              .turn_seq = turn_seq_,
                                              .tool_use_id = evt.tool_use_id()});
+    // Same count cap OnToolStarted enforces -- see its comment.
+    TrimLiveSegmentsLocked();
 }
 
 // Scrollback -----------------------------------------------------------------

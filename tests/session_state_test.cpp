@@ -5,6 +5,9 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
+#include <string>
+
 #include "minimal/client/state.hpp"
 
 using namespace minimal::client;
@@ -1143,6 +1146,75 @@ TEST_CASE("live_segments clears alongside streaming_text, not before",
     state.OnResyncRequired("test");
     CHECK(state.TakeSnapshot().live_segments.empty());
     CHECK(state.TakeSnapshot().streaming_text.empty());
+}
+
+// The bug: only the resize-and-mark step was guarded by text_truncated, not
+// the append itself -- a segment kept growing past kStreamingTextCapBytes
+// indefinitely (deep-copied every frame) even though text_truncated was
+// already true and the visible text could never grow past the cap.
+TEST_CASE("a truncated live segment drops further deltas instead of still growing",
+          "[session_state][live_segments]") {
+    SessionState state("s-1");
+    state.AppendStreamingText(std::string(SessionState::kStreamingTextCapBytes + 100, 'a'));
+    const auto first = state.TakeSnapshot();
+    REQUIRE(first.live_segments.size() == 1);
+    CHECK(first.live_segments[0].text_truncated);
+    const std::size_t capped_size = first.live_segments[0].text.size();
+    CHECK(capped_size <= SessionState::kStreamingTextCapBytes + 200);   // cap + marker
+
+    state.AppendStreamingText(std::string(10000, 'b'));
+    const auto second = state.TakeSnapshot();
+    REQUIRE(second.live_segments.size() == 1);
+    CHECK(second.live_segments[0].text.size() == capped_size);   // unchanged, not larger
+}
+
+// The bug: the FIRST overflow inserted a "[...truncated]" marker at index 0
+// and latched live_segments_truncated_; the SECOND overflow reran the same
+// begin()-relative erase, which could erase the marker itself along with
+// real segments -- and the latch then permanently blocked reinserting it,
+// losing it forever while the snapshot still claimed a cut happened.
+TEST_CASE("the live-segment-count marker survives repeated overflows",
+          "[session_state][live_segments]") {
+    SessionState state("s-1");
+    // Two full overflow cycles: kMaxLiveSegments (a marker occupies one slot
+    // after the first overflow) plus enough more tool starts to overflow a
+    // second time.
+    for (std::size_t i = 0; i < SessionState::kMaxLiveSegments + 50; ++i) {
+        state.OnToolStarted(StartTool("t-" + std::to_string(i)));
+    }
+    const auto snap = state.TakeSnapshot();
+    using Kind = LiveTurnSegment::Kind;
+    const auto marker_count =
+        std::count_if(snap.live_segments.begin(), snap.live_segments.end(),
+                      [](const LiveTurnSegment& s) { return s.text == "[...truncated]"; });
+    CHECK(marker_count == 1);
+    REQUIRE_FALSE(snap.live_segments.empty());
+    CHECK(snap.live_segments.front().kind == Kind::Text);
+    CHECK(snap.live_segments.front().text == "[...truncated]");
+    CHECK(snap.live_segments.size() <= SessionState::kMaxLiveSegments);
+}
+
+// The bug: OnToolStarted/OnBackgroundTask pushed a live_segments_ entry with
+// no trim check afterward, unlike the text/thinking delta paths -- a
+// tool-only run (no text/thinking deltas at all) grew live_segments_ without
+// bound.
+TEST_CASE("OnToolStarted alone (no text/thinking deltas) stays within the count cap",
+          "[session_state][live_segments]") {
+    SessionState state("s-1");
+    for (std::size_t i = 0; i < SessionState::kMaxLiveSegments + 50; ++i) {
+        state.OnToolStarted(StartTool("t-" + std::to_string(i)));
+    }
+    CHECK(state.TakeSnapshot().live_segments.size() <= SessionState::kMaxLiveSegments);
+}
+
+TEST_CASE("OnBackgroundTask reopen alone (no text/thinking deltas) stays within the count cap",
+          "[session_state][live_segments]") {
+    SessionState state("s-1");
+    for (std::size_t i = 0; i < SessionState::kMaxLiveSegments + 50; ++i) {
+        state.OnBackgroundTask(
+            BackgroundEvent("bg-" + std::to_string(i), v1::BackgroundTaskEvent::STARTED));
+    }
+    CHECK(state.TakeSnapshot().live_segments.size() <= SessionState::kMaxLiveSegments);
 }
 
 TEST_CASE("OnResyncRequired drops a stale foreground tool row and re-derives state_",

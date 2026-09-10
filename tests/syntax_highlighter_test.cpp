@@ -191,6 +191,33 @@ TEST_CASE("Highlight caches by (language, code) without cross-contaminating entr
     CHECK_FALSE(as_python.empty());
 }
 
+// The bug: the cache's exact-match lookup always misses for a growing
+// streaming block (each debounce tick's code differs from the last), so
+// every tick pushed a brand-new entry instead of recognizing "this is the
+// same block, just longer" -- retaining one near-duplicate prefix entry per
+// tick (full code copy + materialized Elements) until kHighlightCacheCap
+// ticks later evicted it.
+TEST_CASE("Highlight collapses a growing streaming block into one cache entry, "
+         "not one per tick") {
+    const Theme theme = TestTheme();
+    const SyntaxHighlighter highlighter(theme);
+
+    std::string code = "def f():\n";
+    highlighter.Highlight(code, "python");
+    CHECK(highlighter.CacheSizeForTesting() == 1);
+
+    // Ten more debounce ticks, each appending to the SAME block.
+    for (int i = 0; i < 10; ++i) {
+        code += "    x = " + std::to_string(i) + "\n";
+        highlighter.Highlight(code, "python");
+    }
+    CHECK(highlighter.CacheSizeForTesting() == 1);   // still one entry, not eleven
+
+    // An unrelated block for the same language is its own, separate entry.
+    highlighter.Highlight("import os\n", "python");
+    CHECK(highlighter.CacheSizeForTesting() == 2);
+}
+
 // The /theme swap path replaces the referenced Theme's CONTENTS in place and
 // calls OnThemeChanged(); highlight_cache_ bakes the old colors into its
 // cached Elements, so without the clear, every cached block would keep the

@@ -890,12 +890,27 @@ ftxui::Elements SyntaxHighlighter::Highlight(std::string_view code,
     // OBJECT's lifetime (bound at construction) even though its CONTENTS may
     // be swapped in place (/theme); a swap calls OnThemeChanged(), which
     // clears this cache precisely because the entries bake the old colors in.
+    auto prefix_match = highlight_cache_.end();
     for (auto it = highlight_cache_.begin(); it != highlight_cache_.end(); ++it) {
-        if (it->language == language && it->code == code) {
+        if (it->language != language) continue;
+        if (it->code == code) {
             if (it != highlight_cache_.begin()) {
                 highlight_cache_.splice(highlight_cache_.begin(), highlight_cache_, it);
             }
             return highlight_cache_.front().lines;
+        }
+        // A streaming code block grows by append every debounce tick, so
+        // this call's `code` never matches an earlier tick's entry exactly
+        // -- without this, every tick would push a brand-new near-duplicate
+        // prefix entry instead of recognizing "this is the same block, just
+        // longer," retaining up to kHighlightCacheCap full copies of a
+        // growing string (plus its materialized Elements tree) for one
+        // block. Remember the first (most-recently-used) entry this code is
+        // a strict extension of, so it can be dropped once the new one is
+        // computed below.
+        if (prefix_match == highlight_cache_.end() && code.size() > it->code.size() &&
+            code.substr(0, it->code.size()) == it->code) {
+            prefix_match = it;
         }
     }
 
@@ -964,6 +979,7 @@ ftxui::Elements SyntaxHighlighter::Highlight(std::string_view code,
     emit_range(pos, static_cast<uint32_t>(code.size()), HighlightCategory::Plain);
     flush_line();
 
+    if (prefix_match != highlight_cache_.end()) highlight_cache_.erase(prefix_match);
     highlight_cache_.push_front({std::string(language), std::string(code), lines});
     if (highlight_cache_.size() > kHighlightCacheCap) highlight_cache_.pop_back();
     return lines;
