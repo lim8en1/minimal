@@ -1,4 +1,4 @@
-// tool-ask -- the `question` tool.
+// tool-ask -- the `ask_user` tool.
 //
 // One tool. It turns a structured model request ("ask the operator which of
 // these approaches to take") into a blocking round-trip to the human via
