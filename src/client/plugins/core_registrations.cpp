@@ -119,7 +119,7 @@ Element RenderThinking(const ChatRow& row, const Theme& theme, const RowRenderCo
     return vbox({
         hbox({text("▎thinking") | color(theme.ColorFor("thinking")) | dim,
               text(std::string(ctx.collapse_marker)) | color(theme.ColorFor("thinking")) | dim}),
-        paragraph(row.text) | color(theme.ColorFor("thinking")) | dim,
+        paragraph(row.text) | color(theme.ColorFor("thinking")),
     });
 }
 

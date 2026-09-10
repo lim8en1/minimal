@@ -380,7 +380,7 @@ ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
             column.push_back(live_text_streams[i].view->Render(theme_));
             column.push_back(text(" "));
         } else if (segment.kind == LiveTurnSegment::Kind::Thinking) {
-            // Reasoning streams as plain dim text, same look as the persisted
+            // Reasoning streams as plain quiet text, same look as the persisted
             // expanded thinking row (core_registrations.cpp's
             // RenderThinking). No LiveTextStreamSlot and no markdown engine:
             // thinking renders verbatim, so a debounced reparse view would
@@ -388,7 +388,7 @@ ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
             // same way RenderLiveToolRow reads its state.
             if (segment.text.empty()) continue;
             column.push_back(text("▎thinking") | color(theme_.ColorFor("thinking")) | dim);
-            column.push_back(paragraph(segment.text) | color(theme_.ColorFor("thinking")) | dim);
+            column.push_back(paragraph(segment.text) | color(theme_.ColorFor("thinking")));
             column.push_back(text(" "));
         } else if (segment.kind == LiveTurnSegment::Kind::Tool) {
             const ToolExecutionState* tool = nullptr;

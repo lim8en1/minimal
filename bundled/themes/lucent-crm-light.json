@@ -3,7 +3,7 @@
   "colors": {
     "user_message": "#8a0a43",
     "assistant_message": "#240e17",
-    "thinking": "#7d5f6a",
+    "thinking": "#5c4149",
     "working": "#8a0a43",
     "system_message": "#7d5f6a",
     "error": "#d1383d",
