@@ -325,24 +325,24 @@ nlohmann::json NormalizeOpencodeProvider(const nlohmann::json& provider,
 namespace {
 
 // The overlay ResolvedModel for one discovered model: the entry's connection
-// and provider-level defaults, the backend's id and window. Touches neither
-// ImmutableCatalog nor DiscoveryCacheState directly -- a pure function of its
-// two parameters despite living beside methods that hold cache_.mutex_ -- so
-// it needs no ProvidersConfig membership at all.
+// and provider-level defaults, the backend's id, window, and output cap.
+// Touches neither ImmutableCatalog nor DiscoveryCacheState directly -- a pure
+// function of its two parameters despite living beside methods that hold
+// cache_.mutex_ -- so it needs no ProvidersConfig membership at all.
 ResolvedModel BuildDiscoveredLocked(const ProviderEntry& entry,
                                     const llm::DiscoveredModel& discovered) {
     // The backend knows the model id it serves; the entry supplies the
     // connection and the provider-level defaults, inherited exactly as a
-    // static model would inherit them. The backend's context window wins over
-    // the provider-level default, the same precedence InheritNumber gives a
-    // model's own value over the provider's.
+    // static model would inherit them. The backend's context window and
+    // output cap win over the provider-level defaults -- the same precedence
+    // InheritNumber gives a model's own value over the provider's.
     ResolvedModel resolved;
     resolved.ref = ModelRef{entry.name, discovered.id};
     resolved.backend = entry.backend;
     resolved.provider = entry.connection;
     resolved.provider.model_name = discovered.id;
     resolved.parameters = entry.parameters;
-    resolved.max_tokens = entry.max_tokens;
+    resolved.max_tokens = discovered.max_tokens ? discovered.max_tokens : entry.max_tokens;
     resolved.context_window_tokens =
         discovered.context_window_tokens ? discovered.context_window_tokens
                                          : entry.context_window_tokens;
@@ -388,17 +388,28 @@ std::shared_ptr<const ResolvedModel> ProvidersConfig::Resolve(const ModelRef& re
     std::unique_lock<std::mutex> lock(cache_.mutex_);
 
     if (const auto it = catalog_.models_.find(key); it != catalog_.models_.end()) {
-        if (it->second->context_window_tokens) return it->second;
+        if (it->second->context_window_tokens && it->second->max_tokens) return it->second;
         // A static entry usually resolves as parsed. Under a discover-entry, a
-        // model whose context_window_tokens is absent can still be enriched
-        // from the catalog -- but only by handing back an overlay COPY: the
-        // parsed node must never be mutated after a snapshot of it has escaped.
+        // model whose context_window_tokens or max_tokens is absent can still
+        // be enriched from the catalog -- but only by handing back an overlay
+        // COPY: the parsed node must never be mutated after a snapshot of it
+        // has escaped.
         if (const auto enriched = cache_.overlay_.find(key); enriched != cache_.overlay_.end()) {
             return enriched->second;
         }
         if (const ProviderEntry* entry = FindProviderLocked(ref.provider);
             entry != nullptr && entry->discover) {
-            return ResolveDiscovered(*entry, ref.model, key, lock);
+            // The catalog's answer for a model it lists, or nothing when the
+            // fetch failed. A STATIC hit degrades to its parsed self either
+            // way -- a dead backend must not take a hand-written model down
+            // with it (this is the "failed discovery degrades to the entry's
+            // static models" rule; before the output cap, a windowed static
+            // model never reached discovery at all, so the degradation was
+            // only ever observable for window-less ones).
+            if (auto resolved = ResolveDiscovered(*entry, ref.model, key, lock)) {
+                return resolved;
+            }
+            return it->second;
         }
         return it->second;
     }
@@ -446,12 +457,19 @@ std::shared_ptr<const ResolvedModel> ProvidersConfig::ResolveDiscovered(
 
     if (const auto static_it = catalog_.models_.find(ref_key); static_it != catalog_.models_.end()) {
         // A STATIC model under a discover-entry: its own inheritance stands,
-        // and the discovered window fills the gap that made Resolve consult
-        // discovery at all.
+        // and the discovered window / output cap fill only the gaps that made
+        // Resolve consult discovery at all -- each field independently, since
+        // a model with a window but no cap reaches here too.
         const auto discovered = cache.models.find(model_id);
-        if (discovered != cache.models.end() && discovered->second.context_window_tokens) {
+        if (discovered != cache.models.end() &&
+            (discovered->second.context_window_tokens || discovered->second.max_tokens)) {
             ResolvedModel copy = *static_it->second;
-            copy.context_window_tokens = discovered->second.context_window_tokens;
+            if (!copy.context_window_tokens && discovered->second.context_window_tokens) {
+                copy.context_window_tokens = discovered->second.context_window_tokens;
+            }
+            if (!copy.max_tokens && discovered->second.max_tokens) {
+                copy.max_tokens = discovered->second.max_tokens;
+            }
             return cache_.overlay_
                 .emplace(ref_key, std::make_shared<const ResolvedModel>(std::move(copy)))
                 .first->second;
@@ -759,12 +777,26 @@ ProvidersConfig ParseProvidersConfigUnwrapped(const nlohmann::json& doc) {
             if (!model.is_object()) {
                 throw std::runtime_error("providers.json: " + model_where + " must be an object");
             }
-            if (model_name.find('/') != std::string::npos ||
-                provider_name.find('/') != std::string::npos) {
+            if (provider_name.find('/') != std::string::npos) {
                 // Otherwise the reference cannot be parsed back apart.
-                throw std::runtime_error("providers.json: '" + provider_name + "/" + model_name +
-                                         "' contains a '/' in a name, which makes the reference "
-                                         "ambiguous");
+                throw std::runtime_error("providers.json: provider '" + provider_name +
+                                         "' contains a '/', which makes the reference ambiguous");
+            }
+            // A model KEY may contain '/', split at the FIRST one -- the same
+            // rule SplitModelRef applies to interactive refs and the
+            // ModelRefs() picker filter applies to catalog keys. This is what
+            // makes static entries express OpenRouter ids ("anthropic/
+            // claude-opus-5" under provider "openrouter" resolves as
+            // openrouter/anthropic/claude-opus-5 and is sent on the wire
+            // verbatim, exactly as discovery's slash-bearing ids are). Empty
+            // halves are still refused: a name with a dangling slash is a
+            // typo, and "a/" as a wire model id would 400 with no hint why.
+            if (const auto slash = model_name.find('/'); slash == 0 || slash + 1 == model_name.size()) {
+                throw std::runtime_error(
+                    "providers.json: model '" + provider_name + "/" + model_name +
+                    "' has an empty half -- a model key may contain '/' (OpenRouter ids like "
+                    "\"anthropic/claude-opus-5\"), but it must not be empty, and both sides of its "
+                    "first '/' must be non-empty");
             }
 
             ResolvedModel resolved;

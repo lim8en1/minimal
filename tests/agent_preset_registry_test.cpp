@@ -250,7 +250,8 @@ TEST_CASE("AgentPresetRegistry: a preset naming a discover-only model resolves t
             CHECK(c.base_url == "http://localhost:8000/v1");
             return config::DiscoveryOutcome{
                 /*catalog_present=*/true, /*ok=*/true, {},
-                {llm::DiscoveredModel{"served-model", 262144, nlohmann::json::object()}}};
+                {llm::DiscoveredModel{"served-model", 262144, nlohmann::json::object(),
+                                      std::nullopt}}};
         });
 
     const AgentPreset& preset = registry.Resolve("build");

@@ -169,7 +169,7 @@ TEST_CASE("switching to a discovered model resolves it lazily, window and all",
     fixture.ReloadPresets();
 
     auto hook_models = std::vector<llm::DiscoveredModel>{
-        {"newmodel", 12345, nlohmann::json::object()}};
+        {"newmodel", 12345, nlohmann::json::object(), std::nullopt}};
     int calls = 0;
     fixture.SetDiscoveryHook(
         [&calls, &hook_models](const std::string&, const llm::ProviderConfig&) {

@@ -63,8 +63,27 @@
 
       "models": {
         "claude-opus-5": {
-          "//": "The model KEY is sent on the wire verbatim as the request's \"model\" field -- unlike the provider name, it is NOT yours to choose; it must be the backend's real model id.",
+          "//": "The model KEY is sent on the wire verbatim as the request's \"model\" field -- unlike the provider name, it is NOT yours to choose; it must be the backend's real model id. A key MAY contain '/' (split at the first one), so ids like \"anthropic/claude-opus-5\" are expressible -- see the openrouter block below.",
           "context_window_tokens": 1000000
+        }
+      }
+    },
+
+    "openrouter": {
+      "//": "OpenRouter is an ordinary openai-backend endpoint; its model ids are vendor/model, and a static model key may carry that '/' (the full ref is then three segments: openrouter/anthropic/claude-opus-5). Or set \"discover\": true and drop \"models\" entirely -- OpenRouter's catalog supplies ids and context windows.",
+      "backend": "openai",
+      "url": "https://openrouter.ai/api/v1",
+      "api_key_env": "OPENROUTER_API_KEY",
+
+      "models": {
+        "anthropic/claude-opus-5": {
+          "//": "parameters are spread verbatim into the request body, so OpenRouter's provider-routing field passes through untouched: this pins the model to those upstream providers (other keys: ignore, order, allow_fallbacks).",
+          "context_window_tokens": 200000,
+          "parameters": {
+            "provider": {
+              "only": ["anthropic"]
+            }
+          }
         }
       }
     }

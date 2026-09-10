@@ -444,7 +444,7 @@ void WriteDiscoverConfig(const std::filesystem::path& dir, const char* backend =
 class FakeCatalog : public llm::ModelCatalog {
 public:
     std::vector<llm::DiscoveredModel> List(const llm::ProviderConfig&) const override {
-        return {{"some-model", 8192, nlohmann::json::object()}};
+        return {{"some-model", 8192, nlohmann::json::object(), std::nullopt}};
     }
 };
 

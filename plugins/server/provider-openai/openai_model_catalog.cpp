@@ -1,5 +1,6 @@
 #include "openai_model_catalog.hpp"
 
+#include <limits>
 #include <stdexcept>
 
 #include "openai_error_mapping.hpp"
@@ -48,6 +49,25 @@ std::optional<std::int64_t> ContextWindow(const json& entry) {
     return std::nullopt;
 }
 
+// The output cap, when the backend reports one. Only OpenRouter carries it
+// (`top_provider.max_completion_tokens`) -- a plain OpenAI-shape /models body
+// has no such field and yields nullopt, same as the absent-window case. The
+// same positive-only rule as ContextWindow: a non-positive value is a misparse
+// or a hostile entry, and storing it would cap every request at nothing.
+std::optional<int> MaxCompletionTokens(const json& entry) {
+    if (!entry.contains("top_provider") || !entry.at("top_provider").is_object()) {
+        return std::nullopt;
+    }
+    const json& top = entry.at("top_provider");
+    if (top.contains("max_completion_tokens") && top.at("max_completion_tokens").is_number()) {
+        const std::int64_t value = top.at("max_completion_tokens").get<std::int64_t>();
+        if (value > 0 && value <= std::numeric_limits<int>::max()) {
+            return static_cast<int>(value);
+        }
+    }
+    return std::nullopt;
+}
+
 }  // namespace
 
 std::vector<llm::DiscoveredModel> ParseModelList(const std::string& body) {
@@ -76,6 +96,7 @@ std::vector<llm::DiscoveredModel> ParseModelList(const std::string& body) {
         llm::DiscoveredModel model;
         model.id = entry.at("id").get<std::string>();
         model.context_window_tokens = ContextWindow(entry);
+        model.max_tokens = MaxCompletionTokens(entry);
         // Everything the backend said about the model minus the id: pricing,
         // quantization, ... -- opaque to core, free for a future consumer.
         // MOVED, not copied: OpenRouter entries carry multi-KB descriptions

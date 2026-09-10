@@ -36,11 +36,15 @@ namespace minimal::llm {
 
 // One model as the backend reports it. `id` is the <model> half of
 // <provider>/<model>. `context_window_tokens` feeds compaction and the status
-// surface; `metadata` (pricing, quantization, ...) is opaque to core.
+// surface. `metadata` (pricing, quantization, ...) is opaque to core.
+// `max_tokens` is the backend's own output cap when it reports one
+// (OpenRouter's `top_provider.max_completion_tokens`); LAST so existing
+// brace-initializers that stop at `metadata` keep compiling.
 struct DiscoveredModel {
     std::string id;
     std::optional<std::int64_t> context_window_tokens;
     nlohmann::json metadata = nlohmann::json::object();
+    std::optional<int> max_tokens;
 };
 
 class ModelCatalog {
