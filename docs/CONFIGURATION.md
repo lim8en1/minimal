@@ -406,11 +406,13 @@ register runtime ids. Bundled actions (see `bundled/keybindings.json`):
 `chat.toggle_timestamps`, `turn.cancel`, `app.quit`.
 
 Modifiers: `ctrl` (or `control`), `alt` (or `option`/`opt`/`meta` — the
-macOS key's spelling), `shift`, joined by `+` in any order. macOS caveat:
-Option only produces Alt events when the terminal is configured to send
-them — Terminal.app: Settings → Profiles → Keyboard → "Use Option as Meta
-Key"; iTerm2: Left/Right Option → "Esc+". Without that, Option+letter sends
-a Unicode glyph (e.g. `∆`) no binding can match.
+macOS key's spelling), `shift`, joined by `+` in any order. macOS: Apple
+builds match `alt+letter`/`alt+digit` bindings against both the ESC-prefixed
+Alt encoding *and* the glyphs an unconfigured Option key sends (US layout:
+option+g sends `©`, option+j `∆`, …), so bindings fire without the
+terminal's "Use Option as Meta Key" setting. The glyph is then claimed by
+the binding and no longer typeable; on non-US layouts whose plain keys send
+those characters (ß on German), rebind rather than fight it.
 The `/keymap` command opens the same overlay as the `help.overlay` binding:
 a filterable listing of every configured action → key pair.
 

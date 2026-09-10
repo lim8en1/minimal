@@ -133,6 +133,23 @@ TEST_CASE("ParseKeySpec: option/opt/meta are aliases for alt (the macOS key)",
     CHECK(ParseKeySpec("hyper+j").empty());                // unknown stays unknown
 }
 
+#if defined(__APPLE__)
+TEST_CASE("ParseKeySpec: alt bindings also match the macOS Option glyphs",
+          "[key_event_parser]") {
+    // With the terminal's "Use Option as Meta Key" off, option+g sends "©"
+    // and friends; the glyph rides along as a second candidate so the
+    // binding fires anyway (the ESC-prefixed encoding stays, first).
+    CHECK(Has(ParseKeySpec("alt+g"), Event::AltG));
+    CHECK(Has(ParseKeySpec("alt+g"), Event::Character("©")));
+    CHECK(Has(ParseKeySpec("option+g"), Event::Character("©")));
+    CHECK(Has(ParseKeySpec("alt+j"), Event::Character("∆")));
+    CHECK(Has(ParseKeySpec("alt+a"), Event::Character("å")));
+    CHECK(Has(ParseKeySpec("alt+1"), Event::Character("¡")));
+    CHECK_FALSE(Has(ParseKeySpec("ctrl+g"), Event::Character("©")));
+    CHECK_FALSE(Has(ParseKeySpec("g"), Event::Character("å")));
+}
+#endif
+
 TEST_CASE("NormalizeKeySpec: alias spellings share one collision identity",
           "[key_event_parser]") {
     // keybindings.cpp's collision warnings compare these, so "option+down"

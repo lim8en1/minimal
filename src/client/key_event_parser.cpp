@@ -48,6 +48,49 @@ Event CtrlAltLetter(char lower_letter) {
                           static_cast<char>(lower_letter - 'a' + 1));
 }
 
+#if defined(__APPLE__)
+// macOS Option glyphs, US layout: with the terminal's "Use Option as Meta
+// Key" setting OFF (the default), Option+letter/digit sends the glyph
+// instead of an ESC-prefixed alt encoding -- option+g sends "©", option+j
+// "∆", option+a "å". AltCandidates below adds the glyph as a second
+// candidate for every alt+letter/alt+digit spec, so bindings fire without
+// that terminal setting. The trade-off is claiming: while "alt+g" is
+// bound, "©" is no longer typeable into the prompt (HandleGlobalKey sees
+// every event first). Only letters/digits are covered -- shift+option
+// produces a different, layout-dependent glyph set (alt+shift+letter
+// already degrades to plain alt, so those bindings match it anyway), and
+// non-US layouts remap the whole table (a German layout's plain ß key
+// sends "ß", which an "alt+s" binding then claims -- rebind rather than
+// fight it). Not built on other platforms: there Option/Alt is ESC-prefixed
+// and these glyph bytes only arise from compose sequences the user meant.
+const std::unordered_map<char, const char*>& OptionGlyphs() {
+    static const std::unordered_map<char, const char*> table = {
+        {'a', "å"}, {'b', "∫"}, {'c', "ç"}, {'d', "∂"}, {'e', "´"},
+        {'f', "ƒ"}, {'g', "©"}, {'h', "˙"}, {'i', "ˆ"}, {'j', "∆"},
+        {'k', "˚"}, {'l', "¬"}, {'m', "µ"}, {'n', "˜"}, {'o', "ø"},
+        {'p', "π"}, {'q', "œ"}, {'r', "®"}, {'s', "ß"}, {'t', "†"},
+        {'u', "¨"}, {'v', "√"}, {'w', "∑"}, {'x', "≈"}, {'y', "¥"},
+        {'z', "Ω"},
+        {'1', "¡"}, {'2', "™"}, {'3', "£"}, {'4', "¢"}, {'5', "∞"},
+        {'6', "§"}, {'7', "¶"}, {'8', "•"}, {'9', "ª"}, {'0', "º"},
+    };
+    return table;
+}
+#endif
+
+// Every encoding an alt+letter / alt+digit press might produce: the classic
+// ESC-prefixed alt byte, plus (on Apple builds) the US-layout Option glyph
+// for terminals without the Meta setting.
+std::vector<Event> AltCandidates(char c) {
+    std::vector<Event> out{AltLetter(c)};
+#if defined(__APPLE__)
+    if (const auto it = OptionGlyphs().find(c); it != OptionGlyphs().end()) {
+        out.push_back(Event::Character(it->second));
+    }
+#endif
+    return out;
+}
+
 const std::unordered_map<std::string, Event>& NamedKeys() {
     static const std::unordered_map<std::string, Event> table = {
         {"tab", Event::Tab},
@@ -242,7 +285,7 @@ std::vector<Event> ParseKeySpec(const std::string& spec) {
         const char c = base[0];
         if (ctrl && alt) return {CtrlAltLetter(c)};
         if (ctrl) return {CtrlLetter(c)};
-        if (alt) return {AltLetter(c)};
+        if (alt) return AltCandidates(c);
         const char out = shift ? static_cast<char>(std::toupper(static_cast<unsigned char>(c))) : c;
         return {Event::Character(std::string(1, out))};
     }
@@ -251,7 +294,7 @@ std::vector<Event> ParseKeySpec(const std::string& spec) {
     // well-defined; ctrl+digit has no single standard byte encoding across
     // terminals, so it is left unmapped rather than guessed.
     if (base.size() == 1 && std::isdigit(static_cast<unsigned char>(base[0]))) {
-        if (alt && !ctrl) return {Event::Special(std::string("\x1b") + base)};
+        if (alt && !ctrl) return AltCandidates(base[0]);
         if (!ctrl && !alt) return {Event::Character(base)};
         return {};
     }
