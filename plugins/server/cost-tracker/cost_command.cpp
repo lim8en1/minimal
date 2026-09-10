@@ -2,13 +2,68 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <iomanip>
 #include <sstream>
+#include <vector>
 
 #include "minimal/commands/command_context.hpp"
 
 namespace minimal::cost_tracker {
 namespace {
+
+// "$X" when every turn of the row was priced; ">= $X" when the priced turns
+// sum to something but others could not be priced (the total is a floor);
+// "?" when nothing at all was priced. A missing price is never "$0.0000" --
+// the cost_view status segment's "cost?" rule, same honesty, table shape.
+std::string CostCell(double cost, bool known) {
+    if (known) return FormatCost(cost);
+    if (cost > 0.0) return ">= " + FormatCost(cost);
+    return "?";
+}
+
+struct Column {
+    std::string header;
+    std::vector<std::string> cells;
+    bool right_aligned;
+};
+
+std::size_t Width(const Column& column) {
+    std::size_t width = column.header.size();
+    for (const auto& cell : column.cells) width = std::max(width, cell.size());
+    return width;
+}
+
+// Column widths come from the CONTENT -- a fixed-width model column let one
+// long model id push every later column out of alignment.
+std::string FormatTable(const std::vector<Column>& columns) {
+    std::vector<std::size_t> widths;
+    widths.reserve(columns.size());
+    for (const auto& column : columns) widths.push_back(Width(column));
+
+    constexpr std::size_t kHeader = static_cast<std::size_t>(-1);
+    std::ostringstream out;
+    const auto emit_row = [&](const std::size_t row) {
+        out << "  ";
+        for (std::size_t i = 0; i < columns.size(); ++i) {
+            if (i > 0) out << "  ";
+            const std::string& text =
+                row < columns[i].cells.size() ? columns[i].cells[row] : columns[i].header;
+            if (columns[i].right_aligned) {
+                out << std::setw(static_cast<int>(widths[i])) << std::right << text;
+            } else {
+                out << std::setw(static_cast<int>(widths[i])) << std::left << text;
+            }
+        }
+        out << '\n';
+    };
+
+    emit_row(kHeader);
+    if (!columns.empty()) {
+        for (std::size_t row = 0; row < columns.front().cells.size(); ++row) emit_row(row);
+    }
+    return out.str();
+}
 
 std::string FormatAllSessions(const std::vector<std::string>& session_ids, CostStore& store,
                               RateTable& rates) {
@@ -46,10 +101,8 @@ std::string FormatAllSessions(const std::vector<std::string>& session_ids, CostS
     });
 
     std::ostringstream out;
-    out << std::fixed;
     for (const auto& row : rows) {
-        out << FormatCost(row.totals.total_cost);
-        if (!row.totals.total_cost_known) out << "+";
+        out << CostCell(row.totals.total_cost, row.totals.total_cost_known);
         out << "  " << row.session_id;
         if (!row.parent.empty()) out << "  (subagent of " << row.parent << ")";
         if (row.totals.unpriced_turns > 0) {
@@ -78,25 +131,54 @@ std::string FormatTokens(std::int64_t tokens) {
 }
 
 std::string FormatSessionTotals(const SessionTotals& totals) {
-    std::ostringstream out;
-    out << std::fixed;
-    out << "  model              turns        in       out   cache r/w            cost\n";
+    // OpenAI-shaped backends have no cache writes (often no reads either);
+    // an all-zero cache column is pure noise, dropped the same way the
+    // {token_detail} status segment drops zero fields.
+    const bool show_cache =
+        std::any_of(totals.models.begin(), totals.models.end(),
+                    [](const ModelTotals& model) {
+                        return model.cache_read_tokens > 0 || model.cache_write_tokens > 0;
+                    });
+
+    Column models{"model", {}, false};
+    Column turns{"turns", {}, true};
+    Column in{"in", {}, true};
+    Column out{"out", {}, true};
+    Column cache{"cache r/w", {}, true};
+    Column cost{"cost", {}, true};
     for (const auto& model : totals.models) {
-        out << std::setw(19) << std::left << (model.model.empty() ? "(unknown)" : model.model);
-        out << std::setw(6) << std::right << model.turns;
-        out << std::setw(11) << FormatTokens(model.input_tokens);
-        out << std::setw(11) << FormatTokens(model.output_tokens);
-        out << std::setw(13) << FormatTokens(model.cache_read_tokens) + "/" +
-                   FormatTokens(model.cache_write_tokens);
-        out << std::setw(15) << FormatCost(model.cost);
-        if (!model.cost_known) out << "+";
-        out << '\n';
+        models.cells.push_back(model.model.empty() ? "(unknown)" : model.model);
+        turns.cells.push_back(std::to_string(model.turns));
+        in.cells.push_back(FormatTokens(model.input_tokens));
+        out.cells.push_back(FormatTokens(model.output_tokens));
+        if (show_cache) {
+            cache.cells.push_back(FormatTokens(model.cache_read_tokens) + "/" +
+                                  FormatTokens(model.cache_write_tokens));
+        }
+        cost.cells.push_back(CostCell(model.cost, model.cost_known));
     }
-    out << "  total " << totals.total_turns << " turn(s)";
-    out << ", est. " << FormatCost(totals.total_cost);
-    if (!totals.total_cost_known) out << "+  (some turns unpriced -- run /cost-update-rates)";
-    out << '\n';
-    return out.str();
+
+    std::vector<Column> columns;
+    columns.reserve(6);
+    columns.push_back(std::move(models));
+    columns.push_back(std::move(turns));
+    columns.push_back(std::move(in));
+    columns.push_back(std::move(out));
+    if (show_cache) columns.push_back(std::move(cache));
+    columns.push_back(std::move(cost));
+
+    std::string table = FormatTable(columns);
+
+    std::ostringstream report;
+    report << table;
+    report << "  total " << totals.total_turns << " turn(s), est. "
+           << CostCell(totals.total_cost, totals.total_cost_known);
+    if (totals.unpriced_turns > 0) {
+        report << "  (" << totals.unpriced_turns
+               << " turn(s) unpriced -- run /cost-update-rates)";
+    }
+    report << '\n';
+    return report.str();
 }
 
 commands::CommandResult CostCommand::Execute(commands::CommandContext& context,

@@ -5,6 +5,8 @@
 
 #include <memory>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include <catch2/catch_test_macros.hpp>
 #include <nlohmann/json.hpp>
@@ -404,6 +406,99 @@ TEST_CASE("/cost reports a session's totals and its unpriced turns",
     CHECK(result.message.find("$6.0000") != std::string::npos);
     CHECK(result.message.find("mystery") != std::string::npos);
     CHECK(result.message.find("unpriced") != std::string::npos);
+}
+
+TEST_CASE("the /cost table sizes columns to content and never fakes a price",
+          "[cost_tracker][commands]") {
+    // Dynamic widths: a long model id must not push the later columns out of
+    // alignment (the fixed setw(19) failure this replaced).
+    SessionTotals one_model;
+    ModelTotals priced;
+    priced.model = "long-model-name";
+    priced.turns = 2;
+    priced.input_tokens = 1'000'000;
+    priced.output_tokens = 0;
+    priced.cost = 2.0;  // 1M in @ $2/Mtok
+    one_model.models.push_back(priced);
+    one_model.total_turns = 2;
+    one_model.total_cost = 2.0;
+    const auto text = FormatSessionTotals(one_model);
+    const auto lines = [&] {
+        std::vector<std::string> out;
+        std::string current;
+        for (const char c : text) {
+            if (c == '\n') {
+                out.push_back(std::exchange(current, {}));
+            } else {
+                current.push_back(c);
+            }
+        }
+        if (!current.empty()) out.push_back(current);
+        return out;
+    }();
+    REQUIRE(lines.size() == 3);
+    // Expected rows built piecewise (widths are content-derived: model 15,
+    // turns 5, in 9, out 3, cost 7) so the spaces cannot be miscounted.
+    const auto pad = [](std::string text, const std::size_t width, const bool right) {
+        text.insert(right ? text.begin() : text.end(), width - text.size(), ' ');
+        return text;
+    };
+    const std::string sep = "  ";
+    CHECK(lines[0] == "  " + pad("model", 15, false) + sep + pad("turns", 5, true) + sep +
+                          pad("in", 9, true) + sep + pad("out", 3, true) + sep +
+                          pad("cost", 7, true));
+    CHECK(lines[1] == "  " + pad("long-model-name", 15, false) + sep + pad("2", 5, true) + sep +
+                          pad("1,000,000", 9, true) + sep + pad("0", 3, true) + sep +
+                          pad("$2.0000", 7, true));
+    CHECK(lines[2] == "  total 2 turn(s), est. $2.0000");
+
+    // A model id longer than the header widens the column, and every row
+    // still pads to the same width (the shorter id's row pads the model
+    // cell, the long one fills it).
+    SessionTotals two_models;
+    ModelTotals short_row = priced;
+    short_row.model = "m2";
+    two_models.models.push_back(short_row);
+    two_models.models.push_back(priced);
+    two_models.total_turns = 4;
+    two_models.total_cost = 4.0;
+    const auto two_text = FormatSessionTotals(two_models);
+    CHECK(two_text.find("  " + pad("m2", 15, false) + sep + pad("2", 5, true) + sep +
+                        pad("1,000,000", 9, true) + sep + pad("0", 3, true) + sep +
+                        pad("$2.0000", 7, true) + "\n") != std::string::npos);
+
+    // THE HONESTY RULE: an unpriced row renders "?", never "$0.0000" and
+    // never the old "+" suffix -- a missing price is not a price of zero.
+    SessionTotals unknown;
+    ModelTotals unpriced = priced;
+    unpriced.cost = 0.0;
+    unpriced.cost_known = false;
+    unpriced.unpriced_turns = 1;
+    unknown.models.push_back(unpriced);
+    unknown.total_turns = 1;
+    unknown.total_cost_known = false;
+    unknown.unpriced_turns = 1;
+    const auto unknown_text = FormatSessionTotals(unknown);
+    CHECK(unknown_text.find("?") != std::string::npos);
+    CHECK(unknown_text.find("$0.0000") == std::string::npos);
+    CHECK(unknown_text.find('+') == std::string::npos);
+    CHECK(unknown_text.find("(1 turn(s) unpriced -- run /cost-update-rates)") !=
+          std::string::npos);
+
+    // Partially priced: the priced portion is shown as a floor, ">= $X".
+    SessionTotals partial = unknown;
+    partial.models.front().cost = 6.0;
+    partial.total_cost = 6.0;
+    const auto partial_text = FormatSessionTotals(partial);
+    CHECK(partial_text.find(">= $6.0000") != std::string::npos);
+    CHECK(partial_text.find("$0.0000") == std::string::npos);
+
+    // An all-zero cache column is noise (OpenAI-shaped backends): dropped.
+    CHECK(text.find("cache r/w") == std::string::npos);
+    // Present again as soon as any cache tokens exist.
+    SessionTotals cached = one_model;
+    cached.models.front().cache_read_tokens = 17'536;
+    CHECK(FormatSessionTotals(cached).find("cache r/w") != std::string::npos);
 }
 
 TEST_CASE("/cost handles the empty and degraded cases", "[cost_tracker][commands]") {
