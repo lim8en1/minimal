@@ -1008,6 +1008,36 @@ grpc::Status SessionServiceImpl::GetMessages(grpc::ServerContext* context,
     return grpc::Status::OK;
 }
 
+grpc::Status SessionServiceImpl::GetSession(grpc::ServerContext* context,
+                                            const v1::GetSessionRequest* request,
+                                            v1::SessionSummary* response) {
+    if (const auto auth = EnsureAuthenticated(auth_providers_, context); !auth.ok()) return auth;
+    if (request->session_id().empty()) {
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "session_id is required");
+    }
+
+    // GetSession throws on a store failure (locked database, I/O error,
+    // corruption) rather than answering "no such session" -- same mapping the
+    // resume path uses for the same call.
+    std::optional<session::SessionSummary> stored;
+    try {
+        stored = db_.GetSession(request->session_id());
+    } catch (const std::exception& e) {
+        logger_.warn("GetSession({}): {}", request->session_id(), e.what());
+        return grpc::Status(grpc::StatusCode::INTERNAL, e.what());
+    }
+    if (!stored) {
+        return grpc::Status(grpc::StatusCode::NOT_FOUND,
+                            "no such session: " + request->session_id());
+    }
+    *response = ToProto(*stored);
+    // Liveness from the registry, not the row -- the caller's attach-vs-resume
+    // decision reads THIS flag, so it must answer the same question
+    // ListSessions' is_live does.
+    response->set_is_live(sessions_.Find(stored->session_id) != nullptr);
+    return grpc::Status::OK;
+}
+
 grpc::Status SessionServiceImpl::ListSessions(grpc::ServerContext* context,
                                               const v1::ListSessionsRequest* request,
                                               v1::ListSessionsResponse* response) {

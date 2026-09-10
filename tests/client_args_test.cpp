@@ -236,13 +236,29 @@ TEST_CASE("the resume flag follows the same value rules as every other flag",
     }
 }
 
-TEST_CASE("resume without -p is an error", "[client_args][resume]") {
-    // Resume runs one headless turn; without -p there is nowhere for the prompt
-    // to come from, and the TUI that would own an interactive resume does not
-    // exist yet.
+TEST_CASE("resume without -p opens the TUI on the stored session", "[client_args][resume]") {
+    // Used to be an error ("--resume needs -p"); the TUI startup resume path
+    // made the flag meaningful without a prompt: attach to the session when
+    // it is live, revive it from the transcript when it is not.
     const auto parsed = Parse({"--resume", "01ARZ3NDEKTSV4RRFFQ69G5FAV"});
-    REQUIRE(parsed.action == ParsedArgs::Action::Error);
-    CHECK(parsed.error.find("-p") != std::string::npos);
+    REQUIRE(parsed.action == ParsedArgs::Action::Tui);
+    CHECK(parsed.headless.resume_session_id == "01ARZ3NDEKTSV4RRFFQ69G5FAV");
+}
+
+TEST_CASE("TUI resume refuses the per-turn override flags", "[client_args][resume]") {
+    // The stored row's preset/model govern a resumed session, and a TUI
+    // resume has no single turn to borrow --agent/--model FOR -- a headless
+    // resume does (the two tests above/below its TurnOverrides path).
+    SECTION("--agent") {
+        const auto parsed = Parse({"--resume", "01ARZ3", "--agent", "plan"});
+        REQUIRE(parsed.action == ParsedArgs::Action::Error);
+        CHECK(parsed.error.find("--agent") != std::string::npos);
+    }
+    SECTION("--model") {
+        const auto parsed = Parse({"--resume", "01ARZ3", "--model", "local/qwen4"});
+        REQUIRE(parsed.action == ParsedArgs::Action::Error);
+        CHECK(parsed.error.find("--model") != std::string::npos);
+    }
 }
 
 TEST_CASE("resume and agent flags combine: the agent borrows the resumed turn only", "[client_args][resume]") {
@@ -296,4 +312,56 @@ TEST_CASE("auto-spawn defaults on and --no-autospawn turns it off", "[client_arg
     // The flag exists so a script never blocks on a startup: the usage text has
     // to be where they find it.
     CHECK(UsageText().find("--no-autospawn") != std::string::npos);
+}
+
+// --- List sessions -------------------------------------------------------------
+
+TEST_CASE("list-sessions is its own action", "[client_args][list]") {
+    const auto parsed = Parse({"--list-sessions"});
+    REQUIRE(parsed.action == ParsedArgs::Action::ListSessions);
+    CHECK_FALSE(parsed.headless.all_dirs);
+
+    const auto all = Parse({"--list-sessions", "--all-dirs"});
+    REQUIRE(all.action == ParsedArgs::Action::ListSessions);
+    CHECK(all.headless.all_dirs);
+}
+
+TEST_CASE("list-sessions refuses the flags it has no use for", "[client_args][list]") {
+    SECTION("-p") {
+        const auto parsed = Parse({"--list-sessions", "-p", "hi"});
+        REQUIRE(parsed.action == ParsedArgs::Action::Error);
+        CHECK(parsed.error.find("-p") != std::string::npos);
+    }
+    SECTION("--resume") {
+        const auto parsed = Parse({"--list-sessions", "--resume", "01ARZ3"});
+        REQUIRE(parsed.action == ParsedArgs::Action::Error);
+        CHECK(parsed.error.find("--resume") != std::string::npos);
+    }
+    SECTION("session-shaping flags") {
+        CHECK(Parse({"--list-sessions", "--agent", "plan"}).action == ParsedArgs::Action::Error);
+        CHECK(Parse({"--list-sessions", "--model", "local/qwen4"}).action ==
+              ParsedArgs::Action::Error);
+        CHECK(Parse({"--list-sessions", "--signals", "sessions"}).action ==
+              ParsedArgs::Action::Error);
+    }
+}
+
+TEST_CASE("output-format json belongs to list-sessions", "[client_args][list]") {
+    SECTION("accepted alongside it") {
+        const auto parsed = Parse({"--list-sessions", "--output-format", "json"});
+        REQUIRE(parsed.action == ParsedArgs::Action::ListSessions);
+        CHECK(parsed.headless.list_json);
+    }
+    SECTION("refused on a turn") {
+        // A turn's output formats stay text|jsonl; json would otherwise look
+        // accepted and silently mean jsonl.
+        const auto parsed = Parse({"-p", "hi", "--output-format", "json"});
+        REQUIRE(parsed.action == ParsedArgs::Action::Error);
+        CHECK(parsed.error.find("--list-sessions") != std::string::npos);
+    }
+    SECTION("jsonl refused on a listing") {
+        const auto parsed = Parse({"--list-sessions", "--output-format", "jsonl"});
+        REQUIRE(parsed.action == ParsedArgs::Action::Error);
+        CHECK(parsed.error.find("json") != std::string::npos);
+    }
 }

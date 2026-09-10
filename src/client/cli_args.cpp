@@ -92,24 +92,33 @@ std::string DefaultServerTarget() {
 }
 
 std::string UsageText() {
-    return "usage: minimal [-p PROMPT] [options]\n"
+    return "usage: minimal [options] [-p PROMPT]\n"
            "\n"
            "  -p, --print PROMPT        run one turn headlessly and exit\n"
-           "      --resume SESSION_ID   continue a stored session (see ListSessions);\n"
-           "                              it keeps its stored preset and project_root\n"
+           "      --resume SESSION_ID   open a stored session: attach to it in the TUI\n"
+           "                              (or run one headless turn with -p); it keeps its\n"
+           "                              stored preset and project_root\n"
+           "      --list-sessions       list stored sessions (id, name, messages, last\n"
+           "                              activity) for the current project and exit\n"
+           "      --all-dirs            with --list-sessions: list every project's sessions\n"
            "      --server TARGET       socket path or gRPC target\n"
            "                              (default: unix://<data dir>/server.sock;\n"
            "                               a bare path pairs with minimal-server --listen)\n"
-           "      --agent PRESET        agent preset (default: settings.json); with --resume it\n"
-          "                              applies to the resumed turn only\n"
+           "      --agent PRESET        agent preset (default: settings.json); with --resume\n"
+           "                              it applies to the resumed turn only (requires -p)\n"
            "      --model P/M           provider/model, overriding the preset's\n"
-           "      --output-format FMT   text (default) or jsonl\n"
+           "      --output-format FMT   text (default) or jsonl; json is a --list-sessions\n"
+           "                              listing for scripts\n"
            "      --signals LIST        comma-separated signal subscriptions for this\n"
            "                              session: 'channel/signal', 'channel' (extended\n"
            "                              channels), or 'sessions' (agent-to-agent)\n"
            "      --dangerously-bypass  skip every permission check\n"
            "      --no-autospawn      never start a server; fail if none is reachable\n"
            "      --version\n"
+           "\n"
+           "A typical scripting loop captures the session id a headless run prints:\n"
+           "  id=$(minimal -p \"task\" --output-format jsonl | head -1 | jq -r .session_id)\n"
+           "  minimal --resume \"$id\"        # open it (and its live subagents) in the TUI\n"
            "\n"
            "SIGINT/SIGTERM during a -p turn cancels it through the protocol: the\n"
            "process exits 4 once the server reports the turn cancelled.\n"
@@ -122,6 +131,7 @@ ParsedArgs ParseArgs(int argc, const char* const* argv) {
     ParsedArgs parsed;
     bool headless = false;
     bool prompt_set = false;
+    bool list_sessions = false;
 
     for (int i = 1; i < argc; ++i) {
         const std::string_view arg = argv[i];
@@ -199,6 +209,23 @@ ParsedArgs ParseArgs(int argc, const char* const* argv) {
                 return parsed;
             }
             parsed.headless.resume_session_id = *value;
+        } else if (name == "--list-sessions") {
+            list_sessions = true;
+        } else if (name == "--all-dirs") {
+            bool flag_value = true;
+            if (has_inline) {
+                if (inline_value == "true") {
+                    flag_value = true;
+                } else if (inline_value == "false") {
+                    flag_value = false;
+                } else {
+                    parsed.action = ParsedArgs::Action::Error;
+                    parsed.error = std::string(name) + "= expects true or false, got '" +
+                                   std::string(inline_value) + "'";
+                    return parsed;
+                }
+            }
+            parsed.headless.all_dirs = flag_value;
         } else if (name == "--agent") {
             const auto value = take_value(name);
             if (!value) return parsed;
@@ -223,10 +250,12 @@ ParsedArgs ParseArgs(int argc, const char* const* argv) {
             if (!value) return parsed;
             if (*value == "jsonl") {
                 parsed.headless.jsonl = true;
+            } else if (*value == "json") {
+                parsed.headless.list_json = true;
             } else if (*value != "text") {
                 parsed.action = ParsedArgs::Action::Error;
                 parsed.error = "unknown --output-format '" + std::string(*value) +
-                               "' (want text or jsonl)";
+                               "' (want text, jsonl or json)";
                 return parsed;
             }
         } else if (name == "--signals") {
@@ -296,10 +325,53 @@ ParsedArgs ParseArgs(int argc, const char* const* argv) {
         parsed.error = "-p needs a non-empty prompt";
         return parsed;
     }
-    if (!headless && !parsed.headless.resume_session_id.empty()) {
-        parsed.action = ParsedArgs::Action::Error;
-        parsed.error = "--resume needs -p: resuming runs one headless turn";
+    // --list-sessions is a standalone action: it reads, it runs no turn and
+    // opens no session, so the session-shaping flags are refused rather than
+    // silently ignored.
+    if (list_sessions) {
+        if (headless) {
+            parsed.action = ParsedArgs::Action::Error;
+            parsed.error = "--list-sessions cannot be combined with -p";
+            return parsed;
+        }
+        if (!parsed.headless.resume_session_id.empty()) {
+            parsed.action = ParsedArgs::Action::Error;
+            parsed.error = "--list-sessions cannot be combined with --resume";
+            return parsed;
+        }
+        if (!parsed.headless.agent_preset.empty() || !parsed.headless.model.empty() ||
+            !parsed.headless.signals.empty()) {
+            parsed.action = ParsedArgs::Action::Error;
+            parsed.error = "--list-sessions takes no session options "
+                           "(--agent/--model/--signals)";
+            return parsed;
+        }
+        if (parsed.headless.jsonl) {
+            parsed.action = ParsedArgs::Action::Error;
+            parsed.error = "--output-format jsonl is a turn format; use json for a "
+                           "--list-sessions listing";
+            return parsed;
+        }
+        parsed.action = ParsedArgs::Action::ListSessions;
         return parsed;
+    }
+    if (parsed.headless.list_json) {
+        parsed.action = ParsedArgs::Action::Error;
+        parsed.error = "--output-format json is only available for --list-sessions";
+        return parsed;
+    }
+    if (!headless && !parsed.headless.resume_session_id.empty()) {
+        // LEGAL now: the TUI opens the stored session -- attaching when it is
+        // live, reviving it from the transcript when it is not. What stays
+        // headless-only is the per-turn override pair: the stored row's
+        // preset/model govern the session, and a TUI resume has no single turn
+        // to borrow --agent/--model FOR (the headless resume does; see
+        // RunHeadless's TurnOverrides).
+        if (!parsed.headless.agent_preset.empty() || !parsed.headless.model.empty()) {
+            parsed.action = ParsedArgs::Action::Error;
+            parsed.error = "--agent/--model apply to a headless resume turn only: add -p";
+            return parsed;
+        }
     }
     if (!headless && !parsed.headless.signals.empty()) {
         parsed.action = ParsedArgs::Action::Error;

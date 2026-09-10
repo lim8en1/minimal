@@ -1205,6 +1205,54 @@ TEST_CASE("ListSessions.is_live reflects the live registry, not the stored row",
     CHECK(saw_dead);
 }
 
+TEST_CASE("GetSession answers one stored row with registry liveness",
+          "[session_service][S5]") {
+    // The startup --resume probe's primitive: one id in, the row out, with the
+    // same is_live answer ListSessions gives -- the caller's attach-vs-resume
+    // decision reads it. A subagent row answers normally (parent_session_id
+    // set); that passthrough is the store layer's ToProto, covered there.
+    ServiceFixture fixture;
+    fixture.Script(testing::TextResponse("hi"));
+    fixture.Start();
+
+    const std::string live_id = fixture.CreateSession();
+    const std::string dead_id = fixture.CreateSession();
+    fixture.sessions->Terminate(dead_id);
+
+    grpc::ClientContext live_context;
+    v1::GetSessionRequest live_request;
+    live_request.set_session_id(live_id);
+    v1::SessionSummary live_summary;
+    REQUIRE(fixture.stub->GetSession(&live_context, live_request, &live_summary).ok());
+    CHECK(live_summary.session_id() == live_id);
+    CHECK(live_summary.is_live());
+
+    grpc::ClientContext dead_context;
+    v1::GetSessionRequest dead_request;
+    dead_request.set_session_id(dead_id);
+    v1::SessionSummary dead_summary;
+    REQUIRE(fixture.stub->GetSession(&dead_context, dead_request, &dead_summary).ok());
+    CHECK_FALSE(dead_summary.is_live());
+}
+
+TEST_CASE("GetSession refuses unknown and empty ids", "[session_service][S5]") {
+    ServiceFixture fixture;
+    fixture.Start();
+
+    grpc::ClientContext unknown_context;
+    v1::GetSessionRequest unknown_request;
+    unknown_request.set_session_id("01ARZ3NDEKTSV4RRFFQ69G5FAV");
+    v1::SessionSummary unknown_summary;
+    CHECK(fixture.stub->GetSession(&unknown_context, unknown_request, &unknown_summary)
+              .error_code() == grpc::StatusCode::NOT_FOUND);
+
+    grpc::ClientContext empty_context;
+    v1::GetSessionRequest empty_request;  // no session_id
+    v1::SessionSummary empty_summary;
+    CHECK(fixture.stub->GetSession(&empty_context, empty_request, &empty_summary)
+              .error_code() == grpc::StatusCode::INVALID_ARGUMENT);
+}
+
 TEST_CASE("a failed CreateSession leaves no session row behind",
           "[session_service][naming]") {
     // The database mints the id, so its row exists before the Session does. If

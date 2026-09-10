@@ -579,6 +579,16 @@ message ListSessionsResponse {
   repeated SessionSummary sessions = 1;
 }
 
+// One stored row by id. The startup --resume probe's primitive: a client that
+// knows a session id (from a previous headless run's session_created line, or
+// --list-sessions) needs exactly this row -- liveness (attach vs resume) and
+// subagent provenance -- without paging through ListSessions and matching
+// client-side. NOT_FOUND for an unknown id; a subagent row answers normally
+// (its parent_session_id is set), so a caller can refuse one with a message.
+message GetSessionRequest {
+  string session_id = 1;
+}
+
 // --- Agent preset picker (name + description only; no model/provider
 // resolution -- see AgentPresetRegistry::ListAvailable) ---
 
@@ -736,6 +746,7 @@ service SessionService {
   rpc OpenSession(stream ClientEvent) returns (stream ServerEvent);
 
   rpc GetMessages(GetMessagesRequest) returns (GetMessagesResponse);
+  rpc GetSession(GetSessionRequest) returns (SessionSummary);
   rpc ListSessions(ListSessionsRequest) returns (ListSessionsResponse);
   rpc ListAgentPresets(ListAgentPresetsRequest) returns (ListAgentPresetsResponse);
   // The /model picker's list: every configured or discovered model ref.

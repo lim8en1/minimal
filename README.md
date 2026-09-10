@@ -42,14 +42,24 @@ seeding): **[BUILD.md](BUILD.md)**.
 | Flag | Description |
 |---|---|
 | `-p, --print PROMPT` | headless one turn; a prompt starting with `/` runs a command |
-| `--resume SESSION_ID` | continue a stored session (requires `-p`) |
+| `--resume SESSION_ID` | open a stored session: attach to it in the TUI (or run one headless turn with `-p`); it keeps its stored preset and project_root |
+| `--list-sessions` | list stored sessions for the current project (`--all-dirs` for every project); `--output-format json` prints the same list for scripts |
 | `--server TARGET` | socket path or gRPC target (default `unix://<data dir>/server.sock`) |
-| `--agent PRESET` | agent preset (file stem of `agents/<name>.md`) |
+| `--agent PRESET` | agent preset (file stem of `agents/<name>.md`); with `--resume` it applies to the resumed turn only (requires `-p`) |
 | `--model P/M` | model as `<provider>/<model>` (overrides preset and settings) |
-| `--output-format text\|jsonl` | headless output format |
+| `--output-format text\|jsonl` | headless output format (`json` is a `--list-sessions` listing) |
 | `--signals LIST` | comma-separated signals to receive (requires `-p`) |
 | `--dangerously-bypass` | bypass permission gating |
 | `--no-autospawn` | never start a server; fail if none is reachable |
+
+A headless run prints the session id it used — `[session <id>]` on stderr in
+text mode, a `session_created` line first in `jsonl` — so scripts can chain
+turns and open the result in the TUI:
+
+```sh
+id=$(minimal -p "refactor the parser" --output-format jsonl | head -1 | jq -r .session_id)
+minimal --resume "$id"    # attach to the session (and its live subagents)
+```
 
 `minimal-server` — the server: `--listen <path>` (socket path) and
 `--version`. Normally spawned for you by the first client that needs it; it

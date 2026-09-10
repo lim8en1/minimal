@@ -47,6 +47,11 @@ struct HeadlessOptions {
     // session start; works on resume too (subscriptions never persist).
     std::vector<std::string> signals;
     bool jsonl = false;
+    // --output-format json: a machine-readable listing, valid only alongside
+    // --list-sessions (a turn's output formats stay text|jsonl).
+    bool list_json = false;
+    // --list-sessions: list every project's sessions, not just the cwd's.
+    bool all_dirs = false;
     bool bypass = false;
     // When nothing is listening on a unix-socket target, the client starts one
     // (see server_spawn.hpp). --no-autospawn restores the old "cannot reach"
@@ -55,7 +60,7 @@ struct HeadlessOptions {
 };
 
 struct ParsedArgs {
-    enum class Action { Tui, Headless, Usage, Version, Error };
+    enum class Action { Tui, Headless, ListSessions, Usage, Version, Error };
 
     Action action = Action::Tui;
     HeadlessOptions headless;

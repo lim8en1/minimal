@@ -763,6 +763,16 @@ public:
     // picker focuses explicitly afterward.
     std::string ResumeTab(const std::string& session_id);
 
+    // The startup --resume path for a LIVE session: attach the session and,
+    // as one tab group under it, every LIVE subagent child of its group
+    // (ListSessions include_subagents, filtered by parent id; finished
+    // children are skipped -- a subagent's life is one turn, so there is
+    // nothing to reopen). Children spawn AFTER this call arrive the ordinary
+    // way, through OnSubagentSpawned. Returns the root tab's tab_id, or ""
+    // when the main attach failed (e.g. the session ended between the
+    // caller's probe and this call -- the caller falls back to ResumeTab).
+    std::string AttachSessionGroup(const std::string& session_id);
+
     // Called by the reader thread for every ServerEvent whose payload is not bound to
     // a tab the client already owns (e.g. SubagentStarted on the PARENT's stream).
     void OnSubagentSpawned(std::string_view parent_id, const v1::SubagentStartedEvent& evt);

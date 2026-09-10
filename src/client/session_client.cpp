@@ -131,12 +131,24 @@ SessionClient::ListSessionsResult SessionClient::ListSessions(const ListSessions
     v1::ListSessionsRequest request;
     request.set_project_root(options.project_root);
     request.set_include_all_dirs(options.include_all_dirs);
+    request.set_include_subagents(options.include_subagents);
     request.set_limit(options.limit);
     if (options.before_updated_at.has_value()) request.set_before_updated_at(*options.before_updated_at);
     if (options.before_id.has_value()) request.set_before_id(*options.before_id);
 
     ListSessionsResult result;
     result.status = stub_->ListSessions(&context, request, &result.response);
+    return result;
+}
+
+SessionClient::GetSessionResult SessionClient::GetSession(const std::string& session_id) {
+    grpc::ClientContext context;
+    context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(2));
+    v1::GetSessionRequest request;
+    request.set_session_id(session_id);
+
+    GetSessionResult result;
+    result.status = stub_->GetSession(&context, request, &result.summary);
     return result;
 }
 

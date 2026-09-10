@@ -296,6 +296,9 @@ public:
     struct ListSessionsOptions {
         std::string project_root;
         bool include_all_dirs = false;
+        // Subagent rows (parent_session_id set) are hidden unless set -- the
+        // startup group-attach scan is the caller that needs them.
+        bool include_subagents = false;
         int32_t limit = 100;
         // Keyset cursor (exclusive upper bound on updated_at, tie-broken by
         // id), mirroring ListSessionsRequest's before_updated_at/before_id --
@@ -310,6 +313,15 @@ public:
         grpc::Status status;
     };
     ListSessionsResult ListSessions(const ListSessionsOptions& options);
+
+    // One stored row by id (the startup --resume probe). NOT_FOUND for an
+    // unknown id; a subagent row answers normally with parent_session_id set.
+    // is_live comes from the live registry, like ListSessions'.
+    struct GetSessionResult {
+        v1::SessionSummary summary;
+        grpc::Status status;
+    };
+    GetSessionResult GetSession(const std::string& session_id);
 
     // @-mention suggestions, resolved by the server's MentionResolver so the
     // strategy is pluggable server-side and every frontend inherits it. Paths

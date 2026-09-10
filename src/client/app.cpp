@@ -310,7 +310,23 @@ int RunHeadless(const HeadlessOptions& options) {
         return kUnavailable;
     }
 
-            int exit_code = kOk;
+    // THE SESSION ID, out where its consumer can find it. Without this the
+    // create-then-resume scripting loop (`minimal -p "task"` today, `minimal
+    // --resume <id> -p "continue"` tomorrow) had no answer: the id only lived
+    // in the database. jsonl puts it IN BAND as the stream's first line (a
+    // hand-built object -- it comes from the CreateSession response, not a
+    // ServerEvent, so ServerEventToJsonLine never sees it); text mode keeps
+    // stdout pure assistant output for piping and prints to stderr instead.
+    if (options.jsonl) {
+        nlohmann::json line;
+        line["type"] = "session_created";
+        line["session_id"] = created.session_id;
+        PrintJsonLine(line);
+    } else {
+        std::fprintf(stderr, "[session %s]\n", created.session_id.c_str());
+    }
+
+    int exit_code = kOk;
     bool saw_error = false;
     // Set when the server kills the session under us (SessionEndedEvent): the
     // turn never completed, so the run reports as unavailable rather than
@@ -506,6 +522,104 @@ int RunHeadless(const HeadlessOptions& options) {
     return exit_code;
 }
 
+// --- --list-sessions ---------------------------------------------------------
+//
+// The headless answer to "which session do I resume?": the picker's data,
+// printed. Subagents stay excluded (they belong to their parent's group, like
+// the picker's list); the server sorts newest-activity-first already.
+
+int RunListSessions(const minimal::client::HeadlessOptions& options) {
+    const std::string target =
+        options.server.empty() ? minimal::client::DefaultServerTarget() : options.server;
+
+    // Same autospawn-before-channel discipline as RunHeadless: the probe
+    // channel must not hold open descriptors the forked server would inherit.
+    minimal::client::SpawnOptions spawn_options;
+    spawn_options.enabled = options.autospawn;
+    const bool reachable = minimal::client::EnsureServerRunning(
+        target, spawn_options, [](const std::string& line) {
+            std::fprintf(stderr, "minimal: %s\n", line.c_str());
+        });
+
+    minimal::client::SessionClient client(target);
+    if (!reachable || !client.WaitForConnected(std::chrono::seconds(5))) {
+        std::fprintf(stderr, "cannot reach a minimal-server at %s\n", target.c_str());
+        std::fprintf(stderr, "start one with: minimal-server --listen %s\n",
+                     target.rfind("unix://", 0) == 0 ? target.c_str() + 7 : "<socket path>");
+        return kUnavailable;
+    }
+
+    std::vector<minimal::v1::SessionSummary> sessions;
+    std::optional<int64_t> before_updated_at;
+    std::optional<std::string> before_id;
+    constexpr int32_t kPageSize = 200;
+    for (;;) {
+        minimal::client::SessionClient::ListSessionsOptions opts;
+        opts.include_all_dirs = options.all_dirs;
+        if (!options.all_dirs) opts.project_root = std::filesystem::current_path().string();
+        opts.limit = kPageSize;
+        opts.before_updated_at = before_updated_at;
+        opts.before_id = before_id;
+        const auto page = client.ListSessions(opts);
+        if (!page.status.ok()) {
+            std::fprintf(stderr, "could not list sessions: %s\n",
+                         page.status.error_message().c_str());
+            return kUnavailable;
+        }
+        const auto& rows = page.response.sessions();
+        for (const auto& row : rows) sessions.push_back(row);
+        if (rows.empty() || static_cast<int>(rows.size()) < kPageSize) break;
+        before_updated_at = rows[rows.size() - 1].updated_at_unix_ms();
+        before_id = rows[rows.size() - 1].session_id();
+    }
+
+    if (options.list_json) {
+        // ONE array, not NDJSON: a listing is consumed whole
+        // (`--list-sessions --output-format json | jq -r '.[0].session_id'`),
+        // unlike a turn's jsonl stream which is parsed incrementally by design.
+        nlohmann::json out = nlohmann::json::array();
+        for (const auto& row : sessions) {
+            nlohmann::json item;
+            item["session_id"] = row.session_id();
+            item["name"] = row.name();
+            item["message_count"] = row.message_count();
+            item["updated_at_unix_ms"] = row.updated_at_unix_ms();
+            item["is_live"] = row.is_live();
+            item["project_root"] = row.project_root();
+            out.push_back(std::move(item));
+        }
+        std::fputs(out.dump(2).c_str(), stdout);
+        std::fputc('\n', stdout);
+        return kOk;
+    }
+
+    // Human table. ID first and whole (it is the --resume argument; a ULID is
+    // 26 columns, so it gets exactly that), then the quick facts, then the
+    // name -- which truncates, being the only column of unbounded width.
+    const auto human_time = [](int64_t unix_ms) {
+        if (unix_ms <= 0) return std::string("-");
+        const std::time_t seconds = static_cast<std::time_t>(unix_ms / 1000);
+        std::tm local{};
+        localtime_r(&seconds, &local);
+        char buffer[32];
+        std::strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M", &local);
+        return std::string(buffer);
+    };
+    if (sessions.empty()) {
+        std::fprintf(stderr, "no stored sessions for %s\n",
+                     std::filesystem::current_path().string().c_str());
+        return kOk;
+    }
+    for (const auto& row : sessions) {
+        std::string name = row.name().empty() ? "(unnamed)" : row.name();
+        if (name.size() > 48) name = name.substr(0, 47) + "…";
+        std::printf("%-26s  %6d  %s  %s  %s\n", row.session_id().c_str(),
+                    row.message_count(), human_time(row.updated_at_unix_ms()).c_str(),
+                    row.is_live() ? "live" : "    ", name.c_str());
+    }
+    return kOk;
+}
+
 // --- TUI --------------------------------------------------------------------
 //
 // Frame assembly (ARCHITECTURE.md "TUI layout"): tab bar / session view /
@@ -582,6 +696,37 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         std::fprintf(stderr, "start one with: minimal-server --listen %s\n",
                      target.rfind("unix://", 0) == 0 ? target.c_str() + 7 : "<socket path>");
         return kUnavailable;
+    }
+
+    // The startup --resume probe: resolve the target session BEFORE the UI is
+    // built, so a bad id fails fast with a clear line instead of an empty TUI.
+    // What is kept from the summary is exactly what the attach step needs:
+    // liveness (attach vs revive) and the subagent refusal (a subagent's life
+    // is one turn of its parent; opening one standalone has no meaning -- the
+    // server refuses its resume too).
+    std::optional<minimal::v1::SessionSummary> startup_resume;
+    if (!args.headless.resume_session_id.empty()) {
+        const auto found = client->GetSession(args.headless.resume_session_id);
+        if (found.status.error_code() == grpc::StatusCode::NOT_FOUND) {
+            std::fprintf(stderr, "no such session: %s\n",
+                         args.headless.resume_session_id.c_str());
+            std::fprintf(stderr, "list stored sessions with: minimal --list-sessions\n");
+            return kUnavailable;
+        }
+        if (!found.status.ok()) {
+            std::fprintf(stderr, "could not look up session %s: %s\n",
+                         args.headless.resume_session_id.c_str(),
+                         found.status.error_message().c_str());
+            return kUnavailable;
+        }
+        if (!found.summary.parent_session_id().empty()) {
+            std::fprintf(stderr, "session %s is a subagent of %s and cannot be opened "
+                                 "standalone; open the parent session instead\n",
+                         args.headless.resume_session_id.c_str(),
+                         found.summary.parent_session_id().c_str());
+            return kUnavailable;
+        }
+        startup_resume = found.summary;
     }
 
     // The /-command catalog, fetched ONCE at connect (plugins load at startup
@@ -665,6 +810,22 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     auto app = std::make_shared<AppState>(client);
     app->SetPluginAttention(&env.attention_state);
     app->SetChatSurface(chat_surface);
+    // THE STARTUP RESUME, on the probed session (probe above, before the UI
+    // was built). LIVE opens the whole tab group -- the session plus every
+    // live subagent child (AttachSessionGroup); anything else REVIVES the
+    // stored transcript into a fresh root group (ResumeTab), the picker's own
+    // stale-liveness fallthrough. "" from the live path means the session
+    // ended between probe and attach; resume is then the remaining option,
+    // and its failure is visible as an Error tab, never silent. Either way
+    // the tab focuses itself (focus-if-empty), so no separate SetFocusedTab
+    // is needed here.
+    if (startup_resume) {
+        const std::string session_id = startup_resume->session_id();
+        if (startup_resume->is_live()) {
+            if (!app->AttachSessionGroup(session_id).empty()) startup_resume = std::nullopt;
+        }
+        if (startup_resume) (void)app->ResumeTab(session_id);
+    }
     // The focus seam's target, now that AppState exists (host_seams.hpp:
     // plugin load ran before app construction, so the provider attaches here).
     // Plugins captured the provider POINTER at registration; anything they
@@ -1683,6 +1844,7 @@ int main(int argc, char** argv) {
             std::fputs(minimal::client::UsageText().c_str(), stderr);
             return kUsage;
         case minimal::client::ParsedArgs::Action::Headless:
+        case minimal::client::ParsedArgs::Action::ListSessions:
         case minimal::client::ParsedArgs::Action::Tui:
             break;
     }
@@ -1708,6 +1870,9 @@ int main(int argc, char** argv) {
 
     if (parsed.action == minimal::client::ParsedArgs::Action::Headless) {
         return RunHeadless(parsed.headless);
+    }
+    if (parsed.action == minimal::client::ParsedArgs::Action::ListSessions) {
+        return RunListSessions(parsed.headless);
     }
     return RunTui(parsed);
 }

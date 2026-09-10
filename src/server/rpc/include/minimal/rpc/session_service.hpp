@@ -79,6 +79,8 @@ public:
 
     grpc::Status GetMessages(grpc::ServerContext*, const v1::GetMessagesRequest*,
                              v1::GetMessagesResponse*) override;
+    grpc::Status GetSession(grpc::ServerContext*, const v1::GetSessionRequest*,
+                            v1::SessionSummary*) override;
     grpc::Status ListSessions(grpc::ServerContext*, const v1::ListSessionsRequest*,
                               v1::ListSessionsResponse*) override;
     grpc::Status ListAgentPresets(grpc::ServerContext*, const v1::ListAgentPresetsRequest*,

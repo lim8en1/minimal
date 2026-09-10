@@ -1361,6 +1361,67 @@ std::string AppState::ResumeTab(const std::string& session_id) {
     return registered;
 }
 
+// The startup --resume path for a LIVE session (see the header): root tab
+// first, then its live subagent children as members of the same group. The
+// child scan runs AFTER the root attaches, both because the children need the
+// root's ordinal to group under and because a probe-then-attach caller can
+// only get fresher is_live data this way.
+std::string AppState::AttachSessionGroup(const std::string& session_id) {
+    const std::string root_tab = AttachTab(session_id);
+    if (root_tab.empty()) return "";
+
+    // The group's own project_root governs where its children live -- not
+    // this client's cwd -- so the scan lists all dirs and filters by parent
+    // here. Paged with the same (updated_at, id) cursor rule ListSessions
+    // documents, until a short page says there is no more.
+    std::vector<std::string> live_children;
+    std::optional<int64_t> before_updated_at;
+    std::optional<std::string> before_id;
+    for (;;) {
+        SessionClient::ListSessionsOptions opts;
+        opts.include_all_dirs = true;
+        opts.include_subagents = true;
+        opts.limit = 200;
+        opts.before_updated_at = before_updated_at;
+        opts.before_id = before_id;
+        const auto page = client_->ListSessions(opts);
+        if (!page.status.ok()) {
+            // The root tab is already open and usable; a failed listing must
+            // not undo it. The group just opens without its children.
+            common::DefaultLogger().warn("AttachSessionGroup({}): child listing failed: {}",
+                                         session_id, page.status.error_message());
+            break;
+        }
+        const auto& rows = page.response.sessions();
+        for (const auto& row : rows) {
+            if (row.parent_session_id() == session_id && row.is_live()) {
+                live_children.push_back(row.session_id());
+            }
+        }
+        if (rows.empty() || static_cast<int>(rows.size()) < opts.limit) break;
+        before_updated_at = rows[rows.size() - 1].updated_at_unix_ms();
+        before_id = rows[rows.size() - 1].session_id();
+    }
+
+    // Children inherit the ROOT's ordinal, and only the root's: AttachTab's
+    // grouping matches the group leader by "this ordinal, no parent" -- the
+    // same lookup OnSubagentSpawned does for the parent before attaching.
+    int64_t root_ordinal = 0;
+    {
+        std::lock_guard lk(mtx_);
+        for (const auto& tab : tabs_) {
+            if (tab.info.tab_id == root_tab) {
+                root_ordinal = tab.info.root_ordinal;
+                break;
+            }
+        }
+    }
+    for (const auto& child : live_children) {
+        AttachTab(child, root_ordinal);
+    }
+    return root_tab;
+}
+
 bool AppState::HasTab(const std::string& tab_id) const {
     std::lock_guard lk(mtx_);
     for (const auto& tab : tabs_) {
