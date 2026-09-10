@@ -6,6 +6,11 @@
 
 namespace minimal::client {
 
+bool ModalSlotStale(const std::string& tracked_request_id, const std::string& request_id,
+                    const std::string& slot_tab, const std::string& focused_tab) {
+    return tracked_request_id != request_id || slot_tab != focused_tab;
+}
+
 TabMaintenance::TabMaintenance(Dependencies deps) : deps_(std::move(deps)) {}
 
 // Per-frame maintenance for the focused tab: feed streaming deltas to the
@@ -191,8 +196,10 @@ void TabMaintenance::MaintainModals(const SessionState::Snapshot& snap) {
 
     if (snap.pending_permission.has_value()) {
         const auto& request = *snap.pending_permission;
-        if (ui.grants_for_request != request.request_id) {
+        if (ModalSlotStale(ui.grants_for_request, request.request_id, permission_slot_tab_,
+                           focused_)) {
             ui.grants_for_request = request.request_id;
+            permission_slot_tab_ = focused_;
             // ONE shared_ptr shared by the modal component and the answer
             // closure. The old code captured a raw `&toggles` (pointee of
             // ui.grants) in the closure, which stayed valid only through the
@@ -230,8 +237,10 @@ void TabMaintenance::MaintainModals(const SessionState::Snapshot& snap) {
     // once (each Set clears the others in SessionState).
     if (snap.pending_confirmation.has_value()) {
         const auto& request = *snap.pending_confirmation;
-        if (ui.confirmation_for_request != request.request_id) {
+        if (ModalSlotStale(ui.confirmation_for_request, request.request_id,
+                           confirmation_slot_tab_, focused_)) {
             ui.confirmation_for_request = request.request_id;
+            confirmation_slot_tab_ = focused_;
             const auto session_id = snap.session_id;   // SESSION-keyed (see above)
             const auto request_copy = request;
             AppState& app = deps_.app;
@@ -252,8 +261,9 @@ void TabMaintenance::MaintainModals(const SessionState::Snapshot& snap) {
     // response, which AnswerAsk sends unchanged.
     if (snap.pending_ask.has_value()) {
         const auto& request = *snap.pending_ask;
-        if (ui.ask_for_request != request.request_id) {
+        if (ModalSlotStale(ui.ask_for_request, request.request_id, ask_slot_tab_, focused_)) {
             ui.ask_for_request = request.request_id;
+            ask_slot_tab_ = focused_;
             const auto session_id = snap.session_id;
             const auto request_copy = request;
             AppState& app = deps_.app;

@@ -36,6 +36,19 @@
 
 namespace minimal::client {
 
+// Whether a SHARED modal slot (see TabMaintenance::MaintainModals) must be
+// rebuilt: either this is genuinely a new request for the tab whose id is
+// tracked alongside the old one, or focus has moved to a different tab
+// since the slot was last filled. The rebuild-on-new-request-id bookkeeping
+// is per-tab (TabUi), but permission_child/confirmation_child/ask_child are
+// each ONE slot shared by every tab -- so a tab switch alone (A -> B -> A,
+// A's own request id unchanged throughout) can leave the slot holding B's
+// (possibly already-answered) modal while A's guard reads "unchanged,
+// nothing to rebuild." Pure so the rebuild decision is directly testable
+// without TabMaintenance's AppState/FTXUI dependencies.
+bool ModalSlotStale(const std::string& tracked_request_id, const std::string& request_id,
+                    const std::string& slot_tab, const std::string& focused_tab);
+
 struct TabUi {
     // Track C4: one slot per SessionState::Snapshot::live_segments entry,
     // index-aligned (ChatView::LiveTextStreamSlot -- a Tool-kind index's
@@ -168,6 +181,17 @@ private:
     Dependencies deps_;
     std::string focused_;
     SessionState::Snapshot focused_details_;
+    // Which tab's request currently occupies each SHARED modal slot (see
+    // MaintainModals): the rebuild-on-new-request-id guard is keyed per tab
+    // in TabUi, but permission_child/confirmation_child/ask_child are each
+    // ONE slot for the whole app. Without this, focus moving A -> B -> A
+    // left A's un-rebuilt guard reading "unchanged" while the shared slot
+    // still held B's (possibly already-answered) modal -- A's own request
+    // was never displayed, and the modal that WAS shown answered the wrong
+    // session.
+    std::string permission_slot_tab_;
+    std::string confirmation_slot_tab_;
+    std::string ask_slot_tab_;
     // Sentinel, not 0: forces the first call (before the loop starts) to
     // run regardless of whatever OpenTab's own bumps left UiVersion at.
     uint64_t last_ui_version_ = static_cast<uint64_t>(-1);

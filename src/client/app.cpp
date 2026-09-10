@@ -1724,7 +1724,8 @@ int RunTui(const minimal::client::ParsedArgs& args) {
                 it->second.chat->ToggleTimestamps();
             }
         },
-        *pasting};
+        *pasting,
+        [&] { return prompt_state.list_open; }};
     auto with_keys = CatchEvent(session_view, [&](const Event& event) {
         return minimal::client::HandleGlobalKey(key_ctx, event);
     });

@@ -173,8 +173,14 @@ ftxui::Component MakePermissionModal(const PendingPermission& request, GrantTogg
     // `on_answer` is captured BY VALUE: the CatchEvent outlives the factory
     // and a by-reference capture of the parameter was a dangling call.
     return CatchEvent(body, [on_answer, interacted](const Event& event) {
+        // The FIRST event this modal ever sees only arms it -- it never
+        // approves. A Return that lands in the same input batch as the
+        // request's own arrival (a fast typist's unrelated keystroke, a
+        // paste's trailing newline) must not read as the user's answer to a
+        // prompt they have not seen yet.
+        const bool was_interacted = *interacted;
         *interacted = true;
-        if (event == Event::Return) {
+        if (event == Event::Return && was_interacted) {
             on_answer(true);
             return true;
         }
@@ -207,6 +213,20 @@ ftxui::Component MakeConfirmationModal(const PendingConfirmation& request, const
     }
     auto buttons = ftxui::Container::Horizontal(std::move(option_components));
     const auto buttons_val = buttons;   // outlives the factory: by value
+    // Default keyboard focus off the destructive option: Container defaults
+    // ActiveChild() to index 0, and the real call sites (close/quit's
+    // "close anyway", the picker's "delete") put the destructive action
+    // FIRST -- a reflexive Enter as the modal opens fired it with no arming
+    // delay. Options with no cancel choice (the server's Yes/No) have no
+    // single safe default and are left as index 0, unchanged.
+    if (has_cancel) {
+        for (std::size_t i = 0; i < request_state->options.size(); ++i) {
+            if (request_state->options[i] == "cancel") {
+                buttons_val->SetActiveChild(buttons_val->ChildAt(static_cast<int>(i)));
+                break;
+            }
+        }
+    }
     const auto interacted = std::make_shared<bool>(false);
     auto body = Renderer(buttons, [buttons_val, request_state, has_cancel, &theme, interacted] {
         const PendingConfirmation& request = *request_state;
@@ -266,6 +286,12 @@ struct AskModalState {
         std::deque<bool> boxes;
         // single: the radiobox's selected index, -1 = nothing picked.
         int radio = -1;
+        // FTXUI's Radiobox clamps *selected from -1 to 0 the first time it
+        // RENDERS, with no user interaction -- so `radio >= 0` alone cannot
+        // distinguish "the user picked option 0" from "the user never
+        // touched this question." Only on_change (fired by an actual
+        // selection change, not the render-time clamp) sets this.
+        bool radio_touched = false;
         bool use_other = false;
         std::string other_text;
     };
@@ -291,7 +317,7 @@ v1::AskUserResponse CollectAnswer(const PendingAsk& request, const AskModalState
             for (int j = 0; j < question.options_size(); ++j) {
                 if (qs.boxes[j]) slot->add_selected(question.options(j).label());
             }
-        } else if (qs.radio >= 0 && qs.radio < question.options_size()) {
+        } else if (qs.radio_touched && qs.radio >= 0 && qs.radio < question.options_size()) {
             slot->add_selected(question.options(qs.radio).label());
         }
     }
@@ -324,7 +350,7 @@ std::string ReviewLine(const v1::AskQuestion& question,
         }
         return joined.empty() ? "(not answered)" : "-> " + joined;
     }
-    if (qs.radio >= 0 && qs.radio < question.options_size()) {
+    if (qs.radio_touched && qs.radio >= 0 && qs.radio < question.options_size()) {
         return "-> " + question.options(qs.radio).label();
     }
     return "(not answered)";
@@ -384,6 +410,11 @@ ftxui::Component MakeAskModal(const PendingAsk& request, const Theme& theme,
             RadioboxOption radio_state;
             radio_state.entries = ConstStringListRef(&qs.entries);
             radio_state.selected = &qs.radio;
+            const auto state_ref = state;   // shared_ptr copy: outlives the closure
+            const int index = i;
+            radio_state.on_change = [state_ref, index] {
+                state_ref->questions[index].radio_touched = true;
+            };
             block.push_back(Radiobox(std::move(radio_state)));
         }
 

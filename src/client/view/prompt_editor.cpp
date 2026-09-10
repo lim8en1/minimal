@@ -362,7 +362,13 @@ ftxui::Component MakePromptEditor(
         // older entries; ArrowDown walks back toward newer ones and, past
         // the newest, restores whatever was being typed before recall
         // started.
-        if (!state.list_open && event == Event::ArrowUp && !state.history.empty()) {
+        // Single-line drafts only: a multi-line draft (built with Alt+Enter)
+        // has its own use for Up -- moving the cursor up a line -- and
+        // recalling history over it silently discarded the draft. Falling
+        // through hands the event to the wrapped Input, which already moves
+        // the cursor up a visual line for multi-line content.
+        if (!state.list_open && event == Event::ArrowUp && !state.history.empty() &&
+            state.content.find('\n') == std::string::npos) {
             if (!state.history_cursor.has_value()) {
                 state.history_draft = state.content;
                 state.history_cursor = state.history.size() - 1;

@@ -23,6 +23,7 @@
 #include "../plugins/server/commands-core/core_commands.hpp"
 #include "deadline.hpp"
 #include "fakes.hpp"
+#include "minimal/client/keybinding_dispatch.hpp"
 #include "minimal/client/plugins/host_seams.hpp"
 #include "minimal/client/session_client.hpp"
 #include "minimal/client/state.hpp"
@@ -1336,4 +1337,62 @@ TEST_CASE("sends stacked before the create resolves land on ONE session",
     }
     REQUIRE(settled);
     CHECK(fixture.sessions->size() == 1);
+}
+
+TEST_CASE("HandleGlobalKey: an open suggestion list gets Escape before "
+          "turn-cancel claims it",
+          "[app_state][keybinding_dispatch]") {
+    // Regression: HandleGlobalKey sees every event before the prompt editor
+    // does, and used to claim a busy tab's Escape for turn.cancel
+    // unconditionally -- the editor's own Escape-closes-the-suggestion-list
+    // handling (prompt_editor.cpp) never got a turn. This is the first
+    // direct test of HandleGlobalKey itself (previously untested -- see
+    // .claude/client-review/synthesis.md's test-harness-gaps note); AppState
+    // has no seam to fake around, hence the e2e-weight ClientFixture.
+    ClientFixture fixture;
+    fixture.Script("hi");
+    fixture.Start();
+
+    AppState app(fixture.client);
+    const auto tab = app.OpenTab(fixture.Options("first"));
+
+    const auto keys = minimal::client::Keybindings::Parse(R"({"turn.cancel": "escape"})");
+    const auto keymap = minimal::client::ResolvedKeymap::Build(keys);
+
+    bool show_panel = false;
+    bool show_plugin_modal = false;
+    std::vector<minimal::client::plugins::PluginViewEntry> plugin_views;
+    std::shared_ptr<ftxui::Component> plugin_modal_child;
+    bool pasting = false;
+    bool suggestions_open_value = true;
+    bool quit_requested = false;
+
+    minimal::client::KeyContext ctx{
+        app, keymap, tab,
+        show_panel, show_plugin_modal,
+        plugin_views, plugin_modal_child,
+        [] {}, [] {}, [] {}, [] {},
+        [&] { quit_requested = true; },
+        [](const std::string&) {},
+        [](const std::string&, int) {},
+        [](const std::string&) {},
+        [](std::vector<std::string>) {},
+        [](const std::string&, int) {},
+        [](const std::string&) {},
+        [](const std::string&) {},
+        [](const std::string&, int) -> bool { return false; },
+        [](const std::string&) {},
+        pasting,
+        [&] { return suggestions_open_value; }};
+
+    // Suggestions open: Escape must NOT be consumed here -- it falls through
+    // to the editor's own CatchEvent.
+    CHECK_FALSE(minimal::client::HandleGlobalKey(ctx, ftxui::Event::Escape));
+    CHECK_FALSE(quit_requested);
+
+    // No suggestions open: the idle tab's Escape is simply not cancel_pressed's
+    // busy path (turn_in_flight is false) -- unconsumed either way, but for a
+    // different reason, proving the new guard only fires when it should.
+    suggestions_open_value = false;
+    CHECK_FALSE(minimal::client::HandleGlobalKey(ctx, ftxui::Event::Escape));
 }

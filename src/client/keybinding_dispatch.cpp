@@ -239,6 +239,14 @@ bool HandleGlobalKey(KeyContext& ctx, const ftxui::Event& event) {
     // two keys actually arrived, never per keystroke.
     const bool cancel_pressed = event == Event::CtrlC || ctx.keymap.Matches("turn.cancel", event);
     if (cancel_pressed) {
+        // An open @/-suggestion list takes Escape first: closing it is the
+        // smaller, expected action, and the editor's own CatchEvent (which
+        // would otherwise dismiss it) never runs when this branch claims
+        // the key ahead of it. Ctrl+C is unaffected -- it was never the
+        // suggestion list's key.
+        if (event == Event::Escape && ctx.suggestions_open && ctx.suggestions_open()) {
+            return false;
+        }
         bool busy = false;
         if (!sid.empty()) {
             for (const auto& tab : ctx.app.GetAllTabs()) {

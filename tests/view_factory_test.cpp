@@ -387,6 +387,43 @@ TEST_CASE("permission modal: with no grants offered, the footer omits the dead "
     CHECK(frame.find("toggle grants") == std::string::npos);
 }
 
+TEST_CASE("permission modal: a Return as the FIRST event arms but does not "
+          "approve; a second Return does") {
+    // Regression: a Return landing in the same input batch as the request's
+    // own arrival (a fast typist's unrelated keystroke, a paste's trailing
+    // newline) used to approve a tool call the user had not read yet.
+    const auto theme = TestTheme();
+    GrantToggles toggles;
+    const auto request = MakePermissionRequest();
+    std::optional<bool> answered;
+    auto modal = MakePermissionModal(request, toggles, theme,
+                                     [&](bool allow) { answered = allow; });
+
+    // Whether the underlying checkbox container also consumes this first
+    // Return is incidental (FTXUI's own widget behavior); what matters is
+    // that on_answer must NOT have fired from it.
+    SendEvent(modal, ftx::Event::Return);   // arms, does not approve
+    CHECK_FALSE(answered.has_value());
+
+    REQUIRE(SendEvent(modal, ftx::Event::Return));   // the user's real answer
+    REQUIRE(answered.has_value());
+    CHECK(*answered);
+}
+
+TEST_CASE("permission modal: Escape still denies as the very first event") {
+    // Denying is the safe default; only the approve path needs an arming
+    // delay.
+    const auto theme = TestTheme();
+    GrantToggles toggles;
+    const auto request = MakePermissionRequest();
+    std::optional<bool> answered;
+    auto modal = MakePermissionModal(request, toggles, theme,
+                                     [&](bool allow) { answered = allow; });
+    REQUIRE(SendEvent(modal, ftx::Event::Escape));
+    REQUIRE(answered.has_value());
+    CHECK_FALSE(*answered);
+}
+
 // ---------------------------------------------------------------------------
 // Confirmation modal
 // ---------------------------------------------------------------------------
@@ -407,9 +444,54 @@ TEST_CASE("confirmation modal: renders the ask and answers the focused option") 
     CHECK(frame.find("destroy running work?") != std::string::npos);
     CHECK(frame.find("close anyway") != std::string::npos);
 
-    REQUIRE(SendEvent(modal, ftx::Event::Return));   // focused button: the first option
+    // "cancel" is the safe default focus (see the dedicated test below), not
+    // the destructive "close anyway" -- a bare Return answers "cancel".
+    REQUIRE(SendEvent(modal, ftx::Event::Return));
     REQUIRE(answers.size() == 1);
-    CHECK(answers[0] == "close anyway");
+    CHECK(answers[0] == "cancel");
+}
+
+TEST_CASE("confirmation modal: default focus is the cancel option, not the "
+          "destructive one") {
+    // Regression: Container defaults ActiveChild() to index 0, and both real
+    // call sites (close/quit's "close anyway", the picker's "delete") put
+    // the destructive action first -- a reflexive Enter as the modal opened
+    // fired it with no arming delay.
+    const auto theme = TestTheme();
+    PendingConfirmation request;
+    request.kind = "delete_session";
+    request.title = "delete this session?";
+    request.detail = "this cannot be undone";
+    request.options = {"delete", "cancel"};
+
+    std::vector<std::string> answers;
+    auto modal = MakeConfirmationModal(
+        request, theme, [&](const std::string& chosen) { answers.push_back(chosen); });
+
+    RenderFrame(modal);   // ActiveChild is set at construction; render just settles the DOM
+    REQUIRE(SendEvent(modal, ftx::Event::Return));
+    REQUIRE(answers.size() == 1);
+    CHECK(answers[0] == "cancel");
+}
+
+TEST_CASE("confirmation modal: with no cancel option, focus stays on the "
+          "first option") {
+    // The server's Yes/No confirms have no cancel option to default to;
+    // behavior there is unchanged from before this fix.
+    const auto theme = TestTheme();
+    PendingConfirmation request;
+    request.kind = "wire_confirm";
+    request.title = "clear the conversation?";
+    request.detail = "";
+    request.options = {"Yes", "No"};
+
+    std::vector<std::string> answers;
+    auto modal = MakeConfirmationModal(
+        request, theme, [&](const std::string& chosen) { answers.push_back(chosen); });
+
+    REQUIRE(SendEvent(modal, ftx::Event::Return));
+    REQUIRE(answers.size() == 1);
+    CHECK(answers[0] == "Yes");
 }
 
 // ---------------------------------------------------------------------------
@@ -554,6 +636,29 @@ TEST_CASE("ask modal: review mode swallows widget keys but passes Ctrl+C through
     CHECK_FALSE(SendEvent(modal, ftx::Event::CtrlC));   // still passes through
     CHECK(SendEvent(modal, ftx::Event::Character("x")));   // frozen: consumed
     CHECK(SendEvent(modal, ftx::Event::ArrowDown));        // frozen: consumed
+}
+
+TEST_CASE("ask modal: a single-choice question the user never touched stays "
+          "unanswered, not option 0") {
+    // Regression: FTXUI's Radiobox clamps *selected from -1 to 0 the first
+    // time it RENDERS, with no user interaction -- so a skipped question
+    // used to silently submit option 0 and "(not answered)" could never
+    // appear for a radio question.
+    const auto theme = TestTheme();
+    const auto request = MakeAskRequest(
+        {MakeAskQuestion("Approach", "which approach?", {"one", "two"})});
+    std::optional<v1::AskUserResponse> submitted;
+    auto modal = MakeAskModal(
+        request, theme, [&](v1::AskUserResponse r) { submitted = std::move(r); });
+
+    RenderFrame(modal);   // force the render-time clamp the regression exploited
+    REQUIRE(SendEvent(modal, ftx::Event::Return));   // -> review, untouched
+    const auto review = RenderFrame(modal);
+    CHECK(review.find("(not answered)") != std::string::npos);
+
+    REQUIRE(SendEvent(modal, ftx::Event::Return));   // -> submit
+    REQUIRE(submitted.has_value());
+    CHECK(submitted->answers(0).selected_size() == 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -1554,6 +1659,31 @@ TEST_CASE("prompt editor: up-arrow walks further back through older entries, "
     CHECK(state.content == "three");
     REQUIRE(SendEvent(editor, ftx::Event::ArrowDown));
     CHECK(state.content.empty());   // past the newest: back to the (empty) draft
+}
+
+TEST_CASE("prompt editor: up-arrow inside a multi-line draft does not recall "
+         "history",
+         "[prompt_editor]") {
+    // Regression: the recall branch had no check for a multi-line
+    // in-progress draft (built with Alt+Enter) -- Up used to unconditionally
+    // recall the last history entry over it instead of moving the cursor.
+    const auto theme = TestTheme();
+    PromptEditorState state;
+    auto editor = MakePromptEditor(
+        theme, state, [](const std::string&) {}, [](const std::string&) {},
+        [](const std::string&) { return std::vector<std::string>{}; });
+
+    Type(editor, "first message");
+    REQUIRE(SendEvent(editor, ftx::Event::Return));   // seed history
+
+    Type(editor, "line one");
+    REQUIRE(SendEvent(editor, ftx::Event::Character("\x1b\r")));   // Alt+Enter: newline
+    Type(editor, "line two");
+    REQUIRE(state.content == "line one\nline two");
+
+    SendEvent(editor, ftx::Event::ArrowUp);
+    CHECK(state.content == "line one\nline two");   // draft untouched, not recalled
+    CHECK_FALSE(state.history_cursor.has_value());
 }
 
 TEST_CASE("prompt editor: a consecutive duplicate submission does not grow history",

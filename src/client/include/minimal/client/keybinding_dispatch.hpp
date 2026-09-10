@@ -197,6 +197,13 @@ struct KeyContext {
     // IsOptionGlyphEvent) arrives mid-paste, byte-identical to a real
     // alt+key press.
     bool& pasting;
+
+    // True while the prompt editor's own @/-suggestion list is open (the
+    // single app-wide PromptEditorState's list_open) -- so a busy-tab
+    // Escape can defer to the editor's own dismiss-the-list handling
+    // instead of reading as turn.cancel first. Null-checked at the call
+    // site (every real caller sets it; test fixtures may not need to).
+    std::function<bool()> suggestions_open;
 };
 
 // The global-keybinding CatchEvent body (app.cpp's with_keys), as a function
