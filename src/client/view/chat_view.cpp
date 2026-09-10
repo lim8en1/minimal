@@ -270,6 +270,13 @@ ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
     // with a wall of blank space beneath it, far from the input box below.
     column.push_back(filler());
     column.push_back(separator());
+    // A resumed session with more history than the initial page looked like
+    // its full history unless the user already knew about chat.load_older
+    // (PageUp) -- has_earlier_messages was never rendered anywhere.
+    if (snapshot.has_earlier_messages) {
+        column.push_back(text("··· earlier messages available -- pageup to load ···") | dim |
+                         color(theme_.ColorFor("system_message")));
+    }
     // The sliding-window boundary (track R2): older-page loads beyond the cap
     // evicted pages from the window's NEWEST end, so this view's top is NOT
     // the live newest message. A marker here, never a silent gap.

@@ -465,6 +465,57 @@ TEST_CASE("FindRewindTargetSeq resolves the Nth user turn back", "[app_state][re
     CHECK_FALSE(app.FindRewindTargetSeq(sid, 3).has_value());   // only two user turns exist
 }
 
+TEST_CASE("FindRewindTargetSeq refuses once the window is trimmed",
+          "[app_state][rewind]") {
+    // Regression: a trimmed window's front is not the true newest message
+    // (the sliding window evicts from the NEWEST end once
+    // scrollback_max_messages is exceeded by older-page loads) -- counting
+    // "n user turns back" off it could silently target a turn far older
+    // than the user asked for, and /rewind enacts whatever this returns.
+    ClientFixture fixture;
+    fixture.ScriptSteps({testing::TextResponse("first reply"), testing::TextResponse("second reply"),
+                         testing::TextResponse("third reply")});
+    fixture.Start();
+
+    AppState app(fixture.client);
+    // A tiny cap so three turns' worth of history (6 rows) overflows it
+    // almost immediately -- applied to sessions created AFTER this call.
+    app.SetUiBounds(/*scrollback_max_messages=*/3, /*tool_output_buffer_bytes=*/64 * 1024);
+    const auto tab = app.OpenTab(fixture.Options("trimmed-rewind"));
+    REQUIRE_FALSE(tab.empty());
+
+    app.SubmitChatTurn(tab, "first message");
+    REQUIRE(WaitForSession(app, tab));
+    app.SubmitChatTurn(tab, "second message");
+    app.SubmitChatTurn(tab, "third message");
+
+    const auto sid = SessionIdOf(app, tab);
+    REQUIRE_FALSE(sid.empty());
+
+    // Settle the newest slice (capped to 3 rows by the fix under test).
+    const auto deadline1 = std::chrono::steady_clock::now() + 5s;
+    while (std::chrono::steady_clock::now() < deadline1) {
+        app.RequestScrollback(sid, /*newest=*/true);
+        std::this_thread::sleep_for(50ms);
+        if (!app.GetDetails(tab).scrollback_page->empty()) break;
+    }
+    REQUIRE_FALSE(app.GetDetails(tab).scrollback_page->empty());
+
+    // Load older until the sliding window's cap-triggered eviction flags
+    // the trim (session_state_test.cpp's INVARIANT test covers the
+    // mechanism directly; this proves FindRewindTargetSeq respects it on a
+    // live, AppState-owned session).
+    const auto deadline2 = std::chrono::steady_clock::now() + 5s;
+    while (!app.GetDetails(tab).scrollback_trimmed &&
+          std::chrono::steady_clock::now() < deadline2) {
+        app.RequestScrollback(sid, /*newest=*/false);
+        std::this_thread::sleep_for(50ms);
+    }
+    REQUIRE(app.GetDetails(tab).scrollback_trimmed);
+
+    CHECK_FALSE(app.FindRewindTargetSeq(sid, 1).has_value());
+}
+
 // The client's half of the rewind feature: the server emits SessionRewoundEvent
 // for both verbs, and DispatchToTab must route it -- the dispatch chain used to
 // have no branch, so a rewind left the discarded rows on screen and a redo

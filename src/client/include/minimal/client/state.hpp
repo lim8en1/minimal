@@ -457,6 +457,21 @@ public:
     // what RequestScrollback captures at submit time for the check above.
     uint64_t CurrentTurnSeq() const;
 
+    // Bumped by OnSessionRewound -- what RequestScrollback captures at submit
+    // time (mirroring CurrentTurnSeq above) to detect a rewind/redo that
+    // happened while its fetch was in flight, so the stale response can be
+    // discarded instead of re-inserting rows the rewind just cut.
+    uint64_t CurrentRewindEpoch() const;
+
+    // A GetMessages response that arrived after a rewind/redo superseded the
+    // fetch that requested it: resolves the pending-fetch bookkeeping
+    // (mirroring ApplyScrollbackPage's empty-page branch) WITHOUT touching
+    // scrollback_page_ -- OnSessionRewound already produced the authoritative
+    // window, and this response no longer describes it. Deliberately not
+    // NoteRefreshFailed: nothing failed, the fetch was just superseded, and
+    // that path's failure-streak notice would be spurious here.
+    void DiscardStaleScrollbackPage();
+
     // The session's stream ended (server closed it / session terminated) --
     // the real "Done" (✓) signal, distinct from a turn merely completing.
     void OnSessionEnded();
@@ -585,6 +600,7 @@ private:
     bool has_earlier_ = false;
     uint64_t transcript_version_ = 0;
     uint64_t refresh_seq_ = 0;   // see Snapshot::refresh_seq
+    uint64_t rewind_epoch_ = 0;   // see CurrentRewindEpoch
     bool refresh_succeeded_ = false;   // outcome of the attempt that bumped refresh_seq_
     // Consecutive RESOLVED-FAILED scrollback fetches; reset by every
     // successful apply. Drives the one-shot error notice in NoteRefreshFailed

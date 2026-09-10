@@ -606,6 +606,17 @@ uint64_t SessionState::CurrentTurnSeq() const {
     return turn_seq_;
 }
 
+uint64_t SessionState::CurrentRewindEpoch() const {
+    std::lock_guard lk(mtx_);
+    return rewind_epoch_;
+}
+
+void SessionState::DiscardStaleScrollbackPage() {
+    std::lock_guard lk(mtx_);
+    refresh_succeeded_ = true;
+    ++refresh_seq_;
+}
+
 void SessionState::OnError(const std::string& error_message) {
     std::lock_guard lk(mtx_);
     is_streaming_ = false;
@@ -741,10 +752,14 @@ void SessionState::OnSessionRewound(int64_t truncated_to_seq, int64_t active_las
         std::make_shared<const std::vector<v1::StoredMessage>>(scrollback_page_);
     // Same bookkeeping ApplyScrollbackPage resolves with: the version bump is
     // the mismatch the refresh state machine refetches; the refresh_seq bump
-    // retires any fetch that was in flight across the rewind.
+    // unsticks the tab_ui.cpp refresh latch. Neither one stops an
+    // ALREADY-IN-FLIGHT fetch from applying its (now stale) response -- that
+    // is rewind_epoch_'s job (RequestScrollback captures it at submit time,
+    // AppState::CurrentRewindEpoch(); DiscardStaleScrollbackPage above).
     refresh_succeeded_ = true;
     ++transcript_version_;
     ++refresh_seq_;
+    ++rewind_epoch_;
 }
 
 // Pending modals -------------------------------------------------------------
@@ -1000,12 +1015,26 @@ void SessionState::ApplyScrollbackPage(const v1::GetMessagesResponse& resp) {
         return;
     }
 
+    // Set when a fresh/newest fetch itself exceeds the configured cap (below)
+    // -- distinct from scrollback_trimmed_, which specifically means NEWER
+    // rows were evicted; this is the opposite direction (we chose to keep
+    // fewer than the full fetch), so it only needs to correct has_earlier_.
+    bool assign_capped = false;
     if (scrollback_page_.empty() ||
         resp.messages(0).seq() > scrollback_page_.front().seq()) {
         // Newer than what we hold — keep only the contiguous newest slice (bounded memory).
         scrollback_page_.assign(resp.messages().begin(), resp.messages().end());
         scrollback_trimmed_ = false;
         scrollback_gap_ = false;   // same reset as the newest-slice refresh's other boundary flag
+        // RequestScrollback always asks for up to 100 rows, independent of
+        // scrollback_max_messages_ -- without this, a newest apply could
+        // exceed the configured cap outright, and the VERY NEXT older-page
+        // load's eviction loop (below) would evict some of the rows just
+        // shown instead of only the ones it actually fetched.
+        if (static_cast<int>(scrollback_page_.size()) > scrollback_max_messages_) {
+            scrollback_page_.resize(static_cast<std::size_t>(scrollback_max_messages_));
+            assign_capped = true;
+        }
     } else {
         // Older than (or overlapping) what we hold: append, SKIPPING rows we
         // already hold. The assign branch above must only ever fire when the
@@ -1045,7 +1074,11 @@ void SessionState::ApplyScrollbackPage(const v1::GetMessagesResponse& resp) {
     }
 
     last_loaded_seq_ = scrollback_page_.empty() ? -1 : scrollback_page_.back().seq();
-    has_earlier_ = resp.has_more();
+    // The server's own has_more() may say false (this genuinely was the
+    // whole remaining history) while assign_capped means we still chose to
+    // keep less than the full fetch -- "load older" must not read as
+    // exhausted in that case.
+    has_earlier_ = resp.has_more() || assign_capped;
     // The one copy the shared page ever pays: rows changed, so the old
     // snapshot's view must stay stable for whatever frame is still reading it.
     scrollback_page_shared_ =
@@ -2389,6 +2422,12 @@ std::optional<int64_t> AppState::FindRewindTargetSeq(const std::string& session_
     // a position the server refuses to rewind to, and one the user could
     // never re-enter as a prompt.
     const auto snapshot = state->TakeSnapshot();
+    // A trimmed window's front is NOT the true newest message (the sliding
+    // window evicts from the newest end once scrollback_max_messages_ is
+    // exceeded by older-page loads) -- counting "the last n user turns" off
+    // it can name a turn far older than the user asked for, and /rewind
+    // enacts whatever target this returns. Refuse rather than guess wrong.
+    if (snapshot.scrollback_trimmed) return std::nullopt;
     int remaining = n;
     for (const auto& stored : *snapshot.scrollback_page) {
         if (stored.message().role() != v1::ROLE_USER) continue;
@@ -2433,6 +2472,11 @@ void AppState::RequestScrollback(const std::string& session_id, bool newest) {
     // The turn live at submit time (Fix: the persisted page covers THIS turn;
     // a newer one that starts before the apply must keep its live text).
     const uint64_t turn_at_submit = state->CurrentTurnSeq();
+    // A rewind/redo between submit and apply means this response describes a
+    // transcript OnSessionRewound has already trimmed away -- applying it
+    // would re-insert the discarded rows. See CurrentRewindEpoch's header
+    // comment.
+    const uint64_t rewind_epoch_at_submit = state->CurrentRewindEpoch();
 
     // `this` is captured because BumpUiVersion() is AppState's own private
     // method -- SessionState has no back-reference to bump it, so the
@@ -2444,7 +2488,8 @@ void AppState::RequestScrollback(const std::string& session_id, bool newest) {
     // machine's refresh_pending (resolved only by a refresh_seq bump, which
     // only a run produces) -- drop-oldest eviction of this job stranded both
     // forever, so it is protected (rpc_queue.hpp).
-    rpc_queue_.Submit([this, state, session_id, newest, cursor, turn_at_submit] {
+    rpc_queue_.Submit([this, state, session_id, newest, cursor, turn_at_submit,
+                      rewind_epoch_at_submit] {
         v1::GetMessagesResponse resp;
         grpc::ClientContext context;
         // Bounded: the fetch runs off the loop thread now, but a wedged
@@ -2468,6 +2513,17 @@ void AppState::RequestScrollback(const std::string& session_id, bool newest) {
             // WHY the transcript stopped moving.
             state->NoteRefreshFailed(status.error_message());
             if (!newest) state->EndOlderFetch();   // the latch resolves on failure too
+            BumpUiVersion();
+            return;
+        }
+        if (state->CurrentRewindEpoch() != rewind_epoch_at_submit) {
+            // Superseded by a rewind/redo since this fetch was submitted:
+            // OnSessionRewound already produced the authoritative window --
+            // applying this stale response would silently undo it (re-insert
+            // rows the rewind just cut, or hide the redo's restored ones
+            // behind a page keyed to seqs that no longer mean what they did).
+            state->DiscardStaleScrollbackPage();
+            if (!newest) state->EndOlderFetch();
             BumpUiVersion();
             return;
         }

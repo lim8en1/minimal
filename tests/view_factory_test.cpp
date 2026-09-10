@@ -1050,6 +1050,26 @@ TEST_CASE("chat view: a throwing live markdown stream renders a fallback, not a 
     CHECK(frame.find("render failed") != std::string::npos);
 }
 
+TEST_CASE("chat view: has_earlier_messages renders a load-older hint") {
+    // Regression: has_earlier_messages was never read by this file at all --
+    // a resumed session with more history than the initial page looked like
+    // its full history unless the user already knew about chat.load_older.
+    const auto theme = TestTheme();
+    plugins::MessageRendererRegistry messages;
+    plugins::RegisterCoreMessageRenderers(messages);
+    plugins::ToolResultRendererRegistry tool_renderers;
+
+    ChatView view(theme, messages, tool_renderers);
+
+    SessionState::Snapshot snap;
+    snap.session_id = "session-earlier";
+    snap.transcript_version = 1;
+    snap.has_earlier_messages = true;
+
+    const auto frame = RenderElement(view.Render(snap));
+    CHECK(frame.find("earlier messages available") != std::string::npos);
+}
+
 TEST_CASE("chat view: a completed tool call with no name-specific renderer still renders "
          "(falls back to the message-kind default)") {
     const auto theme = TestTheme();

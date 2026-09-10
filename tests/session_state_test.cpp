@@ -839,6 +839,28 @@ TEST_CASE("INVARIANT: paging older beyond the cap evicts newest pages and flags 
     CHECK(snap.scrollback_page->size() == 3);
 }
 
+// Regression: RequestScrollback always asks for up to 100 rows, independent
+// of scrollback_max_messages_ -- the "newer than what we hold" (assign)
+// branch used to take the whole fetched page unconditionally, so a fresh/
+// newest apply could exceed the configured cap outright.
+TEST_CASE("a newest-page apply is capped even when the fetch itself exceeds "
+         "scrollback_max_messages",
+         "[session_state][scrollback]") {
+    SessionState state("s-1");
+    state.SetBounds(/*scrollback_max_messages=*/3, /*tool_output_buffer_bytes=*/64 * 1024);
+
+    state.ApplyScrollbackPage(PageOf({20, 19, 18, 17, 16}, /*has_more=*/false));
+
+    const auto snap = state.TakeSnapshot();
+    REQUIRE(snap.scrollback_page->size() == 3);
+    CHECK(snap.scrollback_page->front().seq() == 20);   // kept the NEWEST rows
+    CHECK(snap.scrollback_page->back().seq() == 18);
+    // The server said has_more=false (this WAS the whole remaining history),
+    // but the client itself chose to keep fewer rows than the fetch
+    // returned -- "load older" must not read as exhausted.
+    CHECK(snap.has_earlier_messages);
+}
+
 // THE DUPLICATE-FETCH REGRESSION: two "load older" presses inside one RPC
 // round trip fetch the same before_seq page. The second apply used to fall
 // through to the newer/assign branch (its newest seq is no longer below the
@@ -896,6 +918,37 @@ TEST_CASE("OnSessionRewound trims the window to the active transcript and clears
     // refresh_seq bump for any fetch in flight across the rewind.
     CHECK(snap.transcript_version > version_before);
     CHECK(snap.refresh_succeeded);
+}
+
+TEST_CASE("a rewind supersedes an in-flight fetch: the stale page is "
+         "discarded, not applied",
+         "[session_state][rewind]") {
+    // Regression: RequestScrollback's job used to call ApplyScrollbackPage
+    // unconditionally on RPC success, with no way to know a rewind trimmed
+    // the window out from under it while the fetch was in flight -- the
+    // stale (pre-rewind) response's front seq reads as "newer" than the
+    // just-trimmed window and gets ASSIGNED wholesale, re-inserting the rows
+    // OnSessionRewound just discarded. rewind_epoch_ is what RequestScrollback
+    // now checks before applying.
+    SessionState state("s-1");
+    state.ApplyScrollbackPage(PageOf({40, 39, 38, 37}, /*has_more=*/false));
+
+    // A fetch "in flight" captures the epoch before the rewind lands.
+    const uint64_t epoch_at_submit = state.CurrentRewindEpoch();
+
+    state.OnSessionRewound(/*truncated_to_seq=*/39, /*active_last_seq=*/38);
+    CHECK(state.CurrentRewindEpoch() != epoch_at_submit);
+
+    const auto before = state.TakeSnapshot();
+    // What RequestScrollback's job calls instead of ApplyScrollbackPage once
+    // it sees the epoch moved: must resolve the pending-fetch bookkeeping
+    // without touching the (already-authoritative, post-rewind) window.
+    state.DiscardStaleScrollbackPage();
+    const auto after = state.TakeSnapshot();
+    REQUIRE(after.scrollback_page->size() == before.scrollback_page->size());
+    CHECK(after.scrollback_page->front().seq() == 38);   // still post-rewind, not 40
+    CHECK(after.refresh_seq > before.refresh_seq);
+    CHECK(after.refresh_succeeded);
 }
 
 TEST_CASE("OnSessionRewound REDO clears the whole window for a refetch",

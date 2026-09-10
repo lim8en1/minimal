@@ -1153,20 +1153,37 @@ int RunTui(const minimal::client::ParsedArgs& args) {
                 return;
             }
             int n = 1;   // default: undo the most recent user turn
+            bool valid_n = true;
             if (line.size() > 8) {
+                const std::string arg = line.substr(8);
                 try {
-                    n = std::stoi(line.substr(8));
+                    std::size_t consumed = 0;
+                    n = std::stoi(arg, &consumed);
+                    // Reject a partially-numeric arg ("2x" -- stoi stops at
+                    // the first non-digit and silently returns 2) and a
+                    // non-positive one, rather than acting on a depth the
+                    // user never actually typed.
+                    if (consumed != arg.size() || n <= 0) valid_n = false;
                 } catch (const std::exception&) {
-                    n = 1;
+                    valid_n = false;   // "/rewind all", overflow, no digits at all
                 }
             }
-            // Silently no-ops when fewer than n user turns exist in the
-            // loaded window: FindRewindTargetSeq is the client's only way to
-            // resolve a target, and GetState (which OnError needs) is
-            // AppState-private -- not worth widening its access for a rare
-            // out-of-range /rewind arg.
+            if (!valid_n) {
+                if (const std::string tab = app->FocusedTabId(); !tab.empty()) {
+                    app->TabNotice(tab, "/rewind needs a positive number of turns, e.g. "
+                                        "/rewind 2");
+                }
+                return;
+            }
+            // nullopt covers both "fewer than n user turns exist in the
+            // loaded window" and FindRewindTargetSeq's own refusal when the
+            // window is trimmed (scrolled far up -- its front is no longer
+            // the true newest message, so it cannot answer reliably).
             if (const auto seq = app->FindRewindTargetSeq(sid, n)) {
                 app->SendRewind(sid, *seq, /*redo=*/false);
+            } else if (const std::string tab = app->FocusedTabId(); !tab.empty()) {
+                app->TabNotice(tab, "/rewind: could not find that many turns in the loaded "
+                                    "history");
             }
             return;
         }
