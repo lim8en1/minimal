@@ -1,0 +1,26 @@
+{
+  "name": "lucent-crm",
+  "colors": {
+    "user_message": "#ff2e6a",
+    "assistant_message": "#ffe6f0",
+    "thinking": "#8a5e6b",
+    "working": "#ff6294",
+    "system_message": "#8a5e6b",
+    "error": "#ff5f56",
+    "attention": "#e6ff57",
+    "border_focused": "#ff6294",
+    "border_unfocused": "#40242c",
+    "row_focused": "#e6ff57",
+    "status_bar_bg": "#2b0f1c",
+    "banner_art": "#ff2e6a",
+    "banner_hint": "#8a5e6b",
+    "syntax_keyword": "#ff2e6a",
+    "syntax_string": "#ffb6c9",
+    "syntax_comment": "#8a5e6b",
+    "syntax_number": "#e6ff57",
+    "syntax_function": "#ff6294",
+    "syntax_type": "#fff0f5",
+    "syntax_operator": "#24f6d9",
+    "syntax_plain": "#ffe6f0"
+  }
+}

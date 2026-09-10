@@ -94,6 +94,13 @@ public:
     // Whether `language` resolves to a grammar in the active set (aliases
     // applied). With no table injected, the vendored set.
     bool Supports(std::string_view language) const;
+
+    // The Theme the highlighter holds is a REFERENCE whose contents may be
+    // swapped in place at runtime (/theme); highlight_cache_ bakes the colors
+    // into its cached Elements, so a swap must drop them or every cached block
+    // keeps rendering the previous theme's palette. The parser cache is
+    // theme-independent (parsers outlive color assignments) and survives.
+    void OnThemeChanged();
 private:
     const Theme& theme_;
     const std::vector<LanguageDefinition>* languages_ = nullptr;  // null = vendored

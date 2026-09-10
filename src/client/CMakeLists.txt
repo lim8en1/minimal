@@ -36,6 +36,7 @@ add_library(minimal_client_core SHARED
     view/session_picker.cpp
     view/model_picker.cpp
     view/agent_picker.cpp
+    view/theme_picker.cpp
     view/keymap_help.cpp
     view/commands_help.cpp
     view/picker_controller.cpp

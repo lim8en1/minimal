@@ -323,10 +323,34 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
 
     // The exclusive chat surface, when a plugin claimed it.
     out.chat_surface = out.surface_registry.surface.get();
+
+    // Both pushes below (chat surface + views) live in PushThemeToPlugins so
+    // RunTui's /theme swap can re-run the identical sequence after replacing
+    // out.theme's contents in place.
+    PushThemeToPlugins(out);
+
+    // Registration window closes here: every plugin's register_* hook (and
+    // core's own registrations) has run. A stashed registry reference that
+    // registers after this point warns and is ignored instead of silently
+    // bypassing the collision and attribution rules.
+    out.view_registry.Seal();
+    out.start_view_registry.Seal();
+    out.renderer_registry.Seal();
+    out.message_registry.Seal();
+    out.status_registry.Seal();
+    out.grammar_registry.Seal();
+    out.surface_registry.Seal();
+    out.engine_registry.Seal();
+
+    return true;
+}
+
+void PushThemeToPlugins(TuiEnvironment& out) {
+    // The exclusive chat surface, when a plugin claimed it. A throwing
+    // surface is disabled, not fatal (catch + disable, track R2): OnTheme
+    // runs before any event flows, so a throw here is the plugin's first
+    // chance to kill the process unguarded.
     if (out.chat_surface != nullptr) {
-        // A throwing surface is disabled, not fatal (catch + disable, track
-        // R2): OnTheme runs before any event flows, so a throw here is the
-        // plugin's first chance to kill the process unguarded.
         try {
             out.chat_surface->OnTheme(*out.theme);
         } catch (const std::exception& error) {
@@ -358,21 +382,6 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
                          view->spec().id.c_str());
         }
     }
-
-    // Registration window closes here: every plugin's register_* hook (and
-    // core's own registrations) has run. A stashed registry reference that
-    // registers after this point warns and is ignored instead of silently
-    // bypassing the collision and attribution rules.
-    out.view_registry.Seal();
-    out.start_view_registry.Seal();
-    out.renderer_registry.Seal();
-    out.message_registry.Seal();
-    out.status_registry.Seal();
-    out.grammar_registry.Seal();
-    out.surface_registry.Seal();
-    out.engine_registry.Seal();
-
-    return true;
 }
 
 minimal::plugins::NameKind MatchAliasKind(

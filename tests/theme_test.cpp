@@ -101,7 +101,15 @@ TEST_CASE("Bundled themes keep text roles legible on their background family") {
     const struct {
         const char* name;
         double background_luminance;  // dark theme vs #000, light vs #fff
-    } kThemes[] = {{"dark", 0.0}, {"light", 1.0}};
+    } kThemes[] = {{"dark", 0.0},
+                   {"light", 1.0},
+                   // The ported opencode themes (lucent-*): same test, same
+                   // bar -- a conversion typo (an unresolved def reference, a
+                   // leftover "transparent") would fail the parse outright.
+                   {"lucent-crm", 0.0},
+                   {"lucent-crm-light", 1.0},
+                   {"lucent-grn", 0.0},
+                   {"lucent-grn-light", 1.0}};
 
     for (const auto& entry : kThemes) {
         std::ifstream in(themes_dir / (std::string(entry.name) + ".json"));

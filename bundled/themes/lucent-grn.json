@@ -1,0 +1,26 @@
+{
+  "name": "lucent-grn",
+  "colors": {
+    "user_message": "#2eff6a",
+    "assistant_message": "#e6fff0",
+    "thinking": "#5e8a6b",
+    "working": "#62ff94",
+    "system_message": "#5e8a6b",
+    "error": "#ff5f56",
+    "attention": "#e6ff57",
+    "border_focused": "#62ff94",
+    "border_unfocused": "#24402c",
+    "row_focused": "#e6ff57",
+    "status_bar_bg": "#0f2b1c",
+    "banner_art": "#2eff6a",
+    "banner_hint": "#5e8a6b",
+    "syntax_keyword": "#2eff6a",
+    "syntax_string": "#b6ffc9",
+    "syntax_comment": "#5e8a6b",
+    "syntax_number": "#e6ff57",
+    "syntax_function": "#62ff94",
+    "syntax_type": "#f0fff5",
+    "syntax_operator": "#24f6d9",
+    "syntax_plain": "#e6fff0"
+  }
+}
