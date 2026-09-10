@@ -1202,7 +1202,7 @@ The highlighter never hardcodes a color; the theme supplies one per `HighlightCa
 
 **Both engines are slots, not privileged code paths.** The md4c adapter is the default registrant of an exclusive markdown-engine slot — a replacement engine must carry the streaming contract itself (partial input cannot soundly parse; the debounce and the authoritative `Finalize()` reparse are the implementer's obligations, not the host's). The syntax highlighter takes additive, language-keyed grammar registrations with the vendored set as the defaults. `docs/EXTENSIBILITY.md` §4.2 specifies both.
 
-**Themes**: `themes/*.json`, bundled `dark.json`/`light.json`, seeded like other config. Flat role/category → truecolor RGB:
+**Themes**: `themes/*.json`, bundled `dark`/`light` (and the ported opencode `lucent-*` variants), seeded like other config. Flat role/category → truecolor RGB:
 
 ```json
 {
@@ -1218,7 +1218,7 @@ The highlighter never hardcodes a color; the theme supplies one per `HighlightCa
 }
 ```
 
-`src/client/render/color_downsample.{hpp,cpp}` maps truecolor to the nearest 256-/16-color entry, checked once at startup against `COLORTERM`/`TERM` — themes are authored once and degrade automatically. Bundled-theme contrast is validated per family: each bundled theme's text roles must hold WCAG 3.0 against the terminal background the theme is named for (dark against black, light against white). Requiring every color to work against *both* backgrounds would forbid exactly what a theme family exists to express — near-white assistant text in the dark theme, near-black in the light one.
+`src/client/render/color_downsample.{hpp,cpp}` maps truecolor to the nearest 256-/16-color entry, checked once at startup against `COLORTERM`/`TERM` — themes are authored once and degrade automatically. Bundled-theme contrast is validated per family: each bundled theme's text roles must hold WCAG 3.0 against the terminal background the theme is named for (dark against black, light against white). Requiring every color to work against *both* backgrounds would forbid exactly what a theme family exists to express — near-white assistant text in the dark theme, near-black in the light one. The exception is the mid-tone family (`slate`, `moss`) for *transparent* terminals, whose backdrop is whatever the desktop shows: every text role there holds WCAG 3.0 against both black and white (relative luminance ≈ 0.10–0.30), and the contrast test validates them against both extremes.
 
 ## TUI layout — `src/client/`
 

@@ -3,6 +3,7 @@
 #include <cmath>
 #include <fstream>
 #include <sstream>
+#include <vector>
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
@@ -100,16 +101,23 @@ TEST_CASE("Bundled themes keep text roles legible on their background family") {
     };
     const struct {
         const char* name;
-        double background_luminance;  // dark theme vs #000, light vs #fff
-    } kThemes[] = {{"dark", 0.0},
-                   {"light", 1.0},
+        // The terminal backgrounds the theme is named for. Most themes pick
+        // one family (dark vs black, light vs white); the mid-tone themes are
+        // named for *transparent* terminals, whose backdrop is whatever the
+        // desktop shows -- they must stay legible on both extremes.
+        std::vector<double> background_luminances;
+    } kThemes[] = {{"dark", {0.0}},
+                   {"light", {1.0}},
                    // The ported opencode themes (lucent-*): same test, same
                    // bar -- a conversion typo (an unresolved def reference, a
                    // leftover "transparent") would fail the parse outright.
-                   {"lucent-crm", 0.0},
-                   {"lucent-crm-light", 1.0},
-                   {"lucent-grn", 0.0},
-                   {"lucent-grn-light", 1.0}};
+                   {"lucent-crm", {0.0}},
+                   {"lucent-crm-light", {1.0}},
+                   {"lucent-grn", {0.0}},
+                   {"lucent-grn-light", {1.0}},
+                   // Mid-tone themes for transparent terminal backgrounds.
+                   {"slate", {0.0, 1.0}},
+                   {"moss", {0.0, 1.0}}};
 
     for (const auto& entry : kThemes) {
         std::ifstream in(themes_dir / (std::string(entry.name) + ".json"));
@@ -118,9 +126,12 @@ TEST_CASE("Bundled themes keep text roles legible on their background family") {
         contents << in.rdbuf();
         const auto doc = nlohmann::json::parse(contents.str());
         for (const char* role : kTextRoles) {
-            INFO(entry.name << " role " << role);
-            REQUIRE(doc.at("colors").contains(role));
-            CHECK(Contrast(doc.at("colors").at(role), entry.background_luminance) >= 3.0);
+            for (const double background_luminance : entry.background_luminances) {
+                INFO(entry.name << " role " << role << " vs background luminance "
+                                << background_luminance);
+                REQUIRE(doc.at("colors").contains(role));
+                CHECK(Contrast(doc.at("colors").at(role), background_luminance) >= 3.0);
+            }
         }
     }
 }

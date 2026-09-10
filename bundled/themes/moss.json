@@ -1,0 +1,26 @@
+{
+  "name": "moss",
+  "colors": {
+    "user_message": "#5d9e4c",
+    "assistant_message": "#829072",
+    "thinking": "#6d7a5e",
+    "working": "#4f9e6e",
+    "system_message": "#7c8a6b",
+    "error": "#c46a5a",
+    "attention": "#9c8a2a",
+    "border_focused": "#5d9e4c",
+    "border_unfocused": "#3c4634",
+    "row_focused": "#9c8a2a",
+    "status_bar_bg": "#1c2518",
+    "banner_art": "#5d9e4c",
+    "banner_hint": "#6d7a5e",
+    "syntax_keyword": "#7d9038",
+    "syntax_string": "#4f9e6e",
+    "syntax_comment": "#6d7a5e",
+    "syntax_number": "#a8873a",
+    "syntax_function": "#4a9e8a",
+    "syntax_type": "#96883a",
+    "syntax_operator": "#829072",
+    "syntax_plain": "#829072"
+  }
+}

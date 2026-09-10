@@ -1,0 +1,26 @@
+{
+  "name": "slate",
+  "colors": {
+    "user_message": "#4f8dbd",
+    "assistant_message": "#8492a6",
+    "thinking": "#6d7a8c",
+    "working": "#5f9e78",
+    "system_message": "#7c8899",
+    "error": "#c46a6a",
+    "attention": "#a3812a",
+    "border_focused": "#4f8dbd",
+    "border_unfocused": "#3a4452",
+    "row_focused": "#a3812a",
+    "status_bar_bg": "#1e2530",
+    "banner_art": "#4f8dbd",
+    "banner_hint": "#6d7a8c",
+    "syntax_keyword": "#9480bd",
+    "syntax_string": "#5f9e78",
+    "syntax_comment": "#6d7a8c",
+    "syntax_number": "#a3812a",
+    "syntax_function": "#4f93a8",
+    "syntax_type": "#9c8636",
+    "syntax_operator": "#8492a6",
+    "syntax_plain": "#8492a6"
+  }
+}

@@ -438,6 +438,13 @@ Shape: `{ "name": ..., "colors": { ... } }` — hex color roles as in
 `syntax_string`, `syntax_comment`, `syntax_number`, `syntax_function`,
 `syntax_type`, `syntax_operator`, `syntax_plain`).
 
+Bundled themes: `dark`, `light`, `lucent-crm`, `lucent-crm-light`,
+`lucent-grn`, `lucent-grn-light` — each tuned for one solid background
+(dark for black, `-light` for white). `slate` and `moss` are mid-tone
+themes for **transparent** terminal backgrounds: every text role stays
+legible on both black and white, so they survive whatever the desktop
+shows through.
+
 ---
 
 ## agents/ and prompts/
