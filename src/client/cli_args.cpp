@@ -7,6 +7,7 @@
 #include <system_error>
 
 #include "minimal/common/config_paths.hpp"
+#include "minimal/common/logger.hpp"
 #include "minimal/common/model_ref.hpp"
 
 namespace minimal::client {
@@ -89,6 +90,18 @@ std::string ResolveServerTarget(std::string_view value) {
 
 std::string DefaultServerTarget() {
     return "unix://" + (common::DataDir() / "server.sock").string();
+}
+
+std::string CurrentProjectRootOrEmpty() {
+    std::error_code ec;
+    auto dir = std::filesystem::current_path(ec);
+    if (ec) {
+        common::DefaultLogger().warn(
+            "current_path() failed: {} -- project scoping disabled for this call",
+            ec.message());
+        return {};
+    }
+    return dir.string();
 }
 
 std::string UsageText() {
@@ -199,7 +212,13 @@ ParsedArgs ParseArgs(int argc, const char* const* argv) {
         } else if (name == "--server") {
             const auto value = take_value(name);
             if (!value) return parsed;
-            parsed.headless.server = ResolveServerTarget(*value);
+            try {
+                parsed.headless.server = ResolveServerTarget(*value);
+            } catch (const std::exception& error) {
+                parsed.action = ParsedArgs::Action::Error;
+                parsed.error = error.what();
+                return parsed;
+            }
         } else if (name == "--resume") {
             const auto value = take_value(name);
             if (!value) return parsed;

@@ -91,6 +91,13 @@ std::string ResolveServerTarget(std::string_view value);
 // rpc::DefaultSocketPath()/SocketTarget() on the server side.
 std::string DefaultServerTarget();
 
+// The project root scoping every session create/list call. Never throws: a
+// deleted cwd (the project dir removed while the client is running) would
+// otherwise abort with whatever shape std::filesystem::current_path() throws
+// in. Falls back to an empty string, which every call site already treats as
+// "no scope" (the same shape --all-dirs uses).
+std::string CurrentProjectRootOrEmpty();
+
 std::string UsageText();
 
 }  // namespace minimal::client

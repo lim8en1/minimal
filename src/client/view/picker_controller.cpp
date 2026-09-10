@@ -5,6 +5,7 @@
 #include <utility>
 
 #include "minimal/common/logger.hpp"
+#include "minimal/client/cli_args.hpp"
 #include "minimal/client/view/agent_picker.hpp"
 #include "minimal/client/view/model_picker.hpp"
 #include "minimal/client/view/session_picker.hpp"
@@ -105,7 +106,7 @@ void PickerController::FetchPickerPage(bool reset) {
     // above) can supersede it -- see picker_fetch_generation_'s doc comment.
     const uint64_t generation = ++picker_fetch_generation_;
     SessionClient::ListSessionsOptions opts;
-    opts.project_root = std::filesystem::current_path().string();
+    opts.project_root = CurrentProjectRootOrEmpty();
     opts.include_all_dirs = picker_data_.include_all_dirs;
     opts.limit = kPickerPageSize + 1;
     if (!reset && !picker_data_.sessions.empty()) {

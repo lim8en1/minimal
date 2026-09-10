@@ -125,6 +125,17 @@ TEST_CASE("the server flag accepts what the listen flag accepts", "[client_args]
     }
 }
 
+TEST_CASE("a bare --server word is a clean usage error, not an abort",
+          "[client_args]") {
+    // ResolveServerTarget throws for a non-connectable bare word (it would
+    // resolve as DNS and never reach a local socket) -- ParseArgs must turn
+    // that into the same Action::Error every other bad flag gets, not let it
+    // escape uncaught.
+    const auto parsed = Parse({"--server", "myserver"});
+    REQUIRE(parsed.action == ParsedArgs::Action::Error);
+    CHECK(parsed.error.find("myserver") != std::string::npos);
+}
+
 TEST_CASE("no -p means the TUI, and flags alone do not imply headless", "[client_args]") {
     CHECK(Parse({}).action == ParsedArgs::Action::Tui);
     CHECK(Parse({"--server", "unix:///tmp/x.sock"}).action == ParsedArgs::Action::Tui);

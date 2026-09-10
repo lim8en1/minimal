@@ -89,6 +89,7 @@ enum ExitCode {
     kCancelled = 4,
     kUsage = 64,
     kUnavailable = 69,  // no server, or it refused the session
+    kInternalError = 70,  // EX_SOFTWARE: an exception escaped somewhere it shouldn't have
 };
 
 // ONE WRITE, UNDER ONE LOCK. This was fputs(dump) followed by fputc('\n') --
@@ -216,7 +217,7 @@ nlohmann::json ServerEventToJsonLine(const minimal::v1::ServerEvent& event) {
 // resume path, ~line 210) build CreateOptions by hand instead.
 minimal::client::SessionClient::CreateOptions DefaultCreateOptions() {
     minimal::client::SessionClient::CreateOptions opts;
-    opts.project_root = std::filesystem::current_path().string();
+    opts.project_root = minimal::client::CurrentProjectRootOrEmpty();
     return opts;
 }
 
@@ -250,7 +251,7 @@ int RunHeadless(const HeadlessOptions& options) {
         // server refuses them rather than silently ignoring a conflict.
         create.resume_session_id = options.resume_session_id;
     } else {
-        create.project_root = std::filesystem::current_path().string();
+        create.project_root = minimal::client::CurrentProjectRootOrEmpty();
         create.agent_preset = options.agent_preset;
         create.name = TruncateUtf8(options.prompt, 60);
     }
@@ -599,7 +600,7 @@ int RunListSessions(const minimal::client::HeadlessOptions& options) {
     for (;;) {
         minimal::client::SessionClient::ListSessionsOptions opts;
         opts.include_all_dirs = options.all_dirs;
-        if (!options.all_dirs) opts.project_root = std::filesystem::current_path().string();
+        if (!options.all_dirs) opts.project_root = minimal::client::CurrentProjectRootOrEmpty();
         opts.limit = kPageSize;
         opts.before_updated_at = before_updated_at;
         opts.before_id = before_id;
@@ -649,8 +650,13 @@ int RunListSessions(const minimal::client::HeadlessOptions& options) {
         return std::string(buffer);
     };
     if (sessions.empty()) {
-        std::fprintf(stderr, "no stored sessions for %s\n",
-                     std::filesystem::current_path().string().c_str());
+        const std::string root =
+            options.all_dirs ? std::string() : minimal::client::CurrentProjectRootOrEmpty();
+        if (root.empty()) {
+            std::fprintf(stderr, "no stored sessions\n");
+        } else {
+            std::fprintf(stderr, "no stored sessions for %s\n", root.c_str());
+        }
         return kOk;
     }
     for (const auto& row : sessions) {
@@ -1907,66 +1913,93 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     } bracketed_paste_guard;
     std::fputs("\x1b[?2004h", stdout);
     std::fflush(stdout);
-    screen.Loop(final_tree);
-    {
-        // Under shutdown_mtx, not a bare store: the heartbeat's
-        // wait_for(lock, 2s, predicate) checks the predicate WHILE holding
-        // this same lock. Without it, a store+notify landing exactly as the
-        // heartbeat finishes checking (still true) but before it actually
-        // blocks on the cv can be missed entirely -- bounded by the 2s
-        // timeout floor, so not a hang, but a real extra 2s of quit delay
-        // for no reason. Taking the lock here guarantees one of two
-        // outcomes: the heartbeat is already blocked (wakes immediately), or
-        // it hasn't checked yet (acquires the lock after this and sees
-        // false right away).
-        std::lock_guard<std::mutex> lk(shutdown_mtx);
-        running.store(false, std::memory_order_release);
+
+    // Everything screen.Loop() needs undone before app/env/client unwind, in
+    // the order their own comments require -- called once on the normal
+    // return path below, and again from the catch block if a key handler (or
+    // anything else running under the loop) throws. Without this, an
+    // escaping exception skips straight to ~app/~env/~client: pump/heartbeat
+    // are still joinable std::thread locals at that point, and a joinable
+    // thread's destructor calls std::terminate() immediately -- before any of
+    // the ordering below (which exists to avoid a deadlock or a
+    // dereference-after-free) ever runs.
+    auto shutdown_tui = [&] {
+        {
+            // Under shutdown_mtx, not a bare store: the heartbeat's
+            // wait_for(lock, 2s, predicate) checks the predicate WHILE holding
+            // this same lock. Without it, a store+notify landing exactly as the
+            // heartbeat finishes checking (still true) but before it actually
+            // blocks on the cv can be missed entirely -- bounded by the 2s
+            // timeout floor, so not a hang, but a real extra 2s of quit delay
+            // for no reason. Taking the lock here guarantees one of two
+            // outcomes: the heartbeat is already blocked (wakes immediately), or
+            // it hasn't checked yet (acquires the lock after this and sees
+            // false right away).
+            std::lock_guard<std::mutex> lk(shutdown_mtx);
+            running.store(false, std::memory_order_release);
+        }
+        shutdown_cv.notify_all();   // wakes the heartbeat immediately, not on its next 2s tick
+        pump.join();
+        heartbeat.join();
+
+        // Join the async RPC worker BEFORE tearing down tabs: a job's completion
+        // (RequestScrollback et al.) publishes into SessionState/AppState the
+        // same way a reader thread's dispatch does, and DetachAllTabs() below
+        // destroys the very tabs a straggling job would publish into.
+        //
+        // The terminal is already restored by this point (screen.Loop() above
+        // has returned or thrown -- either way it is off the stack), and
+        // StopRpcQueue()'s join is unbounded against whatever job is currently
+        // running (a blocking RPC with its own multi-second deadline --
+        // EnsureSession up to 5s, a model-list refresh up to 15s). Without this
+        // notice the process just sits there silently for up to that long,
+        // looking hung rather than merely finishing up.
+        if (app->RpcQueueBusy()) {
+            std::fprintf(stderr, "minimal: waiting for a pending request to finish...\n");
+        }
+        app->StopRpcQueue();
+
+        // S5.4: quitting the TUI DETACHES every remaining tab rather than
+        // terminating it -- a session outlives the client that opened it, so
+        // closing the terminal must not destroy in-flight work. With the new
+        // idle-exit rule the server follows the client: once every detached
+        // session is quiescent (and the heartbeat is stale), the linger expires
+        // and the process shuts down. The close confirmation's "close anyway"
+        // already TERMINATEd its sessions and erased those tabs, so this finds
+        // nothing left for them; ctrl+w on an idle group and /detach-session end
+        // their streams explicitly before erasing. DetachAllTabs is the catch-all
+        // for whatever remains (sessionless tabs contribute nothing).
+        app->DetachAllTabs();
+
+        // Detach the focus seam BEFORE `app` unwinds: `app` (owning AppState) is
+        // declared after `env` (owning the plugin registries and this provider),
+        // so it is destroyed FIRST -- a plugin poller thread still calling
+        // Tabs()/FocusedSessionId() during env's own teardown would otherwise
+        // dereference a freed AppState. See HostFocusProvider::Detach().
+        env.host_focus_provider->Detach();
+
+        // Cancel subscribe streams BEFORE this function's locals unwind: `env`
+        // (the plugin environment) is declared after `client`, so it is
+        // destroyed FIRST, and a subscribing plugin that joins its worker in its
+        // destructor would deadlock on a stream nobody has cancelled -- the
+        // client's own destructor sweep only runs after env is already gone.
+        client->CancelSubscriptions();
+    };
+
+    try {
+        screen.Loop(final_tree);
+    } catch (const std::exception& error) {
+        shutdown_tui();
+        minimal::common::DefaultLogger().error("tui: escaping exception: {}", error.what());
+        std::fprintf(stderr, "minimal: internal error: %s\n", error.what());
+        return kInternalError;
+    } catch (...) {
+        shutdown_tui();
+        minimal::common::DefaultLogger().error("tui: escaping non-standard exception");
+        std::fprintf(stderr, "minimal: internal error (non-standard exception)\n");
+        return kInternalError;
     }
-    shutdown_cv.notify_all();   // wakes the heartbeat immediately, not on its next 2s tick
-    pump.join();
-    heartbeat.join();
-
-    // Join the async RPC worker BEFORE tearing down tabs: a job's completion
-    // (RequestScrollback et al.) publishes into SessionState/AppState the
-    // same way a reader thread's dispatch does, and DetachAllTabs() below
-    // destroys the very tabs a straggling job would publish into.
-    //
-    // The terminal is already restored by this point (screen.Loop() above
-    // returned), and StopRpcQueue()'s join is unbounded against whatever job
-    // is currently running (a blocking RPC with its own multi-second
-    // deadline -- EnsureSession up to 5s, a model-list refresh up to 15s).
-    // Without this notice the process just sits there silently for up to
-    // that long, looking hung rather than merely finishing up.
-    if (app->RpcQueueBusy()) {
-        std::fprintf(stderr, "minimal: waiting for a pending request to finish...\n");
-    }
-    app->StopRpcQueue();
-
-    // S5.4: quitting the TUI DETACHES every remaining tab rather than
-    // terminating it -- a session outlives the client that opened it, so
-    // closing the terminal must not destroy in-flight work. With the new
-    // idle-exit rule the server follows the client: once every detached
-    // session is quiescent (and the heartbeat is stale), the linger expires
-    // and the process shuts down. The close confirmation's "close anyway"
-    // already TERMINATEd its sessions and erased those tabs, so this finds
-    // nothing left for them; ctrl+w on an idle group and /detach-session end
-    // their streams explicitly before erasing. DetachAllTabs is the catch-all
-    // for whatever remains (sessionless tabs contribute nothing).
-    app->DetachAllTabs();
-
-    // Detach the focus seam BEFORE `app` unwinds: `app` (owning AppState) is
-    // declared after `env` (owning the plugin registries and this provider),
-    // so it is destroyed FIRST -- a plugin poller thread still calling
-    // Tabs()/FocusedSessionId() during env's own teardown would otherwise
-    // dereference a freed AppState. See HostFocusProvider::Detach().
-    env.host_focus_provider->Detach();
-
-    // Cancel subscribe streams BEFORE this function's locals unwind: `env`
-    // (the plugin environment) is declared after `client`, so it is
-    // destroyed FIRST, and a subscribing plugin that joins its worker in its
-    // destructor would deadlock on a stream nobody has cancelled -- the
-    // client's own destructor sweep only runs after env is already gone.
-    client->CancelSubscriptions();
+    shutdown_tui();
     return kOk;
 }
 
@@ -2005,22 +2038,38 @@ int main(int argc, char** argv) {
     // usage/version exits above -- those print to stdout on purpose -- and
     // before any client code runs, per the ordering contract in
     // logging_setup.hpp.
-    minimal::common::LoggingOptions logging;
-    logging.path = (minimal::common::DataDir() / "log" / "client.log").string();
-    // File-only: the client owns the terminal, and headless stdout carries
-    // JSONL. If the file cannot be opened, ConfigureLogging degrades back to
-    // the console sink rather than dropping every message.
-    logging.console = false;
-    const auto logging_error = minimal::common::ConfigureLogging(logging);
-    if (!logging_error.empty()) {
-        minimal::common::DefaultLogger().warn("logging: {}", logging_error);
-    }
+    // A safety net for anything that throws before its own catch can run --
+    // DataDir()/ConfigDir() with no $HOME, plugin discovery, BuildTuiEnvironment
+    // -- none of which has entered the terminal's raw/alt-screen mode yet, so
+    // there is nothing to restore; this only turns a bare SIGABRT (exit 134)
+    // into a clean message and exit code. RunTui has its own inner try/catch
+    // around screen.Loop() for throws *during* the TUI (see its shutdown_tui).
+    try {
+        minimal::common::LoggingOptions logging;
+        logging.path = (minimal::common::DataDir() / "log" / "client.log").string();
+        // File-only: the client owns the terminal, and headless stdout carries
+        // JSONL. If the file cannot be opened, ConfigureLogging degrades back to
+        // the console sink rather than dropping every message.
+        logging.console = false;
+        const auto logging_error = minimal::common::ConfigureLogging(logging);
+        if (!logging_error.empty()) {
+            minimal::common::DefaultLogger().warn("logging: {}", logging_error);
+        }
 
-    if (parsed.action == minimal::client::ParsedArgs::Action::Headless) {
-        return RunHeadless(parsed.headless);
+        if (parsed.action == minimal::client::ParsedArgs::Action::Headless) {
+            return RunHeadless(parsed.headless);
+        }
+        if (parsed.action == minimal::client::ParsedArgs::Action::ListSessions) {
+            return RunListSessions(parsed.headless);
+        }
+        return RunTui(parsed);
+    } catch (const std::exception& error) {
+        minimal::common::DefaultLogger().error("main: escaping exception: {}", error.what());
+        std::fprintf(stderr, "minimal: internal error: %s\n", error.what());
+        return kInternalError;
+    } catch (...) {
+        minimal::common::DefaultLogger().error("main: escaping non-standard exception");
+        std::fprintf(stderr, "minimal: internal error (non-standard exception)\n");
+        return kInternalError;
     }
-    if (parsed.action == minimal::client::ParsedArgs::Action::ListSessions) {
-        return RunListSessions(parsed.headless);
-    }
-    return RunTui(parsed);
 }
