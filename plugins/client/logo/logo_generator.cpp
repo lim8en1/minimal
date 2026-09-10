@@ -73,11 +73,15 @@ const std::vector<LogoStyle>& Styles() {
         {"letters", "abcdefghijklmnopqrstuvwxyz", "", ""},
         {"symbols", "!?;:^~+-*=<>", "", ""},
         {"shades", "#*+:.", "", ""},
+        {"strokes", "|/-\\_", "", ""},
+        {"brackets", "[]{}()<>", "", ""},
+        {"solid", "#", "", ""},
         // Marked styles: one marker draws the whole word; noise fills the
         // rest. Readability comes from the marker being the only uniform
-        // symbol in the block.
-        {"noise", "", "#@%&$*+=XY", "abcdefghijklmnopqrstuvwxyz0123456789"},
-        {"static", "", "#*+@%", " .,:;-'"},
+        // symbol in the block -- the shared marker pool is heavy glyphs
+        // only, so the word stays visually dominant against either noise.
+        {"noise", "", "#*&^%$@!", "abcdefghijklmnopqrstuvwxyz0123456789"},
+        {"static", "", "#*&^%$@!", " .,:;-'"},
     };
     return styles;
 }
