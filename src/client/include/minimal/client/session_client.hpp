@@ -113,8 +113,8 @@ public:
         bool Send(const v1::ClientEvent& event);
 
     // Half-close our send side, drain remaining server output, then Finish(). Safe from
-    // any thread (idempotent via closed_ latch). Closing the last stream of a session
-    // terminates it server-side; closing one tab leaves others running.
+    // any thread (idempotent via launch_state_'s kClosed latch). Closing the last stream
+    // of a session terminates it server-side; closing one tab leaves others running.
     //
     // The bidi context is CANCELLED before the joins: a writer blocked in
     // Write() (server stopped reading) or a reader blocked in Read() (wedged
@@ -151,8 +151,10 @@ public:
     // paths), so losing the unsent tail and ending the RPC with a
     // CANCELLED status is acceptable there. With DETACH the SESSION keeps
     // running; only this stream ends. Safe from any thread, idempotent
-    // (shares Close()'s closed_ latch -- whichever of the two runs first
-    // wins).
+    // (shares Close()'s launch_state_ kClosed latch -- whichever of the two
+    // runs first wins). A stream whose Resume() never ran before this fires
+    // is reaped directly (cancel + Finish()), not via the graceful path
+    // below -- see the definition.
     void Detach(EndSessionMode mode = EndSessionMode::kDetach);
 
         // Unblocks the underlying call without the full Close() discipline
@@ -165,7 +167,10 @@ public:
         // Close(), or the reader's error when the server died mid-stream.
         grpc::Status status() const;
         const std::string& session_id() const { return session_id_; }
-        bool resumed() const { return resumed_.load(); }
+        bool resumed() const {
+            std::lock_guard<std::mutex> lk(launch_mtx_);
+            return ever_resumed_;
+        }
 
         // True once the reader delivered at least one ServerEvent. The
         // on-closed handler's one reliable attach-refusal discriminator: a
@@ -232,8 +237,38 @@ public:
         // writer_cv_, cancels past the bound, waits again.
         std::condition_variable writer_cv_;
         bool writer_exited_ = false;   // guarded by qmtx_; set once, near the writer's end
-        std::atomic<bool> resumed_{false};   // threads started at most once
-        std::atomic<bool> closed_{false};    // Close() called
+        // Same bounded-join support, mirrored for the reader: the writer's
+        // bound alone isn't enough, because WritesDone() needs no reply and
+        // so finishes quickly whether or not the SERVER is still alive --
+        // Detach() then fell to a plain, unbounded reader join, and a server
+        // that stopped responding but never closed the socket hung quit
+        // forever. Latched under qmtx_ at the same point closing_ already
+        // is (right after the reader's own Finish(), before on_closed_).
+        std::condition_variable reader_cv_;
+        bool reader_exited_ = false;   // guarded by qmtx_; set once, near the reader's end
+
+        // Single source of truth for the resume/close race. Resume() (does it
+        // get to launch threads?) and Close()/Detach() (were there ever any
+        // threads to join?) used to answer from two independent atomics
+        // (resumed_, closed_) with no shared critical section -- a Detach()
+        // landing between the owning AppState registering this stream's tab
+        // and its own Resume() call could latch "closed" while Resume() had
+        // already read "not resumed" and was about to launch reader_/writer_
+        // anyway (a joinable thread pair destroyed moments later in ~Stream
+        // -> std::terminate); or Detach() could find no writer thread to
+        // bound its wait against and, since its graceful path deliberately
+        // skips an up-front cancel, never issue one at all -- Finish() then
+        // blocks forever waiting for a naming event that was queued but
+        // never sent (a hang at quit). One mutex-guarded transition makes
+        // "may I start" and "how do I tear down" the same decision: Resume()
+        // launches the threads from INSIDE the critical section (the thread
+        // constructors return immediately, so this cannot deadlock), and
+        // Close()/Detach() read whether that already happened before
+        // deciding how to reap the call.
+        enum class LaunchState { kIdle, kRunning, kClosed };
+        mutable std::mutex launch_mtx_;
+        LaunchState launch_state_ = LaunchState::kIdle;
+        bool ever_resumed_ = false;   // guarded by launch_mtx_; latched once Resume() actually ran
     };
 
     explicit SessionClient(std::string server_address);
@@ -541,6 +576,15 @@ private:
     struct SubscribeRegistry {
         std::mutex mtx;
         std::unordered_set<grpc::ClientContext*> active;
+        // Latched by CancelSubscriptions (guarded by mtx, same as active):
+        // without this, CancelSubscriptions was a one-time SWEEP, not a
+        // latch -- a plugin that re-subscribes AFTER it runs (its own
+        // retry-on-error logic reacting to the kError/kCancelled the sweep
+        // just produced) got a fresh, uncancelled context with no deadline.
+        // Nothing would ever cancel it, and that plugin's own destructor
+        // joining its subscriber thread hung quit -- the exact deadlock
+        // CancelSubscriptions exists to prevent, reappearing one level down.
+        bool shutting_down = false;
     };
     std::shared_ptr<SubscribeRegistry> subscribes_ = std::make_shared<SubscribeRegistry>();
 

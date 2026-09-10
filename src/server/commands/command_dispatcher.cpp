@@ -35,6 +35,16 @@ CommandResult ExecuteAndShape(Command& command, const std::string& name,
         if (outcome.display == CommandDisplay::kView) {
             outcome.view_hint = std::string(command.ViewHintFor(args));
         }
+        // Derived from the TYPE, not trusted from the command (see
+        // CommandResult::submitted_turn): a PromptShorthandCommand's own
+        // contract is "Execute enqueues the turn and answers with an empty
+        // kOk" (command.hpp), so an Ok result from one always means a turn
+        // was just submitted and is still running. dynamic_cast is the same
+        // pattern ListCommands and the sessionless guard above already use to
+        // derive a command's kind, rather than trusting a per-command flag a
+        // future PromptShorthandCommand author could forget to set.
+        outcome.submitted_turn = outcome.status == CommandResult::Status::kOk &&
+                                 dynamic_cast<const PromptShorthandCommand*>(&command) != nullptr;
         return outcome;
     } catch (const std::exception& error) {
         // A throwing command must not take the worker down with it: the session

@@ -108,6 +108,14 @@ TEST_CASE("message_stop stays Working while ANY parallel tool is still running, 
     state.OnToolFinished("t-1", FinishTool());
     state.OnToolFinished("t-2", FinishTool());
     state.FinalizeStreamingText();
+    // Working, not Idle, here: this turn was opened by OnToolStarted (a
+    // tool-first turn), so turn_in_flight_ is armed and outranks the display
+    // state until the turn actually completes -- no tool is left ACTIVE, but
+    // the turn itself is still live.
+    REQUIRE(state.TakeSnapshot().state == SessionStateKind::Working);
+
+    // Idle only once the turn genuinely completes.
+    state.OnTurnCompleted(v1::TurnCompletedEvent{});
     REQUIRE(state.TakeSnapshot().state == SessionStateKind::Idle);   // now nothing is active
 }
 
@@ -354,6 +362,20 @@ TEST_CASE("a fresh assistant turn and terminal events clear a pending ask", "[se
         state.OnSessionEnded();
         REQUIRE_FALSE(state.TakeSnapshot().pending_ask.has_value());
     }
+    SECTION("turn completed (a cancel ends the turn without a message stop)") {
+        // OnTurnCompleted already reset pending_permission_/pending_confirmation_
+        // for exactly this reason (pending.CancelAll denies a parked prompt on
+        // the client's behalf, with no answer ever traveling back through
+        // Answer*) -- pending_ask_ was left out, an inconsistency: ESC during
+        // an ask_user tool call left the tab Waiting with a dead ask modal
+        // that resolved nothing when answered.
+        SessionState state("s-1");
+        auto ask = std::make_unique<PendingAsk>();
+        ask->request_id = "ask-1";
+        state.SetAskRequest(std::move(ask));
+        state.OnTurnCompleted(v1::TurnCompletedEvent{});
+        REQUIRE_FALSE(state.TakeSnapshot().pending_ask.has_value());
+    }
 }
 
 TEST_CASE("tool tracking: start -> deltas -> finish, keyed by tool_use_id", "[session_state]") {
@@ -470,7 +492,11 @@ TEST_CASE("OnTurnCompleted records occupancy and clears tools, but does not set 
     state.OnToolStarted(StartTool("t-1"));
     state.OnToolFinished("t-1", FinishTool());
     state.FinalizeStreamingText();   // the message_stop that precedes TurnCompletedEvent
-    REQUIRE(state.TakeSnapshot().state == SessionStateKind::Idle);
+    // Working, not Idle: this is a tool-first turn (OnToolStarted arms
+    // turn_in_flight_ the same way a delta would), and the turn has not
+    // completed yet -- turn_in_flight_ outranks the display state exactly
+    // like the silent-provider-window case does.
+    REQUIRE(state.TakeSnapshot().state == SessionStateKind::Working);
 
     v1::TurnCompletedEvent evt;
     evt.mutable_usage()->set_input_tokens(100);
@@ -500,6 +526,67 @@ TEST_CASE("OnError sets Error and clears pending modals; sticky against OnTurnCo
     state.OnTurnCompleted(evt);
     // The turn's completion bookkeeping must not silently clear an in-flight error.
     REQUIRE(state.TakeSnapshot().state == SessionStateKind::Error);
+}
+
+TEST_CASE("OnSendFailed surfaces the failure but leaves the pending modal and state_ alone",
+          "[session_state]") {
+    // Answer*'s own comment is "leave the modal up so the user can retry" on
+    // a stream->Send() failure -- calling OnError there (as it used to)
+    // directly contradicted that: OnError unconditionally clears every
+    // pending_* field and sets state_ = Error, making the very prompt the
+    // user was trying to answer vanish with nothing left to retry.
+    SessionState state("s-1");
+    auto pp = std::make_unique<PendingPermission>();
+    pp->request_id = "perm-1";
+    state.SetPermissionRequest(std::move(pp));
+    REQUIRE(state.TakeSnapshot().state == SessionStateKind::Waiting);
+
+    state.OnSendFailed("cannot answer: the stream is closing or stalled");
+    auto snap = state.TakeSnapshot();
+    CHECK(snap.state == SessionStateKind::Waiting);   // unchanged -- NOT Error
+    REQUIRE(snap.pending_permission.has_value());      // the modal survives, retriable
+    CHECK(snap.pending_permission->request_id == "perm-1");
+    // The failure is still visible, just not destructive.
+    REQUIRE(snap.latest_notice.has_value());
+    CHECK(snap.latest_notice->is_error);
+}
+
+TEST_CASE("a genuinely new turn clears a sticky Error; a stray same-turn delta does not",
+          "[session_state]") {
+    // The bug: Error was sticky against EVERY later event, including a
+    // brand-new turn's own first delta -- once set, a tab stayed Error (no
+    // attention glyph, no "cancelling..." on ESC) for the rest of the
+    // session, even after the user successfully tried again.
+    SessionState state("s-1");
+    state.OnError("rate limited");
+    REQUIRE(state.TakeSnapshot().state == SessionStateKind::Error);
+
+    // The turn that just errored ended (OnError sets turn_ended_), so this
+    // delta opens a NEW turn (the explicit-submit path and the seedless
+    // "injected turn" path both go through the same turn_ended_ detection --
+    // see AppendStreamingText).
+    state.AppendStreamingText("trying again");
+    REQUIRE(state.TakeSnapshot().state == SessionStateKind::Thinking);
+
+    // Negative case: a stray event that belongs to the SAME (already-ended)
+    // turn must not clear Error. FinalizeStreamingText/MaybeGoIdleLocked's
+    // Error early-return only holds once nothing has re-armed turn_ended_;
+    // simulate that by finalizing straight after OnError with no new delta.
+    SessionState state2("s-2");
+    state2.OnError("rate limited");
+    v1::TurnCompletedEvent stale_completion;
+    state2.OnTurnCompleted(stale_completion);   // a stray terminal event for the dead turn
+    REQUIRE(state2.TakeSnapshot().state == SessionStateKind::Error);
+}
+
+TEST_CASE("a new turn clears Error via thinking too (thinking-first turns)",
+          "[session_state]") {
+    SessionState state("s-1");
+    state.OnError("stream died");
+    REQUIRE(state.TakeSnapshot().state == SessionStateKind::Error);
+
+    state.AppendStreamingThinking("reasoning about the retry");
+    REQUIRE(state.TakeSnapshot().state == SessionStateKind::Thinking);
 }
 
 TEST_CASE("OnSessionEnded is the real Done signal, not turn completion", "[session_state]") {
@@ -1003,6 +1090,41 @@ TEST_CASE("live_segments clears alongside streaming_text, not before",
     state.OnResyncRequired("test");
     CHECK(state.TakeSnapshot().live_segments.empty());
     CHECK(state.TakeSnapshot().streaming_text.empty());
+}
+
+TEST_CASE("OnResyncRequired drops a stale foreground tool row and re-derives state_",
+          "[session_state]") {
+    // A dropped ToolExecutionEvent{finished} left a foreground row "running"
+    // forever, and (per MaybeGoIdleLocked) blocked the tab from ever
+    // resolving off Working -- and nothing called MaybeGoIdleLocked after a
+    // resync at all, so state_ stayed stale regardless.
+    SessionState state("s-1");
+    state.OnToolStarted(StartTool("t-1"));   // foreground; never gets a finished event
+    REQUIRE(state.TakeSnapshot().state == SessionStateKind::Working);
+    REQUIRE(state.TakeSnapshot().tools.size() == 1);
+
+    state.OnResyncRequired("delivery hole");
+    auto snap = state.TakeSnapshot();
+    CHECK(snap.tools.empty());   // the stale row is dropped, not stuck "running" forever
+    // turn_in_flight_ is still armed (this turn was never reported
+    // complete), so MaybeGoIdleLocked correctly resolves this to Working --
+    // the point under test is that state_ was RE-DERIVED at all.
+    CHECK(snap.state == SessionStateKind::Working);
+}
+
+TEST_CASE("OnResyncRequired leaves a live BACKGROUND tool row alone", "[session_state]") {
+    SessionState state("s-1");
+    state.OnToolStarted(StartTool("t-1"));
+    state.OnBackgroundTask(BackgroundEvent("t-1", v1::BackgroundTaskEvent::STARTED));
+    state.OnToolFinished("t-1", FinishTool());   // the gating ack; the task itself keeps running
+    REQUIRE(state.TakeSnapshot().tools.size() == 1);
+    REQUIRE(state.TakeSnapshot().tools[0].is_background);
+
+    state.OnResyncRequired("delivery hole");
+    // Untouched: a resync knows nothing new about a background task, and its
+    // own terminal BackgroundTaskEvent is a real, separate signal this does
+    // not (and must not) preempt.
+    CHECK(state.TakeSnapshot().tools.size() == 1);
 }
 
 // Thinking deltas are live segments too (the OpenAI-compatible backends

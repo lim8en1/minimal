@@ -271,6 +271,11 @@ void SessionState::AppendStreamingText(std::string_view text) {
         !streaming_truncated_) {
         streaming_accumulated_.append("\n\n");
     }
+    // Captured before turn_ended_ resets below: this is the one reliable
+    // "a genuinely new turn just started" signal (vs. a stray late event for
+    // the turn that just errored), and it is what authorizes clearing a
+    // sticky Error state a few lines down -- see that guard's comment.
+    const bool starting_new_turn = turn_ended_;
     if (turn_ended_) {
         ++turn_seq_;
         turn_ended_ = false;
@@ -308,7 +313,12 @@ void SessionState::AppendStreamingText(std::string_view text) {
     // A fresh assistant turn supersedes any unanswered prompt (including Waiting
     // -- the prompt below is cleared by this same call, so the state must move
     // with it rather than being stranded in Waiting with nothing pending).
-    if (state_ != SessionStateKind::Error) {
+    // Error is normally sticky here too (a stray delta for the turn that just
+    // errored must not silently erase the visible error tint) -- EXCEPT when
+    // this delta is starting a genuinely new turn (starting_new_turn above):
+    // the user tried again, and Error must not outlive the turn that caused
+    // it, or it never clears for the rest of the session.
+    if (state_ != SessionStateKind::Error || starting_new_turn) {
         state_ = SessionStateKind::Thinking;
     }
     pending_permission_.reset();
@@ -339,6 +349,11 @@ void SessionState::AppendStreamingThinking(std::string_view text) {
     // arming branch would otherwise wipe this very delta when it is the
     // turn's first (AppendStreamingText has the same ordering for the same
     // reason).
+    // Same "genuinely new turn" signal AppendStreamingText captures, and for
+    // the same reason: it is what authorizes clearing a sticky Error state
+    // below, since thinking typically opens the turn and so is often the
+    // FIRST delta to see it end.
+    const bool starting_new_turn = turn_ended_;
     if (turn_ended_) {
         ++turn_seq_;
         turn_ended_ = false;
@@ -400,7 +415,9 @@ void SessionState::AppendStreamingThinking(std::string_view text) {
         }
     }
     is_streaming_ = true;
-    if (state_ != SessionStateKind::Error) {
+    // See AppendStreamingText's identical guard: Error stays sticky within a
+    // turn, but must not outlive it.
+    if (state_ != SessionStateKind::Error || starting_new_turn) {
         state_ = SessionStateKind::Thinking;
     }
 }
@@ -424,9 +441,16 @@ void SessionState::MaybeGoIdleLocked() {
     // Idle (spinner gone, "Working" lost) the moment the last-STARTED tool
     // finished, even with earlier calls of the same round still executing on
     // the pool.
+    // Excludes background rows: OnTurnCompleted deliberately KEEPS a live
+    // background row across a turn boundary (its launching call already got
+    // its own finished ack; the detached process is a separate concern whose
+    // terminal BackgroundTaskEvent can arrive many turns later). Counting it
+    // here as "still active" made a backgrounded `npm run dev` pin this
+    // whole branch off forever -- state_ simply stopped being re-derived by
+    // this function for as long as that background task ran.
     const bool tool_active =
         std::any_of(tools_.begin(), tools_.end(), [](const ToolExecutionState& t) {
-            return t.started;
+            return t.started && !t.is_background;
         });
     if (!tool_active && !pending_permission_ && !pending_confirmation_ && !pending_ask_) {
         state_ = turn_in_flight_ ? SessionStateKind::Working : SessionStateKind::Idle;
@@ -470,9 +494,13 @@ void SessionState::OnTurnCompleted(const v1::TurnCompletedEvent& evt) {
     // nothing left to answer. A turn cannot complete while its OWN prompt is
     // genuinely outstanding (the worker is blocked on it), so anything pending
     // here is stale. MaybeGoIdleLocked resolves the Waiting the missing
-    // message stop would have; it leaves an in-flight Error alone.
+    // message stop would have; it leaves an in-flight Error alone. Ask is the
+    // same shape as permission/confirmation here -- CancelAll covers all
+    // three pending kinds identically -- so it resets alongside them; leaving
+    // it out stranded the tab Waiting with a dead ask modal after ESC.
     pending_permission_.reset();
     pending_confirmation_.reset();
+    pending_ask_.reset();
     MaybeGoIdleLocked();
     // The completed turn's messages are persisted now but NOT yet in the
     // scrollback window; bumping the version is what makes the chat view
@@ -603,6 +631,20 @@ void SessionState::OnError(const std::string& error_message) {
     ++notice_seq_;
 }
 
+void SessionState::OnSendFailed(const std::string& error_message) {
+    std::lock_guard lk(mtx_);
+    // Same transient-notice surface OnError uses, and nothing else: no
+    // pending_* reset, no state_ change, no turn bookkeeping. Answer*'s own
+    // comment is "leave the modal up so the user can retry" -- OnError's
+    // blanket clearing (including the very pending field the modal reads)
+    // directly contradicted that, making the prompt the user was trying to
+    // answer vanish with nothing left to retry while the server worker
+    // stayed parked on it.
+    latest_notice_ = CommandNotice{error_message, /*is_error=*/true,
+                                   v1::COMMAND_DISPLAY_STATUS, /*view_hint=*/{}};
+    ++notice_seq_;
+}
+
 // The real "subagent session stopped" signal (ARCHITECTURE.md): the session's
 // stream ended, not merely a turn. Terminal -- nothing can answer a pending
 // modal once the session is gone.
@@ -638,6 +680,23 @@ void SessionState::OnResyncRequired(const std::string& reason) {
     is_streaming_ = false;
     live_segments_.clear();
     live_segments_truncated_ = false;
+    // A dropped ToolExecutionEvent{finished} is exactly the kind of gap a
+    // resync exists to cover: a FOREGROUND row whose finish never arrived
+    // stays "running" forever, and (per MaybeGoIdleLocked) blocks the tab
+    // from ever resolving off Working. Background rows are left alone, same
+    // exception MaybeGoIdleLocked and OnTurnCompleted both already draw:
+    // their terminal BackgroundTaskEvent is a real, separate signal this
+    // resync does not touch.
+    tools_.erase(std::remove_if(tools_.begin(), tools_.end(),
+                                [](const ToolExecutionState& t) {
+                                    return t.started && !t.is_background;
+                                }),
+                tools_.end());
+    // Nothing else re-derives state_ after a resync otherwise -- a resync
+    // that arrived while the tab looked idle-but-actually-Working (or vice
+    // versa) left it stuck reading that way until some unrelated event
+    // happened to fire MaybeGoIdleLocked next.
+    MaybeGoIdleLocked();
     ++transcript_version_;
     common::DefaultLogger().info("session {}: resync required ({})", session_id_, reason);
 }
@@ -767,6 +826,30 @@ void SessionState::OnToolStarted(const v1::ToolExecutionEvent& evt) {
     for (const auto& existing : tools_) {
         if (existing.tool_use_id == evt.tool_use_id() && existing.started) return;
     }
+    // A NEW TURN can open on a tool call with no preceding text or thinking
+    // delta -- a tool-first turn, or an injected turn (a subagent completion
+    // triggers one with no OnChatSubmitted at all, same as the delta paths'
+    // "seedless turn" case, state.cpp's AppendStreamingText/
+    // AppendStreamingThinking). Without this arming, the tool's live segment
+    // kept the PREVIOUS turn's turn_seq_, so that turn's later
+    // ClearStreamingIfCurrentTurn retired this turn's own tool marker along
+    // with it, and turn_in_flight_ was never armed -- the tab dropped to
+    // Idle between tool cycles (ESC did nothing; ctrl+c took the idle-quit
+    // path). Mirrors the delta paths' identical arming, including clearing
+    // BOTH flat buffers: consuming turn_ended_ here means whichever delta
+    // path (if either) sees the next event for this turn no longer finds
+    // turn_ended_ set, so it takes the same-turn "new block" branch instead
+    // and never gets to clear its own buffer's previous-turn leftover.
+    const bool starting_new_turn = turn_ended_;
+    if (turn_ended_) {
+        ++turn_seq_;
+        turn_ended_ = false;
+        turn_in_flight_ = true;
+        streaming_accumulated_.clear();
+        streaming_truncated_ = false;
+        thinking_accumulated_.clear();
+        thinking_truncated_ = false;
+    }
     ToolExecutionState tool;
     tool.tool_use_id = evt.tool_use_id();
     tool.tool_name = evt.tool_name();
@@ -782,7 +865,11 @@ void SessionState::OnToolStarted(const v1::ToolExecutionEvent& evt) {
 
     auto& live = tools_.back();   // the row just pushed, regardless of how many precede it
     live.started = true;
-    if (state_ == SessionStateKind::Idle || state_ == SessionStateKind::Done) {
+    // Same Error-stickiness guard as the delta paths: Error stays sticky
+    // within a turn, but must not outlive it -- including when a tool call,
+    // not a delta, is what opens the new turn.
+    if (state_ == SessionStateKind::Idle || state_ == SessionStateKind::Done ||
+        (state_ == SessionStateKind::Error && starting_new_turn)) {
         state_ = SessionStateKind::Working;
     }
 }
@@ -1430,6 +1517,14 @@ bool AppState::HasTab(const std::string& tab_id) const {
     return false;
 }
 
+bool AppState::HasQueuedWork() const {
+    std::lock_guard lk(mtx_);
+    for (const auto& tab : tabs_) {
+        if (tab.stream == nullptr && !tab.pending.empty()) return true;
+    }
+    return false;
+}
+
 // Reader-thread callback: route a ServerEvent to its owned tab. Defers subagent creation
 // until the app lock is released, so opening a child stream never happens while held.
 void AppState::DispatchToTab(const std::string& session_id, const v1::ServerEvent& event) {
@@ -2067,16 +2162,26 @@ void AppState::AnswerPermission(const std::string& session_id, const std::string
     // A refused send must NOT close the prompt: the server worker is parked
     // on this request, and clearing the pending entry locally would strand it
     // there forever with the answer undelivered (the "blocked UI" failure).
-    // Surface the refusal and leave the modal up so the user can retry.
+    // Surface the refusal and leave the modal up so the user can retry --
+    // OnSendFailed, not OnError: OnError would clear the very pending field
+    // (and set state_ = Error) this comment says must survive.
     if (!stream->Send(ev)) {
         if (auto state = GetState(session_id)) {
-            state->OnError("cannot answer: the stream is closing or stalled");
+            state->OnSendFailed("cannot answer: the stream is closing or stalled");
             BumpUiVersion();
         }
         return;
     }
 
-    if (auto state = GetState(session_id)) state->ClearPendingFor(request_id);
+    if (auto state = GetState(session_id)) {
+        state->ClearPendingFor(request_id);
+        // Same re-derive as AnswerConfirmation/AnswerAsk: the server collects
+        // every permission for a round before starting any tool, so no tool
+        // event or message stop necessarily follows THIS individual answer --
+        // without this the tab stayed Waiting (with the attention glyph) for
+        // the whole tool run that followed.
+        state->OnPendingResolved();
+    }
 }
 
 void AppState::AnswerConfirmation(const std::string& session_id, const std::string& request_id,
@@ -2097,10 +2202,11 @@ void AppState::AnswerConfirmation(const std::string& session_id, const std::stri
     cr->set_request_id(request_id);
     cr->set_chosen_option(chosen_option);
     // Same refusal rule as AnswerPermission: keep the modal up on a stalled
-    // stream rather than pretending the answer went out.
+    // stream rather than pretending the answer went out (OnSendFailed, same
+    // reason as there).
     if (!stream->Send(ev)) {
         if (auto state = GetState(session_id)) {
-            state->OnError("cannot answer: the stream is closing or stalled");
+            state->OnSendFailed("cannot answer: the stream is closing or stalled");
             BumpUiVersion();
         }
         return;
@@ -2130,10 +2236,10 @@ void AppState::AnswerAsk(const std::string& session_id, const v1::AskUserRespons
     *ev.mutable_ask_response() = response;
     // Same refusal rule as AnswerPermission/AnswerConfirmation: keep the
     // modal up on a stalled stream rather than pretending the answer went
-    // out.
+    // out (OnSendFailed, same reason as there).
     if (!stream->Send(ev)) {
         if (auto state = GetState(session_id)) {
-            state->OnError("cannot answer: the stream is closing or stalled");
+            state->OnSendFailed("cannot answer: the stream is closing or stalled");
             BumpUiVersion();
         }
         return;

@@ -677,6 +677,7 @@ void FillProto(v1::CommandResult& out, const commands::CommandResult& value) {
                               ? v1::COMMAND_DISPLAY_SILENT
                               : v1::COMMAND_DISPLAY_STATUS);
     out.set_view_hint(value.view_hint);
+    out.set_submitted_turn(value.submitted_turn);
 }
 
 }  // namespace minimal::rpc

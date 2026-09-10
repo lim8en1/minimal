@@ -50,6 +50,17 @@ struct CommandResult {
     std::string message;
     CommandDisplay display = CommandDisplay::kStatus;
     std::string view_hint;
+    // Set by the dispatcher (command_dispatcher.cpp), never by a command
+    // itself: true iff this is a successful PromptShorthandCommand result --
+    // the command's own Execute already returned, but the TURN it queued
+    // (SessionControl::SubmitTurn) is still running, and its output will
+    // arrive as ordinary turn events on this same stream, not as part of this
+    // CommandResult. A caller that stops reading the moment CommandResult
+    // arrives (the headless -p client's ordinary rule for every OTHER
+    // command) would otherwise report success and exit while that turn -- and
+    // anything it does, including spawning a subagent nothing then attaches
+    // to -- runs completely unobserved.
+    bool submitted_turn = false;
 
     static CommandResult Ok(std::string message = {}) {
         CommandResult result;

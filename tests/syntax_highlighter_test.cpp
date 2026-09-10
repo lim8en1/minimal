@@ -127,6 +127,40 @@ TEST_CASE("Every vendored language categorizes its comment") {
 // same language must not collide, and re-highlighting the FIRST one after the
 // SECOND (a cache hit past the most-recent entry) must still return its own
 // text, not the second's.
+TEST_CASE("Incremental parse never reuses a stale tree from an unrelated block") {
+    // The bug: Collect() fed tree-sitter WHATEVER tree it last produced for
+    // this language as the incremental base, without ts_tree_edit() -- which
+    // tree-sitter's own contract requires, and without it silently reuses old
+    // nodes by byte position against text that never produced them. Two
+    // back-to-back, UNRELATED code blocks for the same language (two chat
+    // messages, or two fenced blocks in one reply) shared one parser_cache_
+    // slot, so the second reused the first's parse.
+    const SyntaxHighlighter highlighter(TestTheme());
+    const std::string block_a = "import os\n";
+    highlighter.HighlightCode(block_a, "python");   // seeds parser_cache_'s tree for "python"
+
+    // NOT an extension of block_a: a different block entirely. "# setup"
+    // must be its own Comment, never block_a's import_statement node reused
+    // at byte 0.
+    const std::string block_b = "# setup\n";
+    const auto pieces = Resolve(block_b, highlighter.HighlightCode(block_b, "python"));
+    CHECK(HasPiece(pieces, HighlightCategory::Comment, "# setup"));
+}
+
+TEST_CASE("Incremental parse correctly categorizes content appended after the cached base") {
+    // The companion to the test above: a genuine streaming-growth append
+    // (this call's code is the previous call's code with a suffix appended,
+    // the debounce-tick shape a still-growing block actually produces) DOES
+    // take the incremental-reuse path (ts_tree_edit + the previous tree), and
+    // the appended suffix must still parse correctly.
+    const SyntaxHighlighter highlighter(TestTheme());
+    highlighter.HighlightCode("def f():\n", "python");
+    const std::string grown = "def f():\n    return 1\n";
+    const auto pieces = Resolve(grown, highlighter.HighlightCode(grown, "python"));
+    CHECK(HasPiece(pieces, HighlightCategory::Keyword, "return"));
+    CHECK(HasPiece(pieces, HighlightCategory::Number, "1"));
+}
+
 TEST_CASE("Highlight caches by (language, code) without cross-contaminating entries") {
     // A NAMED local, not TestTheme() inline: SyntaxHighlighter stores
     // `const Theme&`, and a reference member initialized from a temporary

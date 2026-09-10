@@ -923,6 +923,72 @@ TEST_CASE("client::SessionClient::Stream::Detach leaves the session running",
     CHECK(fixture.sessions->Find(session_id) == session);
 }
 
+TEST_CASE("Detach before Resume reaps the stream instead of hanging",
+          "[session_service][S5]") {
+    // The bug: Detach() on a stream whose Resume() never ran skipped its
+    // whole bounded-wait-then-cancel block (nothing to wait on -- no writer
+    // thread exists yet) and fell straight to a raw Finish(), with no cancel
+    // ever issued. The naming event this stream's Attach() queued was never
+    // sent (no writer thread ever ran to send it), so the server's handler
+    // sat forever in its own Read() waiting for it, and Finish() blocked
+    // right along with it -- quit hung forever whenever a subagent spawn
+    // (AttachTab) raced a shutdown (DetachAllTabs) landing between
+    // registering the tab and calling Resume() (the exact window
+    // AttachTab's own comment names).
+    ServiceFixture fixture;
+    fixture.Script(testing::TextResponse("hi"));
+    fixture.Start();
+
+    const std::string session_id = fixture.CreateSession();
+
+    auto client = std::make_shared<minimal::client::SessionClient>(
+        rpc::SocketTarget(fixture.socket));
+    auto stream = client->MakeStream([](const v1::ServerEvent&) {});
+    REQUIRE(stream->Attach(session_id).has_value());
+    // Deliberately no stream->Resume() here.
+
+    // A hang is the failure mode under test, so this runs on a detached
+    // thread the callable owns by shared_ptr (see deadline.hpp) rather than
+    // blocking the test itself if the bug regresses.
+    auto result = minimal::testing::RunInBackground([client, stream] {
+        stream->Detach();
+        return true;
+    });
+    REQUIRE(result.WaitFor(std::chrono::seconds(2)));
+}
+
+TEST_CASE("Resume after Detach never launches threads on an already-closed stream",
+          "[session_service][S5]") {
+    // The other half of the same race: if Resume() runs AFTER a concurrent
+    // Detach() already closed the stream, it used to launch reader_/writer_
+    // anyway (the old resumed_.exchange(true) never checked closed_). On a
+    // stream whose last owner drops it right after, ~Stream's Close() is
+    // then a no-op (already latched by Detach()) and the destructor destroys
+    // the now-joinable thread members: std::terminate.
+    ServiceFixture fixture;
+    fixture.Script(testing::TextResponse("hi"));
+    fixture.Start();
+
+    const std::string session_id = fixture.CreateSession();
+
+    minimal::client::SessionClient client(rpc::SocketTarget(fixture.socket));
+    auto stream = client.MakeStream([](const v1::ServerEvent&) {});
+    REQUIRE(stream->Attach(session_id).has_value());
+
+    stream->Detach();
+    // The never-resumed path cancels before Finish() (unlike the graceful,
+    // writer-flushes-EndSession path a resumed stream takes) -- CANCELLED is
+    // the correct, expected status here, not OK. The real assertion is that
+    // this line was ever reached at all: pre-fix, Detach() blocked forever.
+    CHECK_FALSE(stream->status().ok());
+
+    stream->Resume();   // must be a safe no-op, never launch threads on a closed stream
+    CHECK_FALSE(stream->resumed());
+    // The real assertion is that falling off the end of this test destroys
+    // `stream` (and `client`) with no joinable thread ever created --
+    // std::terminate would otherwise take the whole test binary down.
+}
+
 TEST_CASE("the last client detaching signals shutdown", "[session_service]") {
     // No daemon: the server is refcounted by attached clients and goes away when
     // the last one leaves.
@@ -1449,10 +1515,21 @@ TEST_CASE("a prompt shorthand submits exactly the interpolated turn, and a comma
     const auto view = RunCommand(stream, session_id, "openview");
     REQUIRE(view.has_value());
     CHECK(view->status() == v1::COMMAND_STATUS_OK);
+    // An ordinary HarnessCommand's Ok result never means a turn was queued --
+    // the headless -p client's stay-attached-and-keep-reading path (Fix 6)
+    // must only trigger for a PromptShorthandCommand.
+    CHECK_FALSE(view->submitted_turn());
 
     const auto review = RunCommand(stream, session_id, "review", {"the", "login", "flow"});
     REQUIRE(review.has_value());
     CHECK(review->status() == v1::COMMAND_STATUS_OK);
+    // The signal the headless -p client's command branch keys on to stay
+    // attached instead of exiting the moment this CommandResult arrives: an
+    // Ok result from a PromptShorthandCommand always means the turn it just
+    // queued is still running (command_dispatcher.cpp's ExecuteAndShape
+    // derives this from dynamic_cast<PromptShorthandCommand*>, never trusted
+    // from the command itself).
+    CHECK(review->submitted_turn());
 
     // The submitted turn runs after the command; wait for it to finish before
     // reading the transcript.
@@ -1671,6 +1748,75 @@ TEST_CASE("the generic plugin channel streams PluginSubscribe payloads",
                                  &refused_status) ==
           minimal::client::SubscribeOutcome::kError);
     CHECK_FALSE(refused_status.ok());
+}
+
+TEST_CASE("a PluginSubscribe call outliving SessionClient's destruction doesn't use a "
+          "freed channel",
+          "[session_service][e5]") {
+    // A subscription is designed to run for a plugin's whole lifetime, on
+    // the plugin's own thread, with no deadline -- ~SessionClient's
+    // CancelSubscriptions only REQUESTS cancellation and returns
+    // immediately; it does not wait for this call to actually finish.
+    // Before the fix, PluginSubscribe used this->stub_/this->channel_, so a
+    // subscriber still inside Read()/Finish() when SessionClient's members
+    // were destroyed dereferenced freed memory through gRPC's completion
+    // queue. Meaningful primarily under ASan.
+    ServiceFixture fixture;
+    fixture.LoadEndpointPlugin();
+    fixture.Start();
+
+    auto client =
+        std::make_unique<minimal::client::SessionClient>(rpc::SocketTarget(fixture.socket));
+
+    std::atomic<int> seen{0};
+    std::atomic<bool> subscriber_done{false};
+    std::thread subscriber([&] {
+        client->PluginSubscribe("fixture-endpoint", "ticks", "10000",
+                                [&](const std::string&) {
+                                    ++seen;
+                                    return true;   // never stops on its own
+                                });
+        subscriber_done = true;
+    });
+
+    // Let the subscription actually start receiving before destroying the
+    // client out from under it.
+    while (seen.load() == 0) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+
+    client.reset();   // ~SessionClient: CancelSubscriptions(), then destroys channel_/stub_
+    // The subscriber's OWN local channel/stub copy (the fix) keeps it alive
+    // independent of `client` -- it must finish cleanly rather than hang or
+    // crash.
+    subscriber.join();
+    CHECK(subscriber_done.load());
+}
+
+TEST_CASE("PluginSubscribe after CancelSubscriptions is refused immediately, not left "
+          "uncancelled",
+          "[session_service][e5]") {
+    // CancelSubscriptions used to be a one-time sweep, not a latch: a
+    // subscribe call landing AFTER it ran got a fresh, uncancelled context
+    // with no deadline -- nothing would ever cancel it, hanging whoever
+    // joins that call's thread at quit (a plugin's own retry-on-error is
+    // the realistic trigger).
+    ServiceFixture fixture;
+    fixture.LoadEndpointPlugin();
+    fixture.Start();
+
+    // shared_ptr, not a local: a hang is the failure mode under test, so
+    // this runs on a DETACHED thread (deadline.hpp) that must own every
+    // object it touches -- a reference into this test's stack would crash
+    // on top of the failure if the wait below ever times out.
+    auto client =
+        std::make_shared<minimal::client::SessionClient>(rpc::SocketTarget(fixture.socket));
+    client->CancelSubscriptions();
+
+    auto result = minimal::testing::RunInBackground([client] {
+        return client->PluginSubscribe("fixture-endpoint", "ticks", "10000",
+                                       [](const std::string&) { return true; });
+    });
+    REQUIRE(result.WaitFor(std::chrono::seconds(2)));
+    CHECK(result.Get() == minimal::client::SubscribeOutcome::kCancelled);
 }
 
 TEST_CASE("ListModels lists static refs cold and discovered refs after refresh",

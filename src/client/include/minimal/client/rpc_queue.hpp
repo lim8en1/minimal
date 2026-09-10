@@ -71,7 +71,22 @@ public:
     // caller state they'd mutate (AppState/SessionState) may already be
     // torn down by the time Stop() is reachable (RunTui calls it right
     // after the pump joins, before CloseAllTabs).
+    //
+    // Stop()'s join is UNBOUNDED against whatever job is currently
+    // executing (a blocking gRPC call with its own multi-second deadline,
+    // typically): by the time RunTui calls this the terminal has already
+    // been restored, so a job still in flight makes the process sit with no
+    // output for up to that long, looking hung rather than merely slow.
+    // There is no cancellation hook into an arbitrary job's own
+    // grpc::ClientContext (a larger change, not undertaken here) -- Busy()
+    // below exists so the caller can at least say something before joining.
     void Stop();
+
+    // True if a job is queued or currently executing. Racy by construction
+    // (the answer can change the instant after this returns) -- meant only
+    // to decide whether to print a "waiting..." notice before Stop()'s
+    // unbounded join, not to make a correctness decision.
+    bool Busy() const;
 
 private:
     void WorkerMain();
@@ -85,10 +100,11 @@ private:
     };
 
     std::size_t capacity_;
-    std::mutex mtx_;
+    mutable std::mutex mtx_;
     std::condition_variable cv_;
     std::deque<Item> queue_;
     bool stopping_ = false;
+    bool running_job_ = false;   // guarded by mtx_; true only while WorkerMain is inside job()
     std::thread worker_;
 };
 

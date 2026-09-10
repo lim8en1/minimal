@@ -23,6 +23,7 @@
 #include "../plugins/server/commands-core/core_commands.hpp"
 #include "deadline.hpp"
 #include "fakes.hpp"
+#include "minimal/client/plugins/host_seams.hpp"
 #include "minimal/client/session_client.hpp"
 #include "minimal/client/state.hpp"
 #include "minimal/commands/command_registry.hpp"
@@ -237,6 +238,65 @@ TEST_CASE("OpenTab opens a sessionless tab; the session appears on the first sen
     REQUIRE_FALSE(SessionIdOf(app, tab).empty());
     tabs = app.GetAllTabs();
     CHECK(tabs[0].has_session);
+}
+
+TEST_CASE("HostFocusProvider::Detach makes Tabs()/FocusedSessionId() safe to call after",
+          "[app_state][host_seams]") {
+    // RunTui declares AppState's owner after the plugin registries (this
+    // provider's owner), so locals unwind in the reverse order -- AppState
+    // dies FIRST. A plugin poller thread still calling Tabs() during the
+    // registries' own teardown used to dereference a freed AppState;
+    // Detach() (called explicitly before AppState unwinds) is the fix. This
+    // test can't reproduce the use-after-free directly (AppState here
+    // outlives the provider, the opposite of RunTui's real ordering) -- it
+    // asserts the CONTRACT Detach() provides: once it returns, the provider
+    // answers its own "no focus knowledge" empty values instead of touching
+    // app_ at all.
+    ClientFixture fixture;
+    fixture.Script("hi");
+    fixture.Start();
+
+    AppState app(fixture.client);
+    const auto tab = app.OpenTab(fixture.Options("focus-me"));
+    REQUIRE_FALSE(tab.empty());
+    app.SetFocusedTab(tab);
+
+    auto provider = minimal::client::plugins::MakeHostFocusProvider();
+    provider->Attach(&app);
+    CHECK(provider->FocusedSessionId().empty());   // sessionless tab: no session id yet
+    REQUIRE(provider->Tabs().size() == 1);
+
+    provider->Detach();
+    CHECK(provider->FocusedSessionId().empty());
+    CHECK(provider->Tabs().empty());
+}
+
+TEST_CASE("HasQueuedWork sees a sessionless tab's queued action before "
+          "EnsureSession resolves it",
+          "[app_state]") {
+    // AnyWorkInFlight (keybinding_dispatch.hpp) reads SessionStateKind, which
+    // stays Idle for a freshly queued sessionless tab until its create round
+    // trip actually starts -- so quit's confirmation couldn't see this work
+    // at all, and StopRpcQueue() DISCARDS the queue rather than draining it
+    // (rpc_queue.hpp), silently dropping the message.
+    ClientFixture fixture;
+    fixture.Script("hi");
+    fixture.Start();
+
+    AppState app(fixture.client);
+    const auto tab = app.OpenTab(fixture.Options("queued"));
+    REQUIRE_FALSE(tab.empty());
+    CHECK_FALSE(app.HasQueuedWork());   // nothing queued on a fresh, untouched tab
+
+    app.SubmitChatTurn(tab, "hello");
+    // The queued action is pushed synchronously (under AppState's lock)
+    // before EnsureSession is even scheduled onto the RPC worker -- checked
+    // immediately, with no wait, so this is not racing the worker's own
+    // (separate-thread) create round trip.
+    CHECK(app.HasQueuedWork());
+
+    REQUIRE(WaitForSession(app, tab));
+    CHECK_FALSE(app.HasQueuedWork());   // drained once the create resolved
 }
 
 TEST_CASE("two tabs do not cross-talk", "[app_state]") {
@@ -848,6 +908,45 @@ TEST_CASE("a wire confirmation is answered and unwedges the tab", "[app_state][c
     // The command actually ran: its result comes back as the notice.
     CHECK(WaitForDetails(app, tab, [](const SessionState::Snapshot& s) {
         return s.latest_notice.has_value();
+    }));
+}
+
+TEST_CASE("AnswerPermission unwedges the tab immediately, before the tool's own "
+          "started event",
+          "[app_state][permission]") {
+    // Mirrors "a wire confirmation is answered and unwedges the tab": the
+    // server collects every permission of a round BEFORE starting any tool,
+    // so nothing guarantees a ToolExecutionEvent follows an individual
+    // permission answer right away -- AnswerPermission must re-derive
+    // state_ itself (OnPendingResolved), the same as AnswerConfirmation and
+    // AnswerAsk already did, or the tab stays Waiting (with the attention
+    // glyph) for the whole tool run that follows.
+    ClientFixture fixture;
+    fixture.tools.Register(
+        std::make_unique<testing::FakeTool>("bash", tools::ToolCategory::Execute, "ran it"));
+    fixture.ScriptSteps({testing::ToolUseResponse("call-1", "bash", {{"command", "make"}}),
+                         testing::TextResponse("done")});
+    fixture.Write("permissions.json", nlohmann::json{{"fallback", {{"execute", "ask"}}}}.dump());
+    fixture.Start();
+
+    AppState app(fixture.client);
+    const auto tab = app.OpenTab(fixture.Options("permission-me"));
+    REQUIRE_FALSE(tab.empty());
+
+    app.SubmitChatTurn(tab, "build it");
+    REQUIRE(WaitForDetails(app, tab, [](const SessionState::Snapshot& s) {
+        return s.pending_permission.has_value();
+    }));
+    const auto pending = app.GetDetails(tab).pending_permission;
+    REQUIRE(pending.has_value());
+
+    app.AnswerPermission(SessionIdOf(app, tab), pending->request_id,
+                         v1::PERMISSION_DECISION_ALLOW, {});
+
+    // THE FIX: state must move off Waiting on the answer itself, not wait
+    // for the tool's own started event.
+    CHECK(WaitFor(app, tab, [](const AppState::TabSnapshot& t) {
+        return t.state != SessionStateKind::Waiting;
     }));
 }
 

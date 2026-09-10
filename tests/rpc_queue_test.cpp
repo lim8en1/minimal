@@ -10,6 +10,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <mutex>
+#include <stdexcept>
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
@@ -119,6 +120,31 @@ TEST_CASE("RpcQueue: Submit after Stop() is a silent no-op") {
     queue.Submit([&] { ran = true; });
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
     REQUIRE_FALSE(ran.load());
+}
+
+TEST_CASE("RpcQueue: a throwing job doesn't take the worker down with it") {
+    // Nothing caught this before: an uncaught exception escapes the thread
+    // function and calls std::terminate, killing the whole client over a
+    // single bad job (EnsureSession, a scrollback fetch, a sessionless
+    // command are all real jobs running arbitrary downstream code).
+    RpcQueue queue;
+    std::atomic<bool> threw{false};
+    std::atomic<bool> after_ran{false};
+
+    queue.Submit([&] {
+        threw = true;
+        throw std::runtime_error("boom");
+    });
+    queue.Submit([&] { after_ran = true; });
+
+    for (int i = 0; i < 200 && !after_ran.load(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    REQUIRE(threw.load());
+    // The worker survived the throw and kept processing the queue -- this
+    // line is only reached at all if it did (a dead worker never runs the
+    // second job, and REQUIRE above would already have failed the wait).
+    REQUIRE(after_ran.load());
 }
 
 TEST_CASE("RpcQueue: destruction joins the worker without hanging") {

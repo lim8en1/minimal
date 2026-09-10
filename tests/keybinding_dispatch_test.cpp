@@ -23,6 +23,7 @@
 
 using minimal::client::AnyWorkInFlight;
 using minimal::client::AppState;
+using minimal::client::ClosePluginModal;
 using minimal::client::CyclePanelFocus;
 using minimal::client::FocusPanelOnClose;
 using minimal::client::FocusPanelOnOpen;
@@ -318,6 +319,27 @@ plugins::PluginViewEntry Panel(const std::string& id, bool visible = false) {
     return plugins::PluginViewEntry{store.back().get(), nullptr, visible, false};
 }
 
+class ModalStubView final : public plugins::View {
+public:
+    explicit ModalStubView(std::string id)
+        : spec_{std::move(id), "", plugins::ViewPlacement::Modal, ""} {}
+    const plugins::ViewSpec& spec() const override { return spec_; }
+    ftxui::Component component() override { return nullptr; }
+
+private:
+    plugins::ViewSpec spec_;
+};
+
+// component left null: ClosePluginModal only needs to reassign the slot to
+// whatever entry.component is, and null is a perfectly good sentinel for
+// checking that the reassignment happened, without this file pulling in a
+// real render component (see the file header: no FTXUI event loop here).
+plugins::PluginViewEntry ModalEntry(const std::string& id, bool visible = false) {
+    static std::vector<std::unique_ptr<plugins::View>> store;
+    store.push_back(std::make_unique<ModalStubView>(id));
+    return plugins::PluginViewEntry{store.back().get(), nullptr, visible, false};
+}
+
 }  // namespace
 
 TEST_CASE("FocusPanelOnOpen: the opened panel takes focus, others lose it",
@@ -397,4 +419,46 @@ TEST_CASE("CyclePanelFocus with no visible panels is a quiet no-op",
     views.push_back(Panel("a"));  // not visible
     CyclePanelFocus(views, true);
     CHECK_FALSE(views[0].focused);
+}
+
+// --- ClosePluginModal (keybinding_dispatch.hpp) ------------------------------
+//
+// FTXUI's Modal() gives the shown modal exclusive input (a Container::Tab
+// routes every event to it alone while its show flag is true), so
+// HandleGlobalKey's own toggle keybinding -- "main" in Modal()'s terms -- can
+// never run again to close a plugin modal once it is up. app.cpp wires
+// Escape to this function directly, ahead of forwarding the event to the
+// plugin, as a close that never depends on plugin cooperation. These tests
+// cover the pure logic; driving an actual Escape keypress through the real
+// composed Modal() stack (RunTui itself has no test surface) is not covered
+// here.
+
+TEST_CASE("ClosePluginModal closes the shown modal, mirroring the toggle-off exactly, "
+          "and leaves panels untouched",
+          "[keybinding_dispatch][plugin_modal]") {
+    std::vector<plugins::PluginViewEntry> views;
+    views.push_back(Panel("panel.a", /*visible=*/true));
+    views.push_back(ModalEntry("fixture.modal", /*visible=*/true));
+
+    auto slot = std::make_shared<ftxui::Component>();
+    bool show_modal = true;
+
+    CHECK(ClosePluginModal(views, slot, show_modal));
+    CHECK_FALSE(views[1].visible);
+    CHECK_FALSE(show_modal);
+    CHECK(views[0].visible);   // an unrelated visible PANEL is untouched
+
+    // Idempotent: nothing Modal left showing, so a second call is a no-op.
+    CHECK_FALSE(ClosePluginModal(views, slot, show_modal));
+}
+
+TEST_CASE("ClosePluginModal with nothing shown is a quiet no-op",
+          "[keybinding_dispatch][plugin_modal]") {
+    std::vector<plugins::PluginViewEntry> views;
+    views.push_back(ModalEntry("fixture.modal", /*visible=*/false));
+    auto slot = std::make_shared<ftxui::Component>();
+    bool show_modal = false;
+
+    CHECK_FALSE(ClosePluginModal(views, slot, show_modal));
+    CHECK_FALSE(show_modal);
 }

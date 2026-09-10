@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <vector>
 
@@ -37,14 +38,25 @@ std::unique_ptr<ClientApi> MakeHostClientApi(SessionClient* client);
 // how the interface's own null-degrade rule reads to a plugin.
 class HostFocusProvider final : public FocusProvider {
 public:
-    // Once, after AppState is constructed; never re-attached, never detached.
+    // Once, after AppState is constructed.
     void Attach(AppState* app);
+    // Before AppState is destroyed: RunTui declares AppState's owner after
+    // the plugin registries (this provider's owner), so locals unwind in
+    // the reverse order -- AppState dies FIRST. A plugin poller thread still
+    // calling Tabs()/FocusedSessionId() during the registries' own teardown
+    // would otherwise dereference a freed AppState. Mutex-guarded (not just
+    // a null-out) so it acts as a real barrier: FocusedSessionId()/Tabs()
+    // hold the same lock for their WHOLE call into app_, so once Detach()
+    // returns, no in-flight call is still touching app_ and no new one can
+    // start.
+    void Detach();
 
     std::string FocusedSessionId() const override;
     std::vector<TabInfo> Tabs() const override;
 
 private:
-    AppState* app_ = nullptr;  // host-owned; null until Attach
+    mutable std::mutex mtx_;
+    AppState* app_ = nullptr;  // guarded by mtx_; host-owned, null until Attach/after Detach
 };
 
 std::unique_ptr<HostFocusProvider> MakeHostFocusProvider();

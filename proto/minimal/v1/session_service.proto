@@ -272,6 +272,16 @@ message CommandResult {
   CommandDisplay display = 4;
   // Non-empty only when display == VIEW: the client view id to open/refresh.
   string view_hint = 5;
+  // True iff this is a successful PromptShorthandCommand result (a /-command
+  // that translates into a turn, e.g. a commands-md shorthand): the command
+  // has already returned, but the TURN it queued is still running and its
+  // output arrives as ordinary events on this same stream (deltas, tool
+  // calls, a TurnCompletedEvent), never as part of this CommandResult. A
+  // reader that stops at CommandResult -- the ordinary rule for every other
+  // command -- must instead keep reading (or re-attach) until that turn
+  // completes, or it observes none of it. See minimal::commands::CommandResult
+  // in command.hpp for the server-side derivation.
+  bool submitted_turn = 6;
 }
 
 // One row of ListCommands: everything the prompt editor needs to render

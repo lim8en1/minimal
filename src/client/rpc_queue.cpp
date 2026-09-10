@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <utility>
 
+#include "minimal/common/logger.hpp"
+
 namespace minimal::client {
 
 RpcQueue::RpcQueue(std::size_t capacity) : capacity_(capacity) {
@@ -46,6 +48,11 @@ void RpcQueue::Stop() {
     if (worker_.joinable()) worker_.join();
 }
 
+bool RpcQueue::Busy() const {
+    std::lock_guard lk(mtx_);
+    return running_job_ || !queue_.empty();
+}
+
 void RpcQueue::WorkerMain() {
     while (true) {
         Job job;
@@ -55,8 +62,23 @@ void RpcQueue::WorkerMain() {
             if (stopping_) return;   // Stop() already cleared queue_; nothing left to run
             job = std::move(queue_.front().job);
             queue_.pop_front();
+            running_job_ = true;
         }
-        job();   // off the loop thread; the job publishes its own result
+        // Contained, not propagated: a throwing job (EnsureSession, a
+        // scrollback fetch, a sessionless command -- all arbitrary
+        // downstream code) escaping this call would std::terminate the
+        // worker thread, taking the whole client down for a single bad job.
+        try {
+            job();   // off the loop thread; the job publishes its own result
+        } catch (const std::exception& error) {
+            common::DefaultLogger().warn("rpc queue: job threw: {}", error.what());
+        } catch (...) {
+            common::DefaultLogger().warn("rpc queue: job threw a non-standard exception");
+        }
+        {
+            std::lock_guard lk(mtx_);
+            running_job_ = false;
+        }
     }
 }
 

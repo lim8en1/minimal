@@ -97,16 +97,28 @@ private:
 
 // --- HostFocusProvider ----------------------------------------------------------
 
-void HostFocusProvider::Attach(AppState* app) { app_ = app; }
+void HostFocusProvider::Attach(AppState* app) {
+    std::lock_guard lk(mtx_);
+    app_ = app;
+}
+
+void HostFocusProvider::Detach() {
+    std::lock_guard lk(mtx_);
+    app_ = nullptr;
+}
 
 std::string HostFocusProvider::FocusedSessionId() const {
-    // Refuses until Attach (see the header): "" is the interface's own
-    // "no focus knowledge" answer, not a distinct condition.
+    // Refuses until Attach, or once Detach has run (see the header): "" is
+    // the interface's own "no focus knowledge" answer, not a distinct
+    // condition. Held for the whole call: see Detach()'s comment for why
+    // this is what makes it a real barrier, not just a racy null-out.
+    std::lock_guard lk(mtx_);
     if (app_ == nullptr) return {};
     return app_->FocusedSessionId();
 }
 
 std::vector<TabInfo> HostFocusProvider::Tabs() const {
+    std::lock_guard lk(mtx_);
     if (app_ == nullptr) return {};
     // LIGHT snapshots only (include_tool_output=false): a focus poller needs
     // identity and names, never tool buffers -- the same reason the tools

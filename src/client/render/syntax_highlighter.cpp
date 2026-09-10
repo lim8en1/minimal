@@ -24,6 +24,23 @@ namespace minimal::client {
 
 namespace {
 
+// The TSPoint (row, column) reached after scanning `text`, starting from
+// `start`. Used to build the TSInputEdit a streaming block's incremental
+// reparse needs -- only over the APPENDED suffix (see ParserCache::AdoptTree
+// below), not the whole growing block, so this stays cheap per debounce tick.
+TSPoint AdvancePoint(TSPoint start, std::string_view text) {
+    TSPoint point = start;
+    for (const char ch : text) {
+        if (ch == '\n') {
+            ++point.row;
+            point.column = 0;
+        } else {
+            ++point.column;
+        }
+    }
+    return point;
+}
+
 // The per-language work, per ARCHITECTURE.md: one node-type -> category table.
 // tree-sitter node types are stable within a grammar's major version. A name
 // not listed is Plain, so a grammar update degrades coloring, never crashes.
@@ -602,22 +619,58 @@ public:
     // The previous parse's tree for `canonical`, or nullptr. Incremental
     // parsing hint for the streaming path: a code block still growing is
     // re-highlighted every debounce tick, and each reparse used to start from
-    // scratch. Tree-sitter accepts ANY tree produced by the same parser as
-    // the base (an outdated one merely reduces how much is reused, never the
-    // result's correctness), so one tree slot per language is enough -- even
-    // two interleaved growing blocks stay correct, just with less reuse.
+    // scratch. Tree-sitter requires the base tree to have been through
+    // ts_tree_edit() describing exactly how its source changed -- passing an
+    // unedited tree from DIFFERENT source (a different code block, or this
+    // same block's text changed some other way) makes it reuse old nodes by
+    // byte position against text that never produced them, which is silently
+    // WRONG, not just less-reused. Collect() only offers this tree back to
+    // the parser after confirming (via LastSource) it is a valid base for an
+    // append and editing it accordingly; everything else gets a full reparse
+    // (nullptr base), same as a cache miss.
     TSTree* LastTree(const std::string& canonical) {
         const auto it = trees_.find(canonical);
         return it != trees_.end() ? it->second : nullptr;
     }
 
+    // The exact source string `LastTree(canonical)` was parsed from, and the
+    // TSPoint reached at its end -- both needed to build the TSInputEdit for
+    // an append, and both kept here (not recomputed) so a growing block's
+    // per-tick cost stays proportional to what changed, not to the whole
+    // block.
+    const std::string* LastSource(const std::string& canonical) const {
+        const auto it = last_code_.find(canonical);
+        return it != last_code_.end() ? &it->second : nullptr;
+    }
+    TSPoint LastEndPoint(const std::string& canonical) const {
+        const auto it = last_point_.find(canonical);
+        return it != last_point_.end() ? it->second : TSPoint{0, 0};
+    }
+
     // Takes ownership of `tree` for `canonical`, releasing the tree it
-    // replaces. Only called with a tree from this language's own parser
-    // (tree-sitter requires the base tree and the parser to match).
-    void AdoptTree(const std::string& canonical, TSTree* tree) {
+    // replaces, and remembers the source text and end point it was parsed
+    // from (LastSource/LastEndPoint above). Only called with a tree from this
+    // language's own parser (tree-sitter requires the base tree and the
+    // parser to match).
+    void AdoptTree(const std::string& canonical, TSTree* tree, std::string code,
+                   TSPoint end_point) {
         const auto it = trees_.find(canonical);
         if (it != trees_.end() && it->second != nullptr) ts_tree_delete(it->second);
         trees_[canonical] = tree;
+        last_code_[canonical] = std::move(code);
+        last_point_[canonical] = end_point;
+    }
+
+    // Drops `canonical`'s cached tree/source/point entirely (see Collect()'s
+    // parse-failure-after-edit path): forces the next call for this language
+    // into a full reparse rather than risk an inconsistent incremental base.
+    void Invalidate(const std::string& canonical) {
+        if (auto it = trees_.find(canonical); it != trees_.end()) {
+            if (it->second != nullptr) ts_tree_delete(it->second);
+            trees_.erase(it);
+        }
+        last_code_.erase(canonical);
+        last_point_.erase(canonical);
     }
 
     // Node-type -> category, hashed once per language (the first draft walked
@@ -650,6 +703,13 @@ private:
     // One kept-alive tree per language, the base of the next incremental
     // parse (see LastTree/AdoptTree above). Bounded by the language count.
     std::unordered_map<std::string, TSTree*> trees_;
+    // The exact source `trees_[canonical]` was parsed from, and the point
+    // reached at its end -- see LastSource/LastEndPoint. Bounded the same way
+    // trees_ is (one entry per language); each entry is one code block's
+    // worth of text, freed the moment a different or completed block reuses
+    // the slot.
+    std::unordered_map<std::string, std::string> last_code_;
+    std::unordered_map<std::string, TSPoint> last_point_;
 };
 
 std::vector<HighlightSpan> SyntaxHighlighter::HighlightCode(std::string_view code,
@@ -702,17 +762,53 @@ std::vector<HighlightSpan> SyntaxHighlighter::Collect(std::string_view code,
     // Incremental parse: feed the previous tree for this language as the base
     // so a still-growing block's reparse only re-examines what changed (the
     // dominant cost on the streaming path, where every debounce tick used to
-    // rebuild the whole tree from scratch). A cache miss -- first parse for
-    // the language, or after the parser itself was rebuilt -- starts from
-    // nullptr, which tree-sitter treats as a full parse. On parse failure the
-    // cached base is kept: it remains a valid base for the next attempt.
+    // rebuild the whole tree from scratch). tree-sitter requires an edited
+    // tree describing exactly how the source changed -- an unedited tree from
+    // DIFFERENT source silently reuses old nodes against text that never
+    // produced them (two unrelated blocks sharing a tree; a streamed token
+    // like "ret" -> "return" keeping its old category). Offer the previous
+    // tree back only when this call's code is verifiably that previous
+    // source with a suffix appended -- the actual streaming-growth case this
+    // optimizes -- and edit it first; anything else (a different block, a
+    // shrink, a mid-string edit) gets a full reparse (nullptr base), same as
+    // a cache miss.
     TSTree* old_tree = parser_cache_->LastTree(canonical);
+    const std::string* old_code = parser_cache_->LastSource(canonical);
+    TSPoint new_end_point{0, 0};
+    bool edited_old_tree = false;
+    if (old_tree != nullptr && old_code != nullptr && old_code->size() <= code.size() &&
+        code.compare(0, old_code->size(), *old_code) == 0) {
+        const TSPoint old_end_point = parser_cache_->LastEndPoint(canonical);
+        new_end_point = AdvancePoint(old_end_point, code.substr(old_code->size()));
+        TSInputEdit edit{};
+        edit.start_byte = static_cast<uint32_t>(old_code->size());
+        edit.old_end_byte = static_cast<uint32_t>(old_code->size());
+        edit.new_end_byte = static_cast<uint32_t>(code.size());
+        edit.start_point = old_end_point;
+        edit.old_end_point = old_end_point;
+        edit.new_end_point = new_end_point;
+        ts_tree_edit(old_tree, &edit);
+        edited_old_tree = true;
+    } else {
+        old_tree = nullptr;   // not a valid base -- full reparse
+        new_end_point = AdvancePoint(TSPoint{0, 0}, code);
+    }
     TSTree* tree =
         ts_parser_parse_string(parser, old_tree, code.data(), static_cast<uint32_t>(code.size()));
     if (tree == nullptr) {
+        // Rare (a parser with no cancellation/timeout set essentially never
+        // returns nullptr for merely invalid syntax -- tree-sitter produces
+        // ERROR nodes instead). If we just edited old_tree in place above,
+        // the cached tree and last_code_/last_point_ (still the PRE-edit
+        // values) now disagree about what the tree reflects -- drop the
+        // cache entry rather than risk a future edit compounding on an
+        // already-edited-but-never-reparsed tree. A tree we left untouched
+        // (the full-reparse branch) is still a valid base to retry with, same
+        // as today.
+        if (edited_old_tree) parser_cache_->Invalidate(canonical);
         return {{HighlightCategory::Plain, 0, static_cast<uint32_t>(code.size())}};
     }
-    parser_cache_->AdoptTree(canonical, tree);
+    parser_cache_->AdoptTree(canonical, tree, std::string(code), new_end_point);
 
     std::vector<HighlightSpan> spans;
     TSTreeCursor cursor = ts_tree_cursor_new(ts_tree_root_node(tree));

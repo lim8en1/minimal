@@ -56,10 +56,10 @@ SessionClient::~SessionClient() {
 }
 
 void SessionClient::CancelSubscriptions() {
-    {
-        std::lock_guard lk(subscribes_->mtx);
-        for (auto* context : subscribes_->active) context->TryCancel();
-    }
+    std::lock_guard lk(subscribes_->mtx);
+    // Latched, not just a one-time sweep -- see SubscribeRegistry::shutting_down.
+    subscribes_->shutting_down = true;
+    for (auto* context : subscribes_->active) context->TryCancel();
 }
 
 bool SessionClient::WaitForConnected(std::chrono::milliseconds timeout) {
@@ -251,6 +251,19 @@ SubscribeOutcome SessionClient::PluginSubscribe(
     const std::function<bool(const std::string& json_payload)>& on_payload,
     grpc::Status* status) {
     grpc::ClientContext context;
+    // OUR OWN channel + stub, not `this->channel_`/`this->stub_`: this call
+    // can run on a plugin's own thread for the plugin's whole lifetime (no
+    // deadline, see below), and ~SessionClient's CancelSubscriptions only
+    // REQUESTS cancellation -- it does not wait for this call to actually
+    // finish. A subscriber still inside Read()/Finish() when SessionClient
+    // (and its channel_/stub_ members) is destroyed would otherwise
+    // dereference a freed grpc::Channel through the completion queue. A
+    // local shared_ptr copy keeps the channel alive for exactly as long as
+    // THIS call needs it, independent of SessionClient's own lifetime -- the
+    // same "OUR reference, not this->" rule `registry` below already
+    // follows.
+    const auto channel = channel_;
+    const auto stub = v1::SessionService::NewStub(channel);
     // No deadline: a subscription lives as long as the subscriber does. The
     // escape hatch is on_payload returning false, which cancels the call.
     // Registered for teardown: a subscriber still blocked in Read() at client
@@ -263,13 +276,19 @@ SubscribeOutcome SessionClient::PluginSubscribe(
     const auto registry = subscribes_;
     {
         std::lock_guard lk(registry->mtx);
+        // Re-checked under the lock, same pattern Stream::Send() uses
+        // against closing_: shutting_down can only flip to true while we
+        // hold this lock, so seeing it false here means CancelSubscriptions
+        // cannot have swept (or ever will sweep) this context -- refuse
+        // instead of registering a context nothing will ever cancel.
+        if (registry->shutting_down) return SubscribeOutcome::kCancelled;
         registry->active.insert(&context);
     }
     v1::PluginCallRequest request;
     request.set_plugin_name(plugin_name);
     request.set_method(method);
     request.set_json_payload(json_payload);
-    auto reader = stub_->PluginSubscribe(&context, request);
+    auto reader = stub->PluginSubscribe(&context, request);
     v1::PluginCallResponse response;
     while (reader->Read(&response)) {
         if (on_payload && !on_payload(response.json_payload())) {
@@ -599,7 +618,19 @@ std::optional<std::string> SessionClient::Stream::Attach(const std::string& sid)
 }
 
 void SessionClient::Stream::Resume() {
-    if (resumed_.exchange(true)) return;   // start reader/writer at most once
+    std::lock_guard<std::mutex> lk(launch_mtx_);
+    // Idle -> Running at most once: covers a second Resume() call (the
+    // existing rule) AND a Resume() racing a Close()/Detach() that already
+    // closed this stream before it ever started (see launch_mtx_'s comment
+    // in the header) -- in the latter case the threads below must never
+    // launch at all.
+    if (launch_state_ != LaunchState::kIdle) return;
+    launch_state_ = LaunchState::kRunning;
+    ever_resumed_ = true;
+    // Launched INSIDE the lock: the thread constructors return immediately
+    // (nothing in them can block on launch_mtx_), so this can't deadlock --
+    // and it closes the narrower race where Close()/Detach() could otherwise
+    // observe kRunning before writer_/reader_ are actually assigned.
     LaunchReaderThread();
     LaunchWriterThread();
 }
@@ -623,7 +654,11 @@ bool SessionClient::Stream::Send(const v1::ClientEvent& event) {
 }
 
 void SessionClient::Stream::Close() {
-    if (closed_.exchange(true)) return;     // idempotent latch: only first caller proceeds
+    {
+        std::lock_guard<std::mutex> lk(launch_mtx_);
+        if (launch_state_ == LaunchState::kClosed) return;   // idempotent latch
+        launch_state_ = LaunchState::kClosed;   // a racing Resume() now sees this and no-ops
+    }
     {
         std::lock_guard lk(qmtx_);
         closing_ = true;                    // under qmtx_: see Send()
@@ -671,7 +706,29 @@ void SessionClient::Stream::JoinReaderOrDetachSelf() {
 }
 
 void SessionClient::Stream::Detach(EndSessionMode mode) {
-    if (closed_.exchange(true)) return;     // idempotent latch, shared with Close()
+    bool was_running;
+    {
+        std::lock_guard<std::mutex> lk(launch_mtx_);
+        if (launch_state_ == LaunchState::kClosed) return;   // idempotent latch, shared with Close()
+        was_running = (launch_state_ == LaunchState::kRunning);
+        launch_state_ = LaunchState::kClosed;   // a racing Resume() now sees this and no-ops
+    }
+
+    if (!was_running) {
+        // Resume() never ran, and per launch_state_ (kClosed now) never
+        // will: there is no writer thread to flush the graceful EndSession
+        // below, and the naming event this stream's Open()/Attach() queued
+        // is still sitting unsent in send_queue_ -- the server is still
+        // waiting to read it. The graceful path deliberately skips an
+        // up-front cancel (see below); that assumption only holds once a
+        // writer thread exists to actually deliver the EndSession. Cancel
+        // and reap directly instead -- the same "abandoned before ever
+        // attaching" handling AttachTab's duplicate-registration race
+        // already uses (see AppState::AttachTab).
+        context_.TryCancel();
+        if (bidi_) SetStatus(bidi_->Finish());
+        return;
+    }
 
     v1::ClientEvent end_session;
     end_session.set_session_id(session_id_);
@@ -718,6 +775,24 @@ void SessionClient::Stream::Detach(EndSessionMode mode) {
         writer_.join();
     }
     if (reader_.joinable()) {
+        // Bounded exactly like the writer's wait above, and for the same
+        // reason Detach() runs at quit -- but the writer finishing (fast:
+        // WritesDone() needs no reply) says nothing about whether the
+        // SERVER is still alive. A server that stopped responding but never
+        // closed the socket leaves the reader blocked in Read() forever;
+        // the graceful path above deliberately skips an up-front cancel,
+        // and without this bound that left quit hanging regardless of the
+        // writer's own bound already firing. reader_exited_ -- latched
+        // under qmtx_ right after the reader's own Finish() -- is the timed
+        // wait's predicate.
+        const auto deadline = std::chrono::steady_clock::now() + kDetachJoinTimeout;
+        {
+            std::unique_lock lk(qmtx_);
+            if (!reader_cv_.wait_until(lk, deadline, [this] { return reader_exited_; })) {
+                context_.TryCancel();
+                reader_cv_.wait(lk, [this] { return reader_exited_; });
+            }
+        }
         JoinReaderOrDetachSelf();
     } else if (bidi_) {
         SetStatus(bidi_->Finish());
@@ -771,7 +846,25 @@ void SessionClient::Stream::LaunchReaderThread() {
         v1::ServerEvent event;
         while (bidi_ && bidi_->Read(&event)) {
             received_any_.store(true, std::memory_order_release);
-            if (event_cb_) event_cb_(event);   // delivers to AppState; may itself Send()
+            if (event_cb_) {
+                // Contained, not propagated: this delivers into AppState's
+                // DispatchToTab (which may itself Send()), and an uncaught
+                // throw here escapes the thread function -- std::terminate,
+                // taking the whole client down (a std::thread constructor's
+                // std::system_error under thread pressure, reachable from
+                // AttachTab->Resume, is the concrete example, but any
+                // throwing path in the dispatch chain works).
+                try {
+                    event_cb_(event);
+                } catch (const std::exception& error) {
+                    common::DefaultLogger().warn(
+                        "session {}: event callback threw: {}", session_id_, error.what());
+                } catch (...) {
+                    common::DefaultLogger().warn(
+                        "session {}: event callback threw a non-standard exception",
+                        session_id_);
+                }
+            }
         }
         // Read() returned false: the server closed its send side -- because the
         // session terminated, because our own half-close or Close()'s cancel
@@ -787,8 +880,10 @@ void SessionClient::Stream::LaunchReaderThread() {
         {
             std::lock_guard lk(qmtx_);
             closing_.store(true, std::memory_order_release);
+            reader_exited_ = true;   // Detach()'s bounded reader join predicate
         }
         send_cv_.notify_all();   // wake the writer onto the latch, not its poll timer
+        reader_cv_.notify_all();   // wake Detach()'s bounded wait, not its timeout
         // The status is captured BEFORE the callback: the callback's last
         // act can release the last shared_ptr holding this Stream, and ~Stream
         // (running right here on the reader thread) must not race it.

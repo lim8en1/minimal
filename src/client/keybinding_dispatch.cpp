@@ -65,6 +65,25 @@ void CyclePanelFocus(std::vector<plugins::PluginViewEntry>& views, bool forward)
     visible[next]->focused = true;
 }
 
+bool ClosePluginModal(std::vector<plugins::PluginViewEntry>& views,
+                      std::shared_ptr<ftxui::Component>& modal_child_slot, bool& show_modal) {
+    for (auto& entry : views) {
+        if (entry.view->spec().placement == plugins::ViewPlacement::Modal && entry.visible) {
+            // Mirrors HandleGlobalKey's own toggle-off exactly (entry.visible,
+            // the slot reassignment, show_modal) -- see the header for why a
+            // second, host-level closer is needed at all: FTXUI's Modal()
+            // gives the shown modal exclusive input, so the toggle keybinding
+            // below (routed through HandleGlobalKey, i.e. "main" in Modal()'s
+            // terms) can never run again to close it.
+            entry.visible = false;
+            *modal_child_slot = entry.component;
+            show_modal = false;
+            return true;
+        }
+    }
+    return false;
+}
+
 bool TabBusyForInterrupt(const bool turn_in_flight, const SessionStateKind state) {
     switch (state) {
         case SessionStateKind::Thinking:

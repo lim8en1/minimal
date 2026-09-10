@@ -340,6 +340,79 @@ int RunHeadless(const HeadlessOptions& options) {
     // the child session -- its work is done).
     std::vector<std::thread> child_attaches;
 
+    // Shared by the ordinary turn path (RunTurn, below) and a command whose
+    // CommandResult carries submitted_turn (right below): both need to print
+    // events and derive an exit code the same way, and a queued turn's own
+    // output is otherwise indistinguishable from one this process started
+    // directly.
+    const auto on_turn_event = [&](const minimal::v1::ServerEvent& event) {
+        if (options.jsonl) {
+            // One JSON value per line, so the stream stays parseable
+            // incrementally rather than only once complete.
+            PrintJsonLine(ServerEventToJsonLine(event));
+        } else if (event.has_stream_event() && event.stream_event().has_text_delta()) {
+            // Text mode prints the assistant's words and nothing else.
+            std::fputs(event.stream_event().text_delta().text().c_str(), stdout);
+            std::fflush(stdout);
+        }
+
+        if (event.has_stream_event() && event.stream_event().has_message_delta()) {
+            exit_code = ExitCodeFor(event.stream_event().message_delta().stop_reason());
+        }
+        // TurnCompletedEvent WINS, and it is the only source that is always
+        // present. ARCHITECTURE.md says the headless exit code derives from
+        // the turn's stop reason, and §11.4 changed the server specifically
+        // so a cancel inside retry backoff reports Cancelled rather than
+        // Unknown -- but that path emits no message_delta at all, so reading
+        // only the delta left the exit code at 0 and made that fix
+        // unobservable from here. This file already asserts that
+        // TurnCompletedEvent is the only reliable end-of-turn signal; now it
+        // acts on it.
+        if (event.has_turn_completed()) {
+            exit_code = ExitCodeFor(event.turn_completed().stop_reason());
+            // Hitting the turn ceiling is not success: the work stopped
+            // short of an answer, which is the same shape as truncation.
+            if (event.turn_completed().hit_max_turns()) exit_code = kTruncated;
+        }
+        if (event.has_error()) saw_error = true;
+        // The server-side kill: stop reading and report the run as
+        // unavailable. RunTurn's/Attach's read loop treats this event as
+        // terminal exactly like turn_completed, so returning false here just
+        // makes the stop explicit from the consumer side too.
+        if (event.has_session_ended()) {
+            session_ended = true;
+            return false;
+        }
+
+        // Attaching to a child session is a CLIENT PROTOCOL OBLIGATION, not
+        // a TUI behaviour: an unattached subagent is killed by the server's
+        // initial-attach guard. The attach runs on its own thread so the
+        // parent's stream keeps pumping; jsonl merges the child's events by
+        // session_id, text mode discards them.
+        if (event.has_subagent_started()) {
+            const std::string child_id = event.subagent_started().child_session_id();
+            if (!options.jsonl) {
+                std::fprintf(stderr, "\n[subagent %s started]\n", child_id.c_str());
+            }
+            child_attaches.emplace_back([&client, child_id, jsonl = options.jsonl] {
+                client.Attach(child_id, [jsonl](const minimal::v1::ServerEvent& child_event) {
+                    if (jsonl) {
+                        PrintJsonLine(ServerEventToJsonLine(child_event));
+                    }
+                    // The child's one turn ends at turn_completed -- or the
+                    // child is killed server-side (a cancelled blocking
+                    // spawn), which now arrives as session_ended instead of
+                    // silence. Nothing follows either signal, and staying
+                    // attached would hold the session open. Closing the
+                    // stream terminates it.
+                    return !(child_event.has_turn_completed() ||
+                             child_event.has_session_ended());
+                });
+            });
+        }
+        return true;
+    };
+
     if (options.command) {
         minimal::client::SessionClient::CommandOptions invocation;
         invocation.name = options.command->name;
@@ -354,6 +427,7 @@ int RunHeadless(const HeadlessOptions& options) {
             return request.options_size() > 0 ? request.options(0) : std::string();
         };
 
+        bool submitted_turn = false;
         const auto command_status = client.RunCommand(
             created.session_id, invocation, [&](const minimal::v1::ServerEvent& event) {
                 if (!event.has_command_result()) return true;
@@ -363,6 +437,7 @@ int RunHeadless(const HeadlessOptions& options) {
                     if (result.message().back() != '\n') std::fputc('\n', stdout);
                 }
                 if (result.status() == minimal::v1::COMMAND_STATUS_ERROR) saw_error = true;
+                submitted_turn = result.submitted_turn();
                 return true;
             });
         if (!command_status.ok()) {
@@ -370,7 +445,42 @@ int RunHeadless(const HeadlessOptions& options) {
                          command_status.error_message().c_str());
             return kUnavailable;
         }
-        return saw_error ? kModelError : kOk;
+        if (!submitted_turn) return saw_error ? kModelError : kOk;
+
+        // A PromptShorthandCommand (e.g. a commands-md /-command that
+        // composes a prompt and submits it as a turn): RunCommand's stream
+        // already ended at the CommandResult above, but the turn it queued
+        // is still running server-side, unobserved -- returning here would
+        // report success (or, if the command's own "submitted" message
+        // tripped the error check, failure) for work that has not happened
+        // yet. Re-attach -- the same protocol obligation a subagent child
+        // gets, and the same on_turn_event the ordinary turn path below
+        // uses -- so this queued turn's output, exit code and any subagent
+        // IT spawns are observed exactly as if `-p` had been given the
+        // composed prompt directly.
+        //
+        // KNOWN LIMITATION: unlike the ordinary turn path, Attach() has no
+        // handle for the SIGINT/SIGTERM watcher below (that machinery is
+        // wired to RunTurn's TurnHandle, which only a turn STARTED by this
+        // process produces) -- a signal here kills the process rather than
+        // cancelling the queued turn server-side.
+        if (!options.jsonl) std::fputc('\n', stdout);
+        const auto attach_status = client.Attach(created.session_id, on_turn_event);
+        for (auto& thread : child_attaches) {
+            if (thread.joinable()) thread.join();
+        }
+        if (!options.jsonl) std::fputc('\n', stdout);
+        if (!attach_status.ok()) {
+            std::fprintf(stderr, "stream ended with an error: %s\n",
+                         attach_status.error_message().c_str());
+            return kUnavailable;
+        }
+        if (session_ended) {
+            std::fprintf(stderr, "the session was terminated by the server\n");
+            return kUnavailable;
+        }
+        if (saw_error) return kModelError;
+        return exit_code;
     }
 
     // Wire SIGINT/SIGTERM to a protocol-level cancel before the turn starts.
@@ -420,76 +530,8 @@ int RunHeadless(const HeadlessOptions& options) {
         };
     }
 
-    const auto status = client.RunTurn(
-        created.session_id, options.prompt,
-        [&](const minimal::v1::ServerEvent& event) {
-            if (options.jsonl) {
-                // One JSON value per line, so the stream stays parseable
-                // incrementally rather than only once complete.
-                PrintJsonLine(ServerEventToJsonLine(event));
-            } else if (event.has_stream_event() && event.stream_event().has_text_delta()) {
-                // Text mode prints the assistant's words and nothing else.
-                std::fputs(event.stream_event().text_delta().text().c_str(), stdout);
-                std::fflush(stdout);
-            }
-
-            if (event.has_stream_event() && event.stream_event().has_message_delta()) {
-                exit_code = ExitCodeFor(event.stream_event().message_delta().stop_reason());
-            }
-            // TurnCompletedEvent WINS, and it is the only source that is always
-            // present. ARCHITECTURE.md says the headless exit code derives from
-            // the turn's stop reason, and §11.4 changed the server specifically
-            // so a cancel inside retry backoff reports Cancelled rather than
-            // Unknown -- but that path emits no message_delta at all, so reading
-            // only the delta left the exit code at 0 and made that fix
-            // unobservable from here. This file already asserts that
-            // TurnCompletedEvent is the only reliable end-of-turn signal; now it
-            // acts on it.
-            if (event.has_turn_completed()) {
-                exit_code = ExitCodeFor(event.turn_completed().stop_reason());
-                // Hitting the turn ceiling is not success: the work stopped
-                // short of an answer, which is the same shape as truncation.
-                if (event.turn_completed().hit_max_turns()) exit_code = kTruncated;
-            }
-            if (event.has_error()) saw_error = true;
-            // The server-side kill: stop reading and report the run as
-            // unavailable. RunTurn's read loop treats this event as terminal
-            // exactly like turn_completed, so returning false here just makes
-            // the stop explicit from the consumer side too.
-            if (event.has_session_ended()) {
-                session_ended = true;
-                return false;
-            }
-
-            // Attaching to a child session is a CLIENT PROTOCOL OBLIGATION, not
-            // a TUI behaviour: an unattached subagent is killed by the server's
-            // initial-attach guard. The attach runs on its own thread so the
-            // parent's stream keeps pumping; jsonl merges the child's events by
-            // session_id, text mode discards them.
-            if (event.has_subagent_started()) {
-                const std::string child_id = event.subagent_started().child_session_id();
-                if (!options.jsonl) {
-                    std::fprintf(stderr, "\n[subagent %s started]\n", child_id.c_str());
-                }
-                child_attaches.emplace_back([&client, child_id, jsonl = options.jsonl] {
-                    client.Attach(child_id, [jsonl](const minimal::v1::ServerEvent& child_event) {
-                        if (jsonl) {
-                            PrintJsonLine(ServerEventToJsonLine(child_event));
-                        }
-                        // The child's one turn ends at turn_completed -- or the
-                        // child is killed server-side (a cancelled blocking
-                        // spawn), which now arrives as session_ended instead of
-                        // silence. Nothing follows either signal, and staying
-                        // attached would hold the session open. Closing the
-                        // stream terminates it.
-                        return !(child_event.has_turn_completed() ||
-                                 child_event.has_session_ended());
-                    });
-                });
-            }
-            return true;
-        },
-        publish_turn_handle, turn_overrides);
+    const auto status = client.RunTurn(created.session_id, options.prompt, on_turn_event,
+                                       publish_turn_handle, turn_overrides);
 
     if (cancel_wired) {
         // Wake the watcher (it exits without cancelling on 'q') and take the
@@ -1456,6 +1498,17 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     });
     auto plugin_modal_host_interactive = CatchEvent(plugin_modal_host, [&](const Event& event) {
         if (!show_plugin_modal || !*plugin_modal_child) return false;
+        // Host-level close, ahead of the plugin: FTXUI's Modal() gives this
+        // component exclusive input while show_plugin_modal is true, so
+        // HandleGlobalKey's own toggle keybinding -- "main" in Modal()'s
+        // terms -- can never run again to close it (see
+        // ClosePluginModal's header comment). A plugin whose own component
+        // neither consumes Escape nor otherwise clears the flag would
+        // otherwise trap every key until the terminal is killed.
+        if (event == Event::Escape) {
+            minimal::client::ClosePluginModal(plugin_views, plugin_modal_child, show_plugin_modal);
+            return true;
+        }
         // Plugin component code: a throw escaping into the ftxui loop would
         // std::terminate the process. Contained like the render side above --
         // logged, and the event treated as consumed.
@@ -1575,7 +1628,12 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         const auto tabs = app->GetAllTabs();
         std::vector<std::string> ids;
         for (const auto& tab : tabs) ids.push_back(tab.tab_id);
-        if (!AnyWorkInFlight(tabs, ids)) {
+        // HasQueuedWork: a sessionless tab's EnsureSession job can still be
+        // QUEUED (not yet started, so SessionStateKind hasn't moved off Idle
+        // -- AnyWorkInFlight can't see it) when quit is pressed. StopRpcQueue
+        // DISCARDS the queue rather than draining it, so without this check
+        // a message typed moments before quit was silently dropped.
+        if (!AnyWorkInFlight(tabs, ids) && !app->HasQueuedWork()) {
             quit();
         } else {
             pending_close = PendingClose{};
@@ -1803,7 +1861,20 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     std::fputs("\x1b[?2004h", stdout);
     std::fflush(stdout);
     screen.Loop(final_tree);
-    running.store(false, std::memory_order_release);
+    {
+        // Under shutdown_mtx, not a bare store: the heartbeat's
+        // wait_for(lock, 2s, predicate) checks the predicate WHILE holding
+        // this same lock. Without it, a store+notify landing exactly as the
+        // heartbeat finishes checking (still true) but before it actually
+        // blocks on the cv can be missed entirely -- bounded by the 2s
+        // timeout floor, so not a hang, but a real extra 2s of quit delay
+        // for no reason. Taking the lock here guarantees one of two
+        // outcomes: the heartbeat is already blocked (wakes immediately), or
+        // it hasn't checked yet (acquires the lock after this and sees
+        // false right away).
+        std::lock_guard<std::mutex> lk(shutdown_mtx);
+        running.store(false, std::memory_order_release);
+    }
     shutdown_cv.notify_all();   // wakes the heartbeat immediately, not on its next 2s tick
     pump.join();
     heartbeat.join();
@@ -1812,6 +1883,16 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     // (RequestScrollback et al.) publishes into SessionState/AppState the
     // same way a reader thread's dispatch does, and DetachAllTabs() below
     // destroys the very tabs a straggling job would publish into.
+    //
+    // The terminal is already restored by this point (screen.Loop() above
+    // returned), and StopRpcQueue()'s join is unbounded against whatever job
+    // is currently running (a blocking RPC with its own multi-second
+    // deadline -- EnsureSession up to 5s, a model-list refresh up to 15s).
+    // Without this notice the process just sits there silently for up to
+    // that long, looking hung rather than merely finishing up.
+    if (app->RpcQueueBusy()) {
+        std::fprintf(stderr, "minimal: waiting for a pending request to finish...\n");
+    }
     app->StopRpcQueue();
 
     // S5.4: quitting the TUI DETACHES every remaining tab rather than
@@ -1825,6 +1906,13 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     // their streams explicitly before erasing. DetachAllTabs is the catch-all
     // for whatever remains (sessionless tabs contribute nothing).
     app->DetachAllTabs();
+
+    // Detach the focus seam BEFORE `app` unwinds: `app` (owning AppState) is
+    // declared after `env` (owning the plugin registries and this provider),
+    // so it is destroyed FIRST -- a plugin poller thread still calling
+    // Tabs()/FocusedSessionId() during env's own teardown would otherwise
+    // dereference a freed AppState. See HostFocusProvider::Detach().
+    env.host_focus_provider->Detach();
 
     // Cancel subscribe streams BEFORE this function's locals unwind: `env`
     // (the plugin environment) is declared after `client`, so it is

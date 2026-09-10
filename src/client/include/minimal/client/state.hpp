@@ -416,6 +416,15 @@ public:
     // --- Turn boundaries (ToolExecution / TextDelta set Working/Thinking; these clear it) ---
     void OnTurnCompleted(const v1::TurnCompletedEvent& evt);
     void OnError(const std::string& error_message);
+    // A local send failure for an in-flight answer (Answer*'s stream->Send()
+    // returned false: the stream is closing or its bounded queue is
+    // stalled) -- NOT the same as OnError's "the session is dead" meaning.
+    // Surfaces the failure as a transient notice only; touches no pending_*
+    // field and no state_/turn bookkeeping, so the modal the user was trying
+    // to answer (and needs to retry) stays exactly as it was. A real
+    // disconnect surfaces separately, through the reader thread's own
+    // on_closed_/OnError path.
+    void OnSendFailed(const std::string& error_message);
 
     // Mid-turn usage (message_start/message_delta). Keeps {tokens} live
     // during a turn; OnTurnCompleted still overwrites with the final tally.
@@ -1010,6 +1019,21 @@ public:
     // and CloseAllTabs() tears down the very tabs a straggling job would
     // publish into.
     void StopRpcQueue() { rpc_queue_.Stop(); }
+
+    // True if the RPC worker has a job queued or running -- callable before
+    // StopRpcQueue() to decide whether its join (unbounded against whatever
+    // job is currently executing) is worth warning about; see RpcQueue::Busy.
+    bool RpcQueueBusy() const { return rpc_queue_.Busy(); }
+
+    // True if any sessionless tab has actions waiting for its EnsureSession
+    // to land (SubmitChatTurn/SubmitCommand/OnTabEnsureSession's queued
+    // closures) -- work AnyWorkInFlight (keybinding_dispatch.hpp) can't see,
+    // since that reads SessionStateKind and a freshly queued sessionless tab
+    // is still Idle until its create round trip actually starts. Quit's
+    // StopRpcQueue() DISCARDS the RPC queue rather than draining it (see
+    // rpc_queue.hpp), so without this a message typed into a sessionless tab
+    // moments before quit was silently dropped with no confirmation shown.
+    bool HasQueuedWork() const;
 
     // Escape hatch: runs an arbitrary job on the same async RPC worker,
     // off the loop thread. For a call site that needs a blocking AppState

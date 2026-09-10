@@ -230,6 +230,21 @@ void FocusPanelOnClose(std::vector<plugins::PluginViewEntry>& views,
                        plugins::PluginViewEntry& entry);
 void CyclePanelFocus(std::vector<plugins::PluginViewEntry>& views, bool forward);
 
+// Host-level close for the ONE plugin modal slot, callable from OUTSIDE
+// HandleGlobalKey's own dispatch. FTXUI's Modal() gives the shown modal
+// exclusive input (see ftxui/component/modal.cpp: a Container::Tab routes
+// every event to the modal alone while its show flag is true) -- so once a
+// plugin modal is up, HandleGlobalKey's own toggle keybinding (which lives in
+// "main", the layer Modal() stops routing to) can never fire again to close
+// it. A plugin whose own component neither consumes Escape nor otherwise
+// clears the flag traps every key, forever. app.cpp's plugin modal host wires
+// Escape here directly, ahead of forwarding the event to the plugin, as a
+// close that never depends on plugin cooperation. Finds the currently-shown
+// Modal-placement entry (there is at most one, by construction) and closes
+// it exactly as the toggle-off would; returns false if none was showing.
+bool ClosePluginModal(std::vector<plugins::PluginViewEntry>& views,
+                      std::shared_ptr<ftxui::Component>& modal_child_slot, bool& show_modal);
+
 // The interrupt probe's per-tab busy verdict (turn.cancel / ctrl+c): the
 // derived display state PLUS Snapshot::turn_in_flight, which OUTRANKS it.
 // MaybeGoIdleLocked resolves the tab to Idle in the windows between message
