@@ -404,6 +404,8 @@ register runtime ids. Bundled actions (see `bundled/keybindings.json`):
 `chat.scroll_up`, `chat.scroll_down`, `chat.scroll_bottom`, `chat.row_up`,
 `chat.row_down`, `chat.toggle_collapse`, `chat.toggle_collapse_all`,
 `chat.toggle_timestamps`, `turn.cancel`, `app.quit`.
+The `/keymap` command opens the same overlay as the `help.overlay` binding:
+a filterable listing of every configured action → key pair.
 
 ### ui.json
 

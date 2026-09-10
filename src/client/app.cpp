@@ -608,8 +608,12 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     // requires_session: /new opens a sessionless TAB (no session to
     // require); /rewind and /redo act on a session's transcript, and
     // /detach-session detaches the focused tab's session group, so all three
-    // are hidden until one exists.
+    // are hidden until one exists. /keymap joins them (client-side data,
+    // nothing to require).
     command_catalog.push_back({"new", "start a new session", /*read_only=*/false,
+                               /*submits_prompt=*/false, /*requires_session=*/false});
+    command_catalog.push_back({"keymap", "show all configured key bindings",
+                               /*read_only=*/true,
                                /*submits_prompt=*/false, /*requires_session=*/false});
     command_catalog.push_back({"rewind", "undo the most recent user turn (or N of them)",
                                /*read_only=*/false, /*submits_prompt=*/false,
@@ -729,6 +733,11 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     std::function<void()> open_agent_picker_fn = [] {};
     std::function<void()> open_model_picker_fn = [] {};
     std::function<void()> open_theme_picker_fn = [] {};
+
+    // Keymap-help overlay opener, assigned after the overlay exists (below):
+    // submit_command intercepts bare /keymap the same way it intercepts bare
+    // /help -- the overlay is where the full binding listing lives.
+    std::function<void()> open_keymap_help_fn = [] {};
 
     // `focused`/`focused_details` become aliases into TabMaintenance once it
     // exists (below, after open_picker/plugin_modal_child) -- see the
@@ -883,7 +892,7 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     // junk session and bought nothing). /agent //model never reach this
     // guard: they are the desired-state commands above, usable on any tab.
     auto submit_command = [app, &command_catalog, commands_listed, focused_or_new_tab,
-                           &show_commands_help, &close_tab,
+                           &show_commands_help, &open_keymap_help_fn, &close_tab,
                            &open_picker_fn, &open_agent_picker_fn,
                            &open_model_picker_fn, &open_theme_picker_fn,
                            &apply_theme](const std::string& line) {
@@ -896,6 +905,15 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         // the server: a single command's usage/summary is one short notice.
         if (line == "/help") {
             show_commands_help = true;
+            return;
+        }
+        // Bare /keymap opens the same overlay the help.overlay binding
+        // (F1) opens: the full action -> key listing lives client-side
+        // (defaults + the user's keybindings.json + plugin folds), so the
+        // server has nothing to answer with. Exact match only -- there is
+        // no per-argument detail to show.
+        if (line == "/keymap") {
+            open_keymap_help_fn();
             return;
         }
         const std::string sid = app->FocusedSessionId();
@@ -1218,6 +1236,7 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         if (keymap_help_reset) keymap_help_reset();
         show_keymap_help = true;
     };
+    open_keymap_help_fn = open_keymap_help;
 
     // Built once, unlike the pickers above: env.keybindings is already final
     // by the time RunTui runs (BuildTuiEnvironment folds in the user's file
