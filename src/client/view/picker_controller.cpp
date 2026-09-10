@@ -73,6 +73,17 @@ void PickerController::Poll() {
     for (auto& apply : ready) apply();   // loop thread only, from here on
 }
 
+// The delete confirmation's resolution path: a confirmed delete must not
+// leave the removed row on screen, so the still-open picker re-fetches from
+// scratch. Called from RunTui's delete_modal callback on the loop thread --
+// FetchPickerPage(reset) clears picker_data_ synchronously (like the ctrl+a
+// toggle) and the fetch's apply closure rebuilds the component when the page
+// lands.
+void PickerController::RefreshSessionPicker() {
+    FetchPickerPage(/*reset=*/true);
+    RebuildPickerComponent();
+}
+
 void PickerController::FetchPickerPage(bool reset) {
     if (reset) {
         picker_data_.sessions.clear();
@@ -155,13 +166,19 @@ void PickerController::RebuildPickerComponent() {
                  });
              },
          .on_delete =
-             [this](const std::string& session_id) {
-                 // Deletion is destructive and permanent, so it asks -- its
-                 // own confirmation layer, styled like the quit one.
-                 deps_.staged_delete_id = session_id;
-                 deps_.show_delete_confirm = true;
-                 deps_.show_picker = false;
-             },
+              [this](const std::string& session_id) {
+                  // Deletion is destructive and permanent, so it asks -- its
+                  // own confirmation layer, styled like the quit one. The
+                  // confirm sits BELOW this picker in RunTui's modal stack
+                  // (app.cpp), so the picker must hide itself for the
+                  // confirm's duration; RunTui's delete_modal callback
+                  // restores show_picker when the confirm resolves, so the
+                  // user lands back here (a confirmed delete also triggers
+                  // RefreshSessionPicker to drop the removed row).
+                  deps_.staged_delete_id = session_id;
+                  deps_.show_delete_confirm = true;
+                  deps_.show_picker = false;
+              },
          .on_new = deps_.open_new_session,
          .on_close = [this] { deps_.show_picker = false; },
          .on_toggle_all_dirs =

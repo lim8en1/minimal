@@ -5,7 +5,10 @@
 // shape RunTui's own comments already named: "modal over data it does not
 // own" -- picker_data/agent_picker_presets are the fetched list, a mutating
 // action (resume/delete/new) closes the modal, and toggling all-dirs or
-// loading more re-fetches and rebuilds the component in place.
+// loading more re-fetches and rebuilds the component in place. Delete is
+// the exception on the return trip: its confirmation hides the picker for
+// its duration, and resolving it restores the picker (RefreshSessionPicker
+// re-fetches so the deleted row is gone).
 //
 // PickerController owns that state privately (nothing outside this class
 // read picker_data or agent_picker_presets in the inline code either) and
@@ -106,6 +109,13 @@ public:
     // belong to. Call every pass, unconditionally -- cheap (one lock, an
     // empty check) when nothing is pending. See TabMaintenance::Run.
     void Poll();
+
+    // Re-fetches the session list from scratch and rebuilds the picker in
+    // place -- RunTui calls this when the delete confirmation resolves with
+    // "delete", so the removed row drops out of the still-open picker. The
+    // reset keeps include_all_dirs (only the fetched rows are cleared); the
+    // rebuild, like every rebuild, starts a fresh filter and cursor.
+    void RefreshSessionPicker();
 
 private:
     void FetchPickerPage(bool reset);

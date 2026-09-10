@@ -1176,7 +1176,9 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     delete_request.options = {"delete", "cancel"};
     auto delete_modal = minimal::client::MakeConfirmationModal(
         delete_request, theme, [&](const std::string& chosen) {
-            if (chosen == "delete" && !staged_delete_id.empty()) {
+            const bool confirmed = chosen == "delete";
+            const std::string id = staged_delete_id;
+            if (confirmed && !id.empty()) {
                 // Off the loop thread: DeleteSession carries a 2 s deadline
                 // (session_client.cpp), and this callback fires from inside
                 // the event loop -- a slow server used to stall the whole
@@ -1192,7 +1194,6 @@ int RunTui(const minimal::client::ParsedArgs& args) {
                 // the message was invisible behind the fullscreen buffer
                 // regardless -- logged instead, same as every other
                 // background-job failure in this file.
-                const std::string id = staged_delete_id;
                 app->RunOnRpcQueue([client, id] {
                     if (const auto status = client->DeleteSession(id); !status.ok()) {
                         minimal::common::DefaultLogger().error("delete failed: {}",
@@ -1202,6 +1203,18 @@ int RunTui(const minimal::client::ParsedArgs& args) {
             }
             staged_delete_id.clear();
             show_delete_confirm = false;
+            // The confirm is only ever staged FROM the session picker (which
+            // it hides for its duration -- it sits below the picker in the
+            // modal stack above), so resolving it returns there. Cancel:
+            // nothing changed, so the picker's slot component is untouched
+            // and its filter/cursor/sort survive as the user left them.
+            // Confirmed delete: re-fetch so the removed row drops out of the
+            // list (that rebuild starts a fresh filter and cursor -- the
+            // same tradeoff the picker's ctrl+a toggle already accepts).
+            show_picker = true;
+            if (confirmed && !id.empty()) {
+                picker_controller.RefreshSessionPicker();
+            }
         });
 
     // --- first run --------------------------------------------------------------
