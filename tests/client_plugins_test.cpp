@@ -77,6 +77,7 @@ struct LoadedFixtures {
     // Null client: the api's documented no-offer behavior.
     std::unique_ptr<AttentionSink> attention_sink;
     std::unique_ptr<ClientApi> client_api;
+    std::unique_ptr<FocusProvider> focus_provider;
 
     // `candidates` loaded against fresh registries. unique_ptr, not a value:
     // AttentionState holds a mutex, so the struct cannot move, and NRVO still
@@ -85,10 +86,11 @@ struct LoadedFixtures {
         auto f = std::make_unique<LoadedFixtures>();
         f->attention_sink = MakeHostAttentionSink(&f->attention);
         f->client_api = MakeHostClientApi(nullptr);
+        f->focus_provider = MakeHostFocusProvider();
         ClientPluginLoader loader(f->views, f->renderers, f->message_renderers,
                                   f->status_segments, f->grammars, f->chat_surface,
                                   f->markdown_engine, f->start_views, f->attention_sink.get(),
-                                  f->client_api.get());
+                                  f->client_api.get(), f->focus_provider.get());
         f->records = loader.LoadAll(candidates);
         return f;
     }

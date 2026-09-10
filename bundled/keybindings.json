@@ -10,6 +10,8 @@
   "help.overlay": "f1",
   "permission.cycle": "shift+tab",
   "panel.toggle": "ctrl+t",
+  "panel.focus.next": "ctrl+g",
+  "panel.focus.prev": "ctrl+e",
   "tab.close": "ctrl+w",
   "chat.load_older": "pageup",
   "chat.scroll_up": "ctrl+up",

@@ -20,6 +20,51 @@ std::string NextRootGroup(const std::vector<AppState::TabSnapshot>& tabs,
     return roots[(idx + (forward ? 1 : roots.size() - 1)) % roots.size()];
 }
 
+// --- Panel focus rules (see the header for the contract) ---------------------
+
+void FocusPanelOnOpen(std::vector<plugins::PluginViewEntry>& views,
+                      plugins::PluginViewEntry& entry) {
+    for (auto& other : views) other.focused = false;
+    entry.focused = true;
+}
+
+void FocusPanelOnClose(std::vector<plugins::PluginViewEntry>& views,
+                       plugins::PluginViewEntry& entry) {
+    if (!entry.focused) return;
+    entry.focused = false;
+    for (auto& other : views) {
+        if (&other != &entry &&
+            other.view->spec().placement == plugins::ViewPlacement::Panel && other.visible) {
+            other.focused = true;
+            break;
+        }
+    }
+}
+
+void CyclePanelFocus(std::vector<plugins::PluginViewEntry>& views, bool forward) {
+    std::vector<plugins::PluginViewEntry*> visible;
+    for (auto& entry : views) {
+        if (entry.view->spec().placement == plugins::ViewPlacement::Panel && entry.visible) {
+            visible.push_back(&entry);
+        }
+    }
+    if (visible.empty()) return;
+
+    std::size_t current = visible.size();  // none focused
+    for (std::size_t i = 0; i < visible.size(); ++i) {
+        if (visible[i]->focused) current = i;
+    }
+    std::size_t next = 0;
+    if (current != visible.size() && visible.size() > 1) {
+        next = (current + (forward ? 1 : visible.size() - 1)) % visible.size();
+    }
+    // EVERY flag clears, visible or not: focus is "at most one, period" -- a
+    // panel that just became invisible must not carry a stale flag around
+    // (the frame's chrome and the dispatch routing both read the flag).
+    for (auto& entry : views) entry.focused = false;
+    visible[next]->focused = true;
+}
+
 std::string NextAttentionTab(const std::vector<AppState::TabSnapshot>& tabs,
                              const std::string& focused) {
     std::size_t start = 0;
@@ -321,14 +366,37 @@ bool HandleGlobalKey(KeyContext& ctx, const ftxui::Event& event) {
         return true;
     }
 
-    // Plugin views, after every core action: a visible PANEL gets the event
-    // first (its component consumes what it wants); any view id bound in
+    // Panel focus cycling among VISIBLE plugin panels (see CyclePanelFocus
+    // and the header's focus-rule contract). Consumed even against an empty
+    // visible set: the action was pressed, it just had nothing to do.
+    if (ctx.keymap.Matches("panel.focus.next", event) ||
+        ctx.keymap.Matches("panel.focus.prev", event)) {
+        CyclePanelFocus(ctx.plugin_views, ctx.keymap.Matches("panel.focus.next", event));
+        return true;
+    }
+
+    // Plugin views, after every core action: the FOCUSED panel gets the event
+    // (its component consumes what it wants); any view id bound in
     // keybindings.json toggles its visibility. The ids were registered as
     // runtime defaults (EnsureDefault) BEFORE the keymap was built, so the
     // keymap already knows them -- a user's file that already names them
     // still wins (EnsureDefault only fills what's unbound).
+    bool any_focused = false;
+    for (const auto& entry : ctx.plugin_views) {
+        if (entry.view->spec().placement == plugins::ViewPlacement::Panel &&
+            entry.visible && entry.focused) {
+            any_focused = true;
+        }
+    }
     for (auto& entry : ctx.plugin_views) {
         if (entry.view->spec().placement != plugins::ViewPlacement::Panel || !entry.visible) {
+            continue;
+        }
+        // Focus routing: when some visible panel holds focus, only it
+        // receives events. With no focus holder -- the degenerate state a
+        // mid-session load could produce -- every visible panel is offered
+        // the event in order, the pre-focus behavior.
+        if (any_focused && !entry.focused) {
             continue;
         }
         // OnEvent is plugin code on the input path: a throw here propagated
@@ -365,6 +433,15 @@ bool HandleGlobalKey(KeyContext& ctx, const ftxui::Event& event) {
                 }
             }
             entry.visible = !entry.visible;
+            if (entry.view->spec().placement == plugins::ViewPlacement::Panel) {
+                // Focus follows the toggle -- see the header's focus-rule
+                // contract.
+                if (entry.visible) {
+                    FocusPanelOnOpen(ctx.plugin_views, entry);
+                } else {
+                    FocusPanelOnClose(ctx.plugin_views, entry);
+                }
+            }
             if (entry.view->spec().placement == plugins::ViewPlacement::Modal) {
                 *ctx.plugin_modal_child_slot = entry.component;
                 ctx.show_plugin_modal = entry.visible;

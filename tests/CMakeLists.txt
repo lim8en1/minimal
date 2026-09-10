@@ -111,6 +111,13 @@ add_executable(minimal_tests
     plugin_storage_test.cpp
     plugin_rpc_test.cpp
     checklist_test.cpp
+    # The checklist-VIEW client plugin: model (header-only), poller and panel
+    # view are pure plugin logic over the ClientApi/FocusProvider seams,
+    # compiled in with stub seams; checklist_view_plugin.cpp (the extern "C"
+    # entry points) stays out, like every other bundled plugin.
+    "${CMAKE_SOURCE_DIR}/plugins/client/checklist-view/checklist_poller.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/client/checklist-view/checklist_panel_view.cpp"
+    checklist_view_test.cpp
     color_downsample_test.cpp
     theme_test.cpp
     streaming_markdown_view_test.cpp
@@ -254,7 +261,8 @@ target_include_directories(minimal_tests PRIVATE
     "${CMAKE_SOURCE_DIR}/plugins/server/tool-ask"
     "${CMAKE_SOURCE_DIR}/plugins/server/session-titler"
     "${CMAKE_SOURCE_DIR}/plugins/server/cost-tracker"
-    "${CMAKE_SOURCE_DIR}/plugins/client/cost-view")
+    "${CMAKE_SOURCE_DIR}/plugins/client/cost-view"
+    "${CMAKE_SOURCE_DIR}/plugins/client/checklist-view")
 
 target_include_directories(minimal_tests PRIVATE
     "${CMAKE_SOURCE_DIR}/plugins/server/tools-web"

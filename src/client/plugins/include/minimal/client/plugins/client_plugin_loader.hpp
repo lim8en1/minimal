@@ -10,7 +10,8 @@
 
 namespace minimal::client::plugins {
 
-class ClientApi;  // declared in client_plugin_abi.h; host-implemented
+class ClientApi;          // declared in client_plugin_abi.h; host-implemented
+class FocusProvider;      // declared in registries.hpp; host-implemented
 
 // "Came out of this build" vs. "someone dropped this in" -- the same trust
 // distinction the server loader encodes, driving default enablement and the
@@ -74,8 +75,8 @@ std::string_view ToString(LoadStatus status);
 class ClientPluginLoader {
 public:
     // Registries are references -- the host owns them and outlives the loader.
-    // `attention` and `client_api` are the host implementations handed to
-    // plugins in the context; null is allowed (a test exercising only
+    // `attention`, `client_api` and `focus` are the host implementations handed
+    // to plugins in the context; null is allowed (a test exercising only
     // registration) and means the seam is simply not offered.
     ClientPluginLoader(ViewRegistry& views, ToolResultRendererRegistry& renderers,
                        MessageRendererRegistry& message_renderers,
@@ -83,7 +84,7 @@ public:
                        SyntaxGrammarRegistry& grammars, ChatSurfaceRegistry& chat_surface,
                        MarkdownEngineRegistry& markdown_engine,
                        StartViewRegistry& start_views, AttentionSink* attention,
-                       ClientApi* client_api);
+                       ClientApi* client_api, FocusProvider* focus);
     ~ClientPluginLoader();
 
     ClientPluginLoader(const ClientPluginLoader&) = delete;
@@ -106,6 +107,7 @@ private:
     StartViewRegistry& start_views_;
     AttentionSink* attention_ = nullptr;
     ClientApi* client_api_ = nullptr;
+    FocusProvider* focus_ = nullptr;
     std::vector<void*> handles_;  // never closed; see LIFETIME above
 };
 

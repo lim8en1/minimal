@@ -47,6 +47,7 @@
 
 #include "minimal/client/keybinding_dispatch.hpp"
 #include "minimal/client/keybindings.hpp"
+#include "minimal/client/plugins/host_seams.hpp"
 #include "minimal/client/plugins/registries.hpp"
 #include "minimal/client/render/markdown_renderer.hpp"
 #include "minimal/client/render/syntax_highlighter.hpp"
@@ -73,6 +74,10 @@ struct TuiEnvironment {
     plugins::AttentionState attention_state;
     std::unique_ptr<plugins::AttentionSink> attention_sink;
     std::unique_ptr<plugins::ClientApi> host_client_api;
+    // Concrete type: app.cpp attaches the (later-constructed) AppState after
+    // BuildTuiEnvironment returns -- see host_seams.hpp for why the seam's
+    // target cannot be supplied at construction time.
+    std::unique_ptr<plugins::HostFocusProvider> host_focus_provider;
 
     plugins::ViewRegistry view_registry;
     plugins::StartViewRegistry start_view_registry;

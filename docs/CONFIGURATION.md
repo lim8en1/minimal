@@ -399,7 +399,8 @@ action. Unknown action names are **kept, not rejected** — plugin views
 register runtime ids. Bundled actions (see `bundled/keybindings.json`):
 `tab.next`, `tab.previous`, `group.previous`, `group.next`, `jump.attention`,
 `session.picker`, `agent.picker`, `model.picker`, `help.overlay`,
-`permission.cycle`, `panel.toggle`, `tab.close`, `chat.load_older`,
+`permission.cycle`, `panel.toggle`, `panel.focus.next`, `panel.focus.prev`,
+`tab.close`, `chat.load_older`,
 `chat.scroll_up`, `chat.scroll_down`, `chat.scroll_bottom`, `chat.row_up`,
 `chat.row_down`, `chat.toggle_collapse`, `chat.toggle_collapse_all`,
 `chat.toggle_timestamps`, `turn.cancel`, `app.quit`.

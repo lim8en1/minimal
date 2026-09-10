@@ -311,6 +311,12 @@ struct PluginViewEntry {
     const View* view;
     ftxui::Component component;
     bool visible = false;
+    // The panel-focus rule (keybinding_dispatch.cpp): at most ONE visible
+    // panel is focused; it alone receives key events, and the frame renders
+    // its chrome (border + title). Opening a panel takes focus; closing the
+    // focused one moves focus to the first remaining visible panel. Modals
+    // never use it (they stage into the modal layer whole).
+    bool focused = false;
 };
 
 // --- Start views (additive: the initial view on start) ----------------------
@@ -379,6 +385,41 @@ public:
         const std::string& plugin_name, const std::string& method,
         const std::string& json_payload,
         const std::function<bool(const std::string&)>& on_payload) = 0;
+};
+
+// --- Focus context (which tab/session the user is looking at) ---------------
+
+// Status segments receive their render-time session id as a Render argument;
+// COMPONENTS (panel views, chat surfaces) are self-contained and have no
+// other route to it. This is that route -- the focused/summary split a
+// session-aware panel needs, and the display-name lookup the .rpc channel
+// cannot answer (names are client-side tab state, not server data).
+//
+// Null in the registration context = the host does not offer the seam (a
+// test exercising other registries, or a host built before the seam): a
+// plugin treats that as "no focus knowledge" -- degraded content, not an
+// error -- the same rule `attention` and `client_api` follow.
+//
+// THREADING: callable from any thread (a plugin's background poller reads
+// focus between fetches and refetches when it changed). Cheap and
+// non-blocking: the host answers from in-memory state, never over the wire.
+struct TabInfo {
+    std::string tab_id;        // the UI's tab handle (AppState's tab id)
+    std::string session_id;    // "" while the tab has no session
+    std::string display_name;  // the tab bar's name for it
+};
+
+class FocusProvider {
+public:
+    virtual ~FocusProvider() = default;
+
+    // The focused tab's session id: "" when no tab is focused or the focused
+    // tab has no session yet.
+    virtual std::string FocusedSessionId() const = 0;
+
+    // Every open tab, focused first, in the host's own render order;
+    // sessionless tabs included (their session_id is "").
+    virtual std::vector<TabInfo> Tabs() const = 0;
 };
 
 // --- Registries -------------------------------------------------------------

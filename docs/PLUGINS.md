@@ -38,7 +38,7 @@ Installed to `<libdir>/minimal/plugins/client/`.
 |---|---|
 | `logo` | The ASCII-banner start view (random banner per session) |
 | `cost-view` | The `{cost}` status-bar segment (polls `cost-tracker.rpc`, renders cumulative $ / tokens) |
-| `checklist-view` | The `{todo}` status-bar segment (polls `checklist.rpc` for the focused session) |
+| `checklist-view` | The `{todo}` status-bar segment + the `checklist.panel` view (both poll `checklist.rpc` through one shared worker; the panel toggles between a focused-tab tasklist and a per-tab summary; default binding `ctrl+k`) |
 
 ## User plugins (`user-plugins/`)
 

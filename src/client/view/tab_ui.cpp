@@ -1,3 +1,4 @@
+#include "minimal/client/keybinding_dispatch.hpp"
 #include "minimal/client/view/tab_ui.hpp"
 
 #include "minimal/common/logger.hpp"
@@ -143,7 +144,12 @@ void TabMaintenance::HandleNotice(const SessionState::Snapshot& snap) {
         deps_.open_model_picker();   // core mapping: bare `/model`
     } else if (auto* view = deps_.view_registry.Find(notice.view_hint)) {
         for (auto& entry : deps_.plugin_views) {
-            if (entry.view == view) entry.visible = true;
+            if (entry.view != view) continue;
+            // Same focus-follows-open rule as the keybinding toggle (see
+            // keybinding_dispatch.hpp's focus-rule contract).
+            const bool was_visible = entry.visible;
+            entry.visible = true;
+            if (!was_visible) FocusPanelOnOpen(deps_.plugin_views, entry);
         }
         if (view->spec().placement == plugins::ViewPlacement::Modal) {
             // REUSE the staged component (bootstrap built one instance per

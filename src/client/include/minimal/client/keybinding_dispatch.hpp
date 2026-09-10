@@ -198,4 +198,27 @@ struct KeyContext {
 // loop. Returns whether the event was consumed, same as any CatchEvent.
 bool HandleGlobalKey(KeyContext& ctx, const ftxui::Event& event);
 
+// --- Panel focus rules (pure over the plugin view table) --------------------
+//
+// At most ONE visible panel is focused: it alone receives key events and the
+// frame draws its chrome (border + title). These three are the only places
+// the flag changes -- extracted from the dispatch body so the rules are
+// testable directly (AppState's gRPC fixture is far too heavy for what is,
+// in the end, a three-line flag dance over a vector).
+//
+// OPEN: the panel the user just asked for takes focus; every other panel
+// loses it (it is the only one that can receive its own keys).
+// CLOSE: closing the focused panel moves focus to the first remaining
+// visible panel, so ctrl+g never has to "restore" focus from nothing;
+// closing an unfocused panel changes nothing.
+// CYCLE: next/prev among VISIBLE panels, wrapping; with none focused, focus
+// lands on the first visible panel (next) or the last (prev); a single
+// visible panel simply keeps focus.
+
+void FocusPanelOnOpen(std::vector<plugins::PluginViewEntry>& views,
+                      plugins::PluginViewEntry& entry);
+void FocusPanelOnClose(std::vector<plugins::PluginViewEntry>& views,
+                       plugins::PluginViewEntry& entry);
+void CyclePanelFocus(std::vector<plugins::PluginViewEntry>& views, bool forward);
+
 }  // namespace minimal::client

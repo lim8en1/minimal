@@ -47,6 +47,12 @@ struct ClientPluginRegistrationContext {
     // The sanctioned data path (EXTENSIBILITY 4.2): scrollback pages through
     // the same RPC core uses. Null on the same terms as `attention`.
     ClientApi* client_api = nullptr;
+
+    // Which tab/session the user is looking at (registries.hpp FocusProvider):
+    // the route a session-aware panel view takes besides the status segments'
+    // per-render argument. Null on the same terms as `attention` -- a plugin
+    // degrades to focus-blind content, never an error.
+    FocusProvider* focus = nullptr;
 };
 
 }  // namespace minimal::client::plugins

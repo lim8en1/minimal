@@ -273,23 +273,45 @@ ftxui::Element FrameRenderer::Render() {
     // Plugin PANEL views, beside the tools panel -- moved here (this used to
     // sit after the status bar, rendering every plugin panel BELOW it,
     // contradicting this very comment) so they actually land next to the
-    // tools panel they're described as beside. Events reach the visible ones
-    // through the frame's CatchEvent (see with_keys). A throwing view is
-    // hidden for the frame that threw (never fatal), like the status
-    // segments below.
+    // tools panel they're described as beside. Events reach the FOCUSED one
+    // through the frame's CatchEvent (see with_keys and
+    // keybinding_dispatch.cpp); here focus is presentation only: the focused
+    // panel gets a border + title chrome, the unfocused ones render dimmed.
+    // A throwing view is hidden for the frame that threw (never fatal), like
+    // the status segments below.
     for (auto& entry : deps_.plugin_views) {
         if (entry.view->spec().placement == plugins::ViewPlacement::Panel && entry.visible) {
+            Element body;
             try {
-                rows.push_back(entry.component->Render() |
-                               yframe | size(HEIGHT, LESS_THAN, deps_.panel_height));
+                body = entry.component->Render();
             } catch (const std::exception& error) {
                 common::DefaultLogger().error("plugin view '{}' threw: {}",
                                               std::string(entry.view->spec().id), error.what());
+                continue;
             } catch (...) {
                 common::DefaultLogger().error(
                     "plugin view '{}' threw a non-standard exception",
                     std::string(entry.view->spec().id));
+                continue;
             }
+
+            Element framed = std::move(body) | yframe |
+                             size(HEIGHT, LESS_THAN, deps_.panel_height);
+            if (entry.focused) {
+                // The focused panel's chrome: a title strip over the content,
+                // the whole box bordered in the theme's focused-border role.
+                // The title rides INSIDE the border (border is applied last),
+                // so the cap below bounds content + title + chrome together.
+                framed = vbox({
+                             text(" " + entry.view->spec().title + " ") |
+                                 bgcolor(deps_.theme.ColorFor("status_bar_bg")) | bold,
+                             std::move(framed),
+                         }) |
+                         borderStyled(deps_.theme.ColorFor("border_focused"));
+            } else {
+                framed = std::move(framed) | dim;
+            }
+            rows.push_back(std::move(framed));
         }
     }
 

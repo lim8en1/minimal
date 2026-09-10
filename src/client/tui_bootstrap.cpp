@@ -52,6 +52,7 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
     // is never relocated, which is the caller's obligation.
     out.attention_sink = plugins::MakeHostAttentionSink(&out.attention_state);
     out.host_client_api = plugins::MakeHostClientApi(&client);
+    out.host_focus_provider = plugins::MakeHostFocusProvider();
 
     plugins::RegisterCoreSyntaxGrammars(out.grammar_registry);
 
@@ -108,7 +109,8 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
                                            out.message_registry, out.status_registry,
                                            out.grammar_registry, out.surface_registry,
                                            out.engine_registry, out.start_view_registry,
-                                           out.attention_sink.get(), out.host_client_api.get());
+                                           out.attention_sink.get(), out.host_client_api.get(),
+                                           out.host_focus_provider.get());
         const auto records = loader.LoadAll(candidates);
 
         // Provenance-keyed severity, mirrored from the server's sanity check:

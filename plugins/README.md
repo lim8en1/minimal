@@ -59,6 +59,7 @@ names. Configured in providers.json, not plugins.json
 | Plugin | Adds | README |
 | --- | --- | --- |
 | checklist | `checklist` tool + `checklist.rpc` service (per-session task list) | [README](server/checklist/README.md) |
+| checklist-view | `{todo}` status segment + `checklist.panel` view (focused tasklist / per-tab summary, `ctrl+k`) | [README](client/checklist-view/README.md) |
 | cost-tracker | `/cost`, `/cost-update-rates`, `cost-tracker.rpc` (token usage and cost) | [README](server/cost-tracker/README.md) |
 | session-titler | LLM-generated session titles after turn 1. **Ships disabled** — enable in plugins.json | [README](server/session-titler/README.md) |
 | signals-message | `message_session` tool (cross-session messaging) | [README](server/signals-message/README.md) |

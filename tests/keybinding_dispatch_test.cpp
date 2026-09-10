@@ -11,6 +11,8 @@
 // exactly when Waiting is the reason someone pressed the key).
 
 #include <algorithm>
+#include <memory>
+#include <vector>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -21,6 +23,9 @@
 
 using minimal::client::AnyWorkInFlight;
 using minimal::client::AppState;
+using minimal::client::CyclePanelFocus;
+using minimal::client::FocusPanelOnClose;
+using minimal::client::FocusPanelOnOpen;
 using minimal::client::Keybindings;
 using minimal::client::NextAttentionTab;
 using minimal::client::NextRootGroup;
@@ -237,9 +242,116 @@ TEST_CASE("ResolvedKeymap: every core default binds to something", "[keybinding_
         "group.previous": "alt+left", "group.next": "alt+right",
         "jump.attention": "alt+a", "session.picker": "ctrl+o",
         "agent.picker": "alt+g", "panel.toggle": "ctrl+t",
+        "panel.focus.next": "ctrl+g", "panel.focus.prev": "ctrl+e",
         "tab.close": "ctrl+w", "chat.load_older": "pageup",
         "chat.scroll_up": "ctrl+up", "chat.scroll_down": "ctrl+down",
         "chat.scroll_bottom": "pagedown",
         "turn.cancel": "escape", "app.quit": "ctrl+q"
     })")).Unmapped().empty());
+}
+
+// --- Panel focus rules (keybinding_dispatch.hpp) -----------------------------
+//
+// PluginViewEntry holds a `const View*`; the tests need only a spec(), so a
+// one-stub view stands in (the same shape client_plugins_test.cpp uses).
+
+namespace {
+
+namespace plugins = minimal::client::plugins;
+
+class PanelStubView final : public plugins::View {
+public:
+    explicit PanelStubView(std::string id) : spec_{std::move(id), "", plugins::ViewPlacement::Panel, ""} {}
+    const plugins::ViewSpec& spec() const override { return spec_; }
+    ftxui::Component component() override { return nullptr; }
+
+private:
+    plugins::ViewSpec spec_;
+};
+
+plugins::PluginViewEntry Panel(const std::string& id, bool visible = false) {
+    static std::vector<std::unique_ptr<plugins::View>> store;
+    store.push_back(std::make_unique<PanelStubView>(id));
+    return plugins::PluginViewEntry{store.back().get(), nullptr, visible, false};
+}
+
+}  // namespace
+
+TEST_CASE("FocusPanelOnOpen: the opened panel takes focus, others lose it",
+          "[keybinding_dispatch][panel_focus]") {
+    std::vector<plugins::PluginViewEntry> views;
+    views.push_back(Panel("a"));
+    views.push_back(Panel("b"));
+
+    FocusPanelOnOpen(views, views[0]);
+    CHECK(views[0].focused);
+    CHECK_FALSE(views[1].focused);
+
+    FocusPanelOnOpen(views, views[1]);
+    CHECK(views[1].focused);
+    CHECK_FALSE(views[0].focused);
+}
+
+TEST_CASE("FocusPanelOnClose: closing the focused panel refocuses the first survivor",
+          "[keybinding_dispatch][panel_focus]") {
+    std::vector<plugins::PluginViewEntry> views;
+    views.push_back(Panel("a"));
+    views.push_back(Panel("b"));
+    views.push_back(Panel("c"));
+    views[1].visible = true;
+    views[2].visible = true;
+    views[2].focused = true;
+
+    FocusPanelOnClose(views, views[2]);
+    CHECK_FALSE(views[2].focused);
+    CHECK(views[1].focused);  // the first remaining VISIBLE panel
+
+    // Closing an UNFOCUSED panel changes nothing.
+    FocusPanelOnClose(views, views[0]);
+    CHECK(views[1].focused);
+}
+
+TEST_CASE("CyclePanelFocus moves among visible panels and wraps",
+          "[keybinding_dispatch][panel_focus]") {
+    std::vector<plugins::PluginViewEntry> views;
+    views.push_back(Panel("a"));
+    views.push_back(Panel("b"));
+    views.push_back(Panel("c"));
+    views[0].visible = true;
+    views[1].visible = true;
+    views[2].visible = true;
+
+    // None focused: next lands on the first.
+    CyclePanelFocus(views, /*forward=*/true);
+    CHECK(views[0].focused);
+
+    // Forward wraps; backward is the inverse direction.
+    CyclePanelFocus(views, true);
+    CHECK(views[1].focused);
+    CyclePanelFocus(views, true);
+    CHECK(views[2].focused);
+    CyclePanelFocus(views, true);
+    CHECK(views[0].focused);
+    CyclePanelFocus(views, false);
+    CHECK(views[2].focused);
+
+    // Invisible panels never take focus, however they are flagged.
+    views[2].visible = false;
+    views[1].focused = true;
+    CyclePanelFocus(views, true);
+    CHECK(views[0].focused);
+    CHECK_FALSE(views[2].focused);
+
+    // A single visible panel keeps focus.
+    views[0].visible = false;
+    CyclePanelFocus(views, true);
+    CHECK(views[1].focused);
+}
+
+TEST_CASE("CyclePanelFocus with no visible panels is a quiet no-op",
+          "[keybinding_dispatch][panel_focus]") {
+    std::vector<plugins::PluginViewEntry> views;
+    views.push_back(Panel("a"));  // not visible
+    CyclePanelFocus(views, true);
+    CHECK_FALSE(views[0].focused);
 }

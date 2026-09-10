@@ -645,6 +645,11 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     auto app = std::make_shared<AppState>(client);
     app->SetPluginAttention(&env.attention_state);
     app->SetChatSurface(chat_surface);
+    // The focus seam's target, now that AppState exists (host_seams.hpp:
+    // plugin load ran before app construction, so the provider attaches here).
+    // Plugins captured the provider POINTER at registration; anything they
+    // read through it happens later, so the attach is never raced.
+    env.host_focus_provider->Attach(app.get());
     // Memory bounds (track R2): ui.json's values, or the built-in defaults
     // (SetUiBounds treats 0 as "keep the default"). Applied before any tab can
     // open, so every SessionState starts bounded.

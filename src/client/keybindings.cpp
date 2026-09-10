@@ -28,6 +28,12 @@ const std::unordered_map<std::string, std::string>& DefaultBindings() {
         {"help.overlay", "f1"},
         {"permission.cycle", "shift+tab"},
         {"panel.toggle", "ctrl+t"},
+        // Panel focus cycling among VISIBLE plugin panels: the focused one
+        // alone receives key events (keybinding_dispatch.cpp). ctrl+j was
+        // taken (it collides with enter), ctrl+e/ctrl+g are unclaimed
+        // ctrl-letters with distinct encodings.
+        {"panel.focus.next", "ctrl+g"},
+        {"panel.focus.prev", "ctrl+e"},
         {"tab.close", "ctrl+w"},
         {"chat.load_older", "pageup"},
         {"chat.scroll_up", "ctrl+up"},

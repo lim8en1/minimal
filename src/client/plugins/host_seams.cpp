@@ -1,9 +1,11 @@
 #include "minimal/client/plugins/host_seams.hpp"
 
 #include <chrono>
+#include <utility>
 
 #include <grpcpp/client_context.h>
 
+#include "minimal/client/state.hpp"
 #include "minimal/common/logger.hpp"
 
 namespace minimal::client::plugins {
@@ -93,12 +95,47 @@ private:
 
 }  // namespace
 
+// --- HostFocusProvider ----------------------------------------------------------
+
+void HostFocusProvider::Attach(AppState* app) { app_ = app; }
+
+std::string HostFocusProvider::FocusedSessionId() const {
+    // Refuses until Attach (see the header): "" is the interface's own
+    // "no focus knowledge" answer, not a distinct condition.
+    if (app_ == nullptr) return {};
+    return app_->FocusedSessionId();
+}
+
+std::vector<TabInfo> HostFocusProvider::Tabs() const {
+    if (app_ == nullptr) return {};
+    // LIGHT snapshots only (include_tool_output=false): a focus poller needs
+    // identity and names, never tool buffers -- the same reason the tools
+    // panel reads the light table (state.hpp track R).
+    std::vector<TabInfo> out;
+    for (const auto& tab : app_->GetAllTabs(/*include_tool_output=*/false)) {
+        TabInfo info;
+        info.tab_id = tab.tab_id;
+        info.session_id = tab.session_id;
+        info.display_name = tab.display_name;
+        if (tab.is_focused) {
+            out.insert(out.begin(), std::move(info));
+        } else {
+            out.push_back(std::move(info));
+        }
+    }
+    return out;
+}
+
 std::unique_ptr<AttentionSink> MakeHostAttentionSink(AttentionState* state) {
     return std::make_unique<HostAttentionSink>(state);
 }
 
 std::unique_ptr<ClientApi> MakeHostClientApi(SessionClient* client) {
     return std::make_unique<HostClientApi>(client);
+}
+
+std::unique_ptr<HostFocusProvider> MakeHostFocusProvider() {
+    return std::make_unique<HostFocusProvider>();
 }
 
 }  // namespace minimal::client::plugins

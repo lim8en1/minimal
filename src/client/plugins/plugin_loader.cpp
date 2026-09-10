@@ -95,7 +95,7 @@ ClientPluginLoader::ClientPluginLoader(ViewRegistry& views,
                                        ChatSurfaceRegistry& chat_surface,
                                        MarkdownEngineRegistry& markdown_engine,
                                        StartViewRegistry& start_views, AttentionSink* attention,
-                                       ClientApi* client_api)
+                                       ClientApi* client_api, FocusProvider* focus)
     : views_(views),
       renderers_(renderers),
       message_renderers_(message_renderers),
@@ -105,7 +105,8 @@ ClientPluginLoader::ClientPluginLoader(ViewRegistry& views,
       markdown_engine_(markdown_engine),
       start_views_(start_views),
       attention_(attention),
-      client_api_(client_api) {}
+      client_api_(client_api),
+      focus_(focus) {}
 
 // Handles are intentionally leaked -- see LIFETIME in the header.
 ClientPluginLoader::~ClientPluginLoader() = default;
@@ -165,6 +166,7 @@ PluginRecord ClientPluginLoader::LoadOne(const PluginCandidate& candidate) {
     context.config = candidate.config;
     context.attention = attention_;
     context.client_api = client_api_;
+    context.focus = focus_;
 
     if (auto register_views = Lookup<RegisterViewsFn>(handle, "minimal_client_plugin_register_views")) {
         const std::size_t before = views_.attributions().size();
