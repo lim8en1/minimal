@@ -463,6 +463,13 @@ void SessionRegistry::ReaperMain() {
         std::vector<std::string> guard_expired_logs;
         std::vector<std::string> reaped_logs;
         bool fire_idle_exit = false;
+        // Set during the sweep when any session still holds the process up:
+        // a never-attached session (its attach guard owns it) or a
+        // detached-but-busy one (a turn in flight, a live background task,
+        // subagent children). Every detached-quiescent session is
+        // exit-transparent -- close-with-detach relies on it: the client is
+        // gone, the turn finishes, and the idle linger below expires.
+        bool any_session_holds = false;
         {
             std::unique_lock<std::mutex> lock(mutex_);
             // Polling at a fraction of the guard keeps every deadline below
@@ -508,6 +515,7 @@ void SessionRegistry::ReaperMain() {
                     ChildCountLocked(it->first) == 0;
                 if (!detached_quiescent) {
                     quiescent_since_.erase(it->first);
+                    any_session_holds = true;
                     ++it;
                     continue;
                 }
@@ -530,19 +538,27 @@ void SessionRegistry::ReaperMain() {
                 }
             }
 
-            // The process idle exit (S5): zero attached clients AND zero live
-            // sessions, held for server.idle_shutdown_seconds. The old
-            // on-last-client-detached fired the instant the count hit zero,
-            // which only worked because sessions could not outlive clients.
+            // The process idle exit (S5, relaxed): zero attached clients AND
+            // no session holding the process up, held for
+            // server.idle_shutdown_seconds. The old condition demanded a
+            // fully empty registry, which pinned the process for the whole
+            // detached_idle_ttl whenever a client quit while any session
+            // existed -- even a long-idle one. Now a session is
+            // exit-transparent the moment it is detached AND quiescent (the
+            // reaper's own definition above); a detached-but-busy session
+            // keeps the server alive until its work finishes, and a
+            // never-attached session is owned by its attach guard, not here.
             //
-            // With a wired client_idle_for, "zero" must ALSO mean "no recent
+            // With a wired client_idle_for, "quiet" must ALSO mean "no recent
             // Ping": a live session-less client (the TUI's welcome state)
             // holds neither a stream nor a session, and only its heartbeat
             // distinguishes it from an empty world. See ReaperConfig::
-            // client_idle_for.
+            // client_idle_for. The same heartbeat keeps the server up after
+            // /detach-session: the TUI is still running, its Ping still
+            // fresh, so reattach stays possible.
             if (reaper_config_.idle_shutdown.count() > 0 && reaper_config_.attached_clients &&
                 reaper_config_.on_idle_expired) {
-                bool quiet = sessions_.empty() && reaper_config_.attached_clients() == 0;
+                bool quiet = !any_session_holds && reaper_config_.attached_clients() == 0;
                 if (quiet && reaper_config_.client_idle_for) {
                     quiet = reaper_config_.client_idle_for() >= reaper_config_.idle_shutdown;
                 }

@@ -261,10 +261,18 @@ config-gated timeout on `PendingRequests::AwaitResponse`, not a new
 invariant. It also cost the "no daemon" guarantee its unconditional form: the
 server no longer exits the instant the last client detaches, since a
 detached session may still be mid-turn. The exit condition is now **zero
-attached clients AND zero live sessions AND no recent client Ping**, held for
-`server.idle_shutdown_seconds` (0 = never — a true daemon deployment); the
+attached clients AND no live session still holding the process up AND no
+recent client Ping**, held for
+`server.idle_shutdown_seconds` (0 = never — a true daemon deployment). A
+session holds the process up until it is detached *and* quiescent (the
+reaper's own definition: no turn in flight, no live background tasks, no
+subagent children); a never-attached session is owned by its attach guard
+instead. In other words: a detached-but-busy session keeps the server alive
+until its work finishes (the TUI's close-confirmation "detach" flow), a
+detached-idle one is exit-transparent (so a plain quit — even with idle
+sessions left behind — shuts the server down within the linger), and the
 common case (one client, no detached sessions left behind) still exits
-promptly, and client auto-spawn (§ Non-interactive client, "Auto-spawn") stays
+promptly. Client auto-spawn (§ Non-interactive client, "Auto-spawn") stays
 correct under this. The Ping half (`rpc Ping(PingRequest)` on SessionService, wired into
 `ReaperConfig::client_idle_for`) exists because a live client can hold
 neither a stream nor a session: the TUI creates its first session lazily on
@@ -272,7 +280,8 @@ the first submission, so its empty-state welcome view attaches nothing —
 without a heartbeat the reaper read that silence as "nobody is here" and shut
 the server down while the user was still composing. The TUI sends one Ping
 every ~2s from a background thread; quitting stops the beats and the linger
-expires on its own.
+expires on its own. The same heartbeat is what keeps the server up after
+`/detach-session` while the TUI stays open, so `/sessions` can reattach.
 
 **Fan-out (S5.1).** `Session` no longer owns a single `EventQueue` with one
 attach flag; `rpc::EventBroadcaster` (`src/server/rpc/event_broadcaster.{hpp,cpp}`)
@@ -303,7 +312,7 @@ not a designed flow.
 
 - **Confirm when work is in flight.** Closing a tab mid-turn destroys running work, so it routes through the existing `ConfirmationBroker`; closing an idle tab needs no prompt.
 - **Terminating a blocking subagent must unblock its parent** — the parent's `SpawnSubagentTool` is synchronously waiting and receives an error `ToolResultBlock` (the child's completion signal fires on every exit path, teardown included) rather than hanging. Cancelling the parent's turn propagates the same way: the wait observes the parent's cancellation and terminates the child. "Every exit path" includes a terminate that lands BEFORE the seeded turn ever ran (the initial-attach reaper, or a terminate racing `SubmitTurn`): the completion hook fires from `Terminate` with a synthesized `Cancelled` result, because the only alternative is a blocking parent waiting on a promise nothing will ever set.
-- **Client quit (S5.4)** detaches every tab (`Stream::Detach()`, which sends `EndSession{DETACH}` and lets the writer flush before joining — no `TryCancel`, unlike `Close()`) rather than terminating; a session with a turn in flight keeps running unattended. `ctrl+w` (closing one tab) still terminates, with the existing confirmation if work is in flight — that path is unchanged.
+- **Client quit (S5.4)** detaches every remaining tab (`Stream::Detach()`, which sends `EndSession{DETACH}` and lets the writer flush before joining — no `TryCancel`, unlike `Close()`) rather than terminating; a session with a turn in flight keeps running unattended, and the server follows the client out once that work finishes (§ Session lifetime, the relaxed idle exit). The quit/tab-close confirmation offers three answers: **close anyway** sends `EndSession{TERMINATE}` (the session and everything in flight are destroyed — the only client path that does), **detach** sends `EndSession{DETACH}`, **cancel** backs out. A bare `ctrl+w` on an *idle* group skips the modal and just drops the streams (a bare drop reads as DETACH server-side). `/detach-session` is client-intercepted like `/new`: it ends the focused tab's whole group (parent + children) with an explicit `EndSession{DETACH}`, erases the tabs, and the sessions stay live for `/sessions` to reattach while the TUI (and its heartbeat) keeps the server up.
 
 ## LLM provider adapter — `src/server/llm/`
 

@@ -193,7 +193,7 @@ All values must be ≥ 0 (negative → **fatal**); `0` means "never" where noted
 | `sessions.detached_idle_ttl_seconds` | int | `1800` | idle reaper collects a fully quiescent detached session after this; `0` = never |
 | `sessions.unattended_prompt_timeout_seconds` | int | `0` | bound on permission/confirmation waits for detached sessions; `0` = wait forever |
 | `sessions.initial_attach_guard_seconds` | int | `10` | guard for sessions that never attach a client |
-| `server.idle_shutdown_seconds` | int | `5` | exit after this long with zero attached clients and zero live sessions; `0` = never (daemon) |
+| `server.idle_shutdown_seconds` | int | `5` | exit after this long with zero attached clients and no live session still doing work (a detached-but-busy session holds the server until it finishes); `0` = never (daemon) |
 
 ---
 

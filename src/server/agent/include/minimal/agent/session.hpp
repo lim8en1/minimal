@@ -558,6 +558,14 @@ public:
     // event stream, not by turn completion.
     bool WaitForIdleForTesting(std::chrono::milliseconds timeout);
 
+    // Testing seam: pins the background-task count the way a live background
+    // bash would (a STARTED with no terminal event yet), without running one.
+    // The reaper's quiescence rule and the relaxed process idle exit both read
+    // this counter; production never sets it directly.
+    void SetBackgroundTasksForTesting(std::size_t live) {
+        channels_->background_tasks_live.store(live, std::memory_order_release);
+    }
+
 private:
     void WorkerMain();
     // info_ copied under mutex_ -- the snapshot the Notify* call sites take, so

@@ -681,6 +681,65 @@ TEST_CASE("a session terminated server-side (not via CloseTab) reaches Done",
     CHECK(app.HasTab(tab));   // the tab itself is never removed automatically
 }
 
+TEST_CASE("EndTabSessions TERMINATE destroys the session server-side", "[app_state]") {
+    // The close confirmation's "close anyway": the ONLY client path that
+    // ends a session on the wire (EndSession{TERMINATE}). The stream ends,
+    // the live session is torn down with everything in flight -- unlike
+    // CloseTab's bare drop, which the server reads as a DETACH.
+    ClientFixture fixture;
+    fixture.Script("hi");
+    fixture.Start();
+
+    AppState app(fixture.client);
+    const auto tab = app.OpenTab(fixture.Options("kill-me"));
+    REQUIRE_FALSE(tab.empty());
+    app.SubmitChatTurn(tab, "hi");
+    REQUIRE(WaitForSession(app, tab));
+    REQUIRE(WaitForAttached(app, tab));
+    const auto sid = SessionIdOf(app, tab);
+
+    app.EndTabSessions({tab}, minimal::client::EndSessionMode::kTerminate);
+    const auto deadline = std::chrono::steady_clock::now() + 5s;
+    while (fixture.sessions->Find(sid) != nullptr &&
+           std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(10ms);
+    }
+    CHECK(fixture.sessions->Find(sid) == nullptr);
+}
+
+TEST_CASE("EndTabSessions DETACH leaves the session running and the tab closable",
+          "[app_state]") {
+    // The close confirmation's "detach" and /detach-session: the stream ends
+    // with an explicit EndSession{DETACH}; the session keeps running
+    // server-side (reattachable while it lives), and the tab erase that
+    // follows lands on the already-latched stream as a no-op.
+    ClientFixture fixture;
+    fixture.Script("hi");
+    fixture.Start();
+
+    AppState app(fixture.client);
+    const auto tab = app.OpenTab(fixture.Options("detach-me"));
+    REQUIRE_FALSE(tab.empty());
+    app.SubmitChatTurn(tab, "hi");
+    REQUIRE(WaitForSession(app, tab));
+    REQUIRE(WaitForAttached(app, tab));
+    const auto sid = SessionIdOf(app, tab);
+
+    app.EndTabSessions({tab}, minimal::client::EndSessionMode::kDetach);
+    app.CloseTab(tab);   // erases the tab; the detached stream is already ended
+    REQUIRE_FALSE(app.HasTab(tab));
+
+    const auto deadline = std::chrono::steady_clock::now() + 1s;
+    while (std::chrono::steady_clock::now() < deadline) {
+        // Give the server's read loop a moment to observe the DETACH -- the
+        // assertion is that it NEVER erases the session for one.
+        if (fixture.sessions->Find(sid) == nullptr) break;
+        std::this_thread::sleep_for(10ms);
+    }
+    REQUIRE(fixture.sessions->Find(sid) != nullptr);
+    CHECK_FALSE(fixture.sessions->Find(sid)->terminated());
+}
+
 // Track R1b-4 (see .opencode/plans/track-r-remediation.md): DispatchToTab used
 // to grab a RAW SessionState* under the lock and use it after releasing it.
 // CloseTab erases the TabEntry -- dropping the map's shared_ptr -- and only

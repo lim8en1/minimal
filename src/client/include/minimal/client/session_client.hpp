@@ -22,6 +22,12 @@
 
 namespace minimal::client {
 
+// The explicit EndSession.Mode a stream ends with. The proto REQUIRES one
+// (MODE_UNSPECIFIED is refused server-side); DETACH lets the session keep
+// running (close/detach flow, quit teardown), TERMINATE kills the session
+// and everything in flight (the close confirmation's "close anyway").
+enum class EndSessionMode { kDetach, kTerminate };
+
 // Transport layer for the TUI: owns one gRPC channel and spawns persistent per-tab
 // streams. The headless client (`-p`) still uses RunTurn() directly below; the two
 // share a channel but are independent RPC lifecycles.
@@ -126,24 +132,28 @@ public:
     // empty: the thread never touches members again.
     void Close();
 
-    // S5.4: the graceful sibling of Close(). Sends EndSession{DETACH}
-    // (queued ahead of closing_, so anything already pending flushes
-    // first), then half-closes and joins WITHOUT the TryCancel() Close()
-    // uses -- the point of detaching is to let the writer actually
-    // deliver that message rather than possibly losing it to a cancel
-    // race, and the server ends this stream's RPC normally once it reads
-    // the DETACH (Dispatch's read loop, session_service.cpp), so there is
-    // nothing here for a cancel to rescue -- NORMALLY. The writer's join
+    // S5.4: the graceful sibling of Close(). Sends EndSession{mode} --
+    // DETACH (the default: quit teardown, tab close, /detach-session; the
+    // session keeps running) or TERMINATE (the close confirmation's
+    // "close anyway": the session and everything in flight are destroyed)
+    // -- queued ahead of closing_, so anything already pending flushes
+    // first, then half-closes and joins WITHOUT the TryCancel() Close()
+    // uses -- the point of an explicit EndSession is to let the writer
+    // actually deliver that message rather than possibly losing it to a
+    // cancel race, and the server ends this stream's RPC normally once it
+    // reads the mode (Dispatch's read loop, session_service.cpp), so there
+    // is nothing here for a cancel to rescue -- NORMALLY. The writer's join
     // is still bounded (2 s): a server that wedged mid-turn leaves the
     // writer blocked in a flow-control-stalled Write(), and a plain join
     // would hang the whole client at quit. Past the bound the context IS
-    // cancelled: the client is quitting (Detach runs only from
-    // DetachAllTabs at teardown), so losing the unsent tail and ending
-    // the RPC with a CANCELLED status is acceptable there. The SESSION
-    // keeps running; only this stream ends. Safe from any thread,
-    // idempotent (shares Close()'s closed_ latch -- whichever of the two
-    // runs first wins).
-    void Detach();
+    // cancelled: the client is quitting or destroying the tab (Detach runs
+    // only from DetachAllTabs at teardown and the close-confirmation
+    // paths), so losing the unsent tail and ending the RPC with a
+    // CANCELLED status is acceptable there. With DETACH the SESSION keeps
+    // running; only this stream ends. Safe from any thread, idempotent
+    // (shares Close()'s closed_ latch -- whichever of the two runs first
+    // wins).
+    void Detach(EndSessionMode mode = EndSessionMode::kDetach);
 
         // Unblocks the underlying call without the full Close() discipline
         // (joins, Finish). For streams being discarded without ever having

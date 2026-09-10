@@ -367,14 +367,17 @@ bool HandleGlobalKey(KeyContext& ctx, const ftxui::Event& event) {
     }
     if (ctx.keymap.Matches("tab.close", event)) {
         if (!sid.empty()) {
-            // Closing a ROOT tab terminates its group: TabsToClose stages the
-            // group in render order -- root FIRST, children after (the old
-            // "children first" claim inverted the actual order; either works,
-            // since the root's close terminates the children's sessions and
-            // their closes degrade to no-ops). ONE confirmation if any of
-            // it is in flight; app.cpp's confirm_close owns staging that
-            // (PendingClose, show_quit_confirm) -- this function stays
-            // ignorant of both types.
+            // Closing a ROOT tab takes its whole group: TabsToClose stages
+            // the group in render order -- root FIRST, children after (the
+            // old "children first" claim inverted the actual order). ONE
+            // confirmation if any of it is in flight; app.cpp's confirm modal
+            // owns staging that (PendingClose, show_quit_confirm) and now
+            // asks close-vs-detach -- "detach" ends the streams with an
+            // explicit EndSession{DETACH} so the sessions keep running
+            // (/sessions reattaches), "close anyway" TERMINATEs. Idle groups
+            // close straight through: the bare stream drop reads as a DETACH
+            // server-side either way. This function stays ignorant of both
+            // types.
             const auto tabs = ctx.app.GetAllTabs();
             auto ids = TabsToClose(tabs, sid);
             if (AnyWorkInFlight(tabs, ids)) {

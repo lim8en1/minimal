@@ -1629,7 +1629,26 @@ void AppState::CloseTab(const std::string& tab_id) {
             }
         }
     }
-    if (to_close) to_close->Close();   // drains + joins; terminates the session when last open
+    if (to_close) to_close->Close();   // bare drop: the server reads it as a DETACH
+}
+
+void AppState::EndTabSessions(const std::vector<std::string>& tab_ids, EndSessionMode mode) {
+    // Same shape as CloseTab/DetachAllTabs: copy the streams out from under
+    // the lock, act on the copies outside it -- Detach() drains and joins
+    // the writer (bounded), which must never happen under mtx_.
+    std::vector<std::shared_ptr<SessionClient::Stream>> to_end;
+    {
+        std::lock_guard lk(mtx_);
+        for (const auto& tab_id : tab_ids) {
+            for (auto& tab : tabs_) {
+                if (tab.info.tab_id == tab_id && tab.stream) {
+                    to_end.push_back(tab.stream);
+                    break;
+                }
+            }
+        }
+    }
+    for (auto& stream : to_end) stream->Detach(mode);
 }
 
 void AppState::SetFocusedTab(const std::string& tab_id) {

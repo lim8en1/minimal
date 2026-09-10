@@ -772,6 +772,17 @@ public:
     void CloseTab(const std::string& tab_id);
     bool HasTab(const std::string& tab_id) const;
 
+    // Ends each named tab's stream with an EXPLICIT EndSession{mode} --
+    // DETACH: the session keeps running server-side (the close
+    // confirmation's "detach", /detach-session); TERMINATE: the session and
+    // everything in flight are destroyed (the confirmation's "close
+    // anyway"). CloseTab's bare stream drop also detaches server-side, but
+    // only by fallback; these are the paths that state their intent on the
+    // wire. Tabs themselves are untouched -- callers erase them (and their
+    // UI caches) via CloseTab afterward; a stream Detach already latched is
+    // a no-op there. Sessionless tabs in the list contribute nothing.
+    void EndTabSessions(const std::vector<std::string>& tab_ids, EndSessionMode mode);
+
     // --- Sending on a tab's stream (UI calls these; routes ClientEvents out) ---
 
     // THE SEND ENTRIES for the prompt editor. Tab-keyed, and the only paths
@@ -915,10 +926,10 @@ public:
     // valid whether or not a session exists yet.
     std::string FocusedTabId() const;
 
-    // Closes (terminates) every tab. Used by ctrl+w's explicit close, not
-    // quit -- see DetachAllTabs for that (S5.4: a session now outlives the
-    // client that opened it, so quitting the app is no longer the same
-    // action as terminating every open session).
+    // Closes (drops) every tab's stream. The ~AppState safety net, not a user
+    // verb -- ctrl+w closes ONE tab (CloseTab), quit detaches (DetachAllTabs),
+    // and the close confirmation's terminate path goes through
+    // EndTabSessions{TERMINATE} + CloseTab.
     void CloseAllTabs();
 
     // Detaches every tab: the TUI's quit path. Every session this client was

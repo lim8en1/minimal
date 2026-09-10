@@ -658,12 +658,14 @@ void SessionClient::Stream::JoinReaderOrDetachSelf() {
     }
 }
 
-void SessionClient::Stream::Detach() {
+void SessionClient::Stream::Detach(EndSessionMode mode) {
     if (closed_.exchange(true)) return;     // idempotent latch, shared with Close()
 
     v1::ClientEvent end_session;
     end_session.set_session_id(session_id_);
-    end_session.mutable_end_session()->set_mode(v1::EndSession::DETACH);
+    end_session.mutable_end_session()->set_mode(mode == EndSessionMode::kTerminate
+                                                    ? v1::EndSession::TERMINATE
+                                                    : v1::EndSession::DETACH);
     {
         std::lock_guard lk(qmtx_);
         // Queued before closing_ flips, under the same lock Send() checks --
@@ -674,10 +676,11 @@ void SessionClient::Stream::Detach() {
     }
     send_cv_.notify_all();
 
-    // No TryCancel up front: see the header. The writer flushes DETACH (and
-    // anything queued ahead of it) and calls WritesDone() on its own; the
-    // server reads DETACH, unsubscribes this stream, and returns -- ending
-    // the RPC without needing to be cancelled.
+    // No TryCancel up front: see the header. The writer flushes the
+    // EndSession (and anything queued ahead of it) and calls WritesDone() on
+    // its own; the server reads the mode, unsubscribes this stream (and
+    // TERMINATEs the session, for TERMINATE), and returns -- ending the RPC
+    // without needing to be cancelled.
     //
     // BOUNDED join, though: a server wedged mid-turn leaves the writer
     // blocked in a flow-control-stalled Write() where no amount of waiting

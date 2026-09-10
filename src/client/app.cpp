@@ -542,7 +542,10 @@ using minimal::client::TabUi;
 using minimal::client::SessionStateKind;
 using minimal::client::Theme;
 
-// What a quit / tab-close confirmation will destroy, when confirmed.
+// What a quit / tab-close confirmation will act on, when answered: the
+// confirm modal chooses TERMINATE (destroy the sessions and everything in
+// flight) or DETACH (end only the streams; work finishes unattended and
+// /sessions reattaches).
 struct PendingClose {
     bool quit = false;
     // STAGING ORDER: render order -- the root FIRST, its children directly
@@ -597,19 +600,24 @@ int RunTui(const minimal::client::ParsedArgs& args) {
             }
         }
     }
-    // /new, /rewind, /redo are intercepted client-side (submit_command,
-    // below) rather than routed through the server's ListCommands/Command
-    // dispatch, so they have no CommandInfo of their own to appear here --
-    // added by hand so /-autocomplete still offers them. requires_session:
-    // /new opens a sessionless TAB (no session to require); /rewind and
-    // /redo act on a session's transcript, so they are hidden until one
-    // exists.
+    // /new, /detach-session, /rewind, /redo are intercepted client-side
+    // (submit_command, below) rather than routed through the server's
+    // ListCommands/Command dispatch, so they have no CommandInfo of their own
+    // to appear here -- added by hand so /-autocomplete still offers them.
+    // requires_session: /new opens a sessionless TAB (no session to
+    // require); /rewind and /redo act on a session's transcript, and
+    // /detach-session detaches the focused tab's session group, so all three
+    // are hidden until one exists.
     command_catalog.push_back({"new", "start a new session", /*read_only=*/false,
                                /*submits_prompt=*/false, /*requires_session=*/false});
     command_catalog.push_back({"rewind", "undo the most recent user turn (or N of them)",
                                /*read_only=*/false, /*submits_prompt=*/false,
                                /*requires_session=*/true});
     command_catalog.push_back({"redo", "restore the most recently rewound turn",
+                               /*read_only=*/false, /*submits_prompt=*/false,
+                               /*requires_session=*/true});
+    command_catalog.push_back({"detach-session",
+                               "detach this tab group; work keeps running, /sessions reattaches",
                                /*read_only=*/false, /*submits_prompt=*/false,
                                /*requires_session=*/true});
 
@@ -692,6 +700,17 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     // and close_tab is defined before TabMaintenance can be constructed --
     // it needs open_picker/plugin_modal_child, built later.
     std::map<std::string, minimal::client::TabUi> tab_ui;
+
+    // Tab close, for every caller (keybinding, quit confirmation, quit,
+    // /detach-session): the per-tab UI caches must die WITH the tab --
+    // tab_ui entries were never erased, leaking each closed tab's streaming
+    // buffer, grants and surface body for the process lifetime. Defined
+    // HERE (before submit_command) because /detach-session intercepts the
+    // command client-side and erases the group's tabs through it.
+    auto close_tab = [&](const std::string& id) {
+        app->CloseTab(id);
+        tab_ui.erase(id);
+    };
 
     // Picker-open lambdas, assigned after PickerController exists (below):
     // submit_command (above's definition point) intercepts the bare
@@ -809,7 +828,7 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     // junk session and bought nothing). /agent //model never reach this
     // guard: they are the desired-state commands above, usable on any tab.
     auto submit_command = [app, &command_catalog, commands_listed, focused_or_new_tab,
-                           &show_commands_help,
+                           &show_commands_help, &close_tab,
                            &open_picker_fn, &open_agent_picker_fn,
                            &open_model_picker_fn](const std::string& line) {
         // Bare /help is answered CLIENT-SIDE from the ListCommands catalog:
@@ -864,6 +883,32 @@ int RunTui(const minimal::client::ParsedArgs& args) {
             // whatever's already open). Nothing is created server-side until
             // the first message names it.
             app->SetFocusedTab(app->OpenTab(DefaultCreateOptions()));
+            return;
+        }
+        if (line == "/detach-session") {
+            // Client-native, like /new: detaching is a TAB operation (end
+            // the group's streams with an explicit EndSession{DETACH}, erase
+            // the tabs), not a server Command -- the server has no part in
+            // the client's tab model. The group is TabsToClose's resolution:
+            // the focused root plus its subagent children, or -- invoked
+            // from a child tab -- the whole group, parent included. The
+            // sessions keep running server-side (work in flight finishes
+            // unattended) and /sessions reattaches them while they live.
+            // No confirmation: nothing is destroyed.
+            const std::string focused = app->FocusedTabId();
+            if (focused.empty()) return;
+            const auto ids = minimal::client::TabsToClose(app->GetAllTabs(), focused);
+            if (!has_session) {
+                // A sessionless tab has nothing to detach; closing it is the
+                // whole job (same as ctrl+w on an idle tab, minus staging).
+                close_tab(focused);
+                return;
+            }
+            app->EndTabSessions(ids, minimal::client::EndSessionMode::kDetach);
+            for (const auto& id : ids) close_tab(id);
+            if (const std::string tab = app->FocusedTabId(); !tab.empty()) {
+                app->TabNotice(tab, "detached -- /sessions reattaches a live session");
+            }
             return;
         }
         // THE DESIRED-STATE COMMANDS. /agent and /model work identically on
@@ -994,31 +1039,34 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     auto ask_child = std::make_shared<Component>();
     auto ask_host_interactive = minimal::client::MakeModalHost(ask_child, show_ask);
 
-    // Tab close, for every caller (keybinding, quit confirmation, quit): the
-    // per-tab UI caches must die WITH the tab -- tab_ui entries were never
-    // erased, leaking each closed tab's streaming buffer, grants and surface
-    // body for the process lifetime.
-    auto close_tab = [&](const std::string& id) {
-        app->CloseTab(id);
-        tab_ui.erase(id);
-    };
-
     // --- quit / close confirmation --------------------------------------------
+    // THREE answers, not two (the close-vs-detach split): "close anyway"
+    // destroys the sessions and everything in flight (EndSession{TERMINATE});
+    // "detach" ends only the streams -- the sessions keep running
+    // server-side, work finishes unattended, the server shuts itself down
+    // once nothing is busy; "cancel" (esc) backs out.
     PendingConfirmation confirm_request;
     confirm_request.kind = "app_quit";
-    confirm_request.title = "destroy running work?";
-    confirm_request.detail = "a session still has work in flight; closing destroys it";
-    confirm_request.options = {"close anyway", "cancel"};
+    confirm_request.title = "work is still running";
+    confirm_request.detail =
+        "a session still has work in flight. close: destroy it now. "
+        "detach: keep it running in the background (/sessions reattaches).";
+    confirm_request.options = {"close anyway", "cancel", "detach"};
     auto confirm_modal = minimal::client::MakeConfirmationModal(
         confirm_request, theme, [&](const std::string& chosen) {
-            if (chosen != "close anyway") {
+            if (chosen != "close anyway" && chosen != "detach") {
                 show_quit_confirm = false;
                 pending_close = PendingClose{};
                 return;
             }
-            // Root first, children after (the staging order -- see
-            // PendingClose): closing the root terminates the group, so the
-            // child closes are no-ops on terminated sessions.
+            // State the intent on the wire FIRST, while the streams are
+            // still open: DETACH or TERMINATE per the answer. Then close the
+            // tabs root first, children after (the staging order -- see
+            // PendingClose); each Close() lands on an already-ended stream
+            // and degrades to a no-op.
+            app->EndTabSessions(pending_close.session_ids,
+                                chosen == "detach" ? minimal::client::EndSessionMode::kDetach
+                                                   : minimal::client::EndSessionMode::kTerminate);
             for (const auto& id : pending_close.session_ids) close_tab(id);
             if (pending_close.quit) quit();
             show_quit_confirm = false;
@@ -1472,10 +1520,16 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     // destroys the very tabs a straggling job would publish into.
     app->StopRpcQueue();
 
-    // S5.4: quitting the TUI DETACHES every tab rather than terminating it --
-    // a session now outlives the client that opened it, so closing the
-    // terminal must not destroy in-flight work. ctrl+w (CloseTab) is the
-    // explicit per-tab terminate path and is unchanged.
+    // S5.4: quitting the TUI DETACHES every remaining tab rather than
+    // terminating it -- a session outlives the client that opened it, so
+    // closing the terminal must not destroy in-flight work. With the new
+    // idle-exit rule the server follows the client: once every detached
+    // session is quiescent (and the heartbeat is stale), the linger expires
+    // and the process shuts down. The close confirmation's "close anyway"
+    // already TERMINATEd its sessions and erased those tabs, so this finds
+    // nothing left for them; ctrl+w on an idle group and /detach-session end
+    // their streams explicitly before erasing. DetachAllTabs is the catch-all
+    // for whatever remains (sessionless tabs contribute nothing).
     app->DetachAllTabs();
 
     // Cancel subscribe streams BEFORE this function's locals unwind: `env`

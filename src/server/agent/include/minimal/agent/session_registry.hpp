@@ -69,8 +69,14 @@ public:
         // session is lossless: the transcript stays in SQLite, and re-attach
         // becomes resume. 0 = never reap detached sessions.
         std::chrono::seconds detached_idle_ttl = std::chrono::seconds(1800);
-        // Once zero clients are attached AND zero sessions are live, fire
-        // on_idle_expired after this linger. 0 = never (daemon deployment).
+        // Once zero clients are attached AND every remaining session is
+        // detached-quiescent (the reaper's own definition: idle, no live
+        // background tasks, no subagent children; never-attached sessions
+        // are owned by the attach guard instead), fire on_idle_expired
+        // after this linger. 0 = never (daemon deployment). A
+        // detached-but-busy session keeps the process up until its work
+        // finishes; the TUI's Ping heartbeat keeps it up regardless while
+        // any client is running.
         std::chrono::seconds idle_shutdown = std::chrono::seconds(5);
         // The service's attached-stream count; empty disables the idle exit.
         std::function<std::size_t()> attached_clients;
