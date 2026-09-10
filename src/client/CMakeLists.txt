@@ -66,8 +66,9 @@ target_link_libraries(minimal_client_core
         minimal::common
         minimal::proto
         nlohmann_json::nlohmann_json
-        ftxui::screen
-        ftxui::dom
+        # ftxui::component alone: it publicly links ftxui::dom and ftxui::screen,
+        # so naming them here too would put those archives on the link line
+        # twice (ld notes the duplicate).
         ftxui::component
         md4c::md4c
         minimal_tree_sitter

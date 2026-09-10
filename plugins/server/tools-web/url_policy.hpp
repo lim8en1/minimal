@@ -17,7 +17,7 @@ struct UrlCheck {
     // re-resolves the host at connect time, and an attacker controlling DNS
     // could answer the two lookups differently (the classic rebinding TOCTOU:
     // vetted address for check time, 169.254.169.254 for connect time).
-    std::vector<std::string> resolve_entries;
+    std::vector<std::string> resolve_entries = {};
 };
 
 // Parses `url`'s scheme and host, and -- unless `allow_private_hosts` --

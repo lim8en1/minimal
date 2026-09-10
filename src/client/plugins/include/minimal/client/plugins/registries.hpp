@@ -275,7 +275,7 @@ struct ViewSpec {
     ViewPlacement placement = ViewPlacement::Panel;
     // Registered as the DEFAULT binding only if the user's keybindings.json
     // does not already name this id (Keybindings::EnsureDefault).
-    std::string default_keybinding;
+    std::string default_keybinding = {};
 };
 
 // A self-contained view. Panels render in the panel region; modals render in

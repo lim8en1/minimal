@@ -32,7 +32,7 @@ struct MenuRow {
     // Optional "#rrggbb" for the label (the agent picker's preset.color).
     // Anything unparseable renders as the theme default -- a picker row must
     // never throw over cosmetics.
-    std::string color;
+    std::string color = {};
 };
 
 // What on_extra_key needs to answer a key the generic handler doesn't

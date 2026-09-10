@@ -289,8 +289,10 @@ target_compile_definitions(minimal_tests PRIVATE
 # The headless client is exercised as a real client here, so the test binary
 # links it -- the E2E tier is the whole point of building -p first.
 #
-# SQLite3 directly: server_core links it PRIVATE (session_database.hpp keeps
-# <sqlite3.h> out of its interface), but the session-store tests build fixtures
+# SQLite3 comes in transitively via minimal::common (it links it PUBLIC --
+# sqlite_util lives there), so it must NOT be named here as well: that puts
+# libsqlite3.a on the link line twice and ld notes the duplicate. The
+# session-store tests still see <sqlite3.h> and can build fixtures
 # (a hand-crafted newer-version database) and assert on internals
 # (integrity_check, journal_mode, sqlite_master) that SessionDatabase
 # deliberately does not expose.
@@ -299,7 +301,6 @@ target_link_libraries(minimal_tests PRIVATE
     minimal::test_support
     minimal::client_core
     Catch2::Catch2
-    SQLite3::SQLite3
     # tools-search sources are compiled directly into the test binary (see the
     # sources list above), so RE2 comes with them -- same linkage as the plugin.
     minimal_re2

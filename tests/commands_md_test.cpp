@@ -614,16 +614,17 @@ TEST_CASE("LoadCommands: the nearest directory wins a stem collision and malform
 namespace {
 class FixedCommand : public commands::Command {
 public:
-    explicit FixedCommand(std::string name) : name_(std::move(name)) {}
+    explicit FixedCommand(std::string name) : name_(std::move(name)), usage_("/" + name_) {}
     std::string_view Name() const override { return name_; }
     std::string_view Summary() const override { return "already registered"; }
-    std::string_view Usage() const override { return "/" + name_; }
+    std::string_view Usage() const override { return usage_; }
     commands::CommandResult Execute(commands::CommandContext&,
                                     const commands::CommandArgs&) override {
         return commands::CommandResult::Ok();
     }
 private:
     std::string name_;
+    std::string usage_;
 };
 }  // namespace
 

@@ -94,7 +94,7 @@ TEST_CASE("ask_user formats selections and free text as prose", "[tool_ask]") {
     auto tool = tool_ask::MakeAskTool();
 
     SECTION("a selected label is echoed verbatim") {
-        tools::ToolContext ctx = ContextWithBroker([](const tools::AskRequest& request) {
+        tools::ToolContext ctx = ContextWithBroker([]([[maybe_unused]] const tools::AskRequest& request) {
             tools::AskAnswer answer;
             answer.answered = true;
             answer.slots.push_back({{"patch"}, {}});

@@ -1087,7 +1087,7 @@ struct ToolFixture {
     }
 
     Run Exec(CtxBuilder& builder, const nlohmann::json& input,
-             const std::string& session_id = "s1") {
+             [[maybe_unused]] const std::string& session_id = "s1") {
         auto tool = tools_python::MakePythonExecTool(settings, store);
         Run run;
         run.injected = builder.injected;
@@ -1126,11 +1126,6 @@ struct ToolFixture {
         return run;
     }
 };
-
-const nlohmann::json& EmptySlice() {
-    static const nlohmann::json json = nlohmann::json::object();
-    return json;
-}
 
 }  // namespace
 

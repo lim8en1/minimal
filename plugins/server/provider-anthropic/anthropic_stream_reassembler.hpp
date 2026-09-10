@@ -55,7 +55,7 @@ private:
         enum class Kind { Text, ToolUse, Thinking } kind;
         std::string text;                      // Kind::Text / Kind::Thinking
         std::optional<std::string> signature;  // Kind::Thinking: signature_delta fragments, concatenated
-        std::optional<std::string> redacted_data;  // Kind::Thinking: redacted_thinking's data blob
+        std::optional<std::string> redacted_data = std::nullopt;  // Kind::Thinking: redacted_thinking's data blob
         std::string id, name, input_json;      // Kind::ToolUse
         bool stopped = false;                  // content_block_stop already seen
     };

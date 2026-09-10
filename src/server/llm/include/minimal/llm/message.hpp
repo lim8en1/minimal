@@ -24,7 +24,7 @@ struct ThinkingBlock {
     // Anthropic's redacted_thinking payload: replayed verbatim, carries no
     // text and no signature. Mutually exclusive with signature by
     // construction (one block kind on the wire).
-    std::optional<std::string> redacted_data;
+    std::optional<std::string> redacted_data = std::nullopt;
 };
 
 struct ToolUseBlock {

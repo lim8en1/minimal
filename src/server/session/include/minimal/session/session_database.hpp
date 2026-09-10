@@ -82,7 +82,7 @@ struct SessionSummary {
     // from, empty for everything else. Deliberately NOT parent_session_id,
     // which means "subagent" everywhere (picker hiding, refused resume/rewind)
     // -- a fork is a top-level peer, and none of the subagent semantics apply.
-    std::string forked_from_session_id;
+    std::string forked_from_session_id = {};
 };
 
 // The persisted compaction checkpoint: the current derived VIEW of a session's

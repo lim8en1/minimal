@@ -103,7 +103,7 @@ struct LoopConfig {
         std::shared_ptr<llm::LlmProvider> provider;
         std::string model_name;
         nlohmann::json parameters = nlohmann::json::object();
-        std::optional<int> max_tokens;
+        std::optional<int> max_tokens = std::nullopt;
     };
     std::optional<SmallModel> small_model;
 

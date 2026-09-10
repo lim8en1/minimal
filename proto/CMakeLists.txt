@@ -12,8 +12,11 @@ set(MINIMAL_PROTO_FILES
 add_library(minimal_proto SHARED ${MINIMAL_PROTO_FILES})
 add_library(minimal::proto ALIAS minimal_proto)
 
+# gRPC::grpc++ alone: it publicly links protobuf::libprotobuf itself, so also
+# naming it here would put libprotobuf.a on the link line twice (ld notes the
+# duplicate). Includes still propagate through grpc++'s interface.
 target_link_libraries(minimal_proto
-    PUBLIC protobuf::libprotobuf gRPC::grpc++)
+    PUBLIC gRPC::grpc++)
 
 set_target_properties(minimal_proto PROPERTIES
     VERSION "${PROJECT_VERSION}"

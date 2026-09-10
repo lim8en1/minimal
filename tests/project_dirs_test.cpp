@@ -32,12 +32,6 @@ struct TempProjectTree {
     }
 };
 
-std::vector<std::string> Names(const ProjectDirs& dirs) {
-    std::vector<std::string> out;
-    for (const auto& dir : dirs.dirs()) out.push_back(dir.filename().string());
-    return out;
-}
-
 }  // namespace
 
 TEST_CASE("an empty project root yields no project scope", "[project_dirs]") {

@@ -24,7 +24,7 @@ namespace minimal::tools {
 
 struct AskOption {
     std::string label;       // what the model receives back verbatim
-    std::string description; // human-facing elaboration; may be empty
+    std::string description = {}; // human-facing elaboration; may be empty
 };
 
 struct AskQuestion {
