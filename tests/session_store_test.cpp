@@ -791,11 +791,31 @@ TEST_CASE("appends persist and reload structurally identical", "[session][store]
         const auto* reloaded_result = std::get_if<llm::ToolResultBlock>(&page.messages[1].message.content[0]);
         REQUIRE(reloaded_result != nullptr);
         CHECK(reloaded_result->tool_use_id == "toolu_1");
+        CHECK(reloaded_result->display.is_null());   // absent stays absent
         CHECK(page.messages[0].message.content.size() == 1);
         // Assistant rows carry the reported output count; user rows do not.
         CHECK(page.messages[0].token_count == 42);
         CHECK(page.messages[3].token_count == 0);
     }
+}
+
+TEST_CASE("a tool result's display payload round-trips through the store", "[session][store]") {
+    TempDir dir;
+    SessionDatabase db(dir.path() / "display.db");
+    const auto session_id = db.CreateSession("", std::nullopt, "/proj", "build").session_id;
+    SqliteHistoryStore store(db, session_id);
+
+    llm::ToolResultBlock result;
+    result.tool_use_id = "toolu_1";
+    result.content.push_back(llm::TextBlock{"replaced 1 occurrence in a.cpp"});
+    result.display = {{"kind", "diff"}, {"path", "a.cpp"}, {"hunks", nlohmann::json::array()}};
+    store.Append(llm::Message{llm::Role::User, {result}}, std::nullopt);
+
+    SessionReader reader(db);
+    const auto page = reader.GetMessages(session_id, std::nullopt, 10);
+    REQUIRE(page.messages.size() == 1);
+    const auto& reloaded = std::get<llm::ToolResultBlock>(page.messages[0].message.content[0]);
+    CHECK(reloaded.display == result.display);
 }
 
 TEST_CASE("seqs are per-session and independent", "[session][store]") {

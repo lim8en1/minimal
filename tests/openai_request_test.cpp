@@ -177,6 +177,17 @@ TEST_CASE("BuildRequestBody: N tool results explode into N tool messages", "[ope
     CHECK(messages[1]["content"] == "result two");
 }
 
+TEST_CASE("BuildRequestBody: a tool_result's display payload never reaches the model",
+          "[openai_request][invariant]") {
+    llm::ToolResultBlock result{"call_1", {llm::TextBlock{"ok"}}, false};
+    result.display = {{"kind", "diff"}, {"path", "DISPLAY_SENTINEL"}};
+    Fixture fixture({llm::Message{llm::Role::User, {result}}});
+
+    const nlohmann::json body = ParseBody(fixture.request);
+    CHECK(body.dump().find("DISPLAY_SENTINEL") == std::string::npos);
+    CHECK_FALSE(body["messages"][0].contains("display"));
+}
+
 TEST_CASE("BuildRequestBody: ThinkingBlock is dropped silently", "[openai_request]") {
     Fixture fixture({llm::Message{
         llm::Role::Assistant,

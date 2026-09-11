@@ -42,6 +42,9 @@ struct ToolResultBlock {
     std::string tool_use_id;
     std::vector<ToolResultContentBlock> content;
     bool is_error = false;
+    // Client-only display payload (tools::ToolResult::display). Providers must
+    // NEVER serialize it -- the model sees `content` only.
+    nlohmann::json display = nullptr;
 };
 
 using ContentBlock = std::variant<TextBlock, ToolUseBlock, ToolResultBlock, ThinkingBlock>;

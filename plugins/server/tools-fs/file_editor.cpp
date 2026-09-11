@@ -121,6 +121,8 @@ EditOutcome FileEditor::StrReplace(const std::filesystem::path& path, std::strin
 
     outcome.ok = true;
     outcome.summary = "replaced 1 occurrence in " + path.filename().string();
+    outcome.before = loaded.content;
+    outcome.after = std::move(updated);
     return outcome;
 }
 
@@ -189,7 +191,16 @@ EditOutcome FileEditor::Insert(const std::filesystem::path& path, int insert_lin
     outcome.ok = true;
     outcome.summary = "inserted after line " + std::to_string(insert_line) + " in " +
                        path.filename().string();
+    outcome.before = loaded.content;
+    outcome.after = std::move(updated);
     return outcome;
+}
+
+std::optional<std::string> FileEditor::ReadForDiff(const std::filesystem::path& path,
+                                                   std::int64_t max_bytes) {
+    auto loaded = LoadWholeFile(path, max_bytes);
+    if (!loaded.ok) return std::nullopt;
+    return std::move(loaded.content);
 }
 
 }  // namespace minimal::tools_fs

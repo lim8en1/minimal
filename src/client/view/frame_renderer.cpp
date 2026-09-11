@@ -201,6 +201,7 @@ ftxui::Element FrameRenderer::Render() {
                 if (!ui.chat) {
                     ui.chat = std::make_unique<ChatView>(deps_.theme, deps_.message_registry,
                                                          deps_.renderer_registry,
+                                                         deps_.display_registry,
                                                          deps_.toggle_collapse_hint);
                 }
                 rows.push_back(ui.chat->Render(snap, ui.live_text_streams) | yframe |

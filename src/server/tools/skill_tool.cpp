@@ -87,7 +87,7 @@ ToolResult SkillTool::execute(const nlohmann::json& input, ToolContext& ctx) {
     if (!body) {
         return Error("failed to read skill body: " + name);
     }
-    return ToolResult{false, std::move(*body)};
+    return ToolResult{false, std::move(*body), nlohmann::json{{"kind", "markdown"}}};
 }
 
 std::optional<PermissionMode> SkillTool::mode_override_for(const nlohmann::json& input,

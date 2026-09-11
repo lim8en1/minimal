@@ -422,6 +422,7 @@ llm::ToolResultBlock ToolExecutor::Execute(const PreparedInvocation& prepared,
         // per-tool, since any tool can produce no output.
         if (result.content_text.empty()) result.content_text = "(no output)";
         block.content.push_back(llm::TextBlock{std::move(result.content_text)});
+        block.display = std::move(result.display);
         return block;
     } catch (const std::exception& error) {
         ctx.logger.warn("tool '{}' threw: {}", prepared.tool_name, error.what());

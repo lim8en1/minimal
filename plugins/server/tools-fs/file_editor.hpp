@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -11,6 +12,10 @@ struct EditOutcome {
     bool ok = false;
     std::string error;
     std::string summary;  // what changed, echoed back so the model sees the effect
+    // The file's content before and after a successful edit, for the diff
+    // display payload. Empty on failure.
+    std::string before;
+    std::string after;
 };
 
 // The mutating half of the `edit` tool, separated from the Tool subclass so the
@@ -34,6 +39,12 @@ public:
     // usually means the model is working from a stale view of the file.
     static EditOutcome Insert(const std::filesystem::path& path, int insert_line,
                                std::string_view insert_text, std::int64_t max_bytes);
+
+    // The file's current content, for diffing an overwrite -- nullopt when
+    // there is nothing to diff against (missing, not a regular file, over
+    // max_bytes, unreadable).
+    static std::optional<std::string> ReadForDiff(const std::filesystem::path& path,
+                                                  std::int64_t max_bytes);
 };
 
 }  // namespace minimal::tools_fs

@@ -19,6 +19,12 @@ void RegisterCoreMessageRenderers(MessageRendererRegistry& registry);
 void RegisterCoreAgentMarkdownRenderer(MessageRendererRegistry& registry,
                                        const MarkdownEngine& engine);
 
+// Renderers for the core display-payload kinds (diff, file, process,
+// markdown), filling only the kinds no plugin claimed. The engine and the
+// highlighter must outlive the registry (both live in TuiEnvironment).
+void RegisterCoreDisplayRenderers(DisplayRendererRegistry& registry, const MarkdownEngine& engine,
+                                  const SyntaxHighlighter& highlighter);
+
 // The vendored grammars as the additive registry's defaults. Always runs --
 // the grammar slot has no "core default" concept beyond the vendored set; a
 // plugin may only ADD a language (claiming an existing one is a fatal

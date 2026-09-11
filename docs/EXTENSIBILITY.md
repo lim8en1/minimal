@@ -324,6 +324,7 @@ The "write a different frontend" tier shrinks to exactly this list.
 | Slot | Kind | Default |
 |---|---|---|
 | Tool-result renderer (keyed by tool name) | additive | generic collapsible row |
+| Display-kind renderer (keyed by display-payload kind) | additive | core renderers for the core kinds |
 | Message-kind presentation (agent/thinking/tool-activity/system) | additive | core defaults (§ *Message-kind rendering*) |
 | Chat surface (the whole chat view) | **exclusive**, first registration wins | core chat view |
 | Status-bar segments (keyed by segment id) | additive; **format string orders/selects** | core segments |
@@ -383,6 +384,27 @@ The format string (`"{version} | {tokens} | {git_branch}"`) is the ordering/sele
 ```
 
 A section's roles are addressable only as `git_plugin.branch`, merged **after** core roles so a plugin can never shadow one; two sections with the same name, or roles naming no known plugin, are reported by the sanity check (the `naming_model` pattern).
+
+**Tool-result display payloads.** A tool result carries its text (what the model reads) and, optionally, a display payload for clients: `ToolResult::display`, a JSON object `{"kind": "<kind>", ...}`. The tool owns *what* its result is; the client owns *how* it looks.
+
+- **Never shown to the model.** Providers serialize `ToolResultBlock` fields by name and skip `display`; `anthropic_request_test.cpp` and `openai_request_test.cpp` enforce it.
+- **Self-contained.** A renderer never parses the result text, which stays the model's input and the fallback for a client with no renderer for the kind. The one sanctioned exception is `markdown`, whose `text` may be omitted to mean "render the result text" (identical content, so a copy would buy nothing).
+- **Dropped, never truncated.** Over `tools.max_display_bytes` (default 128 KiB) the agent loop drops the payload and the client shows the text; a cut diff would misrepresent the change.
+- **Versioned by name.** An incompatible shape change gets a new kind (`diff2`); unknown fields are ignored.
+- **Carried uninterpreted.** Persisted inside the message's `content_json`, sent as `ToolResultBlock.display_json` (a string, not a `Struct`, which would turn every number into a double).
+
+A result row tries, most specific first: a tool-name `ToolResultRenderer`, then a `DisplayRenderer` for the payload's kind, then the default row. A renderer that throws is contained and the next tier draws the row. Kinds rather than tool names are the key because `plugins.json` aliases rename tools, and because kinds are shared: a third-party or MCP tool that emits a core kind gets the core rendering without shipping a client plugin.
+
+Core kinds (v1):
+
+| kind | fields | emitted by |
+|---|---|---|
+| `diff` | `path`, `created`, `hunks[]{old_start, old_count, new_start, new_count, lines[]{op, text}}`; `op` is `" "`, `"-"` or `"+"`, and an empty side's start is the line before the hunk | `edit` (str_replace, insert, create), `write` |
+| `file` | `path`, `start_line`, `end_line`, `total_lines`, `truncated`, `lines[]` (raw, unnumbered) | `read`, `edit view` |
+| `process` | `command`, `cwd`, `duration_ms`, `exit_code` or `signal` (neither when unknown), `cancelled`, `timed_out`, `output` (a tail of at most 16 KiB), `output_truncated` | `bash` |
+| `markdown` | `text` (optional; absent means the result text) | `checklist`, `skill` |
+
+A `diff` row starts expanded (it is the review surface for a change the model just made); every other tool row keeps the collapsed default.
 
 ### 4.3 Rulings from the architecture review
 

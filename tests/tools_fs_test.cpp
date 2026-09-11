@@ -8,6 +8,7 @@
 #include "fs_settings.hpp"
 #include "fakes.hpp"
 #include "fs_tools.hpp"
+#include "line_diff.hpp"
 #include "minimal/tools/tool_executor.hpp"
 #include "temp_dir.hpp"
 
@@ -480,6 +481,146 @@ TEST_CASE("out-of-workdir access is refused by the executor, not by the tool",
         // The executor's wording, not the tool's -- proving which layer decided.
         CHECK(text.find("permission denied") != std::string::npos);
     }
+}
+
+// --- display payloads --------------------------------------------------------
+
+namespace {
+nlohmann::json DiffLine(const char* op, const char* text) {
+    return nlohmann::json{{"op", op}, {"text", text}};
+}
+std::string NumberedLines(int count, const char* prefix = "l") {
+    std::string text;
+    for (int i = 1; i <= count; ++i) text += prefix + std::to_string(i) + "\n";
+    return text;
+}
+}  // namespace
+
+TEST_CASE("DiffDisplay: one changed line is one hunk with real line numbers and 3 lines of "
+          "context",
+          "[tools_fs][display]") {
+    const std::string before = NumberedLines(10);
+    std::string after = before;
+    after.replace(after.find("l5\n"), 3, "L5\n");
+
+    const auto display = tools_fs::DiffDisplay("a.txt", before, after, false);
+
+    REQUIRE(display.at("kind") == "diff");
+    CHECK(display.at("path") == "a.txt");
+    CHECK(display.at("created") == false);
+    REQUIRE(display.at("hunks").size() == 1);
+    const auto& hunk = display.at("hunks")[0];
+    CHECK(hunk.at("old_start") == 2);
+    CHECK(hunk.at("old_count") == 7);
+    CHECK(hunk.at("new_start") == 2);
+    CHECK(hunk.at("new_count") == 7);
+    REQUIRE(hunk.at("lines").size() == 8);   // l2-l4, -l5, +L5, l6-l8
+    CHECK(hunk.at("lines")[0] == DiffLine(" ", "l2"));
+    CHECK(hunk.at("lines")[3] == DiffLine("-", "l5"));
+    CHECK(hunk.at("lines")[4] == DiffLine("+", "L5"));
+    CHECK(hunk.at("lines")[7] == DiffLine(" ", "l8"));
+}
+
+TEST_CASE("DiffDisplay: distant changes are separate hunks, near ones merge",
+          "[tools_fs][display]") {
+    const std::string before = NumberedLines(30);
+    std::string distant = before;
+    distant.replace(distant.find("l2\n"), 3, "X\n");
+    distant.replace(distant.find("l28\n"), 4, "Y\n");
+    CHECK(tools_fs::DiffDisplay("a", before, distant, false).at("hunks").size() == 2);
+
+    std::string near = before;   // 6 unchanged lines apart: the contexts touch
+    near.replace(near.find("l10\n"), 4, "X\n");
+    near.replace(near.find("l17\n"), 4, "Y\n");
+    CHECK(tools_fs::DiffDisplay("a", before, near, false).at("hunks").size() == 1);
+}
+
+TEST_CASE("DiffDisplay: a created file is one all-added hunk starting at line 1",
+          "[tools_fs][display]") {
+    const auto display = tools_fs::DiffDisplay("n.txt", "", "a\nb\n", true);
+    CHECK(display.at("created") == true);
+    REQUIRE(display.at("hunks").size() == 1);
+    const auto& hunk = display.at("hunks")[0];
+    CHECK(hunk.at("old_start") == 0);
+    CHECK(hunk.at("old_count") == 0);
+    CHECK(hunk.at("new_start") == 1);
+    CHECK(hunk.at("new_count") == 2);
+    CHECK(hunk.at("lines")[1] == DiffLine("+", "b"));
+}
+
+TEST_CASE("DiffDisplay: no change, binary content, and oversized changes", "[tools_fs][display]") {
+    CHECK(tools_fs::DiffDisplay("a", "same\n", "same\n", false).at("hunks").empty());
+    CHECK(tools_fs::DiffDisplay("a", std::string("a\0b", 3), "a\n", false).is_null());
+    // Too large to review as a diff: no payload, the client shows the text.
+    CHECK(tools_fs::DiffDisplay("a", "", NumberedLines(3000), true).is_null());
+}
+
+TEST_CASE("DiffDisplay: a line with no trailing newline diffs as a line", "[tools_fs][display]") {
+    const auto display = tools_fs::DiffDisplay("a", "one\ntwo", "one\nTWO", false);
+    const auto& lines = display.at("hunks")[0].at("lines");
+    CHECK(lines[1] == DiffLine("-", "two"));
+    CHECK(lines[2] == DiffLine("+", "TWO"));
+}
+
+TEST_CASE("edit str_replace and insert return a diff payload naming the typed path",
+          "[tools_fs][display]") {
+    Fixture f;
+    f.Write("a.txt", "one\ntwo\nthree\n");
+    auto tool = tools_fs::MakeEditTool(f.settings);
+    auto ctx = f.Context();
+
+    const auto replaced = tool->execute(
+        {{"command", "str_replace"}, {"path", "a.txt"}, {"old_str", "two"}, {"new_str", "2"}},
+        ctx);
+    REQUIRE_FALSE(replaced.is_error);
+    CHECK(replaced.content_text == "replaced 1 occurrence in a.txt");   // the model's view
+    REQUIRE(replaced.display.at("kind") == "diff");
+    CHECK(replaced.display.at("path") == "a.txt");
+    CHECK(replaced.display.at("hunks")[0].at("lines")[1] == DiffLine("-", "two"));
+    CHECK(replaced.display.at("hunks")[0].at("lines")[2] == DiffLine("+", "2"));
+
+    const auto inserted = tool->execute(
+        {{"command", "insert"}, {"path", "a.txt"}, {"insert_line", 1}, {"insert_text", "new"}},
+        ctx);
+    REQUIRE_FALSE(inserted.is_error);
+    const auto& hunk = inserted.display.at("hunks")[0];
+    CHECK(hunk.at("new_start") == 1);
+    CHECK(hunk.at("lines")[1] == DiffLine("+", "new"));
+}
+
+TEST_CASE("write diffs an overwrite against the previous content; a new file is created",
+          "[tools_fs][display]") {
+    Fixture f;
+    auto tool = tools_fs::MakeWriteTool(f.settings);
+    auto ctx = f.Context();
+
+    const auto created = tool->execute({{"path", "n.txt"}, {"content", "x\n"}}, ctx);
+    REQUIRE_FALSE(created.is_error);
+    CHECK(created.display.at("created") == true);
+
+    const auto overwritten = tool->execute({{"path", "n.txt"}, {"content", "y\n"}}, ctx);
+    REQUIRE_FALSE(overwritten.is_error);
+    CHECK(overwritten.display.at("created") == false);
+    const auto& lines = overwritten.display.at("hunks")[0].at("lines");
+    CHECK(lines[0] == DiffLine("-", "x"));
+    CHECK(lines[1] == DiffLine("+", "y"));
+}
+
+TEST_CASE("read returns a file payload with raw, unnumbered lines", "[tools_fs][display]") {
+    Fixture f;
+    f.Write("a.py", "alpha\nbeta\n");
+    auto tool = tools_fs::MakeReadTool(f.settings);
+    auto ctx = f.Context();
+
+    const auto result = tool->execute({{"path", "a.py"}}, ctx);
+
+    REQUIRE(result.display.at("kind") == "file");
+    CHECK(result.display.at("path") == "a.py");
+    CHECK(result.display.at("start_line") == 1);
+    CHECK(result.display.at("end_line") == 2);
+    CHECK(result.display.at("total_lines") == 2);
+    CHECK(result.display.at("truncated") == false);
+    CHECK(result.display.at("lines") == nlohmann::json::array({"alpha", "beta"}));
 }
 
 // --- settings ----------------------------------------------------------------

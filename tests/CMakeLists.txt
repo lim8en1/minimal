@@ -174,6 +174,7 @@ add_executable(minimal_tests
     "${CMAKE_SOURCE_DIR}/plugins/server/tools-fs/fs_tools.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/tools-fs/fs_settings.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/tools-fs/file_editor.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/tools-fs/line_diff.cpp"
     # Same pattern for tools-bash. The execution tests fork real processes, so
     # they need the actual spawn code, not a seam around it.
     "${CMAKE_SOURCE_DIR}/plugins/server/tools-bash/bash_tool.cpp"

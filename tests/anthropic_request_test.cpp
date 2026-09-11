@@ -160,6 +160,21 @@ TEST_CASE("BuildRequestBody: tool_result carries is_error and joined text conten
     CHECK(block["is_error"] == true);
 }
 
+TEST_CASE("BuildRequestBody: a tool_result's display payload never reaches the model",
+         "[anthropic_request][invariant]") {
+    llm::ToolResultBlock result;
+    result.tool_use_id = "toolu_1";
+    result.content = {llm::TextBlock{"replaced 1 occurrence"}};
+    result.display = {{"kind", "diff"}, {"path", "DISPLAY_SENTINEL"}};
+    Fixture fixture({llm::Message{llm::Role::User, {result}}});
+    fixture.request.model = "claude-opus-5";
+    fixture.request.max_tokens = 1024;
+
+    const nlohmann::json body = ParseBody(fixture.request);
+    CHECK(body.dump().find("DISPLAY_SENTINEL") == std::string::npos);
+    CHECK_FALSE(body["messages"][0]["content"][0].contains("display"));
+}
+
 TEST_CASE("BuildRequestBody: unsigned thinking blocks are dropped on replay",
           "[anthropic_request]") {
     // An unsigned block cannot be replayed (the API rejects or silently

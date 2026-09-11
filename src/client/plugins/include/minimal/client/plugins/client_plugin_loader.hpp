@@ -51,6 +51,7 @@ struct PluginRecord {
     std::vector<std::string> registered_views;
     std::vector<std::string> registered_start_views;
     std::vector<std::string> registered_renderers;    // tool names
+    std::vector<std::string> registered_display_kinds;
     std::vector<std::string> registered_status_segments;
     std::vector<std::string> registered_grammars;     // language keys
     std::vector<std::string> registered_message_kinds;
@@ -79,6 +80,7 @@ public:
     // to plugins in the context; null is allowed (a test exercising only
     // registration) and means the seam is simply not offered.
     ClientPluginLoader(ViewRegistry& views, ToolResultRendererRegistry& renderers,
+                       DisplayRendererRegistry& display_renderers,
                        MessageRendererRegistry& message_renderers,
                        StatusSegmentRegistry& status_segments,
                        SyntaxGrammarRegistry& grammars, ChatSurfaceRegistry& chat_surface,
@@ -99,6 +101,7 @@ private:
 
     ViewRegistry& views_;
     ToolResultRendererRegistry& renderers_;
+    DisplayRendererRegistry& display_renderers_;
     MessageRendererRegistry& message_renderers_;
     StatusSegmentRegistry& status_segments_;
     SyntaxGrammarRegistry& grammars_;

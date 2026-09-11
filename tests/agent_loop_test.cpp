@@ -414,6 +414,55 @@ TEST_CASE("a result at or under max_tool_result_bytes is untouched",
     CHECK(std::get<llm::TextBlock>(result->content.front()).text == std::string(50, 'x'));
 }
 
+namespace {
+const llm::ToolResultBlock* LastToolResult(const InMemoryHistoryStore& store) {
+    const llm::ToolResultBlock* result = nullptr;
+    for (const auto& message : store.messages) {
+        for (const auto& block : message.content) {
+            if (const auto* r = std::get_if<llm::ToolResultBlock>(&block)) result = r;
+        }
+    }
+    return result;
+}
+}  // namespace
+
+TEST_CASE("a display payload under max_tool_display_bytes is persisted as-is",
+         "[agent_loop][display]") {
+    Harness h;
+    auto owned = std::make_unique<FakeTool>("t", ToolCategory::ReadOnly, "text");
+    owned->set_display({{"kind", "process"}, {"command", "ls"}});
+    h.registry.Register(std::move(owned));
+    h.provider.PushResponse(ToolUseResponse("tu1", "t"));
+    h.provider.PushResponse(TextResponse("done"));
+    h.Build({}, agent::LoopConfig{});
+
+    h.loop->RunTurn(UserText("go"));
+
+    const auto* result = LastToolResult(h.store);
+    REQUIRE(result != nullptr);
+    CHECK(result->display.at("kind") == "process");
+}
+
+TEST_CASE("a display payload over max_tool_display_bytes is dropped whole, text kept",
+         "[agent_loop][display][invariant]") {
+    Harness h;
+    auto owned = std::make_unique<FakeTool>("t", ToolCategory::ReadOnly, "text");
+    owned->set_display({{"kind", "file"}, {"lines", std::string(500, 'x')}});
+    h.registry.Register(std::move(owned));
+    h.provider.PushResponse(ToolUseResponse("tu1", "t"));
+    h.provider.PushResponse(TextResponse("done"));
+    agent::LoopConfig config;
+    config.max_tool_display_bytes = 100;
+    h.Build({}, config);
+
+    h.loop->RunTurn(UserText("go"));
+
+    const auto* result = LastToolResult(h.store);
+    REQUIRE(result != nullptr);
+    CHECK(result->display.is_null());
+    CHECK(std::get<llm::TextBlock>(result->content.front()).text == "text");
+}
+
 TEST_CASE("max_tool_result_bytes == 0 disables the ceiling", "[agent_loop][invariant]") {
     Harness h;
     auto owned =

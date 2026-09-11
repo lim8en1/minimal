@@ -6,6 +6,7 @@
 #include <utility>
 
 #include "file_editor.hpp"
+#include "line_diff.hpp"
 #include "minimal/tools/atomic_write.hpp"
 #include "minimal/tools/path_confinement.hpp"
 
@@ -43,6 +44,28 @@ ConfineResult ResolveForUse(const ToolContext& ctx, const nlohmann::json& input,
 std::optional<std::string> ExtractPathField(const nlohmann::json& input) {
     if (!input.contains("path") || !input.at("path").is_string()) return std::nullopt;
     return input.at("path").get<std::string>();
+}
+
+// Display payloads name the path AS THE MODEL TYPED IT (project-relative, as
+// a rule), not the canonical absolute one: it is a header for a human.
+std::string DisplayPath(const nlohmann::json& input) { return ExtractPathField(input).value_or(""); }
+
+// A `file` display payload for a read window. Null for a binary file or an
+// empty window -- the text already says what happened there.
+nlohmann::json FileDisplay(const nlohmann::json& input, const tools::FileWindow& window) {
+    if (window.is_binary || window.lines.empty()) return nullptr;
+    return {{"kind", "file"},           {"path", DisplayPath(input)},
+            {"start_line", window.start_line}, {"end_line", window.end_line},
+            {"total_lines", window.total_lines}, {"truncated", window.truncated},
+            {"lines", window.lines}};
+}
+
+// A `diff` payload for a whole-file write: against the previous content when
+// the file existed and was readable, as an all-added hunk when it is new.
+nlohmann::json WriteDisplay(const nlohmann::json& input, const std::optional<std::string>& previous,
+                            std::string_view content, bool created) {
+    if (!created && !previous) return nullptr;
+    return DiffDisplay(DisplayPath(input), previous.value_or(""), content, created);
 }
 
 // `write` and `edit create` make the directories the file needs, so the model
@@ -181,7 +204,7 @@ public:
             text += "\n[The requested window was clipped to the configured read ceiling (" +
                     std::to_string(settings_.read_max_lines) + " lines).]";
         }
-        return ToolResult{false, std::move(text)};
+        return ToolResult{false, std::move(text), FileDisplay(input, window)};
     }
 
 private:
@@ -262,12 +285,16 @@ public:
                          "-byte write limit; build the file with a shell command instead");
         }
 
+        const auto previous = FileEditor::ReadForDiff(resolved.absolute_path,
+                                                      settings_.edit_max_editable_file_bytes);
         const auto outcome = tools::write_file(resolved.absolute_path, content);
         if (!outcome.ok) return Error(outcome.error);
 
-        return ToolResult{false, (outcome.created ? "Created " : "Wrote ") +
-                                      resolved.absolute_path.string() + " (" +
-                                      std::to_string(outcome.bytes_written) + " bytes)"};
+        return ToolResult{false,
+                          (outcome.created ? "Created " : "Wrote ") +
+                              resolved.absolute_path.string() + " (" +
+                              std::to_string(outcome.bytes_written) + " bytes)",
+                          WriteDisplay(input, previous, content, outcome.created)};
     }
 
 private:
@@ -430,7 +457,7 @@ private:
             text += "\n[The requested window was clipped to the configured read ceiling (" +
                     std::to_string(settings_.read_max_lines) + " lines).]";
         }
-        return ToolResult{false, std::move(text)};
+        return ToolResult{false, std::move(text), FileDisplay(input, window)};
     }
 
     ToolResult Create(const nlohmann::json& input, const std::filesystem::path& path) {
@@ -451,9 +478,12 @@ private:
         // Overwrites, matching text_editor_20250728's `create`. Diverging would
         // defeat the point of adopting that vocabulary, and it is FileWrite-gated
         // either way.
+        const auto previous =
+            FileEditor::ReadForDiff(path, settings_.edit_max_editable_file_bytes);
         const auto outcome = tools::write_file(path, file_text);
         if (!outcome.ok) return Error(outcome.error);
-        return ToolResult{false, (outcome.created ? "Created " : "Overwrote ") + path.string()};
+        return ToolResult{false, (outcome.created ? "Created " : "Overwrote ") + path.string(),
+                          WriteDisplay(input, previous, file_text, outcome.created)};
     }
 
     ToolResult StrReplace(const nlohmann::json& input, const std::filesystem::path& path) {
@@ -471,7 +501,8 @@ private:
         const auto outcome =
             FileEditor::StrReplace(path, old_str, new_str, settings_.edit_max_editable_file_bytes);
         if (!outcome.ok) return Error(outcome.error);
-        return ToolResult{false, outcome.summary};
+        return ToolResult{false, outcome.summary,
+                          DiffDisplay(DisplayPath(input), outcome.before, outcome.after, false)};
     }
 
     ToolResult Insert(const nlohmann::json& input, const std::filesystem::path& path) {
@@ -495,7 +526,8 @@ private:
                                 input.at("insert_text").get<std::string>(),
                                 settings_.edit_max_editable_file_bytes);
         if (!outcome.ok) return Error(outcome.error);
-        return ToolResult{false, outcome.summary};
+        return ToolResult{false, outcome.summary,
+                          DiffDisplay(DisplayPath(input), outcome.before, outcome.after, false)};
     }
 
     ToolSpec spec_;

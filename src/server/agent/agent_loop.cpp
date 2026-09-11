@@ -58,6 +58,19 @@ void CapToolResult(llm::ToolResultBlock& block, std::int64_t max_bytes) {
     block.content.push_back(llm::TextBlock{std::move(kept)});
 }
 
+// The display payload's ceiling (settings.json tools.max_display_bytes).
+// DROPPED whole over the cap, never truncated: a cut diff or file excerpt
+// misrepresents what happened, while the text fallback stays truthful.
+// Returns the serialized size when it dropped the payload, 0 otherwise.
+std::size_t CapToolDisplay(llm::ToolResultBlock& block, std::int64_t max_bytes) {
+    if (max_bytes <= 0 || block.display.is_null()) return 0;
+    const std::size_t size =
+        block.display.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace).size();
+    if (size <= static_cast<std::size_t>(max_bytes)) return 0;
+    block.display = nullptr;
+    return size;
+}
+
 // S4's no-boundary fallback: when snap_compaction_boundary finds no safe cut
 // anywhere (every candidate lands inside an open tool-call cycle), context
 // would otherwise grow forever -- but the actual harm that trips the trigger
@@ -100,6 +113,7 @@ bool ElideLargestToolResult(std::vector<llm::Message>& history) {
         return false;
     }
     CapToolResult(*largest, kElisionTargetBytes);
+    largest->display = nullptr;   // it described the full result, not the stub
     return true;
 }
 
@@ -1061,6 +1075,13 @@ void AgentLoop::RunTurnLoop(TurnResult& result, bool flush_first) {
             // regardless of which tool produced this, including MCP tools and
             // any third-party plugin tool that caps nothing on its own.
             CapToolResult(tool_result, config_.max_tool_result_bytes);
+            if (const std::size_t dropped =
+                    CapToolDisplay(tool_result, config_.max_tool_display_bytes)) {
+                session_.logger.warn(
+                    "tool {}: display payload ({} bytes) exceeds tools.max_display_bytes ({}); "
+                    "dropped, the client falls back to text",
+                    use->name, dropped, config_.max_tool_display_bytes);
+            }
 
             // Emitted even when Execute() reports an error, and before the
             // result is appended: a client that showed a tool as started must

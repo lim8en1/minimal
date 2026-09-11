@@ -53,7 +53,7 @@ SessionState::Snapshot TabMaintenance::Maintain(const std::string& tab_id,
     // -- see frame_renderer.cpp).
     if (!ui.chat) {
         ui.chat = std::make_unique<ChatView>(deps_.theme, deps_.message_registry,
-                                             deps_.renderer_registry);
+                                             deps_.renderer_registry, deps_.display_registry);
     }
 
     const auto make_stream = [&] { return deps_.engine.MakeStream(); };

@@ -31,6 +31,32 @@ using tools::ToolSpec;
 
 ToolResult Error(std::string message) { return ToolResult{true, std::move(message)}; }
 
+// The process display payload carries only the output's TAIL: the text result
+// already holds the whole capped output for the model, a client renders a
+// tail anyway, and a full copy would blow tools.max_display_bytes (dropping
+// the payload) for exactly the long runs where the exit badge matters most.
+constexpr std::size_t kDisplayOutputTailBytes = 16 * 1024;
+
+nlohmann::json ProcessDisplay(const std::string& command, const std::filesystem::path& cwd,
+                              std::int64_t duration_ms, const std::string& output) {
+    std::size_t start = output.size() > kDisplayOutputTailBytes
+                            ? output.size() - kDisplayOutputTailBytes
+                            : 0;
+    // Never start mid-codepoint: skip UTF-8 continuation bytes.
+    while (start < output.size() && (static_cast<unsigned char>(output[start]) & 0xC0) == 0x80) {
+        ++start;
+    }
+    return {{"kind", "process"},        {"command", command},
+            {"cwd", cwd.string()},      {"duration_ms", duration_ms},
+            {"output", output.substr(start)}, {"output_truncated", start > 0},
+            {"cancelled", false},       {"timed_out", false}};
+}
+
+ToolResult WithDisplay(ToolResult result, nlohmann::json display) {
+    result.display = std::move(display);
+    return result;
+}
+
 std::int64_t ElapsedMs(std::chrono::steady_clock::time_point started) {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
                std::chrono::steady_clock::now() - started)
@@ -366,17 +392,27 @@ public:
         const auto with_output = [&](const std::string& footer) {
             return outcome.output.empty() ? footer : outcome.output + "\n" + footer;
         };
+        // The run's facts as fields -- a client shows the status as a badge
+        // instead of parsing the footer text the model gets.
+        const auto display = [&](const nlohmann::json& facts) {
+            auto payload = ProcessDisplay(command, state.cwd, duration_ms, outcome.output);
+            payload.update(facts);
+            return payload;
+        };
 
         if (outcome.cancelled) {
             ctx.logger.info("bash[{}] cancelled '{}' after {} ms", ctx.session_id, command,
                             duration_ms);
-            return Error(with_output("[cancelled after " + std::to_string(duration_ms) + " ms]"));
+            return WithDisplay(
+                Error(with_output("[cancelled after " + std::to_string(duration_ms) + " ms]")),
+                display({{"cancelled", true}}));
         }
         if (outcome.timed_out) {
             ctx.logger.warn("bash[{}] timed out: '{}' ({} ms)", ctx.session_id, command,
                             duration_ms);
-            return Error(with_output("[timed out after " + std::to_string(timeout_ms) +
-                                     " ms; process group killed]"));
+            return WithDisplay(Error(with_output("[timed out after " + std::to_string(timeout_ms) +
+                                                 " ms; process group killed]")),
+                               display({{"timed_out", true}}));
         }
 
         // Adoption happens only AFTER the failure returns above, and that
@@ -400,24 +436,28 @@ public:
             // ECHILD: the pid was reaped out from under us, so the status in
             // wait_status is meaningless. Reporting it (0 would mean success)
             // instead of silently calling the command a clean exit.
-            return Error(with_output(
-                "[could not determine exit status (process already reaped)]"));
+            return WithDisplay(
+                Error(with_output("[could not determine exit status (process already reaped)]")),
+                display(nlohmann::json::object()));
         }
         if (WIFSIGNALED(outcome.wait_status)) {
             const int sig = WTERMSIG(outcome.wait_status);
             ctx.logger.warn("bash[{}] '{}' terminated by signal {} ({} ms)", ctx.session_id,
                             command, sig, duration_ms);
-            return Error(with_output("[terminated by signal " + std::to_string(sig) + "]"));
+            return WithDisplay(
+                Error(with_output("[terminated by signal " + std::to_string(sig) + "]")),
+                display({{"signal", sig}}));
         }
 
         const int code = WIFEXITED(outcome.wait_status) ? WEXITSTATUS(outcome.wait_status) : -1;
         if (code == 0) {
             ctx.logger.info("bash[{}] ok: '{}' ({} ms)", ctx.session_id, command, duration_ms);
-            return ToolResult{false, outcome.output};
+            return ToolResult{false, outcome.output, display({{"exit_code", 0}})};
         }
         ctx.logger.warn("bash[{}] exit {}: '{}' ({} ms)", ctx.session_id, code, command,
                         duration_ms);
-        return Error(with_output("[exit status: " + std::to_string(code) + "]"));
+        return WithDisplay(Error(with_output("[exit status: " + std::to_string(code) + "]")),
+                           display({{"exit_code", code}}));
     }
 
 private:

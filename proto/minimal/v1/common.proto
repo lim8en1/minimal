@@ -32,6 +32,10 @@ message ToolResultBlock {
   string tool_use_id = 1;
   repeated ContentBlock content = 2;
   bool is_error = 3;
+  // Optional client-only display payload, JSON text: {"kind": "<kind>", ...}.
+  // Never shown to the model. A string, not a Struct: core transports it
+  // uninterpreted, and Struct would turn every number into a double.
+  optional string display_json = 4;
 }
 
 message ContentBlock {

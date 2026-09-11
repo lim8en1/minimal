@@ -82,6 +82,7 @@ struct TuiEnvironment {
     plugins::ViewRegistry view_registry;
     plugins::StartViewRegistry start_view_registry;
     plugins::ToolResultRendererRegistry renderer_registry;
+    plugins::DisplayRendererRegistry display_registry;
     plugins::MessageRendererRegistry message_registry;
     plugins::StatusSegmentRegistry status_registry;
     plugins::SyntaxGrammarRegistry grammar_registry;
