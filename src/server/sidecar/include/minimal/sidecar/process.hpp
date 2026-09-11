@@ -21,6 +21,7 @@
 // the permission gate is the boundary).
 
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <map>
 #include <string>

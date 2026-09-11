@@ -7,6 +7,7 @@
 #include <cerrno>
 #include <cstring>
 #include <string>
+#include <vector>
 
 namespace minimal::tools {
 namespace {

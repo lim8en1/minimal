@@ -174,12 +174,12 @@ std::optional<T> InheritNumber(const nlohmann::json& provider, const nlohmann::j
                                const char* key, const std::string& where) {
     for (const auto* node : {&model, &provider}) {
         if (!node->contains(key)) continue;
-        const auto& value = node->at(key);
+        const nlohmann::json& value = node->at(key);
         if (!value.is_number_integer()) {
             throw std::runtime_error("providers.json: " + where + " field \"" + key +
                                      "\" must be an integer, got " + value.dump());
         }
-        return value.get<T>();
+        return value.template get<T>();
     }
     return std::nullopt;
 }

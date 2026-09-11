@@ -11,13 +11,23 @@
 #include <catch2/catch_session.hpp>
 
 #include <signal.h>
-#include <sys/sysctl.h>
 #include <sys/types.h>
 #include <unistd.h>
 
 #include <vector>
 
+#if defined(__APPLE__)
+#include <sys/sysctl.h>
+#else
+#include <cstring>
+#include <dirent.h>
+#include <fstream>
+#include <string>
+#endif
+
 namespace {
+
+#if defined(__APPLE__)
 
 void KillLingeringChildren() {
     int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0};
@@ -38,6 +48,41 @@ void KillLingeringChildren() {
         }
     }
 }
+
+#else  // Linux: /proc scan, same pgroup preference as above.
+
+void KillLingeringChildren() {
+    DIR* proc = opendir("/proc");
+    if (!proc) return;
+    const pid_t self = getpid();
+    const pid_t self_pgrp = getpgrp();
+    while (const dirent* entry = readdir(proc)) {
+        char* end = nullptr;
+        const long pid = strtol(entry->d_name, &end, 10);
+        if (!end || *end != '\0' || pid <= 0) continue;
+
+        // /proc/<pid>/stat: pid (comm) state ppid pgrp ... -- comm may contain
+        // spaces, so parse the fields after the closing paren.
+        std::ifstream stat_file("/proc/" + std::to_string(pid) + "/stat");
+        std::string stat((std::istreambuf_iterator<char>(stat_file)),
+                         std::istreambuf_iterator<char>());
+        const auto paren = stat.rfind(')');
+        if (paren == std::string::npos) continue;
+        unsigned ppid = 0;
+        unsigned pgrp = 0;
+        if (sscanf(stat.c_str() + paren + 1, " %*c %u %u", &ppid, &pgrp) != 2) continue;
+
+        if (static_cast<pid_t>(ppid) != self) continue;
+        if (static_cast<pid_t>(pgrp) != self_pgrp) {
+            killpg(static_cast<pid_t>(pgrp), SIGKILL);
+        } else {
+            kill(static_cast<pid_t>(pid), SIGKILL);
+        }
+    }
+    closedir(proc);
+}
+
+#endif
 
 }  // namespace
 

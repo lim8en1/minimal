@@ -145,8 +145,10 @@ ExclusiveFileLock::ExclusiveFileLock(const std::filesystem::path& db_path)
     }
 
     // Record the holder for the loser's error message. Diagnostic only: a
-    // failed write changes nothing about who holds the lock.
-    (void)::ftruncate(fd, 0);
+    // failed truncate/write changes nothing about who holds the lock.
+    if (::ftruncate(fd, 0) != 0) {
+        // Best-effort; keep going so the pid write below still lands.
+    }
     (void)::dprintf(fd, "%ld\n", static_cast<long>(::getpid()));
 
     fd_ = fd;

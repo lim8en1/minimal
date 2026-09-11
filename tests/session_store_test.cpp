@@ -1085,7 +1085,7 @@ TEST_CASE("append latency: the checkpoint on the write path vs the reaper's tick
                 std::chrono::duration_cast<std::chrono::microseconds>(clock::now() - start)
                     .count();
             total_us += us;
-            max_us = std::max(max_us, us);
+            max_us = std::max(max_us, static_cast<long long>(us));
         }
         sqlite3_close(db);
         return std::pair<long long, long long>{total_us, max_us};

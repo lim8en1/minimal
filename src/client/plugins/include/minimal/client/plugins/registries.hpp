@@ -27,6 +27,7 @@
 // load BEFORE the theme does (theme `sections` need to know which plugins are
 // loaded), so nothing renderable can capture a theme at registration.
 
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <optional>

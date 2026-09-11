@@ -11,6 +11,7 @@
 // boundary, and the authoritative record is the capped result here.
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <string_view>
 
