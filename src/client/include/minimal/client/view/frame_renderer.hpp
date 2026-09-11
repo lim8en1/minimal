@@ -21,6 +21,7 @@
 // ui.live_text_streams (track C4) needs no such fallback: ChatView::Render
 // defensively skips any live_segments index it has no slot for.
 
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <string>
@@ -88,6 +89,17 @@ private:
     ftxui::Elements RenderStartViews(const std::string& session_id);
 
     Dependencies deps_;
+
+    // Tools-panel render cache: RenderToolsPanel's input deep-copies every
+    // tab's buffered tool output, and naively rebuilding it on every
+    // Render() call redid that on every mouse move, not just on a real
+    // state change. Rebuilt only when UiVersion() has actually moved since
+    // the last build -- DispatchToTab bumps it on every wire event
+    // (state.cpp), including tool output deltas, so this never shows stale
+    // content.
+    ftxui::Element tools_panel_cache_;
+    uint64_t tools_panel_cache_version_ = 0;
+    bool tools_panel_cache_valid_ = false;
 };
 
 }  // namespace minimal::client

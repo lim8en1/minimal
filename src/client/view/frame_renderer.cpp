@@ -78,10 +78,13 @@ ftxui::Elements FrameRenderer::RenderStartViews(const std::string& session_id) {
 ftxui::Element FrameRenderer::Render() {
     using namespace ftxui;
 
-    // Tool output (the panel's live tail) only when the panel is actually
-    // about to render -- the tab bar below needs name/state only, and this
-    // call already happens every render.
-    const auto tabs = deps_.app.GetAllTabs(/*include_tool_output=*/deps_.show_panel);
+    // LIGHT only: the tab bar and the activity-label lookup below need
+    // name/state/tool-name, never buffered tool output. The tools panel
+    // (which DOES need it) gets its own, separately cached, heavy fetch
+    // below -- gated on UiVersion so it isn't redone on every render (FTXUI
+    // renders on every event, including mouse move, not just on a real
+    // state change).
+    const auto tabs = deps_.app.GetAllTabs(/*include_tool_output=*/false);
 
     // The snapshot (and everything derived from it) was taken by
     // TabMaintenance::Run() on this loop iteration's event, BEFORE Render --
@@ -263,11 +266,25 @@ ftxui::Element FrameRenderer::Render() {
     }
 
     if (deps_.show_panel) {
-        // vscroll_indicator: every other scrollable yframe region in the
-        // frame (chat, plugin panels below, the pickers) has one; this was
-        // the one silent exception.
-        rows.push_back(RenderToolsPanel(tabs, deps_.tools_panel_stdout_buffer_lines, deps_.theme) |
-                       yframe | size(HEIGHT, LESS_THAN, deps_.panel_height) | vscroll_indicator);
+        // Rebuilt only when something the panel actually shows changed
+        // (DispatchToTab bumps UiVersion on every wire event) -- with the
+        // panel open, rebuilding unconditionally deep-copied every tab's
+        // buffered tool output (up to tool_output_buffer_bytes_ each) under
+        // AppState + session locks on every mouse move, blocking reader
+        // threads for no reason.
+        const uint64_t version = deps_.app.UiVersion();
+        if (!tools_panel_cache_valid_ || version != tools_panel_cache_version_) {
+            const auto panel_tabs = deps_.app.GetAllTabs(/*include_tool_output=*/true);
+            // vscroll_indicator: every other scrollable yframe region in the
+            // frame (chat, plugin panels below, the pickers) has one; this
+            // was the one silent exception.
+            tools_panel_cache_ =
+                RenderToolsPanel(panel_tabs, deps_.tools_panel_stdout_buffer_lines, deps_.theme) |
+                yframe | size(HEIGHT, LESS_THAN, deps_.panel_height) | vscroll_indicator;
+            tools_panel_cache_version_ = version;
+            tools_panel_cache_valid_ = true;
+        }
+        rows.push_back(tools_panel_cache_);
     }
 
     // Plugin PANEL views, beside the tools panel -- moved here (this used to
