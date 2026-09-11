@@ -54,6 +54,42 @@ TEST_CASE("ParseKeySpec: shift+tab (backtab) matches both terminal encodings",
     CHECK(Has(ParseKeySpec("shift+tab"), Event::Special("\x1b[27;2;9~")));
 }
 
+// The bug: the tab special cases matched the raw spec STRING before modifier
+// parsing ran, so a reordered modifier ("shift+ctrl+tab") or the "control"
+// alias every other modifier already accepts ("control+tab") fell through
+// to no mapping at all.
+TEST_CASE("ParseKeySpec: tab's modifier combos match regardless of order or alias spelling",
+          "[key_event_parser]") {
+    CHECK(ParseKeySpec("shift+ctrl+tab") == ParseKeySpec("ctrl+shift+tab"));
+    CHECK(Has(ParseKeySpec("shift+ctrl+tab"), Event::Special("\x1b[27;6;9~")));
+    CHECK(ParseKeySpec("control+tab") == ParseKeySpec("ctrl+tab"));
+    CHECK(Has(ParseKeySpec("control+tab"), Event::Special("\x1b[27;5;9~")));
+}
+
+// The bug: the arrow dispatch only tested ctrl/alt, so "shift+up" parsed to
+// the same candidate list as plain "up" -- a configured shift+up binding
+// fired on every ArrowUp, not just a shift-held one.
+TEST_CASE("ParseKeySpec: shift+arrow is distinct from a plain arrow",
+          "[key_event_parser]") {
+    CHECK_FALSE(Has(ParseKeySpec("shift+up"), Event::ArrowUp));
+    CHECK(Has(ParseKeySpec("shift+up"), Event::Special("\x1b[1;2A")));
+    CHECK_FALSE(Has(ParseKeySpec("shift+down"), Event::ArrowDown));
+    CHECK(Has(ParseKeySpec("shift+down"), Event::Special("\x1b[1;2B")));
+    // ctrl+shift+arrow is likewise distinct from plain ctrl+arrow.
+    CHECK_FALSE(Has(ParseKeySpec("ctrl+shift+up"), Event::ArrowUpCtrl));
+    CHECK(Has(ParseKeySpec("ctrl+shift+up"), Event::Special("\x1b[1;6A")));
+}
+
+// The bug: a digit's shifted form is a different, layout-dependent symbol
+// (US shift+5 sends '%', not a distinguishable "shifted 5"), so there is no
+// safe single encoding to guess -- but the old code silently collapsed
+// "shift+5" onto plain Character("5") anyway, matching every bare "5" press.
+TEST_CASE("ParseKeySpec: shift+digit has no guessed encoding, unlike shift+letter",
+          "[key_event_parser]") {
+    CHECK(ParseKeySpec("shift+5").empty());
+    CHECK_FALSE(Has(ParseKeySpec("shift+5"), Event::Character("5")));
+}
+
 TEST_CASE("ParseKeySpec: plain letters and digits", "[key_event_parser]") {
     CHECK(Has(ParseKeySpec("q"), Event::Character("q")));
     CHECK(Has(ParseKeySpec("Q"), Event::Character("q")));   // case-insensitive spec
@@ -163,6 +199,24 @@ TEST_CASE("NormalizeKeySpec: alias spellings share one collision identity",
     CHECK(NormalizeKeySpec("ctrl+j") == "enter");                    // C0 alias, kept
     CHECK(NormalizeKeySpec("control+j") == "enter");                 // ...via the alias too
     CHECK(NormalizeKeySpec("hyper+q") == "hyper+q");                 // unknown: raw spelling
+}
+
+// The bug: NamedKeys() maps every one of these pairs to the identical
+// ftxui::Event, but NormalizeKeySpec emitted the raw spelling verbatim --
+// a user's "esc" vs. the default turn.cancel=escape never collided in the
+// startup warning.
+TEST_CASE("NormalizeKeySpec: base-key alias spellings share one collision identity",
+          "[key_event_parser]") {
+    CHECK(NormalizeKeySpec("esc") == NormalizeKeySpec("escape"));
+    CHECK(NormalizeKeySpec("return") == NormalizeKeySpec("enter"));
+    CHECK(NormalizeKeySpec("del") == NormalizeKeySpec("delete"));
+    CHECK(NormalizeKeySpec("ins") == NormalizeKeySpec("insert"));
+    CHECK(NormalizeKeySpec("pgup") == NormalizeKeySpec("pageup"));
+    CHECK(NormalizeKeySpec("pgdn") == NormalizeKeySpec("pagedown"));
+    // Canonicalizes to the long spelling, matching keybindings.cpp's own
+    // defaults (e.g. turn.cancel=escape, chat.load_older=pageup).
+    CHECK(NormalizeKeySpec("esc") == "escape");
+    CHECK(NormalizeKeySpec("ctrl+pgup") == "ctrl+pageup");
 }
 
 TEST_CASE("ParseKeySpec: unrecognized specs return empty, never a guess",

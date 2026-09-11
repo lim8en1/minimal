@@ -9,9 +9,23 @@
 #include <string>
 
 #include "minimal/client/state.hpp"
+#include "minimal/client/utf8.hpp"
 
 using namespace minimal::client;
 namespace v1 = minimal::v1;
+
+namespace {
+// Any 0xFFFD reported while walking `text` codepoint-by-codepoint means a
+// malformed/split sequence -- none of this file's test inputs contain a
+// genuine pre-existing U+FFFD, so this is purely a corruption detector.
+bool IsValidUtf8(std::string_view text) {
+    std::size_t i = 0;
+    while (i < text.size()) {
+        if (Utf8Decode(text, i) == 0xFFFD) return false;
+    }
+    return true;
+}
+}  // namespace
 
 namespace {
 
@@ -996,6 +1010,28 @@ TEST_CASE("INVARIANT: tool output deltas stay bounded, with marker and tail pres
     CHECK(out.find("xxx") != std::string::npos);   // head AND tail content preserved
 }
 
+// The bug: all three cut points (the head-keep boundary and both tail-start
+// boundaries) were raw byte offsets, with no check that they landed on a
+// codepoint lead byte.
+TEST_CASE("a tool-output buffer trim at the cap boundary never splits a UTF-8 codepoint",
+          "[session_state][tools][utf8]") {
+    SessionState state("s-1");
+    state.SetBounds(2000, /*tool_output_buffer_bytes=*/4096);
+    state.OnToolStarted(StartTool("t1"));
+    // Every delta is a whole number of 3-byte CJK codepoints, so the running
+    // total is always a multiple of 3 -- head_bytes (buffer/4 = 1024) and the
+    // tail-start offset are NOT multiples of 3, so the raw byte-offset cuts
+    // this replaced would land mid-codepoint on every trim pass.
+    std::string chunk;
+    for (int i = 0; i < 500; ++i) chunk += "\xE6\x97\xA5";   // U+65E5, 3 bytes
+    for (int i = 0; i < 16; ++i) {
+        state.OnToolOutputDelta("t1", chunk);   // far past the 4 KB cap
+    }
+    const auto snap = state.TakeLightSnapshot(/*include_tool_output=*/true);
+    REQUIRE(snap.tools.size() == 1);
+    CHECK(IsValidUtf8(snap.tools[0].buffered_output));
+}
+
 // {tokens} liveness: usage events arrive at message start (input half) and
 // message_delta (output half) DURING a turn; before OnUsage existed the
 // segment sat empty until TurnCompleted.
@@ -1146,6 +1182,21 @@ TEST_CASE("live_segments clears alongside streaming_text, not before",
     state.OnResyncRequired("test");
     CHECK(state.TakeSnapshot().live_segments.empty());
     CHECK(state.TakeSnapshot().streaming_text.empty());
+}
+
+// The bug: the per-segment cap resized to a raw byte offset, which can land
+// inside a multi-byte sequence straddling the boundary.
+TEST_CASE("a streaming-text truncation at the cap boundary never splits a UTF-8 codepoint",
+          "[session_state][live_segments][utf8]") {
+    SessionState state("s-1");
+    // kStreamingTextCapBytes-1 ASCII bytes, then a 3-byte CJK codepoint
+    // straddling the cap by 2 bytes.
+    state.AppendStreamingText(std::string(SessionState::kStreamingTextCapBytes - 1, 'a'));
+    state.AppendStreamingText("\xE6\x97\xA5");   // U+65E5, 3 bytes
+    const auto snap = state.TakeSnapshot();
+    REQUIRE(snap.live_segments.size() == 1);
+    CHECK(snap.live_segments[0].text_truncated);
+    CHECK(IsValidUtf8(snap.live_segments[0].text));
 }
 
 // The bug: only the resize-and-mark step was guarded by text_truncated, not

@@ -660,8 +660,15 @@ int RunListSessions(const minimal::client::HeadlessOptions& options) {
         return kOk;
     }
     for (const auto& row : sessions) {
-        std::string name = row.name().empty() ? "(unnamed)" : row.name();
-        if (name.size() > 48) name = name.substr(0, 47) + "…";
+        // A server-titler-generated name is untrusted display text: a raw
+        // ESC or newline in it would either break this table's layout or
+        // inject a terminal escape sequence. TruncateUtf8 (not substr) for
+        // the same reason options.prompt-derived names already use it at
+        // :256 -- a raw byte cut can split a codepoint.
+        std::string name =
+            row.name().empty() ? "(unnamed)" : minimal::client::StripControlChars(row.name());
+        if (name.empty()) name = "(unnamed)";   // a name that was ONLY control chars
+        if (name.size() > 48) name = TruncateUtf8(name, 47) + "…";
         std::printf("%-26s  %6d  %s  %s  %s\n", row.session_id().c_str(),
                     row.message_count(), human_time(row.updated_at_unix_ms()).c_str(),
                     row.is_live() ? "live" : "    ", name.c_str());

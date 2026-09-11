@@ -376,3 +376,15 @@ TEST_CASE("output-format json belongs to list-sessions", "[client_args][list]") 
         CHECK(parsed.error.find("json") != std::string::npos);
     }
 }
+
+TEST_CASE("a -p prompt with invalid UTF-8 is sanitized, not sent raw",
+          "[client_args][invariant]") {
+    // "caf\xE9" -- 0xE9 alone (Latin-1 'e') is not a valid UTF-8 lead byte for
+    // a 1-byte sequence and has no continuation byte following: malformed.
+    // CreateSessionRequest.name/RunTurn's prompt are proto3 strings the
+    // SERVER rejects outright on invalid UTF-8 -- sanitize here instead of a
+    // confusing INTERNAL error deep in the turn.
+    const auto parsed = Parse({"-p", "caf\xE9"});
+    REQUIRE(parsed.action == ParsedArgs::Action::Headless);
+    CHECK(parsed.headless.prompt == "caf\xEF\xBF\xBD");
+}

@@ -6,6 +6,7 @@
 #include <optional>
 #include <system_error>
 
+#include "minimal/client/utf8.hpp"
 #include "minimal/common/config_paths.hpp"
 #include "minimal/common/logger.hpp"
 #include "minimal/common/model_ref.hpp"
@@ -201,13 +202,22 @@ ParsedArgs ParseArgs(int argc, const char* const* argv) {
             if (!value) return parsed;
             headless = true;
             prompt_set = true;
-            parsed.headless.prompt = *value;
+            // Sanitized once, used everywhere below: a raw argv prompt is
+            // whatever bytes the OS handed over, and
+            // CreateSessionRequest.name/RunTurn's prompt field are proto3
+            // strings the SERVER rejects outright on invalid UTF-8 (a pasted
+            // Latin-1 title) -- a confusing INTERNAL error deep in the turn,
+            // not a client-side message pointing at the prompt. Repaired the
+            // same way invalid UTF-8 is already handled server-side
+            // (BuildRequestBody's replace-on-dump), just earlier.
+            const std::string sanitized = SanitizeUtf8(*value);
+            parsed.headless.prompt = sanitized;
             // A prompt beginning with '/' IS a command -- that is how a user
             // types one, and the alternative was a second flag saying the same
             // thing. `--print=/some/path` stays a prompt, because the '=' form
             // is how you say "this really is text".
-            if (!has_inline && value->size() > 1 && value->front() == '/') {
-                parsed.headless.command = SplitCommand(*value);
+            if (!has_inline && sanitized.size() > 1 && sanitized.front() == '/') {
+                parsed.headless.command = SplitCommand(sanitized);
             }
         } else if (name == "--server") {
             const auto value = take_value(name);

@@ -9,6 +9,7 @@
 #include <utility>
 
 #include "minimal/client/cli_args.hpp"
+#include "minimal/client/utf8.hpp"
 #include "minimal/common/logger.hpp"
 
 namespace minimal::client {
@@ -236,7 +237,7 @@ void SessionState::AppendStreamingText(std::string_view text) {
     if (!live_segments_.back().text_truncated) {
         live_segments_.back().text.append(text);
         if (live_segments_.back().text.size() > kStreamingTextCapBytes) {
-            live_segments_.back().text.resize(kStreamingTextCapBytes);
+            live_segments_.back().text = TruncateUtf8(live_segments_.back().text, kStreamingTextCapBytes);
             live_segments_.back().text.append(kStreamingTruncationMarker);
             live_segments_.back().text_truncated = true;
         }
@@ -296,7 +297,7 @@ void SessionState::AppendStreamingText(std::string_view text) {
     } else {
         streaming_accumulated_.append(text);
         if (streaming_accumulated_.size() > kStreamingTextCapBytes) {
-            streaming_accumulated_.resize(kStreamingTextCapBytes);
+            streaming_accumulated_ = TruncateUtf8(streaming_accumulated_, kStreamingTextCapBytes);
             streaming_accumulated_.append(kStreamingTruncationMarker);
             streaming_truncated_ = true;
         }
@@ -365,7 +366,7 @@ void SessionState::AppendStreamingThinking(std::string_view text) {
     if (thinking_truncated_) return;
     thinking_accumulated_.append(text);
     if (thinking_accumulated_.size() > kStreamingTextCapBytes) {
-        thinking_accumulated_.resize(kStreamingTextCapBytes);
+        thinking_accumulated_ = TruncateUtf8(thinking_accumulated_, kStreamingTextCapBytes);
         thinking_accumulated_.append(kStreamingTruncationMarker);
         thinking_truncated_ = true;
     }
@@ -390,7 +391,7 @@ void SessionState::AppendStreamingThinking(std::string_view text) {
     if (!live_segments_.back().text_truncated) {
         live_segments_.back().text.append(text);
         if (live_segments_.back().text.size() > kStreamingTextCapBytes) {
-            live_segments_.back().text.resize(kStreamingTextCapBytes);
+            live_segments_.back().text = TruncateUtf8(live_segments_.back().text, kStreamingTextCapBytes);
             live_segments_.back().text.append(kStreamingTruncationMarker);
             live_segments_.back().text_truncated = true;
         }
@@ -938,16 +939,26 @@ void SessionState::OnToolOutputDelta(const std::string& tool_use_id, const std::
                 // `size() - tail_budget` into an out-of-range substr() thrown
                 // on the gRPC reader thread. Falling back to a plain
                 // keep-the-tail truncation is always safe.
+                // Utf8CeilToBoundary on both tail-start cuts below: a raw
+                // byte offset here can land inside a multi-byte sequence,
+                // which would otherwise keep an invalid leading fragment at
+                // the very front of the tail. TruncateUtf8 already handles
+                // the symmetric case for a kept HEAD (the boundary search
+                // runs backward instead of forward).
                 if (head_bytes + kMarker.size() >= static_cast<std::size_t>(tool_output_buffer_bytes_)) {
                     const std::size_t keep = static_cast<std::size_t>(tool_output_buffer_bytes_);
+                    const std::size_t start =
+                        it->buffered_output.size() > keep ? it->buffered_output.size() - keep : 0;
                     it->buffered_output = it->buffered_output.substr(
-                        it->buffered_output.size() > keep ? it->buffered_output.size() - keep : 0);
+                        Utf8CeilToBoundary(it->buffered_output, start));
                 } else {
                     const std::size_t tail_budget = static_cast<std::size_t>(tool_output_buffer_bytes_) -
                                                     head_bytes - kMarker.size();
+                    const std::size_t tail_start = Utf8CeilToBoundary(
+                        it->buffered_output, it->buffered_output.size() - tail_budget);
                     it->buffered_output =
-                        it->buffered_output.substr(0, head_bytes) + kMarker +
-                        it->buffered_output.substr(it->buffered_output.size() - tail_budget);
+                        TruncateUtf8(it->buffered_output, head_bytes) + kMarker +
+                        it->buffered_output.substr(tail_start);
                 }
             }
             return;

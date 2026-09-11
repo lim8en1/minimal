@@ -39,6 +39,15 @@ inline std::string TruncateUtf8(const std::string& text, std::size_t max_bytes) 
     return text.substr(0, end);
 }
 
+// The smallest index >= pos that is not a continuation byte -- the
+// forward-scanning complement to TruncateUtf8's backward boundary search.
+// Used when a byte-offset cut point for the START of a kept tail (not the
+// end of a kept head) might land inside a multi-byte sequence.
+inline std::size_t Utf8CeilToBoundary(std::string_view text, std::size_t pos) {
+    while (pos < text.size() && (static_cast<unsigned char>(text[pos]) & 0xC0) == 0x80) ++pos;
+    return pos;
+}
+
 // Terminal display columns for one code point, per the ranges East Asian
 // Width marks Wide/Fullwidth and the common emoji planes. Not a full wcwidth
 // (no ambient-charset awareness, no unassigned-code-point subtleties) but it
@@ -105,6 +114,45 @@ inline char32_t Utf8Decode(std::string_view text, std::size_t& i) {
     return cp;
 }
 
+// Drops C0 controls (0x00-0x1F), DEL (0x7F), and C1 controls (0x80-0x9F) --
+// an untrusted display string (a server-titler-generated session name, e.g.)
+// must never carry a raw ESC or newline into a terminal write: either breaks
+// a table's layout or, for ESC specifically, is a terminal escape-sequence
+// injection. Leaves everything else, including wide/multi-byte text,
+// byte-exact.
+inline std::string StripControlChars(std::string_view text) {
+    std::string out;
+    out.reserve(text.size());
+    std::size_t i = 0;
+    while (i < text.size()) {
+        const std::size_t start = i;
+        const char32_t cp = Utf8Decode(text, i);
+        if (cp < 0x20 || cp == 0x7F || (cp >= 0x80 && cp <= 0x9F)) continue;
+        out.append(text.substr(start, i - start));
+    }
+    return out;
+}
+
+// Repairs invalid UTF-8 byte-for-byte: each malformed sequence Utf8Decode
+// would report as U+FFFD is re-encoded as the real U+FFFD replacement
+// character (valid input, including a genuine pre-existing U+FFFD, passes
+// through byte-identical). Used at the one place outside a JSON/proto
+// serializer that takes a raw OS string (argv) and must guarantee valid
+// UTF-8 before it reaches a proto string field -- unlike nlohmann::json's
+// own dump()-time replace mode (used server-side), there is no serializer in
+// the way here to do it implicitly.
+inline std::string SanitizeUtf8(std::string_view text) {
+    std::string out;
+    out.reserve(text.size());
+    std::size_t i = 0;
+    while (i < text.size()) {
+        const std::size_t start = i;
+        const char32_t cp = Utf8Decode(text, i);
+        out.append(cp == 0xFFFD ? "\xEF\xBF\xBD" : std::string(text.substr(start, i - start)));
+    }
+    return out;
+}
+
 // Decodes the LAST code point of text and returns the byte length of its
 // UTF-8 sequence (0 when text is empty). Used by Utf8PopGrapheme.
 inline std::size_t Utf8LastCodepointBytes(std::string_view text) {
@@ -123,21 +171,34 @@ inline std::size_t Utf8LastCodepointBytes(std::string_view text) {
 // not full UAX #29: handles ZWJ sequences, U+FE0E/U+FE0F selectors, and
 // combining marks (which contribute no column -- see Utf8CharColumnWidth).
 inline std::string_view Utf8PopGrapheme(std::string_view text) {
+    const auto is_glue = [](char32_t cp) {
+        return cp == 0x200D /* ZWJ */ || cp == 0xFE0E || cp == 0xFE0F ||
+               (cp >= 0x0300 && cp <= 0x036F) /* combining marks */;
+    };
     std::size_t len = Utf8LastCodepointBytes(text);
     while (len > 0) {
+        // Decode the codepoint about to be removed: a ZWJ or a variation
+        // selector/combining mark is glue for what PRECEDES it, so removing
+        // one of those always continues the pop unconditionally -- checking
+        // the codepoint newly exposed AFTER removal (the old bug) tests the
+        // wrong side of the glue and stops one codepoint too early.
+        std::size_t i = text.size() - len;
+        const char32_t cp = Utf8Decode(text, i);
         text.remove_suffix(len);
-        // Continue popping while the new tail is glue that bound what we
-        // just removed to what precedes it.
-        const std::size_t prev = Utf8LastCodepointBytes(text);
-        if (prev == 0) break;
-        const std::size_t at = text.size() - prev;
-        char32_t cp = 0;
-        std::size_t i = at;
-        cp = Utf8Decode(text, i);
-        const bool is_glue = cp == 0x200D /* ZWJ */ || cp == 0xFE0E || cp == 0xFE0F ||
-                             (cp >= 0x0300 && cp <= 0x036F) /* combining marks */;
-        if (!is_glue) break;
-        len = prev;
+        bool continue_popping = is_glue(cp);
+        if (!continue_popping) {
+            // `cp` was an ordinary base character. If a ZWJ now sits at the
+            // new end, `cp` was the right-hand half of a ZWJ join -- the
+            // cluster continues through the ZWJ (and, via this same check
+            // next iteration, through whatever it joins in turn).
+            const std::size_t prev = Utf8LastCodepointBytes(text);
+            if (prev > 0) {
+                std::size_t j = text.size() - prev;
+                continue_popping = Utf8Decode(text, j) == 0x200D;
+            }
+        }
+        if (!continue_popping) break;
+        len = Utf8LastCodepointBytes(text);
     }
     return text;
 }

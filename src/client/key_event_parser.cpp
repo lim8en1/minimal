@@ -131,6 +131,25 @@ const std::array<Event, 12>& FunctionKeys() {
 // "ctrl+j" while something else owns Enter gets a binding that silently
 // never fires: the alias table is what keybindings.cpp's collision warning
 // consults to make that visible at startup.
+// Base-key spelling aliases: NamedKeys() above maps every pair here to the
+// identical ftxui::Event, but without this table NormalizeKeySpec emitted
+// the raw spelling verbatim -- a user's "esc" vs. the default
+// turn.cancel=escape (keybindings.cpp's DefaultBindings, which already
+// spells these out long-form) is a real collision over one physical key
+// that the startup warning never saw. Canonicalizes to the long spelling,
+// matching the defaults.
+const std::unordered_map<std::string, std::string>& NamedKeyAliases() {
+    static const std::unordered_map<std::string, std::string> table = {
+        {"esc", "escape"},
+        {"return", "enter"},
+        {"del", "delete"},
+        {"ins", "insert"},
+        {"pgup", "pageup"},
+        {"pgdn", "pagedown"},
+    };
+    return table;
+}
+
 const std::unordered_map<std::string, std::string>& CtrlLetterAliases() {
     static const std::unordered_map<std::string, std::string> table = {
         {"j", "enter"},      // 0x0A == Event::Return
@@ -197,11 +216,16 @@ std::string NormalizeKeySpec(const std::string& spec) {
         out += m;
         out += '+';
     }
-    out += parts.back();
+    // Merge base-key aliases (esc/escape, return/enter, ...) onto one
+    // canonical spelling -- see NamedKeyAliases()'s comment.
+    std::string base = parts.back();
+    if (const auto it = NamedKeyAliases().find(base); it != NamedKeyAliases().end()) {
+        base = it->second;
+    }
+    out += base;
 
     if (modifiers.size() == 1 && modifiers.front() == "ctrl") {
-        if (const auto it = CtrlLetterAliases().find(parts.back());
-            it != CtrlLetterAliases().end()) {
+        if (const auto it = CtrlLetterAliases().find(base); it != CtrlLetterAliases().end()) {
             return it->second;
         }
     }
@@ -211,20 +235,6 @@ std::string NormalizeKeySpec(const std::string& spec) {
 std::vector<Event> ParseKeySpec(const std::string& spec) {
     const std::string lower = ToLower(spec);
     if (lower.empty()) return {};
-
-    // Ambiguous multi-byte combos that predate this parser and must keep
-    // byte-identical candidates: no general rule derives these (they are
-    // workarounds for what specific terminals actually send without the
-    // kitty keyboard protocol / CSI-u).
-    if (lower == "ctrl+tab") return {Event::Special("\x1b[27;5;9~")};
-    if (lower == "ctrl+shift+tab") return {Event::Special("\x1b[27;6;9~")};
-    // shift+tab ("backtab"): terminals send the legacy CSI Z sequence; CSI-u
-    // terminals send the explicit modifier form. Both listed so a Match()
-    // succeeds on whichever arrives (the same dual-candidate rule as
-    // ctrl+tab above).
-    if (lower == "shift+tab") {
-        return {Event::TabReverse, Event::Special("\x1b[27;2;9~")};
-    }
 
     std::vector<std::string> parts = Split(lower, '+');
     if (parts.empty()) return {};
@@ -245,9 +255,32 @@ std::vector<Event> ParseKeySpec(const std::string& spec) {
         }
     }
 
+    // Tab/BackTab: ambiguous multi-byte combos that predate this parser and
+    // must keep byte-identical candidates -- no general rule derives these
+    // (they are workarounds for what specific terminals actually send
+    // without the kitty keyboard protocol / CSI-u). Keyed on the PARSED
+    // modifier set, not the raw spec string: "shift+ctrl+tab" (reordered)
+    // and "control+tab" (the alias every other modifier already accepts)
+    // must match identically to "ctrl+shift+tab" and "ctrl+tab". shift+tab
+    // ("backtab") also lists FTXUI's own Event::TabReverse, since legacy
+    // terminals send the CSI Z sequence FTXUI already decodes to that
+    // constant -- both candidates listed so a Match() succeeds on whichever
+    // arrives.
+    if (base == "tab") {
+        if (alt) return {};   // alt+tab and combinations: no known encoding
+        if (ctrl && shift) return {Event::Special("\x1b[27;6;9~")};
+        if (ctrl) return {Event::Special("\x1b[27;5;9~")};
+        if (shift) return {Event::TabReverse, Event::Special("\x1b[27;2;9~")};
+        // unmodified "tab" falls through to the NamedKeys() lookup below.
+    }
+
     // Arrow keys: alt+ generalizes the old alt+left/alt+right-only special
     // case (both common CSI-u-less encodings) to all four directions;
-    // ctrl+ and plain reuse FTXUI's own Arrow*Ctrl / Arrow* constants.
+    // ctrl+/shift+ and plain reuse FTXUI's own Arrow*Ctrl / Arrow* constants
+    // or, for shift, the same xterm CSI modifier-code convention FTXUI's own
+    // Arrow*Ctrl constants use (mod = 1 + 4 for ctrl; 2 for shift alone; 6
+    // for ctrl+shift -- confirmed against FTXUI's event.cpp, which defines
+    // Event::ArrowUpCtrl as Event::Special("\x1B[1;5A")).
     if (base == "left" || base == "right" || base == "up" || base == "down") {
         const char csi = base == "left" ? 'D' : base == "right" ? 'C' : base == "up" ? 'A' : 'B';
         if (alt && !ctrl) {
@@ -255,12 +288,14 @@ std::vector<Event> ParseKeySpec(const std::string& spec) {
                     Event::Special(std::string("\x1b\x1b[") + csi)};
         }
         if (ctrl && !alt) {
+            if (shift) return {Event::Special(std::string("\x1b[1;6") + csi)};
             if (base == "left") return {Event::ArrowLeftCtrl};
             if (base == "right") return {Event::ArrowRightCtrl};
             if (base == "up") return {Event::ArrowUpCtrl};
             return {Event::ArrowDownCtrl};
         }
         if (!ctrl && !alt) {
+            if (shift) return {Event::Special(std::string("\x1b[1;2") + csi)};
             if (base == "left") return {Event::ArrowLeft};
             if (base == "right") return {Event::ArrowRight};
             if (base == "up") return {Event::ArrowUp};
@@ -305,11 +340,15 @@ std::vector<Event> ParseKeySpec(const std::string& spec) {
     }
 
     // A single digit: alt+digit (ESC + digit) and plain digit are
-    // well-defined; ctrl+digit has no single standard byte encoding across
-    // terminals, so it is left unmapped rather than guessed.
+    // well-defined; ctrl+digit and shift+digit have no single standard byte
+    // encoding across terminals/layouts (unlike a letter, where shift just
+    // changes case, a digit's shifted form is a different, layout-dependent
+    // symbol -- US shift+5 sends '%', not a distinguishable "shifted 5"), so
+    // both are left unmapped rather than guessed. Without the shift check, a
+    // "shift+5" binding silently collapsed onto plain Character("5").
     if (base.size() == 1 && std::isdigit(static_cast<unsigned char>(base[0]))) {
         if (alt && !ctrl) return AltCandidates(base[0]);
-        if (!ctrl && !alt) return {Event::Character(base)};
+        if (!ctrl && !alt && !shift) return {Event::Character(base)};
         return {};
     }
 
