@@ -30,8 +30,12 @@ too. The rest of this document describes what runs underneath.
 |---|---|---|
 | CMake | ≥ 3.28 | needed for `EXCLUDE_FROM_ALL` on FetchContent |
 | Ninja | any recent | all presets use the Ninja generator |
-| C++ compiler | C++20 | Clang or GCC; native Windows is not supported (use WSL) |
+| C++ compiler | C++20 | Clang or GCC; macOS and Linux. Native Windows is not supported (use WSL) |
 | vcpkg | current | `$VCPKG_ROOT` must point at a vcpkg checkout |
+
+On Linux, vcpkg itself also needs `curl`, `zip`, `unzip`, `tar`, and
+`pkg-config` (on Debian/Ubuntu, with `build-essential`, `git`, `ninja-build`, and
+`cmake`).
 
 All C/C++ dependencies come from the vcpkg manifest: `grpc`, `protobuf`,
 `curl`, `sqlite3`, `nlohmann-json`, `yaml-cpp`, `spdlog`, `tree-sitter`, `re2`
@@ -47,6 +51,39 @@ checkout:
 ```sh
 export VCPKG_ROOT=/path/to/vcpkg   # optional; ./configure bootstraps one otherwise
 ```
+
+### Dependency linkage
+
+Dependencies are built as **shared libraries**. When `VCPKG_TARGET_TRIPLET` is
+not set, the top-level `CMakeLists.txt` picks `<arch>-<os>-dynamic`
+(`arm64-osx-dynamic`, `x64-linux-dynamic`, ...) rather than vcpkg's static
+default. This is a correctness requirement, not a preference. A static
+protobuf/gRPC/abseil is copied into every shared object that links it: both
+cores, every plugin, the tests. On Linux those copies share one descriptor
+pool, and the server aborts at startup with `File already exists in database`.
+macOS survives only because its two-level namespace keeps the copies apart.
+
+- Configure **fails** if protobuf or gRPC resolves to a static library,
+  including when you pass `-DVCPKG_TARGET_TRIPLET=<static triplet>`.
+- A build tree that cached the old static default is migrated automatically on
+  its next configure. vcpkg then rebuilds the dependency tree once under the
+  new triplet.
+- The sanitizer overlay triplets (`cmake/triplets/`) are dynamic too.
+- On macOS, `cmake/triplets/{arm64,x64}-osx-dynamic.cmake` shadow vcpkg's
+  community triplets of the same name. They use the same settings, plus
+  per-port workarounds for SDKs newer than the deployment target (currently
+  c-ares's `pipe2` probe).
+- `vcpkg.json` requests `protobuf[libprotoc]`. On a dynamic triplet, grpc always
+  builds a shared `libgrpc_plugin_support` that needs libprotoc, and macOS's
+  linker refuses to leave those symbols unresolved. Nothing here links
+  libprotoc, so it is not installed.
+- abseil comes from an overlay port, `cmake/ports/abseil/`. That is vcpkg's
+  baseline port with its static-only restriction (outside Windows) removed, so
+  it builds shared like Homebrew's and Debian's. A static abseil gets embedded
+  separately in libprotobuf, libgrpc, libgpr, ..., and on macOS a gRPC server
+  shutdown then waits forever on a CondVar belonging to one copy while another
+  copy signals it. When bumping `builtin-baseline`, refresh the overlay from the
+  new baseline's `ports/abseil/` and keep the one-line portfile change.
 
 ## Build
 
@@ -111,13 +148,17 @@ Seed on the target machine by running the server once, or by hand.
 <prefix>/bin/minimal-server                       the server
 <prefix>/lib/libminimal_server_core.0.dylib|.so.0   shared core, plugins link it
 <prefix>/lib/libminimal_client_core.0.dylib|.so.0
+<prefix>/lib/libminimal_proto.0.dylib|.so.0         generated protobuf/gRPC bindings
+<prefix>/lib/lib{protobuf,grpc++,absl_*,...}        vcpkg dependencies (shared, see above)
 <prefix>/lib/minimal/plugins/server/                bundled server plugins (*.so|*.dylib)
 <prefix>/lib/minimal/plugins/client/              bundled client plugins
 ```
 
-Binaries, cores, and plugins carry RPATHs relative to their own location
-(`@loader_path` / `$ORIGIN`), so the installed tree is relocatable — no
-`ldconfig`, no install-name fixing.
+Binaries, cores, plugins, and the vcpkg libraries carry RPATHs relative to
+their own location (`@loader_path` / `$ORIGIN`), so the installed tree is
+relocatable — no `ldconfig`, no install-name fixing. The dependency libraries
+are gathered by the `minimal_runtime_deps` runtime-dependency set. Only files
+from the vcpkg installed tree are copied; system libraries are never bundled.
 
 ## Config seeding
 

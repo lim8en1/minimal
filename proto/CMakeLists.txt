@@ -26,7 +26,9 @@ set_target_properties(minimal_proto PROPERTIES
 # @rpath/libminimal_proto.0.dylib; once installed, that resolves against THIS
 # dylib's own LC_RPATH, not the loading executable's (macOS rpaths are not
 # inherited). Proto sits in lib/ next to them, so its own directory is the
-# answer; proto's other deps (grpc/protobuf) are static, nothing further needed.
+# answer -- and the same answer covers its grpc/protobuf/absl deps, which are
+# SHARED (the top-level dependency guard enforces it) and installed into lib/
+# beside it through the minimal_runtime_deps set.
 if(APPLE)
     set_property(TARGET minimal_proto PROPERTY INSTALL_RPATH "@loader_path")
 else()
@@ -54,4 +56,5 @@ protobuf_generate(
 # beside them -- without it, the installed binaries abort with
 # "Library not loaded: @rpath/libminimal_proto.0.dylib".
 install(TARGETS minimal_proto
+    RUNTIME_DEPENDENCY_SET minimal_runtime_deps
     LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}")

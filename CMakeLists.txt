@@ -4,6 +4,91 @@ cmake_minimum_required(VERSION 3.28)
 
 # The vcpkg toolchain must be set before project(). Pass it on the command line
 # (-DCMAKE_TOOLCHAIN_FILE=...) or use CMakePresets.json, which reads $VCPKG_ROOT.
+#
+# --- Dependency linkage: dynamic vcpkg triplet -------------------------------
+# Every vcpkg dependency is a SHARED library, on every platform. vcpkg's default
+# triplets (x64-linux, arm64-osx) are static, and a static protobuf/gRPC/absl
+# reaches every shared object here -- both cores, every plugin, the tests --
+# through minimal_proto's PUBLIC gRPC::grpc++. Each object then carries its own
+# partial copy. On macOS the two-level namespace keeps the copies apart and
+# nothing crashes; on Linux's flat namespace they share one interposed
+# descriptor pool, and the second copy's static initializers abort the server
+# at startup ("File already exists in database"). One shared library, one copy
+# in memory, one init -- the rule minimal_proto already follows (see
+# proto/CMakeLists.txt). The guard after find_package(gRPC) enforces it.
+#
+# Chosen here, not in the presets, because the name depends on the host and
+# the toolchain reads it during project(). An explicit -DVCPKG_TARGET_TRIPLET
+# (the sanitizer presets pass one) is left alone.
+#
+# cmake/triplets/ overlays: the sanitizer triplets, and the macOS dynamic
+# triplets that shadow vcpkg's community ones to carry per-port SDK
+# workarounds. Appended here, not only in the presets, so a configure without
+# a preset resolves the same triplet files.
+if(NOT "${CMAKE_CURRENT_SOURCE_DIR}/cmake/triplets" IN_LIST VCPKG_OVERLAY_TRIPLETS)
+    list(APPEND VCPKG_OVERLAY_TRIPLETS "${CMAKE_CURRENT_SOURCE_DIR}/cmake/triplets")
+    set(VCPKG_OVERLAY_TRIPLETS "${VCPKG_OVERLAY_TRIPLETS}" CACHE STRING
+        "vcpkg overlay triplet directories" FORCE)
+endif()
+# cmake/ports/ overlays: abseil, whose vcpkg port is static-only outside
+# Windows. A static abseil is embedded in libprotobuf, libgrpc, libgpr, ...
+# each its own copy, and on macOS a CondVar waited on in one copy is
+# signalled from another -- gRPC server shutdown hangs forever. The overlay is
+# the baseline port with only that restriction lifted (see its portfile);
+# refresh it from the new baseline when bumping builtin-baseline.
+if(NOT "${CMAKE_CURRENT_SOURCE_DIR}/cmake/ports" IN_LIST VCPKG_OVERLAY_PORTS)
+    list(APPEND VCPKG_OVERLAY_PORTS "${CMAKE_CURRENT_SOURCE_DIR}/cmake/ports")
+    set(VCPKG_OVERLAY_PORTS "${VCPKG_OVERLAY_PORTS}" CACHE STRING
+        "vcpkg overlay port directories" FORCE)
+endif()
+cmake_host_system_information(RESULT _minimal_host_arch QUERY OS_PLATFORM)
+if(_minimal_host_arch MATCHES "^(x86_64|AMD64|amd64)$")
+    set(_minimal_triplet_arch x64)
+elseif(_minimal_host_arch MATCHES "^(arm64|aarch64|ARM64)$")
+    set(_minimal_triplet_arch arm64)
+endif()
+if(CMAKE_HOST_APPLE)
+    set(_minimal_triplet_os osx)
+elseif(CMAKE_HOST_LINUX)
+    set(_minimal_triplet_os linux)
+endif()
+if(DEFINED _minimal_triplet_arch AND DEFINED _minimal_triplet_os)
+    set(_minimal_static_triplet "${_minimal_triplet_arch}-${_minimal_triplet_os}")
+    # A build tree configured before this change has the toolchain's own
+    # static default cached. A plain reconfigure would keep it forever (a CACHE
+    # default only applies when nothing is cached), so migrate it once. How we
+    # tell "the toolchain's default" from "the user asked for static": the
+    # toolchain caches it under its own helpstring, while a command-line -D
+    # gets CMake's "No help..." one. Done once per tree (the marker), so a later
+    # explicit -D back to static reaches the guard instead of being undone.
+    get_property(_minimal_triplet_help CACHE VCPKG_TARGET_TRIPLET PROPERTY HELPSTRING)
+    if(NOT MINIMAL_TRIPLET_MIGRATED
+       AND VCPKG_TARGET_TRIPLET STREQUAL _minimal_static_triplet
+       AND _minimal_triplet_help MATCHES "^Vcpkg target triplet")
+        message(STATUS "minimal: migrating vcpkg triplet ${_minimal_static_triplet} -> "
+                       "${_minimal_static_triplet}-dynamic (dependencies rebuild once)")
+        set(VCPKG_TARGET_TRIPLET "${_minimal_static_triplet}-dynamic" CACHE STRING "" FORCE)
+        # Changing the triplet alone is not enough: every find_package and
+        # find_library result of the old configure is cached (protobuf_DIR,
+        # ZLIB_LIBRARY, ...) and still points into the STATIC install tree, so
+        # the new configure would silently link the old static libraries.
+        # Drop those entries so they are found again under the new triplet.
+        # tools/ is kept: the host triplet is this same static name, and
+        # protoc and grpc_cpp_plugin really do live in its tools/ tree.
+        get_cmake_property(_minimal_cache_vars CACHE_VARIABLES)
+        foreach(_minimal_var IN LISTS _minimal_cache_vars)
+            get_property(_minimal_val CACHE "${_minimal_var}" PROPERTY VALUE)
+            if(_minimal_val MATCHES "/vcpkg_installed/${_minimal_static_triplet}/"
+               AND NOT _minimal_val MATCHES "/vcpkg_installed/${_minimal_static_triplet}/tools/")
+                unset("${_minimal_var}" CACHE)
+            endif()
+        endforeach()
+    endif()
+    set(MINIMAL_TRIPLET_MIGRATED ON CACHE INTERNAL "")
+    set(VCPKG_TARGET_TRIPLET "${_minimal_static_triplet}-dynamic" CACHE STRING
+        "vcpkg target triplet (minimal requires dynamic library linkage)")
+endif()
+
 project(minimal
     VERSION 0.1.0
     DESCRIPTION "Local-first coding-agent harness"
@@ -155,8 +240,35 @@ message(STATUS "minimal plugin ABI tag: ${MINIMAL_ABI_TAG}")
 # --- Dependencies ------------------------------------------------------------
 find_package(protobuf CONFIG REQUIRED)
 find_package(gRPC CONFIG REQUIRED)
+
+# Fail closed on a static protobuf, gRPC or abseil, whatever supplied it (see
+# the triplet selection and the abseil overlay above project() for what a
+# duplicated copy does). absl::base arrives with protobuf's config. Checks the
+# imported targets, not the triplet name, so a Homebrew or system package
+# build -- shared either way -- passes without special cases.
+foreach(_minimal_dep IN ITEMS protobuf::libprotobuf gRPC::grpc++ absl::base)
+    get_target_property(_minimal_dep_type ${_minimal_dep} TYPE)
+    if(_minimal_dep_type STREQUAL "STATIC_LIBRARY")
+        message(FATAL_ERROR
+            "minimal: ${_minimal_dep} is a static library (vcpkg triplet: "
+            "'${VCPKG_TARGET_TRIPLET}'). Every shared library linking it would carry "
+            "its own copy: protobuf's copies collide at server startup on Linux "
+            "(\"File already exists in database\"), abseil's deadlock gRPC shutdown "
+            "on macOS. Use a dynamic triplet -- the default, <arch>-<os>-dynamic, "
+            "when VCPKG_TARGET_TRIPLET is not set -- with the cmake/ports overlays. "
+            "See BUILD.md, \"Dependency linkage\".")
+    endif()
+endforeach()
+
 find_package(CURL REQUIRED)
 find_package(SQLite3 REQUIRED)
+# FindSQLite3 names the target SQLite3::SQLite3 only since CMake 4.3; older
+# CMake (3.28 is the minimum above -- Ubuntu 24.04 ships it) defines just the
+# now-deprecated SQLite::SQLite3. The alias is the compatibility shim the
+# module's own documentation gives; visible here and in every subdirectory.
+if(NOT TARGET SQLite3::SQLite3)
+    add_library(SQLite3::SQLite3 ALIAS SQLite::SQLite3)
+endif()
 find_package(nlohmann_json CONFIG REQUIRED)
 find_package(yaml-cpp CONFIG REQUIRED)
 find_package(spdlog CONFIG REQUIRED)
@@ -295,3 +407,36 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/user-plugins")
         unset(_user_plugin_entries)
     endforeach()
 endif()
+
+# --- Runtime dependencies ------------------------------------------------------
+#
+# The dependencies are shared libraries (see the triplet selection at the top),
+# so an installed tree needs them in lib/ next to the cores, where the binaries',
+# cores' and plugins' $ORIGIN / @loader_path RPATHs already point. Every
+# install(TARGETS) above joins the minimal_runtime_deps set; this installs what
+# the set resolves to. Only files from the vcpkg installed tree ship: system
+# libraries belong to the OS, and our own libminimal_* are installed by their
+# install(TARGETS). Without vcpkg (Homebrew, system packages) nothing matches
+# the include, so nothing is copied -- the package manager owns those.
+set(_minimal_runtime_dep_dirs "")
+set(_minimal_runtime_dep_include "")
+if(DEFINED VCPKG_INSTALLED_DIR AND DEFINED VCPKG_TARGET_TRIPLET)
+    set(_minimal_vcpkg_prefix "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}")
+    if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+        set(_minimal_runtime_dep_dirs "${_minimal_vcpkg_prefix}/debug/lib")
+    else()
+        set(_minimal_runtime_dep_dirs "${_minimal_vcpkg_prefix}/lib")
+    endif()
+    string(REGEX REPLACE "([][+.*?()^$|\\\\{}])" "\\\\\\1"
+           _minimal_runtime_dep_include "${_minimal_vcpkg_prefix}")
+    set(_minimal_runtime_dep_include "^${_minimal_runtime_dep_include}/")
+endif()
+install(RUNTIME_DEPENDENCY_SET minimal_runtime_deps
+    DESTINATION "${CMAKE_INSTALL_LIBDIR}"
+    DIRECTORIES ${_minimal_runtime_dep_dirs}
+    # macOS system libraries live in the dyld shared cache, not on disk, so
+    # they cannot resolve; they are the OS's regardless. (Linux sonames never
+    # start with '/', so this is a no-op there.)
+    PRE_EXCLUDE_REGEXES "^/usr/lib/" "^/System/"
+    POST_INCLUDE_REGEXES ${_minimal_runtime_dep_include}
+    POST_EXCLUDE_REGEXES ".*")

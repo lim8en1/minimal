@@ -63,7 +63,12 @@ function(minimal_add_plugin name)
             INSTALL_RPATH "$ORIGIN/${MINIMAL_PLUGIN_RPATH_TO_LIBDIR}")
     endif()
 
-    install(TARGETS ${name} LIBRARY DESTINATION "${MINIMAL_PLUGIN_INSTALL_DIR}")
+    # The runtime-dependency set: a plugin may link a shared dependency the
+    # cores do not (tools-search -> re2, tools-bash -> tree-sitter), and that
+    # library has to be installed into lib/ too. See the top-level install.
+    install(TARGETS ${name}
+        RUNTIME_DEPENDENCY_SET minimal_runtime_deps
+        LIBRARY DESTINATION "${MINIMAL_PLUGIN_INSTALL_DIR}")
 endfunction()
 
 # The client twin: MODULE, links the SHARED minimal::client_core (one copy in
@@ -88,7 +93,9 @@ function(minimal_add_client_plugin name)
             INSTALL_RPATH "$ORIGIN/${MINIMAL_CLIENT_PLUGIN_RPATH_TO_LIBDIR}")
     endif()
 
-    install(TARGETS ${name} LIBRARY DESTINATION "${MINIMAL_CLIENT_PLUGIN_INSTALL_DIR}")
+    install(TARGETS ${name}
+        RUNTIME_DEPENDENCY_SET minimal_runtime_deps
+        LIBRARY DESTINATION "${MINIMAL_CLIENT_PLUGIN_INSTALL_DIR}")
 endfunction()
 
 # --- User --------------------------------------------------------------------

@@ -6,7 +6,13 @@
   "license": "MIT",
   "dependencies": [
     "grpc",
-    "protobuf",
+    {
+      "$comment": "libprotoc: on a dynamic triplet grpc always builds the SHARED libgrpc_plugin_support, which only links libprotoc if the target build has it; macOS's linker rejects the unresolved symbols otherwise. Nothing of ours links it, so it is not installed. See BUILD.md, Dependency linkage.",
+      "name": "protobuf",
+      "features": [
+        "libprotoc"
+      ]
+    },
     "curl",
     "sqlite3",
     "nlohmann-json",

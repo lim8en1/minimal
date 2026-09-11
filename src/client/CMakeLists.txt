@@ -119,6 +119,7 @@ else()
 endif()
 
 install(TARGETS minimal minimal_client_core
+    RUNTIME_DEPENDENCY_SET minimal_runtime_deps
     RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
     LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}")
 
