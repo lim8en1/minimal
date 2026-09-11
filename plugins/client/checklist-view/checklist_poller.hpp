@@ -80,7 +80,6 @@ private:
     plugins::ClientApi* api_;
     plugins::FocusProvider* focus_;
     std::chrono::milliseconds cadence_;
-    std::thread worker_;
 
     mutable std::mutex mtx_;
     std::condition_variable cv_;
@@ -91,6 +90,14 @@ private:
     bool all_ever_fetched_ = false;
     bool stop_ = false;
     bool refresh_requested_ = false;
+
+    // LAST, and it must stay last: the constructor starts RunLoop() from this
+    // member's initializer, and members are constructed in declaration order.
+    // Declared above mtx_ (as it was), the worker could lock a mutex -- and
+    // read stop_ -- that did not exist yet: macOS reported "mutex lock
+    // failed: Invalid argument" in ~1 of 5 runs of the poller tests under
+    // parallel load. The destructor joins before any member is destroyed.
+    std::thread worker_;
 };
 
 }  // namespace minimal::checklist_view

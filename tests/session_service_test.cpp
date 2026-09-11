@@ -569,8 +569,15 @@ TEST_CASE("answering a permission prompt dismisses every other subscriber's copy
 
     grpc::ClientContext context_a;
     auto stream_a = fixture.stub->OpenSession(&context_a);
-    REQUIRE(stream_a->Write(ChatTurn(session_id, "build it")));
 
+    // B attaches BEFORE A starts the turn. A later subscriber is replayed
+    // nothing it missed (EventBroadcaster::Subscribe hands it a late_attach
+    // resync instead), so a B attaching after the prompt went out would sit
+    // in its Read below forever. Attaching after the turn only ever worked
+    // because the scripted turn usually took longer than B's attach round
+    // trip; under load it did not (~1% of runs on macOS, ~9% on Linux).
+    // Reading B's SessionMetadataEvent proves its subscription is live: the
+    // server subscribes the stream before emitting it.
     grpc::ClientContext context_b;
     auto stream_b = fixture.stub->OpenSession(&context_b);
     v1::ClientEvent attach_b;
@@ -579,6 +586,8 @@ TEST_CASE("answering a permission prompt dismisses every other subscriber's copy
     REQUIRE(stream_b->Write(attach_b));
     v1::ServerEvent metadata_b;
     REQUIRE(stream_b->Read(&metadata_b));  // the attach-time SessionMetadataEvent
+
+    REQUIRE(stream_a->Write(ChatTurn(session_id, "build it")));
 
     // Stream A drives the turn and sees the permission_request; stream B sees
     // the same request (broadcast) but never answers it.

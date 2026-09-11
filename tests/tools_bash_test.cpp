@@ -395,7 +395,9 @@ TEST_CASE("bash runs pipelines, chains and redirection", "[tools_bash][exec]") {
 
 TEST_CASE("bash merges stderr and reports a non-zero exit", "[tools_bash][exec]") {
     Fixture f;
-    const auto out = f.Run({{"command", "ls definitely-not-a-directory-xyz"}});
+    // The exit code is pinned explicitly: ls's own status for a missing
+    // operand is not portable (BSD ls exits 1, GNU coreutils exits 2).
+    const auto out = f.Run({{"command", "ls definitely-not-a-directory-xyz || exit 1"}});
     CHECK(out.result.is_error);
     CHECK(out.result.content_text.find("exit status: 1") != std::string::npos);
     CHECK(out.result.content_text.find("definitely-not-a-directory-xyz") != std::string::npos);
