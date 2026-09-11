@@ -13,8 +13,9 @@ namespace {
 
 // "#rrggbb" -> Color, case-insensitive, tolerant: anything malformed yields
 // nullopt (theme default) rather than an exception -- a picker row's cosmetics
-// must never break rendering.
-std::optional<ftxui::Color> RowColor(const std::string& value) {
+// must never break rendering. Downsampled to the theme's depth like every
+// theme role: a preset's raw truecolor used to reach 256/16-color terminals.
+std::optional<ftxui::Color> RowColor(const std::string& value, ColorDepth depth) {
     if (value.size() != 7 || value.front() != '#') return std::nullopt;
     auto nibble = [](char c) -> int {
         if (c >= '0' && c <= '9') return c - '0';
@@ -38,8 +39,11 @@ std::optional<ftxui::Color> RowColor(const std::string& value) {
     const int hi = hi_hi * 16 + hi_lo;
     const int mid = mid_hi * 16 + mid_lo;
     const int lo = lo_hi * 16 + lo_lo;
-    return ftxui::Color(static_cast<std::uint8_t>(hi), static_cast<std::uint8_t>(mid),
-                        static_cast<std::uint8_t>(lo));
+    const ftxui::Color c = Downsample(static_cast<std::uint8_t>(hi), static_cast<std::uint8_t>(mid),
+                                      static_cast<std::uint8_t>(lo), depth);
+    // ColorDepth::None: no tint, so the window's own color still applies.
+    if (c == ftxui::Color::Default) return std::nullopt;
+    return c;
 }
 
 }  // namespace
@@ -74,14 +78,15 @@ ftxui::Component MakeFilterableMenuModal(
     rebuild();
 
     // Header rows (the model picker's provider groups) get their own entry
-    // style: bold, flush-left, never cursor-prefixed or inverted. Normal rows
+    // style: bold, flush-left, never cursor-prefixed or highlighted. Normal rows
     // replicate FTXUI's DefaultOptionTransform plus one indent level, so the
     // two tiers read visually. The transform reads state->rows by index --
     // the same shared block every closure here uses, so it can never outlive
     // or diverge from what Menu itself is displaying.
     MenuOption menu_options;
     menu_options.entries_option.transform =
-        [state](const EntryState& entry) -> Element {
+        [state, depth = theme.depth(), selection = SelectionStyle(theme)](
+            const EntryState& entry) -> Element {
         const bool is_header = entry.index >= 0 &&
                                entry.index < static_cast<int>(state->rows.size()) &&
                                state->rows[entry.index].header;
@@ -91,10 +96,12 @@ ftxui::Component MakeFilterableMenuModal(
         std::string label =
             (std::string(entry.active ? "> " : "  ") + "  ") + state->rows[entry.index].label;
         Element e = text(std::move(label));
-        if (const std::optional<ftxui::Color> tint = RowColor(state->rows[entry.index].color)) {
+        if (const std::optional<ftxui::Color> tint =
+                RowColor(state->rows[entry.index].color, depth)) {
             e = e | color(*tint);
         }
-        if (entry.focused) e = e | inverted;
+        // Applied OUTSIDE the tint, so a preset's own color survives focus.
+        if (entry.focused) e = e | selection;
         if (entry.active) e = e | bold;
         return e;
     };
@@ -154,13 +161,13 @@ ftxui::Component MakeFilterableMenuModal(
         // No separate header row here: it used to repeat window_title's own
         // text right below it ("resume a session" / " sessions ") -- the
         // window's title already says what this is.
-        rows.push_back(text(spec.hint_line) | dim);
+        rows.push_back(text(spec.hint_line) | Muted(theme));
         std::string status = " filter: " + (state->filter.empty() ? "(none)" : state->filter);
         if (spec.status_suffix) status += spec.status_suffix(state->filter);
-        rows.push_back(text(status) | dim);
-        rows.push_back(separator());
+        rows.push_back(text(status) | Muted(theme));
+        rows.push_back(separator() | color(theme.ColorFor("border_unfocused")));
         if (state->rows.size() <= spec.empty_threshold) {
-            rows.push_back(text(spec.empty_message) | dim);
+            rows.push_back(text(spec.empty_message) | Muted(theme));
         }
         rows.push_back(interactive->Render() | vscroll_indicator | frame | flex);
         // Padded with a space each side, matching prompt_modal.cpp's " permission "/

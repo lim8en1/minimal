@@ -6,6 +6,8 @@
 #include <stdexcept>
 #include <tuple>
 
+#include <ftxui/dom/node.hpp>
+#include <ftxui/screen/screen.hpp>
 #include <nlohmann/json.hpp>
 
 #include "minimal/common/logger.hpp"
@@ -45,7 +47,63 @@ std::tuple<uint8_t, uint8_t, uint8_t> ParseHexColor(std::string_view value,
     return {static_cast<uint8_t>(r), static_cast<uint8_t>(g), static_cast<uint8_t>(b)};
 }
 
+// FillBackground's node: lays out exactly like its child, then back-fills the
+// cells still at the default background once the child has drawn.
+class BackgroundFill : public ftxui::Node {
+public:
+    BackgroundFill(ftxui::Element child, ftxui::Color bg)
+        : Node(ftxui::Elements{std::move(child)}), bg_(bg) {}
+
+    void ComputeRequirement() override {
+        Node::ComputeRequirement();
+        requirement_ = children_[0]->requirement();
+    }
+
+    void SetBox(ftxui::Box box) override {
+        Node::SetBox(box);
+        children_[0]->SetBox(box);
+    }
+
+    void Render(ftxui::Screen& screen) override {
+        Node::Render(screen);
+        const int x_max = std::min(box_.x_max, screen.dimx() - 1);
+        const int y_max = std::min(box_.y_max, screen.dimy() - 1);
+        for (int y = std::max(box_.y_min, 0); y <= y_max; ++y) {
+            for (int x = std::max(box_.x_min, 0); x <= x_max; ++x) {
+                auto& cell = screen.CellAt(x, y);
+                if (cell.background_color == ftxui::Color::Default) cell.background_color = bg_;
+            }
+        }
+    }
+
+private:
+    ftxui::Color bg_;
+};
+
 }  // namespace
+
+ftxui::Decorator SelectionStyle(const Theme& theme) {
+    const ftxui::Color fg = theme.ColorFor("row_focused");
+    const ftxui::Color bg = theme.ColorFor("status_bar_bg");
+    if (fg == ftxui::Color::Default || bg == ftxui::Color::Default) return ftxui::inverted;
+    return ftxui::color(fg) | ftxui::bgcolor(bg);
+}
+
+ftxui::Decorator Muted(const Theme& theme) {
+    ftxui::Color c = theme.ColorFor("muted");
+    if (c == ftxui::Color::Default) c = theme.ColorFor("system_message");
+    // Not color(Default): that would reset an enclosing tint (a modal's
+    // attention color) back to the terminal's foreground.
+    if (c == ftxui::Color::Default) return [](ftxui::Element e) { return e; };
+    return ftxui::color(c);
+}
+
+ftxui::Decorator FillBackground(ftxui::Color bg) {
+    return [bg](ftxui::Element child) -> ftxui::Element {
+        if (bg == ftxui::Color::Default) return child;
+        return std::make_shared<BackgroundFill>(std::move(child), bg);
+    };
+}
 
 Theme Theme::Parse(std::string_view json, ColorDepth depth,
                    const std::vector<std::string>* known_plugins) {
@@ -57,6 +115,7 @@ Theme Theme::Parse(std::string_view json, ColorDepth depth,
     }
 
     Theme theme;
+    theme.depth_ = depth;
     theme.name_ = doc.value("name", std::string{});
     if (!doc.contains("colors") || !doc.at("colors").is_object()) {
         throw std::runtime_error("theme '" + theme.name_ + "': no \"colors\" object");

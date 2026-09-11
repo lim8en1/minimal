@@ -657,7 +657,7 @@ ftxui::Component MakePromptEditor(
         }
 
         Elements lines;
-        lines.push_back(separator());
+        lines.push_back(separator() | color(theme.ColorFor("border_unfocused")));
 
         // The prompt body: SOFT-WRAPPED. FTXUI's Input renders one terminal
         // row per LOGICAL line (a split at '\n' and nothing else), so a long
@@ -692,7 +692,7 @@ ftxui::Component MakePromptEditor(
         if (state.content.empty()) {
             // Placeholder, decorated the way FTXUI's own Input renders one:
             // dim text with the caret parked at the row start.
-            body.push_back(text(kPromptPlaceholder) | dim | caret_deco);
+            body.push_back(text(kPromptPlaceholder) | Muted(theme) | caret_deco);
         } else {
             const auto cursor_byte = static_cast<std::size_t>(
                 std::clamp(state.cursor_position, 0, static_cast<int>(state.content.size())));
@@ -724,7 +724,9 @@ ftxui::Component MakePromptEditor(
         // first_row` tall starting at first_row, so y -> row is arithmetic.
         mouse_map->wrap = wrap;
         mouse_map->first_row = first_row;
-        lines.push_back(vbox(std::move(body)) | reflect(mouse_map->box));
+        // Body text role, not the terminal's own foreground.
+        lines.push_back(vbox(std::move(body)) | color(theme.ColorFor("assistant_message")) |
+                        reflect(mouse_map->box));
 
         if (state.list_open) {
             Elements items;

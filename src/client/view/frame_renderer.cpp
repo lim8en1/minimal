@@ -259,7 +259,7 @@ ftxui::Element FrameRenderer::Render() {
             rows.push_back(vbox({text("minimal") | bold,
                                  text("ctrl+o opens the session picker; typing starts a "
                                       "session") |
-                                     dim}) |
+                                     Muted(deps_.theme)}) |
                            center | flex);
         } else {
             for (auto& element : start) rows.push_back(std::move(element) | flex);
@@ -333,7 +333,7 @@ ftxui::Element FrameRenderer::Render() {
                          }) |
                          borderStyled(deps_.theme.ColorFor("border_focused"));
             } else {
-                framed = std::move(framed) | dim;
+                framed = std::move(framed) | Muted(deps_.theme);
             }
             rows.push_back(std::move(framed));
         }

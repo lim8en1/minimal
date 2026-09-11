@@ -23,6 +23,12 @@ namespace {
 using ftxui::Element;
 using ftxui::Elements;
 
+// A modal's internal divider, in the hairline role rather than the window's
+// `attention` tint -- dividers are structure, not a call to act.
+Element Rule(const Theme& theme) {
+    return ftxui::separator() | ftxui::color(theme.ColorFor("border_unfocused"));
+}
+
 // The modal body's height budget: what the content may take before the pinned
 // hint line and the window borders stop fitting on screen. Without a cap the
 // modal simply ran past the terminal's bottom edge -- and the KEYBOARD HINTS,
@@ -139,7 +145,7 @@ ftxui::Component MakePermissionModal(const PendingPermission& request, GrantTogg
         const PendingPermission& request = *request_state;
         Elements rows;
         rows.push_back(text("permission required") | bold | color(theme.ColorFor("attention")));
-        rows.push_back(text("tool: " + request.tool_name) | dim);
+        rows.push_back(text("tool: " + request.tool_name) | Muted(theme));
         rows.push_back(paragraph(request.summary));
         if (!request.complete) {
             // THE LOWER-BOUND OBLIGATION: say what the disclosure does not
@@ -162,7 +168,7 @@ ftxui::Component MakePermissionModal(const PendingPermission& request, GrantTogg
         }
         int active_grant_row = -1;
         if (!request.grants.empty()) {
-            rows.push_back(text("session grants (sent only with allow):") | dim);
+            rows.push_back(text("session grants (sent only with allow):") | Muted(theme));
             for (std::size_t i = 0; i < request.grants.size(); ++i) {
                 auto row = hbox({grant_container_val->ChildAt(static_cast<int>(i))->Render(),
                                  text(" allow " + request.grants[i].label() +
@@ -194,7 +200,7 @@ ftxui::Component MakePermissionModal(const PendingPermission& request, GrantTogg
                                text(std::to_string(i + 1) + ". " + choice.label)});
             if (is_selected) label |= bold;
             if (is_selected) selected_row = static_cast<int>(rows.size());
-            rows.push_back(hbox({std::move(label), text("  " + hint) | dim}));
+            rows.push_back(hbox({std::move(label), text("  " + hint) | Muted(theme)}));
         }
         int message_row = -1;
         if (state->composing) {
@@ -241,8 +247,8 @@ ftxui::Component MakePermissionModal(const PendingPermission& request, GrantTogg
                       PadHorizontal(vbox({
                           vbox(std::move(rows)) | yframe | vscroll_indicator |
                               size(HEIGHT, LESS_THAN, ModalBodyHeightBudget()),
-                          separator(),
-                          paragraph(footer_text) | dim,
+                          Rule(theme),
+                          paragraph(footer_text) | Muted(theme),
                       }))) |
                // 82, not 80: PadHorizontal above spends 2 columns of the
                // modal's own width on the new interior margin -- widening
@@ -383,8 +389,8 @@ ftxui::Component MakeConfirmationModal(const PendingConfirmation& request, const
                       PadHorizontal(vbox({
                           vbox(std::move(rows)) | yframe | vscroll_indicator |
                               size(HEIGHT, LESS_THAN, ModalBodyHeightBudget()),
-                          has_cancel ? separator() : emptyElement(),
-                          has_cancel ? text("esc: cancel") | dim : emptyElement(),
+                          has_cancel ? Rule(theme) : emptyElement(),
+                          has_cancel ? text("esc: cancel") | Muted(theme) : emptyElement(),
                       }))) |
                size(WIDTH, LESS_THAN, 72) | color(theme.ColorFor("attention"));  // see the 82 note above
     });
@@ -476,16 +482,18 @@ v1::AskUserResponse DismissedAnswer(const PendingAsk& request) {
 // wrapped and dimmed beneath it -- both hanging under the label column
 // instead of running off the modal's fixed width like a bare text() would.
 // Mirrors RadioboxOption::Simple()/CheckboxOption::Simple() styling (bold
-// when active, inverted when focused) so the only visible change is wrapping.
+// when active, highlighted when focused) so the only visible change is wrapping.
 ftxui::Element WrappedOptionEntry(const ftxui::EntryState& s, const char* marker_on,
-                                  const char* marker_off, const std::string& description) {
+                                  const char* marker_off, const std::string& description,
+                                  const ftxui::Decorator& selection,
+                                  const ftxui::Decorator& muted) {
     using namespace ftxui;
     Element marker = text(s.state ? marker_on : marker_off);
     Element label = paragraph(s.label);
     if (s.active) label |= bold;
-    if (s.focused) label |= inverted;
+    if (s.focused) label |= selection;
     Elements column = {label};
-    if (!description.empty()) column.push_back(paragraph(description) | dim);
+    if (!description.empty()) column.push_back(paragraph(description) | muted);
     return hbox({marker, vbox(std::move(column)) | flex});
 }
 
@@ -525,6 +533,8 @@ ftxui::Component MakeAskModal(const PendingAsk& request, const Theme& theme,
     const auto request_state = std::make_shared<PendingAsk>(request);
     const auto state = std::make_shared<AskModalState>();
     state->questions.resize(request_state->request.questions_size());
+    const ftxui::Decorator selection = SelectionStyle(theme);
+    const ftxui::Decorator muted = Muted(theme);
 
     Components question_components;
     for (int i = 0; i < request_state->request.questions_size(); ++i) {
@@ -554,8 +564,8 @@ ftxui::Component MakeAskModal(const PendingAsk& request, const Theme& theme,
                 // itself, not a list), so the description is baked into the
                 // closure by j rather than looked up through the entry state.
                 const std::string description = question.options(static_cast<int>(j)).description();
-                option_state.transform = [description](const EntryState& s) {
-                    return WrappedOptionEntry(s, "▣ ", "☐ ", description);
+                option_state.transform = [description, selection, muted](const EntryState& s) {
+                    return WrappedOptionEntry(s, "▣ ", "☐ ", description, selection, muted);
                 };
                 boxes.push_back(Checkbox(std::move(option_state)));
             }
@@ -578,10 +588,11 @@ ftxui::Component MakeAskModal(const PendingAsk& request, const Theme& theme,
             };
             // Radiobox's EntryState.index tracks the list position, so the
             // description can be looked up straight from the question.
-            radio_state.transform = [request_state, index](const EntryState& s) {
+            radio_state.transform = [request_state, index, selection,
+                                     muted](const EntryState& s) {
                 const std::string description =
                     request_state->request.questions(index).options(s.index).description();
-                return WrappedOptionEntry(s, "◉ ", "○ ", description);
+                return WrappedOptionEntry(s, "◉ ", "○ ", description, selection, muted);
             };
             block.push_back(Radiobox(std::move(radio_state)));
         }
@@ -637,7 +648,7 @@ ftxui::Component MakeAskModal(const PendingAsk& request, const Theme& theme,
             int first_line = -1;
             for (int i = 0; i < ask.request.questions_size(); ++i) {
                 const auto& question = ask.request.questions(i);
-                if (i > 0) rows.push_back(separator());
+                if (i > 0) rows.push_back(Rule(theme));
                 const std::string name =
                     question.header().empty()
                         ? "Question " + std::to_string(i + 1)
@@ -653,14 +664,14 @@ ftxui::Component MakeAskModal(const PendingAsk& request, const Theme& theme,
                           PadHorizontal(vbox({
                               vbox(std::move(rows)) | yframe | vscroll_indicator |
                                   size(HEIGHT, LESS_THAN, ModalBodyHeightBudget()),
-                              separator(),
-                              paragraph("enter: submit  ·  esc: edit answers") | dim,
+                              Rule(theme),
+                              paragraph("enter: submit  ·  esc: edit answers") | Muted(theme),
                           }))) |
                    size(WIDTH, LESS_THAN, 82) | color(theme.ColorFor("attention"));
         }
         for (int i = 0; i < ask.request.questions_size(); ++i) {
             const auto& question = ask.request.questions(i);
-            if (i > 0) rows.push_back(separator());
+            if (i > 0) rows.push_back(Rule(theme));
             if (!question.header().empty()) {
                 rows.push_back(text(question.header()) | bold);
             }
@@ -674,8 +685,8 @@ ftxui::Component MakeAskModal(const PendingAsk& request, const Theme& theme,
                       PadHorizontal(vbox({
                           vbox(std::move(rows)) | yframe | vscroll_indicator |
                               size(HEIGHT, LESS_THAN, ModalBodyHeightBudget()),
-                          separator(),
-                          paragraph("enter: review  ·  esc: dismiss  ·  tab/arrow: move") | dim,
+                          Rule(theme),
+                          paragraph("enter: review  ·  esc: dismiss  ·  tab/arrow: move") | Muted(theme),
                       }))) |
                size(WIDTH, LESS_THAN, 82) | color(theme.ColorFor("attention"));
     });

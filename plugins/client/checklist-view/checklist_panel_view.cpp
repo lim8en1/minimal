@@ -41,7 +41,7 @@ ftxui::Element ChecklistPanelView::StatusGlyph(const Item& item) const {
     using namespace ftxui;
     switch (item.status) {
         case Status::Completed:
-            return hbox({text("[x]") | dim, text(" ")});
+            return hbox({text("[x]") | color(ColorFor("muted")), text(" ")});
         case Status::InProgress:
             // The active marker gets the accent: it is what "what's running
             // right now" wants the eye to find.
@@ -58,15 +58,15 @@ ftxui::Element ChecklistPanelView::FocusedSurface() const {
     Elements rows;
 
     if (!snapshot.ever_fetched) {
-        rows.push_back(text(" fetching…") | dim | color(ColorFor("system_message")));
+        rows.push_back(text(" fetching…") | color(ColorFor("system_message")));
         return vbox(std::move(rows));
     }
     if (!snapshot.valid) {
-        rows.push_back(text(" last update failed; retrying") | dim | color(ColorFor("error")));
+        rows.push_back(text(" last update failed; retrying") | color(ColorFor("error")));
     }
     if (snapshot.items.empty()) {
         if (snapshot.valid) {
-            rows.push_back(text(" (no tasks)") | dim | color(ColorFor("system_message")));
+            rows.push_back(text(" (no tasks)") | color(ColorFor("system_message")));
         }
         return vbox(std::move(rows));
     }
@@ -75,10 +75,9 @@ ftxui::Element ChecklistPanelView::FocusedSurface() const {
         rows.push_back(hbox({StatusGlyph(item), paragraph(item.text)}));
     }
     const Counts counts = CountOf(snapshot.items);
-    rows.push_back(text(" ") | dim);  // spacer
+    rows.push_back(text(" "));  // spacer
     rows.push_back(text(std::to_string(counts.done) + "/" + std::to_string(counts.total) +
-                        " done") |
-                    dim | color(ColorFor("system_message")));
+                        " done") | color(ColorFor("system_message")));
     return vbox(std::move(rows));
 }
 
@@ -87,12 +86,12 @@ ftxui::Element ChecklistPanelView::SummarySurface() const {
     Elements rows;
 
     if (!poller_->AllEverFetched()) {
-        rows.push_back(text(" fetching…") | dim | color(ColorFor("system_message")));
+        rows.push_back(text(" fetching…") | color(ColorFor("system_message")));
         return vbox(std::move(rows));
     }
     const auto all_items = poller_->AllItems();
     if (!poller_->AllValid()) {
-        rows.push_back(text(" last update failed; retrying") | dim | color(ColorFor("error")));
+        rows.push_back(text(" last update failed; retrying") | color(ColorFor("error")));
     }
 
     // Open tabs only, in the host's own order (focused first): the summary
@@ -113,8 +112,7 @@ ftxui::Element ChecklistPanelView::SummarySurface() const {
                 color(ColorFor("border_focused")),
             text(tab.display_name.empty() ? tab.session_id : tab.display_name) |
                 color(ColorFor("assistant_message")),
-            text("  " + std::to_string(counts.done) + "/" + std::to_string(counts.total)) |
-                dim | color(ColorFor("system_message")),
+            text("  " + std::to_string(counts.done) + "/" + std::to_string(counts.total)) | color(ColorFor("system_message")),
         });
         if (counts.active > 0) {
             line = hbox({std::move(line),
@@ -125,7 +123,7 @@ ftxui::Element ChecklistPanelView::SummarySurface() const {
         ++lines;
     }
     if (lines == 0) {
-        rows.push_back(text(" (no open tabs with tasks)") | dim |
+        rows.push_back(text(" (no open tabs with tasks)") |
                        color(ColorFor("system_message")));
     }
     return vbox(std::move(rows));
@@ -139,7 +137,7 @@ ftxui::Element ChecklistPanelView::RenderBody() const {
     rows.push_back(hbox({
         text(mode_ == Mode::Focused ? " tasks · this tab" : " tasks · all tabs") |
             color(ColorFor("syntax_function")),
-        text(" (tab to switch)") | dim | color(ColorFor("system_message")),
+        text(" (tab to switch)") | color(ColorFor("system_message")),
     }));
     rows.push_back(mode_ == Mode::Focused ? FocusedSurface() : SummarySurface());
     return vbox(std::move(rows));

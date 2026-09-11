@@ -179,15 +179,9 @@ ftxui::Element RenderTabCell(const AppState::TabSnapshot& tab, const std::string
 
     Element content = text(label);
     content |= color(StateColor(tab.state, active, theme));
-    // `dim` stacking on an already-borderline color was exactly what made an
-    // idle, unfocused tab (border_unfocused, 1.70:1 dark / 1.16:1 light)
-    // unreadable -- now that Idle uses a legible role on its own
-    // (StateColor above), it no longer needs `dim` to read as "not focused".
-    if (active) {
-        content |= bold;
-    } else if (tab.state != SessionStateKind::Idle) {
-        content |= dim;
-    }
+    // No `dim` for unfocused tabs: SGR dim is terminal-defined and unreadable
+    // in practice. Focus reads from bold + the status_bar_bg fill below.
+    if (active) content |= bold;
 
     const std::string glyph = StateGlyph(tab.state);
     if (!glyph.empty()) {
@@ -237,14 +231,14 @@ ftxui::Element RenderTabBar(const std::vector<AppState::TabSnapshot>& tabs, cons
 
     Elements cells;
     if (window.hidden_before > 0) {
-        cells.push_back(text("«" + std::to_string(window.hidden_before) + " ") | dim);
+        cells.push_back(text("«" + std::to_string(window.hidden_before) + " ") | Muted(theme));
     }
     for (std::size_t i = window.visible_start; i < window.visible_end; ++i) {
-        if (!cells.empty()) cells.push_back(text(" │ ") | dim);  // never let labels fuse
+        if (!cells.empty()) cells.push_back(text(" │ ") | Muted(theme));  // never let labels fuse
         cells.push_back(RenderTabCell(tabs[i], labels[i], theme));
     }
     if (window.hidden_after > 0) {
-        cells.push_back(text(" " + std::to_string(window.hidden_after) + "»") | dim);
+        cells.push_back(text(" " + std::to_string(window.hidden_after) + "»") | Muted(theme));
     }
     return hbox(std::move(cells));
 }

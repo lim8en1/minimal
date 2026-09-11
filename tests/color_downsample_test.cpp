@@ -45,6 +45,13 @@ TEST_CASE("Downsample to 16 colors picks the nearest palette entry") {
           ftxui::Color(ftxui::Color::Blue));  // (0,0,170) beats (85,85,255)
 }
 
+TEST_CASE("Downsample at ColorDepth::None emits no color at all") {
+    // Not a gray: any explicit color still writes a 38;2 SGR, which is what
+    // NO_COLOR forbids and what TERM=dumb prints as garbage.
+    CHECK(Downsample(255, 0, 0, ColorDepth::None) == ftxui::Color::Default);
+    CHECK(Downsample(128, 128, 128, ColorDepth::None) == ftxui::Color::Default);
+}
+
     TEST_CASE("NO_COLOR and TERM=dumb disable color entirely") {
         // The de-facto NO_COLOR standard and TERM=dumb were both ignored: colors
         // were emitted regardless, so a piped/monochrome terminal got SGR noise.

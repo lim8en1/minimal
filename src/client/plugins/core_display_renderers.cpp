@@ -82,9 +82,9 @@ Element Header(const ToolResultView& result, Elements detail, const Theme& theme
     line.push_back(text("▎tool " + name) | color(theme.ColorFor("syntax_function")));
     for (auto& element : detail) line.push_back(std::move(element));
     if (ctx.collapsed) {
-        line.push_back(text(" (collapsed -- " + ctx.toggle_collapse_hint + " to expand)") | dim);
+        line.push_back(text(" (collapsed -- " + ctx.toggle_collapse_hint + " to expand)") | Muted(theme));
     }
-    if (!ctx.collapse_marker.empty()) line.push_back(text(std::string(ctx.collapse_marker)) | dim);
+    if (!ctx.collapse_marker.empty()) line.push_back(text(std::string(ctx.collapse_marker)) | Muted(theme));
     return hbox(std::move(line));
 }
 
@@ -135,7 +135,7 @@ public:
         Elements parts{Header(result, std::move(detail), theme, ctx)};
         if (ctx.collapsed) return vbox(std::move(parts));
         if (hunks.empty()) {
-            parts.push_back(text("  (no changes)") | dim);
+            parts.push_back(text("  (no changes)") | Muted(theme));
             return vbox(std::move(parts));
         }
 
@@ -182,7 +182,7 @@ private:
                 op == "+" ? std::string(gutter, ' ') : PadLeft(std::to_string(old_no++), gutter);
             const std::string new_col =
                 op == "-" ? std::string(gutter, ' ') : PadLeft(std::to_string(new_no++), gutter);
-            Element numbers = text(old_col + " " + new_col + " ") | dim;
+            Element numbers = text(old_col + " " + new_col + " ") | Muted(theme);
             if (op == "+") {
                 ++new_index;
                 parts.push_back(hbox({numbers, text("+ " + texts[i]) |
@@ -219,7 +219,7 @@ public:
         Elements detail{text(" " + path) | color(theme.ColorFor("assistant_message")),
                         text("  lines " + std::to_string(start) + "–" + std::to_string(end) +
                              " of " + std::to_string(total)) |
-                            dim};
+                            Muted(theme)};
         Elements parts{Header(result, std::move(detail), theme, ctx)};
         if (ctx.collapsed) return vbox(std::move(parts));
 
@@ -232,11 +232,11 @@ public:
         for (std::size_t i = 0; i < code.size(); ++i) {
             parts.push_back(hbox({text(PadLeft(std::to_string(start + static_cast<int>(i)), gutter) +
                                        "  ") |
-                                      dim,
+                                      Muted(theme),
                                   code[i]}));
         }
         if (display.value("truncated", false) && total > end) {
-            parts.push_back(text("  ··· " + std::to_string(total - end) + " more lines") | dim);
+            parts.push_back(text("  ··· " + std::to_string(total - end) + " more lines") | Muted(theme));
         }
         return vbox(std::move(parts));
     }
@@ -269,7 +269,7 @@ public:
         detail.push_back(Badge(display, theme));
         if (display.contains("duration_ms")) {
             detail.push_back(text("  " + FormatDuration(display.at("duration_ms").get<std::int64_t>())) |
-                             dim);
+                             Muted(theme));
         }
         Elements parts{Header(result, std::move(detail), theme, ctx)};
         if (ctx.collapsed) return vbox(std::move(parts));
@@ -288,7 +288,7 @@ public:
         }
         if (!output.empty()) {
             parts.push_back(paragraph((cut ? "... " : "") + Printable(output)) |
-                            color(theme.ColorFor("system_message")) | dim);
+                            color(theme.ColorFor("system_message")));
         }
         return vbox(std::move(parts));
     }

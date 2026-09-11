@@ -445,16 +445,33 @@ Unknown keys ignored; the file is never rewritten (it is yours).
 
 Shape: `{ "name": ..., "colors": { ... } }` — hex color roles as in
 `bundled/themes/dark.json`: UI roles (`user_message`, `assistant_message`,
-`thinking`, `working`, `system_message`, `error`, `attention`,
+`thinking`, `working`, `system_message`, `muted`, `error`, `attention`,
 `border_focused`, `border_unfocused`, `row_focused`, `status_bar_bg`,
-`banner_art`, `banner_hint`) and syntax roles (`syntax_keyword`,
+`background`, `banner_art`, `banner_hint`), syntax roles (`syntax_keyword`,
 `syntax_string`, `syntax_comment`, `syntax_number`, `syntax_function`,
-`syntax_type`, `syntax_operator`, `syntax_plain`).
+`syntax_type`, `syntax_operator`, `syntax_plain`) and diff roles
+(`diff_added`, `diff_removed`, `diff_hunk`).
+
+- `assistant_message` is also the base color of message bodies and the prompt
+  editor's text; `syntax_plain` is the base color of code blocks.
+- `muted` is secondary text: hints, footers, line-number gutters, collapse
+  markers (falls back to `system_message`). The UI never uses SGR dim, whose
+  look is up to the terminal.
+- `border_unfocused` colors separators and rules.
+- `row_focused` on `status_bar_bg` is the picker / option cursor; with either
+  unset the terminal's reverse video is used instead.
+- `background` is **optional**: when set it paints every cell the UI leaves
+  unpainted; when omitted the terminal's own (possibly transparent)
+  background shows through.
+
+A missing role falls back to the terminal default. With `NO_COLOR` set or
+`TERM=dumb`, no colors are emitted at all.
 
 Bundled themes: `dark`, `light`, `lucent-crm`, `lucent-crm-light`,
-`lucent-grn`, `lucent-grn-light` — each tuned for one solid background
-(dark for black, `-light` for white). `slate` and `moss` are mid-tone
-themes for **transparent** terminal backgrounds: every text role stays
+`lucent-grn`, `lucent-grn-light` — each sets its own `background` (dark
+for the dark ones, near-white for `-light`), so they read the same on any
+terminal. `slate` and `moss` are mid-tone themes for **transparent**
+terminal backgrounds: they set no `background`, and every text role stays
 legible on both black and white, so they survive whatever the desktop
 shows through.
 

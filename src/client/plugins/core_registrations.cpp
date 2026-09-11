@@ -87,8 +87,8 @@ Element RenderUserAttachment(const ChatRow& row, const Theme& theme,
     const int lines = static_cast<int>(std::count(row.text.begin(), row.text.end(), '\n')) + 1;
     parts.push_back(hbox({text("▎@") | color(theme.ColorFor("user_message")),
                           text(row.attachment_path) | color(theme.ColorFor("user_message")),
-                          text(" (attached, " + std::to_string(lines) + " lines)") | dim,
-                          text(std::string(ctx.collapse_marker)) | dim}));
+                          text(" (attached, " + std::to_string(lines) + " lines)") | Muted(theme),
+                          text(std::string(ctx.collapse_marker)) | Muted(theme)}));
     if (!ctx.collapsed) {
         std::string body = row.text;
         bool truncated = false;
@@ -98,7 +98,7 @@ Element RenderUserAttachment(const ChatRow& row, const Theme& theme,
         }
         parts.push_back(paragraph(body) | color(theme.ColorFor("system_message")));
         if (truncated) {
-            parts.push_back(text("··· truncated, too large to render in full ···") | dim |
+            parts.push_back(text("··· truncated, too large to render in full ···") |
                             color(theme.ColorFor("system_message")));
         }
     }
@@ -108,17 +108,17 @@ Element RenderUserAttachment(const ChatRow& row, const Theme& theme,
 Element RenderThinking(const ChatRow& row, const Theme& theme, const RowRenderContext& ctx) {
     using namespace ftxui;
     if (ctx.collapsed) {
-        return hbox({text("▎thinking ") | color(theme.ColorFor("thinking")) | dim,
+        return hbox({text("▎thinking ") | color(theme.ColorFor("thinking")),
                      text("(" + std::to_string(static_cast<int>(row.text.size())) +
                           " chars, collapsed -- " + ctx.toggle_collapse_hint +
                           " to expand)") |
-                         color(theme.ColorFor("thinking")) | dim,
+                         color(theme.ColorFor("thinking")),
                      text(std::string(ctx.collapse_marker)) |
-                         color(theme.ColorFor("thinking")) | dim});
+                         color(theme.ColorFor("thinking"))});
     }
     return vbox({
-        hbox({text("▎thinking") | color(theme.ColorFor("thinking")) | dim,
-              text(std::string(ctx.collapse_marker)) | color(theme.ColorFor("thinking")) | dim}),
+        hbox({text("▎thinking") | color(theme.ColorFor("thinking")),
+              text(std::string(ctx.collapse_marker)) | color(theme.ColorFor("thinking"))}),
         paragraph(row.text) | color(theme.ColorFor("thinking")),
     });
 }
@@ -135,12 +135,12 @@ Element RenderToolActivity(const ChatRow& row, const Theme& theme, const RowRend
         // The call has no result in this page yet: mark it rather than
         // presenting an empty-ended entry ("tool bash" with nothing under it
         // read as a broken render, not as "running").
-        line.push_back(text(" ·") | color(theme.ColorFor("system_message")) | dim);
+        line.push_back(text(" ·") | color(theme.ColorFor("system_message")));
     }
     if (ctx.collapsed)
-        line.push_back(text(" (collapsed -- " + ctx.toggle_collapse_hint + " to expand)") | dim);
+        line.push_back(text(" (collapsed -- " + ctx.toggle_collapse_hint + " to expand)") | Muted(theme));
     if (!ctx.collapse_marker.empty())
-        line.push_back(text(std::string(ctx.collapse_marker)) | dim);
+        line.push_back(text(std::string(ctx.collapse_marker)) | Muted(theme));
     Elements parts;
     parts.push_back(hbox(std::move(line)));
 
@@ -164,7 +164,7 @@ Element RenderToolActivity(const ChatRow& row, const Theme& theme, const RowRend
         // what was run.
         const std::string summary = InputSummary(row.tool_input);
         if (!summary.empty()) {
-            parts.push_back(paragraph(summary) | color(theme.ColorFor("system_message")) | dim);
+            parts.push_back(paragraph(summary) | color(theme.ColorFor("system_message")));
         }
     }
     if (ctx.collapsed) return vbox(std::move(parts));
@@ -186,7 +186,7 @@ Element RenderToolActivity(const ChatRow& row, const Theme& theme, const RowRend
             body = "... " + (newline != std::string::npos ? body.substr(newline + 1)
                                                             : body.substr(tail_start));
         }
-        parts.push_back(paragraph(body) | color(theme.ColorFor("system_message")) | dim);
+        parts.push_back(paragraph(body) | color(theme.ColorFor("system_message")));
     }
     return vbox(std::move(parts));
 }
@@ -236,7 +236,10 @@ public:
         // continuity between "in flight" and "settled".
         return vbox({
             text("▎assistant") | color(theme.ColorFor("assistant_message")) | bold,
-            RenderAgentMarkdown(row, theme, engine_),
+            // The body's base color: markdown only styles spans, so without
+            // this the prose fell through to the terminal's own foreground.
+            RenderAgentMarkdown(row, theme, engine_) |
+                color(theme.ColorFor("assistant_message")),
         });
     }
 

@@ -41,7 +41,7 @@ ftxui::Element RenderToolsPanel(const std::vector<AppState::TabSnapshot>& tabs,
     // snapshot to feed it.
     Elements rows;
     rows.push_back(hbox({text(" running tools ") | bgcolor(theme.ColorFor("status_bar_bg")),
-                         text(" (live tail only; the transcript is authoritative)") | dim}));
+                         text(" (live tail only; the transcript is authoritative)") | Muted(theme)}));
 
     bool any = false;
     for (const auto& tab : tabs) {
@@ -57,12 +57,12 @@ ftxui::Element RenderToolsPanel(const std::vector<AppState::TabSnapshot>& tabs,
             } else {
                 line.push_back(text(" done") | color(theme.ColorFor("system_message")));
             }
-            line.push_back(text(" | " + tab.display_name) | dim);
+            line.push_back(text(" | " + tab.display_name) | Muted(theme));
             const std::string summary = (tool.summary.has_value() && !tool.summary->empty())
                                              ? *tool.summary
                                              : SummarizeToolInput(tool.tool_name, tool.input);
             if (!summary.empty()) {
-                line.push_back(text(" | " + summary) | dim);
+                line.push_back(text(" | " + summary) | Muted(theme));
             }
             rows.push_back(hbox(std::move(line)));
             const std::size_t tail_start = TailStart(tool.buffered_output, stdout_buffer_lines);
@@ -86,14 +86,14 @@ ftxui::Element RenderToolsPanel(const std::vector<AppState::TabSnapshot>& tabs,
                     const std::size_t newline = tail.find('\n', pos);
                     const std::size_t end = newline == std::string_view::npos ? tail.size() : newline;
                     rows.push_back(text("   " + std::string(tail.substr(pos, end - pos))) |
-                                   color(theme.ColorFor("system_message")) | dim);
+                                   color(theme.ColorFor("system_message")));
                     if (newline == std::string_view::npos) break;
                     pos = newline + 1;
                 }
             }
         }
     }
-    if (!any) rows.push_back(text(" (no tool activity)") | dim);
+    if (!any) rows.push_back(text(" (no tool activity)") | Muted(theme));
     // Pin the view to the newest row: the caller wraps this in yframe
     // (frame_renderer.cpp), which only auto-scrolls to a descendant marked
     // via focus() -- without one it stays pinned at offset 0 forever (the

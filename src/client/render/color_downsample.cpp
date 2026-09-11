@@ -101,13 +101,12 @@ ColorDepth DetectColorDepth() {
 ftxui::Color Downsample(uint8_t r, uint8_t g, uint8_t b, ColorDepth depth) {
     switch (depth) {
         case ColorDepth::None:
-            // Grayscale fallback rather than SGR suppression: the call sites
-            // render with ftxui colors, so "no color" here means the nearest
-            // gray for every requested RGB -- nothing ANSI is distinguishable
-            // on a dumb terminal anyway, and this keeps one code path.
-            return ftxui::Color(std::min(255, (r + g + b) / 3),
-                                std::min(255, (r + g + b) / 3),
-                                std::min(255, (r + g + b) / 3));
+            // The terminal default, i.e. no color SGR at all. This used to be a
+            // truecolor gray, which still emitted 38;2 sequences -- exactly
+            // what NO_COLOR asks us not to do, and garbage on TERM=dumb.
+            // Every call site already treats Default as "role not set".
+            (void)r, (void)g, (void)b;
+            return ftxui::Color::Default;
         case ColorDepth::Truecolor:
             return ftxui::Color(r, g, b);
         case ColorDepth::Palette256:

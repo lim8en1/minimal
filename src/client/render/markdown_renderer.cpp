@@ -25,7 +25,7 @@ struct InlineStyle {
     bool strikethrough = false;
     bool underline = false;
     bool code = false;
-    bool dim = false;
+    bool muted = false;
 };
 
 // A block being accumulated. Inline-bearing blocks (paragraph, heading, table
@@ -153,7 +153,7 @@ Element ApplyStyle(Element element, const InlineStyle& style, const Theme* theme
     if (style.italic) element = element | ftxui::italic;
     if (style.strikethrough) element = element | ftxui::strikethrough;
     if (style.underline) element = element | ftxui::underlined;
-    if (style.dim) element = element | ftxui::dim;
+    if (style.muted && theme != nullptr) element = element | Muted(*theme);
     return element;
 }
 
@@ -275,6 +275,9 @@ public:
                 break;
             case MD_BLOCK_HR:
                 rendered = ftxui::separator();
+                if (theme_ != nullptr) {
+                    rendered = rendered | ftxui::color(theme_->ColorFor("border_unfocused"));
+                }
                 break;
             case MD_BLOCK_TABLE:
                 rendered = block.table_rows.empty()
@@ -304,7 +307,7 @@ public:
             case MD_BLOCK_HTML:
                 // Raw HTML passes through dimmed; interpreting it is a browser's
                 // job, not a terminal's.
-                rendered = RenderInlineBlock(block) | ftxui::dim;
+                rendered = RenderInlineBlock(block) | Mute();
                 break;
             default:
                 // TR/THEAD/TBODY returned above; this only guards future md4c
@@ -351,9 +354,9 @@ public:
             case MD_SPAN_LATEXMATH:
             case MD_SPAN_LATEXMATH_DISPLAY:
                 // Math-heavy models emit $...$ constantly; a terminal cannot
-                // typeset it, but dimming separates live math from the prose
+                // typeset it, but muting separates live math from the prose
                 // around it instead of letting it read as ordinary text.
-                style.dim = true;
+                style.muted = true;
                 break;
             case MD_SPAN_WIKILINK:
                 break;
@@ -371,12 +374,12 @@ public:
             // constantly.
             if (block.link_text != block.link_href) {
                 PushStyledText(block, " <" + block.link_href + ">", InlineStyle{});
-                DimLast(block);
+                MuteLast(block);
             }
             block.link_href.clear();
         } else if (type == MD_SPAN_IMG && !block.img_src.empty()) {
             PushStyledText(block, "[image: " + block.img_src + "]", InlineStyle{});
-            DimLast(block);
+            MuteLast(block);
             block.img_src.clear();
         }
         return 0;
@@ -411,7 +414,7 @@ public:
                 break;
             case MD_TEXT_HTML:
                 PushStyledText(top, std::string(value), InlineStyle{});
-                DimLast(top);
+                MuteLast(top);
                 break;
             case MD_TEXT_ENTITY:
                 // md4c hands the entity's SOURCE text through and expects the
@@ -422,7 +425,7 @@ public:
                     top.code_text.append(value);
                 } else if (top.type == MD_BLOCK_HTML) {
                     PushStyledText(top, std::string(value), InlineStyle{});
-                    DimLast(top);
+                    MuteLast(top);
                 } else {
                     PushStyledText(top, DecodeEntity(value), CurrentStyle());
                 }
@@ -451,7 +454,7 @@ public:
                     // into code_text here was a dead write: HTML blocks render
                     // via RenderInlineBlock, which never reads code_text.
                     PushStyledText(top, std::string(value), InlineStyle{});
-                    DimLast(top);
+                    MuteLast(top);
                 } else {
                     PushStyledText(top, std::string(value), CurrentStyle());
                 }
@@ -487,9 +490,16 @@ private:
         }
     }
 
-    void DimLast(Block& block) {
+    // Secondary text in the theme's muted role -- never SGR dim, which
+    // terminals render unreadably.
+    ftxui::Decorator Mute() const {
+        if (theme_ != nullptr) return Muted(*theme_);
+        return [](Element e) { return e; };
+    }
+
+    void MuteLast(Block& block) {
         if (!block.current_runs.empty()) {
-            block.current_runs.back() = block.current_runs.back() | ftxui::dim;
+            block.current_runs.back() = block.current_runs.back() | Mute();
         }
     }
 
@@ -529,6 +539,13 @@ private:
         for (Element& line : lines) {
             indented.push_back(ftxui::hbox({ftxui::text("  "), std::move(line)}));
         }
+        // syntax_plain as the block's base color: untagged blocks and the
+        // highlighter's plain gaps read as code, not as the surrounding prose
+        // (token colors applied inside still win).
+        if (theme_ != nullptr) {
+            return ftxui::vbox(std::move(indented)) |
+                   ftxui::color(theme_->ColorFor("syntax_plain"));
+        }
         return ftxui::vbox(std::move(indented));
     }
 
@@ -536,7 +553,7 @@ private:
         Elements quoted;
         quoted.reserve(children.size());
         for (Element& child : children) {
-            quoted.push_back(ftxui::hbox({ftxui::text("> ") | ftxui::dim, std::move(child)}));
+            quoted.push_back(ftxui::hbox({ftxui::text("> ") | Mute(), std::move(child)}));
         }
         return ftxui::vbox(std::move(quoted));
     }

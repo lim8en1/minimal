@@ -263,7 +263,7 @@ private:
         return ftxui::paragraph(
                    "typing starts a session; ctrl+o opens the session picker;\n"
                    "/model and /agent choose what a session starts with") |
-               ftxui::dim | ftxui::color(theme.ColorFor("banner_hint")) | ftxui::hcenter;
+               ftxui::color(theme.ColorFor("banner_hint")) | ftxui::hcenter;
     }
 
     plugins::ViewSpec spec_{"logo.banner", "minimal banner", plugins::ViewPlacement::Panel, ""};

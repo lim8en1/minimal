@@ -953,7 +953,9 @@ ftxui::Elements SyntaxHighlighter::Highlight(std::string_view code,
     const auto emit_text = [&](std::string_view text, HighlightCategory category) {
         ftxui::Element element = ftxui::text(std::string(text));
         const ftxui::Color c = color_of(category);
-        if (category != HighlightCategory::Plain && c != ftxui::Color::Default) {
+        // Plain included: syntax_plain used to be looked up and then skipped,
+        // leaving untagged tokens in the terminal's own foreground.
+        if (c != ftxui::Color::Default) {
             element = element | ftxui::color(c);
         }
         current_line.push_back(element);

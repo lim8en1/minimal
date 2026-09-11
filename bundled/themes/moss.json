@@ -3,9 +3,10 @@
   "colors": {
     "user_message": "#5d9e4c",
     "assistant_message": "#829072",
-    "thinking": "#7f8c6d",
+    "thinking": "#948766",
     "working": "#4f9e6e",
     "system_message": "#7c8a6b",
+    "muted": "#6d7a5e",
     "error": "#c46a5a",
     "attention": "#9c8a2a",
     "border_focused": "#5d9e4c",

@@ -1832,6 +1832,12 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         }
         return false;
     });
+    // The theme's optional canvas color, outermost so it reaches every modal
+    // too. Read per frame: /theme swaps `theme` in place. A theme without
+    // `background` leaves the terminal's own (possibly transparent) bg.
+    final_tree = Renderer(final_tree, [inner = final_tree, &theme] {
+        return inner->Render() | minimal::client::FillBackground(theme.ColorFor("background"));
+    });
     tab_maintenance.Run();   // the first frame must not render an empty snapshot
 
     // Shutdown signal shared by both background threads below: notified once,

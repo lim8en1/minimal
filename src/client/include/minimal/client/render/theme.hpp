@@ -7,6 +7,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include <ftxui/dom/elements.hpp>
 #include <ftxui/screen/color.hpp>
 
 #include "minimal/client/render/color_downsample.hpp"
@@ -40,9 +41,13 @@ public:
     const std::string& name() const { return name_; }
     // Number of roles the theme defines. Visible for tests.
     std::size_t size() const { return colors_.size(); }
+    // The depth the roles were downsampled to, for colors that arrive from
+    // outside the theme (agent preset colors) and must be degraded the same way.
+    ColorDepth depth() const { return depth_; }
 
 private:
     std::string name_;
+    ColorDepth depth_ = ColorDepth::Truecolor;
     // Transparent hash + equality: ColorFor(string_view) looks up WITHOUT
     // constructing a std::string key per call (called per frame by the bars
     // and per highlight span stream).
@@ -58,5 +63,23 @@ private:
     };
     std::unordered_map<std::string, ftxui::Color, TransparentHash, TransparentEqual> colors_;
 };
+
+// The focused-row style for pickers and option lists: row_focused on
+// status_bar_bg, so the cursor follows the theme instead of swapping the
+// terminal's own fg/bg. Falls back to `inverted` when either role is unset (a
+// partial theme, or ColorDepth::None) -- a cursor must never vanish.
+ftxui::Decorator SelectionStyle(const Theme& theme);
+
+// Secondary text -- hints, footers, gutters, collapse affordances: the `muted`
+// role, falling back to system_message. This replaces SGR `dim`, which the
+// terminal renders however it likes (unreadable in practice). With neither
+// role set (NO_COLOR) it is a no-op: plain text, never dim.
+ftxui::Decorator Muted(const Theme& theme);
+
+// Paints `bg` into every cell the element leaves at the terminal-default
+// background, AFTER the element renders -- so it also reaches cells a Modal's
+// clear_under reset. Default `bg` is a no-op: transparent terminals keep
+// showing through (the mid-tone themes rely on that).
+ftxui::Decorator FillBackground(ftxui::Color bg);
 
 }  // namespace minimal::client

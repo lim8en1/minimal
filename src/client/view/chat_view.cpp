@@ -250,7 +250,7 @@ ftxui::Element ChatView::RenderLiveToolRow(const ToolExecutionState& tool) const
                                      ? *tool.summary
                                      : SummarizeToolInput(tool.tool_name, tool.input);
     if (!summary.empty()) {
-        line.push_back(text("  " + summary) | dim);
+        line.push_back(text("  " + summary) | Muted(theme_));
     }
     return hbox(std::move(line));
 }
@@ -283,28 +283,26 @@ ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
     // terminal" case, which used to leave the conversation pinned to the top
     // with a wall of blank space beneath it, far from the input box below.
     column.push_back(filler());
-    column.push_back(separator());
+    column.push_back(separator() | color(theme_.ColorFor("border_unfocused")));
     // A resumed session with more history than the initial page looked like
     // its full history unless the user already knew about chat.load_older
     // (PageUp) -- has_earlier_messages was never rendered anywhere.
     if (snapshot.has_earlier_messages) {
-        column.push_back(text("··· earlier messages available -- pageup to load ···") | dim |
+        column.push_back(text("··· earlier messages available -- pageup to load ···") |
                          color(theme_.ColorFor("system_message")));
     }
     // The sliding-window boundary (track R2): older-page loads beyond the cap
     // evicted pages from the window's NEWEST end, so this view's top is NOT
     // the live newest message. A marker here, never a silent gap.
     if (snapshot.scrollback_trimmed) {
-        column.push_back(text("··· newer messages hidden -- they return with the next turn ···") |
-                         dim | color(theme_.ColorFor("system_message")));
+        column.push_back(text("··· newer messages hidden -- they return with the next turn ···") | color(theme_.ColorFor("system_message")));
     }
     // A discontinuity INSIDE the window (older-page append landed out of
     // order -- e.g. a refresh racing a rewind): rows the transcript holds are
     // simply absent from this view, and without a marker the hole reads as
     // lost history. Same policy as the trimmed boundary: marked, never silent.
     if (snapshot.scrollback_gap) {
-        column.push_back(text("··· some messages in this window could not be loaded ···") |
-                         dim | color(theme_.ColorFor("system_message")));
+        column.push_back(text("··· some messages in this window could not be loaded ···") | color(theme_.ColorFor("system_message")));
     }
     // Assembly cache: the box/spy wrapping, row-cursor highlight, and
     // timestamp formatting below only need to redo their work when one of
@@ -362,7 +360,7 @@ ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
                     const auto stamp = FormatClockTime(row_timestamps_[i]);
                     if (!stamp.empty()) {
                         part = hbox({std::move(part) | flex,
-                                    text(stamp) | dim | color(theme_.ColorFor("system_message"))});
+                                    text(stamp) | color(theme_.ColorFor("system_message"))});
                     }
                 }
                 // Outermost wrap, after the focus/timestamp decoration: the spy
@@ -446,14 +444,16 @@ ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
             // present, matching tab_ui.cpp's AppendDelta/Finalize containment
             // for the same plugin-owned stream object.
             try {
-                column.push_back(live_text_streams[i].view->Render(theme_));
+                // Base body color, as on the settled row (core_registrations.cpp).
+                column.push_back(live_text_streams[i].view->Render(theme_) |
+                                 color(theme_.ColorFor("assistant_message")));
             } catch (const std::exception& error) {
                 common::DefaultLogger().warn("markdown stream Render threw: {}", error.what());
-                column.push_back(text("(render failed)") | dim);
+                column.push_back(text("(render failed)") | Muted(theme_));
             } catch (...) {
                 common::DefaultLogger().warn(
                     "markdown stream Render threw a non-standard exception");
-                column.push_back(text("(render failed)") | dim);
+                column.push_back(text("(render failed)") | Muted(theme_));
             }
             column.push_back(text(" "));
         } else if (segment.kind == LiveTurnSegment::Kind::Thinking) {
@@ -464,7 +464,7 @@ ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
             // only add latency -- this reads the segment text directly, the
             // same way RenderLiveToolRow reads its state.
             if (segment.text.empty()) continue;
-            column.push_back(text("▎thinking") | color(theme_.ColorFor("thinking")) | dim);
+            column.push_back(text("▎thinking") | color(theme_.ColorFor("thinking")));
             // paragraph() word-wraps the WHOLE accumulated text; skip redoing
             // that on a repaint tick with no new delta (a mouse move, a
             // keystroke elsewhere) by reusing the cached Element when this
