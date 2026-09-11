@@ -58,8 +58,11 @@ ftxui::Element RenderToolsPanel(const std::vector<AppState::TabSnapshot>& tabs,
                 line.push_back(text(" done") | color(theme.ColorFor("system_message")));
             }
             line.push_back(text(" | " + tab.display_name) | dim);
-            if (tool.summary.has_value() && !tool.summary->empty()) {
-                line.push_back(text(" | " + *tool.summary) | dim);
+            const std::string summary = (tool.summary.has_value() && !tool.summary->empty())
+                                             ? *tool.summary
+                                             : SummarizeToolInput(tool.tool_name, tool.input);
+            if (!summary.empty()) {
+                line.push_back(text(" | " + summary) | dim);
             }
             rows.push_back(hbox(std::move(line)));
             const std::size_t tail_start = TailStart(tool.buffered_output, stdout_buffer_lines);

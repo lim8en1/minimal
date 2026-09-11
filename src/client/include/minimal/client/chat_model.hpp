@@ -98,6 +98,33 @@ inline constexpr std::string_view kAskUserToolName = "ask_user";
 // spawn_subagent call: those are the harness speaking, and render as System.
 std::vector<ChatRow> ChatRowsFromMessages(const std::vector<v1::StoredMessage>& descending);
 
+// google.protobuf.Struct -> JSON, for a tool's input/args. Exposed here (the
+// definition lives in chat_model.cpp) so callers outside the transcript path
+// -- e.g. SessionState::OnToolStarted, which needs the SAME conversion for
+// the LIVE tool_use_id it just opened, not a persisted StoredMessage -- can
+// reuse it instead of re-deriving it from google::protobuf::Value by hand.
+nlohmann::json StructToJson(const google::protobuf::Struct& value);
+
+// A bounded one-line dump of a tool's raw input JSON (truncated at 120
+// chars), for a tool with no dedicated special case below.
+std::string InputSummary(const nlohmann::json& input);
+
+// bash's own $command, if `tool_name` is "bash" and `input` has one.
+std::optional<std::string> BashCommandOf(const std::string& tool_name, const nlohmann::json& input);
+
+// ask_user's own question text, if `tool_name` is kAskUserToolName and
+// `input` has one.
+std::optional<std::string> AskQuestionOf(const std::string& tool_name, const nlohmann::json& input);
+
+// The single-line merge of the three above -- bash's $command, ask_user's
+// question, or the generic JSON dump, in that preference order. Shared by
+// the persisted ToolActivity renderer (core_registrations.cpp, which also
+// uses the three individually for their distinct per-kind styling) and the
+// LIVE tool row renderers (ChatView::RenderLiveToolRow, RenderToolsPanel),
+// which have room for only one dim line and want it to read the same
+// whether the call is still running or already in the transcript.
+std::string SummarizeToolInput(const std::string& tool_name, const nlohmann::json& input);
+
 // CommandResult -> transient notice line. The return type is deliberately not
 // a ChatRow and not convertible to one: a command result has no path into the
 // chat model at compile time, which is the invariant (§4.4) expressed where it

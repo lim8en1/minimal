@@ -123,49 +123,6 @@ Element RenderThinking(const ChatRow& row, const Theme& theme, const RowRenderCo
     });
 }
 
-// A bounded one-line summary of what the tool was asked to do, for the row
-// header: the model's input IS the orientation ("which file", "which
-// command"), and a bare "tool bash" line with nothing under it reads as
-// noise. Compact JSON, truncated -- the authoritative record is persisted.
-std::string InputSummary(const nlohmann::json& input) {
-    if (input.is_null() || input.empty()) return "";
-    try {
-        std::string summary = input.dump();
-        if (summary.size() > 120) summary = summary.substr(0, 120) + "…";
-        return summary;
-    } catch (const std::exception&) {
-        return "";   // a non-serializable input degrades to no summary
-    }
-}
-
-// bash's own input shape (tools-bash plugin): {"command": "..."}. Every other
-// tool falls back to InputSummary's generic JSON dump -- this is a header
-// improvement for the single most common tool, not a general input schema.
-std::optional<std::string> BashCommandOf(const ChatRow& row) {
-    if (row.tool_name != "bash") return std::nullopt;
-    const auto it = row.tool_input.find("command");
-    if (it == row.tool_input.end() || !it->is_string()) return std::nullopt;
-    return it->get<std::string>();
-}
-
-// ask_user's input shape (tool-ask plugin): {"questions": [{"question":
-// ..., ...}]}. The question text is the row's orientation ("what was I
-// asked") -- the same job bash's $command does for its row -- and the raw
-// JSON dump of a full ask request is noise next to it.
-std::optional<std::string> AskQuestionOf(const ChatRow& row) {
-    if (row.tool_name != kAskUserToolName) return std::nullopt;
-    const auto questions = row.tool_input.find("questions");
-    if (questions == row.tool_input.end() || !questions->is_array() || questions->empty() ||
-        !(*questions)[0].is_object()) {
-        return std::nullopt;
-    }
-    std::string question = (*questions)[0].value("question", std::string{});
-    if (question.empty()) return std::nullopt;
-    constexpr std::size_t kMaxQuestion = 120;
-    if (question.size() > kMaxQuestion) question = question.substr(0, kMaxQuestion) + "…";
-    return question;
-}
-
 Element RenderToolActivity(const ChatRow& row, const Theme& theme, const RowRenderContext& ctx) {
     using namespace ftxui;
     const std::string name = row.tool_name.empty() ? std::string("tool") : row.tool_name;
@@ -187,8 +144,8 @@ Element RenderToolActivity(const ChatRow& row, const Theme& theme, const RowRend
     Elements parts;
     parts.push_back(hbox(std::move(line)));
 
-    const auto bash_command = BashCommandOf(row);
-    const auto ask_question = AskQuestionOf(row);
+    const auto bash_command = BashCommandOf(row.tool_name, row.tool_input);
+    const auto ask_question = AskQuestionOf(row.tool_name, row.tool_input);
     if (bash_command.has_value()) {
         // bash's real command, not a JSON dump of it -- the header IS the
         // orientation for the most common tool call.

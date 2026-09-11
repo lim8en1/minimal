@@ -48,6 +48,31 @@ v1::ContentBlock ToolResult(const std::string& id, const std::string& text, bool
 
 }  // namespace
 
+TEST_CASE("SummarizeToolInput prefers bash's $command over a generic dump",
+          "[chat_model][tool_summary]") {
+    nlohmann::json input = {{"command", "ls -la"}};
+    CHECK(client::SummarizeToolInput("bash", input) == "$ ls -la");
+}
+
+TEST_CASE("SummarizeToolInput prefers ask_user's question text over a generic dump",
+          "[chat_model][tool_summary]") {
+    nlohmann::json input = nlohmann::json::parse(R"({"questions":[{"question":"which branch?"}]})");
+    CHECK(client::SummarizeToolInput(std::string(client::kAskUserToolName), input) ==
+         "which branch?");
+}
+
+TEST_CASE("SummarizeToolInput falls back to a truncated JSON dump for other tools",
+          "[chat_model][tool_summary]") {
+    nlohmann::json input = {{"path", "a.md"}};
+    CHECK(client::SummarizeToolInput("read", input) == input.dump());
+}
+
+TEST_CASE("SummarizeToolInput is empty for null/empty input, not a bare \"{}\"",
+          "[chat_model][tool_summary]") {
+    CHECK(client::SummarizeToolInput("bash", nlohmann::json::object()).empty());
+    CHECK(client::SummarizeToolInput("bash", nlohmann::json()).empty());
+}
+
 TEST_CASE("a plain conversation renders user text and agent markdown",
           "[chat_model]") {
     // Descending seq, as GetMessages returns: assistant LAST (seq 1), user

@@ -45,6 +45,7 @@ std::vector<ToolExecutionState> SessionState::CopyToolsLocked(bool include_outpu
         t.tool_use_id = tool.tool_use_id;
         t.tool_name = tool.tool_name;
         t.summary = tool.summary;
+        t.input = tool.input;
         t.started_at_unix_ms = tool.started_at_unix_ms;
         t.started = tool.started;
         t.is_error = tool.is_error;
@@ -878,6 +879,7 @@ void SessionState::OnToolStarted(const v1::ToolExecutionEvent& evt) {
     tool.tool_use_id = evt.tool_use_id();
     tool.tool_name = evt.tool_name();
     tool.summary = evt.summary();
+    tool.input = StructToJson(evt.input());
     tool.started_at_unix_ms = std::chrono::milliseconds(evt.started_at_unix_ms());
     tools_.push_back(std::move(tool));
     // Track C4: a marker in the SAME arrival-order timeline text segments

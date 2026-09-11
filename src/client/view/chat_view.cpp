@@ -235,8 +235,14 @@ ftxui::Element ChatView::RenderLiveToolRow(const ToolExecutionState& tool) const
     } else {
         line.push_back(text(" done") | color(theme_.ColorFor("system_message")));
     }
-    if (tool.summary.has_value() && !tool.summary->empty()) {
-        line.push_back(text("  " + *tool.summary) | dim);
+    // tool.summary is currently always empty on the wire (rendering from
+    // tool_name + input is the client's job); tool.input is what actually
+    // carries the model's call args, so it's the real fallback, not a rare one.
+    const std::string summary = (tool.summary.has_value() && !tool.summary->empty())
+                                     ? *tool.summary
+                                     : SummarizeToolInput(tool.tool_name, tool.input);
+    if (!summary.empty()) {
+        line.push_back(text("  " + summary) | dim);
     }
     return hbox(std::move(line));
 }

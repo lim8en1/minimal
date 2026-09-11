@@ -40,6 +40,12 @@ struct ToolExecutionState {
     std::string tool_use_id;
     std::string tool_name;
     std::optional<std::string> summary;      // human-readable from ToolExecutionEvent
+    // The model's call args (ToolExecutionEvent.input), for SummarizeToolInput
+    // to build a one-line row summary from -- `summary` above is currently
+    // always empty on the wire (rendering from tool_name + input is the
+    // client's job; see agent_loop.hpp), so this is what the live row actually
+    // has to work with.
+    nlohmann::json input = nlohmann::json::object();
     std::chrono::milliseconds started_at_unix_ms{-1};  // server-supplied timestamp
 
     // Accumulated chunks arrive here (lossy ring buffer). The final authoritative

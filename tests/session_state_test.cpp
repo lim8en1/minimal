@@ -395,6 +395,27 @@ TEST_CASE("a fresh assistant turn and terminal events clear a pending ask", "[se
     }
 }
 
+TEST_CASE("OnToolStarted carries the call's input through to the snapshot, "
+          "for the live row's SummarizeToolInput",
+          "[session_state][tool]") {
+    // The wire's ToolExecutionEvent.summary is currently always empty in
+    // production (rendering from tool_name + input is the client's job) --
+    // this is the field the live row actually has to draw from.
+    v1::ToolExecutionEvent evt = StartTool("t-1", "bash");
+    (*evt.mutable_input()->mutable_fields())["command"].set_string_value("ls -la");
+
+    SessionState state("s-1");
+    state.OnToolStarted(evt);
+
+    const auto snapshot = state.TakeSnapshot();
+    REQUIRE(snapshot.tools.size() == 1);
+    CHECK(snapshot.tools[0].input.at("command") == "ls -la");
+
+    const auto light = state.TakeLightSnapshot();
+    REQUIRE(light.tools.size() == 1);
+    CHECK(light.tools[0].input.at("command") == "ls -la");
+}
+
 TEST_CASE("tool tracking: start -> deltas -> finish, keyed by tool_use_id", "[session_state]") {
     SessionState state("s-1");
     state.OnToolStarted(StartTool("t-1"));
