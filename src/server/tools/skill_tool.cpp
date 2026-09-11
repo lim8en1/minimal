@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <optional>
+#include <system_error>
 #include <utility>
 
 namespace minimal::tools {
@@ -41,7 +42,8 @@ SkillTool::SkillTool(const config::SkillRegistry& registry) : registry_(registry
     spec_.definition.name = spec_.name;
     spec_.definition.description =
         "Load the full instructions for a skill by name. The skills available in this session, "
-        "with one-line descriptions, are listed in your system prompt.";
+        "with one-line descriptions, are listed in your system prompt. The result includes the "
+        "skill's directory, which may contain additional supporting files referenced by the skill.";
     spec_.definition.input_schema = {
         {"type", "object"},
         {"properties",
@@ -87,7 +89,17 @@ ToolResult SkillTool::execute(const nlohmann::json& input, ToolContext& ctx) {
     if (!body) {
         return Error("failed to read skill body: " + name);
     }
-    return ToolResult{false, std::move(*body), nlohmann::json{{"kind", "markdown"}}};
+    // Surface the skill's directory so the body can point at sibling files
+    // ("in that case load additional.md") and the model can resolve them with
+    // the read tool. Most skills are single-file; the line is unconditional so
+    // the model never has to guess whether the directory exists. Canonicalized
+    // so global and project-overlay skills report the same form (the global
+    // scan keeps the config dir as given; the overlay canonicalizes its root),
+    // and the read tool's confinement canonicalizes too.
+    std::error_code ec;
+    const std::filesystem::path dir = std::filesystem::weakly_canonical(meta->body_path.parent_path(), ec);
+    const std::string header = "skill directory: " + (ec ? meta->body_path.parent_path() : dir).string() + "\n\n";
+    return ToolResult{false, header + *body, nlohmann::json{{"kind", "markdown"}}};
 }
 
 std::optional<PermissionMode> SkillTool::mode_override_for(const nlohmann::json& input,

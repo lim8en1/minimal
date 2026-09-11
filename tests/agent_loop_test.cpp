@@ -1429,8 +1429,10 @@ TEST_CASE("the skill tool round-trips a lazy-loaded body through the loop", "[ag
     REQUIRE(block != nullptr);
     CHECK_FALSE(block->is_error);
     REQUIRE(block->content.size() == 1);
-    CHECK(std::get<llm::TextBlock>(block->content.front()).text ==
-          "Always run the smoke tests first.\n");
+    const std::string text = std::get<llm::TextBlock>(block->content.front()).text;
+    // The body arrives prefixed by the skill-directory header.
+    CHECK(text.starts_with("skill directory: "));
+    CHECK(text.ends_with("Always run the smoke tests first.\n"));
 }
 
 TEST_CASE("the skill tool is offered only when the preset allows skills", "[agent_loop][skills]") {

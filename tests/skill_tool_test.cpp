@@ -92,14 +92,41 @@ TEST_CASE("SkillTool spec: name, ReadOnly category, and the input schema", "[ski
     CHECK(spec.definition.input_schema.at("properties").at("name").at("type") == "string");
 }
 
-TEST_CASE("SkillTool returns the SKILL.md body verbatim, frontmatter stripped", "[skill_tool]") {
+TEST_CASE("SkillTool returns the SKILL.md body verbatim, frontmatter stripped, with a header "
+          "naming the skill directory",
+          "[skill_tool]") {
     SkillFixture fixture;
     ToolContext ctx = fixture.MakeContext({SkillFixture::Allow("alpha")});
 
     const ToolResult result = fixture.tool.execute({{"name", "alpha"}}, ctx);
 
     CHECK_FALSE(result.is_error);
-    CHECK(result.content_text == "Alpha body.\n");
+    // The header points at the skill's directory (sibling supporting files live
+    // there); the body itself is unchanged after the blank-line separator. The
+    // registry canonicalizes the project root before scanning it, so the path is
+    // compared canonically too (symlinked /var -> /private/var on macOS).
+    CHECK(result.content_text ==
+          "skill directory: " +
+              std::filesystem::weakly_canonical(fixture.config.dir / "skills" / "alpha").string() +
+              "\n\nAlpha body.\n");
+}
+
+TEST_CASE("SkillTool's header names the global skill directory when the project has no overlay",
+          "[skill_tool]") {
+    SkillFixture fixture;
+    ToolContext ctx = fixture.MakeContext({SkillFixture::Allow("alpha")});
+    // A different project root: alpha is no longer a project-local skill and
+    // resolves through the global registry, but its directory line must still
+    // point at the real files.
+    ctx.project_root = fixture.config.dir / "elsewhere";
+
+    const ToolResult result = fixture.tool.execute({{"name", "alpha"}}, ctx);
+
+    CHECK_FALSE(result.is_error);
+    CHECK(result.content_text ==
+          "skill directory: " +
+              std::filesystem::weakly_canonical(fixture.config.dir / "skills" / "alpha").string() +
+              "\n\nAlpha body.\n");
 }
 
 TEST_CASE("SkillTool rejects a missing, non-string, or empty name", "[skill_tool]") {
@@ -171,7 +198,7 @@ TEST_CASE("SkillTool admits every skill listed explicitly -- wildcard expansion 
 
     const ToolResult alpha = fixture.tool.execute({{"name", "alpha"}}, ctx);
     CHECK_FALSE(alpha.is_error);
-    CHECK(alpha.content_text == "Alpha body.\n");
+    CHECK(alpha.content_text.ends_with("Alpha body.\n"));
 
     const ToolResult broken = fixture.tool.execute({{"name", "broken"}}, ctx);
     CHECK(broken.is_error);
