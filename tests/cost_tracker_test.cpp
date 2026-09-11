@@ -96,6 +96,39 @@ TEST_CASE("LiteLLM ingestion converts per-token to per-mtok and skips the rest",
     CHECK(rates.at("some-model").cache_write_per_mtok == 3.125);
 }
 
+TEST_CASE("OpenRouter ingestion parses string pricing and skips the rest", "[cost_tracker]") {
+    const nlohmann::json document = nlohmann::json::parse(R"({
+        "data": [
+            {"id": "z-ai/glm-5.3-flash",
+             "pricing": {"prompt": "0.00000015", "completion": "0.0000005",
+                         "input_cache_read": "0.00000003"}},
+            {"id": "free-model", "pricing": {"prompt": "0", "completion": "0"}},
+            {"id": "numeric-values", "pricing": {"prompt": 0.0000025, "completion": 0.00001}},
+            {"id": "missing-completion", "pricing": {"prompt": "0.1"}},
+            {"id": "junk-price", "pricing": {"prompt": "ask", "completion": "0.1"}},
+            {"id": "trailing-junk", "pricing": {"prompt": "0.1 USD", "completion": "0.2"}},
+            {"id": "negative", "pricing": {"prompt": "-1", "completion": "0.2"}},
+            {"id": "no-pricing"},
+            {"id": "", "pricing": {"prompt": "0.1", "completion": "0.2"}}
+        ],
+        "total_count": 9
+    })");
+    const auto rates = IngestOpenRouterPrices(document);
+
+    REQUIRE(rates.size() == 3);
+    // Per-token 0.00000015 == $0.15 per million tokens.
+    CHECK(rates.at("z-ai/glm-5.3-flash").input_per_mtok == 0.15);
+    CHECK(rates.at("z-ai/glm-5.3-flash").output_per_mtok == 0.5);
+    CHECK(rates.at("z-ai/glm-5.3-flash").cache_read_per_mtok == 0.03);
+    // A free tier is a genuine $0 rate (usage still reported, so priced).
+    CHECK(rates.at("free-model").input_per_mtok == 0.0);
+    CHECK(rates.at("numeric-values").input_per_mtok == 2.5);
+    CHECK(rates.at("numeric-values").output_per_mtok == 10.0);
+
+    // No "data" array (or a non-array one) is simply an empty table.
+    CHECK(IngestOpenRouterPrices(nlohmann::json::parse(R"({"error": "x"})")).empty());
+}
+
 TEST_CASE("fetched-rates blob round-trips and rejects corruption", "[cost_tracker]") {
     FetchedRates rates;
     rates.fetched_at = "2026-08-31T00:00:00Z";
@@ -151,10 +184,13 @@ TEST_CASE("aggregation groups per model and keeps unpriced turns honest",
     CHECK(totals.unpriced_turns == 2);
 }
 
-TEST_CASE("rate resolution is config > fetched > bundled", "[cost_tracker][invariant]") {
+TEST_CASE("rate resolution is config > openrouter > litellm > bundled",
+          "[cost_tracker][invariant]") {
     Harness harness;
-    harness.store.SetFetchedRates(
-        FetchedRates{"t", {{"m", Rate{10.0, 10.0}}, {"only-fetched", Rate{7.0, 7.0}}}});
+    harness.store.SetFetchedRates(FetchedRates{
+        "t", {{"m", Rate{10.0, 10.0}}, {"only-litellm", Rate{7.0, 7.0}}}});
+    harness.store.SetOpenRouterFetchedRates(FetchedRates{
+        "t", {{"m", Rate{20.0, 20.0}}, {"only-openrouter", Rate{30.0, 30.0}}}});
 
     RateSources sources;
     sources.bundled_models = nlohmann::json::parse(R"({"m": {"input": 1.0, "output": 1.0}})");
@@ -164,9 +200,17 @@ TEST_CASE("rate resolution is config > fetched > bundled", "[cost_tracker][invar
 
     REQUIRE(table.Resolve("m"));
     CHECK(table.Resolve("m")->input_per_mtok == 100.0);
-    REQUIRE(table.Resolve("only-fetched"));
-    CHECK(table.Resolve("only-fetched")->input_per_mtok == 7.0);
-    CHECK(!table.Resolve("absolutely-unknown"));
+    // A slug both snapshots carry resolves to OpenRouter's own price.
+    sources.config_rates = nlohmann::json::object();
+    RateTable no_config(sources, &harness.storage);
+    no_config.RefreshFetched();
+    REQUIRE(no_config.Resolve("m"));
+    CHECK(no_config.Resolve("m")->input_per_mtok == 20.0);
+    REQUIRE(no_config.Resolve("only-openrouter"));
+    CHECK(no_config.Resolve("only-openrouter")->input_per_mtok == 30.0);
+    REQUIRE(no_config.Resolve("only-litellm"));
+    CHECK(no_config.Resolve("only-litellm")->input_per_mtok == 7.0);
+    CHECK(!no_config.Resolve("absolutely-unknown"));
 
     // The store write a later process makes is picked up by RefreshFetched --
     // the snapshot outranking the stale bundled copy is what makes fetching
@@ -175,7 +219,16 @@ TEST_CASE("rate resolution is config > fetched > bundled", "[cost_tracker][invar
     RateTable reload(sources, &harness.storage);
     reload.RefreshFetched();
     REQUIRE(reload.Resolve("m"));
-    CHECK(reload.Resolve("m")->input_per_mtok == 10.0);
+    CHECK(reload.Resolve("m")->input_per_mtok == 20.0);
+
+    // One corrupt snapshot blob clears only ITS tier: the LiteLLM data must
+    // survive a corrupt OpenRouter blob (and vice versa).
+    harness.storage.Set("cost-tracker", "rates/fetched_openrouter", "{not json");
+    RateTable with_corrupt(sources, &harness.storage);
+    with_corrupt.RefreshFetched();
+    REQUIRE(with_corrupt.Resolve("only-litellm"));
+    CHECK(with_corrupt.Resolve("only-litellm")->input_per_mtok == 7.0);
+    CHECK(!with_corrupt.Resolve("only-openrouter"));
 }
 
 TEST_CASE("the store round-trips history and pins the parent", "[cost_tracker]") {
@@ -372,17 +425,21 @@ TEST_CASE("plugin settings parse from the config slice with defaults",
           "[cost_tracker]") {
     const auto defaults = ParseCostSettings(nlohmann::json::object());
     CHECK(!defaults.rates_fetch_url.empty());
+    CHECK(!defaults.openrouter_rates_fetch_url.empty());
     CHECK(defaults.rates_fetch_timeout_ms == 30000);
 
     const auto custom = ParseCostSettings(nlohmann::json::parse(
-        R"({"rates_fetch_url": "http://mirror/x.json", "rates_fetch_timeout_ms": 5})"));
+        R"({"rates_fetch_url": "http://mirror/x.json", "rates_fetch_timeout_ms": 5, )"
+        R"("openrouter_rates_fetch_url": "http://mirror/or.json"})"));
     CHECK(custom.rates_fetch_url == "http://mirror/x.json");
+    CHECK(custom.openrouter_rates_fetch_url == "http://mirror/or.json");
     CHECK(custom.rates_fetch_timeout_ms == 5);
 
     // Junk values keep defaults rather than poisoning the fetch.
-    const auto junk = ParseCostSettings(
-        nlohmann::json::parse(R"({"rates_fetch_url": 3, "rates_fetch_timeout_ms": -1})"));
+    const auto junk = ParseCostSettings(nlohmann::json::parse(
+        R"({"rates_fetch_url": 3, "openrouter_rates_fetch_url": [], "rates_fetch_timeout_ms": -1})"));
     CHECK(junk.rates_fetch_url == defaults.rates_fetch_url);
+    CHECK(junk.openrouter_rates_fetch_url == defaults.openrouter_rates_fetch_url);
     CHECK(junk.rates_fetch_timeout_ms == 30000);
 }
 
@@ -610,10 +667,11 @@ TEST_CASE("a failed rates fetch keeps the old table", "[cost_tracker]") {
     RateTable rates(sources, &harness.storage);
     harness.store.AppendTurn("s1", "", Turn("m1", 1000000, 0));
 
-    // An unroutable port: the command must fail cleanly and the price must
-    // survive. (No live network in tests; this hits nothing.)
+    // Unroutable ports for BOTH sources: the command must fail cleanly and
+    // the price must survive. (No live network in tests; this hits nothing.)
     CostSettings settings;
     settings.rates_fetch_url = "http://127.0.0.1:1/x.json";
+    settings.openrouter_rates_fetch_url = "http://127.0.0.1:1/or.json";
     settings.rates_fetch_timeout_ms = 2000;
 
     testing::CommandFixture fixture;

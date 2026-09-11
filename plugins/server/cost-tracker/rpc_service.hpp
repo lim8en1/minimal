@@ -9,10 +9,12 @@
 // Methods (JSON in, JSON out):
 //   totals {"session_id": "..."} -> the session's totals (see TotalsToJson)
 //   list   {}                    -> {"sessions": [totals...]}   every session
-//   refresh_rates {}             -> fetches the LiteLLM snapshot now; same
+//   refresh_rates {}             -> fetches both pricing snapshots now; same
 //                                   path as /cost-update-rates. Returns
-//                                   {"updated": N, "fetched_at": "..."} or
-//                                   !ok with the failure.
+//                                   {"updated": N, "litellm_updated": N,
+//                                   "openrouter_updated": N, "fetched_at":
+//                                   "...", "warning": "..."} or !ok with the
+//                                   failure (both sources down).
 //
 // Threading: Handle runs on gRPC handler threads, concurrently across calls;
 // all state sits behind PluginStorage's per-call mutex and RateTable's own.

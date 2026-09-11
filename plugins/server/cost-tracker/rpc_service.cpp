@@ -126,7 +126,10 @@ plugins::PluginRpcHandler::Reply CostRpcService::Handle(const std::string& metho
             return reply;
         }
         reply.payload = nlohmann::json{{"updated", outcome.updated},
-                                       {"fetched_at", outcome.fetched_at}}
+                                       {"litellm_updated", outcome.litellm_updated},
+                                       {"openrouter_updated", outcome.openrouter_updated},
+                                       {"fetched_at", outcome.fetched_at},
+                                       {"warning", outcome.warning}}
                             .dump();
         return reply;
     }

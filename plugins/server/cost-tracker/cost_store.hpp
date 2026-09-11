@@ -69,6 +69,12 @@ public:
     // Throws std::runtime_error on I/O failure.
     void SetFetchedRates(const FetchedRates& rates);
 
+    // The same shape, under "rates/fetched_openrouter". The two snapshots are
+    // separate blobs so each refreshes (and corrupts) independently.
+    std::optional<FetchedRates> GetOpenRouterFetchedRates() const;
+    // Throws std::runtime_error on I/O failure.
+    void SetOpenRouterFetchedRates(const FetchedRates& rates);
+
 private:
     plugins::PluginStorage* storage_;  // borrowed; may be null
 };

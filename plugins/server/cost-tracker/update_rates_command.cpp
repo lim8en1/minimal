@@ -13,12 +13,16 @@ commands::CommandResult UpdateRatesCommand::Execute(commands::CommandContext&,
     }
     const auto outcome = FetchAndUpdateRates(settings_, store_, rates_);
     if (!outcome.ok) {
-        // The previously fetched (or bundled) table stays in force -- a failed
+        // The previously fetched (or bundled) tables stay in force -- a failed
         // refresh degrades to the stale price, never to no price.
         return commands::CommandResult::Error(outcome.error);
     }
-    return commands::CommandResult::Ok("updated " + std::to_string(outcome.updated) +
-                                       " model rates (snapshot of " + outcome.fetched_at + ")");
+    std::string message = "updated " + std::to_string(outcome.updated) + " model rates (LiteLLM " +
+                          std::to_string(outcome.litellm_updated) + ", OpenRouter " +
+                          std::to_string(outcome.openrouter_updated) + ") (snapshot of " +
+                          outcome.fetched_at + ")";
+    if (!outcome.warning.empty()) message += "; " + outcome.warning;
+    return commands::CommandResult::Ok(message);
 }
 
 }  // namespace minimal::cost_tracker

@@ -170,4 +170,16 @@ void CostStore::SetFetchedRates(const FetchedRates& rates) {
     storage_->Set(kStorageNamespace, kFetchedRatesKey, FetchedToJson(rates).dump());
 }
 
+std::optional<FetchedRates> CostStore::GetOpenRouterFetchedRates() const {
+    if (storage_ == nullptr) return std::nullopt;
+    const auto blob = storage_->Get(kStorageNamespace, kOpenRouterFetchedRatesKey);
+    if (!blob) return std::nullopt;
+    return FetchedFromJson(*blob);
+}
+
+void CostStore::SetOpenRouterFetchedRates(const FetchedRates& rates) {
+    if (storage_ == nullptr) return;
+    storage_->Set(kStorageNamespace, kOpenRouterFetchedRatesKey, FetchedToJson(rates).dump());
+}
+
 }  // namespace minimal::cost_tracker

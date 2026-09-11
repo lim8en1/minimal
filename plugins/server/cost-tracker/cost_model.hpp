@@ -6,9 +6,17 @@
 // RATE SOURCES, in resolution order (first hit wins):
 //   1. the plugin's own config slice in plugins.json ("rates") -- the user's
 //      explicit prices, so they outrank everything;
-//   2. the fetched LiteLLM snapshot, cached in this plugin's storage by
-//      /cost-update-rates (opt-in network, never at startup);
-//   3. the seeded bundled snapshot (cost-rates.json in the config dir).
+//   2. the fetched OpenRouter snapshot (its own /api/v1/models list), cached
+//      in this plugin's storage by /cost-update-rates (opt-in network, never
+//      at startup);
+//   3. the fetched LiteLLM snapshot, same command, same opt-in rule;
+//   4. the seeded bundled snapshot (cost-rates.json in the config dir).
+//
+// The OpenRouter tier sits above LiteLLM because the wire ids an
+// OpenRouter-shaped provider sends ARE OpenRouter slugs ("z-ai/glm-5.3-flash"
+// -- the key inside providers.json's models map, whatever the provider is
+// named), so OpenRouter's own price for that exact string is the authoritative
+// one; LiteLLM's "openrouter/*" entries duplicate the same data and lag it.
 //
 // KEYS ARE MODEL IDS. The observer payload carries the request's model name
 // and nothing else (TurnSummary::model), so a rate is keyed by the model id
@@ -41,10 +49,12 @@ inline constexpr char kPluginName[] = "cost-tracker";
 inline constexpr char kStorageNamespace[] = "cost-tracker";
 
 // Storage layout keys. Session history is one blob per session under
-// "sessions/<session_id>"; the fetched-rates snapshot /cost-update-rates
-// writes and RateTable's third tier reads lives at "rates/fetched".
+// "sessions/<session_id>"; the two fetched-rates snapshots /cost-update-rates
+// writes and RateTable's middle tiers read live at "rates/fetched" (LiteLLM)
+// and "rates/fetched_openrouter".
 inline constexpr char kSessionKeyPrefix[] = "sessions/";
 inline constexpr char kFetchedRatesKey[] = "rates/fetched";
+inline constexpr char kOpenRouterFetchedRatesKey[] = "rates/fetched_openrouter";
 
 // USD per million tokens. Absent fields are 0, which is correct for models
 // without cache pricing -- it is also what a genuinely free tier looks like,
@@ -127,6 +137,14 @@ std::map<std::string, Rate> ParseRateTable(const nlohmann::json& models_object);
 // embedding-only) is skipped. Normalized to per-mtok on the way in.
 std::map<std::string, Rate> IngestLiteLlmPrices(const nlohmann::json& document);
 
+// OpenRouter's /api/v1/models reply: {"data": [{"id": "vendor/model",
+// "pricing": {"prompt": "0.00000015", "completion": "0.0000005", ...}}, ...]}.
+// Prices are per-token USD as JSON STRINGS (a numeric value is accepted for
+// tolerance). Kept entries are those with a string id and parseable prompt +
+// completion; free tiers ("0") ingest as a genuine $0 rate. Normalized to
+// per-mtok on the way in.
+std::map<std::string, Rate> IngestOpenRouterPrices(const nlohmann::json& document);
+
 struct FetchedRates {
     std::string fetched_at;  // ISO-8601 UTC, diagnostic only
     std::map<std::string, Rate> models;
@@ -144,20 +162,21 @@ struct RateSources {
     nlohmann::json bundled_models = nlohmann::json::object();
     nlohmann::json config_rates = nlohmann::json::object();
     std::optional<FetchedRates> fetched;
+    std::optional<FetchedRates> openrouter_fetched;
 };
 
-// Resolution: config > fetched > bundled. Thread-safe: /cost and the .rpc
-// service read from command-pool and gRPC threads while /cost-update-rates
-// swaps the fetched table.
+// Resolution: config > openrouter-fetched > litellm-fetched > bundled.
+// Thread-safe: /cost and the .rpc service read from command-pool and gRPC
+// threads while /cost-update-rates swaps the fetched tables.
 class RateTable {
 public:
     explicit RateTable(RateSources sources, plugins::PluginStorage* storage);
 
     std::optional<Rate> Resolve(const std::string& model) const;
 
-    // Re-reads the fetched snapshot from storage and swaps it in. Called at
-    // registration and after a successful /cost-update-rates. A missing or
-    // corrupt blob clears the fetched tier -- the next fetch repopulates it.
+    // Re-reads both fetched snapshots from storage and swaps them in. Called
+    // at registration and after /cost-update-rates. A missing or corrupt blob
+    // clears only THAT tier -- one corrupt snapshot must not lose the other.
     void RefreshFetched();
 
 private:
@@ -165,6 +184,7 @@ private:
     std::map<std::string, Rate> bundled_;
     std::map<std::string, Rate> config_;
     std::map<std::string, Rate> fetched_;
+    std::map<std::string, Rate> openrouter_fetched_;
     plugins::PluginStorage* storage_;  // borrowed; may be null
 };
 

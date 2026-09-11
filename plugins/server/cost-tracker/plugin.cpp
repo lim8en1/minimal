@@ -7,7 +7,8 @@
 //     plugins through the §2.2 service channel;
 //   - "cost-tracker.rpc" serves the same state as JSON over the generic
 //     PluginCall channel -- the data path the future UI view consumes;
-//   - /cost-update-rates is the opt-in live refresh of the LiteLLM snapshot.
+//   - /cost-update-rates is the opt-in live refresh of the LiteLLM and
+//     OpenRouter pricing snapshots.
 // All of them resolve prices through the same RateTable, so a report can never
 // disagree with itself, and the command-free sibling of the checklist shape:
 // the model has no tool here because cost is the operator's business.
@@ -17,14 +18,16 @@
 // (ARCHITECTURE.md names usage tracking among SessionObserver's uses, and
 // TurnSummary::model exists so a per-model rate is resolvable at all).
 //
-// PRICING. Three sources, config > fetched > bundled: the user's "rates"
-// slice in plugins.json, the LiteLLM snapshot cached by /cost-update-rates
-// (opt-in -- no network at startup, none during a turn), and the seeded
-// cost-rates.json in the config dir (bundled/ treatment: user-editable text,
-// never overwritten, never compiled in). Keys are model ids -- the ccusage
-// convention. A model with no rate anywhere, and a turn whose usage the
-// backend reported as all zeros (the known proxy gap), render as "unknown",
-// never as $0.00.
+// PRICING. Four sources, config > openrouter-fetched > litellm-fetched >
+// bundled: the user's "rates" slice in plugins.json, the OpenRouter snapshot
+// cached by /cost-update-rates (its slugs ARE the wire model ids an
+// OpenRouter-shaped provider sends, so no provider naming is consulted), the
+// LiteLLM snapshot from the same command (opt-in -- no network at startup,
+// none during a turn), and the seeded cost-rates.json in the config dir
+// (bundled/ treatment: user-editable text, never overwritten, never compiled
+// in). Keys are model ids -- the ccusage convention. A model with no rate
+// anywhere, and a turn whose usage the backend reported as all zeros (the
+// known proxy gap), render as "unknown", never as $0.00.
 //
 // LIFETIME. History blobs survive session termination and are NOT purged on
 // OnSessionEnded -- the checklist precedent: a resumed session keeps its

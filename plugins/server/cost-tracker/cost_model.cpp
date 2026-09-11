@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <string>
 
 namespace minimal::cost_tracker {
 namespace {
@@ -26,6 +27,37 @@ std::optional<double> PositiveNumber(const nlohmann::json& entry, const char* ke
     // value (inf/nan from an out-of-range float literal) is corruption.
     // Both are treated as absent -- CostFor would otherwise produce an
     // infected total that renders as $inf or $nan.
+    if (!(value >= 0.0) || !std::isfinite(value)) return std::nullopt;
+    return value;
+}
+
+constexpr const char* kOpenRouterPrompt = "prompt";
+constexpr const char* kOpenRouterCompletion = "completion";
+constexpr const char* kOpenRouterCacheRead = "input_cache_read";
+constexpr const char* kOpenRouterCacheWrite = "input_cache_write";
+
+// OpenRouter prices every field as a STRING of a decimal ("0.00000015");
+// a JSON number is accepted too, for tolerance against a format drift.
+// Same reject rules as PositiveNumber: negative, non-finite, or (for the
+// string form) anything not fully consumed as one decimal number.
+std::optional<double> OpenRouterPrice(const nlohmann::json& pricing, const char* key) {
+    const auto it = pricing.find(key);
+    if (it == pricing.end()) return std::nullopt;
+    double value = 0.0;
+    if (it->is_number()) {
+        value = it->get<double>();
+    } else if (it->is_string()) {
+        const std::string text = it->get<std::string>();
+        try {
+            std::size_t consumed = 0;
+            value = std::stod(text, &consumed);
+            if (consumed != text.size()) return std::nullopt;
+        } catch (const std::exception&) {
+            return std::nullopt;
+        }
+    } else {
+        return std::nullopt;
+    }
     if (!(value >= 0.0) || !std::isfinite(value)) return std::nullopt;
     return value;
 }
@@ -131,6 +163,35 @@ std::map<std::string, Rate> IngestLiteLlmPrices(const nlohmann::json& document) 
     return rates;
 }
 
+std::map<std::string, Rate> IngestOpenRouterPrices(const nlohmann::json& document) {
+    std::map<std::string, Rate> rates;
+    const auto data = document.find("data");
+    if (data == document.end() || !data->is_array()) return rates;
+    for (const auto& entry : *data) {
+        if (!entry.is_object()) continue;
+        const auto id = entry.find("id");
+        if (id == entry.end() || !id->is_string() || id->get<std::string>().empty()) continue;
+        const auto pricing = entry.find("pricing");
+        if (pricing == entry.end() || !pricing->is_object()) continue;
+        const auto in = OpenRouterPrice(*pricing, kOpenRouterPrompt);
+        const auto out = OpenRouterPrice(*pricing, kOpenRouterCompletion);
+        // Same both-fields rule as LiteLLM: a row without a usable pair of
+        // per-token prices is not a text-chat price at all.
+        if (!in || !out) continue;
+        Rate rate;
+        rate.input_per_mtok = *in * kTokensPerMtok;
+        rate.output_per_mtok = *out * kTokensPerMtok;
+        if (const auto v = OpenRouterPrice(*pricing, kOpenRouterCacheRead)) {
+            rate.cache_read_per_mtok = *v * kTokensPerMtok;
+        }
+        if (const auto v = OpenRouterPrice(*pricing, kOpenRouterCacheWrite)) {
+            rate.cache_write_per_mtok = *v * kTokensPerMtok;
+        }
+        rates.emplace(id->get<std::string>(), rate);
+    }
+    return rates;
+}
+
 nlohmann::json FetchedToJson(const FetchedRates& rates) {
     nlohmann::json models = nlohmann::json::object();
     for (const auto& [model, rate] : rates.models) {
@@ -166,26 +227,41 @@ RateTable::RateTable(RateSources sources, plugins::PluginStorage* storage)
     : bundled_(ParseRateTable(sources.bundled_models)),
       config_(ParseRateTable(sources.config_rates)),
       fetched_(sources.fetched ? sources.fetched->models : std::map<std::string, Rate>{}),
+      openrouter_fetched_(sources.openrouter_fetched ? sources.openrouter_fetched->models
+                                                     : std::map<std::string, Rate>{}),
       storage_(storage) {}
 
 void RateTable::RefreshFetched() {
     std::map<std::string, Rate> fetched;
+    std::map<std::string, Rate> openrouter;
     if (storage_ != nullptr) {
-        // Namespace is this plugin's own, so the blob is unreachable from
-        // outside; the key is the one /cost-update-rates writes.
+        // Namespace is this plugin's own, so the blobs are unreachable from
+        // outside; the keys are the ones /cost-update-rates writes. Each tier
+        // decodes independently: one corrupt snapshot must not lose the other.
         if (const auto blob = storage_->Get(kStorageNamespace, kFetchedRatesKey)) {
             if (const auto rates = FetchedFromJson(*blob)) fetched = rates->models;
         }
+        if (const auto blob = storage_->Get(kStorageNamespace, kOpenRouterFetchedRatesKey)) {
+            if (const auto rates = FetchedFromJson(*blob)) openrouter = rates->models;
+        }
     }
-    const std::lock_guard<std::mutex> lock(mu_);
-    fetched_ = std::move(fetched);
+    {
+        const std::lock_guard<std::mutex> lock(mu_);
+        fetched_ = std::move(fetched);
+        openrouter_fetched_ = std::move(openrouter);
+    }
 }
 
 std::optional<Rate> RateTable::Resolve(const std::string& model) const {
     const std::lock_guard<std::mutex> lock(mu_);
-    // config > fetched > bundled: the user's explicit price outranks a
-    // snapshot, and a fresh snapshot outranks the stale shipped one.
+    // config > openrouter > litellm > bundled: the user's explicit price
+    // outranks every snapshot, OpenRouter's own price for its slug outranks
+    // the derived copy in LiteLLM's catalog, and any snapshot outranks the
+    // stale shipped one.
     if (const auto it = config_.find(model); it != config_.end()) return it->second;
+    if (const auto it = openrouter_fetched_.find(model); it != openrouter_fetched_.end()) {
+        return it->second;
+    }
     if (const auto it = fetched_.find(model); it != fetched_.end()) return it->second;
     if (const auto it = bundled_.find(model); it != bundled_.end()) return it->second;
     return std::nullopt;
