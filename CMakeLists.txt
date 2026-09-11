@@ -68,25 +68,30 @@ if(DEFINED _minimal_triplet_arch AND DEFINED _minimal_triplet_os)
         message(STATUS "minimal: migrating vcpkg triplet ${_minimal_static_triplet} -> "
                        "${_minimal_static_triplet}-dynamic (dependencies rebuild once)")
         set(VCPKG_TARGET_TRIPLET "${_minimal_static_triplet}-dynamic" CACHE STRING "" FORCE)
-        # Changing the triplet alone is not enough: every find_package and
-        # find_library result of the old configure is cached (protobuf_DIR,
-        # ZLIB_LIBRARY, ...) and still points into the STATIC install tree, so
-        # the new configure would silently link the old static libraries.
-        # Drop those entries so they are found again under the new triplet.
-        # tools/ is kept: the host triplet is this same static name, and
-        # protoc and grpc_cpp_plugin really do live in its tools/ tree.
-        get_cmake_property(_minimal_cache_vars CACHE_VARIABLES)
-        foreach(_minimal_var IN LISTS _minimal_cache_vars)
-            get_property(_minimal_val CACHE "${_minimal_var}" PROPERTY VALUE)
-            if(_minimal_val MATCHES "/vcpkg_installed/${_minimal_static_triplet}/"
-               AND NOT _minimal_val MATCHES "/vcpkg_installed/${_minimal_static_triplet}/tools/")
-                unset("${_minimal_var}" CACHE)
-            endif()
-        endforeach()
     endif()
-    set(MINIMAL_TRIPLET_MIGRATED ON CACHE INTERNAL "")
     set(VCPKG_TARGET_TRIPLET "${_minimal_static_triplet}-dynamic" CACHE STRING
         "vcpkg target triplet (minimal requires dynamic library linkage)")
+endif()
+# Changing the triplet is not the whole migration: every find_package and
+# find_library result of a configure that predates dynamic linkage is cached
+# (protobuf_DIR, ZLIB_LIBRARY, ...) and still points into the install tree AS
+# IT WAS -- the renamed default's static tree, or, for the sanitizer triplets
+# (same name, linkage flipped underneath), a lib/ whose .a files vcpkg has
+# since replaced with .dylib/.so. Either way the new configure would link the
+# stale paths as-is. So, once per tree, drop every cached entry pointing into
+# a vcpkg install tree and let everything be found afresh. tools/ is kept:
+# the host triplet is still static, and protoc and grpc_cpp_plugin really do
+# live in its tools/ tree. A fresh tree has nothing cached; this is a no-op.
+if(NOT MINIMAL_TRIPLET_MIGRATED)
+    get_cmake_property(_minimal_cache_vars CACHE_VARIABLES)
+    foreach(_minimal_var IN LISTS _minimal_cache_vars)
+        get_property(_minimal_val CACHE "${_minimal_var}" PROPERTY VALUE)
+        if(_minimal_val MATCHES "/vcpkg_installed/[^/]+/"
+           AND NOT _minimal_val MATCHES "/vcpkg_installed/[^/]+/tools/")
+            unset("${_minimal_var}" CACHE)
+        endif()
+    endforeach()
+    set(MINIMAL_TRIPLET_MIGRATED ON CACHE INTERNAL "")
 endif()
 
 project(minimal
