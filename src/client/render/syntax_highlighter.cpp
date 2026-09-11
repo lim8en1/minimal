@@ -558,8 +558,15 @@ std::string CanonicalLanguage(std::string_view language,
         // into a vendored name that then resolved to nothing.) Anything NOT
         // registered falls through to the vendored aliases below, so the
         // default highlighting for "js" etc. is unchanged.
+        const auto iequals = [](std::string_view a, std::string_view b) {
+            return a.size() == b.size() &&
+                   std::equal(a.begin(), a.end(), b.begin(), [](char x, char y) {
+                       return std::tolower(static_cast<unsigned char>(x)) ==
+                              std::tolower(static_cast<unsigned char>(y));
+                   });
+        };
         for (const LanguageDefinition& entry : *languages) {
-            if (lower == entry.name) return lower;
+            if (iequals(lower, entry.name)) return lower;
         }
     }
     for (const Alias& alias : kAliases) {

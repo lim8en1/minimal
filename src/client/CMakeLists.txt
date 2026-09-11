@@ -19,6 +19,7 @@ add_library(minimal_client_core SHARED
     key_event_parser.cpp
     status_format.cpp
     ui_config.cpp
+    config_file_io.cpp
     chat_model.cpp
     scrollback_refresh.cpp
     tui_bootstrap.cpp

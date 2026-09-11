@@ -5,6 +5,7 @@
 #include <iterator>
 #include <system_error>
 
+#include "minimal/client/config_file_io.hpp"
 #include "minimal/client/plugins/client_plugin_loader.hpp"
 #include "minimal/client/plugins/core_registrations.hpp"
 #include "minimal/client/plugins/host_seams.hpp"
@@ -64,21 +65,34 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
         const auto config_path = out.config_dir / "client-plugins.json";
         std::error_code ec;
         if (std::filesystem::exists(config_path, ec)) {
-            std::ifstream in(config_path);
-            const std::string contents((std::istreambuf_iterator<char>(in)),
-                                       std::istreambuf_iterator<char>());
-            plugin_config = plugins::ParseClientPluginConfig(contents);
-            // ParseClientPluginConfig degrades a malformed file to an empty
-            // config; silently rewriting the user's bytes over that default
-            // would destroy their enablement decisions and per-plugin config
-            // (a trailing comma would disable every user plugin on next
-            // boot). On a malformed parse: warn and DO NOT rewrite.
-            if (plugin_config.malformed) {
-                plugin_config.preserved = contents;
+            std::string contents;
+            if (!TryReadConfigFile(config_path, &contents)) {
+                // Exists but could not be read (permission, a transient I/O
+                // error, a race with another process's own write): treated
+                // exactly like a malformed parse below -- "we couldn't read
+                // it" must never be silently treated as "it's empty," which
+                // is what let the rewrite below replace the user's real
+                // (merely unreadable) file with a fresh default.
+                plugin_config.malformed = true;
                 std::fprintf(stderr,
-                             "minimal: warning: %s is malformed -- it was NOT rewritten; "
-                             "fix or remove it to enable plugin config management\n",
+                             "minimal: warning: could not read %s -- it was NOT rewritten; "
+                             "fix its permissions or remove it to enable plugin config "
+                             "management\n",
                              std::filesystem::path(config_path).c_str());
+            } else {
+                plugin_config = plugins::ParseClientPluginConfig(contents);
+                // ParseClientPluginConfig degrades a malformed file to an empty
+                // config; silently rewriting the user's bytes over that default
+                // would destroy their enablement decisions and per-plugin config
+                // (a trailing comma would disable every user plugin on next
+                // boot). On a malformed parse: warn and DO NOT rewrite.
+                if (plugin_config.malformed) {
+                    plugin_config.preserved = contents;
+                    std::fprintf(stderr,
+                                 "minimal: warning: %s is malformed -- it was NOT rewritten; "
+                                 "fix or remove it to enable plugin config management\n",
+                                 std::filesystem::path(config_path).c_str());
+                }
             }
         }
         const auto candidates = plugins::DiscoverClientPlugins(
@@ -90,15 +104,16 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
             std::filesystem::create_directories(out.config_dir, ec);
             const auto serialized = plugins::SerializeClientPluginConfig(plugin_config);
             std::string existing;
+            bool existing_known = true;
             if (std::filesystem::exists(config_path, ec)) {
-                std::ifstream in(config_path);
-                existing = std::string((std::istreambuf_iterator<char>(in)),
-                                       std::istreambuf_iterator<char>());
+                existing_known = TryReadConfigFile(config_path, &existing);
             }
-            if (existing != serialized) {
-                std::ofstream out_file(config_path);
-                out_file << serialized;
-                if (!out_file) {
+            // existing_known false means the file exists but could not be
+            // read just now (a race since the read above, or a permission
+            // change) -- skip the write rather than risk clobbering real
+            // bytes we never actually saw.
+            if (existing_known && existing != serialized) {
+                if (!WriteConfigFileAtomic(config_path, serialized)) {
                     std::fprintf(stderr, "minimal: warning: could not write %s\n",
                                  std::filesystem::path(config_path).c_str());
                 }

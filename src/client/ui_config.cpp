@@ -6,6 +6,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "minimal/client/config_file_io.hpp"
 #include "minimal/common/logger.hpp"
 
 namespace minimal::client {
@@ -71,12 +72,17 @@ void SaveThemePreference(const std::filesystem::path& config_dir, const std::str
     std::string existing;
     {
         std::error_code ec;
-        if (std::filesystem::exists(path, ec)) {
-            std::ifstream in(path);
-            if (in) {
-                existing = std::string((std::istreambuf_iterator<char>(in)),
-                                       std::istreambuf_iterator<char>());
-            }
+        if (std::filesystem::exists(path, ec) && !TryReadConfigFile(path, &existing)) {
+            // Exists but could not be read (permission, a transient I/O
+            // error): never treat that as "empty" -- the write below would
+            // otherwise replace the user's real (merely unreadable) file
+            // with a fresh, near-empty document, dropping every key but
+            // theme. Same discipline as the malformed-JSON branch just
+            // below: warn, leave it untouched.
+            common::DefaultLogger().warn(
+                "ui.json exists but could not be read -- theme preference NOT persisted; "
+                "fix its permissions to enable persistence");
+            return;
         }
     }
     if (!existing.empty()) {
@@ -95,34 +101,14 @@ void SaveThemePreference(const std::filesystem::path& config_dir, const std::str
     }
     doc["theme"] = name;
 
-    // Atomic-ish write: serialize to a sibling tmp file, then rename over the
+    // Atomic write: serialize to a sibling tmp file, then rename over the
     // original. A crash mid-write leaves ui.json.tmp behind (harmless) rather
     // than a truncated ui.json (which LoadUiConfig would degrade to defaults,
     // dropping the user's other keys).
     std::filesystem::create_directories(config_dir);
-    const auto tmp = path.string() + ".tmp";
-    {
-        std::ofstream out(tmp);
-        if (!out) {
-            common::DefaultLogger().warn("could not write {} -- theme preference not "
-                                         "persisted",
-                                         tmp);
-            return;
-        }
-        out << doc.dump(2) << "\n";
-        if (!out) {
-            common::DefaultLogger().warn("could not write {} -- theme preference not "
-                                         "persisted",
-                                         tmp);
-            return;
-        }
-    }
-    std::error_code ec;
-    std::filesystem::rename(tmp, path, ec);
-    if (ec) {
-        common::DefaultLogger().warn("could not replace {} with {} -- theme preference not "
-                                     "persisted ({})",
-                                     path.string(), tmp, ec.message());
+    if (!WriteConfigFileAtomic(path, doc.dump(2) + "\n")) {
+        common::DefaultLogger().warn("could not write {} -- theme preference not persisted",
+                                     path.string());
     }
 }
 

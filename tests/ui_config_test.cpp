@@ -4,6 +4,8 @@
 #include <fstream>
 #include <sstream>
 
+#include <unistd.h>
+
 #include <catch2/catch_test_macros.hpp>
 
 namespace minimal::client {
@@ -70,6 +72,31 @@ TEST_CASE("SaveThemePreference refuses to rewrite a malformed ui.json") {
     // Same discipline as client-plugins.json's writer: bytes we cannot parse
     // are the user's, and silently replacing them would destroy their config.
     CHECK(ReadAll(dir / "ui.json") == original);
+    std::filesystem::remove_all(dir);
+}
+
+TEST_CASE("SaveThemePreference refuses to rewrite a ui.json it cannot read") {
+    // root bypasses POSIX read permission checks entirely -- chmod-000 would
+    // still open fine, making this test spuriously pass regardless of
+    // whether the production code distinguishes "unreadable" from "empty".
+    if (::geteuid() == 0) {
+        WARN("skipped: running as root, which bypasses POSIX read permissions");
+        return;
+    }
+    const auto dir = TestDir("unreadable");
+    const auto path = dir / "ui.json";
+    const std::string original = R"({"theme": "dark", "status_format": "{version}"})";
+    {
+        std::ofstream out(path);
+        out << original;
+    }
+    std::filesystem::permissions(path, std::filesystem::perms::none);
+    SaveThemePreference(dir, "lucent-crm");
+    std::filesystem::permissions(
+        path, std::filesystem::perms::owner_read | std::filesystem::perms::owner_write);
+    // Same discipline as the malformed-JSON case: bytes we could not even
+    // read are never replaced with a fresh, near-empty document.
+    CHECK(ReadAll(path) == original);
     std::filesystem::remove_all(dir);
 }
 

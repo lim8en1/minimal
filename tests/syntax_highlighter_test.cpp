@@ -83,6 +83,22 @@ TEST_CASE("Aliases resolve to the vendored grammars") {
     CHECK(!highlighter.Supports("cobol"));
 }
 
+// The bug: the fence text is lowercased before comparing, but a plugin's
+// registered key (LanguageDefinition::name) never was -- a mixed-case
+// registration like "HCL" was unreachable by any fence spelling at all,
+// including its own exact case.
+TEST_CASE("A plugin-registered grammar key resolves case-insensitively") {
+    const auto vendored = VendoredLanguages();
+    REQUIRE_FALSE(vendored.empty());
+    const std::vector<LanguageDefinition> languages = {
+        LanguageDefinition{"HCL", vendored[0].language_fn, vendored[0].rules},
+    };
+    const SyntaxHighlighter highlighter(TestTheme(), languages);
+    CHECK(highlighter.Supports("hcl"));
+    CHECK(highlighter.Supports("HCL"));
+    CHECK(highlighter.Supports("Hcl"));
+}
+
 TEST_CASE("An unsupported language is one Plain span over the whole input") {
     const SyntaxHighlighter highlighter(TestTheme());
     const std::string code = "some [unusual] source\n";
