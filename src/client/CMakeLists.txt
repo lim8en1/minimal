@@ -32,6 +32,7 @@ add_library(minimal_client_core SHARED
     view/tab_bar.cpp
     view/chat_view.cpp
     view/prompt_editor.cpp
+    view/prompt_wrap.cpp
     view/status_bar.cpp
     view/tools_panel.cpp
     view/filterable_menu.cpp

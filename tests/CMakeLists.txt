@@ -131,6 +131,8 @@ add_executable(minimal_tests
     tab_bar_test.cpp
     status_bar_test.cpp
     utf8_test.cpp
+    prompt_wrap_test.cpp
+    prompt_editor_test.cpp
     modal_host_test.cpp
     keybindings_test.cpp
     keybinding_dispatch_test.cpp

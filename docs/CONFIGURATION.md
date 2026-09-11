@@ -417,6 +417,18 @@ those characters (ß on German), rebind rather than fight it.
 The `/keymap` command opens the same overlay as the `help.overlay` binding:
 a filterable listing of every configured action → key pair.
 
+Prompt newline: Enter submits; Alt+Enter inserts a newline (the prompt
+soft-wraps to the terminal width, at most half the screen). Besides ESC CR /
+ESC LF, the editor recognizes the CSI-u encodings terminals emit when the
+kitty keyboard protocol or xterm modifyOtherKeys is on (`13;3u`,
+`13;2u`, `27;3;13~`, `27;2;13~`) — Shift+Enter works on those terminals
+with no configuration. macOS caveat:
+Terminal.app, Ghostty, Alacritty and WezTerm send Option+Enter as a plain
+`\r` until Option is configured as Alt (Terminal.app: "Use Option as Meta
+Key"; Ghostty: `macos-option-as-alt`; Alacritty: `option_as_alt`; WezTerm:
+`LeftOption` as `LeftAlt`) — with no byte distinguishing it from Enter, no
+in-app binding can catch it.
+
 ### ui.json
 
 | Field | Type | Default | Notes |
