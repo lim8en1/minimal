@@ -279,6 +279,13 @@ TEST_CASE("upload progress counts toward the streaming idle timeout", "[http_cli
     // 8-way parallel ctest may inflict on the client thread between progress
     // callbacks before this test reports a starvation flake instead of the
     // invariant it exists to prove.
+    //
+    // The tiny server receive window does not keep curl writing on Linux:
+    // send-buffer autotuning lets the client socket absorb ~1.6 MiB of the
+    // body at once, so ulnow reaches its end almost immediately and then sits
+    // still for the ~5 s the kernel spends draining it. The kernel's send
+    // queue shrinking has to count as progress too -- which is the other half
+    // of the invariant this test pins down.
     SlowReadServer server;
     HttpClient http;
     HttpRequest request;

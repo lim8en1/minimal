@@ -5,6 +5,12 @@
 
 #include <curl/curl.h>
 
+#include <sys/socket.h>
+#if defined(__linux__)
+#include <linux/sockios.h>
+#include <sys/ioctl.h>
+#endif
+
 namespace minimal::net {
 
 bool HeaderNameEquals(std::string_view a, std::string_view b) {
@@ -88,6 +94,8 @@ struct TransferState {
     std::chrono::steady_clock::time_point last_progress = std::chrono::steady_clock::now();
     curl_off_t last_dlnow = 0;
     curl_off_t last_ulnow = 0;
+    // The kernel's view of the upload, not just curl's: see KernelSendQueueBytes.
+    long last_send_queue = -1;
 
     // Response-header bookkeeping -- the same bound-in-bytes story the body
     // caps tell. A header firehose advances no dlnow, so the idle timeout was
@@ -154,6 +162,31 @@ std::size_t WriteCallback(char* ptr, std::size_t size, std::size_t nmemb, void* 
     return total;
 }
 
+// Bytes the kernel still holds in the transfer's socket send queue -- unsent
+// plus unacknowledged -- or -1 when it cannot say (not connected yet, or a
+// platform without the query). ulnow only counts bytes curl has handed to the
+// kernel; with Linux send-buffer autotuning (up to tcp_wmem's 4 MiB max) the
+// kernel accepts most of a multi-MB body at once, ulnow then stands still,
+// and the body actually leaves at uplink speed with nothing moving -- idle,
+// as far as ulnow can tell. A draining queue is that progress.
+long KernelSendQueueBytes(CURL* handle) {
+    curl_socket_t socket = CURL_SOCKET_BAD;
+    if (curl_easy_getinfo(handle, CURLINFO_ACTIVESOCKET, &socket) != CURLE_OK ||
+        socket == CURL_SOCKET_BAD) {
+        return -1;
+    }
+    int bytes = 0;
+#if defined(__APPLE__)
+    socklen_t length = sizeof(bytes);
+    if (::getsockopt(socket, SOL_SOCKET, SO_NWRITE, &bytes, &length) != 0) return -1;
+#elif defined(__linux__)
+    if (::ioctl(socket, SIOCOUTQ, &bytes) != 0) return -1;
+#else
+    return -1;
+#endif
+    return bytes;
+}
+
 int XferInfoCallback(void* clientp, curl_off_t /*dltotal*/, curl_off_t dlnow, curl_off_t /*ultotal*/,
                       curl_off_t ulnow) {
     auto& state = *static_cast<TransferState*>(clientp);
@@ -164,10 +197,15 @@ int XferInfoCallback(void* clientp, curl_off_t /*dltotal*/, curl_off_t dlnow, cu
     // multi-MB serialized request -- exactly the 512k-1M-token shape this
     // harness exists for -- on an uplink slower than body/idle_timeout was
     // aborted mid-upload, classified Transport (retryable), and failed
-    // identically until the retries ran out.
-    if (dlnow != state.last_dlnow || ulnow != state.last_ulnow) {
+    // identically until the retries ran out. The kernel send queue changing
+    // is upload progress as well (see KernelSendQueueBytes); a peer that has
+    // truly stopped reading leaves it constant, so a stall still times out.
+    const long send_queue = KernelSendQueueBytes(state.handle);
+    if (dlnow != state.last_dlnow || ulnow != state.last_ulnow ||
+        send_queue != state.last_send_queue) {
         state.last_dlnow = dlnow;
         state.last_ulnow = ulnow;
+        state.last_send_queue = send_queue;
         state.last_progress = now;
         return 0;
     }
