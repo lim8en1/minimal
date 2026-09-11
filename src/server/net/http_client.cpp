@@ -95,6 +95,10 @@ struct TransferState {
     curl_off_t last_dlnow = 0;
     curl_off_t last_ulnow = 0;
     // The kernel's view of the upload, not just curl's: see KernelSendQueueBytes.
+    // The socket is recorded by SockOptCallback when libcurl creates it --
+    // CURLINFO_ACTIVESOCKET answers CURL_SOCKET_BAD until the transfer is
+    // over, so asking for it from the progress callback probed nothing.
+    curl_socket_t socket = CURL_SOCKET_BAD;
     long last_send_queue = -1;
 
     // Response-header bookkeeping -- the same bound-in-bytes story the body
@@ -162,6 +166,19 @@ std::size_t WriteCallback(char* ptr, std::size_t size, std::size_t nmemb, void* 
     return total;
 }
 
+// libcurl hands the socket over right after creating it. This is the only way
+// to learn it DURING a transfer: CURLINFO_ACTIVESOCKET answers
+// CURL_SOCKET_BAD until the transfer finishes, so the send-queue probe below
+// -- asking for the socket from the progress callback -- measured nothing at
+// all, on every one of a transfer's callbacks. Nothing about the socket is
+// changed here; only the descriptor is recorded.
+int SockOptCallback(void* clientp, curl_socket_t curlfd, curlsocktype purpose) {
+    if (purpose == CURLSOCKTYPE_IPCXN) {
+        static_cast<TransferState*>(clientp)->socket = curlfd;
+    }
+    return CURL_SOCKOPT_OK;
+}
+
 // Bytes the kernel still holds in the transfer's socket send queue -- unsent
 // plus unacknowledged -- or -1 when it cannot say (not connected yet, or a
 // platform without the query). ulnow only counts bytes curl has handed to the
@@ -169,12 +186,8 @@ std::size_t WriteCallback(char* ptr, std::size_t size, std::size_t nmemb, void* 
 // kernel accepts most of a multi-MB body at once, ulnow then stands still,
 // and the body actually leaves at uplink speed with nothing moving -- idle,
 // as far as ulnow can tell. A draining queue is that progress.
-long KernelSendQueueBytes(CURL* handle) {
-    curl_socket_t socket = CURL_SOCKET_BAD;
-    if (curl_easy_getinfo(handle, CURLINFO_ACTIVESOCKET, &socket) != CURLE_OK ||
-        socket == CURL_SOCKET_BAD) {
-        return -1;
-    }
+long KernelSendQueueBytes(curl_socket_t socket) {
+    if (socket == CURL_SOCKET_BAD) return -1;
     int bytes = 0;
 #if defined(__APPLE__)
     socklen_t length = sizeof(bytes);
@@ -200,7 +213,7 @@ int XferInfoCallback(void* clientp, curl_off_t /*dltotal*/, curl_off_t dlnow, cu
     // identically until the retries ran out. The kernel send queue changing
     // is upload progress as well (see KernelSendQueueBytes); a peer that has
     // truly stopped reading leaves it constant, so a stall still times out.
-    const long send_queue = KernelSendQueueBytes(state.handle);
+    const long send_queue = KernelSendQueueBytes(state.socket);
     if (dlnow != state.last_dlnow || ulnow != state.last_ulnow ||
         send_queue != state.last_send_queue) {
         state.last_dlnow = dlnow;
@@ -353,6 +366,10 @@ HttpResponse ConfigureAndPerform(CURL* handle, const HttpRequest& request, Mode 
         curl_easy_setopt(handle, CURLOPT_NOPROGRESS, 0L);
         curl_easy_setopt(handle, CURLOPT_XFERINFOFUNCTION, &XferInfoCallback);
         curl_easy_setopt(handle, CURLOPT_XFERINFODATA, &state);
+        // Records the socket the idle check probes for its send queue; see
+        // SockOptCallback. Only here, with the progress callback it serves.
+        curl_easy_setopt(handle, CURLOPT_SOCKOPTFUNCTION, &SockOptCallback);
+        curl_easy_setopt(handle, CURLOPT_SOCKOPTDATA, &state);
     }
 
     CURLcode code = curl_easy_perform(handle);

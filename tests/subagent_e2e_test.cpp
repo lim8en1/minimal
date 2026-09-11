@@ -178,6 +178,42 @@ private:
     tools::ToolSpec spec_;
 };
 
+// The child's turn must not COMPLETE before the client's attach lands. Once a
+// session's broadcaster closes, a late subscriber is handed an empty, closed
+// queue and observes nothing at all -- and the scripted child below finishes
+// in about a millisecond, which lost that race in ~30% of runs on Linux (the
+// attach saw no events, so the child's session id never arrived). Parking the
+// child's turn in a tool until the attach reports its first event makes the
+// attach provably live while the child still has events to deliver. The cap
+// keeps a genuine attach failure a FAILED assertion rather than a hang.
+class AttachGateTool : public tools::Tool {
+public:
+    explicit AttachGateTool(std::shared_ptr<ChildObservations> observations)
+        : observations_(std::move(observations)) {
+        spec_.name = "gate";
+        spec_.category = tools::ToolCategory::ReadOnly;
+        spec_.definition.name = spec_.name;
+        spec_.definition.description = "parks until the client's attach is live";
+        spec_.definition.input_schema = nlohmann::json::object();
+    }
+    const tools::ToolSpec& spec() const override { return spec_; }
+    tools::ToolResult execute(const nlohmann::json&, tools::ToolContext&) override {
+        const auto deadline = std::chrono::steady_clock::now() + 5s;
+        while (std::chrono::steady_clock::now() < deadline) {
+            {
+                std::lock_guard<std::mutex> lock(observations_->mu);
+                if (!observations_->session_id.empty()) break;
+            }
+            std::this_thread::sleep_for(5ms);
+        }
+        return tools::ToolResult{false, "gate opened"};
+    }
+
+private:
+    std::shared_ptr<ChildObservations> observations_;
+    tools::ToolSpec spec_;
+};
+
 std::string TextOf(const llm::ToolResultBlock& block) {
     std::string out;
     for (const auto& content : block.content) {
@@ -208,7 +244,9 @@ TEST_CASE("a client attaches to a blocking subagent over the wire", "[subagent][
         "call-spawn", "spawn_subagent", {{"task", "find the answer"}, {"agent_preset", "child"}}));
     parent_script->Push(testing::TextResponse("all done"),
                         TextStream("all done", llm::StopReason::EndTurn));
-    child_script->Push(testing::ToolUseResponse("r1", "read", {{"path", "x.txt"}}));
+    // "gate", not an instant tool: the child must still be running when the
+    // attach below lands -- see AttachGateTool.
+    child_script->Push(testing::ToolUseResponse("r1", "gate", nlohmann::json::object()));
     child_script->Push(testing::TextResponse("child found it"),
                        TextStream("child found it", llm::StopReason::EndTurn));
 
@@ -220,6 +258,7 @@ TEST_CASE("a client attaches to a blocking subagent over the wire", "[subagent][
     REQUIRE(created.status.ok());
 
     auto observations = std::make_shared<ChildObservations>();
+    fixture.tools.Register(std::make_unique<AttachGateTool>(observations));
     std::string started_child_id;
     bool saw_started = false;
     std::string parent_text;
@@ -263,6 +302,15 @@ TEST_CASE("a client attaches to a blocking subagent over the wire", "[subagent][
     CHECK(saw_started);
     CHECK_FALSE(started_child_id.empty());
     CHECK(parent_text.find("all done") != std::string::npos);
+
+    // Before reading what the attach saw, as the other two attach cases here
+    // do: the thread was only joined by the fixture's destructor, so these
+    // assertions raced the very stream they are about. The gate above bounds
+    // the wait -- a child that ended before the attach cannot park it.
+    for (auto& thread : fixture.attach_threads) {
+        if (thread.joinable()) thread.join();
+    }
+    fixture.attach_threads.clear();
 
     {
         std::lock_guard<std::mutex> lock(observations->mu);

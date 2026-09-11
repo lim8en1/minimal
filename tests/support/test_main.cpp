@@ -63,14 +63,26 @@ void KillLingeringChildren() {
 
         // /proc/<pid>/stat: pid (comm) state ppid pgrp ... -- comm may contain
         // spaces, so parse the fields after the closing paren.
-        std::ifstream stat_file("/proc/" + std::to_string(pid) + "/stat");
-        std::string stat((std::istreambuf_iterator<char>(stat_file)),
-                         std::istreambuf_iterator<char>());
-        const auto paren = stat.rfind(')');
-        if (paren == std::string::npos) continue;
+        //
+        // stdio, not ifstream: this walk races the children it is about to
+        // kill, and a process that exits between opendir and the read makes
+        // libstdc++ THROW std::ios_base::failure out of filebuf::underflow
+        // ("basic_filebuf::underflow error reading the file: No such
+        // process"). Nothing here catches it, so it called std::terminate --
+        // after a fully green run, main() aborting on the way out.
+        char path[64];
+        std::snprintf(path, sizeof(path), "/proc/%ld/stat", pid);
+        std::FILE* stat_file = std::fopen(path, "re");
+        if (!stat_file) continue;
+        char stat[512];
+        const std::size_t filled = std::fread(stat, 1, sizeof(stat) - 1, stat_file);
+        std::fclose(stat_file);
+        stat[filled] = '\0';
+        const char* paren = std::strrchr(stat, ')');
+        if (paren == nullptr) continue;
         unsigned ppid = 0;
         unsigned pgrp = 0;
-        if (sscanf(stat.c_str() + paren + 1, " %*c %u %u", &ppid, &pgrp) != 2) continue;
+        if (std::sscanf(paren + 1, " %*c %u %u", &ppid, &pgrp) != 2) continue;
 
         if (static_cast<pid_t>(ppid) != self) continue;
         if (static_cast<pid_t>(pgrp) != self_pgrp) {
