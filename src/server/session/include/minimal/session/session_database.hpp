@@ -29,7 +29,7 @@ namespace minimal::session {
 // the moment the statement changes, which is how a reverted predicate passed
 // its own guard.
 inline constexpr std::string_view kMessagesPageSql =
-    "SELECT seq, content_json, token_count, created_at FROM messages"
+    "SELECT seq, content_json, token_count, created_at, agent_preset, model FROM messages"
     " WHERE session_id = ?1 AND discarded = 0 AND seq < COALESCE(?2, 9223372036854775807)"
     " ORDER BY seq DESC LIMIT ?3;";
 
@@ -150,7 +150,7 @@ struct OpenOptions {
 // (Default naming is NOT part of the append transaction; see SetDefaultName.)
 class SessionDatabase {
 public:
-    static constexpr int kSchemaVersion = 8;
+    static constexpr int kSchemaVersion = 9;
 
     // Opens (creating if needed) and migrates. Throws std::runtime_error on any
     // failure, including a database whose user_version is newer than this
@@ -183,8 +183,10 @@ public:
     // The seq is read back inside the transaction rather than computed by the
     // caller, because SQL is what assigns it -- anything else would be a second
     // opinion that the UNIQUE(session_id, seq) constraint exists to reject.
+    //
+    // attribution's empty fields are stored as NULL (unknown), never as ''.
     std::int64_t AppendMessage(const std::string& session_id, const llm::Message& message,
-                               int token_count = 0);
+                               int token_count = 0, const MessageAttribution& attribution = {});
 
     // Phase 5: the free-default-naming rule (first user text, made
     // label-shaped) moved to agent::Session, which computes the candidate and

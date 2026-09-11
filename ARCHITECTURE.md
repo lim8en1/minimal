@@ -1313,7 +1313,8 @@ A client-side presentational categorization, broader than the wire `Role` enum (
 | Kind | Source | Treatment |
 |---|---|---|
 | User | `Message{role: User}` text | Plain styled text — echoes typed input verbatim, not Markdown-rendered |
-| Agent | `Message{role: Assistant}` text | `MarkdownRenderer` / `StreamingMarkdownView` |
+| Agent | `Message{role: Assistant}` text | `MarkdownRenderer` / `StreamingMarkdownView`, labeled `agent (model)` from the message's persisted attribution (`StoredMessage.agent_preset`/`model`) |
+| Switch | synthetic, between assistant messages | A muted rule (`── agent build → plan · model a/x → b/y ──`) before the first assistant message whose agent or model differs from the previous one's — `/agent`, `/model` and per-turn overrides all surface where they took effect. Unknown attribution never draws one |
 | Thinking | `ThinkingBlock` | `Collapsible`, dimmed, collapsed by default |
 | Tool activity | `ToolExecutionEvent`, `ToolUseBlock`/`ToolResultBlock` | `Collapsible` one-line status. A result row tries a renderer for that tool name, then one for its display-payload kind (`diff`, `file`, `process`, `markdown`), then this default |
 | System/harness | `ErrorEvent`, subagent-completion injections | Muted, distinctly prefixed — separates "the harness told you something" from "the model said something". Command results are **not** in this row: they surface as views/status lines and never as chat messages (§ `/-command system`) |

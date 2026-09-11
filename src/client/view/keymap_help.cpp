@@ -15,14 +15,14 @@ ftxui::Component MakeKeymapHelpView(const std::unordered_map<std::string, std::s
     auto build_rows = [bindings](const std::string& filter) {
         std::vector<MenuRow> rows;
         for (const auto& row : BuildKeymapHelpRows(bindings, filter)) {
-            rows.push_back({row.label, row.action});
+            rows.push_back({row.label, row.action, row.header});
         }
         return rows;
     };
 
     const FilterableMenuSpec spec{
         .window_title = "keybindings",
-        .hint_line = " esc: close",
+        .hint_line = " type a key, an action or what it does to filter  ·  esc: close",
         .status_suffix = nullptr,
         .empty_message = " (no bindings match)",
         .empty_threshold = 0,

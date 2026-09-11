@@ -398,7 +398,8 @@ Flat object mapping action name → key string (e.g. `"tab.next": "alt+down"`).
 Missing file → built-in defaults; non-string value fails the load naming the
 action. Unknown action names are **kept, not rejected** — plugin views
 register runtime ids. Bundled actions (see `bundled/keybindings.json`):
-`tab.next`, `tab.previous`, `group.previous`, `group.next`, `jump.attention`,
+`tab.next`, `tab.previous`, `tab.goto.1` … `tab.goto.9` (`alt+1` … `alt+9`, the
+number the tab bar shows), `group.previous`, `group.next`, `jump.attention`,
 `session.picker`, `agent.picker`, `model.picker`, `help.overlay`,
 `permission.cycle`, `panel.toggle`, `panel.focus.next`, `panel.focus.prev`,
 `tab.close`, `chat.load_older`,
@@ -433,7 +434,7 @@ in-app binding can catch it.
 
 | Field | Type | Default | Notes |
 |---|---|---|---|
-| `status_format` | string | built-in default | `{version} \| {session} \| {activity} \| {tokens} \| {model} \| {agent} \| {permission_mode}` placeholders |
+| `status_format` | string | built-in default | segment ids in braces with literal text between; the default is `{activity} · {tokens} · {cost} · {token_detail}{>}{model} · {agent} · {permission_mode}`. Core ids: `activity`, `tokens`, `model`, `agent`, `permission_mode`, `session`, `version`; plugin ids (e.g. cost-view's `cost`, `token_detail`) too. `{>}` right-aligns everything after it. An empty segment takes its separator with it; when the bar overflows, whole segments drop lowest-priority first (`version`, `token_detail`, `session` … `permission_mode` last) — a value is never clipped |
 | `scrollback_window_max_messages` | int | `0` (= built-in) | must be positive if set |
 | `tool_output_buffer_bytes` | int | `0` | |
 | `tools_panel_stdout_buffer_lines` | int | `0` | distinct from the server's `tools_view.stdout_buffer_lines` |
@@ -447,7 +448,7 @@ Shape: `{ "name": ..., "colors": { ... } }` — hex color roles as in
 `bundled/themes/dark.json`: UI roles (`user_message`, `assistant_message`,
 `thinking`, `working`, `system_message`, `muted`, `error`, `attention`,
 `border_focused`, `border_unfocused`, `row_focused`, `status_bar_bg`,
-`background`, `banner_art`, `banner_hint`), syntax roles (`syntax_keyword`,
+`background`, `banner_art`, `banner_hint`, `tool`, `success`, `cursor`), syntax roles (`syntax_keyword`,
 `syntax_string`, `syntax_comment`, `syntax_number`, `syntax_function`,
 `syntax_type`, `syntax_operator`, `syntax_plain`) and diff roles
 (`diff_added`, `diff_removed`, `diff_hunk`).
@@ -458,8 +459,12 @@ Shape: `{ "name": ..., "colors": { ... } }` — hex color roles as in
   markers (falls back to `system_message`). The UI never uses SGR dim, whose
   look is up to the terminal.
 - `border_unfocused` colors separators and rules.
-- `row_focused` on `status_bar_bg` is the picker / option cursor; with either
-  unset the terminal's reverse video is used instead.
+- `cursor` on `status_bar_bg` is the picker / option cursor and the chat row
+  cursor (falls back to `row_focused`); with neither set, or `status_bar_bg`
+  unset, the terminal's reverse video is used instead.
+- `tool` colors tool-call headers (falls back to `syntax_function`); keep it
+  distinct from `user_message` so tool rows never read as your own turns.
+- `success` colors a successful tool outcome (falls back to `working`).
 - `background` is **optional**: when set it paints every cell the UI leaves
   unpainted; when omitted the terminal's own (possibly transparent)
   background shows through.

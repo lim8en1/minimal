@@ -186,8 +186,20 @@ std::string_view ToString(ChatRowKind kind) {
         case ChatRowKind::Thinking: return "thinking";
         case ChatRowKind::ToolActivity: return "tool_activity";
         case ChatRowKind::System: return "system";
+        case ChatRowKind::Switch: return "switch";
     }
     return "unknown";
+}
+
+std::string AssistantLabel(const std::string& agent, const std::string& model) {
+    // "openrouter/anthropic/claude-opus-5" -> "claude-opus-5": the full ref is
+    // the switch divider's job; a label only needs to be recognizable.
+    const auto slash = model.find_last_of('/');
+    const std::string short_model = slash == std::string::npos ? model : model.substr(slash + 1);
+    if (!agent.empty() && !short_model.empty()) return agent + " (" + short_model + ")";
+    if (!agent.empty()) return agent;
+    if (!short_model.empty()) return short_model;
+    return "assistant";
 }
 
 std::vector<ChatRow> ChatRowsFromMessages(const std::vector<v1::StoredMessage>& descending) {
@@ -241,10 +253,32 @@ std::vector<ChatRow> ChatRowsFromMessages(const std::vector<v1::StoredMessage>& 
         }
     }
 
+    // The attribution of the last assistant message that HAD one. Unknown
+    // (pre-attribution) messages neither set it nor draw a divider: "unknown
+    // -> build" is not a switch, it is the history getting a label.
+    std::optional<std::pair<std::string, std::string>> last_speaker;
+
     for (auto it = descending.rbegin(); it != descending.rend(); ++it) {
         const auto& message = it->message();
         const int64_t message_seq = it->seq();
         const std::size_t first_row_of_message = rows.size();
+
+        // A divider BEFORE the first assistant message whose agent or model
+        // differs from the previous one's -- /agent, /model and a per-turn
+        // override all show up here, where the change actually took effect.
+        // Pushed ahead of the message's own rows so the stamp below gives it
+        // this message's seq (and the new attribution).
+        if (message.role() == v1::ROLE_ASSISTANT &&
+            (!it->agent_preset().empty() || !it->model().empty())) {
+            std::pair<std::string, std::string> speaker{it->agent_preset(), it->model()};
+            if (last_speaker.has_value() && *last_speaker != speaker) {
+                ChatRow divider{.kind = ChatRowKind::Switch};
+                divider.switch_from_agent = last_speaker->first;
+                divider.switch_from_model = last_speaker->second;
+                rows.push_back(std::move(divider));
+            }
+            last_speaker = std::move(speaker);
+        }
 
         // One message's worth of row-pushing, as an IIFE rather than inline
         // loop body: every early exit below used to be a `continue` that
@@ -370,9 +404,36 @@ std::vector<ChatRow> ChatRowsFromMessages(const std::vector<v1::StoredMessage>& 
              r != rows.end(); ++r) {
             r->seq = message_seq;
             r->created_at_unix_ms = it->created_at_unix_ms();
+            if (message.role() == v1::ROLE_ASSISTANT) {
+                r->agent = it->agent_preset();
+                r->model = it->model();
+            }
         }
     }
     return rows;
+}
+
+std::vector<bool> LabelContinuations(const std::vector<ChatRow>& rows) {
+    std::vector<bool> out(rows.size(), false);
+    bool labeled_in_turn = false;
+    for (std::size_t i = 0; i < rows.size(); ++i) {
+        switch (rows[i].kind) {
+            case ChatRowKind::UserText:
+            case ChatRowKind::UserAttachment:
+            case ChatRowKind::System:
+            case ChatRowKind::Switch:
+                labeled_in_turn = false;
+                break;
+            case ChatRowKind::AgentMarkdown:
+                out[i] = labeled_in_turn;
+                labeled_in_turn = true;
+                break;
+            case ChatRowKind::Thinking:
+            case ChatRowKind::ToolActivity:
+                break;
+        }
+    }
+    return out;
 }
 
 bool CollapsedByDefault(const ChatRow& row) {
@@ -399,6 +460,7 @@ bool CollapsedByDefault(const ChatRow& row) {
         case ChatRowKind::UserText:
         case ChatRowKind::AgentMarkdown:
         case ChatRowKind::System:
+        case ChatRowKind::Switch:
             return false;
     }
     return false;

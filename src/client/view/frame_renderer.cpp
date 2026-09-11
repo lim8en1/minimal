@@ -102,7 +102,9 @@ ftxui::Element FrameRenderer::Render() {
     const bool space_critical = term_height > 0 && term_height < kCriticalHeight;
 
     Elements rows;
-    if (!space_critical) rows.push_back(RenderTabBar(tabs, deps_.theme));
+    // One tab: the bar would only repeat what the status bar and the chat
+    // already say, for a whole row. It appears with the second tab.
+    if (!space_critical && tabs.size() > 1) rows.push_back(RenderTabBar(tabs, deps_.theme));
 
     const std::string& focused = deps_.focused;
     const SessionState::Snapshot& focused_details = deps_.focused_details;
@@ -148,11 +150,11 @@ ftxui::Element FrameRenderer::Render() {
                                    flex);
                 } catch (const std::exception& error) {
                     deps_.app.DisableChatSurface(error.what());
-                    rows.push_back(text(" chat surface plugin threw -- the core chat view "
+                    rows.push_back(text(" chat surface plugin threw · the core chat view "
                                         "takes over") | color(deps_.theme.ColorFor("error")));
                 } catch (...) {
                     deps_.app.DisableChatSurface(nullptr);
-                    rows.push_back(text(" chat surface plugin threw -- the core chat view "
+                    rows.push_back(text(" chat surface plugin threw · the core chat view "
                                         "takes over") | color(deps_.theme.ColorFor("error")));
                 }
             }
@@ -202,10 +204,19 @@ ftxui::Element FrameRenderer::Render() {
                     ui.chat = std::make_unique<ChatView>(deps_.theme, deps_.message_registry,
                                                          deps_.renderer_registry,
                                                          deps_.display_registry,
-                                                         deps_.toggle_collapse_hint);
+                                                         deps_.toggle_collapse_hint,
+                                                         deps_.load_older_hint);
                 }
                 rows.push_back(ui.chat->Render(snap, ui.live_text_streams) | yframe |
                                vscroll_indicator | flex);
+                // Scrolled up (or parked on a row) while the turn is still
+                // producing: the newest output lands below the viewport, and
+                // nothing said so. Outside the yframe, so it stays on screen.
+                if (ui.chat->IsScrolledAway() && turn_busy) {
+                    rows.push_back(text(" ↓ new output below · " + deps_.scroll_bottom_hint +
+                                        " to follow") |
+                                   color(deps_.theme.ColorFor("attention")));
+                }
             }
         }
 
@@ -257,8 +268,8 @@ ftxui::Element FrameRenderer::Render() {
         Elements start = RenderStartViews("");
         if (start.empty()) {
             rows.push_back(vbox({text("minimal") | bold,
-                                 text("ctrl+o opens the session picker; typing starts a "
-                                      "session") |
+                                 text(deps_.session_picker_hint +
+                                      " opens the session picker; typing starts a session") |
                                      Muted(deps_.theme)}) |
                            center | flex);
         } else {
@@ -293,8 +304,9 @@ ftxui::Element FrameRenderer::Render() {
     // contradicting this very comment) so they actually land next to the
     // tools panel they're described as beside. Events reach the FOCUSED one
     // through the frame's CatchEvent (see with_keys and
-    // keybinding_dispatch.cpp); here focus is presentation only: the focused
-    // panel gets a border + title chrome, the unfocused ones render dimmed.
+    // keybinding_dispatch.cpp); here focus is presentation only: every panel
+    // is framed and titled, the focused one's border in the focus color, the
+    // unfocused ones' content muted.
     // A throwing view is hidden for the frame that threw (never fatal), like
     // the status segments below.
     for (auto& entry : deps_.plugin_views) {
@@ -321,20 +333,23 @@ ftxui::Element FrameRenderer::Render() {
 
             Element framed = std::move(body) | yframe |
                              size(HEIGHT, LESS_THAN, deps_.panel_height);
+            // EVERY panel gets the same chrome -- a title strip inside a
+            // border -- so focusing one never shifts the layout (the border
+            // used to appear only on focus: two rows and two columns of jump)
+            // and an unfocused panel still says which plugin it is. Focus is
+            // the border's color and the title's weight; unfocused content is
+            // muted. The title rides INSIDE the border, so the cap above
+            // bounds content only and the chrome is a constant 3 rows.
+            Element title = text(" " + entry.view->spec().title + " ") |
+                            bgcolor(deps_.theme.ColorFor("status_bar_bg"));
             if (entry.focused) {
-                // The focused panel's chrome: a title strip over the content,
-                // the whole box bordered in the theme's focused-border role.
-                // The title rides INSIDE the border (border is applied last),
-                // so the cap below bounds content + title + chrome together.
-                framed = vbox({
-                             text(" " + entry.view->spec().title + " ") |
-                                 bgcolor(deps_.theme.ColorFor("status_bar_bg")) | bold,
-                             std::move(framed),
-                         }) |
-                         borderStyled(deps_.theme.ColorFor("border_focused"));
+                title = std::move(title) | bold;
             } else {
                 framed = std::move(framed) | Muted(deps_.theme);
             }
+            framed = vbox({std::move(title), std::move(framed)}) |
+                     borderStyled(deps_.theme.ColorFor(entry.focused ? "border_focused"
+                                                                     : "border_unfocused"));
             rows.push_back(std::move(framed));
         }
     }
@@ -345,6 +360,7 @@ ftxui::Element FrameRenderer::Render() {
     // below (the E5 metadata emission); empty/unknown renders as nothing,
     // per the format string's unknown-or-unfilled rule.
     std::map<std::string, std::string> values;
+    std::map<std::string, ftxui::Color> emphasis;
     values["version"] = std::string(common::Version());
     // The focused tab's DEEP snapshot (see focused_details above) drives
     // the status bar's values. A SESSIONLESS tab renders too: it has a name
@@ -354,12 +370,6 @@ ftxui::Element FrameRenderer::Render() {
         values["session"] = !focused_details.display_name.empty()
                                 ? focused_details.display_name
                                 : std::string("new session");
-        // The interrupt press is never silent: from SendCancel until the
-        // turn actually ends, the focused session says so (status bar =
-        // the home of focused-session detail, per ARCHITECTURE.md).
-        if (focused_details.cancel_requested) {
-            values["session"] += "  ·  cancelling…";
-        }
         // {tokens} is used/max now that the metadata emission carries the
         // window (E5a); max unknown (0) renders used-only, the E4 behavior.
         // Cache tokens ARE occupancy: providers report input_tokens as the
@@ -373,11 +383,18 @@ ftxui::Element FrameRenderer::Render() {
                              focused_details.cache_read_tokens +
                              focused_details.cache_write_tokens;
         if (used > 0) {
-            values["tokens"] = focused_details.context_window_tokens > 0
-                                   ? std::to_string(used) + "/" +
-                                         std::to_string(focused_details.context_window_tokens) +
-                                         " tok"
-                                   : std::to_string(used) + " tok";
+            const int64_t window = focused_details.context_window_tokens;
+            values["tokens"] = FormatTokenUsage(used, window);
+            // Tinted as the window fills: attention from 80% (compaction is
+            // near), error from 95%.
+            if (window > 0) {
+                const int64_t percent = used * 100 / window;
+                if (percent >= 95) {
+                    emphasis["tokens"] = deps_.theme.ColorFor("error");
+                } else if (percent >= 80) {
+                    emphasis["tokens"] = deps_.theme.ColorFor("attention");
+                }
+            }
         }
         // The metadata segments: empty = unknown = render nothing, the
         // format string's unknown-or-unfilled rule. The {model}/{agent}
@@ -400,20 +417,51 @@ ftxui::Element FrameRenderer::Render() {
         const std::string agent_value = !focused_details.desired_agent_preset.empty()
                                             ? focused_details.desired_agent_preset
                                             : focused_details.agent_preset;
+        // A staged change reads as "→ gpt-5" -- switching to -- where it
+        // used to be a bare "gpt-5~".
         if (!model_value.empty()) {
-            values["model"] = model_value + (model_pending ? "~" : "");
+            values["model"] = (model_pending ? "→ " : "") + model_value;
         }
         if (!agent_value.empty()) {
-            values["agent"] = agent_value + (agent_pending ? "~" : "");
+            values["agent"] = (agent_pending ? "→ " : "") + agent_value;
         }
         if (!focused_details.permission_mode.empty()) {
             values["permission_mode"] = focused_details.permission_mode;
+            // bypass runs every tool unasked: the one mode that must never
+            // look like the others.
+            if (focused_details.permission_mode == "bypass") {
+                emphasis["permission_mode"] = deps_.theme.ColorFor("error");
+            }
         }
         for (const auto& tab : tabs) {
             if (tab.tab_id != focused) continue;
             const auto activity = ActivityLabel(tab.state, tab.tools);
             if (!activity.empty()) values["activity"] = activity;
+            switch (tab.state) {
+                case SessionStateKind::Thinking:
+                    emphasis["activity"] = deps_.theme.ColorFor("thinking");
+                    break;
+                case SessionStateKind::Working:
+                    emphasis["activity"] = deps_.theme.ColorFor("working");
+                    break;
+                case SessionStateKind::Waiting:
+                    emphasis["activity"] = deps_.theme.ColorFor("attention");
+                    break;
+                case SessionStateKind::Error:
+                    emphasis["activity"] = deps_.theme.ColorFor("error");
+                    break;
+                case SessionStateKind::Done:
+                case SessionStateKind::Idle:
+                    break;
+            }
             break;
+        }
+        // The interrupt press is never silent: from SendCancel until the
+        // turn actually ends, the focused session says so -- in {activity},
+        // which the default format always shows (it used to ride {session}).
+        if (focused_details.cancel_requested) {
+            values["activity"] = "cancelling…";
+            emphasis["activity"] = deps_.theme.ColorFor("attention");
         }
     }
     // Registered segment providers fill their own ids. Render runs on the
@@ -435,7 +483,7 @@ ftxui::Element FrameRenderer::Render() {
         }
     }
     rows.push_back(RenderStatusBar(deps_.status_format, values, deps_.theme,
-                                   ftxui::Terminal::Size().dimx));
+                                   ftxui::Terminal::Size().dimx, emphasis));
 
     return vbox(std::move(rows));
 }

@@ -49,7 +49,8 @@ public:
              const plugins::MessageRendererRegistry& message_renderers,
              const plugins::ToolResultRendererRegistry& tool_renderers,
              const plugins::DisplayRendererRegistry& display_renderers,
-             std::string toggle_collapse_hint = "alt+c");
+             std::string toggle_collapse_hint = "alt+c",
+             std::string load_older_hint = "pageup");
 
     // `live_text_streams` is the tab's own per-segment views, index-aligned
     // with snapshot.live_segments (TabMaintenance::Maintain builds and feeds
@@ -72,6 +73,11 @@ public:
     // submit, so sending a message while scrolled up returns to the live
     // content instead of leaving it scrolled away from what just arrived.
     void ScrollToBottom() { scroll_from_bottom_ = 0; }
+
+    // True while the viewport is NOT pinned to the newest content -- scrolled
+    // back, or anchored on the row cursor -- so new output lands out of view.
+    // The frame says so while a turn is running.
+    bool IsScrolledAway() const { return scroll_from_bottom_ > 0 || focused_row_.has_value(); }
 
     // chat.toggle_timestamps: per-row clock display, layout-level (drawn by
     // this view directly, not a MessageRenderer concern -- see
@@ -131,6 +137,8 @@ private:
     // The host-resolved chat.toggle_collapse binding, surfaced to row
     // renderers through RowRenderContext (they have no keymap access).
     std::string toggle_collapse_hint_ = "alt+c";
+    // chat.load_older's binding, named by the "earlier messages" marker.
+    std::string load_older_hint_ = "pageup";
     uint64_t rendered_version_ = 0;   // transcript_version these rows came from
     std::string rendered_session_id_; // which tab they came from (see Render)
     // ChatRowsFromMessages' own output, cached on scrollback_page's pointer
@@ -156,7 +164,14 @@ private:
     // drop out of the map. Collapsed joins the key because a toggle changes
     // what a cached render even shows -- a stale hit would serve the WRONG
     // (pre-toggle) content for that row.
-    std::map<std::tuple<int64_t, int, bool>, ftxui::Elements> row_cache_;
+    // The 4th member is RowRenderContext::continuation (the label-suppression
+    // flag), for the same reason.
+    std::map<std::tuple<int64_t, int, bool, bool>, ftxui::Elements> row_cache_;
+    // Parallel to row_keys_: each row's kind and RESOLVED collapse state, for
+    // the assembly's layout decisions (gutter color, whether consecutive
+    // compact rows get a spacer) -- made outside the per-row render cache.
+    std::vector<ChatRowKind> row_kinds_;
+    std::vector<bool> row_collapsed_;
     // Rows back from the bottom to focus on the next Render(); clamped there
     // against the current row count (a scroll issued while few rows exist,
     // then more arrive, should not leave the offset stuck out of range).
@@ -177,9 +192,10 @@ private:
     // without needing the row's own ChatRow (RebuildRows is the only place
     // that has one; Elements are all that survive past it).
     std::map<RowKey, bool> resolved_collapsed_;
-    // Parallel to row_keys_ (and to rendered_rows_): one rendered-position
-    // box per PART of each row, recorded by the RowBoxSpy nodes Render()
-    // wraps every part in. FTXUI assigns each Node its final box during the
+    // Parallel to row_keys_ (and to rendered_rows_): the rendered-position
+    // box of each row (one slot; none for a row that rendered nothing),
+    // recorded by the RowBoxSpy node Render() wraps each row in. FTXUI
+    // assigns each Node its final box during the
     // screen's layout pass -- AFTER yframe's scroll offset has been applied
     // to the subtree's coordinate space -- so these are true screen
     // coordinates and a mouse y maps straight onto a row. Rebuilt only when

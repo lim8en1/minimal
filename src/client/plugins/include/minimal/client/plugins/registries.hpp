@@ -107,11 +107,17 @@ struct RowRenderContext {
     // so hints used to hardcode "alt+c" -- which lied the moment the user
     // remapped the action.
     std::string toggle_collapse_hint = "alt+c";
-    // The click affordance for collapsible rows: " [+]" while collapsed,
-    // " [-]" while expanded, "" for kinds a click never collapses. Appended
-    // to the row's HEADER line; a renderer for a collapsible kind that
-    // ignores it simply forgoes the visual hint (clicking still works).
+    // The click affordance for collapsible rows: a disclosure glyph, "▸"
+    // while collapsed, "▾" while expanded, "" for kinds a click never
+    // collapses. Core renderers draw it LEADING the row's header line; a
+    // renderer for a collapsible kind that ignores it simply forgoes the
+    // visual hint (clicking still works).
     std::string_view collapse_marker = "";
+    // AgentMarkdown only: an earlier assistant text row of the SAME turn (and
+    // the same agent/model) already carried the speaker label, so this one
+    // should not repeat it -- a tool-calling turn used to say "assistant" once
+    // per text segment. See LabelContinuations (chat_model.hpp).
+    bool continuation = false;
 };
 
 // Everything a tool-result renderer draws FROM. One struct rather than a

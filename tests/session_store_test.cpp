@@ -762,15 +762,15 @@ TEST_CASE("appends persist and reload structurally identical", "[session][store]
         SqliteHistoryStore store(db, session_id);
 
         // A full tool cycle: user text, assistant tool use, tool result, final text.
-        store.Append(UserMsg("read the file"), std::nullopt);
+        store.Append(UserMsg("read the file"), std::nullopt, {});
         llm::Message tool_use{llm::Role::Assistant, {}};
         tool_use.content.push_back(llm::ToolUseBlock{"toolu_1", "read", {{"path", "a.cpp"}}});
-        store.Append(tool_use, std::nullopt);
+        store.Append(tool_use, std::nullopt, {});
         llm::ToolResultBlock result;
         result.tool_use_id = "toolu_1";
         result.content.push_back(llm::TextBlock{"int main() {}"});
-        store.Append(llm::Message{llm::Role::User, {result}}, std::nullopt);
-        store.Append(llm::Message{llm::Role::Assistant, {llm::TextBlock{"it is a trivial program"}}}, 42);
+        store.Append(llm::Message{llm::Role::User, {result}}, std::nullopt, {});
+        store.Append(llm::Message{llm::Role::Assistant, {llm::TextBlock{"it is a trivial program"}}}, 42, {});
     }
 
     {
@@ -799,6 +799,41 @@ TEST_CASE("appends persist and reload structurally identical", "[session][store]
     }
 }
 
+TEST_CASE("message attribution round-trips; empty reads back as unknown", "[session][store]") {
+    TempDir dir;
+    SessionDatabase db(dir.path() / "attribution.db");
+    const auto session_id = db.CreateSession("", std::nullopt, "/proj", "build").session_id;
+    SqliteHistoryStore store(db, session_id);
+
+    store.Append(UserMsg("hello"), std::nullopt, {});
+    store.Append(llm::Message{llm::Role::Assistant, {llm::TextBlock{"hi"}}}, 3,
+                 {.agent_preset = "build", .model = "anthropic/sonnet-4-5"});
+    store.Append(llm::Message{llm::Role::Assistant, {llm::TextBlock{"hi again"}}}, 3,
+                 {.agent_preset = "plan", .model = "openai/gpt-5"});
+
+    SessionReader reader(db);
+    const auto page = reader.GetMessages(session_id, std::nullopt, 10);
+    REQUIRE(page.messages.size() == 3);
+    // Descending: [2] is the user row, stored with no attribution.
+    CHECK(page.messages[2].attribution.agent_preset.empty());
+    CHECK(page.messages[2].attribution.model.empty());
+    CHECK(page.messages[1].attribution.agent_preset == "build");
+    CHECK(page.messages[1].attribution.model == "anthropic/sonnet-4-5");
+    CHECK(page.messages[0].attribution.agent_preset == "plan");
+    CHECK(page.messages[0].attribution.model == "openai/gpt-5");
+    // Empty is stored as NULL, never as '' -- "unknown" has one spelling.
+    CHECK(RawScalar(dir.path() / "attribution.db",
+                    "SELECT COUNT(*) FROM messages WHERE model IS NULL;") == "1");
+
+    // Every read path carries it, not just the page query.
+    const auto loaded = db.LoadMessages(session_id);
+    REQUIRE(loaded.size() == 3);
+    CHECK(loaded[1].attribution.agent_preset == "build");
+    const auto one = db.LoadMessage(session_id, 2);
+    REQUIRE(one.has_value());
+    CHECK(one->attribution.model == "openai/gpt-5");
+}
+
 TEST_CASE("a tool result's display payload round-trips through the store", "[session][store]") {
     TempDir dir;
     SessionDatabase db(dir.path() / "display.db");
@@ -809,7 +844,7 @@ TEST_CASE("a tool result's display payload round-trips through the store", "[ses
     result.tool_use_id = "toolu_1";
     result.content.push_back(llm::TextBlock{"replaced 1 occurrence in a.cpp"});
     result.display = {{"kind", "diff"}, {"path", "a.cpp"}, {"hunks", nlohmann::json::array()}};
-    store.Append(llm::Message{llm::Role::User, {result}}, std::nullopt);
+    store.Append(llm::Message{llm::Role::User, {result}}, std::nullopt, {});
 
     SessionReader reader(db);
     const auto page = reader.GetMessages(session_id, std::nullopt, 10);
@@ -1097,7 +1132,7 @@ TEST_CASE("a store opened on a stored transcript continues its sequence",
     SqliteHistoryStore store(db, id);
     CHECK(store.last_appended_seq() == 2);  // before ANY append of its own
 
-    store.Append(UserMsg("after resume"), std::nullopt);
+    store.Append(UserMsg("after resume"), std::nullopt, {});
     CHECK(store.last_appended_seq() == 3);
 
     const auto loaded = SessionReader(db).LoadAll(id);
@@ -1913,6 +1948,23 @@ struct ForkFixture {
 };
 
 }  // namespace
+
+TEST_CASE("ForkSession carries message attribution into the fork", "[session][fork]") {
+    testing::TempDir dir;
+    SessionDatabase db{dir.path() / "sessions.db"};
+    const auto source = db.CreateSession("", std::nullopt, "/work/proj", "build").session_id;
+    db.AppendMessage(source, UserMsg("first"));
+    db.AppendMessage(source, llm::Message{llm::Role::Assistant, {llm::TextBlock{"reply"}}}, 5,
+                     {.agent_preset = "build", .model = "anthropic/sonnet-4-5"});
+    db.AppendMessage(source, UserMsg("second"));
+
+    const auto row = db.ForkSession(source, /*target_seq=*/2, "the fork", std::nullopt);
+    const auto child = db.LoadMessagesFrom(row.session_id, /*after_seq=*/-1);
+    REQUIRE(child.size() == 2);
+    CHECK(child[0].attribution.agent_preset.empty());
+    CHECK(child[1].attribution.agent_preset == "build");
+    CHECK(child[1].attribution.model == "anthropic/sonnet-4-5");
+}
 
 TEST_CASE("ForkSession copies the active prefix verbatim and leaves the source untouched",
           "[session][fork]") {

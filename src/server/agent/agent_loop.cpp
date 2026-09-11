@@ -198,7 +198,19 @@ bool AgentLoop::SleepForBackoff(int attempt,
 }
 
 void AgentLoop::AppendAndPersist(llm::Message message, std::optional<int> output_tokens) {
-    store_.Append(message, output_tokens);
+    // Assistant rows carry who produced them: preset_ is the EFFECTIVE preset
+    // for this turn (Session swaps in a per-turn borrow before RunTurn and
+    // restores it after), so a one-turn override is recorded as exactly that.
+    session::MessageAttribution attribution;
+    if (message.role == llm::Role::Assistant) {
+        attribution.agent_preset = preset_.name;
+        // str() of an unset ref is "/", which would persist as a bogus model
+        // rather than as unknown.
+        if (!preset_.model_ref.provider.empty() && !preset_.model_ref.model.empty()) {
+            attribution.model = preset_.model_ref.str();
+        }
+    }
+    store_.Append(message, output_tokens, attribution);
     // The persisted suffix gains its first member. Appends land at the END of
     // both history_ and the store, so this is the only place the boundary can
     // move forward.

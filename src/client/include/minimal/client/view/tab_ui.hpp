@@ -150,6 +150,11 @@ public:
         bool& show_confirmation;
         std::shared_ptr<ftxui::Component>& ask_child;
         bool& show_ask;
+        // The resolved chat.toggle_collapse / chat.load_older bindings, for
+        // the ChatViews built here (their row hints and scrollback marker
+        // name these keys).
+        std::string toggle_collapse_hint = "alt+c";
+        std::string load_older_hint = "pageup";
     };
 
     explicit TabMaintenance(Dependencies deps);

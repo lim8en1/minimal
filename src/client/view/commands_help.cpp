@@ -8,7 +8,8 @@ namespace minimal::client {
 ftxui::Component MakeCommandsHelpView(const std::vector<CommandCatalogEntry>& catalog,
                                       const Theme& theme, std::function<void()> on_close,
                                       std::function<bool()> session_available,
-                                      std::function<void()>* reset_state) {
+                                      std::function<void()>* reset_state,
+                                      std::function<void(const std::string&)> on_pick) {
     // BY VALUE, not by reference: `catalog` is this factory's OWN parameter,
     // and the returned Component (and its closures) outlive this call -- the
     // exact "closures outlive the factory" trap keymap_help.cpp documents for
@@ -25,7 +26,7 @@ ftxui::Component MakeCommandsHelpView(const std::vector<CommandCatalogEntry>& ca
         const bool session_ok = !session_available || session_available();
         for (const auto& entry : catalog) {
             if (!UsableWithoutSession(entry) && !session_ok) continue;
-            std::string label = "/" + entry.name + "  -  " + entry.summary;
+            std::string label = "/" + entry.name + "  " + entry.summary;
             if (entry.submits_prompt) label += "  (submits a prompt as your turn)";
             if (entry.read_only) label += "  (read-only)";
             // Case-insensitive, like every other picker (picker_model,
@@ -41,17 +42,24 @@ ftxui::Component MakeCommandsHelpView(const std::vector<CommandCatalogEntry>& ca
 
     const FilterableMenuSpec spec{
         .window_title = "commands",
-        .hint_line = " /help <command>: detail   esc: close",
+        .hint_line = on_pick ? " enter: insert into the prompt  ·  /help <command>: detail  ·  "
+                               "esc: close"
+                             : " /help <command>: detail  ·  esc: close",
         .status_suffix = nullptr,
         .empty_message = " (no commands match)",
         .empty_threshold = 0,
         .reset_state = reset_state,
     };
 
-    // Nothing to select: Enter closes the overlay exactly like Escape --
-    // this is a reference, not a picker.
+    // Enter picks: the command goes into the prompt, ready for its arguments
+    // -- the overlay is the place you FIND a command, so leaving it should
+    // not mean retyping what you found.
     const FilterableMenuCallbacks callbacks{
-        .on_select = [on_close](const MenuRow&) { if (on_close) on_close(); },
+        .on_select =
+            [on_close, on_pick](const MenuRow& row) {
+                if (on_pick) on_pick(row.id);
+                if (on_close) on_close();
+            },
         .on_close = on_close,
         .on_extra_key = nullptr,
     };

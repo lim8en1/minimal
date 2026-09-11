@@ -114,7 +114,52 @@ TEST_CASE("{session} is dropped, along with its leading separator, when there is
     const std::map<std::string, std::string> values = {
         {"version", std::string(30, 'v')},
         {"session", "anything"},
-        {"tokens", std::string(30, 't')}};
-    const auto parts = ResolveStatusBar(format, values, /*max_width=*/60);
-    CHECK(Texts(parts) == std::vector<std::string>{std::string(30, 'v'), " | ", std::string(30, 't')});
+        {"tokens", std::string(28, 't')}};
+    const auto parts = ResolveStatusBar(format, values, /*max_width=*/61);
+    CHECK(Texts(parts) == std::vector<std::string>{std::string(30, 'v'), " | ", std::string(28, 't')});
+}
+
+TEST_CASE("overflow drops whole segments by priority, never clips a value", "[status_bar]") {
+    // The tail used to be clipped by the terminal edge -- and the tail is
+    // where permission_mode sits. Now version (lowest) goes first, with the
+    // separator that joined it, and the mode survives intact.
+    const auto format = ParseStatusFormat("{version} | {tokens} | {permission_mode}");
+    const std::map<std::string, std::string> values = {
+        {"version", "0.1.0-long-build-tag"}, {"tokens", "62k/200k · 31%"},
+        {"permission_mode", "bypass"}};
+    const auto parts = ResolveStatusBar(format, values, /*max_width=*/30);
+    CHECK(Texts(parts) == std::vector<std::string>{"62k/200k · 31%", " | ", "bypass"});
+
+    // Narrower still: tokens (70) goes before permission_mode (100).
+    const auto tighter = ResolveStatusBar(format, values, /*max_width=*/10);
+    CHECK(Texts(tighter) == std::vector<std::string>{"bypass"});
+}
+
+TEST_CASE("{>} splits the bar; the right group's first value takes no separator",
+          "[status_bar]") {
+    const auto format = ParseStatusFormat("{activity} · {tokens}{>}{model} · {agent}");
+    const std::map<std::string, std::string> values = {
+        {"activity", "thinking…"}, {"tokens", "1k tok"}, {"model", "a/x"}, {"agent", "build"}};
+    const auto parts = ResolveStatusBar(format, values, /*max_width=*/0);
+    REQUIRE(parts.size() == 7);
+    CHECK(parts[3].is_split);
+    CHECK(Texts(parts) ==
+          std::vector<std::string>{"thinking…", " · ", "1k tok", "", "a/x", " · ", "build"});
+    CHECK(parts[4].segment_id == "model");
+
+    // An empty first value on the right does not leave a leading separator.
+    const std::map<std::string, std::string> no_model = {{"activity", "thinking…"},
+                                                         {"agent", "build"}};
+    CHECK(Texts(ResolveStatusBar(format, no_model, 0)) ==
+          std::vector<std::string>{"thinking…", "", "build"});
+    CHECK(minimal::client::IsKnownStatusSegment(">"));
+}
+
+TEST_CASE("FormatTokenUsage is compact but never wrong", "[status_bar]") {
+    using minimal::client::FormatTokenUsage;
+    CHECK(FormatTokenUsage(551, 262144) == "551/262k · 0%");
+    CHECK(FormatTokenUsage(62000, 200000) == "62k/200k · 31%");
+    CHECK(FormatTokenUsage(4250, 0) == "4.2k tok");
+    CHECK(FormatTokenUsage(2000, 8000) == "2k/8k · 25%");
+    CHECK(FormatTokenUsage(1'500'000, 2'000'000) == "1.5M/2M · 75%");
 }

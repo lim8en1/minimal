@@ -515,6 +515,11 @@ message StoredMessage {
   // compatibility.
   int32 token_count = 3;
   int64 created_at_unix_ms = 4;
+  // Who produced an ASSISTANT message: the agent preset name and the
+  // "<provider>/<model>" it ran on, per-turn overrides included. Empty =
+  // unknown (user/tool-result rows, and rows persisted before v9).
+  string agent_preset = 5;
+  string model = 6;
 }
 
 message GetMessagesRequest {

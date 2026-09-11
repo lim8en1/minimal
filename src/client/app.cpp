@@ -1516,7 +1516,12 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         // commands (the overlay rebuilds its rows on every open, so the probe
         // is fresh each time).
         [&app]() { return !app->FocusedSessionId().empty(); },
-        &commands_help_reset);
+        &commands_help_reset,
+        // Enter inserts "/name " with the caret after it, ready for args.
+        [&prompt_state](const std::string& name) {
+            prompt_state.content = "/" + name + " ";
+            prompt_state.cursor_position = static_cast<int>(prompt_state.content.size());
+        });
 
     // --- plugin views (panel region + modal layer) -----------------------------
     // Panels: rendered in the frame beside the tools panel; one shared
@@ -1581,7 +1586,12 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         show_plugin_modal, open_picker, open_agent_picker, open_model_picker,
         [&picker_controller] { picker_controller.Poll(); }, tab_ui, theme,
         message_registry, renderer_registry, display_registry, permission_child, show_permission,
-        confirmation_child, show_confirmation, ask_child, show_ask});
+        confirmation_child, show_confirmation, ask_child, show_ask,
+        // The chat views this builds name these keys in their own text; the
+        // user's keymap decides them (FrameRenderer's fallback builder gets
+        // the same two).
+        env.keybindings.KeyFor("chat.toggle_collapse", "alt+c"),
+        env.keybindings.KeyFor("chat.load_older", "pageup")});
     // Same names the inline code declared directly -- every lambda below
     // this point (with_keys' KeyContext, the still-inline render body)
     // captures `[&]`, i.e. by ordinary lexical scoping.
@@ -1699,8 +1709,12 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         env.ui.tools_panel_stdout_buffer_lines > 0 ? env.ui.tools_panel_stdout_buffer_lines : 100,
         editor, status_format, plugin_views,
         // Row-renderer collapse hints follow the user's keymap, not a
-        // hardcoded alt+c.
-        env.keybindings.KeyFor("chat.toggle_collapse", "alt+c")});
+        // hardcoded alt+c -- and so do the other key names the frame spells
+        // out.
+        env.keybindings.KeyFor("chat.toggle_collapse", "alt+c"),
+        env.keybindings.KeyFor("session.picker", "ctrl+o"),
+        env.keybindings.KeyFor("chat.load_older", "pageup"),
+        env.keybindings.KeyFor("chat.scroll_bottom", "pagedown")});
     auto session_view = Renderer(editor, [&] { return frame_renderer.Render(); });
 
     // --- global keybindings -----------------------------------------------------

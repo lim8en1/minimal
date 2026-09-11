@@ -37,6 +37,31 @@ TEST_CASE("picker rows: the synthetic new-session row is always first") {
     CHECK(rows[1].session_id == "s1");
 }
 
+TEST_CASE("picker rows: labels are aligned columns with a live dot and a relative age") {
+    constexpr int64_t kNow = 1'700'000'000'000;
+    auto live = Session("s1", "alpha", "/p", kNow - 2 * 3'600'000, 12);
+    live.set_is_live(true);
+    const std::vector<minimal::v1::SessionSummary> sessions = {
+        live, Session("s2", "a much longer name", "/p", kNow - 30'000, 3)};
+
+    const auto rows = BuildPickerRows(sessions, "", PickerSort::kRecent, kNow);
+    REQUIRE(rows.size() == 3);
+    // Newest first: s2 (30s ago), then s1 (2h ago).
+    CHECK(rows[1].label == "  a much longer name     3 msgs  just now");
+    CHECK(rows[2].label == "● alpha                 12 msgs  2h ago");
+}
+
+TEST_CASE("RelativeAge buckets by minute, hour and day, then falls back to a date") {
+    using minimal::client::RelativeAge;
+    constexpr int64_t kNow = 1'700'000'000'000;
+    CHECK(RelativeAge(kNow - 5'000, kNow) == "just now");
+    CHECK(RelativeAge(kNow - 5 * 60'000, kNow) == "5m ago");
+    CHECK(RelativeAge(kNow - 3 * 3'600'000, kNow) == "3h ago");
+    CHECK(RelativeAge(kNow - 2 * 86'400'000LL, kNow) == "2d ago");
+    CHECK(RelativeAge(kNow - 30 * 86'400'000LL, kNow).size() == 10);   // YYYY-MM-DD
+    CHECK(RelativeAge(0, kNow).empty());
+}
+
 TEST_CASE("picker rows: new-session row survives a filter that matches nothing") {
     const std::vector<minimal::v1::SessionSummary> sessions = {
         Session("s1", "alpha", "/proj", 100)};

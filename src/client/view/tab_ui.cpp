@@ -52,8 +52,12 @@ SessionState::Snapshot TabMaintenance::Maintain(const std::string& tab_id,
     // own null-guarded fallback for the one documented race where it hasn't
     // -- see frame_renderer.cpp).
     if (!ui.chat) {
+        // The keymap's hints, not the ChatView defaults: this is the builder
+        // that normally runs first, so a remapped chat.toggle_collapse never
+        // reached the row hints when it passed none.
         ui.chat = std::make_unique<ChatView>(deps_.theme, deps_.message_registry,
-                                             deps_.renderer_registry, deps_.display_registry);
+                                             deps_.renderer_registry, deps_.display_registry,
+                                             deps_.toggle_collapse_hint, deps_.load_older_hint);
     }
 
     const auto make_stream = [&] { return deps_.engine.MakeStream(); };

@@ -93,8 +93,10 @@ ftxui::Component MakeFilterableMenuModal(
         if (is_header) {
             return text(state->rows[entry.index].label) | bold;
         }
+        // "❯ " -- the same cursor glyph the permission modal's answer list
+        // uses, so every list in the app marks its selection one way.
         std::string label =
-            (std::string(entry.active ? "> " : "  ") + "  ") + state->rows[entry.index].label;
+            (std::string(entry.active ? "❯ " : "  ") + "  ") + state->rows[entry.index].label;
         Element e = text(std::move(label));
         if (const std::optional<ftxui::Color> tint =
                 RowColor(state->rows[entry.index].color, depth)) {
@@ -161,20 +163,46 @@ ftxui::Component MakeFilterableMenuModal(
         // No separate header row here: it used to repeat window_title's own
         // text right below it ("resume a session" / " sessions ") -- the
         // window's title already says what this is.
-        rows.push_back(text(spec.hint_line) | Muted(theme));
-        std::string status = " filter: " + (state->filter.empty() ? "(none)" : state->filter);
-        if (spec.status_suffix) status += spec.status_suffix(state->filter);
-        rows.push_back(text(status) | Muted(theme));
+        //
+        // The filter line reads as the input it is -- the typed text with a
+        // caret, or a muted prompt when empty -- instead of "filter: (none)".
+        // The caller's state (sort order, scope) rides the same line, flush
+        // right.
+        Elements top;
+        if (state->filter.empty()) {
+            top.push_back(text(" / type to filter") | Muted(theme));
+        } else {
+            top.push_back(text(" / " + state->filter));
+            top.push_back(text("▏") | Muted(theme));
+        }
+        top.push_back(filler());
+        if (spec.status_suffix) {
+            std::string status = spec.status_suffix(state->filter);
+            // Suffixes are composed as "  ·  a  ·  b" (appended to the old
+            // filter text); standing alone, the leading separator goes.
+            const auto start = status.find_first_not_of(" \xC2\xB7");
+            status = start == std::string::npos ? std::string() : status.substr(start);
+            if (!status.empty()) top.push_back(text(status + " ") | Muted(theme));
+        }
+        rows.push_back(hbox(std::move(top)));
         rows.push_back(separator() | color(theme.ColorFor("border_unfocused")));
         if (state->rows.size() <= spec.empty_threshold) {
             rows.push_back(text(spec.empty_message) | Muted(theme));
         }
         rows.push_back(interactive->Render() | vscroll_indicator | frame | flex);
+        // Key hints in a pinned footer, like the permission/confirm modals --
+        // one place to look, whichever overlay is open. paragraph(): a long
+        // hint line wraps rather than losing its tail.
+        rows.push_back(separator() | color(theme.ColorFor("border_unfocused")));
+        rows.push_back(paragraph(spec.hint_line) | Muted(theme));
         // Padded with a space each side, matching prompt_modal.cpp's " permission "/
         // " confirm " -- window() draws the border flush against the title text
-        // otherwise, and this shell's callers previously left it unpadded.
-        return window(text(" " + spec.window_title + " "),
-                      vbox(std::move(rows)) | size(HEIGHT, LESS_THAN, 20)) |
+        // otherwise. The accent colors the FRAME and title; the rows inside
+        // keep the body color (a whole window of accent-colored text had no
+        // hierarchy left).
+        return window(text(" " + spec.window_title + " ") | bold,
+                      vbox(std::move(rows)) | color(theme.ColorFor("assistant_message")) |
+                          size(HEIGHT, LESS_THAN, 20)) |
                color(theme.ColorFor("border_focused"));
     });
 }

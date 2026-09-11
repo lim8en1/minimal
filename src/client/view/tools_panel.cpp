@@ -2,9 +2,15 @@
 
 #include <string_view>
 
+#include "minimal/client/utf8.hpp"
+#include "minimal/client/view/tool_status.hpp"
+
 namespace minimal::client {
 
 namespace {
+
+// The session-name column's width, in display columns.
+constexpr std::size_t kSessionColumn = 16;
 
 // The starting BYTE OFFSET of the last `max_lines` lines of `text` -- an
 // offset into the ORIGINAL string, not a copy of the tail. This function ran
@@ -40,8 +46,9 @@ ftxui::Element RenderToolsPanel(const std::vector<AppState::TabSnapshot>& tabs,
     // streaming text, so the frame no longer deep-copies every tab's full
     // snapshot to feed it.
     Elements rows;
-    rows.push_back(hbox({text(" running tools ") | bgcolor(theme.ColorFor("status_bar_bg")),
-                         text(" (live tail only; the transcript is authoritative)") | Muted(theme)}));
+    // The title only: the panel lists finished calls too, and "the transcript
+    // is authoritative" was a note for developers, not for the reader.
+    rows.push_back(text(" tools ") | bgcolor(theme.ColorFor("status_bar_bg")) | bold);
 
     bool any = false;
     for (const auto& tab : tabs) {
@@ -49,20 +56,22 @@ ftxui::Element RenderToolsPanel(const std::vector<AppState::TabSnapshot>& tabs,
             any = true;
             Elements line;
             const std::string name = tool.tool_name.empty() ? std::string("tool") : tool.tool_name;
-            line.push_back(text(" " + name) | color(theme.ColorFor("syntax_function")));
-            if (tool.started) {
-                line.push_back(text(" running") | color(theme.ColorFor("assistant_message")));
-            } else if (tool.is_error) {
-                line.push_back(text(" FAILED") | color(theme.ColorFor("error")));
-            } else {
-                line.push_back(text(" done") | color(theme.ColorFor("system_message")));
-            }
-            line.push_back(text(" | " + tab.display_name) | Muted(theme));
+            const ToolStatus status = tool.started    ? ToolStatus::Running
+                                      : tool.is_error ? ToolStatus::Failed
+                                                      : ToolStatus::Ok;
+            line.push_back(text(" "));
+            line.push_back(ToolHeadline(status, name, theme));
+            // The session as a fixed-width column, so the summaries line up
+            // across tabs instead of starting wherever each name ended.
+            std::string session = TruncateUtf8Columns(tab.display_name, kSessionColumn);
+            session += std::string(
+                kSessionColumn - std::min(kSessionColumn, Utf8ColumnWidth(session)), ' ');
+            line.push_back(text("  " + session) | Muted(theme));
             const std::string summary = (tool.summary.has_value() && !tool.summary->empty())
                                              ? *tool.summary
                                              : SummarizeToolInput(tool.tool_name, tool.input);
             if (!summary.empty()) {
-                line.push_back(text(" | " + summary) | Muted(theme));
+                line.push_back(text("  " + summary) | Muted(theme));
             }
             rows.push_back(hbox(std::move(line)));
             const std::size_t tail_start = TailStart(tool.buffered_output, stdout_buffer_lines);

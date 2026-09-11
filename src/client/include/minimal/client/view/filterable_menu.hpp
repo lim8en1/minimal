@@ -65,11 +65,11 @@ struct FilterableMenuCallbacks {
 
 struct FilterableMenuSpec {
     std::string window_title;    // "resume a session" / "switch agent preset"
-    std::string hint_line;       // caller-composed: key hints differ per picker
-    // Appended after " filter: X" (or "(none)") -- the session picker adds
-    // sort/all-dirs/more-below; the agent picker leaves this empty. Composed
-    // fresh each render so it reflects state (sort order, has_more) the
-    // shell has no access to.
+    std::string hint_line;       // caller-composed key hints, rendered as the footer
+    // Shown flush right on the filter line (a leading "  ·  " is dropped) --
+    // the session picker adds sort/all-dirs/more-below; the agent picker
+    // leaves this empty. Composed fresh each render so it reflects state
+    // (sort order, has_more) the shell has no access to.
     std::function<std::string(const std::string& filter)> status_suffix;
     std::string empty_message;   // "(no other stored sessions here)" / "(no agent presets match)"
     // The empty message shows when build_rows(filter).size() <= this. The

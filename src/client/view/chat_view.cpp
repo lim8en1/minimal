@@ -2,6 +2,7 @@
 
 #include <algorithm>
 
+#include "minimal/client/view/tool_status.hpp"
 #include "minimal/common/logger.hpp"
 
 namespace minimal::client {
@@ -48,9 +49,48 @@ bool ClickCollapsible(ChatRowKind kind) {
         case ChatRowKind::UserText:
         case ChatRowKind::AgentMarkdown:
         case ChatRowKind::System:
+        case ChatRowKind::Switch:
             return false;
     }
     return false;
+}
+
+// Who is speaking, readable from the left edge alone while scrolling: your
+// rows in your color, everything the assistant side produced (text,
+// thinking, tools) in a quiet one, harness rows in theirs.
+ftxui::Color GutterColor(ChatRowKind kind, const Theme& theme) {
+    switch (kind) {
+        case ChatRowKind::UserText:
+        case ChatRowKind::UserAttachment:
+            return theme.ColorFor("user_message");
+        case ChatRowKind::System:
+            return theme.ColorFor("system_message");
+        case ChatRowKind::AgentMarkdown:
+        case ChatRowKind::Thinking:
+        case ChatRowKind::ToolActivity:
+        case ChatRowKind::Switch:
+            break;
+    }
+    return theme.ColorForOr("muted", "system_message");
+}
+
+// A full-height speaker bar: separatorCharacter fills its whole box, so the
+// bar spans every line of a multi-line row, not just its label line.
+constexpr const char* kGutterGlyph = "▎";
+// The row cursor's bar: a different SHAPE as well as a different color, so the
+// cursor survives a colorless terminal (NO_COLOR, ColorDepth::None).
+constexpr const char* kCursorGutterGlyph = "┃";
+
+ftxui::Element WithGutter(ftxui::Element body, ftxui::Color gutter,
+                          const char* glyph = kGutterGlyph) {
+    using namespace ftxui;
+    return hbox({separatorCharacter(glyph) | color(gutter), text(" "), std::move(body) | flex});
+}
+
+// Rows that stack without a blank line between them while collapsed: a turn
+// of ten tool calls is a ten-line list, not thirty lines of chrome.
+bool IsCompact(ChatRowKind kind) {
+    return kind == ChatRowKind::ToolActivity || kind == ChatRowKind::Thinking;
 }
 
 }  // namespace
@@ -59,12 +99,13 @@ ChatView::ChatView(const Theme& theme,
                    const plugins::MessageRendererRegistry& message_renderers,
                    const plugins::ToolResultRendererRegistry& tool_renderers,
                    const plugins::DisplayRendererRegistry& display_renderers,
-                   std::string toggle_collapse_hint)
+                   std::string toggle_collapse_hint, std::string load_older_hint)
     : theme_(theme),
       message_renderers_(message_renderers),
       tool_renderers_(tool_renderers),
       display_renderers_(display_renderers),
-      toggle_collapse_hint_(std::move(toggle_collapse_hint)) {}
+      toggle_collapse_hint_(std::move(toggle_collapse_hint)),
+      load_older_hint_(std::move(load_older_hint)) {}
 
 bool ChatView::IsCollapsed(const RowKey& key, const ChatRow& row) const {
     if (const auto it = collapse_overrides_.find(key); it != collapse_overrides_.end()) {
@@ -109,6 +150,11 @@ void ChatView::RebuildRows(const SessionState::Snapshot& snapshot) {
     row_keys_.reserve(rows.size());
     row_timestamps_.clear();
     row_timestamps_.reserve(rows.size());
+    row_kinds_.clear();
+    row_kinds_.reserve(rows.size());
+    row_collapsed_.clear();
+    row_collapsed_.reserve(rows.size());
+    const std::vector<bool> continuations = LabelContinuations(rows);
 
     // Per-row cache keyed by (seq, occurrence within seq, resolved collapsed
     // state): a version bump re-renders only rows the page did not already
@@ -117,7 +163,7 @@ void ChatView::RebuildRows(const SessionState::Snapshot& snapshot) {
     // hits cache under its unchanged key. Same-key rows from one message are
     // stable (a message's row decomposition is deterministic), so a cached
     // hit is always the same visual content.
-    std::map<std::tuple<int64_t, int, bool>, ftxui::Elements> fresh_cache;
+    std::map<std::tuple<int64_t, int, bool, bool>, ftxui::Elements> fresh_cache;
     std::map<RowKey, bool> fresh_resolved;
     std::map<int64_t, int> occurrences;
 
@@ -128,6 +174,12 @@ void ChatView::RebuildRows(const SessionState::Snapshot& snapshot) {
         row_timestamps_.push_back(row.created_at_unix_ms);
         const bool collapsed = IsCollapsed(row_key, row);
         fresh_resolved.emplace(row_key, collapsed);
+        row_kinds_.push_back(row.kind);
+        row_collapsed_.push_back(collapsed);
+        // Joins the cache key: loading an older page can put an earlier text
+        // row of the same turn in front of this one, flipping it to a
+        // continuation with no change to its own content.
+        const bool continuation = continuations[row_keys_.size() - 1];
         // The click affordance rides the SAME ctx.collapsed resolution the
         // renderer draws from, and only for click-collapsible kinds -- a
         // plugin renderer for user text must never see a marker for a click
@@ -135,9 +187,10 @@ void ChatView::RebuildRows(const SessionState::Snapshot& snapshot) {
         const plugins::RowRenderContext ctx{
             .collapsed = collapsed,
             .toggle_collapse_hint = toggle_collapse_hint_,
-            .collapse_marker = ClickCollapsible(row.kind) ? (collapsed ? " [+]" : " [-]")
-                                                          : std::string_view("")};
-        const auto key = std::make_tuple(row.seq, occurrence, collapsed);
+            .collapse_marker = ClickCollapsible(row.kind) ? (collapsed ? "▸" : "▾")
+                                                          : std::string_view(""),
+            .continuation = continuation};
+        const auto key = std::make_tuple(row.seq, occurrence, collapsed, continuation);
 
         ftxui::Elements parts;
         const auto cached = row_cache_.find(key);
@@ -233,16 +286,11 @@ void ChatView::RebuildRows(const SessionState::Snapshot& snapshot) {
 ftxui::Element ChatView::RenderLiveToolRow(const ToolExecutionState& tool) const {
     using namespace ftxui;
     Elements line;
-    line.push_back(text("▎tool " + (tool.tool_name.empty() ? std::string("tool")
-                                                            : tool.tool_name)) |
-                   color(theme_.ColorFor("syntax_function")));
-    if (tool.started) {
-        line.push_back(text(" running…") | color(theme_.ColorFor("assistant_message")));
-    } else if (tool.is_error) {
-        line.push_back(text(" FAILED") | color(theme_.ColorFor("error")));
-    } else {
-        line.push_back(text(" done") | color(theme_.ColorFor("system_message")));
-    }
+    const ToolStatus status = tool.started    ? ToolStatus::Running
+                              : tool.is_error ? ToolStatus::Failed
+                                              : ToolStatus::Ok;
+    line.push_back(ToolHeadline(
+        status, tool.tool_name.empty() ? std::string("tool") : tool.tool_name, theme_));
     // tool.summary is currently always empty on the wire (rendering from
     // tool_name + input is the client's job); tool.input is what actually
     // carries the model's call args, so it's the real fallback, not a rare one.
@@ -288,14 +336,15 @@ ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
     // its full history unless the user already knew about chat.load_older
     // (PageUp) -- has_earlier_messages was never rendered anywhere.
     if (snapshot.has_earlier_messages) {
-        column.push_back(text("··· earlier messages available -- pageup to load ···") |
+        column.push_back(text("··· earlier messages · " + load_older_hint_ + " to load ···") |
                          color(theme_.ColorFor("system_message")));
     }
     // The sliding-window boundary (track R2): older-page loads beyond the cap
     // evicted pages from the window's NEWEST end, so this view's top is NOT
     // the live newest message. A marker here, never a silent gap.
     if (snapshot.scrollback_trimmed) {
-        column.push_back(text("··· newer messages hidden -- they return with the next turn ···") | color(theme_.ColorFor("system_message")));
+        column.push_back(text("··· newer messages hidden · they return with the next turn ···") |
+                         color(theme_.ColorFor("system_message")));
     }
     // A discontinuity INSIDE the window (older-page append landed out of
     // order -- e.g. a refresh racing a rewind): rows the transcript holds are
@@ -331,49 +380,63 @@ ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
         // same number.
         assembled_row_start_index_.clear();
         assembled_row_start_index_.reserve(rendered_rows_.size());
-        // One box slot per row part; ToggleCollapseAt hit-tests these against
-        // a click's screen y.
+        // One box slot per row; ToggleCollapseAt hit-tests these against a
+        // click's screen y.
         row_boxes_.clear();
         row_boxes_.reserve(rendered_rows_.size());
         for (std::size_t i = 0; i < rendered_rows_.size(); ++i) {
             assembled_row_start_index_.push_back(assembled_column_rows_.size());
-            auto& parts = rendered_rows_[i];
+            Elements parts = rendered_rows_[i];   // shared Elements, cheap copy
             const bool is_focused = focused_row_.has_value() && i < row_keys_.size() &&
                                     row_keys_[i] == *focused_row_;
+            const ChatRowKind kind =
+                i < row_kinds_.size() ? row_kinds_[i] : ChatRowKind::AgentMarkdown;
             std::vector<std::shared_ptr<ftxui::Box>> boxes;
-            boxes.reserve(parts.size());
-            for (std::size_t p = 0; p < parts.size(); ++p) {
-                Element part = parts[p];
-                // The row cursor: a left-edge marker on the row's FIRST element
-                // only (a whole-row background tint would fight a code block's
-                // own coloring) -- subtle, since this is a cursor to navigate
-                // from, not a selection to fight visually.
-                if (is_focused && p == 0) {
-                    part = hbox({text("▏") | color(theme_.ColorFor("row_focused")), std::move(part) | flex});
-                }
+            if (!parts.empty()) {
                 // The timestamp rides the row's FIRST element (its label line),
                 // right-aligned via a flex gap -- it used to get its own row
                 // below the whole thing, plus the blank line after THAT, which
                 // was 3 lines of chrome per message and visually glued the
                 // stamp to the NEXT speaker rather than the row it timed.
-                if (p == 0 && show_timestamps_ && i < row_timestamps_.size()) {
+                // Not on a Switch divider: it is a rule, and the stamp would
+                // only repeat the reply's own right below it.
+                if (show_timestamps_ && kind != ChatRowKind::Switch &&
+                    i < row_timestamps_.size()) {
                     const auto stamp = FormatClockTime(row_timestamps_[i]);
                     if (!stamp.empty()) {
-                        part = hbox({std::move(part) | flex,
-                                    text(stamp) | color(theme_.ColorFor("system_message"))});
+                        parts[0] = hbox({std::move(parts[0]) | flex,
+                                         text(stamp) | color(theme_.ColorFor("system_message"))});
                     }
                 }
-                // Outermost wrap, after the focus/timestamp decoration: the spy
+                Element row = parts.size() == 1 ? std::move(parts[0]) : vbox(std::move(parts));
+                // The speaker gutter, full height. The row cursor recolors the
+                // SAME bar rather than adding a marker of its own (a whole-row
+                // background tint would fight a code block's own coloring). A
+                // Switch divider is a rule across the page, not a speaker.
+                if (is_focused) {
+                    row = WithGutter(std::move(row), theme_.ColorForOr("cursor", "row_focused"),
+                                     kCursorGutterGlyph);
+                } else if (kind != ChatRowKind::Switch) {
+                    row = WithGutter(std::move(row), GutterColor(kind, theme_));
+                }
+                // Outermost wrap, after the gutter/timestamp decoration: the spy
                 // records the box of exactly what is pushed into the column (the
-                // layout-visible position), whatever the decorations did to the
-                // width. Baked in at ASSEMBLY time, never into the cached
-                // Elements -- a cache hit must not accumulate one spy per frame.
+                // layout-visible position). Baked in at ASSEMBLY time, never
+                // into the cached Elements -- a cache hit must not accumulate
+                // one spy per frame.
                 auto slot = std::make_shared<ftxui::Box>();
                 boxes.push_back(slot);
                 assembled_column_rows_.push_back(
-                    std::make_shared<RowBoxSpy>(std::move(slot), std::move(part)));
+                    std::make_shared<RowBoxSpy>(std::move(slot), std::move(row)));
             }
-            assembled_column_rows_.push_back(text(" "));  // breathing room between rows
+            // Breathing room between rows -- except inside a run of collapsed
+            // tool/thinking rows, which reads as one compact list. The LAST
+            // row always gets it: the bottom pin (see the focus logic below)
+            // anchors on a one-line element, never on a tall row's top.
+            const bool compact_run = i + 1 < row_kinds_.size() && i < row_collapsed_.size() &&
+                                     IsCompact(kind) && row_collapsed_[i] &&
+                                     IsCompact(row_kinds_[i + 1]);
+            if (!compact_run) assembled_column_rows_.push_back(text(" "));
             row_boxes_.push_back(std::move(boxes));
         }
         assembled_version_ = rendered_version_;
@@ -402,9 +465,11 @@ ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
             // live echo, not a persisted row) -- plugin code is not trusted
             // to return normally here either.
             try {
-                column.push_back(renderer->Render(
-                    echo, theme_,
-                    plugins::RowRenderContext{.toggle_collapse_hint = toggle_collapse_hint_}));
+                column.push_back(WithGutter(
+                    renderer->Render(
+                        echo, theme_,
+                        plugins::RowRenderContext{.toggle_collapse_hint = toggle_collapse_hint_}),
+                    GutterColor(ChatRowKind::UserText, theme_)));
                 column.push_back(text(" "));
             } catch (const std::exception& error) {
                 common::DefaultLogger().warn("message renderer for UserText threw: {}",
@@ -433,28 +498,45 @@ ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
     // (ChatRowsFromMessages) -- this is what lets the live view already
     // look like where it is about to land, instead of only converging to it
     // once the turn ends.
+    const ftxui::Color assistant_gutter = GutterColor(ChatRowKind::AgentMarkdown, theme_);
+    bool live_labeled = false;   // the live turn's label, once -- LabelContinuations' rule
     for (std::size_t i = 0; i < snapshot.live_segments.size(); ++i) {
         const auto& segment = snapshot.live_segments[i];
         if (segment.kind == LiveTurnSegment::Kind::Text) {
             if (i >= live_text_streams.size() || !live_text_streams[i].view) continue;
-            column.push_back(text("assistant") | color(theme_.ColorFor("assistant_message")) |
-                             bold);
+            Elements block;
+            if (!live_labeled) {
+                // The same label the settled row will carry. The EFFECTIVE
+                // agent/model is what this turn runs on (a staged /model
+                // applies at the next turn boundary); desired only fills in on
+                // a tab whose metadata has not arrived yet. The post-turn page
+                // apply swaps in the persisted attribution either way.
+                const std::string& live_agent = !snapshot.agent_preset.empty()
+                                                    ? snapshot.agent_preset
+                                                    : snapshot.desired_agent_preset;
+                const std::string& live_model =
+                    !snapshot.model.empty() ? snapshot.model : snapshot.desired_model;
+                block.push_back(text(AssistantLabel(live_agent, live_model)) |
+                                color(theme_.ColorFor("assistant_message")) | bold);
+                live_labeled = true;
+            }
             // A throwing stream must not collapse the whole turn's layout --
             // a short fallback line stands in so the row is still visibly
             // present, matching tab_ui.cpp's AppendDelta/Finalize containment
             // for the same plugin-owned stream object.
             try {
                 // Base body color, as on the settled row (core_registrations.cpp).
-                column.push_back(live_text_streams[i].view->Render(theme_) |
-                                 color(theme_.ColorFor("assistant_message")));
+                block.push_back(live_text_streams[i].view->Render(theme_) |
+                                color(theme_.ColorFor("assistant_message")));
             } catch (const std::exception& error) {
                 common::DefaultLogger().warn("markdown stream Render threw: {}", error.what());
-                column.push_back(text("(render failed)") | Muted(theme_));
+                block.push_back(text("(render failed)") | Muted(theme_));
             } catch (...) {
                 common::DefaultLogger().warn(
                     "markdown stream Render threw a non-standard exception");
-                column.push_back(text("(render failed)") | Muted(theme_));
+                block.push_back(text("(render failed)") | Muted(theme_));
             }
+            column.push_back(WithGutter(vbox(std::move(block)), assistant_gutter));
             column.push_back(text(" "));
         } else if (segment.kind == LiveTurnSegment::Kind::Thinking) {
             // Reasoning streams as plain quiet text, same look as the persisted
@@ -464,7 +546,6 @@ ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
             // only add latency -- this reads the segment text directly, the
             // same way RenderLiveToolRow reads its state.
             if (segment.text.empty()) continue;
-            column.push_back(text("▎thinking") | color(theme_.ColorFor("thinking")));
             // paragraph() word-wraps the WHOLE accumulated text; skip redoing
             // that on a repaint tick with no new delta (a mouse move, a
             // keystroke elsewhere) by reusing the cached Element when this
@@ -477,7 +558,9 @@ ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
                 if (i >= thinking_render_cache_.size()) thinking_render_cache_.resize(i + 1);
                 thinking_render_cache_[i] = {segment.text, thinking_body};
             }
-            column.push_back(thinking_body);
+            column.push_back(WithGutter(
+                vbox({text("thinking") | color(theme_.ColorFor("thinking")), thinking_body}),
+                assistant_gutter));
             column.push_back(text(" "));
         } else if (segment.kind == LiveTurnSegment::Kind::Tool) {
             const ToolExecutionState* tool = nullptr;
@@ -493,8 +576,12 @@ ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
             // anyway) -- render nothing for this marker rather than stale
             // or crashing.
             if (tool != nullptr) {
-                column.push_back(RenderLiveToolRow(*tool));
-                column.push_back(text(" "));
+                column.push_back(WithGutter(RenderLiveToolRow(*tool), assistant_gutter));
+                // Consecutive calls stack as a list, like the settled rows.
+                const bool next_is_tool = i + 1 < snapshot.live_segments.size() &&
+                                          snapshot.live_segments[i + 1].kind ==
+                                              LiveTurnSegment::Kind::Tool;
+                if (!next_is_tool) column.push_back(text(" "));
             }
         }
     }

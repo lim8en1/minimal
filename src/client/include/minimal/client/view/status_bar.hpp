@@ -6,6 +6,7 @@
 // -- and RunTui warns at startup, once, naming the id (the keybindings.json
 // rule for names unknown at compile time).
 
+#include <cstdint>
 #include <map>
 #include <string>
 #include <vector>
@@ -25,10 +26,17 @@ bool IsKnownStatusSegment(std::string_view id);
 // at startup rather than every frame.
 std::vector<std::string> UnknownStatusSegments(const std::string& format);
 
-// One resolved literal-or-value piece, in render order.
+// The pseudo-segment "{>}": everything after it right-aligns. Not a value --
+// it never renders text and never takes a separator.
+inline constexpr std::string_view kStatusSplitId = ">";
+
+// One resolved piece, in render order: a literal, a segment's value (with its
+// id, for per-segment styling), or the left/right split point.
 struct StatusBarPart {
     bool is_literal = false;
     std::string text;
+    std::string segment_id;   // empty for literals and the split
+    bool is_split = false;
 };
 
 // The status bar's width decision, pure and independently testable
@@ -37,19 +45,31 @@ struct StatusBarPart {
 // parts, given the terminal width available in display columns
 // (`max_width <= 0` means "don't clamp", e.g. an unknown terminal size).
 //
-// `{session}` is the ONLY elastic segment: capped at min(24, leftover
-// budget) columns, truncated with an ellipsis, or dropped entirely (along
-// with its now-orphaned adjacent literal) when the OTHER segments alone
-// already exceed max_width. Every other segment renders at its natural
-// width, unclamped -- a status value silently losing digits (a truncated
-// token count reading as a smaller, WRONG number) is worse than a status bar
-// that overflows the terminal.
+// Overflow is resolved by DROPPING whole segments, never by clipping one: a
+// status value silently losing digits (a truncated token count reading as a
+// smaller, WRONG number) is the one thing the bar must never show.
+//   1. `{session}` is capped at min(24, leftover budget) columns, truncated
+//      with an ellipsis, or dropped when the rest alone already overflows.
+//   2. Still too wide: the lowest-priority segment goes, with the separator
+//      that joined it, until the bar fits. Version and the reference detail
+//      (token_detail, session) go first; permission_mode -- the one
+//      safety-relevant value -- goes last. Unknown (plugin) ids sit in the
+//      middle.
 std::vector<StatusBarPart> ResolveStatusBar(const std::vector<StatusSegment>& format,
                                             const std::map<std::string, std::string>& values,
                                             int max_width);
 
+// "62k/200k · 31%" (window known) or "4.2k tok" (not). Compact on purpose --
+// the exact count was seven digits of noise at a glance -- but never
+// truncated: every figure shown is the real one, rounded.
+std::string FormatTokenUsage(std::int64_t used, std::int64_t max);
+
+// `emphasis` colors individual segment values by id (activity by state,
+// tokens near the window, a risky permission mode); unlisted values use the
+// body color, literals the muted one.
 ftxui::Element RenderStatusBar(const std::vector<StatusSegment>& format,
                                const std::map<std::string, std::string>& values,
-                               const Theme& theme, int max_width);
+                               const Theme& theme, int max_width,
+                               const std::map<std::string, ftxui::Color>& emphasis = {});
 
 }  // namespace minimal::client

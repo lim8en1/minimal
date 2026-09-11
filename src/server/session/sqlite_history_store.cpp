@@ -13,8 +13,10 @@ SqliteHistoryStore::SqliteHistoryStore(SessionDatabase& db, std::string session_
       // report values that belong to the previous incarnation of the session.
       last_seq_(db.LastMessageSeq(session_id_)) {}
 
-void SqliteHistoryStore::Append(const llm::Message& message, std::optional<int> output_tokens) {
-    const std::int64_t seq = db_.AppendMessage(session_id_, message, output_tokens.value_or(0));
+void SqliteHistoryStore::Append(const llm::Message& message, std::optional<int> output_tokens,
+                                const MessageAttribution& attribution) {
+    const std::int64_t seq =
+        db_.AppendMessage(session_id_, message, output_tokens.value_or(0), attribution);
     last_seq_.store(seq, std::memory_order_release);
 }
 

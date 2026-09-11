@@ -298,7 +298,7 @@ TEST_CASE("a store opened across a rewind resumes the active transcript",
     // seq 2 and not above rows the user rewound away.
     session::SqliteHistoryStore store(db, row.session_id);
     CHECK(store.last_appended_seq() == 1);
-    store.Append(llm::Message{llm::Role::User, {llm::TextBlock{"after rewind"}}}, std::nullopt);
+    store.Append(llm::Message{llm::Role::User, {llm::TextBlock{"after rewind"}}}, std::nullopt, {});
     CHECK(store.last_appended_seq() == 2);
 }
 

@@ -5,6 +5,7 @@
 #include <stdexcept>
 
 #include "minimal/llm/message.hpp"
+#include "minimal/session/stored_message.hpp"
 
 namespace minimal::session {
 
@@ -33,7 +34,11 @@ public:
     // the STATIC type of the expression, not the dynamic one, so a base and an
     // override that disagree silently produce different values depending on
     // which reference you happen to be holding. Callers pass it explicitly.
-    virtual void Append(const llm::Message& message, std::optional<int> output_tokens) = 0;
+    //
+    // attribution: the agent preset and model that produced an assistant
+    // message; empty for everything else (same explicit-argument rule).
+    virtual void Append(const llm::Message& message, std::optional<int> output_tokens,
+                        const MessageAttribution& attribution) = 0;
 
     // The seq the last Append was assigned, or -1 if nothing has been appended.
     // Read, not counted: seq is assigned by the store, so a caller that tracked

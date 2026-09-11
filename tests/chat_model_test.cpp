@@ -46,7 +46,108 @@ v1::ContentBlock ToolResult(const std::string& id, const std::string& text, bool
     return block;
 }
 
+v1::StoredMessage Attributed(v1::StoredMessage stored, const std::string& agent,
+                             const std::string& model) {
+    stored.set_agent_preset(agent);
+    stored.set_model(model);
+    return stored;
+}
+
 }  // namespace
+
+TEST_CASE("AssistantLabel shows agent (short model) and degrades per missing half",
+          "[chat_model][attribution]") {
+    CHECK(client::AssistantLabel("build", "anthropic/sonnet-4-5") == "build (sonnet-4-5)");
+    CHECK(client::AssistantLabel("build", "openrouter/anthropic/claude-opus-5") ==
+          "build (claude-opus-5)");
+    CHECK(client::AssistantLabel("build", "") == "build");
+    CHECK(client::AssistantLabel("", "openai/gpt-5") == "gpt-5");
+    CHECK(client::AssistantLabel("", "") == "assistant");
+}
+
+TEST_CASE("assistant rows carry their message's attribution; user rows do not",
+          "[chat_model][attribution]") {
+    // Descending, as GetMessages returns it.
+    const std::vector<v1::StoredMessage> page = {
+        Attributed(MakeMessage(v1::ROLE_ASSISTANT, {TextBlock("hi")}, 1), "build",
+                   "anthropic/sonnet-4-5"),
+        MakeMessage(v1::ROLE_USER, {TextBlock("hello")}, 0),
+    };
+    const auto rows = client::ChatRowsFromMessages(page);
+    REQUIRE(rows.size() == 2);
+    CHECK(rows[0].kind == ChatRowKind::UserText);
+    CHECK(rows[0].agent.empty());
+    CHECK(rows[1].kind == ChatRowKind::AgentMarkdown);
+    CHECK(rows[1].agent == "build");
+    CHECK(rows[1].model == "anthropic/sonnet-4-5");
+}
+
+TEST_CASE("a switch divider marks where the agent or model changed",
+          "[chat_model][attribution]") {
+    const std::vector<v1::StoredMessage> page = {
+        Attributed(MakeMessage(v1::ROLE_ASSISTANT, {TextBlock("c")}, 5), "plan", "openai/gpt-5"),
+        MakeMessage(v1::ROLE_USER, {TextBlock("q3")}, 4),
+        Attributed(MakeMessage(v1::ROLE_ASSISTANT, {TextBlock("b")}, 3), "build",
+                   "anthropic/sonnet-4-5"),
+        MakeMessage(v1::ROLE_USER, {TextBlock("q2")}, 2),
+        Attributed(MakeMessage(v1::ROLE_ASSISTANT, {TextBlock("a")}, 1), "build",
+                   "anthropic/sonnet-4-5"),
+        MakeMessage(v1::ROLE_USER, {TextBlock("q1")}, 0),
+    };
+    const auto rows = client::ChatRowsFromMessages(page);
+    // q1, a, q2, b (same speaker: no divider), q3, [switch], c
+    REQUIRE(rows.size() == 7);
+    CHECK(rows[3].kind == ChatRowKind::AgentMarkdown);
+    CHECK(rows[4].kind == ChatRowKind::UserText);
+    REQUIRE(rows[5].kind == ChatRowKind::Switch);
+    CHECK(rows[5].switch_from_agent == "build");
+    CHECK(rows[5].switch_from_model == "anthropic/sonnet-4-5");
+    CHECK(rows[5].agent == "plan");
+    CHECK(rows[5].model == "openai/gpt-5");
+    CHECK(rows[5].seq == 5);   // the message where the change took effect
+    CHECK(rows[6].kind == ChatRowKind::AgentMarkdown);
+    CHECK_FALSE(client::CollapsedByDefault(rows[5]));
+}
+
+TEST_CASE("unknown attribution never draws a switch divider", "[chat_model][attribution]") {
+    // Pre-attribution history followed by labeled rows: that is history
+    // getting a label, not a switch.
+    const std::vector<v1::StoredMessage> page = {
+        Attributed(MakeMessage(v1::ROLE_ASSISTANT, {TextBlock("new")}, 3), "build",
+                   "anthropic/sonnet-4-5"),
+        MakeMessage(v1::ROLE_USER, {TextBlock("q2")}, 2),
+        MakeMessage(v1::ROLE_ASSISTANT, {TextBlock("old")}, 1),
+        MakeMessage(v1::ROLE_USER, {TextBlock("q1")}, 0),
+    };
+    const auto rows = client::ChatRowsFromMessages(page);
+    REQUIRE(rows.size() == 4);
+    for (const auto& row : rows) CHECK(row.kind != ChatRowKind::Switch);
+    CHECK(rows[1].agent.empty());   // the old row stays unlabeled
+}
+
+TEST_CASE("LabelContinuations labels an assistant turn once, resetting at boundaries",
+          "[chat_model][labels]") {
+    using client::ChatRow;
+    const auto row = [](ChatRowKind kind) { return ChatRow{.kind = kind}; };
+    const std::vector<ChatRow> rows = {
+        row(ChatRowKind::UserText),        // 0
+        row(ChatRowKind::AgentMarkdown),   // 1 labeled
+        row(ChatRowKind::ToolActivity),    // 2
+        row(ChatRowKind::Thinking),        // 3
+        row(ChatRowKind::AgentMarkdown),   // 4 continuation
+        row(ChatRowKind::Switch),          // 5 boundary
+        row(ChatRowKind::AgentMarkdown),   // 6 labeled again (new speaker)
+        row(ChatRowKind::System),          // 7 boundary
+        row(ChatRowKind::AgentMarkdown),   // 8 labeled
+        row(ChatRowKind::UserText),        // 9
+        row(ChatRowKind::AgentMarkdown),   // 10 labeled
+    };
+    const auto continuations = client::LabelContinuations(rows);
+    REQUIRE(continuations.size() == rows.size());
+    const std::vector<bool> expected = {false, false, false, false, true, false,
+                                        false, false, false, false, false};
+    CHECK(continuations == expected);
+}
 
 TEST_CASE("SummarizeToolInput prefers bash's $command over a generic dump",
           "[chat_model][tool_summary]") {

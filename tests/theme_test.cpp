@@ -100,6 +100,12 @@ TEST_CASE("SelectionStyle uses the theme's roles and falls back to inverted") {
         R"({"colors": {"row_focused": "#ff0000", "status_bar_bg": "#000080"}})",
         ColorDepth::None);
     CHECK(RenderOneCell(SelectionStyle(none)).inverted);
+
+    // `cursor` wins over row_focused when a theme sets it.
+    const auto with_cursor = Theme::Parse(
+        R"({"colors": {"row_focused": "#ff0000", "cursor": "#00ff00", "status_bar_bg": "#000080"}})",
+        ColorDepth::Truecolor);
+    CHECK(RenderOneCell(SelectionStyle(with_cursor)).foreground_color == ftxui::Color(0, 255, 0));
 }
 
 TEST_CASE("Muted is a theme color, never SGR dim") {
@@ -173,7 +179,8 @@ TEST_CASE("Bundled themes keep text roles legible on their background family") {
         "syntax_comment",  "syntax_number",     "syntax_function", "syntax_type",
         "syntax_operator", "syntax_plain",      "banner_hint",   "banner_art",
         "working",         "row_focused",       "diff_added",    "diff_removed",
-        "diff_hunk",       "muted",
+        "diff_hunk",       "muted",             "tool",          "success",
+        "cursor",
     };
     const struct {
         const char* name;
@@ -215,6 +222,35 @@ TEST_CASE("Bundled themes keep text roles legible on their background family") {
             }
         }
     }
+}
+
+// The chrome roles exist so chrome stops borrowing colors that already mean
+// something: a tool header the same hue as your own turns, a row cursor the
+// same hue as "act on this".
+TEST_CASE("Bundled themes keep chrome roles distinct from the roles they replace") {
+    const std::filesystem::path themes_dir = std::filesystem::path(MINIMAL_BUNDLED_DIR) / "themes";
+    for (const auto& file : std::filesystem::directory_iterator(themes_dir)) {
+        if (file.path().extension() != ".json") continue;
+        std::ifstream in(file.path());
+        REQUIRE(in.good());
+        std::ostringstream contents;
+        contents << in.rdbuf();
+        const auto colors = nlohmann::json::parse(contents.str()).at("colors");
+        INFO(file.path().filename().string());
+        CHECK(colors.at("tool") != colors.at("user_message"));
+        CHECK(colors.at("tool") != colors.at("syntax_function"));
+        CHECK(colors.at("cursor") != colors.at("attention"));
+    }
+}
+
+TEST_CASE("ColorForOr falls back to the older role only when the new one is unset") {
+    const auto with = Theme::Parse(R"({"colors": {"tool": "#010203", "syntax_function": "#ffffff"}})",
+                                   ColorDepth::Truecolor);
+    CHECK(with.ColorForOr("tool", "syntax_function") == ftxui::Color(1, 2, 3));
+    const auto without =
+        Theme::Parse(R"({"colors": {"syntax_function": "#ffffff"}})", ColorDepth::Truecolor);
+    CHECK(without.ColorForOr("tool", "syntax_function") == ftxui::Color(255, 255, 255));
+    CHECK(without.ColorForOr("tool", "nope") == ftxui::Color::Default);
 }
 
 // Two syntax categories sharing a color are one category on screen (the
