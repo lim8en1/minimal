@@ -277,9 +277,10 @@ namespace {
 // call that built the checkboxes pointing into it.
 struct AskModalState {
     struct QuestionState {
-        // Entry strings for the checkbox/radio labels: "label" or
-        // "label -- description". Stored here (not built per frame) because
-        // ftxui's ConstStringRef/ConstStringListRef borrow the storage.
+        // Entry strings: option labels only (descriptions render separately,
+        // wrapped, via each control's transform -- see WrappedOptionEntry).
+        // Stored here (not built per frame) because ftxui's
+        // ConstStringRef/ConstStringListRef borrow the storage.
         std::vector<std::string> entries;
         // multiple: one stable bool per option (deque, not vector<bool>:
         // the checkboxes need stable bool* -- same rule as GrantToggles).
@@ -329,6 +330,23 @@ v1::AskUserResponse DismissedAnswer(const PendingAsk& request) {
     response.set_request_id(request.request_id);
     response.set_answered(false);
     return response;
+}
+
+// One option row: marker, then the label wrapped, then its description
+// wrapped and dimmed beneath it -- both hanging under the label column
+// instead of running off the modal's fixed width like a bare text() would.
+// Mirrors RadioboxOption::Simple()/CheckboxOption::Simple() styling (bold
+// when active, inverted when focused) so the only visible change is wrapping.
+ftxui::Element WrappedOptionEntry(const ftxui::EntryState& s, const char* marker_on,
+                                  const char* marker_off, const std::string& description) {
+    using namespace ftxui;
+    Element marker = text(s.state ? marker_on : marker_off);
+    Element label = paragraph(s.label);
+    if (s.active) label |= bold;
+    if (s.focused) label |= inverted;
+    Elements column = {label};
+    if (!description.empty()) column.push_back(paragraph(description) | dim);
+    return hbox({marker, vbox(std::move(column)) | flex});
 }
 
 // One review-screen line for ONE question, mirroring CollectAnswer's slot
@@ -384,9 +402,7 @@ ftxui::Component MakeAskModal(const PendingAsk& request, const Theme& theme,
 
         if (question.multiple()) {
             for (const auto& option : question.options()) {
-                std::string entry = option.label();
-                if (!option.description().empty()) entry += "  --  " + option.description();
-                qs.entries.push_back(entry);
+                qs.entries.push_back(option.label());
                 qs.boxes.push_back(false);
             }
             Components boxes;
@@ -394,6 +410,13 @@ ftxui::Component MakeAskModal(const PendingAsk& request, const Theme& theme,
                 CheckboxOption option_state;
                 option_state.label = ConstStringRef(qs.entries[j]);
                 option_state.checked = Ref<bool>(&qs.boxes[j]);
+                // Checkbox's own EntryState.index is always -1 (it renders
+                // itself, not a list), so the description is baked into the
+                // closure by j rather than looked up through the entry state.
+                const std::string description = question.options(static_cast<int>(j)).description();
+                option_state.transform = [description](const EntryState& s) {
+                    return WrappedOptionEntry(s, "▣ ", "☐ ", description);
+                };
                 boxes.push_back(Checkbox(std::move(option_state)));
             }
             block.push_back(Container::Vertical(std::move(boxes)));
@@ -402,9 +425,7 @@ ftxui::Component MakeAskModal(const PendingAsk& request, const Theme& theme,
             // manual "uncheck the others" bookkeeping.
             std::vector<std::string> entries;
             for (const auto& option : question.options()) {
-                std::string entry = option.label();
-                if (!option.description().empty()) entry += "  --  " + option.description();
-                entries.push_back(entry);
+                entries.push_back(option.label());
             }
             qs.entries = std::move(entries);
             RadioboxOption radio_state;
@@ -414,6 +435,13 @@ ftxui::Component MakeAskModal(const PendingAsk& request, const Theme& theme,
             const int index = i;
             radio_state.on_change = [state_ref, index] {
                 state_ref->questions[index].radio_touched = true;
+            };
+            // Radiobox's EntryState.index tracks the list position, so the
+            // description can be looked up straight from the question.
+            radio_state.transform = [request_state, index](const EntryState& s) {
+                const std::string description =
+                    request_state->request.questions(index).options(s.index).description();
+                return WrappedOptionEntry(s, "◉ ", "○ ", description);
             };
             block.push_back(Radiobox(std::move(radio_state)));
         }
@@ -475,7 +503,7 @@ ftxui::Component MakeAskModal(const PendingAsk& request, const Theme& theme,
                         ? "Question " + std::to_string(i + 1)
                         : question.header();
                 rows.push_back(text(name) | bold);
-                rows.push_back(text(ReviewLine(question, state->questions[i])));
+                rows.push_back(paragraph(ReviewLine(question, state->questions[i])));
                 if (first_line < 0) first_line = static_cast<int>(rows.size()) - 1;
             }
             if (!(*interacted) && first_line >= 0) {

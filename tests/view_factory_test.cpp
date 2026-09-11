@@ -554,6 +554,43 @@ TEST_CASE("ask modal: every question renders") {
     CHECK(frame.find("large") != std::string::npos);
 }
 
+TEST_CASE("ask modal: long option descriptions wrap instead of clipping") {
+    // Regression: Radiobox/Checkbox render entries with a bare text(), which
+    // never wraps, and the modal is capped at size(WIDTH, LESS_THAN, 82) --
+    // so a description longer than that cap used to run off the right edge
+    // ("...lease/durable-handle state machi") instead of wrapping like the
+    // question text (paragraph()) already does.
+    const auto theme = TestTheme();
+
+    v1::AskQuestion single;
+    single.set_header("Approach");
+    single.set_question("which approach?");
+    auto* radio_option = single.add_options();
+    radio_option->set_label("Trace lease path");
+    radio_option->set_description(
+        "Trace unrequested lease and durable-handle state machine transitions across the "
+        "reconnect path to find where the grant silently outlives its lease token ENDMARKONE");
+    single.add_options()->set_label("Quick check");
+
+    v1::AskQuestion multi;
+    multi.set_header("Zones");
+    multi.set_question("which zones?");
+    multi.set_multiple(true);
+    auto* box_option = multi.add_options();
+    box_option->set_label("zone A");
+    box_option->set_description(
+        "Identify the zone backing the buffer and size the free-list scan so the checker "
+        "does not walk pages the allocator has already reclaimed ENDMARKTWO");
+    multi.add_options()->set_label("zone B");
+
+    const auto request = MakeAskRequest({single, multi});
+    auto modal = MakeAskModal(request, theme, [](v1::AskUserResponse) {});
+
+    const auto frame = RenderFrame(modal, 80, 40);
+    CHECK(frame.find("ENDMARKONE") != std::string::npos);
+    CHECK(frame.find("ENDMARKTWO") != std::string::npos);
+}
+
 TEST_CASE("ask modal: the free-text input exists only while its toggle is checked") {
     const auto theme = TestTheme();
     const auto request = MakeAskRequest(
