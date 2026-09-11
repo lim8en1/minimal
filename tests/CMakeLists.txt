@@ -331,6 +331,15 @@ add_dependencies(minimal_tests minimal-server)
 target_compile_definitions(minimal_tests PRIVATE
     MINIMAL_SPAWN_TEST_SERVER="$<TARGET_FILE:minimal-server>")
 
+# The tests load bundled plugins by path (the logo client plugin) and spawn a
+# server whose startup loads the bundled server plugins by directory -- all
+# runtime loads with no ordinary link dependency ordering them. Without this
+# edge, a partial build (`--target minimal_tests`) pairs a fresh test binary
+# with stale plugin .so files, and the ABI-tag guard fails the load: the logo
+# tests dead-end on record.ok(), the spawn test on the server's fatal
+# startup sanity check. The aggregate target is the freshness coupling.
+add_dependencies(minimal_tests bundled_plugins)
+
 # Scripted stdio SIGNAL-CHANNEL server, hand-rolled (no cpp-mcp: its server
 # cannot push a notification over stdio -- see fake_signal_channel.cpp and the
 # note in mcp_fake_server.cpp). Deterministic single-threaded emission.

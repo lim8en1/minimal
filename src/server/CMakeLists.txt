@@ -152,6 +152,15 @@ endif()
 add_executable(minimal-server main.cpp)
 target_link_libraries(minimal-server PRIVATE minimal::server_core)
 
+# The server loads its bundled plugins from the plugin DIRECTORY at startup,
+# not through any link dependency -- so without this edge nothing orders the
+# plugin builds after the host, and a partial build could produce a
+# just-built server next to stale plugins. The startup sanity check treats a
+# failed bundled plugin as fatal, so that pairing aborts startup outright
+# (the "abi mismatch ... rebuild the plugin" failure mode). The aggregate
+# target lives in plugins/CMakeLists.txt.
+add_dependencies(minimal-server bundled_plugins)
+
 # Find libminimal_server_core next to us both in the build tree and once
 # installed. Plugins get the same treatment in plugins/CMakeLists.txt.
 if(APPLE)

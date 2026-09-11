@@ -39,3 +39,15 @@ add_subdirectory(server)
 # minimal_add_client_fixture_plugin. The subtree exists so a bundled client
 # plugin lands here the same way a server plugin lands in plugins/server/.
 add_subdirectory(client)
+
+# The aggregate both host binaries and the tests hang off: every target the
+# add_* functions registered above. Bundled plugins are loaded at RUNTIME by
+# directory, so without this target nothing orders their builds after (or at
+# all alongside) the host binaries -- a partial build (`--target minimal_tests`,
+# say) then pairs a fresh host with stale plugins, the exact state the ABI tag
+# was baked to catch: the client loader refuses the plugin; the server's
+# startup sanity check aborts outright. Consumers that load or dlopen plugins
+# (minimal-server, minimal_tests) depend on this target, so "rebuilt the host"
+# always means "rebuilt the plugins it will load".
+get_property(_bundled_plugin_targets GLOBAL PROPERTY MINIMAL_BUNDLED_PLUGIN_TARGETS)
+add_custom_target(bundled_plugins DEPENDS ${_bundled_plugin_targets})

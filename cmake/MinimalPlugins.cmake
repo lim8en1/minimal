@@ -46,6 +46,15 @@ function(minimal_add_plugin name)
     target_compile_options(${name} PRIVATE ${MINIMAL_WARNING_FLAGS})
     set_target_properties(${name} PROPERTIES PREFIX "" OUTPUT_NAME "${name}")
 
+    # Membership in the bundled-plugins aggregate (plugins/CMakeLists.txt):
+    # these plugins are loaded at RUNTIME by directory, so no ordinary link
+    # dependency couples their freshness to the host binaries. The aggregate
+    # target is that coupling -- a consumer depending on it (minimal-server,
+    # the tests) can never pair a freshly built host with stale plugins, the
+    # exact state the ABI-tag guard then refuses at load (fatally, server
+    # startup).
+    set_property(GLOBAL APPEND PROPERTY MINIMAL_BUNDLED_PLUGIN_TARGETS "${name}")
+
     if(APPLE)
         set_target_properties(${name} PROPERTIES
             INSTALL_RPATH "@loader_path/${MINIMAL_PLUGIN_RPATH_TO_LIBDIR}")
@@ -67,6 +76,9 @@ function(minimal_add_client_plugin name)
     target_link_libraries(${name} PRIVATE minimal::client_core)
     target_compile_options(${name} PRIVATE ${MINIMAL_WARNING_FLAGS})
     set_target_properties(${name} PROPERTIES PREFIX "" OUTPUT_NAME "${name}")
+
+    # Same aggregate membership as the server twin above (see it).
+    set_property(GLOBAL APPEND PROPERTY MINIMAL_BUNDLED_PLUGIN_TARGETS "${name}")
 
     if(APPLE)
         set_target_properties(${name} PROPERTIES
