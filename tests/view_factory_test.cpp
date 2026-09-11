@@ -337,10 +337,10 @@ TEST_CASE("permission modal: answers after the caller's request snapshot dies") 
     // The callback owns its copy (RunTui's does too): GrantedKeys reads the
     // request AFTER the caller's snapshot is gone.
     const PendingPermission answer_source = *request;
-    std::optional<bool> answered;
+    std::optional<PermissionVerdict> answered;
     std::vector<std::string> keys;
-    auto modal = MakePermissionModal(*request, toggles, theme, [&](bool allow) {
-        answered = allow;
+    auto modal = MakePermissionModal(*request, toggles, theme, [&](PermissionVerdict verdict) {
+        answered = verdict;
         keys = toggles.GrantedKeys(answer_source);
     });
 
@@ -349,14 +349,19 @@ TEST_CASE("permission modal: answers after the caller's request snapshot dies") 
     const auto frame = RenderFrame(modal);
     CHECK(frame.find("bash") != std::string::npos);
     CHECK(frame.find("may reach more") != std::string::npos);   // lower-bound obligation
-    CHECK(frame.find("session grants:") != std::string::npos);  // per-binary offers present
+    CHECK(frame.find("session grants") != std::string::npos);   // per-binary offers present
+    // All four answers are listed, numbered in PermissionChoice order.
+    CHECK(frame.find("1. allow") != std::string::npos);
+    CHECK(frame.find("2. deny") != std::string::npos);
+    CHECK(frame.find("3. deny with message") != std::string::npos);
+    CHECK(frame.find("4. deny and stop") != std::string::npos);
 
     // Toggle the first grant (space on the focused checkbox), then allow: the
     // granted key is exactly what was offered, never minted.
     REQUIRE(SendEvent(modal, ftx::Event::Character(" ")));
     REQUIRE(SendEvent(modal, ftx::Event::Return));
     REQUIRE(answered.has_value());
-    CHECK(*answered);
+    CHECK(answered->choice == PermissionChoice::Allow);
     REQUIRE(keys.size() == 1);
     CHECK(keys[0] == "bash:/usr/bin/make");
 }
@@ -365,39 +370,38 @@ TEST_CASE("permission modal: Escape denies without recording grants") {
     const auto theme = TestTheme();
     GrantToggles toggles;
     const auto request = MakePermissionRequest();
-    std::optional<bool> answered;
+    std::optional<PermissionVerdict> answered;
     auto modal = MakePermissionModal(request, toggles, theme,
-                                     [&](bool allow) { answered = allow; });
+                                     [&](PermissionVerdict verdict) { answered = verdict; });
     REQUIRE(SendEvent(modal, ftx::Event::Escape));
     REQUIRE(answered.has_value());
-    CHECK_FALSE(*answered);
+    CHECK(answered->choice == PermissionChoice::Deny);
 }
 
 TEST_CASE("permission modal: with grants offered, the footer advertises tab/space") {
     const auto theme = TestTheme();
     GrantToggles toggles;
     const auto request = MakePermissionRequest();  // has two grants
-    auto modal = MakePermissionModal(request, toggles, theme, [](bool) {});
+    auto modal = MakePermissionModal(request, toggles, theme, [](PermissionVerdict) {});
     const auto frame = RenderFrame(modal);
-    CHECK(frame.find("tab/arrow: move") != std::string::npos);
-    CHECK(frame.find("toggle grants") != std::string::npos);
+    CHECK(frame.find("1-4: choose") != std::string::npos);
+    CHECK(frame.find("tab/space: grants") != std::string::npos);
 }
 
 TEST_CASE("permission modal: with no grants offered, the footer omits the dead "
           "tab/space affordances") {
-    // Regression: the footer used to always advertise "tab/arrow: move" and
-    // "space: toggle grants", even on a request with nothing to move between
-    // or toggle -- dead keys advertised on the security-decision surface.
+    // Regression: the footer used to always advertise the grant keys, even
+    // on a request with nothing to move between or toggle -- dead keys
+    // advertised on the security-decision surface.
     const auto theme = TestTheme();
     GrantToggles toggles;
     auto request = MakePermissionRequest();
     request.grants.clear();
-    auto modal = MakePermissionModal(request, toggles, theme, [](bool) {});
+    auto modal = MakePermissionModal(request, toggles, theme, [](PermissionVerdict) {});
     const auto frame = RenderFrame(modal);
-    CHECK(frame.find("enter: allow") != std::string::npos);
+    CHECK(frame.find("enter: confirm") != std::string::npos);
     CHECK(frame.find("esc: deny") != std::string::npos);
-    CHECK(frame.find("tab/arrow: move") == std::string::npos);
-    CHECK(frame.find("toggle grants") == std::string::npos);
+    CHECK(frame.find("tab/space") == std::string::npos);
 }
 
 TEST_CASE("permission modal: a Return as the FIRST event arms but does not "
@@ -408,33 +412,135 @@ TEST_CASE("permission modal: a Return as the FIRST event arms but does not "
     const auto theme = TestTheme();
     GrantToggles toggles;
     const auto request = MakePermissionRequest();
-    std::optional<bool> answered;
+    std::optional<PermissionVerdict> answered;
     auto modal = MakePermissionModal(request, toggles, theme,
-                                     [&](bool allow) { answered = allow; });
+                                     [&](PermissionVerdict verdict) { answered = verdict; });
 
-    // Whether the underlying checkbox container also consumes this first
-    // Return is incidental (FTXUI's own widget behavior); what matters is
-    // that on_answer must NOT have fired from it.
     SendEvent(modal, ftx::Event::Return);   // arms, does not approve
     CHECK_FALSE(answered.has_value());
 
     REQUIRE(SendEvent(modal, ftx::Event::Return));   // the user's real answer
     REQUIRE(answered.has_value());
-    CHECK(*answered);
+    CHECK(answered->choice == PermissionChoice::Allow);
 }
 
 TEST_CASE("permission modal: Escape still denies as the very first event") {
-    // Denying is the safe default; only the approve path needs an arming
+    // Denying is the safe default; only the other answers need an arming
     // delay.
     const auto theme = TestTheme();
     GrantToggles toggles;
     const auto request = MakePermissionRequest();
-    std::optional<bool> answered;
+    std::optional<PermissionVerdict> answered;
     auto modal = MakePermissionModal(request, toggles, theme,
-                                     [&](bool allow) { answered = allow; });
+                                     [&](PermissionVerdict verdict) { answered = verdict; });
     REQUIRE(SendEvent(modal, ftx::Event::Escape));
     REQUIRE(answered.has_value());
-    CHECK_FALSE(*answered);
+    CHECK(answered->choice == PermissionChoice::Deny);
+}
+
+TEST_CASE("permission modal: a digit as the FIRST event only selects; Return then "
+          "answers the selection") {
+    // The arming rule covers the deny answers too: a stray '4' must not stop
+    // the turn behind a prompt nobody has read.
+    const auto theme = TestTheme();
+    GrantToggles toggles;
+    const auto request = MakePermissionRequest();
+    std::optional<PermissionVerdict> answered;
+    auto modal = MakePermissionModal(request, toggles, theme,
+                                     [&](PermissionVerdict verdict) { answered = verdict; });
+
+    REQUIRE(SendEvent(modal, ftx::Event::Character("4")));
+    CHECK_FALSE(answered.has_value());
+    CHECK(RenderFrame(modal).find("❯ 4. deny and stop") != std::string::npos);
+
+    REQUIRE(SendEvent(modal, ftx::Event::Return));
+    REQUIRE(answered.has_value());
+    CHECK(answered->choice == PermissionChoice::DenyAndStop);
+}
+
+TEST_CASE("permission modal: once armed, a digit answers directly") {
+    const auto theme = TestTheme();
+    GrantToggles toggles;
+    const auto request = MakePermissionRequest();
+    std::optional<PermissionVerdict> answered;
+    auto modal = MakePermissionModal(request, toggles, theme,
+                                     [&](PermissionVerdict verdict) { answered = verdict; });
+
+    REQUIRE(SendEvent(modal, ftx::Event::ArrowDown));   // arms
+    CHECK_FALSE(answered.has_value());
+    REQUIRE(SendEvent(modal, ftx::Event::Character("2")));
+    REQUIRE(answered.has_value());
+    CHECK(answered->choice == PermissionChoice::Deny);
+}
+
+TEST_CASE("permission modal: arrows move the selection and clamp at both ends") {
+    const auto theme = TestTheme();
+    GrantToggles toggles;
+    const auto request = MakePermissionRequest();
+    std::optional<PermissionVerdict> answered;
+    auto modal = MakePermissionModal(request, toggles, theme,
+                                     [&](PermissionVerdict verdict) { answered = verdict; });
+
+    REQUIRE(SendEvent(modal, ftx::Event::ArrowUp));   // already at the top: stays
+    CHECK(RenderFrame(modal).find("❯ 1. allow") != std::string::npos);
+    for (int i = 0; i < 6; ++i) REQUIRE(SendEvent(modal, ftx::Event::ArrowDown));
+    CHECK(RenderFrame(modal).find("❯ 4. deny and stop") != std::string::npos);
+    REQUIRE(SendEvent(modal, ftx::Event::ArrowUp));
+    CHECK(RenderFrame(modal).find("❯ 3. deny with message") != std::string::npos);
+    CHECK_FALSE(answered.has_value());   // moving never answers
+}
+
+TEST_CASE("permission modal: deny with message collects typed text and sends it") {
+    const auto theme = TestTheme();
+    GrantToggles toggles;
+    const auto request = MakePermissionRequest();
+    std::optional<PermissionVerdict> answered;
+    auto modal = MakePermissionModal(request, toggles, theme,
+                                     [&](PermissionVerdict verdict) { answered = verdict; });
+
+    REQUIRE(SendEvent(modal, ftx::Event::Character("3")));   // arms + selects
+    REQUIRE(SendEvent(modal, ftx::Event::Character("3")));   // opens the input
+    CHECK_FALSE(answered.has_value());
+    CHECK(RenderFrame(modal).find("message:") != std::string::npos);
+    CHECK(RenderFrame(modal).find("enter: deny with this message") != std::string::npos);
+
+    // Typed text -- a space included -- goes to the input, never to the
+    // grant checkboxes behind it, and digits type rather than pick.
+    for (const char c : std::string(" use make -j4 ")) {
+        REQUIRE(SendEvent(modal, ftx::Event::Character(std::string(1, c))));
+    }
+    CHECK(toggles.GrantedKeys(request).empty());
+    CHECK_FALSE(answered.has_value());
+
+    REQUIRE(SendEvent(modal, ftx::Event::Return));
+    REQUIRE(answered.has_value());
+    CHECK(answered->choice == PermissionChoice::DenyWithMessage);
+    CHECK(answered->message == "use make -j4");   // trimmed
+}
+
+TEST_CASE("permission modal: Escape backs out of the message input; an empty "
+          "message degrades to a plain deny") {
+    const auto theme = TestTheme();
+    GrantToggles toggles;
+    const auto request = MakePermissionRequest();
+    std::optional<PermissionVerdict> answered;
+    auto modal = MakePermissionModal(request, toggles, theme,
+                                     [&](PermissionVerdict verdict) { answered = verdict; });
+
+    REQUIRE(SendEvent(modal, ftx::Event::ArrowDown));        // arms
+    REQUIRE(SendEvent(modal, ftx::Event::Character("3")));   // opens the input
+    REQUIRE(SendEvent(modal, ftx::Event::Escape));           // back, NOT a deny
+    CHECK_FALSE(answered.has_value());
+    CHECK(RenderFrame(modal).find("message:") == std::string::npos);
+
+    // Ctrl+C falls through to the root's turn-cancel, input open or not.
+    REQUIRE(SendEvent(modal, ftx::Event::Character("3")));
+    CHECK_FALSE(SendEvent(modal, ftx::Event::CtrlC));
+
+    REQUIRE(SendEvent(modal, ftx::Event::Return));   // nothing typed
+    REQUIRE(answered.has_value());
+    CHECK(answered->choice == PermissionChoice::Deny);
+    CHECK(answered->message.empty());
 }
 
 // ---------------------------------------------------------------------------
@@ -552,6 +658,43 @@ TEST_CASE("ask modal: every question renders") {
     CHECK(frame.find("how much scope?") != std::string::npos);
     CHECK(frame.find("small") != std::string::npos);
     CHECK(frame.find("large") != std::string::npos);
+}
+
+TEST_CASE("ask modal: long option descriptions wrap instead of clipping") {
+    // Regression: Radiobox/Checkbox render entries with a bare text(), which
+    // never wraps, and the modal is capped at size(WIDTH, LESS_THAN, 82) --
+    // so a description longer than that cap used to run off the right edge
+    // ("...lease/durable-handle state machi") instead of wrapping like the
+    // question text (paragraph()) already does.
+    const auto theme = TestTheme();
+
+    v1::AskQuestion single;
+    single.set_header("Approach");
+    single.set_question("which approach?");
+    auto* radio_option = single.add_options();
+    radio_option->set_label("Trace lease path");
+    radio_option->set_description(
+        "Trace unrequested lease and durable-handle state machine transitions across the "
+        "reconnect path to find where the grant silently outlives its lease token ENDMARKONE");
+    single.add_options()->set_label("Quick check");
+
+    v1::AskQuestion multi;
+    multi.set_header("Zones");
+    multi.set_question("which zones?");
+    multi.set_multiple(true);
+    auto* box_option = multi.add_options();
+    box_option->set_label("zone A");
+    box_option->set_description(
+        "Identify the zone backing the buffer and size the free-list scan so the checker "
+        "does not walk pages the allocator has already reclaimed ENDMARKTWO");
+    multi.add_options()->set_label("zone B");
+
+    const auto request = MakeAskRequest({single, multi});
+    auto modal = MakeAskModal(request, theme, [](v1::AskUserResponse) {});
+
+    const auto frame = RenderFrame(modal, 80, 40);
+    CHECK(frame.find("ENDMARKONE") != std::string::npos);
+    CHECK(frame.find("ENDMARKTWO") != std::string::npos);
 }
 
 TEST_CASE("ask modal: the free-text input exists only while its toggle is checked") {
@@ -826,7 +969,8 @@ TEST_CASE("chat view: a session switch at an EQUAL transcript version re-renders
     plugins::RegisterCoreMessageRenderers(messages);
     plugins::RegisterCoreAgentMarkdownRenderer(messages, engine);
 
-    ChatView view(theme, messages, tool_renderers);
+    plugins::DisplayRendererRegistry display_renderers;
+    ChatView view(theme, messages, tool_renderers, display_renderers);
 
     // Tab A, version 2. Then tab B, ALSO at version 2: the per-session
     // counter collides across tabs, so version alone cannot key the cache.
@@ -856,7 +1000,8 @@ TEST_CASE("chat view: a new scrollback page for the SAME session is not served s
     plugins::RegisterCoreMessageRenderers(messages);
     plugins::RegisterCoreAgentMarkdownRenderer(messages, engine);
 
-    ChatView view(theme, messages, tool_renderers);
+    plugins::DisplayRendererRegistry display_renderers;
+    ChatView view(theme, messages, tool_renderers, display_renderers);
 
     const auto snap_v1 = SnapshotWithText("session-fresh", 1, "first page");
     const auto frame_1 = RenderElement(view.Render(snap_v1));
@@ -905,7 +1050,8 @@ TEST_CASE("chat view: scrolling up mid-turn stays put while the streaming block 
     plugins::RegisterCoreMessageRenderers(messages);
     plugins::RegisterCoreAgentMarkdownRenderer(messages, engine);
 
-    ChatView view(theme, messages, tool_renderers);
+    plugins::DisplayRendererRegistry display_renderers;
+    ChatView view(theme, messages, tool_renderers, display_renderers);
 
     // 20 persisted rows; scroll up far enough (15 of 20) that the anchored
     // row sits well clear of the live streaming tail in a short viewport.
@@ -963,7 +1109,8 @@ TEST_CASE("chat view: live text and tool activity render interleaved, "
     plugins::RegisterCoreMessageRenderers(messages);
     plugins::RegisterCoreAgentMarkdownRenderer(messages, engine);
 
-    ChatView view(theme, messages, tool_renderers);
+    plugins::DisplayRendererRegistry display_renderers;
+    ChatView view(theme, messages, tool_renderers, display_renderers);
 
     SessionState::Snapshot snap;
     snap.session_id = "session-interleave";
@@ -1029,7 +1176,8 @@ TEST_CASE("chat view: a throwing UserText renderer does not crash the echo row")
     messages.ClearAttribution();
     plugins::ToolResultRendererRegistry tool_renderers;
 
-    ChatView view(theme, messages, tool_renderers);
+    plugins::DisplayRendererRegistry display_renderers;
+    ChatView view(theme, messages, tool_renderers, display_renderers);
 
     SessionState::Snapshot snap;
     snap.session_id = "session-echo-throws";
@@ -1047,7 +1195,8 @@ TEST_CASE("chat view: a throwing live markdown stream renders a fallback, not a 
     plugins::RegisterCoreMessageRenderers(messages);
     plugins::ToolResultRendererRegistry tool_renderers;
 
-    ChatView view(theme, messages, tool_renderers);
+    plugins::DisplayRendererRegistry display_renderers;
+    ChatView view(theme, messages, tool_renderers, display_renderers);
 
     SessionState::Snapshot snap;
     snap.session_id = "session-stream-throws";
@@ -1071,7 +1220,8 @@ TEST_CASE("chat view: has_earlier_messages renders a load-older hint") {
     plugins::RegisterCoreMessageRenderers(messages);
     plugins::ToolResultRendererRegistry tool_renderers;
 
-    ChatView view(theme, messages, tool_renderers);
+    plugins::DisplayRendererRegistry display_renderers;
+    ChatView view(theme, messages, tool_renderers, display_renderers);
 
     SessionState::Snapshot snap;
     snap.session_id = "session-earlier";
@@ -1080,6 +1230,145 @@ TEST_CASE("chat view: has_earlier_messages renders a load-older hint") {
 
     const auto frame = RenderElement(view.Render(snap));
     CHECK(frame.find("earlier messages available") != std::string::npos);
+}
+
+namespace {
+
+// StoredToolCallAndResult plus a display payload on the result (page[0] is
+// the newest message, the result).
+std::vector<v1::StoredMessage> StoredToolCallWithDisplay(const std::string& tool_name,
+                                                         const std::string& result_text,
+                                                         const nlohmann::json& display) {
+    auto page = StoredToolCallAndResult(1, tool_name, result_text);
+    page[0].mutable_message()->mutable_content(0)->mutable_tool_result()->set_display_json(
+        display.dump());
+    return page;
+}
+
+class LabelKindRenderer final : public plugins::DisplayRenderer {
+public:
+    std::string_view kind() const override { return "test_kind"; }
+    ftxui::Element Render(const plugins::ToolResultView& result, const Theme&,
+                          const plugins::RowRenderContext&) const override {
+        return ftxui::text("KIND " + result.display.at("label").get<std::string>());
+    }
+};
+
+class ThrowingKindRenderer final : public plugins::DisplayRenderer {
+public:
+    std::string_view kind() const override { return "test_kind"; }
+    ftxui::Element Render(const plugins::ToolResultView&, const Theme&,
+                          const plugins::RowRenderContext&) const override {
+        throw std::runtime_error("malformed payload");
+    }
+};
+
+class BashNameRenderer final : public plugins::ToolResultRenderer {
+public:
+    std::string_view tool_name() const override { return "bash"; }
+    ftxui::Element Render(const plugins::ToolResultView&, const Theme&,
+                          const plugins::RowRenderContext&) const override {
+        return ftxui::text("NAME RENDERER");
+    }
+};
+
+// The registries every display-dispatch test below needs, core defaults filled.
+struct DisplayHarness {
+    Theme theme = TestTheme();
+    minimal::client::MarkdownRenderer renderer{&theme, nullptr};
+    plugins::MarkdownEngineRegistry engine_registry;
+    plugins::MessageRendererRegistry messages;
+    plugins::ToolResultRendererRegistry tool_renderers;
+    plugins::DisplayRendererRegistry display_renderers;
+
+    DisplayHarness() {
+        plugins::RegisterDefaultMarkdownEngine(engine_registry, renderer);
+        plugins::RegisterCoreMessageRenderers(messages);
+        plugins::RegisterCoreAgentMarkdownRenderer(messages, *engine_registry.engine);
+    }
+
+    std::string Render(std::vector<v1::StoredMessage> page) {
+        ChatView view(theme, messages, tool_renderers, display_renderers);
+        SessionState::Snapshot snap;
+        snap.session_id = "session-display";
+        snap.transcript_version = 1;
+        snap.scrollback_page =
+            std::make_shared<const std::vector<v1::StoredMessage>>(std::move(page));
+        return RenderElement(view.Render(snap));
+    }
+};
+
+}  // namespace
+
+TEST_CASE("chat view: a result's display kind picks its renderer; a tool-name renderer wins") {
+    DisplayHarness h;
+    h.display_renderers.Register(std::make_unique<LabelKindRenderer>());
+    const auto page = StoredToolCallWithDisplay("bash", "plain text",
+                                                {{"kind", "test_kind"}, {"label", "hello"}});
+
+    SECTION("the kind renderer draws the row") {
+        CHECK(h.Render(page).find("KIND hello") != std::string::npos);
+    }
+    SECTION("a renderer for the tool's NAME takes precedence over the kind") {
+        h.tool_renderers.Register(std::make_unique<BashNameRenderer>());
+        const auto frame = h.Render(page);
+        CHECK(frame.find("NAME RENDERER") != std::string::npos);
+        CHECK(frame.find("KIND hello") == std::string::npos);
+    }
+}
+
+TEST_CASE("chat view: a throwing or unclaimed display kind falls back to the text row") {
+    DisplayHarness h;
+    h.display_renderers.Register(std::make_unique<ThrowingKindRenderer>());
+
+    SECTION("throwing") {
+        const auto frame = h.Render(
+            StoredToolCallWithDisplay("bash", "plain text", {{"kind", "test_kind"}}));
+        CHECK(frame.find("tool bash") != std::string::npos);
+    }
+    SECTION("no renderer for the kind") {
+        const auto frame = h.Render(
+            StoredToolCallWithDisplay("bash", "plain text", {{"kind", "nobody_draws_this"}}));
+        CHECK(frame.find("tool bash") != std::string::npos);
+    }
+}
+
+TEST_CASE("chat view: the core diff and process renderers draw their payloads") {
+    DisplayHarness h;
+    const minimal::client::SyntaxHighlighter highlighter(h.theme);
+    plugins::RegisterCoreDisplayRenderers(h.display_renderers, *h.engine_registry.engine,
+                                          highlighter);
+
+    SECTION("diff: expanded by default, with markers and counts") {
+        const nlohmann::json display = {
+            {"kind", "diff"},
+            {"path", "a.txt"},
+            {"created", false},
+            {"hunks",
+             {{{"old_start", 1},
+               {"old_count", 1},
+               {"new_start", 1},
+               {"new_count", 1},
+               {"lines",
+                {{{"op", "-"}, {"text", "old line"}}, {{"op", "+"}, {"text", "new line"}}}}}}}};
+        const auto frame =
+            h.Render(StoredToolCallWithDisplay("edit", "replaced 1 occurrence", display));
+        CHECK(frame.find("a.txt") != std::string::npos);
+        CHECK(frame.find("+1") != std::string::npos);
+        CHECK(frame.find("- old line") != std::string::npos);
+        CHECK(frame.find("+ new line") != std::string::npos);
+    }
+    SECTION("process: the header carries the command, the status badge and the duration") {
+        const nlohmann::json display = {{"kind", "process"},  {"command", "make"},
+                                        {"exit_code", 2},     {"duration_ms", 1500},
+                                        {"output", "boom\n"}, {"cancelled", false},
+                                        {"timed_out", false}};
+        const auto frame = h.Render(StoredToolCallWithDisplay("bash", "boom\n[exit status: 2]",
+                                                              display));
+        CHECK(frame.find("$ make") != std::string::npos);
+        CHECK(frame.find("exit 2") != std::string::npos);
+        CHECK(frame.find("1.5s") != std::string::npos);
+    }
 }
 
 TEST_CASE("chat view: a completed tool call with no name-specific renderer still renders "
@@ -1094,7 +1383,8 @@ TEST_CASE("chat view: a completed tool call with no name-specific renderer still
     plugins::RegisterCoreMessageRenderers(messages);
     plugins::RegisterCoreAgentMarkdownRenderer(messages, engine);
 
-    ChatView view(theme, messages, tool_renderers);
+    plugins::DisplayRendererRegistry display_renderers;
+    ChatView view(theme, messages, tool_renderers, display_renderers);
 
     SessionState::Snapshot snap;
     snap.session_id = "session-tool";
@@ -1133,7 +1423,8 @@ TEST_CASE("chat view: a tool result with one early newline and a long single-lin
     plugins::RegisterCoreMessageRenderers(messages);
     plugins::RegisterCoreAgentMarkdownRenderer(messages, engine);
 
-    ChatView view(theme, messages, tool_renderers);
+    plugins::DisplayRendererRegistry display_renderers;
+    ChatView view(theme, messages, tool_renderers, display_renderers);
 
     // Space-separated filler, not one giant unbroken token: paragraph() wraps
     // at word boundaries, so a single 6000-byte word would render as one
@@ -1210,7 +1501,8 @@ TEST_CASE("chat view: ask_user result rows render expanded by default, with the 
     row.tool_name = "bash";
     CHECK(CollapsedByDefault(row));   // every other tool keeps the default
 
-    ChatView view(theme, messages, tool_renderers);
+    plugins::DisplayRendererRegistry display_renderers;
+    ChatView view(theme, messages, tool_renderers, display_renderers);
     SessionState::Snapshot snap;
     snap.session_id = "session-ask";
     snap.transcript_version = 1;
@@ -1238,7 +1530,8 @@ TEST_CASE("chat view: ScrollBy moves the viewport off the pinned-to-newest defau
     plugins::RegisterCoreMessageRenderers(messages);
     plugins::RegisterCoreAgentMarkdownRenderer(messages, engine);
 
-    ChatView view(theme, messages, tool_renderers);
+    plugins::DisplayRendererRegistry display_renderers;
+    ChatView view(theme, messages, tool_renderers, display_renderers);
     const auto snapshot = SnapshotWithRows("session-scroll", 1, 40);
 
     // A viewport far shorter than 40 rows: yframe can only show a slice, so
@@ -1282,7 +1575,8 @@ TEST_CASE("chat view: ScrollToBottom resets the anchor directly, not just relati
     plugins::RegisterCoreMessageRenderers(messages);
     plugins::RegisterCoreAgentMarkdownRenderer(messages, engine);
 
-    ChatView view(theme, messages, tool_renderers);
+    plugins::DisplayRendererRegistry display_renderers;
+    ChatView view(theme, messages, tool_renderers, display_renderers);
     const auto snapshot = SnapshotWithRows("session-scroll-bottom", 1, 40);
 
     const auto pinned =
@@ -1321,7 +1615,8 @@ TEST_CASE("chat view: the row-cursor highlight moves after a render with no tran
     plugins::RegisterCoreMessageRenderers(messages);
     plugins::RegisterCoreAgentMarkdownRenderer(messages, engine);
 
-    ChatView view(theme, messages, tool_renderers);
+    plugins::DisplayRendererRegistry display_renderers;
+    ChatView view(theme, messages, tool_renderers, display_renderers);
     const auto snapshot = SnapshotWithRows("session-cursor-move", 1, 5);
 
     RenderElement(view.Render(snapshot));   // first pass: builds row_keys_ for MoveRowFocus
@@ -1351,7 +1646,8 @@ TEST_CASE("chat view: toggling timestamps updates the render with no transcript 
     plugins::RegisterCoreMessageRenderers(messages);
     plugins::RegisterCoreAgentMarkdownRenderer(messages, engine);
 
-    ChatView view(theme, messages, tool_renderers);
+    plugins::DisplayRendererRegistry display_renderers;
+    ChatView view(theme, messages, tool_renderers, display_renderers);
     v1::StoredMessage stored = StoredUserText(1, "hello");
     stored.set_created_at_unix_ms(1700000000000LL);
     SessionState::Snapshot snap;
@@ -1386,7 +1682,8 @@ TEST_CASE("chat view: a growing thinking segment renders its full text, not a st
     plugins::RegisterCoreMessageRenderers(messages);
     plugins::RegisterCoreAgentMarkdownRenderer(messages, engine);
 
-    ChatView view(theme, messages, tool_renderers);
+    plugins::DisplayRendererRegistry display_renderers;
+    ChatView view(theme, messages, tool_renderers, display_renderers);
     SessionState::Snapshot snap;
     snap.session_id = "session-thinking-grow";
     snap.transcript_version = 1;
@@ -1439,7 +1736,8 @@ TEST_CASE("chat view: clicking a thinking row toggles its collapse", "[chat_view
     plugins::RegisterCoreMessageRenderers(messages);
     plugins::RegisterCoreAgentMarkdownRenderer(messages, *engine_registry.engine);
 
-    ChatView view(theme, messages, tool_renderers);
+    plugins::DisplayRendererRegistry display_renderers;
+    ChatView view(theme, messages, tool_renderers, display_renderers);
 
     // One user text row (seq 1) and one thinking row (seq 2, the newest --
     // pages are DESCENDING by seq). Thinking collapses BY DEFAULT.
@@ -1492,7 +1790,8 @@ TEST_CASE("chat view: clicks that miss a collapsible row are not consumed",
     plugins::RegisterCoreMessageRenderers(messages);
     plugins::RegisterCoreAgentMarkdownRenderer(messages, *engine_registry.engine);
 
-    ChatView view(theme, messages, tool_renderers);
+    plugins::DisplayRendererRegistry display_renderers;
+    ChatView view(theme, messages, tool_renderers, display_renderers);
 
     // A user text row is NOT click-collapsible; the filler above the
     // bottom-aligned short transcript belongs to no row at all.
@@ -1518,7 +1817,8 @@ TEST_CASE("chat view: clicking a tool-activity row toggles its collapse",
     plugins::RegisterCoreMessageRenderers(messages);
     plugins::RegisterCoreAgentMarkdownRenderer(messages, *engine_registry.engine);
 
-    ChatView view(theme, messages, tool_renderers);
+    plugins::DisplayRendererRegistry display_renderers;
+    ChatView view(theme, messages, tool_renderers, display_renderers);
 
     SessionState::Snapshot snap;
     snap.session_id = "clicky-tool";

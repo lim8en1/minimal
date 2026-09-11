@@ -10,6 +10,8 @@
 #include <unordered_set>
 #include <utility>
 
+#include "minimal/common/logger.hpp"
+
 namespace minimal::client {
 
 std::string FormatClockTime(int64_t unix_ms) {
@@ -29,6 +31,17 @@ std::string FormatClockTime(int64_t unix_ms) {
 }
 
 namespace {
+
+// The result's display payload, or null: absent, malformed and non-object
+// payloads all degrade to the text row -- never to a lost row.
+nlohmann::json DisplayOf(const v1::ToolResultBlock& block) {
+    if (!block.has_display_json()) return nullptr;
+    auto display = nlohmann::json::parse(block.display_json(), nullptr, /*allow_exceptions=*/false);
+    if (display.is_object()) return display;
+    common::DefaultLogger().warn("tool result {}: ignoring malformed display_json",
+                                 block.tool_use_id());
+    return nullptr;
+}
 
 std::string JoinResultText(const v1::ToolResultBlock& block) {
     std::string joined;
@@ -313,6 +326,7 @@ std::vector<ChatRow> ChatRowsFromMessages(const std::vector<v1::StoredMessage>& 
                                 .text = JoinResultText(block.tool_result()),
                                 .tool_name = call != nullptr ? call->name : std::string{},
                                 .tool_input = call != nullptr ? call->input : nlohmann::json::object(),
+                                .tool_display = DisplayOf(block.tool_result()),
                                 .tool_is_error = block.tool_result().is_error()};
                     rows.push_back(std::move(row));
                 }
@@ -372,7 +386,14 @@ bool CollapsedByDefault(const ChatRow& row) {
             // they answered, since the modal closes the moment they submit.
             // It renders expanded by default; the collapse toggle still
             // works on it.
-            return row.tool_name != kAskUserToolName;
+            if (row.tool_name == kAskUserToolName) return false;
+            // A diff is the review surface for a change the model just made,
+            // and its hunks are small by construction: it starts expanded.
+            if (row.tool_display.is_object()) {
+                const auto kind = row.tool_display.find("kind");
+                if (kind != row.tool_display.end() && *kind == "diff") return false;
+            }
+            return true;
         case ChatRowKind::UserAttachment:
             return row.text.size() > kAttachmentCollapseThresholdChars;
         case ChatRowKind::UserText:

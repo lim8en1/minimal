@@ -10,10 +10,10 @@
 //
 // Per ARCHITECTURE.md "Message-kind rendering" -- presentation is now slotted
 // (E5): each row renders through the MessageRendererRegistry (core supplies
-// the defaults for every kind a plugin does not claim), and a tool RESULT row
-// consults the ToolResultRendererRegistry by tool name FIRST, falling back to
-// the default when no renderer matches (the disabled-plugin fallback is a
-// fallback, not an error).
+// the defaults for every kind a plugin does not claim). A tool RESULT row
+// tries, most specific first: the ToolResultRendererRegistry by tool name,
+// then the DisplayRendererRegistry by the result's display-payload kind, then
+// the kind default (the disabled-plugin fallback is a fallback, not an error).
 
 #include <ftxui/dom/elements.hpp>
 #include <ftxui/screen/box.hpp>
@@ -48,6 +48,7 @@ public:
     ChatView(const Theme& theme,
              const plugins::MessageRendererRegistry& message_renderers,
              const plugins::ToolResultRendererRegistry& tool_renderers,
+             const plugins::DisplayRendererRegistry& display_renderers,
              std::string toggle_collapse_hint = "alt+c");
 
     // `live_text_streams` is the tab's own per-segment views, index-aligned
@@ -126,6 +127,7 @@ private:
     const Theme& theme_;
     const plugins::MessageRendererRegistry& message_renderers_;
     const plugins::ToolResultRendererRegistry& tool_renderers_;
+    const plugins::DisplayRendererRegistry& display_renderers_;
     // The host-resolved chat.toggle_collapse binding, surfaced to row
     // renderers through RowRenderContext (they have no keymap access).
     std::string toggle_collapse_hint_ = "alt+c";

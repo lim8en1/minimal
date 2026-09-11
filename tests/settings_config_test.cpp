@@ -248,6 +248,16 @@ TEST_CASE("ParseSettingsConfig: max_result_bytes defaults to 10 MiB, must not be
                     std::runtime_error);
 }
 
+TEST_CASE("ParseSettingsConfig: max_display_bytes defaults to 128 KiB, must not be negative",
+         "[settings_config]") {
+    CHECK(ParseSettingsConfig(nlohmann::json::object()).tools.max_display_bytes == 128 * 1024);
+    CHECK(ParseSettingsConfig(nlohmann::json{{"tools", {{"max_display_bytes", 0}}}})
+              .tools.max_display_bytes == 0);
+    CHECK_THROWS_AS(ParseSettingsConfig(
+                        nlohmann::json{{"tools", {{"max_display_bytes", -1}}}}),
+                    std::runtime_error);
+}
+
 TEST_CASE("ParseSettingsConfig: tools_view and logging overridable", "[settings_config]") {
     nlohmann::json doc = {{"tools_view", {{"stdout_buffer_lines", 250}}},
                            {"logging", {{"level", "debug"}, {"path", "/var/log/minimal.log"},

@@ -58,10 +58,12 @@ bool ClickCollapsible(ChatRowKind kind) {
 ChatView::ChatView(const Theme& theme,
                    const plugins::MessageRendererRegistry& message_renderers,
                    const plugins::ToolResultRendererRegistry& tool_renderers,
+                   const plugins::DisplayRendererRegistry& display_renderers,
                    std::string toggle_collapse_hint)
     : theme_(theme),
       message_renderers_(message_renderers),
       tool_renderers_(tool_renderers),
+      display_renderers_(display_renderers),
       toggle_collapse_hint_(std::move(toggle_collapse_hint)) {}
 
 bool ChatView::IsCollapsed(const RowKey& key, const ChatRow& row) const {
@@ -146,43 +148,49 @@ void ChatView::RebuildRows(const SessionState::Snapshot& snapshot) {
             continue;
         }
 
-        // The tool-result slot: a renderer keyed by the tool's NAME takes
-        // precedence on RESULT rows (it has something to render FROM). A bare
-        // tool_use row (nothing produced yet) and any unmatched name fall back
-        // to the message-kind default -- the "disabled tool's plugin" fallback
-        // is a fallback, not an error. That fallback used to be reachable only
-        // through the `else` branch below, which a RESULT row (non-empty text)
-        // never takes -- so a completed call for any tool with no NAME-specific
-        // renderer (every built-in tool: bash, edit, read, ...) rendered
-        // nothing at all. The nested lookup here restores the fallback for
-        // exactly that case.
+        // A tool RESULT row, most specific renderer first: one for the tool's
+        // NAME (a tool and renderer shipped as a pair), then one for the
+        // result's display-payload KIND (any tool emitting it), then the
+        // message-kind default. A bare tool_use row (no result yet) has no
+        // text and takes the `else` branch. Renderers are plugin code on the
+        // render path: a throw is contained (it used to std::terminate the
+        // TUI) and the NEXT tier gets the row, so a malformed payload
+        // degrades to the text row rather than to nothing.
         if (row.kind == ChatRowKind::ToolActivity && !row.text.empty()) {
-            if (const auto* renderer = tool_renderers_.Find(row.tool_name)) {
-                // Plugin code on the render path: a throw here (or in the
-                // message-renderer calls below) propagated out of Render()
-                // and std::terminate'd the TUI. Contained, the row degrades
-                // to whatever earlier parts produced -- an empty one if none.
+            bool rendered = false;
+            const auto attempt = [&](const std::string& what, const auto& render) {
                 try {
-                    parts.push_back(renderer->Render(row.tool_input, row.text,
-                                                     row.tool_is_error, theme_, ctx));
+                    parts.push_back(render());
+                    rendered = true;
                 } catch (const std::exception& error) {
-                    common::DefaultLogger().warn("tool-result renderer for '{}' threw: {}",
-                                                 row.tool_name, error.what());
+                    common::DefaultLogger().warn("{} threw: {}", what, error.what());
                 } catch (...) {
-                    common::DefaultLogger().warn(
-                        "tool-result renderer for '{}' threw a non-standard exception",
-                        row.tool_name);
+                    common::DefaultLogger().warn("{} threw a non-standard exception", what);
                 }
-            } else if (const auto* fallback = message_renderers_.Find(row.kind)) {
-                try {
-                    parts.push_back(fallback->Render(row, theme_, ctx));
-                } catch (const std::exception& error) {
-                    common::DefaultLogger().warn("message renderer for {} threw: {}",
-                                                 ToString(row.kind), error.what());
-                } catch (...) {
-                    common::DefaultLogger().warn(
-                        "message renderer for {} threw a non-standard exception",
-                        ToString(row.kind));
+            };
+            const plugins::ToolResultView result{.tool_name = row.tool_name,
+                                                 .tool_input = row.tool_input,
+                                                 .display = row.tool_display,
+                                                 .result_text = row.text,
+                                                 .is_error = row.tool_is_error};
+            if (const auto* renderer = tool_renderers_.Find(row.tool_name)) {
+                attempt("tool-result renderer for '" + row.tool_name + "'",
+                        [&] { return renderer->Render(result, theme_, ctx); });
+            }
+            if (!rendered && row.tool_display.is_object()) {
+                const auto kind = row.tool_display.find("kind");
+                if (kind != row.tool_display.end() && kind->is_string()) {
+                    const auto& name = kind->get_ref<const std::string&>();
+                    if (const auto* renderer = display_renderers_.Find(name)) {
+                        attempt("display renderer for kind '" + name + "'",
+                                [&] { return renderer->Render(result, theme_, ctx); });
+                    }
+                }
+            }
+            if (!rendered) {
+                if (const auto* fallback = message_renderers_.Find(row.kind)) {
+                    attempt("message renderer for " + std::string(ToString(row.kind)),
+                            [&] { return fallback->Render(row, theme_, ctx); });
                 }
             }
         } else {

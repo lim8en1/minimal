@@ -41,9 +41,18 @@ private:
 class FixtureToolRenderer final : public plugins::ToolResultRenderer {
 public:
     std::string_view tool_name() const override { return "fixture_tool"; }
-    ftxui::Element Render(const nlohmann::json&, std::string_view result_text, bool,
-                          const Theme&, const plugins::RowRenderContext&) const override {
-        return ftxui::text("fixture rendered: " + std::string(result_text));
+    ftxui::Element Render(const plugins::ToolResultView& result, const Theme&,
+                          const plugins::RowRenderContext&) const override {
+        return ftxui::text("fixture rendered: " + std::string(result.result_text));
+    }
+};
+
+class FixtureDisplayRenderer final : public plugins::DisplayRenderer {
+public:
+    std::string_view kind() const override { return "fixture_kind"; }
+    ftxui::Element Render(const plugins::ToolResultView& result, const Theme&,
+                          const plugins::RowRenderContext&) const override {
+        return ftxui::text("fixture kind: " + result.display.value("label", std::string{}));
     }
 };
 
@@ -135,6 +144,12 @@ void minimal_client_plugin_register_renderers(
     plugins::ToolResultRendererRegistry& registry,
     const plugins::ClientPluginRegistrationContext&) {
     registry.Register(std::make_unique<FixtureToolRenderer>());
+}
+
+void minimal_client_plugin_register_display_renderers(
+    plugins::DisplayRendererRegistry& registry,
+    const plugins::ClientPluginRegistrationContext&) {
+    registry.Register(std::make_unique<FixtureDisplayRenderer>());
 }
 
 void minimal_client_plugin_register_message_renderers(

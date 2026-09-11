@@ -95,6 +95,10 @@ struct ToolsSettings {
     // compaction. Truncated over the cap, with a visible marker, never an
     // error result -- a large result is not a refusal. 0 disables.
     std::int64_t max_result_bytes = 10 * 1024 * 1024;
+    // Ceiling on one result's client-only display payload (serialized JSON).
+    // Over it the payload is DROPPED, never truncated -- a cut diff misleads --
+    // and the client falls back to the text. 0 disables.
+    std::int64_t max_display_bytes = 128 * 1024;
     // The full parsed "tools" JSON object, verbatim -- alongside the typed
     // fields above -- so a plugin's own top-level key under "tools" that
     // ParseTools does not recognize still reaches PluginLoader intact. This

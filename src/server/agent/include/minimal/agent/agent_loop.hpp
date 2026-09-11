@@ -64,6 +64,10 @@ struct LoopConfig {
     // applies uniformly to every tool regardless of who wrote it. 0 disables.
     std::int64_t max_tool_result_bytes = 10 * 1024 * 1024;
 
+    // Ceiling on a result's display payload (settings.json
+    // tools.max_display_bytes). Over it the payload is dropped whole. 0 disables.
+    std::int64_t max_tool_display_bytes = 128 * 1024;
+
     // Exponential-with-EQUAL-jitter backoff between retries: half the ceiling
     // is a fixed floor, the other half random. Full jitter can legally draw
     // zero, which leaves a real 429 unbackoffed and makes the wait

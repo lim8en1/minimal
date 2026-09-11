@@ -149,6 +149,31 @@ TEST_CASE("a tool_use with no result in the page stays, flagged pending",
     CHECK(rows[0].tool_pending);
 }
 
+TEST_CASE("a tool result's display_json becomes the row's tool_display; malformed is dropped",
+          "[chat_model][display]") {
+    auto result = ToolResult("t1", "replaced 1 occurrence", false);
+    result.mutable_tool_result()->set_display_json(R"({"kind":"diff","path":"a.cpp","hunks":[]})");
+    std::vector<v1::StoredMessage> page;
+    page.push_back(MakeMessage(v1::ROLE_USER, {result}));
+    page.push_back(MakeMessage(v1::ROLE_ASSISTANT, {ToolUse("t1", "edit")}));
+
+    auto rows = client::ChatRowsFromMessages(page);
+    REQUIRE(rows.size() == 1);
+    CHECK(rows[0].tool_display.at("kind") == "diff");
+    CHECK(rows[0].tool_display.at("path") == "a.cpp");
+    // A diff is the review surface for a change: it starts expanded, unlike
+    // other tool rows.
+    CHECK_FALSE(client::CollapsedByDefault(rows[0]));
+
+    page[0].mutable_message()->mutable_content(0)->mutable_tool_result()->set_display_json(
+        "{not json");
+    rows = client::ChatRowsFromMessages(page);
+    REQUIRE(rows.size() == 1);
+    CHECK(rows[0].tool_display.is_null());
+    CHECK(rows[0].text == "replaced 1 occurrence");   // the row itself survives
+    CHECK(client::CollapsedByDefault(rows[0]));
+}
+
 TEST_CASE("an errored tool result is marked, not hidden", "[chat_model]") {
     std::vector<v1::StoredMessage> page;
     page.push_back(MakeMessage(v1::ROLE_USER, {ToolResult("t1", "boom", true)}));

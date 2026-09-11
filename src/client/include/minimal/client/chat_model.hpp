@@ -54,6 +54,9 @@ struct ChatRow {
     // tool-result renderer can show what was rendered FROM (a diff renderer
     // needs the file path, not just the hunk text). Empty object when unknown.
     nlohmann::json tool_input = nlohmann::json::object();
+    // ToolActivity result rows only: the tool's display payload
+    // ({"kind": ..., ...}), null when it sent none or sent a malformed one.
+    nlohmann::json tool_display = nullptr;
     std::string attachment_path;  // UserAttachment: the path="..." from the frame
     bool tool_is_error = false;   // ToolActivity only
     // ToolActivity only: true for a tool_use whose tool_result is NOT in the

@@ -56,6 +56,7 @@ public:
         plugins::StartViewRegistry& start_view_registry;
         plugins::MessageRendererRegistry& message_registry;
         plugins::ToolResultRendererRegistry& renderer_registry;
+        plugins::DisplayRendererRegistry& display_registry;
         plugins::StatusSegmentRegistry& status_registry;
         plugins::MarkdownEngine& engine;
 

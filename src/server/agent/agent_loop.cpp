@@ -58,6 +58,19 @@ void CapToolResult(llm::ToolResultBlock& block, std::int64_t max_bytes) {
     block.content.push_back(llm::TextBlock{std::move(kept)});
 }
 
+// The display payload's ceiling (settings.json tools.max_display_bytes).
+// DROPPED whole over the cap, never truncated: a cut diff or file excerpt
+// misrepresents what happened, while the text fallback stays truthful.
+// Returns the serialized size when it dropped the payload, 0 otherwise.
+std::size_t CapToolDisplay(llm::ToolResultBlock& block, std::int64_t max_bytes) {
+    if (max_bytes <= 0 || block.display.is_null()) return 0;
+    const std::size_t size =
+        block.display.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace).size();
+    if (size <= static_cast<std::size_t>(max_bytes)) return 0;
+    block.display = nullptr;
+    return size;
+}
+
 // S4's no-boundary fallback: when snap_compaction_boundary finds no safe cut
 // anywhere (every candidate lands inside an open tool-call cycle), context
 // would otherwise grow forever -- but the actual harm that trips the trigger
@@ -100,6 +113,7 @@ bool ElideLargestToolResult(std::vector<llm::Message>& history) {
         return false;
     }
     CapToolResult(*largest, kElisionTargetBytes);
+    largest->display = nullptr;   // it described the full result, not the stub
     return true;
 }
 
@@ -903,6 +917,16 @@ void AgentLoop::RunTurnLoop(TurnResult& result, bool flush_first) {
         };
         std::vector<PendingCall> calls;
         calls.reserve(tool_uses.size());
+        // "Deny and stop" (PreparedInvocation::stop_turn): once any call of the
+        // round is denied that way, the operator is done with this turn -- the
+        // later calls are answered without prompting, the earlier (already
+        // allowed) ones without running, and no provider call follows. Nothing
+        // has executed yet when the flag lands: gating precedes all execution.
+        bool stop_requested = false;
+        const auto stopped_by_user = [](const std::string& tool_use_id) {
+            return llm::ToolResultBlock{
+                tool_use_id, {llm::TextBlock{"not run: the user stopped the turn"}}, true};
+        };
         for (std::size_t i = 0; i < tool_uses.size(); ++i) {
             const auto* use = tool_uses[i];
             // Aggregate-built around its context: ToolContext holds a Logger
@@ -961,7 +985,12 @@ void AgentLoop::RunTurnLoop(TurnResult& result, bool flush_first) {
             prepared.tool_use_id = use->id;
             prepared.tool_name = use->name;
             bool denied_for_input = false;
-            if (config_.max_tool_input_bytes > 0) {
+            if (stop_requested) {
+                // Not prompted, not run: see stop_requested above. Takes the
+                // same skip-Prepare path as an oversized input.
+                prepared.denial = stopped_by_user(use->id);
+                denied_for_input = true;
+            } else if (config_.max_tool_input_bytes > 0) {
                 const std::size_t input_bytes = use->input.dump().size();
                 if (input_bytes > static_cast<std::size_t>(config_.max_tool_input_bytes)) {
                     prepared.denial = llm::ToolResultBlock{
@@ -992,6 +1021,7 @@ void AgentLoop::RunTurnLoop(TurnResult& result, bool flush_first) {
                     }
                 }
                 prepared = executor_.Prepare(use->id, use->name, use->input, call.ctx);
+                if (prepared.stop_turn) stop_requested = true;
             }
             // Unknown tools arrive here with no resolved tool; they execute as
             // their denial result and have no exclusivity to protect.
@@ -999,6 +1029,17 @@ void AgentLoop::RunTurnLoop(TurnResult& result, bool flush_first) {
                            prepared.tool->parallel_safe();
             call.prepared = std::move(prepared);
             calls.push_back(std::move(call));
+        }
+
+        // Calls gated BEFORE the stopping one were allowed but have not run:
+        // stop means stop, so they are answered unrun too. Every tool_use still
+        // gets its result, which keeps the transcript paired.
+        if (stop_requested) {
+            for (auto& call : calls) {
+                if (call.prepared.denial) continue;
+                call.prepared.denial = stopped_by_user(tool_uses[call.index]->id);
+                call.to_pool = false;
+            }
         }
 
         // Phase 2 -- RUN. The brackets below run on whichever thread executes
@@ -1061,6 +1102,13 @@ void AgentLoop::RunTurnLoop(TurnResult& result, bool flush_first) {
             // regardless of which tool produced this, including MCP tools and
             // any third-party plugin tool that caps nothing on its own.
             CapToolResult(tool_result, config_.max_tool_result_bytes);
+            if (const std::size_t dropped =
+                    CapToolDisplay(tool_result, config_.max_tool_display_bytes)) {
+                session_.logger.warn(
+                    "tool {}: display payload ({} bytes) exceeds tools.max_display_bytes ({}); "
+                    "dropped, the client falls back to text",
+                    use->name, dropped, config_.max_tool_display_bytes);
+            }
 
             // Emitted even when Execute() reports an error, and before the
             // result is appended: a client that showed a tool as started must
@@ -1142,6 +1190,15 @@ void AgentLoop::RunTurnLoop(TurnResult& result, bool flush_first) {
                 // The store is what's failing; nothing more to do in memory.
             }
             throw;
+        }
+
+        // "Deny and stop": the round is answered and persisted; no provider
+        // call follows. Cancelled is what the operator did -- halted the turn
+        // -- and every consumer already reads it that way (the headless exit
+        // code, the stop hook, a subagent's parent).
+        if (stop_requested) {
+            result.stop_reason = llm::StopReason::Cancelled;
+            break;
         }
 
         // Turn boundary: safe to splice in anything a background subagent

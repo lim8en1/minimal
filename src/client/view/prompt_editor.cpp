@@ -4,6 +4,11 @@
 #include <memory>
 
 #include <ftxui/component/event.hpp>
+#include <ftxui/dom/elements.hpp>
+#include <ftxui/screen/terminal.hpp>
+
+#include "minimal/client/utf8.hpp"
+#include "minimal/client/view/prompt_wrap.hpp"
 
 namespace minimal::client {
 
@@ -13,6 +18,56 @@ using ftxui::Element;
 using ftxui::Event;
 
 constexpr auto kSuggestDebounce = std::chrono::milliseconds(120);
+
+constexpr const char* kPromptPlaceholder =
+    "type here; @ for files, / for commands, alt+enter for newline";
+
+// The events that INSERT a newline rather than submit. Alt+Enter is the
+// portable multi-line key, encoded ESC CR (most terminals) or ESC LF; the
+// CSI-u rows cover terminals that report Enter with a modifier attached --
+// the kitty keyboard protocol's \x1b[13;{mod}u and xterm modifyOtherKeys'
+// \x1b[27;{mod};13~ (FTXUI 7 delivers unknown CSI as Event::Special with the
+// raw bytes preserved -- the same mechanism the bracketed-paste markers use,
+// and the one ctrl+tab's \x1b[27;5;9~ already arrives through). On macOS
+// several terminals send Option+Enter as a PLAIN \r unless their
+// option-as-alt / kitty-protocol setting is on -- no byte distinguishes it
+// from submit then, and no in-app match can fix that (see prompt_editor.hpp).
+bool IsNewlineEvent(const Event& event) {
+    static const Event kAltEnterCr = Event::Character("\x1b\r");
+    static const Event kAltEnterLf = Event::Character("\x1b\n");
+    static const Event kKittyAltEnter = Event::Special("\x1b[13;3u");
+    static const Event kKittyShiftEnter = Event::Special("\x1b[13;2u");
+    static const Event kModifyOtherKeysAltEnter = Event::Special("\x1b[27;3;13~");
+    static const Event kModifyOtherKeysShiftEnter = Event::Special("\x1b[27;2;13~");
+    return event == kAltEnterCr || event == kAltEnterLf || event == kKittyAltEnter ||
+           event == kKittyShiftEnter || event == kModifyOtherKeysAltEnter ||
+           event == kModifyOtherKeysShiftEnter;
+}
+
+// Newline AT THE CURSOR, not appended to the end: appending always broke a
+// newline inserted while editing mid-line (the common case -- Alt+Enter is
+// how a multi-line prompt gets built up one line at a time) into a line
+// dropped at the tail instead. cursor_position is clamped defensively --
+// FTXUI only clamps it INTO content's bounds after an external splice, it
+// never derives it, so a stale value from before some other edit must not be
+// trusted past content's own length.
+void InsertNewlineAtCursor(PromptEditorState& state) {
+    const auto pos = std::clamp<std::size_t>(
+        static_cast<std::size_t>(state.cursor_position), 0, state.content.size());
+    state.content.insert(pos, "\n");
+    state.cursor_position = static_cast<int>(pos) + 1;
+}
+
+// Render-pass geometry shared with the mouse handler below: where the wrapped
+// rows landed on screen and which content slice they show. Written by the
+// Renderer every frame (its vbox is reflected into `box`), read on mouse
+// events -- the wrapped Input's own click-to-position is out of the loop now
+// that its Render() output is no longer what the frame draws.
+struct PromptMouseMap {
+    ftxui::Box box;
+    std::size_t first_row = 0;
+    PromptWrapResult wrap;
+};
 
 // The start index of the '@' token the CURSOR currently sits inside (or at
 // the end of), or nullopt if none. Scans backward from `cursor`: an '@' hit
@@ -103,9 +158,13 @@ ftxui::Component MakePromptEditor(
     // here, and only clamps it into range rather than moving it.
     InputOption input_option;
     input_option.content = &state.content;
-    input_option.placeholder = "type here; @ for files, / for commands, alt+enter for newline";
+    input_option.placeholder = kPromptPlaceholder;
     input_option.cursor_position = &state.cursor_position;
     auto input = Input(input_option);
+
+    // Render/mouse shared geometry (see PromptMouseMap). One per editor,
+    // captured by both the CatchEvent below and the Renderer at the end.
+    auto mouse_map = std::make_shared<PromptMouseMap>();
 
     // Accept the highlighted suggestion in place. Shared by Tab and (when the
     // list is open) Enter -- see below for why Enter needed this at all.
@@ -179,7 +238,7 @@ ftxui::Component MakePromptEditor(
     // which outlives this component.
     auto with_events = CatchEvent(
         input, [&state, accept_suggestion, on_text, on_command,
-                command_catalog, pasting](const Event& event) {
+                command_catalog, pasting, mouse_map](const Event& event) {
         // Bracketed paste (DECSET 2004): the terminal wraps a paste in
         // \x1b[200~ ... \x1b[201~ and every line break inside it arrives as
         // a plain Return, which used to submit each pasted line as its own
@@ -187,10 +246,10 @@ ftxui::Component MakePromptEditor(
         // with the raw bytes preserved (terminal_input_parser.cpp: ParseCSI's
         // default arm returns SPECIAL; Event::Special keeps input()), so the
         // markers are matchable here. While pasting, Return inserts a
-        // newline (exactly as Alt+Enter does -- see that branch for the
-        // cursor clamping) and the pasted characters pass through to the
-        // Input unchanged. A terminal without 2004 support never delivers
-        // the markers and behavior is exactly as it was before.
+        // newline (exactly as Alt+Enter does -- InsertNewlineAtCursor) and
+        // the pasted characters pass through to the Input unchanged. A
+        // terminal without 2004 support never delivers the markers and
+        // behavior is exactly as it was before.
         if (event.input().find("\x1b[200~") != std::string::npos) {
             *pasting = true;
             return true;   // swallowed
@@ -200,10 +259,7 @@ ftxui::Component MakePromptEditor(
             return true;   // swallowed
         }
         if (*pasting && event == Event::Return) {
-            const auto pos = std::clamp<std::size_t>(
-                static_cast<std::size_t>(state.cursor_position), 0, state.content.size());
-            state.content.insert(pos, "\n");
-            state.cursor_position = static_cast<int>(pos) + 1;
+            InsertNewlineAtCursor(state);
             return true;   // consumed
         }
 
@@ -244,22 +300,10 @@ ftxui::Component MakePromptEditor(
             return true;
         }
 
-        // Alt+Enter (ESC CR) inserts a newline -- the portable multi-line key.
-        static const Event kAltEnterCr = Event::Character("\x1b\r");
-        static const Event kAltEnterLf = Event::Character("\x1b\n");
-        if (event == kAltEnterCr || event == kAltEnterLf) {
-            // AT THE CURSOR, not appended to the end: appending always broke
-            // a newline inserted while editing mid-line (the common case --
-            // Alt+Enter is how a multi-line prompt gets built up one line at
-            // a time) into a line dropped at the tail instead. cursor_position
-            // is clamped defensively -- FTXUI only clamps it INTO content's
-            // bounds after an external splice, it never derives it, so a
-            // stale value from before some other edit must not be trusted
-            // past content's own length.
-            const auto pos = std::clamp<std::size_t>(
-                static_cast<std::size_t>(state.cursor_position), 0, state.content.size());
-            state.content.insert(pos, "\n");
-            state.cursor_position = static_cast<int>(pos) + 1;
+        // Alt+Enter and its CSI-u siblings insert a newline -- the portable
+        // multi-line keys (see IsNewlineEvent for the encodings).
+        if (IsNewlineEvent(event)) {
+            InsertNewlineAtCursor(state);
             return true;   // consumed
         }
         // Enter accepts the highlighted suggestion when the list is open,
@@ -416,6 +460,49 @@ ftxui::Component MakePromptEditor(
             // silently discard what was just typed.
             state.history_cursor.reset();
         }
+
+        // Click-to-position, re-implemented from the render pass's geometry
+        // (mouse_map): the wrapped Input's own mouse handling relied on
+        // reflected boxes inside ITS rendered element, which is no longer
+        // what the frame draws (see the Renderer below). Row from the screen
+        // y (the rendered window starts at mouse_map->first_row), byte offset
+        // from the click column. Everything else (wheel, drag, clicks on the
+        // suggestion list or elsewhere) falls through untouched.
+        if (event.is_mouse()) {
+            // Event::mouse() is not const in FTXUI 7, so take a copy of the
+            // (plain-value) event rather than const_cast.
+            Event mutable_event = event;
+            const auto& mouse = mutable_event.mouse();
+            if (mouse.button == ftxui::Mouse::Left &&
+                mouse.motion == ftxui::Mouse::Pressed &&
+                mouse_map->box.Contain(mouse.x, mouse.y) && !mouse_map->wrap.lines.empty()) {
+                const std::size_t row_index =
+                    static_cast<std::size_t>(mouse.y - mouse_map->box.y_min) +
+                    mouse_map->first_row;
+                if (row_index < mouse_map->wrap.lines.size()) {
+                    const PromptVisualLine& row = mouse_map->wrap.lines[row_index];
+                    const auto target = static_cast<std::size_t>(
+                        std::max(mouse.x - mouse_map->box.x_min, 0));
+                    // Largest byte offset whose column position fits before
+                    // the click column, never splitting a code point: a wide
+                    // glyph clicked on its first column selects the glyph, on
+                    // its second the position stays at its start.
+                    std::size_t off = 0;
+                    std::size_t col = 0;
+                    std::size_t best = 0;
+                    while (off < row.text.size()) {
+                        const std::size_t cp_cols =
+                            Utf8CharColumnWidth(Utf8Decode(row.text, off));
+                        if (col + cp_cols > target) break;
+                        col += cp_cols;
+                        best = off;
+                    }
+                    state.cursor_position =
+                        static_cast<int>(row.begin + best);
+                }
+                return true;   // a press inside the prompt body is ours
+            }
+        }
         return false;   // everything else goes to the Input
     });
 
@@ -571,7 +658,73 @@ ftxui::Component MakePromptEditor(
 
         Elements lines;
         lines.push_back(separator());
-        lines.push_back(with_events->Render());
+
+        // The prompt body: SOFT-WRAPPED. FTXUI's Input renders one terminal
+        // row per LOGICAL line (a split at '\n' and nothing else), so a long
+        // single-line prompt scrolled horizontally and could not be reviewed
+        // before sending. The editor therefore renders its own DOM from
+        // WrapPromptContent's visual lines; the wrapped Input stays in the
+        // component tree (it still owns every key event) -- only its Render()
+        // output is replaced, which is also why click-to-position had to move
+        // into the CatchEvent above.
+        const ftxui::Dimensions term = ftxui::Terminal::Size();
+        const PromptWrapResult wrap = WrapPromptContent(
+            state.content, static_cast<std::size_t>(std::max(state.cursor_position, 0)),
+            static_cast<std::size_t>(std::max(term.dimx, 0)));
+
+        // Visible window over the wrapped rows: at most half the screen (min
+        // 4), anchored so the caret row is always inside it. Stateless on
+        // purpose: the content only changes by editing, and editing moves the
+        // caret with it, so re-anchoring on the caret row each frame is the
+        // whole scroll model -- there is nothing to look at without also
+        // moving the caret there.
+        constexpr std::size_t kMinPromptRows = 4;
+        const std::size_t cap =
+            std::max(kMinPromptRows, static_cast<std::size_t>(std::max(term.dimy, 0)) / 2);
+        const std::size_t first_row = wrap.cursor_row >= cap ? wrap.cursor_row - cap + 1 : 0;
+        const std::size_t last_row = std::min(wrap.lines.size(), first_row + cap);
+
+        const ftxui::Decorator caret_deco =
+            input->Focused() ? ftxui::Decorator(ftxui::focusCursorBarBlinking)
+                             : ftxui::Decorator(ftxui::focus);
+
+        Elements body;
+        if (state.content.empty()) {
+            // Placeholder, decorated the way FTXUI's own Input renders one:
+            // dim text with the caret parked at the row start.
+            body.push_back(text(kPromptPlaceholder) | dim | caret_deco);
+        } else {
+            const auto cursor_byte = static_cast<std::size_t>(
+                std::clamp(state.cursor_position, 0, static_cast<int>(state.content.size())));
+            for (std::size_t k = first_row; k < last_row; ++k) {
+                const PromptVisualLine& row = wrap.lines[k];
+                if (k != wrap.cursor_row) {
+                    body.push_back(text(row.text));
+                    continue;
+                }
+                // The caret row: split at the cursor byte so the glyph under
+                // it carries the terminal cursor. focusCursor* both shapes
+                // the cursor and anchors any enclosing frame's scroll --
+                // exactly how FTXUI's own Input decorates its caret cell.
+                const std::size_t offset = cursor_byte - row.begin;
+                std::size_t glyph_end = offset;
+                if (glyph_end < row.text.size()) {
+                    Utf8Decode(row.text, glyph_end);
+                }
+                const std::string glyph =
+                    offset < row.text.size() ? row.text.substr(offset, glyph_end - offset)
+                                             : std::string(" ");   // caret past the last glyph
+                body.push_back(hbox({text(row.text.substr(0, offset)),
+                                     text(glyph) | caret_deco,
+                                     text(row.text.substr(glyph_end))}));
+            }
+        }
+        // Publish the geometry the mouse handler maps clicks against (see
+        // PromptMouseMap): the rendered vbox is exactly `last_row -
+        // first_row` tall starting at first_row, so y -> row is arithmetic.
+        mouse_map->wrap = wrap;
+        mouse_map->first_row = first_row;
+        lines.push_back(vbox(std::move(body)) | reflect(mouse_map->box));
 
         if (state.list_open) {
             Elements items;

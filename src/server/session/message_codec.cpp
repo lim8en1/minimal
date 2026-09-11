@@ -40,8 +40,10 @@ nlohmann::json BlockToJson(const llm::ContentBlock& block) {
                 for (const auto& inner : b.content) {
                     content.push_back(TextBlockToJson(std::get<llm::TextBlock>(inner)));
                 }
-                return {{"type", "tool_result"}, {"tool_use_id", b.tool_use_id},
-                        {"content", std::move(content)}, {"is_error", b.is_error}};
+                nlohmann::json j = {{"type", "tool_result"}, {"tool_use_id", b.tool_use_id},
+                                    {"content", std::move(content)}, {"is_error", b.is_error}};
+                if (!b.display.is_null()) j["display"] = b.display;
+                return j;
             }
         },
         block);
@@ -131,6 +133,9 @@ llm::ContentBlock BlockFromJson(const nlohmann::json& j, const std::string& ctx)
                 }
             }
         }
+        // Lenient, unlike the fields above: display is presentation-only, and
+        // a malformed payload must never cost the row (and resume) its text.
+        if (j.contains("display") && j.at("display").is_object()) b.display = j.at("display");
         return b;
     }
 

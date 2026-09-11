@@ -28,6 +28,11 @@ struct ToolSpec {
 struct ToolResult {
     bool is_error = false;
     std::string content_text;
+    // Optional display payload for clients: {"kind": "<kind>", ...}. Never
+    // sent to the model -- content_text stays what the model reads and the
+    // fallback a client shows when it has no renderer for the kind. Null =
+    // absent. Self-contained: a renderer never parses content_text.
+    nlohmann::json display = nullptr;
 };
 
 // Lifecycle of a BACKGROUND task -- work a tool starts (background bash) whose

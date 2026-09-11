@@ -857,6 +857,7 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     auto& view_registry = env.view_registry;
     auto& start_view_registry = env.start_view_registry;
     auto& renderer_registry = env.renderer_registry;
+    auto& display_registry = env.display_registry;
     auto& message_registry = env.message_registry;
     auto& status_registry = env.status_registry;
     const auto& status_format = env.status_format;
@@ -1579,7 +1580,7 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         *app, engine, view_registry, plugin_views, plugin_modal_child,
         show_plugin_modal, open_picker, open_agent_picker, open_model_picker,
         [&picker_controller] { picker_controller.Poll(); }, tab_ui, theme,
-        message_registry, renderer_registry, permission_child, show_permission,
+        message_registry, renderer_registry, display_registry, permission_child, show_permission,
         confirmation_child, show_confirmation, ask_child, show_ask});
     // Same names the inline code declared directly -- every lambda below
     // this point (with_keys' KeyContext, the still-inline render body)
@@ -1694,7 +1695,7 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     // permission_child/show_permission/confirmation_child/show_confirmation.
     minimal::client::FrameRenderer frame_renderer(minimal::client::FrameRenderer::Dependencies{
         *app, theme, focused, focused_details, tab_ui, start_view_registry, message_registry,
-        renderer_registry, status_registry, engine, show_panel, panel_height,
+        renderer_registry, display_registry, status_registry, engine, show_panel, panel_height,
         env.ui.tools_panel_stdout_buffer_lines > 0 ? env.ui.tools_panel_stdout_buffer_lines : 100,
         editor, status_format, plugin_views,
         // Row-renderer collapse hints follow the user's keymap, not a

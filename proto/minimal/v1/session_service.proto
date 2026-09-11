@@ -44,6 +44,15 @@ message PermissionResponse {
   // a key the corresponding PermissionRequest offered -- the server drops
   // anything else rather than trusting a client to invent grant keys.
   repeated string granted_keys = 3;
+  // DENY only (ignored on ALLOW): what the operator wants the model to do
+  // instead. Rides into the denial's tool result verbatim, so the model can
+  // adapt instead of guessing why it was refused.
+  string deny_message = 4;
+  // DENY only (ignored on ALLOW): end the turn after this round instead of
+  // handing the denial back to the model for another provider call. The
+  // round's other calls do not run (none has started -- gating precedes all
+  // execution); the turn reports STOP_REASON_CANCELLED.
+  bool stop_turn = 5;
 }
 
 message ConfirmationResponse {

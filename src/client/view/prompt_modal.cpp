@@ -1,5 +1,6 @@
 #include "minimal/client/view/prompt_modal.hpp"
 
+#include <algorithm>
 #include <deque>
 
 #include <ftxui/component/event.hpp>
@@ -46,9 +47,46 @@ Element PadHorizontal(Element content) {
 
 }  // namespace
 
+namespace {
+
+// The answer list, numbered 1-4 in this order (PermissionChoice order).
+struct PermissionChoiceRow {
+    PermissionChoice choice;
+    const char* label;
+    const char* hint;
+};
+constexpr PermissionChoiceRow kPermissionChoices[] = {
+    {PermissionChoice::Allow, "allow", "run it this once"},
+    {PermissionChoice::Deny, "deny", "the assistant is told no and carries on"},
+    {PermissionChoice::DenyWithMessage, "deny with message",
+     "tell the assistant what to do instead"},
+    {PermissionChoice::DenyAndStop, "deny and stop", "end the turn here"},
+};
+constexpr int kPermissionChoiceCount =
+    static_cast<int>(sizeof(kPermissionChoices) / sizeof(kPermissionChoices[0]));
+
+// Ephemeral modal state, component-owned (shared by the renderer and the
+// event handler) -- the same lifetime rule as the request copy below.
+struct PermissionModalState {
+    int selected = 0;             // index into kPermissionChoices; allow by default
+    bool composing = false;       // the deny-with-message input is open
+    bool interacted = false;      // the arming rule (see the CatchEvent)
+    bool grants_focused = false;  // last key moved the grants, not the list
+    std::string message;
+};
+
+std::string TrimmedMessage(const std::string& s) {
+    const auto first = s.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos) return {};
+    const auto last = s.find_last_not_of(" \t\r\n");
+    return s.substr(first, last - first + 1);
+}
+
+}  // namespace
+
 ftxui::Component MakePermissionModal(const PendingPermission& request, GrantToggles& toggles,
                                      const Theme& theme,
-                                     std::function<void(bool allow)> on_answer) {
+                                     std::function<void(PermissionVerdict verdict)> on_answer) {
     using namespace ftxui;
 
     // The request is COPIED into component-owned state. RunTui passes a member
@@ -56,6 +94,17 @@ ftxui::Component MakePermissionModal(const PendingPermission& request, GrantTogg
     // memory on every frame after the one that built it. `theme` stays a
     // reference -- it is a RunTui local that provably outlives the modal.
     const auto request_state = std::make_shared<PendingPermission>(request);
+    const auto state = std::make_shared<PermissionModalState>();
+
+    // The deny-with-message line. Deliberately OUTSIDE the component tree:
+    // the CatchEvent below forwards keys to it only while composing, so it can
+    // never take focus (or keystrokes) from the list while it is not shown --
+    // the "hidden choice" bug class the ask modal's input guards against.
+    // Single-line: Return is the send key, never a newline.
+    InputOption input_option;
+    input_option.multiline = false;
+    const auto input =
+        Input(&state->message, "what should the assistant do instead?", input_option);
 
     toggles.selected.assign(request.grants.size(), false);
 
@@ -84,14 +133,9 @@ ftxui::Component MakePermissionModal(const PendingPermission& request, GrantTogg
     // per-frame temporary instead. Copy, don't trust the caller's lifetime.)
     const auto grant_container_val = grant_container;   // outlives the factory: by value
     const auto grant_boxes_val = std::move(boxes_copy);
-    // Set on the first event the modal sees: before that, the scroll anchor
-    // is the top of the content (the title/summary a human must read first);
-    // after it, the frame follows the ACTIVE grant checkbox, so tab/arrow
-    // navigation scrolls the list the user is moving through.
-    const auto interacted = std::make_shared<bool>(false);
     auto body = Renderer(grant_container,
-                         [grant_boxes_val, grant_container_val, request_state, &theme,
-                          interacted] {
+                         [grant_boxes_val, grant_container_val, request_state, state, input,
+                          &theme] {
         const PendingPermission& request = *request_state;
         Elements rows;
         rows.push_back(text("permission required") | bold | color(theme.ColorFor("attention")));
@@ -116,37 +160,76 @@ ftxui::Component MakePermissionModal(const PendingPermission& request, GrantTogg
                 break;
             }
         }
+        int active_grant_row = -1;
         if (!request.grants.empty()) {
-            rows.push_back(text("session grants:") | dim);
+            rows.push_back(text("session grants (sent only with allow):") | dim);
             for (std::size_t i = 0; i < request.grants.size(); ++i) {
                 auto row = hbox({grant_container_val->ChildAt(static_cast<int>(i))->Render(),
                                  text(" allow " + request.grants[i].label() +
                                       " -- any arguments, this session") |
                                      color(theme.ColorFor("attention"))});
                 if (static_cast<int>(i) == active_grant) {
-                    row |= focus;
                     row |= bgcolor(theme.ColorFor("status_bar_bg"));
+                    active_grant_row = static_cast<int>(rows.size());
                 }
                 rows.push_back(std::move(row));
             }
         }
 
+        // The answer list. The selection marker is the list's cursor; the
+        // grants' background highlight is theirs -- two different shapes, so
+        // the two cursors never read as one.
+        rows.push_back(text(""));
+        int selected_row = -1;
+        for (int i = 0; i < kPermissionChoiceCount; ++i) {
+            const auto& choice = kPermissionChoices[i];
+            const bool is_selected = i == state->selected;
+            std::string hint = choice.hint;
+            if (choice.choice == PermissionChoice::Allow && !request.grants.empty()) {
+                hint = "this once, plus any grants ticked above";
+            }
+            // Marker and label bold TOGETHER: one styled span, so the marker
+            // reads as part of the selected answer.
+            auto label = hbox({text(is_selected ? "❯ " : "  "),
+                               text(std::to_string(i + 1) + ". " + choice.label)});
+            if (is_selected) label |= bold;
+            if (is_selected) selected_row = static_cast<int>(rows.size());
+            rows.push_back(hbox({std::move(label), text("  " + hint) | dim}));
+        }
+        int message_row = -1;
+        if (state->composing) {
+            message_row = static_cast<int>(rows.size());
+            rows.push_back(hbox({text("   message: "), input->Render() | flex}));
+        }
+
         // The scroll anchor: the summary until the user touches a key, then
-        // the active grant row (already marked above). One anchor at a time
-        // -- two `focus` markers would fight over the frame's viewport.
-        if (!(*interacted) || request.grants.empty()) {
+        // whatever the last key moved -- the message line, the active grant,
+        // or the selected answer. One anchor at a time: two `focus` markers
+        // would fight over the frame's viewport.
+        if (!state->interacted) {
             rows[2] |= focus;   // the summary
+        } else if (message_row >= 0) {
+            rows[message_row] |= focus;
+        } else if (state->grants_focused && active_grant_row >= 0) {
+            rows[active_grant_row] |= focus;
+        } else if (selected_row >= 0) {
+            rows[selected_row] |= focus;
         }
 
         // The footer only advertises affordances that actually do something:
-        // tab/arrow and space are dead keys on a request with no grants to
-        // move between or toggle, and advertising them anyway just invites
-        // a press that does nothing. Two-space separators, matching the
-        // pickers' own hint lines (session_picker.cpp etc.), not the three
-        // this line used to use -- also just enough narrower to keep the
-        // full list on one row once interior padding (below) is in play.
-        std::string footer_text = "enter: allow  ·  esc: deny";
-        if (!request.grants.empty()) footer_text += "  ·  tab/arrow: move  ·  space: toggle grants";
+        // tab and space are dead keys on a request with no grants to move
+        // between or toggle, and advertising them anyway just invites a press
+        // that does nothing. Two-space separators, matching the pickers' own
+        // hint lines (session_picker.cpp etc.).
+        std::string footer_text;
+        if (state->composing) {
+            footer_text = "enter: deny with this message  ·  esc: back to the list";
+        } else {
+            // Kept under the modal's 78 usable columns: a wrap could split an
+            // affordance ("tab/space" from "grants") across two lines.
+            footer_text = "↑/↓ 1-4: choose  ·  enter: confirm  ·  esc: deny";
+            if (!request.grants.empty()) footer_text += "  ·  tab/space: grants";
+        }
 
         // Content scrolls; the keyboard hints stay pinned below it -- visible
         // no matter how much content there is (the clipped-footer bug).
@@ -172,23 +255,80 @@ ftxui::Component MakePermissionModal(const PendingPermission& request, GrantTogg
     // keys ride along from state it owns, so the modal never mints a key.
     // `on_answer` is captured BY VALUE: the CatchEvent outlives the factory
     // and a by-reference capture of the parameter was a dangling call.
-    return CatchEvent(body, [on_answer, interacted](const Event& event) {
+    return CatchEvent(body, [on_answer, state, input](const Event& event) {
         // The FIRST event this modal ever sees only arms it -- it never
-        // approves. A Return that lands in the same input batch as the
-        // request's own arrival (a fast typist's unrelated keystroke, a
-        // paste's trailing newline) must not read as the user's answer to a
-        // prompt they have not seen yet.
-        const bool was_interacted = *interacted;
-        *interacted = true;
-        if (event == Event::Return && was_interacted) {
-            on_answer(true);
+        // answers (Escape aside: denying is the safe default). A Return or a
+        // digit that lands in the same input batch as the request's own
+        // arrival (a fast typist's unrelated keystroke, a paste's trailing
+        // newline) must not read as the user's answer to a prompt they have
+        // not seen yet -- and with "deny and stop" on the list, that goes for
+        // the deny answers too, not only for allow.
+        const bool armed = state->interacted;
+        state->interacted = true;
+        if (event == Event::CtrlC) return false;   // the root's turn-cancel
+
+        if (state->composing) {
+            if (event == Event::Escape) {
+                state->composing = false;   // back to the list; the text survives
+                return true;
+            }
+            if (event == Event::Return) {
+                std::string message = TrimmedMessage(state->message);
+                if (message.empty()) {
+                    on_answer({PermissionChoice::Deny, {}});
+                } else {
+                    on_answer({PermissionChoice::DenyWithMessage, std::move(message)});
+                }
+                return true;
+            }
+            // Everything else is typing. Swallowed even when the input
+            // ignores it, so no key can reach the grant checkboxes behind it.
+            input->OnEvent(event);
             return true;
         }
+
         if (event == Event::Escape) {
-            on_answer(false);
+            on_answer({PermissionChoice::Deny, {}});
             return true;
         }
-        return false;
+        if (event == Event::ArrowUp || event == Event::ArrowDown) {
+            const int step = event == Event::ArrowUp ? -1 : 1;
+            state->selected = std::clamp(state->selected + step, 0, kPermissionChoiceCount - 1);
+            state->grants_focused = false;
+            return true;
+        }
+        if (event == Event::Tab || event == Event::TabReverse || event == Event::Character(" ")) {
+            state->grants_focused = true;
+            return false;   // the grant container moves/toggles
+        }
+
+        int pick = -1;
+        if (event == Event::Return) {
+            pick = state->selected;
+        } else if (event.is_character() && event.character().size() == 1) {
+            const char c = event.character()[0];
+            if (c >= '1' && c < '1' + kPermissionChoiceCount) pick = c - '1';
+        }
+        if (pick < 0) return false;
+        state->selected = pick;
+        state->grants_focused = false;
+        if (!armed) return true;   // arms (and shows the pick), never answers
+
+        switch (kPermissionChoices[pick].choice) {
+            case PermissionChoice::Allow:
+                on_answer({PermissionChoice::Allow, {}});
+                break;
+            case PermissionChoice::Deny:
+                on_answer({PermissionChoice::Deny, {}});
+                break;
+            case PermissionChoice::DenyWithMessage:
+                state->composing = true;   // answered on the input's Enter
+                break;
+            case PermissionChoice::DenyAndStop:
+                on_answer({PermissionChoice::DenyAndStop, {}});
+                break;
+        }
+        return true;
     });
 }
 
@@ -277,9 +417,10 @@ namespace {
 // call that built the checkboxes pointing into it.
 struct AskModalState {
     struct QuestionState {
-        // Entry strings for the checkbox/radio labels: "label" or
-        // "label -- description". Stored here (not built per frame) because
-        // ftxui's ConstStringRef/ConstStringListRef borrow the storage.
+        // Entry strings: option labels only (descriptions render separately,
+        // wrapped, via each control's transform -- see WrappedOptionEntry).
+        // Stored here (not built per frame) because ftxui's
+        // ConstStringRef/ConstStringListRef borrow the storage.
         std::vector<std::string> entries;
         // multiple: one stable bool per option (deque, not vector<bool>:
         // the checkboxes need stable bool* -- same rule as GrantToggles).
@@ -329,6 +470,23 @@ v1::AskUserResponse DismissedAnswer(const PendingAsk& request) {
     response.set_request_id(request.request_id);
     response.set_answered(false);
     return response;
+}
+
+// One option row: marker, then the label wrapped, then its description
+// wrapped and dimmed beneath it -- both hanging under the label column
+// instead of running off the modal's fixed width like a bare text() would.
+// Mirrors RadioboxOption::Simple()/CheckboxOption::Simple() styling (bold
+// when active, inverted when focused) so the only visible change is wrapping.
+ftxui::Element WrappedOptionEntry(const ftxui::EntryState& s, const char* marker_on,
+                                  const char* marker_off, const std::string& description) {
+    using namespace ftxui;
+    Element marker = text(s.state ? marker_on : marker_off);
+    Element label = paragraph(s.label);
+    if (s.active) label |= bold;
+    if (s.focused) label |= inverted;
+    Elements column = {label};
+    if (!description.empty()) column.push_back(paragraph(description) | dim);
+    return hbox({marker, vbox(std::move(column)) | flex});
 }
 
 // One review-screen line for ONE question, mirroring CollectAnswer's slot
@@ -384,9 +542,7 @@ ftxui::Component MakeAskModal(const PendingAsk& request, const Theme& theme,
 
         if (question.multiple()) {
             for (const auto& option : question.options()) {
-                std::string entry = option.label();
-                if (!option.description().empty()) entry += "  --  " + option.description();
-                qs.entries.push_back(entry);
+                qs.entries.push_back(option.label());
                 qs.boxes.push_back(false);
             }
             Components boxes;
@@ -394,6 +550,13 @@ ftxui::Component MakeAskModal(const PendingAsk& request, const Theme& theme,
                 CheckboxOption option_state;
                 option_state.label = ConstStringRef(qs.entries[j]);
                 option_state.checked = Ref<bool>(&qs.boxes[j]);
+                // Checkbox's own EntryState.index is always -1 (it renders
+                // itself, not a list), so the description is baked into the
+                // closure by j rather than looked up through the entry state.
+                const std::string description = question.options(static_cast<int>(j)).description();
+                option_state.transform = [description](const EntryState& s) {
+                    return WrappedOptionEntry(s, "▣ ", "☐ ", description);
+                };
                 boxes.push_back(Checkbox(std::move(option_state)));
             }
             block.push_back(Container::Vertical(std::move(boxes)));
@@ -402,9 +565,7 @@ ftxui::Component MakeAskModal(const PendingAsk& request, const Theme& theme,
             // manual "uncheck the others" bookkeeping.
             std::vector<std::string> entries;
             for (const auto& option : question.options()) {
-                std::string entry = option.label();
-                if (!option.description().empty()) entry += "  --  " + option.description();
-                entries.push_back(entry);
+                entries.push_back(option.label());
             }
             qs.entries = std::move(entries);
             RadioboxOption radio_state;
@@ -414,6 +575,13 @@ ftxui::Component MakeAskModal(const PendingAsk& request, const Theme& theme,
             const int index = i;
             radio_state.on_change = [state_ref, index] {
                 state_ref->questions[index].radio_touched = true;
+            };
+            // Radiobox's EntryState.index tracks the list position, so the
+            // description can be looked up straight from the question.
+            radio_state.transform = [request_state, index](const EntryState& s) {
+                const std::string description =
+                    request_state->request.questions(index).options(s.index).description();
+                return WrappedOptionEntry(s, "◉ ", "○ ", description);
             };
             block.push_back(Radiobox(std::move(radio_state)));
         }
@@ -475,7 +643,7 @@ ftxui::Component MakeAskModal(const PendingAsk& request, const Theme& theme,
                         ? "Question " + std::to_string(i + 1)
                         : question.header();
                 rows.push_back(text(name) | bold);
-                rows.push_back(text(ReviewLine(question, state->questions[i])));
+                rows.push_back(paragraph(ReviewLine(question, state->questions[i])));
                 if (first_line < 0) first_line = static_cast<int>(rows.size()) - 1;
             }
             if (!(*interacted) && first_line >= 0) {

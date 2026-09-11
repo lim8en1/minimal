@@ -16,7 +16,9 @@
 // defense in depth, not the boundary.
 
 #include <deque>
+#include <functional>
 #include <memory>
+#include <string>
 
 #include <ftxui/component/component.hpp>
 
@@ -34,9 +36,24 @@ struct GrantToggles {
     std::vector<std::string> GrantedKeys(const PendingPermission& request) const;
 };
 
+// The four answers, in the order the modal lists them (and numbers them 1-4).
+enum class PermissionChoice { Allow, Deny, DenyWithMessage, DenyAndStop };
+
+struct PermissionVerdict {
+    PermissionChoice choice = PermissionChoice::Deny;
+    std::string message;   // DenyWithMessage only; never empty there (see below)
+};
+
+// ↑/↓ (or 1-4) picks an answer, Enter confirms it, Escape is a plain deny.
+// Tab/space move between and toggle the grant checkboxes, which only an Allow
+// sends. "deny with message" opens an inline input: Enter sends it (an empty
+// message degrades to a plain Deny), Escape backs out to the list. The FIRST
+// event only arms the modal -- nothing but Escape answers until the user has
+// touched a key, so a stray Return or digit cannot answer an unread prompt.
+// Ctrl+C always falls through to the root dispatch's turn-cancel branch.
 ftxui::Component MakePermissionModal(const PendingPermission& request, GrantToggles& toggles,
                                      const Theme& theme,
-                                     std::function<void(bool allow)> on_answer);
+                                     std::function<void(PermissionVerdict verdict)> on_answer);
 
 ftxui::Component MakeConfirmationModal(const PendingConfirmation& request, const Theme& theme,
                                        std::function<void(std::string chosen)> on_answer);

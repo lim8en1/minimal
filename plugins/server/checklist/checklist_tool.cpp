@@ -106,7 +106,7 @@ private:
     }
 
     tools::ToolResult Reply(const std::vector<Item>& items) const {
-        return tools::ToolResult{false, RenderMarkdown(items)};
+        return tools::ToolResult{false, RenderMarkdown(items), nlohmann::json{{"kind", "markdown"}}};
     }
 
     tools::ToolResult OpSet(const nlohmann::json& body, const tools::ToolContext& ctx) {

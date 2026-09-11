@@ -536,8 +536,10 @@ std::string CanonicalLanguage(std::string_view language,
     };
     static constexpr Alias kAliases[] = {
         {"c++", "cpp"}, {"cc", "cpp"}, {"cxx", "cpp"}, {"h", "cpp"},   {"hpp", "cpp"},
+        {"c", "cpp"},   {"hh", "cpp"}, {"hxx", "cpp"},
         {"py", "python"}, {"python3", "python"},
         {"js", "javascript"}, {"jsx", "javascript"}, {"node", "javascript"},
+        {"mjs", "javascript"}, {"cjs", "javascript"},
         {"ts", "typescript"}, {"tsx", "typescript"},
         {"sh", "bash"}, {"shell", "bash"}, {"zsh", "bash"},
         {"jsonc", "json"}, {"json5", "json"},

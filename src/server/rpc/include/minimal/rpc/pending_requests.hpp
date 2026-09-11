@@ -48,6 +48,8 @@ struct PermissionAnswer {
     // thread that decodes the client's wire message has no disclosure to
     // filter against, so it hands these across verbatim.
     std::vector<std::string> granted_keys;
+    std::string deny_message{};   // deny-only, see tools::PermissionResponse
+    bool stop_turn = false;     // deny-only, see tools::PermissionResponse
 };
 struct ConfirmationAnswer {
     std::string chosen_option;

@@ -121,7 +121,8 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
         }
 
         plugins::ClientPluginLoader loader(out.view_registry, out.renderer_registry,
-                                           out.message_registry, out.status_registry,
+                                           out.display_registry, out.message_registry,
+                                           out.status_registry,
                                            out.grammar_registry, out.surface_registry,
                                            out.engine_registry, out.start_view_registry,
                                            out.attention_sink.get(), out.host_client_api.get(),
@@ -166,6 +167,7 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
         feed(minimal::plugins::NameKind::ViewId, out.view_registry.attributions());
         feed(minimal::plugins::NameKind::ViewId, out.start_view_registry.attributions());
         feed(minimal::plugins::NameKind::ToolResultRenderer, out.renderer_registry.attributions());
+        feed(minimal::plugins::NameKind::DisplayRenderer, out.display_registry.attributions());
         for (const auto& [kind, attribution] : out.message_registry.claims()) {
             names.Register(minimal::plugins::NameKind::MessageRenderer,
                            attribution.plugin_name, attribution.original_name);
@@ -186,6 +188,7 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
             {minimal::plugins::NameKind::ViewId, &out.view_registry.attributions()},
             {minimal::plugins::NameKind::ViewId, &out.start_view_registry.attributions()},
             {minimal::plugins::NameKind::ToolResultRenderer, &out.renderer_registry.attributions()},
+            {minimal::plugins::NameKind::DisplayRenderer, &out.display_registry.attributions()},
             {minimal::plugins::NameKind::StatusSegment, &out.status_registry.attributions()},
             {minimal::plugins::NameKind::SyntaxGrammar, &out.grammar_registry.attributions()},
         };
@@ -216,6 +219,7 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
     collect_loaded(out.view_registry.attributions());
     collect_loaded(out.start_view_registry.attributions());
     collect_loaded(out.renderer_registry.attributions());
+    collect_loaded(out.display_registry.attributions());
     collect_loaded(out.status_registry.attributions());
     collect_loaded(out.grammar_registry.attributions());
 
@@ -335,6 +339,7 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
     out.engine = out.engine_registry.engine.get();
     plugins::RegisterCoreMessageRenderers(out.message_registry);
     plugins::RegisterCoreAgentMarkdownRenderer(out.message_registry, *out.engine);
+    plugins::RegisterCoreDisplayRenderers(out.display_registry, *out.engine, *out.highlighter);
 
     // The exclusive chat surface, when a plugin claimed it.
     out.chat_surface = out.surface_registry.surface.get();
@@ -351,6 +356,7 @@ bool BuildTuiEnvironment(SessionClient& client, TuiEnvironment& out) {
     out.view_registry.Seal();
     out.start_view_registry.Seal();
     out.renderer_registry.Seal();
+    out.display_registry.Seal();
     out.message_registry.Seal();
     out.status_registry.Seal();
     out.grammar_registry.Seal();

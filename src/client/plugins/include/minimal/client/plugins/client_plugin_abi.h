@@ -107,6 +107,13 @@ void minimal_client_plugin_register_renderers(
     minimal::client::plugins::ToolResultRendererRegistry&,
     const minimal::client::plugins::ClientPluginRegistrationContext&);
 
+// OPTIONAL, additive: renderers for one KIND of tool-result display payload
+// ("diff", "file", ...), for every tool that emits it. Core fills the core
+// kinds no plugin claims; two plugins claiming one kind is fatal at startup.
+void minimal_client_plugin_register_display_renderers(
+    minimal::client::plugins::DisplayRendererRegistry&,
+    const minimal::client::plugins::ClientPluginRegistrationContext&);
+
 // OPTIONAL, additive: message-kind presentation, keyed by ChatRowKind. Core
 // supplies the defaults for every kind a plugin does not claim.
 void minimal_client_plugin_register_message_renderers(

@@ -318,6 +318,10 @@ v1::ContentBlock ToProto(const llm::ContentBlock& block) {
                         },
                         inner);
                 }
+                if (!value.display.is_null()) {
+                    result->set_display_json(value.display.dump(
+                        -1, ' ', false, nlohmann::json::error_handler_t::replace));
+                }
             } else {
                 // THE TOTALITY GUARANTEE THE HEADER CLAIMS, made real. The enum
                 // switches get it from -Wswitch; this chain had no terminal
@@ -362,6 +366,17 @@ std::optional<llm::ContentBlock> FromProto(const v1::ContentBlock& block) {
                     common::DefaultLogger().warn(
                         "proto_convert: dropped non-text block (case {}) inside tool_result {}",
                         static_cast<int>(inner.block_case()), result.tool_use_id);
+                }
+            }
+            if (block.tool_result().has_display_json()) {
+                auto display = nlohmann::json::parse(block.tool_result().display_json(),
+                                                     nullptr, /*allow_exceptions=*/false);
+                if (display.is_object()) {
+                    result.display = std::move(display);
+                } else {
+                    common::DefaultLogger().warn(
+                        "proto_convert: dropped malformed display_json on tool_result {}",
+                        result.tool_use_id);
                 }
             }
             return llm::ContentBlock{std::move(result)};
@@ -616,6 +631,8 @@ tools::PermissionResponse FromProto(const v1::PermissionResponse& response,
                                     const tools::PermissionDisclosure& offered) {
     tools::PermissionResponse out;
     out.decision = FromProto(response.decision());
+    out.deny_message = response.deny_message();
+    out.stop_turn = response.stop_turn();
     // A grant key is only meaningful as the answer to something we asked. Taking
     // arbitrary keys off the wire would let a client mint permissions for
     // binaries no prompt ever showed a human -- the exact failure the disclosure

@@ -61,6 +61,7 @@ struct LoadedFixtures {
     ViewRegistry views;
     StartViewRegistry start_views;
     ToolResultRendererRegistry renderers;
+    DisplayRendererRegistry display_renderers;
     MessageRendererRegistry message_renderers;
     StatusSegmentRegistry status_segments;
     SyntaxGrammarRegistry grammars;
@@ -87,8 +88,9 @@ struct LoadedFixtures {
         f->attention_sink = MakeHostAttentionSink(&f->attention);
         f->client_api = MakeHostClientApi(nullptr);
         f->focus_provider = MakeHostFocusProvider();
-        ClientPluginLoader loader(f->views, f->renderers, f->message_renderers,
-                                  f->status_segments, f->grammars, f->chat_surface,
+        ClientPluginLoader loader(f->views, f->renderers, f->display_renderers,
+                                  f->message_renderers, f->status_segments, f->grammars,
+                                  f->chat_surface,
                                   f->markdown_engine, f->start_views, f->attention_sink.get(),
                                   f->client_api.get(), f->focus_provider.get());
         f->records = loader.LoadAll(candidates);
@@ -245,6 +247,8 @@ TEST_CASE("the client loader loads a real plugin through a real dlopen",
     CHECK(fixtures->status_segments.Find("fixture_seg") != nullptr);
 
     REQUIRE(fixtures->renderers.Find("fixture_tool") != nullptr);
+    REQUIRE(fixtures->display_renderers.Find("fixture_kind") != nullptr);
+    CHECK(record.registered_display_kinds == std::vector<std::string>{"fixture_kind"});
 
     bool has_minilang = false;
     for (const auto& grammar : fixtures->grammars.grammars()) {

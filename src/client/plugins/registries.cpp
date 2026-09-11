@@ -173,6 +173,40 @@ void ToolResultRendererRegistry::RemoveByAttribution(const std::string& plugin_n
     renderers_.resize(write);
 }
 
+void DisplayRendererRegistry::Register(std::unique_ptr<DisplayRenderer> renderer) {
+    if (sealed_) {
+        common::DefaultLogger().warn(
+            "client plugin '{}': registration ignored -- the registries were sealed after "
+            "startup (registration-time-only contract)",
+            attribution_.empty() ? "<core>" : attribution_);
+        return;
+    }
+    if (renderer == nullptr) return;
+    attributions_.push_back({attribution_, std::string(renderer->kind())});
+    renderers_.push_back(std::move(renderer));
+}
+
+const DisplayRenderer* DisplayRendererRegistry::Find(std::string_view kind) const {
+    for (const auto& renderer : renderers_) {
+        if (renderer->kind() == kind) return renderer.get();
+    }
+    return nullptr;
+}
+
+void DisplayRendererRegistry::RemoveByAttribution(const std::string& plugin_name) {
+    std::size_t write = 0;
+    for (std::size_t read = 0; read < attributions_.size(); ++read) {
+        if (attributions_[read].plugin_name == plugin_name) continue;
+        if (write != read) {
+            attributions_[write] = std::move(attributions_[read]);
+            renderers_[write] = std::move(renderers_[read]);
+        }
+        ++write;
+    }
+    attributions_.resize(write);
+    renderers_.resize(write);
+}
+
 void MessageRendererRegistry::Register(ChatRowKind kind, std::unique_ptr<MessageRenderer> renderer) {
     if (sealed_) {
         common::DefaultLogger().warn(

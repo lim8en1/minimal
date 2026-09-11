@@ -21,6 +21,9 @@
     "syntax_function": "#4a9e8a",
     "syntax_type": "#96883a",
     "syntax_operator": "#829072",
-    "syntax_plain": "#829072"
+    "syntax_plain": "#829072",
+    "diff_added": "#4f9e6e",
+    "diff_removed": "#c46a5a",
+    "diff_hunk": "#6d7a5e"
   }
 }

@@ -128,7 +128,35 @@ TEST_CASE("every ContentBlock alternative round-trips", "[proto_convert]") {
         CHECK(converted.is_error);
         REQUIRE(converted.content.size() == 1);
         CHECK(std::get<llm::TextBlock>(converted.content[0]).text == "permission denied");
+        CHECK(converted.display.is_null());
     }
+
+    SECTION("tool_result carrying a display payload") {
+        llm::ToolResultBlock result;
+        result.tool_use_id = "call_1";
+        result.content.push_back(llm::TextBlock{"ok"});
+        result.display = {{"kind", "process"}, {"command", "ls"}, {"exit_code", 0},
+                          {"duration_ms", 12}};
+        const auto out = RoundTrip(llm::ContentBlock{result});
+        const auto& converted = std::get<llm::ToolResultBlock>(out);
+        CHECK(converted.display == result.display);
+        CHECK(converted.display.at("exit_code").is_number_integer());   // not a double
+    }
+}
+
+TEST_CASE("a malformed display_json is dropped, the result text survives", "[proto_convert]") {
+    v1::ContentBlock block;
+    auto* result = block.mutable_tool_result();
+    result->set_tool_use_id("call_1");
+    result->add_content()->mutable_text()->set_text("kept");
+    result->set_display_json("{not json");
+
+    const auto out = FromProto(block);
+    REQUIRE(out.has_value());
+    const auto& converted = std::get<llm::ToolResultBlock>(*out);
+    CHECK(converted.display.is_null());
+    REQUIRE(converted.content.size() == 1);
+    CHECK(std::get<llm::TextBlock>(converted.content[0]).text == "kept");
 }
 
 TEST_CASE("a block with an unset oneof converts to nullopt, not a default block",
@@ -497,4 +525,16 @@ TEST_CASE("denying with grant keys attached still denies", "[proto_convert]") {
     response.add_granted_keys("bash:/usr/bin/make");
 
     CHECK(FromProto(response, offered).decision == tools::PermissionDecision::Deny);
+}
+
+TEST_CASE("a deny's message and stop ride through the wire conversion", "[proto_convert]") {
+    v1::PermissionResponse response;
+    response.set_decision(v1::PERMISSION_DECISION_DENY);
+    response.set_deny_message("use make -j4");
+    response.set_stop_turn(true);
+
+    const tools::PermissionResponse out = FromProto(response, tools::PermissionDisclosure{});
+    CHECK(out.decision == tools::PermissionDecision::Deny);
+    CHECK(out.deny_message == "use make -j4");
+    CHECK(out.stop_turn);
 }

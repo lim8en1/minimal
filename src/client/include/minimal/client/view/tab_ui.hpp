@@ -143,6 +143,7 @@ public:
         const Theme& theme;
         plugins::MessageRendererRegistry& message_registry;
         plugins::ToolResultRendererRegistry& renderer_registry;
+        plugins::DisplayRendererRegistry& display_registry;
         std::shared_ptr<ftxui::Component>& permission_child;
         bool& show_permission;
         std::shared_ptr<ftxui::Component>& confirmation_child;

@@ -100,6 +100,40 @@ bool Offers(const tools::PermissionDisclosure& disclosure, const std::string& su
 
 }  // namespace
 
+// --- display payload -------------------------------------------------------------
+
+TEST_CASE("bash results carry a process display payload with the run's facts",
+          "[tools_bash][display]") {
+    Fixture f;
+    SECTION("success") {
+        const auto out = f.Run({{"command", "echo hi"}});
+        const auto& display = out.result.display;
+        REQUIRE(display.at("kind") == "process");
+        CHECK(display.at("command") == "echo hi");
+        CHECK(display.at("exit_code") == 0);
+        CHECK(display.at("output") == "hi\n");
+        CHECK(display.at("output_truncated") == false);
+        CHECK(display.at("cancelled") == false);
+        CHECK(display.at("timed_out") == false);
+        CHECK(display.at("duration_ms").is_number_integer());
+        CHECK_FALSE(display.at("cwd").get<std::string>().empty());
+    }
+    SECTION("a non-zero exit is a field; the footer stays in the model's text only") {
+        const auto out = f.Run({{"command", "echo oops; exit 3"}});
+        CHECK(out.result.is_error);
+        CHECK(out.result.content_text.find("exit status: 3") != std::string::npos);
+        CHECK(out.result.display.at("exit_code") == 3);
+        CHECK(out.result.display.at("output") == "oops\n");
+    }
+    SECTION("a long output keeps only its tail") {
+        // No SIGPIPE'd producer (`yes | head` kills yes): exactly 20000 bytes.
+        const auto out = f.Run({{"command", "head -c 20000 /dev/zero | tr '\\0' x"}});
+        CHECK(out.result.content_text.size() == 20000);   // the model still gets it all
+        CHECK(out.result.display.at("output_truncated") == true);
+        CHECK(out.result.display.at("output").get<std::string>().size() == 16 * 1024);
+    }
+}
+
 // --- scanner (pure, no I/O) ------------------------------------------------------
 //
 // The scanner exists only to name what a prompt should disclose. It never

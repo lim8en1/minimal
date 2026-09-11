@@ -27,10 +27,12 @@ add_library(minimal_client_core SHARED
     plugins/plugin_discovery.cpp
     plugins/plugin_loader.cpp
     plugins/core_registrations.cpp
+    plugins/core_display_renderers.cpp
     plugins/host_seams.cpp
     view/tab_bar.cpp
     view/chat_view.cpp
     view/prompt_editor.cpp
+    view/prompt_wrap.cpp
     view/status_bar.cpp
     view/tools_panel.cpp
     view/filterable_menu.cpp

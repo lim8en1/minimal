@@ -22,6 +22,8 @@ using RegisterStartViewsFn =
     void (*)(StartViewRegistry&, const ClientPluginRegistrationContext&);
 using RegisterRenderersFn =
     void (*)(ToolResultRendererRegistry&, const ClientPluginRegistrationContext&);
+using RegisterDisplayRenderersFn =
+    void (*)(DisplayRendererRegistry&, const ClientPluginRegistrationContext&);
 using RegisterMessageRenderersFn =
     void (*)(MessageRendererRegistry&, const ClientPluginRegistrationContext&);
 using RegisterStatusSegmentsFn =
@@ -99,6 +101,7 @@ std::string_view ToString(LoadStatus status) {
 
 ClientPluginLoader::ClientPluginLoader(ViewRegistry& views,
                                        ToolResultRendererRegistry& renderers,
+                                       DisplayRendererRegistry& display_renderers,
                                        MessageRendererRegistry& message_renderers,
                                        StatusSegmentRegistry& status_segments,
                                        SyntaxGrammarRegistry& grammars,
@@ -108,6 +111,7 @@ ClientPluginLoader::ClientPluginLoader(ViewRegistry& views,
                                        ClientApi* client_api, FocusProvider* focus)
     : views_(views),
       renderers_(renderers),
+      display_renderers_(display_renderers),
       message_renderers_(message_renderers),
       status_segments_(status_segments),
       grammars_(grammars),
@@ -186,6 +190,7 @@ PluginRecord ClientPluginLoader::LoadOne(const PluginCandidate& candidate) {
         views_.RemoveByAttribution(record.name);
         start_views_.RemoveByAttribution(record.name);
         renderers_.RemoveByAttribution(record.name);
+        display_renderers_.RemoveByAttribution(record.name);
         message_renderers_.RemoveByAttribution(record.name);
         status_segments_.RemoveByAttribution(record.name);
         grammars_.RemoveByAttribution(record.name);
@@ -236,6 +241,21 @@ PluginRecord ClientPluginLoader::LoadOne(const PluginCandidate& candidate) {
         }
         for (std::size_t i = before; i < renderers_.attributions().size(); ++i) {
             record.registered_renderers.push_back(renderers_.attributions()[i].original_name);
+        }
+    }
+
+    if (auto register_display_renderers = Lookup<RegisterDisplayRenderersFn>(
+            handle, "minimal_client_plugin_register_display_renderers")) {
+        const std::size_t before = display_renderers_.attributions().size();
+        if (!GuardedRegistration(record, "minimal_client_plugin_register_display_renderers",
+                [&] { display_renderers_.SetAttribution(record.name); },
+                [&] { register_display_renderers(display_renderers_, context); },
+                [&] { display_renderers_.ClearAttribution(); }, rollback)) {
+            return record;
+        }
+        for (std::size_t i = before; i < display_renderers_.attributions().size(); ++i) {
+            record.registered_display_kinds.push_back(
+                display_renderers_.attributions()[i].original_name);
         }
     }
 

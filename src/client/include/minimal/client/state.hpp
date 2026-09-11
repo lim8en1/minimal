@@ -917,8 +917,10 @@ public:
 
     // --- User answers to pending prompts (UI calls these; routes ClientEvents back) ---
 
+    // deny_message / stop_turn refine a DENY (the server ignores both on ALLOW).
     void AnswerPermission(const std::string& session_id, const std::string& request_id,
-                         v1::PermissionDecision decision, std::vector<std::string> granted_keys);
+                         v1::PermissionDecision decision, std::vector<std::string> granted_keys,
+                         std::string deny_message = {}, bool stop_turn = false);
 
     void AnswerConfirmation(const std::string& session_id, const std::string& request_id,
                             const std::string& chosen_option);

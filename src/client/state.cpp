@@ -2200,7 +2200,8 @@ void AppState::RequestSuggestPaths(const std::string& session_id, const std::str
 
 void AppState::AnswerPermission(const std::string& session_id, const std::string& request_id,
                                 v1::PermissionDecision decision,
-                                std::vector<std::string> granted_keys) {
+                                std::vector<std::string> granted_keys, std::string deny_message,
+                                bool stop_turn) {
     BumpUiVersion();
     // Mirror the wire guarantee (see ARCHITECTURE.md consent scoping): only keys actually
     // offered by the PermissionRequest may be answered. The server filters extras too, but
@@ -2220,6 +2221,8 @@ void AppState::AnswerPermission(const std::string& session_id, const std::string
     pr->set_request_id(request_id);
     pr->set_decision(decision);
     for (auto& k : granted_keys) pr->add_granted_keys(k);
+    pr->set_deny_message(std::move(deny_message));
+    pr->set_stop_turn(stop_turn);
     // A refused send must NOT close the prompt: the server worker is parked
     // on this request, and clearing the pending entry locally would strand it
     // there forever with the answer undelivered (the "blocked UI" failure).

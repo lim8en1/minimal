@@ -29,6 +29,11 @@ struct PreparedInvocation {
     nlohmann::json input;
     std::shared_ptr<Tool> tool;  // null iff denial is set
     std::optional<llm::ToolResultBlock> denial;
+    // The operator denied this call AND asked to end the turn ("deny and
+    // stop"). Only ever set alongside `denial`; the agent loop honors it after
+    // the round's gating -- no further call of the round runs, and no provider
+    // call follows.
+    bool stop_turn = false;
 
     // The confinement verdict Prepare's out-of-workdir fold used, carried so
     // Execute can re-check it (TOCTOU: the two phases are separated by the rest

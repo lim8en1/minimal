@@ -5,10 +5,21 @@
 // NEWLINE: plain Enter SUBMITS; Alt+Enter inserts a newline. Alt+Enter (not
 // Shift+Enter) is the default because terminals disagree on what they can
 // encode -- Shift+Enter is indistinguishable from Enter without the kitty
-// keyboard protocol / CSI-u (ARCHITECTURE.md "Customization surface"). The alt
-// sequence is matched as ESC-prefixed CR, its most common encoding; a terminal
-// that cannot send it is limited to one-line prompts, and keybindings.json is
-// where a user would remap.
+// keyboard protocol / CSI-u (ARCHITECTURE.md "Customization surface"). The
+// alt sequence is matched in every encoding a terminal actually emits: ESC CR
+// / ESC LF, the kitty protocol's CSI 13;{mod}u, and xterm modifyOtherKeys'
+// CSI 27;{mod};13~ (see IsNewlineEvent). A terminal that reports Option+Enter
+// as a PLAIN \r -- the macOS default in Terminal.app, Ghostty, Alacritty and
+// WezTerm until option-as-alt / the kitty protocol is enabled -- cannot be
+// distinguished from submit by any in-app match; enable the terminal setting
+// or remap in keybindings.json.
+//
+// SOFT WRAP: the prompt body is rendered from WrapPromptContent's visual
+// lines (word-aware, to the terminal width, at most half the screen tall,
+// scrolled to keep the caret visible) instead of FTXUI Input's one-row-per-
+// logical-line render, so a long prompt can be reviewed before sending. Only
+// the rendering moved: the Input component still owns every key event, and
+// click-to-position is re-implemented from the render geometry.
 //
 // @-MENTIONS: typing '@' arms the inline suggestion list (a bare '@' is a
 // live query too, but its empty prefix always resolves to an empty answer,

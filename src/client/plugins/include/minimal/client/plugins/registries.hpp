@@ -114,22 +114,46 @@ struct RowRenderContext {
     std::string_view collapse_marker = "";
 };
 
+// Everything a tool-result renderer draws FROM. One struct rather than a
+// parameter list, so a new field is not a signature sweep across plugins.
+struct ToolResultView {
+    std::string_view tool_name;
+    // The JSON the model sent with the call; empty object when unavailable.
+    const nlohmann::json& tool_input;
+    // The tool's display payload ({"kind": ..., ...}); null when it sent none.
+    const nlohmann::json& display;
+    // What the model saw -- the universal fallback.
+    std::string_view result_text;
+    bool is_error = false;
+};
+
 // --- Tool-result renderers (keyed by tool name) -----------------------------
 
-// A renderer for one tool's RESULT row -- "a diff view for `edit`", per
-// ARCHITECTURE.md. Rendering a CORE tool is as legitimate as a plugin tool:
-// keyed by name, source-agnostic. A renderer for a tool whose plugin is
-// disabled (or for a name nothing registers) simply never matches -- the
-// fallback is the default collapsible row, not an error.
+// A renderer for one tool's RESULT row, for a tool and renderer shipped as a
+// pair. Rendering a CORE tool is as legitimate as a plugin tool: keyed by
+// name, source-agnostic. Takes precedence over a display-kind renderer. A
+// renderer for a tool whose plugin is disabled (or for a name nothing
+// registers) simply never matches -- the fallback is not an error.
 class ToolResultRenderer {
 public:
     virtual ~ToolResultRenderer() = default;
     virtual std::string_view tool_name() const = 0;
-    // Takes the tool INPUT as well as its result -- a diff renderer needs the
-    // file path, not just the hunk text (ARCHITECTURE.md). `tool_input` is the
-    // JSON the model sent with the call; empty object when unavailable.
-    virtual ftxui::Element Render(const nlohmann::json& tool_input, std::string_view result_text,
-                                  bool is_error, const Theme& theme,
+    virtual ftxui::Element Render(const ToolResultView& result, const Theme& theme,
+                                  const RowRenderContext& ctx) const = 0;
+};
+
+// --- Display-kind renderers (keyed by display payload kind) -----------------
+
+// Draws one KIND of tool-result display payload (docs/EXTENSIBILITY.md,
+// "Tool-result display payloads"). The tool decides WHAT its result is; this
+// decides how that kind looks, for every tool that emits it -- keyed by kind,
+// not tool name, because aliases rename tools and kinds are shared. Throw on a
+// payload you cannot draw: the host contains it and falls back to the text row.
+class DisplayRenderer {
+public:
+    virtual ~DisplayRenderer() = default;
+    virtual std::string_view kind() const = 0;
+    virtual ftxui::Element Render(const ToolResultView& result, const Theme& theme,
                                   const RowRenderContext& ctx) const = 0;
 };
 
@@ -500,6 +524,22 @@ public:
 
 private:
     std::vector<std::unique_ptr<ToolResultRenderer>> renderers_;
+    std::string attribution_;
+    std::vector<Attribution> attributions_;
+};
+
+class DisplayRendererRegistry : public RegistrationWindow {
+public:
+    void Register(std::unique_ptr<DisplayRenderer> renderer);
+    const DisplayRenderer* Find(std::string_view kind) const;
+    const std::vector<Attribution>& attributions() const { return attributions_; }
+
+    void SetAttribution(std::string plugin_name) { attribution_ = std::move(plugin_name); }
+    void ClearAttribution() { attribution_.clear(); }
+    void RemoveByAttribution(const std::string& plugin_name);
+
+private:
+    std::vector<std::unique_ptr<DisplayRenderer>> renderers_;
     std::string attribution_;
     std::vector<Attribution> attributions_;
 };

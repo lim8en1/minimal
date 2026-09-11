@@ -107,6 +107,7 @@ subkeys are legal and plugin-owned. Core recognizes:
 | `max_parallel_tool_calls` | int | `4` | must be ≥ 1; `1` = inline execution, no pool threads |
 | `max_input_bytes` | int | `10485760` | ≥ 0; `0` disables the limit |
 | `max_result_bytes` | int | `10485760` | ≥ 0; `0` disables the limit |
+| `max_display_bytes` | int | `131072` | ≥ 0; a tool result's client-only display payload over this is dropped (the client shows the text); `0` disables the limit |
 
 **No bundled tool plugin reads a `tools.read` / `tools.edit` / `tools.bash`
 slice from settings.json.** The `tools-fs` and `tools-bash` plugins take their
@@ -415,6 +416,18 @@ the binding and no longer typeable; on non-US layouts whose plain keys send
 those characters (ß on German), rebind rather than fight it.
 The `/keymap` command opens the same overlay as the `help.overlay` binding:
 a filterable listing of every configured action → key pair.
+
+Prompt newline: Enter submits; Alt+Enter inserts a newline (the prompt
+soft-wraps to the terminal width, at most half the screen). Besides ESC CR /
+ESC LF, the editor recognizes the CSI-u encodings terminals emit when the
+kitty keyboard protocol or xterm modifyOtherKeys is on (`13;3u`,
+`13;2u`, `27;3;13~`, `27;2;13~`) — Shift+Enter works on those terminals
+with no configuration. macOS caveat:
+Terminal.app, Ghostty, Alacritty and WezTerm send Option+Enter as a plain
+`\r` until Option is configured as Alt (Terminal.app: "Use Option as Meta
+Key"; Ghostty: `macos-option-as-alt`; Alacritty: `option_as_alt`; WezTerm:
+`LeftOption` as `LeftAlt`) — with no byte distinguishing it from Enter, no
+in-app binding can catch it.
 
 ### ui.json
 

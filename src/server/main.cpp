@@ -546,6 +546,7 @@ int main(int argc, char** argv) {
     loop_config.max_parallel_tool_calls = settings.tools.max_parallel_tool_calls;
     loop_config.max_tool_input_bytes = settings.tools.max_input_bytes;
     loop_config.max_tool_result_bytes = settings.tools.max_result_bytes;
+    loop_config.max_tool_display_bytes = settings.tools.max_display_bytes;
     loop_config.estimate_zero_usage = settings.memory.estimate_zero_usage;
     loop_config.hooks = &hook_dispatcher;
 

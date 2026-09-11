@@ -56,6 +56,8 @@ tools::PermissionResponse WirePermissionChecker::check(const tools::PermissionRe
     // ever showed a human.
     tools::PermissionResponse out;
     out.decision = answer->decision;
+    out.deny_message = answer->deny_message;
+    out.stop_turn = answer->stop_turn;
     for (const auto& key : answer->granted_keys) {
         const bool was_offered =
             std::any_of(request.disclosure.grants.begin(), request.disclosure.grants.end(),
