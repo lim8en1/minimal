@@ -19,6 +19,10 @@ using ftxui::Event;
 
 constexpr auto kSuggestDebounce = std::chrono::milliseconds(120);
 
+// The prompt's own gutter: "❯ " on the first line, two spaces under it. The
+// wrap width and the click-to-position mapping both account for it.
+constexpr int kPromptGutter = 2;
+
 constexpr const char* kPromptPlaceholder =
     "type here; @ for files, / for commands, alt+enter for newline";
 
@@ -482,7 +486,7 @@ ftxui::Component MakePromptEditor(
                 if (row_index < mouse_map->wrap.lines.size()) {
                     const PromptVisualLine& row = mouse_map->wrap.lines[row_index];
                     const auto target = static_cast<std::size_t>(
-                        std::max(mouse.x - mouse_map->box.x_min, 0));
+                        std::max(mouse.x - mouse_map->box.x_min - kPromptGutter, 0));
                     // Largest byte offset whose column position fits before
                     // the click column, never splitting a code point: a wide
                     // glyph clicked on its first column selects the glyph, on
@@ -556,7 +560,7 @@ ftxui::Component MakePromptEditor(
                     // never refuse for want of one).
                     if (!UsableWithoutSession(entry) && !session_ok) continue;
                     if (entry.name.rfind(command_prefix, 0) != 0) continue;
-                    std::string display = "/" + entry.name + " -- " + entry.summary;
+                    std::string display = "/" + entry.name + "  ·  " + entry.summary;
                     if (entry.submits_prompt) display += "  (submits a prompt as your turn)";
                     if (entry.read_only) display += "  (read-only)";
                     suggestions.push_back(std::move(display));
@@ -670,7 +674,7 @@ ftxui::Component MakePromptEditor(
         const ftxui::Dimensions term = ftxui::Terminal::Size();
         const PromptWrapResult wrap = WrapPromptContent(
             state.content, static_cast<std::size_t>(std::max(state.cursor_position, 0)),
-            static_cast<std::size_t>(std::max(term.dimx, 0)));
+            static_cast<std::size_t>(std::max(term.dimx - kPromptGutter, 0)));
 
         // Visible window over the wrapped rows: at most half the screen (min
         // 4), anchored so the caret row is always inside it. Stateless on
@@ -719,9 +723,19 @@ ftxui::Component MakePromptEditor(
                                      text(row.text.substr(glyph_end))}));
             }
         }
+        // The gutter: "❯ " marks where input goes (on the first logical row
+        // only -- a scrolled window shows blanks), two spaces keep the
+        // wrapped rows aligned under it.
+        for (std::size_t k = 0; k < body.size(); ++k) {
+            const bool first_line = k == 0 && first_row == 0;
+            body[k] = hbox({text(first_line ? "❯ " : "  ") |
+                                color(theme.ColorFor("border_focused")) | bold,
+                            std::move(body[k])});
+        }
         // Publish the geometry the mouse handler maps clicks against (see
         // PromptMouseMap): the rendered vbox is exactly `last_row -
-        // first_row` tall starting at first_row, so y -> row is arithmetic.
+        // first_row` tall starting at first_row, so y -> row is arithmetic
+        // (and x is offset by the gutter).
         mouse_map->wrap = wrap;
         mouse_map->first_row = first_row;
         // Body text role, not the terminal's own foreground.

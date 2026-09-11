@@ -151,6 +151,17 @@ const std::vector<Migration>& DefaultMigrationsImpl() {
          {
              "ALTER TABLE sessions ADD COLUMN model TEXT;",
          }},
+        // Per-message attribution: the agent preset and "<provider>/<model>"
+        // that produced an assistant row. The session row's agent_preset and
+        // model are only the CURRENT sticky choice -- /agent, /model and
+        // per-turn overrides all change what a later row ran on, so without
+        // these the transcript could not say who said what. NULL = unknown:
+        // every pre-v9 row, and every user/tool-result row by design.
+        {9,
+         {
+             "ALTER TABLE messages ADD COLUMN agent_preset TEXT;",
+             "ALTER TABLE messages ADD COLUMN model TEXT;",
+         }},
     }};
     // The invariant the version arithmetic depends on, checked where the list
     // is built: kSchemaVersion is the TARGET of ApplyMigrations, so it must
@@ -302,7 +313,23 @@ struct RawRow {
     std::string json;
     int token_count;
     std::int64_t created_at;
+    MessageAttribution attribution;
 };
+
+// A nullable TEXT column as a string: NULL (unknown) reads back as "".
+std::string ColumnTextOrEmpty(sqlite3_stmt* stmt, int column) {
+    const auto* text = reinterpret_cast<const char*>(sqlite3_column_text(stmt, column));
+    return text != nullptr ? std::string(text) : std::string();
+}
+
+// Binds a string as TEXT, or NULL when empty -- the column's "unknown".
+void BindTextOrNull(sqlite3_stmt* stmt, int index, const std::string& value) {
+    if (value.empty()) {
+        sqlite3_bind_null(stmt, index);
+    } else {
+        sqlite3_bind_text(stmt, index, value.c_str(), -1, SQLITE_TRANSIENT);
+    }
+}
 
 // The collect half: steps a prepared, already-bound statement of the
 // "seq, content_json, token_count, created_at" shape to completion. Must be
@@ -317,6 +344,8 @@ std::vector<RawRow> CollectRows(sqlite3_stmt* stmt, sqlite3* db, const std::stri
         row.json = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
         row.token_count = sqlite3_column_int(stmt, 2);
         row.created_at = sqlite3_column_int64(stmt, 3);
+        row.attribution.agent_preset = ColumnTextOrEmpty(stmt, 4);
+        row.attribution.model = ColumnTextOrEmpty(stmt, 5);
         rows.push_back(std::move(row));
     }
     CheckRowLoopEnd(db, rc, context);
@@ -332,6 +361,7 @@ StoredMessage DecodeRow(RawRow&& row) {
     stored.message = JsonToMessage(nlohmann::json::parse(std::move(row.json)));
     stored.token_count = row.token_count;
     stored.created_at_unix_ms = row.created_at;
+    stored.attribution = std::move(row.attribution);
     return stored;
 }
 
@@ -526,7 +556,8 @@ SessionSummary SessionDatabase::CreateSession(std::string name,
 }
 
 std::int64_t SessionDatabase::AppendMessage(const std::string& session_id,
-                                            const llm::Message& message, int token_count) {
+                                            const llm::Message& message, int token_count,
+                                            const MessageAttribution& attribution) {
     // Encode OUTSIDE the mutex. mu_ is the one lock every session's appends and
     // reads serialize on, and the JSON encode -- the DOM plus the dump -- is the
     // expensive half of an append. Holding the lock through it stalled every
@@ -602,10 +633,11 @@ std::int64_t SessionDatabase::AppendMessage(const std::string& session_id,
         // backstop if this arithmetic is ever wrong either way.
         CachedStmt insert(
             db_, prepared_,
-            "INSERT INTO messages (session_id, seq, role, content_json, token_count, created_at)"
+            "INSERT INTO messages (session_id, seq, role, content_json, token_count, created_at,"
+            " agent_preset, model)"
             " VALUES (?, COALESCE((SELECT MAX(seq) FROM messages"
             " WHERE session_id = ? AND discarded = 0), -1) + 1,"
-            " ?, ?, ?, ?);",
+            " ?, ?, ?, ?, ?, ?);",
             "failed to append message");
         sqlite3_bind_text(insert.stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_text(insert.stmt, 2, session_id.c_str(), -1, SQLITE_TRANSIENT);
@@ -619,6 +651,8 @@ std::int64_t SessionDatabase::AppendMessage(const std::string& session_id,
                       static_cast<int>(content_json.size()), SQLITE_STATIC);
         sqlite3_bind_int(insert.stmt, 5, token_count);
         sqlite3_bind_int64(insert.stmt, 6, now);
+        BindTextOrNull(insert.stmt, 7, attribution.agent_preset);
+        BindTextOrNull(insert.stmt, 8, attribution.model);
         if (sqlite3_step(insert.stmt) != SQLITE_DONE) {
             ThrowSqliteError(db_, "failed to append message");
         }
@@ -1030,6 +1064,8 @@ MessagePage SessionDatabase::GetMessagesPage(const std::string& session_id,
             row.json = reinterpret_cast<const char*>(sqlite3_column_text(query.stmt, 1));
             row.token_count = sqlite3_column_int(query.stmt, 2);
             row.created_at = sqlite3_column_int64(query.stmt, 3);
+            row.attribution.agent_preset = ColumnTextOrEmpty(query.stmt, 4);
+            row.attribution.model = ColumnTextOrEmpty(query.stmt, 5);
             rows.push_back(std::move(row));
         }
         // Reached only when the scan ran out of rows, so anything but DONE is a
@@ -1076,7 +1112,8 @@ std::vector<StoredMessage> SessionDatabase::LoadMessages(const std::string& sess
         {
             std::lock_guard lock(mu_);
             CachedStmt query(db_, prepared_,
-                             "SELECT seq, content_json, token_count, created_at FROM messages"
+                             "SELECT seq, content_json, token_count, created_at, agent_preset,"
+                             " model FROM messages"
                              " WHERE session_id = ?1 AND discarded = 0 AND seq > ?2"
                              " ORDER BY seq ASC LIMIT ?3;",
                              "failed to load messages");
@@ -1212,7 +1249,8 @@ std::vector<StoredMessage> SessionDatabase::LoadMessagesFrom(const std::string& 
     {
         std::lock_guard lock(mu_);
         CachedStmt query(db_, prepared_,
-                         "SELECT seq, content_json, token_count, created_at FROM messages"
+                         "SELECT seq, content_json, token_count, created_at, agent_preset,"
+                         " model FROM messages"
                          " WHERE session_id = ?1 AND discarded = 0 AND seq > ?2 ORDER BY seq ASC;",
                          "failed to load messages after seq");
         sqlite3_bind_text(query.stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
@@ -1233,6 +1271,7 @@ std::optional<StoredMessage> SessionDatabase::LoadMessage(const std::string& ses
         std::string json;
         int token_count = 0;
         std::int64_t created_at = 0;
+        MessageAttribution attribution;
     };
     std::optional<RawRow> raw;
     {
@@ -1242,8 +1281,8 @@ std::optional<StoredMessage> SessionDatabase::LoadMessage(const std::string& ses
         // a rewound-away position is not a rewindable one. Strict decode, same
         // contract as every other read path.
         CachedStmt query(db_, prepared_,
-                         "SELECT content_json, token_count, created_at FROM messages"
-                         " WHERE session_id = ?1 AND seq = ?2 AND discarded = 0;",
+                         "SELECT content_json, token_count, created_at, agent_preset, model"
+                         " FROM messages WHERE session_id = ?1 AND seq = ?2 AND discarded = 0;",
                          "failed to load message");
         sqlite3_bind_text(query.stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_int64(query.stmt, 2, seq);
@@ -1255,6 +1294,8 @@ std::optional<StoredMessage> SessionDatabase::LoadMessage(const std::string& ses
         raw->json = json_text != nullptr ? json_text : "";
         raw->token_count = sqlite3_column_int(query.stmt, 1);
         raw->created_at = sqlite3_column_int64(query.stmt, 2);
+        raw->attribution.agent_preset = ColumnTextOrEmpty(query.stmt, 3);
+        raw->attribution.model = ColumnTextOrEmpty(query.stmt, 4);
         // PRIMARY KEY is (id), UNIQUE is (session_id, seq): confirm the scan is
         // over rather than trusting that one row was all there was.
         CheckRowLoopEnd(db_, sqlite3_step(query.stmt), "failed to load message");
@@ -1265,6 +1306,7 @@ std::optional<StoredMessage> SessionDatabase::LoadMessage(const std::string& ses
     stored.message = JsonToMessage(nlohmann::json::parse(raw->json));
     stored.token_count = raw->token_count;
     stored.created_at_unix_ms = raw->created_at;
+    stored.attribution = std::move(raw->attribution);
     return stored;
 }
 
@@ -1449,8 +1491,9 @@ SessionSummary SessionDatabase::ForkSession(const std::string& source_session_id
         // requires a child's seq space to start at zero, and keeping the
         // source's numbers means a copied checkpoint needs no renumbering.
         Stmt copy(db_, "INSERT INTO messages (session_id, seq, role, content_json,"
-                       " token_count, created_at)"
-                       " SELECT ?1, seq, role, content_json, token_count, created_at"
+                       " token_count, created_at, agent_preset, model)"
+                       " SELECT ?1, seq, role, content_json, token_count, created_at,"
+                       " agent_preset, model"
                        " FROM messages WHERE session_id = ?2 AND discarded = 0 AND seq < ?3;",
                   "failed to copy messages into the fork");
         sqlite3_bind_text(copy.stmt, 1, id.c_str(), -1, SQLITE_TRANSIENT);

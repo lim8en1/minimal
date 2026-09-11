@@ -1,6 +1,7 @@
 #include "minimal/client/picker_model.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <ctime>
 
 #include "minimal/client/utf8.hpp"
@@ -16,33 +17,56 @@ bool MatchesFilter(const v1::SessionSummary& session, const std::string& lowered
            ToLower(session.project_root()).find(lowered_filter) != std::string::npos;
 }
 
-std::string HumanTime(std::int64_t unix_ms) {
-    if (unix_ms <= 0) return "";
-    const std::time_t seconds = static_cast<std::time_t>(unix_ms / 1000);
-    std::tm local{};
-    localtime_r(&seconds, &local);
-    char buffer[32];
-    std::strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M", &local);
-    return buffer;
+// A name longer than this is truncated rather than pushing every other
+// column off the picker's width.
+constexpr std::size_t kNameColumnCap = 40;
+
+std::string DisplayName(const v1::SessionSummary& session) {
+    return session.name().empty() ? std::string("(unnamed)") : session.name();
 }
 
-std::string Label(const v1::SessionSummary& session) {
+std::string Label(const v1::SessionSummary& session, std::size_t name_width,
+                  std::int64_t now_unix_ms) {
     // S5.4: "live" marks a session with a Session object still running
     // server-side (attached or detached). Selecting the row ATTACHES to the
     // running instance (PickerController::OpenPickedSession); resume from the
     // stored transcript is for the non-live rows, and a resume sent for a
     // live session is refused server-side ("already open") -- the two verbs
-    // are not interchangeable.
-    std::string label = session.name() + "  ·  " + std::to_string(session.message_count()) +
-                        " msgs  ·  " + HumanTime(session.updated_at_unix_ms());
-    if (session.is_live()) label += "  ·  live";
-    return label;
+    // are not interchangeable. A leading dot, so it scans down the column.
+    std::string name = DisplayName(session);
+    if (Utf8ColumnWidth(name) > name_width) name = TruncateUtf8Columns(name, name_width);
+    const std::size_t pad = name_width - std::min(name_width, Utf8ColumnWidth(name));
+    std::string count = std::to_string(session.message_count()) + " msgs";
+    if (count.size() < 9) count.insert(0, 9 - count.size(), ' ');
+    return std::string(session.is_live() ? "● " : "  ") + name + std::string(pad, ' ') + "  " +
+           count + "  " + RelativeAge(session.updated_at_unix_ms(), now_unix_ms);
 }
 
 }  // namespace
 
+std::string RelativeAge(std::int64_t unix_ms, std::int64_t now_unix_ms) {
+    if (unix_ms <= 0) return "";
+    const std::int64_t seconds = (now_unix_ms - unix_ms) / 1000;
+    if (seconds < 60) return "just now";   // includes a clock slightly behind the server's
+    if (seconds < 3600) return std::to_string(seconds / 60) + "m ago";
+    if (seconds < 86'400) return std::to_string(seconds / 3600) + "h ago";
+    if (seconds < 7 * 86'400) return std::to_string(seconds / 86'400) + "d ago";
+    const std::time_t stamp = static_cast<std::time_t>(unix_ms / 1000);
+    std::tm local{};
+    localtime_r(&stamp, &local);
+    char buffer[16];
+    std::strftime(buffer, sizeof(buffer), "%Y-%m-%d", &local);
+    return buffer;
+}
+
 std::vector<PickerRow> BuildPickerRows(const std::vector<v1::SessionSummary>& sessions,
-                                       const std::string& filter, PickerSort sort) {
+                                       const std::string& filter, PickerSort sort,
+                                       std::int64_t now_unix_ms) {
+    if (now_unix_ms <= 0) {
+        now_unix_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                          std::chrono::system_clock::now().time_since_epoch())
+                          .count();
+    }
     const std::string lowered_filter = ToLower(filter);
 
     std::vector<const v1::SessionSummary*> matched;
@@ -72,8 +96,15 @@ std::vector<PickerRow> BuildPickerRows(const std::vector<v1::SessionSummary>& se
     std::vector<PickerRow> rows;
     rows.reserve(matched.size() + 1);
     rows.push_back(PickerRow{"+ new session", ""});
+    // The name column is as wide as the widest name SHOWN (so a filter
+    // narrows it too), capped.
+    std::size_t name_width = 0;
     for (const auto* session : matched) {
-        rows.push_back(PickerRow{Label(*session), session->session_id()});
+        name_width = std::max(name_width, Utf8ColumnWidth(DisplayName(*session)));
+    }
+    name_width = std::min(name_width, kNameColumnCap);
+    for (const auto* session : matched) {
+        rows.push_back(PickerRow{Label(*session, name_width, now_unix_ms), session->session_id()});
     }
     return rows;
 }

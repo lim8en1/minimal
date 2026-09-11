@@ -303,9 +303,13 @@ private:
 class InMemoryHistoryStore : public session::HistoryStore {
 public:
     // Token counts are a persistence concern; the in-memory fake ignores them.
-    void Append(const llm::Message& message, std::optional<int> output_tokens) override {
+    // Attributions are recorded, parallel to `messages`, so loop tests can
+    // assert what a persisted row would carry.
+    void Append(const llm::Message& message, std::optional<int> output_tokens,
+                const session::MessageAttribution& attribution) override {
         (void)output_tokens;
         messages.push_back(message);
+        attributions.push_back(attribution);
     }
     // The fake starts empty and never compacts, so position is seq.
     std::int64_t last_appended_seq() const override {
@@ -324,6 +328,7 @@ public:
         checkpoint_summary = llm::Message{};
     }
     std::vector<llm::Message> messages;
+    std::vector<session::MessageAttribution> attributions;   // parallel to messages
     std::optional<std::int64_t> checkpoint_boundary;
     llm::Message checkpoint_summary;
     bool checkpoint_cleared = false;

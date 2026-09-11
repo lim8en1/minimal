@@ -145,8 +145,10 @@ SessionState::Snapshot SnapshotWithRows(const std::string& session_id, uint64_t 
 // Whether the row-cursor marker (on the row's FIRST element, i.e. its
 // header line -- the row's own text sits on the line(s) after it) is
 // immediately followed, within the row's own block, by `row_text`.
+// The row cursor is the heavy gutter bar (chat_view.cpp's kCursorGutterGlyph):
+// a shape, not just a color, so it is findable in a colorless render.
 bool CursorMarkerPrecedes(const std::string& frame, std::string_view row_text) {
-    const std::size_t marker = frame.find("▏");
+    const std::size_t marker = frame.find("┃");
     if (marker == std::string::npos) return false;
     const std::size_t window_end = std::min(frame.size(), marker + 200);
     return frame.find(row_text, marker) != std::string::npos &&
@@ -253,13 +255,13 @@ TEST_CASE("session picker: a bare 'd' types into the filter instead of deleting"
     REQUIRE(SendEvent(picker, ftx::Event::Character("d")));
     CHECK(deleted.empty());
     const auto frame = RenderFrame(picker);
-    CHECK(frame.find("filter: d") != std::string::npos);
+    CHECK(frame.find("/ d") != std::string::npos);   // the filter line: typed text + caret
     // "delta" still matches the filter "d"; the row survives.
     CHECK(frame.find("delta") != std::string::npos);
 
     // Backspace clears it back out.
     REQUIRE(SendEvent(picker, ftx::Event::Backspace));
-    CHECK(RenderFrame(picker).find("filter: (none)") != std::string::npos);
+    CHECK(RenderFrame(picker).find("type to filter") != std::string::npos);
 }
 
 TEST_CASE("session picker: an empty list still offers the new-session row, and consumes "
@@ -1229,7 +1231,7 @@ TEST_CASE("chat view: has_earlier_messages renders a load-older hint") {
     snap.has_earlier_messages = true;
 
     const auto frame = RenderElement(view.Render(snap));
-    CHECK(frame.find("earlier messages available") != std::string::npos);
+    CHECK(frame.find("earlier messages") != std::string::npos);
 }
 
 namespace {
@@ -1321,15 +1323,16 @@ TEST_CASE("chat view: a throwing or unclaimed display kind falls back to the tex
     DisplayHarness h;
     h.display_renderers.Register(std::make_unique<ThrowingKindRenderer>());
 
+    // The default text row's headline: status glyph + tool name.
     SECTION("throwing") {
         const auto frame = h.Render(
             StoredToolCallWithDisplay("bash", "plain text", {{"kind", "test_kind"}}));
-        CHECK(frame.find("tool bash") != std::string::npos);
+        CHECK(frame.find("✓ bash") != std::string::npos);
     }
     SECTION("no renderer for the kind") {
         const auto frame = h.Render(
             StoredToolCallWithDisplay("bash", "plain text", {{"kind", "nobody_draws_this"}}));
-        CHECK(frame.find("tool bash") != std::string::npos);
+        CHECK(frame.find("✓ bash") != std::string::npos);
     }
 }
 
@@ -1751,32 +1754,32 @@ TEST_CASE("chat view: clicking a thinking row toggles its collapse", "[chat_view
 
     const auto collapsed =
         RenderElement(view.Render(snap) | ftx::yframe, /*width=*/60, /*height=*/24);
-    CHECK(collapsed.find("collapsed") != std::string::npos);
+    CHECK(collapsed.find("chars") != std::string::npos);   // "thinking  N chars"
     CHECK(collapsed.find("pondering deeply") == std::string::npos);
-    // The click affordance marks the collapsed header.
-    CHECK(collapsed.find("[+]") != std::string::npos);
+    // The click affordance (the disclosure glyph) marks the collapsed header.
+    CHECK(collapsed.find("▸") != std::string::npos);
 
     // Click the thinking header's screen row: the row expands.
-    const int header_y = ScreenLineOf(collapsed, "▎thinking");
+    const int header_y = ScreenLineOf(collapsed, "thinking");
     REQUIRE(header_y >= 0);
     CHECK(view.ToggleCollapseAt(header_y));
 
     const auto expanded =
         RenderElement(view.Render(snap) | ftx::yframe, /*width=*/60, /*height=*/24);
     CHECK(expanded.find("pondering deeply") != std::string::npos);
-    CHECK(expanded.find("[+]") == std::string::npos);
+    CHECK(expanded.find("▸") == std::string::npos);
     // The affordance flips with the state.
-    CHECK(expanded.find("[-]") != std::string::npos);
+    CHECK(expanded.find("▾") != std::string::npos);
 
     // Clicking again -- re-located, the expanded body moved the header --
     // collapses it back.
-    const int header_y2 = ScreenLineOf(expanded, "▎thinking");
+    const int header_y2 = ScreenLineOf(expanded, "thinking");
     REQUIRE(header_y2 >= 0);
     CHECK(view.ToggleCollapseAt(header_y2));
     const auto recollapsed =
         RenderElement(view.Render(snap) | ftx::yframe, /*width=*/60, /*height=*/24);
     CHECK(recollapsed.find("pondering deeply") == std::string::npos);
-    CHECK(recollapsed.find("collapsed") != std::string::npos);
+    CHECK(recollapsed.find("chars") != std::string::npos);
 }
 
 TEST_CASE("chat view: clicks that miss a collapsible row are not consumed",
@@ -1830,16 +1833,16 @@ TEST_CASE("chat view: clicking a tool-activity row toggles its collapse",
     const auto collapsed =
         RenderElement(view.Render(snap) | ftx::yframe, /*width=*/60, /*height=*/24);
     CHECK(collapsed.find("ls output line") == std::string::npos);
-    CHECK(collapsed.find("[+]") != std::string::npos);
+    CHECK(collapsed.find("▸") != std::string::npos);   // the disclosure glyph
 
-    const int header_y = ScreenLineOf(collapsed, "▎tool bash");
+    const int header_y = ScreenLineOf(collapsed, "✓ bash");
     REQUIRE(header_y >= 0);
     CHECK(view.ToggleCollapseAt(header_y));
 
     const auto expanded =
         RenderElement(view.Render(snap) | ftx::yframe, /*width=*/60, /*height=*/24);
     CHECK(expanded.find("ls output line") != std::string::npos);
-    CHECK(expanded.find("[-]") != std::string::npos);
+    CHECK(expanded.find("▾") != std::string::npos);
 }
 
 // ---------------------------------------------------------------------------
@@ -2373,6 +2376,21 @@ TEST_CASE("commands help overlay lists the whole catalog and closes on Escape",
     CHECK(frame.find("cmd14") != std::string::npos);  // ...and the tail, unreachable before
 
     REQUIRE(SendEvent(view, ftx::Event::Escape));
+    CHECK(closed);
+}
+
+TEST_CASE("commands help overlay: Enter hands the command to on_pick, then closes",
+          "[commands_help]") {
+    const auto theme = TestTheme();
+    const std::vector<CommandCatalogEntry> catalog = {{"compact", "summarize", false, false},
+                                                      {"clear", "start over", false, false}};
+    bool closed = false;
+    std::string picked;
+    auto view = MakeCommandsHelpView(catalog, theme, [&] { closed = true; }, nullptr, nullptr,
+                                     [&](const std::string& name) { picked = name; });
+    CHECK(RenderFrame(view).find("enter: insert") != std::string::npos);
+    REQUIRE(SendEvent(view, ftx::Event::Return));
+    CHECK(picked == "compact");   // the first row
     CHECK(closed);
 }
 

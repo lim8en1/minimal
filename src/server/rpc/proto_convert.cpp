@@ -656,6 +656,8 @@ v1::StoredMessage ToProto(const session::StoredMessage& stored) {
     *out.mutable_message() = ToProto(stored.message);
     out.set_token_count(stored.token_count);
     out.set_created_at_unix_ms(stored.created_at_unix_ms);
+    out.set_agent_preset(stored.attribution.agent_preset);
+    out.set_model(stored.attribution.model);
     return out;
 }
 

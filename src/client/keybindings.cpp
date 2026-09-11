@@ -19,6 +19,18 @@ const std::unordered_map<std::string, std::string>& DefaultBindings() {
     static const std::unordered_map<std::string, std::string> kDefaults{
         {"tab.next", "alt+down"},
         {"tab.previous", "alt+up"},
+        // Straight to the Nth tab -- the number the tab bar prints before
+        // each name. alt+digit is ESC+digit (or the macOS Option glyph), a
+        // distinct encoding from the plain digit the editor types.
+        {"tab.goto.1", "alt+1"},
+        {"tab.goto.2", "alt+2"},
+        {"tab.goto.3", "alt+3"},
+        {"tab.goto.4", "alt+4"},
+        {"tab.goto.5", "alt+5"},
+        {"tab.goto.6", "alt+6"},
+        {"tab.goto.7", "alt+7"},
+        {"tab.goto.8", "alt+8"},
+        {"tab.goto.9", "alt+9"},
         {"group.previous", "alt+left"},
         {"group.next", "alt+right"},
         {"jump.attention", "alt+a"},

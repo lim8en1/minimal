@@ -4,19 +4,29 @@
 // filter) -> rows, no FTXUI. Mirrors agent_picker_model.hpp's split.
 
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
 namespace minimal::client {
 
 struct KeymapHelpRow {
-    std::string label;   // display text: "action  --  key"
-    std::string action;  // the action name -- an id only; nothing is "selected"
+    // A binding: "  alt+down  next tab" -- the KEY first, in a column, then
+    // what it does. A header: the group name ("tabs", "chat", ...).
+    std::string label;
+    std::string action;   // the action id (empty for a header); nothing is "selected"
+    bool header = false;
 };
 
-// Every (action, key) pair whose action or key contains `filter`
-// case-insensitively, sorted by action name for a stable, predictable
-// listing (the underlying map has no meaningful order of its own).
+// What a core action does, in words ("next tab"); an action this build has
+// no description for (a plugin view's toggle) is described by its own id.
+std::string ActionDescription(std::string_view action);
+
+// Every binding whose action id, key, or description contains `filter`
+// case-insensitively, grouped by area (tabs, chat, turn, open, panels, app,
+// then plugin actions) under a header row per non-empty group, sorted by
+// action id within a group -- people look for "how do I scroll", not for
+// "chat.scroll_up", so the listing reads by area and by key.
 std::vector<KeymapHelpRow> BuildKeymapHelpRows(
     const std::unordered_map<std::string, std::string>& bindings, const std::string& filter);
 

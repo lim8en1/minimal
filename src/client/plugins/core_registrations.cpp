@@ -7,6 +7,7 @@
 #include <utility>
 
 #include "minimal/client/render/streaming_markdown_view.hpp"
+#include "minimal/client/view/tool_status.hpp"
 
 namespace minimal::client::plugins {
 
@@ -57,6 +58,32 @@ using ftxui::Element;
 // Extracted from ChatView::RebuildRows verbatim; the kind table's semantics
 // live here now. Every renderer colors through the theme, never hardcoded.
 
+// Tool output is preformatted: paragraph() keeps its spacing and line breaks,
+// but ftxui's text layer drops tab characters outright -- Makefile/Go/TSV
+// indentation vanished. 4-column stops, like the code blocks.
+std::string ExpandTabs(std::string_view body) {
+    std::string out;
+    out.reserve(body.size());
+    std::size_t column = 0;
+    for (const char c : body) {
+        if (c == '\t') {
+            const std::size_t pad = 4 - (column % 4);
+            out.append(pad, ' ');
+            column += pad;
+        } else if (c == '\n') {
+            out += c;
+            column = 0;
+        } else if (c != '\r') {
+            out += c;
+            ++column;
+        }
+    }
+    return out;
+}
+
+// The row's own speaker bar ("▎") is drawn by ChatView as a full-height gutter
+// now -- a layout concern, like the timestamp -- so these labels are words
+// only.
 Element RenderUserText(const ChatRow& row, const Theme& theme) {
     using namespace ftxui;
     // Verbatim: the user's text is echoed, never re-rendered as markdown
@@ -66,9 +93,10 @@ Element RenderUserText(const ChatRow& row, const Theme& theme) {
     // the reader to infer the speaker from styling alone -- exactly the
     // "difficult to map user/assistant" complaint. Same one-word label shape
     // the assistant rows use, so the roles scan as a pair.
+    // The label is the bold part; a whole bold paragraph shouted every turn.
     return vbox({
-        text("▎you") | color(theme.ColorFor("user_message")) | bold,
-        paragraph(row.text) | color(theme.ColorFor("user_message")) | bold,
+        text("you") | color(theme.ColorFor("user_message")) | bold,
+        paragraph(row.text) | color(theme.ColorFor("user_message")),
     });
 }
 
@@ -85,10 +113,9 @@ Element RenderUserAttachment(const ChatRow& row, const Theme& theme,
     using namespace ftxui;
     Elements parts;
     const int lines = static_cast<int>(std::count(row.text.begin(), row.text.end(), '\n')) + 1;
-    parts.push_back(hbox({text("▎@") | color(theme.ColorFor("user_message")),
-                          text(row.attachment_path) | color(theme.ColorFor("user_message")),
-                          text(" (attached, " + std::to_string(lines) + " lines)") | Muted(theme),
-                          text(std::string(ctx.collapse_marker)) | Muted(theme)}));
+    parts.push_back(hbox({Disclosure(ctx, theme),
+                          text("@" + row.attachment_path) | color(theme.ColorFor("user_message")),
+                          text("  " + std::to_string(lines) + " lines") | Muted(theme)}));
     if (!ctx.collapsed) {
         std::string body = row.text;
         bool truncated = false;
@@ -107,40 +134,30 @@ Element RenderUserAttachment(const ChatRow& row, const Theme& theme,
 
 Element RenderThinking(const ChatRow& row, const Theme& theme, const RowRenderContext& ctx) {
     using namespace ftxui;
+    const Element header = hbox({Disclosure(ctx, theme), text("thinking") | color(theme.ColorFor("thinking"))});
     if (ctx.collapsed) {
-        return hbox({text("▎thinking ") | color(theme.ColorFor("thinking")),
-                     text("(" + std::to_string(static_cast<int>(row.text.size())) +
-                          " chars, collapsed -- " + ctx.toggle_collapse_hint +
-                          " to expand)") |
-                         color(theme.ColorFor("thinking")),
-                     text(std::string(ctx.collapse_marker)) |
-                         color(theme.ColorFor("thinking"))});
+        return hbox({header, text("  " + std::to_string(row.text.size()) + " chars") | Muted(theme)});
     }
-    return vbox({
-        hbox({text("▎thinking") | color(theme.ColorFor("thinking")),
-              text(std::string(ctx.collapse_marker)) | color(theme.ColorFor("thinking"))}),
-        paragraph(row.text) | color(theme.ColorFor("thinking")),
-    });
+    return vbox({header, paragraph(row.text) | color(theme.ColorFor("thinking"))});
 }
 
 Element RenderToolActivity(const ChatRow& row, const Theme& theme, const RowRenderContext& ctx) {
     using namespace ftxui;
     const std::string name = row.tool_name.empty() ? std::string("tool") : row.tool_name;
-    Elements line;
-    line.push_back(text("▎tool " + name) | color(theme.ColorFor("syntax_function")));
-    if (row.tool_is_error) {
-        line.push_back(text(" FAILED") | color(theme.ColorFor("error")));
+    // No result in this page yet (in flight, or the window cut between the
+    // pair): Pending, rather than an empty-ended entry that read as a broken
+    // render.
+    const ToolStatus status = row.tool_is_error ? ToolStatus::Failed
+                              : row.tool_pending ? ToolStatus::Pending
+                                                 : ToolStatus::Ok;
+    Elements line{Disclosure(ctx, theme), ToolHeadline(status, name, theme)};
+    // Collapsed is ONE line -- the input summary rides the header rather than
+    // a row of its own -- so a turn of many calls reads as a compact list.
+    if (ctx.collapsed) {
+        const std::string summary = SummarizeToolInput(row.tool_name, row.tool_input);
+        if (!summary.empty()) line.push_back(text("  " + summary) | Muted(theme));
+        return hbox(std::move(line));
     }
-    if (row.tool_pending) {
-        // The call has no result in this page yet: mark it rather than
-        // presenting an empty-ended entry ("tool bash" with nothing under it
-        // read as a broken render, not as "running").
-        line.push_back(text(" ·") | color(theme.ColorFor("system_message")));
-    }
-    if (ctx.collapsed)
-        line.push_back(text(" (collapsed -- " + ctx.toggle_collapse_hint + " to expand)") | Muted(theme));
-    if (!ctx.collapse_marker.empty())
-        line.push_back(text(std::string(ctx.collapse_marker)) | Muted(theme));
     Elements parts;
     parts.push_back(hbox(std::move(line)));
 
@@ -150,7 +167,7 @@ Element RenderToolActivity(const ChatRow& row, const Theme& theme, const RowRend
         // bash's real command, not a JSON dump of it -- the header IS the
         // orientation for the most common tool call.
         parts.push_back(paragraph("$ " + *bash_command) |
-                        color(theme.ColorFor("syntax_function")));
+                        color(theme.ColorForOr("tool", "syntax_function")));
     } else if (ask_question.has_value()) {
         // ask_user's real question, not a JSON dump of it. Non-dim: this
         // row is the durable record of a human decision (expanded by
@@ -167,8 +184,6 @@ Element RenderToolActivity(const ChatRow& row, const Theme& theme, const RowRend
             parts.push_back(paragraph(summary) | color(theme.ColorFor("system_message")));
         }
     }
-    if (ctx.collapsed) return vbox(std::move(parts));
-
     if (!row.text.empty()) {
         // Bounded body: the capped persisted ToolResultBlock is the
         // authoritative record; this is orientation, not an archive.
@@ -186,7 +201,10 @@ Element RenderToolActivity(const ChatRow& row, const Theme& theme, const RowRend
             body = "... " + (newline != std::string::npos ? body.substr(newline + 1)
                                                             : body.substr(tail_start));
         }
-        parts.push_back(paragraph(body) | color(theme.ColorFor("system_message")));
+        // Line-buffered output ends in '\n', which paragraph() drew as one
+        // trailing empty row under every expanded result.
+        while (!body.empty() && (body.back() == '\n' || body.back() == '\r')) body.pop_back();
+        parts.push_back(paragraph(ExpandTabs(body)) | color(theme.ColorFor("system_message")));
     }
     return vbox(std::move(parts));
 }
@@ -195,13 +213,36 @@ Element RenderSystem(const ChatRow& row, const Theme& theme) {
     using namespace ftxui;
     // Muted and prefixed: "the harness told you something" must never read as
     // "the model said something".
-    return hbox({text("▎[minimal] ") | color(theme.ColorFor("system_message")) | bold,
+    return hbox({text("[minimal] ") | color(theme.ColorFor("system_message")) | bold,
                  paragraph(row.text) | color(theme.ColorFor("system_message"))});
 }
 
 Element RenderAgentMarkdown(const ChatRow& row, const Theme& theme,
                             const MarkdownEngine& engine) {
     return engine.Render(row.text, theme);
+}
+
+// "── agent build → plan  ·  model anthropic/sonnet-4-5 → openai/gpt-5 ────":
+// only the halves that changed, full model refs (the row labels carry the
+// short form). A rule, not a message -- nobody said this.
+Element RenderSwitch(const ChatRow& row, const Theme& theme) {
+    using namespace ftxui;
+    const auto unknown_or = [](const std::string& value) {
+        return value.empty() ? std::string("?") : value;
+    };
+    std::string label;
+    if (row.switch_from_agent != row.agent) {
+        label += "agent " + unknown_or(row.switch_from_agent) + " → " + unknown_or(row.agent);
+    }
+    if (row.switch_from_model != row.model) {
+        if (!label.empty()) label += "  ·  ";
+        label += "model " + unknown_or(row.switch_from_model) + " → " + unknown_or(row.model);
+    }
+    const Color rule = theme.ColorFor("border_unfocused");
+    // separatorCharacter, not separator(): inside an hbox a plain separator
+    // draws VERTICAL bars; this one fills its (one-row) box with the glyph.
+    return hbox({text("── ") | color(rule), text(label) | Muted(theme), text(" "),
+                 separatorCharacter("─") | color(rule) | flex});
 }
 
 #define MINIMAL_CORE_RENDERER(kind, body)                                       \
@@ -217,6 +258,7 @@ MINIMAL_CORE_RENDERER(UserAttachment, { return RenderUserAttachment(row, theme, 
 MINIMAL_CORE_RENDERER(Thinking, { return RenderThinking(row, theme, ctx); });
 MINIMAL_CORE_RENDERER(ToolActivity, { return RenderToolActivity(row, theme, ctx); });
 MINIMAL_CORE_RENDERER(System, { return RenderSystem(row, theme); });
+MINIMAL_CORE_RENDERER(Switch, { return RenderSwitch(row, theme); });
 
 #undef MINIMAL_CORE_RENDERER
 
@@ -226,8 +268,14 @@ class CoreAgentMarkdownRenderer final : public MessageRenderer {
 public:
     explicit CoreAgentMarkdownRenderer(const MarkdownEngine& engine) : engine_(engine) {}
     Element Render(const ChatRow& row, const Theme& theme,
-                  const RowRenderContext&) const override {
+                  const RowRenderContext& ctx) const override {
         using namespace ftxui;
+        // The base color: markdown only styles spans, so without it the prose
+        // fell through to the terminal's own foreground.
+        Element body = RenderAgentMarkdown(row, theme, engine_) |
+                       color(theme.ColorFor("assistant_message"));
+        // Later text of the same turn: the label already sits above it.
+        if (ctx.continuation) return body;
         // A persisted row loses the streaming block's transient "assistant"
         // label the moment the turn finalizes (chat_view.cpp only shows that
         // label while streaming_text is non-empty) -- without this, a
@@ -235,11 +283,9 @@ public:
         // marker at all. Same theme key as the streaming label, for visual
         // continuity between "in flight" and "settled".
         return vbox({
-            text("▎assistant") | color(theme.ColorFor("assistant_message")) | bold,
-            // The body's base color: markdown only styles spans, so without
-            // this the prose fell through to the terminal's own foreground.
-            RenderAgentMarkdown(row, theme, engine_) |
-                color(theme.ColorFor("assistant_message")),
+            text(AssistantLabel(row.agent, row.model)) |
+                color(theme.ColorFor("assistant_message")) | bold,
+            std::move(body),
         });
     }
 
@@ -275,6 +321,7 @@ void RegisterCoreMessageRenderers(MessageRendererRegistry& registry) {
     fill(ChatRowKind::Thinking, std::make_unique<CoreThinkingRenderer>());
     fill(ChatRowKind::ToolActivity, std::make_unique<CoreToolActivityRenderer>());
     fill(ChatRowKind::System, std::make_unique<CoreSystemRenderer>());
+    fill(ChatRowKind::Switch, std::make_unique<CoreSwitchRenderer>());
     // AgentMarkdown needs the engine and is registered by the caller once the
     // default engine is settled.
 }

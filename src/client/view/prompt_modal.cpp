@@ -51,6 +51,15 @@ Element PadHorizontal(Element content) {
     return ftxui::hbox({ftxui::text(" "), std::move(content) | ftxui::flex, ftxui::text(" ")});
 }
 
+// A modal's body: padded, and in the BODY color. The window's `attention`
+// tint is for the frame and the title -- the call to act -- not for every
+// word inside it: an all-amber window left the summary, the hints and the
+// answers with no hierarchy. Explicitly colored rows (the title line, the
+// grant labels, muted hints) keep their own color; color() nests.
+Element ModalBody(const Theme& theme, Element content) {
+    return PadHorizontal(std::move(content)) | ftxui::color(theme.ColorFor("assistant_message"));
+}
+
 }  // namespace
 
 namespace {
@@ -151,7 +160,7 @@ ftxui::Component MakePermissionModal(const PendingPermission& request, GrantTogg
             // THE LOWER-BOUND OBLIGATION: say what the disclosure does not
             // cover, so "allow" is never read as "exactly this command".
             rows.push_back(
-                paragraph("This is what the command NAMED -- it may reach more. "
+                paragraph("This is what the command NAMED — it may reach more. "
                           "Allowing grants this tool, not this text.") |
                 color(theme.ColorFor("error")));
         }
@@ -172,7 +181,7 @@ ftxui::Component MakePermissionModal(const PendingPermission& request, GrantTogg
             for (std::size_t i = 0; i < request.grants.size(); ++i) {
                 auto row = hbox({grant_container_val->ChildAt(static_cast<int>(i))->Render(),
                                  text(" allow " + request.grants[i].label() +
-                                      " -- any arguments, this session") |
+                                      " · any arguments, this session") |
                                      color(theme.ColorFor("attention"))});
                 if (static_cast<int>(i) == active_grant) {
                     row |= bgcolor(theme.ColorFor("status_bar_bg"));
@@ -244,7 +253,7 @@ ftxui::Component MakePermissionModal(const PendingPermission& request, GrantTogg
         // further) -- text() would silently clip the tail (the exact "toggle
         // grants" the user needs), paragraph() wraps onto a second line.
         return window(text(" permission "),
-                      PadHorizontal(vbox({
+                      ModalBody(theme, vbox({
                           vbox(std::move(rows)) | yframe | vscroll_indicator |
                               size(HEIGHT, LESS_THAN, ModalBodyHeightBudget()),
                           Rule(theme),
@@ -386,7 +395,7 @@ ftxui::Component MakeConfirmationModal(const PendingConfirmation& request, const
         // at all when the wire request offers no cancel option -- see the
         // CatchEvent below.)
         return window(text(" confirm "),
-                      PadHorizontal(vbox({
+                      ModalBody(theme, vbox({
                           vbox(std::move(rows)) | yframe | vscroll_indicator |
                               size(HEIGHT, LESS_THAN, ModalBodyHeightBudget()),
                           has_cancel ? Rule(theme) : emptyElement(),
@@ -661,7 +670,7 @@ ftxui::Component MakeAskModal(const PendingAsk& request, const Theme& theme,
                 rows[first_line] |= focus;   // the viewport follows the review list
             }
             return window(text(" question "),
-                          PadHorizontal(vbox({
+                          ModalBody(theme, vbox({
                               vbox(std::move(rows)) | yframe | vscroll_indicator |
                                   size(HEIGHT, LESS_THAN, ModalBodyHeightBudget()),
                               Rule(theme),
@@ -682,7 +691,7 @@ ftxui::Component MakeAskModal(const PendingAsk& request, const Theme& theme,
             rows[0] |= focus;   // the title anchors the viewport until first key
         }
         return window(text(" question "),
-                      PadHorizontal(vbox({
+                      ModalBody(theme, vbox({
                           vbox(std::move(rows)) | yframe | vscroll_indicator |
                               size(HEIGHT, LESS_THAN, ModalBodyHeightBudget()),
                           Rule(theme),

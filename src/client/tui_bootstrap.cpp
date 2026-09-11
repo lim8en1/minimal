@@ -21,9 +21,11 @@ namespace minimal::client {
 
 namespace {
 
+// Left: what is happening and what it costs. Right ({>}): what it is running
+// on. {version} and {session} are out of the default -- the banner/help carry
+// the one, the tab bar the other -- but remain available ids.
 constexpr const char* kDefaultStatusFormat =
-    "{version} | {session} | {activity} | {tokens} | {cost} | {token_detail} | {model} | "
-    "{agent} | {permission_mode}";
+    "{activity} · {tokens} · {cost} · {token_detail}{>}{model} · {agent} · {permission_mode}";
 
 }  // namespace
 

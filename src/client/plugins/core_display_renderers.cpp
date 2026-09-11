@@ -11,6 +11,7 @@
 
 #include "minimal/client/plugins/core_registrations.hpp"
 #include "minimal/client/utf8.hpp"
+#include "minimal/client/view/tool_status.hpp"
 
 namespace minimal::client::plugins {
 namespace {
@@ -71,20 +72,16 @@ Elements CodeLines(const std::vector<std::string>& lines, const std::string& lan
     return plain;
 }
 
-// "▎tool <name>" -- the default row's own prefix, so rows read alike whoever
-// draws them -- then per-kind detail, then the collapse affordances.
+// "▸ ✓ <name>" -- the default row's own headline (tool_status.hpp), so rows
+// read alike whoever draws them -- then per-kind detail. One line collapsed.
 Element Header(const ToolResultView& result, Elements detail, const Theme& theme,
                const RowRenderContext& ctx) {
     using namespace ftxui;
     const std::string name =
         result.tool_name.empty() ? std::string("tool") : std::string(result.tool_name);
-    Elements line;
-    line.push_back(text("▎tool " + name) | color(theme.ColorFor("syntax_function")));
+    Elements line{Disclosure(ctx, theme),
+                  ToolHeadline(result.is_error ? ToolStatus::Failed : ToolStatus::Ok, name, theme)};
     for (auto& element : detail) line.push_back(std::move(element));
-    if (ctx.collapsed) {
-        line.push_back(text(" (collapsed -- " + ctx.toggle_collapse_hint + " to expand)") | Muted(theme));
-    }
-    if (!ctx.collapse_marker.empty()) line.push_back(text(std::string(ctx.collapse_marker)) | Muted(theme));
     return hbox(std::move(line));
 }
 
@@ -286,6 +283,10 @@ public:
                          : output.substr(Utf8CeilToBoundary(output, tail_start));
             cut = true;
         }
+        // A trailing newline (most output has one) is not a row of its own.
+        while (!output.empty() && (output.back() == '\n' || output.back() == '\r')) {
+            output.pop_back();
+        }
         if (!output.empty()) {
             parts.push_back(paragraph((cut ? "... " : "") + Printable(output)) |
                             color(theme.ColorFor("system_message")));
@@ -308,7 +309,7 @@ private:
         }
         if (!display.contains("exit_code")) return text("  exit ?") | color(theme.ColorFor("error"));
         const int code = display.at("exit_code").get<int>();
-        if (code == 0) return text("  ✓") | color(theme.ColorFor("working"));
+        if (code == 0) return emptyElement();   // the headline's ✓ already says it
         return text("  exit " + std::to_string(code)) | color(theme.ColorFor("error"));
     }
 };

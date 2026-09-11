@@ -127,11 +127,12 @@ const llm::ToolResultBlock& ResultOf(const llm::Message& message, std::size_t in
 class ThrowsOnAppendN : public testing::InMemoryHistoryStore {
 public:
     explicit ThrowsOnAppendN(int throw_on_call) : throw_on_call_(throw_on_call) {}
-    void Append(const llm::Message& message, std::optional<int> output_tokens) override {
+    void Append(const llm::Message& message, std::optional<int> output_tokens,
+                const session::MessageAttribution& attribution) override {
         if (++calls_ == throw_on_call_) {
             throw std::runtime_error("simulated store failure");
         }
-        InMemoryHistoryStore::Append(message, output_tokens);
+        InMemoryHistoryStore::Append(message, output_tokens, attribution);
     }
 
 private:
@@ -248,6 +249,44 @@ TEST_CASE("a single turn ends and persists user + assistant", "[agent_loop]") {
     REQUIRE(h.store.messages.size() == 2);
     CHECK(h.store.messages[0].role == llm::Role::User);
     CHECK(h.store.messages[1].role == llm::Role::Assistant);
+}
+
+TEST_CASE("assistant rows are attributed to the effective preset; others are not",
+          "[agent_loop][attribution]") {
+    Harness h;
+    h.provider.PushResponse(TextResponse("first"));
+    h.provider.PushResponse(TextResponse("second"));
+    agent::AgentPreset preset;
+    preset.name = "build";
+    preset.model_ref = minimal::common::ModelRef{"anthropic", "sonnet-4-5"};
+    h.Build(preset);
+
+    h.loop->RunTurn(UserText("one"));
+    // What Session does for /agent, /model and a per-turn borrow alike.
+    agent::AgentPreset borrowed = preset;
+    borrowed.name = "plan";
+    borrowed.model_ref = minimal::common::ModelRef{"openai", "gpt-5"};
+    h.loop->SetPreset(borrowed);
+    h.loop->RunTurn(UserText("two"));
+
+    REQUIRE(h.store.attributions.size() == 4);
+    CHECK(h.store.attributions[0].agent_preset.empty());   // user
+    CHECK(h.store.attributions[0].model.empty());
+    CHECK(h.store.attributions[1].agent_preset == "build");
+    CHECK(h.store.attributions[1].model == "anthropic/sonnet-4-5");
+    CHECK(h.store.attributions[2].agent_preset.empty());   // user
+    CHECK(h.store.attributions[3].agent_preset == "plan");
+    CHECK(h.store.attributions[3].model == "openai/gpt-5");
+}
+
+TEST_CASE("an unset model ref is attributed as unknown, not as \"/\"",
+          "[agent_loop][attribution]") {
+    Harness h;
+    h.provider.PushResponse(TextResponse("hello"));
+    h.Build();
+    h.loop->RunTurn(UserText("hi"));
+    REQUIRE(h.store.attributions.size() == 2);
+    CHECK(h.store.attributions[1].model.empty());
 }
 
 TEST_CASE("a tool call round-trips and the loop continues", "[agent_loop]") {

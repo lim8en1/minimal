@@ -7,32 +7,69 @@
 
 using minimal::client::BuildKeymapHelpRows;
 
-TEST_CASE("keymap help rows: no filter returns every binding, sorted by action") {
-    const std::unordered_map<std::string, std::string> bindings = {
-        {"tab.next", "alt+down"}, {"app.quit", "ctrl+q"}, {"agent.picker", "alt+g"}};
-
-    const auto rows = BuildKeymapHelpRows(bindings, "");
-    REQUIRE(rows.size() == 3);
-    CHECK(rows[0].action == "agent.picker");
-    CHECK(rows[1].action == "app.quit");
-    CHECK(rows[2].action == "tab.next");
-    CHECK(rows[0].label == "agent.picker  --  alt+g");
+namespace {
+const std::unordered_map<std::string, std::string> kBindings = {
+    {"tab.next", "alt+down"}, {"app.quit", "ctrl+q"}, {"agent.picker", "alt+g"}};
 }
 
-TEST_CASE("keymap help rows: filter matches the action name or the key, case-insensitively") {
-    const std::unordered_map<std::string, std::string> bindings = {
-        {"tab.next", "alt+down"}, {"app.quit", "ctrl+q"}, {"agent.picker", "alt+g"}};
+TEST_CASE("keymap help rows: grouped by area, key column first, described in words") {
+    const auto rows = BuildKeymapHelpRows(kBindings, "");
+    REQUIRE(rows.size() == 6);
+    CHECK(rows[0].header);
+    CHECK(rows[0].label == " tabs");
+    CHECK(rows[1].action == "tab.next");
+    CHECK(rows[1].label == "alt+down  next tab");
+    CHECK(rows[2].label == " open");
+    CHECK(rows[3].action == "agent.picker");
+    CHECK(rows[3].label == "alt+g     switch agent");   // key column padded to the widest
+    CHECK(rows[4].label == " app");
+    CHECK(rows[5].action == "app.quit");
+    CHECK_FALSE(rows[5].header);
+}
 
-    SECTION("matches on action name") {
-        const auto rows = BuildKeymapHelpRows(bindings, "TAB");
-        REQUIRE(rows.size() == 1);
-        CHECK(rows[0].action == "tab.next");
+TEST_CASE("keymap help rows: within a group, the curated order -- not the alphabet") {
+    const auto rows = BuildKeymapHelpRows(
+        {{"tab.goto.2", "alt+2"}, {"tab.close", "ctrl+w"}, {"tab.previous", "alt+up"},
+         {"tab.next", "alt+down"}, {"group.next", "alt+right"}},
+        "");
+    REQUIRE(rows.size() == 6);
+    CHECK(rows[1].action == "tab.next");
+    CHECK(rows[2].action == "tab.previous");
+    CHECK(rows[3].action == "tab.goto.2");
+    CHECK(rows[4].action == "tab.close");
+    CHECK(rows[5].action == "group.next");
+}
+
+TEST_CASE("keymap help rows: filter matches the action, the key or the description") {
+    SECTION("matches on action name and on description alike") {
+        const auto rows = BuildKeymapHelpRows(kBindings, "TAB");
+        REQUIRE(rows.size() == 2);   // the "tabs" header + tab.next
+        CHECK(rows[1].action == "tab.next");
     }
     SECTION("matches on key") {
-        const auto rows = BuildKeymapHelpRows(bindings, "ALT");
-        REQUIRE(rows.size() == 2);   // tab.next (alt+down), agent.picker (alt+g)
+        const auto rows = BuildKeymapHelpRows(kBindings, "ALT");
+        REQUIRE(rows.size() == 4);   // two groups, one binding each
     }
-    SECTION("no match") {
-        CHECK(BuildKeymapHelpRows(bindings, "nonexistent").empty());
+    SECTION("matches on description only") {
+        const auto rows = BuildKeymapHelpRows(kBindings, "switch");
+        REQUIRE(rows.size() == 2);
+        CHECK(rows[1].action == "agent.picker");
     }
+    SECTION("no match: no rows, not even headers") {
+        CHECK(BuildKeymapHelpRows(kBindings, "nonexistent").empty());
+    }
+}
+
+TEST_CASE("keymap help rows: tab.goto.N is described and grouped with the tab keys") {
+    const auto rows = BuildKeymapHelpRows({{"tab.goto.3", "alt+3"}}, "");
+    REQUIRE(rows.size() == 2);
+    CHECK(rows[0].label == " tabs");
+    CHECK(rows[1].label == "alt+3  go to tab 3");
+}
+
+TEST_CASE("keymap help rows: an unknown (plugin) action is listed under plugins by its id") {
+    const auto rows = BuildKeymapHelpRows({{"checklist.toggle", "ctrl+k"}}, "");
+    REQUIRE(rows.size() == 2);
+    CHECK(rows[0].label == " plugins");
+    CHECK(rows[1].label == "ctrl+k  checklist.toggle");
 }

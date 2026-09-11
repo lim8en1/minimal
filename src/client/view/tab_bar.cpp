@@ -7,6 +7,7 @@
 #include <ftxui/screen/terminal.hpp>
 
 #include "minimal/client/utf8.hpp"
+#include "minimal/client/view/tool_status.hpp"
 
 namespace minimal::client {
 
@@ -97,26 +98,16 @@ ftxui::Color StateColor(SessionStateKind state, bool active, const Theme& theme)
     return ftxui::Color::Default;
 }
 
-// Animated for Thinking/Working, static otherwise. Computed from wall clock
-// at RENDER time rather than stored per-tab: storing a frame index would
-// need a dedicated timer to advance it, and the frame pump already redraws
-// continuously while a tab is actually Thinking/Working (every delta bumps
-// ui_version_) -- an idle tab never asks for this branch, so no animation
-// ever needs a redraw nothing else already provides. Waiting keeps its own
+// Animated for Thinking/Working, static otherwise -- the same spinner and
+// the same ✓/✗ the tool rows use (tool_status.hpp), so "busy" and "done"
+// read identically on the tab and in the transcript. Waiting keeps its own
 // '!' glyph (RenderTabCell's attention_glyph, unchanged) -- this function
 // never emits a second signal for it.
-constexpr std::array<const char*, 8> kSpinnerFrames = {"⠋", "⠙", "⠹", "⠸",
-                                                       "⠼", "⠴", "⠦", "⠧"};
-
 std::string StateGlyph(SessionStateKind state) {
     switch (state) {
         case SessionStateKind::Thinking:
-        case SessionStateKind::Working: {
-            using namespace std::chrono;
-            const auto ms = duration_cast<milliseconds>(steady_clock::now().time_since_epoch());
-            const auto frame = static_cast<std::size_t>(ms.count() / 120) % kSpinnerFrames.size();
-            return kSpinnerFrames[frame];
-        }
+        case SessionStateKind::Working:
+            return SpinnerFrame();
         case SessionStateKind::Done:  return "✓";
         case SessionStateKind::Error: return "✗";
         case SessionStateKind::Waiting:
@@ -146,16 +137,18 @@ int DigitWidth(std::size_t n) {
 // to a fraction of the visible characters an ASCII name of the same budget
 // would get) -- with room reserved for the attention glyph, and its
 // rendered width in display columns.
-std::pair<std::string, int> LabelAndWidth(const AppState::TabSnapshot& tab, std::size_t index) {
+std::pair<std::string, int> LabelAndWidth(const AppState::TabSnapshot& tab, std::size_t index,
+                                          std::size_t name_cap) {
     const std::string prefix = std::to_string(index) + " ";
-    std::string label = prefix + TruncateUtf8Columns(tab.display_name, 16);
-    int width = DigitWidth(index) + 1 + std::min<int>(16, static_cast<int>(Utf8ColumnWidth(
-                                                              tab.display_name)));
+    std::string label = prefix + TruncateUtf8Columns(tab.display_name, name_cap);
+    int width = DigitWidth(index) + 1 +
+                std::min<int>(static_cast<int>(name_cap),
+                              static_cast<int>(Utf8ColumnWidth(tab.display_name)));
     if (tab.attention_glyph != '\0') {
         label += ' ';
         width += 2;  // the separating space plus the glyph itself
     }
-    if (tab.is_subagent) width += 1;                  // the indent space
+    if (tab.is_subagent) width += 2;                  // the "↳ " marker
     // The state glyph, when this state has one: one display column plus a
     // separating space, approximated as a flat +2 rather than the glyph's
     // own (multi-byte, UTF-8) string length -- StateGlyph's glyphs are all
@@ -194,9 +187,9 @@ ftxui::Element RenderTabCell(const AppState::TabSnapshot& tab, const std::string
         content = hbox({std::move(content), text("!") | color(theme.ColorFor("attention")) |
                                                bold});
     }
-    // Grouping is conveyed by ORDER only (children directly follow their
-    // parent); one space of indent is the whole subagent marker.
-    if (tab.is_subagent) content = hbox({text(" "), std::move(content)});
+    // Children directly follow their parent; "↳" says so -- one space of
+    // indent, the old marker, was invisible in practice.
+    if (tab.is_subagent) content = hbox({text("↳ ") | Muted(theme), std::move(content)});
 
     if (active) content |= bgcolor(theme.ColorFor("status_bar_bg"));
     return content;
@@ -212,9 +205,15 @@ ftxui::Element RenderTabBar(const std::vector<AppState::TabSnapshot>& tabs, cons
     std::vector<int> widths;
     labels.reserve(tabs.size());
     widths.reserve(tabs.size());
+    // The name cap follows the room there is: a flat 16 columns cut names
+    // short on a wide terminal with two tabs. An even share of the width
+    // (less the label's own chrome), clamped -- the overflow window below
+    // still handles "too many tabs" either way.
+    const int per_tab = Terminal::Size().dimx / static_cast<int>(tabs.size()) - 10;
+    const auto name_cap = static_cast<std::size_t>(std::clamp(per_tab, 12, 32));
     std::size_t focused_index = 0;
     for (std::size_t i = 0; i < tabs.size(); ++i) {
-        auto [label, width] = LabelAndWidth(tabs[i], i + 1);
+        auto [label, width] = LabelAndWidth(tabs[i], i + 1, name_cap);
         labels.push_back(std::move(label));
         widths.push_back(width);
         if (tabs[i].is_focused) focused_index = i;

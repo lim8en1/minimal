@@ -83,7 +83,9 @@ private:
 }  // namespace
 
 ftxui::Decorator SelectionStyle(const Theme& theme) {
-    const ftxui::Color fg = theme.ColorFor("row_focused");
+    // `cursor`, not `attention`-valued row_focused: a cursor that looks like
+    // "act on this" misreads every picker row it lands on.
+    const ftxui::Color fg = theme.ColorForOr("cursor", "row_focused");
     const ftxui::Color bg = theme.ColorFor("status_bar_bg");
     if (fg == ftxui::Color::Default || bg == ftxui::Color::Default) return ftxui::inverted;
     return ftxui::color(fg) | ftxui::bgcolor(bg);
@@ -184,6 +186,11 @@ Theme Theme::Load(const std::filesystem::path& themes_dir, const std::string& na
 ftxui::Color Theme::ColorFor(std::string_view role) const {
     const auto it = colors_.find(role);
     return it != colors_.end() ? it->second : ftxui::Color::Default;
+}
+
+ftxui::Color Theme::ColorForOr(std::string_view role, std::string_view fallback) const {
+    const auto it = colors_.find(role);
+    return it != colors_.end() ? it->second : ColorFor(fallback);
 }
 
 }  // namespace minimal::client

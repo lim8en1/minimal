@@ -19,7 +19,8 @@ class SqliteHistoryStore : public HistoryStore {
 public:
     SqliteHistoryStore(SessionDatabase& db, std::string session_id);
 
-    void Append(const llm::Message& message, std::optional<int> output_tokens) override;
+    void Append(const llm::Message& message, std::optional<int> output_tokens,
+                const MessageAttribution& attribution) override;
 
     // Cached from the database's own answer rather than counted locally, so it
     // stays correct for a session that did not start empty. Atomic because the

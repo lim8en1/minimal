@@ -33,6 +33,9 @@ enum class ChatRowKind {
     ToolActivity,    // collapsible one-liner; expandable body where one exists
     System,          // harness: subagent-completion injections (real messages,
                      // because the model must see them at the turn boundary)
+    Switch,          // synthetic divider: the agent and/or model changed
+                     // between two assistant messages (agent/model = new,
+                     // switch_from_* = old). Never collapsible.
 };
 
 // Stable diagnostic name -- registry collision reports and startup warnings
@@ -69,7 +72,20 @@ struct ChatRow {
     // Rendered by ChatView itself (layout, not per-kind presentation), never
     // by a MessageRenderer -- see chat_view.cpp.
     int64_t created_at_unix_ms = 0;
+    // Rows from an ASSISTANT message: the agent preset and "<provider>/<model>"
+    // that produced it (StoredMessage.agent_preset/model). Empty = unknown --
+    // user/tool-result rows, and anything persisted before attribution.
+    std::string agent;
+    std::string model;
+    // Switch only: the attribution of the previous assistant message.
+    std::string switch_from_agent;
+    std::string switch_from_model;
 };
+
+// The speaker label for an assistant row: "build (sonnet-4-5)" -- the agent
+// preset with the model's last path segment. Degrades to whichever half is
+// known, and to "assistant" when neither is.
+std::string AssistantLabel(const std::string& agent, const std::string& model);
 
 // Formats a wall-clock timestamp for a chat row: local "HH:MM:SS", or empty
 // for 0 (no timestamp known -- a synthetic row). Local time, not UTC: this is
@@ -100,6 +116,13 @@ inline constexpr std::string_view kAskUserToolName = "ask_user";
 // are tool-result-only are tool activity, EXCEPT the ones keyed to a
 // spawn_subagent call: those are the harness speaking, and render as System.
 std::vector<ChatRow> ChatRowsFromMessages(const std::vector<v1::StoredMessage>& descending);
+
+// Parallel to `rows`: true for an AgentMarkdown row that should NOT repeat the
+// speaker label, because an earlier assistant text row of the same turn
+// already carried it. A turn boundary -- a user row, a harness (System) row or
+// a Switch divider -- resets it; thinking and tool rows belong to the turn and
+// neither label nor reset. Every other kind is false.
+std::vector<bool> LabelContinuations(const std::vector<ChatRow>& rows);
 
 // google.protobuf.Struct -> JSON, for a tool's input/args. Exposed here (the
 // definition lives in chat_model.cpp) so callers outside the transcript path

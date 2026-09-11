@@ -38,6 +38,12 @@ public:
     // usable, and every call site would otherwise duplicate the fallback.
     ftxui::Color ColorFor(std::string_view role) const;
 
+    // ColorFor(role), or ColorFor(fallback) when the theme does not set `role`.
+    // For the semantic chrome roles (`tool`, `success`, `cursor`) that newer
+    // themes define and older ones do not: an older theme keeps its previous
+    // look instead of dropping to the terminal default.
+    ftxui::Color ColorForOr(std::string_view role, std::string_view fallback) const;
+
     const std::string& name() const { return name_; }
     // Number of roles the theme defines. Visible for tests.
     std::size_t size() const { return colors_.size(); }

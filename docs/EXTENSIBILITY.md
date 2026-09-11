@@ -339,6 +339,8 @@ Details for the new slots:
 
 **Message-kind presentation.** Renderers keyed by message kind, same shape as `ToolResultRenderer`; core supplies the defaults the message-kind table already specifies. The data plane — event demux, virtualization, streaming buffering — stays core regardless of who renders a row.
 
+Rows from an assistant message carry `ChatRow::agent` / `ChatRow::model` — the agent preset and `<provider>/<model>` that produced it, persisted per message (`StoredMessage.agent_preset`/`model`, schema v9; empty = unknown). `AssistantLabel()` formats the core speaker label (`build (sonnet-4-5)`). The synthetic `ChatRowKind::Switch` row sits before the first assistant message whose agent or model differs from the previous one's (`switch_from_agent`/`switch_from_model` hold the old pair); it is never collapsible, and a plugin may claim it like any other kind.
+
 **Chat surface — the one exclusive client slot.**
 
 ```cpp

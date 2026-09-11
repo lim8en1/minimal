@@ -75,6 +75,11 @@ public:
         // ChatView so row-renderer hints follow the user's keymap instead of
         // a hardcoded "alt+c".
         std::string toggle_collapse_hint = "alt+c";
+        // Same rule for the other bindings the frame names in its own text:
+        // the empty state's session.picker, the chat's chat.load_older marker.
+        std::string session_picker_hint = "ctrl+o";
+        std::string load_older_hint = "pageup";
+        std::string scroll_bottom_hint = "pagedown";   // the "new output below" line
     };
 
     explicit FrameRenderer(Dependencies deps);

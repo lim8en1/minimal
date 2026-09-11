@@ -1,5 +1,8 @@
 #include "minimal/client/keybinding_dispatch.hpp"
 
+#include <array>
+#include <string>
+
 #include "minimal/client/key_event_parser.hpp"
 #include "minimal/common/logger.hpp"
 
@@ -221,6 +224,23 @@ bool HandleGlobalKey(KeyContext& ctx, const ftxui::Event& event) {
     }
     if (ctx.keymap.Matches("tab.previous", event)) {
         ctx.app.CycleFocusBackward();
+        return true;
+    }
+    // tab.goto.1..9: straight to the Nth tab, in tab-bar order (the number the
+    // bar prints before each name). A number past the last tab is consumed
+    // and ignored, like tab.next at an edge. The names are built once, not
+    // per event.
+    static const std::array<std::string, 9> kGotoActions = [] {
+        std::array<std::string, 9> names;
+        for (std::size_t i = 0; i < names.size(); ++i) {
+            names[i] = "tab.goto." + std::to_string(i + 1);
+        }
+        return names;
+    }();
+    for (std::size_t i = 0; i < kGotoActions.size(); ++i) {
+        if (!ctx.keymap.Matches(kGotoActions[i], event)) continue;
+        const auto tabs = ctx.app.GetAllTabs();
+        if (i < tabs.size()) ctx.app.SetFocusedTab(tabs[i].tab_id);
         return true;
     }
     const bool group_next = ctx.keymap.Matches("group.next", event);

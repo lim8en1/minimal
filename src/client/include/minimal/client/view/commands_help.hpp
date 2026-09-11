@@ -9,9 +9,10 @@
 // capped at a handful of rows, and a catalog larger than that viewport was
 // simply unreachable.
 //
-// Mirrors keymap_help.hpp minus selection -- there is nothing to switch to,
-// Enter and Escape both just close it. A `/help <command>` invocation is NOT
-// intercepted: it still reaches the server for the per-command detail notice.
+// Enter on a command hands its name to `on_pick` (the host inserts "/name "
+// into the prompt, ready for arguments) and closes; with no on_pick it only
+// closes, like Escape. A `/help <command>` invocation is NOT intercepted: it
+// still reaches the server for the per-command detail notice.
 
 #include <functional>
 #include <vector>
@@ -26,6 +27,7 @@ namespace minimal::client {
 ftxui::Component MakeCommandsHelpView(const std::vector<CommandCatalogEntry>& catalog,
                                       const Theme& theme, std::function<void()> on_close,
                                       std::function<bool()> session_available = nullptr,
-                                      std::function<void()>* reset_state = nullptr);
+                                      std::function<void()>* reset_state = nullptr,
+                                      std::function<void(const std::string&)> on_pick = nullptr);
 
 }  // namespace minimal::client
