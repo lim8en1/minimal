@@ -1882,26 +1882,31 @@ TEST_CASE("a second client on the same session is served the same events",
 
     const std::string session_id = fixture.CreateSession();
 
-    // Both clients name the stream and attach BEFORE the turn, so neither
-    // misses anything and neither should be told to resync.
+    // Attach #1 must COMPLETE before #2 is even written. The broadcaster's
+    // Subscribe() decides resync-vs-direct-metadata by ever_subscribed_
+    // (event_broadcaster.cpp), and gRPC orders two independent streams'
+    // handlers neither way -- without this read, the second stream could win
+    // the race, attach first, and take the first-subscriber path: a
+    // wrong-order test failure, not a server one (observed ~1 run in 8).
+    // The metadata arriving proves the subscription is registered.
     grpc::ClientContext first_context;
     auto first = fixture.stub->OpenSession(&first_context);
     v1::ClientEvent naming;
     naming.set_session_id(session_id);
     naming.mutable_attach();
+    v1::ServerEvent event;
     REQUIRE(first->Write(naming));
+    REQUIRE(first->Read(&event));
+    REQUIRE(event.has_session_metadata());
 
     grpc::ClientContext second_context;
     auto second = fixture.stub->OpenSession(&second_context);
     REQUIRE(second->Write(naming));
 
-    // Each stream opens with the attach-time delivery notices: the FIRST
-    // subscriber gets its metadata directly; the LATE one is told to resync
-    // first (it missed everything the first subscriber's stream took -- at
-    // minimum the transcript) and gets its metadata after.
-    v1::ServerEvent event;
-    REQUIRE(first->Read(&event));
-    REQUIRE(event.has_session_metadata());
+    // The attach-time delivery notices: the first subscriber took its
+    // metadata above; the LATE one is told to resync first (it missed
+    // everything the first subscriber's stream took -- at minimum the
+    // transcript) and gets its metadata after.
     REQUIRE(second->Read(&event));
     REQUIRE(event.has_resync_required());
     REQUIRE(event.resync_required().reason() == "late_attach");
@@ -1948,26 +1953,35 @@ TEST_CASE("a subscriber that stops reading cannot stall the session's turn",
     naming.mutable_attach();
     REQUIRE(wedged->Write(naming));
 
+    // Attach #1 must COMPLETE before the live stream attaches. Subscribe()
+    // decides resync-vs-direct-metadata by ever_subscribed_
+    // (event_broadcaster.cpp), and gRPC orders two independent streams'
+    // handlers neither way -- without this read the live stream could win
+    // the race, attach first, and take the first-subscriber path (metadata
+    // with no resync notice): a wrong-order test failure, not a server one
+    // (observed ~1 run in 8). The wedged stream reads its attach metadata,
+    // then goes silent -- everything after sits unread, which is the point.
+    v1::ServerEvent event;
+    REQUIRE(wedged->Read(&event));
+    REQUIRE(event.has_session_metadata());
+
     grpc::ClientContext live_context;
     auto live = fixture.stub->OpenSession(&live_context);
     REQUIRE(live->Write(naming));
 
-    // The wedged stream's attach notices sit unread from here on. The live
-    // stream attached SECOND: it is told to resync (it missed the wedged
-    // stream's window) before its own metadata.
-    v1::ServerEvent event;
+    // The live stream attached deterministically SECOND: it is told to
+    // resync (it missed the wedged stream's window) before its own metadata.
     REQUIRE(live->Read(&event));
     REQUIRE(event.has_resync_required());
     REQUIRE(live->Read(&event));
     REQUIRE(event.has_session_metadata());
 
     REQUIRE(live->Write(ChatTurn(session_id, "hello")));
-    // The live stream sees the whole turn -- the wedged one never reads, so
-    // this proves delivery does not wait on it.
+    // The live stream sees the whole turn -- the wedged one stopped reading
+    // after its attach metadata, so this proves delivery does not wait on it.
     CHECK(WaitForTurnCompleted(*live));
 
-    // The session survived the wedged reader; the wedged stream was served
-    // its attach notices (it just never consumed them).
+    // The session survived the wedged reader.
     CHECK(fixture.sessions->Find(session_id) != nullptr);
     (void)DrainAndFinish(live);
     (void)DrainAndFinish(wedged);
