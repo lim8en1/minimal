@@ -348,8 +348,15 @@ PreparedInvocation ToolExecutor::PrepareGuarded(const std::string& tool_use_id,
 
             const PermissionResponse response = checker_.check(request);
             if (response.decision == PermissionDecision::Deny) {
-                prepared.denial =
-                    ErrorResult(tool_use_id, "permission denied by user for tool: " + tool_name);
+                // The operator's message is the whole point of "deny with
+                // message": the model reads WHY, not just that it was refused.
+                std::string text = "permission denied by user for tool: " + tool_name;
+                if (!response.deny_message.empty()) {
+                    text += "\nmessage from the user: " + response.deny_message;
+                }
+                if (response.stop_turn) text += "\nthe user stopped the turn here";
+                prepared.denial = ErrorResult(tool_use_id, text);
+                prepared.stop_turn = response.stop_turn;
                 return prepared;
             }
             // Only keys this invocation actually disclosed may be remembered: a

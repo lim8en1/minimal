@@ -526,3 +526,15 @@ TEST_CASE("denying with grant keys attached still denies", "[proto_convert]") {
 
     CHECK(FromProto(response, offered).decision == tools::PermissionDecision::Deny);
 }
+
+TEST_CASE("a deny's message and stop ride through the wire conversion", "[proto_convert]") {
+    v1::PermissionResponse response;
+    response.set_decision(v1::PERMISSION_DECISION_DENY);
+    response.set_deny_message("use make -j4");
+    response.set_stop_turn(true);
+
+    const tools::PermissionResponse out = FromProto(response, tools::PermissionDisclosure{});
+    CHECK(out.decision == tools::PermissionDecision::Deny);
+    CHECK(out.deny_message == "use make -j4");
+    CHECK(out.stop_turn);
+}

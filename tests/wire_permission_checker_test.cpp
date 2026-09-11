@@ -97,6 +97,28 @@ TEST_CASE("a permission request round-trips to an answer", "[wire_permission]") 
     CHECK(response.granted_keys[0] == "bash:/usr/bin/make");
 }
 
+TEST_CASE("a deny's message and stop survive the wire checker", "[wire_permission]") {
+    auto harness = std::make_shared<Harness>();
+
+    auto answered = RunInBackground(
+        [harness] { return harness->checker.check(BashRequest()); });
+
+    const auto event = harness->Pop();
+    REQUIRE(event.has_value());
+    REQUIRE(event->has_permission_request());
+
+    rpc::PermissionAnswer answer = Answer(tools::PermissionDecision::Deny);
+    answer.deny_message = "not now";
+    answer.stop_turn = true;
+    CHECK(harness->pending.Resolve(event->permission_request().request_id(), std::move(answer)));
+
+    REQUIRE(answered.Ready());
+    const auto response = answered.Get();
+    CHECK(response.decision == tools::PermissionDecision::Deny);
+    CHECK(response.deny_message == "not now");
+    CHECK(response.stop_turn);
+}
+
 TEST_CASE("an unattended prompt with a configured timeout denies rather than hanging forever",
           "[wire_permission][S5]") {
     // sessions.unattended_prompt_timeout_seconds's fail-closed opt-in: with

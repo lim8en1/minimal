@@ -29,6 +29,13 @@ struct PermissionRequest {
 struct PermissionResponse {
     PermissionDecision decision = PermissionDecision::Deny;
     std::vector<std::string> granted_keys;  // must be keys from request.disclosure
+    // Deny-only refinements; ToolExecutor ignores both on Allow. The message
+    // is the operator's note to the model, carried into the denial result;
+    // stop_turn ends the turn after this round (PreparedInvocation::stop_turn).
+    // Default member initializers keep the existing `{decision, keys}`
+    // aggregate inits clean under -Wmissing-field-initializers.
+    std::string deny_message{};
+    bool stop_turn = false;
 };
 
 // Blocks the calling (session worker) thread until answered.

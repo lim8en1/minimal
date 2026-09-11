@@ -260,14 +260,20 @@ void TabMaintenance::MaintainModals(const SessionState::Snapshot& snap) {
             AppState& app = deps_.app;
             *deps_.permission_child = MakePermissionModal(
                 request, *toggles, deps_.theme,
-                [&app, session_id, request, toggles](bool allow) {
+                [&app, session_id, request, toggles](PermissionVerdict verdict) {
                     // granted_keys FILTERED to what this request offered
-                    // (GrantToggles reads the request's own offers).
+                    // (GrantToggles reads the request's own offers). Grants
+                    // ride only an allow; the message and the stop only a deny.
+                    const bool allow = verdict.choice == PermissionChoice::Allow;
                     app.AnswerPermission(session_id, request.request_id,
                                          allow ? v1::PERMISSION_DECISION_ALLOW
                                                : v1::PERMISSION_DECISION_DENY,
                                          allow ? toggles->GrantedKeys(request)
-                                               : std::vector<std::string>{});
+                                               : std::vector<std::string>{},
+                                         verdict.choice == PermissionChoice::DenyWithMessage
+                                             ? std::move(verdict.message)
+                                             : std::string{},
+                                         verdict.choice == PermissionChoice::DenyAndStop);
                 });
         }
         deps_.show_permission = true;

@@ -337,10 +337,10 @@ TEST_CASE("permission modal: answers after the caller's request snapshot dies") 
     // The callback owns its copy (RunTui's does too): GrantedKeys reads the
     // request AFTER the caller's snapshot is gone.
     const PendingPermission answer_source = *request;
-    std::optional<bool> answered;
+    std::optional<PermissionVerdict> answered;
     std::vector<std::string> keys;
-    auto modal = MakePermissionModal(*request, toggles, theme, [&](bool allow) {
-        answered = allow;
+    auto modal = MakePermissionModal(*request, toggles, theme, [&](PermissionVerdict verdict) {
+        answered = verdict;
         keys = toggles.GrantedKeys(answer_source);
     });
 
@@ -349,14 +349,19 @@ TEST_CASE("permission modal: answers after the caller's request snapshot dies") 
     const auto frame = RenderFrame(modal);
     CHECK(frame.find("bash") != std::string::npos);
     CHECK(frame.find("may reach more") != std::string::npos);   // lower-bound obligation
-    CHECK(frame.find("session grants:") != std::string::npos);  // per-binary offers present
+    CHECK(frame.find("session grants") != std::string::npos);   // per-binary offers present
+    // All four answers are listed, numbered in PermissionChoice order.
+    CHECK(frame.find("1. allow") != std::string::npos);
+    CHECK(frame.find("2. deny") != std::string::npos);
+    CHECK(frame.find("3. deny with message") != std::string::npos);
+    CHECK(frame.find("4. deny and stop") != std::string::npos);
 
     // Toggle the first grant (space on the focused checkbox), then allow: the
     // granted key is exactly what was offered, never minted.
     REQUIRE(SendEvent(modal, ftx::Event::Character(" ")));
     REQUIRE(SendEvent(modal, ftx::Event::Return));
     REQUIRE(answered.has_value());
-    CHECK(*answered);
+    CHECK(answered->choice == PermissionChoice::Allow);
     REQUIRE(keys.size() == 1);
     CHECK(keys[0] == "bash:/usr/bin/make");
 }
@@ -365,39 +370,38 @@ TEST_CASE("permission modal: Escape denies without recording grants") {
     const auto theme = TestTheme();
     GrantToggles toggles;
     const auto request = MakePermissionRequest();
-    std::optional<bool> answered;
+    std::optional<PermissionVerdict> answered;
     auto modal = MakePermissionModal(request, toggles, theme,
-                                     [&](bool allow) { answered = allow; });
+                                     [&](PermissionVerdict verdict) { answered = verdict; });
     REQUIRE(SendEvent(modal, ftx::Event::Escape));
     REQUIRE(answered.has_value());
-    CHECK_FALSE(*answered);
+    CHECK(answered->choice == PermissionChoice::Deny);
 }
 
 TEST_CASE("permission modal: with grants offered, the footer advertises tab/space") {
     const auto theme = TestTheme();
     GrantToggles toggles;
     const auto request = MakePermissionRequest();  // has two grants
-    auto modal = MakePermissionModal(request, toggles, theme, [](bool) {});
+    auto modal = MakePermissionModal(request, toggles, theme, [](PermissionVerdict) {});
     const auto frame = RenderFrame(modal);
-    CHECK(frame.find("tab/arrow: move") != std::string::npos);
-    CHECK(frame.find("toggle grants") != std::string::npos);
+    CHECK(frame.find("1-4: choose") != std::string::npos);
+    CHECK(frame.find("tab/space: grants") != std::string::npos);
 }
 
 TEST_CASE("permission modal: with no grants offered, the footer omits the dead "
           "tab/space affordances") {
-    // Regression: the footer used to always advertise "tab/arrow: move" and
-    // "space: toggle grants", even on a request with nothing to move between
-    // or toggle -- dead keys advertised on the security-decision surface.
+    // Regression: the footer used to always advertise the grant keys, even
+    // on a request with nothing to move between or toggle -- dead keys
+    // advertised on the security-decision surface.
     const auto theme = TestTheme();
     GrantToggles toggles;
     auto request = MakePermissionRequest();
     request.grants.clear();
-    auto modal = MakePermissionModal(request, toggles, theme, [](bool) {});
+    auto modal = MakePermissionModal(request, toggles, theme, [](PermissionVerdict) {});
     const auto frame = RenderFrame(modal);
-    CHECK(frame.find("enter: allow") != std::string::npos);
+    CHECK(frame.find("enter: confirm") != std::string::npos);
     CHECK(frame.find("esc: deny") != std::string::npos);
-    CHECK(frame.find("tab/arrow: move") == std::string::npos);
-    CHECK(frame.find("toggle grants") == std::string::npos);
+    CHECK(frame.find("tab/space") == std::string::npos);
 }
 
 TEST_CASE("permission modal: a Return as the FIRST event arms but does not "
@@ -408,33 +412,135 @@ TEST_CASE("permission modal: a Return as the FIRST event arms but does not "
     const auto theme = TestTheme();
     GrantToggles toggles;
     const auto request = MakePermissionRequest();
-    std::optional<bool> answered;
+    std::optional<PermissionVerdict> answered;
     auto modal = MakePermissionModal(request, toggles, theme,
-                                     [&](bool allow) { answered = allow; });
+                                     [&](PermissionVerdict verdict) { answered = verdict; });
 
-    // Whether the underlying checkbox container also consumes this first
-    // Return is incidental (FTXUI's own widget behavior); what matters is
-    // that on_answer must NOT have fired from it.
     SendEvent(modal, ftx::Event::Return);   // arms, does not approve
     CHECK_FALSE(answered.has_value());
 
     REQUIRE(SendEvent(modal, ftx::Event::Return));   // the user's real answer
     REQUIRE(answered.has_value());
-    CHECK(*answered);
+    CHECK(answered->choice == PermissionChoice::Allow);
 }
 
 TEST_CASE("permission modal: Escape still denies as the very first event") {
-    // Denying is the safe default; only the approve path needs an arming
+    // Denying is the safe default; only the other answers need an arming
     // delay.
     const auto theme = TestTheme();
     GrantToggles toggles;
     const auto request = MakePermissionRequest();
-    std::optional<bool> answered;
+    std::optional<PermissionVerdict> answered;
     auto modal = MakePermissionModal(request, toggles, theme,
-                                     [&](bool allow) { answered = allow; });
+                                     [&](PermissionVerdict verdict) { answered = verdict; });
     REQUIRE(SendEvent(modal, ftx::Event::Escape));
     REQUIRE(answered.has_value());
-    CHECK_FALSE(*answered);
+    CHECK(answered->choice == PermissionChoice::Deny);
+}
+
+TEST_CASE("permission modal: a digit as the FIRST event only selects; Return then "
+          "answers the selection") {
+    // The arming rule covers the deny answers too: a stray '4' must not stop
+    // the turn behind a prompt nobody has read.
+    const auto theme = TestTheme();
+    GrantToggles toggles;
+    const auto request = MakePermissionRequest();
+    std::optional<PermissionVerdict> answered;
+    auto modal = MakePermissionModal(request, toggles, theme,
+                                     [&](PermissionVerdict verdict) { answered = verdict; });
+
+    REQUIRE(SendEvent(modal, ftx::Event::Character("4")));
+    CHECK_FALSE(answered.has_value());
+    CHECK(RenderFrame(modal).find("❯ 4. deny and stop") != std::string::npos);
+
+    REQUIRE(SendEvent(modal, ftx::Event::Return));
+    REQUIRE(answered.has_value());
+    CHECK(answered->choice == PermissionChoice::DenyAndStop);
+}
+
+TEST_CASE("permission modal: once armed, a digit answers directly") {
+    const auto theme = TestTheme();
+    GrantToggles toggles;
+    const auto request = MakePermissionRequest();
+    std::optional<PermissionVerdict> answered;
+    auto modal = MakePermissionModal(request, toggles, theme,
+                                     [&](PermissionVerdict verdict) { answered = verdict; });
+
+    REQUIRE(SendEvent(modal, ftx::Event::ArrowDown));   // arms
+    CHECK_FALSE(answered.has_value());
+    REQUIRE(SendEvent(modal, ftx::Event::Character("2")));
+    REQUIRE(answered.has_value());
+    CHECK(answered->choice == PermissionChoice::Deny);
+}
+
+TEST_CASE("permission modal: arrows move the selection and clamp at both ends") {
+    const auto theme = TestTheme();
+    GrantToggles toggles;
+    const auto request = MakePermissionRequest();
+    std::optional<PermissionVerdict> answered;
+    auto modal = MakePermissionModal(request, toggles, theme,
+                                     [&](PermissionVerdict verdict) { answered = verdict; });
+
+    REQUIRE(SendEvent(modal, ftx::Event::ArrowUp));   // already at the top: stays
+    CHECK(RenderFrame(modal).find("❯ 1. allow") != std::string::npos);
+    for (int i = 0; i < 6; ++i) REQUIRE(SendEvent(modal, ftx::Event::ArrowDown));
+    CHECK(RenderFrame(modal).find("❯ 4. deny and stop") != std::string::npos);
+    REQUIRE(SendEvent(modal, ftx::Event::ArrowUp));
+    CHECK(RenderFrame(modal).find("❯ 3. deny with message") != std::string::npos);
+    CHECK_FALSE(answered.has_value());   // moving never answers
+}
+
+TEST_CASE("permission modal: deny with message collects typed text and sends it") {
+    const auto theme = TestTheme();
+    GrantToggles toggles;
+    const auto request = MakePermissionRequest();
+    std::optional<PermissionVerdict> answered;
+    auto modal = MakePermissionModal(request, toggles, theme,
+                                     [&](PermissionVerdict verdict) { answered = verdict; });
+
+    REQUIRE(SendEvent(modal, ftx::Event::Character("3")));   // arms + selects
+    REQUIRE(SendEvent(modal, ftx::Event::Character("3")));   // opens the input
+    CHECK_FALSE(answered.has_value());
+    CHECK(RenderFrame(modal).find("message:") != std::string::npos);
+    CHECK(RenderFrame(modal).find("enter: deny with this message") != std::string::npos);
+
+    // Typed text -- a space included -- goes to the input, never to the
+    // grant checkboxes behind it, and digits type rather than pick.
+    for (const char c : std::string(" use make -j4 ")) {
+        REQUIRE(SendEvent(modal, ftx::Event::Character(std::string(1, c))));
+    }
+    CHECK(toggles.GrantedKeys(request).empty());
+    CHECK_FALSE(answered.has_value());
+
+    REQUIRE(SendEvent(modal, ftx::Event::Return));
+    REQUIRE(answered.has_value());
+    CHECK(answered->choice == PermissionChoice::DenyWithMessage);
+    CHECK(answered->message == "use make -j4");   // trimmed
+}
+
+TEST_CASE("permission modal: Escape backs out of the message input; an empty "
+          "message degrades to a plain deny") {
+    const auto theme = TestTheme();
+    GrantToggles toggles;
+    const auto request = MakePermissionRequest();
+    std::optional<PermissionVerdict> answered;
+    auto modal = MakePermissionModal(request, toggles, theme,
+                                     [&](PermissionVerdict verdict) { answered = verdict; });
+
+    REQUIRE(SendEvent(modal, ftx::Event::ArrowDown));        // arms
+    REQUIRE(SendEvent(modal, ftx::Event::Character("3")));   // opens the input
+    REQUIRE(SendEvent(modal, ftx::Event::Escape));           // back, NOT a deny
+    CHECK_FALSE(answered.has_value());
+    CHECK(RenderFrame(modal).find("message:") == std::string::npos);
+
+    // Ctrl+C falls through to the root's turn-cancel, input open or not.
+    REQUIRE(SendEvent(modal, ftx::Event::Character("3")));
+    CHECK_FALSE(SendEvent(modal, ftx::Event::CtrlC));
+
+    REQUIRE(SendEvent(modal, ftx::Event::Return));   // nothing typed
+    REQUIRE(answered.has_value());
+    CHECK(answered->choice == PermissionChoice::Deny);
+    CHECK(answered->message.empty());
 }
 
 // ---------------------------------------------------------------------------

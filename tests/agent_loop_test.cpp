@@ -1672,6 +1672,98 @@ TEST_CASE("gating stays sequential in a parallel round: one ask, and the grant s
     CHECK_FALSE(ResultOf(results_message, 1).is_error);
 }
 
+namespace {
+
+// Answers in script order; the last answer repeats once the script runs out.
+class ScriptedPermissionChecker : public tools::PermissionChecker {
+public:
+    explicit ScriptedPermissionChecker(std::vector<tools::PermissionResponse> script)
+        : script_(std::move(script)) {}
+    tools::PermissionResponse check(const tools::PermissionRequest&) override {
+        const std::size_t index = std::min(asked, script_.size() - 1);
+        ++asked;
+        return script_[index];
+    }
+    std::size_t asked = 0;
+
+private:
+    std::vector<tools::PermissionResponse> script_;
+};
+
+std::string ResultText(const llm::Message& message, std::size_t index) {
+    const auto& block = ResultOf(message, index);
+    if (block.content.empty()) return {};
+    return std::get<llm::TextBlock>(block.content.front()).text;
+}
+
+// A gated tool whose grant the scripted checker never takes, so every call of
+// it prompts.
+FakeTool& AddGatedTool(Harness& h) {
+    h.executor_policy.read_only = tools::PermissionMode::Ask;
+    auto& tool = h.AddTool("gated");
+    tool.set_disclosure(tools::PermissionDisclosure{
+        "gated: /usr/bin/probe", {tools::GrantOffer{"k1", "allow /usr/bin/probe this session"}},
+        true});
+    return tool;
+}
+
+}  // namespace
+
+TEST_CASE("deny and stop ends the turn: no call of the round runs, no provider call follows",
+          "[agent_loop][permissions]") {
+    Harness h;
+    auto owned = std::make_unique<ScriptedPermissionChecker>(std::vector<tools::PermissionResponse>{
+        {tools::PermissionDecision::Allow, {}},
+        {tools::PermissionDecision::Deny, {}, {}, /*stop_turn=*/true}});
+    auto* checker = owned.get();
+    h.checker_override = std::move(owned);
+    auto& tool = AddGatedTool(h);
+
+    // No second response queued: a provider call after the stop would fail
+    // the turn instead of ending it Cancelled.
+    h.provider.PushResponse(
+        MultiToolUseResponse({{"t1", "gated"}, {"t2", "gated"}, {"t3", "gated"}}));
+    h.Build();
+
+    const auto result = h.loop->RunTurn(UserText("go"));
+
+    CHECK(result.stop_reason == llm::StopReason::Cancelled);
+    CHECK(result.provider_calls == 1);
+    CHECK(checker->asked == 2);   // t3 is answered without a prompt
+    CHECK(tool.calls.empty());    // t1 was allowed, but stop means stop
+    REQUIRE(h.store.messages.size() == 3);
+    const auto& results_message = h.store.messages[2];
+    REQUIRE(results_message.content.size() == 3);   // every tool_use answered
+    for (std::size_t i = 0; i < 3; ++i) CHECK(ResultOf(results_message, i).is_error);
+    CHECK(ResultText(results_message, 0).find("not run: the user stopped the turn") !=
+          std::string::npos);
+    CHECK(ResultText(results_message, 1).find("stopped the turn here") != std::string::npos);
+    CHECK(ResultText(results_message, 2).find("not run: the user stopped the turn") !=
+          std::string::npos);
+}
+
+TEST_CASE("deny with message hands the message to the model and the turn goes on",
+          "[agent_loop][permissions]") {
+    Harness h;
+    h.checker_override = std::make_unique<ScriptedPermissionChecker>(
+        std::vector<tools::PermissionResponse>{
+            {tools::PermissionDecision::Deny, {}, "run the tests first", false}});
+    auto& tool = AddGatedTool(h);
+
+    h.provider.PushResponse(MultiToolUseResponse({{"t1", "gated"}}));
+    h.provider.PushResponse(TextResponse("ok, running the tests"));
+    h.Build();
+
+    const auto result = h.loop->RunTurn(UserText("go"));
+
+    CHECK(result.stop_reason == llm::StopReason::EndTurn);
+    CHECK(result.provider_calls == 2);
+    CHECK(tool.calls.empty());
+    const auto& results_message = h.store.messages[2];
+    CHECK(ResultOf(results_message, 0).is_error);
+    CHECK(ResultText(results_message, 0).find("run the tests first") != std::string::npos);
+}
+
 TEST_CASE("a cancel mid-round still answers every tool_use and reports Cancelled",
           "[agent_loop][parallel][cancel]") {
     Harness h;

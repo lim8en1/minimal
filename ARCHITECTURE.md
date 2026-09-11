@@ -720,6 +720,8 @@ That lower bound has a floor the scanner owes rule 1, and it is the line between
 
 `ToolExecutor` remains the sole owner of the grant set; the checker only reports what the operator chose.
 
+**A denial has three shapes.** `PermissionResponse` also carries `deny_message` and `stop_turn`, both DENY-only — `ToolExecutor` ignores them on an allow, so a client cannot turn an approval into a stop or leak text into a successful result. A message is appended to the denial's tool result, so the model reads *why* it was refused instead of guessing. `stop_turn` sets `PreparedInvocation::stop_turn`; after the round's gating the agent loop answers every call of the round unrun — later calls without a prompt, earlier allowed ones without executing (gate-then-run means none has started) — persists the paired results, and ends the turn `Cancelled` with no further provider call. `Cancelled` because that is what happened: the operator halted the turn, and the headless exit code, the stop hook, and a subagent's parent all already read it that way. The TUI lists the four answers numbered — allow / deny / deny with message / deny and stop — with ↑/↓ or 1–4 to pick, and "deny with message" opens an inline input (Enter sends, Escape backs out, an empty message degrades to a plain deny). The arming rule widens with it: the modal's first event answers nothing but Escape, so a stray digit cannot stop a turn behind an unread prompt.
+
 ## `/`-command system — `src/server/commands/`
 
 Harness-level control operations dispatched from the client over the bidi stream and executed as code — they bypass the agent turn loop and the LLM entirely, except `LLMCommand`s which deliberately touch the provider.

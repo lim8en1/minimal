@@ -631,6 +631,8 @@ tools::PermissionResponse FromProto(const v1::PermissionResponse& response,
                                     const tools::PermissionDisclosure& offered) {
     tools::PermissionResponse out;
     out.decision = FromProto(response.decision());
+    out.deny_message = response.deny_message();
+    out.stop_turn = response.stop_turn();
     // A grant key is only meaningful as the answer to something we asked. Taking
     // arbitrary keys off the wire would let a client mint permissions for
     // binaries no prompt ever showed a human -- the exact failure the disclosure

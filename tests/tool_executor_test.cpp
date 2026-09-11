@@ -84,6 +84,73 @@ TEST_CASE("a denied tool never executes", "[tool_executor]") {
     CHECK(checker.seen.size() == 1);
 }
 
+namespace {
+
+class FixedResponseChecker : public tools::PermissionChecker {
+public:
+    explicit FixedResponseChecker(tools::PermissionResponse response)
+        : response_(std::move(response)) {}
+    tools::PermissionResponse check(const tools::PermissionRequest&) override { return response_; }
+
+private:
+    tools::PermissionResponse response_;
+};
+
+}  // namespace
+
+TEST_CASE("a deny with a message carries the message into the denial result",
+          "[tool_executor]") {
+    Fixture f;
+    f.AddTool("write", ToolCategory::FileWrite);
+    FixedResponseChecker checker(
+        {tools::PermissionDecision::Deny, {}, "use the edit tool instead", false});
+    tools::PermissionPolicy policy;
+    policy.file_write = PermissionMode::Ask;
+
+    tools::ToolExecutor executor(f.registry, checker, policy, {}, PermissionRunMode::Normal);
+    auto ctx = f.Context();
+    const auto prepared = executor.Prepare("tu1", "write", nlohmann::json::object(), ctx);
+
+    REQUIRE(prepared.denial.has_value());
+    CHECK(prepared.denial->is_error);
+    CHECK(TextOf(*prepared.denial).find("permission denied by user") != std::string::npos);
+    CHECK(TextOf(*prepared.denial).find("use the edit tool instead") != std::string::npos);
+    CHECK_FALSE(prepared.stop_turn);
+}
+
+TEST_CASE("deny and stop flags the prepared invocation", "[tool_executor]") {
+    Fixture f;
+    f.AddTool("write", ToolCategory::FileWrite);
+    FixedResponseChecker checker({tools::PermissionDecision::Deny, {}, {}, true});
+    tools::PermissionPolicy policy;
+    policy.file_write = PermissionMode::Ask;
+
+    tools::ToolExecutor executor(f.registry, checker, policy, {}, PermissionRunMode::Normal);
+    auto ctx = f.Context();
+    const auto prepared = executor.Prepare("tu1", "write", nlohmann::json::object(), ctx);
+
+    REQUIRE(prepared.denial.has_value());
+    CHECK(prepared.stop_turn);
+    CHECK(TextOf(*prepared.denial).find("stopped the turn") != std::string::npos);
+}
+
+TEST_CASE("an allow ignores a stray deny message and stop", "[tool_executor]") {
+    // Both fields refine a DENY; a client attaching them to an allow must not
+    // turn it into a stop or leak text into a successful result.
+    Fixture f;
+    f.AddTool("write", ToolCategory::FileWrite);
+    FixedResponseChecker checker({tools::PermissionDecision::Allow, {}, "ignored", true});
+    tools::PermissionPolicy policy;
+    policy.file_write = PermissionMode::Ask;
+
+    tools::ToolExecutor executor(f.registry, checker, policy, {}, PermissionRunMode::Normal);
+    auto ctx = f.Context();
+    const auto prepared = executor.Prepare("tu1", "write", nlohmann::json::object(), ctx);
+
+    CHECK_FALSE(prepared.denial.has_value());
+    CHECK_FALSE(prepared.stop_turn);
+}
+
 TEST_CASE("AlwaysDeny short-circuits before reaching the checker", "[tool_executor]") {
     Fixture f;
     f.AddTool("bash", ToolCategory::Execute);

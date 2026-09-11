@@ -573,6 +573,8 @@ void SessionServiceImpl::Dispatch(const v1::ClientEvent& event, agent::Session& 
             answer.decision = FromProto(permission_response.decision());
             answer.granted_keys.assign(permission_response.granted_keys().begin(),
                                        permission_response.granted_keys().end());
+            answer.deny_message = permission_response.deny_message();
+            answer.stop_turn = permission_response.stop_turn();
             if (Transport(session).pending().Resolve(request_id, std::move(answer))) {
                 PublishPromptResolved(session, request_id);
             }
