@@ -292,58 +292,90 @@ ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
         column.push_back(text("··· some messages in this window could not be loaded ···") |
                          dim | color(theme_.ColorFor("system_message")));
     }
-    // Tracks which column index each ROW's first element landed at, so the
-    // row cursor (focused_row_) can mark the right element for scrolling and
-    // highlighting below -- a row can be several Elements wide (parts.size()
-    // varies per kind), so "row index" and "column index" are not the same
-    // number.
-    std::vector<std::size_t> row_start_index;
-    row_start_index.reserve(rendered_rows_.size());
-    // One box slot per row part; ToggleCollapseAt hit-tests these against a
-    // click's screen y. Cleared with the frame: the spies that fill them die
-    // with the previous frame's element tree.
-    row_boxes_.clear();
-    row_boxes_.reserve(rendered_rows_.size());
-    for (std::size_t i = 0; i < rendered_rows_.size(); ++i) {
-        row_start_index.push_back(column.size());
-        auto& parts = rendered_rows_[i];
-        const bool is_focused = focused_row_.has_value() && i < row_keys_.size() &&
-                                row_keys_[i] == *focused_row_;
-        std::vector<std::shared_ptr<ftxui::Box>> boxes;
-        boxes.reserve(parts.size());
-        for (std::size_t p = 0; p < parts.size(); ++p) {
-            Element part = parts[p];
-            // The row cursor: a left-edge marker on the row's FIRST element
-            // only (a whole-row background tint would fight a code block's
-            // own coloring) -- subtle, since this is a cursor to navigate
-            // from, not a selection to fight visually.
-            if (is_focused && p == 0) {
-                part = hbox({text("▏") | color(theme_.ColorFor("row_focused")), std::move(part) | flex});
-            }
-            // The timestamp rides the row's FIRST element (its label line),
-            // right-aligned via a flex gap -- it used to get its own row
-            // below the whole thing, plus the blank line after THAT, which
-            // was 3 lines of chrome per message and visually glued the
-            // stamp to the NEXT speaker rather than the row it timed.
-            if (p == 0 && show_timestamps_ && i < row_timestamps_.size()) {
-                const auto stamp = FormatClockTime(row_timestamps_[i]);
-                if (!stamp.empty()) {
-                    part = hbox({std::move(part) | flex,
-                                text(stamp) | dim | color(theme_.ColorFor("system_message"))});
+    // Assembly cache: the box/spy wrapping, row-cursor highlight, and
+    // timestamp formatting below only need to redo their work when one of
+    // these five things changes -- not on every FTXUI repaint (a mouse
+    // move, an unrelated editor keystroke used to redo this whole O(rows)
+    // walk, including a make_shared<Box> + make_shared<RowBoxSpy>
+    // allocation and a localtime_r/snprintf call per row PART, every single
+    // call). scroll_from_bottom_ is deliberately NOT a key: it only affects
+    // which element gets focus() applied below, not any row's content.
+    const bool assembly_stale =
+        !assembly_valid_ || assembled_version_ != rendered_version_ ||
+        assembled_session_id_ != rendered_session_id_ ||
+        assembled_collapse_epoch_ != rendered_collapse_epoch_ ||
+        assembled_show_timestamps_ != show_timestamps_ ||
+        assembled_focused_row_ != focused_row_;
+    if (assembly_stale) {
+        assembled_column_rows_.clear();
+        assembled_column_rows_.reserve(rendered_rows_.size() * 2);
+        // Tracks which assembled_column_rows_ index each ROW's first
+        // element landed at (RELATIVE to the start of the assembled rows,
+        // not the final column -- the preamble above is rebuilt fresh every
+        // call and its length is added back in below), so the row cursor
+        // (focused_row_) can mark the right element for scrolling and
+        // highlighting -- a row can be several Elements wide (parts.size()
+        // varies per kind), so "row index" and "element index" are not the
+        // same number.
+        assembled_row_start_index_.clear();
+        assembled_row_start_index_.reserve(rendered_rows_.size());
+        // One box slot per row part; ToggleCollapseAt hit-tests these against
+        // a click's screen y.
+        row_boxes_.clear();
+        row_boxes_.reserve(rendered_rows_.size());
+        for (std::size_t i = 0; i < rendered_rows_.size(); ++i) {
+            assembled_row_start_index_.push_back(assembled_column_rows_.size());
+            auto& parts = rendered_rows_[i];
+            const bool is_focused = focused_row_.has_value() && i < row_keys_.size() &&
+                                    row_keys_[i] == *focused_row_;
+            std::vector<std::shared_ptr<ftxui::Box>> boxes;
+            boxes.reserve(parts.size());
+            for (std::size_t p = 0; p < parts.size(); ++p) {
+                Element part = parts[p];
+                // The row cursor: a left-edge marker on the row's FIRST element
+                // only (a whole-row background tint would fight a code block's
+                // own coloring) -- subtle, since this is a cursor to navigate
+                // from, not a selection to fight visually.
+                if (is_focused && p == 0) {
+                    part = hbox({text("▏") | color(theme_.ColorFor("row_focused")), std::move(part) | flex});
                 }
+                // The timestamp rides the row's FIRST element (its label line),
+                // right-aligned via a flex gap -- it used to get its own row
+                // below the whole thing, plus the blank line after THAT, which
+                // was 3 lines of chrome per message and visually glued the
+                // stamp to the NEXT speaker rather than the row it timed.
+                if (p == 0 && show_timestamps_ && i < row_timestamps_.size()) {
+                    const auto stamp = FormatClockTime(row_timestamps_[i]);
+                    if (!stamp.empty()) {
+                        part = hbox({std::move(part) | flex,
+                                    text(stamp) | dim | color(theme_.ColorFor("system_message"))});
+                    }
+                }
+                // Outermost wrap, after the focus/timestamp decoration: the spy
+                // records the box of exactly what is pushed into the column (the
+                // layout-visible position), whatever the decorations did to the
+                // width. Baked in at ASSEMBLY time, never into the cached
+                // Elements -- a cache hit must not accumulate one spy per frame.
+                auto slot = std::make_shared<ftxui::Box>();
+                boxes.push_back(slot);
+                assembled_column_rows_.push_back(
+                    std::make_shared<RowBoxSpy>(std::move(slot), std::move(part)));
             }
-            // Outermost wrap, after the focus/timestamp decoration: the spy
-            // records the box of exactly what is pushed into the column (the
-            // layout-visible position), whatever the decorations did to the
-            // width. Baked in at ASSEMBLY time, never into the cached
-            // Elements -- a cache hit must not accumulate one spy per frame.
-            auto slot = std::make_shared<ftxui::Box>();
-            boxes.push_back(slot);
-            column.push_back(std::make_shared<RowBoxSpy>(std::move(slot), std::move(part)));
+            assembled_column_rows_.push_back(text(" "));  // breathing room between rows
+            row_boxes_.push_back(std::move(boxes));
         }
-        column.push_back(text(" "));  // breathing room between rows
-        row_boxes_.push_back(std::move(boxes));
+        assembled_version_ = rendered_version_;
+        assembled_session_id_ = rendered_session_id_;
+        assembled_collapse_epoch_ = rendered_collapse_epoch_;
+        assembled_show_timestamps_ = show_timestamps_;
+        assembled_focused_row_ = focused_row_;
+        assembly_valid_ = true;
     }
+    const std::size_t preamble_len = column.size();
+    column.insert(column.end(), assembled_column_rows_.begin(), assembled_column_rows_.end());
+    std::vector<std::size_t> row_start_index;
+    row_start_index.reserve(assembled_row_start_index_.size());
+    for (const auto offset : assembled_row_start_index_) row_start_index.push_back(preamble_len + offset);
 
     // The turn the user JUST submitted, echoed optimistically (state.cpp's
     // OnChatSubmitted): rendered through the same UserText renderer the
@@ -419,7 +451,19 @@ ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
             // same way RenderLiveToolRow reads its state.
             if (segment.text.empty()) continue;
             column.push_back(text("▎thinking") | color(theme_.ColorFor("thinking")) | dim);
-            column.push_back(paragraph(segment.text) | color(theme_.ColorFor("thinking")));
+            // paragraph() word-wraps the WHOLE accumulated text; skip redoing
+            // that on a repaint tick with no new delta (a mouse move, a
+            // keystroke elsewhere) by reusing the cached Element when this
+            // segment's text hasn't changed since the last render.
+            ftxui::Element thinking_body;
+            if (i < thinking_render_cache_.size() && thinking_render_cache_[i].first == segment.text) {
+                thinking_body = thinking_render_cache_[i].second;
+            } else {
+                thinking_body = paragraph(segment.text) | color(theme_.ColorFor("thinking"));
+                if (i >= thinking_render_cache_.size()) thinking_render_cache_.resize(i + 1);
+                thinking_render_cache_[i] = {segment.text, thinking_body};
+            }
+            column.push_back(thinking_body);
             column.push_back(text(" "));
         } else if (segment.kind == LiveTurnSegment::Kind::Tool) {
             const ToolExecutionState* tool = nullptr;

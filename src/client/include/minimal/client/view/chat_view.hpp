@@ -180,11 +180,37 @@ private:
     // wraps every part in. FTXUI assigns each Node its final box during the
     // screen's layout pass -- AFTER yframe's scroll offset has been applied
     // to the subtree's coordinate space -- so these are true screen
-    // coordinates and a mouse y maps straight onto a row. Rebuilt every
-    // Render(); a row whose parts rendered empty holds an empty inner vector
-    // (nothing to hit). The slots are shared with the (replaced-each-frame)
-    // element tree, so no lifetime beyond the current frame is implied.
+    // coordinates and a mouse y maps straight onto a row. Rebuilt only when
+    // the assembly cache below is stale (a row whose parts rendered empty
+    // holds an empty inner vector -- nothing to hit); the box VALUES still
+    // refresh every Render() regardless, since FTXUI's layout pass runs over
+    // whatever Element tree is live that frame whether it's freshly built or
+    // reused from the cache. The slots are shared with the element tree, so
+    // no lifetime beyond the frame(s) that tree is current for is implied.
     std::vector<std::vector<std::shared_ptr<ftxui::Box>>> row_boxes_;
+
+    // Assembly cache for the per-row loop in Render(): the box/spy wrapping,
+    // row-cursor highlight, and timestamp formatting only need to redo their
+    // work when one of the five fields below changes -- not on every FTXUI
+    // repaint (mouse move, an unrelated editor keystroke). Offsets in
+    // assembled_row_start_index_ are RELATIVE to the start of
+    // assembled_column_rows_ (the preamble markers above it are cheap and
+    // still rebuilt fresh every call).
+    ftxui::Elements assembled_column_rows_;
+    std::vector<std::size_t> assembled_row_start_index_;
+    bool assembly_valid_ = false;
+    uint64_t assembled_version_ = 0;
+    std::string assembled_session_id_;
+    uint64_t assembled_collapse_epoch_ = 0;
+    bool assembled_show_timestamps_ = true;
+    std::optional<RowKey> assembled_focused_row_;
+
+    // Thinking segments render as plain text with no debounced reparse view
+    // (unlike Text segments' MarkdownEngine::Stream) -- paragraph() re-wraps
+    // the WHOLE accumulated text every Render() call otherwise, even on a
+    // repaint tick with no new delta. Keyed by live_segments index; any text
+    // mismatch (new turn, or genuinely new content) is simply a cache miss.
+    std::vector<std::pair<std::string, ftxui::Element>> thinking_render_cache_;
 };
 
 }  // namespace minimal::client

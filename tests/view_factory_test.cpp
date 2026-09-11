@@ -142,6 +142,17 @@ SessionState::Snapshot SnapshotWithRows(const std::string& session_id, uint64_t 
     return snap;
 }
 
+// Whether the row-cursor marker (on the row's FIRST element, i.e. its
+// header line -- the row's own text sits on the line(s) after it) is
+// immediately followed, within the row's own block, by `row_text`.
+bool CursorMarkerPrecedes(const std::string& frame, std::string_view row_text) {
+    const std::size_t marker = frame.find("▏");
+    if (marker == std::string::npos) return false;
+    const std::size_t window_end = std::min(frame.size(), marker + 200);
+    return frame.find(row_text, marker) != std::string::npos &&
+           frame.find(row_text, marker) < window_end;
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -1287,6 +1298,109 @@ TEST_CASE("chat view: ScrollToBottom resets the anchor directly, not just relati
         RenderElement(view.Render(snapshot) | ftx::yframe, /*width=*/40, /*height=*/8);
     CHECK(back == pinned);
     CHECK(back.find("row-39") != std::string::npos);
+}
+
+// ---------------------------------------------------------------------------
+// Render() assembly cache (the per-row loop is redone only when something
+// that affects it changes, not on every call)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("chat view: the row-cursor highlight moves after a render with no transcript change",
+          "[chat_view]") {
+    // The bug an under-invalidated assembly cache would reintroduce: moving
+    // the row cursor (MoveRowFocus) changes no transcript_version/session_id/
+    // collapse_epoch, so a cache keyed only on those would keep showing the
+    // marker on the OLD row forever.
+    const auto theme = TestTheme();
+    minimal::client::MarkdownRenderer renderer(&theme, nullptr);
+    plugins::MarkdownEngineRegistry engine_registry;
+    plugins::RegisterDefaultMarkdownEngine(engine_registry, renderer);
+    auto& engine = *engine_registry.engine;
+    plugins::MessageRendererRegistry messages;
+    plugins::ToolResultRendererRegistry tool_renderers;
+    plugins::RegisterCoreMessageRenderers(messages);
+    plugins::RegisterCoreAgentMarkdownRenderer(messages, engine);
+
+    ChatView view(theme, messages, tool_renderers);
+    const auto snapshot = SnapshotWithRows("session-cursor-move", 1, 5);
+
+    RenderElement(view.Render(snapshot));   // first pass: builds row_keys_ for MoveRowFocus
+    view.MoveRowFocus(0);                   // starts at the newest row (row-4)
+    const auto at_newest = RenderElement(view.Render(snapshot), /*width=*/40, /*height=*/20);
+    CHECK(CursorMarkerPrecedes(at_newest, "row-4"));
+    CHECK_FALSE(CursorMarkerPrecedes(at_newest, "row-0"));
+
+    view.MoveRowFocus(4);   // toward older rows: row-4 -> row-0
+    const auto at_oldest = RenderElement(view.Render(snapshot), /*width=*/40, /*height=*/20);
+    CHECK(at_oldest != at_newest);
+    CHECK(CursorMarkerPrecedes(at_oldest, "row-0"));
+    CHECK_FALSE(CursorMarkerPrecedes(at_oldest, "row-4"));
+}
+
+TEST_CASE("chat view: toggling timestamps updates the render with no transcript change",
+          "[chat_view]") {
+    // Same class of bug as the row-cursor test above: ToggleTimestamps()
+    // changes no transcript_version/session_id/collapse_epoch either.
+    const auto theme = TestTheme();
+    minimal::client::MarkdownRenderer renderer(&theme, nullptr);
+    plugins::MarkdownEngineRegistry engine_registry;
+    plugins::RegisterDefaultMarkdownEngine(engine_registry, renderer);
+    auto& engine = *engine_registry.engine;
+    plugins::MessageRendererRegistry messages;
+    plugins::ToolResultRendererRegistry tool_renderers;
+    plugins::RegisterCoreMessageRenderers(messages);
+    plugins::RegisterCoreAgentMarkdownRenderer(messages, engine);
+
+    ChatView view(theme, messages, tool_renderers);
+    v1::StoredMessage stored = StoredUserText(1, "hello");
+    stored.set_created_at_unix_ms(1700000000000LL);
+    SessionState::Snapshot snap;
+    snap.session_id = "session-timestamps";
+    snap.transcript_version = 1;
+    snap.scrollback_page = std::make_shared<const std::vector<v1::StoredMessage>>(
+        std::vector<v1::StoredMessage>{stored});
+
+    const std::string stamp = FormatClockTime(1700000000000LL);
+    REQUIRE_FALSE(stamp.empty());
+    const auto with_stamp = RenderElement(view.Render(snap));
+    CHECK(with_stamp.find(stamp) != std::string::npos);
+
+    view.ToggleTimestamps();
+    const auto without_stamp = RenderElement(view.Render(snap));
+    CHECK(without_stamp.find(stamp) == std::string::npos);
+}
+
+TEST_CASE("chat view: a growing thinking segment renders its full text, not a stale "
+         "cached prefix",
+          "[chat_view]") {
+    // paragraph() over a live Thinking segment is cached by text equality
+    // (see chat_view.cpp) -- a genuinely grown text must be a cache MISS,
+    // not silently keep showing the shorter, earlier version.
+    const auto theme = TestTheme();
+    minimal::client::MarkdownRenderer renderer(&theme, nullptr);
+    plugins::MarkdownEngineRegistry engine_registry;
+    plugins::RegisterDefaultMarkdownEngine(engine_registry, renderer);
+    auto& engine = *engine_registry.engine;
+    plugins::MessageRendererRegistry messages;
+    plugins::ToolResultRendererRegistry tool_renderers;
+    plugins::RegisterCoreMessageRenderers(messages);
+    plugins::RegisterCoreAgentMarkdownRenderer(messages, engine);
+
+    ChatView view(theme, messages, tool_renderers);
+    SessionState::Snapshot snap;
+    snap.session_id = "session-thinking-grow";
+    snap.transcript_version = 1;
+    LiveTurnSegment segment;
+    segment.kind = LiveTurnSegment::Kind::Thinking;
+    segment.text = "short reasoning";
+    snap.live_segments = {segment};
+
+    const auto first = RenderElement(view.Render(snap), /*width=*/80, /*height=*/10);
+    CHECK(first.find("short reasoning") != std::string::npos);
+
+    snap.live_segments[0].text += " plus a lot more reasoning appended afterward";
+    const auto second = RenderElement(view.Render(snap), /*width=*/80, /*height=*/10);
+    CHECK(second.find("plus a lot more reasoning appended afterward") != std::string::npos);
 }
 
 // ---------------------------------------------------------------------------
