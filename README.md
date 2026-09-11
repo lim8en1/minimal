@@ -100,7 +100,9 @@ into `<config>/plugins/`, enable/disable or reconfigure any plugin in
 
 Markdown-defined `/`-commands work zero-copy with opencode's layout: put
 `.md` files in the project's `commands/` or `.opencode/commands/`, or the
-config dir's `commands/` — see **[docs/CONFIGURATION.md](docs/CONFIGURATION.md)**.
+config dir's `commands/` — walkthrough in
+**[docs/COMMANDS_HOWTO.md](docs/COMMANDS_HOWTO.md)**, reference in
+**[docs/CONFIGURATION.md](docs/CONFIGURATION.md)**.
 
 ## Development
 

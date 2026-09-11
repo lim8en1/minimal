@@ -3,6 +3,10 @@
 Markdown-defined `/-commands`: drop a `.md` file in a commands directory and it
 becomes a `/command`. One plugin, no configuration.
 
+Authoring walkthrough with runnable examples:
+**[docs/COMMANDS_HOWTO.md](../../../docs/COMMANDS_HOWTO.md)**; the field
+reference is CONFIGURATION.md § commands/.
+
 ## What it adds
 
 - **Commands**: one per markdown file, named by the file stem

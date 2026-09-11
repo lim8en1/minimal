@@ -568,6 +568,8 @@ shows through.
 ## commands/ (custom slash-commands, `commands-md` plugin)
 
 Every `commands/*.md` file becomes a `/`-command (the file stem is the name).
+Step-by-step walkthrough with runnable examples:
+**[docs/COMMANDS_HOWTO.md](COMMANDS_HOWTO.md)**.
 Discovery merges `<config>/commands/`, the project's `commands/`, and the
 project's `.opencode/commands/` (opencode's layout, so existing command files
 work zero-copy); the nearest directory wins a stem collision. The composed
@@ -594,7 +596,11 @@ Deploy {env} from {branch} per {output:summary.plan}.
 - **The body is inert.** It is a single-pass render of already-evaluated
   values: `{name}` (args, optionals, source names, `{args}`, positionals
   `{1}`..), `{output:source.field}` for JSON sources. Inserted values are never
-  re-scanned. Unknown placeholders are a hard error — nothing is submitted.
+  re-scanned. Substitution is KNOWN-NAMES-ONLY and lenient: an unknown
+  `{token}` passes through as literal text (identifier-shaped ones warn once
+  per render — that is how a typo surfaces); a truly empty composed prompt,
+  a missing required argument, or a failed source is a hard error and
+  nothing is submitted.
 - **Sources are flat**, evaluated in declaration order, no cross-references.
   Substitution in argv/scripts is lenient (only known names substitute; JSON
   and shell braces pass through). An unfilled optional renders empty in the

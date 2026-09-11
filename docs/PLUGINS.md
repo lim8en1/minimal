@@ -24,7 +24,7 @@ Installed to `<libdir>/minimal/plugins/server/`. All enabled by default unless n
 | `provider-openai` | Provider kind `openai` (chat-completions shape) + model catalog for it |
 | `provider-anthropic` | Provider kind `anthropic` (Messages API, prompt caching) |
 | `commands-core` | Commands `/help`, `/clear`, `/compact`, `/agent`, `/model`, `/sessions`, `/connect` (stores a provider credential in `<data dir>/auth.json`) |
-| `commands-md` | Turns `commands/*.md` files into `/`-commands (config dir, project, and `.opencode/commands/`; opencode-syntax desugaring — see CONFIGURATION.md) |
+| `commands-md` | Turns `commands/*.md` files into `/`-commands (config dir, project, and `.opencode/commands/`; opencode-syntax desugaring — see CONFIGURATION.md, how-to in COMMANDS_HOWTO.md) |
 | `checklist` | Tool `checklist` + cross-plugin RPC endpoint `checklist.rpc` |
 | `signals-message` | Tool `message_session` (cross-session messaging on the core `signals` service) |
 | `cost-tracker` | Commands `/cost`, `/cost-update-rates`; per-session cost accumulation; RPC endpoint `cost-tracker.rpc` |
