@@ -42,6 +42,22 @@ TEST_CASE("unknown or anomalous cost renders as cost?, never as $0.0000") {
               .value_or("") == "cost? · 0/0 tok");
 }
 
+TEST_CASE("a partially-known total (mixed priced/unpriced models) shows a floor, not cost?") {
+    // The local -> cloud mid-session model switch: the cloud model's turns
+    // priced fine, the local model's did not, so total_cost_known is false
+    // but total_cost is a real, non-zero partial sum. Discarding it (the old
+    // two-way rule) hid real spend; the fix mirrors CostCell's ">= $X" floor.
+    const nlohmann::json totals{{"turns", 5},
+                                {"total_cost_known", false},
+                                {"total_cost", 0.42},
+                                {"unpriced_turns", 2},
+                                {"models", nlohmann::json::array({
+                                     nlohmann::json{{"input_tokens", 10'000},
+                                                    {"output_tokens", 7'000}},
+                                 })}};
+    CHECK(FormatTotals(totals).value_or("") == ">= $0.42 · 10.0k/7.0k tok (+unpriced)");
+}
+
 TEST_CASE("known totals format normally") {
     const nlohmann::json totals{{"turns", 3},
                                 {"total_cost_known", true},

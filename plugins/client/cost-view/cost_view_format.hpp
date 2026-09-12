@@ -7,6 +7,11 @@
 // Rules the tests pin down:
 //   - "$0.00" must never stand in for "unknown": an absent or non-finite
 //     cost renders as the literal "cost?" marker, chosen by FormatTotals.
+//   - A PARTIALLY known total (some models priced, some not -- a mid-session
+//     model switch is the common case) renders as a ">= $X" floor, never as
+//     the bare "cost?" marker: the real accumulated dollars are real, even
+//     though the true total could be higher. Same three-way rule
+//     cost_command.cpp's CostCell() uses for the /cost table.
 //   - Token counts tier at k/M/G; extreme values never truncate mid-number.
 
 #include <cstdint>
@@ -73,6 +78,11 @@ inline std::optional<std::string> FormatTotals(const nlohmann::json& totals) {
     const double total = totals.value("total_cost", 0.0);
     if (known && total >= 0.0) {
         text = FormatCost(total);
+    } else if (total > 0.0) {
+        // Partially known: at least one model's turns priced (the sum is
+        // real), at least one did not (a model switch mid-session is the
+        // common trigger). A floor beats discarding the real dollars spent.
+        text = ">= " + FormatCost(total);
     } else {
         text = "cost?";
     }
