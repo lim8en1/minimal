@@ -26,7 +26,7 @@ target_link_libraries(minimal_common PUBLIC spdlog::spdlog SQLite3::SQLite3)
 target_compile_definitions(minimal_common
     PUBLIC
         MINIMAL_ABI_TAG="${MINIMAL_ABI_TAG}"
-        MINIMAL_VERSION="${PROJECT_VERSION}"
+        MINIMAL_VERSION="${PROJECT_VERSION}${MINIMAL_VERSION_SUFFIX}"
     # The plugin install location, PRIVATE because only bundled_assets.cpp
     # resolves it, and it must be the SAME value CMake installs to -- it used to
     # be hardcoded in the lookup, so overriding the cache variable moved the

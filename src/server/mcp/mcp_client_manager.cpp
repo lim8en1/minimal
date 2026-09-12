@@ -323,7 +323,7 @@ bool McpClientManager::StartHandle(const config::McpServerEntry& entry, ServerHa
 
     McpConnection::Failure failure;
     auto connection = McpConnection::Open(ToEndpoint(*resolved), limits_, "minimal-server",
-                                          "0.1.0", failure, sink);
+                                          "1.0.0b", failure, sink);
     if (!connection) {
         error = "MCP server '" + entry.name + "' failed to connect: " + failure.message;
         return false;

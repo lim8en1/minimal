@@ -95,9 +95,14 @@ if(NOT MINIMAL_TRIPLET_MIGRATED)
 endif()
 
 project(minimal
-    VERSION 0.1.0
+    VERSION 1.0.0
     DESCRIPTION "Local-first coding-agent harness"
     LANGUAGES C CXX)  # C for the vendored tree-sitter grammar sources
+
+# Beta marker appended to the user-visible version string (MINIMAL_VERSION).
+# project(VERSION) only accepts numeric components, so the suffix lives here --
+# library VERSION/SOVERSION stay numeric (1.0.0/1); set to "" for a final release.
+set(MINIMAL_VERSION_SUFFIX "b")
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

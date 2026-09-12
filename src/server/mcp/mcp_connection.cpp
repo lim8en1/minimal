@@ -19,7 +19,7 @@ namespace {
 
 constexpr const char* kProtocolVersion = "2025-03-26";
 constexpr const char* kClientName = "minimal";
-constexpr const char* kClientVersion = "0.1.0";
+constexpr const char* kClientVersion = "1.0.0b";
 
 // Completion slot for one call. Shared between caller and worker: the caller
 // may give up on deadline or cancellation while the job still runs, so the
