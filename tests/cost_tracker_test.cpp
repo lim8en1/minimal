@@ -184,6 +184,49 @@ TEST_CASE("aggregation groups per model and keeps unpriced turns honest",
     CHECK(totals.unpriced_turns == 2);
 }
 
+TEST_CASE("switching models mid-session sums re-visited and distinct models correctly",
+          "[cost_tracker][invariant]") {
+    // by_model is keyed by model id, not by "the current model" or a
+    // contiguous run -- so a session that goes cloud(A) -> local(B) ->
+    // cloud(A) again must fold both A runs into ONE bucket (not lose the
+    // first), and cloud(A) -> local(B) -> cloud(C) must keep A and C as
+    // separate priced buckets that both contribute to total_cost. Order
+    // and interleaving must not matter.
+    const std::vector<TurnRecord> revisited = {
+        Turn("cloud-a", 1000000, 0),               // priced: $2
+        Turn("local-b", 1000000, 1000000, 0, 0, false),  // unreported: unpriced
+        Turn("cloud-a", 1000000, 0),               // priced: $2, SAME model again
+    };
+    const auto resolve_a_only = [](const std::string& model) {
+        return model == "cloud-a" ? std::optional<Rate>{Rate{2.0, 8.0}} : std::nullopt;
+    };
+    const auto revisited_totals = Aggregate("s1", "", revisited, resolve_a_only);
+    REQUIRE(revisited_totals.models.size() == 2);  // one bucket per DISTINCT model, not per run
+    const auto& a_bucket = revisited_totals.models[0].model == "cloud-a" ? revisited_totals.models[0]
+                                                                         : revisited_totals.models[1];
+    CHECK(a_bucket.turns == 2);
+    CHECK(a_bucket.cost == 4.0);   // both runs' $2 summed into the one bucket
+    CHECK(a_bucket.cost_known);
+    CHECK(revisited_totals.total_cost == 4.0);
+    CHECK_FALSE(revisited_totals.total_cost_known);  // local-b's unpriced turn still taints it
+
+    const std::vector<TurnRecord> two_clouds = {
+        Turn("cloud-a", 1000000, 0),                     // priced: $2
+        Turn("local-b", 1000000, 1000000, 0, 0, false),  // unreported: unpriced
+        Turn("cloud-c", 1000000, 0),                     // priced: $3, a DIFFERENT model
+    };
+    const auto resolve_a_and_c = [](const std::string& model) -> std::optional<Rate> {
+        if (model == "cloud-a") return Rate{2.0, 8.0};
+        if (model == "cloud-c") return Rate{3.0, 8.0};
+        return std::nullopt;
+    };
+    const auto two_cloud_totals = Aggregate("s1", "", two_clouds, resolve_a_and_c);
+    REQUIRE(two_cloud_totals.models.size() == 3);
+    // total_cost is A's $2 + C's $3, regardless of the unpriced leg between them.
+    CHECK(two_cloud_totals.total_cost == 5.0);
+    CHECK_FALSE(two_cloud_totals.total_cost_known);
+}
+
 TEST_CASE("rate resolution is config > openrouter > litellm > bundled",
           "[cost_tracker][invariant]") {
     Harness harness;
