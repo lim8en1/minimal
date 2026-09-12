@@ -7,8 +7,7 @@ code: one plugin (`commands-md`) loads every `commands/*.md` at server
 startup.
 
 This is a walkthrough. The terse field-by-field reference lives in
-[CONFIGURATION.md](CONFIGURATION.md) § commands/; the design record in
-[OPENCODE_COMPAT.md](OPENCODE_COMPAT.md) Phase 4. Ready-to-copy files are in
+[CONFIGURATION.md](CONFIGURATION.md) § commands/. Ready-to-copy files are in
 [`examples/commands/`](../examples/commands/).
 
 ---
@@ -170,7 +169,7 @@ Commits since the last tag:
 !`git log --oneline $(git describe --tags --abbrev=0)..HEAD | head -n 40`
 ```
 
-`@file` expansion is not implemented (see OPENCODE_COMPAT.md Phase 4).
+`@file` expansion is not implemented.
 
 ## 8. No-body mode: a script that writes the whole prompt
 

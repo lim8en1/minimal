@@ -79,6 +79,7 @@ and never overwritten afterward.
 | `permissions.json` | required | permission fallbacks per tool category, per-tool overrides |
 | `hooks.json` | optional | shell-command hooks at named points (veto via exit code 2) |
 | `mcps.json` | optional | MCP servers (stdio/http) |
+| `cost-rates.json` | optional | cost-tracker's fallback price table |
 | `channels.json` | optional | external signal channels |
 | `plugins.json` | optional | plugin enable/disable, per-plugin config, aliases |
 | `agents/*.md` | ≥ 1 required | agent presets (frontmatter + markdown) |
@@ -91,9 +92,10 @@ Full reference — every field, type, default, and allowed value:
 ## Plugins
 
 Everything interesting ships as a plugin: `tools-fs`, `tools-search`,
-`tools-bash`, `tools-web`, `provider-openai`, `provider-anthropic`,
-`commands-core`, `commands-md`, `checklist`, `signals-message`, `cost-tracker`
-(server), and `logo`, `cost-view`, `checklist-view` (client). Drop your own
+`tools-bash`, `tools-python`, `tools-web`, `tool-ask`, `provider-openai`,
+`provider-anthropic`, `commands-core`, `commands-md`, `checklist`,
+`signals-message`, `cost-tracker`, `session-titler` (server), and `logo`,
+`cost-view`, `checklist-view` (client). Drop your own
 into `<config>/plugins/`, enable/disable or reconfigure any plugin in
 `plugins.json`, and rename tools/commands via its `"aliases"` map — see
 **[docs/PLUGINS.md](docs/PLUGINS.md)**.

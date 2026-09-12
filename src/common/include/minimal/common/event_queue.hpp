@@ -17,9 +17,8 @@
 // rather than deleted because the ordering/backpressure/drop-mode invariants
 // are still exactly what a "many producers queue work behind one draining
 // consumer" primitive needs, whichever caller reaches for it next -- and
-// because DEVELOPMENT_PLAN.md and ARCHITECTURE.md's "Concurrency model" still
-// describe the original queue-per-session design this class was extracted
-// from.
+// because ARCHITECTURE.md's "Concurrency model" still describes the original
+// queue-per-session design this class was extracted from.
 //
 // Templated because none of the above depends on the payload type: keeping it
 // generic lets the ordering and concurrency properties be tested against a

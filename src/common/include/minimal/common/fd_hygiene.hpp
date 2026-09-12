@@ -12,7 +12,7 @@ namespace minimal::common {
 // Call once at serve-stage start, after every long-lived descriptor is open and
 // before the RPC server listens. Best-effort: a platform without a self-fd
 // listing returns 0 and the pre-sweep inheritance behavior stands (the known
-// gap this closes, DEVELOPMENT_PLAN.md §7).
+// gap this closes).
 //
 // Returns the number of descriptors newly marked.
 std::size_t MarkInheritedFdsCloseOnExec();

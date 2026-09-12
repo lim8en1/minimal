@@ -1,6 +1,6 @@
 # minimal — Plugin extensibility
 
-Companion to `ARCHITECTURE.md`, which remains the single source of truth for *design*. This document covers only *extensibility*: the plugin surface as it actually exists in the tree (verified against the code, not against other documents), the places it stops short, and the designed answer for each gap. Where a gap is scheduled, `DEVELOPMENT_PLAN.md` carries the milestone; where this document and `ARCHITECTURE.md` disagree, that document wins and this one is stale.
+Companion to `ARCHITECTURE.md`, which remains the single source of truth for *design*. This document covers only *extensibility*: the plugin surface as it actually exists in the tree (verified against the code, not against other documents), the places it stops short, and the designed answer for each gap. Where this document and `ARCHITECTURE.md` disagree, that document wins and this one is stale.
 
 ## 1. The surface as it exists
 
@@ -60,7 +60,7 @@ Constraints that keep it safe:
 
 **Cost.** Low — one member, one producer, tests against an in-memory or SQLite reader.
 
-**Postscript — the pattern held.** This section's "optional member, filled per invocation by the agent loop, null when unavailable" became the template for every later `ToolContext` growth: background bash's three lifetime-safe handles (`schedule_injection` / `session_lifetime` / `emit_task_event` — DEVELOPMENT_PLAN §14), and now `ask_user` — the interactive ask the `tool-ask` plugin blocks on (ARCHITECTURE.md, "Asking the user"). Same three properties each time: plain-data types cross no agent-layer boundary, the handle is produced in the ctx-builder from session-owned wiring, and null is a degrade path the tool surfaces, never a hang.
+**Postscript — the pattern held.** This section's "optional member, filled per invocation by the agent loop, null when unavailable" became the template for every later `ToolContext` growth: background bash's three lifetime-safe handles (`schedule_injection` / `session_lifetime` / `emit_task_event`), and now `ask_user` — the interactive ask the `tool-ask` plugin blocks on (ARCHITECTURE.md, "Asking the user"). Same three properties each time: plain-data types cross no agent-layer boundary, the handle is produced in the ctx-builder from session-owned wiring, and null is a degrade path the tool surfaces, never a hang.
 
 ### 2.2 No sanctioned cross-plugin channel
 
@@ -177,7 +177,7 @@ The design intent is unchanged from `ARCHITECTURE.md`: one generic channel, plug
 
 ### 2.6 No model auto-discovery
 
-**Status: landed as track N.** Implemented with three decisions recorded in DEVELOPMENT_PLAN §4 N: the sanity check is **network-free** (structural warnings only — "unreachable" means no catalog registered for the kind, never a startup probe); **no persisted cache and no TTL** (the server is short-lived, so a runtime cache needs neither, and a month-old cached window is the exact staleness this seam exists to eliminate); and **`/providers refresh` shipped in v1** (evict + refetch now, per-provider outcomes, `ReadOnly()` so it runs beside live turns — fetches run under per-provider gates, never the global config mutex, and `Resolve` returns a snapshot, so a hung catalog costs its own 10 s and a refresh never dangles a concurrent reader). The implementation reads one more field than the sketch below: vLLM reports its window as `max_model_len`. Resume after a backend's model list changed needs no mechanism — it degrades to today's fail-loud session-creation error, now distinguishing "discovery succeeded, model not served" from "discovery failed: <reason>". *[Update: the `/providers` command was later removed — its listing role moved to the client's `/model` picker over the session-free `ListModels` RPC, and its refresh role to `ListModels(refresh_discovery)` (the picker's ctrl+r).]*
+**Status: landed.** Implemented with three decisions: the sanity check is **network-free** (structural warnings only — "unreachable" means no catalog registered for the kind, never a startup probe); **no persisted cache and no TTL** (the server is short-lived, so a runtime cache needs neither, and a month-old cached window is the exact staleness this seam exists to eliminate); and **`/providers refresh` shipped in v1** (evict + refetch now, per-provider outcomes, `ReadOnly()` so it runs beside live turns — fetches run under per-provider gates, never the global config mutex, and `Resolve` returns a snapshot, so a hung catalog costs its own 10 s and a refresh never dangles a concurrent reader). The implementation reads one more field than the sketch below: vLLM reports its window as `max_model_len`. Resume after a backend's model list changed needs no mechanism — it degrades to today's fail-loud session-creation error, now distinguishing "discovery succeeded, model not served" from "discovery failed: <reason>". *[Update: the `/providers` command was later removed — its listing role moved to the client's `/model` picker over the session-free `ListModels` RPC, and its refresh role to `ListModels(refresh_discovery)` (the picker's ctrl+r).]*
 
 **Hole.** Every `<provider>/<model>` a session can use must be hand-written into `providers.json`, including `context_window_tokens` — the field window-relative compaction triggers resolve against (§ *Context compaction*). Yet the servers themselves report most of it: OpenRouter's `GET /models` carries `context_length` and pricing; **llama.cpp's `/v1/models` carries model metadata including context size**; vLLM serves `/v1/models` (ids, no context). Nothing consumes any of it. The result is that the one config field with real consequences for correctness (compaction firing at all) is also the one most likely to be stale or absent — and a provider serving fifty models is unconfigurable by hand in any practical sense.
 
@@ -218,7 +218,7 @@ The one OpenAI-shape catalog implementation (`GET <url>/models`, read `context_l
 
 ## 3. Permission advisor — "auto" mode as a plugin
 
-**Status: landed as track J.** The composition below is implemented as specified: `AdvisedPermissionChecker` over the wire checker, substrate untouched, `permissions.json` `"advisor"`/`"advisor_inherit"`, sanity-check warning for an unresolvable name, and the full test list from DEVELOPMENT_PLAN §4 J (including the E2E through the real plugin loader and the three §6 invariant proofs). The one implementation addition is the `SessionChannels` extraction in DEVELOPMENT_PLAN §4 J's How.
+**Status: landed.** The composition below is implemented as specified: `AdvisedPermissionChecker` over the wire checker, substrate untouched, `permissions.json` `"advisor"`/`"advisor_inherit"`, sanity-check warning for an unresolvable name — the full test list lives with the tests, including the E2E through the real plugin loader and the three §3.3 invariant proofs. The one implementation addition is the `SessionChannels` extraction.
 
 **The request.** A plugin that answers tool-permission prompts automatically — rules, an LLM judge, a remote policy service — falling back to a human only when it abstains.
 
@@ -304,7 +304,7 @@ Zero changes to `clamp_run_mode`, `most_restrictive`, the precedence chains, or 
 | Selection semantics (subagent default-off, inherit opt-in) | moderate — decisions, not code |
 | Tests: unit + integration + E2E over a real socket | moderate |
 
-Sequenced as **track J** in `DEVELOPMENT_PLAN.md`; depends on nothing unbuilt.
+Depends on nothing unbuilt.
 
 ## 4. TUI: core vs. pluggable
 
@@ -465,7 +465,7 @@ Command (the abstract -- already named Command; no rename)
 
 ## 5. Hooks — config-mapped actions on named points
 
-**Status: landed as track O.** ARCHITECTURE.md § *Hooks* is the design source of truth; this section records the surface and the worked example.
+**Status: landed.** ARCHITECTURE.md § *Hooks* is the design source of truth; this section records the surface and the worked example.
 
 **The shape.** Core owns the mechanism (`src/server/hooks/`): a `HookDispatcher` that is both the point registry (registration-time, sealed at `Configure`) and the dispatch surface. `RegisterPoint({name, veto_capable, filterable})` returns a `HookPoint` handle the emitter keeps; `Emit(payload, is_cancelled)` is synchronous and returns the first block reason (nullopt = passed), `EmitAsync` posts to one ordered thread modeled on `SessionObserverRegistry`. Config-declared actions (`hooks.json`) map `/bin/sh -c` commands onto points: JSON payload on stdin, exit 0 pass / 2 block / anything else **fails open, enforced by the dispatcher**. Plugins register ADDITIONAL points — they never see user hook config, and the shell executor never sees plugin code.
 
@@ -500,3 +500,21 @@ Command (the abstract -- already named Command; no rename)
 | 4.4 Command display modes | nothing | **done (track E5a/E5b)**; `CommandDisplay` on the wire, dispatcher downgrades errors to Status, results never enter the chat (`CommandNotice` is type-disjoint from `ChatRow`) |
 
 Track order: **J → K → L → M → N**. K preceded L so the new `register_services` ABI symbol shipped with `PluginRegistrationContext` and never needed a second signature sweep; M and N are independent of everything and each other. 2.1–2.3 were independent of everything and small; 2.5's server half and 2.2 are the same mechanism — the registry was built once by L, and `PluginCall` wires to it when E lands the client half. N added the eleventh `extern "C"` symbol (`minimal_plugin_register_model_catalogs`); discovery reaches the config layer as an injected hook precisely so the config layer never links plugins. O (§5) added the twelfth (`minimal_plugin_register_hook_points`), additive with no signature sweep, and its `hooks.json` reaches the dispatcher the same way `permissions.json` reaches the permission model: config loads before plugins, the dispatcher is core, and the sanity check validates the file against the points both have registered. The mention-resolver registration (`E3`) completed the current set of twelve optional hooks.
+
+## 7. Deferred ideas (recorded, not scheduled)
+
+Carried over from the completed opencode-compatibility effort's deferral table; none is scheduled. Permission glob-pattern rules and per-turn model/agent overrides have since **landed** (`pattern_overrides` in CONFIGURATION.md; command frontmatter `agent:`/`model:`), as has session forking (`ForkSession`).
+
+| Item | Note |
+|---|---|
+| File-edit snapshots / undo (`/undo` reverting tool effects) | conversation rewind/redo exists; a snapshot journal is the missing half |
+| Share/export | local-first analogue: an export-to-markdown/HTML command; a share server is a bigger decision |
+| LSP + formatters | natural fit: a server plugin + a `post_tool_use` hook |
+| TUI diff rendering | the renderer *slot* exists (§4.2), no implementation ships |
+| `@`-mention subagent invocation | prompt-editor autocomplete listing agent presets → `spawn_subagent` shorthand |
+| `.rpc`-addressable computed templates | md placeholders calling any plugin's `.rpc` op (`{{checklist list}}`) — makes `.rpc` payloads a de-facto cross-plugin API; needs a stability note first |
+| Typed `TemplateDataSource` registry | new ABI symbol + `NameRegistry` kind; only if computed templates become an ecosystem pattern |
+| Models.dev-style catalog plugin | fits `ModelCatalogRegistry` (§2.6); a local-first design may prefer `discover: true` |
+| Provider breadth & OAuth | beyond the two bundled chat providers; the `auth.json` credential chain covers static keys only |
+| ACP/IDE/SDK surfaces | an editor-protocol endpoint over the same gRPC core; not planned |
+| Plugin compatibility | opencode plugins are TS/Bun, minimal's are native C++ shared libraries — no bridge by construction (a sidecar or MCP shim would be the only path) |

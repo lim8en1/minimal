@@ -1,4 +1,4 @@
-// Track M (docs/EXTENSIBILITY.md §2.1, DEVELOPMENT_PLAN §4 M): ToolContext::history.
+// Tool history access (docs/EXTENSIBILITY.md §2.1): ToolContext::history.
 //
 // A tool reads the transcript it runs inside through a session::HistoryWindow --
 // a bound, windowed slice of SessionReader with no full-materialization path.

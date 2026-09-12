@@ -4,8 +4,8 @@
 // ARCHITECTURE.md's first goal is "512k-1M token conversation histories without
 // holding full history in memory", and BuildChatRequest is called once per tool
 // cycle and once per retry. So the per-call cost of the messages field is paid
-// on the hottest path there is. DEVELOPMENT_PLAN.md section 6 asks for a number
-// rather than an argument -- the bash rework was 8008 ms -> 0 ms, measured.
+// on the hottest path there is -- a number rather than an argument: the bash
+// rework was 8008 ms -> 0 ms, measured.
 //
 // Hidden by default (the leading dot in the tag): this reports rather than
 // asserts, and a timing threshold in CI would be a flake generator. Run with

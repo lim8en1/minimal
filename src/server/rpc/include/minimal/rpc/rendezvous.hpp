@@ -9,9 +9,9 @@
 // structurally unreadable, not a parse failure the waiter has to detect by
 // hand. Deliberately NOT a shared base class: the two brokers implement
 // different interfaces (tools::PermissionChecker vs
-// commands::ConfirmationBroker, a deliberate port/adapter split -- see
-// docs/SERVER_CORE_FIXES.md's "Explicitly not fixing"), and their event
-// construction and answer-filtering halves are genuinely different shapes.
+// commands::ConfirmationBroker, a deliberate port/adapter split), and their
+// event construction and answer-filtering halves are genuinely different
+// shapes.
 // Only the register/await/fail-closed middle is identical; composition
 // covers exactly that without forcing either class into a common ancestor.
 

@@ -1,6 +1,6 @@
 // commands-md -- markdown-defined /-commands, as one plugin.
 //
-// Discovery, per docs/OPENCODE_COMPAT.md Phase 4: the global config dir's
+// Discovery: the global config dir's
 // commands/ plus the project's commands/ and .opencode/commands/ (opencode's
 // own layout, so existing command files work zero-copy). The nearest directory
 // wins a stem collision -- the same nearest-first rule project-local agents and

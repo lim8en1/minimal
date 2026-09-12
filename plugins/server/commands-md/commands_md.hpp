@@ -5,7 +5,7 @@
 // Every commands/*.md file becomes a PromptShorthandCommand: the file stem is
 // the command name, the frontmatter declares parameters and data sources, and
 // the body is an INERT render template. The design rule that bounds the whole
-// feature (docs/OPENCODE_COMPAT.md, Phase 4): the body never executes anything.
+// feature: the body never executes anything.
 // All execution lives in declared `sources`, evaluated in declaration order,
 // flat and independent; the body is a single-pass render of already-evaluated
 // values, and inserted values are never re-scanned.
