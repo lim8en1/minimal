@@ -165,6 +165,12 @@ struct ServerSettings {
     // Once there are zero attached clients AND zero live sessions, exit after
     // this linger. 0 = never exit (true daemon deployment).
     std::int64_t idle_shutdown_seconds = 5;
+    // Wall-clock budget for the post-listen background warm-up of providers.json
+    // "discover": true entries, so the /model picker lists discovered models on a
+    // freshly started server without a manual refresh. The fetch runs on its own
+    // thread (startup never waits on it); this bounds only that thread. 0 =
+    // disabled (static models only until ctrl+r or first resolve).
+    std::int64_t discovery_warmup_timeout_seconds = 15;
 };
 
 struct SettingsConfig {

@@ -13,12 +13,14 @@
 #include <exception>
 #include <fcntl.h>
 #include <fstream>
+#include <future>
 #include <memory>
 #include <optional>
 #include <sstream>
 #include <string>
 #include <thread>
 #include <unordered_set>
+#include <vector>
 
 #include <unistd.h>
 
@@ -766,6 +768,62 @@ int main(int argc, char** argv) {
     std::printf("\nlistening on %s\n", server.target().c_str());
     std::fflush(stdout);
 
+    // Discovery warm-up (server.discovery_warmup_timeout_seconds): providers.json
+    // "discover": true entries list their models lazily, so a freshly started
+    // server's /model picker would show static models only until the user hits
+    // ctrl+r. This warms the runtime cache in the background right after
+    // listening starts -- the server serves immediately either way; startup
+    // never waits on it. RefreshDiscovery() is const and thread-safe (per-
+    // provider gates, providers fetched in parallel) and each catalog fetch is
+    // bounded by its own transport timeout (10 s for the OpenAI-shape catalog),
+    // so the budget below is a backstop for a catalog that ignores its
+    // transport timeout, not the primary bound. A concurrent ctrl+r refresh
+    // serializes per provider on the same gates -- no corruption, a possible
+    // wait. On expiry the worker keeps running (still transport-bounded) and
+    // its late results publish into the same cache, appearing at the next
+    // ListModels; the detached worker can only dangle if the process exits
+    // while a catalog has already blown past its own 10 s bound AND its
+    // deadline -- a window the deadline exists to shrink, not to close.
+    std::thread discovery_warmup;
+    if (settings.server.discovery_warmup_timeout_seconds > 0) {
+        std::promise<std::vector<minimal::config::DiscoveryRefreshOutcome>> warmup_promise;
+        auto warmup_result = warmup_promise.get_future();
+        std::thread warmup_worker(
+            [&presets, promise = std::move(warmup_promise)]() mutable {
+                try {
+                    promise.set_value(presets->RefreshDiscovery());
+                } catch (...) {
+                    promise.set_exception(std::current_exception());
+                }
+            });
+        discovery_warmup = std::thread(
+            [&logger = minimal::common::DefaultLogger(),
+             budget = std::chrono::seconds(settings.server.discovery_warmup_timeout_seconds),
+             result = std::move(warmup_result), worker = std::move(warmup_worker)]() mutable {
+                if (result.wait_for(budget) != std::future_status::ready) {
+                    logger.warn("model discovery warm-up exceeded {}s; /model lists static "
+                                "models until the fetch completes or ctrl+r refreshes",
+                                budget.count());
+                    worker.detach();
+                    return;
+                }
+                try {
+                    for (const auto& outcome : result.get()) {
+                        if (outcome.ok) {
+                            logger.info("model discovery: '{}' -> {} model(s)", outcome.provider,
+                                        outcome.model_count);
+                        } else {
+                            logger.warn("model discovery: '{}' failed: {}", outcome.provider,
+                                        outcome.error);
+                        }
+                    }
+                } catch (const std::exception& error) {
+                    logger.warn("model discovery warm-up failed: {}", error.what());
+                }
+                worker.join();
+            });
+    }
+
     // The signal watcher turns the self-pipe byte (written by the signal
     // handler, which must stay async-signal-safe) into the same graceful
     // RequestShutdown the idle reaper drives. Joined right after Wait()
@@ -787,6 +845,9 @@ int main(int argc, char** argv) {
     const char wake = 1;
     (void)!::write(shutdown_pipe_fds[1], &wake, 1);
     signal_watcher.join();
+    // Bounded by the warm-up budget (or a no-op when disabled), so a catalog
+    // that wedged past its transport timeout cannot stall process exit.
+    if (discovery_warmup.joinable()) discovery_warmup.join();
 
     // Stop the reaper BEFORE the exit cascade destroys what its callbacks
     // capture by reference: attached_clients/client_idle_for capture `service`

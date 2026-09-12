@@ -245,6 +245,12 @@ ServerSettings ParseServer(const nlohmann::json& doc) {
         throw std::runtime_error(
             "settings.json: server.idle_shutdown_seconds must not be negative (0 = never)");
     }
+    result.discovery_warmup_timeout_seconds = server.value(
+        "discovery_warmup_timeout_seconds", result.discovery_warmup_timeout_seconds);
+    if (result.discovery_warmup_timeout_seconds < 0) {
+        throw std::runtime_error("settings.json: server.discovery_warmup_timeout_seconds must not "
+                                 "be negative (0 = disables the warm-up)");
+    }
     return result;
 }
 

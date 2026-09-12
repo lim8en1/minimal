@@ -319,6 +319,28 @@ TEST_CASE("ParseSettingsConfig: project_context rejects malformed shapes", "[set
     }
 }
 
+TEST_CASE("ParseSettingsConfig: server settings overridable, warm-up budget validated",
+          "[settings_config]") {
+    SECTION("defaults") {
+        auto config = ParseSettingsConfig(nlohmann::json::object());
+        CHECK(config.server.idle_shutdown_seconds == 5);
+        CHECK(config.server.discovery_warmup_timeout_seconds == 15);
+    }
+    SECTION("overridable individually") {
+        auto config = ParseSettingsConfig(
+            {{"server", {{"idle_shutdown_seconds", 60}, {"discovery_warmup_timeout_seconds", 0}}}});
+        CHECK(config.server.idle_shutdown_seconds == 60);
+        CHECK(config.server.discovery_warmup_timeout_seconds == 0);
+    }
+    SECTION("negative values rejected") {
+        CHECK_THROWS_AS(ParseSettingsConfig({{"server", {{"idle_shutdown_seconds", -1}}}}),
+                        std::runtime_error);
+        CHECK_THROWS_AS(
+            ParseSettingsConfig({{"server", {{"discovery_warmup_timeout_seconds", -1}}}}),
+            std::runtime_error);
+    }
+}
+
 TEST_CASE("LoadSettingsConfig: reads and parses a real file", "[settings_config]") {
     minimal::testing::TempDir tempdir;
     const auto path = tempdir.path() / "settings.json";
