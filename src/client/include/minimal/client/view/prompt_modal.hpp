@@ -29,7 +29,8 @@ namespace minimal::client {
 
 // Ephemeral checkbox state, one per offered grant. Lives in RunTui.
 struct GrantToggles {
-    std::deque<bool> selected;   // deque, not vector<bool>: the checkboxes need stable bool*
+    std::deque<bool> selected;   // deque, not vector<bool>: avoids the proxy-reference
+                                 // surprises vector<bool> has whenever code takes &selected[i]
 
     // The keys the operator chose, FILTERED to what the request offered -- an
     // answer can never mint a grant for a binary no prompt displayed.
@@ -44,13 +45,20 @@ struct PermissionVerdict {
     std::string message;   // DenyWithMessage only; never empty there (see below)
 };
 
-// ↑/↓ (or 1-4) picks an answer, Enter confirms it, Escape is a plain deny.
-// Tab/space move between and toggle the grant checkboxes, which only an Allow
-// sends. "deny with message" opens an inline input: Enter sends it (an empty
-// message degrades to a plain Deny), Escape backs out to the list. The FIRST
-// event only arms the modal -- nothing but Escape answers until the user has
-// touched a key, so a stray Return or digit cannot answer an unread prompt.
-// Ctrl+C always falls through to the root dispatch's turn-cancel branch.
+// ONE unified cursor walks every row: the grant checkboxes (if any), then the
+// four answers. ↑/↓ move it; Space/Enter act on whatever it currently points
+// at (toggle a grant, or pick an answer); 1-4 pick an answer directly; Tab
+// jumps between the grants and the answers. Clicking a row does what
+// activating it would -- a grant toggles, an answer is picked -- immediately,
+// with no separate confirm step (a click is a deliberate, aimed action).
+// Grants sent only ride an Allow. "deny with message" opens an inline input:
+// Enter sends it (an empty message degrades to a plain Deny), Escape backs
+// out to the list. For every KEYBOARD path (not clicks -- see above), the
+// FIRST event only arms the modal -- nothing but Escape answers or toggles a
+// grant until the user has touched a key, so a stray Return, space or digit
+// landing in the same input batch as the request's own arrival cannot answer
+// or toggle anything on an unread prompt. Ctrl+C always falls through to the
+// root dispatch's turn-cancel branch.
 ftxui::Component MakePermissionModal(const PendingPermission& request, GrantToggles& toggles,
                                      const Theme& theme,
                                      std::function<void(PermissionVerdict verdict)> on_answer);

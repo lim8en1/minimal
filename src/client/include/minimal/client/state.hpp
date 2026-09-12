@@ -47,6 +47,10 @@ struct ToolExecutionState {
     // has to work with.
     nlohmann::json input = nlohmann::json::object();
     std::chrono::milliseconds started_at_unix_ms{-1};  // server-supplied timestamp
+    // Set by OnToolFinished from the finish event's duration_ms; -1 while the
+    // tool is still running (elapsed is computed from started_at_unix_ms
+    // instead -- see RenderLiveToolRow/RenderToolsPanel).
+    std::chrono::milliseconds duration{-1};
 
     // Accumulated chunks arrive here (lossy ring buffer). The final authoritative
     // record is the persisted ToolResultBlock, but this is what the panel shows.
@@ -439,6 +443,31 @@ public:
     // /-command outcome. Stored as a transient notice for the notice line;
     // never enters the chat rows.
     void OnCommandResult(const v1::CommandResult& evt);
+
+    // Drops the notice line immediately, if one is showing -- a no-op
+    // otherwise (still bumps nothing when there is nothing to clear, so a
+    // burst of these does not spuriously invalidate handled_notice_seq).
+    // Callers: submitting another command/turn, or an idle Escape -- see
+    // their own comments for why each counts as "the user has moved on".
+    // Returns whether there was a notice to clear -- an idle Escape needs
+    // this to decide whether it just did something (consume the key) or
+    // truly had nothing to do (fall through to the editor, unchanged).
+    bool ClearNotice();
+
+    // One tick toward the notice's self-expiry (kNoticeTicksDefault), called
+    // from TabMaintenance::Run for whichever tab is focused. A no-op when
+    // there is no notice showing, so ticking an idle tab with nothing to
+    // expire costs nothing beyond the check.
+    void TickNotice();
+
+    // True while any tool is mid-call (started, not yet finished). A plain
+    // scan, not a copy -- unlike CopyToolsLocked, this never touches
+    // buffered_output, so it is cheap enough for the render pump to poll every
+    // tick (see AppState::FocusedTabHasRunningTool). What it drives: a
+    // foreground tool that prints nothing for a while produced no wire
+    // events, so nothing bumped UiVersion, so even the spinner froze -- this
+    // is the seam that gives the pump a heartbeat while that is true.
+    bool HasRunningTool() const;
 
     // The user asked to interrupt the in-flight turn. A no-op unless the tab
     // is actually mid-turn (Thinking / Working / Waiting -- Waiting counts:
@@ -969,6 +998,20 @@ public:
     // paths (/agent //model on a sessionless tab) report through this.
     void TabNotice(const std::string& tab_id, const std::string& message);
 
+    // Drops the tab's notice line immediately, if one is showing. For the
+    // client-native commands (bare /help, /keymap, bare /theme //agent
+    // //model opening a picker) that answer by opening an overlay rather than
+    // setting a fresh notice -- SubmitCommand/RunSessionlessCommand clear on
+    // their own already, since they always produce a new outcome to show.
+    // Returns whether there was a notice to clear; see SessionState::ClearNotice.
+    bool ClearTabNotice(const std::string& tab_id);
+
+    // One tick toward the tab's notice self-expiry; see
+    // SessionState::TickNotice. Called from TabMaintenance::Run for whichever
+    // tab is focused -- GetStateByTab is private, so this is the seam a view
+    // helper reaches through rather than reaching into SessionState directly.
+    void TickTabNotice(const std::string& tab_id);
+
     // --- Rendering ---
     // in render order. `include_tool_output`: see TakeLightSnapshot -- pass
     // true only when about to render the running-tools panel.
@@ -981,6 +1024,14 @@ public:
     // The focused tab's TAB id ("" when no tabs) -- the UI's handle for it,
     // valid whether or not a session exists yet.
     std::string FocusedTabId() const;
+
+    // True while the focused tab has a tool mid-call. The render pump polls
+    // this every tick (see app.cpp's pump lambda) to force a repaint even
+    // with no wire event to bump UiVersion -- a foreground tool that goes
+    // quiet for a while (a long `sleep`, a silent build step) otherwise
+    // produces no events at all, freezing even the spinner. Cheap: a scan,
+    // not a snapshot copy (SessionState::HasRunningTool).
+    bool FocusedTabHasRunningTool() const;
 
     // Closes (drops) every tab's stream. The ~AppState safety net, not a user
     // verb -- ctrl+w closes ONE tab (CloseTab), quit detaches (DetachAllTabs),

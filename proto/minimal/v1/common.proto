@@ -161,6 +161,11 @@ message ToolExecutionEvent {
   optional bool is_error = 5; // set only when started == false
   string summary = 6;         // one-line description, mirrors PermissionRequest.summary
   int64 started_at_unix_ms = 7;
+  // Wall time the call took; set only when started == false (mirrors is_error).
+  // The client could derive this from started_at_unix_ms on the finish event
+  // (both events echo it), but the server already measured it on a steady
+  // clock -- sending it is one field, not a second, drift-prone stopwatch.
+  int64 duration_ms = 8;
 }
 
 // Live tool output (currently bash stdout/stderr), produced via

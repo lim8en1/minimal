@@ -1,0 +1,6 @@
+Seeds an empty commands/ directory so config seeding creates one, without
+registering a command of its own: commands-md only considers *.md files
+(commands_md_parse.cpp's directory walk filters on extension before it ever
+opens a file), so this is never read as a command.
+
+Drop your own *.md files here -- see docs/COMMANDS_HOWTO.md.

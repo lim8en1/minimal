@@ -11,6 +11,17 @@
 #include "minimal/plugins/plugin_abi.h"
 
 namespace minimal::plugins {
+
+// Completes the type plugin_loader.hpp forward-declares. Not in the
+// anonymous namespace below (unlike the RegisterXFn typedefs): it names a
+// member type of PluginLoader itself, declared at minimal::plugins scope in
+// the header.
+struct ProjectCommandsPlugin {
+    void* handle;
+    std::string name;
+    PluginRegistrationContext context;
+};
+
 namespace {
 
 using AbiTagFn = const char* (*)();
@@ -24,6 +35,9 @@ using RegisterSessionObserverFn =
     void (*)(agent::SessionObserverRegistry&, const PluginRegistrationContext&);
 using RegisterCommandsFn =
     void (*)(commands::CommandRegistry&, const PluginRegistrationContext&);
+using RegisterProjectCommandsFn = void (*)(commands::CommandRegistry&,
+                                           const std::filesystem::path&,
+                                           const PluginRegistrationContext&);
 using RegisterAuthProviderFn =
     void (*)(rpc::AuthProviderRegistry&, const PluginRegistrationContext&);
 using RegisterMentionResolverFn =
@@ -330,6 +344,17 @@ PluginRecord PluginLoader::LoadOne(const PluginCandidate& candidate) {
         for (std::size_t i = commands_before; i < command_attributions.size(); ++i) {
             record.registered_commands.push_back(command_attributions[i].surface_name);
         }
+
+        // The OPTIONAL per-root hook is never CALLED here (there is no project
+        // root at startup) -- only checked for and, if present, remembered
+        // with a copy of this plugin's own `context` for
+        // RegisterProjectCommands to call later, per root, on demand.
+        if (Lookup<RegisterProjectCommandsFn>(handle, "minimal_plugin_register_project_commands") !=
+            nullptr) {
+            project_command_plugins_.push_back(
+                std::make_unique<ProjectCommandsPlugin>(ProjectCommandsPlugin{
+                    handle, record.name, context}));
+        }
     }
 
     if (observers_ != nullptr) {
@@ -467,6 +492,34 @@ std::vector<PluginRecord> PluginLoader::LoadAll(const std::vector<PluginCandidat
         records.push_back(LoadOne(candidate));
     }
     return records;
+}
+
+void PluginLoader::RegisterProjectCommands(commands::CommandRegistry& registry,
+                                           const std::filesystem::path& project_root) const {
+    for (const auto& plugin_ptr : project_command_plugins_) {
+        const ProjectCommandsPlugin& plugin = *plugin_ptr;
+        auto fn = Lookup<RegisterProjectCommandsFn>(plugin.handle,
+                                                     "minimal_plugin_register_project_commands");
+        if (fn == nullptr) continue;   // checked at LoadOne time; defensive
+        // Same attribution window register_commands uses, for the same
+        // reason: a collision within this project registry should be able to
+        // name which plugin is responsible.
+        registry.SetAttribution(plugin.name);
+        try {
+            fn(registry, project_root, plugin.context);
+        } catch (const std::exception& error) {
+            common::DefaultLogger().warn(
+                "plugin '{}': minimal_plugin_register_project_commands threw for project root "
+                "'{}': {}",
+                plugin.name, project_root.string(), error.what());
+        } catch (...) {
+            common::DefaultLogger().warn(
+                "plugin '{}': minimal_plugin_register_project_commands threw a non-standard "
+                "exception for project root '{}'",
+                plugin.name, project_root.string());
+        }
+        registry.ClearAttribution();
+    }
 }
 
 }  // namespace minimal::plugins

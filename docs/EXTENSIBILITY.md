@@ -4,7 +4,7 @@ Companion to `ARCHITECTURE.md`, which remains the single source of truth for *de
 
 ## 1. The surface as it exists
 
-**Server ABI** (`src/server/plugins/include/minimal/plugins/plugin_abi.h`) — twelve optional `extern "C"` registration hooks (plus the required tag/name/version symbols), each `dlsym`'d by `plugin_loader.cpp`:
+**Server ABI** (`src/server/plugins/include/minimal/plugins/plugin_abi.h`) — thirteen optional `extern "C"` registration hooks (plus the required tag/name/version symbols), each `dlsym`'d by `plugin_loader.cpp`:
 
 | Symbol | Status | What it grants |
 |---|---|---|
@@ -12,7 +12,8 @@ Companion to `ARCHITECTURE.md`, which remains the single source of truth for *de
 | `minimal_plugin_register_tools(ToolRegistry&, const PluginRegistrationContext&)` | live | concrete tools; the context carries the verbatim `tools.*` JSON from `settings.json` plus the plugin's own `config` from `plugins.json` |
 | `minimal_plugin_register_provider_factories(ProviderFactoryRegistry&)` | live | provider kinds addressable from `providers.json` |
 | `minimal_plugin_register_session_observer(SessionObserverRegistry&)` | live | fire-and-forget lifecycle reactions; cannot veto anything |
-| `minimal_plugin_register_commands(CommandRegistry&)` | live | `/`-commands |
+| `minimal_plugin_register_commands(CommandRegistry&)` | live | `/`-commands, registered once at startup into the process-wide registry |
+| `minimal_plugin_register_project_commands(CommandRegistry&, const std::filesystem::path&)` | **live** | project-scoped `/`-commands (`commands-md`'s own project-local discovery is the only caller): unlike every other hook, called LAZILY per project root (`ProjectCommandSource`, cached per root) rather than once at startup -- there is no project root yet then. `registry` is a fresh, per-root instance, never the global one; a name here may shadow a global command for sessions rooted there |
 | `minimal_plugin_register_services(ServiceRegistry&)` | **live (track L)** | pull-side access to another plugin's services; consumer side rides `PluginRegistrationContext::services` |
 | `minimal_plugin_register_mention_resolver(...)` | **live** — `plugin_loader.cpp` dlsym's and calls it; `SessionServiceImpl` resolves every `@`-mention through `MentionResolverRegistry::Active()` | pluggable `@`-mention resolution; `PrefixMentionResolver` is the core default, exclusive first-wins |
 | `minimal_plugin_register_auth_provider(...)` | live | exclusive connection policy; pass-through default |

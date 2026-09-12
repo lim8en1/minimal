@@ -239,6 +239,30 @@ void minimal_plugin_register_session_observer(minimal::agent::SessionObserverReg
 void minimal_plugin_register_commands(minimal::commands::CommandRegistry&,
                                       const minimal::plugins::PluginRegistrationContext&);
 
+// OPTIONAL, additive: contributes /-commands scoped to ONE project root.
+//
+// Unlike every other registration hook above -- including register_commands
+// itself -- this one is NOT called once at startup. There is no project root
+// yet then: commands register before any session exists, and the server
+// serves many project roots over its life. Instead it is called LAZILY, the
+// first time a session rooted at `project_root` needs its command catalog
+// (PluginLoader::RegisterProjectCommands, driven by
+// minimal::commands::ProjectCommandSource's per-root cache), and the result is
+// cached for that root's remaining lifetime -- config is static once loaded,
+// the same rule every other registry in this tree follows.
+//
+// `registry` is a FRESH, project-scoped CommandRegistry -- never the global
+// one register_commands populates, and never shared between roots. A name
+// registered here may freely shadow a global command of the same name for
+// sessions rooted at `project_root`: dispatch consults the project registry
+// first, falling back to the global one, matching how a project's own
+// agents/<name>.md already shadows a global preset by name. A throwing
+// implementation is caught and logged by the caller; it must not fail
+// session creation for the root that triggered it.
+void minimal_plugin_register_project_commands(
+    minimal::commands::CommandRegistry& registry, const std::filesystem::path& project_root,
+    const minimal::plugins::PluginRegistrationContext&);
+
 // OPTIONAL, additive: contributes services other plugins may reach. Each
 // registration is an (name, abstract-interface pointer) pair; the interface
 // header the provider ships is the contract, and a consumer static_casts

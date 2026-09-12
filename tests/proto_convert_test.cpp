@@ -369,12 +369,24 @@ TEST_CASE("every SessionEvent alternative lands on its ServerEvent oneof", "[pro
     lifecycle.started = false;
     lifecycle.is_error = true;
     lifecycle.started_at_unix_ms = 42;
+    lifecycle.duration = std::chrono::milliseconds(850);
     const auto execution = trip(lifecycle).tool_execution();
     CHECK(execution.tool_use_id() == "t1");
     CHECK(execution.tool_name() == "bash");
     CHECK_FALSE(execution.started());
     CHECK(execution.is_error());
     CHECK(execution.started_at_unix_ms() == 42);
+    CHECK(execution.duration_ms() == 850);
+
+    // duration_ms is meaningful only on the FINISH event -- a start event
+    // (input still carries the pre-call args) must not report a stale/zero
+    // duration as if the call had already been timed.
+    agent::ToolLifecycleEvent start;
+    start.tool_use_id = "t2";
+    start.tool_name = "bash";
+    start.started = true;
+    start.duration = std::chrono::milliseconds(999);   // never legitimately set pre-finish
+    CHECK(trip(start).tool_execution().duration_ms() == 0);
 
     tools::BackgroundTaskEvent task;
     task.task_id = "bg1";

@@ -525,7 +525,10 @@ v1::ServerEvent ToProto(const std::string& session_id, const agent::SessionEvent
                 execution->set_tool_name(value.tool_name);
                 *execution->mutable_input() = JsonToStruct(value.input);
                 execution->set_started(value.started);
-                if (!value.started) execution->set_is_error(value.is_error);
+                if (!value.started) {
+                    execution->set_is_error(value.is_error);
+                    execution->set_duration_ms(value.duration.count());
+                }
                 execution->set_started_at_unix_ms(value.started_at_unix_ms);
             } else if constexpr (std::is_same_v<T, tools::BackgroundTaskEvent>) {
                 auto* message = out.mutable_background_task();

@@ -134,6 +134,14 @@ public:
     // with "not available". Set before any session exists.
     void set_commands(const commands::CommandRegistry* commands) { commands_ = commands; }
 
+    // The project-scoped half of the catalog (ProjectCommandSource). Same
+    // optionality rule as set_commands: unset means every session's
+    // project_commands is null, and Dispatch simply never sees a project
+    // registry to consult -- global commands work exactly as before.
+    void set_project_commands(const commands::ProjectCommandSource* project_commands) {
+        project_commands_ = project_commands;
+    }
+
     // Project context (AGENTS.md/CLAUDE.md) settings, read once at startup.
     // Optional but DEFAULTS TO DISABLED: until main wires the parsed settings
     // in, no session reads anything from its project_root -- the same shape as
@@ -303,6 +311,7 @@ private:
     const AgentPresetRegistry& presets_;
     // Optional and borrowed; every session gets the same one.
     const commands::CommandRegistry* commands_ = nullptr;
+    const commands::ProjectCommandSource* project_commands_ = nullptr;
     tools::ToolRegistry& tools_;
     const llm::ProviderFactoryRegistry& providers_;
     // Shared provider instances across every session this registry creates.

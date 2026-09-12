@@ -298,13 +298,25 @@ std::vector<CheckResult> StartupSanityCheck::check_providers() {
                                       "settings.json default_model '" + settings_.default_model +
                                           "' is not <provider>/<model>"));
         } else if (providers_.Resolve(*ref) == nullptr) {
-            // Under a discover-entry a non-static model cannot be verified at
-            // startup without a network call, which the check never makes --
-            // the provider exists and discovery answers at first resolve.
+            // Under a discover-entry a non-static model cannot be VERIFIED at
+            // startup without a network call, which the check never makes -- the
+            // provider exists and discovery answers at first resolve. That is
+            // not a reason to stay silent, though: a typo'd or stale discovered
+            // model id is exactly as likely as a static one, and the operator
+            // deserves the same heads-up at startup rather than finding out only
+            // at first session creation. So this still warns under discovery,
+            // worded to say "unverified", not "matches no configured model".
             const auto entry = providers_.provider_entries().find(ref->provider);
             const bool unverifiable = entry != providers_.provider_entries().end() &&
                                       entry->second.discover;
-            if (!unverifiable) {
+            if (unverifiable) {
+                results.push_back(Warning(
+                    "usable_provider",
+                    "settings.json default_model '" + settings_.default_model +
+                        "' is not in provider '" + ref->provider +
+                        "'s static model list; it may only resolve through discovery, which this "
+                        "check cannot verify without a network call -- confirm it after startup"));
+            } else {
                 results.push_back(Warning("usable_provider",
                                           "settings.json default_model '" + settings_.default_model +
                                               "' matches no configured model" +

@@ -369,14 +369,17 @@ public:
     SuggestPathsResult SuggestPaths(const std::string& session_id, const std::string& prefix,
                                     int32_t limit);
 
-    // The /-command catalog, fetched ONCE at connect (plugins load at startup
-    // and config is read once, so the list cannot change mid-connection).
-    // Feeds the prompt editor's /-autocomplete.
+    // The /-command catalog: the GLOBAL half (plugins load at startup and
+    // config is read once, so it cannot change mid-connection) plus, when
+    // `project_root` is given, that project's own commands-md discoveries
+    // (ProjectCommandSource, resolved fresh per call server-side -- a project
+    // command may shadow a global one of the same name). Feeds the prompt
+    // editor's /-autocomplete and the /help overlay.
     struct ListCommandsResult {
         v1::ListCommandsResponse response;
         grpc::Status status;
     };
-    ListCommandsResult ListCommands();
+    ListCommandsResult ListCommands(const std::string& project_root = {});
 
     // Executes a SESSIONLESS /-command (a Sessionless<> command on the
     // server: /help, /sessions and their future siblings). Dispatched with

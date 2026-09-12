@@ -2,6 +2,14 @@
 
 namespace minimal::commands {
 
+Command* FindEffective(const CommandRegistry& global, const CommandRegistry* project,
+                       const std::string& name) {
+    if (project != nullptr) {
+        if (Command* found = project->Find(name)) return found;
+    }
+    return global.Find(name);
+}
+
 std::string UnknownCommandMessage(const std::string& name) {
     return "unknown command: /" + name + " (try /help)";
 }
@@ -64,8 +72,9 @@ CommandResult ExecuteAndShape(Command& command, const std::string& name,
 }  // namespace
 
 CommandResult Dispatch(const CommandRegistry& registry, const std::string& name,
-                       const CommandArgs& args, CommandContext& context, bool busy) {
-    Command* command = registry.Find(name);
+                       const CommandArgs& args, CommandContext& context, bool busy,
+                       const CommandRegistry* project_registry) {
+    Command* command = FindEffective(registry, project_registry, name);
     if (command == nullptr) {
         // Answered, never dropped: a client waiting on a CommandResult would
         // otherwise hang on a request the server quietly discarded.

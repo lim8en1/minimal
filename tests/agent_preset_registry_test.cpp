@@ -194,6 +194,78 @@ TEST_CASE("AgentPresetRegistry: no model and no default_model throws",
     CHECK_THROWS_AS(registry.Resolve("build"), std::runtime_error);
 }
 
+TEST_CASE("AgentPresetRegistry: a model_override rescues a preset with no model and no "
+          "default_model",
+          "[agent_preset_registry]") {
+    // THE BUG this guards against: settings.json default_model was junk (or, as
+    // here, simply absent) and every preset declared no model of its own, so
+    // Resolve() threw before an explicit --model/--model override the caller
+    // already validated ever got a chance to apply. A caller-supplied override
+    // must resolve the session regardless of what the preset or settings.json
+    // says.
+    TempConfigDir config;
+    config.WriteDefaults();
+    config.WriteJson("settings.json", nlohmann::json::object());
+    config.Write("agents/build.md",
+                  "---\n"
+                  "name: build\n"
+                  "---\n"
+                  "body\n");
+    config::SkillRegistry skills = config::SkillRegistry::Load(config.dir);
+    AgentPresetRegistry registry(config.dir, skills,
+                                  config::LoadSettingsConfig(config.dir / "settings.json"));
+
+    const AgentPreset preset = registry.Resolve(
+        "build", /*project_root=*/{}, /*parent_skills=*/std::nullopt,
+        config::ModelRef{"openai-main", "gpt-4.1"});
+    CHECK(preset.provider.model_name == "gpt-4.1");
+}
+
+TEST_CASE("AgentPresetRegistry: a model_override rescues a preset whose OWN model is "
+          "unresolvable",
+          "[agent_preset_registry]") {
+    // Same rescue, but the preset names a real (broken) model rather than none
+    // at all -- the override must win outright, not merely fill a gap.
+    TempConfigDir config;
+    config.WriteDefaults();
+    config.Write("agents/build.md",
+                  "---\n"
+                  "name: build\n"
+                  "model: nonexistent/model\n"
+                  "---\n"
+                  "body\n");
+    config::SkillRegistry skills = config::SkillRegistry::Load(config.dir);
+    AgentPresetRegistry registry(config.dir, skills,
+                                  config::LoadSettingsConfig(config.dir / "settings.json"));
+
+    const AgentPreset preset = registry.Resolve(
+        "build", /*project_root=*/{}, /*parent_skills=*/std::nullopt,
+        config::ModelRef{"openai-main", "small"});
+    CHECK(preset.provider.model_name == "small");
+}
+
+TEST_CASE("AgentPresetRegistry: an unresolvable model_override still throws, named as the "
+          "override",
+          "[agent_preset_registry]") {
+    // The rescue must not silently fall back to a broken preset/default_model
+    // when the override ITSELF is bad -- the user asked for a specific model,
+    // and getting a different one with no warning would be worse than an error.
+    TempConfigDir config;
+    config.WriteDefaults();
+    config::SkillRegistry skills = config::SkillRegistry::Load(config.dir);
+    AgentPresetRegistry registry(config.dir, skills,
+                                  config::LoadSettingsConfig(config.dir / "settings.json"));
+
+    try {
+        registry.Resolve("build", /*project_root=*/{}, /*parent_skills=*/std::nullopt,
+                         config::ModelRef{"openai-main", "nonexistent"});
+        FAIL("expected an unresolvable override to throw");
+    } catch (const std::runtime_error& error) {
+        const std::string message = error.what();
+        CHECK(message.find("openai-main/nonexistent") != std::string::npos);
+    }
+}
+
 TEST_CASE("AgentPresetRegistry: an unknown model names what is available",
           "[agent_preset_registry]") {
     // A miss here is nearly always a typo or an unconfigured provider, and both

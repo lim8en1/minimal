@@ -151,6 +151,15 @@ std::optional<std::string> AskQuestionOf(const std::string& tool_name, const nlo
 // whether the call is still running or already in the transcript.
 std::string SummarizeToolInput(const std::string& tool_name, const nlohmann::json& input);
 
+// How many focused-tab UI-version bumps (SessionState::TickNotice, driven by
+// TabMaintenance::Run) a notice survives before it clears itself. Not a
+// wall-clock TTL: ticking is gated on the SAME UiVersion check that gates a
+// repaint, so a notice on an otherwise-idle screen stays put (there is
+// nothing to wake the tick), and fades once the user resumes actually doing
+// something -- which is when a stale "/theme x" or "/cost" line stops being
+// useful anyway. Picked by feel; tune if it reads as too eager or too sticky.
+inline constexpr int kNoticeTicksDefault = 20;
+
 // CommandResult -> transient notice line. The return type is deliberately not
 // a ChatRow and not convertible to one: a command result has no path into the
 // chat model at compile time, which is the invariant (§4.4) expressed where it
@@ -163,6 +172,12 @@ struct CommandNotice {
     bool is_error = false;
     v1::CommandDisplay display = v1::COMMAND_DISPLAY_STATUS;
     std::string view_hint;
+    // Counts down in SessionState::TickNotice; the notice clears itself at
+    // zero. Every construction site (NoticeFromCommandResult, OnError's and
+    // OnSendFailed's and NoteRefreshFailed's aggregate-inits) leaves this at
+    // its default -- there is exactly one lifetime policy, not one per call
+    // site.
+    int ticks_remaining = kNoticeTicksDefault;
 };
 CommandNotice NoticeFromCommandResult(const v1::CommandResult& result);
 

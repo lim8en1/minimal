@@ -85,15 +85,6 @@ Element Header(const ToolResultView& result, Elements detail, const Theme& theme
     return hbox(std::move(line));
 }
 
-std::string FormatDuration(std::int64_t ms) {
-    if (ms < 1000) return std::to_string(ms) + "ms";
-    if (ms < 60'000) {
-        const auto tenths = ms / 100;
-        return std::to_string(tenths / 10) + "." + std::to_string(tenths % 10) + "s";
-    }
-    return std::to_string(ms / 60'000) + "m " + std::to_string((ms % 60'000) / 1000) + "s";
-}
-
 // --- diff --------------------------------------------------------------------
 
 class DiffRenderer final : public DisplayRenderer {

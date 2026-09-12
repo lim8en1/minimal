@@ -123,8 +123,12 @@ SubagentOutcome SubagentManager::Spawn(const SubagentRequest& request,
 
     AgentPreset child_preset;
     try {
+        // request.model rides straight into Resolve() (not just into
+        // params.model_override below) so an unresolvable settings.default_model
+        // cannot fail the spawn ahead of an explicit spawn-time model -- the
+        // same rescue CreateResolved's own model_override plumbing needs.
         child_preset = presets_.Resolve(preset_name, parent->info().project_root,
-                                        parent->preset().allowed_skills);
+                                        parent->preset().allowed_skills, request.model);
     } catch (const std::exception& e) {
         return SubagentOutcome::Error(e.what());
     }

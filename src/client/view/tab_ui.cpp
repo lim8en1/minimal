@@ -355,6 +355,13 @@ void TabMaintenance::Run() {
         deps_.show_ask = false;
         return;
     }
+    // A notice's self-expiry: one tick per pass THIS gate already let through,
+    // i.e. once per focused-tab-visible UI change -- not per repaint, since a
+    // repaint with nothing new does not reach here at all. Before GetDetails()
+    // below, so a notice that expires this pass is already gone from the
+    // snapshot HandleNotice/the renderer see, instead of lingering one extra
+    // frame.
+    deps_.app.TickTabNotice(focused_);
     // ONE deep snapshot per pass: GetDetails is a full protobuf copy of the
     // scrollback window (up to scrollback_window_max_messages rows), and
     // this used to be paid up to three times per frame. Maintain() may

@@ -1,5 +1,7 @@
 #include "minimal/client/view/tools_panel.hpp"
 
+#include <algorithm>
+#include <chrono>
 #include <string_view>
 
 #include "minimal/client/utf8.hpp"
@@ -72,6 +74,22 @@ ftxui::Element RenderToolsPanel(const std::vector<AppState::TabSnapshot>& tabs,
                                              : SummarizeToolInput(tool.tool_name, tool.input);
             if (!summary.empty()) {
                 line.push_back(text("  " + summary) | Muted(theme));
+            }
+            // Same elapsed/duration ARCHITECTURE.md already promises this
+            // panel shows ("started-at"), and the same reasoning as the live
+            // chat row: without a ticking number, a long-running cross-session
+            // command that has gone quiet is indistinguishable from a hung one.
+            if (tool.started) {
+                if (tool.started_at_unix_ms.count() >= 0) {
+                    const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                            std::chrono::system_clock::now().time_since_epoch())
+                                            .count();
+                    const auto elapsed_ms =
+                        std::max<std::int64_t>(0, now_ms - tool.started_at_unix_ms.count());
+                    line.push_back(text("  " + FormatDuration(elapsed_ms)) | Muted(theme));
+                }
+            } else if (tool.duration.count() >= 0) {
+                line.push_back(text("  " + FormatDuration(tool.duration.count())) | Muted(theme));
             }
             rows.push_back(hbox(std::move(line)));
             const std::size_t tail_start = TailStart(tool.buffered_output, stdout_buffer_lines);

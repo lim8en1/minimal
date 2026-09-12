@@ -1481,6 +1481,63 @@ TEST_CASE("HandleGlobalKey: an open suggestion list gets Escape before "
     CHECK_FALSE(minimal::client::HandleGlobalKey(ctx, ftxui::Event::Escape));
 }
 
+TEST_CASE("HandleGlobalKey: an idle Escape clears a lingering notice, but only "
+          "when there is one",
+          "[app_state][keybinding_dispatch][notice]") {
+    // THE BUG this guards against: a command-result notice ("theme switched
+    // to 'x'", a /cost table) had exactly one clear path (submitting a chat
+    // turn) and otherwise sat above the editor indefinitely. Idle Escape was
+    // a dead key (see keybinding_dispatch.cpp's comment) -- this gives it a
+    // job, on the same "closes the innermost transient thing" ladder the
+    // modals already follow.
+    ClientFixture fixture;
+    fixture.Script("hi");
+    fixture.Start();
+
+    AppState app(fixture.client);
+    const auto tab = app.OpenTab(fixture.Options("first"));
+    app.TabNotice(tab, "theme switched to 'dark'");
+    REQUIRE(app.GetDetails(tab).latest_notice.has_value());
+
+    const auto keys = minimal::client::Keybindings::Parse(R"({"turn.cancel": "escape"})");
+    const auto keymap = minimal::client::ResolvedKeymap::Build(keys);
+
+    bool show_panel = false;
+    bool show_plugin_modal = false;
+    std::vector<minimal::client::plugins::PluginViewEntry> plugin_views;
+    std::shared_ptr<ftxui::Component> plugin_modal_child;
+    bool pasting = false;
+    bool quit_requested = false;
+
+    minimal::client::KeyContext ctx{
+        app, keymap, tab,
+        show_panel, show_plugin_modal,
+        plugin_views, plugin_modal_child,
+        [] {}, [] {}, [] {}, [] {},
+        [&] { quit_requested = true; },
+        [](const std::string&) {},
+        [](const std::string&, int) {},
+        [](const std::string&) {},
+        [](std::vector<std::string>) {},
+        [](const std::string&, int) {},
+        [](const std::string&) {},
+        [](const std::string&) {},
+        [](const std::string&, int) -> bool { return false; },
+        [](const std::string&) {},
+        pasting,
+        [] { return false; }};   // no suggestion list open
+
+    // A notice is showing: idle Escape claims the key and clears it.
+    CHECK(minimal::client::HandleGlobalKey(ctx, ftxui::Event::Escape));
+    CHECK_FALSE(quit_requested);
+    CHECK_FALSE(app.GetDetails(tab).latest_notice.has_value());
+
+    // Nothing left to clear: the SAME key now falls through, unconsumed --
+    // proving the consumption above was conditional on the notice, not
+    // unconditional on idle Escape.
+    CHECK_FALSE(minimal::client::HandleGlobalKey(ctx, ftxui::Event::Escape));
+}
+
 TEST_CASE("HandleGlobalKey: an open suggestion list gets Tab before a "
           "focused plugin panel claims it",
           "[app_state][keybinding_dispatch]") {

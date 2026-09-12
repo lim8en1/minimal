@@ -47,6 +47,7 @@ std::vector<ToolExecutionState> SessionState::CopyToolsLocked(bool include_outpu
         t.summary = tool.summary;
         t.input = tool.input;
         t.started_at_unix_ms = tool.started_at_unix_ms;
+        t.duration = tool.duration;
         t.started = tool.started;
         t.is_error = tool.is_error;
         t.is_background = tool.is_background;
@@ -540,6 +541,30 @@ void SessionState::OnCommandResult(const v1::CommandResult& evt) {
     ++notice_seq_;
 }
 
+bool SessionState::ClearNotice() {
+    std::lock_guard lk(mtx_);
+    if (!latest_notice_.has_value()) return false;
+    latest_notice_.reset();
+    ++notice_seq_;
+    return true;
+}
+
+void SessionState::TickNotice() {
+    std::lock_guard lk(mtx_);
+    if (!latest_notice_.has_value()) return;
+    if (--latest_notice_->ticks_remaining > 0) return;
+    latest_notice_.reset();
+    ++notice_seq_;
+}
+
+bool SessionState::HasRunningTool() const {
+    std::lock_guard lk(mtx_);
+    for (const auto& tool : tools_) {
+        if (tool.started) return true;
+    }
+    return false;
+}
+
 void SessionState::RequestCancel() {
     std::lock_guard lk(mtx_);
     switch (state_) {
@@ -973,6 +998,7 @@ void SessionState::OnToolFinished(const std::string& tool_use_id, const v1::Tool
     for (auto it = tools_.rbegin(); it != tools_.rend(); ++it) {
         if (it->tool_use_id == tool_use_id && it->started) {   // finish the matching active tool
             it->is_error = final_evt.has_is_error() ? final_evt.is_error() : false;
+            it->duration = std::chrono::milliseconds(final_evt.duration_ms());
             // A BACKGROUND row's launching call finishing does NOT mean the
             // task itself is done -- it means the SYNCHRONOUS half (the gate
             // + the call that kicked the detached process off) returned; the
@@ -2002,6 +2028,11 @@ void AppState::SubmitChatTurn(const std::string& tab_id, const std::string& text
 }
 
 void AppState::SubmitCommand(const std::string& tab_id, const std::string& line) {
+    // Symmetric with OnChatSubmitted's own clear: a stale notice from a
+    // PREVIOUS command (an old /help listing, a stale /cost table) has
+    // nothing to say about the one the user is submitting now. Before the
+    // locked block below, not after: GetStateByTab takes mtx_ itself.
+    if (auto state = GetStateByTab(tab_id)) state->ClearNotice();
     std::string sessioned;
     {
         std::lock_guard lk(mtx_);
@@ -2157,6 +2188,10 @@ bool AppState::StageAgentPreset(const std::string& tab_id, const std::string& pr
 void AppState::RunSessionlessCommand(const std::string& tab_id, const std::string& line) {
     const auto state = GetStateByTab(tab_id);
     if (!state) return;
+    // Same "the user has moved on" clear SubmitCommand does for the sessioned
+    // path -- this is the sessionless one (bare /sessions, /model, /agent
+    // before a session exists).
+    state->ClearNotice();
     const auto invocation = SplitCommand(line);
     // The RPC runs on the async worker (bounded deadline -- see
     // SessionClient::RunSessionlessCommand); the result publishes into the
@@ -2182,6 +2217,19 @@ void AppState::TabNotice(const std::string& tab_id, const std::string& message) 
         state->OnCommandResult(notice);
         BumpUiVersion();
     }
+}
+
+bool AppState::ClearTabNotice(const std::string& tab_id) {
+    if (auto state = GetStateByTab(tab_id)) {
+        if (!state->ClearNotice()) return false;
+        BumpUiVersion();
+        return true;
+    }
+    return false;
+}
+
+void AppState::TickTabNotice(const std::string& tab_id) {
+    if (auto state = GetStateByTab(tab_id)) state->TickNotice();
 }
 
 void AppState::RequestSuggestPaths(const std::string& session_id, const std::string& prefix,
@@ -2633,6 +2681,15 @@ std::string AppState::FocusedSessionId() const {
 std::string AppState::FocusedTabId() const {
     std::lock_guard lk(mtx_);
     return focused_id_;
+}
+
+bool AppState::FocusedTabHasRunningTool() const {
+    // GetStateByTab takes mtx_ itself: resolve the tab id first, then release
+    // before that lookup, same ordering FocusedTabId's callers already use.
+    const std::string tab_id = FocusedTabId();
+    if (tab_id.empty()) return false;
+    const auto state = GetStateByTab(tab_id);
+    return state && state->HasRunningTool();
 }
 
 void AppState::CloseAllTabs() {

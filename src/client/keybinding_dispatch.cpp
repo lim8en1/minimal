@@ -307,12 +307,18 @@ bool HandleGlobalKey(KeyContext& ctx, const ftxui::Event& event) {
             return true;
         }
         // Idle ctrl+c means quit: the universal exit reflex, otherwise DEAD
-        // (raw mode -- no SIGINT ever reaches this process). Idle Escape
-        // falls through to the editor, which has no use for it.
+        // (raw mode -- no SIGINT ever reaches this process). Idle Escape used
+        // to fall through to the editor, which has no use for it either --
+        // dismissing a lingering notice line (a stale "/theme x" confirmation,
+        // an old /cost table) gives it a job, matching the same "Escape
+        // closes the innermost transient thing" ladder the modals already
+        // follow. Only consumed when there WAS a notice to drop: with
+        // nothing to do, the key still falls through unchanged.
         if (event == Event::CtrlC) {
             ctx.request_quit();
             return true;
         }
+        if (!sid.empty() && ctx.app.ClearTabNotice(sid)) return true;
     }
     if (ctx.keymap.Matches("session.picker", event)) {
         // Always OPENS, never toggles closed -- see the KeyContext field

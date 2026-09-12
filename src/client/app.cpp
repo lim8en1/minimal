@@ -786,12 +786,24 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     }
 
     // The /-command catalog, fetched ONCE at connect (plugins load at startup
-    // and config is read once, so the list cannot change mid-connection -- no
-    // invalidation machinery). Feeds the prompt editor's /-autocomplete.
+    // and config is read once, so the GLOBAL list cannot change mid-connection
+    // -- no invalidation machinery) and merged server-side with the STARTUP
+    // project root's own commands-md discoveries, if any (ProjectCommandSource
+    // -- a project command may shadow a global one of the same name). Feeds
+    // the prompt editor's /-autocomplete and the /help overlay.
+    //
+    // SIMPLIFICATION, stated precisely: this is the startup root only. A tab
+    // opened later against a DIFFERENT project root (a fresh `/new` elsewhere
+    // on disk) still DISPATCHES that root's own project commands correctly --
+    // Session::ExecuteCommand resolves against the session's own project_root,
+    // never this catalog -- it just will not autocomplete-discover them here.
+    // A full fix needs a per-tab, per-focus-change catalog refresh; this
+    // covers the overwhelmingly common case (one project per invocation) at a
+    // fraction of the machinery.
     std::vector<minimal::client::CommandCatalogEntry> command_catalog;
     bool commands_listed = false;
     {
-        const auto listed = client->ListCommands();
+        const auto listed = client->ListCommands(minimal::client::CurrentProjectRootOrEmpty());
         if (listed.status.ok()) {
             commands_listed = true;
             for (const auto& info : listed.response.commands()) {
@@ -1133,6 +1145,13 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         // catalog the /-autocomplete offers. "/help <command>" still goes to
         // the server: a single command's usage/summary is one short notice.
         if (line == "/help") {
+            // Opens an overlay rather than setting a notice, so nothing here
+            // would otherwise clear a stale one (an old /cost table, a
+            // previous error) left sitting above the editor once the overlay
+            // closes.
+            if (const std::string tab = app->FocusedTabId(); !tab.empty()) {
+                app->ClearTabNotice(tab);
+            }
             show_commands_help = true;
             return;
         }
@@ -1146,6 +1165,9 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         // registered an argument form for it (command_catalog's "keymap"
         // entry only exists to make bare /keymap autocomplete-discoverable).
         if (line == "/keymap" || line.rfind("/keymap ", 0) == 0) {
+            if (const std::string tab = app->FocusedTabId(); !tab.empty()) {
+                app->ClearTabNotice(tab);
+            }
             open_keymap_help_fn();
             return;
         }
@@ -1251,6 +1273,9 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         // switch is decoration, not session state, and works on any tab.
         if (parsed.name == "theme") {
             if (parsed.positional.empty()) {
+                if (const std::string tab = app->FocusedTabId(); !tab.empty()) {
+                    app->ClearTabNotice(tab);
+                }
                 open_theme_picker_fn();
             } else {
                 apply_theme(parsed.positional.front());
@@ -1259,6 +1284,9 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         }
         if (parsed.name == "agent" || parsed.name == "model") {
             if (parsed.positional.empty()) {
+                if (const std::string tab = app->FocusedTabId(); !tab.empty()) {
+                    app->ClearTabNotice(tab);
+                }
                 if (parsed.name == "agent") {
                     open_agent_picker_fn();
                 } else {
@@ -1890,10 +1918,17 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         while (running.load(std::memory_order_acquire)) {
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
             const uint64_t version = app->UiVersion();
+            // FocusedTabHasRunningTool joins the same "force a repaint with no
+            // version bump" seam: a foreground tool that goes quiet (a long
+            // `sleep`, a silent build step) produces no wire events at all, so
+            // nothing bumps UiVersion -- without this, both the spinner and a
+            // live elapsed counter would freeze the moment the tool stopped
+            // printing, reading as hung rather than merely slow.
             const bool debounce_pending =
                 prompt_state.query_pending_hint.load(std::memory_order_acquire) ||
                 minimal::client::StreamingMarkdownView::PendingReparseHint().load(
-                    std::memory_order_acquire);
+                    std::memory_order_acquire) ||
+                app->FocusedTabHasRunningTool();
             if (version != last_version || debounce_pending) {
                 last_version = version;
                 screen.PostEvent(Event::Custom);

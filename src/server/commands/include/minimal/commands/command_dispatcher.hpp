@@ -17,12 +17,28 @@
 
 namespace minimal::commands {
 
+// Resolves `name` against `project` first (if given and non-null), falling
+// back to `global` -- the ONE precedence rule every dispatch path must agree
+// on, project-scoped commands (ProjectCommandSource) included: a project
+// command must never read as "unknown" to the reader thread's pre-check
+// (SessionServiceImpl::DispatchCommand) while still running fine through
+// Dispatch below, or vice versa. A project command may freely shadow a
+// global one of the same name, matching how a project's own
+// agents/<name>.md already shadows a global preset by name.
+Command* FindEffective(const CommandRegistry& global, const CommandRegistry* project,
+                       const std::string& name);
+
 // `busy` is "a turn is in flight". An LLMCommand needs the provider and the
 // history to itself, so it is refused rather than queued behind the turn --
 // queueing would make /compact silently run minutes later against a context that
 // had moved on.
+//
+// `project_registry`, when given, is consulted BEFORE `registry` -- see
+// FindEffective. Defaulted so every caller with no project scope of its own
+// (tests, DispatchSessionless's sibling calls) is unaffected.
 CommandResult Dispatch(const CommandRegistry& registry, const std::string& name,
-                       const CommandArgs& args, CommandContext& context, bool busy);
+                       const CommandArgs& args, CommandContext& context, bool busy,
+                       const CommandRegistry* project_registry = nullptr);
 
 // The sessionless counterpart, for a CommandContext whose session ref is null
 // (the RunSessionlessCommand RPC). Only a command that is BOTH ReadOnly() and

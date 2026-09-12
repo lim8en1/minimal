@@ -43,11 +43,19 @@ endfunction()
 # stage 4 and the user fixed one filename per run to find the next.
 seed()
 foreach(_needed settings.json permissions.json providers.json providers.example.json
-                prompts/compression.md prompts/subagent.md agents/build.md agents/plan.md)
+                prompts/compression.md prompts/subagent.md agents/build.md agents/plan.md
+                commands/.keep)
     if(NOT EXISTS "${_config}/${_needed}")
         message(FATAL_ERROR "cold seed did not produce ${_needed}")
     endif()
 endforeach()
+
+# commands-md's global (trusted) discovery dir must exist after a cold seed --
+# otherwise it is never created by anything, and a user dropping a *.md file
+# into it has to `mkdir` by hand first with no prompt telling them so.
+if(NOT IS_DIRECTORY "${_config}/commands")
+    message(FATAL_ERROR "cold seed did not create the commands/ directory")
+endif()
 
 # providers.json is deliberately empty: a base_url that is right on the machine
 # that built this is wrong on the next one. The example beside it carries the

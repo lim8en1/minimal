@@ -42,6 +42,10 @@ using namespace minimal_test;
 namespace ftx = ftxui;
 namespace v1 = minimal::v1;
 
+// Forward-declared: defined much further down (by the mouse-click collapse
+// tests), but the permission modal's own click tests need it first.
+int ScreenLineOf(std::string_view frame, std::string_view needle);
+
 namespace {
 
 Theme TestTheme() {
@@ -358,9 +362,14 @@ TEST_CASE("permission modal: answers after the caller's request snapshot dies") 
     CHECK(frame.find("3. deny with message") != std::string::npos);
     CHECK(frame.find("4. deny and stop") != std::string::npos);
 
-    // Toggle the first grant (space on the focused checkbox), then allow: the
-    // granted key is exactly what was offered, never minted.
-    REQUIRE(SendEvent(modal, ftx::Event::Character(" ")));
+    // Walk the cursor up onto the first grant (the default cursor is Allow,
+    // not a grant -- see the unified-ladder test below), toggle it with
+    // space, jump back to the answers with Tab, then allow: the granted key
+    // is exactly what was offered, never minted.
+    REQUIRE(SendEvent(modal, ftx::Event::ArrowUp));   // Allow -> grant 1 (tail)
+    REQUIRE(SendEvent(modal, ftx::Event::ArrowUp));   // grant 1 -> grant 0 (make)
+    REQUIRE(SendEvent(modal, ftx::Event::Character(" ")));   // toggle grant 0
+    REQUIRE(SendEvent(modal, ftx::Event::Tab));              // jump to Allow
     REQUIRE(SendEvent(modal, ftx::Event::Return));
     REQUIRE(answered.has_value());
     CHECK(answered->choice == PermissionChoice::Allow);
@@ -380,18 +389,19 @@ TEST_CASE("permission modal: Escape denies without recording grants") {
     CHECK(answered->choice == PermissionChoice::Deny);
 }
 
-TEST_CASE("permission modal: with grants offered, the footer advertises tab/space") {
+TEST_CASE("permission modal: with grants offered, the footer advertises the "
+          "tab jump") {
     const auto theme = TestTheme();
     GrantToggles toggles;
     const auto request = MakePermissionRequest();  // has two grants
     auto modal = MakePermissionModal(request, toggles, theme, [](PermissionVerdict) {});
     const auto frame = RenderFrame(modal);
     CHECK(frame.find("1-4: choose") != std::string::npos);
-    CHECK(frame.find("tab/space: grants") != std::string::npos);
+    CHECK(frame.find("tab: grants/answers") != std::string::npos);
 }
 
 TEST_CASE("permission modal: with no grants offered, the footer omits the dead "
-          "tab/space affordances") {
+          "tab affordance") {
     // Regression: the footer used to always advertise the grant keys, even
     // on a request with nothing to move between or toggle -- dead keys
     // advertised on the security-decision surface.
@@ -403,7 +413,7 @@ TEST_CASE("permission modal: with no grants offered, the footer omits the dead "
     const auto frame = RenderFrame(modal);
     CHECK(frame.find("enter: confirm") != std::string::npos);
     CHECK(frame.find("esc: deny") != std::string::npos);
-    CHECK(frame.find("tab/space") == std::string::npos);
+    CHECK(frame.find("tab:") == std::string::npos);
 }
 
 TEST_CASE("permission modal: a Return as the FIRST event arms but does not "
@@ -475,7 +485,52 @@ TEST_CASE("permission modal: once armed, a digit answers directly") {
     CHECK(answered->choice == PermissionChoice::Deny);
 }
 
-TEST_CASE("permission modal: arrows move the selection and clamp at both ends") {
+TEST_CASE("permission modal: arrows walk the whole ladder -- grants then "
+          "answers -- and clamp at both ends") {
+    // Regression shape: arrows used to move ONLY among the four answers,
+    // never reaching the grant checkboxes at all (they were Tab+Space/mouse
+    // only). One cursor now walks both sections.
+    const auto theme = TestTheme();
+    GrantToggles toggles;
+    const auto request = MakePermissionRequest();   // two grants
+    std::optional<PermissionVerdict> answered;
+    auto modal = MakePermissionModal(request, toggles, theme,
+                                     [&](PermissionVerdict verdict) { answered = verdict; });
+
+    // Starts on Allow -- the default ACTION, not a grant.
+    CHECK(RenderFrame(modal).find("❯ 1. allow") != std::string::npos);
+
+    REQUIRE(SendEvent(modal, ftx::Event::ArrowUp));   // Allow -> grant 1 (tail)
+    REQUIRE(SendEvent(modal, ftx::Event::ArrowUp));   // grant 1 -> grant 0 (make)
+    REQUIRE(SendEvent(modal, ftx::Event::ArrowUp));   // top: clamps, stays on grant 0
+    CHECK(RenderFrame(modal).find("❯ 1. allow") == std::string::npos);   // off the answers entirely
+
+    for (int i = 0; i < 6; ++i) REQUIRE(SendEvent(modal, ftx::Event::ArrowDown));
+    // grant 0 -> grant 1 -> allow -> deny -> deny w/ message -> deny and stop -> clamps
+    CHECK(RenderFrame(modal).find("❯ 4. deny and stop") != std::string::npos);
+    REQUIRE(SendEvent(modal, ftx::Event::ArrowUp));
+    CHECK(RenderFrame(modal).find("❯ 3. deny with message") != std::string::npos);
+    CHECK_FALSE(answered.has_value());   // moving never answers
+}
+
+TEST_CASE("permission modal: Tab jumps between the grants and the answers") {
+    const auto theme = TestTheme();
+    GrantToggles toggles;
+    const auto request = MakePermissionRequest();   // two grants
+    auto modal = MakePermissionModal(request, toggles, theme, [](PermissionVerdict) {});
+
+    // Starts among the answers (Allow); Tab jumps to the first grant.
+    REQUIRE(SendEvent(modal, ftx::Event::Tab));
+    CHECK(RenderFrame(modal).find("❯ 1. allow") == std::string::npos);
+    // And back again, landing on the first answer (Allow).
+    REQUIRE(SendEvent(modal, ftx::Event::Tab));
+    CHECK(RenderFrame(modal).find("❯ 1. allow") != std::string::npos);
+}
+
+TEST_CASE("permission modal: clicking an answer row picks and submits it "
+          "immediately, no arming delay") {
+    // "Clicking an answer row selects and submits it" -- the capability the
+    // old plain-text answer rows had no hit box to offer at all.
     const auto theme = TestTheme();
     GrantToggles toggles;
     const auto request = MakePermissionRequest();
@@ -483,13 +538,70 @@ TEST_CASE("permission modal: arrows move the selection and clamp at both ends") 
     auto modal = MakePermissionModal(request, toggles, theme,
                                      [&](PermissionVerdict verdict) { answered = verdict; });
 
-    REQUIRE(SendEvent(modal, ftx::Event::ArrowUp));   // already at the top: stays
-    CHECK(RenderFrame(modal).find("❯ 1. allow") != std::string::npos);
-    for (int i = 0; i < 6; ++i) REQUIRE(SendEvent(modal, ftx::Event::ArrowDown));
-    CHECK(RenderFrame(modal).find("❯ 4. deny and stop") != std::string::npos);
-    REQUIRE(SendEvent(modal, ftx::Event::ArrowUp));
-    CHECK(RenderFrame(modal).find("❯ 3. deny with message") != std::string::npos);
-    CHECK_FALSE(answered.has_value());   // moving never answers
+    const auto frame = RenderFrame(modal);
+    const int y = ScreenLineOf(frame, "2. deny");
+    REQUIRE(y >= 0);
+    ftx::Mouse click;
+    click.button = ftx::Mouse::Left;
+    click.motion = ftx::Mouse::Pressed;
+    click.x = 5;
+    click.y = y;
+    // A single click answers outright -- no separate arm-then-confirm step,
+    // unlike a keyboard pick (see the arming-rule tests above): a click is
+    // already the deliberate, aimed action that rule exists to require.
+    REQUIRE(SendEvent(modal, ftx::Event::Mouse("", click)));
+    REQUIRE(answered.has_value());
+    CHECK(answered->choice == PermissionChoice::Deny);
+}
+
+TEST_CASE("permission modal: clicking a grant checkbox toggles it without "
+          "answering") {
+    const auto theme = TestTheme();
+    GrantToggles toggles;
+    const auto request = MakePermissionRequest();
+    std::optional<PermissionVerdict> answered;
+    auto modal = MakePermissionModal(request, toggles, theme,
+                                     [&](PermissionVerdict verdict) { answered = verdict; });
+
+    const auto frame = RenderFrame(modal);
+    const int y = ScreenLineOf(frame, "/usr/bin/make");
+    REQUIRE(y >= 0);
+    ftx::Mouse click;
+    click.button = ftx::Mouse::Left;
+    click.motion = ftx::Mouse::Pressed;
+    click.x = 5;
+    click.y = y;
+    REQUIRE(SendEvent(modal, ftx::Event::Mouse("", click)));
+    CHECK_FALSE(answered.has_value());
+    const auto keys = toggles.GrantedKeys(request);
+    REQUIRE(keys.size() == 1);
+    CHECK(keys[0] == "bash:/usr/bin/make");
+}
+
+TEST_CASE("permission modal: a passive mouse move does not arm it") {
+    // THE BUG this replaces: any mouse event -- including a hover with no
+    // click at all -- used to satisfy the arming rule, so a Return arriving
+    // right after could answer a request the user had not deliberately
+    // acted on yet.
+    const auto theme = TestTheme();
+    GrantToggles toggles;
+    const auto request = MakePermissionRequest();
+    std::optional<PermissionVerdict> answered;
+    auto modal = MakePermissionModal(request, toggles, theme,
+                                     [&](PermissionVerdict verdict) { answered = verdict; });
+
+    ftx::Mouse move;
+    move.button = ftx::Mouse::None;
+    move.motion = ftx::Mouse::Moved;
+    move.x = 5;
+    move.y = 5;
+    SendEvent(modal, ftx::Event::Mouse("", move));   // a hover, not a click
+
+    REQUIRE(SendEvent(modal, ftx::Event::Return));   // must still only ARM
+    CHECK_FALSE(answered.has_value());
+    REQUIRE(SendEvent(modal, ftx::Event::Return));   // the user's real answer
+    REQUIRE(answered.has_value());
+    CHECK(answered->choice == PermissionChoice::Allow);
 }
 
 TEST_CASE("permission modal: deny with message collects typed text and sends it") {
@@ -1715,7 +1827,9 @@ v1::StoredMessage StoredThinking(int64_t seq, const std::string& text) {
     return stored;
 }
 
-// The 0-based screen row carrying `needle`, or -1.
+// The 0-based screen row carrying `needle`, or -1. (Forward-declared near the
+// top of this file -- the permission modal's own click tests, further up,
+// need it before this definition is reached.)
 int ScreenLineOf(std::string_view frame, std::string_view needle) {
     int y = 0;
     for (std::size_t pos = 0; pos < frame.size();) {

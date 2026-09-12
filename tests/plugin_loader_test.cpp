@@ -7,6 +7,8 @@
 #include <fstream>
 
 #include "fakes.hpp"
+#include "minimal/commands/command_dispatcher.hpp"
+#include "minimal/commands/project_command_source.hpp"
 #include "minimal/common/logger.hpp"
 #include "minimal/hooks/hook_dispatcher.hpp"
 #include "minimal/llm/provider_factory_registry.hpp"
@@ -51,8 +53,13 @@ struct Harness {
     llm::ModelCatalogRegistry model_catalog_registry;
     plugins::ServiceRegistry service_registry;
     hooks::HookDispatcher hook_dispatcher{common::DefaultLogger()};
+    // A real (empty) registry, not nullptr: RegisterProjectCommands tests
+    // need commands_ != nullptr for LoadOne to even check a plugin for the
+    // optional per-root hook (see plugin_loader.cpp). No existing fixture
+    // registers commands, so every other test here is unaffected.
+    commands::CommandRegistry commands;
     plugins::PluginLoader loader{tool_registry, provider_registry, nlohmann::json::object(),
-                                 nullptr, nullptr, nullptr, nullptr, &model_catalog_registry,
+                                 nullptr, &commands, nullptr, nullptr, &model_catalog_registry,
                                  &service_registry, nullptr, {}, &hook_dispatcher};
 };
 
@@ -858,4 +865,92 @@ TEST_CASE("the service collision check is load-bearing",
     const auto with_service_feed =
         plugins::ResolveRegistrationNames(h.tool_registry, {}, nullptr, {}, &h.service_registry);
     CHECK_FALSE(with_service_feed.result.fatal_collisions.empty());
+}
+
+// --- project-scoped commands (minimal_plugin_register_project_commands) ----
+
+TEST_CASE("RegisterProjectCommands calls the optional per-root hook, into a "
+          "registry the caller supplies",
+          "[plugin_loader][project_commands]") {
+    Harness h;
+    REQUIRE(h.loader.LoadAll({Enabled("fixture-project-commands")}).front().status ==
+            LoadStatus::Loaded);
+
+    commands::CommandRegistry project;
+    h.loader.RegisterProjectCommands(project, "/repo/a");
+
+    CHECK(project.Find("project-only") != nullptr);
+    // Named after the root by the fixture -- proves the actual project_root
+    // argument reached the plugin's hook, not a placeholder.
+    CHECK(project.Find("project-only")->Summary().find("/repo/a") != std::string_view::npos);
+    // The GLOBAL registry never received the per-root hook's registrations --
+    // the two are separate registries, never merged.
+    CHECK(h.commands.Find("project-only") == nullptr);
+}
+
+TEST_CASE("a project registry entry shadows a global one of the same name",
+          "[plugin_loader][project_commands]") {
+    Harness h;
+    REQUIRE(h.loader.LoadAll({Enabled("fixture-project-commands")}).front().status ==
+            LoadStatus::Loaded);
+
+    commands::CommandRegistry project;
+    h.loader.RegisterProjectCommands(project, "/repo/a");
+
+    REQUIRE(h.commands.Find("shared") != nullptr);
+    REQUIRE(project.Find("shared") != nullptr);
+    CHECK(h.commands.Find("shared")->Summary() == "from the global registry");
+    CHECK(project.Find("shared")->Summary() == "from the project registry");
+    // FindEffective is the precedence rule every dispatch path uses -- see
+    // command_dispatcher.hpp -- and it is what actually makes "shadows" true
+    // end to end, not merely "both exist".
+    CHECK(commands::FindEffective(h.commands, &project, "shared")->Summary() ==
+          "from the project registry");
+}
+
+TEST_CASE("a plugin with no project-commands hook is silently skipped by "
+          "RegisterProjectCommands",
+          "[plugin_loader][project_commands]") {
+    Harness h;
+    REQUIRE(h.loader.LoadAll({Enabled("fixture-good")}).front().status == LoadStatus::Loaded);
+
+    commands::CommandRegistry project;
+    h.loader.RegisterProjectCommands(project, "/repo/a");
+    CHECK(project.All().empty());
+}
+
+// --- ProjectCommandSource ----------------------------------------------------
+
+TEST_CASE("ProjectCommandSource::For resolves and caches one registry per root",
+          "[plugin_loader][project_commands][project_command_source]") {
+    Harness h;
+    REQUIRE(h.loader.LoadAll({Enabled("fixture-project-commands")}).front().status ==
+            LoadStatus::Loaded);
+    commands::ProjectCommandSource source(h.loader);
+
+    const commands::CommandRegistry& a = source.For("/repo/a");
+    REQUIRE(a.Find("project-only") != nullptr);
+    CHECK(a.Find("project-only")->Summary().find("/repo/a") != std::string_view::npos);
+
+    const commands::CommandRegistry& b = source.For("/repo/b");
+    REQUIRE(b.Find("project-only") != nullptr);
+    CHECK(b.Find("project-only")->Summary().find("/repo/b") != std::string_view::npos);
+
+    // Same object back for a root already resolved -- the whole point of the
+    // cache (config is static once loaded; no need to ask the plugin twice).
+    CHECK(&source.For("/repo/a") == &a);
+    CHECK(&source.For("/repo/b") == &b);
+}
+
+TEST_CASE("ProjectCommandSource::For on an empty root is a stable, permanently "
+          "empty registry",
+          "[plugin_loader][project_commands][project_command_source]") {
+    Harness h;
+    REQUIRE(h.loader.LoadAll({Enabled("fixture-project-commands")}).front().status ==
+            LoadStatus::Loaded);
+    commands::ProjectCommandSource source(h.loader);
+
+    const commands::CommandRegistry& empty = source.For("");
+    CHECK(empty.All().empty());
+    CHECK(&source.For("") == &empty);   // still cached, not rebuilt every call
 }

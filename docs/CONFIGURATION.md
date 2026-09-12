@@ -575,11 +575,15 @@ shows through.
 Every `commands/*.md` file becomes a `/`-command (the file stem is the name).
 Step-by-step walkthrough with runnable examples:
 **[docs/COMMANDS_HOWTO.md](COMMANDS_HOWTO.md)**.
-Discovery merges `<config>/commands/`, the project's `commands/`, and the
-project's `.opencode/commands/` (opencode's layout, so existing command files
-work zero-copy); the nearest directory wins a stem collision. The composed
-prompt is submitted as the turn itself via the sanctioned shorthand path —
-results of the RUN (errors, the submit notice) never enter the chat.
+Discovery merges `<config>/commands/` (global, registered once at server
+startup) with the SESSION's own project root's `commands/` and
+`.opencode/commands/` (opencode's layout, so existing command files work
+zero-copy; registered lazily, the first time a session rooted there needs its
+catalog, then cached for that root — `ProjectCommandSource`); the nearest
+directory wins a stem collision, and a project command may shadow a global
+one of the same name. The composed prompt is submitted as the turn itself via
+the sanctioned shorthand path — results of the RUN (errors, the submit
+notice) never enter the chat.
 
 ```markdown
 ---

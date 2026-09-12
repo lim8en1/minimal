@@ -56,7 +56,17 @@ std::shared_ptr<Session> SessionRegistry::Create(SessionParams params) {
     // the lookup read a moved-from name. A copy, not the cached reference: a
     // --model override mutates it, and the registry's cache must keep describing
     // the preset as written.
-    AgentPreset preset = presets_.Resolve(params.agent_preset, params.project_root);
+    //
+    // The session's own model_override is passed straight into Resolve() so an
+    // unresolvable settings.default_model cannot throw ahead of it: the user
+    // named a model, and that has to win even when the preset/settings fallback
+    // is broken. CreateResolved's own ResolveModel (below) re-applies the same
+    // override afterward -- see its comment -- for the preset-resolves-fine,
+    // override-still-wins case; passing it here as well is what rescues the
+    // preset-does-NOT-resolve case, which ResolveModel runs too late to fix.
+    AgentPreset preset =
+        presets_.Resolve(params.agent_preset, params.project_root, std::nullopt,
+                         params.model_override);
     return CreateResolved(std::move(params), std::move(preset));
 }
 
@@ -382,6 +392,10 @@ void SessionRegistry::ApplyConstructorWiring(SessionParams& params, bool has_par
     // rule. Closing the surface removes the whole class rather than patching the
     // one command that happens to reach it today.
     params.commands = has_parent ? nullptr : commands_;
+    // Same subagent rule as commands, and for the same reason (§ its own
+    // comment above): a child gets no command channel, project-scoped or
+    // otherwise.
+    params.project_commands = has_parent ? nullptr : project_commands_;
     params.provider_factories = &providers_;
     params.provider_instance_cache = &provider_cache_;
 }

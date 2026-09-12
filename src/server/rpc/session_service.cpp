@@ -9,6 +9,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <filesystem>
+#include <set>
 #include <thread>
 #include <utility>
 
@@ -709,8 +710,17 @@ void SessionServiceImpl::DispatchCommand(const v1::CommandInvocation& invocation
     // Everything else queues for the worker, which pops only between turns. That
     // is what keeps a mutation from landing between a tool_use and its
     // tool_result -- a hard 400 on both wire formats.
+    // FindEffective, not a bare commands_->Find: a command that exists ONLY
+    // in this session's project registry must not read as "unknown" here and
+    // then run fine through Session::ExecuteCommand's own Dispatch call --
+    // both must agree, or the unknown-command refusal below fires before the
+    // command ever gets a chance to run.
+    const commands::CommandRegistry* project_registry =
+        project_commands_ != nullptr ? &project_commands_->For(session.info().project_root)
+                                     : nullptr;
     const commands::Command* command =
-        commands_ != nullptr ? commands_->Find(queued.name) : nullptr;
+        commands_ != nullptr ? commands::FindEffective(*commands_, project_registry, queued.name)
+                             : nullptr;
     if (command != nullptr && command->ReadOnly()) {
         // On the bounded command pool, not a detached thread: a detached task
         // per command made a flood of read-only commands an unbounded pile of
@@ -1277,7 +1287,7 @@ grpc::Status SessionServiceImpl::PluginCall(grpc::ServerContext* context,
 }
 
 grpc::Status SessionServiceImpl::ListCommands(grpc::ServerContext* context,
-                                              const v1::ListCommandsRequest*,
+                                              const v1::ListCommandsRequest* request,
                                               v1::ListCommandsResponse* response) {
     if (const auto auth = EnsureAuthenticated(auth_providers_, context); !auth.ok()) return auth;
 
@@ -1286,10 +1296,9 @@ grpc::Status SessionServiceImpl::ListCommands(grpc::ServerContext* context,
     // invocation with "the /-command subsystem is not available".
     if (commands_ == nullptr) return grpc::Status::OK;
 
-    // Fetched once at connect and never again: plugins load at startup and
-    // config is read once, so the list cannot change mid-connection -- which is
-    // why there is no invalidation machinery, not merely none yet.
-    for (const auto& entry : commands_->All()) {
+    std::set<std::string> seen;   // surface names already emitted (project shadows global)
+    const auto append = [response, &seen](const commands::CommandRegistry::Entry& entry) {
+        if (!seen.insert(entry.surface).second) return;   // already emitted by the project pass
         const commands::Command* command = entry.command;
         // The SURFACE name -- the alias applied, the key Find() resolves --
         // not the command's own Name(): an aliased command advertised under
@@ -1323,7 +1332,26 @@ grpc::Status SessionServiceImpl::ListCommands(grpc::ServerContext* context,
                 info->set_display(v1::COMMAND_DISPLAY_STATUS);
                 break;
         }
+    };
+
+    // The project-scoped half FIRST -- a project command shadows a global one
+    // of the same name (append's `seen` guard is what makes that stick),
+    // matching how a project's own agents/<name>.md already shadows a global
+    // preset. request->project_root() empty (no project_root given, or the
+    // requester has none yet) means this pass is simply empty: For("") is a
+    // permanently-empty registry, not an error.
+    if (project_commands_ != nullptr && !request->project_root().empty()) {
+        for (const auto& entry : project_commands_->For(request->project_root()).All()) {
+            append(entry);
+        }
     }
+
+    // The global half: fetched once at connect and never again for THIS
+    // slice (plugins load at startup and config is read once, so it cannot
+    // change mid-connection); the project slice above, by contrast, is
+    // resolved fresh per call, since a client may ask about a different
+    // project_root on a later call within the same connection.
+    for (const auto& entry : commands_->All()) append(entry);
     return grpc::Status::OK;
 }
 

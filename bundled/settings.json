@@ -1,6 +1,6 @@
 {
   "default_agent_preset": "build",
-  "default_model": "local/your-model-name",
+  "default_model": "",
   "max_concurrent_subagents": 4,
 
   "background_wake": false,

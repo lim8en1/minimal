@@ -147,12 +147,14 @@ AgentPresetRegistry::AgentPresetRegistry(std::filesystem::path config_dir,
 
 AgentPreset AgentPresetRegistry::Resolve(
     const std::string& preset_name, const std::filesystem::path& project_root,
-    const std::optional<std::map<std::string, SkillMode>>& parent_skills) const {
-    if (parent_skills.has_value()) {
+    const std::optional<std::map<std::string, SkillMode>>& parent_skills,
+    const std::optional<config::ModelRef>& model_override) const {
+    if (parent_skills.has_value() || model_override.has_value()) {
         // The clamp input varies per parent, so no cache: resolve fresh every
         // time (spawn is rare; a resolve is frontmatter reads plus a model
-        // lookup, not a turn).
-        return ResolveUncached(preset_name, project_root, parent_skills);
+        // lookup, not a turn). A model_override is likewise per-caller state,
+        // not a property of (preset_name, root) worth caching.
+        return ResolveUncached(preset_name, project_root, parent_skills, model_override);
     }
 
     // The cache key canonicalizes the root: two sessions giving the same
@@ -177,7 +179,7 @@ AgentPreset AgentPresetRegistry::Resolve(
     // result is a pure function of files that do not change at runtime, and the
     // insert below keeps whichever landed first so every later caller still sees
     // one consistent value.
-    AgentPreset resolved = ResolveUncached(preset_name, canonical, std::nullopt);
+    AgentPreset resolved = ResolveUncached(preset_name, canonical, std::nullopt, std::nullopt);
 
     std::lock_guard<std::mutex> lock(cache_mu_);
     return cache_.emplace(std::make_pair(preset_name, std::move(canonical)), std::move(resolved))
@@ -267,7 +269,8 @@ void ApplyModel(AgentPreset& preset, const config::ResolvedModel& model) {
 
 AgentPreset AgentPresetRegistry::ResolveUncached(
     const std::string& preset_name, const std::filesystem::path& project_root,
-    const std::optional<std::map<std::string, SkillMode>>& parent_skills) const {
+    const std::optional<std::map<std::string, SkillMode>>& parent_skills,
+    const std::optional<config::ModelRef>& model_override) const {
     if (preset_name.empty() || preset_name == "." || preset_name == ".." ||
         preset_name.find('/') != std::string::npos) {
         throw std::runtime_error("invalid agent preset name: '" + preset_name + "'");
@@ -314,30 +317,55 @@ AgentPreset AgentPresetRegistry::ResolveUncached(
         throw std::runtime_error("agent preset '" + preset_name + "' is disabled");
     }
 
-    // The preset's model, or settings.default_model when it declares none. Both
-    // are already known to be <provider>/<model>-shaped -- the frontmatter parser
-    // checks its own, and an unparseable default_model is caught here rather than
-    // being silently treated as absent.
-    const std::string model_text = raw.model.empty() ? settings_.default_model : raw.model;
-    if (model_text.empty()) {
-        throw std::runtime_error("agent preset '" + preset_name +
-                                 "' declares no model and settings.json has no default_model");
-    }
-    // SplitModelRef, matching ParseAgentPresetFrontmatter's own shape check (see
-    // its comment) and settings.json default_model's own client/server-shared
-    // parser: a discovered catalog can serve slash-bearing model ids, and this
-    // resolve step must accept whatever the frontmatter parser already accepted.
-    const auto ref = config::SplitModelRef(model_text);
-    if (!ref) {
-        throw std::runtime_error("agent preset '" + preset_name + "': model '" + model_text +
-                                 "' must be <provider>/<model>, e.g. local/qwen4");
-    }
-    const auto model = providers_.Resolve(*ref);  // snapshot; see ProvidersConfig::Resolve
-    if (!model) {
-        throw std::runtime_error("agent preset '" + preset_name + "' names unknown model '" +
-                                 model_text + "'; providers.json defines " +
-                                 config::DescribeModels(providers_) +
-                                 config::DescribeDiscovery(providers_, ref->provider));
+    // The caller's own model choice outranks everything the preset or
+    // settings.json says: it is a decision the caller already made (--model,
+    // /model, a fork's pinned choice, a spawn's inherited override), and its
+    // resolution failure must be reported in terms of THAT choice, not a
+    // default_model the caller never touched. Without this, an unresolvable
+    // settings.default_model throws below before a caller's own
+    // ResolveModel-style override application ever runs -- the exact bug that
+    // made a bad default_model brick session creation even when the caller
+    // supplied a working --model. Resolved here (rather than left to the
+    // caller, as ResolveModel-style callers also do) so a THROWING preset
+    // fails before any of it is committed, and so every caller -- not just
+    // the ones that remember to re-apply an override afterward -- gets the
+    // rescue.
+    std::shared_ptr<const config::ResolvedModel> resolved_model;
+    if (model_override.has_value()) {
+        resolved_model = providers_.Resolve(*model_override);
+        if (!resolved_model) {
+            throw std::runtime_error("unknown model '" + model_override->str() +
+                                     "'; providers.json defines " +
+                                     config::DescribeModels(providers_) +
+                                     config::DescribeDiscovery(providers_, model_override->provider));
+        }
+    } else {
+        // The preset's model, or settings.default_model when it declares none.
+        // Both are already known to be <provider>/<model>-shaped -- the
+        // frontmatter parser checks its own, and an unparseable default_model
+        // is caught here rather than being silently treated as absent.
+        const std::string model_text = raw.model.empty() ? settings_.default_model : raw.model;
+        if (model_text.empty()) {
+            throw std::runtime_error("agent preset '" + preset_name +
+                                     "' declares no model and settings.json has no default_model");
+        }
+        // SplitModelRef, matching ParseAgentPresetFrontmatter's own shape check
+        // (see its comment) and settings.json default_model's own
+        // client/server-shared parser: a discovered catalog can serve
+        // slash-bearing model ids, and this resolve step must accept whatever
+        // the frontmatter parser already accepted.
+        const auto ref = config::SplitModelRef(model_text);
+        if (!ref) {
+            throw std::runtime_error("agent preset '" + preset_name + "': model '" + model_text +
+                                     "' must be <provider>/<model>, e.g. local/qwen4");
+        }
+        resolved_model = providers_.Resolve(*ref);  // snapshot; see ProvidersConfig::Resolve
+        if (!resolved_model) {
+            throw std::runtime_error("agent preset '" + preset_name + "' names unknown model '" +
+                                     model_text + "'; providers.json defines " +
+                                     config::DescribeModels(providers_) +
+                                     config::DescribeDiscovery(providers_, ref->provider));
+        }
     }
 
     AgentPreset preset;
@@ -374,7 +402,7 @@ AgentPreset AgentPresetRegistry::ResolveUncached(
     const std::string preloaded = RenderPreloadedSkills(resolved_skills, skills_, project_root,
                                                         tool_skills);
     preset.system_prompt = raw.body + RenderSkillListing(tool_skills, merged_skills) + preloaded;
-    ApplyModel(preset, *model);
+    ApplyModel(preset, *resolved_model);
     // Preset extras (temperature, top_p, reasoningEffort, ...) override the
     // model config's defaults: an agent declaring `temperature: 0.1` means it,
     // whatever providers.json says about the model.

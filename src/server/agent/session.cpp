@@ -254,6 +254,7 @@ Session::Session(SessionParams params, AgentPreset preset,
     // null. See SessionParams for what each is borrowed from.
     presets_ = params_.presets;
     commands_ = params_.commands;
+    project_commands_ = params_.project_commands;
     provider_factories_ = params_.provider_factories;
     provider_instance_cache_ = params_.provider_instance_cache;
     // Phase 5 step 8: the same copy executor_'s init list above already used,
@@ -490,8 +491,15 @@ void Session::ExecuteCommand(const QueuedCommand& command, bool busy) {
         return;
     }
 
+    // Resolved fresh per command rather than cached on the session: For()'s
+    // own cache makes a second call for the same root free, and a session's
+    // project_root never changes after creation anyway -- there is nothing
+    // to invalidate.
+    const commands::CommandRegistry* project_registry =
+        project_commands_ != nullptr ? &project_commands_->For(info_.project_root) : nullptr;
     commands::CommandContext context(this, *presets_, *confirmations_, logger_);
-    auto outcome = commands::Dispatch(*commands_, command.name, command.args, context, busy);
+    auto outcome =
+        commands::Dispatch(*commands_, command.name, command.args, context, busy, project_registry);
     EmitCommandResult(std::move(outcome), command);
 }
 

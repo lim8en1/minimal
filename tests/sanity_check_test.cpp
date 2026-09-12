@@ -496,19 +496,26 @@ TEST_CASE("a discover-only provider with an unregistered backend is fatal",
     CHECK(hits[1]->severity == CheckSeverity::Fatal);    // nothing usable remains
 }
 
-TEST_CASE("a default_model under a discover-entry is not flagged",
+TEST_CASE("a default_model under a discover-entry warns as unverified, not unresolvable",
           "[sanity_check][usable_provider][discover]") {
     Fixture f;
     WriteDiscoverConfig(f.config_dir);
     ScopedEnv data("XDG_DATA_HOME", f.xdg_data.string().c_str());
     f.RegisterTool("tools-bash", "bash");
     f.model_catalogs.Register("fixture", std::make_shared<FakeCatalog>());
-    // The model names nothing static -- only the catalog would know -- and the
-    // check never probes, so it stays silent.
+    // The model names nothing static -- only the catalog would know, and the
+    // check never probes -- but a typo here is exactly as likely as a typo in
+    // a static reference, so this still warns; it must not say "matches no
+    // configured model" (that would be wrong: it may resolve fine at first
+    // use) and must not be Fatal (unverifiable, not confirmed broken).
     f.Write("settings.json", R"({"default_agent_preset":"build","default_model":"disc/other"})");
 
     const auto results = RunChecks(f);
-    CHECK(ByCheck(results, "usable_provider").empty());
+    const auto hits = ByCheck(results, "usable_provider");
+    REQUIRE(hits.size() == 1);
+    CHECK(hits[0]->severity == CheckSeverity::Warning);
+    CHECK(hits[0]->message.find("disc/other") != std::string::npos);
+    CHECK(hits[0]->message.find("matches no configured model") == std::string::npos);
     CHECK(ByCheck(results, "presets").empty());
 }
 

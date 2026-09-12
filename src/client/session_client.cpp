@@ -187,11 +187,13 @@ v1::CommandResult SessionClient::RunSessionlessCommand(const std::string& name,
     return response.result();
 }
 
-SessionClient::ListCommandsResult SessionClient::ListCommands() {
+SessionClient::ListCommandsResult SessionClient::ListCommands(const std::string& project_root) {
     grpc::ClientContext context;
     context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(2));
+    v1::ListCommandsRequest request;
+    request.set_project_root(project_root);
     ListCommandsResult result;
-    result.status = stub_->ListCommands(&context, v1::ListCommandsRequest{}, &result.response);
+    result.status = stub_->ListCommands(&context, request, &result.response);
     return result;
 }
 

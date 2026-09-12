@@ -372,6 +372,13 @@ int main(int argc, char** argv) {
     // safe. A runtime Provide is logged and ignored (the registry's own rule).
     services.Seal();
 
+    // The project-scoped half of the /-command catalog (docs/COMMANDS_HOWTO.md
+    // §2): unlike `commands` above, this is never populated here -- there is
+    // no project root at startup -- only handed the now-fully-loaded `loader`
+    // so it can ask each plugin's optional per-root hook later, lazily, once
+    // a session names a real one.
+    minimal::commands::ProjectCommandSource project_commands(loader);
+
     std::printf("plugins (%zu discovered):\n", records.size());
     for (const auto& record : records) {
         std::printf("  %-18s %-12s %s\n",
@@ -585,6 +592,7 @@ int main(int argc, char** argv) {
     minimal::agent::SessionRegistry sessions(*presets, tools, providers, observers, *session_db,
                                              loop_config, minimal::common::DefaultLogger());
     sessions.set_commands(&commands);
+    sessions.set_project_commands(&project_commands);
     // Project context (AGENTS.md/CLAUDE.md): each session loads its own, from
     // its own project_root, at creation/resume/spawn -- never at startup, since
     // the server serves many project roots and no file belongs to all of them.
@@ -686,6 +694,7 @@ int main(int argc, char** argv) {
                                              minimal::common::DefaultLogger(),
                                              &permission_advisors);
     service.set_commands(&commands);
+    service.set_project_commands(&project_commands);
     service.set_auth_providers(&auth_providers);
     service.set_mention_resolvers(&mention_resolvers);
     // The PluginCall dispatch target: the same sealed registry plugins

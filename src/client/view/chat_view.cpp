@@ -1,6 +1,7 @@
 #include "minimal/client/view/chat_view.hpp"
 
 #include <algorithm>
+#include <chrono>
 
 #include "minimal/client/view/tool_status.hpp"
 #include "minimal/common/logger.hpp"
@@ -299,6 +300,26 @@ ftxui::Element ChatView::RenderLiveToolRow(const ToolExecutionState& tool) const
                                      : SummarizeToolInput(tool.tool_name, tool.input);
     if (!summary.empty()) {
         line.push_back(text("  " + summary) | Muted(theme_));
+    }
+    // THE BUG this closes: a live "bash, bash, bash" list had no clock or
+    // elapsed anywhere, so a stuck step and a running one looked identical
+    // until the whole turn ended. Running: elapsed since started_at_unix_ms,
+    // ticking because AppState::FocusedTabHasRunningTool keeps the pump
+    // repainting even when the tool itself is silent (app.cpp). Settled: the
+    // server-measured duration_ms, the same number the persisted row will
+    // eventually show. started_at_unix_ms defaults to -1 (never populated) --
+    // skip rather than render a nonsense multi-decade "elapsed".
+    if (tool.started) {
+        if (tool.started_at_unix_ms.count() >= 0) {
+            const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                    std::chrono::system_clock::now().time_since_epoch())
+                                    .count();
+            const auto elapsed_ms =
+                std::max<std::int64_t>(0, now_ms - tool.started_at_unix_ms.count());
+            line.push_back(text("  " + FormatDuration(elapsed_ms)) | Muted(theme_));
+        }
+    } else if (tool.duration.count() >= 0) {
+        line.push_back(text("  " + FormatDuration(tool.duration.count())) | Muted(theme_));
     }
     return hbox(std::move(line));
 }

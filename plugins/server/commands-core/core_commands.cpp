@@ -153,7 +153,14 @@ public:
         try {
             // The session's root anchors project-local discovery: /agent into a
             // project preset works exactly like the session's own creation did.
-            resolved = context.presets().Resolve(wanted, context.session().project_root());
+            // The session's existing model_override rides straight into Resolve()
+            // (not just into the precedence re-apply below) so switching to a
+            // preset with a bad `model:` -- or a bad settings.default_model --
+            // cannot fail the switch when the session already has a working
+            // override in force; see AgentPresetRegistry::Resolve's model_override
+            // doc.
+            resolved = context.presets().Resolve(wanted, context.session().project_root(),
+                                                 std::nullopt, context.session().model_override());
         } catch (const std::exception& error) {
             return CommandResult::Error(error.what());
         }

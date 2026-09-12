@@ -32,11 +32,22 @@ Nearest directory wins a stem collision; project shadows global:
 
 | Directory | Trust |
 |---|---|
-| `<dir>/commands/`, `<dir>/.opencode/commands/` — the server's cwd and ancestors up to the git root | untrusted (project-local) |
+| `<project_root>/commands/`, `<project_root>/.opencode/commands/` — the session's own project root and ancestors up to the git root | untrusted (project-local) |
 | `<config>/commands/` (your own config dir) | trusted |
 
-Files become `/commands` at **server startup** — commands register once,
-before any session exists, so restart the server after adding a file.
+The two rows register at different times, because there is no session (and so
+no project root) until one exists:
+
+- **Global** (`<config>/commands/`) registers once, at **server startup** —
+  restart the server after adding or editing a file there.
+- **Project-local** registers lazily, the **first time a session rooted at
+  that project** asks for its command catalog, and is then cached for that
+  root's remaining lifetime — restart the server (or, if the server has never
+  seen that root before, nothing at all) after adding or editing a file
+  there.
+
+A project command may shadow a global one of the same name for sessions
+rooted there.
 
 Untrusted means: the first and every invocation discloses each source's
 literal program/script and asks run/cancel before anything executes. Trusted

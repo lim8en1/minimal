@@ -54,6 +54,7 @@ add_library(minimal_server_core SHARED
     agent/provider_instance_cache.cpp
     commands/command_registry.cpp
     commands/command_dispatcher.cpp
+    commands/project_command_source.cpp
     agent/subagent_spawn.cpp
     agent/subagent_manager.cpp
     agent/spawn_subagent_tool.cpp

@@ -35,6 +35,7 @@
 #include "minimal/agent/mention_resolver.hpp"
 #include "minimal/agent/session_registry.hpp"
 #include "minimal/commands/command_registry.hpp"
+#include "minimal/commands/project_command_source.hpp"
 #include "minimal/common/logger.hpp"
 #include "minimal/config/permissions_config.hpp"
 #include "minimal/config/settings_config.hpp"
@@ -113,6 +114,14 @@ public:
     // Optional: a service without one answers every invocation with "not
     // available" rather than dropping it. Set before serving.
     void set_commands(const commands::CommandRegistry* commands) { commands_ = commands; }
+    // Optional: the project-scoped half of the catalog (ProjectCommandSource),
+    // consulted BEFORE commands_ by both DispatchCommand's reader-thread
+    // pre-check and ListCommands -- see FindEffective's own doc for why both
+    // must agree. Null means every project-command lookup degrades to
+    // global-only, exactly the pre-existing behavior.
+    void set_project_commands(const commands::ProjectCommandSource* project_commands) {
+        project_commands_ = project_commands;
+    }
     void set_mcp_manager(mcp::McpClientManager* manager) { mcp_manager_ = manager; }
 
     // Optional: null means ListAgentPresets answers with an empty list rather
@@ -246,6 +255,7 @@ private:
     // Borrowed and optional: a service built without commands answers every
     // invocation with "not available" rather than dropping it.
     const commands::CommandRegistry* commands_ = nullptr;
+    const commands::ProjectCommandSource* project_commands_ = nullptr;
     mcp::McpClientManager* mcp_manager_ = nullptr;
     // Borrowed and optional: null = ListAgentPresets answers empty (see setter).
     const agent::AgentPresetRegistry* presets_ = nullptr;

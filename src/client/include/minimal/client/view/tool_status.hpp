@@ -8,6 +8,7 @@
 
 #include <array>
 #include <chrono>
+#include <cstdint>
 #include <string>
 
 #include <ftxui/dom/elements.hpp>
@@ -64,6 +65,20 @@ inline ftxui::Element ToolHeadline(ToolStatus status, const std::string& name,
     using namespace ftxui;
     return hbox({text(ToolStatusGlyph(status) + " ") | color(ToolStatusColor(status, theme)),
                  text(name) | color(theme.ColorForOr("tool", "syntax_function"))});
+}
+
+// "850ms" / "3.4s" / "2m 5s": one duration format, shared by the bash display
+// renderer (a settled call's persisted duration_ms), the live tool row and the
+// running-tools panel (a running call's elapsed time, computed from
+// started_at_unix_ms). Was plugins-local (core_display_renderers.cpp); lifted
+// here so all three read the same number the same way.
+inline std::string FormatDuration(std::int64_t ms) {
+    if (ms < 1000) return std::to_string(ms) + "ms";
+    if (ms < 60'000) {
+        const auto tenths = ms / 100;
+        return std::to_string(tenths / 10) + "." + std::to_string(tenths % 10) + "s";
+    }
+    return std::to_string(ms / 60'000) + "m " + std::to_string((ms % 60'000) / 1000) + "s";
 }
 
 // The leading disclosure glyph of a collapsible row ("▸ " collapsed, "▾ "

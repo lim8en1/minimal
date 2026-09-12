@@ -6,6 +6,8 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
+#include <chrono>
+#include <cstdint>
 #include <string>
 
 #include "minimal/client/state.hpp"
@@ -38,10 +40,11 @@ v1::ToolExecutionEvent StartTool(const std::string& id, const std::string& name 
     return evt;
 }
 
-v1::ToolExecutionEvent FinishTool(bool is_error = false) {
+v1::ToolExecutionEvent FinishTool(bool is_error = false, std::int64_t duration_ms = 0) {
     v1::ToolExecutionEvent evt;
     evt.set_started(false);
     evt.set_is_error(is_error);
+    evt.set_duration_ms(duration_ms);
     return evt;
 }
 
@@ -452,6 +455,44 @@ TEST_CASE("tool tracking: start -> deltas -> finish, keyed by tool_use_id", "[se
            "line one\nline two\n");
 }
 
+// THE BUG this guards against: the server measured a call's wall time
+// (ToolLifecycleEvent::duration) but it never reached the wire, and even the
+// timestamp the client DID store went unrendered -- so a live "bash, bash,
+// bash" list carried no clock or elapsed time until the whole turn ended.
+// This is the storage half: duration_ms lands on the finish event and stays
+// off the start event, and HasRunningTool is the pump's tick source while a
+// tool is still going.
+TEST_CASE("OnToolFinished records duration_ms; HasRunningTool tracks the "
+          "in-flight window",
+          "[session_state]") {
+    SessionState state("s-1");
+    REQUIRE_FALSE(state.HasRunningTool());
+
+    state.OnToolStarted(StartTool("t-1"));
+    REQUIRE(state.HasRunningTool());
+    // duration is meaningless before finish; TakeSnapshot's ToolExecutionState
+    // must not show a stale/zero value as if the call had already been timed.
+    REQUIRE(state.TakeSnapshot().tools[0].duration.count() < 0);
+
+    state.OnToolFinished("t-1", FinishTool(/*is_error=*/false, /*duration_ms=*/1234));
+    REQUIRE_FALSE(state.HasRunningTool());
+    REQUIRE(state.TakeSnapshot().tools[0].duration == std::chrono::milliseconds(1234));
+}
+
+TEST_CASE("HasRunningTool is true iff ANY parallel tool is still active",
+          "[session_state]") {
+    SessionState state("s-1");
+    state.OnToolStarted(StartTool("t-1"));
+    state.OnToolStarted(StartTool("t-2"));
+    REQUIRE(state.HasRunningTool());
+
+    state.OnToolFinished("t-1", FinishTool());
+    REQUIRE(state.HasRunningTool());   // t-2 is still going
+
+    state.OnToolFinished("t-2", FinishTool());
+    REQUIRE_FALSE(state.HasRunningTool());
+}
+
 // --- background bash rows (ARCHITECTURE.md "Background bash rows") --------
 
 TEST_CASE("a background task promotes its ToolExecutionEvent row rather than duplicating it",
@@ -844,6 +885,67 @@ TEST_CASE("submitting a chat turn clears a stale command notice", "[session_stat
     const auto snap = state.TakeSnapshot();
     CHECK_FALSE(snap.latest_notice.has_value());
     CHECK(snap.notice_seq > seq_before);
+}
+
+TEST_CASE("ClearNotice drops the notice and bumps notice_seq; a no-op is not "
+          "counted",
+          "[session_state][notice]") {
+    SessionState state("s-1");
+
+    // Nothing showing: no-op, reported as such, seq untouched.
+    const uint64_t seq_before_any = state.TakeSnapshot().notice_seq;
+    CHECK_FALSE(state.ClearNotice());
+    CHECK(state.TakeSnapshot().notice_seq == seq_before_any);
+
+    v1::CommandResult evt;
+    evt.set_message("theme switched to 'dark'");
+    evt.set_status(v1::COMMAND_STATUS_OK);
+    state.OnCommandResult(evt);
+    REQUIRE(state.TakeSnapshot().latest_notice.has_value());
+    const uint64_t seq_before = state.TakeSnapshot().notice_seq;
+
+    CHECK(state.ClearNotice());
+
+    const auto snap = state.TakeSnapshot();
+    CHECK_FALSE(snap.latest_notice.has_value());
+    CHECK(snap.notice_seq > seq_before);
+}
+
+// THE BUG this guards against: a command-result notice ("/theme x", "/cost")
+// had exactly one clear path (a chat turn) and otherwise sat above the editor
+// indefinitely -- across tab switches, for days. TickNotice is the self-expiry
+// half of the fix: it counts down and clears on its own once the user has
+// gone on doing other things (see kNoticeTicksDefault's comment for why this
+// is gated on UI activity, not a wall clock).
+TEST_CASE("TickNotice expires the notice after kNoticeTicksDefault ticks, not "
+          "before",
+          "[session_state][notice]") {
+    SessionState state("s-1");
+
+    v1::CommandResult evt;
+    evt.set_message("6 sessions");
+    evt.set_status(v1::COMMAND_STATUS_OK);
+    state.OnCommandResult(evt);
+    REQUIRE(state.TakeSnapshot().latest_notice.has_value());
+
+    for (int i = 0; i < kNoticeTicksDefault - 1; ++i) {
+        state.TickNotice();
+        REQUIRE(state.TakeSnapshot().latest_notice.has_value());
+    }
+    const uint64_t seq_before_last_tick = state.TakeSnapshot().notice_seq;
+
+    state.TickNotice();   // the kNoticeTicksDefault-th tick
+
+    const auto snap = state.TakeSnapshot();
+    CHECK_FALSE(snap.latest_notice.has_value());
+    CHECK(snap.notice_seq > seq_before_last_tick);
+}
+
+TEST_CASE("TickNotice on an empty notice is a no-op", "[session_state][notice]") {
+    SessionState state("s-1");
+    const uint64_t seq_before = state.TakeSnapshot().notice_seq;
+    state.TickNotice();
+    CHECK(state.TakeSnapshot().notice_seq == seq_before);
 }
 
 // Track R2-4: the scrollback window is a bounded SLIDING window. Loading older

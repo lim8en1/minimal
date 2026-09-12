@@ -44,6 +44,7 @@
 #include "minimal/commands/command_context.hpp"
 #include "minimal/commands/command_dispatcher.hpp"
 #include "minimal/commands/command_registry.hpp"
+#include "minimal/commands/project_command_source.hpp"
 #include "minimal/commands/confirmation_broker.hpp"
 #include "minimal/tools/ask.hpp"
 #include "minimal/common/logger.hpp"
@@ -265,6 +266,10 @@ struct SessionParams {
     // Null for a subagent: commands are a user control channel a child has
     // none of (see WireSession's reasoning at the call site).
     const commands::CommandRegistry* commands = nullptr;
+    // Same subagent rule as `commands` above (a child gets neither or both);
+    // null also degrades cleanly for tests that never exercise a project
+    // command. Owned by the registry/main, process-wide, like `presets`.
+    const commands::ProjectCommandSource* project_commands = nullptr;
     const llm::ProviderFactoryRegistry* provider_factories = nullptr;
     ProviderInstanceCache* provider_instance_cache = nullptr;
 };
@@ -683,6 +688,7 @@ private:
 
     // The command surface. Borrowed: both outlive every session.
     const commands::CommandRegistry* commands_ = nullptr;
+    const commands::ProjectCommandSource* project_commands_ = nullptr;
     const AgentPresetRegistry* presets_ = nullptr;
     const llm::ProviderFactoryRegistry* provider_factories_ = nullptr;
     ProviderInstanceCache* provider_instance_cache_ = nullptr;

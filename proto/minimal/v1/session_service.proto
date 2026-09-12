@@ -332,7 +332,16 @@ message RunSessionlessCommandResponse {
   CommandResult result = 1;
 }
 
-message ListCommandsRequest {}
+message ListCommandsRequest {
+  // Optional. When set, the response also includes commands registered for
+  // THIS project root (commands-md's <project_root>/commands/ and
+  // .opencode/commands/, discovered lazily on first use for the root -- see
+  // ProjectCommandSource) alongside the global catalog. Empty means global
+  // only, the historical behavior. A project entry may shadow a global one
+  // of the same name, matching how a project's own agents/<name>.md already
+  // shadows a global preset.
+  string project_root = 1;
+}
 
 message ListCommandsResponse {
   repeated CommandInfo commands = 1;

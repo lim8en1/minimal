@@ -1,6 +1,7 @@
 #pragma once
 
 #include <filesystem>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -21,6 +22,10 @@
 namespace minimal::plugins {
 
 class PluginStorage;  // forwarded; the full type reaches plugins via plugin_abi.h
+// Defined in plugin_loader.cpp: holds a copy of a project-command plugin's
+// own PluginRegistrationContext (plugin_abi.h), which this header does not
+// otherwise need to see in full -- see project_command_plugins_ below.
+struct ProjectCommandsPlugin;
 
 // "Came out of this build" vs. "someone dropped this in" is a real trust
 // distinction, and it drives both the default enablement and the severity of a
@@ -131,6 +136,18 @@ public:
     // others: every outcome, good or bad, comes back as a PluginRecord.
     std::vector<PluginRecord> LoadAll(const std::vector<PluginCandidate>& candidates);
 
+    // Invokes every loaded plugin's OPTIONAL
+    // minimal_plugin_register_project_commands hook against `registry` for
+    // `project_root`. Called lazily, per root, by
+    // commands::ProjectCommandSource -- never at startup. A throwing hook is
+    // caught and logged here (not rolled back: `registry` is a fresh,
+    // throwaway per-root instance the caller discards on failure, not the
+    // global one startup's rollback exists to protect). A no-op if `commands`
+    // was never given to the constructor (no CommandRegistry* means no plugin
+    // could have exported the symbol in the first place -- see LoadOne).
+    void RegisterProjectCommands(commands::CommandRegistry& registry,
+                                 const std::filesystem::path& project_root) const;
+
 private:
     PluginRecord LoadOne(const PluginCandidate& candidate);
 
@@ -183,6 +200,20 @@ private:
     // before plugin load, not through this hook.
     agent::CompactionStrategyRegistry* compaction_strategies_ = nullptr;
     std::vector<void*> handles_;  // never closed; see LIFETIME above
+
+    // One entry per loaded plugin that exports
+    // minimal_plugin_register_project_commands, checked once at LoadOne time
+    // (cheap: a dlsym, not a call). Each entry carries a COPY of what this
+    // plugin's other hooks saw at startup -- config, data_dir, tools_settings,
+    // the services/storage pointers -- because RegisterProjectCommands runs
+    // long after LoadOne returns, per project root, and LoadOne's own
+    // `context` local does not survive that. unique_ptr of the
+    // forward-declared type (defined in plugin_loader.cpp, alongside
+    // PluginRegistrationContext's only other use in this header's TU) is what
+    // lets this header avoid including all of plugin_abi.h just to name a
+    // member type nothing else here needs; valid because ~PluginLoader is
+    // itself defined out-of-line, in the same TU that completes the type.
+    std::vector<std::unique_ptr<ProjectCommandsPlugin>> project_command_plugins_;
 };
 
 }  // namespace minimal::plugins

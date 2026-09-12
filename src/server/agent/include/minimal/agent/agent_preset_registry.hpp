@@ -87,9 +87,23 @@ public:
     // resolve time -- its body ships in the prompt -- so a post-resolve clamp
     // could not stop the injection. Uncached when given: the clamp input varies
     // per parent, and spawn is rare enough to pay a resolve every time.
+    //
+    // model_override, when given, is what the CALLER already decided the
+    // session's model is (--model, /model, a fork's pinned choice, or a
+    // spawn's inherited override) -- it outranks both the preset's own
+    // `model:` and settings.json's default_model, and its resolution failure
+    // (unknown model) is reported in terms of the override the user actually
+    // named, not a placeholder default_model they never touched. This is the
+    // difference between "the user's model choice failed to resolve" and "the
+    // session cannot start because of a settings.json value nobody asked
+    // about": without this, an unresolvable default_model throws here before
+    // the caller's own ResolveModel-style override application ever runs.
+    // Uncached for the same reason parent_skills is: the override varies per
+    // caller and session creation is not a hot path.
     AgentPreset Resolve(
         const std::string& preset_name, const std::filesystem::path& project_root = {},
-        const std::optional<std::map<std::string, SkillMode>>& parent_skills = std::nullopt) const;
+        const std::optional<std::map<std::string, SkillMode>>& parent_skills = std::nullopt,
+        const std::optional<config::ModelRef>& model_override = std::nullopt) const;
 
     // Lists every agents/*.md file's name + description WITHOUT resolving its
     // model/provider -- for a picker to show, not for the loop to run. A picker
@@ -124,7 +138,8 @@ public:
 private:
     AgentPreset ResolveUncached(
         const std::string& preset_name, const std::filesystem::path& project_root,
-        const std::optional<std::map<std::string, SkillMode>>& parent_skills) const;
+        const std::optional<std::map<std::string, SkillMode>>& parent_skills,
+        const std::optional<config::ModelRef>& model_override) const;
 
     std::filesystem::path config_dir_;
     config::ProvidersConfig providers_;
