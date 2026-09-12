@@ -194,6 +194,8 @@ void TabMaintenance::HandleNotice(const SessionState::Snapshot& snap) {
         deps_.open_agent_picker();   // core mapping: bare `/agent`
     } else if (notice.view_hint == "models") {
         deps_.open_model_picker();   // core mapping: bare `/model`
+    } else if (notice.view_hint == "mcp") {
+        deps_.open_mcp_picker();   // core mapping: bare `/mcp`
     } else if (auto* view = deps_.view_registry.Find(notice.view_hint)) {
         for (auto& entry : deps_.plugin_views) {
             if (entry.view != view) continue;

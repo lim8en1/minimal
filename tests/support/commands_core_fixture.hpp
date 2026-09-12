@@ -20,8 +20,10 @@
 #include "minimal/commands/command_context.hpp"
 #include "minimal/commands/command_dispatcher.hpp"
 #include "minimal/commands/command_registry.hpp"
+#include "minimal/config/mcps_config.hpp"
 #include "minimal/config/providers_config.hpp"
 #include "minimal/config/settings_config.hpp"
+#include "minimal/mcp/mcp_client_manager.hpp"
 #include "temp_dir.hpp"
 
 namespace minimal::testing {
@@ -105,9 +107,23 @@ public:
                                 bool busy = false) {
         commands::CommandArgs args;
         args.positional = std::move(positional);
-        commands::CommandContext context(this, *presets_, confirmations, common::DefaultLogger());
+        commands::CommandContext context(this, *presets_, confirmations, common::DefaultLogger(),
+                                         mcp_manager_.get());
         return commands::Dispatch(registry, name, args, context, busy);
     }
+
+    // Wires a real McpClientManager for /mcp tests -- null (the default)
+    // exercises the "MCP is not available" guard every mcp_manager()-using
+    // command must have. `entries` is an mcps.json-shaped JSON array.
+    void SetupMcp(const nlohmann::json& entries) {
+        const std::string path = (dir_.path() / "mcps_test.json").string();
+        std::ofstream(path) << entries.dump();
+        mcp_manager_ = std::make_unique<mcp::McpClientManager>(
+            config::LoadMcpsConfig(path), tools_,
+            mcp::McpLimits{std::chrono::seconds(5), std::chrono::seconds(5)},
+            common::DefaultLogger());
+    }
+    mcp::McpClientManager* mcp_manager() { return mcp_manager_.get(); }
 
     // What the durable store holds, which /clear must never touch.
     std::size_t stored_messages() const { return store_.messages.size(); }
@@ -195,6 +211,10 @@ private:
     std::unique_ptr<tools::ToolExecutor> executor_;
     FakeLlmProvider provider_;
     tools::ToolRegistry tools_;
+    // Declared after tools_, so it is destroyed BEFORE it: McpClientManager
+    // borrows the registry by reference and must not outlive it. Null unless
+    // a test calls SetupMcp().
+    std::unique_ptr<mcp::McpClientManager> mcp_manager_;
     AlwaysAllowPermissionChecker checker_;
     InMemoryHistoryStore store_;
     std::unique_ptr<config::SkillRegistry> skills_;

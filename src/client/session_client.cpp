@@ -223,6 +223,27 @@ SessionClient::ListModelsResult SessionClient::ListModels(const ListModelsOption
     return result;
 }
 
+SessionClient::ListMcpServersResult SessionClient::ListMcpServers() {
+    grpc::ClientContext context;
+    context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(2));
+    v1::ListMcpServersRequest request;
+    ListMcpServersResult result;
+    result.status = stub_->ListMcpServers(&context, request, &result.response);
+    return result;
+}
+
+SessionClient::SetMcpServerEnabledResult SessionClient::SetMcpServerEnabled(const std::string& name,
+                                                                            bool enabled) {
+    grpc::ClientContext context;
+    context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(2));
+    v1::SetMcpServerEnabledRequest request;
+    request.set_name(name);
+    request.set_enabled(enabled);
+    SetMcpServerEnabledResult result;
+    result.status = stub_->SetMcpServerEnabled(&context, request, &result.response);
+    return result;
+}
+
 grpc::Status SessionClient::DeleteSession(const std::string& session_id) {
     grpc::ClientContext context;
     context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(2));

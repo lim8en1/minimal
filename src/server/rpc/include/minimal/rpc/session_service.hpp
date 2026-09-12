@@ -89,6 +89,10 @@ public:
                                   v1::ListAgentPresetsResponse*) override;
     grpc::Status ListModels(grpc::ServerContext*, const v1::ListModelsRequest*,
                             v1::ListModelsResponse*) override;
+    grpc::Status ListMcpServers(grpc::ServerContext*, const v1::ListMcpServersRequest*,
+                                v1::ListMcpServersResponse*) override;
+    grpc::Status SetMcpServerEnabled(grpc::ServerContext*, const v1::SetMcpServerEnabledRequest*,
+                                     v1::SetMcpServerEnabledResponse*) override;
     grpc::Status SuggestPaths(grpc::ServerContext*, const v1::SuggestPathsRequest*,
                               v1::SuggestPathsResponse*) override;
     grpc::Status ListCommands(grpc::ServerContext*, const v1::ListCommandsRequest*,

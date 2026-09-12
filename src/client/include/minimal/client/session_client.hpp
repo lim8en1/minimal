@@ -417,6 +417,22 @@ public:
     };
     ListModelsResult ListModels(const ListModelsOptions& options);
 
+    // The /mcp picker's list: every mcps.json entry's live status, fetched
+    // fresh on each open (mirrors ListAgentPresets/ListModels -- no
+    // invalidation machinery, the list is small).
+    struct ListMcpServersResult {
+        v1::ListMcpServersResponse response;
+        grpc::Status status;
+    };
+    ListMcpServersResult ListMcpServers();
+
+    // Live toggle, no server restart.
+    struct SetMcpServerEnabledResult {
+        v1::SetMcpServerEnabledResponse response;
+        grpc::Status status;
+    };
+    SetMcpServerEnabledResult SetMcpServerEnabled(const std::string& name, bool enabled);
+
     // Deletes a stored session that has no stream open. The picker's delete
     // action closes the tab first; the server refuses an open session.
     grpc::Status DeleteSession(const std::string& session_id);

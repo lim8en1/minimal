@@ -873,6 +873,25 @@ TEST_CASE("allowed_mcp_servers naming no configured server warns", "[sanity_chec
     CHECK(hits[0]->message.find("ghost-mcp") != std::string::npos);
 }
 
+// A disabled-but-PRESENT server is not "naming no configured server" -- it is
+// an auto-enable target (Session::RefreshMcpServers), not a config error.
+// Locks in the distinction this feature depends on: `Find() != nullptr`
+// governs this check, independent of `enabled`.
+TEST_CASE("allowed_mcp_servers naming a disabled-but-configured server warns nothing",
+          "[sanity_check][naming_model]") {
+    Fixture f;
+    WriteGoodConfig(f.config_dir);
+    ScopedEnv data("XDG_DATA_HOME", f.xdg_data.string().c_str());
+    f.Write("mcps.json",
+            R"([{"name":"off","transport":"stdio","command":"definitely-not-a-real-mcp-binary",)"
+            R"("enabled":false}])");
+    f.Write("agents/build.md",
+            "---\nname: build\nmodel: fixture-main/test-model\nallowed_mcp_servers:\n  - off\n---\nBody.\n");
+
+    const auto results = RunChecks(f);
+    CHECK(ByCheck(results, "naming_model").empty());
+}
+
 // --- tool_config namespaces --------------------------------------------------------------
 
 TEST_CASE("a tool_config namespace a registered tool claims produces no finding",

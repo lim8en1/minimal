@@ -668,6 +668,36 @@ message ListModelsResponse {
   repeated ModelSummary models = 1;
 }
 
+// --- MCP server picker (/mcp): view and live enable/disable, no restart ---
+
+message McpServerSummary {
+  string name = 1;
+  string transport = 2;  // "stdio" | "http"
+  // Present in mcps.json. False only means the name is unknown to the
+  // server -- it is independent of `enabled`, which a disabled-but-present
+  // entry still reports as false.
+  bool configured = 3;
+  bool enabled = 4;   // runtime flag, toggled live via SetMcpServerEnabled
+  bool alive = 5;      // a live connection exists right now
+  string error = 6;    // last failure, when !alive
+}
+
+message ListMcpServersRequest {}
+
+message ListMcpServersResponse {
+  repeated McpServerSummary servers = 1;
+}
+
+message SetMcpServerEnabledRequest {
+  string name = 1;
+  bool enabled = 2;
+}
+
+message SetMcpServerEnabledResponse {
+  bool ok = 1;
+  string error = 2;  // set when !ok (unknown server name)
+}
+
 // Deletes a stored session that no stream has open. The database delete
 // cascades to messages and subagent children (session_database.hpp). Refused
 // for a session whose stream is open -- the client closes the tab first.
@@ -788,6 +818,11 @@ service SessionService {
   // provider fetch; /providers refresh's eviction role is gone with the
   // command). Server sorts refs ascending.
   rpc ListModels(ListModelsRequest) returns (ListModelsResponse);
+  // The /mcp picker's list: every mcps.json entry's live status, regardless
+  // of its runtime enabled flag.
+  rpc ListMcpServers(ListMcpServersRequest) returns (ListMcpServersResponse);
+  // Live toggle, no server restart. See McpClientManager::SetEnabled.
+  rpc SetMcpServerEnabled(SetMcpServerEnabledRequest) returns (SetMcpServerEnabledResponse);
   rpc CreateSession(CreateSessionRequest) returns (CreateSessionResponse);
   rpc ForkSession(ForkSessionRequest) returns (ForkSessionResponse);
   rpc SuggestPaths(SuggestPathsRequest) returns (SuggestPathsResponse);

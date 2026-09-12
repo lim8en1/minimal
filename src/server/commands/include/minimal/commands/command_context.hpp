@@ -32,6 +32,7 @@
 #include "minimal/common/logger.hpp"
 #include "minimal/common/model_ref.hpp"
 #include "minimal/config/providers_config.hpp"
+#include "minimal/mcp/mcp_client_manager.hpp"
 #include "minimal/tools/tool_executor.hpp"
 
 namespace minimal::commands {
@@ -112,9 +113,18 @@ public:
     // session-bound command can never observe the null. Commands reach the
     // session through session() (asserts non-null); a sessionless-capable one
     // branches on has_session() first.
+    // `mcp_manager` is NULLABLE too: a build with no mcps.json configured (or
+    // a test fixture with no manager at all) still constructs a valid
+    // context -- a command that needs it (e.g. /mcp) checks for null and
+    // reports "MCP is not available" rather than crashing.
     CommandContext(SessionControl* session, const agent::AgentPresetRegistry& presets,
-                   ConfirmationBroker& confirmations, common::Logger& logger)
-        : session_(session), presets_(presets), confirmations_(confirmations), logger_(logger) {}
+                   ConfirmationBroker& confirmations, common::Logger& logger,
+                   mcp::McpClientManager* mcp_manager = nullptr)
+        : session_(session),
+          presets_(presets),
+          confirmations_(confirmations),
+          logger_(logger),
+          mcp_manager_(mcp_manager) {}
 
     // The session, as much of a command may touch. Implemented by agent::Session.
     // ONLY legal when has_session() -- a Sessionless<> command must branch first.
@@ -129,12 +139,14 @@ public:
     const config::ProvidersConfig& providers() const { return presets_.providers(); }
     ConfirmationBroker& confirmations() { return confirmations_; }
     common::Logger& logger() { return logger_; }
+    mcp::McpClientManager* mcp_manager() const { return mcp_manager_; }
 
 private:
     SessionControl* session_;
     const agent::AgentPresetRegistry& presets_;
     ConfirmationBroker& confirmations_;
     common::Logger& logger_;
+    mcp::McpClientManager* mcp_manager_;
 };
 
 }  // namespace minimal::commands

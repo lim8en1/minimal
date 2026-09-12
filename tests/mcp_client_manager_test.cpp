@@ -213,9 +213,77 @@ TEST_CASE("McpClientManager: unconfigured and disabled servers are not alive", "
     CHECK_FALSE(fixture.manager->EnsureAlive("missing", error));
     CHECK(error.find("not configured") != std::string::npos);
     CHECK_FALSE(fixture.manager->EnsureAlive("off", error));
+    CHECK(error.find("disabled") != std::string::npos);
     CHECK(fixture.manager->StatusOf("missing").configured == false);
     CHECK(fixture.manager->IsConfigured("on"));
-    CHECK_FALSE(fixture.manager->IsConfigured("off"));
+    // A disabled-but-present entry is still "configured" -- SetEnabled can
+    // flip it live, without a restart -- distinct from an absent name.
+    CHECK(fixture.manager->IsConfigured("off"));
+    CHECK_FALSE(fixture.manager->StatusOf("off").enabled);
+}
+
+TEST_CASE("McpClientManager: SetEnabled toggles a server live, no restart", "[mcp_manager]") {
+    nlohmann::json disabled = StdioEntry("off", "normal");
+    disabled["enabled"] = false;
+    Fixture fixture(nlohmann::json::array({disabled}));
+
+    std::string error;
+    CHECK(fixture.manager->SetEnabled("off", true, error));
+    CHECK(fixture.manager->StatusOf("off").enabled);
+    CHECK(fixture.manager->EnsureAlive("off", error));
+    CHECK(fixture.manager->StatusOf("off").alive);
+    CHECK_FALSE(fixture.registry.DefinitionsForMcpServers({"off"}).empty());
+
+    CHECK(fixture.manager->SetEnabled("off", false, error));
+    CHECK_FALSE(fixture.manager->StatusOf("off").enabled);
+    CHECK_FALSE(fixture.manager->StatusOf("off").alive);
+    CHECK(fixture.registry.DefinitionsForMcpServers({"off"}).empty());
+
+    // Disabled again: the next EnsureAlive refuses to reconnect it.
+    CHECK_FALSE(fixture.manager->EnsureAlive("off", error));
+    CHECK(error.find("disabled") != std::string::npos);
+}
+
+TEST_CASE("McpClientManager: SetEnabled on an unknown server fails", "[mcp_manager]") {
+    Fixture fixture(nlohmann::json::array({StdioEntry("on", "normal")}));
+    std::string error;
+    CHECK_FALSE(fixture.manager->SetEnabled("nonexistent", true, error));
+    CHECK(error.find("not configured") != std::string::npos);
+}
+
+TEST_CASE("McpClientManager: disabling a server does not disturb an in-flight call against it",
+          "[mcp_manager]") {
+    // Proves the "no new synchronization needed" claim: HandleInvoker::CallTool
+    // takes its own shared_ptr copy of the connection before calling it, so a
+    // concurrent SetEnabled(false) swapping handle->connection to null (via
+    // the same graveyard path a restart uses) must not affect a call already
+    // running against the old, still-referenced connection.
+    Fixture fixture(nlohmann::json::array({StdioEntry("fake", "normal")}));
+    std::string error;
+    REQUIRE(fixture.manager->EnsureAlive("fake", error));
+
+    auto slow_tool = fixture.registry.Find("mcp__fake__slow");
+    REQUIRE(slow_tool != nullptr);
+    minimal::tools::ToolContext ctx(minimal::common::DefaultLogger());
+    auto call = minimal::testing::RunInBackground([slow_tool, ctx]() mutable {
+        return slow_tool->execute(nlohmann::json{{"ms", 1500}}, ctx);
+    });
+
+    // Let the call actually start running on the connection's worker before
+    // disabling out from under it.
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    CHECK(fixture.manager->SetEnabled("fake", false, error));
+    CHECK_FALSE(fixture.manager->StatusOf("fake").alive);
+
+    REQUIRE(call.WaitFor(std::chrono::seconds(5)));
+    const auto result = call.Get();
+    CHECK_FALSE(result.is_error);
+    CHECK(result.content_text == "done");
+
+    // The server stays disabled afterward -- the in-flight call finishing
+    // does not resurrect it.
+    CHECK_FALSE(fixture.manager->EnsureAlive("fake", error));
+    CHECK(error.find("disabled") != std::string::npos);
 }
 
 TEST_CASE("McpClientManager: ${ENV_VAR} interpolation reaches the child and unset vars fail", "[mcp_manager]") {

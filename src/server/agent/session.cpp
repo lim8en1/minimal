@@ -282,6 +282,20 @@ void Session::RefreshMcpServers() {
     std::vector<std::string> live;
     live.reserve(preset_.allowed_mcp_servers.size());
     for (const auto& server : preset_.allowed_mcp_servers) {
+        // A preset naming a server that is configured but currently disabled
+        // (SetEnabled / mcps.json) is an intent to use it -- auto-enable
+        // rather than silently lose those tools. Failure here (only possible
+        // if the name vanished from handles_ between StatusOf and SetEnabled,
+        // which cannot happen since nothing removes a handle post-construction)
+        // falls through to the ordinary EnsureAlive failure path below.
+        const auto status = mcp_manager_->StatusOf(server);
+        if (status.configured && !status.enabled) {
+            std::string enable_error;
+            if (mcp_manager_->SetEnabled(server, true, enable_error)) {
+                logger_.info("session {}: auto-enabled MCP server '{}' required by preset '{}'",
+                             params_.session_id, server, preset_.name);
+            }
+        }
         std::string error;
         if (mcp_manager_->EnsureAlive(server, error)) {
             live.push_back(server);
@@ -497,7 +511,7 @@ void Session::ExecuteCommand(const QueuedCommand& command, bool busy) {
     // to invalidate.
     const commands::CommandRegistry* project_registry =
         project_commands_ != nullptr ? &project_commands_->For(info_.project_root) : nullptr;
-    commands::CommandContext context(this, *presets_, *confirmations_, logger_);
+    commands::CommandContext context(this, *presets_, *confirmations_, logger_, mcp_manager_);
     auto outcome =
         commands::Dispatch(*commands_, command.name, command.args, context, busy, project_registry);
     EmitCommandResult(std::move(outcome), command);

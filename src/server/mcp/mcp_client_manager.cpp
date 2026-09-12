@@ -25,14 +25,20 @@ struct McpClientManager::ServerHandle {
     bool is_channel = false;
     config::ChannelEntry channel;
     std::shared_ptr<HandleInvoker> invoker;
-    mutable std::mutex mu;  // guards connection/alive/generation/verified swaps
+    mutable std::mutex mu;  // guards connection/alive/generation/verified/enabled swaps
     // Serializes ping + (re)start for THIS server. All network I/O for the
     // handle happens under it -- never under mu_, so other servers' checks
     // and the cheap Status/ServerNames lookups never wait behind a wedged or
-    // slow server.
+    // slow server. SetEnabled also takes it, so a disable cannot race a
+    // StartHandle already in flight for the same handle.
     std::mutex start_mu;
     std::shared_ptr<McpConnection> connection;
     bool alive = false;
+    // Runtime toggle (SetEnabled), seeded from mcps.json's `enabled` at
+    // construction. A handle exists for every configured entry regardless of
+    // this flag -- only whether EnsureAlive is willing to connect it depends
+    // on it.
+    bool enabled = true;
     uint64_t generation = 0;
     std::string error;
     std::chrono::steady_clock::time_point verified{};      // epoch = never
@@ -125,9 +131,9 @@ McpClientManager::McpClientManager(config::McpsConfig config, tools::ToolRegistr
     // a second copy of the whole mcps.json is dead weight for the process
     // lifetime.
     for (const auto& entry : config.entries) {
-        if (!entry.enabled) continue;  // deliberate opt-out, silent
         auto handle = std::make_shared<ServerHandle>();
         handle->entry = entry;
+        handle->enabled = entry.enabled;
         handle->invoker = std::make_shared<HandleInvoker>(handle, this);
         handles_.emplace(entry.name, std::move(handle));
     }
@@ -136,7 +142,6 @@ McpClientManager::McpClientManager(config::McpsConfig config, tools::ToolRegistr
     // loudly here, and the startup sanity check reports the collision from
     // the config side -- two lines naming the same problem once each.
     for (const auto& entry : channels_.config.entries) {
-        if (!entry.enabled) continue;  // deliberate opt-out, silent
         // The internal source is not addressable by config: a channel with
         // this name would be unreachable from subscriptions and would collide
         // with cross-session routing. The sanity check names it too; this is
@@ -150,6 +155,7 @@ McpClientManager::McpClientManager(config::McpsConfig config, tools::ToolRegistr
         auto handle = std::make_shared<ServerHandle>();
         handle->is_channel = true;
         handle->channel = entry;
+        handle->enabled = entry.enabled;
         // The channel's CONNECTION fields ride the same McpServerEntry view
         // the stdio path already understands (v1 is stdio-only, so the
         // conversion is command/args/env and nothing else).
@@ -267,17 +273,16 @@ McpEndpoint ToEndpoint(const config::McpServerEntry& entry) {
 
 }  // namespace
 
-bool McpClientManager::StartHandle(const config::McpServerEntry& entry, ServerHandle& handle,
-                                   std::string& error) {
-    // Caller holds handle.start_mu. Close any previous connection first: a
-    // dead child must not linger, and the swap must be atomic from the
-    // invoker's point of view (a concurrent CallTool holds the old
-    // connection alive through its shared_ptr copy). The old connection is
-    // MOVED OUT under handle.mu, not destroyed under it -- ~McpConnection's
-    // teardown blocks (worker join, then a SIGTERM-grace-then-SIGKILL reap),
-    // and handle.mu is the same lock CallTool takes just to read the live
-    // connection pointer. Handing it to the graveyard lets the reaper thread
-    // pay that cost instead of every concurrent tool call stalling behind it.
+void McpClientManager::RetireConnection(ServerHandle& handle) {
+    // Close any previous connection first: a dead child must not linger, and
+    // the swap must be atomic from the invoker's point of view (a concurrent
+    // CallTool holds the old connection alive through its shared_ptr copy).
+    // The old connection is MOVED OUT under handle.mu, not destroyed under
+    // it -- ~McpConnection's teardown blocks (worker join, then a
+    // SIGTERM-grace-then-SIGKILL reap), and handle.mu is the same lock
+    // CallTool takes just to read the live connection pointer. Handing it to
+    // the graveyard lets the reaper thread pay that cost instead of every
+    // concurrent tool call stalling behind it.
     std::shared_ptr<McpConnection> old_connection;
     {
         std::lock_guard<std::mutex> lock(handle.mu);
@@ -289,6 +294,12 @@ bool McpClientManager::StartHandle(const config::McpServerEntry& entry, ServerHa
         graveyard_.push_back(std::move(old_connection));
         graveyard_cv_.notify_one();
     }
+}
+
+bool McpClientManager::StartHandle(const config::McpServerEntry& entry, ServerHandle& handle,
+                                   std::string& error) {
+    // Caller holds handle.start_mu.
+    RetireConnection(handle);
 
     const auto resolved = ResolveEndpoint(entry, error, logger_);
     if (!resolved) return false;
@@ -412,7 +423,7 @@ bool McpClientManager::EnsureAlive(const std::string& server_name, std::string& 
         std::lock_guard<std::mutex> lock(mu_);
         const auto it = handles_.find(server_name);
         if (it == handles_.end()) {
-            error = "MCP server '" + server_name + "' is not configured (mcps.json) or is disabled";
+            error = "MCP server '" + server_name + "' is not configured (mcps.json)";
             return false;
         }
         handle = it->second;
@@ -420,12 +431,19 @@ bool McpClientManager::EnsureAlive(const std::string& server_name, std::string& 
 
     // One ping/restarter at a time per server. A caller that waited behind a
     // successful one falls into the fresh-verdict path below and skips its
-    // own ping entirely.
+    // own ping entirely. Also serializes against SetEnabled: a disable that
+    // grabbed start_mu first is fully applied (flag flipped, connection
+    // retired) before this check runs, and a disable that arrives after this
+    // check waits behind whatever StartHandle this call is about to do.
     std::lock_guard<std::mutex> start_lock(handle->start_mu);
 
     const auto now = std::chrono::steady_clock::now();
     {
         std::lock_guard<std::mutex> lock(handle->mu);
+        if (!handle->enabled) {
+            error = "MCP server '" + server_name + "' is disabled";
+            return false;
+        }
         if (handle->alive && handle->connection && now - handle->verified < kVerifiedTtl) {
             // The liveness check the architecture asks for at session start,
             // answered from the recent verdict rather than the wire.
@@ -480,11 +498,38 @@ McpClientManager::Status McpClientManager::StatusOf(const std::string& server_na
         std::lock_guard<std::mutex> handle_lock(handle.mu);
         Status status;
         status.configured = true;
+        status.enabled = handle.enabled;
         status.alive = handle.alive;
         status.generation = handle.generation;
         status.error = handle.error;
+        status.transport = handle.entry.transport;
         return status;
     }
+}
+
+bool McpClientManager::SetEnabled(const std::string& server_name, bool enabled, std::string& error) {
+    std::shared_ptr<ServerHandle> handle;
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        const auto it = handles_.find(server_name);
+        if (it == handles_.end()) {
+            error = "MCP server '" + server_name + "' is not configured (mcps.json)";
+            return false;
+        }
+        handle = it->second;
+    }
+    // Serializes against EnsureAlive/StartHandle for this handle -- see the
+    // comment on EnsureAlive's start_lock.
+    std::lock_guard<std::mutex> start_lock(handle->start_mu);
+    if (!enabled) {
+        RetireConnection(*handle);
+        registry_.ReplaceMcpTools(server_name, {});
+    }
+    {
+        std::lock_guard<std::mutex> lock(handle->mu);
+        handle->enabled = enabled;
+    }
+    return true;
 }
 
 std::vector<std::string> McpClientManager::ServerNames() const {
@@ -504,7 +549,9 @@ std::vector<std::string> McpClientManager::EnabledChannelNames() const {
     std::lock_guard<std::mutex> lock(mu_);
     std::vector<std::string> names;
     for (const auto& [name, handle] : handles_) {
-        if (handle->is_channel) names.push_back(name);
+        if (!handle->is_channel) continue;
+        std::lock_guard<std::mutex> handle_lock(handle->mu);
+        if (handle->enabled) names.push_back(name);
     }
     return names;
 }

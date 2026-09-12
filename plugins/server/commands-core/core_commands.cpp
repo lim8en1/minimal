@@ -273,6 +273,58 @@ public:
     }
 };
 
+// Bare /mcp opens the client's MCP picker (display=View, view_hint "mcp"),
+// the same shape as /agent and /model: the command itself carries no data,
+// the client fetches the server list over ListMcpServers. "/mcp <name>
+// enable|disable" toggles LIVE via McpClientManager::SetEnabled -- no server
+// restart, unlike editing mcps.json directly.
+//
+// Sessionless AND ReadOnly, like /connect: an MCP server's enabled state is
+// process-global (McpClientManager), not session state, so it never touches
+// the conversation path -- the exact meaning ReadOnly() carries here, not
+// "mutates nothing".
+class McpCommand : public Sessionless<HarnessCommand> {
+public:
+    std::string_view Name() const override { return "mcp"; }
+    std::string_view Summary() const override {
+        return "View MCP servers, or enable/disable one live";
+    }
+    std::string_view Usage() const override { return "/mcp [name enable|disable]"; }
+    bool ReadOnly() const override { return true; }
+    minimal::commands::CommandDisplay Display() const override {
+        return minimal::commands::CommandDisplay::kView;
+    }
+    std::string_view ViewHint() const override { return "mcp"; }
+
+    minimal::commands::CommandDisplay DisplayFor(const CommandArgs& args) const override {
+        return args.positional.empty() ? minimal::commands::CommandDisplay::kView
+                                        : minimal::commands::CommandDisplay::kStatus;
+    }
+    std::string_view ViewHintFor(const CommandArgs& args) const override {
+        return args.positional.empty() ? std::string_view("mcp") : std::string_view{};
+    }
+
+    CommandResult Execute(CommandContext& context, const CommandArgs& args) override {
+        if (args.positional.empty()) {
+            return CommandResult::Ok("mcp list requested");
+        }
+        if (args.positional.size() != 2 ||
+            (args.positional[1] != "enable" && args.positional[1] != "disable")) {
+            return CommandResult::Error("usage: /mcp <name> enable|disable");
+        }
+        if (context.mcp_manager() == nullptr) {
+            return CommandResult::Error("MCP is not available (no mcps.json configured)");
+        }
+        const std::string& name = args.positional[0];
+        const bool enabled = args.positional[1] == "enable";
+        std::string error;
+        if (!context.mcp_manager()->SetEnabled(name, enabled, error)) {
+            return CommandResult::Error(error);
+        }
+        return CommandResult::Ok("mcp: " + name + " " + (enabled ? "enabled" : "disabled"));
+    }
+};
+
 }  // namespace
 
 // /connect <provider> <api-key> -- stores a credential in the data dir's
@@ -392,6 +444,7 @@ std::vector<std::unique_ptr<Command>> MakeCoreCommands() {
     out.push_back(std::make_unique<ModelCommand>());
     out.push_back(std::make_unique<SessionsCommand>());
     out.push_back(std::make_unique<ConnectCommand>());
+    out.push_back(std::make_unique<McpCommand>());
     return out;
 }
 

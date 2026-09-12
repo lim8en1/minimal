@@ -1175,6 +1175,42 @@ grpc::Status SessionServiceImpl::ListModels(grpc::ServerContext* context,
     return grpc::Status::OK;
 }
 
+grpc::Status SessionServiceImpl::ListMcpServers(grpc::ServerContext* context,
+                                                const v1::ListMcpServersRequest*,
+                                                v1::ListMcpServersResponse* response) {
+    if (const auto auth = EnsureAuthenticated(auth_providers_, context); !auth.ok()) return auth;
+
+    if (mcp_manager_ == nullptr) return grpc::Status::OK;  // no mcps.json configured
+    for (const auto& name : mcp_manager_->ServerNames()) {
+        const auto status = mcp_manager_->StatusOf(name);
+        auto* summary = response->add_servers();
+        summary->set_name(name);
+        summary->set_transport(status.transport == config::McpTransport::Http ? "http" : "stdio");
+        summary->set_configured(status.configured);
+        summary->set_enabled(status.enabled);
+        summary->set_alive(status.alive);
+        summary->set_error(status.error);
+    }
+    return grpc::Status::OK;
+}
+
+grpc::Status SessionServiceImpl::SetMcpServerEnabled(grpc::ServerContext* context,
+                                                     const v1::SetMcpServerEnabledRequest* request,
+                                                     v1::SetMcpServerEnabledResponse* response) {
+    if (const auto auth = EnsureAuthenticated(auth_providers_, context); !auth.ok()) return auth;
+
+    if (mcp_manager_ == nullptr) {
+        response->set_ok(false);
+        response->set_error("MCP is not available");
+        return grpc::Status::OK;
+    }
+    std::string error;
+    const bool ok = mcp_manager_->SetEnabled(request->name(), request->enabled(), error);
+    response->set_ok(ok);
+    response->set_error(error);
+    return grpc::Status::OK;
+}
+
 grpc::Status SessionServiceImpl::SuggestPaths(grpc::ServerContext* context,
                                               const v1::SuggestPathsRequest* request,
                                               v1::SuggestPathsResponse* response) {
@@ -1392,7 +1428,7 @@ grpc::Status SessionServiceImpl::RunSessionlessCommand(
     // this call, so the command pool earns nothing by being involved.
     static NullConfirmationBroker null_confirmations;
     commands::CommandContext command_context(/*session=*/nullptr, *presets_, null_confirmations,
-                                             logger_);
+                                             logger_, mcp_manager_);
     const commands::CommandResult outcome =
         commands::DispatchSessionless(*commands_, request->name(), FromProto(request->args()),
                                       command_context);

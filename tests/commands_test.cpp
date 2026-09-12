@@ -147,6 +147,58 @@ TEST_CASE("agent switch by name reports the status line, not the picker view",
     CHECK(result.view_hint.empty());
 }
 
+TEST_CASE("bare /mcp opens the mcp picker rather than erroring", "[commands]") {
+    // Same shape as bare /agent //model: no data carried, the client fetches
+    // the server list itself over ListMcpServers.
+    CommandFixture fixture;
+    const auto result = fixture.Run("mcp");
+    CHECK(result.status == Status::kOk);
+    CHECK(result.display == commands::CommandDisplay::kView);
+    CHECK(result.view_hint == "mcp");
+}
+
+TEST_CASE("/mcp with no manager reports unavailable rather than crashing", "[commands]") {
+    // The fixture's default CommandContext carries a null mcp_manager() --
+    // the guard every mcp_manager()-using branch needs, matching how a
+    // process with no mcps.json configured behaves in production.
+    CommandFixture fixture;
+    const auto result = fixture.Run("mcp", {"anything", "enable"});
+    CHECK(result.status == Status::kError);
+    CHECK(result.message.find("not available") != std::string::npos);
+}
+
+TEST_CASE("/mcp <name> enable toggles a disabled server live", "[commands]") {
+    CommandFixture fixture;
+    nlohmann::json disabled = {{"name", "fake"},
+                               {"transport", "stdio"},
+                               {"command", MINIMAL_MCP_FAKE_SERVER},
+                               {"args", {"normal"}},
+                               {"enabled", false}};
+    fixture.SetupMcp(nlohmann::json::array({disabled}));
+    CHECK_FALSE(fixture.mcp_manager()->StatusOf("fake").enabled);
+
+    const auto result = fixture.Run("mcp", {"fake", "enable"});
+    REQUIRE(result.status == Status::kOk);
+    CHECK(result.display == commands::CommandDisplay::kStatus);
+    CHECK(fixture.mcp_manager()->StatusOf("fake").enabled);
+}
+
+TEST_CASE("/mcp <name> enable|disable rejects a malformed action", "[commands]") {
+    CommandFixture fixture;
+    fixture.SetupMcp(nlohmann::json::array());
+    const auto result = fixture.Run("mcp", {"fake", "sideways"});
+    CHECK(result.status == Status::kError);
+    CHECK(result.message.find("usage") != std::string::npos);
+}
+
+TEST_CASE("/mcp <name> enable on an unknown server reports the error", "[commands]") {
+    CommandFixture fixture;
+    fixture.SetupMcp(nlohmann::json::array());
+    const auto result = fixture.Run("mcp", {"ghost", "enable"});
+    CHECK(result.status == Status::kError);
+    CHECK(result.message.find("not configured") != std::string::npos);
+}
+
 TEST_CASE("agent reports an unknown preset rather than throwing", "[commands]") {
     CommandFixture fixture;
     const auto result = fixture.Run("agent", {"nonexistent"});

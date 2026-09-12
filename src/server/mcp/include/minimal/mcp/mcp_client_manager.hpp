@@ -56,10 +56,12 @@ struct ChannelWiring {
 // and subagent gating all consult it.
 class McpClientManager {
 public:
-    // `config` is the parsed mcps.json; disabled entries and entries with
-    // recorded parse errors are skipped. `registry` receives discovered tools
-    // under mcp__<server>__<tool>. Must outlive every session that was handed
-    // tools from it (sessions borrow the manager via the registry's tools).
+    // `config` is the parsed mcps.json; a handle is built for every entry
+    // regardless of its `enabled` flag (SetEnabled toggles it live, without a
+    // restart), but entries with recorded parse errors are skipped. `registry`
+    // receives discovered tools under mcp__<server>__<tool>. Must outlive
+    // every session that was handed tools from it (sessions borrow the
+    // manager via the registry's tools).
     // `channels` defaults to none, so every existing call site keeps working;
     // when wiring carries entries, their names must not collide with MCP
     // server names -- a collision skips the CHANNEL (logged), keeping the
@@ -75,10 +77,12 @@ public:
     ~McpClientManager();
 
     struct Status {
-        bool configured = false;  // present and enabled in mcps.json
+        bool configured = false;  // present in mcps.json (regardless of enabled)
+        bool enabled = false;     // runtime enabled flag (toggled via SetEnabled)
         bool alive = false;       // a live connection exists right now
         uint64_t generation = 0;  // bumped on every (re)connect; observable respawn
         std::string error;        // last failure, when !alive
+        config::McpTransport transport = config::McpTransport::Stdio;
     };
 
     // Liveness check at session start / /agent switch, and (via HandleInvoker)
@@ -96,17 +100,29 @@ public:
     // the .cpp) is reused without a wire round trip.
     bool EnsureAlive(const std::string& server_name, std::string& error);
 
+    // Live toggle, no restart. Enabling only flips the flag -- the existing
+    // lazy-connect contract (EnsureAlive on next use) covers the rest.
+    // Disabling flips the flag, retires any live connection through the same
+    // graveyard path StartHandle uses on restart (never destroys it inline
+    // under a lock a concurrent CallTool needs), and retires the server's
+    // tools from the registry immediately. Serialized against EnsureAlive via
+    // the handle's start_mu, so a disable cannot race a StartHandle already
+    // in flight. Returns false with `error` set if `server_name` was never in
+    // mcps.json at all (a disabled-but-present entry is a valid target).
+    bool SetEnabled(const std::string& server_name, bool enabled, std::string& error);
+
     Status StatusOf(const std::string& server_name) const;
 
     std::vector<std::string> ServerNames() const;
     bool IsConfigured(const std::string& server_name) const;
 
-    // Channel names that survived construction's enabled/reserved/collision
-    // rules -- the channels this manager actually built a handle for and
-    // will deliver notifications through. A caller validating channel
-    // subscriptions (the signal router) must check against this, not against
-    // channels.json directly, or it would validate a subscription to a
-    // channel the manager never built a handle for.
+    // Channel names that survived construction's reserved/collision rules AND
+    // are currently runtime-enabled -- the channels this manager will
+    // actually deliver notifications through right now. A caller validating
+    // channel subscriptions (the signal router) must check against this, not
+    // against channels.json directly, or it would validate a subscription to
+    // a channel the manager never built a handle for, or one currently
+    // disabled via SetEnabled.
     std::vector<std::string> EnabledChannelNames() const;
 
 private:
@@ -121,6 +137,12 @@ private:
     // Returns false with `error` set. Caller holds the handle's start_mu.
     bool StartHandle(const config::McpServerEntry& entry, ServerHandle& handle,
                      std::string& error);
+
+    // Moves any live connection out of `handle` and into the graveyard for
+    // off-thread teardown, marking the handle not-alive. Shared by
+    // StartHandle (about to replace it with a fresh one) and SetEnabled's
+    // disable path (not replacing it with anything).
+    void RetireConnection(ServerHandle& handle);
 
     tools::ToolRegistry& registry_;
     McpLimits limits_;

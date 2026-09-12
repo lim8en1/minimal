@@ -279,6 +279,32 @@ TEST_CASE("CancelTurn wakes a blocked MCP tool call", "[session_mcp]") {
     REQUIRE(fixture.session->WaitForIdleForTesting(std::chrono::seconds(6)));
 }
 
+TEST_CASE("a preset's disabled-but-configured server is auto-enabled at session start",
+          "[session_mcp]") {
+    nlohmann::json disabled = StdioEntry("fake", "normal");
+    disabled["enabled"] = false;
+    Fixture fixture(nlohmann::json::array({disabled}), {"fake"});
+    fixture.Script(TextResponse("done"));
+    fixture.Start();
+
+    // RefreshMcpServers ran in the constructor, before any turn: the
+    // disabled entry must already be live by the time the first turn's tool
+    // list is built.
+    CHECK(fixture.manager->StatusOf("fake").enabled);
+    CHECK(fixture.manager->StatusOf("fake").alive);
+
+    REQUIRE(fixture.session->SubmitTurn("go"));
+    REQUIRE(fixture.session->WaitForIdleForTesting(5s));
+
+    const auto& requests = fixture.provider->requests();
+    REQUIRE_FALSE(requests.empty());
+    bool saw_echo = false;
+    for (const auto& def : requests[0].tools) {
+        if (def.name == "mcp__fake__echo") saw_echo = true;
+    }
+    CHECK(saw_echo);
+}
+
 TEST_CASE("a subagent whose preset requires a dead server does not start", "[session_mcp]") {
     namespace fs = std::filesystem;
     testing::TempDir dir;

@@ -11,6 +11,7 @@ add_library(minimal_client_core SHARED
     rpc_queue.cpp
     picker_model.cpp
     model_picker_model.cpp
+    mcp_picker_model.cpp
     agent_picker_model.cpp
     keymap_help_model.cpp
     state.cpp
@@ -38,6 +39,7 @@ add_library(minimal_client_core SHARED
     view/filterable_menu.cpp
     view/session_picker.cpp
     view/model_picker.cpp
+    view/mcp_picker.cpp
     view/agent_picker.cpp
     view/theme_picker.cpp
     view/keymap_help.cpp

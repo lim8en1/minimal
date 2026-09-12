@@ -225,13 +225,11 @@ TEST_CASE("McpClientManager: EnabledChannelNames omits a channel colliding with 
     CHECK(std::find(names.begin(), names.end(), "dup") == names.end());
 }
 
-// A channel name matching only a DISABLED mcps.json entry is NOT a real
-// collision -- the disabled entry never gets a handle, so the channel does.
-// Regression for a bug where the router's OWN skip check (mirroring the
-// manager's rules by re-deriving them from raw config instead of asking the
-// manager) matched on name alone, ignoring `enabled`, and refused a
-// subscription to a channel the manager had actually wired up successfully.
-TEST_CASE("McpClientManager: EnabledChannelNames includes a channel matching only a disabled server",
+// A channel name matching a DISABLED mcps.json entry IS still a real
+// collision -- a disabled entry gets a handle too (SetEnabled can flip it
+// live, without a restart), so the name stays reserved for it exactly like an
+// enabled entry's would. The server wins the name; the channel is skipped.
+TEST_CASE("McpClientManager: EnabledChannelNames omits a channel colliding with a disabled server",
           "[mcp][signals]") {
     minimal::tools::ToolRegistry registry;
     minimal::mcp::ChannelWiring wiring;
@@ -255,7 +253,7 @@ TEST_CASE("McpClientManager: EnabledChannelNames includes a channel matching onl
     std::remove(mcps_path.c_str());
 
     const auto names = manager.EnabledChannelNames();
-    CHECK(std::find(names.begin(), names.end(), "dup") != names.end());
+    CHECK(std::find(names.begin(), names.end(), "dup") == names.end());
 }
 
 TEST_CASE("McpClientManager: a channel entry whose server lacks the capability fails loudly",
