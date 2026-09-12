@@ -163,6 +163,18 @@ struct SessionParams {
     // a runtime /model switch survives a server restart; null (test sessions,
     // spawners that persist the override themselves) means memory-only.
     std::function<void(const std::optional<config::ModelRef>&)> model_override_persist;
+    // Set when the user named a model explicitly for this session's spawned
+    // subagents (/subagent-model). Consulted by SubagentManager::Spawn when
+    // the spawn call itself names no model, and outranks the settings.json
+    // global default and the "inherit the parent's model" fallback. NOT
+    // inherited from a parent -- it is this session's own choice for ITS
+    // children.
+    std::optional<config::ModelRef> subagent_model_override;
+    // Persistence hook for subagent_model_override, wired by the registry like
+    // model_override_persist. Fired by set_subagent_model_override so a
+    // /subagent-model choice survives a server restart; null means
+    // memory-only.
+    std::function<void(const std::optional<config::ModelRef>&)> subagent_model_persist;
     // The rendered project-context section (AGENTS.md/CLAUDE.md), loaded by the
     // registry from project_root -- a SESSION property, not a preset one, so a
     // mid-session /agent switch cannot drop the project's instructions. The
@@ -501,6 +513,15 @@ public:
         // what this session runs on; the hook is what a later resume reads.
         if (params_.model_override_persist) params_.model_override_persist(model_override_);
     }
+    const std::optional<common::ModelRef>& subagent_model_override() const override {
+        return subagent_model_override_;
+    }
+    void set_subagent_model_override(std::optional<common::ModelRef> ref) override {
+        subagent_model_override_ = std::move(ref);
+        // Same best-effort durability as set_model_override: /subagent-model
+        // must survive a restart the same way /model does.
+        if (params_.subagent_model_persist) params_.subagent_model_persist(subagent_model_override_);
+    }
 
 
 
@@ -702,6 +723,9 @@ private:
     // The user's explicit model choice. Outranks the preset's, and survives
     // /agent re-resolving it.
     std::optional<common::ModelRef> model_override_;
+    // The user's explicit subagent-model choice (/subagent-model). Read by
+    // SubagentManager::Spawn; never inherited from a parent.
+    std::optional<common::ModelRef> subagent_model_override_;
 
     // Two signals, because they mean different things: cancel ends the CURRENT
     // turn and is inert for the next one; terminated ends the session.

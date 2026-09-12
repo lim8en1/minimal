@@ -7,8 +7,14 @@ namespace minimal::client {
 
 ftxui::Component MakeModelPicker(const std::vector<v1::ModelSummary>& models,
                                  const Theme& theme, ModelPickerCallbacks callbacks) {
-    auto build_rows = [models](const std::string& filter) {
+    auto build_rows = [models, callbacks](const std::string& filter) {
         std::vector<MenuRow> rows;
+        // The leading row first, so it tops the list and survives every
+        // filter (it is not a model; the filter text never applies to it).
+        if (!callbacks.leading_row_id.empty()) {
+            rows.push_back({callbacks.leading_row_label, callbacks.leading_row_id,
+                            /*header=*/false});
+        }
         for (const auto& row : BuildModelPickerRows(models, filter)) {
             rows.push_back({row.label, row.ref, row.header});
         }
@@ -19,6 +25,9 @@ ftxui::Component MakeModelPicker(const std::vector<v1::ModelSummary>& models,
         .window_title = "switch model",
         .hint_line = " enter: switch  ·  ctrl+r: refresh discovery  ·  esc: close",
         .empty_message = " (no models match)",
+        // The leading row is always present; without this the "no models
+        // match" message could never fire (rows is never empty).
+        .empty_threshold = callbacks.leading_row_id.empty() ? std::size_t{0} : std::size_t{1},
     };
 
     FilterableMenuCallbacks callbacks_out{

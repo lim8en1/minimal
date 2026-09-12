@@ -470,6 +470,12 @@ grpc::Status SessionServiceImpl::ResumeSession(const v1::CreateSessionRequest* r
     if (!params.model_override && stored->model) {
         params.model_override = config::SplitModelRef(*stored->model);
     }
+    // Same restore for the subagent-model choice (/subagent-model, v10):
+    // without it a restart silently reverts spawned children to inheriting
+    // the parent's model, undoing the user's earlier choice.
+    if (stored->subagent_model) {
+        params.subagent_model_override = config::SplitModelRef(*stored->subagent_model);
+    }
     // Signals on resume, same rules as fresh creation: validated and warmed
     // before the session starts, never persisted from the previous stream.
     if (const auto status = ApplySignals(*request, params); !status.ok()) return status;

@@ -469,6 +469,13 @@ public:
     // is the seam that gives the pump a heartbeat while that is true.
     bool HasRunningTool() const;
 
+    // Elapsed time of whichever running tool started most recently (the one
+    // whose live clock is in the finest-grained FormatDuration bucket), or
+    // nullopt if nothing is running. Same cheap scan as HasRunningTool -- the
+    // pump uses this to throttle its forced-repaint cadence to whatever the
+    // displayed number can actually show instead of a flat 20Hz (app.cpp).
+    std::optional<std::chrono::milliseconds> FastestRunningToolElapsedMs() const;
+
     // The user asked to interrupt the in-flight turn. A no-op unless the tab
     // is actually mid-turn (Thinking / Working / Waiting -- Waiting counts:
     // the server's Cancel answers a parked permission/confirmation prompt
@@ -1032,6 +1039,10 @@ public:
     // produces no events at all, freezing even the spinner. Cheap: a scan,
     // not a snapshot copy (SessionState::HasRunningTool).
     bool FocusedTabHasRunningTool() const;
+
+    // FocusedTabHasRunningTool's elapsed-time counterpart -- see
+    // SessionState::FastestRunningToolElapsedMs.
+    std::optional<std::chrono::milliseconds> FocusedTabFastestRunningToolElapsedMs() const;
 
     // Closes (drops) every tab's stream. The ~AppState safety net, not a user
     // verb -- ctrl+w closes ONE tab (CloseTab), quit detaches (DetachAllTabs),

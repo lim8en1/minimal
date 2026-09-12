@@ -108,6 +108,11 @@ public:
     // never the loop thread (see the file comment).
     void OpenModelPicker(bool refresh);
 
+    // The bare `/subagent-model` picker: the same model list with one
+    // prepended "same as parent" row (kSameAsParentRowId); selection sends
+    // /subagent-model <ref|inherit> instead of staging a desired model.
+    void OpenSubagentModelPicker();
+
     // The /mcp picker's list: every mcps.json entry's live status. One fresh
     // fetch each time, like OpenAgentPicker -- the list is small.
     void OpenMcpPicker();
@@ -130,6 +135,8 @@ private:
     void RebuildAgentPickerComponent();
     void RebuildModelPickerComponent();
     void RebuildMcpPickerComponent();
+    // OpenModelPicker/OpenSubagentModelPicker's shared fetch-and-rebuild body.
+    void OpenModelPickerFetch(bool refresh);
     // Enter on a picker row: flips the server's enabled flag, then re-fetches
     // and rebuilds -- the round trip on_refresh_discovery uses for models,
     // minus the discovery-refresh option (there is nothing else to refresh
@@ -195,6 +202,11 @@ private:
     // server-side; grouping is a pure display transform). No pagination --
     // even a large discovered catalog is one response of small rows.
     std::vector<v1::ModelSummary> model_picker_models_;
+    // True while the model picker is open in its /subagent-model form: the
+    // same list and fetch, but the rebuild prepends the "same as parent" row
+    // and selection routes to the /subagent-model command rather than
+    // StageModel. Set by OpenSubagentModelPicker, cleared by OpenModelPicker.
+    bool model_picker_subagent_ = false;
     // The /mcp picker's list: fetched whole on each open/toggle, like the
     // model list -- a server list is small, no pagination.
     std::vector<v1::McpServerSummary> mcp_picker_servers_;

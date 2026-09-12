@@ -350,6 +350,7 @@ TEST_CASE("a subagent whose preset requires a dead server does not start", "[ses
         minimal::common::DefaultLogger());
 
     agent::SubagentManager subagents(sessions, db, presets, /*max_concurrent_subagents=*/4,
+                                     /*default_subagent_model=*/"",
                                      minimal::common::DefaultLogger(), &manager);
 
     const auto row = db.CreateSession("", std::nullopt, dir.path().string(), "main");

@@ -682,7 +682,8 @@ int main(int argc, char** argv) {
         permissions.advisor ? permission_advisors.Find(*permissions.advisor) : nullptr;
     auto subagents = std::make_shared<minimal::agent::SubagentManager>(
         sessions, *session_db, *presets, settings.max_concurrent_subagents,
-        minimal::common::DefaultLogger(), &mcp, advisor, permissions.advisor_inherit,
+        settings.default_subagent_model, minimal::common::DefaultLogger(), &mcp, advisor,
+        permissions.advisor_inherit,
         std::chrono::milliseconds(permissions.advisor_timeout_ms), &hook_dispatcher);
     tools.Register(std::make_unique<minimal::agent::SpawnSubagentTool>(
         [subagents](const minimal::agent::SubagentRequest& request,

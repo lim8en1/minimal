@@ -963,6 +963,7 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     std::function<void()> open_picker_fn = [] {};
     std::function<void()> open_agent_picker_fn = [] {};
     std::function<void()> open_model_picker_fn = [] {};
+    std::function<void()> open_subagent_model_picker_fn = [] {};
     std::function<void()> open_mcp_picker_fn = [] {};
     std::function<void()> open_theme_picker_fn = [] {};
 
@@ -1137,7 +1138,8 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     auto submit_command = [app, &command_catalog, commands_listed, focused_or_new_tab,
                            &show_commands_help, &open_keymap_help_fn, &close_tab,
                            &open_picker_fn, &open_agent_picker_fn,
-                           &open_model_picker_fn, &open_mcp_picker_fn, &open_theme_picker_fn,
+                           &open_model_picker_fn, &open_subagent_model_picker_fn,
+                           &open_mcp_picker_fn, &open_theme_picker_fn,
                            &apply_theme](const std::string& line) {
         // Bare /help is answered CLIENT-SIDE from the ListCommands catalog:
         // the server's listing reached the transient notice line, whose
@@ -1317,6 +1319,21 @@ int RunTui(const minimal::client::ParsedArgs& args) {
                 app->TabNotice(tab, std::string(parsed.name == "agent" ? "agent '" : "model '") +
                                         value + "' will be used on your next message");
             }
+            return;
+        }
+        // /subagent-model is NOT a desired-state command: its subject is a
+        // session's own setting (what model its spawned children run), so it
+        // has nothing to stage on a sessionless tab. The bare form opens the
+        // picker directly on a sessioned tab (the same zero-round-trip open
+        // as bare /model); everything else -- the named form on either kind
+        // of tab, and the bare form without a session -- falls through to the
+        // server command stream, which validates the ref and answers the
+        // sessionless-tab refusal.
+        if (parsed.name == "subagent-model" && parsed.positional.empty() && has_session) {
+            if (const std::string tab = app->FocusedTabId(); !tab.empty()) {
+                app->ClearTabNotice(tab);
+            }
+            open_subagent_model_picker_fn();
             return;
         }
         if (!has_session) {
@@ -1507,12 +1524,14 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     auto open_picker = [&] { picker_controller.OpenSessionPicker(); };
     auto open_agent_picker = [&] { picker_controller.OpenAgentPicker(); };
     auto open_model_picker = [&] { picker_controller.OpenModelPicker(/*refresh=*/false); };
+    auto open_subagent_model_picker = [&] { picker_controller.OpenSubagentModelPicker(); };
     auto open_mcp_picker = [&] { picker_controller.OpenMcpPicker(); };
     // Bind the submit_command intercepts (declared before, assigned now --
     // they run only on user input, long after this line).
     open_picker_fn = open_picker;
     open_agent_picker_fn = open_agent_picker;
     open_model_picker_fn = open_model_picker;
+    open_subagent_model_picker_fn = open_subagent_model_picker;
     open_mcp_picker_fn = open_mcp_picker;
     auto open_theme_picker = [&] {
         *theme_picker_child = minimal::client::MakeThemePicker(
@@ -1625,7 +1644,8 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     // FocusedDetails() return references into its own members.
     minimal::client::TabMaintenance tab_maintenance(minimal::client::TabMaintenance::Dependencies{
         *app, engine, view_registry, plugin_views, plugin_modal_child,
-        show_plugin_modal, open_picker, open_agent_picker, open_model_picker, open_mcp_picker,
+        show_plugin_modal, open_picker, open_agent_picker, open_model_picker,
+        open_subagent_model_picker, open_mcp_picker,
         [&picker_controller] { picker_controller.Poll(); }, tab_ui, theme,
         message_registry, renderer_registry, display_registry, permission_child, show_permission,
         confirmation_child, show_confirmation, ask_child, show_ask,
@@ -1931,20 +1951,47 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     std::atomic<bool> running{true};
     std::thread pump([&] {
         uint64_t last_version = app->UiVersion();
+        // Running-tool forced redraws are bucketed to whatever FormatDuration
+        // can actually display (tool_status.hpp) instead of firing every
+        // 50ms tick: a repaint pass is a full FTXUI tree walk + full-screen
+        // terminal write (no dirty-tracking in this FTXUI version), so
+        // forcing it 20x/s for the whole life of a long tool call was paying
+        // real CPU (~1% idle -> ~4-5% while running) for ticks the display
+        // couldn't even show. Sentinel far in the past so the very first
+        // running tick fires immediately.
+        auto last_running_redraw = std::chrono::steady_clock::now() - std::chrono::hours(1);
         while (running.load(std::memory_order_acquire)) {
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
             const uint64_t version = app->UiVersion();
-            // FocusedTabHasRunningTool joins the same "force a repaint with no
-            // version bump" seam: a foreground tool that goes quiet (a long
-            // `sleep`, a silent build step) produces no wire events at all, so
-            // nothing bumps UiVersion -- without this, both the spinner and a
-            // live elapsed counter would freeze the moment the tool stopped
-            // printing, reading as hung rather than merely slow.
+            // FocusedTabFastestRunningToolElapsedMs joins the same "force a
+            // repaint with no version bump" seam: a foreground tool that goes
+            // quiet (a long `sleep`, a silent build step) produces no wire
+            // events at all, so nothing bumps UiVersion -- without this, both
+            // the spinner and a live elapsed counter would freeze the moment
+            // the tool stopped printing, reading as hung rather than merely
+            // slow. Bucketed by elapsed time to match FormatDuration's own
+            // resolution: <1s shows whole ms (needs the full 50ms cadence),
+            // 1s-60s shows tenths of a second (100ms is enough), >=60s shows
+            // whole seconds (1000ms is enough) -- so the redraw rate never
+            // outruns what the number on screen can change to.
+            bool running_tool_redraw_due = false;
+            if (const auto elapsed = app->FocusedTabFastestRunningToolElapsedMs()) {
+                const auto interval = *elapsed < std::chrono::milliseconds(1000)
+                                           ? std::chrono::milliseconds(50)
+                                       : *elapsed < std::chrono::milliseconds(60000)
+                                           ? std::chrono::milliseconds(100)
+                                           : std::chrono::milliseconds(1000);
+                const auto now_steady = std::chrono::steady_clock::now();
+                if (now_steady - last_running_redraw >= interval) {
+                    running_tool_redraw_due = true;
+                    last_running_redraw = now_steady;
+                }
+            }
             const bool debounce_pending =
                 prompt_state.query_pending_hint.load(std::memory_order_acquire) ||
                 minimal::client::StreamingMarkdownView::PendingReparseHint().load(
                     std::memory_order_acquire) ||
-                app->FocusedTabHasRunningTool();
+                running_tool_redraw_due;
             if (version != last_version || debounce_pending) {
                 last_version = version;
                 screen.PostEvent(Event::Custom);

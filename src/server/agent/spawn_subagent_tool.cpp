@@ -46,8 +46,9 @@ tools::ToolSpec MakeSpec() {
             {{"type", "string"},
              {"description",
               "Model for the child as \"<provider>/<model>\". Defaults to the "
-              "preset's model. A child starts with a fresh context, so this "
-              "switches models without re-reading your whole history."}}}}},
+              "parent's own model (unless the child's preset declares one). A "
+              "child starts with a fresh context, so this switches models "
+              "without re-reading your whole history."}}}}},
          {"required", nlohmann::json::array({"task"})},
     };
     return spec;

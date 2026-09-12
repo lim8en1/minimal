@@ -402,6 +402,7 @@ AgentPreset AgentPresetRegistry::ResolveUncached(
     const std::string preloaded = RenderPreloadedSkills(resolved_skills, skills_, project_root,
                                                         tool_skills);
     preset.system_prompt = raw.body + RenderSkillListing(tool_skills, merged_skills) + preloaded;
+    preset.model_declared = !raw.model.empty();
     ApplyModel(preset, *resolved_model);
     // Preset extras (temperature, top_p, reasoningEffort, ...) override the
     // model config's defaults: an agent declaring `temperature: 0.1` means it,

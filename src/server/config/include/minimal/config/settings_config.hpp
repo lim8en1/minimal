@@ -177,6 +177,11 @@ struct SettingsConfig {
     // by the sanity check; a reference providers.json cannot resolve warns and
     // behaves as empty.
     std::string small_model;
+    // "<provider>/<model>" for spawned subagents. Empty = a child inherits
+    // its parent's model (unless its preset declares one or something more
+    // specific overrides it). Shape-checked by the sanity check; a reference
+    // providers.json cannot resolve warns and behaves as empty.
+    std::string default_subagent_model;
     std::string default_theme;
     std::int64_t max_concurrent_subagents = 4;
     // When an out-of-band message (a background task's result, a non-blocking

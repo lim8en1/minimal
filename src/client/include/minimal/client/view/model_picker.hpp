@@ -15,6 +15,11 @@
 
 namespace minimal::client {
 
+// The /subagent-model picker's prepended row. Selection means "clear the
+// session's subagent-model override -- spawned children run the parent's
+// model". Carried as a row id so on_select can tell it from a real model ref.
+inline constexpr const char* kSameAsParentRowId = "same-as-parent";
+
 struct ModelPickerCallbacks {
     std::function<void(const std::string& ref)> on_select;
     // ctrl+r: re-fetch the model list with discovery refreshed. The caller
@@ -22,6 +27,12 @@ struct ModelPickerCallbacks {
     // fetched in parallel server-side) and rebuilds the component in place.
     std::function<void()> on_refresh_discovery;
     std::function<void()> on_close;   // Escape
+    // Prepends one selectable row above the model list (the /subagent-model
+    // picker's "same as parent"). It survives filtering -- it is added in the
+    // row builder, not to the model list -- and on_select receives
+    // leading_row_id for it. Empty id = no leading row.
+    std::string leading_row_label;
+    std::string leading_row_id;
 };
 
 ftxui::Component MakeModelPicker(const std::vector<v1::ModelSummary>& models,

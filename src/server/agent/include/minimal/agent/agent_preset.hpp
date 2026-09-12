@@ -51,6 +51,11 @@ struct AgentPreset {
     // connection plus the model id do not identify it: two providers can serve
     // the same model at the same url with different limits.
     config::ModelRef model_ref;
+    // True when model_ref came from the preset's own frontmatter `model:`
+    // declaration rather than a settings.json default. A spawn consults this
+    // to keep "the child inherits its parent's model" from clobbering an
+    // explicit per-agent declaration.
+    bool model_declared = false;
     // The window the compaction trigger's window-relative strategies (percent /
     // buffer) resolve against, and the status bar's used/max (track E). It rides
     // on the PRESET rather than on LoopConfig because /agent and /model can both

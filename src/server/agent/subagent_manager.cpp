@@ -37,7 +37,8 @@ ChildResult ResultOf(const TurnResult& result) {
 
 SubagentManager::SubagentManager(SessionRegistry& sessions, session::SessionDatabase& db,
                                   const AgentPresetRegistry& presets,
-                                  std::int64_t max_concurrent_subagents, common::Logger& logger,
+                                  std::int64_t max_concurrent_subagents,
+                                  std::string default_subagent_model, common::Logger& logger,
                                   mcp::McpClientManager* mcp_manager,
                                   std::shared_ptr<tools::PermissionAdvisor> advisor,
                                   bool advisor_inherit,
@@ -47,6 +48,7 @@ SubagentManager::SubagentManager(SessionRegistry& sessions, session::SessionData
       db_(db),
       presets_(presets),
       max_concurrent_subagents_(max_concurrent_subagents),
+      default_subagent_model_(std::move(default_subagent_model)),
       logger_(logger),
       mcp_manager_(mcp_manager),
       advisor_(std::move(advisor)),
@@ -121,14 +123,58 @@ SubagentOutcome SubagentManager::Spawn(const SubagentRequest& request,
     const std::string preset_name =
         request.agent_preset.empty() ? parent->info().agent_preset : request.agent_preset;
 
+    // The child's model, by precedence: an explicit model on the spawn call
+    // wins; then the parent session's /subagent-model choice; then the child
+    // preset's own `model:` frontmatter; then settings.json's
+    // default_subagent_model; and finally the parent's own model -- "same as
+    // parent" -- which is the default this chain exists to express.
+    std::optional<common::ModelRef> spawn_model = request.model;
+    if (!spawn_model) spawn_model = parent->subagent_model_override();
+
     AgentPreset child_preset;
     try {
-        // request.model rides straight into Resolve() (not just into
-        // params.model_override below) so an unresolvable settings.default_model
-        // cannot fail the spawn ahead of an explicit spawn-time model -- the
-        // same rescue CreateResolved's own model_override plumbing needs.
-        child_preset = presets_.Resolve(preset_name, parent->info().project_root,
-                                        parent->preset().allowed_skills, request.model);
+        if (spawn_model.has_value()) {
+            // Rides straight into Resolve() (not just into params.model_override
+            // below) so an unresolvable settings default cannot fail the spawn
+            // ahead of the explicit choice -- the same rescue CreateResolved's
+            // own model_override plumbing needs.
+            child_preset = presets_.Resolve(preset_name, parent->info().project_root,
+                                            parent->preset().allowed_skills, spawn_model);
+        } else {
+            // Nothing more specific: the child inherits its parent's model,
+            // unless its preset declares one. Resolved WITH the fallback as the
+            // override so a preset that declares no model -- and a missing or
+            // unresolvable settings.default_model, which used to be this
+            // spawn's failure mode -- cannot brick it. A DECLARED model is
+            // re-resolved without the override so it keeps winning over the
+            // inheritance default.
+            std::optional<common::ModelRef> fallback;
+            if (!default_subagent_model_.empty()) {
+                if (auto ref = common::SplitModelRef(default_subagent_model_)) {
+                    if (presets_.providers().Resolve(*ref) != nullptr) {
+                        fallback = std::move(ref);
+                    } else {
+                        logger_.warn("settings default_subagent_model '{}' resolves to "
+                                     "nothing in providers.json; behaving as unset",
+                                     default_subagent_model_);
+                    }
+                } else {
+                    logger_.warn("settings default_subagent_model '{}' is not a "
+                                 "<provider>/<model> reference; behaving as unset",
+                                 default_subagent_model_);
+                }
+            }
+            if (!fallback) fallback = parent->preset().model_ref;
+            child_preset = presets_.Resolve(preset_name, parent->info().project_root,
+                                            parent->preset().allowed_skills, fallback);
+            if (child_preset.model_declared) {
+                child_preset = presets_.Resolve(preset_name, parent->info().project_root,
+                                                parent->preset().allowed_skills, std::nullopt);
+                spawn_model = std::nullopt;  // the preset's own choice stands
+            } else {
+                spawn_model = std::move(fallback);
+            }
+        }
     } catch (const std::exception& e) {
         return SubagentOutcome::Error(e.what());
     }
@@ -191,11 +237,14 @@ SubagentOutcome SubagentManager::Spawn(const SubagentRequest& request,
     params.policy_ceiling = parent->policy();
     params.mcp_policy_ceiling = parent->mcp_policy();
     params.mcp_manager = mcp_manager_;
-    // An explicit spawn-time model rides model_override: CreateResolved's
+    // The spawn's model decision rides model_override: CreateResolved's
     // ResolveModel honors it for children too, so an unresolvable ref fails
-    // the spawn with a named error before the child's first call. The
-    // parent's own session-level override is deliberately not consulted.
-    params.model_override = request.model;
+    // the spawn with a named error before the child's first call. nullopt
+    // means the child preset's own declared model stands (nothing above it
+    // fired). The parent's /subagent-model choice itself is deliberately not
+    // inherited as child session state -- it is the parent's choice for ITS
+    // children, consumed here at spawn time.
+    params.model_override = spawn_model;
 
     // Inheritance is OPT-IN for the advisor: the default child answers Ask
     // through its own wire checker -- the human -- even when the parent had an

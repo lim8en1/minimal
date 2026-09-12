@@ -111,7 +111,8 @@ struct SubagentFixture {
     }
 
     void Build(std::shared_ptr<tools::PermissionAdvisor> advisor = nullptr,
-               bool advisor_inherit = false) {
+               bool advisor_inherit = false,
+               std::string default_subagent_model = "") {
         presets = std::make_unique<agent::AgentPresetRegistry>(
             dir.path(), skills, config::LoadSettingsConfig(dir.path() / "settings.json"));
         observers = std::make_unique<agent::SessionObserverRegistry>(common::DefaultLogger());
@@ -124,6 +125,7 @@ struct SubagentFixture {
                                                             common::DefaultLogger(), 60s);
         manager = std::make_unique<agent::SubagentManager>(*sessions, *db, *presets,
                                                            /*max_concurrent_subagents=*/4,
+                                                           std::move(default_subagent_model),
                                                            common::DefaultLogger(),
                                                            /*mcp_manager=*/nullptr,
                                                            std::move(advisor), advisor_inherit);
@@ -144,6 +146,7 @@ struct SubagentFixture {
                                                             common::DefaultLogger(), 60s);
         manager = std::make_unique<agent::SubagentManager>(*sessions, *db, *presets,
                                                            max_concurrent,
+                                                           /*default_subagent_model=*/"",
                                                            common::DefaultLogger());
         agent::SubagentManager* mgr = manager.get();
         tools.Register(std::make_unique<agent::SpawnSubagentTool>(
@@ -1274,6 +1277,190 @@ TEST_CASE("an unresolvable spawn-time model rolls back the minted row without ma
             FAIL("an orphan child row survived a rolled-back spawn: " + summary.session_id);
         }
     }
+}
+
+TEST_CASE("a spawned child inherits its parent's model when nothing more specific applies",
+          "[subagent][model]") {
+    // THE DEFAULT. A preset with no `model:` (and, here, no settings
+    // default_model at all) used to be an unresolvable spawn; the child now
+    // simply runs what its parent runs. The nomodel preset resolves onto the
+    // parent's model (main/parent-script), so its provider is the SAME script
+    // queue -- the interleaving below is the assertion: parent's spawn call,
+    // the child's only call, parent's continuation.
+    SubagentFixture fixture;
+    fixture.Write("agents/nomodel.md",
+                  "---\nname: nomodel\nallowed_tools: [\"*\"]\n---\nYou are the model-less child.\n");
+    fixture.Build();
+    auto parent = fixture.CreateParent();
+    auto* script = fixture.scripts["parent-script"].get();
+
+    script->Push(testing::ToolUseResponse(
+        "call-spawn", "spawn_subagent",
+        {{"task", "inherit me"}, {"agent_preset", "nomodel"}}));
+    script->Push(testing::TextResponse("inherited child result"));
+    script->Push(testing::TextResponse("parent done"));
+
+    parent->SubmitTurn("go");
+    REQUIRE(parent->WaitForIdleForTesting(10s));
+
+    const auto page = fixture.db->GetMessagesPage(parent->info().session_id, std::nullopt, 50);
+    REQUIRE(page.messages.size() == 4);
+    const auto& block = std::get<llm::ToolResultBlock>(page.messages[1].message.content.front());
+    CHECK_FALSE(block.is_error);
+    CHECK(TextOf(block) == "inherited child result");
+
+    bool blocking_flag = false;
+    const auto child_id = fixture.WaitForSubagentStarted(parent, &blocking_flag);
+    REQUIRE(child_id.has_value());
+    const auto child = fixture.sessions->Find(*child_id);
+    REQUIRE(child != nullptr);
+    CHECK(child->preset().model_ref.str() == "main/parent-script");
+}
+
+TEST_CASE("a child preset's declared model outranks the inherited default",
+          "[subagent][model]") {
+    // `model:` frontmatter is an explicit per-agent declaration: "same as
+    // parent" must not clobber it. The child preset names childmain/child-script,
+    // so its call lands on the OTHER script queue.
+    SubagentFixture fixture;
+    fixture.Build();
+    auto parent = fixture.CreateParent();
+    auto* parent_script = fixture.scripts["parent-script"].get();
+    auto* child_script = fixture.scripts["child-script"].get();
+
+    parent_script->Push(testing::ToolUseResponse(
+        "call-spawn", "spawn_subagent",
+        {{"task", "declared"}, {"agent_preset", "child"}}));
+    parent_script->Push(testing::TextResponse("parent done"));
+    child_script->Push(testing::TextResponse("declared child result"));
+
+    parent->SubmitTurn("go");
+    REQUIRE(parent->WaitForIdleForTesting(10s));
+
+    const auto page = fixture.db->GetMessagesPage(parent->info().session_id, std::nullopt, 50);
+    REQUIRE(page.messages.size() == 4);
+    const auto& block = std::get<llm::ToolResultBlock>(page.messages[1].message.content.front());
+    CHECK_FALSE(block.is_error);
+    CHECK(TextOf(block) == "declared child result");
+
+    const auto child_id = fixture.WaitForSubagentStarted(parent);
+    REQUIRE(child_id.has_value());
+    const auto child = fixture.sessions->Find(*child_id);
+    REQUIRE(child != nullptr);
+    CHECK(child->preset().model_ref.str() == "childmain/child-script");
+    // ...and the parent's own sticky state is untouched.
+    CHECK(parent->preset().model_ref.str() == "main/parent-script");
+}
+
+TEST_CASE("the session's /subagent-model choice steers spawns and persists",
+          "[subagent][model]") {
+    SubagentFixture fixture;
+    fixture.Write("agents/nomodel.md",
+                  "---\nname: nomodel\nallowed_tools: [\"*\"]\n---\nYou are the model-less child.\n");
+    fixture.Build();
+    auto parent = fixture.CreateParent();
+    auto* parent_script = fixture.scripts["parent-script"].get();
+    auto* child_script = fixture.scripts["child-script"].get();
+
+    const auto override_ref = common::SplitModelRef("childmain/child-script");
+    REQUIRE(override_ref.has_value());
+    parent->set_subagent_model_override(*override_ref);
+
+    // The choice is a session property, durable like /model's.
+    const auto row = fixture.db->GetSession(parent->info().session_id);
+    REQUIRE(row.has_value());
+    REQUIRE(row->subagent_model.has_value());
+    CHECK(*row->subagent_model == "childmain/child-script");
+
+    // Spawn 1: preset declares nothing, so the session override beats the
+    // inherited default -- the child runs childmain/child-script.
+    parent_script->Push(testing::ToolUseResponse(
+        "call-spawn", "spawn_subagent",
+        {{"task", "steered"}, {"agent_preset", "nomodel"}}));
+    parent_script->Push(testing::TextResponse("parent continues"));
+    child_script->Push(testing::TextResponse("steered child result"));
+
+    parent->SubmitTurn("go");
+    REQUIRE(parent->WaitForIdleForTesting(10s));
+
+    const auto first_child_id = fixture.WaitForSubagentStarted(parent);
+    REQUIRE(first_child_id.has_value());
+    const auto first_child = fixture.sessions->Find(*first_child_id);
+    REQUIRE(first_child != nullptr);
+    CHECK(first_child->preset().model_ref.str() == "childmain/child-script");
+
+    // Spawn 2: an explicit model ON THE CALL outranks the session override.
+    parent_script->Push(testing::ToolUseResponse(
+        "call-spawn", "spawn_subagent",
+        {{"task", "explicit"}, {"agent_preset", "nomodel"}, {"model", "main/parent-script"}}));
+    // The explicit model routes the child onto the parent's script queue.
+    parent_script->Push(testing::TextResponse("explicit child result"));
+    parent_script->Push(testing::TextResponse("parent done 2"));
+
+    parent->SubmitTurn("again");
+    REQUIRE(parent->WaitForIdleForTesting(10s));
+
+    bool second_blocking = false;
+    const auto second_child_id = fixture.WaitForSubagentStarted(parent, &second_blocking);
+    REQUIRE(second_child_id.has_value());
+    const auto second_child = fixture.sessions->Find(*second_child_id);
+    REQUIRE(second_child != nullptr);
+    CHECK(second_child->preset().model_ref.str() == "main/parent-script");
+}
+
+TEST_CASE("settings default_subagent_model applies when nothing more specific fires",
+          "[subagent][model]") {
+    SubagentFixture fixture;
+    fixture.Write("agents/nomodel.md",
+                  "---\nname: nomodel\nallowed_tools: [\"*\"]\n---\nYou are the model-less child.\n");
+    fixture.Build(nullptr, false, "childmain/child-script");
+    auto parent = fixture.CreateParent();
+    auto* parent_script = fixture.scripts["parent-script"].get();
+    auto* child_script = fixture.scripts["child-script"].get();
+
+    // Global default beats the inherit-parent fallback: the nomodel child
+    // runs childmain/child-script, not the parent's model.
+    parent_script->Push(testing::ToolUseResponse(
+        "call-spawn", "spawn_subagent",
+        {{"task", "global"}, {"agent_preset", "nomodel"}}));
+    parent_script->Push(testing::TextResponse("parent done"));
+    child_script->Push(testing::TextResponse("global child result"));
+
+    parent->SubmitTurn("go");
+    REQUIRE(parent->WaitForIdleForTesting(10s));
+
+    const auto child_id = fixture.WaitForSubagentStarted(parent);
+    REQUIRE(child_id.has_value());
+    const auto child = fixture.sessions->Find(*child_id);
+    REQUIRE(child != nullptr);
+    CHECK(child->preset().model_ref.str() == "childmain/child-script");
+}
+
+TEST_CASE("a malformed settings default_subagent_model behaves as unset",
+          "[subagent][model]") {
+    // The sanity check warns at startup; the spawn path must still degrade
+    // gracefully rather than refuse -- the child falls back to its parent.
+    SubagentFixture fixture;
+    fixture.Write("agents/nomodel.md",
+                  "---\nname: nomodel\nallowed_tools: [\"*\"]\n---\nYou are the model-less child.\n");
+    fixture.Build(nullptr, false, "not-a-model-ref");
+    auto parent = fixture.CreateParent();
+    auto* script = fixture.scripts["parent-script"].get();
+
+    script->Push(testing::ToolUseResponse(
+        "call-spawn", "spawn_subagent",
+        {{"task", "fallback"}, {"agent_preset", "nomodel"}}));
+    script->Push(testing::TextResponse("inherited child result"));
+    script->Push(testing::TextResponse("parent done"));
+
+    parent->SubmitTurn("go");
+    REQUIRE(parent->WaitForIdleForTesting(10s));
+
+    const auto page = fixture.db->GetMessagesPage(parent->info().session_id, std::nullopt, 50);
+    REQUIRE(page.messages.size() == 4);
+    const auto& block = std::get<llm::ToolResultBlock>(page.messages[1].message.content.front());
+    CHECK_FALSE(block.is_error);
+    CHECK(TextOf(block) == "inherited child result");
 }
 
 TEST_CASE("a subagent gets no /-command surface", "[subagent][commands][invariant]") {

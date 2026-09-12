@@ -119,6 +119,7 @@ public:
         std::function<void()> open_picker;
         std::function<void()> open_agent_picker;
         std::function<void()> open_model_picker;
+        std::function<void()> open_subagent_model_picker;
         std::function<void()> open_mcp_picker;
         // Drains PickerController's async fetch completions and rebuilds
         // whichever picker's component they belong to (PickerController::Poll).

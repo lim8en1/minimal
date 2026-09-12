@@ -106,6 +106,7 @@ std::vector<CheckResult> StartupSanityCheck::RunAll() {
     append(check_compaction_strategy());
     append(check_compaction_keep_recent());
     append(check_small_model());
+    append(check_default_subagent_model());
     return results;
 }
 
@@ -951,6 +952,34 @@ std::vector<CheckResult> StartupSanityCheck::check_small_model() {
         results.push_back(Warning("small_model", "settings.json small_model '" + ref_text +
                                       "' resolves to nothing in providers.json; compaction "
                                       "behaves as if it were unset"));
+    }
+    return results;
+}
+
+std::vector<CheckResult> StartupSanityCheck::check_default_subagent_model() {
+    std::vector<CheckResult> results;
+    if (!settings_loaded_) return results;  // already Fatal under config_parse
+
+    const std::string& ref_text = settings_.default_subagent_model;
+    if (ref_text.empty()) return results;  // children inherit the parent's model: normal
+
+    // Same shape check the spawn path applies (SplitModelRef, so a discovered
+    // catalog's slash-bearing model id is accepted here too) -- run here so the
+    // misconfiguration surfaces at startup, not on the first spawn.
+    const auto ref = common::SplitModelRef(ref_text);
+    if (!ref) {
+        results.push_back(Warning(
+            "default_subagent_model",
+            "settings.json default_subagent_model is '" + ref_text +
+                "'; not a <provider>/<model> reference -- subagents behave as if it were unset"));
+        return results;
+    }
+    if (!providers_loaded_) return results;  // providers.json already Fatal under config_parse
+    if (providers_.Resolve(*ref) == nullptr) {
+        results.push_back(Warning("default_subagent_model",
+                                  "settings.json default_subagent_model '" + ref_text +
+                                      "' resolves to nothing in providers.json; subagents "
+                                      "behave as if it were unset"));
     }
     return results;
 }

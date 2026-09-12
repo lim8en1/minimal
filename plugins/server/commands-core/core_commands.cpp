@@ -246,6 +246,69 @@ public:
     }
 };
 
+// The subagent-model sibling of ModelCommand: sets what model THIS session's
+// spawned subagents run on. Bare /subagent-model opens the client's picker
+// (display=View, view_hint "subagent-models"), which prepends a "Same as
+// parent" row -- the default, expressed by the "inherit" sentinel here: the
+// session's override is cleared and spawned children go back to running the
+// parent's own model (unless something more specific outranks it: the spawn
+// call's own model argument, or the child preset's declared model).
+// "/subagent-model <provider>/<model>" pins the choice for this session's
+// children; "/subagent-model inherit" clears it. The same two-form display
+// rule as ModelCommand: only the bare form opens the picker.
+class SubagentModelCommand : public HarnessCommand {
+public:
+    std::string_view Name() const override { return "subagent-model"; }
+    std::string_view Summary() const override {
+        return "Set the model for spawned subagents, or open its picker";
+    }
+    std::string_view Usage() const override { return "/subagent-model [provider/model|inherit]"; }
+
+    minimal::commands::CommandDisplay Display() const override {
+        return minimal::commands::CommandDisplay::kView;
+    }
+    std::string_view ViewHint() const override { return "subagent-models"; }
+
+    minimal::commands::CommandDisplay DisplayFor(const CommandArgs& args) const override {
+        return args.positional.empty() ? minimal::commands::CommandDisplay::kView
+                                       : minimal::commands::CommandDisplay::kStatus;
+    }
+    std::string_view ViewHintFor(const CommandArgs& args) const override {
+        return args.positional.empty() ? std::string_view("subagent-models")
+                                       : std::string_view{};
+    }
+
+    CommandResult Execute(CommandContext& context, const CommandArgs& args) override {
+        if (args.positional.empty()) {
+            return CommandResult::Ok("subagent model list requested");
+        }
+        const std::string& text = args.positional.front();
+        if (text == "inherit") {
+            // Back to the default: children inherit the parent's model.
+            context.session().set_subagent_model_override(std::nullopt);
+            return CommandResult::Ok("subagent model: inherit (same as parent)");
+        }
+        // SplitModelRef, not ParseModelRef: a discovered model's id may itself
+        // carry slashes ("openrouter/anthropic/claude-opus-5").
+        const auto ref = minimal::common::SplitModelRef(text);
+        if (!ref) {
+            return CommandResult::Error("'" + text +
+                                        "' must be <provider>/<model> or 'inherit' "
+                                        "(or run /subagent-model with no arguments)");
+        }
+        const auto model = context.providers().Resolve(*ref);
+        if (model == nullptr) {
+            return CommandResult::Error("unknown model '" + text +
+                                        "' (run /subagent-model with no arguments for the "
+                                        "list)");
+        }
+        // Recorded on the SESSION as this session's choice for ITS children;
+        // consumed at spawn time, never folded into any preset.
+        context.session().set_subagent_model_override(*ref);
+        return CommandResult::Ok("subagent model: " + text);
+    }
+};
+
 // The result is the interface: display=View with view_hint="sessions" tells the
 // client to open its session picker, which fetches its own list over
 // ListSessions -- the command itself carries no data to show. ReadOnly because
@@ -442,6 +505,7 @@ std::vector<std::unique_ptr<Command>> MakeCoreCommands() {
     out.push_back(std::make_unique<ClearCommand>());
     out.push_back(std::make_unique<AgentCommand>());
     out.push_back(std::make_unique<ModelCommand>());
+    out.push_back(std::make_unique<SubagentModelCommand>());
     out.push_back(std::make_unique<SessionsCommand>());
     out.push_back(std::make_unique<ConnectCommand>());
     out.push_back(std::make_unique<McpCommand>());

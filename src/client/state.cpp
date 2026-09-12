@@ -565,6 +565,21 @@ bool SessionState::HasRunningTool() const {
     return false;
 }
 
+std::optional<std::chrono::milliseconds> SessionState::FastestRunningToolElapsedMs() const {
+    std::lock_guard lk(mtx_);
+    std::optional<std::chrono::milliseconds> newest_start;
+    for (const auto& tool : tools_) {
+        if (!tool.started || tool.started_at_unix_ms.count() < 0) continue;
+        if (!newest_start.has_value() || tool.started_at_unix_ms > *newest_start) {
+            newest_start = tool.started_at_unix_ms;
+        }
+    }
+    if (!newest_start.has_value()) return std::nullopt;
+    const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch());
+    return std::max(std::chrono::milliseconds(0), now_ms - *newest_start);
+}
+
 void SessionState::RequestCancel() {
     std::lock_guard lk(mtx_);
     switch (state_) {
@@ -2690,6 +2705,14 @@ bool AppState::FocusedTabHasRunningTool() const {
     if (tab_id.empty()) return false;
     const auto state = GetStateByTab(tab_id);
     return state && state->HasRunningTool();
+}
+
+std::optional<std::chrono::milliseconds> AppState::FocusedTabFastestRunningToolElapsedMs() const {
+    const std::string tab_id = FocusedTabId();
+    if (tab_id.empty()) return std::nullopt;
+    const auto state = GetStateByTab(tab_id);
+    if (!state) return std::nullopt;
+    return state->FastestRunningToolElapsedMs();
 }
 
 void AppState::CloseAllTabs() {

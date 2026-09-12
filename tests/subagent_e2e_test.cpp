@@ -98,6 +98,7 @@ struct SubagentE2EFixture {
                                                             *observers, *db, agent::LoopConfig{},
                                                             common::DefaultLogger());
         manager = std::make_unique<agent::SubagentManager>(*sessions, *db, *presets, 4,
+                                                           /*default_subagent_model=*/"",
                                                            common::DefaultLogger());
         agent::SubagentManager* mgr = manager.get();
         tools.Register(std::make_unique<testing::FakeTool>("read", tools::ToolCategory::ReadOnly,

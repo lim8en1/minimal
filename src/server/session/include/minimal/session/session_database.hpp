@@ -90,6 +90,12 @@ struct SessionSummary {
     // (--model) and by UpdateSessionModel (/model); read back on resume so
     // the choice survives a server restart.
     std::optional<std::string> model;
+    // The session's subagent-model override (v10), as a full
+    // "<provider>/<model>" reference, NULL when never set -- spawned children
+    // then inherit their parent's model (or their preset's declared one).
+    // Written by UpdateSessionSubagentModel (/subagent-model); read back on
+    // resume so the choice survives a server restart.
+    std::optional<std::string> subagent_model;
 };
 
 // The persisted compaction checkpoint: the current derived VIEW of a session's
@@ -150,7 +156,7 @@ struct OpenOptions {
 // (Default naming is NOT part of the append transaction; see SetDefaultName.)
 class SessionDatabase {
 public:
-    static constexpr int kSchemaVersion = 9;
+    static constexpr int kSchemaVersion = 10;
 
     // Opens (creating if needed) and migrates. Throws std::runtime_error on any
     // failure, including a database whose user_version is newer than this
@@ -208,6 +214,13 @@ public:
     // updated_at (the picker's sort key). Returns false for an unknown id.
     bool UpdateSessionModel(const std::string& session_id,
                             const std::optional<std::string>& model);
+
+    // Persists (or, with nullopt, clears) the session's subagent-model
+    // override (/subagent-model). Same contract as UpdateSessionModel: no
+    // updated_at touch, best-effort persistence, read back on resume. Returns
+    // false for an unknown id.
+    bool UpdateSessionSubagentModel(const std::string& session_id,
+                                    const std::optional<std::string>& model);
 
     // True when the session was created WITH an explicit name
     // (CreateSessionRequest.name) rather than receiving the free default or a

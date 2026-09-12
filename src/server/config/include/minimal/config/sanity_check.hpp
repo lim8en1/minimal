@@ -118,6 +118,7 @@ private:
     std::vector<CheckResult> check_compaction_strategy();
     std::vector<CheckResult> check_compaction_keep_recent();
     std::vector<CheckResult> check_small_model();
+    std::vector<CheckResult> check_default_subagent_model();
 
     SanityCheckInputs inputs_;
 

@@ -162,6 +162,16 @@ const std::vector<Migration>& DefaultMigrationsImpl() {
              "ALTER TABLE messages ADD COLUMN agent_preset TEXT;",
              "ALTER TABLE messages ADD COLUMN model TEXT;",
          }},
+        // The session's subagent-model override, as the full
+        // "<provider>/<model>" reference the user chose for spawned children
+        // (NULL when they never did -- children then inherit the parent's
+        // model, which is what absence must mean on resume too). Follows the
+        // v8 pattern exactly; pre-v10 rows backfill NULL, which reads as "no
+        // override" -- the old sessions genuinely never had one.
+        {10,
+         {
+             "ALTER TABLE sessions ADD COLUMN subagent_model TEXT;",
+         }},
     }};
     // The invariant the version arithmetic depends on, checked where the list
     // is built: kSchemaVersion is the TARGET of ApplyMigrations, so it must
@@ -779,6 +789,24 @@ bool SessionDatabase::UpdateSessionModel(const std::string& session_id,
     return sqlite3_changes(db_) == 1;
 }
 
+bool SessionDatabase::UpdateSessionSubagentModel(const std::string& session_id,
+                                                 const std::optional<std::string>& model) {
+    std::lock_guard lock(mu_);
+    // No updated_at touch, same reasoning as UpdateSessionModel.
+    Stmt update(db_, "UPDATE sessions SET subagent_model = ? WHERE id = ?;",
+                "failed to update session subagent model");
+    if (model) {
+        sqlite3_bind_text(update.stmt, 1, model->c_str(), -1, SQLITE_TRANSIENT);
+    } else {
+        sqlite3_bind_null(update.stmt, 1);
+    }
+    sqlite3_bind_text(update.stmt, 2, session_id.c_str(), -1, SQLITE_TRANSIENT);
+    if (sqlite3_step(update.stmt) != SQLITE_DONE) {
+        ThrowSqliteError(db_, "failed to update session subagent model");
+    }
+    return sqlite3_changes(db_) == 1;
+}
+
 bool SessionDatabase::IsExplicitlyNamed(const std::string& session_id) const {
     std::lock_guard lock(mu_);
     CachedStmt query(db_, prepared_,
@@ -904,7 +932,7 @@ std::optional<SessionSummary> SessionDatabase::GetSession(const std::string& ses
     CachedStmt query(db_, prepared_,
                      "SELECT s.id, s.parent_session_id, s.name, s.name_source, s.project_root,"
                      " s.agent_preset, s.created_at, s.updated_at, s.message_count,"
-                     " s.forked_from_session_id, s.model"
+                     " s.forked_from_session_id, s.model, s.subagent_model"
                      " FROM sessions s WHERE s.id = ?;",
                      "failed to load session");
     sqlite3_bind_text(query.stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
@@ -939,6 +967,9 @@ std::optional<SessionSummary> SessionDatabase::GetSession(const std::string& ses
     }
     if (sqlite3_column_type(query.stmt, 10) == SQLITE_TEXT) {
         summary.model = reinterpret_cast<const char*>(sqlite3_column_text(query.stmt, 10));
+    }
+    if (sqlite3_column_type(query.stmt, 11) == SQLITE_TEXT) {
+        summary.subagent_model = reinterpret_cast<const char*>(sqlite3_column_text(query.stmt, 11));
     }
     return summary;
 }

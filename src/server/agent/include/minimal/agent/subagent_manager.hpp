@@ -48,7 +48,8 @@ public:
     // the parent model adapts to, never a child that starts crippled.
     SubagentManager(SessionRegistry& sessions, session::SessionDatabase& db,
                     const AgentPresetRegistry& presets, std::int64_t max_concurrent_subagents,
-                    common::Logger& logger, mcp::McpClientManager* mcp_manager = nullptr,
+                    std::string default_subagent_model, common::Logger& logger,
+                    mcp::McpClientManager* mcp_manager = nullptr,
                     std::shared_ptr<tools::PermissionAdvisor> advisor = nullptr,
                     bool advisor_inherit = false,
                     std::chrono::milliseconds advisor_timeout = tools::AdvisedPermissionChecker::kDefaultTimeout,
@@ -67,6 +68,9 @@ private:
     session::SessionDatabase& db_;
     const AgentPresetRegistry& presets_;
     std::int64_t max_concurrent_subagents_;
+    // settings.default_subagent_model as "<provider>/<model>". The last
+    // explicit fallback before "inherit the parent's model"; empty = unset.
+    std::string default_subagent_model_;
     common::Logger& logger_;
     mcp::McpClientManager* mcp_manager_ = nullptr;
     // The configured advisor, resolved once at startup; copied into a child's

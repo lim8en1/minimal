@@ -92,6 +92,23 @@ std::shared_ptr<Session> SessionRegistry::ForkSession(
         }
     }
 
+    // A fork copies the session's configuration, not just its transcript: the
+    // source's sticky subagent-model choice (/subagent-model) travels too.
+    // Best-effort like the write above; a failed copy only means the fork's
+    // children fall back to the inherit-parent default.
+    std::optional<config::ModelRef> fork_subagent_model;
+    if (const auto source = db_.GetSession(source_session_id); source && source->subagent_model) {
+        if (const auto ref = config::SplitModelRef(*source->subagent_model)) {
+            fork_subagent_model = ref;
+            try {
+                db_.UpdateSessionSubagentModel(row.session_id, *source->subagent_model);
+            } catch (const std::exception& e) {
+                logger_.warn("session {}: persisting fork subagent-model override failed: {}",
+                             row.session_id, e.what());
+            }
+        }
+    }
+
     SessionParams params;
     params.session_id = row.session_id;
     params.name = name;  // empty rides through: default naming from the first user text
@@ -99,6 +116,7 @@ std::shared_ptr<Session> SessionRegistry::ForkSession(
     params.project_root = row.project_root;
     params.run_mode_override = run_mode;
     params.model_override = model;
+    params.subagent_model_override = fork_subagent_model;
     // The fork's store already holds the copied prefix; params.resume routes
     // creation through LoadResumeSeed exactly like a reopened session --
     // [summary + tail] from a copied checkpoint, occupancy reseeding, and the
@@ -221,6 +239,20 @@ std::shared_ptr<Session> SessionRegistry::CreateResolved(SessionParams params,
                 // cost of a failed write is only a resume losing the choice.
                 logger_.warn("session {}: persisting model override failed: {}", session_id,
                              e.what());
+            }
+        };
+    // Durable half of the subagent-model override (see
+    // SessionParams::subagent_model_override): the same funnel, the same
+    // best-effort reasoning as the hook above.
+    params.subagent_model_persist =
+        [this, session_id](const std::optional<config::ModelRef>& ref) {
+            try {
+                db_.UpdateSessionSubagentModel(session_id,
+                                               ref ? std::optional<std::string>(ref->str())
+                                                   : std::nullopt);
+            } catch (const std::exception& e) {
+                logger_.warn("session {}: persisting subagent-model override failed: {}",
+                             session_id, e.what());
             }
         };
 

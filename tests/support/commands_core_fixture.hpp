@@ -145,6 +145,12 @@ public:
     void set_model_override(std::optional<common::ModelRef> ref) override {
         override_ = std::move(ref);
     }
+    const std::optional<common::ModelRef>& subagent_model_override() const override {
+        return subagent_override_;
+    }
+    void set_subagent_model_override(std::optional<common::ModelRef> ref) override {
+        subagent_override_ = std::move(ref);
+    }
     // Records rather than runs: a prompt-shorthand test asserts the text and
     // shape of the submission, and running a real turn here would need a
     // scripted provider response the command itself knows nothing about.
@@ -222,6 +228,7 @@ private:
     agent::AgentPreset preset_;
     std::unique_ptr<agent::AgentLoop> loop_;
     std::optional<common::ModelRef> override_;
+    std::optional<common::ModelRef> subagent_override_;
     std::vector<std::string> submitted_turns_;
     std::vector<std::string> submitted_models_;
     std::vector<std::string> submitted_agents_;

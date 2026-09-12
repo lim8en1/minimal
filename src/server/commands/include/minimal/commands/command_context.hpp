@@ -83,6 +83,17 @@ public:
     virtual const std::optional<common::ModelRef>& model_override() const = 0;
     virtual void set_model_override(std::optional<common::ModelRef> ref) = 0;
 
+    // The session's explicit subagent-model choice (/subagent-model): what
+    // model its spawned children run when the spawn call itself names none.
+    // Same session-owned-decision reasoning as model_override above.
+    virtual const std::optional<common::ModelRef>& subagent_model_override() const {
+        static const std::optional<common::ModelRef> kNone;
+        return kNone;
+    }
+    virtual void set_subagent_model_override(std::optional<common::ModelRef> ref) {
+        (void)ref;  // a control surface that never grew the feature ignores it
+    }
+
     // Submits a user turn on this session -- the ONE sanctioned path by which a
     // PromptShorthandCommand's content reaches the model (docs/EXTENSIBILITY.md
     // 4.4): as the submitted turn itself, appended to history and answered like

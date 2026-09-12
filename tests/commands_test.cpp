@@ -56,13 +56,16 @@ TEST_CASE("help lists every registered command and explains one", "[commands]") 
 
     const auto listing = fixture.Run("help");
     REQUIRE(listing.status == Status::kOk);
-    for (const char* name : {"/help", "/compact", "/clear", "/agent", "/model"}) {
+    for (const char* name : {"/help", "/compact", "/clear", "/agent", "/model",
+                             "/subagent-model"}) {
         INFO("expected " << name << " in the listing");
         CHECK(listing.message.find(name) != std::string::npos);
     }
 
     const auto one = fixture.Run("help", {"model"});
     CHECK(one.message.find("[provider/model]") != std::string::npos);
+    const auto subagent_one = fixture.Run("help", {"subagent-model"});
+    CHECK(subagent_one.message.find("inherit") != std::string::npos);
 }
 
 TEST_CASE("a user-chosen model survives an agent switch", "[commands][invariant]") {
@@ -145,6 +148,52 @@ TEST_CASE("agent switch by name reports the status line, not the picker view",
     REQUIRE(result.status == Status::kOk);
     CHECK(result.display == commands::CommandDisplay::kStatus);
     CHECK(result.view_hint.empty());
+}
+
+TEST_CASE("bare /subagent-model opens its picker rather than erroring", "[commands]") {
+    // The /model shape: the command carries no data, the client fetches the
+    // list itself over ListModels and prepends the "same as parent" row.
+    CommandFixture fixture;
+    const auto result = fixture.Run("subagent-model");
+    CHECK(result.status == Status::kOk);
+    CHECK(result.display == commands::CommandDisplay::kView);
+    CHECK(result.view_hint == "subagent-models");
+    CHECK_FALSE(fixture.subagent_model_override().has_value());  // nothing set
+}
+
+TEST_CASE("/subagent-model <ref> sets the choice; inherit clears it", "[commands]") {
+    CommandFixture fixture;
+
+    const auto set = fixture.Run("subagent-model", {"main/slow"});
+    REQUIRE(set.status == Status::kOk);
+    // A set is a status-line answer, never the picker view -- the same
+    // DisplayFor rule /model's regression test pins.
+    CHECK(set.display == commands::CommandDisplay::kStatus);
+    CHECK(set.view_hint.empty());
+    REQUIRE(fixture.subagent_model_override().has_value());
+    CHECK(fixture.subagent_model_override()->str() == "main/slow");
+    // The session's own model is untouched: this choice governs spawned
+    // children only.
+    CHECK(fixture.preset().model_ref.str() == "main/fast");
+
+    const auto cleared = fixture.Run("subagent-model", {"inherit"});
+    REQUIRE(cleared.status == Status::kOk);
+    CHECK(cleared.display == commands::CommandDisplay::kStatus);
+    CHECK_FALSE(fixture.subagent_model_override().has_value());
+}
+
+TEST_CASE("/subagent-model refuses malformed and unknown refs", "[commands]") {
+    CommandFixture fixture;
+
+    const auto malformed = fixture.Run("subagent-model", {"noslash"});
+    CHECK(malformed.status == Status::kError);
+    CHECK(malformed.message.find("inherit") != std::string::npos);
+    CHECK_FALSE(fixture.subagent_model_override().has_value());
+
+    const auto unknown = fixture.Run("subagent-model", {"main/ghost"});
+    CHECK(unknown.status == Status::kError);
+    CHECK(unknown.message.find("unknown model") != std::string::npos);
+    CHECK_FALSE(fixture.subagent_model_override().has_value());
 }
 
 TEST_CASE("bare /mcp opens the mcp picker rather than erroring", "[commands]") {

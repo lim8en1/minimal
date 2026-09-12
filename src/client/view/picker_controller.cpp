@@ -299,6 +299,16 @@ void PickerController::OpenAgentPicker() {
 // used to freeze the whole TUI -- no redraw, no keystroke, no streaming
 // progress -- for the duration.
 void PickerController::OpenModelPicker(bool refresh) {
+    model_picker_subagent_ = false;
+    OpenModelPickerFetch(refresh);
+}
+
+void PickerController::OpenSubagentModelPicker() {
+    model_picker_subagent_ = true;
+    OpenModelPickerFetch(/*refresh=*/false);
+}
+
+void PickerController::OpenModelPickerFetch(bool refresh) {
     deps_.show_model_picker = true;
     model_picker_models_.clear();
     RebuildModelPickerComponent();
@@ -321,27 +331,48 @@ void PickerController::OpenModelPicker(bool refresh) {
 }
 
 void PickerController::RebuildModelPickerComponent() {
-    *deps_.model_picker_slot = MakeModelPicker(
-        model_picker_models_, deps_.theme,
-        {.on_select =
-              [this](const std::string& ref) {
-                  // The DESIRED-STATE path, identical on every tab (see the
-                  // agent picker above): the selection sets the tab's
-                  // desired model -- it rides CreateSessionRequest on a
-                  // sessionless tab and converges at the next turn start on
-                  // a sessioned one. No command, no direct switch.
-                  // focused_or_new_tab for the same empty-startup-app
-                  // reason the agent picker stages through it.
-                  const std::string tab = deps_.focused_or_new_tab();
-                  if (!tab.empty()) {
-                      deps_.app.StageModel(tab, ref);
-                      deps_.app.TabNotice(tab, "model '" + ref +
-                                                   "' will be used on your next message");
-                  }
-                  deps_.show_model_picker = false;
-              },
-         .on_refresh_discovery = [this] { OpenModelPicker(/*refresh=*/true); },
-         .on_close = [this] { deps_.show_model_picker = false; }});
+    ModelPickerCallbacks callbacks;
+    if (model_picker_subagent_) {
+        callbacks.leading_row_label = "same as parent";
+        callbacks.leading_row_id = kSameAsParentRowId;
+    }
+    callbacks.on_select =
+        [this](const std::string& ref) {
+            if (model_picker_subagent_) {
+                // The DIRECT-COMMAND path: the subagent-model choice is a
+                // session property, not desired state -- there is nothing to
+                // stage (a sessionless tab has no session to set it on; the
+                // picker only opens from a session's notice or a sessioned
+                // tab's bare /subagent-model). The command's own result
+                // surfaces as the tab notice.
+                deps_.show_model_picker = false;
+                if (const std::string tab = deps_.focused_or_new_tab(); !tab.empty()) {
+                    deps_.app.SubmitCommand(tab,
+                                            ref == kSameAsParentRowId
+                                                ? std::string("/subagent-model inherit")
+                                                : "/subagent-model " + ref);
+                }
+                return;
+            }
+            // The DESIRED-STATE path, identical on every tab (see the
+            // agent picker above): the selection sets the tab's
+            // desired model -- it rides CreateSessionRequest on a
+            // sessionless tab and converges at the next turn start on
+            // a sessioned one. No command, no direct switch.
+            // focused_or_new_tab for the same empty-startup-app
+            // reason the agent picker stages through it.
+            const std::string tab = deps_.focused_or_new_tab();
+            if (!tab.empty()) {
+                deps_.app.StageModel(tab, ref);
+                deps_.app.TabNotice(tab, "model '" + ref +
+                                              "' will be used on your next message");
+            }
+            deps_.show_model_picker = false;
+        };
+    callbacks.on_refresh_discovery = [this] { OpenModelPicker(/*refresh=*/true); };
+    callbacks.on_close = [this] { deps_.show_model_picker = false; };
+    *deps_.model_picker_slot = MakeModelPicker(model_picker_models_, deps_.theme,
+                                               std::move(callbacks));
 }
 
 // The /mcp picker: bare `/mcp` opens with a fresh fetch; toggling a row
