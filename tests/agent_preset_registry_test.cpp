@@ -147,6 +147,47 @@ TEST_CASE("AgentPresetRegistry: a preset with no model takes settings.default_mo
     CHECK(registry.Resolve("build").provider.base_url == "https://api.openai.com/v1");
 }
 
+TEST_CASE("AgentPresetRegistry: model_declared records whether the preset named its model",
+          "[agent_preset_registry]") {
+    // Load-bearing for the spawn path's "inherit the parent's model" default:
+    // a declared `model:` must survive it, a settings default must not be
+    // mistaken for one.
+    TempConfigDir config;
+    config.WriteDefaults();
+    config.Write("agents/build.md",
+                  "---\n"
+                  "name: build\n"
+                  "---\n"
+                  "body\n");
+    config.WriteJson("settings.json", {{"default_model", "openai-main/gpt-4o-mini"}});
+    config.Write("agents/other.md",
+                  "---\n"
+                  "name: other\n"
+                  "model: openai-main/gpt-4.1\n"
+                  "---\n"
+                  "other body\n");
+    config::SkillRegistry skills = config::SkillRegistry::Load(config.dir);
+    AgentPresetRegistry registry(config.dir, skills,
+                                  config::LoadSettingsConfig(config.dir / "settings.json"));
+
+    // Resolved from settings.default_model: not a declaration.
+    const auto fallback = registry.Resolve("build");
+    CHECK(fallback.provider.model_name == "gpt-4o-mini");
+    CHECK_FALSE(fallback.model_declared);
+
+    // Resolved from the preset's own `model:`: declared.
+    const auto declared = registry.Resolve("other");
+    CHECK(declared.provider.model_name == "gpt-4.1");
+    CHECK(declared.model_declared);
+
+    // A model_override stamps the model but does not invent a declaration:
+    // the caller chose the model, the preset still did not.
+    const auto overridden = registry.Resolve(
+        "build", {}, std::nullopt, common::SplitModelRef("openai-main/gpt-4.1"));
+    CHECK(overridden.provider.model_name == "gpt-4.1");
+    CHECK_FALSE(overridden.model_declared);
+}
+
 TEST_CASE("AgentPresetRegistry: default_model comes from the settings it was GIVEN",
           "[agent_preset_registry][invariant]") {
     // settings.json used to be parsed a third time inside the registry, so main

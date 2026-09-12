@@ -28,6 +28,7 @@
 #include "deadline.hpp"
 #include "fakes.hpp"
 #include "temp_dir.hpp"
+#include "../../plugins/server/commands-core/core_commands.hpp"
 #include "minimal/agent/signal_router.hpp"
 #include "minimal/client/session_client.hpp"
 #include "minimal/plugins/plugin_loader.hpp"
@@ -2745,6 +2746,54 @@ TEST_CASE("a resumed session restores the model persisted with it",
         CHECK(session->preset().model_ref.str() == "main/test-model");
         CHECK(*fixture.db->GetSession(session_id)->model == "main/test-model");
     }
+}
+
+TEST_CASE("a resumed session restores the subagent-model persisted with it",
+          "[session_service][resume][invariant]") {
+    // /subagent-model's restart story, same as the model override above: the
+    // choice is session state, so a restart must not silently revert spawned
+    // children to inheriting the parent's model.
+    ServiceFixture fixture;
+    fixture.Write("providers.json",
+                  nlohmann::json{{"providers",
+                                  {{"main",
+                                    {{"backend", "fake"},
+                                     {"url", "http://localhost/v1"},
+                                     {"models",
+                                      {{"test-model", nlohmann::json::object()},
+                                       {"other-model", {{"max_tokens", 512}}}}}}}}}}
+                      .dump());
+    for (auto& command : commands_core::MakeCoreCommands()) {
+        fixture.commands.Register(std::move(command));
+    }
+    fixture.Start();
+
+    const std::string session_id = fixture.CreateSession();
+    REQUIRE_FALSE(session_id.empty());
+
+    {
+        grpc::ClientContext context;
+        auto stream = fixture.stub->OpenSession(&context);
+        const auto set = RunCommand(stream, session_id, "subagent-model", {"main/other-model"});
+        REQUIRE(set.has_value());
+        CHECK(set->status() == v1::COMMAND_STATUS_OK);
+        // The row already carries the choice.
+        REQUIRE(fixture.db->GetSession(session_id).has_value());
+        REQUIRE(fixture.db->GetSession(session_id)->subagent_model.has_value());
+        CHECK(*fixture.db->GetSession(session_id)->subagent_model == "main/other-model");
+
+        REQUIRE(stream->Write(EndSession(session_id, v1::EndSession::TERMINATE)));
+        (void)DrainAndFinish(stream);
+    }
+    WaitForTerminated(*fixture.sessions, session_id);
+
+    v1::CreateSessionResponse resumed;
+    REQUIRE(ResumeOverWire(*fixture.stub, session_id, &resumed).ok());
+
+    auto session = fixture.sessions->Find(session_id);
+    REQUIRE(session != nullptr);
+    REQUIRE(session->subagent_model_override().has_value());
+    CHECK(session->subagent_model_override()->str() == "main/other-model");
 }
 
 TEST_CASE("a client-supplied page limit is clamped, not trusted",

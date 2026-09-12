@@ -562,7 +562,7 @@ SessionSummary SessionDatabase::CreateSession(std::string name,
                           std::move(project_root), std::move(agent_preset),
                           now,                    now,
                           0,                      {},
-                          std::move(model)};
+                          std::move(model),       std::nullopt};
 }
 
 std::int64_t SessionDatabase::AppendMessage(const std::string& session_id,

@@ -12,6 +12,7 @@ TEST_CASE("ParseSettingsConfig: empty doc yields every documented default", "[se
 
     CHECK(config.default_agent_preset.empty());
     CHECK(config.default_model.empty());
+    CHECK(config.default_subagent_model.empty());
     CHECK(config.default_theme.empty());
     CHECK(config.max_concurrent_subagents == 4);
     CHECK(config.memory.auto_compact == true);
@@ -38,6 +39,7 @@ TEST_CASE("ParseSettingsConfig: empty doc yields every documented default", "[se
 TEST_CASE("ParseSettingsConfig: top-level fields overridable individually", "[settings_config]") {
     nlohmann::json doc = {{"default_agent_preset", "build"},
                            {"default_model", "openai-main"},
+                           {"default_subagent_model", "openai-main/small"},
                            {"default_theme", "dark"},
                            {"max_concurrent_subagents", 8},
                            {"session_db_path", "/data/sessions.db"}};
@@ -45,6 +47,7 @@ TEST_CASE("ParseSettingsConfig: top-level fields overridable individually", "[se
     auto config = ParseSettingsConfig(doc);
     CHECK(config.default_agent_preset == "build");
     CHECK(config.default_model == "openai-main");
+    CHECK(config.default_subagent_model == "openai-main/small");
     CHECK(config.default_theme == "dark");
     CHECK(config.max_concurrent_subagents == 8);
     CHECK(config.session_db_path == "/data/sessions.db");

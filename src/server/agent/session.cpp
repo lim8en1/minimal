@@ -112,6 +112,9 @@ Session::Session(SessionParams params, AgentPreset preset,
     // remembering: /agent re-resolves the preset from disk, and without the
     // choice recorded HERE it would silently revert to the preset's own model.
     model_override_ = params_.model_override;
+    // Same "remember the choice" rule for /subagent-model: the value is
+    // consumed by SubagentManager::Spawn, never by this session's own turns.
+    subagent_model_override_ = params_.subagent_model_override;
 
     info_.session_id = params_.session_id;
     info_.parent_session_id = params_.parent_session_id;

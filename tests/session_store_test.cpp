@@ -1224,6 +1224,35 @@ TEST_CASE("the model override is persisted with the session row", "[session][mod
     CHECK_FALSE(db.UpdateSessionModel("no-such-session", std::string("main/x")));
 }
 
+TEST_CASE("the subagent-model override is persisted with the session row",
+          "[session][model]") {
+    // /subagent-model's durable half: same contract as the model override
+    // above -- stored at creation-adjacent writes, no updated_at touch (a
+    // spawn-preference switch must not reorder the picker), cleared by NULL.
+    TempDir dir;
+    SessionDatabase db(dir.path() / "subagent_model.db");
+
+    // Absence is nullopt, never "": absence means "children inherit the
+    // parent's model".
+    const auto plain = db.CreateSession("", std::nullopt, "/p", "build");
+    CHECK_FALSE(plain.subagent_model.has_value());
+    CHECK_FALSE(db.GetSession(plain.session_id)->subagent_model.has_value());
+
+    CHECK(db.UpdateSessionSubagentModel(plain.session_id, std::string("local/big-model")));
+    REQUIRE(db.GetSession(plain.session_id)->subagent_model.has_value());
+    CHECK(*db.GetSession(plain.session_id)->subagent_model == "local/big-model");
+
+    const auto activity_before = db.GetSession(plain.session_id)->updated_at_unix_ms;
+    CHECK(db.UpdateSessionSubagentModel(plain.session_id, std::string("main/other-model")));
+    CHECK(*db.GetSession(plain.session_id)->subagent_model == "main/other-model");
+    CHECK(db.GetSession(plain.session_id)->updated_at_unix_ms == activity_before);
+
+    // Clearing (/subagent-model inherit) removes it; an unknown id reports false.
+    CHECK(db.UpdateSessionSubagentModel(plain.session_id, std::nullopt));
+    CHECK_FALSE(db.GetSession(plain.session_id)->subagent_model.has_value());
+    CHECK_FALSE(db.UpdateSessionSubagentModel("no-such-session", std::string("main/x")));
+}
+
 TEST_CASE("migration to model upgrades a v7 database in place", "[session][migrations]") {
     // A v7 database predates the model column -- every session ever created
     // under it had a memory-only override, i.e. none stored. The ALTER adds
