@@ -4,6 +4,7 @@
 #include <chrono>
 #include <string_view>
 
+#include "minimal/client/chat_model.hpp"
 #include "minimal/client/utf8.hpp"
 #include "minimal/client/view/tool_status.hpp"
 
@@ -75,10 +76,15 @@ ftxui::Element RenderToolsPanel(const std::vector<AppState::TabSnapshot>& tabs,
             if (!summary.empty()) {
                 line.push_back(text("  " + summary) | Muted(theme));
             }
-            // Same elapsed/duration ARCHITECTURE.md already promises this
-            // panel shows ("started-at"), and the same reasoning as the live
-            // chat row: without a ticking number, a long-running cross-session
-            // command that has gone quiet is indistinguishable from a hung one.
+            // "started-at" (ARCHITECTURE.md's promised column) plus elapsed:
+            // without a ticking number, a long-running cross-session command
+            // that has gone quiet is indistinguishable from a hung one.
+            if (tool.started_at_unix_ms.count() >= 0) {
+                const std::string stamp = FormatClockTime(tool.started_at_unix_ms.count());
+                if (!stamp.empty()) {
+                    line.push_back(text("  " + stamp) | Muted(theme));
+                }
+            }
             if (tool.started) {
                 if (tool.started_at_unix_ms.count() >= 0) {
                     const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(

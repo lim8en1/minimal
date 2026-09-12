@@ -321,7 +321,22 @@ ftxui::Element ChatView::RenderLiveToolRow(const ToolExecutionState& tool) const
     } else if (tool.duration.count() >= 0) {
         line.push_back(text("  " + FormatDuration(tool.duration.count())) | Muted(theme_));
     }
-    return hbox(std::move(line));
+    Element row = hbox(std::move(line));
+    // Persisted rows get their clock stamp from ChatRow::created_at_unix_ms
+    // once scrollback catches up (see the timestamp block in Render()) --
+    // but that fetch is deliberately deferred until turn-end whenever the
+    // same round is also streaming text (scrollback_refresh.cpp), which left
+    // a live tool call with no "when did this start" until the whole turn
+    // finished. started_at_unix_ms is already on hand the instant the call
+    // begins, so stamp it here too, same toggle and style as persisted rows.
+    if (show_timestamps_ && tool.started_at_unix_ms.count() >= 0) {
+        const auto stamp = FormatClockTime(tool.started_at_unix_ms.count());
+        if (!stamp.empty()) {
+            row = hbox({std::move(row) | flex,
+                        text(stamp) | color(theme_.ColorFor("system_message"))});
+        }
+    }
+    return row;
 }
 
 ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
