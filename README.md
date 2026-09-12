@@ -16,7 +16,7 @@ C++/FTXUI **terminal client** that renders it — plus a headless one-turn mode
 
 Architecture and design decisions: [ARCHITECTURE.md](ARCHITECTURE.md) ·
 Extensibility: [docs/EXTENSIBILITY.md](docs/EXTENSIBILITY.md) ·
-MIT licensed.
+Licensed under [Apache 2.0](LICENSE).
 
 ## Quick start
 

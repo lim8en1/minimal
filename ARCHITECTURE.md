@@ -11,7 +11,7 @@ Local-first, memory/CPU-efficient coding-agent harness. C++ server/TUI-client sp
 
 ## Distribution
 
-- **License: MIT.**
+- **License: Apache 2.0.**
 - **Server topology: local-only, one server per user.** Each team member installs and runs the binary on their own machine — no shared/remote server in v1. This is a *security* assumption, not just a deployment default: the bash tool, path confinement, and permission checker all assume the server acts on behalf of one trusted local user on their own filesystem. A shared/remote server (multiple people connecting to one instance) would need per-connection auth and a much stricter tool-sandboxing model, and is explicitly out of scope until revisited. A single local server does serve multiple concurrent clients.
 - **Dependency management**: vcpkg manifest mode (`vcpkg.json`) so `cmake --build .` works for any contributor without bespoke local setup. All of grpc, protobuf, curl, sqlite3, nlohmann-json, ftxui, yaml-cpp, md4c, tree-sitter (core), re2, spdlog, and catch2 are present in the registry — verified, not assumed. Only `hkr04/cpp-mcp` is genuinely absent (niche library) and is vendored via `FetchContent`. The curated `tree-sitter-<lang>` **grammars** are vendored the same way, since vcpkg packages the core library but not the per-language parsers — `tree-sitter-bash` is the first in the tree (the bash tool's command scanner), and the rest arrive with client-side highlighting.
 - **Config paths must be platform-aware** — see Config section below.

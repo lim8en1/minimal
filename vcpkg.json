@@ -3,7 +3,7 @@
   "name": "minimal",
   "version": "1.0.0",
   "description": "Local-first, memory/CPU-efficient coding-agent harness (gRPC server + FTXUI TUI client).",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "dependencies": [
     "grpc",
     {
