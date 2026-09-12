@@ -162,6 +162,12 @@ struct KeyContext {
     std::function<void()> request_quit;         // ctrl+q / idle ctrl+c: app.cpp owns the confirm-if-busy logic
     std::function<void(const std::string&)> close_tab;
     std::function<void(const std::string& session_id, int delta_rows)> scroll_chat;   // ChatView::ScrollBy, if that tab has one
+    // The MOUSE WHEEL variant: same tab lookup, but routes to
+    // ChatView::ScrollWheelBy, whose time gate absorbs the event flood a
+    // trackpad/terminal momentum emits (one report per scroll tick, dozens
+    // per flick). Keyboard scrolling stays ungated -- key repeat is already
+    // rate-limited by the OS.
+    std::function<void(const std::string& session_id, int delta_rows)> scroll_chat_wheel;
     // chat.scroll_bottom (PageDown): ChatView::ScrollToBottom, if that tab has
     // one. Resets the scroll anchor scrolling up leaves behind -- there was
     // previously no way back to the newest row except scrolling all the way

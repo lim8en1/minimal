@@ -390,8 +390,12 @@ bool HandleGlobalKey(KeyContext& ctx, const ftxui::Event& event) {
         if (mouse.button == Mouse::WheelUp || mouse.button == Mouse::WheelDown) {
             if (!sid.empty()) {
                 // WheelUp = scroll toward older (positive), matching
-                // conventional scroll-up-reveals-earlier-content.
-                ctx.scroll_chat(sid, mouse.button == Mouse::WheelUp ? 3 : -3);
+                // conventional scroll-up-reveals-earlier-content. ONE anchor
+                // step per event: an anchor is a small chunk of one message
+                // (RenderBlocks), and the wheel callback's gate absorbs the
+                // momentum flood -- 3 was a whole screenful-plus per tick on
+                // long responses.
+                ctx.scroll_chat_wheel(sid, mouse.button == Mouse::WheelUp ? 1 : -1);
             }
             return true;
         }

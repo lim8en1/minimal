@@ -94,6 +94,11 @@ bool IsCompact(ChatRowKind kind) {
     return kind == ChatRowKind::ToolActivity || kind == ChatRowKind::Thinking;
 }
 
+// ScrollWheelBy's gate: wheel events closer together than this are dropped.
+// Roughly one anchor step per two frame-loop ticks at the ~60 Hz repaint pace;
+// still fast when flung, but each step is a small, readable distance.
+constexpr auto kWheelGateMs = std::chrono::milliseconds(30);
+
 }  // namespace
 
 ChatView::ChatView(const Theme& theme,
@@ -254,7 +259,12 @@ void ChatView::RebuildRows(const SessionState::Snapshot& snapshot) {
             // empty row rather than a crash.
             if (renderer != nullptr) {
                 try {
-                    parts.push_back(renderer->Render(row, theme_, ctx));
+                    // RenderBlocks, not Render: a long row comes back as
+                    // several chunk Elements, each its own scroll anchor (the
+                    // default implementation just wraps Render, so a plugin
+                    // renderer that does not opt in still works, as one
+                    // anchor).
+                    parts = renderer->RenderBlocks(row, theme_, ctx);
                 } catch (const std::exception& error) {
                     common::DefaultLogger().warn("message renderer for {} threw: {}",
                                                  ToString(row.kind), error.what());
@@ -416,6 +426,11 @@ ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
         // same number.
         assembled_row_start_index_.clear();
         assembled_row_start_index_.reserve(rendered_rows_.size());
+        // Same walk, one entry per SCROLL anchor (per chunk element; spacers
+        // excluded) -- scroll_from_bottom_ addresses this list. Row cursors
+        // stay row-granular; scrolling is chunk-granular.
+        assembled_chunk_index_.clear();
+        assembled_chunk_index_.reserve(rendered_rows_.size() * 2);
         // One box slot per row; ToggleCollapseAt hit-tests these against a
         // click's screen y.
         row_boxes_.clear();
@@ -444,26 +459,32 @@ ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
                                          text(stamp) | color(theme_.ColorFor("system_message"))});
                     }
                 }
-                Element row = parts.size() == 1 ? std::move(parts[0]) : vbox(std::move(parts));
-                // The speaker gutter, full height. The row cursor recolors the
-                // SAME bar rather than adding a marker of its own (a whole-row
-                // background tint would fight a code block's own coloring). A
-                // Switch divider is a rule across the page, not a speaker.
-                if (is_focused) {
-                    row = WithGutter(std::move(row), theme_.ColorForOr("cursor", "row_focused"),
-                                     kCursorGutterGlyph);
-                } else if (kind != ChatRowKind::Switch) {
-                    row = WithGutter(std::move(row), GutterColor(kind, theme_));
+                // ONE spy per CHUNK, not one per row: each part is its own
+                // scroll anchor (assembled_chunk_index_), so a long message
+                // decomposed into chunks scrolls chunk by chunk instead of
+                // snapping whole-message. The gutter wraps every part so the
+                // speaker bar stays continuous across the row's full height
+                // (separatorCharacter fills each part's box); the timestamp
+                // rode the first part above.
+                for (auto& part : parts) {
+                    if (is_focused) {
+                        part = WithGutter(std::move(part),
+                                          theme_.ColorForOr("cursor", "row_focused"),
+                                          kCursorGutterGlyph);
+                    } else if (kind != ChatRowKind::Switch) {
+                        part = WithGutter(std::move(part), GutterColor(kind, theme_));
+                    }
+                    // Outermost wrap, after the gutter/timestamp decoration: the
+                    // spy records the box of exactly what is pushed into the
+                    // column (the layout-visible position). Baked in at ASSEMBLY
+                    // time, never into the cached Elements -- a cache hit must
+                    // not accumulate one spy per frame.
+                    auto slot = std::make_shared<ftxui::Box>();
+                    boxes.push_back(slot);
+                    assembled_chunk_index_.push_back(assembled_column_rows_.size());
+                    assembled_column_rows_.push_back(
+                        std::make_shared<RowBoxSpy>(std::move(slot), std::move(part)));
                 }
-                // Outermost wrap, after the gutter/timestamp decoration: the spy
-                // records the box of exactly what is pushed into the column (the
-                // layout-visible position). Baked in at ASSEMBLY time, never
-                // into the cached Elements -- a cache hit must not accumulate
-                // one spy per frame.
-                auto slot = std::make_shared<ftxui::Box>();
-                boxes.push_back(slot);
-                assembled_column_rows_.push_back(
-                    std::make_shared<RowBoxSpy>(std::move(slot), std::move(row)));
             }
             // Breathing room between rows -- except inside a run of collapsed
             // tool/thinking rows, which reads as one compact list. The LAST
@@ -636,10 +657,11 @@ ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
     // persisted rows -- "pinned" should track whatever is newest, streaming
     // or not).
     //
-    // A NONZERO value anchors on a PERSISTED row instead, counted back from
-    // the newest one via row_start_index -- the same addressing
-    // focused_row_ uses below, just without the visible row-cursor marker.
-    // NOT column.size()-1-scroll_from_bottom_ (the pre-fix math): that
+    // A NONZERO value anchors on a PERSISTED chunk instead, counted back from
+    // the newest one via assembled_chunk_index_ -- scrolling is chunk-granular
+    // (see the assembly loop), while the row cursor (focused_row_) stays
+    // row-granular, addressed via row_start_index. NOT column.size()-1-scroll_from_bottom_ (the
+    // pre-fix math): that
     // measured the offset from the literal end of `column`, which keeps
     // growing every delta while a turn streams (the live block) or a tool
     // runs (RenderLiveToolRow) -- so a reader scrolled up mid-turn watched
@@ -662,18 +684,23 @@ ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
                 if (row_index < row_start_index.size()) focus_index = row_start_index[row_index];
             }
         }
-        if (!focus_index.has_value() && !row_keys_.empty()) {
+        if (!focus_index.has_value() && !assembled_chunk_index_.empty()) {
             // Clamped and STORED (not just clamped locally): a spam of
-            // ScrollBy(+1) past the oldest row must not leave scroll_from_bottom_
-            // ballooning past what any render can use, or "scroll back down"
-            // afterward would need to burn through that same overshoot one
-            // step at a time before the viewport visibly moved again.
+            // ScrollBy(+1) past the oldest anchor must not leave
+            // scroll_from_bottom_ ballooning past what any render can use, or
+            // "scroll back down" afterward would need to burn through that
+            // same overshoot one step at a time before the viewport visibly
+            // moved again. Counted against CHUNK anchors, not rows: a message
+            // taller than the viewport is several anchors, and the point of
+            // the granularity change is that each wheel/scroll step moves a
+            // small, readable distance.
             scroll_from_bottom_ =
-                std::clamp(scroll_from_bottom_, 0, static_cast<int>(row_keys_.size()));
+                std::clamp(scroll_from_bottom_, 0,
+                           static_cast<int>(assembled_chunk_index_.size()));
             if (scroll_from_bottom_ > 0) {
-                const std::size_t rows_back = static_cast<std::size_t>(scroll_from_bottom_) - 1;
-                const std::size_t row_index = row_keys_.size() - 1 - rows_back;
-                if (row_index < row_start_index.size()) focus_index = row_start_index[row_index];
+                const std::size_t chunks_back = static_cast<std::size_t>(scroll_from_bottom_) - 1;
+                const std::size_t anchor = assembled_chunk_index_.size() - 1 - chunks_back;
+                focus_index = preamble_len + assembled_chunk_index_[anchor];
             }
         }
         if (!focus_index.has_value()) {
@@ -686,6 +713,13 @@ ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
 }
 
 void ChatView::ScrollBy(int delta_rows) { scroll_from_bottom_ += delta_rows; }
+
+void ChatView::ScrollWheelBy(int delta_rows) {
+    const auto now = std::chrono::steady_clock::now();
+    if (now - last_wheel_step_ < kWheelGateMs) return;   // momentum burst: dropped
+    last_wheel_step_ = now;
+    scroll_from_bottom_ += delta_rows;
+}
 
 void ChatView::MoveRowFocus(int delta) {
     if (row_keys_.empty()) return;

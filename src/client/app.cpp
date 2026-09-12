@@ -1801,6 +1801,14 @@ int RunTui(const minimal::client::ParsedArgs& args) {
                 it->second.chat->ScrollBy(delta_rows);
             }
         },
+        // The wheel's own path: the gate in ScrollWheelBy bounds how fast a
+        // momentum flick can walk the transcript (keyboard scrolling above
+        // stays ungated).
+        [&](const std::string& session_id, int delta_rows) {
+            if (auto it = tab_ui.find(session_id); it != tab_ui.end() && it->second.chat) {
+                it->second.chat->ScrollWheelBy(delta_rows);
+            }
+        },
         [&](const std::string& session_id) {
             if (auto it = tab_ui.find(session_id); it != tab_ui.end() && it->second.chat) {
                 it->second.chat->ScrollToBottom();

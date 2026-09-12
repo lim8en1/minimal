@@ -4,7 +4,9 @@
 #include <cstddef>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
+#include <vector>
 
 #include "minimal/client/render/streaming_markdown_view.hpp"
 #include "minimal/client/view/tool_status.hpp"
@@ -52,6 +54,149 @@ private:
 namespace {
 
 using ftxui::Element;
+using ftxui::Elements;
+
+// --- Scroll-anchor chunking ----------------------------------------------------
+//
+// A message taller than the viewport used to be ONE scroll anchor: scrolling
+// snapped whole-message, so one wheel tick on a long response cleared
+// multiple screens. Core renderers decompose long content into chunks of at
+// most kMaxAnchorLines source lines; ChatView gives each chunk its own anchor
+// (assembled_chunk_index_). Roughly one terminal screen per anchor, so each
+// scroll step moves a small, readable distance.
+constexpr std::size_t kMaxAnchorLines = 20;
+
+std::vector<std::string> SplitLines(std::string_view body) {
+    std::vector<std::string> lines;
+    if (body.empty()) return lines;
+    for (std::size_t pos = 0; pos < body.size();) {
+        const std::size_t newline = body.find('\n', pos);
+        std::string_view line = body.substr(pos, newline == std::string_view::npos
+                                                      ? std::string_view::npos
+                                                      : newline - pos);
+        if (!line.empty() && line.back() == '\r') line.remove_suffix(1);
+        lines.emplace_back(line);
+        if (newline == std::string_view::npos) break;
+        pos = newline + 1;
+    }
+    return lines;
+}
+
+bool IsBlankLine(std::string_view line) {
+    return line.find_first_not_of(" \t") == std::string_view::npos;
+}
+
+// A fenced-code marker: 3+ backticks or tildes (up to three leading spaces of
+// indent, like CommonMark). `marker` receives the character run itself, so a
+// close can be matched against the opener's length and character; `info` the
+// rest of the line (the language tag), needed to re-open the fence in the
+// continuation chunk with highlighting intact.
+bool IsFenceLine(std::string_view line, std::string_view& marker, std::string_view& info) {
+    std::size_t indent = 0;
+    while (indent < line.size() && indent < 3 && line[indent] == ' ') ++indent;
+    const std::string_view body = line.substr(indent);
+    if (body.empty()) return false;
+    const char c = body.front();
+    if (c != '`' && c != '~') return false;
+    std::size_t run = 0;
+    while (run < body.size() && body[run] == c) ++run;
+    if (run < 3) return false;
+    marker = body.substr(0, run);
+    info = body.substr(run);
+    while (!info.empty() && (info.back() == ' ' || info.back() == '\t')) info.remove_suffix(1);
+    return true;
+}
+
+// One chunk of a markdown row, with enough fence context that the renderer
+// can make each chunk parse on its own: a chunk that continues a fence opened
+// in an earlier chunk re-opens it (fence_open_line), a chunk that leaves a
+// fence open gets it closed (fence_close_line) -- otherwise the fenced code
+// would re-render as prose from the split point on.
+struct MarkdownBlock {
+    std::string text;                  // the chunk's own lines, no trailing newline
+    bool starts_in_fence = false;      // continues a fence from the previous chunk
+    bool ends_in_fence = false;        // leaves a fence open for the next chunk
+    std::string fence_open_line;       // set when starts_in_fence
+    std::string fence_close_line;      // set when ends_in_fence
+};
+
+std::vector<MarkdownBlock> SplitMarkdownBlocks(std::string_view body) {
+    std::vector<MarkdownBlock> blocks;
+    std::vector<std::string> cur;
+    bool in_fence = false;
+    std::string fence_marker;
+    std::string fence_info;   // rest of the opening line (the language), for re-opening
+    // Fence state carried ACROSS the flush boundary: whether the next chunk
+    // starts inside a fence, and what line re-opens it.
+    bool carrying = false;
+    std::string carrying_open_line;
+    const auto flush = [&] {
+        if (cur.empty()) return;
+        MarkdownBlock block;
+        for (std::size_t i = 0; i < cur.size(); ++i) {
+            if (i > 0) block.text += '\n';
+            block.text += cur[i];
+        }
+        block.starts_in_fence = carrying;
+        block.fence_open_line = carrying_open_line;
+        block.ends_in_fence = in_fence;
+        if (in_fence) block.fence_close_line = fence_marker;
+        blocks.push_back(std::move(block));
+        carrying = in_fence;
+        carrying_open_line = fence_marker + fence_info;
+        cur.clear();
+    };
+    for (const std::string& line : SplitLines(body)) {
+        std::string_view marker;
+        std::string_view info;
+        if (IsFenceLine(line, marker, info)) {
+            if (!in_fence) {
+                in_fence = true;
+                fence_marker = std::string(marker);
+                fence_info = std::string(info);
+            } else if (marker.size() >= fence_marker.size() &&
+                       marker.substr(0, fence_marker.size()) == fence_marker &&
+                       info.empty()) {
+                in_fence = false;   // closing marker: same char, >= opener length, no info
+            }
+        }
+        cur.push_back(line);
+        if (in_fence) {
+            // Inside a fence only the CAP flushes (a blank line in code is
+            // content, not a boundary); the chunk is re-fenced at the split.
+            if (cur.size() >= kMaxAnchorLines) flush();
+        } else if (IsBlankLine(line) || cur.size() >= kMaxAnchorLines) {
+            // Paragraph boundary first (a break at a blank line always reads
+            // better than a hard one), the cap as the fallback for a run with
+            // no blank lines at all.
+            flush();
+        }
+    }
+    flush();
+    return blocks;
+}
+
+// Plain-text chunking: same cap, no fence logic (a tool log line that happens
+// to start with ``` is not a fence). Used for bodies that render verbatim.
+std::vector<std::string> SplitTextBlocks(std::string_view body) {
+    std::vector<std::string> blocks;
+    std::string cur;
+    std::size_t lines = 0;
+    const auto flush = [&] {
+        if (lines == 0) return;
+        blocks.push_back(std::move(cur));
+        cur.clear();
+        lines = 0;
+    };
+    for (const std::string& line : SplitLines(body)) {
+        if (!cur.empty()) cur += '\n';
+        cur += line;
+        ++lines;
+        if (IsBlankLine(line) || lines >= kMaxAnchorLines) flush();
+    }
+    flush();
+    return blocks;
+}
 
 // --- Core message renderers ---------------------------------------------------
 //
@@ -108,14 +253,14 @@ Element RenderUserText(const ChatRow& row, const Theme& theme) {
 // whether a row STARTS collapsed).
 constexpr std::size_t kAttachmentExpandedRenderCapChars = 200'000;
 
-Element RenderUserAttachment(const ChatRow& row, const Theme& theme,
-                             const RowRenderContext& ctx) {
+Elements RenderUserAttachmentBlocks(const ChatRow& row, const Theme& theme,
+                                    const RowRenderContext& ctx) {
     using namespace ftxui;
-    Elements parts;
+    Elements blocks;
     const int lines = static_cast<int>(std::count(row.text.begin(), row.text.end(), '\n')) + 1;
-    parts.push_back(hbox({Disclosure(ctx, theme),
-                          text("@" + row.attachment_path) | color(theme.ColorFor("user_message")),
-                          text("  " + std::to_string(lines) + " lines") | Muted(theme)}));
+    blocks.push_back(hbox({Disclosure(ctx, theme),
+                           text("@" + row.attachment_path) | color(theme.ColorFor("user_message")),
+                           text("  " + std::to_string(lines) + " lines") | Muted(theme)}));
     if (!ctx.collapsed) {
         std::string body = row.text;
         bool truncated = false;
@@ -123,25 +268,57 @@ Element RenderUserAttachment(const ChatRow& row, const Theme& theme,
             body = body.substr(0, kAttachmentExpandedRenderCapChars);
             truncated = true;
         }
-        parts.push_back(paragraph(body) | color(theme.ColorFor("system_message")));
+        for (auto& chunk : SplitTextBlocks(body)) {
+            blocks.push_back(paragraph(std::move(chunk)) |
+                             color(theme.ColorFor("system_message")));
+        }
         if (truncated) {
-            parts.push_back(text("··· truncated, too large to render in full ···") |
-                            color(theme.ColorFor("system_message")));
+            blocks.push_back(text("··· truncated, too large to render in full ···") |
+                             color(theme.ColorFor("system_message")));
         }
     }
-    return vbox(std::move(parts));
+    return blocks;
+}
+
+Element RenderUserAttachment(const ChatRow& row, const Theme& theme,
+                             const RowRenderContext& ctx) {
+    using namespace ftxui;
+    Elements blocks = RenderUserAttachmentBlocks(row, theme, ctx);
+    return blocks.size() == 1 ? std::move(blocks[0]) : vbox(std::move(blocks));
+}
+
+// The thinking row's header line, shared by the single-Element and
+// chunked paths (the chunked one rides it on the first chunk only).
+Element ThinkingHeader(const RowRenderContext& ctx, const Theme& theme) {
+    using namespace ftxui;
+    return hbox({Disclosure(ctx, theme), text("thinking") | color(theme.ColorFor("thinking"))});
+}
+
+Elements RenderThinkingBlocks(const ChatRow& row, const Theme& theme, const RowRenderContext& ctx) {
+    using namespace ftxui;
+    if (ctx.collapsed) {
+        return {hbox({ThinkingHeader(ctx, theme),
+                      text("  " + std::to_string(row.text.size()) + " chars") | Muted(theme)})};
+    }
+    Elements blocks;
+    const auto chunks = SplitTextBlocks(row.text);
+    for (std::size_t i = 0; i < chunks.size(); ++i) {
+        Element body = paragraph(chunks[i]) | color(theme.ColorFor("thinking"));
+        if (i == 0) body = vbox({ThinkingHeader(ctx, theme), std::move(body)});
+        blocks.push_back(std::move(body));
+    }
+    if (blocks.empty()) blocks.push_back(vbox({ThinkingHeader(ctx, theme)}));
+    return blocks;
 }
 
 Element RenderThinking(const ChatRow& row, const Theme& theme, const RowRenderContext& ctx) {
     using namespace ftxui;
-    const Element header = hbox({Disclosure(ctx, theme), text("thinking") | color(theme.ColorFor("thinking"))});
-    if (ctx.collapsed) {
-        return hbox({header, text("  " + std::to_string(row.text.size()) + " chars") | Muted(theme)});
-    }
-    return vbox({header, paragraph(row.text) | color(theme.ColorFor("thinking"))});
+    Elements blocks = RenderThinkingBlocks(row, theme, ctx);
+    return blocks.size() == 1 ? std::move(blocks[0]) : vbox(std::move(blocks));
 }
 
-Element RenderToolActivity(const ChatRow& row, const Theme& theme, const RowRenderContext& ctx) {
+Elements RenderToolActivityBlocks(const ChatRow& row, const Theme& theme,
+                                  const RowRenderContext& ctx) {
     using namespace ftxui;
     const std::string name = row.tool_name.empty() ? std::string("tool") : row.tool_name;
     // No result in this page yet (in flight, or the window cut between the
@@ -156,24 +333,28 @@ Element RenderToolActivity(const ChatRow& row, const Theme& theme, const RowRend
     if (ctx.collapsed) {
         const std::string summary = SummarizeToolInput(row.tool_name, row.tool_input);
         if (!summary.empty()) line.push_back(text("  " + summary) | Muted(theme));
-        return hbox(std::move(line));
+        return {hbox(std::move(line))};
     }
-    Elements parts;
-    parts.push_back(hbox(std::move(line)));
 
+    // Expanded: the header (plus the command/question/summary line if any) is
+    // the first chunk; the RESULT BODY is what can run long, and it gets its
+    // own chunks (SplitTextBlocks) -- a 200-line tool log used to be one
+    // indivisible scroll anchor.
+    Elements first;
+    first.push_back(hbox(std::move(line)));
     const auto bash_command = BashCommandOf(row.tool_name, row.tool_input);
     const auto ask_question = AskQuestionOf(row.tool_name, row.tool_input);
     if (bash_command.has_value()) {
         // bash's real command, not a JSON dump of it -- the header IS the
         // orientation for the most common tool call.
-        parts.push_back(paragraph("$ " + *bash_command) |
+        first.push_back(paragraph("$ " + *bash_command) |
                         color(theme.ColorForOr("tool", "syntax_function")));
     } else if (ask_question.has_value()) {
         // ask_user's real question, not a JSON dump of it. Non-dim: this
         // row is the durable record of a human decision (expanded by
         // default -- CollapsedByDefault), and the answers below it are the
         // point of the whole transcript entry.
-        parts.push_back(paragraph(*ask_question) |
+        first.push_back(paragraph(*ask_question) |
                         color(theme.ColorFor("system_message")));
     } else {
         // The input summary rides the header of every OTHER tool row
@@ -181,9 +362,12 @@ Element RenderToolActivity(const ChatRow& row, const Theme& theme, const RowRend
         // what was run.
         const std::string summary = InputSummary(row.tool_input);
         if (!summary.empty()) {
-            parts.push_back(paragraph(summary) | color(theme.ColorFor("system_message")));
+            first.push_back(paragraph(summary) | color(theme.ColorFor("system_message")));
         }
     }
+    Elements blocks;
+    blocks.push_back(first.size() == 1 ? std::move(first[0]) : vbox(std::move(first)));
+
     if (!row.text.empty()) {
         // Bounded body: the capped persisted ToolResultBlock is the
         // authoritative record; this is orientation, not an archive.
@@ -199,14 +383,23 @@ Element RenderToolActivity(const ChatRow& row, const Theme& theme, const RowRend
             const std::size_t tail_start = body.size() - 4000;
             const auto newline = body.find('\n', tail_start);
             body = "... " + (newline != std::string::npos ? body.substr(newline + 1)
-                                                            : body.substr(tail_start));
+                                                          : body.substr(tail_start));
         }
         // Line-buffered output ends in '\n', which paragraph() drew as one
         // trailing empty row under every expanded result.
         while (!body.empty() && (body.back() == '\n' || body.back() == '\r')) body.pop_back();
-        parts.push_back(paragraph(ExpandTabs(body)) | color(theme.ColorFor("system_message")));
+        for (auto& chunk : SplitTextBlocks(ExpandTabs(body))) {
+            blocks.push_back(paragraph(std::move(chunk)) |
+                             color(theme.ColorFor("system_message")));
+        }
     }
-    return vbox(std::move(parts));
+    return blocks;
+}
+
+Element RenderToolActivity(const ChatRow& row, const Theme& theme, const RowRenderContext& ctx) {
+    using namespace ftxui;
+    Elements blocks = RenderToolActivityBlocks(row, theme, ctx);
+    return blocks.size() == 1 ? std::move(blocks[0]) : vbox(std::move(blocks));
 }
 
 Element RenderSystem(const ChatRow& row, const Theme& theme) {
@@ -253,14 +446,85 @@ Element RenderSwitch(const ChatRow& row, const Theme& theme) {
             const override body                                                \
     }
 
-MINIMAL_CORE_RENDERER(UserText, { return RenderUserText(row, theme); });
-MINIMAL_CORE_RENDERER(UserAttachment, { return RenderUserAttachment(row, theme, ctx); });
-MINIMAL_CORE_RENDERER(Thinking, { return RenderThinking(row, theme, ctx); });
-MINIMAL_CORE_RENDERER(ToolActivity, { return RenderToolActivity(row, theme, ctx); });
-MINIMAL_CORE_RENDERER(System, { return RenderSystem(row, theme); });
 MINIMAL_CORE_RENDERER(Switch, { return RenderSwitch(row, theme); });
 
 #undef MINIMAL_CORE_RENDERER
+
+// The remaining core kinds split long content into scroll-anchor chunks
+// (RenderBlocks), so they are spelled out rather than macro'd: each pairs a
+// single-Element Render with a block decomposition of the same content.
+class CoreUserTextRenderer final : public MessageRenderer {
+public:
+    Element Render(const ChatRow& row, const Theme& theme,
+                   const RowRenderContext&) const override {
+        return RenderUserText(row, theme);
+    }
+    Elements RenderBlocks(const ChatRow& row, const Theme& theme,
+                          [[maybe_unused]] const RowRenderContext& ctx) const override {
+        using namespace ftxui;
+        const auto chunks = SplitTextBlocks(row.text);
+        if (chunks.size() <= 1) return {RenderUserText(row, theme)};
+        Elements blocks;
+        for (std::size_t i = 0; i < chunks.size(); ++i) {
+            Element body = paragraph(chunks[i]) | color(theme.ColorFor("user_message"));
+            if (i == 0) {
+                // The label rides the first chunk, exactly as the unsplit
+                // render draws it.
+                body = vbox({text("you") | color(theme.ColorFor("user_message")) | bold,
+                             std::move(body)});
+            }
+            blocks.push_back(std::move(body));
+        }
+        return blocks;
+    }
+};
+
+class CoreThinkingRenderer final : public MessageRenderer {
+public:
+    Element Render(const ChatRow& row, const Theme& theme,
+                   const RowRenderContext& ctx) const override {
+        return RenderThinking(row, theme, ctx);
+    }
+    // RenderThinkingBlocks IS the chunked layout; both entry points share it.
+    Elements RenderBlocks(const ChatRow& row, const Theme& theme,
+                          const RowRenderContext& ctx) const override {
+        return RenderThinkingBlocks(row, theme, ctx);
+    }
+};
+
+class CoreToolActivityRenderer final : public MessageRenderer {
+public:
+    Element Render(const ChatRow& row, const Theme& theme,
+                   const RowRenderContext& ctx) const override {
+        return RenderToolActivity(row, theme, ctx);
+    }
+    Elements RenderBlocks(const ChatRow& row, const Theme& theme,
+                          const RowRenderContext& ctx) const override {
+        // The decomposition IS the render; collapsed comes back as a single
+        // one-line block (see RenderToolActivityBlocks).
+        return RenderToolActivityBlocks(row, theme, ctx);
+    }
+};
+
+class CoreUserAttachmentRenderer final : public MessageRenderer {
+public:
+    Element Render(const ChatRow& row, const Theme& theme,
+                   const RowRenderContext& ctx) const override {
+        return RenderUserAttachment(row, theme, ctx);
+    }
+    Elements RenderBlocks(const ChatRow& row, const Theme& theme,
+                          const RowRenderContext& ctx) const override {
+        return RenderUserAttachmentBlocks(row, theme, ctx);
+    }
+};
+
+class CoreSystemRenderer final : public MessageRenderer {
+public:
+    Element Render(const ChatRow& row, const Theme& theme,
+                   const RowRenderContext&) const override {
+        return RenderSystem(row, theme);
+    }
+};
 
 // The one renderer that needs the engine is registered separately below, so
 // the macro above stays uniform.
@@ -268,7 +532,7 @@ class CoreAgentMarkdownRenderer final : public MessageRenderer {
 public:
     explicit CoreAgentMarkdownRenderer(const MarkdownEngine& engine) : engine_(engine) {}
     Element Render(const ChatRow& row, const Theme& theme,
-                  const RowRenderContext& ctx) const override {
+                   const RowRenderContext& ctx) const override {
         using namespace ftxui;
         // The base color: markdown only styles spans, so without it the prose
         // fell through to the terminal's own foreground.
@@ -287,6 +551,37 @@ public:
                 color(theme.ColorFor("assistant_message")) | bold,
             std::move(body),
         });
+    }
+
+    // Long responses decompose into scroll-anchor chunks: the source splits
+    // at paragraph boundaries (a long code fence splits too, each piece
+    // re-fenced so highlighting survives -- see SplitMarkdownBlocks), and
+    // each piece re-renders through the engine. Every chunk parses on its
+    // own, so the concatenation of the chunks looks exactly like the
+    // unsplit render.
+    Elements RenderBlocks(const ChatRow& row, const Theme& theme,
+                          const RowRenderContext& ctx) const override {
+        using namespace ftxui;
+        const Color base = theme.ColorFor("assistant_message");
+        // Later text of the same turn: the label already sits above it.
+        const std::string label =
+            ctx.continuation ? std::string() : AssistantLabel(row.agent, row.model);
+        Elements blocks;
+        for (auto& block : SplitMarkdownBlocks(row.text)) {
+            std::string source;
+            if (block.starts_in_fence) source += block.fence_open_line + "\n";
+            source += block.text;
+            if (block.ends_in_fence) source += "\n" + block.fence_close_line;
+            Element body = engine_.Render(source, theme) | color(base);
+            if (!label.empty() && blocks.empty()) {
+                body = vbox({text(label) | color(base) | bold, std::move(body)});
+            }
+            blocks.push_back(std::move(body));
+        }
+        // An empty row (or a splitter edge case producing nothing) keeps the
+        // plain render rather than vanishing.
+        if (blocks.empty()) return {Render(row, theme, ctx)};
+        return blocks;
     }
 
 private:

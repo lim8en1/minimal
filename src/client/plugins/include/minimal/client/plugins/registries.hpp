@@ -178,6 +178,20 @@ public:
     virtual ~MessageRenderer() = default;
     virtual ftxui::Element Render(const ChatRow& row, const Theme& theme,
                                   const RowRenderContext& ctx) const = 0;
+
+    // The row rendered as one or more CHUNK Elements, oldest (top) first.
+    // ChatView turns every chunk into its own scroll ANCHOR, so a message
+    // taller than the viewport can be scrolled through gradually instead of
+    // snapping whole-message per wheel tick (the "mouse scrolls too fast"
+    // complaint). The default keeps the pre-chunking contract exactly: one
+    // chunk = Render(); a renderer opts in by overriding. Chunks render
+    // stacked and adjacent, so splitting is safe anywhere the visual result
+    // equals the unsplit render of the same content -- split at paragraph /
+    // blank-line boundaries, never mid-wrap or mid-glyph.
+    virtual ftxui::Elements RenderBlocks(const ChatRow& row, const Theme& theme,
+                                         const RowRenderContext& ctx) const {
+        return {Render(row, theme, ctx)};
+    }
 };
 
 // --- Status-bar segments (keyed by segment id) ------------------------------

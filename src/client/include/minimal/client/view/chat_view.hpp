@@ -15,6 +15,7 @@
 // then the DisplayRendererRegistry by the result's display-payload kind, then
 // the kind default (the disabled-plugin fallback is a fallback, not an error).
 
+#include <chrono>
 #include <ftxui/dom/elements.hpp>
 #include <ftxui/screen/box.hpp>
 
@@ -63,10 +64,24 @@ public:
 
     // Moves the scroll position by `delta_rows` rows, counted from the
     // bottom: positive scrolls toward older messages (further back from the
-    // newest row), negative toward the newest. Clamped to the row count on
+    // newest row), negative toward the newest. Clamped to the anchor count on
     // the next Render(), so this is safe to call with an out-of-range value.
     // 0 (the default) reproduces the legacy pin-to-newest behavior.
+    //
+    // One "row" here is a scroll ANCHOR -- one rendered chunk of one chat row
+    // (a long message is split into several chunks; see RenderBlocks on
+    // MessageRenderer) -- not a whole message.
     void ScrollBy(int delta_rows);
+
+    // The mouse-wheel variant of ScrollBy: same sign convention, one anchor
+    // step per accepted event, but time-gated. Terminals report a wheel event
+    // per scroll tick and macOS trackpad momentum floods that to dozens per
+    // frame; ungated, a single flick burned through the transcript faster than
+    // it could be read. Events arriving within kWheelGateMs of the last
+    // APPLIED step are dropped (not queued): the gate bounds the top scroll
+    // speed, and a fast flick still lands because FTXUI delivers one event per
+    // frame-loop iteration, most of which pass the gate at rendering pace.
+    void ScrollWheelBy(int delta_rows);
 
     // Resets the scroll anchor to the newest row -- the default state.
     // Bound to chat.scroll_bottom (PageDown) and called on every chat turn
@@ -172,10 +187,13 @@ private:
     // compact rows get a spacer) -- made outside the per-row render cache.
     std::vector<ChatRowKind> row_kinds_;
     std::vector<bool> row_collapsed_;
-    // Rows back from the bottom to focus on the next Render(); clamped there
-    // against the current row count (a scroll issued while few rows exist,
-    // then more arrive, should not leave the offset stuck out of range).
-    // Ignored while focused_row_ has a value -- see Render().
+    // Scroll ANCHORS back from the bottom to focus on the next Render();
+    // clamped there against the current anchor count (a scroll issued while
+    // few rows exist, then more arrive, should not leave the offset stuck out
+    // of range). One anchor is one rendered CHUNK of one chat row, not a
+    // whole message -- a long message decomposed into N chunks is N anchors
+    // (see RenderBlocks on MessageRenderer and the assembly loop in
+    // Render()). Ignored while focused_row_ has a value -- see Render().
     int scroll_from_bottom_ = 0;
     bool show_timestamps_ = true;
 
@@ -216,6 +234,13 @@ private:
     // still rebuilt fresh every call).
     ftxui::Elements assembled_column_rows_;
     std::vector<std::size_t> assembled_row_start_index_;
+    // One entry per scroll ANCHOR -- per chunk element pushed into
+    // assembled_column_rows_ (spacers excluded), in order oldest-first. A
+    // row split into N chunks contributes N consecutive entries; the newest
+    // anchor is the last chunk of the newest row. scroll_from_bottom_
+    // addresses THIS list, not row_keys_ -- anchor-level granularity is what
+    // lets a message taller than the viewport be scrolled through gradually.
+    std::vector<std::size_t> assembled_chunk_index_;
     bool assembly_valid_ = false;
     uint64_t assembled_version_ = 0;
     std::string assembled_session_id_;
@@ -229,6 +254,10 @@ private:
     // repaint tick with no new delta. Keyed by live_segments index; any text
     // mismatch (new turn, or genuinely new content) is simply a cache miss.
     std::vector<std::pair<std::string, ftxui::Element>> thinking_render_cache_;
+
+    // ScrollWheelBy's gate state: when the last wheel step was APPLIED. Epoch
+    // (never a real timestamp) so the first event always passes.
+    std::chrono::steady_clock::time_point last_wheel_step_{};
 };
 
 }  // namespace minimal::client

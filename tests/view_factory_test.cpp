@@ -1710,6 +1710,156 @@ TEST_CASE("chat view: ScrollToBottom resets the anchor directly, not just relati
 }
 
 // ---------------------------------------------------------------------------
+// Scroll-anchor chunking (a long message is several anchors, not one)
+// ---------------------------------------------------------------------------
+
+// An assistant TEXT message (the AgentMarkdown row kind): the "mouse scrolls
+// too fast" scenario's protagonist -- one long response used to be one
+// indivisible scroll anchor.
+v1::StoredMessage StoredAssistantText(int64_t seq, const std::string& text) {
+    v1::StoredMessage stored;
+    stored.set_seq(seq);
+    stored.mutable_message()->set_role(v1::ROLE_ASSISTANT);
+    stored.mutable_message()->add_content()->mutable_text()->set_text(text);
+    return stored;
+}
+
+TEST_CASE("agent markdown: a long response renders as multiple scroll-anchor chunks",
+          "[chat_view][scroll_anchors]") {
+    const auto theme = TestTheme();
+    minimal::client::MarkdownRenderer renderer(&theme, nullptr);
+    plugins::MarkdownEngineRegistry engine_registry;
+    plugins::RegisterDefaultMarkdownEngine(engine_registry, renderer);
+    plugins::MessageRendererRegistry messages;
+    plugins::RegisterCoreMessageRenderers(messages);
+    plugins::RegisterCoreAgentMarkdownRenderer(messages, *engine_registry.engine);
+    const auto* markdown = messages.Find(ChatRowKind::AgentMarkdown);
+    REQUIRE(markdown != nullptr);
+
+    plugins::RowRenderContext ctx;
+    ChatRow row;
+    row.kind = ChatRowKind::AgentMarkdown;
+
+    // 25 blank-line-separated paragraphs: one chunk each, and every chunk
+    // carries the full text through to the render -- splitting must not lose
+    // or reorder content.
+    std::string prose;
+    for (int i = 0; i < 25; ++i) {
+        if (i > 0) prose += "\n";
+        prose += "para-" + std::to_string(i) + " some body text";
+    }
+    row.text = prose;
+    const auto prose_blocks = markdown->RenderBlocks(row, theme, ctx);
+    CHECK(prose_blocks.size() >= 2);
+    std::string joined;
+    for (const auto& block : prose_blocks) joined += RenderElement(block);
+    for (int i = 0; i < 25; ++i) {
+        CHECK(joined.find("para-" + std::to_string(i)) != std::string::npos);
+    }
+    // The speaker label rides the FIRST chunk only.
+    CHECK(RenderElement(prose_blocks.front()).find("assistant") != std::string::npos);
+    CHECK(RenderElement(prose_blocks[1]).find("assistant") == std::string::npos);
+
+    // A fence longer than the cap splits too; each piece is re-fenced so the
+    // split point never turns code into prose, and every line survives.
+    std::string code = "```cpp\ncode-start\n";
+    for (int i = 0; i < 58; ++i) code += "int v" + std::to_string(100 + i) + ";\n";
+    code += "code-end\n```";
+    row.text = code;
+    const auto code_blocks = markdown->RenderBlocks(row, theme, ctx);
+    CHECK(code_blocks.size() >= 3);
+    std::string joined_code;
+    for (const auto& block : code_blocks) joined_code += RenderElement(block);
+    CHECK(joined_code.find("code-start") != std::string::npos);
+    CHECK(joined_code.find("code-end") != std::string::npos);
+    for (int i = 0; i < 58; ++i) {
+        CHECK(joined_code.find("v" + std::to_string(100 + i)) != std::string::npos);
+    }
+}
+
+TEST_CASE("chat view: scrolling moves within one tall message, not just between messages",
+          "[chat_view][scroll_anchors]") {
+    const auto theme = TestTheme();
+    minimal::client::MarkdownRenderer renderer(&theme, nullptr);
+    plugins::MarkdownEngineRegistry engine_registry;
+    plugins::RegisterDefaultMarkdownEngine(engine_registry, renderer);
+    plugins::MessageRendererRegistry messages;
+    plugins::ToolResultRendererRegistry tool_renderers;
+    plugins::RegisterCoreMessageRenderers(messages);
+    plugins::RegisterCoreAgentMarkdownRenderer(messages, *engine_registry.engine);
+
+    plugins::DisplayRendererRegistry display_renderers;
+    ChatView view(theme, messages, tool_renderers, display_renderers);
+
+    // ONE message of 30 paragraphs. Pre-chunking this transcript had exactly
+    // one scroll anchor -- no scroll amount could ever move inside it.
+    std::string text;
+    for (int i = 0; i < 30; ++i) {
+        if (i > 0) text += "\n";
+        text += "chunk-point-" + std::to_string(100 + i);
+    }
+    SessionState::Snapshot snap;
+    snap.session_id = "tall";
+    snap.transcript_version = 1;
+    snap.scrollback_page = std::make_shared<const std::vector<v1::StoredMessage>>(
+        std::vector<v1::StoredMessage>{StoredAssistantText(1, text)});
+
+    const auto pinned = RenderElement(view.Render(snap) | ftx::yframe, /*width=*/40, /*height=*/8);
+    CHECK(pinned.find("chunk-point-129") != std::string::npos);
+
+    // One step moves one CHUNK inside the message.
+    view.ScrollBy(1);
+    const auto stepped = RenderElement(view.Render(snap) | ftx::yframe, /*width=*/40, /*height=*/8);
+    CHECK(stepped != pinned);
+
+    // Twenty steps park the viewport on the message's earlier half, well off
+    // the newest content -- impossible when the whole message was one anchor.
+    view.ScrollBy(20);
+    const auto scrolled = RenderElement(view.Render(snap) | ftx::yframe, /*width=*/40, /*height=*/8);
+    CHECK(scrolled != pinned);
+    CHECK(scrolled.find("chunk-point-129") == std::string::npos);
+    CHECK(scrolled.find("chunk-point-10") != std::string::npos);
+
+    // And the way back is exact, as with row-granular scrolling.
+    view.ScrollToBottom();
+    const auto repinned =
+        RenderElement(view.Render(snap) | ftx::yframe, /*width=*/40, /*height=*/8);
+    CHECK(repinned == pinned);
+}
+
+TEST_CASE("chat view: ScrollWheelBy is time-gated, keyboard ScrollBy is not",
+          "[chat_view][scroll_anchors]") {
+    const auto theme = TestTheme();
+    minimal::client::MarkdownRenderer renderer(&theme, nullptr);
+    plugins::MarkdownEngineRegistry engine_registry;
+    plugins::RegisterDefaultMarkdownEngine(engine_registry, renderer);
+    plugins::MessageRendererRegistry messages;
+    plugins::ToolResultRendererRegistry tool_renderers;
+    plugins::RegisterCoreMessageRenderers(messages);
+    plugins::RegisterCoreAgentMarkdownRenderer(messages, *engine_registry.engine);
+
+    plugins::DisplayRendererRegistry display_renderers;
+    ChatView view(theme, messages, tool_renderers, display_renderers);
+    const auto snapshot = SnapshotWithRows("session-wheel-gate", 1, 40);
+
+    view.ScrollWheelBy(1);
+    CHECK(view.IsScrolledAway());
+
+    view.ScrollToBottom();
+    CHECK_FALSE(view.IsScrolledAway());
+    // The second event lands within the gate (this test executes far faster
+    // than the gate's 30ms): dropped, so the view stays pinned. Trackpad
+    // momentum is the flood this bounds.
+    view.ScrollWheelBy(1);
+    CHECK_FALSE(view.IsScrolledAway());
+
+    // The keyboard path bypasses the gate -- key repeat is already
+    // rate-limited by the OS.
+    view.ScrollBy(1);
+    CHECK(view.IsScrolledAway());
+}
+
+// ---------------------------------------------------------------------------
 // Render() assembly cache (the per-row loop is redone only when something
 // that affects it changes, not on every call)
 // ---------------------------------------------------------------------------
