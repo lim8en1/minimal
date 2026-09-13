@@ -347,6 +347,20 @@ SessionClient::SuggestPathsResult SessionClient::SuggestPaths(const std::string&
     return result;
 }
 
+SessionClient::SuggestPathsResult SessionClient::SuggestPathsForRoot(
+    const std::string& project_root, const std::string& prefix, int32_t limit) {
+    grpc::ClientContext context;
+    context.set_deadline(std::chrono::system_clock::now() + kSuggestPathsDeadline);
+    v1::SuggestPathsRequest request;
+    request.set_project_root(project_root);
+    request.set_prefix(prefix);
+    request.set_limit(limit);
+
+    SuggestPathsResult result;
+    result.status = stub_->SuggestPaths(&context, request, &result.response);
+    return result;
+}
+
 grpc::Status SessionClient::RunTurn(
     const std::string& session_id, const std::string& text,
     const std::function<bool(const ServerEvent&)>& on_event,

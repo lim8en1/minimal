@@ -1203,6 +1203,67 @@ TEST_CASE("SuggestPaths for an unknown session is NOT_FOUND, not an empty page",
           grpc::StatusCode::NOT_FOUND);
 }
 
+TEST_CASE("SuggestPaths scopes to a bare project_root for a sessionless tab",
+          "[session_service][mention]") {
+    // A sessionless tab owns no session row until its first message; the
+    // root scope is how '@' autocomplete stays alive on it.
+    ServiceFixture fixture;
+    fixture.Start();
+
+    std::filesystem::create_directories(fixture.dir / "work" / "src");
+    { std::ofstream out(fixture.dir / "work" / "README.md"); out << "y"; }
+
+    grpc::ClientContext context;
+    v1::SuggestPathsRequest request;
+    request.set_project_root((fixture.dir / "work").string());
+    request.set_prefix("");
+    request.set_limit(50);
+    v1::SuggestPathsResponse response;
+    REQUIRE(fixture.stub->SuggestPaths(&context, request, &response).ok());
+
+    REQUIRE(response.paths_size() == 2);
+    CHECK(response.paths(0) == "README.md");
+    CHECK(response.paths(1) == "src/");
+}
+
+TEST_CASE("SuggestPaths rejects an unknown project_root as NOT_FOUND, and "
+          "ambiguous scopes as INVALID_ARGUMENT",
+          "[session_service][mention]") {
+    ServiceFixture fixture;
+    fixture.Start();
+
+    const std::string session_id = fixture.CreateSession();
+
+    // A root that is not a directory is NOT_FOUND -- the same honest answer
+    // as an unknown session, not an empty page that reads as "no matches".
+    {
+        grpc::ClientContext context;
+        v1::SuggestPathsRequest request;
+        request.set_project_root((fixture.dir / "nope").string());
+        v1::SuggestPathsResponse response;
+        CHECK(fixture.stub->SuggestPaths(&context, request, &response).error_code() ==
+              grpc::StatusCode::NOT_FOUND);
+    }
+    // Exactly one scope must be named: both is a malformed request.
+    {
+        grpc::ClientContext context;
+        v1::SuggestPathsRequest request;
+        request.set_session_id(session_id);
+        request.set_project_root((fixture.dir / "work").string());
+        v1::SuggestPathsResponse response;
+        CHECK(fixture.stub->SuggestPaths(&context, request, &response).error_code() ==
+              grpc::StatusCode::INVALID_ARGUMENT);
+    }
+    // ... and so is neither.
+    {
+        grpc::ClientContext context;
+        v1::SuggestPathsRequest request;
+        v1::SuggestPathsResponse response;
+        CHECK(fixture.stub->SuggestPaths(&context, request, &response).error_code() ==
+              grpc::StatusCode::INVALID_ARGUMENT);
+    }
+}
+
 TEST_CASE("a turn with @-mentions persists the verbatim text plus framed blocks",
           "[session_service][mention]") {
     ServiceFixture fixture;

@@ -951,6 +951,12 @@ public:
     void RequestSuggestPaths(const std::string& session_id, const std::string& prefix,
                              int32_t limit, std::function<void(std::vector<std::string>)> on_result);
 
+    // The same for a SESSIONLESS tab: `project_root` scopes the request
+    // directly (SuggestPathsForRoot), no session row involved.
+    void RequestSuggestPathsForRoot(const std::string& project_root, const std::string& prefix,
+                                    int32_t limit,
+                                    std::function<void(std::vector<std::string>)> on_result);
+
     // --- User answers to pending prompts (UI calls these; routes ClientEvents back) ---
 
     // deny_message / stop_turn refine a DENY (the server ignores both on ALLOW).

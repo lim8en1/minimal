@@ -12,6 +12,7 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <memory>
 #include <string>
 #include <thread>
@@ -272,6 +273,35 @@ TEST_CASE("OpenTab opens a sessionless tab; the session appears on the first sen
     REQUIRE_FALSE(SessionIdOf(app, tab).empty());
     tabs = app.GetAllTabs();
     CHECK(tabs[0].has_session);
+}
+
+TEST_CASE("RequestSuggestPathsForRoot answers through the real RPC for a "
+          "sessionless tab's project root",
+          "[app_state][mention]") {
+    // The sessionless-tab scope of '@' autocomplete: the query carries the
+    // project root directly (no session row exists yet), and the answer is
+    // relative to that root -- the same wire contract the session scope has.
+    ClientFixture fixture;
+    fixture.Script("hi");
+    fixture.Start();
+
+    { std::ofstream out(fixture.dir / "work" / "README.md"); out << "y"; }
+    std::filesystem::create_directories(fixture.dir / "work" / "src");
+
+    AppState app(fixture.client);   // no tab even needed: the RPC is tab-independent
+
+    std::promise<std::vector<std::string>> done;
+    auto answered = done.get_future();
+    app.RequestSuggestPathsForRoot((fixture.dir / "work").string(), "", 50,
+                                   [&done](std::vector<std::string> paths) {
+                                       done.set_value(std::move(paths));
+                                   });
+    using namespace std::chrono_literals;
+    REQUIRE(answered.wait_for(5s) == std::future_status::ready);
+    const auto paths = answered.get();
+    REQUIRE(paths.size() == 2);
+    CHECK(paths[0] == "README.md");
+    CHECK(paths[1] == "src/");
 }
 
 TEST_CASE("HostFocusProvider::Detach makes Tabs()/FocusedSessionId() safe to call after",

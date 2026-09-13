@@ -2261,6 +2261,20 @@ void AppState::RequestSuggestPaths(const std::string& session_id, const std::str
     });
 }
 
+void AppState::RequestSuggestPathsForRoot(const std::string& project_root,
+                                          const std::string& prefix, int32_t limit,
+                                          std::function<void(std::vector<std::string>)> on_result) {
+    rpc_queue_.Submit([this, project_root, prefix, limit, on_result = std::move(on_result)] {
+        const auto result = client_->SuggestPathsForRoot(project_root, prefix, limit);
+        std::vector<std::string> paths;
+        if (result.status.ok()) {
+            paths.assign(result.response.paths().begin(), result.response.paths().end());
+        }
+        if (on_result) on_result(std::move(paths));
+        BumpUiVersion();   // wake the pump so the editor's next poll sees it
+    });
+}
+
 void AppState::AnswerPermission(const std::string& session_id, const std::string& request_id,
                                 v1::PermissionDecision decision,
                                 std::vector<std::string> granted_keys, std::string deny_message,

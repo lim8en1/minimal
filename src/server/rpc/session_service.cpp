@@ -1222,29 +1222,55 @@ grpc::Status SessionServiceImpl::SuggestPaths(grpc::ServerContext* context,
                                               v1::SuggestPathsResponse* response) {
     if (const auto auth = EnsureAuthenticated(auth_providers_, context); !auth.ok()) return auth;
 
-    // The project root of the session named in the request. A LIVE session wins;
-    // a terminated one still answers from its database row, matching GetMessages,
-    // which reads the same way whether or not a tab happens to be open. An id
-    // that is neither is NOT_FOUND, not an empty result that reads like "no
-    // matches here".
+    // Two scopes, mutually exclusive by contract (see the proto comment):
+    // a session id, whose project root is looked up (live row first, database
+    // fallback), or a bare project root for a SESSIONLESS tab -- a tab that
+    // has not sent its first message yet owns no session row, and the
+    // sessionless-tab model must not silence '@' autocomplete until one
+    // exists. Setting both (or neither) is INVALID_ARGUMENT, not a silent
+    // guess; a root that does not exist is NOT_FOUND, the same honest-answer
+    // rule as the unknown-session case below -- an empty page would read as
+    // "no matches here".
     std::filesystem::path project_root;
-    if (const auto session = sessions_.Find(request->session_id())) {
-        project_root = session->info().project_root;
-    } else {
-        // Guarded: GetSession can throw on a store failure (locked database,
-        // I/O error), and an exception leaving an RPC handler is UB -- the
-        // same rule ResumeSession's own comment states.
-        std::optional<session::SessionSummary> row;
-        try {
-            row = db_.GetSession(request->session_id());
-        } catch (const std::exception& e) {
-            return grpc::Status(grpc::StatusCode::INTERNAL, e.what());
+    if (!request->project_root().empty()) {
+        if (!request->session_id().empty()) {
+            return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
+                                "session_id and project_root are mutually exclusive");
         }
-        if (!row) {
+        const std::filesystem::path root(request->project_root());
+        std::error_code ec;
+        if (!std::filesystem::is_directory(root, ec)) {
             return grpc::Status(grpc::StatusCode::NOT_FOUND,
-                                "unknown session: " + request->session_id());
+                                "unknown project root: " + request->project_root());
         }
-        project_root = row->project_root;
+        project_root = root;
+    } else if (!request->session_id().empty()) {
+        // The project root of the session named in the request. A LIVE session wins;
+        // a terminated one still answers from its database row, matching GetMessages,
+        // which reads the same way whether or not a tab happens to be open. An id
+        // that is neither is NOT_FOUND, not an empty result that reads like "no
+        // matches here".
+        if (const auto session = sessions_.Find(request->session_id())) {
+            project_root = session->info().project_root;
+        } else {
+            // Guarded: GetSession can throw on a store failure (locked database,
+            // I/O error), and an exception leaving an RPC handler is UB -- the
+            // same rule ResumeSession's own comment states.
+            std::optional<session::SessionSummary> row;
+            try {
+                row = db_.GetSession(request->session_id());
+            } catch (const std::exception& e) {
+                return grpc::Status(grpc::StatusCode::INTERNAL, e.what());
+            }
+            if (!row) {
+                return grpc::Status(grpc::StatusCode::NOT_FOUND,
+                                    "unknown session: " + request->session_id());
+            }
+            project_root = row->project_root;
+        }
+    } else {
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
+                            "one of session_id or project_root is required");
     }
 
     const agent::MentionResolver& resolver =

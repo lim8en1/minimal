@@ -369,6 +369,12 @@ public:
     SuggestPathsResult SuggestPaths(const std::string& session_id, const std::string& prefix,
                                     int32_t limit);
 
+    // The same suggestions for a SESSIONLESS tab (no session row yet): the
+    // request scopes itself to `project_root` directly, and the answer is
+    // relative to that root. An unknown/non-directory root is NOT_FOUND.
+    SuggestPathsResult SuggestPathsForRoot(const std::string& project_root,
+                                           const std::string& prefix, int32_t limit);
+
     // The /-command catalog: the GLOBAL half (plugins load at startup and
     // config is read once, so it cannot change mid-connection) plus, when
     // `project_root` is given, that project's own commands-md discoveries

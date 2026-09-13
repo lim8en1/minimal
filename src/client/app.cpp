@@ -994,7 +994,11 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     // callback).
     struct MentionQuery {
         std::mutex mtx;
-        std::string session_id;
+        // The query scope, "session:<id>" or "root:<path>" -- keyed by scope
+        // rather than raw session id so a tab that mints its session
+        // mid-query (sessionless -> sessioned) supersedes its own root-scoped
+        // answer instead of consuming it under a changed meaning.
+        std::string scope;
         std::string prefix;
         bool in_flight = false;
         bool ready = false;
@@ -1004,10 +1008,29 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     auto suggest = [app, mention_query](
                        const std::string& prefix) -> std::optional<std::vector<std::string>> {
         const std::string sid = app->FocusedSessionId();
-        if (prefix.empty() || sid.empty()) return std::vector<std::string>{};
+        if (prefix.empty()) return std::vector<std::string>{};
+
+        // Sessioned tabs query by session; a SESSIONLESS tab owns no session
+        // row yet (one is minted on its first message), so its query scopes
+        // to the project root that first message's session will be created
+        // with (DefaultCreateOptions) -- the suggestions then match what the
+        // eventual session would see, instead of the sid.empty() guard
+        // silently killing '@' on every fresh tab. No project context at all
+        // (a stray cwd failure) still answers empty.
+        std::string scope;
+        bool session_scoped = false;
+        std::string root;
+        if (!sid.empty()) {
+            scope = "session:" + sid;
+            session_scoped = true;
+        } else {
+            root = minimal::client::CurrentProjectRootOrEmpty();
+            if (root.empty()) return std::vector<std::string>{};
+            scope = "root:" + root;
+        }
 
         std::lock_guard lk(mention_query->mtx);
-        if (mention_query->session_id == sid && mention_query->prefix == prefix) {
+        if (mention_query->scope == scope && mention_query->prefix == prefix) {
             if (mention_query->ready) {
                 mention_query->in_flight = false;
                 mention_query->ready = false;
@@ -1016,23 +1039,35 @@ int RunTui(const minimal::client::ParsedArgs& args) {
             if (mention_query->in_flight) return std::nullopt;   // still waiting
         }
 
-        // A new (session, prefix) pair: submit it, superseding whatever this
+        // A new (scope, prefix) pair: submit it, superseding whatever this
         // slot previously tracked (its completion, if it arrives late, will
-        // no longer match session_id/prefix and will be dropped -- see
+        // no longer match scope/prefix and will be dropped -- see
         // RequestSuggestPaths's callback below).
-        mention_query->session_id = sid;
+        mention_query->scope = scope;
         mention_query->prefix = prefix;
         mention_query->in_flight = true;
         mention_query->ready = false;
-        app->RequestSuggestPaths(sid, prefix, 20, [mention_query, sid, prefix](
-                                                       std::vector<std::string> paths) {
-            std::lock_guard cb_lk(mention_query->mtx);
-            if (mention_query->session_id != sid || mention_query->prefix != prefix) {
-                return;   // superseded by a newer request; drop the stale answer
-            }
-            mention_query->result = std::move(paths);
-            mention_query->ready = true;
-        });
+        if (session_scoped) {
+            app->RequestSuggestPaths(sid, prefix, 20, [mention_query, scope, prefix](
+                                                          std::vector<std::string> paths) {
+                std::lock_guard cb_lk(mention_query->mtx);
+                if (mention_query->scope != scope || mention_query->prefix != prefix) {
+                    return;   // superseded by a newer request; drop the stale answer
+                }
+                mention_query->result = std::move(paths);
+                mention_query->ready = true;
+            });
+        } else {
+            app->RequestSuggestPathsForRoot(root, prefix, 20, [mention_query, scope, prefix](
+                                                                  std::vector<std::string> paths) {
+                std::lock_guard cb_lk(mention_query->mtx);
+                if (mention_query->scope != scope || mention_query->prefix != prefix) {
+                    return;   // superseded by a newer request; drop the stale answer
+                }
+                mention_query->result = std::move(paths);
+                mention_query->ready = true;
+            });
+        }
         return std::nullopt;
     };
     // --- tabs are sessionless until the first message ---------------------------

@@ -554,6 +554,11 @@ message SuggestPathsRequest {
   string session_id = 1;
   string prefix = 2; // text typed after '@' so far
   int32 limit = 3;
+  // Sessionless-tab scope: paths are suggested for this project root directly,
+  // with no session row involved. Mutually exclusive with session_id -- a
+  // request setting both (or neither) is INVALID_ARGUMENT. Root-relative
+  // paths in the response follow the same contract as the session scope.
+  string project_root = 4;
 }
 
 message SuggestPathsResponse {
