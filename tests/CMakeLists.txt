@@ -20,6 +20,7 @@ add_executable(minimal_tests
     compaction_trigger_test.cpp
     context_compactor_test.cpp
     bundled_assets_test.cpp
+    examples_parse_test.cpp
     chat_request_bench.cpp
     client_args_test.cpp
     client_plugins_test.cpp
@@ -127,6 +128,7 @@ add_executable(minimal_tests
     session_state_test.cpp
     app_state_test.cpp
     view_factory_test.cpp
+    chat_view_scroll_test.cpp
     tab_ui_test.cpp
     tab_bar_test.cpp
     status_bar_test.cpp
@@ -284,11 +286,12 @@ add_dependencies(minimal_tests
     fixture-good fixture-collision fixture-bad-abi fixture-minimal fixture-not-a-plugin
     fixture-throws fixture-advisor fixture-service fixture-service-b fixture-hook
     fixture-client fixture-client-exclusive fixture-client-partial-throw fixture-endpoint
-    fixture-user)
+    fixture-client-bad-abi fixture-user)
 target_compile_definitions(minimal_tests PRIVATE
     MINIMAL_FIXTURE_DIR="${CMAKE_CURRENT_BINARY_DIR}/fixtures"
     MINIMAL_USER_FIXTURE_DIR="${CMAKE_CURRENT_BINARY_DIR}/fixtures-deployed"
     MINIMAL_BUNDLED_DIR="${CMAKE_SOURCE_DIR}/bundled"
+    MINIMAL_EXAMPLES_DIR="${CMAKE_SOURCE_DIR}/examples"
     MINIMAL_LOGO_PLUGIN="$<TARGET_FILE:minimal_logo>"
     MINIMAL_PROTO_DIR="${CMAKE_SOURCE_DIR}/proto")
 

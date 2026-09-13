@@ -14,6 +14,9 @@
 #include <ftxui/dom/elements.hpp>
 #include <ftxui/dom/node.hpp>
 #include <ftxui/screen/screen.hpp>
+#include <spdlog/sinks/base_sink.h>
+#include <spdlog/sinks/stdout_color_sinks.h>
+#include <spdlog/spdlog.h>
 
 #include "minimal/client/keybindings.hpp"
 #include "minimal/client/plugins/client_plugin_loader.hpp"
@@ -228,11 +231,27 @@ TEST_CASE("attention state: plugin raise wins until cleared", "[client_plugins]"
     CHECK_FALSE(attention.GlobalRaised());
 }
 
+TEST_CASE("the client loader verifies the ABI tag before any plugin code runs",
+          "[client_plugins][loader][invariant]") {
+    // fixture-client-bad-abi's name()/version() ABORT if the loader ever
+    // calls them: the bug this pins (the client loader ran both before the
+    // tag check, which the server loader had already fixed) is exactly
+    // "plugin code executed against an incompatible ABI". A clean
+    // AbiMismatch record here therefore proves the gate order; running the
+    // old order dies in the fixture instead.
+    const auto fixtures = LoadedFixtures::Load({Candidate("fixture-client-bad-abi.so")});
+
+    REQUIRE(fixtures->records.size() == 1);
+    const auto& record = fixtures->records.front();
+    CHECK(record.status == LoadStatus::AbiMismatch);
+    CHECK(record.abi_tag == "definitely-not-this-toolchain");
+    CHECK(record.name.empty());  // never read
+}
+
 TEST_CASE("the client loader loads a real plugin through a real dlopen",
           "[client_plugins][loader]") {
     const auto fixtures =
         LoadedFixtures::Load({Candidate("fixture-client.so", {{"echo_value", "hello"}})});
-
     REQUIRE(fixtures->records.size() == 1);
     const auto& record = fixtures->records.front();
     REQUIRE(record.ok());
@@ -492,6 +511,95 @@ TEST_CASE("client plugin discovery: a user-dir twin of a bundled basename is its
     CHECK(config.plugins[0].provenance == Provenance::Bundled);
     CHECK(config.plugins[1].file == "twin.so");
     CHECK(config.plugins[1].provenance == Provenance::User);
+}
+
+namespace {
+
+// Captures warn-level lines through the DefaultLogger's per-call spdlog
+// resolution -- the same path the production warning travels. Restored by the
+// RAII guard below so other tests keep the console default.
+class CapturingSink final : public spdlog::sinks::base_sink<std::mutex> {
+public:
+    bool Matches(const std::string& fragment) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (const auto& line : lines) {
+            if (line.find(fragment) != std::string::npos) return true;
+        }
+        return false;
+    }
+
+protected:
+    void sink_it_(const spdlog::details::log_msg& msg) override {
+        spdlog::memory_buf_t buf;
+        formatter_->format(msg, buf);
+        lines.emplace_back(buf.data(), buf.size());
+    }
+    void flush_() override {}
+
+private:
+    std::vector<std::string> lines;
+};
+
+struct LogCapture {
+    std::shared_ptr<CapturingSink> sink = std::make_shared<CapturingSink>();
+    spdlog::sink_ptr previous;
+
+    LogCapture() {
+        // spdlog's default logger owns its sinks; grabbing the raw pointer is
+        // safe because the old logger object itself is kept alive by the
+        // registry until set_default_logger replaces it -- and we restore
+        // before this struct dies.
+        previous = spdlog::default_logger()->sinks().front();
+        auto capture = std::make_shared<spdlog::logger>(
+            "capture", std::static_pointer_cast<spdlog::sinks::sink>(sink));
+        spdlog::set_default_logger(capture);
+    }
+    ~LogCapture() {
+        auto restore = std::make_shared<spdlog::logger>("minimal", previous);
+        spdlog::set_default_logger(restore);
+    }
+
+    bool HasWarning(const std::string& fragment) { return sink->Matches(fragment); }
+};
+
+}  // namespace
+
+TEST_CASE("client plugin discovery: a stale persisted entry warns nothing once its "
+          "file is gone",
+          "[client_plugins][discovery][invariant]") {
+    // The persisted client-plugins.json is never pruned. The both-provenances
+    // collision warning must scan the DISCOVERED files (the server's rule --
+    // the client had reintroduced the scan over the persisted list), or a
+    // stale user entry for a deleted .so warns forever about a twin that no
+    // longer exists.
+    TempDir dir;
+    std::filesystem::create_directories(dir.path() / "bundled/one");
+    std::filesystem::create_directories(dir.path() / "user");
+    std::ofstream(dir.path() / "bundled/one/a.so") << "stub";
+    // twin.so existed once, was disabled, then deleted: the entry survives.
+
+    ClientPluginConfig config;
+    config.plugins.push_back({"a.so", Provenance::Bundled, true});
+    config.plugins.push_back({"twin.so", Provenance::User, false});
+
+    bool warned = false;
+    {
+        LogCapture capture;
+        DiscoverClientPlugins(dir.path() / "bundled", dir.path() / "user", config);
+        warned = capture.HasWarning("collide");
+    }
+    CHECK_FALSE(warned);
+
+    // The real case still warns: twin.so present on BOTH sides of the disk.
+    std::ofstream(dir.path() / "bundled/one/twin.so") << "stub";
+    std::ofstream(dir.path() / "user/twin.so") << "stub";
+    bool twin_warned = false;
+    {
+        LogCapture capture;
+        DiscoverClientPlugins(dir.path() / "bundled", dir.path() / "user", config);
+        twin_warned = capture.HasWarning("collide");
+    }
+    CHECK(twin_warned);
 }
 
 TEST_CASE("theme sections merge after core roles and never shadow them",

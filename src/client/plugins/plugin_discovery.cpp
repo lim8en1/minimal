@@ -186,9 +186,15 @@ std::vector<PluginCandidate> DiscoverClientPlugins(
         // still load (each under its own now-independent entry), which is a
         // guaranteed name collision the user cannot see coming from
         // client-plugins.json alone. Warned at discovery, like the server's.
+        //
+        // Scanned over `found`, not config.plugins (the server fixed this; the
+        // client had reintroduced the bug): the persisted list keeps entries
+        // for files that have since been deleted (it is never pruned), so a
+        // stale entry would warn forever about a collision that no longer
+        // exists. `found` is sorted with both provenances present, so each
+        // side of a real collision sees the other regardless of loop order.
         const bool also_from_other_provenance = std::any_of(
-            config.plugins.begin(), config.plugins.end(),
-            [&](const ClientPluginConfig::Entry& e) {
+            found.begin(), found.end(), [&](const Found& e) {
                 return e.file == item.file && e.provenance != item.provenance;
             });
         if (also_from_other_provenance) {
