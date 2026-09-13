@@ -30,6 +30,7 @@
 #include "minimal/client/plugins/registries.hpp"
 #include "minimal/client/render/theme.hpp"
 #include "minimal/client/state.hpp"
+#include "minimal/client/view/chat_scroll_region.hpp"
 
 namespace minimal::client {
 
@@ -62,37 +63,46 @@ public:
     ftxui::Element Render(const SessionState::Snapshot& snapshot,
                           const std::vector<LiveTextStreamSlot>& live_text_streams = {});
 
-    // Moves the scroll position by `delta_rows` rows, counted from the
-    // bottom: positive scrolls toward older messages (further back from the
-    // newest row), negative toward the newest. Clamped to the anchor count on
-    // the next Render(), so this is safe to call with an out-of-range value.
-    // 0 (the default) reproduces the legacy pin-to-newest behavior.
-    //
-    // One "row" here is a scroll ANCHOR -- one rendered chunk of one chat row
-    // (a long message is split into several chunks; see RenderBlocks on
-    // MessageRenderer) -- not a whole message.
-    void ScrollBy(int delta_rows);
+    // Moves the scroll position by `delta_steps` half-viewport steps,
+    // positive toward older messages (further back from the newest line),
+    // negative toward the newest. Clamped to the content on the next
+    // Render(), so this is safe to call with an out-of-range value.
+    // 0 steps is a no-op; the resting position (offset 0 from the bottom)
+    // reproduces the legacy pin-to-newest behavior. Scrolling is measured
+    // in SCREEN LINES -- see ScrollRegion (chat_scroll_region.hpp) for why
+    // the old chunk-anchor scheme was replaced.
+    void ScrollBy(int delta_steps);
 
-    // The mouse-wheel variant of ScrollBy: same sign convention, one anchor
-    // step per accepted event, but time-gated. Terminals report a wheel event
-    // per scroll tick and macOS trackpad momentum floods that to dozens per
-    // frame; ungated, a single flick burned through the transcript faster than
-    // it could be read. Events arriving within kWheelGateMs of the last
-    // APPLIED step are dropped (not queued): the gate bounds the top scroll
-    // speed, and a fast flick still lands because FTXUI delivers one event per
-    // frame-loop iteration, most of which pass the gate at rendering pace.
-    void ScrollWheelBy(int delta_rows);
+    // The mouse-wheel variant of ScrollBy: `delta_ticks` wheel ticks, each
+    // worth kWheelLinesPerTick lines, time-gated (one step per gate window;
+    // macOS trackpad momentum floods dozens of events per frame). Terminals
+    // report a wheel event per scroll tick and macOS trackpad momentum
+    // floods that to dozens per frame; ungated, a single flick burned
+    // through the transcript faster than it could be read. Events arriving
+    // within kWheelGateMs of the last APPLIED step are dropped (not
+    // queued): the gate bounds the top scroll speed, and a fast flick still
+    // lands because FTXUI delivers one event per frame-loop iteration, most
+    // of which pass the gate at rendering pace. A tick also retires the row
+    // cursor (chat.row_up/chat.row_down): the cursor's position converts to
+    // a line offset first, so the wheel takes over exactly where the cursor
+    // sat instead of being ignored while a cursor exists.
+    void ScrollWheelBy(int delta_ticks);
 
-    // Resets the scroll anchor to the newest row -- the default state.
+    // Resets the scroll offset to the newest content -- the default state.
     // Bound to chat.scroll_bottom (PageDown) and called on every chat turn
     // submit, so sending a message while scrolled up returns to the live
     // content instead of leaving it scrolled away from what just arrived.
-    void ScrollToBottom() { scroll_from_bottom_ = 0; }
+    void ScrollToBottom() {
+        scroll_from_bottom_lines_ = 0;
+        focused_row_.reset();
+    }
 
     // True while the viewport is NOT pinned to the newest content -- scrolled
     // back, or anchored on the row cursor -- so new output lands out of view.
     // The frame says so while a turn is running.
-    bool IsScrolledAway() const { return scroll_from_bottom_ > 0 || focused_row_.has_value(); }
+    bool IsScrolledAway() const {
+        return scroll_from_bottom_lines_ > 0 || focused_row_.has_value();
+    }
 
     // chat.toggle_timestamps: per-row clock display, layout-level (drawn by
     // this view directly, not a MessageRenderer concern -- see
@@ -137,6 +147,19 @@ private:
     // as they are executed". Called once per Tool-kind live_segments entry,
     // interleaved with the text segments around it (track C4).
     ftxui::Element RenderLiveToolRow(const ToolExecutionState& tool) const;
+
+    // The row cursor (focused_row_) expressed as an offset-from-bottom in
+    // lines, computed against the LAST layout pass's measurements
+    // (scroll_state_ + row_boxes_): the row's HEAD is revealed -- its top
+    // edge pulled to the viewport top when above the viewport, to the
+    // viewport bottom when below, no movement while already visible.
+    // nullopt when there is nothing to compute from (cursor unset, no row
+    // boxes yet, or the first frame's zero-size viewport).
+    std::optional<int> RowCursorOffsetFromBottom() const;
+    // Retires the row cursor into the line offset (ScrollWheelBy's first
+    // duty): the wheel takes over from exactly where the cursor sat. A
+    // no-op when there is no cursor or nothing to measure it against.
+    void RetireRowCursorToOffset();
 
     using RowKey = std::pair<int64_t, int>;   // (transcript seq, occurrence within seq)
 
@@ -187,14 +210,19 @@ private:
     // compact rows get a spacer) -- made outside the per-row render cache.
     std::vector<ChatRowKind> row_kinds_;
     std::vector<bool> row_collapsed_;
-    // Scroll ANCHORS back from the bottom to focus on the next Render();
-    // clamped there against the current anchor count (a scroll issued while
-    // few rows exist, then more arrive, should not leave the offset stuck out
-    // of range). One anchor is one rendered CHUNK of one chat row, not a
-    // whole message -- a long message decomposed into N chunks is N anchors
-    // (see RenderBlocks on MessageRenderer and the assembly loop in
-    // Render()). Ignored while focused_row_ has a value -- see Render().
-    int scroll_from_bottom_ = 0;
+    // Scroll offset back from the bottom, in SCREEN LINES (see ScrollRegion
+    // in chat_scroll_region.hpp). Written into scroll_state_ as the desired
+    // offset every Render(); clamped there against the last measured content
+    // height (a scroll issued while few rows exist, then more arrive, should
+    // not leave the offset stuck out of range, and a shrunk window -- page
+    // trim -- must not leave it wedged past the top). 0 pins to the newest
+    // content. Ignored while focused_row_ has a value -- the row cursor
+    // drives the offset instead (see Render()).
+    int scroll_from_bottom_lines_ = 0;
+    // Shared with the ScrollRegion node ChatView::Render wraps the column
+    // in: desired offset in, applied offset + measured content/viewport
+    // heights out (one frame stale, converging each layout pass).
+    std::shared_ptr<ScrollState> scroll_state_ = std::make_shared<ScrollState>();
     bool show_timestamps_ = true;
 
     std::optional<RowKey> focused_row_;
@@ -211,36 +239,32 @@ private:
     // that has one; Elements are all that survive past it).
     std::map<RowKey, bool> resolved_collapsed_;
     // Parallel to row_keys_ (and to rendered_rows_): the rendered-position
-    // box of each row (one slot; none for a row that rendered nothing),
-    // recorded by the RowBoxSpy node Render() wraps each row in. FTXUI
-    // assigns each Node its final box during the
-    // screen's layout pass -- AFTER yframe's scroll offset has been applied
-    // to the subtree's coordinate space -- so these are true screen
-    // coordinates and a mouse y maps straight onto a row. Rebuilt only when
-    // the assembly cache below is stale (a row whose parts rendered empty
-    // holds an empty inner vector -- nothing to hit); the box VALUES still
-    // refresh every Render() regardless, since FTXUI's layout pass runs over
-    // whatever Element tree is live that frame whether it's freshly built or
-    // reused from the cache. The slots are shared with the element tree, so
-    // no lifetime beyond the frame(s) that tree is current for is implied.
+    // box of each row (one slot per rendered part; a row whose parts
+    // rendered empty holds an empty inner vector -- nothing to hit). The
+    // SLOTS are persistent across assemblies (row_box_slots_ below): a
+    // re-assembly reuses the same shared_ptr<Box> per (row, part) and only
+    // the VALUES are overwritten by the next layout pass. That one-frame
+    // staleness is load-bearing -- the row cursor's reveal offset
+    // (RowCursorOffsetFromBottom) runs right after an assembly that is
+    // ALWAYS stale when the cursor just moved (assembled_focused_row_ is a
+    // cache key), so freshly allocated zeroed boxes would read as "row at
+    // screen top, visible" and the reveal would never move. Rebuilt only
+    // when the assembly cache below is stale; the box VALUES still refresh
+    // every layout pass, since FTXUI's layout pass runs over whatever
+    // Element tree is live that frame whether it's freshly built or reused
+    // from the cache. The slots are shared with the element tree, so no
+    // lifetime beyond the frame(s) that tree is current for is implied.
     std::vector<std::vector<std::shared_ptr<ftxui::Box>>> row_boxes_;
+    // The persistent slot pool row_boxes_ draws from, keyed by RowKey.
+    // Pruned to the current row set on every assembly (page trim / evicted
+    // rows drop out).
+    std::map<RowKey, std::vector<std::shared_ptr<ftxui::Box>>> row_box_slots_;
 
     // Assembly cache for the per-row loop in Render(): the box/spy wrapping,
     // row-cursor highlight, and timestamp formatting only need to redo their
     // work when one of the five fields below changes -- not on every FTXUI
-    // repaint (mouse move, an unrelated editor keystroke). Offsets in
-    // assembled_row_start_index_ are RELATIVE to the start of
-    // assembled_column_rows_ (the preamble markers above it are cheap and
-    // still rebuilt fresh every call).
+    // repaint (mouse move, an unrelated editor keystroke).
     ftxui::Elements assembled_column_rows_;
-    std::vector<std::size_t> assembled_row_start_index_;
-    // One entry per scroll ANCHOR -- per chunk element pushed into
-    // assembled_column_rows_ (spacers excluded), in order oldest-first. A
-    // row split into N chunks contributes N consecutive entries; the newest
-    // anchor is the last chunk of the newest row. scroll_from_bottom_
-    // addresses THIS list, not row_keys_ -- anchor-level granularity is what
-    // lets a message taller than the viewport be scrolled through gradually.
-    std::vector<std::size_t> assembled_chunk_index_;
     bool assembly_valid_ = false;
     uint64_t assembled_version_ = 0;
     std::string assembled_session_id_;

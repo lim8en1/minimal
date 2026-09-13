@@ -207,8 +207,11 @@ ftxui::Element FrameRenderer::Render() {
                                                          deps_.toggle_collapse_hint,
                                                          deps_.load_older_hint);
                 }
-                rows.push_back(ui.chat->Render(snap, ui.live_text_streams) | yframe |
-                               vscroll_indicator | flex);
+                // ChatView::Render wraps its own ScrollRegion + vscroll_
+                // indicator (explicit line-offset scrolling -- see
+                // chat_scroll_region.hpp); yframe's focus-driven scroll
+                // would fight it. flex is the only outer decoration left.
+                rows.push_back(ui.chat->Render(snap, ui.live_text_streams) | flex);
                 // Scrolled up (or parked on a row) while the turn is still
                 // producing: the newest output lands below the viewport, and
                 // nothing said so. Outside the yframe, so it stays on screen.

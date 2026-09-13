@@ -58,12 +58,12 @@ using ftxui::Elements;
 
 // --- Scroll-anchor chunking ----------------------------------------------------
 //
-// A message taller than the viewport used to be ONE scroll anchor: scrolling
-// snapped whole-message, so one wheel tick on a long response cleared
-// multiple screens. Core renderers decompose long content into chunks of at
-// most kMaxAnchorLines source lines; ChatView gives each chunk its own anchor
-// (assembled_chunk_index_). Roughly one terminal screen per anchor, so each
-// scroll step moves a small, readable distance.
+// Scrolling itself is line-granular now (ScrollRegion, chat_scroll_region.hpp)
+// -- a tall element no longer snaps whole-message. Chunking still earns its
+// keep on the RENDER path: the per-row Elements cache is keyed per chunk, so
+// a streamed delta re-renders one small piece, not the whole row, and
+// markdown re-parses stay bounded. Decompose long content into chunks of at
+// most kMaxAnchorLines source lines.
 constexpr std::size_t kMaxAnchorLines = 20;
 
 std::vector<std::string> SplitLines(std::string_view body) {

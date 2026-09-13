@@ -99,6 +99,17 @@ bool IsCompact(ChatRowKind kind) {
 // still fast when flung, but each step is a small, readable distance.
 constexpr auto kWheelGateMs = std::chrono::milliseconds(30);
 
+// Lines one accepted wheel tick scrolls. Small enough that a multi-line
+// thinking block moves past a few lines at a time (the old chunk-anchor
+// scheme could leap a whole wrapped chunk -- several viewports -- per tick);
+// large enough that a trackpad flick still travels. The gate bounds the
+// RATE; this bounds the DISTANCE per accepted event.
+constexpr int kWheelLinesPerTick = 3;
+
+// Keyboard scroll step (chat.scroll_up/chat.scroll_down are half-viewport
+// presses) before the first layout pass has measured the real viewport.
+constexpr int kFallbackViewportLines = 20;
+
 }  // namespace
 
 ChatView::ChatView(const Theme& theme,
@@ -134,6 +145,7 @@ void ChatView::RebuildRows(const SessionState::Snapshot& snapshot) {
         collapse_overrides_.clear();
         focused_row_.reset();
         materialized_page_.reset();   // a different session's page is a different key space
+        row_box_slots_.clear();       // likewise the box slots, keyed by that key space
     }
     // ChatRowsFromMessages is a full O(n) walk over the scrollback window (up
     // to scrollback_window_max_messages, 2000 default), copying every row's
@@ -405,8 +417,8 @@ ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
     // move, an unrelated editor keystroke used to redo this whole O(rows)
     // walk, including a make_shared<Box> + make_shared<RowBoxSpy>
     // allocation and a localtime_r/snprintf call per row PART, every single
-    // call). scroll_from_bottom_ is deliberately NOT a key: it only affects
-    // which element gets focus() applied below, not any row's content.
+    // call). scroll_from_bottom_lines_ is deliberately NOT a key: it only
+    // affects which offset ScrollRegion applies below, not any row's content.
     const bool assembly_stale =
         !assembly_valid_ || assembled_version_ != rendered_version_ ||
         assembled_session_id_ != rendered_session_id_ ||
@@ -416,33 +428,29 @@ ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
     if (assembly_stale) {
         assembled_column_rows_.clear();
         assembled_column_rows_.reserve(rendered_rows_.size() * 2);
-        // Tracks which assembled_column_rows_ index each ROW's first
-        // element landed at (RELATIVE to the start of the assembled rows,
-        // not the final column -- the preamble above is rebuilt fresh every
-        // call and its length is added back in below), so the row cursor
-        // (focused_row_) can mark the right element for scrolling and
-        // highlighting -- a row can be several Elements wide (parts.size()
-        // varies per kind), so "row index" and "element index" are not the
-        // same number.
-        assembled_row_start_index_.clear();
-        assembled_row_start_index_.reserve(rendered_rows_.size());
-        // Same walk, one entry per SCROLL anchor (per chunk element; spacers
-        // excluded) -- scroll_from_bottom_ addresses this list. Row cursors
-        // stay row-granular; scrolling is chunk-granular.
-        assembled_chunk_index_.clear();
-        assembled_chunk_index_.reserve(rendered_rows_.size() * 2);
         // One box slot per row; ToggleCollapseAt hit-tests these against a
-        // click's screen y.
+        // click's screen y, and the row cursor's reveal-offset math reads
+        // them too (see RowCursorOffsetFromBottom).
         row_boxes_.clear();
         row_boxes_.reserve(rendered_rows_.size());
         for (std::size_t i = 0; i < rendered_rows_.size(); ++i) {
-            assembled_row_start_index_.push_back(assembled_column_rows_.size());
             Elements parts = rendered_rows_[i];   // shared Elements, cheap copy
             const bool is_focused = focused_row_.has_value() && i < row_keys_.size() &&
                                     row_keys_[i] == *focused_row_;
             const ChatRowKind kind =
                 i < row_kinds_.size() ? row_kinds_[i] : ChatRowKind::AgentMarkdown;
+            // PERSISTENT slots (row_box_slots_): re-assembly reuses the same
+            // Box per (row, part) so the values from the PREVIOUS layout pass
+            // survive until the next one overwrites them. The reveal-offset
+            // math runs right after an assembly that is always stale when the
+            // cursor just moved -- fresh zeroed boxes there would read as
+            // "row at screen top, already visible" and the reveal would
+            // never move.
+            std::vector<std::shared_ptr<ftxui::Box>>& slots =
+                row_box_slots_[i < row_keys_.size() ? row_keys_[i] : RowKey{}];
+            slots.resize(parts.size());
             std::vector<std::shared_ptr<ftxui::Box>> boxes;
+            boxes.reserve(slots.size());
             if (!parts.empty()) {
                 // The timestamp rides the row's FIRST element (its label line),
                 // right-aligned via a flex gap -- it used to get its own row
@@ -459,13 +467,15 @@ ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
                                          text(stamp) | color(theme_.ColorFor("system_message"))});
                     }
                 }
-                // ONE spy per CHUNK, not one per row: each part is its own
-                // scroll anchor (assembled_chunk_index_), so a long message
-                // decomposed into chunks scrolls chunk by chunk instead of
-                // snapping whole-message. The gutter wraps every part so the
-                // speaker bar stays continuous across the row's full height
+                // ONE spy per PART, not one per row: a row's rendered extent
+                // is the union of its parts' boxes, and multi-part rows
+                // (chunked RenderBlocks output) need every part's box for
+                // the click hit-test and the row-cursor reveal offset. The
+                // gutter wraps every part so the speaker bar stays
+                // continuous across the row's full height
                 // (separatorCharacter fills each part's box); the timestamp
                 // rode the first part above.
+                std::size_t part_index = 0;
                 for (auto& part : parts) {
                     if (is_focused) {
                         part = WithGutter(std::move(part),
@@ -478,23 +488,36 @@ ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
                     // spy records the box of exactly what is pushed into the
                     // column (the layout-visible position). Baked in at ASSEMBLY
                     // time, never into the cached Elements -- a cache hit must
-                    // not accumulate one spy per frame.
-                    auto slot = std::make_shared<ftxui::Box>();
+                    // not accumulate one spy per frame. The slot itself is
+                    // REUSED from row_box_slots_ (allocated once, here, when a
+                    // row or part first appears).
+                    auto& slot = slots[part_index++];
+                    if (!slot) slot = std::make_shared<ftxui::Box>();
                     boxes.push_back(slot);
-                    assembled_chunk_index_.push_back(assembled_column_rows_.size());
                     assembled_column_rows_.push_back(
-                        std::make_shared<RowBoxSpy>(std::move(slot), std::move(part)));
+                        std::make_shared<RowBoxSpy>(slot, std::move(part)));
                 }
             }
             // Breathing room between rows -- except inside a run of collapsed
             // tool/thinking rows, which reads as one compact list. The LAST
-            // row always gets it: the bottom pin (see the focus logic below)
-            // anchors on a one-line element, never on a tall row's top.
+            // row always gets it: the pin-to-newest default (offset 0 from
+            // the bottom) keeps the viewport's bottom line on this one-line
+            // spacer, never mid-way through a tall row's body.
             const bool compact_run = i + 1 < row_kinds_.size() && i < row_collapsed_.size() &&
                                      IsCompact(kind) && row_collapsed_[i] &&
                                      IsCompact(row_kinds_[i + 1]);
             if (!compact_run) assembled_column_rows_.push_back(text(" "));
             row_boxes_.push_back(std::move(boxes));
+        }
+        // Prune slots for rows no longer in the window (page trim, eviction,
+        // session switch): the pool must not outgrow the rendered rows.
+        for (auto it = row_box_slots_.begin(); it != row_box_slots_.end();) {
+            if (std::find(row_keys_.begin(), row_keys_.end(), it->first) ==
+                row_keys_.end()) {
+                it = row_box_slots_.erase(it);
+            } else {
+                ++it;
+            }
         }
         assembled_version_ = rendered_version_;
         assembled_session_id_ = rendered_session_id_;
@@ -503,11 +526,7 @@ ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
         assembled_focused_row_ = focused_row_;
         assembly_valid_ = true;
     }
-    const std::size_t preamble_len = column.size();
     column.insert(column.end(), assembled_column_rows_.begin(), assembled_column_rows_.end());
-    std::vector<std::size_t> row_start_index;
-    row_start_index.reserve(assembled_row_start_index_.size());
-    for (const auto offset : assembled_row_start_index_) row_start_index.push_back(preamble_len + offset);
 
     // The turn the user JUST submitted, echoed optimistically (state.cpp's
     // OnChatSubmitted): rendered through the same UserText renderer the
@@ -643,82 +662,116 @@ ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
         }
     }
 
-    // The enclosing `yframe` (app.cpp) scrolls to whatever element in this
-    // subtree requests focus; with none, its offset stays 0 and it shows the
-    // TOP of the transcript forever, hiding everything -- including live
-    // streaming output -- past the first screen. `focus()` here is a DOM
-    // marker only (Requirement::focused, not an FTXUI Component), so it
-    // cannot steal keyboard focus from the prompt editor, a sibling in the
-    // outer frame; it only tells THIS frame where to scroll.
+    // Scroll position: ScrollRegion (the wrapper this returns) applies an
+    // explicit offset-from-bottom in lines -- no focus() marker anywhere in
+    // the column anymore. 0 (the default) pins to the newest content,
+    // including the live streaming block and live tool rows below the
+    // persisted rows ("pinned" tracks whatever is newest, streaming or not);
+    // an offset-from-bottom also survives content growing underneath, so a
+    // reader parked mid-transcript does not slide while a turn streams.
     //
-    // scroll_from_bottom_ picks WHICH row gets that marker: 0 (the default)
-    // is column.back(), reproducing the old pin-to-newest behavior exactly
-    // (including the live streaming block and live tool rows below the
-    // persisted rows -- "pinned" should track whatever is newest, streaming
-    // or not).
-    //
-    // A NONZERO value anchors on a PERSISTED chunk instead, counted back from
-    // the newest one via assembled_chunk_index_ -- scrolling is chunk-granular
-    // (see the assembly loop), while the row cursor (focused_row_) stays
-    // row-granular, addressed via row_start_index. NOT column.size()-1-scroll_from_bottom_ (the
-    // pre-fix math): that
-    // measured the offset from the literal end of `column`, which keeps
-    // growing every delta while a turn streams (the live block) or a tool
-    // runs (RenderLiveToolRow) -- so a reader scrolled up mid-turn watched
-    // their own viewport slide toward the newest content on every tick,
-    // even though they never touched a key. Persisted rows (row_keys_) do
-    // NOT change mid-turn (the post-turn refresh is what applies a new
-    // page), so anchoring on one is stable regardless of how much streams in
-    // underneath. Clamped here rather than in ScrollBy() -- the row count
-    // this frame is the only bound that matters, and it can shrink/grow
-    // between calls.
-    //
-    // focused_row_ overrides both when set (chat.row_up/chat.row_down): the
-    // row cursor drives scroll position instead, addressed the same way.
-    if (!column.empty()) {
-        std::optional<std::size_t> focus_index;
-        if (focused_row_.has_value()) {
-            if (const auto it = std::find(row_keys_.begin(), row_keys_.end(), *focused_row_);
-                it != row_keys_.end()) {
-                const auto row_index = static_cast<std::size_t>(std::distance(row_keys_.begin(), it));
-                if (row_index < row_start_index.size()) focus_index = row_start_index[row_index];
-            }
+    // The row cursor (focused_row_, chat.row_up/chat.row_down) overrides the
+    // stored offset: the focused row is revealed minimally (see
+    // RowCursorOffsetFromBottom). The stored value is clamped here rather
+    // than in ScrollBy() -- the content height this frame measures is the
+    // only bound that matters, and it can shrink (page trim) or grow
+    // (streaming) between calls. Clamping is STORED, not just local: a spam
+    // of scroll-ups past the top must not leave the offset ballooning past
+    // what any render can use, or scrolling back down would burn through
+    // that same overshoot before the viewport visibly moved again.
+    if (focused_row_.has_value()) {
+        if (const auto offset = RowCursorOffsetFromBottom()) {
+            scroll_from_bottom_lines_ = *offset;
         }
-        if (!focus_index.has_value() && !assembled_chunk_index_.empty()) {
-            // Clamped and STORED (not just clamped locally): a spam of
-            // ScrollBy(+1) past the oldest anchor must not leave
-            // scroll_from_bottom_ ballooning past what any render can use, or
-            // "scroll back down" afterward would need to burn through that
-            // same overshoot one step at a time before the viewport visibly
-            // moved again. Counted against CHUNK anchors, not rows: a message
-            // taller than the viewport is several anchors, and the point of
-            // the granularity change is that each wheel/scroll step moves a
-            // small, readable distance.
-            scroll_from_bottom_ =
-                std::clamp(scroll_from_bottom_, 0,
-                           static_cast<int>(assembled_chunk_index_.size()));
-            if (scroll_from_bottom_ > 0) {
-                const std::size_t chunks_back = static_cast<std::size_t>(scroll_from_bottom_) - 1;
-                const std::size_t anchor = assembled_chunk_index_.size() - 1 - chunks_back;
-                focus_index = preamble_len + assembled_chunk_index_[anchor];
-            }
-        }
-        if (!focus_index.has_value()) {
-            scroll_from_bottom_ = 0;   // nothing to anchor on (e.g. no persisted rows yet): pin
-            focus_index = column.size() - 1;
-        }
-        column[*focus_index] = focus(std::move(column[*focus_index]));
+    } else if (scroll_state_->viewport_height > 0) {
+        // First frame: nothing measured yet -- pass the offset through
+        // unclamped and let ScrollRegion's own clamp (which sees the REAL
+        // content height) bound it; the stored value catches up next pass.
+        const int max_from_bottom = std::max(
+            0, scroll_state_->content_height - scroll_state_->viewport_height);
+        scroll_from_bottom_lines_ =
+            std::clamp(scroll_from_bottom_lines_, 0, max_from_bottom);
     }
-    return vbox(std::move(column));
+    scroll_state_->desired_offset_from_bottom = scroll_from_bottom_lines_;
+    return ScrollRegion(vscroll_indicator(vbox(std::move(column))), scroll_state_);
 }
 
-void ChatView::ScrollBy(int delta_rows) { scroll_from_bottom_ += delta_rows; }
+void ChatView::ScrollBy(int delta_steps) {
+    RetireRowCursorToOffset();
+    const int viewport = scroll_state_->viewport_height > 0
+                             ? scroll_state_->viewport_height
+                             : kFallbackViewportLines;
+    scroll_from_bottom_lines_ += delta_steps * std::max(3, viewport / 2);
+}
 
-void ChatView::ScrollWheelBy(int delta_rows) {
+void ChatView::ScrollWheelBy(int delta_ticks) {
     const auto now = std::chrono::steady_clock::now();
     if (now - last_wheel_step_ < kWheelGateMs) return;   // momentum burst: dropped
     last_wheel_step_ = now;
-    scroll_from_bottom_ += delta_rows;
+    RetireRowCursorToOffset();
+    scroll_from_bottom_lines_ += delta_ticks * kWheelLinesPerTick;
+}
+
+std::optional<int> ChatView::RowCursorOffsetFromBottom() const {
+    if (!focused_row_.has_value() || scroll_state_->viewport_height <= 0) {
+        return std::nullopt;
+    }
+    const auto it = std::find(row_keys_.begin(), row_keys_.end(), *focused_row_);
+    if (it == row_keys_.end()) return std::nullopt;
+    const auto row_index = static_cast<std::size_t>(std::distance(row_keys_.begin(), it));
+    if (row_index >= row_boxes_.size() || row_boxes_[row_index].empty()) {
+        return std::nullopt;
+    }
+    // The row's full vertical extent, from the boxes the last layout pass
+    // recorded (screen coordinates -- RowBoxSpy runs under the scroll
+    // offset, exactly like the click hit-test's assumption).
+    int y_min = row_boxes_[row_index].front()->y_min;
+    int y_max = row_boxes_[row_index].front()->y_max;
+    for (const auto& box : row_boxes_[row_index]) {
+        y_min = std::min(y_min, box->y_min);
+        y_max = std::max(y_max, box->y_max);
+    }
+    // Screen -> viewport-relative coordinates: the row's edges as LAST laid
+    // out, measured against the viewport's own top line. (Content
+    // coordinates would need top_applied folded in; viewport-relative is
+    // the same thing without the arithmetic, and the reveal thresholds
+    // below are viewport-relative by nature -- comparing an absolute
+    // content coordinate against the viewport HEIGHT instead always reads
+    // "below the fold" once content exceeds one screen, slamming the cursor
+    // reveal to the bottom.)
+    const int viewport = scroll_state_->viewport_height;
+    const int top_applied = scroll_state_->content_height - viewport -
+                            scroll_state_->applied_offset_from_bottom;
+    const int row_top = y_min - scroll_state_->viewport_top_screen;
+    const int row_bottom = y_max - scroll_state_->viewport_top_screen;
+    // Reveal the row's HEAD (its top edge -- the label line a chat row is
+    // recognized by): scroll until the top edge is on screen, at the
+    // viewport's top when the row sits above, at its bottom when below; no
+    // movement while the head is already visible. Minimal per move, and
+    // IDEMPOTENT -- re-running it from the revealed position moves nothing,
+    // which matters because the reveal is recomputed every frame while the
+    // cursor sits on a row (a bottom-edge reveal of a tall row would
+    // otherwise drag the view to the row's tail on the frame after it
+    // showed the head). Centering (yframe's old behavior) is deliberately
+    // avoided -- it leapt past readable content whenever the target was
+    // taller than the viewport.
+    int top = top_applied;
+    if (row_top < 0) {
+        top = top_applied + row_top;
+    } else if (row_top >= viewport) {
+        top = top_applied + (row_top - viewport + 1);
+    }
+    const int max_top = std::max(0, scroll_state_->content_height - viewport);
+    top = std::clamp(top, 0, max_top);
+    return max_top - top;
+}
+
+void ChatView::RetireRowCursorToOffset() {
+    if (!focused_row_.has_value()) return;
+    if (const auto offset = RowCursorOffsetFromBottom()) {
+        scroll_from_bottom_lines_ = *offset;
+    }
+    focused_row_.reset();
 }
 
 void ChatView::MoveRowFocus(int delta) {

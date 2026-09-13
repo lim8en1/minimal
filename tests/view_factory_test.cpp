@@ -1188,7 +1188,7 @@ TEST_CASE("chat view: scrolling up mid-turn stays put while the streaming block 
 
     append_segment("the reply so far");
     const auto before =
-        RenderElement(view.Render(snapshot, streams) | ftx::yframe, /*width=*/40, /*height=*/6);
+        RenderElement(view.Render(snapshot, streams), /*width=*/40, /*height=*/6);
     CHECK(before.find("row-19") == std::string::npos);   // scrolled well clear of the newest
 
     // More deltas land -- same persisted page (same transcript_version), just
@@ -1197,7 +1197,7 @@ TEST_CASE("chat view: scrolling up mid-turn stays put while the streaming block 
     append_segment("the reply so far, now with a great deal more text streamed in "
                    "since the last frame, several sentences longer than before");
     const auto after =
-        RenderElement(view.Render(snapshot, streams) | ftx::yframe, /*width=*/40, /*height=*/6);
+        RenderElement(view.Render(snapshot, streams), /*width=*/40, /*height=*/6);
 
     // The anchored (persisted) row is unaffected by how much grew below it --
     // pre-fix, this frame differed on every delta even though nothing the
@@ -1649,13 +1649,12 @@ TEST_CASE("chat view: ScrollBy moves the viewport off the pinned-to-newest defau
     ChatView view(theme, messages, tool_renderers, display_renderers);
     const auto snapshot = SnapshotWithRows("session-scroll", 1, 40);
 
-    // A viewport far shorter than 40 rows: yframe can only show a slice, so
-    // which slice is visible reflects where Render() put the focus marker
-    // (ftxui's Frame::SetBox centers the focused row in the viewport, so
-    // this doesn't assert an exact edge -- just that the visible slice
-    // actually changes). Default (no ScrollBy call): pinned to the newest row.
+    // A viewport far shorter than 40 rows: which slice is visible reflects
+    // the scroll offset (offset 0 pins to the newest row; the assert is on
+    // the visible slice, not an exact edge -- the rows are 3 lines each and
+    // the 8-line viewport shows two and a bit).
     const auto pinned =
-        RenderElement(view.Render(snapshot) | ftx::yframe, /*width=*/40, /*height=*/8);
+        RenderElement(view.Render(snapshot), /*width=*/40, /*height=*/8);
     CHECK(pinned.find("row-39") != std::string::npos);
 
     // Scroll toward older messages (positive == toward older), far enough
@@ -1663,7 +1662,7 @@ TEST_CASE("chat view: ScrollBy moves the viewport off the pinned-to-newest defau
     // slice: proves ScrollBy actually moves the anchor rather than a no-op.
     view.ScrollBy(30);
     const auto scrolled =
-        RenderElement(view.Render(snapshot) | ftx::yframe, /*width=*/40, /*height=*/8);
+        RenderElement(view.Render(snapshot), /*width=*/40, /*height=*/8);
     CHECK(scrolled != pinned);
     CHECK(scrolled.find("row-39") == std::string::npos);
 
@@ -1671,7 +1670,7 @@ TEST_CASE("chat view: ScrollBy moves the viewport off the pinned-to-newest defau
     // reproducing the original (pre-scroll) view exactly.
     view.ScrollBy(-30);
     const auto repinned =
-        RenderElement(view.Render(snapshot) | ftx::yframe, /*width=*/40, /*height=*/8);
+        RenderElement(view.Render(snapshot), /*width=*/40, /*height=*/8);
     CHECK(repinned == pinned);
 }
 
@@ -1695,16 +1694,16 @@ TEST_CASE("chat view: ScrollToBottom resets the anchor directly, not just relati
     const auto snapshot = SnapshotWithRows("session-scroll-bottom", 1, 40);
 
     const auto pinned =
-        RenderElement(view.Render(snapshot) | ftx::yframe, /*width=*/40, /*height=*/8);
+        RenderElement(view.Render(snapshot), /*width=*/40, /*height=*/8);
 
     view.ScrollBy(30);   // scroll far up, same as the ScrollBy test above
     const auto scrolled =
-        RenderElement(view.Render(snapshot) | ftx::yframe, /*width=*/40, /*height=*/8);
+        RenderElement(view.Render(snapshot), /*width=*/40, /*height=*/8);
     CHECK(scrolled != pinned);
 
     view.ScrollToBottom();   // one call, not "however far up ScrollBy went"
     const auto back =
-        RenderElement(view.Render(snapshot) | ftx::yframe, /*width=*/40, /*height=*/8);
+        RenderElement(view.Render(snapshot), /*width=*/40, /*height=*/8);
     CHECK(back == pinned);
     CHECK(back.find("row-39") != std::string::npos);
 }
@@ -1791,8 +1790,10 @@ TEST_CASE("chat view: scrolling moves within one tall message, not just between 
     plugins::DisplayRendererRegistry display_renderers;
     ChatView view(theme, messages, tool_renderers, display_renderers);
 
-    // ONE message of 30 paragraphs. Pre-chunking this transcript had exactly
-    // one scroll anchor -- no scroll amount could ever move inside it.
+    // ONE message of 30 distinct single-screen lines. Scrolling is measured
+    // in SCREEN LINES (ScrollRegion), so the viewport always moves through
+    // the message's interior -- pre-line-scrolling this transcript was one
+    // focus anchor (whole-message snaps) and then one CHUNK anchor (leaps).
     std::string text;
     for (int i = 0; i < 30; ++i) {
         if (i > 0) text += "\n";
@@ -1804,26 +1805,28 @@ TEST_CASE("chat view: scrolling moves within one tall message, not just between 
     snap.scrollback_page = std::make_shared<const std::vector<v1::StoredMessage>>(
         std::vector<v1::StoredMessage>{StoredAssistantText(1, text)});
 
-    const auto pinned = RenderElement(view.Render(snap) | ftx::yframe, /*width=*/40, /*height=*/8);
+    const auto pinned = RenderElement(view.Render(snap), /*width=*/40, /*height=*/8);
     CHECK(pinned.find("chunk-point-129") != std::string::npos);
 
-    // One step moves one CHUNK inside the message.
+    // One keyboard step = half the 8-line viewport = 4 lines: the view moves
+    // a small, readable distance INSIDE the message, off the newest content.
     view.ScrollBy(1);
-    const auto stepped = RenderElement(view.Render(snap) | ftx::yframe, /*width=*/40, /*height=*/8);
+    const auto stepped = RenderElement(view.Render(snap), /*width=*/40, /*height=*/8);
     CHECK(stepped != pinned);
+    CHECK(stepped.find("chunk-point-125") != std::string::npos);
+    CHECK(stepped.find("chunk-point-129") == std::string::npos);
 
-    // Twenty steps park the viewport on the message's earlier half, well off
-    // the newest content -- impossible when the whole message was one anchor.
+    // Many steps clamp at the message's very top -- no overshoot to burn.
     view.ScrollBy(20);
-    const auto scrolled = RenderElement(view.Render(snap) | ftx::yframe, /*width=*/40, /*height=*/8);
+    const auto scrolled = RenderElement(view.Render(snap), /*width=*/40, /*height=*/8);
     CHECK(scrolled != pinned);
     CHECK(scrolled.find("chunk-point-129") == std::string::npos);
     CHECK(scrolled.find("chunk-point-10") != std::string::npos);
 
-    // And the way back is exact, as with row-granular scrolling.
+    // And the way back is exact.
     view.ScrollToBottom();
     const auto repinned =
-        RenderElement(view.Render(snap) | ftx::yframe, /*width=*/40, /*height=*/8);
+        RenderElement(view.Render(snap), /*width=*/40, /*height=*/8);
     CHECK(repinned == pinned);
 }
 
@@ -2017,7 +2020,7 @@ TEST_CASE("chat view: clicking a thinking row toggles its collapse", "[chat_view
         });
 
     const auto collapsed =
-        RenderElement(view.Render(snap) | ftx::yframe, /*width=*/60, /*height=*/24);
+        RenderElement(view.Render(snap), /*width=*/60, /*height=*/24);
     CHECK(collapsed.find("chars") != std::string::npos);   // "thinking  N chars"
     CHECK(collapsed.find("pondering deeply") == std::string::npos);
     // The click affordance (the disclosure glyph) marks the collapsed header.
@@ -2029,7 +2032,7 @@ TEST_CASE("chat view: clicking a thinking row toggles its collapse", "[chat_view
     CHECK(view.ToggleCollapseAt(header_y));
 
     const auto expanded =
-        RenderElement(view.Render(snap) | ftx::yframe, /*width=*/60, /*height=*/24);
+        RenderElement(view.Render(snap), /*width=*/60, /*height=*/24);
     CHECK(expanded.find("pondering deeply") != std::string::npos);
     CHECK(expanded.find("▸") == std::string::npos);
     // The affordance flips with the state.
@@ -2041,7 +2044,7 @@ TEST_CASE("chat view: clicking a thinking row toggles its collapse", "[chat_view
     REQUIRE(header_y2 >= 0);
     CHECK(view.ToggleCollapseAt(header_y2));
     const auto recollapsed =
-        RenderElement(view.Render(snap) | ftx::yframe, /*width=*/60, /*height=*/24);
+        RenderElement(view.Render(snap), /*width=*/60, /*height=*/24);
     CHECK(recollapsed.find("pondering deeply") == std::string::npos);
     CHECK(recollapsed.find("chars") != std::string::npos);
 }
@@ -2064,7 +2067,7 @@ TEST_CASE("chat view: clicks that miss a collapsible row are not consumed",
     // bottom-aligned short transcript belongs to no row at all.
     const auto snap = SnapshotWithText("missy", 1, "hello human");
     const auto frame =
-        RenderElement(view.Render(snap) | ftx::yframe, /*width=*/60, /*height=*/24);
+        RenderElement(view.Render(snap), /*width=*/60, /*height=*/24);
 
     const int row_y = ScreenLineOf(frame, "hello human");
     REQUIRE(row_y >= 0);
@@ -2095,7 +2098,7 @@ TEST_CASE("chat view: clicking a tool-activity row toggles its collapse",
 
     // Tool rows collapse BY DEFAULT (CollapsedByDefault).
     const auto collapsed =
-        RenderElement(view.Render(snap) | ftx::yframe, /*width=*/60, /*height=*/24);
+        RenderElement(view.Render(snap), /*width=*/60, /*height=*/24);
     CHECK(collapsed.find("ls output line") == std::string::npos);
     CHECK(collapsed.find("▸") != std::string::npos);   // the disclosure glyph
 
@@ -2104,7 +2107,7 @@ TEST_CASE("chat view: clicking a tool-activity row toggles its collapse",
     CHECK(view.ToggleCollapseAt(header_y));
 
     const auto expanded =
-        RenderElement(view.Render(snap) | ftx::yframe, /*width=*/60, /*height=*/24);
+        RenderElement(view.Render(snap), /*width=*/60, /*height=*/24);
     CHECK(expanded.find("ls output line") != std::string::npos);
     CHECK(expanded.find("▾") != std::string::npos);
 }
