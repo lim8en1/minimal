@@ -71,14 +71,25 @@ PermissionMode ToolExecutor::ResolveMode(const Tool& tool, const nlohmann::json&
     const std::string_view permission_key = registry_.PermissionKeyFor(name);
     const std::string mcp_server = mcp_server_of(name);
 
-    // The pattern-matching subject, computed only when the policy actually
+    // The pattern-matching subject, computed when any CONSUMING policy actually
     // carries pattern rules (the confine() call below is filesystem work; a
-    // pattern-free policy must not pay it on every invocation). A canonical
-    // path anchors patterns like "**/.env" at "/" for confinement tools; the
-    // raw subject stands for everything else (bash's command line).
+    // pattern-free pair must not pay it on every invocation). Consumers: this
+    // executor's own pattern_overrides, the subagent ceiling's
+    // pattern_overrides, and the ceiling's out_of_workdir_patterns -- the
+    // ceiling's folds below all read this subject, so a pattern-free CHILD
+    // policy must not suppress it when the PARENT's rules need matching (that
+    // was the bug: the parent's {"git *": "ask"} silently never matched for a
+    // child whose own preset declared no patterns). A canonical path anchors
+    // patterns like "**/.env" at "/" for confinement tools; the raw subject
+    // stands for everything else (bash's command line).
     std::optional<std::string> pattern_subject;
     bool subject_is_path = false;
-    if (!policy_.pattern_overrides.empty()) {
+    const bool needs_pattern_subject =
+        !policy_.pattern_overrides.empty() ||
+        (policy_ceiling_.has_value() &&
+         (!policy_ceiling_->pattern_overrides.empty() ||
+          !policy_ceiling_->out_of_workdir_patterns.empty()));
+    if (needs_pattern_subject) {
         if (auto raw = tool.PatternSubject(input)) {
             if (tool.path_confinement_supported()) {
                 const ConfineResult canonical = confine(ctx.project_root, *raw, false);

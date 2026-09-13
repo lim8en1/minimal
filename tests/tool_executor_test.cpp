@@ -1012,3 +1012,32 @@ TEST_CASE("the ceiling's patterns tighten a child's pattern-allow",
     CHECK_FALSE(executor.Run("t1", "bash", {{"command", "git status"}}, ctx).is_error);
     REQUIRE(checker.seen.size() == 1);
 }
+
+TEST_CASE("the ceiling's patterns match even when the child's own policy has none",
+          "[tool_executor][patterns][invariant]") {
+    // The regression: the pattern subject was computed only when the CHILD's
+    // policy carried pattern rules, so a pattern-free child preset silenced
+    // the parent's {"git *": "ask"} ceiling entirely -- exactly the common
+    // configuration, since most child presets declare no patterns at all.
+    Fixture f;
+    auto& bash = f.AddTool("bash", ToolCategory::Execute);
+    bash.set_command_subject(true);
+    AlwaysAllowPermissionChecker checker;
+
+    tools::PermissionPolicy child_policy = AllowAllPolicy();  // no patterns at all
+    // The ceiling's CATEGORY is permissive too, so the ceiling's PATTERN is
+    // the only thing that can force the prompt below.
+    tools::PermissionPolicy ceiling = AllowAllPolicy();
+    ceiling.pattern_overrides["bash"].push_back({"git *", PermissionMode::Ask});
+
+    tools::ToolExecutor executor(f.registry, checker, child_policy, {},
+                                 PermissionRunMode::Normal, ceiling);
+    auto ctx = f.Context();
+
+    // The ceiling's pattern alone must force the prompt on a matching command...
+    CHECK_FALSE(executor.Run("t1", "bash", {{"command", "git status"}}, ctx).is_error);
+    REQUIRE(checker.seen.size() == 1);
+    // ...and a non-matching command stays allowed on both sides.
+    CHECK_FALSE(executor.Run("t2", "bash", {{"command", "ls -la"}}, ctx).is_error);
+    CHECK(checker.seen.size() == 1);
+}

@@ -1,6 +1,7 @@
 #include <atomic>
 #include <chrono>
 #include <filesystem>
+#include <fstream>
 #include <memory>
 #include <optional>
 #include <string>
@@ -12,8 +13,11 @@
 #include "deadline.hpp"
 #include "fakes.hpp"
 #include "session_events.hpp"
+#include "minimal/agent/agent_preset_registry.hpp"
 #include "minimal/agent/session.hpp"
 #include "minimal/common/logger.hpp"
+#include "minimal/config/settings_config.hpp"
+#include "minimal/config/skill_registry.hpp"
 #include "minimal/rpc/session_wiring.hpp"
 #include "minimal/tools/permission_advisor.hpp"
 #include "temp_dir.hpp"
@@ -71,6 +75,9 @@ struct SessionFixture {
         params.policy_ceiling = policy_ceiling;
         params.on_turn_finished = on_turn_finished;
         params.wake_on_injection = wake_on_injection;
+        // A preset registry turns the per-turn /agent borrow path on; tests
+        // that only run plain turns leave it null and never touch it.
+        if (preset_registry != nullptr) params.presets = preset_registry;
         // Builds whatever the test did not inject above: a real transport
         // (unless one already came from rpc::ApplyPermissionAdvisor), the
         // default WirePermissionChecker (unless a fake/advised one was
@@ -126,6 +133,9 @@ struct SessionFixture {
     std::vector<std::string> seed_grants;
     std::optional<tools::PermissionPolicy> policy_ceiling;
     std::function<void(const agent::TurnResult&)> on_turn_finished;
+    // Optional preset registry for the per-turn borrow path; must outlive the
+    // session (declare it in the test, before Start()).
+    const agent::AgentPresetRegistry* preset_registry = nullptr;
     // The idle-wake setting: an out-of-band injection on an IDLE session runs a
     // seedless turn (the injected messages are the user content).
     bool wake_on_injection = false;
@@ -1422,6 +1432,48 @@ TEST_CASE("SubmitRunMode applies at a turn boundary and announces the new mode",
         }
     }
     CHECK(announced);
+}
+
+TEST_CASE("a borrowed turn does not revert a SubmitRunMode switch",
+          "[session][run_mode]") {
+    // The regression: PresetRestore recomputed the executor's run mode from
+    // params_/preset_ -- neither of which a shift+tab change writes -- so the
+    // next turn carrying a per-turn override silently reverted the user's
+    // switch, and the borrowed turn itself ran at the session's default
+    // posture. Both now key off a snapshot of what the executor held.
+    testing::TempDir dir;
+    std::ofstream(dir.path() / "settings.json") << "{}\n";
+    std::ofstream(dir.path() / "permissions.json") << "{}\n";
+    std::ofstream(dir.path() / "providers.json") << "{\"providers\":{}}\n";
+    std::filesystem::create_directories(dir.path() / "agents");
+    std::ofstream(dir.path() / "agents" / "test.md")
+        << "---\nname: test\n---\nborrow body\n";
+    config::SkillRegistry skills = config::SkillRegistry::Load(dir.path());
+    agent::AgentPresetRegistry registry(
+        dir.path(), skills, config::LoadSettingsConfig(dir.path() / "settings.json"));
+
+    SessionFixture fixture(dir.path());
+    fixture.preset_registry = &registry;
+    fixture.Script(testing::TextResponse("borrowed"));
+    fixture.Start();
+
+    REQUIRE(
+        fixture.session->SubmitRunMode(agent::QueuedRunMode{tools::PermissionRunMode::AllowOnly}));
+    REQUIRE(fixture.session->WaitForIdleForTesting(5s));
+    REQUIRE(fixture.session->run_mode() == tools::PermissionRunMode::AllowOnly);
+
+    agent::QueuedTurn borrowed;
+    borrowed.text = "run under the override";
+    borrowed.agent_preset = "test";  // the same preset: a pure borrow
+    REQUIRE(fixture.session->SubmitTurnWithOverrides(borrowed));
+    REQUIRE(fixture.session->WaitForIdleForTesting(5s));
+    CHECK(fixture.session->run_mode() == tools::PermissionRunMode::AllowOnly);
+
+    // And a plain turn keeps it too -- the restore must not have leaked the
+    // borrow's bookkeeping into the session's sticky state.
+    fixture.session->SubmitTurn("plain");
+    REQUIRE(fixture.session->WaitForIdleForTesting(5s));
+    CHECK(fixture.session->run_mode() == tools::PermissionRunMode::AllowOnly);
 }
 
 TEST_CASE("ApplyPreset refreshes info_ and announces the new metadata", "[session][metadata]") {

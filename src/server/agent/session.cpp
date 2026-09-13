@@ -1122,11 +1122,16 @@ void Session::RunOneTurn(std::optional<std::string> text, const QueuedTurn* over
     struct PresetRestore {
         Session* session = nullptr;
         bool active = false;
+        // The executor's run mode as the loop held it BEFORE the borrow.
+        // Recomputing the restore from params_/preset_ was wrong: a shift+tab
+        // run-mode change (RunOneRunMode) writes the executor without touching
+        // either, so the next borrowed turn silently reverted the user's
+        // switch. The snapshot is what was actually there.
+        std::optional<tools::PermissionRunMode> run_mode;
         ~PresetRestore() {
             if (!active || session == nullptr) return;
             session->loop_->SetPreset(session->preset_);
-            session->executor_.SetRunMode(
-                session->params_.run_mode_override.value_or(session->preset_.run_mode));
+            if (run_mode) session->executor_.SetRunMode(*run_mode);
             // provider_ is what the loop held before the borrow by
             // construction; rebind unconditionally so a borrowed provider can
             // never leak into the next turn.
@@ -1137,6 +1142,13 @@ void Session::RunOneTurn(std::optional<std::string> text, const QueuedTurn* over
 
     if (overrides && (!overrides->model.empty() || !overrides->agent_preset.empty())) {
         try {
+            // Snapshot before ANY mutation, and keep active set through the
+            // catch below: a borrow that throws mid-way (after SetRunMode/
+            // SetPreset, during provider construction) must still unwind to
+            // the pre-borrow state, not leave a half-applied borrow behind.
+            // On a fully-failed borrow the restore is a harmless no-op rebind.
+            preset_restore.run_mode = executor_.run_mode();
+            preset_restore.active = true;
             AgentPreset transient = preset_;
             if (!overrides->agent_preset.empty()) {
                 if (presets_ == nullptr) {
@@ -1167,8 +1179,17 @@ void Session::RunOneTurn(std::optional<std::string> text, const QueuedTurn* over
                 }
                 ApplyModel(transient, *resolved);
             }
+            // The borrowed turn's run mode can only narrow the session's
+            // CURRENT posture -- the executor's mode, which a shift+tab
+            // change writes without touching params_ or preset_. Basing the
+            // clamp on params_/preset_ here (as this once did) let a borrowed
+            // turn run at the session's DEFAULT posture, ignoring the user's
+            // switch for the turn's duration, and the old restore then
+            // re-computed it away afterwards.
             executor_.SetRunMode(tools::clamp_run_mode(
-                params_.run_mode_override.value_or(preset_.run_mode), transient.run_mode));
+                preset_restore.run_mode.value_or(
+                    params_.run_mode_override.value_or(preset_.run_mode)),
+                transient.run_mode));
             loop_->SetPreset(transient);
             // Rebind whenever the borrowed preset resolves through a different
             // provider ENTRY or connection identity. The instance cache shares
@@ -1203,12 +1224,13 @@ void Session::RunOneTurn(std::optional<std::string> text, const QueuedTurn* over
         } catch (const std::exception& error) {
             // A resolution failure fails the TURN with a named error -- nothing
             // persisted, the session keeps its sticky choices -- the same
-            // fall-through shape the prompt veto uses below.
+            // fall-through shape the prompt veto uses below. active stays set:
+            // the destructor unwinds whatever the borrow already mutated back
+            // to the snapshot.
             logger_.warn("session {}: per-turn override failed: {}", params_.session_id,
                          error.what());
             EmitEvent(
                 SessionEvent{SessionError{std::string("per-turn override failed: ") + error.what()}});
-            preset_restore.active = false;
             vetoed = true;
         }
     }
