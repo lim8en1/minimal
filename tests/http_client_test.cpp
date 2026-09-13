@@ -176,7 +176,13 @@ TEST_CASE("a buffered response past the size cap aborts with an error", "[http_c
         FAIL("expected the body cap to abort the transfer");
     } catch (const HttpError& error) {
         CHECK(error.kind() == HttpErrorKind::Other);
-        CHECK(std::string(error.what()).find("response body exceeds limit") != std::string::npos);
+        // The server states the Content-Length, so Get's EARLY abort
+        // (CURLOPT_MAXFILESIZE_LARGE at its own 8 MiB threshold, per mode
+        // since the wrong-threshold fix) fires before any body byte arrives
+        // -- the WriteCallback's "response body exceeds limit" is the
+        // chunked-response path, which no Content-Length reaches.
+        CHECK(std::string(error.what()).find("response body exceeded 8 MiB") !=
+              std::string::npos);
     }
 }
 
