@@ -286,3 +286,44 @@ TEST_CASE("AnthropicStreamReassembler: sink returning false stops feeding and is
         R"({"type":"message_start","message":{"id":"msg_5","model":"m","usage":{}}})",
         refusing_sink));
 }
+
+TEST_CASE("AnthropicStreamReassembler: present-but-null fields degrade, never throw",
+          "[anthropic_stream][invariant]") {
+    // value() on a key that is PRESENT but null throws type_error -- only
+    // absence takes the default. The OpenAI reassembler documents the class:
+    // a proxy emitting `"text": null` in a keepalive frame killed the turn
+    // as a non-retryable ParseError. Every optional field here is guarded
+    // the same way provider-openai sweeps its streaming path.
+    AnthropicStreamReassembler reassembler;
+    std::vector<llm::StreamEvent> events;
+    auto sink = CollectInto(events);
+
+    // Null id/model and a null usage on message_start.
+    REQUIRE(reassembler.FeedFrame(
+        R"({"type":"message_start","message":{"id":null,"model":null,"usage":null}})", sink));
+    // Null text / partial_json / thinking / signature in each delta flavour.
+    REQUIRE(reassembler.FeedFrame(
+        R"({"type":"content_block_start","index":null,"content_block":{"type":null,"text":null}})",
+        sink));
+    REQUIRE(reassembler.FeedFrame(
+        R"({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":null}})",
+        sink));
+    REQUIRE(reassembler.FeedFrame(
+        R"({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":null}})",
+        sink));
+    REQUIRE(reassembler.FeedFrame(
+        R"({"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":null}})",
+        sink));
+    REQUIRE(reassembler.FeedFrame(
+        R"({"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":null}})",
+        sink));
+    REQUIRE(reassembler.FeedFrame(R"({"type":"content_block_stop","index":null})", sink));
+    REQUIRE(reassembler.FeedFrame(
+        R"({"type":"message_delta","delta":{"stop_reason":null},"usage":null})", sink));
+    REQUIRE(reassembler.FeedFrame(R"({"type":"message_stop"})", sink));
+
+    // The stream completed as a valid empty message, not a ParseError.
+    const auto response = reassembler.Finalize(/*tolerate_malformed_tool_calls=*/false);
+    CHECK(response.content.empty());
+    CHECK(response.stop_reason == llm::StopReason::Unknown);
+}

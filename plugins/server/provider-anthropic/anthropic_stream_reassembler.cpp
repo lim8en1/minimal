@@ -40,6 +40,24 @@ std::size_t CheckedBlockIndex(std::size_t index) {
     return index;
 }
 
+// value(key, default) throws type_error when the key is PRESENT but null (or
+// any non-matching type) -- only absence takes the default. The OpenAI
+// reassembler documents the failure class: a proxy emitting `"text": null`
+// in a keepalive frame killed the turn as a non-retryable ParseError. These
+// guarded reads degrade a present-but-null field to the default, the same
+// posture provider-openai sweeps across its streaming path.
+std::string StringOr(const nlohmann::json& json, const char* key) {
+    const auto it = json.find(key);
+    if (it == json.end() || !it->is_string()) return {};
+    return it->get<std::string>();
+}
+
+std::size_t IndexOr(const nlohmann::json& json, const char* key) {
+    const auto it = json.find(key);
+    if (it == json.end() || !it->is_number()) return 0;
+    return static_cast<std::size_t>(it->get<std::int64_t>());
+}
+
 }  // namespace
 
 bool AnthropicStreamReassembler::FeedFrame(std::string_view data, const llm::StreamEventSink& sink) {
@@ -53,12 +71,12 @@ bool AnthropicStreamReassembler::FeedFrame(std::string_view data, const llm::Str
         throw AnthropicParseError(std::string("malformed stream event: ") + error.what());
     }
 
-    const std::string type = event.value("type", "");
+    const std::string type = StringOr(event, "type");
 
     if (type == "message_start") {
         const auto& message = event.at("message");
-        id_ = message.value("id", "");
-        model_ = message.value("model", "");
+        id_ = StringOr(message, "id");
+        model_ = StringOr(message, "model");
         message_started_ = true;
         if (message.contains("usage") && !message.at("usage").is_null()) {
             usage_ = ParseUsage(message.at("usage"));
@@ -69,15 +87,15 @@ bool AnthropicStreamReassembler::FeedFrame(std::string_view data, const llm::Str
     }
 
     if (type == "content_block_start") {
-        const std::size_t index = CheckedBlockIndex(event.value("index", static_cast<std::size_t>(0)));
+        const std::size_t index = CheckedBlockIndex(IndexOr(event, "index"));
         const auto& content_block = event.at("content_block");
-        const std::string block_type = content_block.value("type", "");
+        const std::string block_type = StringOr(content_block, "type");
         if (index >= blocks_.size()) blocks_.resize(index + 1);
 
         if (block_type == "tool_use") {
             blocks_[index].kind = Block::Kind::ToolUse;
-            blocks_[index].id = content_block.value("id", "");
-            blocks_[index].name = content_block.value("name", "");
+            blocks_[index].id = StringOr(content_block, "id");
+            blocks_[index].name = StringOr(content_block, "name");
             if (sink &&
                 !sink(llm::ToolUseStartEvent{static_cast<int>(index), blocks_[index].id,
                                              blocks_[index].name})) {
@@ -102,25 +120,25 @@ bool AnthropicStreamReassembler::FeedFrame(std::string_view data, const llm::Str
     }
 
     if (type == "content_block_delta") {
-        const std::size_t index = CheckedBlockIndex(event.value("index", static_cast<std::size_t>(0)));
+        const std::size_t index = CheckedBlockIndex(IndexOr(event, "index"));
         if (index >= blocks_.size()) blocks_.resize(index + 1);
         const auto& delta = event.at("delta");
-        const std::string delta_type = delta.value("type", "");
+        const std::string delta_type = StringOr(delta, "type");
 
         if (delta_type == "text_delta") {
-            std::string text = delta.value("text", "");
+            std::string text = StringOr(delta, "text");
             Accumulate(accumulated_bytes_, text.size());
             blocks_[index].text += text;
             if (sink && !sink(llm::TextDeltaEvent{static_cast<int>(index), text})) return false;
         } else if (delta_type == "input_json_delta") {
-            std::string partial = delta.value("partial_json", "");
+            std::string partial = StringOr(delta, "partial_json");
             Accumulate(accumulated_bytes_, partial.size());
             blocks_[index].input_json += partial;
             if (sink && !sink(llm::ToolUseInputDeltaEvent{static_cast<int>(index), partial})) {
                 return false;
             }
         } else if (delta_type == "thinking_delta") {
-            std::string text = delta.value("thinking", "");
+            std::string text = StringOr(delta, "thinking");
             Accumulate(accumulated_bytes_, text.size());
             blocks_[index].text += text;
             if (sink && !sink(llm::ThinkingDeltaEvent{static_cast<int>(index), text})) return false;
@@ -130,7 +148,7 @@ bool AnthropicStreamReassembler::FeedFrame(std::string_view data, const llm::Str
             // Counted against the same 64 MiB budget as content: it rides the
             // same attacker-influenced channel and unbounded accumulation is
             // unbounded accumulation.
-            std::string signature = delta.value("signature", "");
+            std::string signature = StringOr(delta, "signature");
             Accumulate(accumulated_bytes_, signature.size());
             if (!blocks_[index].signature) blocks_[index].signature = std::string{};
             *blocks_[index].signature += signature;
@@ -139,7 +157,7 @@ bool AnthropicStreamReassembler::FeedFrame(std::string_view data, const llm::Str
     }
 
     if (type == "content_block_stop") {
-        const std::size_t index = event.value("index", static_cast<std::size_t>(0));
+        const std::size_t index = IndexOr(event, "index");
         if (index < blocks_.size()) blocks_[index].stopped = true;
         if (sink && !sink(llm::ContentBlockStopEvent{static_cast<int>(index)})) return false;
         return true;

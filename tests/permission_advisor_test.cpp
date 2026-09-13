@@ -414,3 +414,50 @@ TEST_CASE("a child's advisor cannot exceed its parent's ceiling", "[permission_a
     CHECK(f.tool->calls.empty());
     CHECK(advisor->seen.empty());  // denied before the advisor ever saw it
 }
+
+TEST_CASE("the advisor thread counter returns to zero on the normal path and never "
+          "drifts negative",
+          "[permission_advisor][invariant]") {
+    using namespace std::chrono_literals;
+
+    // The regression: the counter incremented at ABANDON but decremented on
+    // EVERY task exit, so normal completions drove it negative -- and each
+    // drifted decrement then offset a real abandoned increment, quietly
+    // defeating the kMaxAbandonedAdvisors ceiling. Counting from launch makes
+    // the normal path net zero.
+    tools::AdvisedPermissionChecker checker(
+        std::make_shared<ScriptedAdvisor>(),  // answers instantly, every time
+        std::make_unique<AlwaysAllowPermissionChecker>(),
+        [] { return false; }, std::chrono::milliseconds{50});
+
+    for (int i = 0; i < 20; ++i) {
+        (void)checker.check(tools::PermissionRequest{});
+        CHECK(checker.in_flight_advisors() == 0);
+    }
+}
+
+TEST_CASE("abandoned advisor threads stay counted until they exit",
+          "[permission_advisor][invariant]") {
+    using namespace std::chrono_literals;
+
+    // The ceiling's subject: threads launched and still running. A wedged
+    // advisor abandoned at its budget remains counted -- two abandons leave
+    // two in flight, which is what stops an every-call wedge from
+    // accumulating threads unboundedly.
+    struct Wedged : tools::PermissionAdvisor {
+        std::optional<PermissionResponse> Advise(const tools::PermissionRequest&,
+                                                 const tools::AdvisorContext&) override {
+            std::this_thread::sleep_for(30s);  // ignores is_cancelled entirely
+            return std::nullopt;
+        }
+    };
+    tools::AdvisedPermissionChecker checker(std::make_shared<Wedged>(),
+                                            std::make_unique<AlwaysAllowPermissionChecker>(),
+                                            [] { return false; },
+                                            std::chrono::milliseconds{40});
+
+    (void)checker.check(tools::PermissionRequest{});  // burns the budget, abandons
+    CHECK(checker.in_flight_advisors() == 1);
+    (void)checker.check(tools::PermissionRequest{});  // abandons a second thread
+    CHECK(checker.in_flight_advisors() == 2);
+}

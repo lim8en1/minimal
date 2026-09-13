@@ -105,6 +105,14 @@ public:
     // is spent.
     PermissionResponse check(const PermissionRequest& request) override;
 
+    // Diagnostic/test seam: advisor threads launched and not yet exited. The
+    // normal path returns to zero after every call -- a negative reading or a
+    // rising one across normal completions means the launch/exit accounting
+    // broke (that drift once quietly defeated kMaxAbandonedAdvisors).
+    int in_flight_advisors() const {
+        return abandoned_count_->load(std::memory_order_relaxed);
+    }
+
 private:
     PermissionResponse CheckDirect(const PermissionRequest& request);
     PermissionResponse CheckWithTimeout(const PermissionRequest& request);
@@ -113,10 +121,12 @@ private:
     std::unique_ptr<PermissionChecker> inner_;
     std::shared_ptr<AdvisorCancelSource> cancel_source_;
     std::chrono::milliseconds timeout_;
-    // Advisor threads abandoned mid-flight (cancelled or timed out, detached,
-    // still running). Shared with each task lambda so the thread can decrement
-    // it on completion, however long it outlives the checker. See
-    // kMaxAbandonedAdvisors in permission_advisor.cpp.
+    // Advisor threads launched and not yet exited: incremented at launch,
+    // decremented by the thread itself on completion, however long an
+    // abandoned (detached, still running) one outlives the checker. Normal
+    // completions net zero, so the count accumulates only while threads are
+    // abandoned -- which is what kMaxAbandonedAdvisors bounds. See
+    // permission_advisor.cpp.
     std::shared_ptr<std::atomic<int>> abandoned_count_ =
         std::make_shared<std::atomic<int>>(0);
 };

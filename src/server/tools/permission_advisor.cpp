@@ -15,11 +15,12 @@ namespace {
 // decision scale.
 constexpr std::chrono::milliseconds kWaitSlice{25};
 
-// Ceiling on advisor threads abandoned mid-flight (cancelled or timed out and
-// still running). Each abandoned thread is self-contained and harmless, but an
-// advisor that wedges on EVERY call would otherwise accumulate one thread per
-// Ask, unboundedly. Past the ceiling the checker stops spawning: the advisor
-// is skipped and the human is prompted directly, which is the same fallback an
+// Ceiling on advisor threads launched and not yet exited (a normal call
+// returns to zero; an abandoned one stays counted until its thread finishes).
+// Each abandoned thread is self-contained and harmless, but an advisor that
+// wedges on EVERY call would otherwise accumulate one thread per Ask,
+// unboundedly. Past the ceiling the checker stops spawning: the advisor is
+// skipped and the human is prompted directly, which is the same fallback an
 // abandoned wait already takes.
 constexpr int kMaxAbandonedAdvisors = 8;
 
@@ -82,9 +83,10 @@ PermissionResponse AdvisedPermissionChecker::CheckDirect(const PermissionRequest
 }
 
 PermissionResponse AdvisedPermissionChecker::CheckWithTimeout(const PermissionRequest& request) {
-    // Already-abandoned threads are still running. Past the ceiling, spawning
-    // a ninth thread for an advisor that wedges every call is waste with a
-    // side of unbounded accumulation: fall straight through to the wire prompt.
+    // Already-counted threads (launched, not yet exited) are the ceiling's
+    // subject. Past it, spawning yet another thread for an advisor that
+    // wedges every call is waste with a side of unbounded accumulation: fall
+    // straight through to the wire prompt.
     if (abandoned_count_->load(std::memory_order_relaxed) >= kMaxAbandonedAdvisors) {
         common::DefaultLogger().warn(
             "permission advisor has {} abandoned threads in flight; skipping it for tool '{}'",
@@ -98,11 +100,17 @@ PermissionResponse AdvisedPermissionChecker::CheckWithTimeout(const PermissionRe
     // spent. The abandoned thread is detached and self-contained -- owned
     // copies of the advisor, cancel source and REQUEST (by value: the
     // caller's reference dies when check returns), never `this` -- so its
-    // eventual answer or exception is simply discarded. The shared
-    // abandoned_count_ tracks each thread from its abandon point to its
-    // eventual completion: the lambda's guard decrements it, and the abandon
-    // path increments it only while the future is unresolved (the guard
-    // cannot have run yet), so the pair never crosses.
+    // eventual answer or exception is simply discarded.
+    //
+    // abandoned_count_ counts each thread from LAUNCH to its eventual exit:
+    // incremented right after the thread starts (program order, so the count
+    // is exact by the time this function returns on every path), decremented
+    // by the task's guard on every exit. Normal completions cancel their own
+    // increment (net zero, no drift); only threads abandoned mid-flight stay
+    // counted. The earlier shape (increment at abandon, decrement on every
+    // exit) drifted the shared counter negative on the normal path, and each
+    // drifted decrement then offset a real abandoned increment -- the ceiling
+    // leaked.
     auto advisor = advisor_;
     auto cancel_source = cancel_source_;
     auto abandoned_count = abandoned_count_;
@@ -116,12 +124,15 @@ PermissionResponse AdvisedPermissionChecker::CheckWithTimeout(const PermissionRe
         });
     std::future<std::optional<PermissionResponse>> future = task.get_future();
     std::thread worker(std::move(task));
+    // Counted from launch, after construction: if std::thread's own
+    // construction throws (resource exhaustion) nothing was counted and the
+    // caller gets the wire prompt -- no leak in either direction.
+    abandoned_count_->fetch_add(1, std::memory_order_relaxed);
 
     const auto deadline = std::chrono::steady_clock::now() + timeout_;
     for (;;) {
         if (future.wait_for(kWaitSlice) == std::future_status::ready) break;
         if (cancel_source->is_cancelled()) {
-            abandoned_count_->fetch_add(1, std::memory_order_relaxed);
             worker.detach();
             common::DefaultLogger().warn(
                 "permission advisor still running at cancellation for tool '{}'; abandoning it "
@@ -130,7 +141,6 @@ PermissionResponse AdvisedPermissionChecker::CheckWithTimeout(const PermissionRe
             return inner_->check(request);
         }
         if (std::chrono::steady_clock::now() >= deadline) {
-            abandoned_count_->fetch_add(1, std::memory_order_relaxed);
             worker.detach();
             common::DefaultLogger().warn(
                 "permission advisor timed out after {}ms for tool '{}'; falling through to the "
