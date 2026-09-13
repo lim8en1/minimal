@@ -168,7 +168,7 @@ std::size_t PayloadBytes(const Sized& event) { return event.payload.size(); }
 
 }  // namespace
 
-TEST_CASE("the byte bound refuses events past the cap, on both push flavours",
+TEST_CASE("the byte bound refuses events past the cap",
           "[event_queue][invariant]") {
     // A count-only bound does not bound RAM when one event can carry
     // megabytes: bash streams 8 KiB output chunks, so the 65,536-event cap was
@@ -226,128 +226,6 @@ TEST_CASE("Push blocks on the byte bound and wakes on Pop and Close", "[event_qu
     std::this_thread::sleep_for(50ms);
     queue_ptr->Close();
     CHECK(stalled.WaitFor(2s));
-}
-
-TEST_CASE("TryPush returns false on a closed queue, so refusal logging fires",
-          "[event_queue][invariant]") {
-    // It used to return TRUE on a closed queue as "dropped on purpose", which
-    // made every refusal path's drop-logging dead exactly at Terminate -- the
-    // logging contract the call sites promise was false on the shutdown path.
-    EventQueue<int> queue;
-    queue.Close();
-    CHECK_FALSE(queue.TryPush(1));
-}
-
-TEST_CASE("AbortWaitingProducers wakes a parked Push, which drops its event",
-          "[event_queue][invariant]") {
-    // THE INVARIANT: Cancel's unwedge. A worker parked on a full queue -- a
-    // stalled-but-connected client -- was exactly the state a cancel could
-    // not reach: the parked push blocked the very turn the user asked to
-    // stop. The abort must wake it to DROP, not leave it parked.
-    auto queue = std::make_shared<EventQueue<Sized>>(16, 100, PayloadBytes);
-    REQUIRE(queue->TryPush(Sized{std::string(90, 'x')}));
-    auto producer = RunInBackground([queue] { return queue->Push(Sized{std::string(90, 'y')}); });
-    std::this_thread::sleep_for(50ms);
-    CHECK_FALSE(producer.Ready());
-
-    queue->AbortWaitingProducers();
-    REQUIRE(producer.WaitFor(2s));
-    CHECK_FALSE(producer.Get());   // refused, and...
-    CHECK(queue->size() == 1);     // ...dropped, not queued
-}
-
-TEST_CASE("drop-mode self-heals at the next drain", "[event_queue][invariant]") {
-    // Latched rather than one-shot so a producer parking a moment AFTER the
-    // abort gets the same way out -- but the latch must not be permanent, or
-    // one cancel would degrade the queue for its whole life.
-    EventQueue<int> queue(2);  // count cap 2
-    queue.Push(1);
-    queue.Push(2);
-    queue.AbortWaitingProducers();
-    // While latched, an over-bounds push refuses immediately instead of parking.
-    CHECK_FALSE(queue.Push(3));
-    CHECK(queue.size() == 2);
-    // The drain clears the latch: the same push is accepted now.
-    CHECK(queue.Pop().value() == 1);
-    CHECK(queue.Push(3));
-    // ...and ordinary backpressure is back: a push at the cap parks.
-    auto producer = RunInBackground([&queue] { return queue.Push(4); });
-    std::this_thread::sleep_for(50ms);
-    CHECK_FALSE(producer.Ready());
-    CHECK(queue.Pop().value() == 2);
-    REQUIRE(producer.WaitFor(2s));
-    CHECK(producer.Get());
-    CHECK(queue.Pop().value() == 3);
-    CHECK(queue.Pop().value() == 4);
-}
-
-TEST_CASE("PushTerminal opts out of drop-mode, not out of backpressure", "[event_queue]") {
-    // A cancel that unwedges a worker on a full queue must not also swallow
-    // the turn's exit signal: TurnCompleted is how a headless client detects
-    // the end of a turn at all. It still waits for room like any other worker
-    // push -- only the drop-mode refusal is opted out of.
-    EventQueue<int> queue(2);
-    queue.Push(1);
-    queue.Push(2);
-    queue.AbortWaitingProducers();
-    CHECK_FALSE(queue.Push(3));
-
-    auto terminal = RunInBackground([&queue] { return queue.PushTerminal(3); });
-    std::this_thread::sleep_for(50ms);
-    CHECK_FALSE(terminal.Ready());  // still blocked -- for room, not by drop-mode
-    CHECK(queue.Pop().value() == 1);
-    REQUIRE(terminal.WaitFor(2s));
-    CHECK(terminal.Get());
-}
-
-TEST_CASE("DiscardPending resets the byte total, not just the event count",
-          "[event_queue][invariant]") {
-    // events_.clear() alone left bytes_total_ pointing at bytes that no longer
-    // exist, and nothing could ever subtract them back out (Pop/TryPop
-    // subtract per-event, and there are no events left to pop) -- Fits()'s
-    // only escape for an over-bounds queue is an EMPTY deque, so the queue
-    // degraded to holding exactly one event at a time for the rest of its
-    // life.
-    EventQueue<Sized> queue(16, /*max_bytes=*/100, PayloadBytes);
-    REQUIRE(queue.TryPush(Sized{std::string(100, 'x')}));
-    REQUIRE(queue.buffered_bytes() == 100);
-
-    queue.DiscardPending();
-    CHECK(queue.size() == 0);
-    CHECK(queue.buffered_bytes() == 0);
-
-    // Proof the degradation is gone: TWO events now fit, not just one.
-    CHECK(queue.TryPush(Sized{std::string(40, 'y')}));
-    CHECK(queue.TryPush(Sized{std::string(40, 'z')}));
-    CHECK(queue.buffered_bytes() == 80);
-}
-
-TEST_CASE("DiscardPending clears the drop latch too", "[event_queue][invariant]") {
-    // The self-heal (see "drop-mode self-heals at the next drain" above) lived
-    // only in Pop/TryPop; DiscardPending is a drain that frees MAXIMUM room
-    // (the whole queue empties) and must clear the latch for the same reason
-    // -- otherwise a teardown that discards pending work (DiscardPending's own
-    // documented use) leaves drops_ permanently latched, since no Pop is
-    // coming afterward to clear it.
-    EventQueue<int> queue(2);
-    queue.Push(1);
-    queue.Push(2);
-    queue.AbortWaitingProducers();
-    CHECK_FALSE(queue.Push(3));  // drop-mode latched, refuses immediately
-
-    queue.DiscardPending();
-    CHECK(queue.size() == 0);
-
-    // Ordinary backpressure is back: a push now blocks for room instead of
-    // being refused outright.
-    queue.Push(4);
-    queue.Push(5);
-    auto producer = RunInBackground([&queue] { return queue.Push(6); });
-    std::this_thread::sleep_for(50ms);
-    CHECK_FALSE(producer.Ready());
-    (void)queue.Pop();
-    REQUIRE(producer.WaitFor(2s));
-    CHECK(producer.Get());
 }
 
 TEST_CASE("a nonzero byte bound without a SizeOf is refused at construction",

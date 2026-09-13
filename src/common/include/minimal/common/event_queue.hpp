@@ -7,18 +7,17 @@
 // completions and read-only commands running alongside a turn all had to
 // funnel through one draining writer -- but EventBroadcaster (see
 // src/server/rpc/include/minimal/rpc/event_broadcaster.hpp) took that role
-// over, and the
-// terminal/drop-mode machinery below (PushTerminal, AbortWaitingProducers) has
-// no non-test caller anymore. Today's production users are two task queues,
+// over with a never-blocking drop-oldest design. The terminal-push and
+// drop-mode machinery that supported the old queue's blocking producers
+// (PushTerminal, AbortWaitingProducers) had no production caller left and has
+// been DELETED; history has it. Today's production users are two task queues,
 // `EventQueue<std::function<void()>>` in HookDispatcher and
 // SessionObserverRegistry, that use Push/TryPush/Pop/Close/DiscardPending on
-// count-bounded (no SizeOf) queues; the byte-accounting and terminal-push
-// paths are exercised by tests/event_queue_test.cpp only. Kept in common/
-// rather than deleted because the ordering/backpressure/drop-mode invariants
-// are still exactly what a "many producers queue work behind one draining
-// consumer" primitive needs, whichever caller reaches for it next -- and
-// because ARCHITECTURE.md's "Concurrency model" still describes the original
-// queue-per-session design this class was extracted from.
+// count-bounded (no SizeOf) queues; the byte-accounting path is exercised by
+// tests/event_queue_test.cpp only. Kept in common/ because the
+// ordering/backpressure invariants are exactly what a "many producers queue
+// work behind one draining consumer" primitive needs, whichever caller
+// reaches for it next.
 //
 // Templated because none of the above depends on the payload type: keeping it
 // generic lets the ordering and concurrency properties be tested against a
@@ -32,10 +31,7 @@
 //
 // The two push flavours match a WORKER/READER thread split: Push blocks when
 // full and is for the thread allowed to block; TryPush never blocks and is for
-// a thread that must not (draining alongside other work). Push's one
-// non-blocking exit is drop-mode below: something that can cancel a worker
-// must be able to unwedge one parked on a full queue, and the event it was
-// trying to deliver at that moment is the correct thing to lose.
+// a thread that must not (draining alongside other work).
 
 #include <condition_variable>
 #include <cstddef>
@@ -90,41 +86,14 @@ public:
     // same false TryPush already returns, so callers do not need two
     // "did this actually happen" idioms depending on which push they used.
     //
-    // Returns whether the event was queued. False means the queue is closed,
-    // or drop-mode (below) latched and the queue is over its bounds -- the
-    // caller decides what a refusal means. The stream sink's refusal is the
-    // loop abort; sinks without a bool contract simply lose the event.
+    // Returns whether the event was queued. False means the queue is closed;
+    // the caller decides what a refusal means.
     bool Push(T event) {
         bool accepted = false;
         {
             std::unique_lock<std::mutex> lock(mutex_);
             // Closed wakes it too, or a worker would park forever on a queue
-            // whose consumer has already gone. Drop-mode wakes it to DROP,
-            // not to block again -- that is the whole point of Cancel's
-            // unwedge.
-            space_cv_.wait(lock, [this, &event] {
-                return closed_ || drops_ || Fits(event);
-            });
-            if (closed_) return false;
-            if (!Fits(event)) return false;  // drop-mode latched: see below
-            Accept(std::move(event));
-            accepted = true;
-        }
-        cv_.notify_one();
-        return accepted;
-    }
-
-    // The TurnCompleted-shaped push: drop-mode never applies. A cancel that
-    // unwedges a worker on a full queue must not also swallow the turn's exit
-    // signal -- a headless client detects the end of a turn by TurnCompleted
-    // alone, and dropping it converts the unwedge back into a silent hang.
-    // Still blocks for ROOM (the ordinary backpressure a full queue exerts,
-    // released by the next drain or by Close at teardown); it only opts out
-    // of the drop-mode refusal.
-    bool PushTerminal(T event) {
-        bool accepted = false;
-        {
-            std::unique_lock<std::mutex> lock(mutex_);
+            // whose consumer has already gone.
             space_cv_.wait(lock, [this, &event] { return closed_ || Fits(event); });
             if (closed_) return false;
             Accept(std::move(event));
@@ -166,17 +135,8 @@ public:
         T event = std::move(events_.front().event);
         bytes_total_ -= events_.front().bytes;
         events_.pop_front();
-        // The self-heal is precise, not automatic: clearing the latch on ANY
-        // drain -- including one that freed no room -- re-wedged a producer
-        // that parked right after, because its wait predicate
-        // (closed_ || drops_ || Fits) is false on both counts again and only
-        // a SECOND cancel could reach it. Clear only when the drain actually
-        // created room (HasRoomLocked); until then Push keeps refusing, so
-        // the parked producer's way out survives.
-        if (drops_ && HasRoomLocked()) drops_ = false;
         // notify_all, not notify_one: waiters' Fits(event) predicates differ by
-        // the size of THEIR OWN pending event (and Push additionally wakes on
-        // drops_ while PushTerminal does not), so one drain can free room for a
+        // the size of THEIR OWN pending event, so one drain can free room for a
         // small waiter while notify_one happens to wake a large one, which
         // re-waits without re-notifying -- the small waiter starves until the
         // next drain. All woken waiters re-check their own predicate and
@@ -193,7 +153,6 @@ public:
         T event = std::move(events_.front().event);
         bytes_total_ -= events_.front().bytes;
         events_.pop_front();
-        if (drops_ && HasRoomLocked()) drops_ = false;  // same precise self-heal as Pop
         space_cv_.notify_all();  // same non-uniform-predicate reasoning as Pop
         return event;
     }
@@ -212,43 +171,18 @@ public:
     // Drops every queued event; open/closed state are untouched, and this is a
     // drain like Pop/TryPop, not a reset -- it clears bytes_total_ (an empty
     // deque has zero bytes buffered, and leaving the stale total in place would
-    // make Fits() refuse everything but a single event forever) and applies the
-    // same drop-latch self-heal (this drain always frees maximum room, so
-    // drops_ always clears here). For teardown paths that must not spend
-    // unbounded time draining work whose results nobody can consume anymore
-    // (the hook dispatcher's destructor: N queued hooks x up to a 60 s
-    // uncancellable floor each). Blocked producers wake with the queue roomy.
+    // make Fits() refuse everything but a single event forever). For teardown
+    // paths that must not spend unbounded time draining work whose results
+    // nobody can consume anymore (the hook dispatcher's destructor: N queued
+    // hooks x up to a 60 s uncancellable floor each). Blocked producers wake
+    // with the queue roomy.
     void DiscardPending() {
         {
             std::lock_guard<std::mutex> lock(mutex_);
             events_.clear();
             bytes_total_ = 0;
-            if (drops_ && HasRoomLocked()) drops_ = false;
         }
         cv_.notify_all();
-        space_cv_.notify_all();
-    }
-
-    // Latches drop-mode: until the consumer next drains (Pop/TryPop), Push
-    // REFUSES over-bounds events instead of blocking on them. Cancel's
-    // unwedge: a worker parked on a full queue -- a stalled-but-connected
-    // client, the one state backpressure exists for -- was exactly the state
-    // a cancel could not reach: the parked push blocked the very turn the
-    // user asked to stop, and only stream close helped.
-    //
-    // Latched rather than one-shot so a producer parking a moment AFTER the
-    // cancel gets the same way out, and so the self-heal is visible: the
-    // latch clears at the next drain that actually frees room (Pop/TryPop,
-    // see HasRoomLocked), when ordinary backpressure resumes. NOT Close():
-    // cancel ends a turn, not the session -- the queued
-    // backlog stays deliverable, the queue stays open, and PushTerminal
-    // events still wait for room.
-    void AbortWaitingProducers() {
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            if (closed_) return;
-            drops_ = true;
-        }
         space_cv_.notify_all();
     }
 
@@ -297,17 +231,6 @@ private:
         events_.push_back(Item{std::move(event), bytes});
     }
 
-    // Is there room for at least a minimal event right now -- below BOTH
-    // bounds? The drop-latch's self-heal condition (see Pop). Byte comparison
-    // is against max_bytes_ itself, not max minus an event size: the point is
-    // "did this drain move the queue back under the watermark it wedged at",
-    // not "would one specific event fit" -- that test is Push's own Fits.
-    bool HasRoomLocked() const {
-        if (events_.size() >= max_size_) return false;
-        if (max_bytes_ == 0) return true;   // count-bound only
-        return events_.empty() || bytes_total_ < max_bytes_;
-    }
-
     struct Item {
         T event;
         std::size_t bytes = 0;
@@ -322,10 +245,6 @@ private:
     std::size_t bytes_total_ = 0;
     SizeOf size_of_;
     bool closed_ = false;
-    // Drop-mode, latched by AbortWaitingProducers, cleared by the next drain
-    // that actually frees room (Pop/TryPop + HasRoomLocked): while set, Push
-    // refuses over-bounds events instead of blocking the worker on them.
-    bool drops_ = false;
 };
 
 }  // namespace minimal::common
