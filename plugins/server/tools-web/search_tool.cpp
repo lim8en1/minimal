@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <limits>
 #include <sstream>
 
 #include <nlohmann/json.hpp>
@@ -82,7 +83,14 @@ public:
             return Error("web_search: 'max_results' must be an integer");
         }
         if (input.contains("max_results")) {
-            max_results = input.at("max_results").get<int>();
+            // Same narrowing discipline as web_fetch's max_bytes: get<int>()
+            // after only an is_number_integer check silently truncated (or
+            // wrapped) a value outside int range before the clamp could run.
+            const auto raw = input.at("max_results").get<std::int64_t>();
+            if (raw < 1 || raw > std::numeric_limits<int>::max()) {
+                return Error("web_search: 'max_results' is out of range");
+            }
+            max_results = static_cast<int>(raw);
         }
         max_results = std::clamp(max_results, 1, settings_.search_max_results);
 

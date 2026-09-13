@@ -252,9 +252,14 @@ int XferInfoCallback(void* clientp, curl_off_t /*dltotal*/, curl_off_t dlnow, cu
             // MAXFILESIZE_LARGE's abort carried no message of its own: it fell
             // to the generic curl_easy_strerror ("Exceeded the maximum amount
             // of..."), unrecognizable next to Get's named limit error and
-            // unclassifiable for retry decisions. Name it.
+            // unclassifiable for retry decisions. Name it -- and name the cap
+            // of the ACTUAL mode: Get buffers at 8 MiB, Post/DELETE at 64 MiB
+            // (the option below was once set to the Post cap for every mode,
+            // so Get's early abort reported the wrong threshold).
             throw HttpError(HttpErrorKind::Other,
-                            "response body exceeded 64 MiB (MAXFILESIZE abort)");
+                            state.mode == Mode::Get
+                                ? "response body exceeded 8 MiB (MAXFILESIZE abort)"
+                                : "response body exceeded 64 MiB (MAXFILESIZE abort)");
         case CURLE_COULDNT_CONNECT:
         case CURLE_COULDNT_RESOLVE_HOST:
         case CURLE_COULDNT_RESOLVE_PROXY:
@@ -309,9 +314,13 @@ HttpResponse ConfigureAndPerform(CURL* handle, const HttpRequest& request, Mode 
     curl_easy_setopt(handle, CURLOPT_NOSIGNAL, 1L);
     curl_easy_setopt(handle, CURLOPT_CONNECTTIMEOUT_MS, static_cast<long>(request.connect_timeout.count()));
     // Early abort when the server states a Content-Length above the cap; the
-    // WriteCallback check remains the authority for chunked responses -- and
-    // for Get's tighter 8 MiB cap, which must produce its own named error.
-    curl_easy_setopt(handle, CURLOPT_MAXFILESIZE_LARGE, static_cast<curl_off_t>(kMaxBodyBytes));
+    // WriteCallback check remains the authority for chunked responses. The
+    // threshold is per mode: Get buffers at 8 MiB, Post/DELETE at 64 MiB --
+    // setting the Post cap here unconditionally made Get's early abort fire
+    // at the wrong threshold (its WriteCallback still caught the real cap).
+    curl_easy_setopt(handle, CURLOPT_MAXFILESIZE_LARGE,
+                     static_cast<curl_off_t>(state.mode == Mode::Get ? kMaxResponseBodyBytes
+                                                                     : kMaxBodyBytes));
 
     // The cap is total, not per-phase, in EVERY mode: a streaming server that
     // accepts the connection and then goes silent must degrade to a bounded

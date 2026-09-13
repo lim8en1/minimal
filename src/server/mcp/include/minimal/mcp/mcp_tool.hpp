@@ -32,10 +32,17 @@ public:
 // and never a hang. `error` is user-facing text naming what went wrong
 // (timeout, dead server, protocol error); it must never contain secrets --
 // the connection layer redacts interpolated env before anything reaches here.
+// `caller_cancelled` is the TYPED form of one failure kind: the CALLER's
+// cancel token fired (a turn abort, a tab close), which the manager treats
+// differently from a transport failure -- the server did nothing wrong, so
+// the connection stays alive. (This was once detected by comparing `error`
+// against the literal "cancelled"; any rename of that string silently
+// changed whether a cancelled call killed the connection.)
 struct McpCallOutcome {
     bool ok = false;
-    std::string error;     // meaningful iff !ok
-    nlohmann::json result; // meaningful iff ok
+    std::string error;         // meaningful iff !ok
+    bool caller_cancelled = false;  // meaningful iff !ok: the caller's token fired
+    nlohmann::json result;     // meaningful iff ok
 };
 
 // Converts an MCP tools/call result object into a ToolResult. `content` items

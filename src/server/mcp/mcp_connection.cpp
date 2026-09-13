@@ -52,38 +52,45 @@ tools::CancelToken& TokenFor(const tools::CancelTokenPtr& cancel) {
     return cancel != nullptr ? *cancel : never_cancelled;
 }
 
+// How a wait ended. Typed rather than a sentinel string in `error`: the
+// caller-cancelled case changes what the manager does to the connection
+// (leave it alive -- the server did nothing wrong), and detecting that by
+// comparing the human-facing message against the literal "cancelled" broke
+// silently under any rename.
+enum class WaitResult { kCompleted, kCallerCancelled, kTimedOut, kSlotError };
+
 // Waits until the slot completes, the token is cancelled, or the deadline
 // passes. Zero polling: the completion path notifies the token's cv, so the
-// waiter wakes on exactly the events that can change its outcome. True when
-// the slot completed; false after setting `error` -- the underlying job keeps
-// running in the background either way.
+// waiter wakes on exactly the events that can change its outcome. kCompleted
+// when the slot completed; otherwise `error` is set -- the underlying job
+// keeps running in the background either way.
 //
 // Lock order: the token mutex is held across the predicate loop and the wait,
 // then RELEASED before slot.mu is taken -- the worker's completion path takes
 // them in the opposite order (slot.mu, then token.mu in Notify), and a
 // waiter that held both would close a cycle.
 template <typename T>
-bool WaitSlot(Slot<T>& slot, const tools::CancelTokenPtr& cancel,
-              std::chrono::steady_clock::time_point deadline, std::string& error) {
+WaitResult WaitSlot(Slot<T>& slot, const tools::CancelTokenPtr& cancel,
+                    std::chrono::steady_clock::time_point deadline, std::string& error) {
     tools::CancelToken& token = TokenFor(cancel);
     {
         std::unique_lock<std::mutex> lock(token.Mu());
         while (!slot.done.load(std::memory_order_acquire)) {
             if (token.IsCancelled()) {
                 error = "cancelled";
-                return false;
+                return WaitResult::kCallerCancelled;
             }
             if (std::chrono::steady_clock::now() >= deadline) {
                 error = "request timed out";
-                return false;
+                return WaitResult::kTimedOut;
             }
             token.Cv().wait_until(lock, deadline);
         }
     }
     std::lock_guard<std::mutex> slot_lock(slot.mu);
-    if (slot.error.empty()) return true;
+    if (slot.error.empty()) return WaitResult::kCompleted;
     error = slot.error;
-    return false;
+    return WaitResult::kSlotError;
 }
 
 // We send integer ids; a conforming server echoes the id verbatim. Lenient
@@ -716,8 +723,8 @@ std::unique_ptr<McpConnection> McpConnection::Open(const McpEndpoint& endpoint,
                        TokenFor(token).Notify();
                    },
                    *slot, token, "MCP connection is shutting down");
-    if (!WaitSlot(*slot, token, std::chrono::steady_clock::now() + limits.connect,
-                  error.message)) {
+    if (WaitSlot(*slot, token, std::chrono::steady_clock::now() + limits.connect,
+                 error.message) != WaitResult::kCompleted) {
         if (error.message.empty()) error.message = "MCP initialize timed out";
         connection->Teardown();
         return nullptr;
@@ -739,8 +746,9 @@ bool McpConnection::Ping(const tools::CancelTokenPtr& cancel, Failure& error) {
                        TokenFor(cancel).Notify();
                    },
                    *slot, cancel, "MCP connection is shutting down");
-    const bool completed =
-        WaitSlot(*slot, cancel, std::chrono::steady_clock::now() + request_timeout_, error.message);
+    const bool completed = WaitSlot(*slot, cancel,
+                                    std::chrono::steady_clock::now() + request_timeout_,
+                                    error.message) == WaitResult::kCompleted;
     if (!completed) return false;
     std::lock_guard<std::mutex> lock(slot->mu);
     return slot->value.value_or(false);
@@ -755,8 +763,8 @@ std::optional<std::vector<McpConnection::ToolListing>> McpConnection::ListTools(
                        TokenFor(cancel).Notify();
                    },
                    *slot, cancel, "MCP connection is shutting down");
-    if (!WaitSlot(*slot, cancel, std::chrono::steady_clock::now() + request_timeout_,
-                  error.message)) {
+    if (WaitSlot(*slot, cancel, std::chrono::steady_clock::now() + request_timeout_,
+                 error.message) != WaitResult::kCompleted) {
         return std::nullopt;
     }
     std::lock_guard<std::mutex> lock(slot->mu);
@@ -775,9 +783,13 @@ McpCallOutcome McpConnection::CallTool(std::string_view tool_name, const nlohman
                    },
                    *slot, cancel, "MCP connection is shutting down");
     std::string error;
-    if (!WaitSlot(*slot, cancel, std::chrono::steady_clock::now() + request_timeout_, error)) {
+    const WaitResult wait = WaitSlot(*slot, cancel,
+                                     std::chrono::steady_clock::now() + request_timeout_, error);
+    if (wait != WaitResult::kCompleted) {
         outcome.error = std::move(error);
         if (outcome.error.empty()) outcome.error = "MCP call failed";
+        // The typed form of the cancel case (was: error == "cancelled").
+        outcome.caller_cancelled = wait == WaitResult::kCallerCancelled;
         return outcome;
     }
     {

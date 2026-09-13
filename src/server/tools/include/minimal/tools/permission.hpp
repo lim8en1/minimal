@@ -97,16 +97,20 @@ struct PermissionPolicy {
 
     // Pattern rules, keyed by PERMISSION key (never an alias -- the same rule
     // per_tool_overrides obeys). Semantics: an exact per_tool_overrides entry
-    // still wins; otherwise the most_restrictive MATCHING pattern for the
-    // tool's subject replaces the category default when at least one pattern
-    // matches (zero matches -> the category default, untouched). Patterns are
-    // operator intent at tool granularity, the same standing per_tool_overrides
-    // has -- everything downstream (out_of_workdir, network, ceilings, run
-    // modes) still folds on top, so a pattern can never bypass the substrate.
-    // The one shape most-restrictive folding cannot express: a strict default
-    // pattern plus a more-specific ALLOW ("git *": "ask" + "git status":
-    // "allow" stays ask). Escape hatches: an exact per_tool_overrides entry,
-    // or splitting the rule per tool.
+    // and the most_restrictive MATCHING pattern for the tool's subject FOLD --
+    // exact does not short-circuit past the pattern layer (a short-circuit let
+    // an AlwaysAllow exact override silently defeat a built-in pattern denial,
+    // e.g. the dotenv rule, for every input, since the pattern layer was never
+    // even consulted). No pattern match -> the exact entry wins as before
+    // (folding with nullopt is a no-op); any match -> most_restrictive of the
+    // two, so a matching deny pattern is undefeatable by a scalar allow.
+    // Patterns are operator intent at tool granularity, the same standing
+    // per_tool_overrides has -- everything downstream (out_of_workdir, network,
+    // ceilings, run modes) still folds on top, so a pattern can never bypass
+    // the substrate. The one shape this folding cannot express: a strict
+    // default pattern plus a more-specific ALLOW ("git *": "ask" + "git
+    // status": "allow" stays ask) -- the remedy is to write the broad rule
+    // narrower, not to layer an override on top.
     std::unordered_map<std::string, std::vector<PermissionPatternRule>> pattern_overrides;
 
     // Path patterns on the out_of_workdir dimension: when an invocation

@@ -60,6 +60,7 @@ NameRegistry::Result NameRegistry::Resolve() const {
         resolved.reserve(kind_entries.size());
         std::unordered_map<std::string, int> unaliased_name_counts;
         std::unordered_map<std::string, int> total_name_counts;
+        std::unordered_map<std::string, int> identity_counts;
         for (const auto& e : kind_entries) {
             std::string stable_identity = StableIdentity(e.plugin_name, e.original_name);
             std::string surface_name = e.original_name;
@@ -82,6 +83,16 @@ NameRegistry::Result NameRegistry::Resolve() const {
         for (std::size_t i = 0; i < kind_entries.size(); ++i) {
             const auto& e = kind_entries[i];
             const auto& r = resolved[i];
+
+            // The composition-ambiguity check, per kind: two (plugin, name)
+            // pairs whose StableIdentity strings coincide -- ("a.b","c") and
+            // ("a","b.c") both compose "a.b.c" -- cannot be told apart by
+            // ANY qualified key, so an alias or rule targeting one silently
+            // governs both. That is the case the Register-time dot warning
+            // only gestures at; here, where the whole registered set is
+            // visible, it becomes startup-fatal. A LONE dotted plugin name
+            // composes nothing and stays the warning it always was.
+            identity_counts[r.stable_identity]++;
 
             // Bare in two disjoint cases:
             //  - no other entry, aliased or not, ever claimed this
@@ -110,6 +121,10 @@ NameRegistry::Result NameRegistry::Resolve() const {
 
         for (const auto& [surface, count] : surface_name_counts) {
             if (count > 1) result.fatal_collisions.push_back(surface);
+        }
+
+        for (const auto& [identity, count] : identity_counts) {
+            if (count > 1) result.ambiguous_identities.push_back(identity);
         }
 
         if (kind_aliases) {

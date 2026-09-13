@@ -159,3 +159,34 @@ TEST_CASE("a service name is a separate namespace from tools and commands",
     CHECK(result.fatal_collisions.empty());
     REQUIRE(result.entries.size() == 3);
 }
+
+TEST_CASE("a lone dotted plugin name stays a warning, not a collision",
+          "[name_registry][dotted]") {
+    // ("a.b", "widget") composes "a.b.widget"; nothing else composes it, so
+    // no identity ambiguity exists and Resolve reports none -- the dot
+    // warning at Register time is the whole story.
+    NameRegistry reg;
+    reg.Register(NameKind::Tool, "a.b", "widget");
+
+    auto result = reg.Resolve();
+    CHECK(result.fatal_collisions.empty());
+    CHECK(result.ambiguous_identities.empty());
+}
+
+TEST_CASE("two dotted names composing the same identity are a fatal ambiguity",
+          "[name_registry][dotted][invariant]") {
+    // ("a.b", "c") and ("a", "b.c") both compose the stable identity
+    // "a.b.c": no alias or rule can address one claimant without governing
+    // both, so the ambiguity must be startup-fatal rather than the
+    // Register-time warning that left resolution order-dependent.
+    NameRegistry reg;
+    reg.Register(NameKind::Tool, "a.b", "c");
+    reg.Register(NameKind::Tool, "a", "b.c");
+
+    auto result = reg.Resolve();
+    REQUIRE(result.ambiguous_identities.size() == 1);
+    CHECK(result.ambiguous_identities[0] == "a.b.c");
+    // Distinct names, so no surface collision -- the ambiguity is the only
+    // finding.
+    CHECK(result.fatal_collisions.empty());
+}

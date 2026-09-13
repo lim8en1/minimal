@@ -100,16 +100,16 @@ public:
             // (a stuck cancel token or a hung caller must not be doubled),
             // but the NEXT one takes the need_restart branch above.
             //
-            // EXCEPT caller cancellation: WaitSlot sets exactly "cancelled"
-            // when the CALLER's token fired (a turn abort, a tab close). The
-            // server did nothing wrong -- the MCP job keeps running server-side,
-            // and its state is the user's to keep. Killing the connection here
-            // would respawn (and drop every server-side session) on a routine
-            // turn abort, so a cancelled call leaves `alive` untouched. A
-            // timeout still kills: the worker is single-threaded, and a call
-            // that wedges its transport must otherwise wedge every later call
-            // with it.
-            const bool caller_cancelled = outcome.error == "cancelled";
+            // EXCEPT caller cancellation: WaitSlot reports the CALLER's token
+            // firing (a turn abort, a tab close) as the typed
+            // outcome.caller_cancelled. The server did nothing wrong -- the
+            // MCP job keeps running server-side, and its state is the user's
+            // to keep. Killing the connection here would respawn (and drop
+            // every server-side session) on a routine turn abort, so a
+            // cancelled call leaves `alive` untouched. A timeout still kills:
+            // the worker is single-threaded, and a call that wedges its
+            // transport must otherwise wedge every later call with it.
+            const bool caller_cancelled = outcome.caller_cancelled;
             if (!caller_cancelled) {
                 std::lock_guard<std::mutex> lock(handle->mu);
                 handle->alive = false;

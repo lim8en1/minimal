@@ -59,6 +59,13 @@ public:
         std::vector<ResolvedEntry> entries;
         std::vector<std::string> fatal_collisions;   // duplicate surface names
         std::vector<std::string> dangling_aliases;    // alias key naming nothing registered
+        // Stable identities ("plugin.name") composed by MORE THAN ONE
+        // (plugin, original_name) pair -- ("a.b","c") and ("a","b.c") both
+        // compose "a.b.c". An alias or rule targeting such an identity cannot
+        // be resolved to one claimant, which is a startup-fatal ambiguity,
+        // not a warning. A LONE dotted plugin name composes nothing and
+        // stays the Register-time warning it always was.
+        std::vector<std::string> ambiguous_identities;
     };
 
     Result Resolve() const;

@@ -695,6 +695,21 @@ std::vector<CheckResult> StartupSanityCheck::check_name_collisions() {
                                   "' resolves to nothing registered (typo, or the providing plugin is disabled)"));
     }
 
+    // Dotted plugin names that actually COMPOSE ambiguously: ("a.b","c") and
+    // ("a","b.c") both form the stable identity "a.b.c", so no alias or rule
+    // can address one claimant without governing both. Fatal like a surface
+    // collision -- the Register-time dot warning alone left the resolution
+    // order-dependent. Renaming one of the plugin files (or aliasing within
+    // one plugin) is the fix.
+    for (const auto& identity : resolution.result.ambiguous_identities) {
+        results.push_back(Fatal(
+            "name_collisions",
+            "stable identity '" + identity +
+                "' is composed ambiguously by two or more registered names (a plugin name "
+                "containing a dot collides across ('a.b','c') and ('a','b.c')) -- rename one of "
+                "the plugins"));
+    }
+
     // THE THIRD REGISTRATION NAMESPACE. Tools and commands both feed
     // ResolveRegistrationNames and collide fatally; provider kinds were exempt,
     // because ProviderFactoryRegistry::Register signalled a duplicate only
