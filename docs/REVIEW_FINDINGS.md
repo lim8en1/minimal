@@ -178,10 +178,15 @@ crosses" holds per-thread, not for the shared counter.
 
 ## E. Open verification item
 
-- **TSan suite needs a fresh complete run.** The repo's latest `build-tsan`
-  ctest log shows only 24 of 2,198 tests executed before the run ended; the
-  `LastTestsFailed.log` there is from Sep 11 and the tests I could locate in
-  the current log all report "Test Passed". The `build/` suite is clean
-  (2,198/2,198 on Sep 12). Concurrency correctness is this codebase's core
-  claim — the TSan tier is the one that proves it, and its status is currently
-  unconfirmed.
+- **(Resolved 2026-09-12.)** Full TSan suite run completed: **2,229/2,229
+  pass** (as do the full `build/` and ASan tiers). The first complete TSan
+  run in the tree's history surfaced six failures in three classes, all
+  test-side, all fixed: the unlocked `InMemoryHistoryStore` test fake (now
+  mutexed, with `Snapshot()` copy-out reads), a test-side shared-variable
+  race in `checklist_view_test.cpp` (mutexed setters), and uninstrumented
+  system-sqlite cross-process WAL false positives in the multi-process E2E
+  tier (suppressed by frame function in `tests/tsan.supp`; note
+  `called_from_lib` cannot be used there -- the system and vcpkg sqlite3
+  share a basename, and the TSan runtime aborts on the ambiguity). See
+  commit "test(tier): make the test fakes as thread-safe as what they
+  fake".
