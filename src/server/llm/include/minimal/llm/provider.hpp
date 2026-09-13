@@ -20,6 +20,13 @@ struct ProviderConfig {
     // the provider already sets (Content-Type, the auth header) is the
     // operator's to avoid.
     std::vector<std::pair<std::string, std::string>> headers;
+    // The JSON body key the request's output cap (ChatRequest::max_tokens) is
+    // serialized under. Empty means "max_tokens" -- the historical
+    // chat-completions field every OpenAI-compatible local backend accepts,
+    // and what newer OpenAI models REJECT in favor of "max_completion_tokens".
+    // providers.json's "max_tokens_field" sets it per entry; the OpenAI
+    // provider consumes it, other backends ignore it.
+    std::string max_tokens_field;
     std::chrono::milliseconds connect_timeout{5000};
     std::chrono::milliseconds request_timeout{120000};
     std::chrono::milliseconds stream_idle_timeout{60000};

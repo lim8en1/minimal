@@ -12,7 +12,8 @@ separate data dir: `$XDG_DATA_HOME/minimal`, else `$HOME/.local/share/minimal`.
 
 The config dir is seeded from `bundled/` at `cmake --install` time (see
 BUILD.md); existing files are never overwritten. Nothing is seeded at server
-runtime.
+runtime. Copyable example agents, prompts, skills, and commands live in
+[examples/](../examples/).
 
 ## File inventory
 
@@ -235,6 +236,7 @@ is a commented starting point.
 | `models` | yes (unless `discover`) | object | — | keyed by model name |
 | `parameters` | no | object | `{}` | arbitrary sampling/generation knobs passed through to the backend (e.g. `temperature`, `top_p`, `cache_ttl` for anthropic: `"5m"` or `"1h"`). Model-level `parameters` **replaces** (does not merge) the provider's |
 | `max_tokens` | no | int | — | required for the `anthropic` backend (here or per-model) or every request fails |
+| `max_tokens_field` | no | string | `"max_tokens"` | the JSON body key the output cap is emitted under (`openai` backend only). Newer OpenAI models reject the legacy `max_tokens` key and require `"max_completion_tokens"` — set that here. Any other value is a parse error. Ignored by the `anthropic` backend |
 | `context_window_tokens` | no | int | — | per provider = default for all its models |
 
 ### Per model (`models.<name>`)

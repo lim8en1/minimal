@@ -22,9 +22,10 @@ namespace {
 // agent loop, brick the session: every subsequent turn -- and the compaction
 // call -- threw again). The string escaping now replaces invalid UTF-8 rather
 // than throwing; any residual serializer failure is still classified here.
-std::string GuardedBuildRequestBody(const llm::ChatRequest& request, bool stream) {
+std::string GuardedBuildRequestBody(const llm::ChatRequest& request, bool stream,
+                                    const std::string& max_tokens_field) {
     try {
-        return BuildRequestBody(request, stream);
+        return BuildRequestBody(request, stream, max_tokens_field);
     } catch (const std::exception& error) {
         throw llm::LlmError(llm::LlmErrorCategory::RequestError,
                             "failed to build request body: " + std::string(error.what()));
@@ -59,7 +60,7 @@ llm::ChatResponse OpenAiProvider::Complete(const llm::ChatRequest& request) {
     // parameters object and the system string per call -- and, worse, per
     // RETRY ATTEMPT, since the loop calls this method once per attempt.
     net::HttpRequest http_request =
-        BuildHttpRequest(GuardedBuildRequestBody(request, /*stream=*/false), /*streaming=*/false);
+        BuildHttpRequest(GuardedBuildRequestBody(request, /*stream=*/false, config_.max_tokens_field), /*streaming=*/false);
 
     net::HttpResponse http_response;
     try {
@@ -87,7 +88,7 @@ llm::ChatResponse OpenAiProvider::Complete(const llm::ChatRequest& request) {
 
 llm::ChatResponse OpenAiProvider::StreamComplete(const llm::ChatRequest& request, const llm::StreamEventSink& sink) {
     net::HttpRequest http_request =
-        BuildHttpRequest(GuardedBuildRequestBody(request, /*stream=*/true), /*streaming=*/true);
+        BuildHttpRequest(GuardedBuildRequestBody(request, /*stream=*/true, config_.max_tokens_field), /*streaming=*/true);
 
     OpenAiStreamReassembler reassembler;
     net::SseParser sse_parser;

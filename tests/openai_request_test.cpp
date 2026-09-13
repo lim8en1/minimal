@@ -289,6 +289,30 @@ TEST_CASE("BuildRequestBody: max_tokens presence and precedence over parameters"
     CHECK_FALSE(ParseBody(without_max).contains("max_tokens"));
 }
 
+TEST_CASE("BuildRequestBody: max_tokens_field renames the output-cap key and drops the "
+          "colliding parameter",
+          "[openai_request]") {
+    // Newer OpenAI models reject the legacy "max_tokens" key in favor of
+    // "max_completion_tokens"; the provider entry's max_tokens_field switches
+    // the spelling. The ACTIVE cap field is dropped from `parameters` too, so
+    // a backend never sees two competing caps; the OTHER spelling passes
+    // through untouched (it is the user's parameters, not a structural key).
+    Fixture fixture = BaseRequest();
+    fixture.request.max_tokens = 256;
+    fixture.request.parameters = {{"max_completion_tokens", 1}, {"temperature", 0.5}};
+
+    const auto body = nlohmann::json::parse(
+        BuildRequestBody(fixture.request, /*stream=*/false, "max_completion_tokens"));
+    CHECK(body["max_completion_tokens"] == 256);   // the structural cap, renamed
+    CHECK_FALSE(body.contains("max_tokens"));      // no legacy key either
+    CHECK(body["temperature"] == 0.5);             // unrelated parameters survive
+
+    // Default (empty field name) is byte-compatible with the historical form.
+    const auto default_body =
+        nlohmann::json::parse(BuildRequestBody(fixture.request, /*stream=*/false, ""));
+    CHECK(default_body["max_tokens"] == 256);
+}
+
 TEST_CASE("BuildRequestBody: cache_control flag off is the historical body", "[openai_request][cache]") {
     // Default: no flag, no markers. Plain OpenAI, llama.cpp and vLLM either
     // auto-cache or reject unknown content-part fields, so the flagged-on form

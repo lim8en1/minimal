@@ -121,7 +121,13 @@ nlohmann::json ToOpenAiToolChoice(const llm::ToolChoiceSpec& choice) {
     return "auto";
 }
 
-std::string BuildRequestBody(const llm::ChatRequest& request, bool stream) {
+std::string BuildRequestBody(const llm::ChatRequest& request, bool stream,
+                             const std::string& max_tokens_field) {
+    // The active output-cap key: empty/absent config means the historical
+    // "max_tokens", which llama.cpp/vLLM and older OpenAI models accept.
+    // "max_completion_tokens" is the spelling newer OpenAI models demand.
+    const std::string cap_field =
+        max_tokens_field.empty() ? std::string("max_tokens") : max_tokens_field;
     // THE WHOLE BODY IS SERIALIZED INCREMENTALLY. The previous version built a
     // nlohmann DOM of the entire history and then dump()ed it -- two
     // materializations of every message per provider call, against a stated
@@ -154,9 +160,14 @@ std::string BuildRequestBody(const llm::ChatRequest& request, bool stream) {
 
     // 1. parameters first, verbatim minus structural names -- see the comment
     //    on StructuralKeys() for why "dropped" preserves the old guarantee.
+    //    The active cap field is dropped too, whether or not it is the
+    //    historical "max_tokens": a parameters key of the same name would
+    //    otherwise ride alongside the structural cap and the backend would
+    //    see both.
     if (request.parameters.is_object()) {
         for (const auto& [key, value] : request.parameters.items()) {
             if (StructuralKeys().count(key) != 0) continue;
+            if (key == cap_field) continue;
             if (!first_key) out += ',';
             first_key = false;
             AppendStringValue(out, key);
@@ -334,7 +345,9 @@ std::string BuildRequestBody(const llm::ChatRequest& request, bool stream) {
     }
 
     if (request.max_tokens) {
-        out += R"(,"max_tokens":)" + std::to_string(*request.max_tokens);
+        out += ',';
+        AppendKey(out, cap_field);
+        out += std::to_string(*request.max_tokens);
     }
 
     if (stream) {

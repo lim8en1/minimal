@@ -751,6 +751,23 @@ ProvidersConfig ParseProvidersConfigUnwrapped(const nlohmann::json& doc) {
         entry.max_tokens = OwnNumber<int>(provider_normalized, "max_tokens");
         entry.context_window_tokens =
             OwnNumber<std::int64_t>(provider_normalized, "context_window_tokens");
+        // The output-cap key spelling for the OpenAI-shaped request body.
+        // Empty (absent) means the historical "max_tokens"; the only other
+        // value accepted is "max_completion_tokens" (newer OpenAI models
+        // reject the legacy key). A typo'd value is a named parse error, not
+        // a silent pass-through that no backend understands.
+        if (provider_normalized.contains("max_tokens_field")) {
+            const auto& field = provider_normalized.at("max_tokens_field");
+            if (!field.is_string() ||
+                (field.get<std::string>() != "max_tokens" &&
+                 field.get<std::string>() != "max_completion_tokens")) {
+                throw std::runtime_error(
+                    "providers.json: " + where +
+                    " has an invalid \"max_tokens_field\": expected \"max_tokens\" or "
+                    "\"max_completion_tokens\"");
+            }
+            entry.connection.max_tokens_field = field.get<std::string>();
+        }
         if (provider_normalized.contains("headers") && provider_normalized.at("headers").is_array()) {
             for (const auto& pair : provider_normalized.at("headers")) {
                 if (pair.is_array() && pair.size() == 2 && pair[0].is_string() &&
@@ -806,6 +823,7 @@ ProvidersConfig ParseProvidersConfigUnwrapped(const nlohmann::json& doc) {
             resolved.provider.api_key = api_key.key;
             resolved.provider.model_name = model_name;
             resolved.provider.headers = entry.connection.headers;
+            resolved.provider.max_tokens_field = entry.connection.max_tokens_field;
             resolved.parameters = InheritParameters(provider, model);
             resolved.max_tokens = InheritNumber<int>(provider, model, "max_tokens", model_where);
             resolved.context_window_tokens =

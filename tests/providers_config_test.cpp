@@ -133,6 +133,32 @@ TEST_CASE("a model inherits its provider's settings and may override them", "[pr
     CHECK(overridden.parameters.at("temperature") == 0.7);       // its own
 }
 
+TEST_CASE("max_tokens_field parses onto the connection and validates its value",
+          "[providers]") {
+    // The output-cap key spelling for the OpenAI-shaped request body. Absent
+    // means the historical "max_tokens" (an empty string on the connection);
+    // the only accepted alternative is "max_completion_tokens" -- a typo is a
+    // named parse error, not a pass-through no backend understands.
+    auto doc = TwoModelsOnOneProvider();
+    doc["providers"]["local"]["max_tokens_field"] = "max_completion_tokens";
+    const auto config = ParseProvidersConfig(doc);
+    const auto& model = Require(config, "local/qwen4");
+    CHECK(model.provider.max_tokens_field == "max_completion_tokens");
+
+    // The default: absent field -> empty on the connection -> the OpenAI
+    // provider emits the historical key.
+    const auto defaults = ParseProvidersConfig(TwoModelsOnOneProvider());
+    CHECK(Require(defaults, "local/small").provider.max_tokens_field.empty());
+
+    for (const nlohmann::json& bad :
+         {nlohmann::json("max_completions_tokens"), nlohmann::json("tokens"),
+          nlohmann::json(5)}) {
+        nlohmann::json broken = TwoModelsOnOneProvider();
+        broken["providers"]["local"]["max_tokens_field"] = bad;
+        CHECK_THROWS_AS(ParseProvidersConfig(broken), std::runtime_error);
+    }
+}
+
 TEST_CASE("a model's parameters replace the provider's rather than merging", "[providers]") {
     // Shallow on purpose: what a model declares is exactly what it sends. A deep
     // merge would make a model's effective settings depend on a block elsewhere

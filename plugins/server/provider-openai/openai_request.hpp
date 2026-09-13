@@ -46,7 +46,14 @@ namespace minimal::provider_openai {
 // reach those backends by misconfiguration. The tail message's `tool_calls`
 // and assistant null-content cases carry no breakpoint (there is no text part
 // to hang it on); the system breakpoint still covers the prefix there.
-std::string BuildRequestBody(const llm::ChatRequest& request, bool stream);
+// max_tokens_field: the JSON key the output cap is emitted under -- the
+// provider entry's "max_tokens_field" ("max_tokens" when empty, the
+// historical spelling llama.cpp/vLLM accept; "max_completion_tokens" for
+// newer OpenAI models). The active cap field is also DROPPED from
+// `parameters` alongside the fixed structural keys, so the backend never
+// sees two competing caps.
+std::string BuildRequestBody(const llm::ChatRequest& request, bool stream,
+                             const std::string& max_tokens_field = "max_tokens");
 
 // Tool definitions and tool_choice are small and structured; nlohmann is the
 // right tool for them, and they are exposed individually so each translation
