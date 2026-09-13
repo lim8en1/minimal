@@ -518,6 +518,37 @@ shows through.
   | signals-message | `message_session` |
   | tool-ask | `ask_user` |
 
+- **`allowed_subagents`** — the allow-list of agent preset KEYS (the
+  `agents/<name>.md` file stems, what `spawn_subagent`'s `agent_preset`
+  accepts — NOT the frontmatter display `name:`, which need not match) this
+  preset may spawn. Absent = every spawnable preset; `["*"]` is explicit
+  "all"; a present list is the exact set, and a present EMPTY list means no
+  spawns at all — `spawn_subagent` is withheld from the session entirely, the
+  same fail-closed rule as `allowed_skills` resolving empty. An unlisted
+  preset is refused by `SubagentManager::Spawn` with a named error before any
+  child session exists. An entry naming no preset warns at resolve time (a
+  typo would silently shrink the set). The spawn tool's per-preset definition
+  (below) reflects the same list: it names this preset as the default,
+  lists exactly the allowed presets, and carries a JSON-schema `enum` of them
+  — with the default line omitted when the preset does not list itself, since
+  enforcement would refuse the very default being advertised.
+
+- **Preset-scoped tool definitions** — any core tool may ship a per-preset
+  definition: a builder registered on `AgentPresetRegistry`
+  (`SetDefinitionBuilder`, wired in `main.cpp` beside the tool's own
+  registration) runs ONCE per resolved preset — lazily, inside the resolve
+  cache keyed (preset, project root) — and its result rides
+  `AgentPreset::tool_definition_overrides`; `AgentLoop::BuildSystemAndTools`
+  swaps it in for the tool's static definition by name. The definition is
+  constant per session, so the request prefix the provider's prompt cache
+  keys on never shifts. `skill` and `spawn_subagent` use it today — the
+  skill listing that used to render into the system prompt now rides the
+  skill tool's description, and the spawn tool's description/enum are built
+  the same way. The builders' shared per-root inputs (the spawnable-presets
+  scan — which, unlike the picker listing, includes `hidden` and
+  `mode: subagent` presets, and the merged skill view) are memoized per
+  canonical project root.
+
 - **opencode-compat preset fields** — also accepted in the frontmatter:
   `mode: all|primary|subagent` (subagent = spawnable but hidden from the agent
   picker; never gates spawnability), `disable: true` (refuses to resolve, not
@@ -551,10 +582,11 @@ shows through.
 - **Project-local skills** — the same walk scans `<dir>/skills/*/SKILL.md` plus
   the Claude-compatible `<dir>/.claude/skills/*/SKILL.md` and
   `<dir>/.agents/skills/*/SKILL.md`; the nearest directory wins on a name
-  collision and a project skill shadows a global one. The preset's system-prompt
-  listing, its `allowed_skills` resolution, and the `skill` tool all consult the
-  same session-scoped view, so the prompt never advertises a skill the tool
-  would refuse.
+  collision and a project skill shadows a global one. The `skill` tool's
+  preset-scoped description (see the preset-scoped tool definitions note under
+  `allowed_subagents`), the preset's `allowed_skills` resolution, and the tool
+  itself all consult the same session-scoped view, so the description never
+  advertises a skill the tool would refuse.
 - **`allowed_skills` modes** — the list form means every entry is `allow`; the
   map form gives per-skill `allow` (listed, tool loads outright), `ask` (listed,
   marked "(asks before loading)"; the tool narrows its own permission resolution

@@ -15,6 +15,7 @@
 #include "minimal/common/read_file.hpp"
 #include "minimal/config/frontmatter.hpp"
 #include "minimal/config/project_dirs.hpp"
+#include "minimal/tools/skill_tool.hpp"
 
 namespace minimal::agent {
 
@@ -70,8 +71,11 @@ const config::SkillMeta* FindInMerged(const std::vector<config::SkillMeta>& merg
     return nullptr;
 }
 
-// The on-demand listing: Allow and Ask entries, one bullet each. Ask entries
-// say so, so the model can prefer a no-friction skill when two cover the task.
+// The on-demand listing, as rendered into the `skill` tool's preset-scoped
+// description (AgentPresetRegistry::MakeSkillDefinitionBuilder): Allow and Ask
+// entries, one bullet each. Ask entries say so, so the model can prefer a
+// no-friction skill when two cover the task. No trailing newline -- it is
+// appended to the description text.
 std::string RenderSkillListing(const std::map<std::string, SkillMode>& resolved,
                                const std::vector<config::SkillMeta>& merged) {
     std::string out;
@@ -80,10 +84,12 @@ std::string RenderSkillListing(const std::map<std::string, SkillMode>& resolved,
         const config::SkillMeta* meta = FindInMerged(merged, name);
         if (meta == nullptr) continue;  // unreachable: resolved came from merged
         if (out.empty()) {
-            out = "\n## Available skills\n\nLoad a skill's full instructions with the `skill` tool.\n";
+            out = "Available skills:\n";
+        } else {
+            out += "\n";
         }
         out += "- " + meta->name + ": " + meta->description +
-               (mode == SkillMode::Ask ? " (asks before loading)" : "") + "\n";
+               (mode == SkillMode::Ask ? " (asks before loading)" : "");
     }
     return out;
 }
@@ -186,8 +192,8 @@ AgentPreset AgentPresetRegistry::Resolve(
         .first->second;
 }
 
-std::vector<AgentPresetSummary> AgentPresetRegistry::ListAvailable(
-    const std::filesystem::path& project_root) const {
+std::vector<AgentPresetSummary> AgentPresetRegistry::ListPresets(
+    const std::filesystem::path& project_root, const bool picker_visibility) const {
     // name -> summary, first (nearest) declaration wins: project presets are
     // inserted before the global scan and shadow a global preset of the same
     // name, matching Resolve()'s lookup order.
@@ -216,8 +222,8 @@ std::vector<AgentPresetSummary> AgentPresetRegistry::ListAvailable(
     // the rule Resolve() itself applies. The stem is what both picker
     // selection and /agent <name> actually resolve against, so keying on it
     // is what makes every listed entry selectable.
-    auto scan_dir = [&merged](const std::filesystem::path& agents_dir,
-                              std::set<std::string>* record, const std::set<std::string>* skip) {
+    auto scan_dir = [&](const std::filesystem::path& agents_dir,
+                        std::set<std::string>* record, const std::set<std::string>* skip) {
         std::error_code ec;
         if (!std::filesystem::exists(agents_dir, ec)) return;
 
@@ -228,14 +234,17 @@ std::vector<AgentPresetSummary> AgentPresetRegistry::ListAvailable(
             try {
                 const AgentPresetFrontmatter raw = LoadAgentPresetFrontmatter(entry.path());
                 if (record != nullptr) record->insert(id);
-                // Picker-visibility rules: disabled presets cannot run at all;
+                // Visibility rules. Picker: disabled presets cannot run at all;
                 // `hidden` and `mode: subagent` presets are spawnable but not
                 // switchable from the picker (spawn accepts them regardless).
-                if (raw.disable || raw.hidden || raw.mode == AgentMode::Subagent) continue;
+                // Spawnable listing: only `disable` removes a preset -- mode
+                // and hidden never gate spawnability.
+                if (raw.disable) continue;
+                if (picker_visibility && (raw.hidden || raw.mode == AgentMode::Subagent)) continue;
                 if (skip != nullptr && skip->count(id) != 0) continue;
                 merged.try_emplace(id, AgentPresetSummary{id, raw.description, raw.color});
             } catch (const std::exception& error) {
-                // One malformed preset must not hide the rest from a picker.
+                // One malformed preset must not hide the rest from a listing.
                 common::DefaultLogger().warn("agent preset '{}' skipped in listing: {}",
                                              entry.path().string(), error.what());
             }
@@ -256,6 +265,44 @@ std::vector<AgentPresetSummary> AgentPresetRegistry::ListAvailable(
     out.reserve(merged.size());
     for (auto& [name, summary] : merged) out.push_back(std::move(summary));
     return out;  // map order == name order
+}
+
+std::vector<AgentPresetSummary> AgentPresetRegistry::ListAvailable(
+    const std::filesystem::path& project_root) const {
+    return ListPresets(project_root, /*picker_visibility=*/true);
+}
+
+void AgentPresetRegistry::SetDefinitionBuilder(std::string tool_name,
+                                               PresetToolDefinitionBuilder builder) {
+    std::lock_guard<std::mutex> lock(cache_mu_);
+    definition_builders_[std::move(tool_name)] = std::move(builder);
+}
+
+const PresetToolEnv& AgentPresetRegistry::EnvFor(const std::filesystem::path& project_root) const {
+    // Same canonicalization the preset cache applies: symlinks must not
+    // fragment the memo.
+    std::filesystem::path canonical = project_root;
+    if (!canonical.empty()) {
+        std::error_code ec;
+        auto resolved = std::filesystem::weakly_canonical(canonical, ec);
+        if (!ec) canonical = std::move(resolved);
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(cache_mu_);
+        if (auto it = env_cache_.find(canonical); it != env_cache_.end()) return it->second;
+    }
+
+    // Computed OUTSIDE the lock, exactly like the preset cache: directory
+    // scans behind the mutex would serialize concurrent resolves, and a race
+    // is harmless -- both threads scan immutable files, and the insert below
+    // keeps whichever landed first so every caller sees one consistent env.
+    PresetToolEnv env;
+    env.available_agents = ListPresets(project_root, /*picker_visibility=*/false);
+    env.skills = skills_.AllFor(project_root);
+
+    std::lock_guard<std::mutex> lock(cache_mu_);
+    return env_cache_.emplace(std::move(canonical), std::move(env)).first->second;
 }
 
 void ApplyModel(AgentPreset& preset, const config::ResolvedModel& model) {
@@ -401,7 +448,13 @@ AgentPreset AgentPresetRegistry::ResolveUncached(
     std::map<std::string, SkillMode> tool_skills = resolved_skills;
     const std::string preloaded = RenderPreloadedSkills(resolved_skills, skills_, project_root,
                                                         tool_skills);
-    preset.system_prompt = raw.body + RenderSkillListing(tool_skills, merged_skills) + preloaded;
+    // The on-demand skill listing used to be rendered into the system prompt;
+    // it now rides the `skill` tool's preset-scoped definition instead (the
+    // builder below -- registered by main.cpp beside the tool itself), so the
+    // prompt carries only the preset body and the preloaded bodies. The
+    // preload demotion in the call above still runs HERE: it must, or an
+    // unreadable preload would silently vanish from both surfaces.
+    preset.system_prompt = raw.body + preloaded;
     preset.model_declared = !raw.model.empty();
     ApplyModel(preset, *resolved_model);
     // Preset extras (temperature, top_p, reasoningEffort, ...) override the
@@ -411,6 +464,21 @@ AgentPreset AgentPresetRegistry::ResolveUncached(
         preset.parameters[key] = value;
     }
     preset.allowed_tools = raw.allowed_tools;
+    // Spawn allowlist, resolved: "*" expands to no restriction (nullopt);
+    // anything else carries verbatim -- an explicit EMPTY list stays empty,
+    // meaning no spawns at all (the tool is withheld downstream and every
+    // spawn request refused). Unlike allowed_skills, unknown entries are
+    // warned about rather than dropped: absence-is-deny would make a typo
+    // silently SHRINK the set, and naming it is the fail-loud direction.
+    // The check itself runs below, where the spawnable listing is at hand.
+    if (raw.allowed_subagents.has_value()) {
+        if (std::find(raw.allowed_subagents->begin(), raw.allowed_subagents->end(), "*") !=
+            raw.allowed_subagents->end()) {
+            preset.allowed_subagents = std::nullopt;  // explicit "all"
+        } else {
+            preset.allowed_subagents = raw.allowed_subagents;
+        }
+    }
     preset.allowed_skills = tool_skills;
     preset.allowed_mcp_servers = raw.allowed_mcp_servers;
     // Per-tool plugin config rides verbatim; namespaced slices are delivered
@@ -450,7 +518,65 @@ AgentPreset AgentPresetRegistry::ResolveUncached(
         preset.compression_prompt = default_compression_prompt_;
     }
 
+    // --- Preset-scoped tool definitions ---------------------------------------
+    // Run ONCE here, on the frozen preset the cache is about to hold (and on
+    // the uncached spawn path too, where the skill builder MUST re-run: the
+    // parent clamp above changes the listing per parent). The builders'
+    // per-root inputs come memoized from EnvFor, so N presets of one root
+    // scan agents/ and skills/ once; a deployment with neither a builder nor
+    // any allowlisted preset skips the scan entirely.
+    std::map<std::string, PresetToolDefinitionBuilder> builders;
+    {
+        std::lock_guard<std::mutex> lock(cache_mu_);
+        builders = definition_builders_;
+    }
+    const bool need_listing =
+        !builders.empty() ||
+        (preset.allowed_subagents.has_value() && !preset.allowed_subagents->empty());
+    if (need_listing) {
+        const PresetToolEnv& env = EnvFor(project_root);
+        // The typo warning promised above: an allowlist entry naming no
+        // preset. The child could never resolve the name anyway ("unknown
+        // agent preset" at spawn), but saying so at load points at the FILE.
+        if (preset.allowed_subagents.has_value()) {
+            for (const auto& entry : *preset.allowed_subagents) {
+                const bool known = std::any_of(
+                    env.available_agents.begin(), env.available_agents.end(),
+                    [&entry](const AgentPresetSummary& summary) {
+                        return summary.name == entry;
+                    });
+                if (!known) {
+                    common::DefaultLogger().warn(
+                        "agent preset '{}': allowed_subagents entry '{}' matches no agent preset",
+                        preset_name, entry);
+                }
+            }
+        }
+        for (auto& [tool_name, builder] : builders) {
+            preset.tool_definition_overrides[tool_name] =
+                builder(PresetToolContext{preset, preset_name, env});
+        }
+    }
+
     return preset;
+}
+
+PresetToolDefinitionBuilder AgentPresetRegistry::MakeSkillDefinitionBuilder() {
+    // The static base definition comes from the tool itself (skill_tool.hpp),
+    // so the schema lives in exactly one place; the builder's whole job is
+    // appending the preset's own listing. preset.allowed_skills is the FINAL
+    // tool-side set -- clamped for spawn children, "*" expanded, preload
+    // entries consumed (they ship in the system prompt, never the tool) --
+    // so the description cannot advertise a skill the tool would refuse,
+    // which is the invariant the old system-prompt rendering guaranteed.
+    return [](const PresetToolContext& ctx) {
+        llm::ToolDefinition def = tools::MakeSkillToolDefinition();
+        std::string listing = RenderSkillListing(ctx.preset.allowed_skills, ctx.env.skills);
+        if (!listing.empty()) {
+            def.description += "\n\n" + std::move(listing);
+        }
+        return def;
+    };
 }
 
 }  // namespace minimal::agent

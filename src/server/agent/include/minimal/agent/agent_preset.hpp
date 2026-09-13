@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <map>
 #include <optional>
 #include <string>
 #include <vector>
@@ -9,6 +10,7 @@
 
 #include "minimal/agent/agent_preset_frontmatter.hpp"
 #include "minimal/config/providers_config.hpp"
+#include "minimal/llm/chat.hpp"
 #include "minimal/llm/provider.hpp"
 #include "minimal/tools/permission.hpp"
 
@@ -29,6 +31,13 @@ struct AgentPreset {
     // a resolved preset cannot actually construct the provider it describes.
     std::string provider_kind;
     std::vector<std::string> allowed_tools;  // {"*"} means all registered
+    // RESOLVED spawn allowlist, from the frontmatter's allowed_subagents:
+    // nullopt = every spawnable preset (the field was absent, or named "*");
+    // a present list -- possibly EMPTY -- is the exact set of preset keys a
+    // spawn_subagent call may name. Enforced by SubagentManager::Spawn; the
+    // empty case also withholds the tool entirely (AgentLoop::BuildChatRequest),
+    // the same fail-closed rule as allowed_skills resolving empty.
+    std::optional<std::vector<std::string>> allowed_subagents;
     // RESOLVED, not the raw frontmatter map: `*` is already expanded and names
     // that are unknown or failed to load are already dropped, so this is exactly
     // the set the system-prompt listing advertises. Keeping it raw let the
@@ -68,6 +77,17 @@ struct AgentPreset {
     tools::McpPermissionPolicy mcp_permissions;
     tools::PermissionRunMode run_mode = tools::PermissionRunMode::Normal;
     std::string compression_prompt;  // loaded text, not a filename
+
+    // Preset-scoped tool definitions, produced by the builders registered on
+    // AgentPresetRegistry (SetDefinitionBuilder) and run ONCE at resolve time
+    // -- their results ride the frozen preset, so a definition is computed
+    // lazily per (preset, project root) and static for every session running
+    // it. AgentLoop::BuildSystemAndTools replaces a returned definition whose
+    // name matches a key, before the subagent/skill strips. Constant per
+    // session, so the request prefix the provider's prompt cache keys on
+    // never shifts; core tools not covered by a builder keep their static
+    // spec() definition, and MCP definitions are never overridden.
+    std::map<std::string, llm::ToolDefinition> tool_definition_overrides;
 
     // Per-tool/per-plugin configuration from the preset's `tool_config`
     // frontmatter map, VERBATIM ({namespace: {...}}). Delivered per-invocation

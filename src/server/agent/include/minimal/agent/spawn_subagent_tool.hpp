@@ -12,10 +12,23 @@
 #include <functional>
 #include <string>
 
+#include "minimal/agent/agent_preset_registry.hpp"
 #include "minimal/agent/subagent_spawn.hpp"
 #include "minimal/tools/tool.hpp"
 
 namespace minimal::agent {
+
+// The preset-scoped half of the spawn tool's presentation: the static base
+// schema with (a) the preset's own default named in the description -- omitted
+// when the preset does not allow spawning ITSELF, since enforcement would
+// refuse the very default being advertised -- (b) the allowed-subagent
+// listing (the registry's spawnable scan, filtered by the preset's
+// allowed_subagents), and (c) a JSON-schema enum of exactly the names a spawn
+// request may carry, so the model cannot hallucinate a preset name the
+// enforcement below would refuse. Registered on the AgentPresetRegistry by
+// main.cpp, beside the tool's own registration; runs once per resolved preset
+// and the result rides AgentPreset::tool_definition_overrides.
+PresetToolDefinitionBuilder MakeSpawnDefinitionBuilder();
 
 class SpawnSubagentTool : public tools::Tool {
 public:

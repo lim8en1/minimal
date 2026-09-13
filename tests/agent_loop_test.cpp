@@ -769,6 +769,70 @@ TEST_CASE("a subagent never receives the spawn tool", "[agent_loop][subagent]") 
     }
 }
 
+TEST_CASE("an empty allowed_subagents withholds the spawn tool", "[agent_loop][subagent]") {
+    // Fail-closed spawn allowlist: an explicit empty list (present, unlike the
+    // absent default that means "all") resolves to "no spawns", and a tool
+    // every call of which would be refused must not be advertised.
+    Harness h;
+    h.AddTool(agent::kSpawnSubagentToolName, ToolCategory::Execute);
+
+    SECTION("absent allowlist keeps the tool") {
+        h.Build();
+        const auto request = h.loop->BuildChatRequest();
+        bool found = false;
+        for (const auto& t : request.tools) {
+            if (t.name == agent::kSpawnSubagentToolName) found = true;
+        }
+        CHECK(found);
+    }
+
+    SECTION("a non-empty allowlist keeps the tool") {
+        agent::AgentPreset preset;
+        preset.allowed_tools = {"*"};
+        preset.allowed_subagents = std::vector<std::string>{"child"};
+        h.Build(preset);
+        const auto request = h.loop->BuildChatRequest();
+        bool found = false;
+        for (const auto& t : request.tools) {
+            if (t.name == agent::kSpawnSubagentToolName) found = true;
+        }
+        CHECK(found);
+    }
+
+    SECTION("an empty allowlist strips it, even under an explicit allow") {
+        agent::AgentPreset preset;
+        preset.allowed_tools = {agent::kSpawnSubagentToolName, "read"};
+        preset.allowed_subagents = std::vector<std::string>{};
+        h.Build(preset);
+        const auto request = h.loop->BuildChatRequest();
+        for (const auto& t : request.tools) {
+            CHECK(t.name != agent::kSpawnSubagentToolName);
+        }
+    }
+}
+
+TEST_CASE("preset tool definition overrides replace the static definition",
+          "[agent_loop][preset]") {
+    // The registry's builders freeze a per-preset definition onto the preset;
+    // the loop's whole job is the name-for-name swap. Whatever the tool's
+    // spec() advertises must not survive an override.
+    Harness h;
+    h.AddTool("read");
+
+    agent::AgentPreset preset;
+    llm::ToolDefinition overridden;
+    overridden.name = "read";
+    overridden.description = "PRESET-SCOPED READ DESCRIPTION";
+    overridden.input_schema = nlohmann::json{{"type", "object"}};
+    preset.tool_definition_overrides["read"] = std::move(overridden);
+    h.Build(preset);
+
+    const auto request = h.loop->BuildChatRequest();
+    REQUIRE(request.tools.size() == 1);
+    CHECK(request.tools[0].name == "read");
+    CHECK(request.tools[0].description == "PRESET-SCOPED READ DESCRIPTION");
+}
+
 TEST_CASE("max_turns bounds a subagent", "[agent_loop][subagent]") {
     Harness h;
     h.AddTool("read");

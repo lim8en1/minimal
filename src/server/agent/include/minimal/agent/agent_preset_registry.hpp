@@ -21,6 +21,39 @@ struct AgentPresetSummary {
     std::string color;  // "#rrggbb" from frontmatter; empty = theme default
 };
 
+// Per-root environment the definition builders read: material that varies by
+// project root but not by preset, memoized once per canonical root and shared
+// by every builder run under it. Plain data, so a builder stays a pure
+// function of (preset, env) and the tools layer never enters the picture.
+struct PresetToolEnv {
+    // Spawnable presets for the root: every parseable, non-disabled
+    // agents/*.md, project shadowing preserved, `hidden` and `mode: subagent`
+    // INCLUDED -- spawnability is independent of picker visibility. Name is
+    // the preset KEY (file stem), what a spawn request's agent_preset accepts.
+    std::vector<AgentPresetSummary> available_agents;
+    // The merged skill view for the same root (global ∪ project overlay,
+    // sorted), for builders that render names + descriptions.
+    std::vector<config::SkillMeta> skills;
+};
+
+// Everything a definition builder may read. `preset_key` is carried separately
+// from the preset because it is NOT the same string: presets are addressed by
+// their file stem everywhere a spawn or /agent names one, while
+// AgentPreset::name is the frontmatter display value, which need not match
+// (see ListAvailable's stem-keying note).
+struct PresetToolContext {
+    const AgentPreset& preset;
+    const std::string& preset_key;
+    const PresetToolEnv& env;
+};
+
+// Returns the definition the named tool advertises TO THIS PRESET: the
+// builder's one shot at a preset-scoped description/schema. Runs once per
+// (preset, root) inside ResolveUncached -- lazily, with the rest of the
+// resolve -- and its result rides AgentPreset::tool_definition_overrides.
+using PresetToolDefinitionBuilder =
+    std::function<llm::ToolDefinition(const PresetToolContext&)>;
+
 // Loads providers.json/permissions.json/agents/*.md into fully resolved
 // AgentPresets, plus the settings.json handed to it. Config is read once at
 // startup -- there is no hot-reload (see ARCHITECTURE.md's Config section).
@@ -115,6 +148,21 @@ public:
     std::vector<AgentPresetSummary> ListAvailable(
         const std::filesystem::path& project_root = {}) const;
 
+    // Registers the builder that produces `tool_name`'s definition per preset.
+    // Startup-only wiring (main.cpp, beside the tool's own registration);
+    // every builder runs inside ResolveUncached for each resolved preset, and
+    // a preset resolved before its builder was registered would carry no
+    // override -- so all builders MUST be set before the first Resolve().
+    // Overwriting a name replaces the builder; there is deliberately no
+    // unregister (config is read once at startup).
+    void SetDefinitionBuilder(std::string tool_name, PresetToolDefinitionBuilder builder);
+
+    // The `skill` tool's preset-scoped definition: the static base schema with
+    // this preset's resolved (clamped, expanded, preload-consumed) skill
+    // listing appended to the description -- the migration of what used to be
+    // rendered into the system prompt, onto the generic builder mechanism.
+    static PresetToolDefinitionBuilder MakeSkillDefinitionBuilder();
+
     const std::string& SubagentPrefix() const { return subagent_prefix_; }
 
     // The parsed providers.json this registry resolved presets against. Exposed
@@ -141,6 +189,17 @@ private:
         const std::optional<std::map<std::string, SkillMode>>& parent_skills,
         const std::optional<config::ModelRef>& model_override) const;
 
+    // The one merged agents/ scan both listings run, parameterized by
+    // visibility: the picker listing hides `hidden` and `mode: subagent`
+    // presets; the spawnable listing includes them, because spawn addresses
+    // presets by key whatever the picker shows. Disabled and malformed files
+    // are skipped exactly the same by both.
+    std::vector<AgentPresetSummary> ListPresets(const std::filesystem::path& project_root,
+                                                bool picker_visibility) const;
+
+    // The shared per-root builder inputs (memoized; see env_cache_ below).
+    const PresetToolEnv& EnvFor(const std::filesystem::path& project_root) const;
+
     std::filesystem::path config_dir_;
     config::ProvidersConfig providers_;
     config::SettingsConfig settings_;
@@ -148,6 +207,19 @@ private:
     const config::SkillRegistry& skills_;
     std::string subagent_prefix_;
     std::string default_compression_prompt_;
+    // Startup-only in practice (main.cpp wires builders beside the tool
+    // registrations), but guarded because ResolveUncached reads it from
+    // session-creation threads and a stray late SetDefinitionBuilder must not
+    // race a concurrent resolve.
+    std::map<std::string, PresetToolDefinitionBuilder> definition_builders_;
+    // The builders' per-root inputs, computed lazily on the first resolve
+    // that needs them and memoized per canonical root: N presets of one root
+    // scan agents/ and skills/ once, and a deployment with no builders never
+    // scans at all. Same lifetime assumption as the preset cache -- files do
+    // not change at runtime. GUARDED (populated from ResolveUncached, whose
+    // callers are on different threads); std::map so a returned reference
+    // stays valid across later inserts.
+    mutable std::map<std::filesystem::path, PresetToolEnv> env_cache_;
     // GUARDED, because Resolve() populates it lazily and its callers are on
     // different threads with nothing between them: SessionRegistry::Create runs
     // on a gRPC handler thread (before it takes its own lock), and

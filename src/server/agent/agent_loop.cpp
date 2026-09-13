@@ -274,6 +274,18 @@ AgentLoop::SystemAndTools AgentLoop::BuildSystemAndTools() const {
         allowed.erase(std::remove(allowed.begin(), allowed.end(), kSpawnSubagentToolName),
                       allowed.end());
     }
+    // Fail-closed spawn allowlist: a preset whose allowed_subagents resolved
+    // to an explicit EMPTY list gets no spawn tool, exactly like a preset
+    // whose allowed_skills resolve empty gets no skill tool -- advertising a
+    // tool every call of which would be refused is worse than offering none.
+    // nullopt (the default) means no restriction and reaches this check not
+    // at all.
+    const bool spawn_allowlist_empty =
+        preset_.allowed_subagents.has_value() && preset_.allowed_subagents->empty();
+    if (spawn_allowlist_empty) {
+        allowed.erase(std::remove(allowed.begin(), allowed.end(), kSpawnSubagentToolName),
+                      allowed.end());
+    }
 
     out.tools = registry_.DefinitionsFor(allowed);
     // Live MCP tools for the allowed-and-alive servers, merged into the same
@@ -295,6 +307,16 @@ AgentLoop::SystemAndTools AgentLoop::BuildSystemAndTools() const {
                                            return def.name == kSpawnSubagentToolName;
                                        }),
                         out.tools.end());
+    }
+    // Preset-scoped definitions replace the static ones name-for-name. They
+    // were built once at preset resolve and frozen on the preset, so this is
+    // one map lookup per tool and the request prefix -- which the provider's
+    // prompt cache keys on -- never shifts mid-session. Run AFTER the merge
+    // and sort so the final array is what gets rewritten; before the strips
+    // below, which operate on the same names.
+    for (auto& def : out.tools) {
+        const auto it = preset_.tool_definition_overrides.find(def.name);
+        if (it != preset_.tool_definition_overrides.end()) def = it->second;
     }
     if (preset_.allowed_skills.empty()) {
         // No skills in this preset: the tool would only ever return errors. One

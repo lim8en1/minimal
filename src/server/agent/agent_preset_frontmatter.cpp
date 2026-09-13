@@ -317,6 +317,7 @@ bool IsKnownKey(const std::string& key) {
     static const std::unordered_map<std::string, char> kKnown{
         {"name", 0},          {"description", 0},   {"model", 0},
         {"allowed_tools", 0}, {"allowed_skills", 0},{"allowed_mcp_servers", 0},
+        {"allowed_subagents", 0},
         {"permission_mode", 0}, {"permission", 0},  {"tools", 0},
         {"mcp_permissions", 0}, {"compression_prompt", 0},
         {"mode", 0},          {"disable", 0},       {"hidden", 0},
@@ -437,6 +438,27 @@ AgentPresetFrontmatter ParseAgentPresetFrontmatter(const config::ParsedFrontmatt
     result.allowed_tools = OptionalStringList(node, "allowed_tools");
     result.allowed_skills = DecodeAllowedSkills(node);
     result.allowed_mcp_servers = OptionalStringList(node, "allowed_mcp_servers");
+    // Present-vs-absent is semantic here (absent = no restriction, present =
+    // the exact allowlist), so this cannot go through OptionalStringList,
+    // whose empty result is ambiguous. An empty entry would silently match
+    // nothing-or-everything depending on downstream comparison, so it is
+    // named instead.
+    if (const YAML::Node value = node["allowed_subagents"]) {
+        if (!value.IsSequence()) {
+            throw std::runtime_error(
+                "agent preset: allowed_subagents must be a list of preset names");
+        }
+        std::vector<std::string> list;
+        for (const auto& item : value) {
+            const std::string name = item.as<std::string>();
+            if (name.empty()) {
+                throw std::runtime_error(
+                    "agent preset: allowed_subagents has an empty entry");
+            }
+            list.push_back(name);
+        }
+        result.allowed_subagents = std::move(list);
+    }
     // Alias first, native second: `permission_mode` -- categories AND per-tool
     // overrides -- always wins over an alias encoding of the same intent. Both
     // aliases feed the layer BEFORE the native block decodes into it, so a

@@ -5,10 +5,19 @@
 
 namespace minimal::tools {
 
+// The tool's static base definition, shared by the SkillTool constructor and
+// AgentPresetRegistry::MakeSkillDefinitionBuilder -- the registry's builder
+// appends the preset's own skill listing to the description, so the schema
+// (and the prose around it) must live in exactly one place. The base text
+// deliberately does not say WHERE the listing appears: with a builder
+// registered it is this description; without one (bare tool in a test) the
+// text still reads correctly.
+llm::ToolDefinition MakeSkillToolDefinition();
+
 // Core tool, not a plugin: a thin accessor over the core skill registry. A
-// skill's resident cost is its frontmatter (rendered into the system prompt by
-// the preset); this tool is the lazy-load trigger that returns the SKILL.md
-// body on invocation.
+// skill's resident cost is its frontmatter (rendered into the tool's
+// preset-scoped description by the registry's builder); this tool is the
+// lazy-load trigger that returns the SKILL.md body on invocation.
 //
 // Category ReadOnly, so the permission model never prompts by default -- the
 // per-skill gate is allowed_skills, enforced here at invocation time against

@@ -36,20 +36,26 @@ std::string AvailableSkills(const config::SkillRegistry& registry,
 
 }  // namespace
 
-SkillTool::SkillTool(const config::SkillRegistry& registry) : registry_(registry) {
-    spec_.name = "skill";
-    spec_.category = ToolCategory::ReadOnly;
-    spec_.definition.name = spec_.name;
-    spec_.definition.description =
-        "Load the full instructions for a skill by name. The skills available in this session, "
-        "with one-line descriptions, are listed in your system prompt. The result includes the "
-        "skill's directory, which may contain additional supporting files referenced by the skill.";
-    spec_.definition.input_schema = {
+llm::ToolDefinition MakeSkillToolDefinition() {
+    llm::ToolDefinition def;
+    def.name = "skill";
+    def.description =
+        "Load the full instructions for a skill by name. The result includes the "
+        "skill's directory, which may contain additional supporting files referenced "
+        "by the skill.";
+    def.input_schema = {
         {"type", "object"},
         {"properties",
          {{"name", {{"type", "string"},
-                    {"description", "Skill name, exactly as listed in the system prompt"}}}}},
+                    {"description", "Skill name, exactly as listed in this tool's description"}}}}},
         {"required", nlohmann::json::array({"name"})}};
+    return def;
+}
+
+SkillTool::SkillTool(const config::SkillRegistry& registry) : registry_(registry) {
+    spec_.name = "skill";
+    spec_.category = ToolCategory::ReadOnly;
+    spec_.definition = MakeSkillToolDefinition();
 }
 
 ToolResult SkillTool::execute(const nlohmann::json& input, ToolContext& ctx) {

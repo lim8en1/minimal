@@ -65,6 +65,15 @@ struct AgentPresetFrontmatter {
     // exact names: ask}).
     std::map<std::string, SkillMode> allowed_skills;
     std::vector<std::string> allowed_mcp_servers;   // default empty
+    // Allowlist of agent preset keys THIS preset may spawn via spawn_subagent
+    // (agents/<name>.md file stems -- the names a spawn request's agent_preset
+    // accepts, not the frontmatter display `name:`). Absent = every spawnable
+    // preset; an explicit list may contain "*" (= all); an explicit empty list
+    // means no spawns at all -- the tool is withheld downstream, the same rule
+    // as allowed_skills resolving empty. Enforced by SubagentManager::Spawn and
+    // reflected in the spawn tool's per-preset description (the registry's
+    // definition builder filters its listing with exactly this list).
+    std::optional<std::vector<std::string>> allowed_subagents;
     tools::PermissionOverrideLayer permission_mode;  // read_only/file_write/execute/out_of_workdir/network + overrides -> per_tool_overrides
     std::unordered_map<std::string, tools::PermissionMode> mcp_permissions;  // server -> mode
     std::string compression_prompt;                 // filename under prompts/, "" = use default

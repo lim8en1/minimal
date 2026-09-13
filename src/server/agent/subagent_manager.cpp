@@ -2,6 +2,7 @@
 
 #include "minimal/mcp/mcp_client_manager.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <future>
 #include <utility>
@@ -122,6 +123,21 @@ SubagentOutcome SubagentManager::Spawn(const SubagentRequest& request,
     // resolved with -- not the frontmatter display name, which need not match.
     const std::string preset_name =
         request.agent_preset.empty() ? parent->info().agent_preset : request.agent_preset;
+
+    // The parent's spawn allowlist (agents/*.md allowed_subagents) is the gate
+    // the spawn tool's per-preset description and enum advertise: a name the
+    // schema never offers is also a name the manager refuses, so neither
+    // surface can drift from the enforcement. nullopt = unrestricted ("*"
+    // expanded at resolve); an empty list never reaches here because the loop
+    // withholds the tool -- reaching this check at all means the model named
+    // a preset explicitly, which the error below names.
+    const auto& allowed_subagents = parent->preset().allowed_subagents;
+    if (allowed_subagents.has_value() &&
+        std::find(allowed_subagents->begin(), allowed_subagents->end(), preset_name) ==
+            allowed_subagents->end()) {
+        return SubagentOutcome::Error("agent preset '" + preset_name +
+                                      "' is not in this agent's allowed_subagents");
+    }
 
     // The child's model, by precedence: an explicit model on the spawn call
     // wins; then the parent session's /subagent-model choice; then the child

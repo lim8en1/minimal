@@ -8,6 +8,8 @@
 #include <unistd.h>
 
 #include "minimal/agent/agent_preset_registry.hpp"
+#include "minimal/agent/spawn_subagent_tool.hpp"
+#include "minimal/tools/skill_tool.hpp"
 #include "temp_dir.hpp"
 
 using namespace minimal;
@@ -651,7 +653,8 @@ TEST_CASE("AgentPresetRegistry: Resolve() caches -- a second call survives the f
     CHECK(registry.Resolve("build").name == first_name);
 }
 
-TEST_CASE("AgentPresetRegistry: allowed skills render into the system prompt, sorted by name",
+TEST_CASE("AgentPresetRegistry: allowed skills render into the skill tool's preset-scoped "
+          "description, sorted by name",
           "[agent_preset_registry][skills]") {
     TempConfigDir config;
     config.WriteDefaults();
@@ -676,12 +679,18 @@ TEST_CASE("AgentPresetRegistry: allowed skills render into the system prompt, so
     auto skills = config::SkillRegistry::Load(config.dir);
     AgentPresetRegistry registry(config.dir, skills,
                                   config::LoadSettingsConfig(config.dir / "settings.json"));
+    registry.SetDefinitionBuilder(kSkillToolName, AgentPresetRegistry::MakeSkillDefinitionBuilder());
 
-    CHECK(registry.Resolve("build").system_prompt == "You are a build agent.\n"
-                                                     "\n## Available skills\n\n"
-                                                     "Load a skill's full instructions with the `skill` tool.\n"
-                                                     "- alpha: First skill.\n"
-                                                     "- beta: Second skill.\n");
+    const auto preset = registry.Resolve("build");
+    // The listing rode the skill tool's definition, not the system prompt:
+    // the prompt is the bare preset body.
+    CHECK(preset.system_prompt == "You are a build agent.\n");
+    REQUIRE(preset.tool_definition_overrides.count("skill") == 1);
+    CHECK(preset.tool_definition_overrides.at("skill").description ==
+          std::string(tools::MakeSkillToolDefinition().description) +
+              "\n\nAvailable skills:\n"
+              "- alpha: First skill.\n"
+              "- beta: Second skill.");
 }
 
 TEST_CASE("AgentPresetRegistry: allowed_skills resolves to exactly what the listing advertises",
@@ -710,13 +719,15 @@ TEST_CASE("AgentPresetRegistry: allowed_skills resolves to exactly what the list
     auto skills = config::SkillRegistry::Load(config.dir);
     AgentPresetRegistry registry(config.dir, skills,
                                   config::LoadSettingsConfig(config.dir / "settings.json"));
+    registry.SetDefinitionBuilder(kSkillToolName, AgentPresetRegistry::MakeSkillDefinitionBuilder());
     const auto preset = registry.Resolve("build");
 
     using SM = SkillMode;
     CHECK(preset.allowed_skills == std::map<std::string, SkillMode>{{"alpha", SM::Allow}});
-    CHECK(preset.system_prompt.find("- alpha: First skill.") != std::string::npos);
-    CHECK(preset.system_prompt.find("typo") == std::string::npos);
-    CHECK(preset.system_prompt.find("broken") == std::string::npos);
+    const std::string& listing = preset.tool_definition_overrides.at("skill").description;
+    CHECK(listing.find("- alpha: First skill.") != std::string::npos);
+    CHECK(listing.find("typo") == std::string::npos);
+    CHECK(listing.find("broken") == std::string::npos);
 }
 
 TEST_CASE("AgentPresetRegistry: allowed_skills naming only unusable skills resolves empty",
@@ -906,10 +917,120 @@ TEST_CASE("AgentPresetRegistry: allowed_skills ['*'] lists every loaded skill",
     auto skills = config::SkillRegistry::Load(config.dir);
     AgentPresetRegistry registry(config.dir, skills,
                                   config::LoadSettingsConfig(config.dir / "settings.json"));
+    registry.SetDefinitionBuilder(kSkillToolName, AgentPresetRegistry::MakeSkillDefinitionBuilder());
 
-    const std::string prompt = registry.Resolve("build").system_prompt;
-    CHECK(prompt.find("- alpha: First skill.") != std::string::npos);
-    CHECK(prompt.find("- beta: Second skill.") != std::string::npos);
+    const std::string description =
+        registry.Resolve("build").tool_definition_overrides.at("skill").description;
+    CHECK(description.find("- alpha: First skill.") != std::string::npos);
+    CHECK(description.find("- beta: Second skill.") != std::string::npos);
+}
+
+TEST_CASE("AgentPresetRegistry: allowed_subagents resolves -- absent and '*' unrestricted, "
+          "a list verbatim, empty stays empty",
+          "[agent_preset_registry][subagents]") {
+    TempConfigDir config;
+    config.WriteDefaults();
+    config::SkillRegistry skills = config::SkillRegistry::Load(config.dir);
+    AgentPresetRegistry registry(config.dir, skills,
+                                  config::LoadSettingsConfig(config.dir / "settings.json"));
+
+    const auto resolved = [&](const std::string& key, const std::string& frontmatter) {
+        config.Write("agents/" + key + ".md",
+                     "---\nname: " + key + "\nmodel: openai-main/gpt-4o-mini\n" + frontmatter +
+                         "---\nbody\n");
+        return registry.Resolve(key).allowed_subagents;
+    };
+
+    // Distinct keys per case, not rewrites of one file: Resolve caches per
+    // (name, root), so a second resolve of a rewritten preset returns the
+    // first answer.
+    CHECK_FALSE(resolved("default", "").has_value());                  // the default: everything
+    CHECK_FALSE(resolved("starred", "allowed_subagents: [\"*\"]\n").has_value());  // explicit all
+    CHECK(*resolved("listed", "allowed_subagents: [plan, build]\n") ==
+          std::vector<std::string>{"plan", "build"});
+    const auto empty = resolved("none", "allowed_subagents: []\n");    // explicit none
+    REQUIRE(empty.has_value());
+    CHECK(empty->empty());
+}
+
+TEST_CASE("AgentPresetRegistry: the spawn definition builder names the default, lists "
+          "spawnable presets (hidden included), and enums the allowlist",
+          "[agent_preset_registry][subagents]") {
+    TempConfigDir config;
+    config.WriteDefaults();
+    config.Write("agents/researcher.md",
+                 "---\nname: researcher\ndescription: Deep research.\nmodel: openai-main/gpt-4.1\n---\nbody\n");
+    // hidden and mode:subagent presets are NOT picker-listed but ARE spawnable:
+    // the spawn listing must include them even though ListAvailable excludes them.
+    config.Write("agents/secret.md",
+                 "---\nname: secret\ndescription: Hidden worker.\nmodel: openai-main/gpt-4.1\nhidden: true\n---\nbody\n");
+
+    config::SkillRegistry skills = config::SkillRegistry::Load(config.dir);
+    AgentPresetRegistry registry(config.dir, skills,
+                                  config::LoadSettingsConfig(config.dir / "settings.json"));
+    registry.SetDefinitionBuilder(kSpawnSubagentToolName, MakeSpawnDefinitionBuilder());
+
+    const auto preset = registry.Resolve("build");
+    REQUIRE(preset.tool_definition_overrides.count("spawn_subagent") == 1);
+    const auto& def = preset.tool_definition_overrides.at("spawn_subagent");
+
+    // The default line names the preset KEY and the preset's own description
+    // (absent here, so no parenthetical).
+    CHECK(def.description.find("Default subagent preset: `build`") != std::string::npos);
+    CHECK(def.description.find("(You are a build agent.)") == std::string::npos);
+    // Spawnable listing: researcher AND the hidden preset, sorted.
+    CHECK(def.description.find("- `researcher` (Deep research.)") != std::string::npos);
+    CHECK(def.description.find("- `secret` (Hidden worker.)") != std::string::npos);
+    // The enum carries exactly the names the schema will accept.
+    REQUIRE(def.input_schema["properties"]["agent_preset"].contains("enum"));
+    CHECK(def.input_schema["properties"]["agent_preset"]["enum"] ==
+          nlohmann::json::array({"build", "researcher", "secret"}));
+}
+
+TEST_CASE("AgentPresetRegistry: the spawn builder filters by allowed_subagents and omits "
+          "a default line the enforcement would refuse",
+          "[agent_preset_registry][subagents]") {
+    TempConfigDir config;
+    config.WriteDefaults();
+    config.Write("agents/researcher.md",
+                 "---\nname: researcher\ndescription: Deep research.\nmodel: openai-main/gpt-4.1\n---\nbody\n");
+
+    config::SkillRegistry skills = config::SkillRegistry::Load(config.dir);
+    AgentPresetRegistry registry(config.dir, skills,
+                                  config::LoadSettingsConfig(config.dir / "settings.json"));
+    registry.SetDefinitionBuilder(kSpawnSubagentToolName, MakeSpawnDefinitionBuilder());
+
+    SECTION("the allowlist filters both the listing and the enum") {
+        config.Write("agents/build.md",
+                     "---\nname: build\nmodel: openai-main/gpt-4o-mini\n"
+                     "allowed_subagents: [researcher]\n---\nYou are a build agent.\n");
+        const auto def = registry.Resolve("build").tool_definition_overrides.at("spawn_subagent");
+        CHECK(def.description.find("- `researcher` (Deep research.)") != std::string::npos);
+        CHECK(def.description.find("`build`") == std::string::npos);
+        CHECK(def.input_schema["properties"]["agent_preset"]["enum"] ==
+              nlohmann::json::array({"researcher"}));
+    }
+
+    SECTION("own preset not allowlisted: no default line is advertised") {
+        config.Write("agents/build.md",
+                     "---\nname: build\nmodel: openai-main/gpt-4o-mini\n"
+                     "allowed_subagents: [researcher]\n---\nbody\n");
+        // build is not in its own allowlist, so "Defaults to your own" would
+        // advertise a spawn the manager refuses; the line must be gone while
+        // the listing itself survives.
+        const auto def = registry.Resolve("build").tool_definition_overrides.at("spawn_subagent");
+        CHECK(def.description.find("Default subagent preset") == std::string::npos);
+        CHECK(def.description.find("- `researcher` (Deep research.)") != std::string::npos);
+    }
+
+    SECTION("an empty allowlist yields no listing and no enum") {
+        config.Write("agents/build.md",
+                     "---\nname: build\nmodel: openai-main/gpt-4o-mini\n"
+                     "allowed_subagents: []\n---\nbody\n");
+        const auto def = registry.Resolve("build").tool_definition_overrides.at("spawn_subagent");
+        CHECK(def.description.find("Available presets") == std::string::npos);
+        CHECK_FALSE(def.input_schema["properties"]["agent_preset"].contains("enum"));
+    }
 }
 
 // --- project-local discovery ---------------------------------------------------
@@ -1022,19 +1143,22 @@ TEST_CASE("AgentPresetRegistry: a preset resolved for a project advertises that 
     config::SkillRegistry skills = config::SkillRegistry::Load(config.dir);
     AgentPresetRegistry registry(config.dir, skills,
                                   config::LoadSettingsConfig(config.dir / "settings.json"));
+    registry.SetDefinitionBuilder(kSkillToolName, AgentPresetRegistry::MakeSkillDefinitionBuilder());
     const auto project_root = config.dir / "proj";
 
     const auto in_project = registry.Resolve("build", project_root);
     CHECK(in_project.allowed_skills ==
           (std::map<std::string, SkillMode>{{"alpha", SkillMode::Allow}, {"beta", SkillMode::Allow}}));
-    CHECK(in_project.system_prompt.find("- beta: Project.") != std::string::npos);
+    CHECK(in_project.tool_definition_overrides.at("skill").description.find("- beta: Project.") !=
+          std::string::npos);
 
     // The same preset resolved WITHOUT project scope must not advertise a
     // skill its sessions could not load: the listing and the tool must agree
     // per root.
     const auto global = registry.Resolve("build");
     CHECK(global.allowed_skills == (std::map<std::string, SkillMode>{{"alpha", SkillMode::Allow}}));
-    CHECK(global.system_prompt.find("beta") == std::string::npos);
+    CHECK(global.tool_definition_overrides.at("skill").description.find("beta") ==
+          std::string::npos);
 }
 
 TEST_CASE("AgentPresetRegistry: ListAvailable merges project presets, project shadows global",
@@ -1225,10 +1349,11 @@ TEST_CASE("AgentPresetRegistry: an ask-mode skill is listed, marked, and tool-ca
     config::SkillRegistry skills = config::SkillRegistry::Load(config.dir);
     AgentPresetRegistry registry(config.dir, skills,
                                   config::LoadSettingsConfig(config.dir / "settings.json"));
+    registry.SetDefinitionBuilder(kSkillToolName, AgentPresetRegistry::MakeSkillDefinitionBuilder());
 
     const auto preset = registry.Resolve("build");
-    CHECK(preset.system_prompt.find("- style: House style. (asks before loading)") !=
-          std::string::npos);
+    CHECK(preset.tool_definition_overrides.at("skill").description.find(
+              "- style: House style. (asks before loading)") != std::string::npos);
     CHECK(preset.allowed_skills == (std::map<std::string, SkillMode>{
                                        {"other", SkillMode::Allow}, {"style", SkillMode::Ask}}));
 }

@@ -548,6 +548,18 @@ int main(int argc, char** argv) {
             return outcome;
         });
 
+    // Preset-scoped tool definitions: the builders run once per resolved
+    // preset (inside the registry's resolve cache) and their results ride the
+    // frozen preset into AgentLoop::BuildSystemAndTools. Registered HERE
+    // rather than inside the registry so the registry stays a config reader
+    // and each tool owns its own presentation -- and here rather than later
+    // because every builder must exist before the first Resolve(), the same
+    // deadline the discovery hook above is under.
+    presets->SetDefinitionBuilder(minimal::agent::kSkillToolName,
+                                  minimal::agent::AgentPresetRegistry::MakeSkillDefinitionBuilder());
+    presets->SetDefinitionBuilder(minimal::agent::kSpawnSubagentToolName,
+                                  minimal::agent::MakeSpawnDefinitionBuilder());
+
     minimal::agent::LoopConfig loop_config;
     loop_config.auto_compact = settings.memory.auto_compact;
     loop_config.compaction_trigger = settings.memory.context_compaction_trigger;

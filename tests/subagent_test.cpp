@@ -115,6 +115,13 @@ struct SubagentFixture {
                std::string default_subagent_model = "") {
         presets = std::make_unique<agent::AgentPresetRegistry>(
             dir.path(), skills, config::LoadSettingsConfig(dir.path() / "settings.json"));
+        // Production registers the preset-scoped definition builders beside the
+        // tools themselves (main.cpp); the mirror here keeps the spawn path's
+        // child resolve producing the same overrides a real server bakes in.
+        presets->SetDefinitionBuilder(agent::kSkillToolName,
+                                      agent::AgentPresetRegistry::MakeSkillDefinitionBuilder());
+        presets->SetDefinitionBuilder(agent::kSpawnSubagentToolName,
+                                      agent::MakeSpawnDefinitionBuilder());
         observers = std::make_unique<agent::SessionObserverRegistry>(common::DefaultLogger());
         db = std::make_unique<session::SessionDatabase>(dir.path() / "sessions.db");
         // A long guard: unattached children are normal here (no client in this
@@ -1207,7 +1214,11 @@ TEST_CASE("a child cannot widen a skill into preload its parent only allows",
     CHECK(child->preset().allowed_skills ==
           (std::map<std::string, agent::SkillMode>{{"research", agent::SkillMode::Allow}}));
     CHECK(child->preset().system_prompt.find("## Preloaded skills") == std::string::npos);
-    CHECK(child->preset().system_prompt.find("- research: Deep research.") != std::string::npos);
+    // The demoted skill is listed in the child's preset-scoped skill tool
+    // description (the listing no longer renders into the system prompt).
+    REQUIRE(child->preset().tool_definition_overrides.count(agent::kSkillToolName) == 1);
+    CHECK(child->preset().tool_definition_overrides.at(agent::kSkillToolName)
+              .description.find("- research: Deep research.") != std::string::npos);
 
     // And the equal-mode case survives intact: preload under preload stays
     // preload (the child is not widening -- the parent already ships the body).
@@ -1236,6 +1247,84 @@ TEST_CASE("an unknown preset refuses the spawn without creating anything",
         std::get<llm::ToolResultBlock>(page.messages[1].message.content.front());
     CHECK(block.is_error);
     CHECK(TextOf(block).find("nonexistent") != std::string::npos);
+}
+
+TEST_CASE("the parent's allowed_subagents gate spawns", "[subagent][preset]") {
+    // The same allowlist the spawn tool's per-preset description and enum
+    // advertise, enforced where the request lands: an unlisted preset is
+    // refused as an error result the model adapts to, before any child row
+    // exists. The default (no agent_preset) is the parent's OWN preset, so a
+    // preset that does not list itself refuses its own default too.
+    const std::string main_with_allowlist =
+        "---\nname: main\nmodel: main/parent-script\nallowed_tools: [\"*\"]\n"
+        "allowed_subagents: [child]\n---\nYou are the main agent.\n";
+
+    SECTION("a listed preset spawns normally") {
+        SubagentFixture fixture;
+        fixture.Write("agents/main.md", main_with_allowlist);
+        fixture.Build();
+        auto parent = fixture.CreateParent();
+        auto* script = fixture.scripts["parent-script"].get();
+        auto* child_script = fixture.scripts["child-script"].get();
+
+        script->Push(testing::ToolUseResponse(
+            "call-spawn", "spawn_subagent",
+            {{"task", "allowed"}, {"agent_preset", "child"}}));
+        script->Push(testing::TextResponse("parent done"));
+        child_script->Push(testing::TextResponse("allowlisted child result"));
+
+        parent->SubmitTurn("go");
+        REQUIRE(parent->WaitForIdleForTesting(10s));
+
+        const auto page = fixture.db->GetMessagesPage(parent->info().session_id, std::nullopt, 50);
+        const auto& block = std::get<llm::ToolResultBlock>(page.messages[1].message.content.front());
+        CHECK_FALSE(block.is_error);
+        CHECK(TextOf(block) == "allowlisted child result");
+    }
+
+    SECTION("an unlisted preset is refused, naming the gate") {
+        SubagentFixture fixture;
+        fixture.Write("agents/main.md", main_with_allowlist);
+        fixture.Build();
+        auto parent = fixture.CreateParent();
+        auto* script = fixture.scripts["parent-script"].get();
+
+        script->Push(testing::ToolUseResponse(
+            "call-spawn", "spawn_subagent",
+            {{"task", "doomed"}, {"agent_preset", "child-allow"}}));
+        script->Push(testing::TextResponse("parent done"));
+
+        parent->SubmitTurn("go");
+        REQUIRE(parent->WaitForIdleForTesting(10s));
+
+        CHECK(fixture.sessions->ChildCount(parent->info().session_id) == 0);
+        const auto page = fixture.db->GetMessagesPage(parent->info().session_id, std::nullopt, 50);
+        const auto& block = std::get<llm::ToolResultBlock>(page.messages[1].message.content.front());
+        CHECK(block.is_error);
+        CHECK(TextOf(block).find("allowed_subagents") != std::string::npos);
+        CHECK(TextOf(block).find("child-allow") != std::string::npos);
+    }
+
+    SECTION("own preset not listed: the default spawn is refused too") {
+        SubagentFixture fixture;
+        fixture.Write("agents/main.md", main_with_allowlist);
+        fixture.Build();
+        auto parent = fixture.CreateParent();
+        auto* script = fixture.scripts["parent-script"].get();
+
+        script->Push(testing::ToolUseResponse(
+            "call-spawn", "spawn_subagent", {{"task", "doomed"}}));  // no agent_preset
+        script->Push(testing::TextResponse("parent done"));
+
+        parent->SubmitTurn("go");
+        REQUIRE(parent->WaitForIdleForTesting(10s));
+
+        CHECK(fixture.sessions->ChildCount(parent->info().session_id) == 0);
+        const auto page = fixture.db->GetMessagesPage(parent->info().session_id, std::nullopt, 50);
+        const auto& block = std::get<llm::ToolResultBlock>(page.messages[1].message.content.front());
+        CHECK(block.is_error);
+        CHECK(TextOf(block).find("allowed_subagents") != std::string::npos);
+    }
 }
 
 TEST_CASE("an unresolvable spawn-time model rolls back the minted row without masking the error",

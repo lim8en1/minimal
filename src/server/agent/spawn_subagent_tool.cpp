@@ -1,5 +1,6 @@
 #include "minimal/agent/spawn_subagent_tool.hpp"
 
+#include <algorithm>
 #include <utility>
 
 #include "minimal/agent/agent_preset.hpp"
@@ -55,6 +56,60 @@ tools::ToolSpec MakeSpec() {
 }
 
 }  // namespace
+
+PresetToolDefinitionBuilder MakeSpawnDefinitionBuilder() {
+    // The enum and the listing are driven by ONE filter -- the preset's
+    // resolved allowed_subagents over the registry's spawnable scan -- so the
+    // description can never advertise a name the input schema rejects, nor
+    // the schema accept a name enforcement refuses. nullopt (field absent or
+    // "*") filters nothing.
+    return [](const PresetToolContext& ctx) {
+        llm::ToolDefinition def = MakeSpec().definition;
+
+        std::vector<const AgentPresetSummary*> allowed;
+        for (const auto& summary : ctx.env.available_agents) {
+            if (!ctx.preset.allowed_subagents.has_value() ||
+                std::find(ctx.preset.allowed_subagents->begin(),
+                          ctx.preset.allowed_subagents->end(),
+                          summary.name) != ctx.preset.allowed_subagents->end()) {
+                allowed.push_back(&summary);
+            }
+        }
+
+        // The default line names the preset KEY (preset_key), not the
+        // frontmatter display name -- spawn requests address presets by key,
+        // and a display name that differs would send the model calling with
+        // an enum value that does not exist.
+        const bool self_spawnable =
+            !ctx.preset.allowed_subagents.has_value() ||
+            std::find(ctx.preset.allowed_subagents->begin(),
+                      ctx.preset.allowed_subagents->end(),
+                      ctx.preset_key) != ctx.preset.allowed_subagents->end();
+        std::string description = def.description;
+        if (self_spawnable) {
+            description += "\n\nDefault subagent preset: `" + ctx.preset_key + "`" +
+                           (ctx.preset.description.empty()
+                                ? ""
+                                : " (" + ctx.preset.description + ")");
+        }
+        if (!allowed.empty()) {
+            description += "\n\nAvailable presets:";
+            for (const AgentPresetSummary* summary : allowed) {
+                description += "\n- `" + summary->name + "`" +
+                               (summary->description.empty()
+                                    ? ""
+                                    : " (" + summary->description + ")");
+            }
+            nlohmann::json names = nlohmann::json::array();
+            for (const AgentPresetSummary* summary : allowed) {
+                names.push_back(summary->name);
+            }
+            def.input_schema["properties"]["agent_preset"]["enum"] = std::move(names);
+        }
+        def.description = std::move(description);
+        return def;
+    };
+}
 
 SpawnSubagentTool::SpawnSubagentTool(Runner runner)
     : runner_(std::move(runner)), spec_(MakeSpec()) {}

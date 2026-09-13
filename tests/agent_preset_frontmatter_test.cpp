@@ -87,6 +87,44 @@ TEST_CASE("ParseAgentPresetFrontmatter: allowed_* lists decode", "[agent_preset_
     CHECK(preset.allowed_mcp_servers == std::vector<std::string>{"search"});
 }
 
+TEST_CASE("ParseAgentPresetFrontmatter: allowed_subagents is absent-vs-list, not just a list",
+          "[agent_preset_frontmatter]") {
+    // The empty list is SEMANTIC (no spawns at all), so absent must stay
+    // distinguishable from present-but-empty -- which is why this field cannot
+    // share the OptionalStringList lowering, whose empty result is ambiguous.
+    CHECK_FALSE(Parse("---\nname: build\n---\nbody\n").allowed_subagents.has_value());
+
+    const auto listed = Parse(
+        "---\nname: build\nallowed_subagents: [researcher, \"*\"]\n---\nbody\n");
+    REQUIRE(listed.allowed_subagents.has_value());
+    CHECK(*listed.allowed_subagents == std::vector<std::string>{"researcher", "*"});
+
+    const auto empty = Parse("---\nname: build\nallowed_subagents: []\n---\nbody\n");
+    REQUIRE(empty.allowed_subagents.has_value());
+    CHECK(empty.allowed_subagents->empty());
+}
+
+TEST_CASE("ParseAgentPresetFrontmatter: allowed_subagents shape errors name the field",
+          "[agent_preset_frontmatter]") {
+    CHECK_THROWS_AS(
+        Parse("---\nname: build\nallowed_subagents: researcher\n---\nbody\n"),
+        std::runtime_error);  // scalar, not a list
+    CHECK_THROWS_AS(
+        Parse("---\nname: build\nallowed_subagents:\n  - \"\"\n---\nbody\n"),
+        std::runtime_error);  // an empty entry would match nothing or everything
+}
+
+TEST_CASE("ParseAgentPresetFrontmatter: allowed_subagents is structural, not provider passthrough",
+          "[agent_preset_frontmatter]") {
+    // Every unrecognized key lands in extra_parameters and rides to the
+    // provider as a request parameter; if allowed_subagents were missing from
+    // the known-key table, `allowed_subagents: [x]` would silently become an
+    // API argument.
+    const auto preset = Parse(
+        "---\nname: build\nallowed_subagents: [researcher]\n---\nbody\n");
+    CHECK(preset.extra_parameters.empty());
+}
+
 TEST_CASE("ParseAgentPresetFrontmatter: each permission_mode field is independently optional",
           "[agent_preset_frontmatter]") {
     auto preset = Parse(
