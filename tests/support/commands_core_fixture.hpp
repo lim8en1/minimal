@@ -67,6 +67,7 @@ public:
         Write("settings.json", R"({"default_model":"main/fast"})");
         Write("permissions.json", "{}");
         Write("prompts/compression.md", "SUMMARIZE.\n");
+        Write("prompts/terse.md", "TERSE.\n");
         Write("agents/build.md", "---\nname: build\nmodel: main/fast\n---\nbody\n");
         Write("agents/other.md", "---\nname: other\nmodel: main/fast\n---\nother body\n");
 
@@ -85,9 +86,12 @@ public:
             provider_, *executor_, tools_, store_, preset_, agent::LoopConfig{}, std::move(context),
             [] { return false; }, [](const llm::StreamEvent&) { return true; },
             // A real-shaped compactor: /compact must actually fold history, not
-            // just be dispatched. Returns a summary without a provider call.
-            [](std::span<const llm::Message>, llm::LlmProvider&,
-               const agent::CompactionRequest&) {
+            // just be dispatched. Returns a summary without a provider call, and
+            // records the compression prompt each call carried -- /compact
+            // <name> tests assert on it.
+            [this](std::span<const llm::Message>, llm::LlmProvider&,
+                   const agent::CompactionRequest& request) {
+                last_compaction_prompt_ = std::string(request.compression_prompt);
                 return agent::CompactionResult{UserText("[summary]"), 42};
             });
 
@@ -127,6 +131,11 @@ public:
 
     // What the durable store holds, which /clear must never touch.
     std::size_t stored_messages() const { return store_.messages.size(); }
+
+    // The compression prompt the most recent compaction call carried, if any.
+    const std::optional<std::string>& last_compaction_prompt() const {
+        return last_compaction_prompt_;
+    }
 
     // --- commands::SessionControl ------------------------------------------
     const std::string& session_id() const override { return session_id_; }
@@ -232,6 +241,7 @@ private:
     std::vector<std::string> submitted_turns_;
     std::vector<std::string> submitted_models_;
     std::vector<std::string> submitted_agents_;
+    std::optional<std::string> last_compaction_prompt_;
 };
 
 }  // namespace minimal::testing

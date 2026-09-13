@@ -7,7 +7,7 @@ The built-in `/-commands`, as one plugin rather than nine.
 | Command | Usage | What it does |
 | --- | --- | --- |
 | `/help` | `/help [command]` | Lists all registered commands (including plugins loaded after this one), or explains one. Read-only; answers even on a sessionless tab. |
-| `/compact` | `/compact` | Summarizes the older half of the conversation into one message. The transcript is kept. |
+| `/compact` | `/compact [prompt]` | Summarizes the older half of the conversation into one message. The transcript is kept. With a name, uses `prompts/<name>.md` as the summarization prompt for this compaction only (auto-compaction and bare `/compact` keep the active preset's prompt). |
 | `/clear` | `/clear` | Forgets the conversation so far (asks for confirmation). The transcript on disk is unchanged — what the model sees and what scrollback shows are different things. |
 | `/agent` | `/agent [name]` | Bare form opens the agent-preset picker; with a name, switches the session's preset. |
 | `/model` | `/model [provider/model]` | Bare form opens the model picker; with a `<provider>/<model>` reference, switches the session's model. The choice is recorded on the session, so a later `/agent` re-applies it rather than resolving it away. |

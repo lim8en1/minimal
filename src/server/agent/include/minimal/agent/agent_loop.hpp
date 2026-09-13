@@ -329,10 +329,14 @@ public:
     // /compact. Compacts regardless of occupancy -- the user asked -- but still
     // respects the per-turn failure cooldown, which exists so a broken
     // summarizer is not re-invoked repeatedly, and is just as true when the
-    // repeated invocation is manual.
+    // repeated invocation is manual. An optional `prompt_override` (the
+    // resolved TEXT of a prompts/<name>.md, resolved by the caller through
+    // AgentPresetRegistry::ResolveCompressionPrompt) replaces the preset's
+    // compression prompt for this one compaction; it is not sticky, and
+    // auto-compaction never sees it.
     //
     // Returns how many messages were folded away, or nullopt if nothing was.
-    std::optional<std::size_t> CompactNow();
+    std::optional<std::size_t> CompactNow(std::string_view prompt_override = {});
 
     // /clear. Drops the in-memory working set; the STORE keeps the full record,
     // the same rule compaction follows. Scrollback is unaffected.
@@ -443,8 +447,11 @@ private:
     // MaybeCompact adds and CompactNow deliberately skips. `trigger` names who
     // asked -- the pre/post_compact hook payloads carry it filterable, since
     // "auto compacted" and "the user ran /compact" are different events even
-    // when the mechanics are identical.
-    std::optional<std::size_t> Compact(std::string_view trigger);
+    // when the mechanics are identical. A non-empty `prompt_override` (/compact
+    // <name>) replaces the preset's compression prompt for THIS invocation only;
+    // auto-compact and bare /compact never pass one.
+    std::optional<std::size_t> Compact(std::string_view trigger,
+                                       std::string_view prompt_override = {});
     void FlushInjectedMessages();
     // The while(true) body both RunTurn overloads share. Takes `result` by
     // reference so the two entry points can differ only in seeding. The wake

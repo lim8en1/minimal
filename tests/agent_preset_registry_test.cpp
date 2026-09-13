@@ -596,6 +596,37 @@ TEST_CASE("AgentPresetRegistry: an explicitly-named missing compression prompt t
     CHECK_THROWS_AS(registry.Resolve("build"), std::runtime_error);
 }
 
+TEST_CASE("AgentPresetRegistry: ResolveCompressionPrompt loads the named file's body",
+          "[agent_preset_registry]") {
+    TempConfigDir config;
+    config.WriteDefaults();
+    config.Write("prompts/terse.md", "---\nignored: yes\n---\nTerse compaction prompt.\n");
+    config::SkillRegistry skills = config::SkillRegistry::Load(config.dir);
+    AgentPresetRegistry registry(config.dir, skills,
+                                  config::LoadSettingsConfig(config.dir / "settings.json"));
+
+    CHECK(registry.ResolveCompressionPrompt("terse") == "Terse compaction prompt.\n");
+}
+
+TEST_CASE("AgentPresetRegistry: ResolveCompressionPrompt applies the same bare-filename rule",
+          "[agent_preset_registry]") {
+    TempConfigDir config;
+    config.WriteDefaults();
+    config.Write("prompts/terse.md", "Terse compaction prompt.\n");
+    config::SkillRegistry skills = config::SkillRegistry::Load(config.dir);
+    AgentPresetRegistry registry(config.dir, skills,
+                                  config::LoadSettingsConfig(config.dir / "settings.json"));
+
+    // Same traversal shapes the frontmatter field refuses: the /compact <name>
+    // argument builds a path into prompts/ just the same way.
+    for (const auto* bad : {"../../prompts/evil", "/etc/evil", "terse\\evil", "..", "."}) {
+        CHECK_THROWS_AS(registry.ResolveCompressionPrompt(bad), std::runtime_error);
+    }
+    CHECK_THROWS_AS(registry.ResolveCompressionPrompt("nonexistent"), std::runtime_error);
+    // The honest name still resolves after all the failures.
+    CHECK(registry.ResolveCompressionPrompt("terse") == "Terse compaction prompt.\n");
+}
+
 TEST_CASE("AgentPresetRegistry: missing prompts/subagent.md yields an empty SubagentPrefix", "[agent_preset_registry]") {
     TempConfigDir config;
     config.WriteDefaults();

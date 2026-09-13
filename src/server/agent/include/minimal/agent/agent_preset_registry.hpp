@@ -148,6 +148,14 @@ public:
     std::vector<AgentPresetSummary> ListAvailable(
         const std::filesystem::path& project_root = {}) const;
 
+    // Resolves a compression prompt BY NAME -- the per-invocation override
+    // /compact <name> uses. Same rules a preset frontmatter `compression_prompt:`
+    // value follows: a bare file name (no '/' or '\\', never "." or "..") naming
+    // prompts/<name>.md under the config dir; the frontmatter body is returned.
+    // Throws with the reason on an invalid name or a missing file; the caller
+    // decides whether that is a command error or something louder.
+    std::string ResolveCompressionPrompt(const std::string& name) const;
+
     // Registers the builder that produces `tool_name`'s definition per preset.
     // Startup-only wiring (main.cpp, beside the tool's own registration);
     // every builder runs inside ResolveUncached for each resolved preset, and
@@ -188,6 +196,17 @@ private:
         const std::string& preset_name, const std::filesystem::path& project_root,
         const std::optional<std::map<std::string, SkillMode>>& parent_skills,
         const std::optional<config::ModelRef>& model_override) const;
+
+    // The shared loader behind a preset frontmatter `compression_prompt:` value
+    // and ResolveCompressionPrompt(): validates the bare-filename rule (the name
+    // becomes a path into prompts/, and presets and clients are untrusted
+    // content -- '/' or '\\' would climb out and read an arbitrary *.md into
+    // the summarization prompt), then reads prompts/<name>.md and returns the
+    // frontmatter body. Throws on violation or missing file. `error_context`
+    // prefixes the message -- the preset name where one exists, so a resolve
+    // failure for preset X is attributable to X.
+    std::string LoadCompressionPromptFile(const std::string& name,
+                                          const std::string& error_context) const;
 
     // The one merged agents/ scan both listings run, parameterized by
     // visibility: the picker listing hides `hidden` and `mode: subagent`

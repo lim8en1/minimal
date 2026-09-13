@@ -416,12 +416,12 @@ void AgentLoop::MaybeCompact() {
     Compact("auto");
 }
 
-std::optional<std::size_t> AgentLoop::CompactNow() {
+std::optional<std::size_t> AgentLoop::CompactNow(std::string_view prompt_override) {
     // The TRIGGER is skipped -- the user asked, so occupancy, auto_compact and
     // the configured strategy are all beside the point. Everything Compact()
     // checks is not: an empty history, a missing compactor and a summarizer that
     // already failed this turn are just as true when the request is manual.
-    return Compact("manual");
+    return Compact("manual", prompt_override);
 }
 
 void AgentLoop::ClearHistory() {
@@ -538,7 +538,8 @@ void AgentLoop::RestorePersisted(std::vector<llm::Message> rows, std::int64_t fi
                          session_.session_id, history_.size(), first_seq);
 }
 
-std::optional<std::size_t> AgentLoop::Compact(std::string_view trigger) {
+std::optional<std::size_t> AgentLoop::Compact(std::string_view trigger,
+                                              std::string_view prompt_override) {
     if (!compactor_) return std::nullopt;
     if (history_.size() < 2) return std::nullopt;
     if (compaction_failed_this_turn_) return std::nullopt;
@@ -643,7 +644,10 @@ std::optional<std::size_t> AgentLoop::Compact(std::string_view trigger) {
     const std::span to_compact(history_.begin(), history_.begin() + static_cast<long>(cut));
     CompactionRequest params;
     params.model_name = preset_.provider.model_name;
-    params.compression_prompt = preset_.compression_prompt;
+    // A non-empty override (/compact <name>) wins for THIS invocation only --
+    // auto-compact and bare /compact keep the preset's prompt.
+    params.compression_prompt =
+        prompt_override.empty() ? preset_.compression_prompt : prompt_override;
     params.parameters = preset_.parameters;
     params.max_tokens = preset_.max_tokens;
     params.last_reported_input_tokens = tokens_.last_input_tokens();

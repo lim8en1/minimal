@@ -73,10 +73,33 @@ public:
     std::string_view Summary() const override {
         return "Summarize the older half of the conversation";
     }
-    std::string_view Usage() const override { return "/compact"; }
+    std::string_view Usage() const override { return "/compact [prompt]"; }
 
-    CommandResult Execute(CommandContext& context, const CommandArgs&) override {
-        const auto folded = context.session().loop().CompactNow();
+    CommandResult Execute(CommandContext& context, const CommandArgs& args) override {
+        if (args.positional.size() > 1) {
+            return CommandResult::Error("usage: /compact [prompt]");
+        }
+        // A named prompt is resolved by the registry -- same bare-filename rule
+        // and same prompts/ directory a preset frontmatter `compression_prompt:`
+        // value uses -- so a miss or a traversal is a clean command error, not a
+        // half-configured compaction. The override rides THIS invocation only.
+        std::string prompt;
+        if (!args.positional.empty()) {
+            try {
+                prompt = context.presets().ResolveCompressionPrompt(args.positional.front());
+            } catch (const std::exception& error) {
+                return CommandResult::Error(error.what());
+            }
+            if (prompt.empty()) {
+                // An empty body would short-circuit compact_messages into
+                // disabling compaction; saying so here is the honest answer.
+                return CommandResult::Error(
+                    "compression prompt '" + args.positional.front() + "' is empty");
+            }
+        }
+        const auto folded = prompt.empty()
+                                ? context.session().loop().CompactNow()
+                                : context.session().loop().CompactNow(prompt);
         if (!folded) {
             // The reason is already in the log at the point it was decided --
             // repeating a guess here would be a second, possibly wrong, story.

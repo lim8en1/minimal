@@ -520,6 +520,66 @@ TEST_CASE("/compact works when the automatic trigger is Never", "[commands][inva
     CHECK(fixture.loop().history().size() < 4);
 }
 
+TEST_CASE("/compact with a named prompt folds history under THAT prompt",
+          "[commands][compact]") {
+    CommandFixture fixture;
+    fixture.SeedHistory();
+    fixture.SeedHistory();
+    REQUIRE(fixture.loop().history().size() == 4);
+
+    const auto result = fixture.Run("compact", {"terse"});
+    REQUIRE(result.status == Status::kOk);
+    CHECK(result.message.find("compacted") != std::string::npos);
+    CHECK(fixture.loop().history().size() < 4);
+    // The named file's body reached the compaction call, not the default.
+    REQUIRE(fixture.last_compaction_prompt().has_value());
+    CHECK(*fixture.last_compaction_prompt() == "TERSE.\n");
+}
+
+TEST_CASE("bare /compact still uses the preset's compression prompt", "[commands][compact]") {
+    CommandFixture fixture;
+    fixture.SeedHistory();
+    fixture.SeedHistory();
+
+    const auto result = fixture.Run("compact");
+    REQUIRE(result.status == Status::kOk);
+    REQUIRE(fixture.last_compaction_prompt().has_value());
+    CHECK(*fixture.last_compaction_prompt() == "SUMMARIZE.\n");
+}
+
+TEST_CASE("/compact rejects an unknown or invalid prompt name without compacting",
+          "[commands][compact]") {
+    CommandFixture fixture;
+    fixture.SeedHistory();
+    fixture.SeedHistory();
+
+    // A name with no prompts/<name>.md behind it: the registry's throw becomes
+    // a clean command error, and the history is untouched.
+    const auto missing = fixture.Run("compact", {"nonexistent"});
+    CHECK(missing.status == Status::kError);
+    CHECK(missing.message.find("nonexistent") != std::string::npos);
+    CHECK(fixture.loop().history().size() == 4);
+    CHECK(!fixture.last_compaction_prompt().has_value());
+
+    // The same bare-filename rule the frontmatter field enforces: a traversal
+    // attempt is refused, never resolved relative to somewhere else.
+    const auto traversal = fixture.Run("compact", {"../prompts/terse"});
+    CHECK(traversal.status == Status::kError);
+    CHECK(traversal.message.find("must be a file name") != std::string::npos);
+    CHECK(fixture.loop().history().size() == 4);
+}
+
+TEST_CASE("/compact refuses more than one prompt argument", "[commands][compact]") {
+    CommandFixture fixture;
+    fixture.SeedHistory();
+    fixture.SeedHistory();
+
+    const auto result = fixture.Run("compact", {"terse", "other"});
+    CHECK(result.status == Status::kError);
+    CHECK(result.message.find("usage") != std::string::npos);
+    CHECK(fixture.loop().history().size() == 4);
+}
+
 // ---------------------------------------------------------------------------
 // The sessionless dispatch path (RunSessionlessCommand RPC): a NULL session
 // ref in the CommandContext, refused for everything but a Sessionless<>

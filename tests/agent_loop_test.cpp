@@ -1349,6 +1349,35 @@ TEST_CASE("the preset's compression_prompt reaches the summarization request",
     CHECK(*h.provider.requests()[1].system == "OVERRIDE PROMPT");
 }
 
+TEST_CASE("CompactNow with a prompt override uses it for that call only, and a bare "
+          "CompactNow keeps the preset's prompt",
+          "[agent_loop][compaction]") {
+    Harness h;
+    agent::AgentPreset preset;
+    preset.compression_prompt = "PRESET PROMPT";
+    h.Build(std::move(preset), agent::LoopConfig{}, &agent::compact_messages);
+
+    // Two messages of history, the minimum Compact needs to find a cut.
+    h.provider.PushResponse(SmallTextResponse("ok"));
+    h.loop->RunTurn(UserText("hi"));
+    REQUIRE(h.loop->history().size() == 2);
+
+    // The override rides THIS invocation only.
+    h.provider.PushResponse(TextResponse("SUMMARY"));
+    const auto folded = h.loop->CompactNow("MANUAL OVERRIDE");
+    REQUIRE(folded.has_value());
+    REQUIRE(h.provider.requests().size() == 2);
+    REQUIRE(h.provider.requests()[1].system.has_value());
+    CHECK(*h.provider.requests()[1].system == "MANUAL OVERRIDE");
+
+    // Bare CompactNow falls back to the preset's prompt, untouched by the
+    // earlier override.
+    h.provider.PushResponse(TextResponse("SUMMARY TWO"));
+    REQUIRE(h.loop->CompactNow().has_value());
+    REQUIRE(h.provider.requests()[2].system.has_value());
+    CHECK(*h.provider.requests()[2].system == "PRESET PROMPT");
+}
+
 TEST_CASE("small_model: the summarizer alone runs on the alternate provider, and the "
           "session's own provider is left untouched",
           "[agent_loop][compaction][small_model]") {
