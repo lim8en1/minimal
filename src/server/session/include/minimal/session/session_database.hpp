@@ -33,6 +33,18 @@ inline constexpr std::string_view kMessagesPageSql =
     " WHERE session_id = ?1 AND discarded = 0 AND seq < COALESCE(?2, 9223372036854775807)"
     " ORDER BY seq DESC LIMIT ?3;";
 
+// The delta-fetch twin of kMessagesPageSql: everything NEWER than the
+// client's cursor, ascending. This is the "fetch only the changes" shape --
+// an append-only transcript makes seq an exact content address, so a client
+// holding rows through seq N needs only `seq > N`, never a re-send of the
+// window it already has. has_more means MORE NEWER rows remain (the probe
+// row), NOT "older pages exist" -- callers must not feed it to a
+// load-older affordance.
+inline constexpr std::string_view kMessagesPageAfterSql =
+    "SELECT seq, content_json, token_count, created_at, agent_preset, model FROM messages"
+    " WHERE session_id = ?1 AND discarded = 0 AND seq > ?2"
+    " ORDER BY seq ASC LIMIT ?3;";
+
 // The session picker's page. The cursor is a PAIR because the sort key is:
 // updated_at is not unique, and ordering is (updated_at DESC, id ASC). The
 // SEEK is carried by the `updated_at <= COALESCE(?3, INT64_MAX)` ceiling --
@@ -286,6 +298,13 @@ public:
     // nullopt means "start at the most recent". limit must be > 0.
     MessagePage GetMessagesPage(const std::string& session_id,
                                 std::optional<std::int64_t> before_seq, int limit) const;
+
+    // Keyset page, ASCENDING by seq: every active row with seq > after_seq.
+    // The delta-fetch path (GetMessagesRequest.after_seq). limit must be > 0;
+    // has_more is true when the (limit+1)-th row exists -- more NEWER rows,
+    // not older ones.
+    MessagePage GetMessagesPageAfter(const std::string& session_id, std::int64_t after_seq,
+                                     int limit) const;
 
     // The session's entire transcript, ascending by seq. One-shot O(n) load --
     // resume is its only caller: the loop's working history is what gets sent

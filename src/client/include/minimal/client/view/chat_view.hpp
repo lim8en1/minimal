@@ -19,6 +19,8 @@
 #include <ftxui/dom/elements.hpp>
 #include <ftxui/screen/box.hpp>
 
+#include <cstdint>
+#include <functional>
 #include <map>
 #include <memory>
 #include <optional>
@@ -139,6 +141,22 @@ public:
     // LAST Render() recorded (see row_boxes_); a click before the first
     // render hits nothing. True when a row was toggled.
     bool ToggleCollapseAt(int screen_y);
+
+    // Registers the handler a click on a QUEUED (pending) message row
+    // invokes: AppState::SendCancelQueuedTurn for the owning session. A
+    // queued row renders a "click to cancel" affordance only when a handler
+    // is set and the entry's server-assigned turn id has arrived
+    // (TurnQueuedEvent); before the id, the cancel is not addressable.
+    void SetCancelPendingHandler(std::function<void(std::uint64_t turn_id)> handler) {
+        cancel_pending_ = std::move(handler);
+    }
+
+    // Mouse-click cancel for a QUEUED message row: hit-tests the boxes the
+    // last Render() recorded for the pending rows (see pending_row_boxes_)
+    // and, on a hit whose turn id is known, invokes the handler set above.
+    // True when the click was consumed (the event must not fall through to
+    // collapse toggling or text selection).
+    bool CancelPendingAt(int screen_y);
 
 private:
     void RebuildRows(const SessionState::Snapshot& snapshot);
@@ -278,6 +296,16 @@ private:
     // repaint tick with no new delta. Keyed by live_segments index; any text
     // mismatch (new turn, or genuinely new content) is simply a cache miss.
     std::vector<std::pair<std::string, ftxui::Element>> thinking_render_cache_;
+
+    // QUEUED message rows (Snapshot::pending_user_messages): the boxes the
+    // last Render() recorded, one per row (a single slot per row -- the
+    // wrapper wraps row + tag), parallel to the turn ids the rows carried.
+    // CancelPendingAt hit-tests these; the slot is persistent across frames
+    // the way row_box_slots_ is (values refresh every layout pass).
+    std::vector<std::shared_ptr<ftxui::Box>> pending_row_boxes_;
+    std::vector<std::uint64_t> pending_row_turn_ids_;
+    std::vector<std::shared_ptr<ftxui::Box>> pending_box_slots_;
+    std::function<void(std::uint64_t turn_id)> cancel_pending_;
 
     // ScrollWheelBy's gate state: when the last wheel step was APPLIED. Epoch
     // (never a real timestamp) so the first event always passes.

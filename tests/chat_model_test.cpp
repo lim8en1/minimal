@@ -481,17 +481,23 @@ TEST_CASE("a turn-end version bump fetches even though streaming text is still h
     CHECK(state.refresh_from_version == 5);
 }
 
-TEST_CASE("a version bump mid-turn with live streaming text latches instead of fetching",
+TEST_CASE("a version bump mid-turn with live streaming text fetches anyway",
           "[chat_model][refresh]") {
+    // A tool round finishing bumps the version WHILE the turn keeps
+    // streaming, and the fetch is safe mid-turn by construction:
+    // ApplyScrollbackPage's content-matched retirement swaps in exactly the
+    // persisted rows that cover the finished rounds' live segments, leaving
+    // anything still open or running live. (The old latch -- "the streaming
+    // block IS the content until the turn ends" -- was what made live tool
+    // rows structurally different from their persisted twins.)
     ScrollbackRefreshState state;
     state.rendered_version = 4;
     auto snap = SnapAt(5, 0);
     snap.streaming_text = "still streaming";
     snap.turn_ended = false;
-    CHECK(AdvanceScrollbackRefresh(state, snap) == ScrollbackRefreshAction::kNone);
-    REQUIRE(state.rendered_version.has_value());
-    CHECK(*state.rendered_version == 5);   // latched: no fetch around the live block
-    CHECK_FALSE(state.refresh_pending);
+    CHECK(AdvanceScrollbackRefresh(state, snap) == ScrollbackRefreshAction::kSubmit);
+    CHECK(state.refresh_pending);
+    CHECK(state.refresh_from_version == 5);
 }
 
 TEST_CASE("empty streaming text fetches regardless of the turn flag",

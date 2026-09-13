@@ -1688,7 +1688,12 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         // user's keymap decides them (FrameRenderer's fallback builder gets
         // the same two).
         env.keybindings.KeyFor("chat.toggle_collapse", "alt+c"),
-        env.keybindings.KeyFor("chat.load_older", "pageup")});
+        env.keybindings.KeyFor("chat.load_older", "pageup"),
+        // Click-to-cancel for QUEUED message rows: resolve the tab's session
+        // at click time (a tab's ChatView may predate its session).
+        [app](const std::string& tab_id, std::uint64_t turn_id) {
+            app->SendCancelQueuedTurnByTab(tab_id, turn_id);
+        }});
     // Same names the inline code declared directly -- every lambda below
     // this point (with_keys' KeyContext, the still-inline render body)
     // captures `[&]`, i.e. by ordinary lexical scoping.
@@ -1877,6 +1882,15 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         [&](const std::string& session_id, int screen_y) -> bool {
             if (auto it = tab_ui.find(session_id); it != tab_ui.end() && it->second.chat) {
                 return it->second.chat->ToggleCollapseAt(screen_y);
+            }
+            return false;
+        },
+        // Mouse-click cancel of a QUEUED message: CancelPendingAt consumes
+        // the click only when a cancellable queued row is under it; a miss
+        // falls through to the collapse toggle above's handling order.
+        [&](const std::string& session_id, int screen_y) -> bool {
+            if (auto it = tab_ui.find(session_id); it != tab_ui.end() && it->second.chat) {
+                return it->second.chat->CancelPendingAt(screen_y);
             }
             return false;
         },

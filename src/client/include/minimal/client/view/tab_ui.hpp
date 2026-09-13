@@ -157,6 +157,12 @@ public:
         // name these keys).
         std::string toggle_collapse_hint = "alt+c";
         std::string load_older_hint = "pageup";
+        // Click-to-cancel for a QUEUED message row: sends CancelQueuedTurn
+        // for (this tab's session, turn_id). Null when unset -- queued rows
+        // then render without the cancel affordance. `tab_id` (not session
+        // id): the ChatView is built under a tab's key and may exist before
+        // the session does.
+        std::function<void(const std::string& tab_id, std::uint64_t turn_id)> cancel_pending_turn;
     };
 
     explicit TabMaintenance(Dependencies deps);

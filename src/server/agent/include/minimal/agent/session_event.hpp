@@ -99,10 +99,27 @@ struct SessionError {
     std::string message;
 };
 
+// A user turn was ACCEPTED onto the work queue (not yet running -- the seed
+// user row persists only when the worker pops it). The per-session
+// monotonic id is what a client addresses a per-message cancel at.
+struct TurnQueued {
+    std::uint64_t turn_id = 0;
+    std::string text;
+};
+
+// A queued turn left the work queue without running: cancelled by id, or
+// flushed by a CancelTurn{include_queued}. `removed = false` answers a
+// CancelQueuedTurn whose turn had already been popped -- it must run.
+struct TurnCanceled {
+    std::uint64_t turn_id = 0;
+    bool removed = false;
+};
+
 using SessionEvent = std::variant<llm::StreamEvent, ToolLifecycleEvent, tools::BackgroundTaskEvent,
                                   llm::LlmError, SessionCommandResult, ToolOutputDelta,
                                   SubagentStarted, SessionMetadataChanged, SessionEnded,
-                                  SessionRewound, TurnCompleted, SessionError>;
+                                  SessionRewound, TurnCompleted, SessionError, TurnQueued,
+                                  TurnCanceled>;
 
 // Returns whether the transport accepted the event -- mirrors
 // EventBroadcaster::Publish's own return exactly (false only means the

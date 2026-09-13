@@ -622,6 +622,15 @@ void SessionServiceImpl::Dispatch(const v1::ClientEvent& event, agent::Session& 
 
         case v1::ClientEvent::kCancel:
             session.Cancel();
+            // include_queued: the interrupt takes the queued messages with it
+            // (messages submitted mid-turn and not yet started). Each dropped
+            // turn announces itself; the in-flight turn unwinds as cancelled
+            // either way.
+            if (event.cancel().include_queued()) session.CancelAllQueuedTurns();
+            return;
+
+        case v1::ClientEvent::kCancelQueuedTurn:
+            session.CancelQueuedTurn(event.cancel_queued_turn().turn_id());
             return;
 
         case v1::ClientEvent::kAttach:
@@ -1032,9 +1041,29 @@ grpc::Status SessionServiceImpl::GetMessages(grpc::ServerContext* context,
     const int limit = ClampPageSize(request->limit(), ScrollbackPageSize());
 
     try {
-        // has_before_seq(), not a value test: the wire field is optional
-        // precisely so "page from the newest" and "page before seq 0" stay
-        // distinguishable.
+        if (request->has_after_seq() && request->has_before_seq()) {
+            // The two cursors page in opposite directions; honoring both has
+            // no coherent meaning, so name the misuse instead of silently
+            // picking one.
+            return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
+                                "after_seq and before_seq are mutually exclusive");
+        }
+        // has_before_seq()/has_after_seq(), not value tests: the wire fields
+        // are optional precisely so "page from the newest" and "page before
+        // seq 0" stay distinguishable.
+        if (request->has_after_seq()) {
+            // Delta fetch: only the rows the client does not hold, ascending.
+            const auto page =
+                reader_.GetMessagesAfter(request->session_id(), request->after_seq(), limit);
+            for (const auto& stored : page.messages) {
+                *response->add_messages() = ToProto(stored);
+            }
+            // Note the flipped meaning vs. the before_seq path: more NEWER
+            // rows remain (the page was full), not older pages -- see the
+            // proto comment.
+            response->set_has_more(page.has_more);
+            return grpc::Status::OK;
+        }
         const std::optional<std::int64_t> cursor =
             request->has_before_seq() ? std::optional<std::int64_t>(request->before_seq())
                                       : std::nullopt;

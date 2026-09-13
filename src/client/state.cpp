@@ -94,7 +94,9 @@ SessionState::Snapshot SessionState::TakeSnapshot() {
     s.display_name = display_name_;
     s.state = state_;
     s.scrollback_page = scrollback_page_shared_;   // shared, copy-on-apply
-    s.pending_user_text = pending_user_text_;
+    s.pending_user_messages = pending_user_messages_;
+    s.pending_user_text =
+        pending_user_messages_.empty() ? std::string{} : pending_user_messages_.front().text;
     s.has_earlier_messages = has_earlier_;
     s.last_loaded_seq = last_loaded_seq_;
     s.streaming_text = streaming_accumulated_;
@@ -651,9 +653,113 @@ void SessionState::ClearStreamingIfCurrentTurn(uint64_t turn_seq) {
     live_segments_.erase(keep_end, live_segments_.end());
 }
 
+void SessionState::RetireCoveredLiveSegments(const std::set<std::string>& answered_tool_ids,
+                                             const std::vector<std::string>& assistant_text,
+                                             const std::vector<std::string>& assistant_thinking) {
+    // Segment coverage test, per kind (see the header comment for the rule).
+    // Exact equality for Text/Thinking: the live segment IS the concatenation
+    // of the block's deltas, and the persisted block IS the same block
+    // server-side -- the strings are built from the same bytes. A
+    // cap-truncated segment never equals its block (the marker tail is
+    // client-side presentation loss), so it matches by prefix instead: the
+    // persisted block necessarily starts with everything the live segment
+    // kept. The truncation marker itself is stripped before comparing.
+    const auto text_matches = [&](const LiveTurnSegment& segment,
+                                  const std::vector<std::string>& blocks) {
+        if (blocks.empty()) return false;
+        if (segment.text_truncated) {
+            std::string_view prefix = segment.text;
+            const auto cut = prefix.rfind(kStreamingTruncationMarker);
+            if (cut != std::string_view::npos) prefix.remove_suffix(prefix.size() - cut);
+            if (prefix.empty()) return false;
+            for (const auto& block : blocks) {
+                if (block.size() >= prefix.size() &&
+                    std::string_view(block).substr(0, prefix.size()) == prefix) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        return std::find(blocks.begin(), blocks.end(), segment.text) != blocks.end();
+    };
+    const auto covered = [&](const LiveTurnSegment& segment) {
+        if (segment.kind == LiveTurnSegment::Kind::Tool) {
+            if (!answered_tool_ids.contains(segment.tool_use_id)) return false;
+            // A still-running tool must never retire even though its result
+            // row reached the page: only its ACK result is persisted -- the
+            // detached process of a background row keeps producing live
+            // output (ARCHITECTURE.md "Background bash rows"), and a
+            // foreground row still on the pool has not emitted its finish
+            // event yet. Swept rows (no state left) are by definition done.
+            for (const auto& tool : tools_) {
+                if (tool.tool_use_id == segment.tool_use_id) {
+                    return !tool.started;
+                }
+            }
+            return true;
+        }
+        if (segment.kind == LiveTurnSegment::Kind::Text) {
+            return text_matches(segment, assistant_text);
+        }
+        return text_matches(segment, assistant_thinking);
+    };
+
+    const auto keep_end = std::stable_partition(live_segments_.begin(), live_segments_.end(),
+                                                [&](const LiveTurnSegment& segment) {
+                                                    return !covered(segment);
+                                                });
+    if (keep_end == live_segments_.begin()) {
+        // Everything retired: the classic clear (the turn's whole live tail is
+        // covered by the page).
+        streaming_accumulated_.clear();
+        streaming_truncated_ = false;
+        thinking_accumulated_.clear();
+        thinking_truncated_ = false;
+        is_streaming_ = false;
+        live_segments_.clear();
+        live_segments_truncated_ = false;
+        return;
+    }
+    // Rebuild the flat accumulations from the surviving segments, exactly the
+    // shapes the append paths maintain: text segments joined by the blank
+    // block separator, thinking concatenated without one
+    // (AppendStreamingText / AppendStreamingThinking).
+    std::string rebuilt_text;
+    std::string rebuilt_thinking;
+    for (auto it = live_segments_.begin(); it != keep_end; ++it) {
+        if (it->kind == LiveTurnSegment::Kind::Text && !it->text.empty()) {
+            if (!rebuilt_text.empty()) rebuilt_text.append("\n\n");
+            rebuilt_text.append(it->text);
+        } else if (it->kind == LiveTurnSegment::Kind::Thinking) {
+            rebuilt_thinking.append(it->text);
+        }
+    }
+    streaming_accumulated_ = std::move(rebuilt_text);
+    streaming_truncated_ = streaming_accumulated_.size() > kStreamingTextCapBytes;
+    thinking_accumulated_ = std::move(rebuilt_thinking);
+    thinking_truncated_ = thinking_accumulated_.size() > kStreamingTextCapBytes;
+    // is_streaming_ describes the OPEN block, and an open Text/Thinking
+    // segment is by construction the LAST segment in the vector (a tool_use
+    // marker is only pushed after its block closed). If retirement removed
+    // that last textual segment -- an exact match means the block's full
+    // content is persisted, so it cannot grow anymore -- the open-block
+    // notion goes with it: downgrade is_streaming_ so the next delta opens a
+    // fresh segment instead of fusing onto a retired one. A surviving last
+    // textual segment keeps the flag untouched.
+    if (!live_segments_.empty() && live_segments_.back().kind == LiveTurnSegment::Kind::Tool) {
+        is_streaming_ = false;
+    }
+    live_segments_.erase(keep_end, live_segments_.end());
+}
+
 uint64_t SessionState::CurrentTurnSeq() const {
     std::lock_guard lk(mtx_);
     return turn_seq_;
+}
+
+bool SessionState::CurrentTurnEnded() const {
+    std::lock_guard lk(mtx_);
+    return turn_ended_;
 }
 
 uint64_t SessionState::CurrentRewindEpoch() const {
@@ -679,7 +785,7 @@ void SessionState::OnError(const std::string& error_message) {
     // The turn failed before any page apply could retire the echo; nothing
     // will, so drop it here rather than leaving a ghost of an unacknowledged
     // message above the error.
-    pending_user_text_.clear();
+    pending_user_messages_.clear();
     state_ = SessionStateKind::Error;
     // The message is part of the outcome: dropped here, an errored tab showed
     // only a state tint and "cannot send"/"connection lost"/"resume failed"
@@ -718,7 +824,7 @@ void SessionState::OnSessionEnded() {
     pending_permission_.reset();
     pending_confirmation_.reset();
     pending_ask_.reset();
-    pending_user_text_.clear();   // same rule as OnError: nothing will retire it
+    pending_user_messages_.clear();   // same rule as OnError: nothing will retire it
     state_ = SessionStateKind::Done;
 }
 
@@ -796,7 +902,7 @@ void SessionState::OnSessionRewound(int64_t truncated_to_seq, int64_t active_las
     is_streaming_ = false;
     live_segments_.clear();
     live_segments_truncated_ = false;
-    pending_user_text_.clear();
+    pending_user_messages_.clear();
     cancel_requested_ = false;
     scrollback_page_shared_ =
         std::make_shared<const std::vector<v1::StoredMessage>>(scrollback_page_);
@@ -1022,7 +1128,19 @@ void SessionState::OnToolFinished(const std::string& tool_use_id, const v1::Tool
             // liveness -- flipping `started` here would drop live deltas
             // (OnToolOutputDelta requires `started`) and read the row as
             // done while the task is still running.
-            if (!it->is_background) it->started = false;   // no longer current
+            if (!it->is_background) {
+                it->started = false;   // no longer current
+                // A finished foreground tool round is exactly when the server
+                // has the round's rows persisted (the assistant message at
+                // response completion, the results after the pool drains) --
+                // bump the version so the frame pump fetches and the
+                // content-matched retirement in ApplyScrollbackPage swaps
+                // the finished live rows for the real persisted ones
+                // MID-TURN, instead of holding everything live until the
+                // turn ends. Background rows stay out of it: their result
+                // row retires nothing (the live row outlives the ack).
+                ++transcript_version_;
+            }
             return;
         }
     }
@@ -1074,23 +1192,63 @@ void SessionState::OnBackgroundTask(const v1::BackgroundTaskEvent& evt) {
 
 // Scrollback -----------------------------------------------------------------
 
-void SessionState::ApplyScrollbackPage(const v1::GetMessagesResponse& resp) {
+void SessionState::ApplyScrollbackPage(const v1::GetMessagesResponse& resp, bool delta) {
     std::lock_guard lk(mtx_);
     refresh_succeeded_ = true;   // resolved OK, even when the page is empty
     scrollback_failures_ = 0;   // a success ends any failure streak (and its notice)
     if (resp.messages().empty()) {
-        has_earlier_ = resp.has_more();   // no rows, but the server may still have older pages
+        // A delta fetch that returns nothing proves nothing about OLDER
+        // history -- has_more on an after_seq response means "more newer
+        // rows", which is definitionally false for an empty one. The
+        // load-older affordance must not move.
+        if (!delta) has_earlier_ = resp.has_more();
         ++refresh_seq_;   // a resolved attempt (successful RPC, empty page) -- see NoteRefreshFailed
         return;
     }
 
-    // Set when a fresh/newest fetch itself exceeds the configured cap (below)
-    // -- distinct from scrollback_trimmed_, which specifically means NEWER
-    // rows were evicted; this is the opposite direction (we chose to keep
-    // fewer than the full fetch), so it only needs to correct has_earlier_.
+    // Set when the newest-slice assign below trims the fetched page to the
+    // configured cap -- distinct from scrollback_trimmed_, which specifically
+    // means NEWER rows were evicted; this is the opposite direction (we chose
+    // to keep fewer than the full fetch), so it only needs to correct
+    // has_earlier_.
     bool assign_capped = false;
-    if (scrollback_page_.empty() ||
-        resp.messages(0).seq() > scrollback_page_.front().seq()) {
+    if (delta) {
+        // ASCENDING rows newer than the cursor the fetch was submitted with:
+        // merge onto the window's newest end, never replacing it. Rows the
+        // window already holds (a racing duplicate fetch, or the window's
+        // front having moved past part of the page between submit and apply)
+        // are skipped; a discontinuity against the held newest seq records
+        // scrollback_gap_ exactly as the older-page stitch below does --
+        // rows are only ever APPENDED server-side, so a hole here means rows
+        // were discarded (a rewind race that the epoch guard missed, or a
+        // redo) and a full refresh must reconcile the window.
+        const int64_t held_newest = scrollback_page_.empty() ? -1 : scrollback_page_.front().seq();
+        std::vector<v1::StoredMessage> fresh;   // ascending -> reversed into desc
+        for (const auto& stored : resp.messages()) {
+            if (stored.seq() <= held_newest) continue;   // already held
+            fresh.push_back(stored);
+        }
+        if (!fresh.empty()) {
+            int64_t expected_prev = held_newest;   // each accepted row must be exactly one newer
+            for (const auto& stored : fresh) {   // ascending; each lands at the window's front
+                if (stored.seq() != expected_prev + 1) scrollback_gap_ = true;
+                expected_prev = stored.seq();
+                scrollback_page_.insert(scrollback_page_.begin(), stored);
+            }
+            // Caught up to the server's newest: anything an older-page load
+            // evicted from the window's NEWEST end is visible again. (A gap
+            // INSIDE the window is a different flag and stays.)
+            if (!resp.has_more()) scrollback_trimmed_ = false;
+            // Sliding window, oldest end only: the same bound the
+            // newest-slice assign applies, from the same direction.
+            while (static_cast<int>(scrollback_page_.size()) > scrollback_max_messages_) {
+                scrollback_page_.pop_back();
+            }
+        }
+        // The shared-page rebuild, retirement, and bookkeeping below are
+        // shared with the non-delta path.
+    } else if (scrollback_page_.empty() ||
+               resp.messages(0).seq() > scrollback_page_.front().seq()) {
         // Newer than what we hold — keep only the contiguous newest slice (bounded memory).
         scrollback_page_.assign(resp.messages().begin(), resp.messages().end());
         scrollback_trimmed_ = false;
@@ -1130,37 +1288,91 @@ void SessionState::ApplyScrollbackPage(const v1::GetMessagesResponse& resp) {
             expected_prev = stored.seq() - 1;
             scrollback_page_.push_back(stored);
         }
-        // Sliding window (track R2): the wire has only desc-order paging
-        // (before_seq), so there is no way to reload NEWER pages on demand --
-        // eviction from the newest end is therefore flagged
-        // (scrollback_trimmed_) and the view renders a boundary marker, never
-        // a silent gap. The newest-slice refresh at turn end (below, and in
-        // RequestScrollback(newest=true)) resets the flag and the window.
+        // Sliding window (track R2): an older-page load evicts from the
+        // window's NEWEST end to hold the cap -- flagged (scrollback_trimmed_)
+        // and rendered as a boundary marker, never a silent gap. The flag
+        // clears when a delta fetch catches the window back up to the
+        // server's newest (the delta branch above), which is exactly the
+        // "reload NEWER pages on demand" the wire used to lack.
         while (static_cast<int>(scrollback_page_.size()) > scrollback_max_messages_) {
             scrollback_page_.erase(scrollback_page_.begin());
             scrollback_trimmed_ = true;
         }
     }
 
+    // Content-matched retirement: the rows just applied prove what is now
+    // persisted, so live segments whose content they carry retire here rather
+    // than waiting for the turn-end refresh. This is what makes a MID-TURN
+    // apply safe (a tool round's finished rows swap in while the turn keeps
+    // streaming): the page covers exactly the finished rounds' segments, and
+    // anything still open or running stays live below them. The turn-end
+    // refresh's coarse clear (ClearStreamingIfCurrentTurn, called by the
+    // fetcher after this) remains the belt-and-suspenders for anything the
+    // exact match cannot name.
+    std::set<std::string> answered_tool_ids;
+    std::vector<std::string> assistant_text_blocks;
+    std::vector<std::string> assistant_thinking_blocks;
+    for (const auto& stored : resp.messages()) {
+        const bool assistant = stored.message().role() == v1::ROLE_ASSISTANT;
+        for (const auto& block : stored.message().content()) {
+            if (block.has_tool_result()) {
+                answered_tool_ids.insert(block.tool_result().tool_use_id());
+            } else if (assistant && block.has_text()) {
+                assistant_text_blocks.push_back(block.text().text());
+            } else if (assistant && block.has_thinking()) {
+                assistant_thinking_blocks.push_back(block.thinking().text());
+            }
+        }
+    }
+    if (!answered_tool_ids.empty() || !assistant_text_blocks.empty() ||
+        !assistant_thinking_blocks.empty()) {
+        RetireCoveredLiveSegments(answered_tool_ids, assistant_text_blocks,
+                                  assistant_thinking_blocks);
+    }
+
     last_loaded_seq_ = scrollback_page_.empty() ? -1 : scrollback_page_.back().seq();
     // The server's own has_more() may say false (this genuinely was the
     // whole remaining history) while assign_capped means we still chose to
     // keep less than the full fetch -- "load older" must not read as
-    // exhausted in that case.
-    has_earlier_ = resp.has_more() || assign_capped;
+    // exhausted in that case. A delta apply leaves the flag alone: has_more
+    // on an after_seq response speaks about NEWER rows, and only a real
+    // before_seq page (or a newest page) can prove anything about history
+    // below the window.
+    if (!delta) has_earlier_ = resp.has_more() || assign_capped;
     // The one copy the shared page ever pays: rows changed, so the old
     // snapshot's view must stay stable for whatever frame is still reading it.
     scrollback_page_shared_ =
         std::make_shared<const std::vector<v1::StoredMessage>>(scrollback_page_);
-    // The persisted user row (appended FIRST by the server, before any turn
-    // output) is provably in this page once the page's NEWEST seq moved past
-    // the submit-time baseline -- retire the optimistic echo and let the real
-    // row (with the server-side @-mention expansion) take over. Newest, not
-    // last_loaded_seq_: the window is DESCENDING, so back() is the
-    // load-older cursor and moves when OLDER pages arrive too.
-    if (!pending_user_text_.empty() && !scrollback_page_.empty() &&
-        scrollback_page_.front().seq() > pending_user_baseline_seq_) {
-        pending_user_text_.clear();
+    // Retire optimistic echoes whose persisted row just landed. Entries pair
+    // with their rows in FIFO order (the server queue is FIFO; each entry
+    // produces exactly one text-bearing user row when its turn pops), so the
+    // applied page's text-bearing USER rows newer than the OLDEST entry's
+    // baseline retire entries front-to-back, one row per entry. Rows the
+    // baseline filter excludes are the running turn's output (assistant rows)
+    // and injected tool-result-only user rows -- neither is an echo's row,
+    // which is exactly what the old single-slot "any newer seq" check got
+    // wrong (the previous turn's output retired the echo of a message still
+    // waiting in the queue).
+    if (!pending_user_messages_.empty()) {
+        const int64_t oldest_baseline = pending_user_messages_.front().baseline_seq;
+        std::vector<int64_t> user_text_seqs;   // ascending
+        for (const auto& stored : resp.messages()) {
+            if (stored.seq() <= oldest_baseline) continue;
+            if (stored.message().role() != v1::ROLE_USER) continue;
+            bool text_bearing = false;
+            for (const auto& block : stored.message().content()) {
+                if (block.has_text() && !block.text().text().empty()) {
+                    text_bearing = true;
+                    break;
+                }
+            }
+            if (text_bearing) user_text_seqs.push_back(stored.seq());
+        }
+        std::sort(user_text_seqs.begin(), user_text_seqs.end());
+        for (const auto seq : user_text_seqs) {
+            if (pending_user_messages_.empty()) break;
+            pending_user_messages_.erase(pending_user_messages_.begin());
+        }
     }
     ++transcript_version_;
     ++refresh_seq_;
@@ -1168,10 +1380,15 @@ void SessionState::ApplyScrollbackPage(const v1::GetMessagesResponse& resp) {
 
 void SessionState::OnChatSubmitted(const std::string& text) {
     std::lock_guard lk(mtx_);
-    pending_user_text_ = text;
+    // FIFO of echoes: a second submit while the agent is still working is
+    // QUEUED server-side (runs after the current turn), and only the oldest
+    // echo surviving meant every later queued message was invisible -- and
+    // unaddressable by a per-message cancel -- for the whole wait.
+    PendingUserMessage entry;
+    entry.text = text;
     // The page's NEWEST seq (descending window: front, not back/back).
-    pending_user_baseline_seq_ =
-        scrollback_page_.empty() ? -1 : scrollback_page_.front().seq();
+    entry.baseline_seq = scrollback_page_.empty() ? -1 : scrollback_page_.front().seq();
+    pending_user_messages_.push_back(std::move(entry));
     // The turn is in flight from this instant, whatever the display state
     // does -- UNCONDITIONALLY, not only from Idle: a submit right after a
     // Done/Error session must still be interruptible before the first wire
@@ -1189,9 +1406,59 @@ void SessionState::OnChatSubmitted(const std::string& text) {
     ++notice_seq_;
 }
 
+void SessionState::OnTurnQueued(std::uint64_t turn_id, const std::string& text) {
+    std::lock_guard lk(mtx_);
+    // The server acks submissions in queue order; match the id to the OLDEST
+    // still-unassigned echo with the same text. A raced ack (two identical
+    // texts in flight) still pairs deterministically: both acks arrive in
+    // the same FIFO order the echoes sit in. An event with no matching echo
+    // is another client's submission -- ignored here.
+    for (auto& entry : pending_user_messages_) {
+        if (entry.turn_id == 0 && entry.text == text) {
+            entry.turn_id = turn_id;
+            return;
+        }
+    }
+}
+
+void SessionState::OnTurnCanceled(std::uint64_t turn_id, bool removed) {
+    std::lock_guard lk(mtx_);
+    if (!removed) {
+        // The click lost the race: the turn had already been popped and must
+        // run. Say so -- a silent press reads as "the message was cancelled"
+        // when it was not.
+        for (const auto& entry : pending_user_messages_) {
+            if (entry.turn_id == turn_id) {
+                latest_notice_ = CommandNotice{
+                    "queued message already started; it was not cancelled",
+                    /*is_error=*/true, v1::COMMAND_DISPLAY_STATUS, /*view_hint=*/{}};
+                ++notice_seq_;
+                return;
+            }
+        }
+        return;
+    }
+    for (auto it = pending_user_messages_.begin(); it != pending_user_messages_.end(); ++it) {
+        if (it->turn_id == turn_id) {
+            pending_user_messages_.erase(it);
+            return;
+        }
+    }
+}
+
 bool SessionState::CanLoadMore() const {
     std::lock_guard lk(mtx_);
     return has_earlier_;
+}
+
+int64_t SessionState::NewestScrollbackSeq() const {
+    std::lock_guard lk(mtx_);
+    return scrollback_page_.empty() ? -1 : scrollback_page_.front().seq();
+}
+
+std::string SessionState::SessionId() const {
+    std::lock_guard lk(mtx_);
+    return session_id_;
 }
 
 void SessionState::NoteRefreshFailed(const std::string& reason) {
@@ -1719,6 +1986,13 @@ void AppState::DispatchToTab(const std::string& session_id, const v1::ServerEven
         // bump inside makes the refresh state machine refetch what survived.
         target->OnSessionRewound(event.session_rewound().truncated_to_seq(),
                                  event.session_rewound().active_last_seq());
+    } else if (event.has_turn_queued()) {
+        // A submitted turn was accepted onto the server's work queue: assign
+        // its id to the matching optimistic echo, making that message
+        // addressable by a per-message cancel while it waits.
+        target->OnTurnQueued(event.turn_queued().turn_id(), event.turn_queued().text());
+    } else if (event.has_turn_canceled()) {
+        target->OnTurnCanceled(event.turn_canceled().turn_id(), event.turn_canceled().removed());
     } else if (event.has_stream_event()) {
         const auto& se = event.stream_event();
         if (se.has_text_delta()) {
@@ -1977,20 +2251,25 @@ void AppState::SendChatTurn(const std::string& session_id, const std::string& te
     }
 
     // OPTIMISTIC ECHO. The persisted user row only reaches a page through a
-    // fetch, and nothing fetched mid-turn -- so the submitted message did not
-    // render until the turn ENDED, after the assistant's streaming reply had
-    // been visible for the whole turn (the reported "assistant renders before
-    // user hi"). Echo the text now; the server-side @-mention expansion
-    // (attachments render differently from raw text) arrives with the
-    // persisted row and retires the echo.
+    // fetch, and mid-turn it is not even persisted yet (the server appends
+    // the seed message when the queued turn RUNS, not at submit) -- so a
+    // submitted message did not render until the turn ENDED, after the
+    // assistant's streaming reply had been visible for the whole turn (the
+    // reported "assistant renders before user hi"). Echo the text now; the
+    // server-side @-mention expansion (attachments render differently from
+    // raw text) arrives with the persisted row and retires the echo.
     if (auto state = GetState(session_id)) {
         state->OnChatSubmitted(text);
         BumpUiVersion();
     }
     // And fetch eagerly: with the echo covering the latency, this is what
     // swaps in the authoritative expanded row within one round trip instead
-    // of at turn end. One redundant fetch when the turn-end refresh fires
-    // anyway; the refresh machine tolerates out-of-band applies.
+    // of at turn end. Safe MID-TURN too (a submit while the agent is still
+    // working): the apply's content-matched retirement only ever retires
+    // live segments the page proves persisted, so this fetch can no longer
+    // finalize the running turn's rows the way the old coarse clear did.
+    // One redundant fetch when the turn-end refresh fires anyway; the
+    // refresh machine tolerates out-of-band applies.
     RequestScrollback(session_id, /*newest=*/true);
 }
 
@@ -2449,7 +2728,12 @@ void AppState::SendCancel(const std::string& session_id) {
 
     v1::ClientEvent ev;
     ev.set_session_id(session_id);
-    ev.mutable_cancel();
+    // include_queued: the interrupt takes the queued (not yet started)
+    // messages with it. A queued message the user cannot cancel is a message
+    // they cannot take back -- ESC means "stop everything you were going to
+    // do", and each dropped turn announces itself (TurnCanceledEvent) so the
+    // echoes come off the transcript.
+    ev.mutable_cancel()->set_include_queued(true);
     if (!stream->Send(ev)) {
         // Same ruling as SendCommand/SendChatTurn: an explicit user action
         // must not vanish silently on a stalled stream. (The BumpUiVersion
@@ -2458,6 +2742,33 @@ void AppState::SendCancel(const std::string& session_id) {
             state->OnError("cannot cancel: the stream refused the event");
             BumpUiVersion();
         }
+    }
+}
+
+void AppState::SendCancelQueuedTurn(const std::string& session_id, std::uint64_t turn_id) {
+    BumpUiVersion();
+    auto stream = GetStream(session_id);
+    if (!stream) {
+        if (auto state = GetState(session_id)) {
+            state->OnError("cannot cancel the queued message: this session is not attached");
+        }
+        return;
+    }
+    if (RefuseIfEnded(session_id, "cancel")) return;
+    v1::ClientEvent ev;
+    ev.set_session_id(session_id);
+    ev.mutable_cancel_queued_turn()->set_turn_id(turn_id);
+    if (!stream->Send(ev)) {
+        if (auto state = GetState(session_id)) {
+            state->OnError("cannot cancel the queued message: the stream refused the event");
+            BumpUiVersion();
+        }
+    }
+}
+
+void AppState::SendCancelQueuedTurnByTab(const std::string& tab_id, std::uint64_t turn_id) {
+    if (const auto state = GetStateByTab(tab_id)) {
+        SendCancelQueuedTurn(state->SessionId(), turn_id);
     }
 }
 
@@ -2580,6 +2891,22 @@ void AppState::RequestScrollback(const std::string& session_id, bool newest) {
     // The turn live at submit time (Fix: the persisted page covers THIS turn;
     // a newer one that starts before the apply must keep its live text).
     const uint64_t turn_at_submit = state->CurrentTurnSeq();
+    // A turn-end refresh coarsely clears the covered turns' live material
+    // after the apply (ClearStreamingIfCurrentTurn); a MID-TURN fetch -- a
+    // tool round finishing while the turn continues -- must not: its apply's
+    // content-matched retirement (ApplyScrollbackPage) is the only safe
+    // mechanism there, and the coarse clear of the OLD code was exactly what
+    // made a mid-turn submit finalize every live row into its collapsed
+    // persisted form while the agent was still working. The turn-end bump's
+    // own refresh (OnTurnCompleted) always follows with the coarse clear.
+    const bool turn_ended_at_submit = state->CurrentTurnEnded();
+    // Delta-fetch cursor: the newest seq the window holds. A newest refresh
+    // with a non-empty window asks only for rows past this (an append-only
+    // transcript makes seq an exact content address -- no window re-send);
+    // -1 (nothing held) falls back to the plain newest page. Captured once;
+    // a racing apply only makes some returned rows duplicates, which the
+    // apply's merge skips.
+    const int64_t delta_cursor = newest ? state->NewestScrollbackSeq() : -1;
     // A rewind/redo between submit and apply means this response describes a
     // transcript OnSessionRewound has already trimmed away -- applying it
     // would re-insert the discarded rows. See CurrentRewindEpoch's header
@@ -2597,53 +2924,67 @@ void AppState::RequestScrollback(const std::string& session_id, bool newest) {
     // only a run produces) -- drop-oldest eviction of this job stranded both
     // forever, so it is protected (rpc_queue.hpp).
     rpc_queue_.Submit([this, state, session_id, newest, cursor, turn_at_submit,
-                      rewind_epoch_at_submit] {
-        v1::GetMessagesResponse resp;
-        grpc::ClientContext context;
-        // Bounded: the fetch runs off the loop thread now, but a wedged
-        // server must not wedge the worker (and therefore every OTHER
-        // queued request) indefinitely.
-        context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(2));
-        v1::GetMessagesRequest request;
-        request.set_session_id(session_id);
-        if (cursor.has_value()) request.set_before_seq(*cursor);
-        request.set_limit(100);
-        if (const grpc::Status status = client_->GetMessages(&context, request, &resp);
-            !status.ok()) {
-            // Resolve the attempt without applying anything: the fetch that
-            // opened the mismatch is still open, so the next frame's
-            // maintain() sees transcript_version != rendered_version again
-            // and retries -- this used to be a dead comment ("the next
-            // trigger retries") because the loop-thread caller had already
-            // latched rendered_version to the pre-refresh version before
-            // this failure was known. The status message rides along: the
-            // failure streak's user-visible notice (NoteRefreshFailed) names
-            // WHY the transcript stopped moving.
-            state->NoteRefreshFailed(status.error_message());
-            if (!newest) state->EndOlderFetch();   // the latch resolves on failure too
-            BumpUiVersion();
-            return;
+                       turn_ended_at_submit, delta_cursor, rewind_epoch_at_submit] {
+        // Delta mode: page forward (after_seq) while the server says more
+        // newer rows remain -- a turn-end catch-up after a long absence can
+        // exceed one page. Bounded: 50 pages = 5000 rows per job; a longer
+        // backlog finishes over subsequent refreshes instead of one
+        // unbounded worker occupation.
+        const bool delta = newest && delta_cursor >= 0;
+        int64_t after = delta_cursor;
+        for (int page = 0; page < 50; ++page) {
+            v1::GetMessagesResponse resp;
+            grpc::ClientContext context;
+            // Bounded: the fetch runs off the loop thread now, but a wedged
+            // server must not wedge the worker (and therefore every OTHER
+            // queued request) indefinitely.
+            context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(2));
+            v1::GetMessagesRequest request;
+            request.set_session_id(session_id);
+            if (cursor.has_value()) {
+                request.set_before_seq(*cursor);
+            } else if (delta) {
+                request.set_after_seq(after);
+            }
+            request.set_limit(100);
+            if (const grpc::Status status = client_->GetMessages(&context, request, &resp);
+                !status.ok()) {
+                // Resolve the attempt without applying anything: the fetch that
+                // opened the mismatch is still open, so the next frame's
+                // maintain() sees transcript_version != rendered_version again
+                // and retries -- this used to be a dead comment ("the next
+                // trigger retries") because the loop-thread caller had already
+                // latched rendered_version to the pre-refresh version before
+                // this failure was known. The status message rides along: the
+                // failure streak's user-visible notice (NoteRefreshFailed) names
+                // WHY the transcript stopped moving.
+                state->NoteRefreshFailed(status.error_message());
+                break;
+            }
+            if (state->CurrentRewindEpoch() != rewind_epoch_at_submit) {
+                // Superseded by a rewind/redo since this fetch was submitted:
+                // OnSessionRewound already produced the authoritative window --
+                // applying this stale response would silently undo it (re-insert
+                // rows the rewind just cut, or hide the redo's restored ones
+                // behind a page keyed to seqs that no longer mean what they did).
+                state->DiscardStaleScrollbackPage();
+                break;
+            }
+            state->ApplyScrollbackPage(resp, /*delta=*/delta);   // bumps transcript_version + refresh_seq
+            if (!delta) break;
+            // Continue only while this page came back full (has_more on an
+            // after_seq response = more NEWER rows) and non-empty.
+            if (resp.messages().empty() || !resp.has_more()) break;
+            after = resp.messages().rbegin()->seq();   // ascending: last row is the newest
         }
-        if (state->CurrentRewindEpoch() != rewind_epoch_at_submit) {
-            // Superseded by a rewind/redo since this fetch was submitted:
-            // OnSessionRewound already produced the authoritative window --
-            // applying this stale response would silently undo it (re-insert
-            // rows the rewind just cut, or hide the redo's restored ones
-            // behind a page keyed to seqs that no longer mean what they did).
-            state->DiscardStaleScrollbackPage();
-            if (!newest) state->EndOlderFetch();
-            BumpUiVersion();
-            return;
-        }
-        state->ApplyScrollbackPage(resp);   // bumps transcript_version + refresh_seq
-        if (newest) {
-            // Turn-aware: only the turn this fetch was submitted under is
-            // provably covered by the persisted page (see
-            // ClearStreamingIfCurrentTurn).
+        if (newest && turn_ended_at_submit) {
+            // Turn-end refresh only: coarsely retire the covered turns' live
+            // material. A mid-turn fetch (turn_ended_at_submit == false)
+            // relies on the apply's content-matched retirement alone -- see
+            // the capture site above.
             state->ClearStreamingIfCurrentTurn(turn_at_submit);
-        } else {
-            state->EndOlderFetch();
         }
+        if (!newest) state->EndOlderFetch();
         BumpUiVersion();
     }, /*must_run=*/true);
 }

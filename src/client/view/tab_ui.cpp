@@ -58,6 +58,14 @@ SessionState::Snapshot TabMaintenance::Maintain(const std::string& tab_id,
         ui.chat = std::make_unique<ChatView>(deps_.theme, deps_.message_registry,
                                              deps_.renderer_registry, deps_.display_registry,
                                              deps_.toggle_collapse_hint, deps_.load_older_hint);
+        // Click-to-cancel for QUEUED message rows: the view is per-tab, so
+        // the handler binds this tab's own session id.
+        if (deps_.cancel_pending_turn) {
+            ui.chat->SetCancelPendingHandler(
+                [this, tab_id](std::uint64_t turn_id) {
+                    deps_.cancel_pending_turn(tab_id, turn_id);
+                });
+        }
     }
 
     const auto make_stream = [&] { return deps_.engine.MakeStream(); };

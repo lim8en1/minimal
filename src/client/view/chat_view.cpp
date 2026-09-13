@@ -528,24 +528,51 @@ ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
     }
     column.insert(column.end(), assembled_column_rows_.begin(), assembled_column_rows_.end());
 
-    // The turn the user JUST submitted, echoed optimistically (state.cpp's
-    // OnChatSubmitted): rendered through the same UserText renderer the
-    // persisted rows use, so the echo and the row it retires look identical.
-    // Positioned ahead of the streaming block -- the reply comes AFTER the
-    // prompt, always. Cleared server-side of this view: a page apply past the
-    // submit-time baseline swaps in the persisted (expanded) row.
-    if (!snapshot.pending_user_text.empty()) {
-        ChatRow echo{.kind = ChatRowKind::UserText, .text = snapshot.pending_user_text};
-        if (const auto* renderer = message_renderers_.Find(ChatRowKind::UserText)) {
+    // The turns the user submitted that have not landed as persisted rows
+    // yet (state.cpp's OnChatSubmitted FIFO): rendered through the same
+    // UserText renderer the persisted rows use, one row each, in submit
+    // order, ahead of the streaming block -- the replies come AFTER the
+    // prompts, always. A mid-turn submit is QUEUED server-side, so each row
+    // carries a queued tag; once the entry's server-assigned turn id has
+    // arrived (TurnQueuedEvent) the row is addressable, and a click cancels
+    // the queued message before it ever runs. Retired server-side of this
+    // view: a page apply pairs each entry's persisted row with it (FIFO).
+    pending_row_boxes_.clear();
+    pending_row_turn_ids_.clear();
+    if (pending_box_slots_.size() < snapshot.pending_user_messages.size()) {
+        pending_box_slots_.resize(snapshot.pending_user_messages.size());
+    }
+    if (const auto* renderer = message_renderers_.Find(ChatRowKind::UserText)) {
+        for (std::size_t i = 0; i < snapshot.pending_user_messages.size(); ++i) {
+            const auto& pending = snapshot.pending_user_messages[i];
+            ChatRow echo{.kind = ChatRowKind::UserText, .text = pending.text};
             // A separate call from RebuildRows' own try/catch (this is the
             // live echo, not a persisted row) -- plugin code is not trusted
             // to return normally here either.
             try {
-                column.push_back(WithGutter(
+                Elements parts;
+                parts.push_back(
                     renderer->Render(
                         echo, theme_,
-                        plugins::RowRenderContext{.toggle_collapse_hint = toggle_collapse_hint_}),
-                    GutterColor(ChatRowKind::UserText, theme_)));
+                        plugins::RowRenderContext{.toggle_collapse_hint = toggle_collapse_hint_}));
+                // The cancel affordance rides the row, not a second line:
+                // one line of chrome, and the hit-test wraps the whole thing
+                // either way. Before the turn id arrives the cancel is not
+                // addressable -- say queued, not clickable.
+                const bool cancellable = cancel_pending_ != nullptr && pending.turn_id != 0;
+                parts.push_back(text(cancellable ? "  queued · click to cancel"
+                                                 : "  queued") |
+                                color(theme_.ColorFor("system_message")));
+                // ONE persistent box slot per pending row: the spy records the
+                // row's rendered position every layout pass (last write wins)
+                // for CancelPendingAt's hit test, the same way row_boxes_ works.
+                auto& slot = pending_box_slots_[i];
+                if (!slot) slot = std::make_shared<ftxui::Box>();
+                pending_row_boxes_.push_back(slot);
+                pending_row_turn_ids_.push_back(pending.turn_id);
+                column.push_back(ftxui::Element(std::make_shared<RowBoxSpy>(
+                    slot, WithGutter(vbox(std::move(parts)),
+                                     GutterColor(ChatRowKind::UserText, theme_)))));
                 column.push_back(text(" "));
             } catch (const std::exception& error) {
                 common::DefaultLogger().warn("message renderer for UserText threw: {}",
@@ -834,6 +861,23 @@ bool ChatView::ToggleCollapseAt(int screen_y) {
         const bool current = resolved != resolved_collapsed_.end() ? resolved->second : false;
         collapse_overrides_[key] = !current;
         ++collapse_epoch_;
+        return true;
+    }
+    return false;
+}
+
+bool ChatView::CancelPendingAt(int screen_y) {
+    // One box per pending row (the wrapper wraps row + queued tag), parallel
+    // to the turn ids. A click consumes only when the row's turn id has
+    // arrived -- before TurnQueuedEvent the cancel is not addressable, and
+    // consuming the click would just swallow it.
+    for (std::size_t i = 0; i < pending_row_boxes_.size() && i < pending_row_turn_ids_.size();
+         ++i) {
+        const auto& box = pending_row_boxes_[i];
+        if (screen_y < box->y_min || screen_y > box->y_max) continue;
+        const auto turn_id = pending_row_turn_ids_[i];
+        if (turn_id == 0 || !cancel_pending_) return false;
+        cancel_pending_(turn_id);
         return true;
     }
     return false;

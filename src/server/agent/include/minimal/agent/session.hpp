@@ -322,6 +322,10 @@ struct QueuedTurn {
     std::string text;
     std::string model;         // raw "<provider>/<model>"; empty = keep the session's
     std::string agent_preset;  // empty = keep the session's own
+    // Server-assigned at submit (per-session monotonic), announced to every
+    // subscriber by TurnQueuedEvent: what lets a client cancel THIS queued
+    // turn before it runs, and correlate a cancel with its optimistic echo.
+    std::uint64_t turn_id = 0;
 };
 
 using WorkItem =
@@ -415,6 +419,17 @@ public:
     // Reader thread. Interrupts the in-flight turn, leaving the session alive
     // and able to accept the next one.
     void Cancel();
+
+    // Reader thread. Removes the queued (not yet popped) turn with this id
+    // -- the id TurnQueuedEvent announced at submit time. Always answered by
+    // a TurnCanceledEvent: removed=false means the turn had already been
+    // popped and must run.
+    void CancelQueuedTurn(std::uint64_t turn_id);
+
+    // Reader thread. Drops EVERY queued turn still waiting in the work queue
+    // (CancelTurn{include_queued=true}'s flush). Each removal is announced
+    // by a TurnCanceledEvent; the in-flight turn is untouched.
+    void CancelAllQueuedTurns();
 
     // Stops the worker and closes the outbound queue. Idempotent, and safe to
     // call with a turn in flight -- that is its main use. Every terminate path
@@ -765,6 +780,10 @@ private:
     std::condition_variable turn_cv_;
     std::deque<WorkItem> work_;
     bool running_turn_ = false;
+    // Per-session monotonic id handed to each queued user turn (QueuedTurn),
+    // announced by TurnQueuedEvent at submit time and addressed by
+    // CancelQueuedTurn / TurnCanceledEvent. Guarded by mutex_ with the queue.
+    std::uint64_t next_turn_id_ = 1;
 
     // The work queue is BOUNDED, unlike the outbound EventQueue's backpressure
     // there is nothing pulling from here at a predictable rate: one turn can run

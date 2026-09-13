@@ -192,6 +192,13 @@ struct KeyContext {
     // ONLY then; a miss (empty space, a non-collapsible row, a sessionless
     // tab) returns false so the click keeps falling through.
     std::function<bool(const std::string& session_id, int screen_y)> toggle_collapse_at;
+    // Mouse-click cancel for a QUEUED message row: maps a left-press's
+    // screen y onto the focused tab's ChatView (CancelPendingAt) and sends
+    // CancelQueuedTurn for the row's turn id. True when the click hit a
+    // cancellable queued row -- consumed BEFORE toggle_collapse_at is
+    // consulted, since a queued row is never collapsible but must not fall
+    // through to selection either.
+    std::function<bool(const std::string& session_id, int screen_y)> cancel_pending_at;
     // chat.toggle_timestamps: ChatView::ToggleTimestamps.
     std::function<void(const std::string& session_id)> toggle_timestamps;
 

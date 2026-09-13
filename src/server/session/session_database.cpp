@@ -1117,6 +1117,48 @@ MessagePage SessionDatabase::GetMessagesPage(const std::string& session_id,
     return page;
 }
 
+MessagePage SessionDatabase::GetMessagesPageAfter(const std::string& session_id,
+                                                  std::int64_t after_seq, int limit) const {
+    if (limit <= 0) {
+        throw std::runtime_error("GetMessagesPageAfter: limit must be > 0");
+    }
+    // Same planner discipline as GetMessagesPage (its comment): a bound
+    // cursor is an exact index seek, the probe row computes has_more without
+    // a COUNT, and raw rows are collected under the lock and decoded after
+    // it is released.
+    std::vector<RawRow> rows;
+    bool has_more = false;
+    {
+        std::lock_guard lock(mu_);
+        CachedStmt query(db_, prepared_, kMessagesPageAfterSql.data(), "failed to page messages after seq");
+        sqlite3_bind_text(query.stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int64(query.stmt, 2, after_seq);
+        sqlite3_bind_int64(query.stmt, 3, static_cast<std::int64_t>(limit) + 1);
+        int rc = SQLITE_OK;
+        while ((rc = sqlite3_step(query.stmt)) == SQLITE_ROW) {
+            if (static_cast<int>(rows.size()) == limit) {
+                has_more = true;   // more NEWER rows remain (see the SQL comment)
+                break;
+            }
+            RawRow row;
+            row.seq = sqlite3_column_int64(query.stmt, 0);
+            row.json = reinterpret_cast<const char*>(sqlite3_column_text(query.stmt, 1));
+            row.token_count = sqlite3_column_int(query.stmt, 2);
+            row.created_at = sqlite3_column_int64(query.stmt, 3);
+            row.attribution.agent_preset = ColumnTextOrEmpty(query.stmt, 4);
+            row.attribution.model = ColumnTextOrEmpty(query.stmt, 5);
+            rows.push_back(std::move(row));
+        }
+        if (!has_more) {
+            CheckRowLoopEnd(db_, rc, "failed to read message page after seq");
+        }
+    }
+    MessagePage page;
+    page.has_more = has_more;
+    page.messages = DecodeRows(std::move(rows));   // ascending by seq
+    return page;
+}
+
 std::vector<StoredMessage> SessionDatabase::LoadMessages(const std::string& session_id) const {
     // Ascending, no limit on the RESULT: the caller (resume) needs the whole
     // working history in order. Same strict decode as the paging path -- an

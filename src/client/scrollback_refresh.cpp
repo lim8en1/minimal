@@ -51,21 +51,22 @@ ScrollbackRefreshAction AdvanceScrollbackRefresh(ScrollbackRefreshState& state,
     }
 
     if (!state.refresh_pending && state.rendered_version != snap.transcript_version) {
-        if (snap.streaming_text.empty() || snap.turn_ended) {
-            // Backoff gate: a failure streak holds resubmits until the
-            // window passes (or a NEW failure resolves, extending it). Not
-            // latching refresh_pending here means the mismatch simply
-            // survives; the next frame after the window submits.
-            if (state.consecutive_failures < 2 || now >= state.next_retry_earliest) {
-                state.refresh_pending = true;
-                state.refresh_seq_seen = snap.refresh_seq;
-                state.refresh_from_version = snap.transcript_version;
-                return ScrollbackRefreshAction::kSubmit;
-            }
-        } else {
-            // Mid-turn with live streaming text: the streaming block IS the
-            // content until the turn ends; latch rather than fetch around it.
-            state.rendered_version = snap.transcript_version;
+        // No turn-boundary latch: a mismatch fetches whenever the backoff
+        // window allows it, MID-TURN included. A tool round finishing bumps
+        // the version while the turn keeps streaming, and the fetch that
+        // follows is safe mid-turn by construction -- ApplyScrollbackPage's
+        // content-matched retirement swaps in exactly the persisted rows
+        // that cover the finished rounds' live segments, while anything
+        // still open or running stays live below them. (The old latch --
+        // "the streaming block IS the content until the turn ends" -- was
+        // what made live tool rows structurally different from their
+        // persisted twins: expanded and non-collapsible while streaming,
+        // collapsed only at turn end or on a mid-turn submit's eager fetch.)
+        if (state.consecutive_failures < 2 || now >= state.next_retry_earliest) {
+            state.refresh_pending = true;
+            state.refresh_seq_seen = snap.refresh_seq;
+            state.refresh_from_version = snap.transcript_version;
+            return ScrollbackRefreshAction::kSubmit;
         }
     }
     return ScrollbackRefreshAction::kNone;

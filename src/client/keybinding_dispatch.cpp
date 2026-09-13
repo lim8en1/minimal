@@ -399,6 +399,16 @@ bool HandleGlobalKey(KeyContext& ctx, const ftxui::Event& event) {
             }
             return true;
         }
+        // Left-press on a QUEUED message row cancels that message before it
+        // ever runs (a queued row is never collapsible, but the click must
+        // not fall through to text selection either). Consumed only when a
+        // cancellable queued row is under the click.
+        if (mouse.button == Mouse::Left && mouse.motion == Mouse::Pressed) {
+            if (!sid.empty() && ctx.cancel_pending_at &&
+                ctx.cancel_pending_at(sid, mouse.y)) {
+                return true;
+            }
+        }
         // Left-press collapse toggle: only consumed when the click actually
         // landed on a collapsible row (thinking / tool activity / user
         // attachment). Everything else -- a miss, empty space, the editor --

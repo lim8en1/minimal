@@ -351,7 +351,8 @@ bool Session::SubmitTurnWithOverrides(QueuedTurn turn) {
         if (work_.size() >= kMaxWorkItems) {
             refused = true;
         } else {
-            work_.push_back(std::move(turn));
+            turn.turn_id = next_turn_id_++;
+            work_.push_back(turn);
         }
     }
     if (refused) {
@@ -364,6 +365,17 @@ bool Session::SubmitTurnWithOverrides(QueuedTurn turn) {
                          params_.session_id);
         }
         return false;
+    }
+    // Announce the acceptance with its id: a mid-turn submit is QUEUED (it
+    // runs only after the current turn ends, and its seed user row persists
+    // only at pop), so without this the submitting client has nothing to
+    // address a per-message cancel at -- and no confirmation that the
+    // message is held at all.
+    if (SessionEvent evt{TurnQueued{turn.turn_id, turn.text}}; !EmitEvent(evt)) {
+        // Non-fatal: the turn is queued and will run regardless; only the
+        // cancel affordance is degraded on this client.
+        logger_.warn("session {}: turn_queued event dropped by the queue",
+                     params_.session_id);
     }
     turn_cv_.notify_one();
     return true;
@@ -810,6 +822,51 @@ void Session::Cancel() {
     // WirePermissionChecker turns into Deny, so one CancelTurn would silently
     // deny-lock a session that reports itself alive and keeps accepting turns.
     cancel_pending_requests_();
+}
+
+void Session::CancelQueuedTurn(std::uint64_t turn_id) {
+    bool removed = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (auto it = work_.begin(); it != work_.end(); ++it) {
+            auto* turn = std::get_if<QueuedTurn>(&*it);
+            if (turn == nullptr || turn->turn_id != turn_id) continue;
+            work_.erase(it);
+            removed = true;
+            break;
+        }
+    }
+    // Always answered: the caller must learn removed=false (already popped --
+    // it must run, and the pending echo stays) just as surely as removed=true.
+    if (!EmitEvent(SessionEvent{TurnCanceled{turn_id, removed}})) {
+        logger_.warn("session {}: turn_canceled event dropped by the queue",
+                     params_.session_id);
+    }
+}
+
+void Session::CancelAllQueuedTurns() {
+    std::vector<std::uint64_t> dropped;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (auto it = work_.begin(); it != work_.end();) {
+            if (auto* turn = std::get_if<QueuedTurn>(&*it)) {
+                dropped.push_back(turn->turn_id);
+                it = work_.erase(it);
+            } else {
+                // Commands, rewinds, run-mode changes: the flush is about
+                // PENDING MESSAGES, and the current turn is untouched either
+                // way. A queued /model the user asked for one submission ago
+                // is not silently undone by cancelling the queue's messages.
+                ++it;
+            }
+        }
+    }
+    for (const auto turn_id : dropped) {
+        if (!EmitEvent(SessionEvent{TurnCanceled{turn_id, true}})) {
+            logger_.warn("session {}: turn_canceled event dropped by the queue",
+                         params_.session_id);
+        }
+    }
 }
 
 void Session::JoinWorkerOnce() {

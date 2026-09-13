@@ -8,6 +8,7 @@
 #include <atomic>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -112,6 +113,18 @@ struct LiveTurnSegment {
 // Pending interactions awaiting user input (permission/confirmation modals)
 // ============================================================================
 
+// One optimistically echoed, not-yet-persisted user turn (see Snapshot::
+// pending_user_messages). The server assigns the turn id when it accepts the
+// submission (TurnQueuedEvent); 0 means the ack has not arrived yet.
+struct PendingUserMessage {
+    std::uint64_t turn_id = 0;
+    std::string text;
+    // The window's NEWEST seq at submit time: the persisted row provably
+    // landed once a page carries a text-bearing user row past this -- paired
+    // with entries in FIFO order, one row per entry.
+    int64_t baseline_seq = -1;
+};
+
 struct PendingPermission {
     std::string request_id;
     std::string tool_name;
@@ -198,13 +211,21 @@ public:
         bool has_earlier_messages = false;   // paging back will yield more
         int64_t last_loaded_seq = -1;        // cursor for the next "load older"
 
-        // The turn the user JUST submitted, echoed optimistically: the
-        // persisted row (with the server-side @-mention expansion) only
-        // reaches a page via a fetch, and mid-turn nothing fetched -- so a
-        // submitted message did not render until the turn ENDED, after the
-        // assistant's streaming reply. Rendered by the chat view ahead of the
-        // streaming block; cleared once a page apply proves the real row
-        // landed (any seq newer than the submit-time baseline), or on error.
+        // The turns the user submitted that have not yet landed as persisted
+        // rows, in submit order (FIFO -- the server queue is FIFO too and
+        // each entry produces exactly one text-bearing user row when its
+        // turn pops). Mid-turn submits are QUEUED server-side and their seed
+        // row persists only at pop, so without this echo a submitted message
+        // did not render until the turn ENDED, after the assistant's
+        // streaming reply. Rendered by the chat view ahead of the streaming
+        // block, one queued row each; an entry retires when a page apply
+        // pairs its persisted row with it (in order, past the oldest
+        // baseline), when its queued turn is cancelled, or on error/session
+        // end. `turn_id` is 0 until the server's TurnQueuedEvent assigns the
+        // id a per-message cancel addresses.
+        std::vector<PendingUserMessage> pending_user_messages;
+        // Convenience for consumers that only test "is anything pending" or
+        // show one line: the OLDEST pending entry's text.
         std::string pending_user_text;
 
         // Streaming assistant response (partial markdown building up). The
@@ -381,6 +402,10 @@ public:
     // render the running-tools panel's live tail passes true.
     Snapshot TakeLightSnapshot(bool include_tool_output = false);
 
+    // The session's id ("" until SetSessionId) without a full snapshot --
+    // what tab-keyed senders resolve at call time.
+    std::string SessionId() const;
+
     // --- Session lifecycle ---
     void OnSessionCreated(std::string name);
     void OnSessionMetadata(const v1::SessionMetadataEvent& metadata);
@@ -499,6 +524,14 @@ public:
     // what RequestScrollback captures at submit time for the check above.
     uint64_t CurrentTurnSeq() const;
 
+    // Whether the LAST turn has ended and no new one has begun (Snapshot::
+    // turn_ended) without a full snapshot -- what RequestScrollback captures
+    // at submit time to decide its apply's retirement mode: a turn-end
+    // refresh coarsely clears the covered turns' live material; a mid-turn
+    // fetch (a tool round finishing while the turn continues) relies on the
+    // content-matched retirement inside ApplyScrollbackPage alone.
+    bool CurrentTurnEnded() const;
+
     // Bumped by OnSessionRewound -- what RequestScrollback captures at submit
     // time (mirroring CurrentTurnSeq above) to detect a rewind/redo that
     // happened while its fetch was in flight, so the stale response can be
@@ -574,8 +607,17 @@ public:
     void OnBackgroundTask(const v1::BackgroundTaskEvent& evt);
 
     // --- Scrollback paging (keyset by seq) ---
-    void ApplyScrollbackPage(const v1::GetMessagesResponse& resp);
+    // `delta` marks an after_seq response (ASCENDING rows: only what the
+    // client does not hold -- see GetMessagesRequest.after_seq): the page
+    // merges onto the window's newest end instead of replacing it, and
+    // has_more ("more newer rows") never touches the load-older affordance.
+    // A non-delta (newest-page) apply keeps its replace semantics.
+    void ApplyScrollbackPage(const v1::GetMessagesResponse& resp, bool delta = false);
     bool CanLoadMore() const;
+
+    // The window's NEWEST seq (descending window: front), or -1 when nothing
+    // is held -- the delta-fetch cursor, captured without a full snapshot.
+    int64_t NewestScrollbackSeq() const;
 
     // In-flight latch for "load older" fetches (AppState::RequestScrollback,
     // newest=false). Two presses inside one RPC round trip fetch the SAME
@@ -588,11 +630,23 @@ public:
     void EndOlderFetch();
 
     // Records the optimistic echo of a turn the user just submitted (called
-    // by SendChatTurn after the event was accepted onto the wire). Cleared by
-    // the next page apply that carries a seq past the submit-time baseline --
-    // the persisted user row, with the server's @-mention expansion, replaces
-    // the echo -- or by an error/session end, which leave nothing to echo.
+    // by SendChatTurn after the event was accepted onto the wire). Entries
+    // retire when a page apply pairs their persisted row with them (FIFO),
+    // when the server cancels their queued turn, or on error/session end,
+    // which leave nothing to echo.
     void OnChatSubmitted(const std::string& text);
+
+    // The server accepted a queued turn (TurnQueuedEvent): assigns the
+    // per-session id to the OLDEST still-unassigned echo with the same text,
+    // making it addressable by a per-message cancel. An event with no
+    // matching echo (another client's submission) is ignored.
+    void OnTurnQueued(std::uint64_t turn_id, const std::string& text);
+
+    // A queued turn left the server's work queue without running
+    // (TurnCanceledEvent): removed=true drops the matching echo (its row will
+    // never exist); removed=false (already popped) keeps it -- the persisted
+    // row will retire it in the normal way.
+    void OnTurnCanceled(std::uint64_t turn_id, bool removed);
 
     // Resolves an outstanding async scrollback refresh that came back EMPTY
     // or failed: bumps refresh_seq without touching any content, so the frame
@@ -611,6 +665,23 @@ public:
 
 private:
     void MaybeGoIdleLocked();   // mtx_ held by caller
+
+    // Content-matched retirement of live segments that a scrollback apply
+    // has just proven persisted (mtx_ held by caller). `answered_tool_ids`
+    // carries every tool_use_id whose tool_result block is in the applied
+    // rows; `assistant_text` / `assistant_thinking` every text / thinking
+    // block of applied assistant messages. A Tool segment retires when its
+    // id is answered AND the tool is not still running (background rows
+    // especially: their detached task outlives the acked result); a Text or
+    // Thinking segment retires when its exact text is among the applied
+    // blocks (a cap-truncated segment matches by prefix -- the marker's tail
+    // is client-side presentation loss). This is what lets a fetch apply
+    // MID-TURN without double-rendering: the persisted rows that just landed
+    // replace exactly the live segments they cover, while anything still
+    // streaming or running stays live below them.
+    void RetireCoveredLiveSegments(const std::set<std::string>& answered_tool_ids,
+                                   const std::vector<std::string>& assistant_text,
+                                   const std::vector<std::string>& assistant_thinking);
 
     // Shared by every live_segments_ append path (text/thinking deltas,
     // OnToolStarted, OnBackgroundTask): enforces kMaxLiveSegments, keeping the
@@ -666,13 +737,9 @@ private:
     int scrollback_max_messages_ = kDefaultScrollbackWindowMaxMessages;
     int tool_output_buffer_bytes_ = kDefaultToolOutputBufferBytes;
 
-    // The optimistic user-turn echo (see Snapshot::pending_user_text). The
-    // baseline is the page's NEWEST seq at submit time (front of the
-    // descending window): any later apply whose newest seq is past it proves
-    // the persisted row (appended FIRST by the server, before any turn
-    // output) is in the page and the echo can go.
-    std::string pending_user_text_;
-    int64_t pending_user_baseline_seq_ = -1;
+    // The optimistic user-turn echoes (see Snapshot::pending_user_messages).
+    // FIFO, paired with their persisted rows in order on page applies.
+    std::vector<PendingUserMessage> pending_user_messages_;
 
     // Latest /-command outcome (transient notice line; never a chat row).
     // notice_seq_ advances on every OnCommandResult so consumers can tell a
@@ -898,6 +965,15 @@ public:
 
     // Ctrl-style interrupt of the tab's in-flight turn, if any.
     void SendCancel(const std::string& session_id);
+    // Cancels ONE queued (accepted, not yet started) turn by its
+    // TurnQueuedEvent id. Always answered by a TurnCanceledEvent for that id;
+    // removed=false (already popped) is reported as a notice -- the message
+    // must run.
+    void SendCancelQueuedTurn(const std::string& session_id, std::uint64_t turn_id);
+    // Tab-keyed variant for view helpers that hold a TAB id (a tab's
+    // ChatView may exist before its session does): resolves the session at
+    // click time; a sessionless tab has nothing queued, so it no-ops.
+    void SendCancelQueuedTurnByTab(const std::string& tab_id, std::uint64_t turn_id);
 
     // permission.cycle (shift+tab): a client-native wire event, like
     // SendCancel/SendRewind -- no command, no confirmation modal (the

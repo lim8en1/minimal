@@ -599,6 +599,14 @@ v1::ServerEvent ToProto(const std::string& session_id, const agent::SessionEvent
                 error->set_category(v1::LLM_ERROR_CATEGORY_UNSPECIFIED);
                 error->set_message(value.message);
                 error->set_is_retryable(false);
+            } else if constexpr (std::is_same_v<T, agent::TurnQueued>) {
+                auto* queued = out.mutable_turn_queued();
+                queued->set_turn_id(value.turn_id);
+                queued->set_text(value.text);
+            } else if constexpr (std::is_same_v<T, agent::TurnCanceled>) {
+                auto* canceled = out.mutable_turn_canceled();
+                canceled->set_turn_id(value.turn_id);
+                canceled->set_removed(value.removed);
             } else {
                 // Same guarantee as every other domain->wire visit in this file: a
                 // new SessionEvent alternative must not compile into PAYLOAD_NOT_SET.

@@ -39,6 +39,14 @@ public:
     // did. Callers that mean "no cursor" say std::nullopt.
     MessagePage GetMessages(const std::string& session_id, int before_seq, int limit) const = delete;
 
+    // Keyset page, ASCENDING: every active row with seq > after_seq -- the
+    // delta-fetch path. has_more means more NEWER rows remain, not older
+    // pages (see SessionDatabase::GetMessagesPageAfter).
+    MessagePage GetMessagesAfter(const std::string& session_id, std::int64_t after_seq,
+                                 int limit) const {
+        return db_.GetMessagesPageAfter(session_id, after_seq, limit);
+    }
+
     // The full transcript, ascending by seq -- the one-shot load resume seeds
     // the loop's working history with when no compaction checkpoint exists.
     // Not a scrollback path: GetMessages pages precisely so reading a 1M-token

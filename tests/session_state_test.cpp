@@ -734,11 +734,49 @@ TEST_CASE("a submitted turn echoes optimistically until the persisted row lands"
         CHECK(state.TakeSnapshot().pending_user_text == "hi @test.tar.gz");
     }
 
-    SECTION("a page apply past the baseline retires the echo") {
-        // The user row (seq 11) -- and anything after it -- is now in the page.
-        state.ApplyScrollbackPage(PageOf({11, 10, 9}, /*has_more=*/false));
+    SECTION("a page apply past the baseline retires the echo once ITS row lands") {
+        // The user row (seq 11) is now in the page -- and it is the row's own
+        // presence (a text-bearing user row past the baseline) that retires
+        // the echo, not merely "any newer seq".
+        v1::GetMessagesResponse resp;
+        *resp.add_messages() = MakeMessage(11);
+        resp.mutable_messages(0)->mutable_message()->set_role(v1::ROLE_USER);
+        resp.mutable_messages(0)->mutable_message()->add_content()
+            ->mutable_text()->set_text("hi @expanded.tar.gz");
+        state.ApplyScrollbackPage(resp);
         CHECK(state.TakeSnapshot().pending_user_text.empty());
         CHECK(state.TakeSnapshot().scrollback_page->front().seq() == 11);
+    }
+
+    SECTION("the previous turn's OUTPUT does not retire a queued echo") {
+        // THE VANISHING-QUEUED-MESSAGE BUG: a second submit while the agent
+        // is mid-turn waits in the server's work queue (its user row
+        // persists only at pop). The running turn's assistant rows are
+        // newer than the baseline, but they are not user rows -- the echo
+        // must survive until the queued message's OWN row lands.
+        state.OnChatSubmitted("second message");
+        v1::GetMessagesResponse resp;
+        *resp.add_messages() = MakeMessage(11);
+        resp.mutable_messages(0)->mutable_message()->set_role(v1::ROLE_ASSISTANT);
+        resp.mutable_messages(0)->mutable_message()->add_content()
+            ->mutable_text()->set_text("still working...");
+        state.ApplyScrollbackPage(resp);
+        const auto after = state.TakeSnapshot();
+        REQUIRE(after.pending_user_messages.size() == 2);
+        CHECK(after.pending_user_messages[0].text == "hi @test.tar.gz");
+        CHECK(after.pending_user_messages[1].text == "second message");
+
+        // The queued turn pops: its user row lands and retires the FIRST
+        // echo; the second survives for its own row.
+        v1::GetMessagesResponse popped;
+        *popped.add_messages() = MakeMessage(12);
+        popped.mutable_messages(0)->mutable_message()->set_role(v1::ROLE_USER);
+        popped.mutable_messages(0)->mutable_message()->add_content()
+            ->mutable_text()->set_text("hi @expanded.tar.gz");
+        state.ApplyScrollbackPage(popped);
+        const auto paired = state.TakeSnapshot();
+        REQUIRE(paired.pending_user_messages.size() == 1);
+        CHECK(paired.pending_user_messages[0].text == "second message");
     }
 
     SECTION("an error clears the echo: nothing will retire it otherwise") {
@@ -749,6 +787,23 @@ TEST_CASE("a submitted turn echoes optimistically until the persisted row lands"
     SECTION("a session end clears the echo") {
         state.OnSessionEnded();
         CHECK(state.TakeSnapshot().pending_user_text.empty());
+    }
+
+    SECTION("a cancelled queued turn removes its echo") {
+        // The server accepted the turn (TurnQueuedEvent), then it was
+        // cancelled before it ran: the echo goes -- its row will never land.
+        state.OnTurnQueued(7, "hi @test.tar.gz");
+        REQUIRE(state.TakeSnapshot().pending_user_messages.front().turn_id == 7);
+        state.OnTurnCanceled(7, /*removed=*/true);
+        CHECK(state.TakeSnapshot().pending_user_messages.empty());
+    }
+
+    SECTION("a cancel that lost the race keeps the echo and says so") {
+        state.OnTurnQueued(7, "hi @test.tar.gz");
+        state.OnTurnCanceled(7, /*removed=*/false);
+        const auto snap_after = state.TakeSnapshot();
+        REQUIRE(snap_after.pending_user_messages.size() == 1);
+        CHECK(snap_after.latest_notice.has_value());   // the click is not silent
     }
 }
 
@@ -806,6 +861,227 @@ TEST_CASE("an empty page still propagates has_more", "[session_state][scrollback
     state.ApplyScrollbackPage(PageOf({}, /*has_more=*/false));
     REQUIRE_FALSE(state.CanLoadMore());
 }
+
+// --- Delta applies (GetMessagesRequest.after_seq) -----------------------------
+// The transcript is append-only with immutable rows, so a client holding rows
+// through seq N fetches only seq > N, ascending. The merge must grow the
+// window at its newest end, never replace it -- and never read has_more
+// ("more newer rows") as an older-history affordance.
+
+TEST_CASE("a delta page merges onto the window's newest end, growing it",
+          "[session_state][scrollback][delta]") {
+    SessionState state("s-1");
+    state.ApplyScrollbackPage(PageOf({20, 19, 18}, /*has_more=*/true));
+    REQUIRE(state.CanLoadMore());   // older history exists
+
+    v1::GetMessagesResponse delta;   // ascending: [21, 22]
+    *delta.add_messages() = MakeMessage(21);
+    *delta.add_messages() = MakeMessage(22);
+    state.ApplyScrollbackPage(delta, /*delta=*/true);
+
+    const auto snap = state.TakeSnapshot();
+    REQUIRE(snap.scrollback_page->size() == 5);   // grown, not replaced
+    CHECK(snap.scrollback_page->front().seq() == 22);
+    CHECK(snap.scrollback_page->back().seq() == 18);
+    CHECK(snap.last_loaded_seq == 18);
+    // has_more on an ascending delta says nothing about OLDER pages: the
+    // load-older affordance must survive untouched.
+    CHECK(state.CanLoadMore());
+}
+
+TEST_CASE("a delta page that skips held rows merges the rest; a hole flags the gap",
+          "[session_state][scrollback][delta]") {
+    SessionState state("s-1");
+    state.ApplyScrollbackPage(PageOf({20, 19, 18}, /*has_more=*/true));
+
+    SECTION("overlapping rows are skipped, held rows kept") {
+        v1::GetMessagesResponse delta;
+        *delta.add_messages() = MakeMessage(21);
+        *delta.add_messages() = MakeMessage(20);   // already held
+        state.ApplyScrollbackPage(delta, /*delta=*/true);
+        const auto snap = state.TakeSnapshot();
+        REQUIRE(snap.scrollback_page->size() == 4);
+        CHECK(snap.scrollback_page->front().seq() == 21);
+        CHECK_FALSE(snap.scrollback_gap);
+    }
+
+    SECTION("a seq discontinuity records scrollback_gap") {
+        // 21 is missing server-side (discarded): 22 arrives with a hole below it.
+        v1::GetMessagesResponse delta;
+        *delta.add_messages() = MakeMessage(22);
+        state.ApplyScrollbackPage(delta, /*delta=*/true);
+        const auto snap = state.TakeSnapshot();
+        CHECK(snap.scrollback_page->front().seq() == 22);
+        CHECK(snap.scrollback_gap);
+    }
+}
+
+TEST_CASE("an empty delta page does not touch the load-older affordance",
+          "[session_state][scrollback][delta]") {
+    SessionState state("s-1");
+    state.ApplyScrollbackPage(PageOf({20, 19}, /*has_more=*/true));
+    REQUIRE(state.CanLoadMore());
+
+    // Nothing new persisted: the server's after_seq response is empty (and
+    // its has_more would be false) -- but older history still exists.
+    v1::GetMessagesResponse delta;
+    delta.set_has_more(false);
+    state.ApplyScrollbackPage(delta, /*delta=*/true);
+    CHECK(state.CanLoadMore());
+}
+
+// --- Mid-turn content-matched retirement -------------------------------------
+// A tool round finishing persists its rows server-side WHILE the turn keeps
+// streaming; a mid-turn fetch must be able to swap those in without wiping
+// the still-live material (the old coarse clear finalized EVERYTHING -- the
+// "collapsible only at turn end or on submit" inconsistency). Retirement is
+// keyed to content the applied rows prove persisted.
+
+namespace {
+
+v1::StoredMessage AssistantText(int64_t seq, const std::string& text) {
+    v1::StoredMessage m;
+    m.set_seq(seq);
+    m.mutable_message()->set_role(v1::ROLE_ASSISTANT);
+    m.mutable_message()->add_content()->mutable_text()->set_text(text);
+    return m;
+}
+
+v1::StoredMessage ToolResultRow(int64_t seq, const std::string& tool_use_id) {
+    v1::StoredMessage m;
+    m.set_seq(seq);
+    m.mutable_message()->set_role(v1::ROLE_USER);
+    m.mutable_message()->add_content()->mutable_tool_result()->set_tool_use_id(tool_use_id);
+    return m;
+}
+
+v1::ToolExecutionEvent ToolStart(const std::string& id) {
+    v1::ToolExecutionEvent evt;
+    evt.set_tool_use_id(id);
+    evt.set_tool_name("bash");
+    evt.set_started(true);
+    return evt;
+}
+
+v1::ToolExecutionEvent ToolEnd(const std::string& id) {
+    v1::ToolExecutionEvent evt;
+    evt.set_tool_use_id(id);
+    evt.set_started(false);
+    return evt;
+}
+
+}  // namespace
+
+TEST_CASE("a mid-turn apply retires exactly the live segments the page proves persisted",
+          "[session_state][retire]") {
+    SessionState state("s-1");
+    // Round one: text block, then a tool call that already finished.
+    state.AppendStreamingText("round one text");
+    state.FinalizeStreamingText();
+    state.OnToolStarted(ToolStart("t1"));
+    state.OnToolFinished("t1", ToolEnd("t1"));
+    auto snap = state.TakeSnapshot();
+    REQUIRE(snap.live_segments.size() == 2);   // [Text, Tool]
+
+    // The page lands with round one's rows: the assistant text and t1's result.
+    v1::GetMessagesResponse resp;
+    *resp.add_messages() = ToolResultRow(12, "t1");
+    *resp.add_messages() = AssistantText(11, "round one text");
+    state.ApplyScrollbackPage(resp);
+
+    snap = state.TakeSnapshot();
+    CHECK(snap.live_segments.empty());
+    CHECK(snap.streaming_text.empty());
+    // The finished row stays in the panel's tools list until turn end
+    // (OnTurnCompleted sweeps it); only its LIVE segment retires here.
+    REQUIRE(snap.tools.size() == 1);
+    CHECK_FALSE(snap.tools[0].started);
+}
+
+TEST_CASE("a mid-turn apply keeps what is still open or running",
+          "[session_state][retire]") {
+    SessionState state("s-1");
+    state.AppendStreamingText("round one text");
+    state.FinalizeStreamingText();
+    state.OnToolStarted(ToolStart("t1"));
+    state.OnToolFinished("t1", ToolEnd("t1"));
+    // Round two: a second tool STILL RUNNING and a text block still OPEN.
+    state.OnToolStarted(ToolStart("t2"));
+    state.AppendStreamingText("round two streaming");
+
+    v1::GetMessagesResponse resp;
+    *resp.add_messages() = ToolResultRow(12, "t1");
+    *resp.add_messages() = AssistantText(11, "round one text");
+    state.ApplyScrollbackPage(resp);
+
+    const auto snap = state.TakeSnapshot();
+    REQUIRE(snap.live_segments.size() == 2);
+    CHECK(snap.live_segments[0].kind == LiveTurnSegment::Kind::Tool);
+    CHECK(snap.live_segments[0].tool_use_id == "t2");
+    CHECK(snap.live_segments[1].kind == LiveTurnSegment::Kind::Text);
+    CHECK(snap.live_segments[1].text == "round two streaming");
+    CHECK(snap.streaming_text == "round two streaming");
+    // Both panel rows survive until turn end's sweep; only t1's live
+    // SEGMENT retired (its finish closed it, and its result is in the page).
+    REQUIRE(snap.tools.size() == 2);
+    const auto t1 = std::find_if(snap.tools.begin(), snap.tools.end(),
+                                 [](const ToolExecutionState& t) { return t.tool_use_id == "t1"; });
+    const auto t2 = std::find_if(snap.tools.begin(), snap.tools.end(),
+                                 [](const ToolExecutionState& t) { return t.tool_use_id == "t2"; });
+    REQUIRE(t1 != snap.tools.end());
+    REQUIRE(t2 != snap.tools.end());
+    CHECK_FALSE(t1->started);
+    CHECK(t2->started);
+}
+
+TEST_CASE("a background row survives its acked result landing in the page",
+          "[session_state][retire]") {
+    // ARCHITECTURE.md "Background bash rows": the result row acks the
+    // launching call, but the detached task keeps running -- its live row
+    // must not retire just because the result reached the page.
+    SessionState state("s-1");
+    state.OnToolStarted(ToolStart("bg1"));
+    state.OnToolFinished("bg1", ToolEnd("bg1"));
+    v1::BackgroundTaskEvent bg;
+    bg.set_tool_use_id("bg1");
+    bg.set_command("npm run dev");
+    bg.set_state(v1::BackgroundTaskEvent::STARTED);
+    state.OnBackgroundTask(bg);
+    REQUIRE(state.TakeSnapshot().live_segments.size() == 1);
+
+    v1::GetMessagesResponse resp;
+    *resp.add_messages() = ToolResultRow(11, "bg1");
+    state.ApplyScrollbackPage(resp);
+
+    const auto snap = state.TakeSnapshot();
+    REQUIRE(snap.live_segments.size() == 1);
+    CHECK(snap.live_segments[0].tool_use_id == "bg1");
+    REQUIRE(snap.tools.size() == 1);
+    CHECK(snap.tools[0].started);   // the task itself is still live
+}
+
+TEST_CASE("a finished round's text is not double-rendered after a mid-turn apply",
+          "[session_state][retire]") {
+    // The double-render hazard: the persisted assistant message carries the
+    // round's text AND the live segment still holds it. Retirement must
+    // remove the live copy (the flat accumulation rebuilt from survivors).
+    SessionState state("s-1");
+    state.AppendStreamingText("alpha block");
+    state.FinalizeStreamingText();
+    state.AppendStreamingText("beta block");
+    state.FinalizeStreamingText();
+    REQUIRE(state.TakeSnapshot().streaming_text == "alpha block\n\nbeta block");
+
+    v1::GetMessagesResponse resp;
+    *resp.add_messages() = AssistantText(11, "alpha block");
+    state.ApplyScrollbackPage(resp);
+
+    const auto snap = state.TakeSnapshot();
+    REQUIRE(snap.live_segments.size() == 1);
+    CHECK(snap.live_segments[0].text == "beta block");
+    CHECK(snap.streaming_text == "beta block");
+}
+
 
 // Invariant: the "older vs. newer" branch in ApplyScrollbackPage is what keeps
 // paging backward from resetting the window instead of growing it. This is the

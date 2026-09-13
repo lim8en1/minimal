@@ -53,15 +53,13 @@ enum class ScrollbackRefreshAction {
 //     message persisted);
 //   - a resolved FAILED request leaves the mismatch so the SAME frame
 //     resubmits (the retry contract);
-//   - a mismatch fetches whenever the turn boundary allows it: streaming text
-//     empty (idle) OR the turn has ended. The accumulated streaming text is
-//     cleared only BY the applying refresh, so "text empty" cannot tell
-//     "turn over" from "mid-turn" -- Snapshot::turn_ended can, and that is the
-//     fix: the turn-end version bump now reaches a fetch instead of being
-//     latched away;
-//   - a mismatch while a turn is genuinely in flight latches (the streaming
-//     block IS the live content; fetching around it would swap it out
-//     mid-stream);
+//   - a mismatch fetches unconditionally (subject to the backoff window
+//     below): MID-TURN fetches are safe because ApplyScrollbackPage retires
+//     exactly the live segments the applied rows prove persisted
+//     (content-matched retirement), leaving anything still streaming or
+//     running live. A tool round finishing bumps the version mid-turn
+//     (SessionState::OnToolFinished) precisely so its rows swap in as real
+//     persisted rows while the turn continues;
 //   - from the SECOND consecutive failure on, resubmits are backed off
 //     exponentially (250 ms doubling, 5 s cap; reset on success) so a dead
 //     server is not hammered every frame -- the first failure keeps the
