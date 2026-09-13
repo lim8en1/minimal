@@ -90,11 +90,38 @@ public:
         return minimal::client::SubscribeOutcome::kError;
     }
 
+    // The poller thread reads these inside PluginCall (under mtx_) while the
+    // test's main thread mutates them mid-flight. Every mutation goes through
+    // the same mutex the read path holds -- the plain `api.fail = true` this
+    // once was was a TSan-reported data race in the test itself.
+    void SetResponses(std::string get, std::string list) {
+        std::lock_guard<std::mutex> lock(mtx_);
+        get_response = std::move(get);
+        list_response = std::move(list);
+    }
+    void SetGetResponse(std::string get) {
+        std::lock_guard<std::mutex> lock(mtx_);
+        get_response = std::move(get);
+    }
+    void SetFail(bool value) {
+        std::lock_guard<std::mutex> lock(mtx_);
+        fail = value;
+    }
+    int Calls() const {
+        std::lock_guard<std::mutex> lock(mtx_);
+        return calls;
+    }
+    std::string LastPlugin() const {
+        std::lock_guard<std::mutex> lock(mtx_);
+        return last_plugin;
+    }
+
+    mutable std::mutex mtx_;
+
+private:
     std::string get_response;
     std::string list_response;
     bool fail = false;
-
-    mutable std::mutex mtx_;
     int calls = 0;
     std::string last_plugin;
     std::string last_method;
@@ -161,8 +188,7 @@ TEST_CASE("the poller fetches the focused session and every stored list",
     StubClientApi api;
     StubFocusProvider focus;
     focus.focused = "s1";
-    api.get_response = kGetTwo;
-    api.list_response = kListTwo;
+    api.SetResponses(kGetTwo, kListTwo);
 
     ChecklistPoller poller(&api, &focus, 20ms);
     REQUIRE(WaitFor([&] { return poller.Focused().ever_fetched; }));
@@ -173,10 +199,9 @@ TEST_CASE("the poller fetches the focused session and every stored list",
     CHECK(poller.AllEverFetched());
     CHECK(poller.AllItems().size() == 2);
 
-    {
-        std::lock_guard<std::mutex> lock(api.mtx_);
-        CHECK(api.last_plugin == "checklist");
-    }
+    // LastPlugin() takes the stub's own mutex -- the outer lock_guard this
+    // once had self-deadlocked the moment the accessor was introduced.
+    CHECK(api.LastPlugin() == "checklist");
 }
 
 TEST_CASE("a focus switch clears the focused cache and refetches the new session",
@@ -184,8 +209,7 @@ TEST_CASE("a focus switch clears the focused cache and refetches the new session
     StubClientApi api;
     StubFocusProvider focus;
     focus.focused = "s1";
-    api.get_response = kGetTwo;
-    api.list_response = kListTwo;
+    api.SetResponses(kGetTwo, kListTwo);
 
     ChecklistPoller poller(&api, &focus, 20ms);
     REQUIRE(WaitFor([&] { return poller.Focused().ever_fetched; }));
@@ -201,7 +225,7 @@ TEST_CASE("a focus switch clears the focused cache and refetches the new session
     CHECK(poller.Focused().session_id == "s2");
     CHECK(poller.Focused().items.empty());
 
-    api.get_response = R"({"session_id":"s2","items":[{"id":1,"text":"s2 task","status":"pending"}]})";
+    api.SetGetResponse(R"({"session_id":"s2","items":[{"id":1,"text":"s2 task","status":"pending"}]})");
     REQUIRE(WaitFor([&] { return poller.Focused().items.size() == 1; }));
     CHECK(poller.Focused().session_id == "s2");
     CHECK(poller.FocusedText() == "todo 0/1");
@@ -211,8 +235,7 @@ TEST_CASE("the provider's own focus answer drives the worker too", "[checklist_v
     StubClientApi api;
     StubFocusProvider focus;
     focus.focused = "s1";
-    api.get_response = kGetTwo;
-    api.list_response = kListTwo;
+    api.SetResponses(kGetTwo, kListTwo);
 
     ChecklistPoller poller(&api, &focus, 20ms);
     REQUIRE(WaitFor([&] { return poller.Focused().ever_fetched; }));
@@ -220,7 +243,7 @@ TEST_CASE("the provider's own focus answer drives the worker too", "[checklist_v
     // No nudge this time: only the provider changes. The worker's per-cycle
     // cross-check must converge without the segment.
     focus.focused = "s2";
-    api.get_response = R"({"session_id":"s2","items":[]})";
+    api.SetGetResponse(R"({"session_id":"s2","items":[]})");
     REQUIRE(WaitFor([&] { return poller.Focused().session_id == "s2"; }));
     // Clearing the list server-side is a real state change, not a failure.
     REQUIRE(WaitFor([&] { return poller.Focused().ever_fetched && poller.Focused().valid; }));
@@ -232,13 +255,12 @@ TEST_CASE("a fetch failure marks the snapshot stale without losing the cache",
     StubClientApi api;
     StubFocusProvider focus;
     focus.focused = "s1";
-    api.get_response = kGetTwo;
-    api.list_response = kListTwo;
+    api.SetResponses(kGetTwo, kListTwo);
 
     ChecklistPoller poller(&api, &focus, 20ms);
     REQUIRE(WaitFor([&] { return poller.Focused().ever_fetched && poller.AllEverFetched(); }));
 
-    api.fail = true;
+    api.SetFail(true);
     CHECK(WaitFor([&] { return !poller.AllValid(); }));
     CHECK(WaitFor([&] { return !poller.Focused().valid; }));
     // What was fetched stays readable: the panel renders stale data with a
@@ -259,7 +281,7 @@ TEST_CASE("a null api or focus degrades to a quiet poller", "[checklist_view][po
         StubClientApi api;
         ChecklistPoller poller(&api, nullptr, 20ms);
         std::this_thread::sleep_for(20ms);
-        CHECK(api.calls == 0);
+        CHECK(api.Calls() == 0);
     }
 }
 
@@ -271,8 +293,7 @@ TEST_CASE("the panel renders the focused surface, and Tab flips to the summary",
     StubFocusProvider focus;
     focus.focused = "s1";
     focus.tabs = {{"t1", "s1", "first tab"}, {"t2", "s2", "second tab"}};
-    api.get_response = kGetTwo;
-    api.list_response = kListTwo;
+    api.SetResponses(kGetTwo, kListTwo);
 
     auto theme = Theme::Parse(R"({"name":"t","colors":{}})", ColorDepth::Truecolor);
     auto poller = std::make_shared<ChecklistPoller>(&api, &focus, 20ms);
@@ -318,14 +339,13 @@ TEST_CASE("the panel degrades: unfetched, failed, and empty states",
     CHECK(ToText(component->Render()).find("fetching") != std::string::npos);
 
     // After a transport failure: the stale marker, on both surfaces.
-    api.fail = true;
+    api.SetFail(true);
     REQUIRE(WaitFor([&] { return poller->Focused().ever_fetched; }));
     CHECK(ToText(component->Render()).find("last update failed") != std::string::npos);
 
     // A well-formed EMPTY list is "(no tasks)", distinct from a failure.
-    api.fail = false;
-    api.get_response = R"({"session_id":"s1","items":[]})";
-    api.list_response = R"({"checklists":[]})";
+    api.SetFail(false);
+    api.SetResponses(R"({"session_id":"s1","items":[]})", R"({"checklists":[]})");
     REQUIRE(WaitFor([&] { return poller->Focused().valid && poller->Focused().items.empty(); }));
     const std::string empty_text = ToText(component->Render());
     CHECK(empty_text.find("no tasks") != std::string::npos);

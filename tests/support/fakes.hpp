@@ -305,33 +305,56 @@ public:
     // Token counts are a persistence concern; the in-memory fake ignores them.
     // Attributions are recorded, parallel to `messages`, so loop tests can
     // assert what a persisted row would carry.
+    //
+    // MUTEXED, like the real store: a session's worker thread appends while
+    // the test's main thread polls `messages` directly (WaitForInTranscript
+    // and friends). The unlocked version was a TSan-clean fake that lied --
+    // every test racing a live session's appends against a plain vector read
+    // reported a data race whose fix belonged in the fake, not the test.
+    // Readers copy under the lock (Snapshot) so a concurrent Append cannot
+    // invalidate an iteration; a test wanting live contention semantics can
+    // still lock mu_ itself.
     void Append(const llm::Message& message, std::optional<int> output_tokens,
                 const session::MessageAttribution& attribution) override {
         (void)output_tokens;
+        std::lock_guard<std::mutex> lock(mu_);
         messages.push_back(message);
         attributions.push_back(attribution);
     }
     // The fake starts empty and never compacts, so position is seq.
     std::int64_t last_appended_seq() const override {
+        std::lock_guard<std::mutex> lock(mu_);
         return static_cast<std::int64_t>(messages.size()) - 1;
     }
     // Checkpoint tracking mirrors the real store, so compaction tests can
     // assert what a resume would consume.
     void SaveCompactionCheckpoint(std::int64_t boundary_seq, const llm::Message& summary) override {
+        std::lock_guard<std::mutex> lock(mu_);
         checkpoint_boundary = boundary_seq;
         checkpoint_summary = summary;
         checkpoint_cleared = false;
     }
     void ClearCompactionCheckpoint() override {
+        std::lock_guard<std::mutex> lock(mu_);
         checkpoint_cleared = true;
         checkpoint_boundary.reset();
         checkpoint_summary = llm::Message{};
     }
+    // Copy-out read: iteration over the live vector races Append; tests
+    // polling for a message to land must snapshot instead.
+    std::vector<llm::Message> Snapshot() const {
+        std::lock_guard<std::mutex> lock(mu_);
+        return messages;
+    }
+    // Direct access is retained for tests that construct the store before any
+    // session exists (no concurrency yet); synchronize with mu_ when a session
+    // may be running.
     std::vector<llm::Message> messages;
     std::vector<session::MessageAttribution> attributions;   // parallel to messages
     std::optional<std::int64_t> checkpoint_boundary;
     llm::Message checkpoint_summary;
     bool checkpoint_cleared = false;
+    mutable std::mutex mu_;
 };
 
 class AlwaysAllowPermissionChecker : public tools::PermissionChecker {

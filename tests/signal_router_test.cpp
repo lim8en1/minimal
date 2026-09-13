@@ -80,7 +80,10 @@ bool WaitForInTranscript(testing::InMemoryHistoryStore* store, const std::string
                          std::chrono::milliseconds timeout = 5s) {
     const auto deadline = std::chrono::steady_clock::now() + timeout;
     for (;;) {
-        for (const auto& message : store->messages) {
+        // Snapshot, not a live reference: the session worker appends while
+        // this polls (TSan-visible with the mutexed fake; the snapshot is
+        // also the honest read -- one consistent view per attempt).
+        for (const auto& message : store->Snapshot()) {
             if (message.role != llm::Role::User) continue;
             for (const auto& block : message.content) {
                 if (auto* text = std::get_if<llm::TextBlock>(&block)) {
@@ -265,7 +268,7 @@ TEST_CASE("OnMcpNotification: wire contract, allowlist, meta sanitization", "[si
     CHECK(WaitForInTranscript(eve.store, "build 123 passed"));
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
     int signal_turns = 0;
-    for (const auto& message : eve.store->messages) {
+    for (const auto& message : eve.store->Snapshot()) {
         if (message.role != llm::Role::User) continue;
         for (const auto& block : message.content) {
             if (auto* text = std::get_if<llm::TextBlock>(&block)) {
@@ -358,7 +361,7 @@ TEST_CASE("restricted channel: undeclared signals are loud drops, extended pass 
                                  .dump());
 
     int extended = 0, restricted = 0, not_for_frank = 0;
-    for (const auto& message : frank.store->messages) {
+    for (const auto& message : frank.store->Snapshot()) {
         if (message.role != llm::Role::User) continue;
         for (const auto& block : message.content) {
             if (auto* text = std::get_if<llm::TextBlock>(&block)) {

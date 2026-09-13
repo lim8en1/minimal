@@ -1,0 +1,16 @@
+# ThreadSanitizer suppressions for the minimal test suite.
+#
+# The headless E2E tier exercises a real multi-process shape: the spawned
+# server and the test binary open the same SQLite database (WAL mode). All
+# cross-process synchronization -- WAL shared-memory locks, fcntl file locks
+# -- is invisible to TSan, so every race whose frames land inside sqlite's
+# parser/lexer/mutex internals is noise from two sqlite3 handles sharing one
+# WAL file, not a finding. First-party code's own locking (SessionDatabase's
+# one-connection-one-mutex discipline) is NOT covered by this and still
+# reports. called_from_lib is unusable here: it matches by name, and the
+# system libsqlite3 and the vcpkg-built one are both "libsqlite3.dylib",
+# which makes the runtime abort on the ambiguity.
+race:sqlite3*
+race:yy_*
+race:keywordCode
+race:pthreadMutexNotheld

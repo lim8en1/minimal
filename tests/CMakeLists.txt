@@ -360,7 +360,11 @@ target_compile_definitions(minimal_tests PRIVATE
 target_include_directories(minimal_tests SYSTEM PRIVATE
     "${cpp_mcp_SOURCE_DIR}/common")
 
-catch_discover_tests(minimal_tests)
+# TSAN_OPTIONS suppresses the uninstrumented system-libsqlite3 races the
+# multi-process E2E tests trigger (see tests/tsan.supp); ignored by non-TSan
+# builds, where nothing reads the variable.
+catch_discover_tests(minimal_tests
+    PROPERTIES ENVIRONMENT "TSAN_OPTIONS=suppressions=${CMAKE_SOURCE_DIR}/tests/tsan.supp")
 
 target_compile_options(minimal_tests PRIVATE ${MINIMAL_WARNING_FLAGS})
 
