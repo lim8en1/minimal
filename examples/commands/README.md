@@ -23,6 +23,7 @@ Files (walked through step by step in
 | `branch-review.md` | `run:` argv sources, positional substitution, optional argv-entry omission, `output_cap: fail` |
 | `release-notes.md` | opencode syntax: `$1`, `!`cmd`` shell injections (desugared at load) |
 | `prompt-from-script.md` | No-body mode: a script whose stdout IS the whole prompt, `output_cap: confirm` |
+| `agent-override.md` | Per-turn `agent:`/`model:` overrides: the borrowed preset/model run one turn, the session's sticky choices untouched |
 
 Notes:
 

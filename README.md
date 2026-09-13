@@ -87,7 +87,8 @@ and never overwritten afterward.
 | `keybindings.json`, `ui.json`, `themes/` | optional (client) | keymap, status bar, theme |
 
 Full reference — every field, type, default, and allowed value:
-**[docs/CONFIGURATION.md](docs/CONFIGURATION.md)**.
+**[docs/CONFIGURATION.md](docs/CONFIGURATION.md)** · Copyable example agents,
+prompts, skills, and commands: **[examples/](examples/)**.
 
 ## Plugins
 
