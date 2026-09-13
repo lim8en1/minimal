@@ -41,6 +41,22 @@ if(NOT "${CMAKE_CURRENT_SOURCE_DIR}/cmake/ports" IN_LIST VCPKG_OVERLAY_PORTS)
     set(VCPKG_OVERLAY_PORTS "${VCPKG_OVERLAY_PORTS}" CACHE STRING
         "vcpkg overlay port directories" FORCE)
 endif()
+# Clean each port's transient buildtrees/packages entries right after it
+# installs, instead of letting them accumulate (~25 GiB for this manifest).
+# Only the binary cache (~/.cache/vcpkg) and build/vcpkg_installed/ persist.
+# Not --clean-after-build: the downloads/ tarball cache is tiny and saves a
+# re-download when a failed port is retried. A failed port keeps its buildtree
+# for log inspection regardless -- cleanup only happens on success. The toolchain
+# normalizes this variable into the cache at project(), so append to whatever
+# is there (a pre-existing build dir holds an empty cache entry from earlier
+# runs) instead of requiring the entry to not exist; pass the flags yourself in
+# -DVCPKG_INSTALL_OPTIONS to manage them explicitly.
+if(NOT VCPKG_INSTALL_OPTIONS MATCHES "--clean-buildtrees-after-build")
+    list(APPEND VCPKG_INSTALL_OPTIONS "--clean-buildtrees-after-build")
+endif()
+if(NOT VCPKG_INSTALL_OPTIONS MATCHES "--clean-packages-after-build")
+    list(APPEND VCPKG_INSTALL_OPTIONS "--clean-packages-after-build")
+endif()
 cmake_host_system_information(RESULT _minimal_host_arch QUERY OS_PLATFORM)
 if(_minimal_host_arch MATCHES "^(x86_64|AMD64|amd64)$")
     set(_minimal_triplet_arch x64)

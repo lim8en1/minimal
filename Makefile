@@ -26,7 +26,7 @@ PREFIX := /usr/local
 endif
 
 .PHONY: configure build install test debug server-only asan tsan \
-        debug-test asan-test tsan-test clean distclean help
+        debug-test asan-test tsan-test clean distclean vcpkg-clean help
 
 # Run ./configure if the build tree for the recorded preset does not exist yet.
 # Tolerates config.mk being stale (preset reconfigured elsewhere) by trusting
@@ -103,6 +103,13 @@ clean:
 distclean: clean
 	rm -rf .vcpkg
 
+# Reclaim vcpkg's transient per-port dirs (buildtrees/packages). Newer builds
+# clean these automatically (VCPKG_INSTALL_OPTIONS in CMakeLists.txt); this
+# clears leftovers from older runs. Keeps the checkout, downloads/ cache, and
+# binary cache.
+vcpkg-clean:
+	rm -rf .vcpkg/buildtrees .vcpkg/packages
+
 help:
 	@echo "minimal build targets:"
 	@echo "  ./configure          set up vcpkg + cmake (run this first; see --help)"
@@ -111,4 +118,5 @@ help:
 	@echo "  make install         install to the configured prefix (PREFIX=... to override)"
 	@echo "  make debug|asan|tsan configure + build that preset"
 	@echo "  make clean           remove build trees (keeps .vcpkg/)"
+	@echo "  make vcpkg-clean     remove vcpkg buildtrees/packages (keeps .vcpkg/ checkout)"
 	@echo "  make distclean       also remove .vcpkg/"

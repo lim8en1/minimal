@@ -84,6 +84,16 @@ macOS survives only because its two-level namespace keeps the copies apart.
   shutdown then waits forever on a CondVar belonging to one copy while another
   copy signals it. When bumping `builtin-baseline`, refresh the overlay from the
   new baseline's `ports/abseil/` and keep the one-line portfile change.
+- Disk usage: vcpkg cleans each port's transient `buildtrees/` and
+  `packages/` entries right after it installs (`VCPKG_INSTALL_OPTIONS`,
+  set in `CMakeLists.txt`), so `.vcpkg/` stays small instead of accumulating
+  ~25 GiB. What persists is the binary cache (`~/.cache/vcpkg` — compressed
+  per-port packages that make rebuilds free) and the installed tree
+  (`build/vcpkg_installed/`). A **failed** port keeps its buildtree for log
+  inspection — cleanup only happens on success. The flags are appended to
+  `VCPKG_INSTALL_OPTIONS` only when absent, so you can manage them yourself by
+  passing `-DVCPKG_INSTALL_OPTIONS=...` explicitly; `make vcpkg-clean` reclaims
+  leftovers from older runs (pre-flag checkouts can hold ~20 GiB of them).
 
 ## Build
 
