@@ -764,7 +764,10 @@ message ForkSessionRequest {
   // active, text-bearing user message -- the same shape a rewind demands.
   int64 target_seq = 2;
   string name = 3;         // empty = the free default-naming rule
-  // "<provider>/<model>", empty = the source's preset model.
+  // "<provider>/<model>", empty = the source's own model -- including a
+  // model the user pinned there via /model (persisted on the session row),
+  // which the fork copies. Set a value here to start the fork on a
+  // DIFFERENT model than the source was running.
   string model = 4;
   string agent_preset = 5; // empty = the source's preset
   // UNSPECIFIED = the source's run mode.

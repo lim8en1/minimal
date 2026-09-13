@@ -1435,6 +1435,10 @@ SessionSummary SessionDatabase::ForkSession(const std::string& source_session_id
     const char* name_source = name.empty() ? "" : "explicit";
     int copied = 0;
     std::string project_root, agent_preset;
+    // The source's persisted model overrides, read in the transaction below.
+    // nullopt = the source row's column is NULL (no override), and the fork
+    // row gets NULL too rather than an empty string.
+    std::optional<std::string> source_model, source_subagent_model;
     // target_seq < 0: fork the WHOLE active transcript. The upper bound and
     // the checkpoint condition both open up -- "copy everything" has no
     // trailing user message to point at, and any existing checkpoint covers
@@ -1449,7 +1453,7 @@ SessionSummary SessionDatabase::ForkSession(const std::string& source_session_id
         // be a subagent. Subagent transcripts are one task-scoped turn, hidden
         // from the picker and refused rewind/resume -- forking one would hand a
         // top-level session a transcript the whole UI model refuses to show.
-        Stmt source(db_, "SELECT project_root, agent_preset FROM sessions"
+        Stmt source(db_, "SELECT project_root, agent_preset, model, subagent_model FROM sessions"
                          " WHERE id = ?1 AND parent_session_id IS NULL;",
                     "failed to read the source session");
         sqlite3_bind_text(source.stmt, 1, source_session_id.c_str(), -1, SQLITE_TRANSIENT);
@@ -1459,6 +1463,21 @@ SessionSummary SessionDatabase::ForkSession(const std::string& source_session_id
         }
         project_root = reinterpret_cast<const char*>(sqlite3_column_text(source.stmt, 0));
         agent_preset = reinterpret_cast<const char*>(sqlite3_column_text(source.stmt, 1));
+        // The persisted model overrides ride along: a fork's whole point is
+        // "try it on another model from HERE", and "here" includes the model
+        // the user pinned with /model (v8) and /subagent-model (v10). Dropping
+        // them forked a /model session onto its preset's default model --
+        // a different starting point than the one the user was looking at.
+        const bool have_source_model = sqlite3_column_type(source.stmt, 2) != SQLITE_NULL;
+        if (have_source_model) {
+            source_model = reinterpret_cast<const char*>(sqlite3_column_text(source.stmt, 2));
+        }
+        const bool have_source_subagent_model =
+            sqlite3_column_type(source.stmt, 3) != SQLITE_NULL;
+        if (have_source_subagent_model) {
+            source_subagent_model =
+                reinterpret_cast<const char*>(sqlite3_column_text(source.stmt, 3));
+        }
 
         // Target validation, same shape as rewind's IsRewindTarget: the fork
         // point must be an ACTIVE user message with non-empty text, so a fork
@@ -1494,13 +1513,13 @@ SessionSummary SessionDatabase::ForkSession(const std::string& source_session_id
         }
 
         // Mint the child row: a top-level session with fork provenance. The
-        // source's project_root/agent_preset carry over (the registry's
-        // CreateSession params can still override the preset via its own
-        // resolve path).
+        // source's project_root/agent_preset and any persisted model overrides
+        // carry over (the registry's CreateSession params can still override
+        // the preset via its own resolve path).
         Stmt insert(db_, "INSERT INTO sessions (id, parent_session_id, name, name_source,"
                          " project_root, agent_preset, created_at, updated_at,"
-                         " forked_from_session_id)"
-                         " VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?);",
+                         " forked_from_session_id, model, subagent_model)"
+                         " VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
                     "failed to create forked session");
         sqlite3_bind_text(insert.stmt, 1, id.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_text(insert.stmt, 2, name.c_str(), -1, SQLITE_TRANSIENT);
@@ -1512,6 +1531,17 @@ SessionSummary SessionDatabase::ForkSession(const std::string& source_session_id
         sqlite3_bind_int64(insert.stmt, 6, now);
         sqlite3_bind_int64(insert.stmt, 7, now);
         sqlite3_bind_text(insert.stmt, 8, source_session_id.c_str(), -1, SQLITE_TRANSIENT);
+        if (source_model) {
+            sqlite3_bind_text(insert.stmt, 9, source_model->c_str(), -1, SQLITE_TRANSIENT);
+        } else {
+            sqlite3_bind_null(insert.stmt, 9);
+        }
+        if (source_subagent_model) {
+            sqlite3_bind_text(insert.stmt, 10, source_subagent_model->c_str(), -1,
+                              SQLITE_TRANSIENT);
+        } else {
+            sqlite3_bind_null(insert.stmt, 10);
+        }
         if (sqlite3_step(insert.stmt) != SQLITE_DONE) {
             ThrowSqliteError(db_, "failed to create forked session");
         }
@@ -1596,6 +1626,11 @@ SessionSummary SessionDatabase::ForkSession(const std::string& source_session_id
     summary.updated_at_unix_ms = now;
     summary.message_count = copied;
     summary.forked_from_session_id = source_session_id;
+    // The overrides the fork row now carries: the request's preset override
+    // already landed above; the source's model choices were copied verbatim
+    // in the transaction.
+    summary.model = std::move(source_model);
+    summary.subagent_model = std::move(source_subagent_model);
     return summary;
 }
 

@@ -76,37 +76,31 @@ std::shared_ptr<Session> SessionRegistry::ForkSession(
     std::optional<tools::PermissionRunMode> run_mode) {
     // The store mints the child row and copies the transcript prefix in one
     // transaction -- the same "the DATABASE mints the id" ordering every other
-    // creation path follows.
+    // creation path follows. The fork transaction copies the source's
+    // persisted model/subagent_model columns verbatim, and the returned row
+    // reports them.
     session::SessionSummary row = db_.ForkSession(source_session_id, target_seq, name,
                                                   agent_preset);
 
-    // The fork's model override rides the row the same way a creation's does
-    // (the fork transaction itself carries no model column -- this is the
-    // same best-effort write the runtime hook performs).
+    // The fork's model: an explicit request override wins; otherwise the
+    // source's own choice (a /model the user pinned) rides the row -- so a
+    // fork of a /model session starts on THAT model, not the preset's
+    // default. SplitModelRef re-validates whatever the row holds; an
+    // unparseable value is dropped (the fork runs its preset's default)
+    // rather than failing a fork whose transcript is perfectly good.
+    std::optional<config::ModelRef> fork_model;
     if (model) {
-        try {
-            db_.UpdateSessionModel(row.session_id, model->str());
-        } catch (const std::exception& e) {
-            logger_.warn("session {}: persisting fork model override failed: {}",
-                         row.session_id, e.what());
-        }
+        fork_model = model;
+    } else if (row.model) {
+        fork_model = config::SplitModelRef(*row.model);
     }
 
-    // A fork copies the session's configuration, not just its transcript: the
-    // source's sticky subagent-model choice (/subagent-model) travels too.
-    // Best-effort like the write above; a failed copy only means the fork's
-    // children fall back to the inherit-parent default.
+    // The source's sticky subagent-model choice (/subagent-model) travels the
+    // same way; a fork's children fall back to the inherit-parent default
+    // when the source never named one.
     std::optional<config::ModelRef> fork_subagent_model;
-    if (const auto source = db_.GetSession(source_session_id); source && source->subagent_model) {
-        if (const auto ref = config::SplitModelRef(*source->subagent_model)) {
-            fork_subagent_model = ref;
-            try {
-                db_.UpdateSessionSubagentModel(row.session_id, *source->subagent_model);
-            } catch (const std::exception& e) {
-                logger_.warn("session {}: persisting fork subagent-model override failed: {}",
-                             row.session_id, e.what());
-            }
-        }
+    if (row.subagent_model) {
+        fork_subagent_model = config::SplitModelRef(*row.subagent_model);
     }
 
     SessionParams params;
@@ -115,7 +109,7 @@ std::shared_ptr<Session> SessionRegistry::ForkSession(
     params.agent_preset = row.agent_preset;  // the row already carries the effective one
     params.project_root = row.project_root;
     params.run_mode_override = run_mode;
-    params.model_override = model;
+    params.model_override = fork_model;
     params.subagent_model_override = fork_subagent_model;
     // The fork's store already holds the copied prefix; params.resume routes
     // creation through LoadResumeSeed exactly like a reopened session --

@@ -2039,6 +2039,36 @@ TEST_CASE("ForkSession inherits the source's name_source rules", "[session][fork
     CHECK(unnamed.name_source == "");  // the free default-naming rule owns it later
 }
 
+TEST_CASE("ForkSession carries the source's persisted model overrides", "[session][fork]") {
+    // The fork row IS the fork's configuration: a /model the user pinned on
+    // the source (v8) and a /subagent-model choice (v10) must survive the
+    // fork, or "fork and try another model" silently starts from the preset's
+    // default instead of the state the user was looking at. NULL stays NULL --
+    // a source without overrides forks without them.
+    ForkFixture fx;
+    fx.db.UpdateSessionModel(fx.source, "main/big");
+    fx.db.UpdateSessionSubagentModel(fx.source, "main/fast");
+
+    const auto row = fx.db.ForkSession(fx.source, 0, "the fork", std::nullopt);
+    REQUIRE(row.model.has_value());
+    CHECK(*row.model == "main/big");
+    REQUIRE(row.subagent_model.has_value());
+    CHECK(*row.subagent_model == "main/fast");
+
+    const auto reread = fx.db.GetSession(row.session_id);
+    REQUIRE(reread.has_value());
+    REQUIRE(reread->model.has_value());
+    CHECK(*reread->model == "main/big");
+    REQUIRE(reread->subagent_model.has_value());
+    CHECK(*reread->subagent_model == "main/fast");
+
+    // A source with no overrides forks without them -- NULL, not "".
+    ForkFixture plain;
+    const auto bare = plain.db.ForkSession(plain.source, 0, "bare", std::nullopt);
+    CHECK_FALSE(bare.model.has_value());
+    CHECK_FALSE(bare.subagent_model.has_value());
+}
+
 TEST_CASE("ForkSession validates the target like a rewind would", "[session][fork]") {
     ForkFixture fx;
 
