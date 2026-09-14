@@ -85,14 +85,24 @@ macOS survives only because its two-level namespace keeps the copies apart.
   copy signals it. When bumping `builtin-baseline`, refresh the overlay from the
   new baseline's `ports/abseil/` and keep the one-line portfile change.
 - ftxui comes from an overlay port too, `cmake/ports/ftxui/`: the stock 7.0.3
-  port plus `minimal-ftxui-frame-diff.patch` — frame diffing (identical-frame
-  skip, dirty-region write, one requirement pass per frame instead of two).
-  With it, a repaint writes only the rows that changed to the terminal
-  (measured: ~300 KB/s → ~3 KB/s during a silent tool run); set
-  `MINIMAL_FTXUI_DIFF=0` in the client's environment to restore upstream
-  write-everything behavior. The patch only changes WHAT is written, never
-  WHAT is composed. When bumping `builtin-baseline`, refresh the overlay
-  from the new baseline's `ports/ftxui/` and rebase the patch.
+  port plus three patches (applied in this order):
+  - `minimal-ftxui-frame-diff.patch` — one requirement pass per frame
+    instead of two, identical-frame write skip, dirty-region write;
+  - `minimal-ftxui-event-loop.patch` — the event loop blocks in `poll()`
+    on terminal input / posted tasks / due delayed tasks instead of
+    waking at ~60 Hz, and the unconditional 15 ms animation self-repost
+    is gated (removed: a constant ~1.5% CPU burn whenever a session was
+    open, idle or not);
+  - `minimal-ftxui-dirty-rows.patch` — per-row cell hashing; only rows
+    whose content changed are serialized (`Screen::ToStringRow`) and
+    written. Net effect measured: streaming CPU ~3% → ~0.2%, silent tool
+    run ~1.9% → ~0.3%, idle-with-session ~0.4% → ~0.2%, terminal write
+    bandwidth −99%.
+  All three only change WHAT is written and how often the loop wakes,
+  never WHAT is composed. `MINIMAL_FTXUI_DIFF=0` in the client's
+  environment restores upstream write-everything behavior. When bumping
+  `builtin-baseline`, refresh the overlay from the new baseline's
+  `ports/ftxui/` and rebase the patches (they apply in the order above).
 - Disk usage: vcpkg cleans each port's transient `buildtrees/` and
   `packages/` entries right after it installs (`VCPKG_INSTALL_OPTIONS`,
   set in `CMakeLists.txt`), so `.vcpkg/` stays small instead of accumulating
