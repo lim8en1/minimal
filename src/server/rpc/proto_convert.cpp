@@ -578,12 +578,19 @@ v1::ServerEvent ToProto(const std::string& session_id, const agent::SessionEvent
                 // (SetName, EmitDefaultNameIfComputed): the other fields are left
                 // at their proto default rather than sent as zero values that
                 // could be mistaken for an authoritative update.
+                // `partial` mirrors today's two name-only emission sites
+                // (SetName, EmitDefaultNameIfComputed): the other fields are left
+                // at their proto default rather than sent as zero values that
+                // could be mistaken for an authoritative update. PAUSED is the
+                // exception -- both partial sites now fill it in (a bool has no
+                // "absent" encoding), so it is set unconditionally and every
+                // metadata event is wire-authoritative for it.
+                metadata->set_paused(value.paused);
                 if (!value.partial) {
                     metadata->set_agent_preset(value.agent_preset);
                     metadata->set_model(value.model);
                     metadata->set_permission_mode(value.permission_mode);
                     metadata->set_context_window_tokens(value.context_window_tokens);
-                    metadata->set_paused(value.paused);
                 }
             } else if constexpr (std::is_same_v<T, agent::SessionEnded>) {
                 out.mutable_session_ended();

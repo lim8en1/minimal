@@ -843,6 +843,14 @@ int RunTui(const minimal::client::ParsedArgs& args) {
                                "detach this tab group; work keeps running, /sessions reattaches",
                                /*read_only=*/false, /*submits_prompt=*/false,
                                /*requires_session=*/true});
+    command_catalog.push_back({"pause",
+                               "pause the agent (stops after its current tool call)",
+                               /*read_only=*/false, /*submits_prompt=*/false,
+                               /*requires_session=*/true});
+    command_catalog.push_back({"resume",
+                               "resume a paused session (continues from its last tool result)",
+                               /*read_only=*/false, /*submits_prompt=*/false,
+                               /*requires_session=*/true});
     // /theme is intercepted client-side like /new (it swaps the in-memory
     // Theme and re-pushes it to plugins; the server has no part in it), so it
     // has no CommandInfo -- added by hand for /-autocomplete. Works on a
@@ -1217,6 +1225,38 @@ int RunTui(const minimal::client::ParsedArgs& args) {
         }
         const std::string sid = app->FocusedSessionId();
         const bool has_session = !sid.empty();
+        if (line == "/pause" || line == "/resume") {
+            // Client-native, like shift+tab's run-mode cycle: both send the
+            // SetPausedEvent wire message directly (a /-command would queue
+            // for the worker and only land at a turn boundary -- precisely
+            // the delay pause exists to avoid). The current state comes from
+            // the tab's metadata snapshot; the confirming metadata event
+            // refreshes the status bar's paused segment. Explicit /resume
+            // with nothing queued kicks the seedless continuation server-side
+            // (Session::SetPaused).
+            if (!has_session) {
+                if (const std::string tab = app->FocusedTabId(); !tab.empty()) {
+                    app->TabNotice(tab, line.substr(1) + " needs a session; send a message to "
+                                            "start one first");
+                }
+                return;
+            }
+            const bool paused = app->GetDetails(sid).paused;
+            const bool want_paused = line == "/pause";
+            if (paused == want_paused) {
+                if (const std::string tab = app->FocusedTabId(); !tab.empty()) {
+                    app->TabNotice(tab, want_paused ? "already paused" : "not paused");
+                }
+                return;
+            }
+            app->SendSetPaused(sid, want_paused);
+            if (const std::string tab = app->FocusedTabId(); !tab.empty()) {
+                app->TabNotice(tab, want_paused ? "pausing -- the agent stops after its current "
+                                                  "tool call"
+                                                : "resumed");
+            }
+            return;
+        }
         if (line == "/redo" || line == "/rewind" || line.rfind("/rewind ", 0) == 0) {
             // Refused VISIBLY on a sessionless tab: SendRewind with an empty
             // sid hits GetState("") == null and silently returns -- the user

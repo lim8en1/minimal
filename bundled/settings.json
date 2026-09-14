@@ -4,6 +4,7 @@
   "max_concurrent_subagents": 4,
 
   "background_wake": false,
+  "pause_auto_resume_on_submit": true,
 
   "memory": {
     "auto_compact": true,

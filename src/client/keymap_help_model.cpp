@@ -64,6 +64,7 @@ constexpr KnownAction kKnown[] = {
     {"chat.toggle_timestamps", "show / hide timestamps"},
     {"turn.cancel", "interrupt the turn"},
     {"permission.cycle", "cycle the permission mode"},
+    {"session.pause", "pause / resume the agent (stops at the next tool boundary)"},
     {"session.picker", "open or resume a session"},
     {"agent.picker", "switch agent"},
     {"model.picker", "switch model"},

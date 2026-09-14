@@ -80,6 +80,7 @@ Full example (`bundled/settings.json`):
 | `default_theme` | string | `""` | client theme name (`themes/<name>.json`) |
 | `max_concurrent_subagents` | int | `4` | `<= 0` or `> 8` → warning |
 | `background_wake` | bool | `false` | |
+| `pause_auto_resume_on_submit` | bool | `true` | a user turn submitted while the session is paused clears the pause instead of waiting for an explicit resume (`sessions.pause_auto_resume_on_submit`) |
 | `session_db_path` | string | `""` | empty → resolved under the data dir |
 
 ### `memory.*`

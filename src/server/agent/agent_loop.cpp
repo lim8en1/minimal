@@ -183,6 +183,24 @@ bool AgentLoop::Cancelled() const { return is_cancelled_ && is_cancelled_(); }
 
 bool AgentLoop::Paused() const { return is_paused_ && is_paused_(); }
 
+bool AgentLoop::HistoryEndsWithUnansweredUserText() const {
+    if (history_.empty()) return false;
+    const auto& last = history_.back();
+    if (last.role != llm::Role::User) return false;
+    // Text, not tool results: an injected subagent completion also ends the
+    // history in a User message, but its blocks are ToolResultBlocks -- the
+    // model's own answers arriving late, which wait for the next real turn
+    // when the wake setting is off. Only TEXT is a human prompt awaiting a
+    // reply (IsUserTextMessage shares the definition).
+    for (const auto& block : last.content) {
+        if (const auto* text = std::get_if<llm::TextBlock>(&block);
+            text != nullptr && !text->text.empty()) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool AgentLoop::SleepForBackoff(int attempt,
                                 std::optional<std::chrono::milliseconds> retry_after) {
     if (config_.retry_base_delay.count() <= 0 && !retry_after) return !Cancelled();

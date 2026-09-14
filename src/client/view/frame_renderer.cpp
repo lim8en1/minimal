@@ -451,6 +451,14 @@ ftxui::Element FrameRenderer::Render() {
                 }
             }
         }
+        // The paused segment (session.pause / SetPausedEvent): empty = not
+        // paused = renders nothing, per the unknown-or-unfilled rule. Colored
+        // at attention -- "the agent is suspended" is exactly the state the
+        // user must notice before wondering why nothing is happening.
+        if (focused_details.paused) {
+            values["paused"] = "paused";
+            emphasis["paused"] = deps_.theme.ColorFor("attention");
+        }
         for (const auto& tab : tabs) {
             if (tab.tab_id != focused) continue;
             const auto activity = ActivityLabel(tab.state, tab.tools);

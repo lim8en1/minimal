@@ -374,6 +374,23 @@ bool HandleGlobalKey(KeyContext& ctx, const ftxui::Event& event) {
         }
         return true;
     }
+    if (ctx.keymap.Matches("session.pause", event)) {
+        // alt+p toggles the session's pause state as a DIRECT wire event
+        // (SendSetPaused) -- no command, no confirmation modal: the
+        // keybinding IS the confirmation, the same contract shift+tab's
+        // run-mode cycle has. Unlike the run-mode change, the server applies
+        // this on its reader thread (an atomic flip), so a mid-turn press
+        // takes effect at the next tool-call return of the running turn
+        // rather than at a turn boundary. A sessionless tab has nothing to
+        // pause.
+        if (!sid.empty()) {
+            const std::string session = ctx.app.FocusedSessionId();
+            if (session.empty()) return true;
+            const bool current = ctx.app.GetDetails(sid).paused;
+            ctx.app.SendSetPaused(session, !current);
+        }
+        return true;
+    }
     if (ctx.keymap.Matches("panel.toggle", event)) {
         ctx.show_panel = !ctx.show_panel;
         return true;

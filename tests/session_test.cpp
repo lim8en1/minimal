@@ -75,6 +75,7 @@ struct SessionFixture {
         params.policy_ceiling = policy_ceiling;
         params.on_turn_finished = on_turn_finished;
         params.wake_on_injection = wake_on_injection;
+        params.pause_auto_resume_on_submit = pause_auto_resume_on_submit;
         // A preset registry turns the per-turn /agent borrow path on; tests
         // that only run plain turns leave it null and never touch it.
         if (preset_registry != nullptr) params.presets = preset_registry;
@@ -139,6 +140,9 @@ struct SessionFixture {
     // The idle-wake setting: an out-of-band injection on an IDLE session runs a
     // seedless turn (the injected messages are the user content).
     bool wake_on_injection = false;
+    // The auto-resume setting: a turn submitted while paused clears the flag.
+    // Off in the hold tests so a submission is provably held.
+    bool pause_auto_resume_on_submit = true;
     testing::FakeLlmProvider* provider = nullptr;
     testing::InMemoryHistoryStore* store = nullptr;  // owned by the session
     std::shared_ptr<agent::Session> session;
@@ -1542,4 +1546,314 @@ TEST_CASE("SubmitRunMode is refused when the backlog is full, and answers on the
 
     fixture.session->Cancel();  // unpark the worker from the prompt
     fixture.session->Terminate();
+}
+
+// --- pause (SetPausedEvent) and real-time steering ----------------------------
+//
+// The fence semantics: pause fences NEW work only. The tool round in flight
+// when the pause lands runs to completion and persists its REAL results; the
+// turn ends STOP_REASON_PAUSED at the tool-call-return boundary and no further
+// provider call happens. Resume (explicit or via a user message) continues
+// from the paired transcript.
+
+namespace {
+
+bool WaitForCallCount(testing::FakeLlmProvider& provider, std::size_t expected,
+                      std::chrono::milliseconds timeout = 5s) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (provider.call_count() < expected && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(1ms);
+    }
+    return provider.call_count() == expected;
+}
+
+bool WaitForToolStarted(std::atomic<bool>& started, std::chrono::milliseconds timeout = 5s) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (!started.load(std::memory_order_acquire) &&
+           std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(1ms);
+    }
+    return started.load(std::memory_order_acquire);
+}
+
+std::optional<v1::StopReason> LastTurnCompletedStopReason(SessionFixture& fixture) {
+    std::optional<v1::StopReason> observed;
+    for (const auto& event : fixture.DrainQueue()) {
+        if (event.has_turn_completed()) observed = event.turn_completed().stop_reason();
+    }
+    return observed;
+}
+
+}  // namespace
+
+TEST_CASE("pause ends the turn at the tool-call return with real results persisted",
+          "[session][pause]") {
+    SessionFixture fixture;
+    std::atomic<bool> started{false};
+    auto tool = std::make_unique<testing::GatedTool>("gate", started);
+    auto* tool_ptr = tool.get();
+    fixture.tools_registry.Register(std::move(tool));
+    fixture.Script(testing::ToolUseResponse("call-1", "gate"));
+    fixture.Script(testing::TextResponse("must not be consumed"));
+    fixture.Start();
+
+    fixture.session->SubmitTurn("go");
+    REQUIRE(WaitForToolStarted(started));  // the worker is parked inside the tool
+    fixture.session->SetPaused(true);
+    CHECK(fixture.session->paused());
+    tool_ptr->Release();
+    REQUIRE(fixture.session->WaitForIdleForTesting(5s));
+
+    // The in-flight round completed and persisted; the loop never reached the
+    // second provider call.
+    CHECK(fixture.provider->call_count() == 1);
+    const auto& stored = fixture.store->messages;
+    REQUIRE(stored.size() == 3);  // user, assistant(tool_use), user(tool_result)
+    CHECK(stored.back().role == llm::Role::User);
+    REQUIRE(std::holds_alternative<llm::ToolResultBlock>(stored.back().content.front()));
+    CHECK_FALSE(fixture.session->terminated());
+
+    // The wire: the turn reports PAUSED and the metadata carries the state.
+    // One pass over one drain: the metadata event precedes TurnCompleted on
+    // the wire (SetPaused emits it before the turn ends), so a second drain
+    // here would only see what the first already consumed.
+    std::optional<v1::StopReason> stop;
+    bool saw_paused_metadata = false;
+    for (const auto& event : fixture.DrainQueue()) {
+        if (event.has_turn_completed()) stop = event.turn_completed().stop_reason();
+        if (event.has_session_metadata() && event.session_metadata().paused()) {
+            saw_paused_metadata = true;
+        }
+    }
+    REQUIRE(stop.has_value());
+    CHECK(*stop == v1::STOP_REASON_PAUSED);
+    CHECK(saw_paused_metadata);
+}
+
+TEST_CASE("an explicit resume runs the seedless continuation from the persisted results",
+          "[session][pause]") {
+    SessionFixture fixture;
+    std::atomic<bool> started{false};
+    auto tool = std::make_unique<testing::GatedTool>("gate", started);
+    auto* tool_ptr = tool.get();
+    fixture.tools_registry.Register(std::move(tool));
+    fixture.Script(testing::ToolUseResponse("call-1", "gate"));
+    fixture.Script(testing::TextResponse("continued after resume"));
+    fixture.Start();
+
+    fixture.session->SubmitTurn("go");
+    REQUIRE(WaitForToolStarted(started));
+    fixture.session->SetPaused(true);
+    tool_ptr->Release();
+    REQUIRE(fixture.session->WaitForIdleForTesting(5s));
+    REQUIRE(fixture.provider->call_count() == 1);
+
+    // Unpause with nothing queued: the resume kick is the seedless wake turn.
+    fixture.session->SetPaused(false);
+    CHECK_FALSE(fixture.session->paused());
+    // The worker is parked when the notify lands, so WaitForIdle would return
+    // before it even wakes -- poll the provider instead.
+    REQUIRE(WaitForCallCount(*fixture.provider, 2));
+
+    CHECK(fixture.provider->call_count() == 2);
+    const auto& stored = fixture.store->messages;
+    REQUIRE(stored.size() == 4);
+    CHECK(stored.back().role == llm::Role::Assistant);
+    // The continuation's request carried the persisted tool results -- the
+    // model sees what the paused turn did.
+    const auto& request = fixture.provider->requests()[1];
+    REQUIRE(request.messages.size() == 3);
+    CHECK(std::holds_alternative<llm::ToolResultBlock>(request.messages.back().content.front()));
+}
+
+TEST_CASE("a user submission auto-resumes a paused session", "[session][pause]") {
+    SessionFixture fixture;  // pause_auto_resume_on_submit defaults to on
+    fixture.Script(testing::TextResponse("hello there"));
+    fixture.Start();
+
+    fixture.session->SetPaused(true);
+    CHECK(fixture.session->paused());
+    fixture.session->SubmitTurn("anyone there?");
+    REQUIRE(fixture.session->WaitForIdleForTesting(5s));
+
+    CHECK_FALSE(fixture.session->paused());
+    CHECK(fixture.provider->call_count() == 1);
+    const auto& stored = fixture.store->messages;
+    REQUIRE(stored.size() == 2);
+    CHECK(stored.back().role == llm::Role::Assistant);
+}
+
+TEST_CASE("a paused session holds turns and wakes but still runs commands",
+          "[session][pause]") {
+    // The "pause to reconfigure" affordance: /model, /agent and rewinds are
+    // non-turn work the worker keeps running; turns and wake-turns wait.
+    SessionFixture fixture;
+    fixture.pause_auto_resume_on_submit = false;  // provable hold
+    fixture.wake_on_injection = true;             // ...and the wake holds too
+    fixture.Script(testing::TextResponse("held until resume"));
+    fixture.Start();
+
+    fixture.session->SetPaused(true);
+    REQUIRE(fixture.session->SubmitTurn("held"));
+    std::this_thread::sleep_for(50ms);
+    CHECK(fixture.provider->call_count() == 0);  // held, not run
+
+    // A command still executes while the turn is held (commands_ is null in
+    // this fixture, so the answer is the "not available" error -- but that is
+    // the command RUNNING, on the worker, beside the held turn).
+    agent::QueuedCommand command;
+    command.request_id = "cmd-pause";
+    command.name = "anything";
+    REQUIRE(fixture.session->SubmitCommand(command));
+    bool answered = false;
+    const auto deadline = std::chrono::steady_clock::now() + 5s;
+    while (!answered && std::chrono::steady_clock::now() < deadline) {
+        for (const auto& event : fixture.DrainQueue()) {
+            if (event.has_command_result() &&
+                event.command_result().request_id() == "cmd-pause") {
+                answered = true;
+            }
+        }
+        std::this_thread::sleep_for(1ms);
+    }
+    CHECK(answered);
+    CHECK(fixture.provider->call_count() == 0);  // the held turn is still held
+
+    // Unpause releases the held turn.
+    fixture.session->SetPaused(false);
+    REQUIRE(WaitForCallCount(*fixture.provider, 1));
+    CHECK(fixture.store->messages.size() == 2);
+}
+
+TEST_CASE("cancel beats pause", "[session][pause]") {
+    SessionFixture fixture;
+    std::atomic<bool> started{false};
+    auto tool = std::make_unique<testing::GatedTool>("gate", started);
+    auto* tool_ptr = tool.get();
+    fixture.tools_registry.Register(std::move(tool));
+    fixture.Script(testing::ToolUseResponse("call-1", "gate"));
+    fixture.Script(testing::TextResponse("must not be consumed"));
+    fixture.Start();
+
+    fixture.session->SubmitTurn("go");
+    REQUIRE(WaitForToolStarted(started));
+    fixture.session->SetPaused(true);
+    // The cancel fires the tool's token, which wakes the gated tool; the turn
+    // unwinds as CANCELLED and the pause state is gone with it.
+    fixture.session->Cancel();
+    REQUIRE(fixture.session->WaitForIdleForTesting(5s));
+
+    CHECK_FALSE(fixture.session->paused());
+    CHECK(fixture.provider->call_count() == 1);
+    // One drain, both assertions: the metadata (paused=false, from Cancel)
+    // precedes TurnCompleted on the wire.
+    std::optional<v1::StopReason> stop;
+    for (const auto& event : fixture.DrainQueue()) {
+        if (event.has_turn_completed()) stop = event.turn_completed().stop_reason();
+    }
+    REQUIRE(stop.has_value());
+    CHECK(*stop == v1::STOP_REASON_CANCELLED);
+}
+
+TEST_CASE("a paused session holds the injection wake until resume", "[session][pause]") {
+    SessionFixture fixture;
+    fixture.wake_on_injection = true;
+    fixture.Script(testing::TextResponse("wake answer"));
+    fixture.Start();
+
+    fixture.session->SetPaused(true);
+    REQUIRE(fixture.session->QueueInjectedMessage(
+        llm::Message{llm::Role::User,
+                     {llm::ToolResultBlock{"bg-1", {llm::TextBlock{"task finished"}}, false}}}));
+    std::this_thread::sleep_for(50ms);
+    CHECK(fixture.provider->call_count() == 0);  // no provider call nobody asked for
+
+    fixture.session->SetPaused(false);
+    REQUIRE(WaitForCallCount(*fixture.provider, 1));  // the seedless wake ran on resume
+}
+
+TEST_CASE("a mid-turn submission steers into the running turn's next request",
+          "[session][steering]") {
+    SessionFixture fixture;
+    std::atomic<bool> started{false};
+    auto tool = std::make_unique<testing::GatedTool>("gate", started);
+    auto* tool_ptr = tool.get();
+    fixture.tools_registry.Register(std::move(tool));
+    fixture.Script(testing::ToolUseResponse("call-1", "gate"));
+    fixture.Script(testing::TextResponse("after tools"));
+    fixture.Start();
+
+    fixture.session->SubmitTurn("go");
+    REQUIRE(WaitForToolStarted(started));  // mid-turn, provably
+    REQUIRE(fixture.session->SubmitTurn("steer me"));
+    // The steering answer: accepted with steered=true, not a queue row.
+    bool saw_steered = false;
+    const auto queued_deadline = std::chrono::steady_clock::now() + 5s;
+    while (!saw_steered && std::chrono::steady_clock::now() < queued_deadline) {
+        for (const auto& event : fixture.DrainQueue()) {
+            if (event.has_turn_queued() && event.turn_queued().steered()) saw_steered = true;
+        }
+        std::this_thread::sleep_for(1ms);
+    }
+    CHECK(saw_steered);
+
+    tool_ptr->Release();
+    REQUIRE(fixture.session->WaitForIdleForTesting(5s));
+
+    // The steering text reached the model IN the round after the tool
+    // results: [..., assistant(tool_use), user(tool_results), user(steering)]
+    // in one request.
+    CHECK(fixture.provider->call_count() == 2);
+    const auto& request = fixture.provider->requests()[1];
+    REQUIRE(request.messages.size() == 4);
+    CHECK(request.messages.back().role == llm::Role::User);
+    const auto* text = std::get_if<llm::TextBlock>(&request.messages.back().content.front());
+    REQUIRE(text != nullptr);
+    CHECK(text->text == "steer me");
+    // ...and it persisted at the boundary, keeping the transcript paired.
+    const auto& stored = fixture.store->messages;
+    REQUIRE(stored.size() == 5);
+    const auto* stored_text =
+        std::get_if<llm::TextBlock>(&stored[3].content.front());
+    REQUIRE(stored_text != nullptr);
+    CHECK(stored_text->text == "steer me");
+}
+
+TEST_CASE("a steering message that missed the flush is answered by a seedless continuation",
+          "[session][steering]") {
+    // The model had already returned EndTurn by the time the user typed; the
+    // final flush appends the message but nothing answers it. The worker's
+    // wait predicate treats a pending user-text injection as explicit intent
+    // and runs a seedless continuation -- regardless of wake_on_injection.
+    SessionFixture fixture;
+    std::atomic<bool> started{false};
+    auto tool = std::make_unique<testing::GatedTool>("gate", started);
+    auto* tool_ptr = tool.get();
+    fixture.tools_registry.Register(std::move(tool));
+    fixture.Script(testing::ToolUseResponse("call-1", "gate"));
+    fixture.Script(testing::TextResponse("done before you typed"));
+    fixture.Script(testing::TextResponse("answering the steering"));
+    fixture.Start();
+
+    fixture.session->SubmitTurn("go");
+    REQUIRE(WaitForToolStarted(started));
+    tool_ptr->Release();
+    REQUIRE(fixture.session->WaitForIdleForTesting(5s));
+    REQUIRE(fixture.provider->call_count() == 2);
+
+    // Arrives after the turn ended: the flush already ran, so this rides the
+    // sweep. (Session::QueueInjectedMessage is exactly what the routing in
+    // SubmitTurnWithOverrides would have produced.)
+    REQUIRE(fixture.session->QueueInjectedMessage(testing::UserText("late steering")));
+    REQUIRE(WaitForCallCount(*fixture.provider, 3));
+
+    CHECK(fixture.provider->call_count() == 3);
+    const auto& request = fixture.provider->requests()[2];
+    REQUIRE_FALSE(request.messages.empty());
+    const auto* text = std::get_if<llm::TextBlock>(&request.messages.back().content.front());
+    REQUIRE(text != nullptr);
+    CHECK(text->text == "late steering");
+    const auto& stored = fixture.store->messages;
+    REQUIRE(stored.size() == 6);
+    CHECK(stored.back().role == llm::Role::Assistant);
 }

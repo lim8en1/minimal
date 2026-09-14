@@ -32,5 +32,6 @@
   "chat.toggle_collapse_all": "ctrl+alt+c",
   "chat.toggle_timestamps": "alt+t",
   "turn.cancel": "escape",
+  "session.pause": "alt+p",
   "app.quit": "ctrl+q"
 }

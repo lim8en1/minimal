@@ -300,6 +300,50 @@ private:
     std::mutex mu_;
 };
 
+// Parks inside execute() until the test releases it or the turn's cancel
+// token fires -- the deterministic rendezvous for "pause/cancel landed
+// MID-TOOL" tests: while parked, the worker is provably inside Phase 2, so
+// whatever the test does next cannot race the loop's provider call.
+class GatedTool : public tools::Tool {
+public:
+    explicit GatedTool(std::string name, std::atomic<bool>& started) : started_(started) {
+        spec_.name = std::move(name);
+        spec_.category = tools::ToolCategory::ReadOnly;
+        spec_.definition.name = spec_.name;
+        spec_.definition.description = "parks until released or cancelled";
+        spec_.definition.input_schema = nlohmann::json::object();
+    }
+
+    const tools::ToolSpec& spec() const override { return spec_; }
+
+    tools::ToolResult execute(const nlohmann::json&, tools::ToolContext& ctx) override {
+        started_.store(true, std::memory_order_release);
+        std::unique_lock<std::mutex> lock(mu_);
+        // wait_for in a polling loop, not a bare wait: Cancel fires the TURN'S
+        // cancel token (whose cv this tool does not wait on), so the predicate
+        // must be re-polled on the tool's own clock. A bare wait would sleep
+        // through the cancel's notify and deadlock the join.
+        while (!released_.load(std::memory_order_acquire) &&
+               !(ctx.cancel_token != nullptr && ctx.cancel_token->IsCancelled())) {
+            cv_.wait_for(lock, std::chrono::milliseconds(5));
+        }
+        return tools::ToolResult{false, "gated result"};
+    }
+
+    void Release() {
+        released_.store(true, std::memory_order_release);
+        std::lock_guard<std::mutex> lock(mu_);
+        cv_.notify_all();
+    }
+
+private:
+    std::atomic<bool>& started_;
+    std::atomic<bool> released_{false};
+    std::mutex mu_;
+    std::condition_variable cv_;
+    tools::ToolSpec spec_;
+};
+
 class InMemoryHistoryStore : public session::HistoryStore {
 public:
     // Token counts are a persistence concern; the in-memory fake ignores them.

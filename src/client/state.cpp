@@ -88,6 +88,7 @@ SessionState::Snapshot SessionState::TakeLightSnapshot(bool include_tool_output)
     s.desired_agent_preset = desired_agent_;
     s.desired_permission_mode = desired_permission_mode_;
     s.permission_mode = permission_mode_;
+    s.paused = paused_;
     s.context_window_tokens = context_window_tokens_;
     // Deliberately NOT copied (heavy, and only the focused tab renders them):
     // scrollback_page, streaming_text, streaming_thinking_text,
@@ -151,6 +152,7 @@ SessionState::Snapshot SessionState::TakeSnapshot() {
     s.desired_agent_preset = desired_agent_;
     s.desired_permission_mode = desired_permission_mode_;
     s.permission_mode = permission_mode_;
+    s.paused = paused_;
     s.context_window_tokens = context_window_tokens_;
     s.refresh_seq = refresh_seq_;
     s.refresh_succeeded = refresh_succeeded_;
@@ -187,6 +189,10 @@ void SessionState::OnSessionMetadata(const v1::SessionMetadataEvent& metadata) {
     if (metadata.context_window_tokens() > 0) {
         context_window_tokens_ = metadata.context_window_tokens();
     }
+    // The pause state rides EVERY metadata emission (see the proto comment --
+    // partial renames fill it in too), so it applies unconditionally; there
+    // is no partial event that leaves it stale.
+    paused_ = metadata.paused();
 }
 
 void SessionState::SetSessionId(std::string session_id) {
@@ -2841,6 +2847,36 @@ void AppState::SendSetRunMode(const std::string& session_id, v1::PermissionRunMo
         state->SetDesiredPermissionMode(PermissionModeName(mode));
         BumpUiVersion();
     }
+}
+
+void AppState::SendSetPaused(const std::string& session_id, bool paused) {
+    auto stream = GetStream(session_id);
+    if (!stream) {
+        if (auto state = GetState(session_id)) {
+            state->OnError(paused ? "cannot pause: this session is not attached"
+                                  : "cannot resume: this session is not attached");
+            BumpUiVersion();
+        }
+        return;
+    }
+    if (RefuseIfEnded(session_id, paused ? "pause" : "resume")) return;
+
+    v1::ClientEvent ev;
+    ev.set_session_id(session_id);
+    ev.mutable_set_paused()->set_paused(paused);
+    if (!stream->Send(ev)) {
+        if (auto state = GetState(session_id)) {
+            state->OnError(paused ? "cannot pause: the stream refused the event"
+                                  : "cannot resume: the stream refused the event");
+            BumpUiVersion();
+        }
+        return;
+    }
+    // No desired-state marker: the server applies this on its reader thread
+    // (an atomic flip, no turn-boundary wait) and the metadata event that
+    // confirms it is already in flight. Optimistically bump so the frame
+    // re-renders the moment the metadata lands.
+    BumpUiVersion();
 }
 
 void AppState::SendRewind(const std::string& session_id, std::optional<int64_t> target_seq,

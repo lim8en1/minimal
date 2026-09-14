@@ -341,6 +341,16 @@ public:
     bool PushInjectedMessage(llm::Message message);
 
     const std::vector<llm::Message>& history() const { return history_; }
+
+    // True when the working history ends in an UNANSWERED user-text message
+    // -- a real-time steering submission that was flushed after the turn's
+    // last provider call (the model had already finished). The session
+    // worker's wait predicate keys on this to run the seedless continuation
+    // that answers it: keying on the injection QUEUE instead is wrong,
+    // because the final turn-boundary flush already drained the queue. The
+    // durable record is the transcript; "ends in user text" is exactly
+    // "the model owes a reply". Worker-thread-only (history_ mutates there).
+    bool HistoryEndsWithUnansweredUserText() const;
     llm::ChatRequest BuildChatRequest() const;
 
     // Occupancy estimate covering what a request will actually carry: the

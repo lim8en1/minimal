@@ -22,6 +22,9 @@ int SegmentPriority(std::string_view id) {
     if (id == "tokens") return 70;
     if (id == "agent") return 60;
     if (id == "cost") return 40;
+    // Decision-relevant like the mode: a paused session is not running, and
+    // knowing why nothing is happening outranks reference detail.
+    if (id == "paused") return 50;
     if (id == "session") return 20;
     if (id == "token_detail") return 15;
     if (id == "version") return 10;
@@ -71,7 +74,7 @@ std::string CompactCount(std::int64_t n) {
 bool IsKnownStatusSegment(std::string_view id) {
     return id == "version" || id == "model" || id == "tokens" || id == "agent" ||
            id == "permission_mode" || id == "session" || id == "activity" ||
-           id == kStatusSplitId;
+           id == "paused" || id == kStatusSplitId;
 }
 
 std::vector<std::string> UnknownStatusSegments(const std::string& format) {

@@ -698,6 +698,13 @@ private:
     // The worker's wait predicate extension: should an out-of-band message
     // wake this parked worker and drive a seedless turn? Called under mutex_.
     bool ShouldWakeForInjections() const;
+    // Worker-only (the working history mutates on the worker): does the
+    // history end in an unanswered user-text message? Forwarded to the loop;
+    // combined with last_turn_failed_ it distinguishes "steering flushed
+    // after the model finished" (answer it) from "a seeded turn failed
+    // before its first response" (the seed IS the unanswered text -- the
+    // user retries, no automatic provider call fires).
+    bool HistoryEndsWithUnansweredUserText() const;
     // The only call to worker_.join(), reached from both branches of
     // Terminate(). std::call_once makes a second, concurrent caller BLOCK
     // here rather than also calling join() -- concurrent join() on one
@@ -813,11 +820,18 @@ private:
     // SetPaused reader both touch it).
     bool continuation_pending_ = false;
     // True only while the worker is inside RunOneTurn (the AGENT is mid-turn)
-    // -- what SubmitTurn's real-time-steering routing keys on. Distinct from
+    // -- what SubmitTurn's real-time steering routing keys on. Distinct from
     // running_turn_, which is set for every work item including commands: a
     // message typed while a /model command executes is a queued turn, not a
     // steering injection (there is no turn for it to ride). mutex_-guarded.
     bool in_turn_ = false;
+    // Worker-only, recorded where RunOneTurn's `result` is final: did the
+    // last turn end with a NATURAL model stop? What gates the steering
+    // sweep -- a failed turn's seed, a turn cancelled before its first
+    // response, and a vetoed prompt all leave unanswered user text at the
+    // history's end too, and answering any of them automatically would
+    // retry a dead backend, resurrect a halted turn, or bypass a hook.
+    bool last_turn_natural_ = false;
     // A subagent's life is one seeded turn; once its completion hook has fired,
     // a stray client-submitted turn would fire it a second time, so SubmitTurn
     // stops accepting. Only ever set when on_turn_finished exists.

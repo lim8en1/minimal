@@ -346,6 +346,11 @@ public:
         std::string agent_preset;
         std::string permission_mode;
         int64_t context_window_tokens = 0;
+        // The pause state (SetPausedEvent -> SessionMetadataEvent.paused, set
+        // on EVERY metadata emission -- a bool has no "absent" wire encoding,
+        // so the server fills it in on the partial renames too). The status
+        // bar's paused segment renders from this.
+        bool paused = false;
 
         // The tab's DESIRED agent/model (SetDesired*), when it differs from
         // the effective metadata above the status bar shows THIS (the fresh
@@ -772,6 +777,7 @@ private:
     std::string desired_agent_;
     std::string permission_mode_;
     std::string desired_permission_mode_;  // queued shift+tab, unapplied
+    bool paused_ = false;
     int64_t context_window_tokens_ = 0;
 
     // Streaming assistant text
@@ -994,6 +1000,14 @@ public:
     // Snapshot::desired_permission_mode): the pending marker and the next
     // press's cycle source until that metadata event confirms it.
     void SendSetRunMode(const std::string& session_id, v1::PermissionRunMode mode);
+
+    // session.pause (alt+p, /pause // /resume): a client-native wire event,
+    // like SendSetRunMode -- no command, no confirmation (the keybinding IS
+    // the confirmation). Unlike the run-mode change this applies READER-SIDE
+    // (an atomic flip), so there is no turn-boundary wait and no desired-
+    // state marker: the confirming SessionMetadataEvent lands within
+    // milliseconds and the status bar's paused segment refreshes from it.
+    void SendSetPaused(const std::string& session_id, bool paused);
 
     // Rewind is a client-native wire event (a oneof sibling of cancel/attach),
     // not a routed command -- sent directly like SendCancel, never through

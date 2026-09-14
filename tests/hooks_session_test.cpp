@@ -212,3 +212,66 @@ TEST_CASE("a subagent's seeded turn does not answer user_prompt_submit",
 
     std::filesystem::remove_all(dir);
 }
+
+TEST_CASE("a steered message crosses the user_prompt_submit veto too", "[hooks][session][steering]") {
+    // Steering is the one user-prompt path that does not pop a turn -- it is
+    // injected at a tool-result boundary. Without the flush-time gate it would
+    // silently bypass a guard hook every turn-pop passes through. The veto
+    // drops the message BEFORE it is persisted, answers the wire, and the turn
+    // continues.
+    const auto dir = std::filesystem::temp_directory_path() / "minimal_hooks_session_test4";
+    std::filesystem::remove_all(dir);  // stale counter from a previous run would veto the seed
+    std::filesystem::create_directories(dir);
+    HookSessionFixture f{dir};
+    // A STATEFUL guard: pass the first prompt (the seeded turn pop), block the
+    // second (the steered message's flush). A plain block script would veto
+    // the seeded turn before the tool ever ran -- which is the turn-pop seam
+    // doing its job, not the one under test here.
+    {
+        std::ofstream out(f.block_script);
+        out << "c=$(cat \"$0.count\" 2>/dev/null || echo 0)\n"
+               "c=$((c+1))\n"
+               "echo $c > \"$0.count\"\n"
+               "if [ $c -ge 2 ]; then echo 'steering not allowed'; exit 2; fi\n"
+               "exit 0\n";
+        out.close();
+        ::chmod(f.block_script.string().c_str(), 0755);
+    }
+    f.ConfigureBlockingHook();
+    std::atomic<bool> started{false};
+    auto tool = std::make_unique<testing::GatedTool>("gate", started);
+    auto* tool_ptr = tool.get();
+    f.tools_registry.Register(std::move(tool));
+    f.Script(testing::ToolUseResponse("call-1", "gate"));
+    f.Script(testing::TextResponse("after tools"));
+    f.Start();
+
+    REQUIRE(f.session->SubmitTurn("go"));
+    const auto started_deadline = std::chrono::steady_clock::now() + 5s;
+    while (!started.load(std::memory_order_acquire) &&
+           std::chrono::steady_clock::now() < started_deadline) {
+        std::this_thread::sleep_for(1ms);
+    }
+    REQUIRE(started.load(std::memory_order_acquire));
+    REQUIRE(f.session->SubmitTurn("steered text"));  // mid-turn: rides the flush
+    tool_ptr->Release();
+    CHECK(f.session->WaitForIdleForTesting(5s));
+
+    // Vetoed: the error names the steering path, and the message never
+    // reached the provider request or the store.
+    const auto events = f.DrainQueue();
+    CHECK(HasErrorEvent(events, "steered message rejected by hook"));
+    CHECK(f.provider->call_count() == 2);
+    const auto& request = f.provider->requests()[1];
+    for (const auto& message : request.messages) {
+        for (const auto& block : message.content) {
+            if (const auto* text = std::get_if<llm::TextBlock>(&block)) {
+                CHECK(text->text != "steered text");
+            }
+        }
+    }
+    CHECK(f.store->messages.size() == 4);  // user, assistant(tool_use), user(tool_result), assistant
+    CHECK(f.store->messages.back().role == llm::Role::Assistant);  // the turn continued
+
+    std::filesystem::remove_all(dir);
+}

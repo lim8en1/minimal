@@ -39,6 +39,7 @@ const std::unordered_map<std::string, std::string>& DefaultBindings() {
         {"model.picker", "alt+m"},
         {"help.overlay", "f1"},
         {"permission.cycle", "shift+tab"},
+        {"session.pause", "alt+p"},
         {"panel.toggle", "ctrl+t"},
         // Panel focus cycling among VISIBLE plugin panels: the focused one
         // alone receives key events (keybinding_dispatch.cpp). ctrl+j was

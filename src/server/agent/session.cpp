@@ -412,6 +412,11 @@ bool Session::SubmitTurnWithOverrides(QueuedTurn turn) {
         // today. The steering gate (core.user_prompt_submit) fires at flush
         // time on the worker.
         if (in_turn_ && turn.model.empty() && turn.agent_preset.empty()) {
+            // The id is assigned for steered submissions too: TurnQueuedEvent's
+            // per-session monotonicity holds, and the id is what the client
+            // correlates its optimistic echo against even though there is
+            // nothing to cancel.
+            turn.turn_id = next_turn_id_++;
             steered = channels_->injections.Push(
                 llm::Message{llm::Role::User, {llm::TextBlock{turn.text}}});
             if (!steered) refused = true;  // injection backlog full -- answered below
@@ -1126,6 +1131,12 @@ void Session::SetName(std::string name) {
     SessionMetadataChanged metadata;
     metadata.name = std::move(name);
     metadata.partial = true;
+    // Partial emissions carry the pause state too: a bool has no "absent"
+    // wire encoding, so a client applying metadata unconditionally would
+    // read a name-only event's default (false) as "unpaused" and clear its
+    // indicator on every rename. Carrying the live value makes every
+    // metadata event authoritative for paused.
+    metadata.paused = paused();
     EmitEvent(SessionEvent{std::move(metadata)});
 }
 
@@ -1163,8 +1174,14 @@ void Session::WorkerMain() {
                 // is a human prompt sitting unanswered. It wakes the worker
                 // for a seedless continuation turn REGARDLESS of
                 // wake_on_injection -- a user message is explicit intent,
-                // which a background result is not.
-                if (channels_->injections.HasUserText()) return true;
+                // which a background result is not. Keyed on the HISTORY
+                // (the durable record), not the injection queue: the turn's
+                // final flush may already have drained the queue and
+                // appended the message unanswered.
+                if (channels_->injections.HasUserText() ||
+                    (HistoryEndsWithUnansweredUserText() && last_turn_natural_)) {
+                    return true;
+                }
                 // The explicit-resume kick raced a still-running final round:
                 // SetPaused(false) found running_turn_ true and skipped
                 // enqueueing; the turn then ended Paused. The flag survives,
@@ -1299,6 +1316,12 @@ bool Session::ShouldWakeForInjections() const {
     // A finished subagent's life is over regardless of what is staged.
     if (subagent_finished_.load(std::memory_order_acquire)) return false;
     return !channels_->injections.empty();
+}
+
+bool Session::HistoryEndsWithUnansweredUserText() const {
+    // Worker-only: the working history mutates on the worker, and both
+    // callers (the wait predicate, the wake branch) run there.
+    return loop_->HistoryEndsWithUnansweredUserText();
 }
 
 void Session::RunOneTurn(std::optional<std::string> text, const QueuedTurn* overrides) {
@@ -1540,6 +1563,22 @@ void Session::RunOneTurn(std::optional<std::string> text, const QueuedTurn* over
             logger_.warn("session {}: turn threw a non-standard exception", params_.session_id);
         }
     }
+    // THE STEERING SWEEP'S GATE, recorded where `result` is final. True only
+    // for a NATURAL model stop -- the model received the conversation and
+    // finished replying, so user text appearing AFTER it (the final flush's
+    // steering delivery) is a fresh human prompt the model owes a reply to.
+    // Every other ending suppresses the sweep: a failed turn's own seed is
+    // unanswered user text at the history's end, and so is a turn cancelled
+    // before its first response -- answering either automatically would fire
+    // a provider call against a dead backend or resurrect a turn the user
+    // just halted (and, on a permanently failing provider, spin forever).
+    // Vetoed turns fall out with Unknown -- a refused prompt must not be
+    // answered by the back door either.
+    last_turn_natural_ = result.stop_reason == llm::StopReason::EndTurn ||
+                         result.stop_reason == llm::StopReason::MaxTokens ||
+                         result.stop_reason == llm::StopReason::StopSequence ||
+                         result.stop_reason == llm::StopReason::ContentFilter ||
+                         result.stop_reason == llm::StopReason::Refusal;
     // BOTH endings run through here, and that is the point. A failed turn leaves
     // `result` default-constructed -- StopReason::Unknown, zero usage -- which is
     // exactly what a failure should report.
@@ -1671,6 +1710,7 @@ void Session::EmitDefaultNameIfComputed(const std::string& candidate) {
     SessionMetadataChanged metadata;
     metadata.name = candidate;
     metadata.partial = true;
+    metadata.paused = paused();  // see SetName -- every emission is authoritative
     EmitEvent(SessionEvent{std::move(metadata)});
 }
 
