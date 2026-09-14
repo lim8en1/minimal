@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 
+#include "minimal/client/utf8.hpp"
 #include "minimal/client/view/tool_status.hpp"
 #include "minimal/common/logger.hpp"
 
@@ -37,6 +38,37 @@ public:
 private:
     std::shared_ptr<ftxui::Box> slot_;
 };
+
+// Live streaming text (thinking today) renders verbatim through
+// paragraph()/text(), and ftxui's text layer drops tab characters outright --
+// the same loss core_registrations.cpp's ExpandTabs fixes for tool output.
+// 4-column stops, like the code blocks; '\r' dropped.
+std::string ExpandTabsForDisplay(std::string_view body) {
+    std::string out;
+    out.reserve(body.size());
+    std::size_t column = 0;
+    for (const char c : body) {
+        if (c == '\t') {
+            const std::size_t pad = 4 - (column % 4);
+            out.append(pad, ' ');
+            column += pad;
+        } else if (c == '\n') {
+            out += c;
+            column = 0;
+        } else if (c != '\r') {
+            out += c;
+            ++column;
+        }
+    }
+    return out;
+}
+
+// The live thinking render's bounds (see RenderLiveThinking): how many
+// settled lines are kept/ drawn, and how many bytes of the trailing partial
+// line are ever re-wrapped. The transcript is authoritative -- these cap
+// presentation only, mirroring the segment-level "[...truncated]" sentinel.
+constexpr std::size_t kMaxLiveThinkingLines = 300;
+constexpr std::size_t kMaxLiveThinkingTailBytes = 64 * 1024;
 
 // The row kinds a click may collapse: exactly those whose core renderers
 // draw a distinct collapsed form (ctx.collapsed is otherwise ignored, so a
@@ -316,10 +348,15 @@ ftxui::Element ChatView::RenderLiveToolRow(const ToolExecutionState& tool) const
         status, tool.tool_name.empty() ? std::string("tool") : tool.tool_name, theme_));
     // tool.summary is currently always empty on the wire (rendering from
     // tool_name + input is the client's job); tool.input is what actually
-    // carries the model's call args, so it's the real fallback, not a rare one.
-    const std::string summary = (tool.summary.has_value() && !tool.summary->empty())
-                                     ? *tool.summary
-                                     : SummarizeToolInput(tool.tool_name, tool.input);
+    // carries the model's call args, so it's the real fallback, not a rare
+    // one. OneLineSummary guards BOTH paths: a background bash row's
+    // wire-carried command (state.cpp OnBackgroundTask) can be multi-line,
+    // and text() draws one row regardless of embedded newlines -- the junk
+    // class frame_renderer.cpp's notice path documents.
+    const std::string summary =
+        (tool.summary.has_value() && !tool.summary->empty())
+            ? OneLineSummary(*tool.summary)
+            : SummarizeToolInput(tool.tool_name, tool.input);
     if (!summary.empty()) {
         line.push_back(text("  " + summary) | Muted(theme_));
     }
@@ -359,6 +396,84 @@ ftxui::Element ChatView::RenderLiveToolRow(const ToolExecutionState& tool) const
         }
     }
     return row;
+}
+
+// Incremental plain-text wrap for ONE live thinking segment -- see the
+// declaration comment. The segment's text is append-only except for its
+// one-time cap truncation (TruncateUtf8 + marker REWRITES the tail), so the
+// entry carries the truncated flag: a mismatch (or a size smaller than the
+// rendered watermark, only truncation can shrink) forces a full rebuild,
+// where the settled-lines cache starts over from byte 0.
+ftxui::Element ChatView::RenderLiveThinking(const LiveTurnSegment& segment) {
+    using namespace ftxui;
+    const std::string& body_text = segment.Text();
+    ThinkingRenderCacheEntry& entry = thinking_render_cache_[segment.segment_id];
+    if (entry.rendered_bytes > body_text.size() ||
+        entry.truncated != segment.text_truncated) {
+        entry = ThinkingRenderCacheEntry{};
+        entry.truncated = segment.text_truncated;
+    }
+    // Complete lines settle: wrapped once (tabs expanded, words split by
+    // paragraph's own rules -- identical semantics to the old
+    // paragraph(whole_text), just bounded to one line each), then reused
+    // every later frame. Only the trailing partial line is re-wrapped.
+    if (body_text.size() > entry.rendered_bytes) {
+        if (const std::size_t last_newline = body_text.rfind('\n');
+            last_newline != std::string::npos && last_newline + 1 > entry.rendered_bytes) {
+            std::string_view fresh(body_text.data() + entry.rendered_bytes,
+                                   last_newline + 1 - entry.rendered_bytes);
+            std::size_t start = 0;
+            while (start < fresh.size()) {
+                const std::size_t newline = fresh.find('\n', start);
+                const std::size_t end =
+                    newline == std::string_view::npos ? fresh.size() : newline;
+                const std::string line = ExpandTabsForDisplay(fresh.substr(start, end - start));
+                entry.settled_lines.push_back(paragraph(line));
+                start = end + 1;
+            }
+            entry.rendered_bytes = last_newline + 1;
+        }
+        // Bound the cache's memory too, not just the drawn height: pruning
+        // the front loses nothing visible while the drawn window (below)
+        // still covers the kept tail.
+        if (entry.settled_lines.size() > kMaxLiveThinkingLines * 2) {
+            const std::size_t surplus =
+                entry.settled_lines.size() - kMaxLiveThinkingLines;
+            entry.settled_lines.erase(entry.settled_lines.begin(),
+                                      entry.settled_lines.begin() +
+                                          static_cast<std::ptrdiff_t>(surplus));
+            entry.head_clipped = true;
+        }
+    }
+    // The trailing partial line: still growing, re-wrapped per changed
+    // frame -- hence the byte cap, so even a pathological no-newline stream
+    // (minified JSON, base64) stays bounded.
+    std::string_view tail(body_text.data() + entry.rendered_bytes,
+                          body_text.size() - entry.rendered_bytes);
+    bool tail_clipped = false;
+    if (tail.size() > kMaxLiveThinkingTailBytes) {
+        const std::size_t cut =
+            Utf8CeilToBoundary(tail, tail.size() - kMaxLiveThinkingTailBytes);
+        tail = tail.substr(cut);
+        tail_clipped = true;
+    }
+    Elements body;
+    if (entry.head_clipped || tail_clipped) {
+        body.push_back(text("[...]"));
+    }
+    const std::size_t drawn =
+        std::min(entry.settled_lines.size(), kMaxLiveThinkingLines);
+    const auto first = entry.settled_lines.size() - drawn;
+    for (std::size_t i = first; i < entry.settled_lines.size(); ++i) {
+        body.push_back(entry.settled_lines[i]);   // shared Elements, cheap copy
+    }
+    if (!tail.empty()) {
+        body.push_back(paragraph(ExpandTabsForDisplay(tail)));
+    }
+    if (body.empty()) {
+        body.push_back(text(""));
+    }
+    return vbox(std::move(body)) | color(theme_.ColorFor("thinking"));
 }
 
 ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
@@ -591,7 +706,8 @@ ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
     // more text) rendered as if it happened at the very end, with the text
     // before and after it fused into one block underneath it. Each
     // live_segments entry is either a TEXT segment (fed its own debounced
-    // view, live_text_streams[i]), a THINKING segment (rendered verbatim,
+    // view, looked up by the segment's stable id in live_text_streams), a
+    // THINKING segment (rendered verbatim,
     // dim -- reasoning is plain text, no markdown reparse), or a TOOL
     // marker (looked up by id in
     // snapshot.tools -- RenderLiveToolRow renders whatever that tool's
@@ -603,10 +719,41 @@ ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
     // once the turn ends.
     const ftxui::Color assistant_gutter = GutterColor(ChatRowKind::AgentMarkdown, theme_);
     bool live_labeled = false;   // the live turn's label, once -- LabelContinuations' rule
+    // Prune the thinking cache to the ids actually live (removals are
+    // permanent within a turn -- see LiveTurnSegment::segment_id), so a
+    // trimmed/retired segment's wrapped lines cannot pile up unbounded.
+    {
+        std::vector<uint64_t> live_thinking_ids;
+        live_thinking_ids.reserve(snapshot.live_segments.size());
+        for (const auto& segment : snapshot.live_segments) {
+            if (segment.kind == LiveTurnSegment::Kind::Thinking) {
+                live_thinking_ids.push_back(segment.segment_id);
+            }
+        }
+        for (auto it = thinking_render_cache_.begin();
+             it != thinking_render_cache_.end();) {
+            if (std::find(live_thinking_ids.begin(), live_thinking_ids.end(),
+                          it->first) == live_thinking_ids.end()) {
+                it = thinking_render_cache_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
     for (std::size_t i = 0; i < snapshot.live_segments.size(); ++i) {
         const auto& segment = snapshot.live_segments[i];
         if (segment.kind == LiveTurnSegment::Kind::Text) {
-            if (i >= live_text_streams.size() || !live_text_streams[i].view) continue;
+            // The slot is found by the segment's stable id, not this loop's
+            // index: mid-turn removals (the page apply's retirement, the
+            // count-cap trim) shift indices -- see TabMaintenance::Maintain.
+            const LiveTextStreamSlot* slot = nullptr;
+            for (const auto& candidate : live_text_streams) {
+                if (candidate.segment_id == segment.segment_id && candidate.view) {
+                    slot = &candidate;
+                    break;
+                }
+            }
+            if (slot == nullptr) continue;
             Elements block;
             if (!live_labeled) {
                 // The same label the settled row will carry. The EFFECTIVE
@@ -629,7 +776,7 @@ ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
             // for the same plugin-owned stream object.
             try {
                 // Base body color, as on the settled row (core_registrations.cpp).
-                block.push_back(live_text_streams[i].view->Render(theme_) |
+                block.push_back(slot->view->Render(theme_) |
                                 color(theme_.ColorFor("assistant_message")));
             } catch (const std::exception& error) {
                 common::DefaultLogger().warn("markdown stream Render threw: {}", error.what());
@@ -646,24 +793,13 @@ ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
             // expanded thinking row (core_registrations.cpp's
             // RenderThinking). No LiveTextStreamSlot and no markdown engine:
             // thinking renders verbatim, so a debounced reparse view would
-            // only add latency -- this reads the segment's published text
-            // view (state.hpp LiveTurnSegment::Text), the same way
-            // RenderLiveToolRow reads its state.
+            // only add latency -- but the WRAPPING is incremental
+            // (RenderLiveThinking): the old paragraph(whole_text) per
+            // changed frame re-split the entire accumulated block into word
+            // Elements up to 20x/s, which froze the frame loop on a long
+            // reasoning stream.
             if (segment.Text().empty()) continue;
-            // paragraph() word-wraps the WHOLE accumulated text; skip redoing
-            // that on a repaint tick with no new delta (a mouse move, a
-            // keystroke elsewhere) by reusing the cached Element when this
-            // segment's text hasn't changed since the last render.
-            const std::string& thinking_text = segment.Text();
-            ftxui::Element thinking_body;
-            if (i < thinking_render_cache_.size() &&
-                thinking_render_cache_[i].first == thinking_text) {
-                thinking_body = thinking_render_cache_[i].second;
-            } else {
-                thinking_body = paragraph(thinking_text) | color(theme_.ColorFor("thinking"));
-                if (i >= thinking_render_cache_.size()) thinking_render_cache_.resize(i + 1);
-                thinking_render_cache_[i] = {thinking_text, thinking_body};
-            }
+            ftxui::Element thinking_body = RenderLiveThinking(segment);
             column.push_back(WithGutter(
                 vbox({text("thinking") | color(theme_.ColorFor("thinking")), thinking_body}),
                 assistant_gutter));

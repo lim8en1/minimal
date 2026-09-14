@@ -10,6 +10,7 @@
 #include <unordered_set>
 #include <utility>
 
+#include "minimal/client/utf8.hpp"
 #include "minimal/common/logger.hpp"
 
 namespace minimal::client {
@@ -168,14 +169,39 @@ std::optional<std::string> AskQuestionOf(const std::string& tool_name,
 // The single-line merge of the above, for a caller (the LIVE tool row) that
 // has no room for the persisted view's per-kind styling and just wants the
 // best available one-liner.
+std::string OneLineSummary(std::string summary) {
+    if (summary.find('\n') != std::string::npos ||
+        summary.find('\r') != std::string::npos) {
+        std::string joined;
+        joined.reserve(summary.size());
+        for (const char c : summary) {
+            if (c == '\r') continue;
+            if (c == '\n') {
+                // A space, not a visible break glyph: an ambiguous-width
+                // character here would itself drift the columns this exists
+                // to keep aligned.
+                if (!joined.empty() && joined.back() != ' ') joined += ' ';
+            } else {
+                joined += c;
+            }
+        }
+        summary = std::move(joined);
+    }
+    constexpr std::size_t kMaxLiveSummaryBytes = 200;
+    if (summary.size() > kMaxLiveSummaryBytes) {
+        summary = TruncateUtf8(summary, kMaxLiveSummaryBytes) + "…";
+    }
+    return summary;
+}
+
 std::string SummarizeToolInput(const std::string& tool_name, const nlohmann::json& input) {
     if (const auto bash_command = BashCommandOf(tool_name, input); bash_command.has_value()) {
-        return "$ " + *bash_command;
+        return OneLineSummary("$ " + *bash_command);
     }
     if (const auto ask_question = AskQuestionOf(tool_name, input); ask_question.has_value()) {
-        return *ask_question;
+        return OneLineSummary(*ask_question);
     }
-    return InputSummary(input);
+    return OneLineSummary(InputSummary(input));
 }
 
 std::string_view ToString(ChatRowKind kind) {

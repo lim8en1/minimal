@@ -38,10 +38,15 @@ namespace minimal::client {
 
 // One live TEXT segment's streaming view, owned and fed by TabMaintenance
 // (the event path -- track C4), read by ChatView::Render (which must stay a
-// pure read, like every other render-path consumer here). Parallel to
-// SessionState::Snapshot::live_segments BY INDEX: a Tool-kind segment's slot
-// stays default/unused, since only Text segments need a reparse debounce.
+// pure read, like every other render-path consumer here). Keyed by the
+// segment's stable id (LiveTurnSegment::segment_id), NOT its vector index:
+// segments are removed mid-turn (the page apply's retirement, the count-cap
+// trim, the turn-aware clear) and the survivors shift down -- an index-keyed
+// slot's seen-watermark then appended one segment's tail onto another
+// segment's buffered view. Only Text segments need a reparse debounce.
 struct LiveTextStreamSlot {
+    // Which segment this slot serves; 0 only in default-constructed slots.
+    uint64_t segment_id = 0;
     std::unique_ptr<plugins::MarkdownEngine::Stream> view;
     std::size_t seen = 0;             // bytes of THIS segment's text already appended
     bool finalized_for_turn = false;
@@ -56,12 +61,12 @@ public:
              std::string toggle_collapse_hint = "alt+c",
              std::string load_older_hint = "pageup");
 
-    // `live_text_streams` is the tab's own per-segment views, index-aligned
-    // with snapshot.live_segments (TabMaintenance::Maintain builds and feeds
-    // them; each one's own debounce decides when it re-parses). A segment
-    // index beyond the vector's size, or a Tool-kind slot, renders nothing
-    // for THAT text entry -- defensive only; Maintain keeps the vector
-    // sized to match every live pass.
+    // `live_text_streams` is the tab's own per-segment views, keyed by each
+    // segment's stable id (TabMaintenance::Maintain builds and feeds them;
+    // each one's own debounce decides when it re-parses). A segment whose id
+    // has no slot -- or whose slot has no view -- renders nothing for THAT
+    // text entry -- defensive only; Maintain builds a slot for every live
+    // Text segment each pass.
     ftxui::Element Render(const SessionState::Snapshot& snapshot,
                           const std::vector<LiveTextStreamSlot>& live_text_streams = {});
 
@@ -165,6 +170,15 @@ private:
     // as they are executed". Called once per Tool-kind live_segments entry,
     // interleaved with the text segments around it (track C4).
     ftxui::Element RenderLiveToolRow(const ToolExecutionState& tool) const;
+    // ONE live thinking segment's body. Replaces the old
+    // paragraph(whole_accumulated_text) per changed frame: a long reasoning
+    // block re-split into thousands of word Elements up to 20x/s was the
+    // streaming freeze. Complete lines wrap ONCE into settled_lines; only
+    // the trailing (still-growing) partial line is re-wrapped, and only when
+    // it changed. The rendered tail is capped -- the transcript is
+    // authoritative. Mutates thinking_render_cache_; NOT pure, like
+    // RebuildRows' caches.
+    ftxui::Element RenderLiveThinking(const LiveTurnSegment& segment);
 
     // The row cursor (focused_row_) expressed as an offset-from-bottom in
     // lines, computed against the LAST layout pass's measurements
@@ -290,12 +304,18 @@ private:
     bool assembled_show_timestamps_ = true;
     std::optional<RowKey> assembled_focused_row_;
 
-    // Thinking segments render as plain text with no debounced reparse view
-    // (unlike Text segments' MarkdownEngine::Stream) -- paragraph() re-wraps
-    // the WHOLE accumulated text every Render() call otherwise, even on a
-    // repaint tick with no new delta. Keyed by live_segments index; any text
-    // mismatch (new turn, or genuinely new content) is simply a cache miss.
-    std::vector<std::pair<std::string, ftxui::Element>> thinking_render_cache_;
+    // Live thinking's incremental wrap cache (see RenderLiveThinking), keyed
+    // by the segment's stable id -- NOT the vector index, for the same
+    // mid-turn-removal reason LiveTextStreamSlot carries one. Entries whose
+    // id is absent from the snapshot's Thinking segments are pruned each
+    // Render (removals are permanent within a turn).
+    struct ThinkingRenderCacheEntry {
+        std::size_t rendered_bytes = 0;   // prefix already wrapped into settled_lines
+        bool truncated = false;           // built knowing the segment hit its cap
+        bool head_clipped = false;        // settled_lines pruned from the front
+        ftxui::Elements settled_lines;    // wrapped complete lines (tail kept)
+    };
+    std::map<uint64_t, ThinkingRenderCacheEntry> thinking_render_cache_;
 
     // QUEUED message rows (Snapshot::pending_user_messages): the boxes the
     // last Render() recorded, one per row (a single slot per row -- the

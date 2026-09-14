@@ -1176,11 +1176,13 @@ TEST_CASE("chat view: scrolling up mid-turn stays put while the streaming block 
     // SessionState::Snapshot carries -- live_segments, not just the flat
     // streaming_text convenience field ChatView no longer renders from
     // directly), fed through its own stream slot exactly like
-    // TabMaintenance::Maintain does.
+    // TabMaintenance::Maintain does -- slot keyed by the segment's stable
+    // id, the same key the production lookup uses.
     std::vector<LiveTextStreamSlot> streams(1);
+    streams[0].segment_id = 1;
     const auto append_segment = [&](const std::string& text) {
         snapshot.live_segments = {LiveTurnSegment{
-            .kind = LiveTurnSegment::Kind::Text,
+            .kind = LiveTurnSegment::Kind::Text, .segment_id = 1,
             .text_view = std::make_shared<const std::string>(text)}};
         if (!streams[0].view) streams[0].view = engine.MakeStream();
         streams[0].view->AppendDelta(std::string_view(text).substr(streams[0].seen));
@@ -1231,10 +1233,11 @@ TEST_CASE("chat view: live text and tool activity render interleaved, "
     snap.session_id = "session-interleave";
     snap.transcript_version = 1;
     snap.live_segments = {
-        LiveTurnSegment{.kind = LiveTurnSegment::Kind::Text,
+        LiveTurnSegment{.kind = LiveTurnSegment::Kind::Text, .segment_id = 1,
                         .text_view = std::make_shared<const std::string>("opening remarks")},
-        LiveTurnSegment{.kind = LiveTurnSegment::Kind::Tool, .tool_use_id = "call-1"},
-        LiveTurnSegment{.kind = LiveTurnSegment::Kind::Text,
+        LiveTurnSegment{.kind = LiveTurnSegment::Kind::Tool, .segment_id = 2,
+                        .tool_use_id = "call-1"},
+        LiveTurnSegment{.kind = LiveTurnSegment::Kind::Text, .segment_id = 3,
                         .text_view = std::make_shared<const std::string>("closing remarks")},
     };
     ToolExecutionState tool;
@@ -1244,9 +1247,11 @@ TEST_CASE("chat view: live text and tool activity render interleaved, "
     snap.tools = {tool};
 
     std::vector<LiveTextStreamSlot> streams(3);
+    streams[0].segment_id = 1;
     streams[0].view = engine.MakeStream();
     streams[0].view->AppendDelta("opening remarks");
     streams[0].seen = 15;
+    streams[2].segment_id = 3;
     streams[2].view = engine.MakeStream();
     streams[2].view->AppendDelta("closing remarks");
     streams[2].seen = 15;
@@ -1319,10 +1324,11 @@ TEST_CASE("chat view: a throwing live markdown stream renders a fallback, not a 
     snap.session_id = "session-stream-throws";
     snap.transcript_version = 1;
     snap.live_segments = {
-        LiveTurnSegment{.kind = LiveTurnSegment::Kind::Text,
+        LiveTurnSegment{.kind = LiveTurnSegment::Kind::Text, .segment_id = 1,
                         .text_view = std::make_shared<const std::string>("partial")},
     };
     std::vector<LiveTextStreamSlot> streams(1);
+    streams[0].segment_id = 1;
     streams[0].view = std::make_unique<ThrowingStream>();
 
     const auto frame = RenderElement(view.Render(snap, streams));

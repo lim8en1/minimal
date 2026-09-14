@@ -70,9 +70,13 @@ ftxui::Element RenderToolsPanel(const std::vector<AppState::TabSnapshot>& tabs,
             session += std::string(
                 kSessionColumn - std::min(kSessionColumn, Utf8ColumnWidth(session)), ' ');
             line.push_back(text("  " + session) | Muted(theme));
-            const std::string summary = (tool.summary.has_value() && !tool.summary->empty())
-                                             ? *tool.summary
-                                             : SummarizeToolInput(tool.tool_name, tool.input);
+            // OneLineSummary guards BOTH paths -- a background bash row's
+            // wire-carried command can be multi-line, and this panel's rows
+            // are single text() lines like the live tool row's.
+            const std::string summary =
+                (tool.summary.has_value() && !tool.summary->empty())
+                    ? OneLineSummary(*tool.summary)
+                    : SummarizeToolInput(tool.tool_name, tool.input);
             if (!summary.empty()) {
                 line.push_back(text("  " + summary) | Muted(theme));
             }

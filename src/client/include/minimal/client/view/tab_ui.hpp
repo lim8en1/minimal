@@ -50,12 +50,17 @@ bool ModalSlotStale(const std::string& tracked_request_id, const std::string& re
                     const std::string& slot_tab, const std::string& focused_tab);
 
 struct TabUi {
-    // Track C4: one slot per SessionState::Snapshot::live_segments entry,
-    // index-aligned (ChatView::LiveTextStreamSlot -- a Tool-kind index's
-    // slot stays default/unused). Replaces the single shared `streaming`
-    // view a pre-C4 tab held: text before and after a tool call are now
-    // SEPARATE segments, each needing its own debounce/finalize lifecycle,
-    // not one buffer the tool row rendered unconditionally after in full.
+    // Track C4: one slot per live TEXT segment, keyed by the segment's
+    // stable id (LiveTurnSegment::segment_id) rather than its vector index.
+    // Replaces the single shared `streaming` view a pre-C4 tab held: text
+    // before and after a tool call are now SEPARATE segments, each needing
+    // its own debounce/finalize lifecycle, not one buffer the tool row
+    // rendered unconditionally after in full. The KEY matters because
+    // segments are removed mid-turn (the page apply's retirement, the count
+    // cap, the turn-aware clear) and survivors shift down: an index-keyed
+    // slot fed by seen-watermark appends spliced one segment's tail onto
+    // another segment's view -- the reported "random unrelated text" in
+    // long streaming turns. Maintain GCs slots whose id is no longer live.
     std::vector<LiveTextStreamSlot> live_text_streams;
     // The permission modal's toggles are owned by the modal/closure pair
     // (a shared_ptr captured by both, see TabMaintenance::MaintainModals) --
@@ -78,11 +83,10 @@ struct TabUi {
     // VIEW-display notice side-effects fire ONCE per notice, keyed on the
     // notice's sequence number (see TabMaintenance::HandleNotice).
     uint64_t handled_notice_seq = 0;
-    // Streaming bookkeeping (see TabMaintenance::Maintain): turn_seq keys
-    // recreation of the WHOLE live_text_streams vector (a new turn starts a
-    // fresh timeline); each slot's own finalized_for_turn fires that
-    // segment's one authoritative reparse.
-    uint64_t streaming_turn = 0;
+    // Each slot's own finalized_for_turn fires that segment's one
+    // authoritative reparse (see TabMaintenance::Maintain); slots live and
+    // die with their segment ids, so no turn-boundary wholesale recreation
+    // is needed.
     // The newest-slice refresh state machine (T2, reworked): submitted on a
     // version mismatch, resolved via Snapshot::refresh_seq, with the
     // submit/latch/mark-current decision in AdvanceScrollbackRefresh

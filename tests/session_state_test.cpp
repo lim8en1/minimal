@@ -1073,6 +1073,111 @@ TEST_CASE("a mid-turn apply keeps what is still open or running",
     CHECK(t2->started);
 }
 
+TEST_CASE("the segment count cap trims text/thinking BEFORE tool markers",
+          "[session_state][retire]") {
+    // A tool-dense turn (a subagent doing dozens of round trips: one tool
+    // marker + one text block per round) used to trim from the FRONT
+    // indiscriminately, erasing live tool markers mid-turn -- those calls
+    // vanished from the view until the persisted page replaced them. The
+    // trim now spends the budget on the (typically larger) text/thinking
+    // segments first.
+    SessionState state("s-1");
+    const std::size_t rounds = SessionState::kMaxLiveSegments + 40;
+    for (std::size_t i = 0; i < rounds; ++i) {
+        state.OnToolStarted(ToolStart("t" + std::to_string(i)));
+        state.AppendStreamingText("text " + std::to_string(i));
+        state.FinalizeStreamingText();
+    }
+    const auto snap = state.TakeSnapshot();
+    REQUIRE(snap.live_segments.size() == SessionState::kMaxLiveSegments);
+    // The cut is visible, never silent (the permanent sentinel at index 0).
+    REQUIRE(snap.live_segments[0].kind == LiveTurnSegment::Kind::Text);
+    CHECK(snap.live_segments[0].Text() == "[...truncated]");
+    // With the budget spent on text first, the survivors are sentinel +
+    // tools only -- and the OLDEST surviving marker is exactly the one the
+    // first erasure lands on, not shifted arbitrarily.
+    std::size_t tool_markers = 0;
+    std::size_t text_besides_sentinel = 0;
+    for (std::size_t i = 1; i < snap.live_segments.size(); ++i) {
+        if (snap.live_segments[i].kind == LiveTurnSegment::Kind::Tool) {
+            ++tool_markers;
+        } else {
+            ++text_besides_sentinel;
+        }
+    }
+    CHECK(tool_markers == SessionState::kMaxLiveSegments - 1);
+    CHECK(text_besides_sentinel == 0);
+    // The newest marker survives, whatever else was trimmed.
+    const auto newest = std::find_if(snap.live_segments.begin(), snap.live_segments.end(),
+                                     [](const LiveTurnSegment& s) {
+                                         return s.tool_use_id ==
+                                                "t" + std::to_string(rounds - 1);
+                                     });
+    CHECK(newest != snap.live_segments.end());
+}
+
+TEST_CASE("segment ids survive mid-turn removals, so per-segment stream slots stay aligned",
+          "[session_state][retire]") {
+    // Stream slots key on LiveTurnSegment::segment_id, not the vector index
+    // -- the index shifts when a mid-turn page apply (or the count cap)
+    // erases segments, and an index-keyed slot's seen-watermark then spliced
+    // one segment's tail onto another segment's buffered view (the reported
+    // "random unrelated text" at the end of long thinking blocks).
+    SessionState state("s-1");
+    state.AppendStreamingText("round one text");
+    state.FinalizeStreamingText();
+    state.OnToolStarted(ToolStart("t1"));
+    state.OnToolFinished("t1", ToolEnd("t1"));
+    // Round two: a still-running tool and an OPEN text block.
+    state.OnToolStarted(ToolStart("t2"));
+    state.AppendStreamingText("round two streaming");
+
+    const auto before = state.TakeSnapshot();
+    REQUIRE(before.live_segments.size() == 4);   // [Text, Tool t1, Tool t2, Text]
+    // Ids exist, are nonzero, and never repeat.
+    for (const auto& segment : before.live_segments) {
+        CHECK(segment.segment_id != 0);
+    }
+    for (std::size_t i = 0; i < before.live_segments.size(); ++i) {
+        for (std::size_t j = i + 1; j < before.live_segments.size(); ++j) {
+            CHECK(before.live_segments[i].segment_id != before.live_segments[j].segment_id);
+        }
+    }
+
+    // The page covers round one: its two segments retire, the survivors
+    // shift down -- but keep their ids.
+    v1::GetMessagesResponse resp;
+    *resp.add_messages() = ToolResultRow(12, "t1");
+    *resp.add_messages() = AssistantText(11, "round one text");
+    state.ApplyScrollbackPage(resp);
+
+    const auto after = state.TakeSnapshot();
+    REQUIRE(after.live_segments.size() == 2);
+    CHECK(after.live_segments[0].kind == LiveTurnSegment::Kind::Tool);
+    CHECK(after.live_segments[0].segment_id == before.live_segments[2].segment_id);
+    CHECK(after.live_segments[1].kind == LiveTurnSegment::Kind::Text);
+    CHECK(after.live_segments[1].segment_id == before.live_segments[3].segment_id);
+
+    // A continuation delta extends the OPEN segment in place -- same id.
+    state.AppendStreamingText(", still streaming");
+    auto continued = state.TakeSnapshot();
+    REQUIRE(continued.live_segments.size() == 2);
+    CHECK(continued.live_segments[1].segment_id == before.live_segments[3].segment_id);
+    CHECK(continued.live_segments[1].Text() == "round two streaming, still streaming");
+
+    // A NEW block (after the open one closes) gets a fresh id, never a
+    // reused one.
+    state.FinalizeStreamingText();
+    state.AppendStreamingText("a new block");
+    continued = state.TakeSnapshot();
+    REQUIRE(continued.live_segments.size() == 3);
+    const uint64_t fresh = continued.live_segments[2].segment_id;
+    CHECK(fresh != before.live_segments[0].segment_id);
+    CHECK(fresh != before.live_segments[1].segment_id);
+    CHECK(fresh != before.live_segments[2].segment_id);
+    CHECK(fresh != before.live_segments[3].segment_id);
+}
+
 TEST_CASE("a background row survives its acked result landing in the page",
           "[session_state][retire]") {
     // ARCHITECTURE.md "Background bash rows": the result row acks the

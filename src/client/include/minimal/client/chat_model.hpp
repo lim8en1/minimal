@@ -138,6 +138,14 @@ std::string InputSummary(const nlohmann::json& input);
 // bash's own $command, if `tool_name` is "bash" and `input` has one.
 std::optional<std::string> BashCommandOf(const std::string& tool_name, const nlohmann::json& input);
 
+// Collapses a tool summary to the single line the LIVE tool row and the
+// running-tools panel render it as. text() declares itself ONE row tall
+// regardless of embedded '\n's (the bug class frame_renderer.cpp's notice
+// path documents), so a multi-line bash command -- a heredoc, a `cd x && \`
+// continuation, a subagent's tool call -- spilled over every row below it.
+// Newlines collapse to spaces; overlong commands truncate.
+std::string OneLineSummary(std::string summary);
+
 // ask_user's own question text, if `tool_name` is kAskUserToolName and
 // `input` has one.
 std::optional<std::string> AskQuestionOf(const std::string& tool_name, const nlohmann::json& input);

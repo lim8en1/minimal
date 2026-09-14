@@ -1995,7 +1995,17 @@ int RunTui(const minimal::client::ParsedArgs& args) {
     // Event::Custom, even while a modal would consume ordinary keys), runs
     // the maintenance pass, and consumes NOTHING -- a pure pre-render
     // observation point. This is what keeps side-effects out of Render().
+    // Coalescing for the pump's Event::Custom posts, cleared by the frame's
+    // CatchEvent below (the one handler that sees every consumed event): a
+    // frame render that cannot keep pace must not find a fresh post queued
+    // every 50ms tick -- each queued Custom renders one FULL frame, so the
+    // posts only lengthened a post-stall backlog instead of catching up.
+    std::atomic<bool> custom_event_in_flight{false};
     Component final_tree = CatchEvent(with_permission, [&](const Event&) {
+        // This event is consumed and its frame is about to render -- the
+        // pump may queue its next post. Set here (not at post time) so at
+        // most one un-consumed Custom is ever outstanding.
+        custom_event_in_flight.store(false, std::memory_order_release);
         tab_maintenance.Run();
         // A paste can only be IN PROGRESS while the editor is the stack's
         // active leaf; any modal grabbing exclusive routing (FTXUI Modal()'s
@@ -2101,8 +2111,15 @@ int RunTui(const minimal::client::ParsedArgs& args) {
                     std::memory_order_acquire) ||
                 running_tool_redraw_due;
             if (version != last_version || debounce_pending) {
-                last_version = version;
-                screen.PostEvent(Event::Custom);
+                // Coalesce: skip the post while the previous Custom is still
+                // unconsumed. last_version moves ONLY on a successful post,
+                // so a skipped tick re-posts (with the newer version) on the
+                // next one -- worst case one pump tick of extra latency,
+                // never a stale frame.
+                if (!custom_event_in_flight.exchange(true, std::memory_order_acq_rel)) {
+                    last_version = version;
+                    screen.PostEvent(Event::Custom);
+                }
             }
         }
     });

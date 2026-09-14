@@ -123,6 +123,7 @@ std::vector<LiveTurnSegment> SessionState::CopyLiveSegmentsLocked() const {
         LiveTurnSegment s;
         s.kind = segment.kind;
         s.turn_seq = segment.turn_seq;
+        s.segment_id = segment.segment_id;
         s.text_truncated = segment.text_truncated;
         s.tool_use_id = segment.tool_use_id;
         if ((segment.kind == LiveTurnSegment::Kind::Text ||
@@ -333,7 +334,8 @@ void SessionState::AppendStreamingText(std::string_view text) {
     const uint64_t segment_turn = turn_ended_ ? turn_seq_ + 1 : turn_seq_;
     if (new_segment) {
         live_segments_.push_back(
-            LiveTurnSegment{.kind = LiveTurnSegment::Kind::Text, .turn_seq = segment_turn});
+            LiveTurnSegment{.kind = LiveTurnSegment::Kind::Text, .turn_seq = segment_turn,
+                            .segment_id = next_segment_id_++});
     }
     // Per-segment cap: same 2 MiB budget as the flat accumulation, same
     // shape (truncate once, append the marker, drop further deltas -- the
@@ -494,7 +496,8 @@ void SessionState::AppendStreamingThinking(std::string_view text) {
         // Turn arming above already consumed turn_ended_, so turn_seq_ IS
         // the segment's turn.
         live_segments_.push_back(
-            LiveTurnSegment{.kind = LiveTurnSegment::Kind::Thinking, .turn_seq = turn_seq_});
+            LiveTurnSegment{.kind = LiveTurnSegment::Kind::Thinking, .turn_seq = turn_seq_,
+                            .segment_id = next_segment_id_++});
     }
     // Per-segment cap, same 2 MiB budget and shape as text segments:
     // truncate once, append the marker, and -- same fix as text segments --
@@ -556,27 +559,38 @@ void SessionState::MaybeGoIdleLocked() {
 }
 
 // Shared by every live_segments_ append path -- see the header comment.
+// Oldest-first, but Text/Thinking go before Tool markers: a marker is a tiny
+// struct, and its disappearance mid-turn is exactly the "tool calls invisible
+// until finished" failure -- the persisted rows that would replace it only
+// arrive with the refresh. A Tool marker is trimmed only when the turn is
+// entirely tool calls.
 void SessionState::TrimLiveSegmentsLocked() {
-    if (live_segments_truncated_) {
-        // The marker is a permanent sentinel at index 0 once present: trim
-        // only the real segments after it, so it can never itself be erased.
-        if (live_segments_.size() > kMaxLiveSegments) {
-            const auto keep_from =
-                live_segments_.begin() + 1 +
-                static_cast<std::ptrdiff_t>(live_segments_.size() - 1 - (kMaxLiveSegments - 1));
-            live_segments_.erase(live_segments_.begin() + 1, keep_from);
-        }
-        return;
-    }
-    if (live_segments_.size() > kMaxLiveSegments) {
-        const auto keep_from = live_segments_.begin() +
-                               static_cast<std::ptrdiff_t>(live_segments_.size() - kMaxLiveSegments);
-        live_segments_.erase(live_segments_.begin(), keep_from);
+    if (live_segments_.size() <= kMaxLiveSegments) return;
+    if (!live_segments_truncated_) {
+        // The cut must be visible, never silent: a permanent sentinel at
+        // index 0, stamped turn_seq 0 so ClearStreamingIfCurrentTurn retires
+        // it first once a persisted page covers the turn (same rule as the
+        // pre-2026-09 whole-vector trim this replaced).
+        live_segments_truncated_ = true;
         live_segments_.insert(live_segments_.begin(),
                               LiveTurnSegment{.kind = LiveTurnSegment::Kind::Text,
                                               .turn_seq = 0,
+                                              .segment_id = next_segment_id_++,
                                               .text = "[...truncated]"});
-        live_segments_truncated_ = true;
+    }
+    // The sentinel occupies one slot, so the real segments cap at
+    // kMaxLiveSegments - 1 -- the same budget the previous single-shot erase
+    // kept. Candidates start after the sentinel (index >= 1); it can never
+    // itself be erased.
+    while (live_segments_.size() > kMaxLiveSegments) {
+        auto victim = std::find_if(live_segments_.begin() + 1, live_segments_.end(),
+                                   [](const LiveTurnSegment& segment) {
+                                       return segment.kind != LiveTurnSegment::Kind::Tool;
+                                   });
+        if (victim == live_segments_.end()) {
+            victim = live_segments_.begin() + 1;   // all tools: drop the oldest
+        }
+        live_segments_.erase(victim);
     }
 }
 
@@ -857,16 +871,21 @@ void SessionState::RetireCoveredLiveSegments(const std::set<std::string>& answer
     thinking_truncated_ = thinking_accumulated_.size() > kStreamingTextCapBytes;
     // is_streaming_ describes the OPEN block, and an open Text/Thinking
     // segment is by construction the LAST segment in the vector (a tool_use
-    // marker is only pushed after its block closed). If retirement removed
-    // that last textual segment -- an exact match means the block's full
-    // content is persisted, so it cannot grow anymore -- the open-block
-    // notion goes with it: downgrade is_streaming_ so the next delta opens a
-    // fresh segment instead of fusing onto a retired one. A surviving last
-    // textual segment keeps the flag untouched.
+    // marker is only pushed after its block closed). If the surviving tail
+    // ends on a Tool marker -- the turn is mid-round, or the open textual
+    // block was covered (an exact match means the block's full content is
+    // persisted, so it cannot grow anymore) -- the open-block notion goes
+    // with it: downgrade is_streaming_ so the next delta opens a fresh
+    // segment instead of fusing onto a retired one. A surviving last
+    // textual segment keeps the flag untouched. The check runs on the
+    // SURVIVING tail -- stable_partition has moved the covered segments to
+    // the end, so back() before the erase would inspect a RETIRED segment
+    // and wrongly close a still-streaming block whenever the retired tail
+    // happened to end on a marker.
+    live_segments_.erase(keep_end, live_segments_.end());
     if (!live_segments_.empty() && live_segments_.back().kind == LiveTurnSegment::Kind::Tool) {
         is_streaming_ = false;
     }
-    live_segments_.erase(keep_end, live_segments_.end());
 }
 
 uint64_t SessionState::CurrentTurnSeq() const {
@@ -1162,6 +1181,7 @@ void SessionState::OnToolStarted(const v1::ToolExecutionEvent& evt) {
     // that preceded and followed it instead of after everything.
     live_segments_.push_back(LiveTurnSegment{.kind = LiveTurnSegment::Kind::Tool,
                                              .turn_seq = turn_seq_,
+                                             .segment_id = next_segment_id_++,
                                              .tool_use_id = evt.tool_use_id()});
     // Same count cap the text/thinking delta paths enforce right after their
     // own push_back -- without it, a tool-only run (no text/thinking deltas
@@ -1328,6 +1348,7 @@ void SessionState::OnBackgroundTask(const v1::BackgroundTaskEvent& evt) {
     // and was swept) is still live content for whatever turn is current now.
     live_segments_.push_back(LiveTurnSegment{.kind = LiveTurnSegment::Kind::Tool,
                                              .turn_seq = turn_seq_,
+                                             .segment_id = next_segment_id_++,
                                              .tool_use_id = evt.tool_use_id()});
     // Same count cap OnToolStarted enforces -- see its comment.
     TrimLiveSegmentsLocked();

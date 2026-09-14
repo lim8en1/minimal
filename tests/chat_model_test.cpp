@@ -174,6 +174,31 @@ TEST_CASE("SummarizeToolInput is empty for null/empty input, not a bare \"{}\"",
     CHECK(client::SummarizeToolInput("bash", nlohmann::json()).empty());
 }
 
+TEST_CASE("SummarizeToolInput collapses a multi-line bash command to one line",
+          "[chat_model][tool_summary]") {
+    // The live tool row and the tools panel render the summary as ONE
+    // text() -- which ftxui sizes as a single row regardless of embedded
+    // '\n's, so heredocs and line continuations used to spill over every
+    // row below them (frame_renderer.cpp's notice-path bug class).
+    nlohmann::json input = {{"command", "cat <<EOF\nhello\nworld\nEOF"}};
+    const auto summary = client::SummarizeToolInput("bash", input);
+    CHECK(summary.find('\n') == std::string::npos);
+    CHECK(summary.find("hello") != std::string::npos);
+    CHECK(summary.find("world") != std::string::npos);
+    CHECK(client::SummarizeToolInput("bash", input) == "$ cat <<EOF hello world EOF");
+}
+
+TEST_CASE("OneLineSummary truncates an overlong command mid-content",
+          "[chat_model][tool_summary]") {
+    std::string command(500, 'x');
+    const auto summary = client::OneLineSummary("$ " + command);
+    CHECK(summary.size() < command.size());
+    CHECK(summary.size() > 0);
+    CHECK(summary.compare(summary.size() - 3, 3, "…") == 0);   // trailing ellipsis
+    // Single-line, under-cap summaries pass through byte-for-byte.
+    CHECK(client::OneLineSummary("plain") == "plain");
+}
+
 TEST_CASE("a plain conversation renders user text and agent markdown",
           "[chat_model]") {
     // Descending seq, as GetMessages returns: assistant LAST (seq 1), user

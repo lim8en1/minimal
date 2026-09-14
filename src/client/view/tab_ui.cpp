@@ -1,6 +1,8 @@
 #include "minimal/client/keybinding_dispatch.hpp"
 #include "minimal/client/view/tab_ui.hpp"
 
+#include <algorithm>
+
 #include "minimal/common/logger.hpp"
 #include "minimal/v1/session_service.pb.h"
 
@@ -70,37 +72,49 @@ SessionState::Snapshot TabMaintenance::Maintain(const std::string& tab_id,
 
     const auto make_stream = [&] { return deps_.engine.MakeStream(); };
 
-    // One stream slot per live_segments entry (track C4), index-aligned;
-    // recreated WHOLESALE on turn_seq (SessionState's counter, bumped when a
-    // new streaming turn begins) -- same trigger the old single shared
-    // `streaming` field used, NOT the old buffer-size heuristic: turn A
-    // ending and turn B streaming past A's byte count between two frames
-    // spliced B's middle onto A's cached tail, silently. Segments only ever
-    // APPEND within a turn (AppendStreamingText/OnToolStarted push, nothing
-    // removes mid-turn), so growing the vector to match -- without clearing
-    // slots already built for EARLIER segments -- is exactly what a new
-    // segment arriving needs.
-    if (ui.streaming_turn != snap.turn_seq) {
-        ui.live_text_streams.clear();
-        ui.streaming_turn = snap.turn_seq;
-    }
-    if (ui.live_text_streams.size() < snap.live_segments.size()) {
-        ui.live_text_streams.resize(snap.live_segments.size());
-    }
-    for (std::size_t i = 0; i < snap.live_segments.size(); ++i) {
-        if (snap.live_segments[i].kind != LiveTurnSegment::Kind::Text) continue;
-        LiveTextStreamSlot& slot = ui.live_text_streams[i];
+    // One stream slot per live TEXT segment (track C4), keyed by the
+    // segment's stable id (LiveTurnSegment::segment_id) -- NOT its vector
+    // index. The old index-aligned vector assumed "segments only ever APPEND
+    // within a turn", but three paths REMOVE without bumping turn_seq:
+    // RetireCoveredLiveSegments (a mid-turn page apply), the count cap's
+    // trim, and ClearStreamingIfCurrentTurn. The survivors shift down, an
+    // index-keyed slot's `seen` watermark then named a DIFFERENT segment,
+    // and AppendDelta(text.substr(seen)) spliced the tail of one segment
+    // onto another segment's buffered view -- corrupted for the rest of the
+    // turn ("random unrelated text" at the end of long thinking blocks;
+    // self-healing only because the next turn's turn_seq bump cleared the
+    // whole vector). Ids are never reused, and removals are permanent
+    // within a turn, so a slot whose id is absent from this pass's snapshot
+    // is dead -- the GC below retires it, which also replaces the old
+    // wholesale turn-boundary clear.
+    std::vector<uint64_t> live_text_ids;
+    live_text_ids.reserve(snap.live_segments.size());
+    for (const auto& segment : snap.live_segments) {
+        if (segment.kind != LiveTurnSegment::Kind::Text) continue;
+        live_text_ids.push_back(segment.segment_id);
+        LiveTextStreamSlot* slot = nullptr;
+        for (auto& candidate : ui.live_text_streams) {
+            if (candidate.segment_id == segment.segment_id) {
+                slot = &candidate;
+                break;
+            }
+        }
+        if (slot == nullptr) {
+            ui.live_text_streams.push_back(
+                LiveTextStreamSlot{.segment_id = segment.segment_id});
+            slot = &ui.live_text_streams.back();
+        }
         // The snapshot's copy-on-publish view (state.hpp LiveTurnSegment) --
         // shared with every other consumer of this segment's current text;
         // only the actively-appending segment republishes per delta.
-        const std::string& text = snap.live_segments[i].Text();
+        const std::string& text = segment.Text();
         // A plugin MarkdownEngine is not trusted to return normally: a
         // throw here used to kill the whole TUI mid-turn. MakeStream()
         // throwing leaves slot.view null -- the guard above naturally
         // retries next pass, since nothing below has consumed `text` yet.
-        if (!slot.view) {
+        if (!slot->view) {
             try {
-                slot.view = make_stream();
+                slot->view = make_stream();
             } catch (const std::exception& error) {
                 common::DefaultLogger().warn("markdown engine MakeStream threw: {}",
                                              error.what());
@@ -109,16 +123,16 @@ SessionState::Snapshot TabMaintenance::Maintain(const std::string& tab_id,
                     "markdown engine MakeStream threw a non-standard exception");
             }
         }
-        if (slot.view && text.size() > slot.seen) {
+        if (slot->view && text.size() > slot->seen) {
             try {
-                slot.view->AppendDelta(std::string_view(text).substr(slot.seen));
-                slot.seen = text.size();
+                slot->view->AppendDelta(std::string_view(text).substr(slot->seen));
+                slot->seen = text.size();
                 // New text on an ALREADY-finalized segment means a re-arm at
                 // the engine level (StreamingMarkdownView::AppendDelta, track
                 // A1) -- mirror that here too, so this segment gets its own
                 // fresh authoritative reparse when it next finalizes, exactly
                 // like the engine's own re-arm.
-                slot.finalized_for_turn = false;
+                slot->finalized_for_turn = false;
             } catch (const std::exception& error) {
                 common::DefaultLogger().warn("markdown stream AppendDelta threw: {}",
                                              error.what());
@@ -127,16 +141,26 @@ SessionState::Snapshot TabMaintenance::Maintain(const std::string& tab_id,
                 // fresh stream MakeStream() builds next pass replays the
                 // FULL accumulated text from scratch instead of missing the
                 // span this call was trying to append.
-                slot.view.reset();
-                slot.seen = 0;
+                slot->view.reset();
+                slot->seen = 0;
             } catch (...) {
                 common::DefaultLogger().warn(
                     "markdown stream AppendDelta threw a non-standard exception");
-                slot.view.reset();
-                slot.seen = 0;
+                slot->view.reset();
+                slot->seen = 0;
             }
         }
     }
+    // GC: slots whose segment is gone. Safe against a transient absence
+    // because segments never reappear: every removal path (retirement,
+    // trim, turn-aware clear) is permanent, and ids are never reused.
+    ui.live_text_streams.erase(
+        std::remove_if(ui.live_text_streams.begin(), ui.live_text_streams.end(),
+                       [&](const LiveTextStreamSlot& slot) {
+                           return std::find(live_text_ids.begin(), live_text_ids.end(),
+                                            slot.segment_id) == live_text_ids.end();
+                       }),
+        ui.live_text_streams.end());
     // The MOST RECENT text segment's authoritative reparse (the engine
     // contract: Finalize replaces artifacts from mid-stream unclosed spans).
     // is_streaming_finalized fires once per BLOCK boundary, and blocks are
@@ -147,21 +171,27 @@ SessionState::Snapshot TabMaintenance::Maintain(const std::string& tab_id,
     if (snap.is_streaming_finalized) {
         for (std::size_t i = snap.live_segments.size(); i-- > 0;) {
             if (snap.live_segments[i].kind != LiveTurnSegment::Kind::Text) continue;
-            LiveTextStreamSlot& slot = ui.live_text_streams[i];
-            if (slot.view && !slot.finalized_for_turn) {
+            LiveTextStreamSlot* slot = nullptr;
+            for (auto& candidate : ui.live_text_streams) {
+                if (candidate.segment_id == snap.live_segments[i].segment_id) {
+                    slot = &candidate;
+                    break;
+                }
+            }
+            if (slot != nullptr && slot->view && !slot->finalized_for_turn) {
                 try {
-                    slot.view->Finalize();
-                    slot.finalized_for_turn = true;
+                    slot->view->Finalize();
+                    slot->finalized_for_turn = true;
                 } catch (const std::exception& error) {
                     common::DefaultLogger().warn("markdown stream Finalize threw: {}",
                                                  error.what());
-                    slot.view.reset();
-                    slot.seen = 0;
+                    slot->view.reset();
+                    slot->seen = 0;
                 } catch (...) {
                     common::DefaultLogger().warn(
                         "markdown stream Finalize threw a non-standard exception");
-                    slot.view.reset();
-                    slot.seen = 0;
+                    slot->view.reset();
+                    slot->seen = 0;
                 }
             }
             break;

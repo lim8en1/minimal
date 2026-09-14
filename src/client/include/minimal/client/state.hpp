@@ -114,6 +114,17 @@ struct LiveTurnSegment {
     // turn the persisted page covers while leaving a newer turn's live text
     // alone -- without the stamp there is no way to tell them apart.
     uint64_t turn_seq = 0;
+    // Monotonic per-session identity, assigned at every push site. Stream
+    // slots and render caches key on THIS, never on the vector index:
+    // segments are REMOVED mid-turn (RetireCoveredLiveSegments' page apply,
+    // TrimLiveSegmentsLocked's count cap, ClearStreamingIfCurrentTurn) and
+    // the survivors shift down without any turn_seq bump -- an index-keyed
+    // slot fed by seen-watermark appends spliced one segment's tail onto
+    // another segment's buffered view, corrupted for the rest of the turn
+    // (the reported "random unrelated text" in long thinking-heavy turns).
+    // Ids are never reused, and removals are permanent within a turn, so
+    // "id absent from the snapshot" is a sound slot-GC trigger.
+    uint64_t segment_id = 0;
     // WORKING accumulation -- SessionState-internal only: appended by the
     // delta paths, prefix-matched by the retirement logic. Never copied to a
     // snapshot (it is the whole turn's O(text) churn -- see TakeSnapshot);
@@ -760,6 +771,11 @@ private:
     // whether the marker was already there, which could erase the marker
     // itself on a later overflow -- silently losing it forever, since the
     // "already truncated" guard then permanently blocked reinserting it.
+    // Within the real segments, Text/Thinking are trimmed BEFORE Tool
+    // markers: a marker is a tiny struct, and its disappearance mid-turn is
+    // exactly the "tool calls invisible until finished" failure -- the
+    // persisted rows that would replace it only arrive with the refresh. (A
+    // Tool marker is only trimmed when the turn is entirely tool calls.)
     // mtx_ held by caller.
     void TrimLiveSegmentsLocked();
 
@@ -872,6 +888,9 @@ private:
     // This turn's live content in arrival order (track C4) -- see
     // Snapshot::live_segments. Same clear sites as streaming_accumulated_.
     std::vector<LiveTurnSegment> live_segments_;
+    // Source for LiveTurnSegment::segment_id. Starts at 1: 0 is the
+    // default-constructed "no id" value, never assigned to a real segment.
+    uint64_t next_segment_id_ = 1;
 
     // Pending modals
     std::optional<PendingPermission> pending_permission_;

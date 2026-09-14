@@ -196,10 +196,10 @@ ftxui::Element FrameRenderer::Render() {
                 // null on its very first render. Lazily built here too, so
                 // it is never a null deref regardless of which path built
                 // it. ui.live_text_streams needs no such fallback (track
-                // C4): ChatView::Render defensively skips any live_segments
-                // index it has no slot for, so an empty (or short) vector
-                // here just means "nothing live rendered yet" -- exactly
-                // right for this same race, not a null-deref risk.
+                // C4): ChatView::Render defensively skips any live segment
+                // whose stable id has no slot for, so an empty (or short)
+                // vector here just means "nothing live rendered yet" --
+                // exactly right for this same race, not a null-deref risk.
                 if (!ui.chat) {
                     ui.chat = std::make_unique<ChatView>(deps_.theme, deps_.message_registry,
                                                          deps_.renderer_registry,
