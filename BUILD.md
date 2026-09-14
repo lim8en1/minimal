@@ -77,13 +77,22 @@ macOS survives only because its two-level namespace keeps the copies apart.
   builds a shared `libgrpc_plugin_support` that needs libprotoc, and macOS's
   linker refuses to leave those symbols unresolved. Nothing here links
   libprotoc, so it is not installed.
-- abseil comes from an overlay port, `cmake/ports/abseil/`. That is vcpkg's
-  baseline port with its static-only restriction (outside Windows) removed, so
+- abseil comes from an overlay port, `cmake/ports/abseil/`: the baseline port
+  with its static-only restriction (outside Windows) removed, so
   it builds shared like Homebrew's and Debian's. A static abseil gets embedded
   separately in libprotobuf, libgrpc, libgpr, ..., and on macOS a gRPC server
   shutdown then waits forever on a CondVar belonging to one copy while another
   copy signals it. When bumping `builtin-baseline`, refresh the overlay from the
   new baseline's `ports/abseil/` and keep the one-line portfile change.
+- ftxui comes from an overlay port too, `cmake/ports/ftxui/`: the stock 7.0.3
+  port plus `minimal-ftxui-frame-diff.patch` — frame diffing (identical-frame
+  skip, dirty-region write, one requirement pass per frame instead of two).
+  With it, a repaint writes only the rows that changed to the terminal
+  (measured: ~300 KB/s → ~3 KB/s during a silent tool run); set
+  `MINIMAL_FTXUI_DIFF=0` in the client's environment to restore upstream
+  write-everything behavior. The patch only changes WHAT is written, never
+  WHAT is composed. When bumping `builtin-baseline`, refresh the overlay
+  from the new baseline's `ports/ftxui/` and rebase the patch.
 - Disk usage: vcpkg cleans each port's transient `buildtrees/` and
   `packages/` entries right after it installs (`VCPKG_INSTALL_OPTIONS`,
   set in `CMakeLists.txt`), so `.vcpkg/` stays small instead of accumulating

@@ -1,0 +1,174 @@
+diff --git a/src/ftxui/component/app.cpp b/src/ftxui/component/app.cpp
+index 99b4a6d..238e123 100644
+--- a/src/ftxui/component/app.cpp
++++ b/src/ftxui/component/app.cpp
+@@ -5,9 +5,10 @@
+ #include <array>      // for array
+ #include <atomic>
+ #include <chrono>  // for operator-, milliseconds, operator>=, duration, common_type<>::type, time_point
+-#include <csignal>  // for signal, SIGTSTP, SIGABRT, SIGWINCH, raise, SIGFPE, SIGILL, SIGINT, SIGSEGV, SIGTERM, __sighandler_t, size_t
++#include <csignal>  // for signal, SIGTSTP, SIGABRT, raise, SIGFPE, SIGINT, SIGSEGV, SIGTERM, __sigaction, size_t
+ #include <cstdint>
+ #include <cstdio>  // for fileno, stdin
++#include <cstdlib>  // minimal-ftxui patch: getenv
+ #include <ftxui/component/app.hpp>
+ #include <ftxui/component/task.hpp>  // for Task, Closure, AnimationTask
+ #include <ftxui/screen/screen.hpp>  // for Cell, Screen::Cursor, Screen, Screen::Cursor::Hidden
+@@ -63,6 +64,89 @@
+ 
+ namespace ftxui {
+ 
++// ============================================================================
++// minimal-ftxui patch: frame diffing + single requirement pass.
++//
++// Upstream Draw() repaints the ENTIRE screen on every frame: it walks the
++// whole element tree, composes every cell, serializes every cell to a string,
++// and writes the whole thing. For a full-screen app whose frames usually
++// differ in a handful of rows (a streaming chat, a ticking counter), that is
++// the single largest CPU and terminal-bandwidth cost. Three changes, all
++// switchable off with MINIMAL_FTXUI_DIFF=0 (which restores the upstream
++// behavior exactly):
++//
++//   C. Draw() called document->ComputeRequirement() unconditionally, then
++//      Render() ran its layout loop which calls ComputeRequirement() AGAIN on
++//      the same fresh tree. The requirement is only READ for the
++//      TerminalOutput and FitComponent dimensions; for Fullscreen/Fixed the
++//      explicit pass is dead work -- one whole-tree walk saved per frame.
++//
++//   A. Identical-frame skip: the composed frame is diffed against the
++//      previous one; when equal, nothing is written at all. This kills the
++//      redundant full-screen writes that input events (mouse move!) trigger
++//      without changing any pixel.
++//
++//   B. Dirty-region write: when the frame changed, only the rows that
++//      actually differ are emitted, each positioned absolutely
++//      (CSI row;1H), prefixed with an SGR reset (each Screen::ToString row
++//      is serialized relative to the default style -- see the inter-row
++//      UpdateCellStyle transition there), and the cursor is parked back at
++//      the bottom-right corner the same place a full write leaves it, so
++//      ResetPosition()'s relative walk-up and the caller's cursor handling
++//      stay byte-identical to upstream.
++//
++// The previous-frame snapshot is main-thread-only (Draw runs on the render
++// loop) and is dropped by Install() -- after a suspend/resume the terminal's
++// alternate screen is cleared, so the first frame must be a full write.
++// ============================================================================
++
++namespace {
++bool FrameDiffEnabled() {
++  static const bool enabled = [] {
++    const char* env = std::getenv("MINIMAL_FTXUI_DIFF");
++    return !(env != nullptr && std::string_view(env) == "0");
++  }();
++  return enabled;
++}
++
++// Appends to `out` the escape sequences that turn the terminal from
++// displaying `previous` into displaying `next` (both Screen::ToString frames
++// of `rows` rows, "\r\n"-separated). Rows are compared byte-exactly; a row
++// that differs is rewritten in full.
++void AppendFrameDiff(const std::string& previous,
++                     const std::string& next,
++                     int rows,
++                     int columns,
++                     std::string& out) {
++  std::size_t p_begin = 0;
++  std::size_t n_begin = 0;
++  for (int row = 0; row < rows; ++row) {
++    const std::size_t p_end = previous.find("\r\n", p_begin);
++    const std::size_t n_end = next.find("\r\n", n_begin);
++    const std::string_view p_line =
++        p_end == std::string::npos ? std::string_view(previous).substr(p_begin)
++                                   : std::string_view(previous).substr(p_begin, p_end - p_begin);
++    const std::string_view n_line =
++        n_end == std::string::npos ? std::string_view(next).substr(n_begin)
++                                   : std::string_view(next).substr(n_begin, n_end - n_begin);
++    if (p_line != n_line) {
++      out += "\x1b[0m";  // rows serialize relative to the default style
++      out += "\x1b[" + std::to_string(row + 1) + ";1H";
++      out.append(n_line);
++    }
++    if (p_end == std::string::npos || n_end == std::string::npos) {
++      break;
++    }
++    p_begin = p_end + 2;
++    n_begin = n_end + 2;
++  }
++  // Park the cursor where a full-frame write would have left it
++  // (bottom-right), so the relative cursor handling after the frame
++  // (ResetPosition, set_cursor_position_) stays correct.
++  out += "\x1b[" + std::to_string(rows) + ";" + std::to_string(columns) + "H";
++}
++}  // namespace
++
+ enum class AppDimension {
+   FitComponent,
+   Fixed,
+@@ -174,6 +258,10 @@ struct App::Internal {
+       std::chrono::steady_clock::now();
+   std::string output_buffer;
+ 
++  // minimal-ftxui patch: the previous frame's Screen::ToString bytes, for the
++  // identical-frame skip and the dirty-region write. Main thread only.
++  std::string previous_frame_;
++
+   class ThrottledRequest {
+    public:
+     ThrottledRequest(App::Internal* internal, std::function<void()> send)
+@@ -562,6 +650,10 @@ void App::Internal::ExitNow() {
+ void App::Internal::Install() {
+   frame_valid_ = false;
+ 
++  // minimal-ftxui patch: after a suspend/resume the alternate screen has been
++  // torn down and re-entered (blank) -- the first frame must be a full write.
++  previous_frame_.clear();
++
+   // Flush the buffer for stdout to ensure whatever the user has printed before
+   // is fully applied before we start modifying the terminal configuration. This
+   // is important, because we are using two different channels (stdout vs
+@@ -998,7 +1090,17 @@ void App::Internal::Draw(Component component) {
+   int dimx = 0;
+   int dimy = 0;
+   auto terminal = Terminal::Size();
+-  document->ComputeRequirement();
++  // minimal-ftxui patch (C): the requirement is only READ for the
++  // TerminalOutput/FitComponent dimensions; for Fullscreen/Fixed the
++  // dimensions come from the terminal/the screen itself, so this whole-tree
++  // walk -- which Render()'s layout loop below performs again regardless --
++  // is dead work. (Disabled together with the rest of the patch.)
++  const bool need_requirement =
++      !FrameDiffEnabled() || dimension_ == AppDimension::TerminalOutput ||
++      dimension_ == AppDimension::FitComponent;
++  if (need_requirement) {
++    document->ComputeRequirement();
++  }
+   switch (dimension_) {
+     case AppDimension::Fixed:
+       dimx = public_->dimx_;
+@@ -1091,7 +1193,25 @@ void App::Internal::Draw(Component component) {
+     }
+   }
+ 
+-  public_->ToString(output_buffer);
++  // minimal-ftxui patch (A+B): serialize the frame once, then either skip
++  // the write entirely (frame identical to the previous one -- the common
++  // case for input events that change no pixel) or write only the rows that
++  // differ. Upstream always wrote the full frame here.
++  if (!FrameDiffEnabled()) {
++    public_->ToString(output_buffer);
++  } else {
++    std::string new_frame;
++    public_->ToString(new_frame);
++    if (frame_count_ == 0 || resized) {
++      output_buffer += new_frame;
++    } else if (new_frame == previous_frame_) {
++      // Identical frame: nothing to write.
++    } else {
++      AppendFrameDiff(previous_frame_, new_frame, public_->dimy(), public_->dimx(),
++                      output_buffer);
++    }
++    previous_frame_ = std::move(new_frame);
++  }
+   TerminalSend(set_cursor_position_);
+   TerminalFlush();
+ 
