@@ -91,6 +91,16 @@ std::string FormatTokenUsage(std::int64_t used, std::int64_t max) {
            std::to_string(used * 100 / max) + "%";
 }
 
+std::string PermissionModeSegmentValue(const std::string& applied,
+                                       const std::string& desired, bool has_session) {
+    // The applied value is wire truth and renders alone unless a queued
+    // switch is pending. A sessionless tab has nothing to apply into (the
+    // create carries no run mode), so there is no pending state to show --
+    // same rule the {model}/{agent} markers follow.
+    if (desired.empty() || !has_session || desired == applied) return applied;
+    return "→ " + desired;
+}
+
 std::vector<StatusBarPart> ResolveStatusBar(const std::vector<StatusSegment>& format,
                                             const std::map<std::string, std::string>& values,
                                             int max_width) {

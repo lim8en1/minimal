@@ -25,6 +25,12 @@ std::string NextRootGroup(const std::vector<AppState::TabSnapshot>& tabs,
 
 // --- Panel focus rules (see the header for the contract) ---------------------
 
+v1::PermissionRunMode NextPermissionRunMode(const std::string& current) {
+    if (current == "bypass") return v1::PERMISSION_RUN_MODE_ALLOW_ONLY;
+    if (current == "allow-only") return v1::PERMISSION_RUN_MODE_NORMAL;
+    return v1::PERMISSION_RUN_MODE_BYPASS;
+}
+
 void FocusPanelOnOpen(std::vector<plugins::PluginViewEntry>& views,
                       plugins::PluginViewEntry& entry) {
     for (auto& other : views) other.focused = false;
@@ -353,16 +359,18 @@ bool HandleGlobalKey(KeyContext& ctx, const ftxui::Event& event) {
             // GetDetails is TAB-keyed (the focused handle may be a
             // sessionless tab); the mode switch itself is a session-keyed
             // wire event, so a sessionless tab simply has nothing to cycle.
-            const std::string& current = ctx.app.GetDetails(sid).permission_mode;
+            const auto details = ctx.app.GetDetails(sid);
+            // The cycle advances from the QUEUED mode when one is pending:
+            // the status bar's applied value only updates at the apply-time
+            // metadata event, and cycling from it would make two mid-turn
+            // presses repeat the first transition instead of walking
+            // normal -> bypass -> allow-only.
+            const std::string& current = details.desired_permission_mode.empty()
+                                             ? details.permission_mode
+                                             : details.desired_permission_mode;
             const std::string session = ctx.app.FocusedSessionId();
             if (session.empty()) return true;
-            v1::PermissionRunMode next = v1::PERMISSION_RUN_MODE_BYPASS;
-            if (current == "bypass") {
-                next = v1::PERMISSION_RUN_MODE_ALLOW_ONLY;
-            } else if (current == "allow-only") {
-                next = v1::PERMISSION_RUN_MODE_NORMAL;
-            }
-            ctx.app.SendSetRunMode(session, next);
+            ctx.app.SendSetRunMode(session, NextPermissionRunMode(current));
         }
         return true;
     }

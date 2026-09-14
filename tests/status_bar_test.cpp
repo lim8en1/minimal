@@ -163,3 +163,26 @@ TEST_CASE("FormatTokenUsage is compact but never wrong", "[status_bar]") {
     CHECK(FormatTokenUsage(2000, 8000) == "2k/8k · 25%");
     CHECK(FormatTokenUsage(1'500'000, 2'000'000) == "1.5M/2M · 75%");
 }
+
+TEST_CASE("PermissionModeSegmentValue shows the queued mode with the pending marker",
+          "[status_bar][run_mode]") {
+    using minimal::client::PermissionModeSegmentValue;
+
+    // Nothing queued: the applied wire truth alone.
+    CHECK(PermissionModeSegmentValue("normal", "", true) == "normal");
+    CHECK(PermissionModeSegmentValue("bypass", "", true) == "bypass");
+    // Applied but unknown (metadata never arrived): still renders.
+    CHECK(PermissionModeSegmentValue("", "", true) == "");
+
+    // Queued shift+tab: the desired value with the marker, matching the
+    // {model}/{agent} pending convention. Covers the metadata-never-arrived
+    // case too (empty applied, desired set).
+    CHECK(PermissionModeSegmentValue("normal", "bypass", true) == "→ bypass");
+    CHECK(PermissionModeSegmentValue("", "allow-only", true) == "→ allow-only");
+
+    // Already applied (the confirming metadata landed): the marker goes.
+    CHECK(PermissionModeSegmentValue("bypass", "bypass", true) == "bypass");
+
+    // A sessionless tab applies nothing -- no pending state to show.
+    CHECK(PermissionModeSegmentValue("", "bypass", false) == "");
+}

@@ -354,6 +354,13 @@ public:
         // to effective.
         std::string desired_model;
         std::string desired_agent_preset;
+        // Same desired-state pattern for the run mode (shift+tab): the mode
+        // the client asked for that the server has queued but not yet applied
+        // (the worker lands it at a turn boundary). The status bar shows it
+        // with the pending marker and the shift+tab cycle advances from it,
+        // so two mid-turn presses walk the cycle instead of repeating it.
+        // Empty = none pending / equal to effective.
+        std::string desired_permission_mode;
 
         // True when the LAST turn ended (TurnCompleted / Error) and no new
         // turn has begun. The frame's maintain pass fetches the newest
@@ -418,12 +425,14 @@ public:
     void SetSessionId(std::string session_id);
     void SetDesiredModel(std::string model_ref);
     void SetDesiredAgentPreset(std::string preset_name);
+    void SetDesiredPermissionMode(std::string mode);
 
     // The tab's desired agent/model (unresolved refs, client-chosen; empty =
     // none). Read by EnsureSession (create-options overlay) under the state's
     // own mutex.
     std::string DesiredModel() const;
     std::string DesiredAgentPreset() const;
+    std::string DesiredPermissionMode() const;
 
     // The /-command lines that would converge the session's EFFECTIVE
     // agent/model to the desired state right now ("/agent x", "/model p/m"),
@@ -762,6 +771,7 @@ private:
     std::string desired_model_;
     std::string desired_agent_;
     std::string permission_mode_;
+    std::string desired_permission_mode_;  // queued shift+tab, unapplied
     int64_t context_window_tokens_ = 0;
 
     // Streaming assistant text
@@ -979,7 +989,10 @@ public:
     // SendCancel/SendRewind -- no command, no confirmation modal (the
     // keybinding IS the confirmation). The server queues the change for its
     // worker and announces it back via SessionMetadataEvent, which is what
-    // the {permission_mode} status segment refreshes from.
+    // the {permission_mode} status segment refreshes from. On an accepted
+    // send the requested mode becomes the tab's desired state (see
+    // Snapshot::desired_permission_mode): the pending marker and the next
+    // press's cycle source until that metadata event confirms it.
     void SendSetRunMode(const std::string& session_id, v1::PermissionRunMode mode);
 
     // Rewind is a client-native wire event (a oneof sibling of cancel/attach),

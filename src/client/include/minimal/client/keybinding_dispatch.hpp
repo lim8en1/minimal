@@ -265,6 +265,15 @@ void CyclePanelFocus(std::vector<plugins::PluginViewEntry>& views, bool forward)
 bool ClosePluginModal(std::vector<plugins::PluginViewEntry>& views,
                       std::shared_ptr<ftxui::Component>& modal_child_slot, bool& show_modal);
 
+// permission.cycle: the next run mode in the shift+tab cycle. `current` is
+// the mode string the tab is showing -- the APPLIED metadata value, or the
+// QUEUED desired one when a switch is pending (the applied value only moves
+// at the apply-time metadata event, so cycling from it would make two
+// mid-turn presses repeat the first transition instead of walking the
+// cycle). Unknown/absent strings count as "normal", the server default a
+// fresh session starts on: normal -> bypass -> allow-only -> normal.
+v1::PermissionRunMode NextPermissionRunMode(const std::string& current);
+
 // The interrupt probe's per-tab busy verdict (turn.cancel / ctrl+c): the
 // derived display state PLUS Snapshot::turn_in_flight, which OUTRANKS it.
 // MaybeGoIdleLocked resolves the tab to Idle in the windows between message

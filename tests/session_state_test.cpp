@@ -244,6 +244,42 @@ TEST_CASE("turn_in_flight rides both the light and deep snapshots", "[session_st
     REQUIRE_FALSE(state.TakeSnapshot().turn_in_flight);
 }
 
+// --- desired_permission_mode: the queued shift+tab (ARCHITECTURE.md,
+// "A queued switch lands only at a turn boundary") ---------------------------
+
+TEST_CASE("desired permission mode rides both snapshots and is retired by matching metadata",
+          "[session_state][run_mode]") {
+    SessionState state("s-1");
+    REQUIRE(state.TakeSnapshot().desired_permission_mode.empty());
+
+    state.SetDesiredPermissionMode("bypass");
+    REQUIRE(state.TakeLightSnapshot().desired_permission_mode == "bypass");
+    REQUIRE(state.TakeSnapshot().desired_permission_mode == "bypass");
+
+    // A metadata event carrying a DIFFERENT mode (the first apply of a raced
+    // pair) must not retire the pending value -- only the mode the client
+    // actually asked for is its confirmation.
+    v1::SessionMetadataEvent intermediate;
+    intermediate.set_permission_mode("normal");
+    state.OnSessionMetadata(intermediate);
+    REQUIRE(state.TakeSnapshot().desired_permission_mode == "bypass");
+
+    v1::SessionMetadataEvent confirmed;
+    confirmed.set_permission_mode("bypass");
+    state.OnSessionMetadata(confirmed);
+    REQUIRE(state.TakeSnapshot().desired_permission_mode.empty());
+}
+
+TEST_CASE("an error clears a pending desired permission mode", "[session_state][run_mode]") {
+    // The queued change may never reach its apply-time metadata event (the
+    // stream died, the server refused the queue); the pending marker must not
+    // outlive the change it advertised.
+    SessionState state("s-1");
+    state.SetDesiredPermissionMode("allow-only");
+    state.OnError("connection lost");
+    CHECK(state.TakeSnapshot().desired_permission_mode.empty());
+}
+
 TEST_CASE("permission/confirmation requests set Waiting and are mutually exclusive",
           "[session_state]") {
     SessionState state("s-1");

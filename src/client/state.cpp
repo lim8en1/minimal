@@ -21,6 +21,19 @@ namespace {
 // re-fetches the full persisted text.
 constexpr std::string_view kStreamingTruncationMarker =
     "\n··· live text truncated -- the full text is in the transcript ···\n";
+
+// The wire spellings of the run mode, as the server renders it into session
+// metadata's permission_mode field (server's config/permission_codec.hpp
+// ToString -- the client never links that, so the vocabulary is mirrored
+// here; a drift would show up as a status bar that never confirms a pending
+// switch, not as a wrong mode being enforced).
+std::string PermissionModeName(v1::PermissionRunMode mode) {
+    switch (mode) {
+        case v1::PERMISSION_RUN_MODE_BYPASS: return "bypass";
+        case v1::PERMISSION_RUN_MODE_ALLOW_ONLY: return "allow-only";
+        default: return "normal";
+    }
+}
 }  // namespace
 
 // ===========================================================================
@@ -73,6 +86,7 @@ SessionState::Snapshot SessionState::TakeLightSnapshot(bool include_tool_output)
     s.agent_preset = agent_preset_;
     s.desired_model = desired_model_;
     s.desired_agent_preset = desired_agent_;
+    s.desired_permission_mode = desired_permission_mode_;
     s.permission_mode = permission_mode_;
     s.context_window_tokens = context_window_tokens_;
     // Deliberately NOT copied (heavy, and only the focused tab renders them):
@@ -135,6 +149,7 @@ SessionState::Snapshot SessionState::TakeSnapshot() {
     s.agent_preset = agent_preset_;
     s.desired_model = desired_model_;
     s.desired_agent_preset = desired_agent_;
+    s.desired_permission_mode = desired_permission_mode_;
     s.permission_mode = permission_mode_;
     s.context_window_tokens = context_window_tokens_;
     s.refresh_seq = refresh_seq_;
@@ -158,7 +173,17 @@ void SessionState::OnSessionMetadata(const v1::SessionMetadataEvent& metadata) {
     // fields it does not carry.
     if (!metadata.model().empty()) model_ = metadata.model();
     if (!metadata.agent_preset().empty()) agent_preset_ = metadata.agent_preset();
-    if (!metadata.permission_mode().empty()) permission_mode_ = metadata.permission_mode();
+    if (!metadata.permission_mode().empty()) {
+        permission_mode_ = metadata.permission_mode();
+        // The apply-time confirmation of a queued shift+tab: retire the
+        // desired state ONLY when the wire mode matches it. Racing presses
+        // queue two changes; the first apply's metadata (the intermediate
+        // mode) must not clear the pending marker for the second.
+        if (!desired_permission_mode_.empty() &&
+            desired_permission_mode_ == permission_mode_) {
+            desired_permission_mode_.clear();
+        }
+    }
     if (metadata.context_window_tokens() > 0) {
         context_window_tokens_ = metadata.context_window_tokens();
     }
@@ -179,6 +204,11 @@ void SessionState::SetDesiredAgentPreset(std::string preset_name) {
     desired_agent_ = std::move(preset_name);
 }
 
+void SessionState::SetDesiredPermissionMode(std::string mode) {
+    std::lock_guard lk(mtx_);
+    desired_permission_mode_ = std::move(mode);
+}
+
 std::string SessionState::DesiredModel() const {
     std::lock_guard lk(mtx_);
     return desired_model_;
@@ -187,6 +217,11 @@ std::string SessionState::DesiredModel() const {
 std::string SessionState::DesiredAgentPreset() const {
     std::lock_guard lk(mtx_);
     return desired_agent_;
+}
+
+std::string SessionState::DesiredPermissionMode() const {
+    std::lock_guard lk(mtx_);
+    return desired_permission_mode_;
 }
 
 std::vector<std::string> SessionState::ConvergenceCommands() const {
@@ -782,6 +817,11 @@ void SessionState::OnError(const std::string& error_message) {
     pending_permission_.reset();
     pending_confirmation_.reset();
     pending_ask_.reset();
+    // A queued run-mode change whose turn/stream just errored may never reach
+    // its apply-time metadata event; the pending marker would outlive the
+    // change it advertised. The confirming path (OnSessionMetadata) is the
+    // normal retirement; this is the failure path.
+    desired_permission_mode_.clear();
     // The turn failed before any page apply could retire the echo; nothing
     // will, so drop it here rather than leaving a ghost of an unacknowledged
     // message above the error.
@@ -2791,6 +2831,15 @@ void AppState::SendSetRunMode(const std::string& session_id, v1::PermissionRunMo
             state->OnError("cannot switch permission mode: the stream refused the event");
             BumpUiVersion();
         }
+        return;
+    }
+    // The server queues the change for its worker and applies it at a turn
+    // boundary; until the apply-time metadata event confirms, the requested
+    // mode is the tab's desired state -- what the status bar renders with a
+    // pending marker and what the next shift+tab advances from.
+    if (auto state = GetState(session_id)) {
+        state->SetDesiredPermissionMode(PermissionModeName(mode));
+        BumpUiVersion();
     }
 }
 

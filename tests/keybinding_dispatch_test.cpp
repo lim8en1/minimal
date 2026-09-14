@@ -210,6 +210,22 @@ TEST_CASE("TabsToClose on an unknown session id closes nothing", "[keybinding_di
     CHECK(TabsToClose(tabs, "no-such-id").empty());
 }
 
+// --- NextPermissionRunMode (permission.cycle) -------------------------------
+
+TEST_CASE("NextPermissionRunMode walks the cycle and treats unknown as normal",
+          "[keybinding_dispatch][permission]") {
+    using minimal::client::NextPermissionRunMode;
+    namespace v1 = minimal::v1;
+
+    CHECK(NextPermissionRunMode("normal") == v1::PERMISSION_RUN_MODE_BYPASS);
+    CHECK(NextPermissionRunMode("bypass") == v1::PERMISSION_RUN_MODE_ALLOW_ONLY);
+    CHECK(NextPermissionRunMode("allow-only") == v1::PERMISSION_RUN_MODE_NORMAL);
+    // Unknown/absent counts as normal -- the server default a fresh session
+    // starts on (see the header; the status bar renders absent as nothing).
+    CHECK(NextPermissionRunMode("") == v1::PERMISSION_RUN_MODE_BYPASS);
+    CHECK(NextPermissionRunMode("garbage") == v1::PERMISSION_RUN_MODE_BYPASS);
+}
+
 // --- ResolvedKeymap ---------------------------------------------------------
 //
 // Built once from a Keybindings document; the point of the parsed form is

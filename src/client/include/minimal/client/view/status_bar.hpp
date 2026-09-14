@@ -64,6 +64,16 @@ std::vector<StatusBarPart> ResolveStatusBar(const std::vector<StatusSegment>& fo
 // truncated: every figure shown is the real one, rounded.
 std::string FormatTokenUsage(std::int64_t used, std::int64_t max);
 
+// The {permission_mode} segment's displayed value, pure and independently
+// testable. A queued shift+tab (the server applies it at a turn boundary)
+// is the tab's DESIRED state: while it differs from the applied mode -- and
+// the tab has a session to apply into -- the desired value renders with the
+// "→ " pending marker, the same desired-state convention {model}/{agent}
+// follow. Empty `desired` (nothing pending) renders `applied`; both empty
+// renders "" (the unknown-segment rule: the segment renders nothing).
+std::string PermissionModeSegmentValue(const std::string& applied,
+                                       const std::string& desired, bool has_session);
+
 // `emphasis` colors individual segment values by id (activity by state,
 // tokens near the window, a risky permission mode); unlisted values use the
 // body color, literals the muted one.

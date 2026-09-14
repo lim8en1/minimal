@@ -428,12 +428,27 @@ ftxui::Element FrameRenderer::Render() {
         if (!agent_value.empty()) {
             values["agent"] = (agent_pending ? "→ " : "") + agent_value;
         }
-        if (!focused_details.permission_mode.empty()) {
-            values["permission_mode"] = focused_details.permission_mode;
-            // bypass runs every tool unasked: the one mode that must never
-            // look like the others.
-            if (focused_details.permission_mode == "bypass") {
-                emphasis["permission_mode"] = deps_.theme.ColorFor("error");
+        {
+            // The desired-state rule for the run mode: a queued shift+tab
+            // (the server applies it at a turn boundary) renders the
+            // requested value with the pending marker until the apply-time
+            // metadata event confirms it. See PermissionModeSegmentValue.
+            const std::string permission_value = PermissionModeSegmentValue(
+                focused_details.permission_mode, focused_details.desired_permission_mode,
+                !focused_details.session_id.empty());
+            if (!permission_value.empty()) {
+                values["permission_mode"] = permission_value;
+                // bypass runs every tool unasked: the one mode that must never
+                // look like the others. Colored by the DISPLAYED mode (marker
+                // aside), so a pending bypass is already red -- it is about to
+                // be true.
+                const std::string& displayed_mode =
+                    focused_details.desired_permission_mode.empty()
+                        ? focused_details.permission_mode
+                        : focused_details.desired_permission_mode;
+                if (displayed_mode == "bypass") {
+                    emphasis["permission_mode"] = deps_.theme.ColorFor("error");
+                }
             }
         }
         for (const auto& tab : tabs) {
