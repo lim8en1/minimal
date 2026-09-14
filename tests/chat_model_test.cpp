@@ -199,6 +199,82 @@ TEST_CASE("OneLineSummary truncates an overlong command mid-content",
     CHECK(client::OneLineSummary("plain") == "plain");
 }
 
+TEST_CASE("SelectRowWindow: everything visible elides nothing",
+          "[chat_model][row_window]") {
+    const std::vector<client::RowSpan> spans = {{0, 4}, {6, 9}, {11, 14}};
+    const auto sel = client::SelectRowWindow(spans, /*visible_top=*/0, /*visible_bottom=*/14,
+                                             /*margin=*/0, {});
+    CHECK(sel.first == 0);
+    CHECK(sel.last == 2);
+    CHECK_FALSE(sel.rows_elided_above);
+    CHECK_FALSE(sel.rows_elided_below);
+    CHECK(sel.above_lines == 0);
+    CHECK(sel.below_lines == 0);
+}
+
+TEST_CASE("SelectRowWindow: the window slides with the visible range and sizes the fillers",
+          "[chat_model][row_window]") {
+    const std::vector<client::RowSpan> spans = {{0, 4}, {6, 9}, {11, 14}};
+    // A viewport exactly on the middle row.
+    const auto sel = client::SelectRowWindow(spans, 6, 9, 0, {});
+    CHECK(sel.first == 1);
+    CHECK(sel.last == 1);
+    CHECK(sel.rows_elided_above);
+    CHECK(sel.rows_elided_below);
+    // Above: row 0's full span [0,4] plus the spacer gap [5,5].
+    CHECK(sel.above_lines == 6);
+    // Below: row 1's skipped trailing spacer [10], row 2's span [11,14],
+    // and row 2's own trailing spacer [15] -- everything up to the live
+    // block, which renders for real and is not counted.
+    CHECK(sel.below_lines == 6);
+}
+
+TEST_CASE("SelectRowWindow: the margin widens the intersection",
+          "[chat_model][row_window]") {
+    const std::vector<client::RowSpan> spans = {{0, 4}, {6, 9}, {11, 14}};
+    // Margin 2 widens [6,9] to [4,11]: row 0's tail (y=4) and row 2's head
+    // (y=11) both now touch the range -- the window grows to all three rows.
+    const auto sel = client::SelectRowWindow(spans, 6, 9, /*margin=*/2, {});
+    CHECK(sel.first == 0);
+    CHECK(sel.last == 2);
+    CHECK(sel.above_lines == 0);
+    CHECK(sel.below_lines == 0);
+    // With no margin the same viewport only ever saw the middle row (the
+    // sliding test above) -- the margin is what pulled its neighbors in.
+}
+
+TEST_CASE("SelectRowWindow: force-includes pull far rows into a contiguous range",
+          "[chat_model][row_window]") {
+    const std::vector<client::RowSpan> spans = {{0, 4}, {6, 9}, {11, 14}};
+    // Pinned at the bottom, but the row cursor targets the FIRST row: the
+    // window must span the whole transcript (contiguous), everything
+    // force-include between stays rendered.
+    const auto sel = client::SelectRowWindow(spans, 11, 14, 0, {0});
+    CHECK(sel.first == 0);
+    CHECK(sel.last == 2);
+    CHECK_FALSE(sel.rows_elided_above);
+    CHECK(sel.above_lines == 0);
+    // Out-of-range force-includes are dropped, not clamped.
+    const auto sel2 = client::SelectRowWindow(spans, 11, 14, 0, {0, 99});
+    CHECK(sel2.first == 0);
+    CHECK(sel2.last == 2);
+}
+
+TEST_CASE("SelectRowWindow: clamps and the empty-viewport fallback",
+          "[chat_model][row_window]") {
+    const std::vector<client::RowSpan> spans = {{0, 4}, {6, 9}, {11, 14}};
+    // A visible range poking above the content top clamps cleanly.
+    const auto sel = client::SelectRowWindow(spans, -10, 2, 0, {});
+    CHECK(sel.first == 0);
+    CHECK(sel.last == 0);
+    CHECK(sel.below_lines == 11);
+    // A viewport entirely inside a spacer gap renders the newest row rather
+    // than nothing.
+    const auto gap = client::SelectRowWindow(spans, 10, 10, 0, {});
+    CHECK(gap.first == 2);
+    CHECK(gap.last == 2);
+}
+
 TEST_CASE("a plain conversation renders user text and agent markdown",
           "[chat_model]") {
     // Descending seq, as GetMessages returns: assistant LAST (seq 1), user

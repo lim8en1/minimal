@@ -159,6 +159,71 @@ std::optional<std::string> AskQuestionOf(const std::string& tool_name, const nlo
 // whether the call is still running or already in the transcript.
 std::string SummarizeToolInput(const std::string& tool_name, const nlohmann::json& input);
 
+// ============================================================================
+// Scrollback row windowing (ChatView::Render). The chat column's Element
+// tree contains every row of the scrollback window, and FTXUI walks the
+// whole tree every frame -- requirement (word wrap), SetBox, and cell
+// composition are each O(transcript). Windowing builds only the rows whose
+// content-coordinate span intersects the viewport (plus force-includes),
+// representing the elided space with fixed-height fillers, so the per-frame
+// walk is O(viewport). Content height is preserved by the fillers, so the
+// scroll offset math (chat_scroll_region.hpp) is unchanged.
+//
+// The seam is the pure part: SELECTING the window from per-row geometry.
+// Measuring the geometry lives in ChatView (RowBoxSpy boxes -> content
+// coordinates, one frame stale by construction -- the same convergence
+// every ScrollState read already accepts). Spans are COMPLETE when the
+// selector runs: ChatView full-assembles (and measures) whenever any row
+// has never been laid out, so no estimation enters the math.
+// ============================================================================
+
+// One rendered row's vertical extent in CONTENT coordinates (lines,
+// inclusive [y_min, y_max]), as laid out by the last pass that included the
+// row, trailing spacer line included. Content coordinates are anchored to
+// the top of the scroll region's child box, so they are stable across
+// scroll offsets and content growth below -- the invariant that lets an
+// off-window row's last-measured span stay valid.
+struct RowSpan {
+    int y_min = 0;
+    int y_max = -1;   // < y_min marks "never laid out"
+    bool known() const { return y_max >= y_min; }
+    int lines() const { return y_max - y_min + 1; }
+};
+
+struct RowWindowSelection {
+    std::size_t first = 0;   // inclusive row index range of the window
+    std::size_t last = 0;
+    bool rows_elided_above = false;   // first > 0: the transcript continues above
+    bool rows_elided_below = false;   // last + 1 < row count
+    // Elided line counts. above_lines spans everything above the window's
+    // first row -- top filler slack, boundary markers, elided rows and their
+    // spacers (the caller renders none of those when rows are elided above).
+    // below_lines spans elided rows and their spacers down to the LAST row's
+    // span end; the region below that (live streaming block, pending echoes)
+    // always renders for real below the filler, so it must not be counted.
+    // The window's last row does not render its own trailing spacer when
+    // rows are elided below (the filler covers it). Both clamped >= 0; the
+    // fillers keep the column's total content height -- and therefore every
+    // scroll offset -- what the full tree would have measured.
+    int above_lines = 0;
+    int below_lines = 0;
+};
+
+// Rows whose span intersects [visible_top, visible_bottom] (content
+// coordinates, inclusive), widened by `margin_lines` on both sides to absorb
+// the one-frame staleness of the spans (content that grew or scrolled since
+// the spans were measured), unioned with `force_include` indices (the row
+// cursor's target, a just-toggled row), then closed over the contiguous
+// index range [first, last]. Everything outside the range is elided into
+// above_lines/below_lines. `spans` must be complete (every span known) and
+// ascending with the rendered row order. A selection that would be empty
+// (visible range in a gap between rows, no force-includes) falls back to
+// the LAST row so the viewport never renders nothing.
+RowWindowSelection SelectRowWindow(const std::vector<RowSpan>& spans,
+                                   int visible_top, int visible_bottom,
+                                   int margin_lines,
+                                   const std::vector<std::size_t>& force_include);
+
 // How many focused-tab UI-version bumps (SessionState::TickNotice, driven by
 // TabMaintenance::Run) a notice survives before it clears itself. Not a
 // wall-clock TTL: ticking is gated on the SAME UiVersion check that gates a

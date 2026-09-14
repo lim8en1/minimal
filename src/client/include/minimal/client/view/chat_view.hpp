@@ -24,6 +24,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <tuple>
 #include <utility>
 #include <vector>
@@ -147,6 +148,21 @@ public:
     // render hits nothing. True when a row was toggled.
     bool ToggleCollapseAt(int screen_y);
 
+    // True when the LAST windowed frame elided rows above the viewport
+    // (nullopt/false on the full-assembly path, which elides nothing): the
+    // frame renders a floating "earlier rows above" hint from this -- an
+    // in-content marker at the cut point would sit above the viewport
+    // whenever the elided region is taller than one screen.
+    bool RowsElidedAbove() const { return rows_elided_above_; }
+
+    // Test seam: the shared ScrollState the ScrollRegion node writes its
+    // measurements into. Read-only; scroll-accounting assertions read the
+    // applied offset and measured heights the same way the production
+    // consumers (reveal math, span conversion) do.
+    const std::shared_ptr<ScrollState>& scroll_state_for_test() const {
+        return scroll_state_;
+    }
+
     // Registers the handler a click on a QUEUED (pending) message row
     // invokes: AppState::SendCancelQueuedTurn for the owning session. A
     // queued row renders a "click to cancel" affordance only when a handler
@@ -179,6 +195,15 @@ private:
     // authoritative. Mutates thinking_render_cache_; NOT pure, like
     // RebuildRows' caches.
     ftxui::Element RenderLiveThinking(const LiveTurnSegment& segment);
+
+    // The row-windowing kill switch: MINIMAL_CHAT_VIRTUALIZATION=0 restores
+    // the full-assembly path exactly (the same env-gating convention as the
+    // ftxui overlay's MINIMAL_FTXUI_DIFF). Windowing also self-disables per
+    // frame whenever its prerequisites are unmet -- no measured viewport
+    // yet, any row without a measured span, a collapse-epoch change -- so
+    // the full path remains the ground truth the windowed path must
+    // reproduce.
+    static bool VirtualizationEnabled();
 
     // The row cursor (focused_row_) expressed as an offset-from-bottom in
     // lines, computed against the LAST layout pass's measurements
@@ -316,6 +341,36 @@ private:
         ftxui::Elements settled_lines;    // wrapped complete lines (tail kept)
     };
     std::map<uint64_t, ThinkingRenderCacheEntry> thinking_render_cache_;
+
+    // --- Row windowing (chat_model.hpp's SelectRowWindow) ------------------
+    // The chat column's tree is O(transcript) per frame -- requirement, SetBox
+    // and Render each walk every row. Windowing builds only the rows whose
+    // content-coordinate span intersects the viewport (plus force-includes),
+    // eliding the rest into fixed-height fillers, so the walk is O(viewport).
+    // Each row's span is measured from its RowBoxSpy boxes (screen
+    // coordinates) converted to content coordinates via ScrollState -- one
+    // frame stale by construction, the same convergence every ScrollState
+    // read already accepts. Keyed by RowKey so entries follow their row
+    // across page changes; an off-window row keeps its last span (content
+    // coordinates are stable across scroll offsets and growth below).
+    std::map<RowKey, RowSpan> row_spans_;
+    // The collapse_epoch_ the spans were measured under. A collapse toggle
+    // changes row heights wholesale, so an epoch mismatch forces one full-
+    // assembly (re-measuring) frame before windowing resumes.
+    uint64_t spans_epoch_ = 0;
+    // One-shot force-includes: rows the next selection must render even if
+    // their span sits outside the viewport (a just-toggled row must be
+    // visible while its span is re-measured). Cleared every selection.
+    std::set<RowKey> force_include_next_;
+    // Which rows the previous frame's TREE contained (all of it, or the
+    // windowed range): the span conversion may only reinterpret a row's box
+    // when that box was written by the layout the current ScrollState
+    // describes. Rows outside it keep their stored span -- content
+    // coordinates survive the gap.
+    bool last_assembly_full_ = true;
+    std::size_t last_window_first_ = 0;
+    std::size_t last_window_last_ = 0;
+    bool rows_elided_above_ = false;   // last windowed frame elided rows above
 
     // QUEUED message rows (Snapshot::pending_user_messages): the boxes the
     // last Render() recorded, one per row (a single slot per row -- the

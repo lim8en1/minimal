@@ -204,6 +204,64 @@ std::string SummarizeToolInput(const std::string& tool_name, const nlohmann::jso
     return OneLineSummary(InputSummary(input));
 }
 
+RowWindowSelection SelectRowWindow(const std::vector<RowSpan>& spans,
+                                   int visible_top, int visible_bottom,
+                                   int margin_lines,
+                                   const std::vector<std::size_t>& force_include) {
+    RowWindowSelection selection;
+    const long n = static_cast<long>(spans.size());
+    if (n == 0) return selection;
+
+    // The intersection test is a linear scan: spans are ascending and the
+    // common case is a handful of rows in the margin-widened range, but even
+    // the degenerate full pass is O(rows) integer compares -- noise next to
+    // the tree walk this seam exists to bound.
+    long first = -1;
+    long last = -1;
+    const int top = std::min(visible_top, visible_bottom) - std::max(0, margin_lines);
+    const int bottom = std::max(visible_top, visible_bottom) + std::max(0, margin_lines);
+    for (long i = 0; i < n; ++i) {
+        if (!spans[i].known()) continue;   // caller full-assembles instead
+        if (spans[i].y_max < top || spans[i].y_min > bottom) continue;
+        if (first < 0) first = i;
+        last = i;
+    }
+    for (const std::size_t included : force_include) {
+        if (static_cast<long>(included) >= n) continue;
+        if (first < 0 || static_cast<long>(included) < first) first = static_cast<long>(included);
+        if (static_cast<long>(included) > last) last = static_cast<long>(included);
+    }
+    if (first < 0) {
+        // Nothing intersects (a viewport entirely inside a spacer gap) and
+        // nothing is force-included: render the newest row rather than an
+        // empty viewport.
+        first = n - 1;
+        last = n - 1;
+    }
+    selection.first = static_cast<std::size_t>(first);
+    selection.last = static_cast<std::size_t>(last);
+    selection.rows_elided_above = first > 0;
+    selection.rows_elided_below = last + 1 < n;
+    // The elided fillers reproduce the full tree's geometry. Above: the
+    // content top through the window's first row (the spans are anchored to
+    // the content top, so spans[first].y_min IS that distance). Below: from
+    // the window's last row's span end through the LAST row's span end PLUS
+    // its trailing spacer -- when rows are elided below, the window's last
+    // row skips its own trailing spacer (the filler covers it) and the
+    // elided tail's spacer is part of the elided space. When nothing is
+    // elided below, the last window row renders its spacer for real (the
+    // full path's invariant) and the filler is zero. The live block and
+    // pending echoes below that render for real and are not part of the
+    // filler.
+    selection.above_lines = std::max(0, spans[first].y_min);
+    selection.below_lines = 0;
+    if (selection.rows_elided_below) {
+        selection.below_lines =
+            std::max(0, spans.back().y_max + 1 - spans[last].y_max);
+    }
+    return selection;
+}
+
 std::string_view ToString(ChatRowKind kind) {
     switch (kind) {
         case ChatRowKind::UserText: return "user_text";

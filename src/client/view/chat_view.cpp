@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
+#include <cstring>
 
 #include "minimal/client/utf8.hpp"
 #include "minimal/client/view/tool_status.hpp"
@@ -178,6 +180,7 @@ void ChatView::RebuildRows(const SessionState::Snapshot& snapshot) {
         focused_row_.reset();
         materialized_page_.reset();   // a different session's page is a different key space
         row_box_slots_.clear();       // likewise the box slots, keyed by that key space
+        row_spans_.clear();           // spans are keyed by that key space too
     }
     // ChatRowsFromMessages is a full O(n) walk over the scrollback window (up
     // to scrollback_window_max_messages, 2000 default), copying every row's
@@ -194,6 +197,16 @@ void ChatView::RebuildRows(const SessionState::Snapshot& snapshot) {
         materialized_page_ = snapshot.scrollback_page;
     }
     const std::vector<ChatRow>& rows = materialized_rows_;
+    // Row windowing bookkeeping, part 1 -- captured BEFORE row_keys_ is
+    // rebuilt below: row_boxes_ is a parallel VECTOR (index == position in
+    // row_keys_), but its entries belong to KEYS. A page change re-derives
+    // keys, and the windowed path reads boxes of rows it did not assemble
+    // this frame, so each entry must follow its row across the rebuild.
+    std::map<RowKey, std::vector<std::shared_ptr<ftxui::Box>>> old_row_boxes;
+    for (std::size_t i = 0; i < row_keys_.size() && i < row_boxes_.size(); ++i) {
+        old_row_boxes.emplace(row_keys_[i], std::move(row_boxes_[i]));
+    }
+    row_boxes_.clear();
     rendered_rows_.clear();
     rendered_rows_.reserve(rows.size());
     row_keys_.clear();
@@ -324,6 +337,25 @@ void ChatView::RebuildRows(const SessionState::Snapshot& snapshot) {
     }
     row_cache_ = std::move(fresh_cache);   // evicted rows' renders drop out
     resolved_collapsed_ = std::move(fresh_resolved);
+    // Row windowing bookkeeping, part 2: refill the parallel box vector from
+    // the key-remapped pool (captured above, before row_keys_ was rebuilt) --
+    // rows that persisted across the rebuild keep their last measured
+    // geometry; new rows start empty (never laid out). Spans for keys that
+    // left the page prune with their slots.
+    row_boxes_.resize(row_keys_.size());
+    for (std::size_t i = 0; i < row_keys_.size(); ++i) {
+        const auto it = old_row_boxes.find(row_keys_[i]);
+        row_boxes_[i] = it != old_row_boxes.end()
+                            ? std::move(it->second)
+                            : std::vector<std::shared_ptr<ftxui::Box>>{};
+    }
+    for (auto it = row_spans_.begin(); it != row_spans_.end();) {
+        if (std::find(row_keys_.begin(), row_keys_.end(), it->first) == row_keys_.end()) {
+            it = row_spans_.erase(it);
+        } else {
+            ++it;
+        }
+    }
     rendered_version_ = snapshot.transcript_version;
     rendered_session_id_ = snapshot.session_id;
     rendered_collapse_epoch_ = collapse_epoch_;
@@ -476,6 +508,16 @@ ftxui::Element ChatView::RenderLiveThinking(const LiveTurnSegment& segment) {
     return vbox(std::move(body)) | color(theme_.ColorFor("thinking"));
 }
 
+// The kill switch (see the declaration): on unless explicitly "0", the same
+// convention the ftxui overlay's MINIMAL_FTXUI_DIFF established.
+bool ChatView::VirtualizationEnabled() {
+    static const bool enabled = [] {
+        const char* env = std::getenv("MINIMAL_CHAT_VIRTUALIZATION");
+        return env == nullptr || std::strcmp(env, "0") != 0;
+    }();
+    return enabled;
+}
+
 ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
                                 const std::vector<LiveTextStreamSlot>& live_text_streams) {
     using namespace ftxui;
@@ -494,7 +536,121 @@ ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
         RebuildRows(snapshot);
     }
 
+    // --- Row windowing: measurement, then selection ------------------------
+    // (chat_model.hpp's SelectRowWindow; the why lives on the members and in
+    // the seam's comment.) Step 1 converts the boxes the LAST layout pass
+    // recorded -- screen coordinates -- into content coordinates via
+    // ScrollState. ONLY the rows the last tree contained are converted: the
+    // ScrollState describes that tree's layout (its applied_top), and a
+    // row not in it still carries the box of an OLDER layout under a
+    // different scroll offset -- but ITS span was already converted, and
+    // content coordinates are immune to scroll offsets and to growth below,
+    // so the stale-in-screen-terms box is fresh in content terms. Step 2
+    // decides whether this frame can window at all: every row must have a
+    // measured span, the viewport must have been measured, and no collapse
+    // toggle may have happened since the spans were taken (heights changed
+    // wholesale -- one full-assembly frame re-measures everything before
+    // windowing resumes). Any unmet prerequisite runs the full-assembly
+    // path below, which is also what (re-)measures, so windowing converges
+    // back on its own.
+    if (scroll_state_->viewport_height > 0) {
+        const int viewport = scroll_state_->viewport_height;
+        const int applied_top = scroll_state_->content_height - viewport -
+                                scroll_state_->applied_offset_from_bottom;
+        const int child_top = scroll_state_->viewport_top_screen - applied_top;
+        const auto convert = [&](std::size_t i) {
+            const auto& boxes = row_boxes_[i];
+            if (boxes.empty()) return;   // never assembled: no geometry yet
+            int y_min = boxes.front()->y_min;
+            int y_max = boxes.front()->y_max;
+            for (const auto& box : boxes) {
+                y_min = std::min(y_min, box->y_min);
+                y_max = std::max(y_max, box->y_max);
+            }
+            if (y_max < y_min) return;
+            row_spans_[row_keys_[i]] = RowSpan{y_min - child_top, y_max - child_top};
+        };
+        if (last_assembly_full_) {
+            for (std::size_t i = 0; i < row_keys_.size() && i < row_boxes_.size(); ++i) {
+                convert(i);
+            }
+        } else {
+            for (std::size_t i = last_window_first_;
+                 i <= last_window_last_ && i < row_keys_.size() && i < row_boxes_.size();
+                 ++i) {
+                convert(i);
+            }
+        }
+    }
+    std::optional<RowWindowSelection> window;
+    if (VirtualizationEnabled() && scroll_state_->viewport_height > 0 &&
+        !row_keys_.empty() && spans_epoch_ == collapse_epoch_) {
+        std::vector<RowSpan> spans;
+        spans.reserve(row_keys_.size());
+        bool all_known = true;
+        for (const auto& key : row_keys_) {
+            const auto it = row_spans_.find(key);
+            if (it == row_spans_.end() || !it->second.known()) {
+                all_known = false;
+                break;
+            }
+            spans.push_back(it->second);
+        }
+        if (all_known) {
+            const int viewport = scroll_state_->viewport_height;
+            // The visible range must use the offset THIS frame will apply --
+            // scroll_from_bottom_lines_, already moved by ScrollBy/wheel --
+            // not ScrollState's applied_offset_from_bottom, which is the
+            // PREVIOUS frame's application and would put every scroll one
+            // frame late (the window chasing the viewport). It is clamped
+            // against the last measured heights here; ScrollRegion's own
+            // clamp (this frame's real measurements) remains the authority,
+            // and the margin absorbs the difference.
+            const int max_offset =
+                std::max(0, scroll_state_->content_height - viewport);
+            const int desired =
+                std::clamp(scroll_from_bottom_lines_, 0, max_offset);
+            const int sel_top = scroll_state_->content_height - viewport - desired;
+            std::vector<std::size_t> force;
+            const auto push_key = [&](const RowKey& key) {
+                const auto it = std::find(row_keys_.begin(), row_keys_.end(), key);
+                if (it != row_keys_.end()) {
+                    force.push_back(static_cast<std::size_t>(it - row_keys_.begin()));
+                }
+            };
+            if (focused_row_.has_value()) push_key(*focused_row_);
+            for (const auto& key : force_include_next_) push_key(key);
+            // The margin absorbs the spans' one-frame staleness: content that
+            // grew below or scrolled since the spans were measured must not
+            // leave rows popping in late at the viewport's edges.
+            const int margin = std::clamp(viewport / 2, 10, 80);
+            window = SelectRowWindow(spans, sel_top, sel_top + viewport - 1,
+                                     margin, force);
+        }
+    }
+    force_include_next_.clear();
+    const bool windowed = window.has_value();
+    if (!windowed) {
+        // The full-assembly path re-measures every row (its layout pass runs
+        // SetBox on the whole tree), so the spans recorded under THIS epoch
+        // are complete afterwards and windowing can resume.
+        spans_epoch_ = collapse_epoch_;
+    }
+
     Elements column;
+    const bool render_head = !windowed || window->first == 0;
+    if (windowed && !render_head) {
+        // Elided head: a fixed filler reproduces every line above the
+        // window's first row -- top slack, boundary markers, elided rows and
+        // their spacers, all measured geometry. No top flex filler: rows are
+        // elided only when content already overflows the viewport. The cut
+        // itself is announced by the frame's floating hint
+        // (RowsElidedAbove, frame_renderer.cpp) -- an in-content marker here
+        // would sit at the cut, lines above the viewport whenever the
+        // elided region is taller than one screen, which is almost always.
+        column.push_back(filler() | size(HEIGHT, EQUAL,
+                                         std::max(0, window->above_lines)));
+    } else {
     // Bottom-aligns a short transcript against the enclosing yframe's
     // viewport (frame_renderer.cpp): a `flex` filler at the TOP absorbs
     // whatever vertical space the actual rows don't need. It collapses to
@@ -526,6 +682,7 @@ ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
     if (snapshot.scrollback_gap) {
         column.push_back(text("··· some messages in this window could not be loaded ···") | color(theme_.ColorFor("system_message")));
     }
+    }
     // Assembly cache: the box/spy wrapping, row-cursor highlight, and
     // timestamp formatting below only need to redo their work when one of
     // these five things changes -- not on every FTXUI repaint (a mouse
@@ -534,6 +691,75 @@ ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
     // allocation and a localtime_r/snprintf call per row PART, every single
     // call). scroll_from_bottom_lines_ is deliberately NOT a key: it only
     // affects which offset ScrollRegion applies below, not any row's content.
+    if (windowed) {
+        // The windowed assembly: decorate ONLY the selected rows, fresh every
+        // frame -- the per-row work (gutter wrap, spy reuse, timestamp) is
+        // O(viewport), so the assembly cache above is unnecessary here, and
+        // the window itself changes whenever the user scrolls. The
+        // decoration semantics mirror the full path's loop exactly (timestamp
+        // on the first part, gutter/cursor wrap per part, persistent box
+        // slots, spacer rules); the two paths are kept textually separate so
+        // the kill-switch path stays byte-identical to its pre-windowing
+        // behavior.
+        row_boxes_.resize(row_keys_.size());
+        for (std::size_t i = window->first; i <= window->last && i < rendered_rows_.size(); ++i) {
+            Elements parts = rendered_rows_[i];   // shared Elements, cheap copy
+            const bool is_focused = focused_row_.has_value() && row_keys_[i] == *focused_row_;
+            const ChatRowKind kind = row_kinds_[i];
+            // PERSISTENT slots (row_box_slots_), the same pool the full path
+            // draws from: a row's Box survives frames it was not assembled
+            // in, so off-window rows keep their last geometry for the span
+            // conversion and the hit-tests.
+            std::vector<std::shared_ptr<ftxui::Box>>& slots = row_box_slots_[row_keys_[i]];
+            slots.resize(parts.size());
+            std::vector<std::shared_ptr<ftxui::Box>> boxes;
+            boxes.reserve(slots.size());
+            if (!parts.empty()) {
+                // Timestamp on the row's FIRST element, right-aligned -- same
+                // placement the full path uses (see its comment there).
+                if (show_timestamps_ && kind != ChatRowKind::Switch &&
+                    i < row_timestamps_.size()) {
+                    const auto stamp = FormatClockTime(row_timestamps_[i]);
+                    if (!stamp.empty()) {
+                        parts[0] = hbox({std::move(parts[0]) | flex,
+                                         text(stamp) | color(theme_.ColorFor("system_message"))});
+                    }
+                }
+                std::size_t part_index = 0;
+                for (auto& part : parts) {
+                    if (is_focused) {
+                        part = WithGutter(std::move(part),
+                                          theme_.ColorForOr("cursor", "row_focused"),
+                                          kCursorGutterGlyph);
+                    } else if (kind != ChatRowKind::Switch) {
+                        part = WithGutter(std::move(part), GutterColor(kind, theme_));
+                    }
+                    auto& slot = slots[part_index++];
+                    if (!slot) slot = std::make_shared<ftxui::Box>();
+                    boxes.push_back(slot);
+                    column.push_back(std::make_shared<RowBoxSpy>(slot, std::move(part)));
+                }
+            }
+            row_boxes_[i] = std::move(boxes);
+            // Spacer between rows -- the full path's rules, with one
+            // windowing exception: the window's LAST row skips its spacer
+            // when rows are elided below, because SelectRowWindow's filler
+            // already counts it (the elided tail's geometry includes it).
+            const bool compact_run = i + 1 < row_kinds_.size() &&
+                                     IsCompact(kind) && row_collapsed_[i] &&
+                                     IsCompact(row_kinds_[i + 1]);
+            const bool spacer_skipped =
+                (i == window->last && window->rows_elided_below) || compact_run;
+            if (!spacer_skipped) column.push_back(text(" "));
+        }
+        if (window->rows_elided_below) {
+            column.push_back(filler() | size(HEIGHT, EQUAL, window->below_lines));
+        }
+        last_assembly_full_ = false;
+        last_window_first_ = window->first;
+        last_window_last_ = window->last;
+        rows_elided_above_ = window->rows_elided_above;
+    } else {
     const bool assembly_stale =
         !assembly_valid_ || assembled_version_ != rendered_version_ ||
         assembled_session_id_ != rendered_session_id_ ||
@@ -640,8 +866,11 @@ ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
         assembled_show_timestamps_ = show_timestamps_;
         assembled_focused_row_ = focused_row_;
         assembly_valid_ = true;
+        last_assembly_full_ = true;
+        rows_elided_above_ = false;
     }
     column.insert(column.end(), assembled_column_rows_.begin(), assembled_column_rows_.end());
+    }
 
     // The turns the user submitted that have not landed as persisted rows
     // yet (state.cpp's OnChatSubmitted FIFO): rendered through the same
@@ -963,6 +1192,10 @@ void ChatView::ToggleCollapseFocused() {
     const bool current = it != resolved_collapsed_.end() ? it->second : false;
     collapse_overrides_[*focused_row_] = !current;
     ++collapse_epoch_;
+    // The toggled row's height just changed; keep it rendered while the
+    // spans re-measure (the epoch mismatch already forces one full frame,
+    // but a same-frame selection must not elide the row the user clicked).
+    force_include_next_.insert(*focused_row_);
 }
 
 void ChatView::ToggleCollapseAll() {
@@ -1000,6 +1233,8 @@ bool ChatView::ToggleCollapseAt(int screen_y) {
         const bool current = resolved != resolved_collapsed_.end() ? resolved->second : false;
         collapse_overrides_[key] = !current;
         ++collapse_epoch_;
+        // Same keep-visible rule as ToggleCollapseFocused.
+        force_include_next_.insert(key);
         return true;
     }
     return false;

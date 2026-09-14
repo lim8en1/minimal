@@ -212,10 +212,22 @@ ftxui::Element FrameRenderer::Render() {
                 // chat_scroll_region.hpp); yframe's focus-driven scroll
                 // would fight it. flex is the only outer decoration left.
                 rows.push_back(ui.chat->Render(snap, ui.live_text_streams) | flex);
+                // Row windowing elided the transcript's head: a floating
+                // hint says so, the same out-of-region pattern as the
+                // new-output line below (an in-content marker would sit at
+                // the cut, above the viewport whenever the elided region is
+                // taller than one screen -- see ChatView::RowsElidedAbove).
+                // Not shown while the new-output line is: one chrome line is
+                // the budget, and live output outranks a position hint.
+                const bool new_output_below = ui.chat->IsScrolledAway() && turn_busy;
+                if (!new_output_below && ui.chat->RowsElidedAbove()) {
+                    rows.push_back(text("··· earlier rows above ···") |
+                                   color(deps_.theme.ColorFor("system_message")));
+                }
                 // Scrolled up (or parked on a row) while the turn is still
                 // producing: the newest output lands below the viewport, and
                 // nothing said so. Outside the yframe, so it stays on screen.
-                if (ui.chat->IsScrolledAway() && turn_busy) {
+                if (new_output_below) {
                     rows.push_back(text(" ↓ new output below · " + deps_.scroll_bottom_hint +
                                         " to follow") |
                                    color(deps_.theme.ColorFor("attention")));

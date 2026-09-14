@@ -2708,3 +2708,114 @@ TEST_CASE("tools panel: the yframe scrolls to the newest tool, not stuck at the 
     CHECK(frame.find("tool9") != std::string::npos);
     CHECK(frame.find("tool0") == std::string::npos);
 }
+
+// ============================================================================
+// Row windowing (chat_model.hpp's SelectRowWindow + ChatView's span
+// bookkeeping). The windowed path only engages from the SECOND render on --
+// the first frame full-assembles and measures -- so every test here renders
+// at least twice.
+// ============================================================================
+
+// A windowed frame elides rows whose spans sit outside the viewport: the
+// frame shows the elision marker and the newest rows, never a row from the
+// far end of the transcript. (The pin-to-newest default, 40 three-line rows
+// in a 10-line viewport.)
+TEST_CASE("chat view: windowing elides off-viewport rows and marks the cut") {
+    const auto theme = TestTheme();
+    minimal::client::MarkdownRenderer renderer(&theme, nullptr);
+    plugins::MarkdownEngineRegistry engine_registry;
+    plugins::RegisterDefaultMarkdownEngine(engine_registry, renderer);
+    auto& engine = *engine_registry.engine;
+    plugins::MessageRendererRegistry messages;
+    plugins::ToolResultRendererRegistry tool_renderers;
+    plugins::RegisterCoreMessageRenderers(messages);
+    plugins::RegisterCoreAgentMarkdownRenderer(messages, engine);
+    plugins::DisplayRendererRegistry display_renderers;
+    ChatView view(theme, messages, tool_renderers, display_renderers);
+    const auto snapshot = SnapshotWithRows("session-window", 1, 40);
+
+    (void)RenderElement(view.Render(snapshot), 40, 10);   // full: measures
+    const auto windowed = RenderElement(view.Render(snapshot), 40, 10);
+    CHECK(windowed.find("row-39") != std::string::npos);
+    CHECK(windowed.find("row-0") == std::string::npos);
+    // The elision marker lives at the CUT POINT in content coordinates -- it
+    // scrolls with the transcript and is only visible parked near it (the
+    // scrolled-up resize test below exercises that end). What must hold
+    // while pinned: the elided geometry reproduces the full tree's content
+    // height, so the scroll accounting (applied offset 0) is unchanged.
+    CHECK(view.scroll_state_for_test()->content_height ==
+          121);   // separator + 40 rows x (2 lines + 1 spacer)
+    CHECK(view.scroll_state_for_test()->applied_offset_from_bottom == 0);
+
+    // Parked mid-transcript the viewport has elided rows on BOTH sides: the
+    // view reports the cut through RowsElidedAbove (the frame renderer turns
+    // that into the floating hint -- an in-content marker would sit above
+    // the viewport), and neither transcript end may leak in.
+    view.ScrollBy(15);
+    const auto parked = RenderElement(view.Render(snapshot), 40, 10);
+    CHECK(view.RowsElidedAbove());
+    CHECK(parked.find("row-39") == std::string::npos);
+    CHECK(parked.find("row-0") == std::string::npos);
+    CHECK(view.scroll_state_for_test()->content_height == 121);
+}
+
+// THE RESIZE CONTRACT: growing or shrinking the terminal must not break the
+// scroll accounting -- a pinned viewport keeps showing the newest row, a
+// scrolled-up viewport keeps showing the rows it was parked on, and the
+// span bookkeeping (which the resize invalidates only in screen terms, never
+// in content terms) converges within a frame.
+TEST_CASE("chat view: windowing survives resize while pinned to the newest row") {
+    const auto theme = TestTheme();
+    minimal::client::MarkdownRenderer renderer(&theme, nullptr);
+    plugins::MarkdownEngineRegistry engine_registry;
+    plugins::RegisterDefaultMarkdownEngine(engine_registry, renderer);
+    auto& engine = *engine_registry.engine;
+    plugins::MessageRendererRegistry messages;
+    plugins::ToolResultRendererRegistry tool_renderers;
+    plugins::RegisterCoreMessageRenderers(messages);
+    plugins::RegisterCoreAgentMarkdownRenderer(messages, engine);
+    plugins::DisplayRendererRegistry display_renderers;
+    ChatView view(theme, messages, tool_renderers, display_renderers);
+    const auto snapshot = SnapshotWithRows("session-resize-pin", 1, 40);
+
+    // Tall -> short -> tall, pinned throughout: the newest row must be
+    // visible in every frame, whatever the viewport.
+    for (const int height : {24, 8, 16, 8, 24}) {
+        const auto frame = RenderElement(view.Render(snapshot), 80, height);
+        CAPTURE(height);
+        CHECK(frame.find("row-39") != std::string::npos);
+        CHECK(view.scroll_state_for_test()->applied_offset_from_bottom == 0);
+    }
+}
+
+TEST_CASE("chat view: windowing survives resize while scrolled up") {
+    const auto theme = TestTheme();
+    minimal::client::MarkdownRenderer renderer(&theme, nullptr);
+    plugins::MarkdownEngineRegistry engine_registry;
+    plugins::RegisterDefaultMarkdownEngine(engine_registry, renderer);
+    auto& engine = *engine_registry.engine;
+    plugins::MessageRendererRegistry messages;
+    plugins::ToolResultRendererRegistry tool_renderers;
+    plugins::RegisterCoreMessageRenderers(messages);
+    plugins::RegisterCoreAgentMarkdownRenderer(messages, engine);
+    plugins::DisplayRendererRegistry display_renderers;
+    ChatView view(theme, messages, tool_renderers, display_renderers);
+    const auto snapshot = SnapshotWithRows("session-resize-scroll", 1, 40);
+
+    (void)RenderElement(view.Render(snapshot), 80, 16);   // full: measures
+    // Park on an early row, then resize around: the parked row stays on
+    // screen (the offset-from-bottom is clamped against the measured
+    // content, and content height is preserved by the fillers), and the
+    // newest row never leaks in from below the fold.
+    view.ScrollBy(30);
+    for (const int height : {16, 8, 24, 12, 16}) {
+        const auto frame = RenderElement(view.Render(snapshot), 80, height);
+        CAPTURE(height);
+        CHECK(frame.find("row-39") == std::string::npos);
+        CHECK(frame.find("row-") != std::string::npos);   // some transcript row renders
+    }
+    // Scrolling back down re-pins and the newest row returns.
+    view.ScrollToBottom();
+    const auto back = RenderElement(view.Render(snapshot), 80, 16);
+    CHECK(back.find("row-39") != std::string::npos);
+}
