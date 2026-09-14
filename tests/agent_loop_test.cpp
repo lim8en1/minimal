@@ -226,6 +226,7 @@ struct Harness {
         loop = std::make_unique<agent::AgentLoop>(
             provider, *executor, registry, store, std::move(preset), config, std::move(session),
             [this] { return cancel_flag.load(); },
+            [] { return false; },  // never paused
             [this](const llm::StreamEvent& e) {
                 seen_events.push_back(e);
                 return !cancel_flag.load();
@@ -365,7 +366,7 @@ TEST_CASE("a store failure appending tool results repairs history_ before rethro
 
     agent::AgentLoop loop(
         provider, executor, registry, store, preset, agent::LoopConfig{}, std::move(session),
-        [] { return false; }, [](const llm::StreamEvent&) { return true; }, agent::Compactor{});
+        [] { return false; }, [] { return false; }, [](const llm::StreamEvent&) { return true; }, agent::Compactor{});
 
     // Manual catch, not CHECK_THROWS_WITH: this must be the ORIGINAL
     // exception, not one from the repair attempt's own store call, and
@@ -943,6 +944,74 @@ TEST_CASE("estimate_zero_usage = false keeps the old zeroing behavior",
     CHECK_FALSE(result.usage_estimated);
     CHECK(result.last_usage.input_tokens == 0);
     CHECK(compactions == 0);   // occupancy stayed 0, below the trigger of 2
+}
+
+TEST_CASE("every provider round reports its usage before the turn ends",
+          "[agent_loop][usage]") {
+    // The live-cost seam: a cost tracker prices each round AS IT LANDS, not
+    // at turn end -- a turn (or a subagent it spawned) can run for minutes,
+    // and the round sums are what the turn record must carry too (each round
+    // is a separately-billed request).
+    Harness h;
+    h.AddTool("read");
+
+    llm::ChatResponse round1 = ToolUseResponse("tu1", "read");
+    round1.usage = llm::Usage{1000, 10, 0, 0};
+    llm::ChatResponse round2 = TextResponse("done");
+    round2.usage = llm::Usage{2000, 20, 5, 0};
+
+    std::vector<agent::RoundUsage> rounds;
+    h.Build({}, agent::LoopConfig{.on_provider_round = [&rounds](agent::RoundUsage round) {
+        rounds.push_back(std::move(round));
+    }});
+    h.provider.PushResponse(round1);
+    h.provider.PushResponse(round2);
+
+    const agent::TurnResult result = h.loop->RunTurn(UserText("go"));
+
+    REQUIRE(rounds.size() == 2);
+    CHECK(rounds[0].model == "test-model");
+    CHECK(rounds[0].usage.input_tokens == 1000);
+    CHECK(rounds[0].usage.output_tokens == 10);
+    CHECK_FALSE(rounds[0].usage_estimated);
+    CHECK(rounds[1].usage.input_tokens == 2000);
+    CHECK(rounds[1].usage.cache_read_input_tokens == 5);
+    // The turn's billing shape: the across-rounds sum.
+    CHECK(result.turn_usage.input_tokens == 3000);
+    CHECK(result.turn_usage.output_tokens == 30);
+    CHECK(result.turn_usage.cache_read_input_tokens == 5);
+    CHECK(result.turn_usage_fully_reported);
+}
+
+TEST_CASE("an estimated round contributes no tokens and clears the fully-reported flag",
+          "[agent_loop][usage][invariant]") {
+    // The zero-usage proxy gap: the bytes/4 estimate is mirrored into the
+    // round's usage fields so the status bar can render, but a cost consumer
+    // must see the FLAG and keep the fabricated count out of the bill.
+    Harness h;
+    h.AddTool("read");
+
+    llm::ChatResponse reported = ToolUseResponse("tu1", "read");
+    reported.usage = llm::Usage{1000, 10, 0, 0};
+    llm::ChatResponse estimated = TextResponse("done");
+    estimated.usage = llm::Usage{};  // the backend reported nothing: the proxy gap
+
+    std::vector<agent::RoundUsage> rounds;
+    h.Build({}, agent::LoopConfig{.estimate_zero_usage = true,
+                                  .on_provider_round =
+                                      [&rounds](agent::RoundUsage round) {
+                                          rounds.push_back(std::move(round));
+                                      }});
+    h.provider.PushResponse(reported);
+    h.provider.PushResponse(estimated);
+
+    const agent::TurnResult result = h.loop->RunTurn(UserText("go"));
+
+    REQUIRE(rounds.size() == 2);
+    CHECK(rounds[1].usage_estimated);
+    CHECK(result.turn_usage.input_tokens == 1000);   // only the reported round
+    CHECK(result.turn_usage.output_tokens == 10);
+    CHECK_FALSE(result.turn_usage_fully_reported);
 }
 
 TEST_CASE("compaction re-seeds the occupancy estimate", "[agent_loop][compaction][invariant]") {    // The fold halves the working set, but the accumulator still described the

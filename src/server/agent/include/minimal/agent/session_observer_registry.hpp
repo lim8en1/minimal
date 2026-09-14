@@ -88,6 +88,7 @@ public:
     void RemoveAfter(std::size_t existing_count);
 
     void NotifySessionCreated(SessionInfo info);
+    void NotifyProviderRound(SessionInfo info, RoundUsage round);
     void NotifyTurnCompleted(SessionInfo info, TurnSummary summary);
     void NotifyToolExecuted(SessionInfo info, ToolInvocation invocation);
     void NotifySessionRewound(SessionInfo info, std::int64_t truncated_to_seq);

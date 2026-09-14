@@ -60,6 +60,9 @@ struct SessionMetadataChanged {
     std::string model;
     std::string permission_mode;
     std::int64_t context_window_tokens = 0;
+    // The pause state (SetPausedEvent). Set on every full metadata emission so
+    // a status bar's paused indicator survives /agent and run-mode changes.
+    bool paused = false;
     bool partial = false;
 };
 
@@ -99,12 +102,19 @@ struct SessionError {
     std::string message;
 };
 
-// A user turn was ACCEPTED onto the work queue (not yet running -- the seed
-// user row persists only when the worker pops it). The per-session
-// monotonic id is what a client addresses a per-message cancel at.
+// A user turn was ACCEPTED (not yet running -- the seed user row persists
+// only when the worker pops it). The per-session monotonic id is what a
+// client addresses a per-message cancel at.
+//
+// steered=true means the turn arrived while the agent was MID-TURN and was
+// routed onto the injection queue instead (real-time steering): it will be
+// appended at the next tool-result boundary of the running turn and reach
+// the model in the very next request. It is not on the work queue, so
+// CancelQueuedTurn cannot address it -- clients hide the cancel affordance.
 struct TurnQueued {
     std::uint64_t turn_id = 0;
     std::string text;
+    bool steered = false;
 };
 
 // A queued turn left the work queue without running: cancelled by id, or

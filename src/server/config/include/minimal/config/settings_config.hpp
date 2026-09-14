@@ -196,6 +196,11 @@ struct SettingsConfig {
     // a wake is a real provider call the user did not ask for. Per-session,
     // resolved at creation; a session never changes its answer mid-life.
     bool background_wake = false;
+    // Whether a user turn submitted while the session is PAUSED auto-resumes
+    // it. On by default: the message IS the intent to continue. Per-session,
+    // resolved at creation like background_wake.
+    // (`sessions.pause_auto_resume_on_submit`.)
+    bool pause_auto_resume_on_submit = true;
     MemorySettings memory;
     ToolsSettings tools;
     ToolsViewSettings tools_view;

@@ -74,6 +74,29 @@ public:
         return pending_.empty();
     }
 
+    // True when the queue holds at least one USER-TEXT message -- i.e. a
+    // real-time steering submission (Session routes a mid-turn UserChatTurn
+    // here), as opposed to the tool-result-only shapes subagent completions
+    // and background task results arrive as. The session worker's wait
+    // predicate reads this: a steering message that missed the turn's flush
+    // (the model had already finished, or the turn ended paused) must be
+    // ANSWERED, so the worker wakes and runs a seedless continuation turn
+    // regardless of the wake_on_injection setting -- a user message is
+    // explicit intent, which a background result is not.
+    bool HasUserText() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (const auto& message : pending_) {
+            if (message.role != llm::Role::User) continue;
+            for (const auto& block : message.content) {
+                if (const auto* text = std::get_if<llm::TextBlock>(&block);
+                    text != nullptr && !text->text.empty()) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
     // /clear drops the VIEW of the conversation, and a staged completion is
     // part of that view's future: draining the history without this would
     // replay a subagent result the user just wiped.

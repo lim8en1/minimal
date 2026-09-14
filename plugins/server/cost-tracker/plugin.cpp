@@ -1,7 +1,10 @@
 // cost-tracker -- per-session token usage and estimated cost.
 //
 // Five seams, one owner, one store:
-//   - the SessionObserver records every completed turn (the only writer);
+//   - the SessionObserver records every completed turn (the store's only
+//     writer) and feeds every provider round into the in-flight provisional
+//     total, so a live UI can show usage MID-turn -- subagent runs included
+//     -- without waiting for the turn to end;
 //   - /cost renders a session's (or every session's) totals as text;
 //   - "cost-tracker.tracking" exposes read-only totals to other server-side
 //     plugins through the §2.2 service channel;
@@ -44,6 +47,7 @@
 #include "cost_store.hpp"
 #include "cost_tracking_service.hpp"
 #include "cost_tracking_service_impl.hpp"
+#include "in_flight.hpp"
 #include "rates_fetch.hpp"
 #include "rpc_service.hpp"
 #include "update_rates_command.hpp"
@@ -58,6 +62,11 @@ constexpr char kBundledRatesFile[] = "cost-rates.json";
 std::shared_ptr<minimal::cost_tracker::CostStore>& SharedStore() {
     static std::shared_ptr<minimal::cost_tracker::CostStore> store;
     return store;
+}
+
+std::shared_ptr<minimal::cost_tracker::InFlightUsage>& SharedInFlight() {
+    static std::shared_ptr<minimal::cost_tracker::InFlightUsage> in_flight;
+    return in_flight;
 }
 
 std::shared_ptr<minimal::cost_tracker::RateTable>& SharedRates() {
@@ -109,6 +118,7 @@ void EnsureSharedState(const minimal::plugins::PluginRegistrationContext& contex
     if (!SharedStore()) {
         SharedStore() = std::make_shared<minimal::cost_tracker::CostStore>(context.storage);
     }
+    if (!SharedInFlight()) SharedInFlight() = std::make_shared<minimal::cost_tracker::InFlightUsage>();
 }
 
 }  // namespace
@@ -131,8 +141,8 @@ void minimal_plugin_register_session_observer(
     minimal::agent::SessionObserverRegistry& registry,
     const minimal::plugins::PluginRegistrationContext& context) {
     EnsureSharedState(context);
-    registry.Register(
-        std::make_shared<minimal::cost_tracker::CostSessionObserver>(*SharedStore()));
+    registry.Register(std::make_shared<minimal::cost_tracker::CostSessionObserver>(
+        *SharedStore(), *SharedInFlight()));
 }
 
 void minimal_plugin_register_services(
@@ -147,7 +157,7 @@ void minimal_plugin_register_services(
     // The PluginCall dispatch target, under the "<plugin_name>.rpc" convention
     // (see minimal/plugins/plugin_rpc.hpp). This is the UI data path.
     static minimal::cost_tracker::CostRpcService rpc(*SharedStore(), *SharedRates(),
-                                                     *SharedSettings());
+                                                     *SharedSettings(), *SharedInFlight());
     registry.Provide(minimal::plugins::PluginRpcServiceName(minimal::cost_tracker::kPluginName),
                      &rpc);
 }

@@ -45,6 +45,35 @@ struct TurnSummary {
     // must treat an estimated turn as unreported -- an estimated token count
     // is not a reported one.
     bool usage_estimated = false;
+    // The turn's CUMULATIVE usage: the sum across every provider round of the
+    // turn (each round is a separately-billed request, so summing is what
+    // cost accounting needs -- `usage` above is deliberately the LAST round's
+    // occupancy-shaped count). Rounds whose usage was estimated (unreported)
+    // contribute nothing to the sum.
+    llm::Usage turn_usage;
+    // False when ANY round of the turn went unreported (estimated): the sum
+    // above is then a lower bound, and a pricing observer must treat the turn
+    // as unpriced rather than bill a partial count as if it were whole.
+    bool turn_usage_fully_reported = true;
+};
+
+// One provider round answered inside a still-running turn (AgentLoop fires it
+// the moment a response lands, NOT at turn end). The sanctioned channel for
+// usage that must be visible MID-turn -- a cost tracker showing a running
+// total while tools run, including while subagents run -- without waiting for
+// OnTurnCompleted's turn-granular summary.
+struct RoundUsage {
+    // The request's model (the same name TurnSummary::model carries, so a
+    // per-model rate resolves identically for rounds and turns).
+    std::string model;
+    // This round's usage only -- one provider request, never cumulative.
+    llm::Usage usage;
+    // True when `usage` is the request's bytes/4 estimate rather than a
+    // backend-reported count (the zero-usage proxy gap). Same rule as
+    // TurnSummary::usage_estimated: an estimated count is not a reported one,
+    // so a pricing consumer must record the round's EXISTENCE but not its
+    // tokens.
+    bool usage_estimated = false;
 };
 
 struct ToolInvocation {
@@ -68,6 +97,10 @@ class SessionObserver {
 public:
     virtual ~SessionObserver() = default;
     virtual void OnSessionCreated(const SessionInfo&) {}
+    // Per provider round inside a live turn (see RoundUsage). Fires BETWEEN
+    // OnSessionCreated and OnTurnCompleted for the same session, on the same
+    // ordered dispatch thread -- ordering an observer can rely on.
+    virtual void OnProviderRound(const SessionInfo&, const RoundUsage&) {}
     virtual void OnTurnCompleted(const SessionInfo&, const TurnSummary&) {}
     virtual void OnToolExecuted(const SessionInfo&, const ToolInvocation&) {}
     // The session's transcript was rewound (truncated_to_seq >= 0: the cut

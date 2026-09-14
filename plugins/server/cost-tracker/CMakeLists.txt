@@ -3,6 +3,7 @@ minimal_add_plugin(cost-tracker
     cost_model.cpp
     cost_store.cpp
     cost_settings.cpp
+    in_flight.cpp
     cost_observer.cpp
     cost_command.cpp
     update_rates_command.cpp

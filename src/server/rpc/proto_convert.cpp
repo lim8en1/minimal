@@ -150,6 +150,7 @@ v1::StopReason ToProto(llm::StopReason value) {
         case llm::StopReason::ContentFilter: return v1::STOP_REASON_CONTENT_FILTER;
         case llm::StopReason::Refusal:       return v1::STOP_REASON_REFUSAL;
         case llm::StopReason::Cancelled:     return v1::STOP_REASON_CANCELLED;
+        case llm::StopReason::Paused:        return v1::STOP_REASON_PAUSED;
         case llm::StopReason::Unknown:       return v1::STOP_REASON_UNSPECIFIED;
     }
     return v1::STOP_REASON_UNSPECIFIED;
@@ -164,6 +165,7 @@ llm::StopReason FromProto(v1::StopReason value) {
         case v1::STOP_REASON_CONTENT_FILTER: return llm::StopReason::ContentFilter;
         case v1::STOP_REASON_REFUSAL:        return llm::StopReason::Refusal;
         case v1::STOP_REASON_CANCELLED:      return llm::StopReason::Cancelled;
+        case v1::STOP_REASON_PAUSED:         return llm::StopReason::Paused;
         default:                             return llm::StopReason::Unknown;
     }
 }
@@ -581,6 +583,7 @@ v1::ServerEvent ToProto(const std::string& session_id, const agent::SessionEvent
                     metadata->set_model(value.model);
                     metadata->set_permission_mode(value.permission_mode);
                     metadata->set_context_window_tokens(value.context_window_tokens);
+                    metadata->set_paused(value.paused);
                 }
             } else if constexpr (std::is_same_v<T, agent::SessionEnded>) {
                 out.mutable_session_ended();
@@ -603,6 +606,7 @@ v1::ServerEvent ToProto(const std::string& session_id, const agent::SessionEvent
                 auto* queued = out.mutable_turn_queued();
                 queued->set_turn_id(value.turn_id);
                 queued->set_text(value.text);
+                queued->set_steered(value.steered);
             } else if constexpr (std::is_same_v<T, agent::TurnCanceled>) {
                 auto* canceled = out.mutable_turn_canceled();
                 canceled->set_turn_id(value.turn_id);

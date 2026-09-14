@@ -84,7 +84,7 @@ public:
         context.session_id = "s1";
         loop_ = std::make_unique<agent::AgentLoop>(
             provider_, *executor_, tools_, store_, preset_, agent::LoopConfig{}, std::move(context),
-            [] { return false; }, [](const llm::StreamEvent&) { return true; },
+            [] { return false; }, [] { return false; }, [](const llm::StreamEvent&) { return true; },
             // A real-shaped compactor: /compact must actually fold history, not
             // just be dispatched. Returns a summary without a provider call, and
             // records the compression prompt each call carried -- /compact

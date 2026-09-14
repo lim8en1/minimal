@@ -17,6 +17,7 @@
 #include "minimal/agent/compaction_strategy.hpp"
 #include "minimal/agent/context_compactor.hpp"
 #include "minimal/agent/injection_queue.hpp"
+#include "minimal/agent/session_observer.hpp"
 #include "minimal/common/logger.hpp"
 #include "minimal/config/settings_config.hpp"
 #include "minimal/hooks/hook_dispatcher.hpp"
@@ -118,6 +119,17 @@ struct LoopConfig {
     // never feed cost pricing.
     bool estimate_zero_usage = true;
 
+    // Per-provider-round usage signal, fired the moment each response lands
+    // (NOT at turn end) -- the seam a cost tracker uses to keep a RUNNING
+    // total visible while the turn is still working, subagent runs included.
+    // Session wires this to SessionObserverRegistry::NotifyProviderRound; null
+    // in tests that construct a bare AgentLoop. Fired for estimated rounds
+    // too, flagged -- a consumer must record the round's existence without
+    // pricing its tokens (RoundUsage::usage_estimated). Runs on the session
+    // worker thread inside the turn; the callback must not block (the same
+    // fire-and-forget dispatch contract every observer notification has).
+    std::function<void(RoundUsage)> on_provider_round;
+
     // The producer-resolved summarizer: compaction_strategy's own when a
     // strategy set one, compact_messages (today's only behavior) otherwise.
     // Centralized here so the consumer (Session's ctor, building AgentLoop)
@@ -173,6 +185,15 @@ struct SessionContext {
     // a free function so a later per-session sink (session-id prefix) is an
     // implementation detail of the wiring, not of the tools.
     common::Logger& logger;
+
+    // The real-time steering gate, applied at flush time to every USER-TEXT
+    // injection (a mid-turn UserChatTurn routed here by Session). Runs on the
+    // worker -- the flush is worker-only -- which is where the
+    // core.user_prompt_submit subprocess budget is allowed to land, matching
+    // the turn-pop veto seam. Returning false DROPS the message (it is never
+    // persisted; the gate itself surfaces the reason on the wire). Null means
+    // ungated: plain test loops that never wired hooks.
+    std::function<bool(const llm::Message&)> steer_gate;
 
     // The session's cross-thread staging queue for out-of-band messages
     // (non-blocking subagent completions, background task results). Shared
@@ -237,6 +258,14 @@ struct TurnResult {
     // on TurnCompletedEvent and TurnSummary carries it to observers -- cost
     // pricing keys off it to keep an estimated token count unpriced.
     bool usage_estimated = false;
+    // The turn's CUMULATIVE usage: the sum across every reported provider
+    // round (each round is a separately-billed request; `last_usage` is only
+    // the final round's occupancy-shaped count). Estimated rounds contribute
+    // nothing. Session copies this into TurnSummary::turn_usage for observers.
+    llm::Usage turn_usage;
+    // False when ANY round of the turn went unreported: the sum above is then
+    // a lower bound and must be treated as unreported, not billed partially.
+    bool turn_usage_fully_reported = true;
 };
 
 // RESUME: the stored transcript, loaded without being re-appended -- the
@@ -274,6 +303,13 @@ public:
     AgentLoop(llm::LlmProvider& provider, tools::ToolExecutor& executor,
               tools::ToolRegistry& registry, session::HistoryStore& store, AgentPreset preset,
               LoopConfig config, SessionContext session, std::function<bool()> is_cancelled,
+              // The pause probe (SetPausedEvent): checked ONLY at the loop top,
+              // before each provider call. The tool round in flight when the
+              // pause lands always completes and persists its real results --
+              // the stop point is the tool-call return, never mid-round --
+              // which is what keeps the transcript paired and the turn
+              // resumable. Null in tests that never pause.
+              std::function<bool()> is_paused,
               llm::StreamEventSink event_sink, Compactor compactor, ResumeSeed seed = {},
               // The rendered project-context section (AGENTS.md/CLAUDE.md),
               // loaded from project_root by the registry and carried on
@@ -459,6 +495,9 @@ private:
     // flushed BEFORE appending the seed, which is the chronological order.
     void RunTurnLoop(TurnResult& result, bool flush_first);
     bool Cancelled() const;
+    // The pause probe. Same call-shape as Cancelled(): an injected predicate,
+    // nullopt-safe. Checked at the loop top only.
+    bool Paused() const;
     // Waits before retry `attempt`, polling cancellation. False means "give up"
     // -- cancelled during the wait -- so the caller stops retrying. The
     // server's own hint (a parsed Retry-After) outranks the computed backoff:
@@ -483,6 +522,7 @@ private:
     LoopConfig config_;
     SessionContext session_;
     std::function<bool()> is_cancelled_;
+    std::function<bool()> is_paused_;
     llm::StreamEventSink event_sink_;
     Compactor compactor_;
 

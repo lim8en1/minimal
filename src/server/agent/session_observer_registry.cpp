@@ -107,6 +107,12 @@ void SessionObserverRegistry::NotifySessionCreated(SessionInfo info) {
     });
 }
 
+void SessionObserverRegistry::NotifyProviderRound(SessionInfo info, RoundUsage round) {
+    Dispatch([info = std::move(info), round = std::move(round)](SessionObserver& observer) {
+        observer.OnProviderRound(info, round);
+    });
+}
+
 void SessionObserverRegistry::NotifyTurnCompleted(SessionInfo info, TurnSummary summary) {
     Dispatch([info = std::move(info), summary = std::move(summary)](SessionObserver& observer) {
         observer.OnTurnCompleted(info, summary);

@@ -205,6 +205,7 @@ add_executable(minimal_tests
     "${CMAKE_SOURCE_DIR}/plugins/server/cost-tracker/cost_model.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/cost-tracker/cost_store.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/cost-tracker/cost_settings.cpp"
+    "${CMAKE_SOURCE_DIR}/plugins/server/cost-tracker/in_flight.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/cost-tracker/cost_observer.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/cost-tracker/cost_command.cpp"
     "${CMAKE_SOURCE_DIR}/plugins/server/cost-tracker/update_rates_command.cpp"

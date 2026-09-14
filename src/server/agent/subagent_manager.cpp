@@ -26,6 +26,12 @@ ChildResult ResultOf(const TurnResult& result) {
         if (result.hit_max_turns) {
             return {true, "subagent reached its max_turns limit without producing a result"};
         }
+        // A paused child's one-turn life ended at the tool-call return; there
+        // is no completed answer to hand the parent, but the reason is not a
+        // failure -- say what happened rather than reading as an error state.
+        if (result.stop_reason == llm::StopReason::Paused) {
+            return {true, "subagent was paused before it produced a result"};
+        }
         if (result.stop_reason == llm::StopReason::Unknown) {
             return {true, "subagent failed to produce a result"};
         }

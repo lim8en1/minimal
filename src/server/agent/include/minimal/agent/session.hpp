@@ -219,6 +219,16 @@ struct SessionParams {
     // never wake (their life is one seeded turn, and they take the default).
     bool wake_on_injection = false;
 
+    // Whether a user turn submitted while the session is PAUSED auto-resumes
+    // it (clears the flag before queueing). On by default: a message IS the
+    // user's intent to continue, and requiring an explicit unpause first is
+    // friction. Off, a paused session holds submissions until SetPaused(false)
+    // or /resume. Real-time steering (a mid-turn submission) auto-resumes
+    // under the same key: clearing the flag lets the in-flight turn continue
+    // past the pause check and answer the steered message within itself.
+    // (`sessions.pause_auto_resume_on_submit`.)
+    bool pause_auto_resume_on_submit = true;
+
     // The read side of the session's durable transcript, injected by the
     // registry (which owns the database). Session owns it and builds the
     // HistoryWindow that reaches tools as ToolContext::history
@@ -315,6 +325,15 @@ struct QueuedRunMode {
     tools::PermissionRunMode mode = tools::PermissionRunMode::Normal;
 };
 
+// The explicit-resume kick (SetPausedEvent{paused=false} with a turn that
+// ended STOP_REASON_PAUSED and nothing else queued). Runs the seedless wake
+// turn: the model continues from the persisted tool results the paused turn
+// left behind -- possibly answering a steered message that flushed after it.
+// Enqueued only when no turn is running or queued, so it can never double-run
+// behind a real turn; a turn that was merely requeued by auto-resume clears
+// continuation_pending_ at pop instead.
+struct QueuedResume {};
+
 // A user turn carrying PER-TURN model/agent overrides. Applied for this turn
 // only, on the worker at turn pop -- the sticky session preset, the session's
 // model_override_, and every metadata event are untouched. The model rides as
@@ -331,8 +350,8 @@ struct QueuedTurn {
     std::uint64_t turn_id = 0;
 };
 
-using WorkItem =
-    std::variant<std::string, QueuedTurn, QueuedCommand, QueuedRewind, QueuedRunMode>;  // string = a plain user turn
+using WorkItem = std::variant<std::string, QueuedTurn, QueuedCommand, QueuedRewind, QueuedRunMode,
+                              QueuedResume>;  // string = a plain user turn
 
 class Session : public commands::SessionControl {
 public:
@@ -422,6 +441,16 @@ public:
     // Reader thread. Interrupts the in-flight turn, leaving the session alive
     // and able to accept the next one.
     void Cancel();
+
+    // Reader thread. Sets the pause state (SetPausedEvent / alt+p). Pause is
+    // a FENCE on new work, not an interruption: the turn in flight runs to
+    // its next tool-call-return boundary and ends STOP_REASON_PAUSED with its
+    // real results persisted; the worker then holds turns and wake-turns
+    // (commands and rewinds still run). Unpausing notifies the worker and --
+    // iff the last turn actually ended paused and nothing else is queued --
+    // enqueues a seedless continuation turn. See ARCHITECTURE.md "Pause".
+    void SetPaused(bool paused);
+    bool paused() const { return paused_.load(std::memory_order_acquire); }
 
     // Reader thread. Removes the queued (not yet popped) turn with this id
     // -- the id TurnQueuedEvent announced at submit time. Always answered by
@@ -772,6 +801,23 @@ private:
     // destroyed. Null without an advisor. See AdvisorCancelSource.
     std::shared_ptr<std::atomic<bool>> advisor_cancel_flag_;
     std::atomic<bool> terminated_{false};
+    // The pause state (SetPausedEvent). Reader-thread-written, worker-read:
+    // the loop's pause probe reads it mid-turn, and the worker's wait
+    // predicate holds turn work while it is set. Cancel clears it (cancel
+    // beats pause); Terminate need not bother -- terminated_ dominates every
+    // reader.
+    std::atomic<bool> paused_{false};
+    // Set on the worker when a turn ends STOP_REASON_PAUSED, cleared when any
+    // turn starts or a resume kick is enqueued: the record that an explicit
+    // unpause has something to continue INTO. mutex_-guarded (worker and the
+    // SetPaused reader both touch it).
+    bool continuation_pending_ = false;
+    // True only while the worker is inside RunOneTurn (the AGENT is mid-turn)
+    // -- what SubmitTurn's real-time-steering routing keys on. Distinct from
+    // running_turn_, which is set for every work item including commands: a
+    // message typed while a /model command executes is a queued turn, not a
+    // steering injection (there is no turn for it to ride). mutex_-guarded.
+    bool in_turn_ = false;
     // A subagent's life is one seeded turn; once its completion hook has fired,
     // a stray client-submitted turn would fire it a second time, so SubmitTurn
     // stops accepting. Only ever set when on_turn_finished exists.

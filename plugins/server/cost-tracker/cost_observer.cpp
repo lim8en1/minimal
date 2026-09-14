@@ -15,21 +15,23 @@ void CostSessionObserver::OnTurnCompleted(const agent::SessionInfo& info,
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch())
             .count();
-    record.usage.input_tokens = summary.usage.input_tokens;
-    record.usage.output_tokens = summary.usage.output_tokens;
-    record.usage.cache_read_tokens = summary.usage.cache_read_input_tokens;
-    record.usage.cache_write_tokens = summary.usage.cache_creation_input_tokens;
+    record.usage.input_tokens = summary.turn_usage.input_tokens;
+    record.usage.output_tokens = summary.turn_usage.output_tokens;
+    record.usage.cache_read_tokens = summary.turn_usage.cache_read_input_tokens;
+    record.usage.cache_write_tokens = summary.turn_usage.cache_creation_input_tokens;
     record.usage.usage_reported =
-        // An estimated turn (the zero-usage proxy gap's bytes/4 fallback)
-        // carries non-zero fields but is NOT a reported count -- pricing it
-        // would break the honesty rule ("unknown", never a fabricated $0 or
-        // a fabricated $X). The estimate exists to arm the compaction
-        // trigger, nothing else.
-        !summary.usage_estimated &&
-        (summary.usage.input_tokens > 0 ||
-         summary.usage.output_tokens > 0 ||
-         summary.usage.cache_read_input_tokens > 0 ||
-         summary.usage.cache_creation_input_tokens > 0);
+        // A turn with ANY unreported round (the zero-usage proxy gap's
+        // bytes/4 fallback) prices as unreported even though its other
+        // rounds reported: the sum is a lower bound, and billing a partial
+        // count as whole would understate silently. The estimate exists to
+        // arm the compaction trigger, nothing else -- the honesty rule
+        // ("unknown", never a fabricated $0 or a fabricated $X) applies to
+        // the whole turn, not per round.
+        summary.turn_usage_fully_reported &&
+        (summary.turn_usage.input_tokens > 0 ||
+         summary.turn_usage.output_tokens > 0 ||
+         summary.turn_usage.cache_read_input_tokens > 0 ||
+         summary.turn_usage.cache_creation_input_tokens > 0);
     record.first_seq = summary.first_seq;
     record.last_seq = summary.last_seq;
     try {
@@ -41,6 +43,18 @@ void CostSessionObserver::OnTurnCompleted(const agent::SessionInfo& info,
         common::DefaultLogger().warn("cost-tracker: recording turn for session {} failed: {}",
                                      info.session_id, error.what());
     }
+    // The turn's provisional rounds are now superseded by the authoritative
+    // record -- dropped whether or not the append succeeded, so the totals
+    // RPC can never count a round twice (live view + turn record).
+    in_flight_.Clear(info.session_id);
+}
+
+void CostSessionObserver::OnProviderRound(const agent::SessionInfo& info,
+                                          const agent::RoundUsage& round) {
+    // No throw here to catch: the in-flight tracker's RecordRound allocates a
+    // few small nodes, and one provisional round lost to a bad_alloc is
+    // cosmetic. Everything fallible stays in OnTurnCompleted's path.
+    in_flight_.RecordRound(info.session_id, round);
 }
 
 void CostSessionObserver::OnSessionRewound(const agent::SessionInfo& info,
@@ -71,6 +85,13 @@ void CostSessionObserver::OnSessionRewound(const agent::SessionInfo& info,
         common::DefaultLogger().warn("cost-tracker: applying rewind for session {} failed: {}",
                                      info.session_id, error.what());
     }
+}
+
+void CostSessionObserver::OnSessionEnded(const agent::SessionInfo& info) {
+    // A session never ends mid-turn, so this normally finds nothing -- but a
+    // provisional total outliving its session would be a slow leak keyed by
+    // dead ids.
+    in_flight_.Clear(info.session_id);
 }
 
 }  // namespace minimal::cost_tracker

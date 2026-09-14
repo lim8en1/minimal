@@ -35,6 +35,11 @@ enum class StopReason {
     // LlmError: the provider catches its own aborted transfer and returns a
     // partial ChatResponse carrying this stop reason.
     Cancelled,
+    // The session was paused (SetPausedEvent): the turn ended at the
+    // tool-call-return boundary -- the in-flight round ran to completion and
+    // its results are persisted -- and no further provider call was made.
+    // Distinct from Cancelled: "suspended, will continue", not "halted".
+    Paused,
     Unknown,
 };
 

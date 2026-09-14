@@ -1,5 +1,7 @@
 #include "rpc_service.hpp"
 
+#include <algorithm>
+
 #include "minimal/common/logger.hpp"
 #include "rates_fetch.hpp"
 
@@ -79,16 +81,73 @@ plugins::PluginRpcHandler::Reply CostRpcService::Handle(const std::string& metho
         }
         const std::string session_id = it->get<std::string>();
         try {
-            const auto history = store_.Load(session_id);
-            if (history.turns.empty()) {
+            // The requested session's WHOLE SUBAGENT SUBTREE, not just its own
+            // blob: a subagent's turns are recorded under the child session's
+            // id (its parent rides along in the blob), so a status line that
+            // polled only the focused session would never see what its
+            // subagents spend -- the operator's bill is the family's. One
+            // load of every history up front, then the descendant closure via
+            // parent_session_id (visited-guarded: the closure must terminate
+            // even if a corrupt blob ever forged a parent cycle).
+            std::map<std::string, SessionHistory> histories;
+            for (const auto& id : store_.SessionIds()) {
+                try {
+                    histories.emplace(id, store_.Load(id));
+                } catch (const std::exception& error) {
+                    // One corrupt blob loses one session's share of the
+                    // subtotal, not the whole answer -- the same skip rule
+                    // the "list" path below follows.
+                    minimal::common::DefaultLogger().warn(
+                        "cost-tracker: skipping unreadable cost history for session {}: {}",
+                        id, error.what());
+                }
+            }
+            std::map<std::string, std::vector<std::string>> children;
+            for (const auto& [id, history] : histories) {
+                if (!history.parent_session_id.empty()) {
+                    children[history.parent_session_id].push_back(id);
+                }
+            }
+            std::vector<std::string> subtree{session_id};
+            for (std::size_t i = 0; i < subtree.size(); ++i) {
+                const auto kids = children.find(subtree[i]);
+                if (kids == children.end()) continue;
+                for (const auto& child : kids->second) {
+                    if (std::find(subtree.begin(), subtree.end(), child) == subtree.end()) {
+                        subtree.push_back(child);
+                    }
+                }
+            }
+
+            // Stored turns plus every member's in-flight provisional rounds
+            // (a fresh session mid-first-turn has a live total and NO stored
+            // blob yet -- the live rows must not be dropped for that).
+            std::vector<TurnRecord> turns;
+            bool in_flight = false;
+            for (const auto& id : subtree) {
+                const auto history = histories.find(id);
+                if (history != histories.end()) {
+                    turns.insert(turns.end(), history->second.turns.begin(),
+                                 history->second.turns.end());
+                }
+                auto live = in_flight_.Records(id);
+                if (!live.empty()) in_flight = true;
+                turns.insert(turns.end(), std::make_move_iterator(live.begin()),
+                             std::make_move_iterator(live.end()));
+            }
+            if (turns.empty()) {
                 reply.ok = false;
                 reply.error = "no recorded cost for session " + session_id;
                 return reply;
             }
-            const auto totals = Aggregate(
-                session_id, history.parent_session_id, history.turns,
-                [this](const std::string& model) { return rates_.Resolve(model); });
-            reply.payload = TotalsAsJson(totals).dump();
+            const auto parent = histories.find(session_id);
+            const auto totals =
+                Aggregate(session_id, parent == histories.end() ? "" : parent->second.parent_session_id,
+                          turns, [this](const std::string& model) { return rates_.Resolve(model); });
+            nlohmann::json body = TotalsAsJson(totals);
+            body["includes_subagents"] = subtree.size() > 1;
+            body["in_flight"] = in_flight;
+            reply.payload = body.dump();
         } catch (const std::exception& error) {
             reply.ok = false;
             reply.error = error.what();

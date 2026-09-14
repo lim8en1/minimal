@@ -24,6 +24,24 @@ std::vector<const llm::ToolUseBlock*> ToolUsesOf(const llm::Message& message) {
     return out;
 }
 
+// The injection queue carries two shapes: tool-result-only user messages (a
+// non-blocking subagent's completion, a background task's result -- these are
+// the model's own tool answers arriving late) and USER-TEXT messages -- a
+// real-time steering submission, which is a human prompt arriving mid-turn
+// and therefore crosses the same hook seam a turn-pop prompt does. Shape is
+// the only marker the queue keeps; this is the shared definition (the
+// session's wake predicate carries a copy in injection_queue.hpp).
+bool IsUserTextMessage(const llm::Message& message) {
+    if (message.role != llm::Role::User) return false;
+    for (const auto& block : message.content) {
+        if (const auto* text = std::get_if<llm::TextBlock>(&block);
+            text != nullptr && !text->text.empty()) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // THE global tool-RESULT ceiling (settings.json tools.max_result_bytes), the
 // output-side mirror of the input ceiling checked before Prepare. Applied
 // here, once, after Execute() returns, so it covers every tool uniformly --
@@ -122,7 +140,8 @@ bool ElideLargestToolResult(std::vector<llm::Message>& history) {
 AgentLoop::AgentLoop(llm::LlmProvider& provider, tools::ToolExecutor& executor,
                       tools::ToolRegistry& registry, session::HistoryStore& store, AgentPreset preset,
                       LoopConfig config, SessionContext session,
-                      std::function<bool()> is_cancelled, llm::StreamEventSink event_sink,
+                      std::function<bool()> is_cancelled, std::function<bool()> is_paused,
+                      llm::StreamEventSink event_sink,
                       Compactor compactor, ResumeSeed seed, std::string project_context)
     : provider_(provider),
       executor_(executor),
@@ -133,6 +152,7 @@ AgentLoop::AgentLoop(llm::LlmProvider& provider, tools::ToolExecutor& executor,
       config_(config),
       session_(std::move(session)),
       is_cancelled_(std::move(is_cancelled)),
+      is_paused_(std::move(is_paused)),
       event_sink_(std::move(event_sink)),
       compactor_(std::move(compactor)),
       history_(std::move(seed.history)),
@@ -160,6 +180,8 @@ AgentLoop::AgentLoop(llm::LlmProvider& provider, tools::ToolExecutor& executor,
 }
 
 bool AgentLoop::Cancelled() const { return is_cancelled_ && is_cancelled_(); }
+
+bool AgentLoop::Paused() const { return is_paused_ && is_paused_(); }
 
 bool AgentLoop::SleepForBackoff(int attempt,
                                 std::optional<std::chrono::milliseconds> retry_after) {
@@ -250,7 +272,20 @@ void AgentLoop::RepairOrphanedToolUses(
 void AgentLoop::FlushInjectedMessages() {
     // DrainAll runs the sink outside the queue's mutex; AppendAndPersist
     // touches the store and must not hold it.
-    injections_->DrainAll([this](llm::Message message) { AppendAndPersist(std::move(message)); });
+    injections_->DrainAll([this](llm::Message message) {
+        // REAL-TIME STEERING VETO. A user-text injection is a human prompt
+        // arriving mid-turn, so it crosses the same seam a turn-pop prompt
+        // does: core.user_prompt_submit, on the worker, where the hook's
+        // subprocess budget is allowed to block. Without this, steering would
+        // be the one input path that silently bypasses a guard hook -- and
+        // "hooks can only narrow" would have a hole shaped exactly like the
+        // feature. A veto drops the message before it is persisted; the gate
+        // surfaces the reason on the wire itself.
+        if (IsUserTextMessage(message) && session_.steer_gate && !session_.steer_gate(message)) {
+            return;
+        }
+        AppendAndPersist(std::move(message));
+    });
 }
 
 AgentLoop::SystemAndTools AgentLoop::BuildSystemAndTools() const {
@@ -826,6 +861,23 @@ void AgentLoop::RunTurnLoop(TurnResult& result, bool flush_first) {
             break;
         }
 
+        // THE PAUSE CHECK -- the only one in the loop. The tool round in
+        // flight when the pause lands always runs to completion and persists
+        // its real results (the previous iteration's Phase 2 finished before
+        // control returned here); this break therefore lands exactly on the
+        // tool-call-return boundary, and the turn ends with the transcript
+        // ending in a paired [tool_use, tool_result]. No further provider
+        // call happens, so the model sees those results only when the session
+        // resumes -- a steering message or /resume's seedless continuation.
+        // Paused, not Cancelled: nothing in flight was harmed, and every
+        // consumer of the stop reason (headless exit code, core.stop hook, a
+        // subagent's parent) can tell "suspended, will continue" from
+        // "halted".
+        if (Paused()) {
+            result.stop_reason = llm::StopReason::Paused;
+            break;
+        }
+
         if (config_.max_turns > 0 && turns >= config_.max_turns) {
             result.hit_max_turns = true;
             break;
@@ -883,7 +935,33 @@ void AgentLoop::RunTurnLoop(TurnResult& result, bool flush_first) {
         // Usage would only add zeros to the cumulative totals); the
         // occupancy seed below replaces last_turn_ once the assistant
         // message is actually in history_ and the estimate can cover it.
-        if (!result.usage_estimated) tokens_.RecordTurn(response.usage);
+        if (!result.usage_estimated) {
+            tokens_.RecordTurn(response.usage);
+            // Turn-cost accounting sums ACROSS rounds -- each round is a
+            // separately-billed request, unlike context occupancy where
+            // summing would double-count the history (token_accounting.hpp).
+            // Estimated rounds contribute nothing; they only clear the
+            // fully-reported flag below.
+            result.turn_usage.input_tokens += response.usage.input_tokens;
+            result.turn_usage.output_tokens += response.usage.output_tokens;
+            result.turn_usage.cache_read_input_tokens +=
+                response.usage.cache_read_input_tokens;
+            result.turn_usage.cache_creation_input_tokens +=
+                response.usage.cache_creation_input_tokens;
+        } else {
+            result.turn_usage_fully_reported = false;
+        }
+        // Mid-turn usage signal: fire per round, not per turn, so a live cost
+        // readout moves while the turn (and any subagent it spawned) is still
+        // working. Estimated rounds fire too, flagged -- the consumer keeps
+        // the round's existence honest without pricing fabricated tokens.
+        if (config_.on_provider_round) {
+            RoundUsage round;
+            round.model = result.model;
+            round.usage = response.usage;
+            round.usage_estimated = result.usage_estimated;
+            config_.on_provider_round(std::move(round));
+        }
         result.stop_reason = response.stop_reason;
 
         // MOVED, not copied. `response` is loop-local and dead after this point

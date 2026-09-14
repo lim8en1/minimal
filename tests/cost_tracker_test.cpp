@@ -37,6 +37,7 @@ struct Harness {
     minimal::testing::TempDir dir;
     plugins::PluginStorage storage{dir.path() / "plugin_storage.db"};
     CostStore store{&storage};
+    InFlightUsage in_flight;
 };
 
 TurnRecord Turn(const std::string& model, std::int64_t in, std::int64_t out,
@@ -339,7 +340,7 @@ TEST_CASE("AppendTurn refuses an empty session id instead of storing under a deg
 
 TEST_CASE("the observer records turns with zero-usage honesty", "[cost_tracker]") {
     Harness harness;
-    CostSessionObserver observer(harness.store);
+    CostSessionObserver observer(harness.store, harness.in_flight);
 
     agent::SessionInfo info;
     info.session_id = "s1";
@@ -347,7 +348,9 @@ TEST_CASE("the observer records turns with zero-usage honesty", "[cost_tracker]"
 
     agent::TurnSummary good;
     good.model = "gpt-4o";
-    good.usage = llm::Usage{100, 50, 20, 10};
+    // The turn's ACROSS-rounds sum is what gets priced, not the last round's
+    // occupancy-shaped count.
+    good.turn_usage = llm::Usage{100, 50, 20, 10};
     observer.OnTurnCompleted(info, good);
 
     agent::TurnSummary failed;  // StopReason::Unknown, zero usage: the failure shape
@@ -363,22 +366,45 @@ TEST_CASE("the observer records turns with zero-usage honesty", "[cost_tracker]"
     CHECK(!history.turns[1].usage.usage_reported);
 }
 
-TEST_CASE("the observer never prices an estimated turn", "[cost_tracker][invariant]") {
-    // The zero-usage fallback mirrors its bytes/4 estimate into the usage
-    // fields so the status bar can render; the estimated flag is what keeps
-    // that count OUT of cost pricing. Non-zero fields alone must not flip
-    // usage_reported once the flag is set.
+TEST_CASE("the observer prices the whole turn, not the last round", "[cost_tracker]") {
+    // A multi-round turn bills every round -- each is a separate provider
+    // request. TurnSummary::usage is the LAST round's count (occupancy
+    // semantics); pricing that would drop rounds 1..n-1 from the bill.
     Harness harness;
-    CostSessionObserver observer(harness.store);
+    CostSessionObserver observer(harness.store, harness.in_flight);
+
+    agent::SessionInfo info;
+    info.session_id = "s1";
+    agent::TurnSummary multi;
+    multi.model = "gpt-4o";
+    multi.usage = llm::Usage{3000, 30, 0, 0};  // the last round only
+    multi.turn_usage = llm::Usage{1000 + 2000 + 3000, 10 + 20 + 30, 0, 0};
+    observer.OnTurnCompleted(info, multi);
+
+    const auto history = harness.store.Load("s1");
+    REQUIRE(history.turns.size() == 1);
+    CHECK(history.turns[0].usage.input_tokens == 6000);
+    CHECK(history.turns[0].usage.output_tokens == 60);
+    CHECK(history.turns[0].usage.usage_reported);
+}
+
+TEST_CASE("a turn with any unreported round prices as unreported", "[cost_tracker][invariant]") {
+    // The zero-usage fallback mirrors its bytes/4 estimate into the usage
+    // fields so the status bar can render; an estimated ROUND makes the
+    // turn's summed count a lower bound. Billing the reported rounds as if
+    // they were whole would understate silently -- the whole turn goes
+    // unpriced instead.
+    Harness harness;
+    CostSessionObserver observer(harness.store, harness.in_flight);
 
     agent::SessionInfo info;
     info.session_id = "s1";
 
-    agent::TurnSummary estimated;
-    estimated.model = "gpt-4o";
-    estimated.usage = llm::Usage{1234, 0, 0, 0};  // the estimate, mirrored in
-    estimated.usage_estimated = true;
-    observer.OnTurnCompleted(info, estimated);
+    agent::TurnSummary partial;
+    partial.model = "gpt-4o";
+    partial.turn_usage = llm::Usage{1234, 0, 0, 0};  // only the reported rounds' sum
+    partial.turn_usage_fully_reported = false;
+    observer.OnTurnCompleted(info, partial);
 
     const auto history = harness.store.Load("s1");
     REQUIRE(history.turns.size() == 1);
@@ -423,7 +449,7 @@ TEST_CASE("rewind removes the records past the cut; redo and unclassifiable reco
     // /rewind + retry used to double-count: the discarded turns stayed in the
     // history blob and the re-executed turns appended on top.
     Harness harness;
-    CostSessionObserver observer(harness.store);
+    CostSessionObserver observer(harness.store, harness.in_flight);
     agent::SessionInfo info;
     info.session_id = "s1";
 
@@ -654,7 +680,7 @@ TEST_CASE("the .rpc service answers totals, list and malformed calls",
     sources.config_rates = nlohmann::json::parse(R"({"m1": {"input": 2.0, "output": 8.0}})");
     RateTable rates(sources, &harness.storage);
     harness.store.AppendTurn("s1", "root", Turn("m1", 1000000, 500000));
-    CostRpcService service(harness.store, rates, CostSettings{});
+    CostRpcService service(harness.store, rates, CostSettings{}, harness.in_flight);
 
     const auto totals = service.Handle("totals", R"({"session_id": "s1"})");
     REQUIRE(totals.ok);
@@ -678,6 +704,137 @@ TEST_CASE("the .rpc service answers totals, list and malformed calls",
     CHECK(!service.Handle("no-such-method", "").ok);               // unknown method
     CHECK(service.Handle("no-such-method", "").error.find("no-such-method") !=
           std::string::npos);
+}
+
+TEST_CASE("the in-flight accumulator merges rounds per model and clears on demand",
+          "[cost_tracker]") {
+    InFlightUsage in_flight;
+    agent::SessionInfo info;
+    info.session_id = "s1";
+
+    agent::RoundUsage round;
+    round.model = "m1";
+    round.usage = llm::Usage{100, 10, 5, 0};
+    in_flight.RecordRound("s1", round);
+    round.model = "m2";  // a mid-turn model switch keeps per-model rows
+    round.usage = llm::Usage{200, 20, 0, 0};
+    in_flight.RecordRound("s1", round);
+
+    const auto records = in_flight.Records("s1");
+    REQUIRE(records.size() == 2);
+    CHECK(records[0].model == "m1");
+    CHECK(records[0].usage.input_tokens == 100);
+    CHECK(records[0].usage.usage_reported);
+    CHECK(records[1].model == "m2");
+    CHECK(records[1].usage.input_tokens == 200);
+
+    // Sessions do not bleed into each other.
+    CHECK(in_flight.Records("s2").empty());
+
+    in_flight.Clear("s1");
+    CHECK(in_flight.Records("s1").empty());
+}
+
+TEST_CASE("an estimated round is recorded as existing but never as tokens",
+          "[cost_tracker][invariant]") {
+    // The bytes/4 fallback fabricates counts; the provisional total must not
+    // price them. It must also not silently pretend the round was fine: the
+    // session's live rows go unreported, which is what renders "cost?".
+    InFlightUsage in_flight;
+
+    agent::RoundUsage reported;
+    reported.model = "m1";
+    reported.usage = llm::Usage{100, 10, 0, 0};
+    in_flight.RecordRound("s1", reported);
+
+    agent::RoundUsage estimated;
+    estimated.model = "m1";
+    estimated.usage = llm::Usage{9999, 999, 0, 0};  // the fabricated estimate
+    estimated.usage_estimated = true;
+    in_flight.RecordRound("s1", estimated);
+
+    const auto records = in_flight.Records("s1");
+    REQUIRE(records.size() == 1);
+    CHECK(records[0].usage.input_tokens == 100);
+    CHECK(!records[0].usage.usage_reported);
+}
+
+TEST_CASE("the observer feeds rounds live and retires them at turn end",
+          "[cost_tracker]") {
+    // THE UX CONTRACT: a round is visible in the live view the moment it
+    // lands, and the authoritative turn record replaces it exactly once --
+    // never both (double count), never neither (drop).
+    Harness harness;
+    CostSessionObserver observer(harness.store, harness.in_flight);
+    agent::SessionInfo info;
+    info.session_id = "s1";
+
+    agent::RoundUsage round;
+    round.model = "m1";
+    round.usage = llm::Usage{1000, 10, 0, 0};
+    observer.OnProviderRound(info, round);
+    observer.OnProviderRound(info, round);
+
+    auto live = harness.in_flight.Records("s1");
+    REQUIRE(live.size() == 1);
+    CHECK(live[0].usage.input_tokens == 2000);
+
+    agent::TurnSummary summary;
+    summary.model = "m1";
+    summary.turn_usage = llm::Usage{3000, 30, 0, 0};  // rounds 1+2+3, the last
+    observer.OnTurnCompleted(info, summary);          // one landed after the polls
+
+    CHECK(harness.in_flight.Records("s1").empty());   // live rows retired...
+    const auto history = harness.store.Load("s1");
+    REQUIRE(history.turns.size() == 1);
+    CHECK(history.turns[0].usage.input_tokens == 3000);  // ...record keeps all three
+}
+
+TEST_CASE("the .rpc totals roll up the whole subagent subtree and the live rounds",
+          "[cost_tracker][rpc]") {
+    // The status line polls the FOCUSED session; a subagent's spend is
+    // recorded under the child's own id. Without the roll-up the operator's
+    // bill silently excludes everything the subagents did -- the exact
+    // complaint this feature exists to answer.
+    Harness harness;
+    RateSources sources;
+    sources.config_rates = nlohmann::json::parse(R"({"m1": {"input": 2.0, "output": 0.0}})");
+    RateTable rates(sources, &harness.storage);
+    harness.store.AppendTurn("root", "", Turn("m1", 1000000, 0));    // $2
+    harness.store.AppendTurn("child", "root", Turn("m1", 500000, 0));    // $1
+    harness.store.AppendTurn("grandchild", "child", Turn("m1", 250000, 0));  // $0.50
+    harness.store.AppendTurn("other", "", Turn("m1", 1000000, 0));   // must NOT merge
+    CostRpcService service(harness.store, rates, CostSettings{}, harness.in_flight);
+
+    agent::RoundUsage round;  // a live round mid-turn on the child
+    round.model = "m1";
+    round.usage = llm::Usage{125000, 0, 0, 0};
+    harness.in_flight.RecordRound("child", round);
+
+    const auto reply = service.Handle("totals", R"({"session_id": "root"})");
+    REQUIRE(reply.ok);
+    const nlohmann::json body = nlohmann::json::parse(reply.payload);
+    CHECK(body.at("total_cost") == 3.75);
+    CHECK(body.at("includes_subagents") == true);
+    CHECK(body.at("in_flight") == true);
+
+    // A leaf asks for itself plus nothing: same arithmetic, honest flags.
+    harness.in_flight.Clear("child");
+    const auto leaf = service.Handle("totals", R"({"session_id": "grandchild"})");
+    REQUIRE(leaf.ok);
+    const nlohmann::json leaf_body = nlohmann::json::parse(leaf.payload);
+    CHECK(leaf_body.at("total_cost") == 0.5);
+    CHECK(leaf_body.at("includes_subagents") == false);
+    CHECK(leaf_body.at("in_flight") == false);
+
+    // A fresh session with only live rounds and NO stored blob yet still
+    // answers -- the first turn's cost must not wait for its record.
+    InFlightUsage fresh;
+    fresh.RecordRound("new", round);
+    CostRpcService fresh_service(harness.store, rates, CostSettings{}, fresh);
+    const auto live_only = fresh_service.Handle("totals", R"({"session_id": "new"})");
+    REQUIRE(live_only.ok);
+    CHECK(nlohmann::json::parse(live_only.payload).at("total_cost") == 0.25);
 }
 
 TEST_CASE("the tracking service reads the same store, degrading to nullopt",

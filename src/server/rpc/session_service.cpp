@@ -182,6 +182,7 @@ grpc::Status SessionServiceImpl::CreateSession(grpc::ServerContext* context,
     // answer mid-life, so a hot edit would not take effect anyway (config is
     // read once at startup).
     params.wake_on_injection = settings_.background_wake;
+    params.pause_auto_resume_on_submit = settings_.pause_auto_resume_on_submit;
 
     if (const auto status = ApplyModelOverride(*request, params); !status.ok()) return status;
 
@@ -455,6 +456,7 @@ grpc::Status SessionServiceImpl::ResumeSession(const v1::CreateSessionRequest* r
     // Same startup-config decision as fresh creation: the setting is a
     // property of the deployment, not of the stored row.
     params.wake_on_injection = settings_.background_wake;
+    params.pause_auto_resume_on_submit = settings_.pause_auto_resume_on_submit;
     ApplyAdvisor(permissions_, permission_advisors_, params);
     // APPLIES ON RESUME TOO, like run_mode and for the same reason: a model
     // named on THIS request outranks anything stored. Silently dropping it
@@ -677,6 +679,16 @@ void SessionServiceImpl::Dispatch(const v1::ClientEvent& event, agent::Session& 
             session.SubmitRunMode(agent::QueuedRunMode{*mode});
             return;
         }
+
+        case v1::ClientEvent::kSetPaused:
+            // THE reader-thread control event, like Cancel: pause must be
+            // able to land MID-TURN, and a mutating command would queue for
+            // the worker and only apply at a turn boundary -- which is
+            // precisely the delay pause exists to avoid. Session::SetPaused
+            // flips an atomic, publishes metadata, and notifies the worker;
+            // nothing here blocks.
+            session.SetPaused(event.set_paused().paused());
+            return;
 
         case v1::ClientEvent::kEndSession:
             // Never reached: OpenSession's read loop intercepts has_end_session()

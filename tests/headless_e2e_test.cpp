@@ -155,8 +155,9 @@ struct HeadlessFixture {
         // asserts against.
         plugin_storage = std::make_unique<plugins::PluginStorage>(tempdir.path() / "plugins.db");
         cost_store = std::make_unique<cost_tracker::CostStore>(plugin_storage.get());
+        cost_in_flight = std::make_unique<cost_tracker::InFlightUsage>();
         observers->Register(
-            std::make_shared<cost_tracker::CostSessionObserver>(*cost_store));
+            std::make_shared<cost_tracker::CostSessionObserver>(*cost_store, *cost_in_flight));
         db = std::make_unique<session::SessionDatabase>(dir / "sessions.db");
         sessions = std::make_unique<agent::SessionRegistry>(*presets, tools, providers, *observers,
                                                             *db, agent::LoopConfig{},
@@ -217,6 +218,7 @@ struct HeadlessFixture {
     std::unique_ptr<agent::SessionObserverRegistry> observers;
     std::unique_ptr<plugins::PluginStorage> plugin_storage;
     std::unique_ptr<cost_tracker::CostStore> cost_store;
+    std::unique_ptr<cost_tracker::InFlightUsage> cost_in_flight;
     std::unique_ptr<session::SessionDatabase> db;
     std::unique_ptr<agent::SessionRegistry> sessions;
     std::unique_ptr<rpc::SessionServiceImpl> service;

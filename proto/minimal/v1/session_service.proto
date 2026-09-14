@@ -199,7 +199,28 @@ message ClientEvent {
     // SessionMetadataEvent announces the new mode to every subscriber.
     SetRunModeEvent set_run_mode = 10;
     CancelQueuedTurn cancel_queued_turn = 12;
+    // Alt+p (or /pause // /resume): direct pause switch, same shape as the
+    // run-mode event -- no command, no confirmation; the keybinding IS the
+    // confirmation. Set on the reader thread (an atomic flag), because a
+    // mutating command would only land at a turn boundary and could never
+    // stop a running turn. See ARCHITECTURE.md "Pause".
+    SetPausedEvent set_paused = 13;
   }
+}
+
+// A client-driven pause toggle (session.paused). While paused, the agent
+// stops at the earliest clean boundary: the tool round in flight when the
+// pause lands runs to completion and its REAL results are persisted -- the
+// stop point is the tool-call return, never mid-round -- and the turn ends
+// STOP_REASON_PAUSED before the next provider call. The model therefore sees
+// the tool results only at resume. While paused the worker holds turns and
+// wake-turns (commands and rewinds still run); a user turn auto-resumes
+// (sessions.pause_auto_resume_on_submit), and an explicit unpause with
+// nothing queued runs a seedless continuation turn off the persisted tool
+// results. Reboot-safe by construction: nothing waits on a live process,
+// the transcript alone is sufficient.
+message SetPausedEvent {
+  bool paused = 1;
 }
 
 // A client-driven permission run-mode change (normal | bypass | allow-only).
@@ -402,8 +423,10 @@ message SessionMetadataEvent {
   // discovery. 0 = unknown; the status bar renders nothing for it, matching
   // the unknown-segment rule.
   int64 context_window_tokens = 6;
+  // The pause state (SetPausedEvent). Announced on change like the other
+  // fields so every attached tab's status bar can render it.
+  bool paused = 7;
 }
-
 // One turn reached a natural stop. The stream stays OPEN -- the client may send
 // another turn on it -- so this is not a stream terminator; it is the only thing
 // that tells a client the server is done talking for now.
@@ -530,6 +553,14 @@ message ServerEvent {
     // the seed user row persists only when the worker pops it). Turn ids are
     // per-session monotonic; the text echoes the submission so a client can
     // correlate it with its optimistic echo. Broadcast to every subscriber.
+    //
+    // steered=true: the turn arrived while the agent was mid-turn and rides
+    // REAL-TIME STEERING instead -- it was staged onto the injection queue and
+    // will be appended at the next tool-result boundary of the RUNNING turn,
+    // reaching the model as [..., tool_result, steering] in the very next
+    // request. It never occupies the work queue: CancelQueuedTurn does not
+    // apply (a client should hide the cancel affordance), and the transcript
+    // row appears when the boundary flush lands it, not at submit.
     TurnQueuedEvent turn_queued = 18;
     // A queued turn left the work queue without running: cancelled by id
     // (CancelQueuedTurn) or in a queue flush (CancelTurn{include_queued}).
@@ -543,6 +574,9 @@ message ServerEvent {
 message TurnQueuedEvent {
   uint64 turn_id = 1;
   string text = 2;
+  // True when the turn was STEERED (see the turn_queued field comment above):
+  // it is on the injection path of the in-flight turn, not the work queue.
+  bool steered = 3;
 }
 
 message TurnCanceledEvent {

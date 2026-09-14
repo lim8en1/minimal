@@ -232,6 +232,37 @@ Session::Session(SessionParams params, AgentPreset preset,
         return sink(SessionEvent{stream});
     };
 
+    // The real-time steering gate. Runs on the WORKER (the loop's flush is
+    // worker-only), which is what makes the hook subprocess safe here -- the
+    // same thread contract as the turn-pop veto in RunOneTurn. A user-text
+    // injection that the core.user_prompt_submit hook blocks is dropped
+    // before it is persisted, with the reason on the wire -- identical
+    // observable semantics to a vetoed turn-pop. A subagent never steers (its
+    // seeded task is not a user prompt; its sessions receive no user turns),
+    // mirroring the turn-pop seam's top-level-only rule. hooks_ is read at
+    // call time -- it is assigned below, before the worker starts.
+    context.steer_gate = [this, sink = event_sink_](const llm::Message& message) {
+        if (hooks_ == nullptr || !params_.parent_session_id.empty()) return true;
+        std::string prompt;
+        for (const auto& block : message.content) {
+            if (const auto* text = std::get_if<llm::TextBlock>(&block)) {
+                if (!prompt.empty()) prompt += "\n";
+                prompt += text->text;
+            }
+        }
+        nlohmann::json payload{{"session_id", params_.session_id},
+                               {"project_root", params_.project_root.string()},
+                               {"prompt", prompt}};
+        if (auto blocked = hooks_->Emit(hooks::kUserPromptSubmit, std::move(payload),
+                                        [this] { return IsCancelled(); })) {
+            logger_.warn("session {}: user_prompt_submit hook blocked a steered message: {}",
+                         params_.session_id, *blocked);
+            sink(SessionEvent{SessionError{"steered message rejected by hook: " + *blocked}});
+            return false;
+        }
+        return true;
+    };
+
     // The real summarizer. Passed as the plain function rather than wrapped,
     // because everything it needs -- provider, model, prompt, cancel flag -- is
     // an argument the loop supplies per call. That is what keeps a mid-session
@@ -245,10 +276,20 @@ Session::Session(SessionParams params, AgentPreset preset,
     // seed is non-default only on resume: the stored transcript becomes the
     // loop's working history WITHOUT being re-appended to the store it was
     // loaded from. See ResumeSeed for what its fields carry.
+    //
+    // on_provider_round: the loop's per-round usage signal routed to the
+    // observer registry -- the same fire-and-forget dispatch every other
+    // notification takes. InfoSnapshot() is read at CALL time (not captured),
+    // so a round dispatched mid-turn reports the session's current name, the
+    // same freshness OnTurnCompleted's snapshot has.
+    loop_config.on_provider_round = [this](agent::RoundUsage round) {
+        observers_.NotifyProviderRound(InfoSnapshot(), std::move(round));
+    };
     loop_ = std::make_unique<AgentLoop>(
         *provider_, executor_, registry, *store_, preset_, loop_config, std::move(context),
-        [this] { return IsCancelled(); }, std::move(stream_event_sink),
-        loop_config.EffectiveCompactor(), std::move(seed), std::move(params_.project_context));
+        [this] { return IsCancelled(); }, [this] { return paused(); },
+        std::move(stream_event_sink), loop_config.EffectiveCompactor(), std::move(seed),
+        std::move(params_.project_context));
 
     // Constructor-injected wiring (Phase 5 step 3): formerly set by
     // SessionRegistry AFTER construction, via set_presets/set_commands/
@@ -342,20 +383,47 @@ bool Session::SubmitTurnWithOverrides(std::string text, const std::optional<comm
 
 bool Session::SubmitTurnWithOverrides(QueuedTurn turn) {
     bool refused = false;
+    bool steered = false;
+    bool auto_resumed = false;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (terminated_.load(std::memory_order_acquire)) return false;
         // A subagent's life is ONE turn: once it has finished, a further turn
         // would run a session its spawner has already collected and reported on.
         if (subagent_finished_.load(std::memory_order_acquire)) return false;
-        if (work_.size() >= kMaxWorkItems) {
+        // AUTO-RESUME: a user message while paused IS the intent to continue,
+        // unless the operator opted out. Cleared before routing so the
+        // mid-turn case (steering, below) lets the running turn continue past
+        // the pause check and answer the message within itself, and the idle
+        // case queues a normal turn. The metadata event -- what every
+        // attached status bar refreshes from -- goes out after the lock.
+        if (paused_.load(std::memory_order_acquire) && params_.pause_auto_resume_on_submit) {
+            paused_.store(false, std::memory_order_release);
+            auto_resumed = true;
+        }
+        // REAL-TIME STEERING: a plain text turn arriving while the AGENT is
+        // mid-turn (in_turn_, not running_turn_ -- a command running is not a
+        // turn to ride) does not queue behind the turn; it is staged onto the
+        // injection queue and appended at the next tool-result boundary, so
+        // the very next provider request carries
+        // [..., assistant(tool_use), user(tool_results), user(steering)].
+        // Overrides opt OUT: a mid-turn model/preset switch is a re-resolution
+        // the running loop cannot absorb, so those ride the work queue as
+        // today. The steering gate (core.user_prompt_submit) fires at flush
+        // time on the worker.
+        if (in_turn_ && turn.model.empty() && turn.agent_preset.empty()) {
+            steered = channels_->injections.Push(
+                llm::Message{llm::Role::User, {llm::TextBlock{turn.text}}});
+            if (!steered) refused = true;  // injection backlog full -- answered below
+        } else if (work_.size() >= kMaxWorkItems) {
             refused = true;
         } else {
             turn.turn_id = next_turn_id_++;
             work_.push_back(turn);
         }
     }
-    if (refused) {
+    if (auto_resumed) EmitMetadataChanged();
+    if (refused && !steered) {
         // Answer the refusal rather than dropping it: the client sent a turn and
         // must learn it was not accepted. The sink never blocks (this runs on
         // the reader, which must never block even on its own error path), and
@@ -370,8 +438,12 @@ bool Session::SubmitTurnWithOverrides(QueuedTurn turn) {
     // runs only after the current turn ends, and its seed user row persists
     // only at pop), so without this the submitting client has nothing to
     // address a per-message cancel at -- and no confirmation that the
-    // message is held at all.
-    if (SessionEvent evt{TurnQueued{turn.turn_id, turn.text}}; !EmitEvent(evt)) {
+    // message is held at all. A STEERED message carries steered=true: it is
+    // not on the work queue, so there is nothing for CancelQueuedTurn to
+    // address -- the client renders "delivers at the next tool boundary"
+    // instead of a cancel affordance, and the transcript row appears when
+    // the boundary flush lands it.
+    if (SessionEvent evt{TurnQueued{turn.turn_id, turn.text, steered}}; !EmitEvent(evt)) {
         // Non-fatal: the turn is queued and will run regardless; only the
         // cancel affordance is degraded on this client.
         logger_.warn("session {}: turn_queued event dropped by the queue",
@@ -696,6 +768,7 @@ void Session::EmitMetadataChanged() {
     metadata.model = preset.model_ref.str();
     metadata.permission_mode = config::ToString(executor_.run_mode());
     metadata.context_window_tokens = preset.context_window_tokens.value_or(0);
+    metadata.paused = paused();
     if (!EmitEvent(SessionEvent{std::move(metadata)})) {
         logger_.warn("session {}: metadata event dropped (broadcaster closed)",
                      params_.session_id);
@@ -838,6 +911,44 @@ void Session::Cancel() {
     // WirePermissionChecker turns into Deny, so one CancelTurn would silently
     // deny-lock a session that reports itself alive and keeps accepting turns.
     cancel_pending_requests_();
+    // CANCEL BEATS PAUSE. Cancel is "stop now" -- the operator escalating past
+    // a pause they just set (or forgot about). Leaving the flag set would
+    // fence the very next turn behind a state the operator just overrode.
+    paused_.store(false, std::memory_order_release);
+}
+
+void Session::SetPaused(bool paused) {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (terminated_.load(std::memory_order_acquire)) return;
+        if (paused_.load(std::memory_order_acquire) == paused) return;
+        paused_.store(paused, std::memory_order_release);
+        // EXPLICIT RESUME KICK. Only when the unpause has something to
+        // continue into: the last turn actually ended paused
+        // (continuation_pending_) -- not one that ended EndTurn on its own
+        // while the flag was set -- and nothing else is queued or running. A
+        // queued turn (auto-resume ran) or the worker still finishing the
+        // final round makes the kick redundant; a turn that continues past an
+        // unpauses' mid-flight clears the flag at its own end. The kick is
+        // the seedless wake turn: the model continues from the persisted tool
+        // results, answering any steered message that flushed after them.
+        if (!paused && !running_turn_ && continuation_pending_ && work_.empty() &&
+            !subagent_finished_.load(std::memory_order_acquire)) {
+            if (work_.size() < kMaxWorkItems) {
+                work_.push_back(QueuedResume{});
+                continuation_pending_ = false;
+            }
+            // Over the bound: drop the kick silently -- the session was
+            // idle (the checks above), so the bound cannot be hit here;
+            // the guard is structural, not operational.
+        }
+    }
+    EmitMetadataChanged();
+    // The worker may be parked on a predicate this change flips in either
+    // direction (hold a turn it was about to pop; release held turns; run the
+    // resume kick). The empty critical section above closed the lost-wakeup
+    // window -- the same shape QueueInjectedMessage and Terminate guard.
+    turn_cv_.notify_all();
 }
 
 void Session::CancelQueuedTurn(std::uint64_t turn_id) {
@@ -1025,8 +1136,40 @@ void Session::WorkerMain() {
         {
             std::unique_lock<std::mutex> lock(mutex_);
             turn_cv_.wait(lock, [this] {
-                return !work_.empty() || terminated_.load(std::memory_order_acquire) ||
-                       ShouldWakeForInjections();
+                if (terminated_.load(std::memory_order_acquire)) return true;
+                if (!work_.empty()) {
+                    // PAUSE HOLD: while paused, only non-turn work may run --
+                    // commands, rewinds, run-mode changes, the resume kick.
+                    // This is the "pause to reconfigure" affordance: /agent,
+                    // /model, shift+tab and a rewind all execute against a
+                    // paused session, while its held turns wait for unpause
+                    // (auto-resume via a new submission, or SetPaused(false)).
+                    // Turns are LEFT IN PLACE, not reordered around.
+                    if (!paused_.load(std::memory_order_acquire)) return true;
+                    for (const auto& candidate : work_) {
+                        if (!std::holds_alternative<std::string>(candidate) &&
+                            !std::holds_alternative<QueuedTurn>(candidate)) {
+                            return true;
+                        }
+                    }
+                    return false;
+                }
+                // Idle: the wake paths. All of them hold while paused --
+                // a paused session makes no provider call nobody asked for.
+                if (paused_.load(std::memory_order_acquire)) return false;
+                if (ShouldWakeForInjections()) return true;
+                // Real-time steering sweep: a steering message that missed
+                // its turn's flush (the model had already returned EndTurn)
+                // is a human prompt sitting unanswered. It wakes the worker
+                // for a seedless continuation turn REGARDLESS of
+                // wake_on_injection -- a user message is explicit intent,
+                // which a background result is not.
+                if (channels_->injections.HasUserText()) return true;
+                // The explicit-resume kick raced a still-running final round:
+                // SetPaused(false) found running_turn_ true and skipped
+                // enqueueing; the turn then ended Paused. The flag survives,
+                // and this predicate is what turns it into the continuation.
+                return continuation_pending_;
             });
             if (terminated_.load(std::memory_order_acquire)) return;
             // Record the cancel generation THIS turn must be measured against,
@@ -1054,14 +1197,40 @@ void Session::WorkerMain() {
             // turn starts clean.
             loop_->SetCancelToken(cancel_source_.Mint());
             if (!work_.empty()) {
-                item = std::move(work_.front());
-                work_.pop_front();
+                if (!paused_.load(std::memory_order_acquire)) {
+                    item = std::move(work_.front());
+                    work_.pop_front();
+                } else {
+                    // The predicate guaranteed a non-turn item exists; find
+                    // it and leave any held turns in place.
+                    for (auto it = work_.begin(); it != work_.end(); ++it) {
+                        if (std::holds_alternative<std::string>(*it) ||
+                            std::holds_alternative<QueuedTurn>(*it)) {
+                            continue;
+                        }
+                        item = std::move(*it);
+                        work_.erase(it);
+                        break;
+                    }
+                }
+                // A real turn (seeded or the resume kick) starting means the
+                // "last turn ended paused" record is consumed: leaving it set
+                // would let a LATER unpause spuriously re-run a continuation
+                // for a session that has moved on.
+                if (std::holds_alternative<std::string>(item) ||
+                    std::holds_alternative<QueuedTurn>(item) ||
+                    std::holds_alternative<QueuedResume>(item)) {
+                    continuation_pending_ = false;
+                }
             } else {
-                // Only reachable when ShouldWakeForInjections() fired: an
-                // out-of-band message landed on an idle session and the wake
-                // setting is on. A seedless turn whose user content is the
-                // injected messages themselves.
+                // Only reachable when a wake condition fired: an out-of-band
+                // message (ShouldWakeForInjections, with the wake setting on)
+                // -- or a steering message that missed its flush, or a resume
+                // kick whose enqueue lost its race -- needs a SEEDLESS turn
+                // whose user content is the injected messages / the persisted
+                // history itself.
                 wake_turn = true;
+                continuation_pending_ = false;
             }
             running_turn_ = true;
         }
@@ -1091,6 +1260,11 @@ void Session::WorkerMain() {
                     RunOneTurn(std::move(*text));
                 } else if (auto* turn = std::get_if<QueuedTurn>(&item)) {
                     RunOneTurn(std::move(turn->text), turn);
+                } else if (std::holds_alternative<QueuedResume>(item)) {
+                    // The explicit-resume kick (SetPausedEvent{false}): the
+                    // seedless wake turn, continuing from the persisted tool
+                    // results the paused turn left behind.
+                    RunOneTurn(std::nullopt);
                 } else if (auto* rewind = std::get_if<QueuedRewind>(&item)) {
                     RunOneRewind(*rewind);
                 } else if (auto* run_mode = std::get_if<QueuedRunMode>(&item)) {
@@ -1129,6 +1303,25 @@ bool Session::ShouldWakeForInjections() const {
 
 void Session::RunOneTurn(std::optional<std::string> text, const QueuedTurn* overrides) {
     const auto started = std::chrono::steady_clock::now();
+
+    // THE AGENT IS NOW MID-TURN. in_turn_ is what SubmitTurn's real-time
+    // steering routing keys on, and it must be true for exactly the span of
+    // the turn -- not of a command (running_turn_ serves that coarser role).
+    // RAII, not a post-call clear: an exception out of RunTurn's catchable
+    // surface is contained below, but the worker's own catch-all is the
+    // backstop, and a stuck flag would silently divert every future
+    // submission onto the steering path.
+    struct InTurnGuard {
+        Session* session;
+        ~InTurnGuard() {
+            std::lock_guard<std::mutex> lock(session->mutex_);
+            session->in_turn_ = false;
+        }
+    } in_turn_guard{this};
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        in_turn_ = true;
+    }
 
     // Computed from the RAW text, before @-mention expansion below may move
     // out of `text` -- a tab label reflects what the user typed, not inlined
@@ -1396,6 +1589,11 @@ void Session::RunOneTurn(std::optional<std::string> text, const QueuedTurn* over
         summary.stop_reason = result.stop_reason;
         summary.usage = result.last_usage;
         summary.usage_estimated = result.usage_estimated;
+        // The turn's whole billing shape, not the last round's occupancy
+        // snapshot: observers that price usage need the ACROSS-rounds sum and
+        // the fully-reported flag to apply the unpriced rule honestly.
+        summary.turn_usage = result.turn_usage;
+        summary.turn_usage_fully_reported = result.turn_usage_fully_reported;
         // Specified by ARCHITECTURE.md since track I and shipped permanently
         // empty, because the loop collected it nowhere and this never set it.
         summary.tool_names_invoked = std::move(result.tool_names_invoked);
@@ -1427,6 +1625,18 @@ void Session::RunOneTurn(std::optional<std::string> text, const QueuedTurn* over
         }
     } catch (...) {
         logger_.warn("session {}: on_turn_finished threw", params_.session_id);
+    }
+    // Record that an explicit unpause has something to continue into. Set
+    // unconditionally on a Paused result -- including when the pause was
+    // already cleared (an unpause racing the final round: SetPaused(false)
+    // found running_turn_ and skipped enqueueing the kick), because the
+    // worker's wait predicate is what turns this flag into the seedless
+    // continuation in exactly that race. Staleness is handled at pop: any
+    // real turn or kick clears the flag, so a later unpause can never
+    // re-run a continuation for a session that has moved on.
+    if (result.stop_reason == llm::StopReason::Paused) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        continuation_pending_ = true;
     }
 }
 

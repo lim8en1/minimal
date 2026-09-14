@@ -47,7 +47,7 @@ TEST_CASE("cost of assembling a ChatRequest at 512k-token scale", "[.bench]") {
     session.session_id = "bench";
 
     agent::AgentLoop loop(provider, executor, registry, store, preset, agent::LoopConfig{},
-                          std::move(session), [] { return false; },
+                          std::move(session), [] { return false; }, [] { return false; },
                           [](const llm::StreamEvent&) { return true; }, {});
 
     // Fill history through the public path.

@@ -267,6 +267,8 @@ SettingsConfig ParseSettingsConfig(const nlohmann::json& doc) {
         config.default_theme = doc.value("default_theme", config.default_theme);
         config.max_concurrent_subagents = doc.value("max_concurrent_subagents", config.max_concurrent_subagents);
         config.background_wake = doc.value("background_wake", config.background_wake);
+        config.pause_auto_resume_on_submit =
+            doc.value("pause_auto_resume_on_submit", config.pause_auto_resume_on_submit);
         config.memory = ParseMemory(doc);
         config.tools = ParseTools(doc);
         config.tools_view = ParseToolsView(doc);

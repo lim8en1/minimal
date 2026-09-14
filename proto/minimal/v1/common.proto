@@ -72,6 +72,14 @@ enum StopReason {
   // derives its exit code from stop_reason -- without one, a cancelled run is
   // indistinguishable from a malformed one.
   STOP_REASON_CANCELLED = 7;
+  // The user paused the session (SetPausedEvent): the turn ended at the
+  // tool-call-return boundary -- the in-flight round ran to completion and
+  // its results are persisted -- and no further provider call was made. Not
+  // an error and not a cancellation: the session is suspended, and resume
+  // (an explicit /resume or the next user turn) continues from the paired
+  // transcript. Distinct from CANCELLED so the headless exit code and the
+  // core.stop hook can tell "suspended, will continue" from "halted".
+  STOP_REASON_PAUSED = 8;
 }
 
 message Usage {

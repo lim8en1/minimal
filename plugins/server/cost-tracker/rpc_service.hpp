@@ -7,8 +7,16 @@
 // JSON. Core transports and never interprets it.
 //
 // Methods (JSON in, JSON out):
-//   totals {"session_id": "..."} -> the session's totals (see TotalsToJson)
+//   totals {"session_id": "..."} -> the session's totals PLUS its whole
+//                                   subagent subtree's (parent_session_id
+//                                   closure; the "includes_subagents" field
+//                                   marks when children merged) and the
+//                                   sessions' in-flight mid-turn rounds
+//                                   (see in_flight.hpp) merged in, so a
+//                                   status line can move DURING a turn --
+//                                   subagent runs included. (see TotalsToJson)
 //   list   {}                    -> {"sessions": [totals...]}   every session
+//                                   (per-session, no roll-up)
 //   refresh_rates {}             -> fetches both pricing snapshots now; same
 //                                   path as /cost-update-rates. Returns
 //                                   {"updated": N, "litellm_updated": N,
@@ -17,13 +25,15 @@
 //                                   failure (both sources down).
 //
 // Threading: Handle runs on gRPC handler threads, concurrently across calls;
-// all state sits behind PluginStorage's per-call mutex and RateTable's own.
+// all state sits behind PluginStorage's per-call mutex, RateTable's own, and
+// InFlightUsage's own.
 
 #include <string_view>
 
 #include "cost_model.hpp"
 #include "cost_settings.hpp"
 #include "cost_store.hpp"
+#include "in_flight.hpp"
 #include "minimal/plugins/plugin_rpc.hpp"
 
 namespace minimal::cost_tracker {
@@ -35,8 +45,9 @@ class CostRpcService : public plugins::PluginRpcHandler {
 public:
     // A null RateResolver renders costs as unknown rather than crashing --
     // the same degrade-not-crash rule as the store's null storage.
-    CostRpcService(CostStore& store, RateTable& rates, const CostSettings& settings)
-        : store_(store), rates_(rates), settings_(settings) {}
+    CostRpcService(CostStore& store, RateTable& rates, const CostSettings& settings,
+                   InFlightUsage& in_flight)
+        : store_(store), rates_(rates), settings_(settings), in_flight_(in_flight) {}
 
     plugins::PluginRpcHandler::Reply Handle(const std::string& method,
                                             std::string_view json_payload) override;
@@ -45,6 +56,7 @@ private:
     CostStore& store_;
     RateTable& rates_;
     const CostSettings& settings_;
+    InFlightUsage& in_flight_;
 };
 
 }  // namespace minimal::cost_tracker

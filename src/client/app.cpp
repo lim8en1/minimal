@@ -87,6 +87,9 @@ enum ExitCode {
     kTruncated = 2,   // max_tokens / stop_sequence: output is incomplete
     kModelError = 3,  // an ErrorEvent reached us
     kCancelled = 4,
+    kPaused = 5,      // the session was paused mid-turn (unreachable from -p,
+                      // which never sends SetPausedEvent -- mapped so a future
+                      // caller cannot mistake suspension for success)
     kUsage = 64,
     kUnavailable = 69,  // no server, or it refused the session
     kInternalError = 70,  // EX_SOFTWARE: an exception escaped somewhere it shouldn't have
@@ -115,6 +118,8 @@ int ExitCodeFor(minimal::v1::StopReason stop_reason) {
             return kTruncated;
         case minimal::v1::STOP_REASON_CANCELLED:
             return kCancelled;
+        case minimal::v1::STOP_REASON_PAUSED:
+            return kPaused;
         case minimal::v1::STOP_REASON_CONTENT_FILTER:
         case minimal::v1::STOP_REASON_REFUSAL:
             return kModelError;

@@ -79,7 +79,7 @@ struct LoopHarness {
 
         loop = std::make_unique<agent::AgentLoop>(
             provider, *executor, registry, store, std::move(preset), config, std::move(session),
-            [] { return false; }, [](const llm::StreamEvent&) { return true; },
+            [] { return false; }, [] { return false; }, [](const llm::StreamEvent&) { return true; },
             std::move(compactor));
     }
 };
