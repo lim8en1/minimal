@@ -71,6 +71,7 @@
 
     "openrouter": {
       "//": "OpenRouter is an ordinary openai-backend endpoint; its model ids are vendor/model, and a static model key may carry that '/' (the full ref is then three segments: openrouter/anthropic/claude-opus-5). Or set \"discover\": true and drop \"models\" entirely -- OpenRouter's catalog supplies ids and context windows.",
+      "//app": "Set \"openrouter_app_id\": true to opt this entry's usage into OpenRouter app attribution: every request (chat and model discovery) carries the project's identity (X-Title: minimal, HTTP-Referer: the project's GitHub URL). An explicit \"headers\" entry of the same name wins.",
       "backend": "openai",
       "url": "https://openrouter.ai/api/v1",
       "api_key_env": "OPENROUTER_API_KEY",

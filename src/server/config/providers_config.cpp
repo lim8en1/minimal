@@ -349,6 +349,40 @@ ResolvedModel BuildDiscoveredLocked(const ProviderEntry& entry,
     return resolved;
 }
 
+// OpenRouter app-attribution opt-in ("openrouter_app_id": true). Every request
+// on the entry -- chat and /models discovery alike -- carries the project's
+// identity, so usage is credited to it on OpenRouter's app leaderboard: the
+// same opt-in opencode bakes into its openrouter provider (HTTP-Referer +
+// X-Title). The headers are SYNTHESIZED at parse time; an explicit "headers"
+// entry of the same name wins (the file's native-keys-always-win rule), so an
+// operator can rebrand or point the referer elsewhere without losing the
+// other half. Backend-agnostic: any backend kind simply carries two extra
+// headers it ignores.
+constexpr const char* kAppAttributionTitle = "minimal";
+constexpr const char* kAppAttributionReferer = "https://github.com/lim8en1/minimal";
+
+void ApplyAppAttribution(const nlohmann::json& provider, llm::ProviderConfig& connection,
+                         const std::string& where) {
+    if (!provider.contains("openrouter_app_id")) return;
+    const auto& flag = provider.at("openrouter_app_id");
+    if (!flag.is_boolean()) {
+        throw std::runtime_error("providers.json: " + where +
+                                 " sets \"openrouter_app_id\" which must be a boolean");
+    }
+    if (!flag.get<bool>()) return;
+    const std::pair<const char*, const char*> synthesized[] = {
+        {"X-Title", kAppAttributionTitle},
+        {"HTTP-Referer", kAppAttributionReferer},
+    };
+    for (const auto& [name, value] : synthesized) {
+        const auto existing =
+            std::find_if(connection.headers.begin(), connection.headers.end(),
+                         [&](const auto& header) { return header.first == name; });
+        if (existing != connection.headers.end()) continue;
+        connection.headers.emplace_back(name, value);
+    }
+}
+
 }  // namespace
 
 ProvidersConfig& ProvidersConfig::operator=(ProvidersConfig&& other) noexcept {
@@ -777,6 +811,7 @@ ProvidersConfig ParseProvidersConfigUnwrapped(const nlohmann::json& doc) {
                 }
             }
         }
+        ApplyAppAttribution(provider_normalized, entry.connection, where);
         for (const char* key : {"whitelist", "blacklist"}) {
             if (provider_normalized.contains(key) && provider_normalized.at(key).is_array()) {
                 for (const auto& id : provider_normalized.at(key)) {

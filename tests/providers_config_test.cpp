@@ -847,6 +847,110 @@ TEST_CASE("an opencode-shaped provider entry normalizes onto minimal's fields",
     CHECK(model->provider.headers[0].second == "hot");
 }
 
+// --- OpenRouter app attribution ----------------------------------------------------
+
+TEST_CASE("openrouter_app_id synthesizes the attribution headers on every request surface",
+          "[providers][attribution]") {
+    // The opt-in ("openrouter_app_id": true) must reach both places the
+    // openai backend reads headers from: the resolved static model (chat
+    // requests) and the ProviderEntry's connection (shared with /models
+    // discovery), so attributed usage is not undercut by unattributed
+    // discovery fetches.
+    const auto config = ParseProvidersConfig(nlohmann::json::parse(R"({
+      "providers": {
+        "closedrouter": {
+          "backend": "openai",
+          "url": "https://openrouter.ai/api/v1",
+          "openrouter_app_id": true,
+          "models": {"glm": {}}
+        }
+      }
+    })"));
+
+    const auto model = config.Resolve(ModelRef{"closedrouter", "glm"});
+    REQUIRE(model != nullptr);
+    REQUIRE(model->provider.headers.size() == 2);
+    bool saw_title = false, saw_referer = false;
+    for (const auto& [name, value] : model->provider.headers) {
+        if (name == "X-Title") {
+            saw_title = true;
+            CHECK(value == "minimal");
+        }
+        if (name == "HTTP-Referer") {
+            saw_referer = true;
+            CHECK(value == "https://github.com/lim8en1/minimal");
+        }
+    }
+    CHECK(saw_title);
+    CHECK(saw_referer);
+
+    const auto& entry = config.provider_entries().at("closedrouter");
+    REQUIRE(entry.connection.headers.size() == 2);
+}
+
+TEST_CASE("explicit headers win over the openrouter_app_id synthesis, per name",
+          "[providers][attribution]") {
+    // The native-keys-always-win rule: an operator who sets their own X-Title
+    // (rebranding) keeps it and still receives the synthesized HTTP-Referer.
+    const auto config = ParseProvidersConfig(nlohmann::json::parse(R"({
+      "providers": {
+        "closedrouter": {
+          "backend": "openai",
+          "url": "https://openrouter.ai/api/v1",
+          "openrouter_app_id": true,
+          "headers": {"X-Title": "my-own-app"},
+          "models": {"glm": {}}
+        }
+      }
+    })"));
+
+    const auto model = config.Resolve(ModelRef{"closedrouter", "glm"});
+    REQUIRE(model != nullptr);
+    REQUIRE(model->provider.headers.size() == 2);
+    for (const auto& [name, value] : model->provider.headers) {
+        if (name == "X-Title") CHECK(value == "my-own-app");
+        if (name == "HTTP-Referer") CHECK(value == "https://github.com/lim8en1/minimal");
+    }
+}
+
+TEST_CASE("openrouter_app_id false or absent synthesizes nothing",
+          "[providers][attribution]") {
+    const auto config = ParseProvidersConfig(nlohmann::json::parse(R"({
+      "providers": {
+        "closedrouter": {
+          "backend": "openai",
+          "url": "https://openrouter.ai/api/v1",
+          "openrouter_app_id": false,
+          "models": {"glm": {}}
+        },
+        "plain": {
+          "backend": "openai",
+          "url": "https://openrouter.ai/api/v1",
+          "models": {"glm": {}}
+        }
+      }
+    })"));
+
+    CHECK(config.Resolve(ModelRef{"closedrouter", "glm"})->provider.headers.empty());
+    CHECK(config.Resolve(ModelRef{"plain", "glm"})->provider.headers.empty());
+}
+
+TEST_CASE("a non-boolean openrouter_app_id is a named parse error", "[providers][attribution]") {
+    // "app_id" suggests a string; a typo'd value must fail HERE, not surface
+    // as an unexplained missing header on the wire.
+    CHECK_THROWS_AS(ParseProvidersConfig(nlohmann::json::parse(R"({
+      "providers": {
+        "closedrouter": {
+          "backend": "openai",
+          "url": "https://openrouter.ai/api/v1",
+          "openrouter_app_id": "minimal",
+          "models": {"glm": {}}
+        }
+      }
+    })")),
+                    std::runtime_error);
+}
+
 TEST_CASE("an opencode-shaped model's options fold into parameters, native keys winning "
           "per-key",
           "[providers][compat]") {
