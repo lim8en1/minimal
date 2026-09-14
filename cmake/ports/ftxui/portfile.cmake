@@ -16,6 +16,11 @@ vcpkg_from_github(
         # the perpetual 15 ms animation self-repost. Removes the constant
         # ~60 Hz wake cycle. (Applies after the frame-diff patch.)
         minimal-ftxui-event-loop.patch
+        # minimal-ftxui-dirty-rows patch: hash each row's cells and serialize
+        # only the rows that changed (Screen::ToStringRow) -- replaces the
+        # frame-diff patch's whole-screen serialize-then-compare. (Applies
+        # after the event-loop patch.)
+        minimal-ftxui-dirty-rows.patch
 )
 
 vcpkg_cmake_configure(
