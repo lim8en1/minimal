@@ -72,6 +72,19 @@ struct ChatRequest {
     std::optional<int> max_tokens;
     bool stream = false;
 
+    // The harness session id, set by the agent loop on every request it builds
+    // (compaction summarizer calls included). Empty means "unknown" -- tests
+    // and direct provider users -- and serializes nothing. Backends emit it
+    // when it carries a routing value: provider-openai as a top-level
+    // "session_id" body field, provider-anthropic as an "x-session-id" header
+    // (the real API ignores custom headers; OpenRouter accepts both and uses
+    // the value as its provider-sticky-routing key). Opt-out is per provider
+    // entry via "parameters": {"session_id": false}; a STRING "session_id"
+    // value in parameters passes through verbatim as a static routing key and
+    // outranks this field -- both are the user's explicit choice. Never
+    // persisted and never derived from the API key, so it carries no secret.
+    std::string session_id;
+
     // Arbitrary sampling/generation knobs passed through verbatim from the
     // resolved providers.json entry (temperature, top_p, reasoning_effort,
     // id_slot, ...). Structural fields above always win on serialize, so a
@@ -79,8 +92,9 @@ struct ChatRequest {
     // conversation or tool-calling mechanics. A few keys are CONSUMED by the
     // provider builders instead of passing through -- "cache_control" and
     // "cache_ttl" steer prompt-cache breakpoint emission (see
-    // provider-openai/openai_request.hpp and provider-anthropic) -- and are
-    // dropped from the wire like any other structural key.
+    // provider-openai/openai_request.hpp and provider-anthropic) and a
+    // boolean "session_id" toggles the session-id emission described above --
+    // and are dropped from the wire like any other structural key.
     nlohmann::json parameters = nlohmann::json::object();
 };
 

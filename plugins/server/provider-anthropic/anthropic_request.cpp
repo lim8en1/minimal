@@ -64,6 +64,18 @@ std::string CacheTtl(const nlohmann::json& parameters) {
 
 }  // namespace
 
+std::string SessionIdHeaderValue(const llm::ChatRequest& request) {
+    if (request.session_id.empty()) return {};
+    if (!request.parameters.is_object()) return request.session_id;
+    const auto it = request.parameters.find("session_id");
+    if (it == request.parameters.end()) return request.session_id;
+    if (it->is_boolean()) return it->get<bool>() ? request.session_id : std::string{};
+    // A string (or any other JSON value) passes through the body verbatim as
+    // a STATIC routing key -- OpenRouter's body form takes precedence over
+    // the header, so the header must not double it up.
+    return {};
+}
+
 nlohmann::json ToAnthropicTools(const std::vector<llm::ToolDefinition>& tools) {
     nlohmann::json out = nlohmann::json::array();
     for (const auto& tool : tools) {
@@ -109,10 +121,17 @@ std::string BuildRequestBody(const llm::ChatRequest& request, bool stream) {
     out += '{';
     bool first_key = true;
 
-    // 1. parameters first, verbatim minus structural names.
+    // 1. parameters first, verbatim minus structural names. A boolean
+    //    "session_id" is consumed like cache_ttl: the session's routing key
+    //    rides the x-session-id HEADER (see AnthropicProvider), and a bare
+    //    JSON true reaching the body would be a bogus top-level field the
+    //    real API rejects. A string value passes through verbatim -- a static
+    //    routing key the user chose to put on the body (OpenRouter's body
+    //    form takes precedence over the header there).
     if (request.parameters.is_object()) {
         for (const auto& [key, value] : request.parameters.items()) {
             if (StructuralKeys().count(key) != 0) continue;
+            if (key == "session_id" && value.is_boolean()) continue;
             if (!first_key) out += ',';
             first_key = false;
             AppendStringValue(out, key);

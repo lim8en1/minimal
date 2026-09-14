@@ -19,7 +19,8 @@ namespace {
 // leave precedence to the receiving parser, which is not a guarantee.
 // "cache_control" / "cache_ttl" are consumed by the builder (see
 // CacheControlEnabled / CacheTtl) and must never leak onto the wire, same rule
-// as provider-anthropic's treatment of "cache_ttl".
+// as provider-anthropic's treatment of "cache_ttl"; a boolean "session_id" is
+// consumed the same way (see SessionIdRoutingValue) but a string passes through.
 const std::set<std::string_view>& StructuralKeys() {
     static const std::set<std::string_view> keys = {"model",    "messages",   "stream",
                                                     "tools",    "tool_choice", "max_tokens",
@@ -80,6 +81,18 @@ struct WireMessage {
 };
 
 }  // namespace
+
+std::string SessionIdRoutingValue(const llm::ChatRequest& request) {
+    if (request.session_id.empty()) return {};
+    if (!request.parameters.is_object()) return request.session_id;
+    const auto it = request.parameters.find("session_id");
+    if (it == request.parameters.end()) return request.session_id;
+    if (it->is_boolean()) return it->get<bool>() ? request.session_id : std::string{};
+    // A string (or any other JSON value) passes through the parameters loop
+    // verbatim below as a STATIC routing key -- emitting the dynamic one too
+    // would put duplicate keys on the wire.
+    return {};
+}
 
 std::string JoinResultContent(const std::vector<llm::ToolResultContentBlock>& content) {
     std::string joined;
@@ -168,6 +181,11 @@ std::string BuildRequestBody(const llm::ChatRequest& request, bool stream,
         for (const auto& [key, value] : request.parameters.items()) {
             if (StructuralKeys().count(key) != 0) continue;
             if (key == cap_field) continue;
+            // A boolean "session_id" is consumed -- true keeps the dynamic
+            // per-session routing key, false opts out -- and must never leak
+            // onto the wire as a bare JSON true (see SessionIdRoutingValue).
+            // A string value passes through verbatim as a STATIC routing key.
+            if (key == "session_id" && value.is_boolean()) continue;
             if (!first_key) out += ',';
             first_key = false;
             AppendStringValue(out, key);
@@ -348,6 +366,17 @@ std::string BuildRequestBody(const llm::ChatRequest& request, bool stream,
         out += ',';
         AppendKey(out, cap_field);
         out += std::to_string(*request.max_tokens);
+    }
+
+    // The sticky-routing key, default ON whenever the request carries one
+    // (agent loop, compaction summarizer included) -- see
+    // SessionIdRoutingValue. Byte-stable position: after the cap, before
+    // stream_options, so a session's serialized prefix -- which OpenRouter
+    // -side caching keys on -- does not shift turn to turn.
+    if (const std::string session_id = SessionIdRoutingValue(request); !session_id.empty()) {
+        out += ',';
+        AppendKey(out, "session_id");
+        AppendStringValue(out, session_id);
     }
 
     if (stream) {

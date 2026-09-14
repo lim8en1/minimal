@@ -34,7 +34,8 @@ std::string GuardedBuildRequestBody(const llm::ChatRequest& request, bool stream
 
 }  // namespace
 
-net::HttpRequest AnthropicProvider::BuildHttpRequest(std::string body, bool streaming) const {
+net::HttpRequest AnthropicProvider::BuildHttpRequest(std::string body, bool streaming,
+                                                     const std::string& session_id) const {
     net::HttpRequest request;
     std::string base = config_.base_url;
     while (!base.empty() && base.back() == '/') base.pop_back();
@@ -48,6 +49,11 @@ net::HttpRequest AnthropicProvider::BuildHttpRequest(std::string body, bool stre
     if (!config_.api_key.empty()) {
         request.headers.push_back({"x-api-key", config_.api_key});
     }
+    // The session's provider-sticky-routing key, default ON whenever the
+    // request carries one (agent loop, compaction summarizer included).
+    if (!session_id.empty()) {
+        request.headers.push_back({"x-session-id", session_id});
+    }
     for (const auto& [name, value] : config_.headers) {
         request.headers.push_back({name, value});
     }
@@ -59,8 +65,12 @@ net::HttpRequest AnthropicProvider::BuildHttpRequest(std::string body, bool stre
 }
 
 llm::ChatResponse AnthropicProvider::Complete(const llm::ChatRequest& request) {
-    net::HttpRequest http_request =
-        BuildHttpRequest(GuardedBuildRequestBody(request, /*stream=*/false), /*streaming=*/false);
+    // The session's sticky-routing key, default ON whenever the request
+    // carries one (agent loop, compaction summarizer included) -- see
+    // SessionIdHeaderValue for the parameters contract.
+    const std::string session_id = SessionIdHeaderValue(request);
+    net::HttpRequest http_request = BuildHttpRequest(
+        GuardedBuildRequestBody(request, /*stream=*/false), /*streaming=*/false, session_id);
 
     net::HttpResponse http_response;
     try {
@@ -88,8 +98,9 @@ llm::ChatResponse AnthropicProvider::Complete(const llm::ChatRequest& request) {
 
 llm::ChatResponse AnthropicProvider::StreamComplete(const llm::ChatRequest& request,
                                                     const llm::StreamEventSink& sink) {
-    net::HttpRequest http_request =
-        BuildHttpRequest(GuardedBuildRequestBody(request, /*stream=*/true), /*streaming=*/true);
+    const std::string session_id = SessionIdHeaderValue(request);
+    net::HttpRequest http_request = BuildHttpRequest(
+        GuardedBuildRequestBody(request, /*stream=*/true), /*streaming=*/true, session_id);
 
     AnthropicStreamReassembler reassembler;
     net::SseParser sse_parser;

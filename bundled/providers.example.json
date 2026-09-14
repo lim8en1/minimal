@@ -75,6 +75,8 @@
       "url": "https://openrouter.ai/api/v1",
       "api_key_env": "OPENROUTER_API_KEY",
 
+      "//2": "Every request (turns, subagents, compaction) carries the harness session id as a top-level \"session_id\" by default. OpenRouter uses it as its sticky-routing key -- the whole session lands on the provider endpoint whose prompt cache is warm, and the requests group in the Logs \"Sessions\" view. A backend that rejects unknown body fields opts out with \"parameters\": { \"session_id\": false }; a string value passes through verbatim as a static routing key. provider-anthropic sends the same value as the x-session-id header instead.",
+
       "models": {
         "anthropic/claude-opus-5": {
           "//": "parameters are spread verbatim into the request body, so OpenRouter's provider-routing field passes through untouched: this pins the model to those upstream providers (other keys: ignore, order, allow_fallbacks).",

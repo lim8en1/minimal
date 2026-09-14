@@ -59,6 +59,21 @@ namespace minimal::provider_anthropic {
 // it.)
 std::string BuildRequestBody(const llm::ChatRequest& request, bool stream);
 
+// SESSION ROUTING (default-on): the effective `x-session-id` header value for
+// the request ("" = omit). OpenRouter accepts the header on every endpoint
+// and uses it as its provider-sticky-routing key (whole session pinned to the
+// endpoint whose prompt cache is warm, requests grouped in its logs); the
+// real Anthropic API ignores custom headers and rejects unknown top-level
+// body fields, which is why the HEADER is this backend's channel rather than
+// provider-openai's body form. The value rides llm::ChatRequest::session_id
+// (set by the agent loop from the harness session id, compaction summarizer
+// included). A boolean `parameters` "session_id" is CONSUMED by
+// BuildRequestBody (true keeps the dynamic value, false opts out); a STRING
+// value passes through the body verbatim as a static routing key and
+// suppresses the header, so OpenRouter's body-over-header precedence lands
+// exactly one value on the wire.
+std::string SessionIdHeaderValue(const llm::ChatRequest& request);
+
 // Tool definitions and tool_choice are small and structured; nlohmann is the
 // right tool for them, exposed individually so each translation rule gets
 // its own focused test -- same split as provider-openai's equivalents.

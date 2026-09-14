@@ -49,6 +49,19 @@ in providers.json (see `bundled/providers.example.json`):
 Provider-level values (`max_tokens`, `parameters`, `context_window_tokens`)
 are defaults for every model below; a model may override any of them.
 
+### Session routing (`session_id`)
+
+The harness session id is sent as a top-level `session_id` body field on every
+request by default (agent turns, subagents, and the compaction summarizer
+alike). Backends that use it for sticky routing — OpenRouter routes the whole
+session to the provider endpoint whose prompt cache is warm, and groups the
+requests in its Logs "Sessions" view — benefit automatically; backends that
+ignore unknown body fields are unaffected. To turn it off (e.g. an
+OpenAI-compatible backend that rejects unknown fields), set
+`"parameters": { "session_id": false }` at provider or model level; a STRING
+`session_id` in `parameters` passes through verbatim as a static routing key
+instead of the per-session one. See `bundled/providers.example.json`.
+
 ## Notes
 
 - Thread-safety contract: instances are shared across concurrent sessions, so

@@ -53,6 +53,15 @@ struct CompactionRequest {
     nlohmann::json parameters = nlohmann::json::object();
     std::optional<int> max_tokens;
 
+    // The session id the compacted conversation belongs to, forwarded onto the
+    // summarizer's ChatRequest so the compaction call sticks to the same
+    // provider-routing key as the session's own traffic (OpenRouter
+    // session_id). Emission still respects the same "parameters":
+    // {"session_id": false} opt-out the rest of the session's requests honor
+    // -- it rides in `parameters` above, whichever entry (the session's own or
+    // small_model's) actually serves the call.
+    std::string session_id;
+
     // The backend's count for the last real request, or 0 if it reported none.
     std::int64_t last_reported_input_tokens = 0;
     // Everything currently in context, used only for the fallback estimate when

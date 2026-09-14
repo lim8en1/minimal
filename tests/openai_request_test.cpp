@@ -426,3 +426,89 @@ TEST_CASE("BuildRequestBody: cache_ttl sets the breakpoints' ttl, same key as pr
     const nlohmann::json no_ttl = ParseBody(default_ttl_fixture.request);
     CHECK(no_ttl["messages"][0]["content"][0]["cache_control"] == nlohmann::json({{"type", "ephemeral"}}));
 }
+
+TEST_CASE("BuildRequestBody: session_id rides the body by default (OpenRouter sticky routing)",
+          "[openai_request][session]") {
+    Fixture fixture = BaseRequest();
+    fixture.request.session_id = "01ABCDEF";
+
+    const nlohmann::json body = ParseBody(fixture.request);
+
+    CHECK(body["session_id"] == "01ABCDEF");
+}
+
+TEST_CASE("BuildRequestBody: an empty session_id serializes nothing", "[openai_request][session]") {
+    // Default ChatRequest and direct provider users carry no id; the body
+    // must stay byte-identical to the historical form.
+    Fixture fixture = BaseRequest();
+    const nlohmann::json body = ParseBody(fixture.request);
+    CHECK_FALSE(body.contains("session_id"));
+}
+
+TEST_CASE("BuildRequestBody: session_id false in parameters opts out, boolean never leaks",
+          "[openai_request][session]") {
+    Fixture fixture = BaseRequest();
+    fixture.request.session_id = "01ABCDEF";
+    fixture.request.parameters = {{"session_id", false}};
+
+    const std::string text = BuildRequestBody(fixture.request, /*stream=*/false);
+    CHECK(text.find("session_id") == std::string::npos);
+
+    // Explicit true is the same as absent: dynamic value on, boolean consumed.
+    Fixture on = BaseRequest();
+    on.request.session_id = "01ABCDEF";
+    on.request.parameters = {{"session_id", true}};
+    const nlohmann::json body = ParseBody(on.request);
+    CHECK(body["session_id"] == "01ABCDEF");
+    const std::string on_text = BuildRequestBody(on.request, /*stream=*/false);
+    REQUIRE(on_text.find("\"session_id\"") != std::string::npos);
+    std::size_t occurrences = 0;
+    for (std::size_t pos = on_text.find("\"session_id\""); pos != std::string::npos;
+         pos = on_text.find("\"session_id\"", pos + 1)) {
+        ++occurrences;
+    }
+    CHECK(occurrences == 1);
+}
+
+TEST_CASE("BuildRequestBody: a string session_id passes through verbatim as a static key",
+          "[openai_request][session]") {
+    // The static form outranks (and suppresses) the dynamic per-session one:
+    // emitting both would put duplicate keys on the wire.
+    Fixture fixture = BaseRequest();
+    fixture.request.session_id = "01ABCDEF";
+    fixture.request.parameters = {{"session_id", "my-static-key"}};
+
+    const std::string text = BuildRequestBody(fixture.request, /*stream=*/false);
+
+    std::size_t occurrences = 0;
+    for (std::size_t pos = text.find("\"session_id\""); pos != std::string::npos;
+         pos = text.find("\"session_id\"", pos + 1)) {
+        ++occurrences;
+    }
+    CHECK(occurrences == 1);
+    CHECK(nlohmann::json::parse(text)["session_id"] == "my-static-key");
+}
+
+TEST_CASE("SessionIdRoutingValue: the parameters contract", "[openai_request][session]") {
+    llm::ChatRequest absent;
+    absent.session_id = "01ABCDEF";
+    CHECK(SessionIdRoutingValue(absent) == "01ABCDEF");
+
+    llm::ChatRequest empty;
+    CHECK(SessionIdRoutingValue(empty).empty());
+
+    llm::ChatRequest off;
+    off.session_id = "01ABCDEF";
+    off.parameters = {{"session_id", false}};
+    CHECK(SessionIdRoutingValue(off).empty());
+
+    llm::ChatRequest on;
+    on.session_id = "01ABCDEF";
+    on.parameters = {{"session_id", true}};
+    CHECK(SessionIdRoutingValue(on) == "01ABCDEF");
+
+    llm::ChatRequest stat;
+    stat.session_id = "01ABCDEF";
+    stat.parameters = {{"session_id", "my-static-key"}};
+    CHECK(SessionIdRoutingValue(stat).empty());
+}

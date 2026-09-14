@@ -393,6 +393,10 @@ llm::ChatRequest AgentLoop::BuildChatRequest() const {
     request.model = preset_.provider.model_name;
     request.parameters = preset_.parameters;
     request.max_tokens = preset_.max_tokens;
+    // The harness session id, riding every request this loop builds -- the
+    // opt-out (parameters "session_id": false) is the provider builder's
+    // decision, made per request from the parameters riding alongside.
+    request.session_id = session_.session_id;
     request.stream = true;
     return request;
 }
@@ -703,6 +707,9 @@ std::optional<std::size_t> AgentLoop::Compact(std::string_view trigger,
         prompt_override.empty() ? preset_.compression_prompt : prompt_override;
     params.parameters = preset_.parameters;
     params.max_tokens = preset_.max_tokens;
+    // The summarizer call sticks to the same routing key as the conversation
+    // it summarizes -- see CompactionRequest::session_id.
+    params.session_id = session_.session_id;
     params.last_reported_input_tokens = tokens_.last_input_tokens();
     params.full_history = &history_;
     // The session's logger, not DefaultLogger: compaction lines belong beside

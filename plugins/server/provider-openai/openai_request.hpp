@@ -55,6 +55,21 @@ namespace minimal::provider_openai {
 std::string BuildRequestBody(const llm::ChatRequest& request, bool stream,
                              const std::string& max_tokens_field = "max_tokens");
 
+// SESSION ROUTING (default-on): the effective top-level `session_id` body
+// value for the request ("" = omit). OpenRouter uses the field as its
+// provider-sticky-routing key -- the whole session lands on the endpoint
+// whose prompt cache is warm, and the requests group in its Logs "Sessions"
+// view; backends that ignore unknown body fields are unaffected. The value
+// rides llm::ChatRequest::session_id (set by the agent loop from the harness
+// session id, compaction summarizer included). A boolean `parameters`
+// "session_id" is CONSUMED (true keeps the dynamic value, false opts out for
+// backends that reject unknown body fields); a STRING value is a static
+// routing key that passes through the parameters loop verbatim and suppresses
+// the dynamic one, so the wire never carries duplicate keys. Exposed because
+// BuildRequestBody's output is asserted through it and the decision deserves
+// its own focused tests, like ToOpenAiTools above.
+std::string SessionIdRoutingValue(const llm::ChatRequest& request);
+
 // Tool definitions and tool_choice are small and structured; nlohmann is the
 // right tool for them, and they are exposed individually so each translation
 // rule gets its own focused test.

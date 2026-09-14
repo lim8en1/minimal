@@ -329,3 +329,54 @@ TEST_CASE("BuildRequestBody: cache_ttl rejects values the API would refuse",
     ok.request.parameters = {{"cache_ttl", "1h"}};
     CHECK_NOTHROW(BuildRequestBody(ok.request, false));
 }
+
+TEST_CASE("BuildRequestBody: a boolean session_id is consumed, never a body field",
+          "[anthropic_request][session]") {
+    // The session's routing key rides the x-session-id HEADER on this backend;
+    // the real API rejects unknown top-level body fields, so neither the
+    // explicit true nor the opting-out false may leak through as a bogus one.
+    Fixture on = BaseRequest();
+    on.request.parameters = {{"session_id", true}};
+    CHECK_FALSE(ParseBody(on.request).contains("session_id"));
+
+    Fixture off = BaseRequest();
+    off.request.parameters = {{"session_id", false}};
+    CHECK_FALSE(ParseBody(off.request).contains("session_id"));
+}
+
+TEST_CASE("BuildRequestBody: a string session_id passes through verbatim as a static key",
+          "[anthropic_request][session]") {
+    // The static form is the user's explicit choice to put a routing key on
+    // the body; OpenRouter's body value would take precedence over the header.
+    Fixture fixture = BaseRequest();
+    fixture.request.session_id = "01ABCDEF";
+    fixture.request.parameters = {{"session_id", "my-static-key"}};
+
+    const nlohmann::json body = ParseBody(fixture.request);
+
+    CHECK(body["session_id"] == "my-static-key");
+}
+
+TEST_CASE("SessionIdHeaderValue: the parameters contract", "[anthropic_request][session]") {
+    llm::ChatRequest absent;
+    absent.session_id = "01ABCDEF";
+    CHECK(SessionIdHeaderValue(absent) == "01ABCDEF");
+
+    llm::ChatRequest empty;
+    CHECK(SessionIdHeaderValue(empty).empty());
+
+    llm::ChatRequest off;
+    off.session_id = "01ABCDEF";
+    off.parameters = {{"session_id", false}};
+    CHECK(SessionIdHeaderValue(off).empty());
+
+    llm::ChatRequest on;
+    on.session_id = "01ABCDEF";
+    on.parameters = {{"session_id", true}};
+    CHECK(SessionIdHeaderValue(on) == "01ABCDEF");
+
+    llm::ChatRequest stat;
+    stat.session_id = "01ABCDEF";
+    stat.parameters = {{"session_id", "my-static-key"}};
+    CHECK(SessionIdHeaderValue(stat).empty());
+}

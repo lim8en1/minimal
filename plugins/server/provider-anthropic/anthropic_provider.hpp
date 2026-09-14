@@ -20,7 +20,8 @@ public:
                                      const llm::StreamEventSink& sink) override;
 
 private:
-    net::HttpRequest BuildHttpRequest(std::string body, bool streaming) const;
+    net::HttpRequest BuildHttpRequest(std::string body, bool streaming,
+                                      const std::string& session_id) const;
 
     llm::ProviderConfig config_;
     net::HttpClient http_;  // stateless -- see HttpClient's own contract

@@ -369,6 +369,7 @@ struct ChatRequest {
     std::vector<ToolDefinition> tools;
     ToolChoiceSpec tool_choice;
     std::string model; std::optional<int> max_tokens; bool stream = false;
+    std::string session_id;  // harness session id; empty serializes nothing
     nlohmann::json parameters = nlohmann::json::object();  // arbitrary sampling/generation knobs
         // (temperature, top_p, reasoning_effort, id_slot, ...) sourced from the resolved
         // providers.json entry -- opencode-style pass-through rather than a named C++ field
@@ -380,6 +381,8 @@ struct ChatResponse { std::string id, model; std::vector<ContentBlock> content; 
 ```
 
 **`parameters` merge order**: `parameters`'s keys are written into the outgoing JSON body first, then the structural fields (`model`, `messages`, `tools`, `tool_choice`, `stream`) are always (re)written from `ChatRequest`'s own members afterward, unconditionally overwriting anything of the same name. A misconfigured `providers.json` `parameters` object can tweak generation behavior but can never corrupt conversation/tool-calling mechanics.
+
+**Session routing** — every `ChatRequest` the loop builds (compaction summarizer included; each subagent carries its own id) rides the harness session id, and the providers emit it *default-on* so OpenRouter-style sticky routing works with zero config: the routing provider pins the whole session to the endpoint whose prompt cache is warm and groups the requests in its logs. The `openai` backend sends a top-level `session_id` body field; the `anthropic` backend sends an `x-session-id` header, because the real API rejects unknown body fields but ignores custom headers. `"parameters": {"session_id": false}` opts a provider entry out (strict OpenAI-compatible backends that reject unknown body fields), and a *string* value passes through the body verbatim as a static routing key; the boolean form is consumed and never reaches the wire, exactly like `cache_control`.
 
 **Streaming** — `StreamEvent` variant modeled at Anthropic's event granularity, not OpenAI's flatter chunk shape; the OpenAI provider absorbs the extra bookkeeping (reassembling tool-call fragments keyed by index) so a future Anthropic provider is a near-transliteration:
 

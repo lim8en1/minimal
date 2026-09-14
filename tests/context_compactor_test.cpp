@@ -85,6 +85,28 @@ TEST_CASE("compact_messages sends the prompt as system and passes messages throu
     CHECK(request.stream);
 }
 
+TEST_CASE("compact_messages forwards the session id onto the summarizer's request",
+          "[compactor][session_id]") {
+    // OpenRouter sticky routing: the compaction call should group with the
+    // session's own traffic, whatever entry (own model or small_model) serves
+    // it -- see CompactionRequest::session_id.
+    FakeLlmProvider provider;
+    provider.PushResponse(TextResponse("SUMMARY TEXT"));
+
+    auto params = Params();
+    params.session_id = "s1";
+    REQUIRE(agent::compact_messages(MixedHistory(), provider, params).has_value());
+
+    REQUIRE(provider.requests().size() == 1);
+    CHECK(provider.requests().front().session_id == "s1");
+
+    // No id, no field: the default CompactionRequest serializes nothing.
+    FakeLlmProvider bare;
+    bare.PushResponse(TextResponse("SUMMARY TEXT"));
+    REQUIRE(agent::compact_messages(MixedHistory(), bare, Params()).has_value());
+    CHECK(bare.requests().front().session_id.empty());
+}
+
 TEST_CASE("context_tokens_before falls back to a bytes/4 estimate when no usage was reported",
           "[compactor]") {
     FakeLlmProvider provider;

@@ -252,6 +252,22 @@ TEST_CASE("a single turn ends and persists user + assistant", "[agent_loop]") {
     CHECK(h.store.messages[1].role == llm::Role::Assistant);
 }
 
+TEST_CASE("every request the loop builds carries the harness session id",
+          "[agent_loop][session_id]") {
+    // The provider-side emission decides on/off per entry (parameters), but
+    // the DECISION needs the value on the request: an opted-in OpenRouter
+    // entry gets its whole session -- every tool round and retry alike --
+    // pinned to one sticky-routing key.
+    Harness h;
+    h.provider.PushResponse(TextResponse("hello"));
+    h.Build();
+
+    (void)h.loop->RunTurn(UserText("hi"));
+
+    REQUIRE(h.provider.requests().size() == 1);
+    CHECK(h.provider.requests().front().session_id == "s1");
+}
+
 TEST_CASE("assistant rows are attributed to the effective preset; others are not",
           "[agent_loop][attribution]") {
     Harness h;
@@ -1475,6 +1491,9 @@ TEST_CASE("small_model: the summarizer alone runs on the alternate provider, and
     REQUIRE(small->requests().size() == 1);
     CHECK(small->requests()[0].model == "small-model");
     CHECK(*small->requests()[0].system == "DEFAULT PROMPT");
+    // The summarizer sticks to the session's own routing key (OpenRouter
+    // session_id), even though the small entry supplies its own parameters.
+    CHECK(small->requests()[0].session_id == "s1");
     // The session's own provider answered every turn and never saw a
     // compaction request. Under the reference-assignment predecessor, this
     // call ran the small provider's copy-assignment THROUGH the main

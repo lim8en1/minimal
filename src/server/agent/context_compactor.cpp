@@ -107,6 +107,10 @@ std::optional<CompactionResult> compact_messages(
     // and an absent max_tokens is worse than inconsistent -- see the header.
     request.parameters = params.parameters;
     request.max_tokens = params.max_tokens;
+    // Same routing key as the conversation being summarized -- whether the
+    // call is served by the session's own provider or small_model, emission
+    // is decided by the parameters riding this request (see chat.hpp).
+    request.session_id = params.session_id;
 
     llm::ChatResponse response;
     try {

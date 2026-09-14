@@ -37,6 +37,7 @@ in providers.json (see `bundled/providers.example.json`):
 | `api_key_env` | Environment variable resolved once at startup; preferred over an inline `api_key` (never both). |
 | `max_tokens` | REQUIRED (not optional the way OpenAI treats it): set it at provider or model level, or every request fails. |
 | `parameters.cache_ttl` | `"5m"` (the default; omit it) or `"1h"` — see ARCHITECTURE.md's prompt-caching notes on when the 1h write premium pays for itself. |
+| `parameters.session_id` | Default on: the harness session id rides every request as the `x-session-id` header (OpenRouter's sticky-routing key; the real Anthropic API ignores custom headers and rejects unknown body fields, so the header is the only safe channel). `false` opts out; a string value passes through on the body verbatim as a static routing key. |
 | `models.<key>` | The KEY is sent on the wire verbatim as the request's `model` field — it must be the backend's real model id, not your own label. |
 
 ## Notes
