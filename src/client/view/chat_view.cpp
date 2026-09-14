@@ -646,20 +646,23 @@ ftxui::Element ChatView::Render(const SessionState::Snapshot& snapshot,
             // expanded thinking row (core_registrations.cpp's
             // RenderThinking). No LiveTextStreamSlot and no markdown engine:
             // thinking renders verbatim, so a debounced reparse view would
-            // only add latency -- this reads the segment text directly, the
-            // same way RenderLiveToolRow reads its state.
-            if (segment.text.empty()) continue;
+            // only add latency -- this reads the segment's published text
+            // view (state.hpp LiveTurnSegment::Text), the same way
+            // RenderLiveToolRow reads its state.
+            if (segment.Text().empty()) continue;
             // paragraph() word-wraps the WHOLE accumulated text; skip redoing
             // that on a repaint tick with no new delta (a mouse move, a
             // keystroke elsewhere) by reusing the cached Element when this
             // segment's text hasn't changed since the last render.
+            const std::string& thinking_text = segment.Text();
             ftxui::Element thinking_body;
-            if (i < thinking_render_cache_.size() && thinking_render_cache_[i].first == segment.text) {
+            if (i < thinking_render_cache_.size() &&
+                thinking_render_cache_[i].first == thinking_text) {
                 thinking_body = thinking_render_cache_[i].second;
             } else {
-                thinking_body = paragraph(segment.text) | color(theme_.ColorFor("thinking"));
+                thinking_body = paragraph(thinking_text) | color(theme_.ColorFor("thinking"));
                 if (i >= thinking_render_cache_.size()) thinking_render_cache_.resize(i + 1);
-                thinking_render_cache_[i] = {segment.text, thinking_body};
+                thinking_render_cache_[i] = {thinking_text, thinking_body};
             }
             column.push_back(WithGutter(
                 vbox({text("thinking") | color(theme_.ColorFor("thinking")), thinking_body}),

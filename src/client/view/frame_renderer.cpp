@@ -175,7 +175,7 @@ ftxui::Element FrameRenderer::Render() {
                                    snap.state == SessionStateKind::Waiting;
             const bool fresh_session =
                 (!snap.scrollback_page || snap.scrollback_page->empty()) &&
-                snap.streaming_text.empty() && !snap.has_earlier_messages &&
+                !snap.has_streaming_text && !snap.has_earlier_messages &&
                 snap.pending_user_text.empty() && !turn_busy;
             // Start views are SESSION-keyed like the status segments (a
             // checklist/cost view caches per session) -- the frame's focused

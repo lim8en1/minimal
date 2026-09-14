@@ -90,7 +90,10 @@ SessionState::Snapshot TabMaintenance::Maintain(const std::string& tab_id,
     for (std::size_t i = 0; i < snap.live_segments.size(); ++i) {
         if (snap.live_segments[i].kind != LiveTurnSegment::Kind::Text) continue;
         LiveTextStreamSlot& slot = ui.live_text_streams[i];
-        const std::string& text = snap.live_segments[i].text;
+        // The snapshot's copy-on-publish view (state.hpp LiveTurnSegment) --
+        // shared with every other consumer of this segment's current text;
+        // only the actively-appending segment republishes per delta.
+        const std::string& text = snap.live_segments[i].Text();
         // A plugin MarkdownEngine is not trusted to return normally: a
         // throw here used to kill the whole TUI mid-turn. MakeStream()
         // throwing leaves slot.view null -- the guard above naturally

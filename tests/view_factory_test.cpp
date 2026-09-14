@@ -1179,8 +1179,9 @@ TEST_CASE("chat view: scrolling up mid-turn stays put while the streaming block 
     // TabMaintenance::Maintain does.
     std::vector<LiveTextStreamSlot> streams(1);
     const auto append_segment = [&](const std::string& text) {
-        snapshot.live_segments = {LiveTurnSegment{.kind = LiveTurnSegment::Kind::Text,
-                                                  .text = text}};
+        snapshot.live_segments = {LiveTurnSegment{
+            .kind = LiveTurnSegment::Kind::Text,
+            .text_view = std::make_shared<const std::string>(text)}};
         if (!streams[0].view) streams[0].view = engine.MakeStream();
         streams[0].view->AppendDelta(std::string_view(text).substr(streams[0].seen));
         streams[0].seen = text.size();
@@ -1230,9 +1231,11 @@ TEST_CASE("chat view: live text and tool activity render interleaved, "
     snap.session_id = "session-interleave";
     snap.transcript_version = 1;
     snap.live_segments = {
-        LiveTurnSegment{.kind = LiveTurnSegment::Kind::Text, .text = "opening remarks"},
+        LiveTurnSegment{.kind = LiveTurnSegment::Kind::Text,
+                        .text_view = std::make_shared<const std::string>("opening remarks")},
         LiveTurnSegment{.kind = LiveTurnSegment::Kind::Tool, .tool_use_id = "call-1"},
-        LiveTurnSegment{.kind = LiveTurnSegment::Kind::Text, .text = "closing remarks"},
+        LiveTurnSegment{.kind = LiveTurnSegment::Kind::Text,
+                        .text_view = std::make_shared<const std::string>("closing remarks")},
     };
     ToolExecutionState tool;
     tool.tool_use_id = "call-1";
@@ -1316,7 +1319,8 @@ TEST_CASE("chat view: a throwing live markdown stream renders a fallback, not a 
     snap.session_id = "session-stream-throws";
     snap.transcript_version = 1;
     snap.live_segments = {
-        LiveTurnSegment{.kind = LiveTurnSegment::Kind::Text, .text = "partial"},
+        LiveTurnSegment{.kind = LiveTurnSegment::Kind::Text,
+                        .text_view = std::make_shared<const std::string>("partial")},
     };
     std::vector<LiveTextStreamSlot> streams(1);
     streams[0].view = std::make_unique<ThrowingStream>();
@@ -1957,13 +1961,19 @@ TEST_CASE("chat view: a growing thinking segment renders its full text, not a st
     snap.transcript_version = 1;
     LiveTurnSegment segment;
     segment.kind = LiveTurnSegment::Kind::Thinking;
-    segment.text = "short reasoning";
+    // Snapshots carry the segment's copy-on-publish view (state.hpp
+    // LiveTurnSegment); the working `text` field is SessionState-internal.
+    segment.text_view = std::make_shared<const std::string>("short reasoning");
     snap.live_segments = {segment};
 
     const auto first = RenderElement(view.Render(snap), /*width=*/80, /*height=*/10);
     CHECK(first.find("short reasoning") != std::string::npos);
 
-    snap.live_segments[0].text += " plus a lot more reasoning appended afterward";
+    // A republished (grown) view must be a cache MISS, not silently keep
+    // showing the shorter, earlier version.
+    snap.live_segments[0].text_view =
+        std::make_shared<const std::string>(
+            "short reasoning plus a lot more reasoning appended afterward");
     const auto second = RenderElement(view.Render(snap), /*width=*/80, /*height=*/10);
     CHECK(second.find("plus a lot more reasoning appended afterward") != std::string::npos);
 }

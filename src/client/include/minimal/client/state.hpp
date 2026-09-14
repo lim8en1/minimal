@@ -114,10 +114,22 @@ struct LiveTurnSegment {
     // turn the persisted page covers while leaving a newer turn's live text
     // alone -- without the stamp there is no way to tell them apart.
     uint64_t turn_seq = 0;
-    // Kind::Text, Kind::Thinking: this segment's OWN accumulated text (one
-    // content block's worth) -- NOT the whole turn's text, unlike
-    // Snapshot::streaming_text.
+    // WORKING accumulation -- SessionState-internal only: appended by the
+    // delta paths, prefix-matched by the retirement logic. Never copied to a
+    // snapshot (it is the whole turn's O(text) churn -- see TakeSnapshot);
+    // TakeSnapshot publishes `text_view` below instead.
     std::string text;
+    // Copy-on-publish view, the same pattern as ToolExecutionState's
+    // buffered_output (state.hpp): WHAT SNAPSHOTS CARRY. Republished -- one
+    // copy of THIS segment's accumulated text -- only when the segment
+    // changed since the last deep snapshot, so a turn's settled segments
+    // share their view across every wire event that changes nothing but the
+    // newest one, and the flat per-event copies are gone. Null for Tool
+    // markers (which carry no text) and for empty segments.
+    // mutable: publishing happens inside TakeSnapshot's segment copy, exactly
+    // like the tool-output cache inside CopyToolsLocked.
+    mutable std::shared_ptr<const std::string> text_view;
+    mutable bool text_dirty = true;
     // True once `text` hit SessionState::kStreamingTextCapBytes: further
     // deltas for THIS segment are dropped (the truncation marker inside
     // `text` was appended once). The transcript itself is authoritative --
@@ -128,6 +140,14 @@ struct LiveTurnSegment {
     // id at render time; this struct carries no tool state of its own so
     // ToolExecutionState stays the single source of truth for it.
     std::string tool_use_id;
+
+    // Snapshot-facing read of this segment's text: the published view when
+    // one is carried, empty when not (Tool markers, empty segments). Callers
+    // must treat the reference as valid only for the snapshot's lifetime.
+    const std::string& Text() const {
+        static const std::string kEmpty;
+        return text_view ? *text_view : kEmpty;
+    }
 };
 
 // ============================================================================
@@ -249,31 +269,21 @@ public:
         // show one line: the OLDEST pending entry's text.
         std::string pending_user_text;
 
-        // Streaming assistant response (partial markdown building up). The
-        // FLAT concatenation of every live_segments Text entry (blocks
-        // joined by a blank line, see AppendStreamingText) -- kept for
-        // consumers that only care "is anything streaming" or need the
-        // total text as one string (scrollback_refresh.cpp's refresh-latch
-        // check, frame_renderer.cpp's fresh-session check), and for
-        // TabMaintenance to diff against for the per-turn refresh-eligible
-        // check. The ORDERED view a chat surface actually renders from is
-        // live_segments below (track C4) -- streaming_text alone lost
-        // ordering relative to tool calls that happened between its blocks.
-        std::string streaming_text;          // empty when not streaming
-        // Live thinking content (ThinkingDeltaEvent deltas, flat like
-        // streaming_text). Accumulated so a thinking turn loses NOTHING
-        // on the live path -- before this field existed, thinking deltas were
-        // dropped client-side and materialized only in the turn-end refetch,
-        // a visible content jump. The ORDERED live view of the same deltas
-        // is the Thinking entries of live_segments below; this flat string
-        // stays for status/wording consumers. Cleared at exactly the same
-        // sites as streaming_text (ClearStreaming / ClearStreamingIfCurrentTurn
-        // / OnResyncRequired / OnSessionRewound).
-        std::string streaming_thinking_text;  // empty when not streaming
+        // "Is anything streaming?" -- the only thing the flat accumulated
+        // text was ever good for on the snapshot path (frame_renderer.cpp's
+        // fresh-session check). The flat text itself stopped being copied
+        // into every deep snapshot: it duplicates live_segments' text (track
+        // C4), it changed on every delta, and the per-event deep copy of a
+        // growing stream was pure churn. The internal flat accumulation
+        // (AppendStreamingText's block joins, the retirement matching) still
+        // lives in SessionState; tests read it via FlatStreamingText().
+        bool has_streaming_text = false;
         bool is_streaming_finalized = false;
         // This turn's live content in arrival order (LiveTurnSegment above).
-        // Empty exactly when streaming_text is (same clear sites:
-        // ClearStreaming, OnResyncRequired).
+        // Empty exactly when has_streaming_text is false AND no tool/thinking
+        // segment is live (same clear sites: ClearStreaming, OnResyncRequired).
+        // Each segment's text rides its copy-on-publish `text_view` (see the
+        // struct) -- NOT a per-event deep copy.
         std::vector<LiveTurnSegment> live_segments;
 
         // Pending modals
@@ -561,6 +571,14 @@ public:
     // persisted row -- otherwise the same content would render twice.
     void ClearStreaming();
 
+    // Test/debug seam: the FLAT accumulated text (AppendStreamingText's
+    // block joins) under the state lock. The snapshot stopped carrying it
+    // (see Snapshot::has_streaming_text -- the per-event deep copy of a
+    // growing stream was churn); these hand a copy to tests that assert the
+    // accumulation semantics.
+    std::string FlatStreamingText() const;
+    std::string FlatThinkingText() const;
+
     // Turn-aware ClearStreaming (AppState::RequestScrollback's newest apply).
     // The persisted page covers the turn that was live at SUBMIT time
     // (`turn_seq` captured then); a DIFFERENT turn that started since owns the
@@ -756,6 +774,13 @@ private:
     // include_tool_output=true). mtx_ held by caller.
     std::vector<ToolExecutionState> CopyToolsLocked(bool include_output) const;
 
+    // TakeSnapshot's live_segments copy: field-copy of every segment with
+    // each text-bearing segment's copy-on-publish view (see LiveTurnSegment)
+    // republished only when the segment changed since the last deep
+    // snapshot. The working `text` strings never leave SessionState.
+    // mtx_ held by caller.
+    std::vector<LiveTurnSegment> CopyLiveSegmentsLocked() const;
+
     mutable std::mutex mtx_;
 
     std::string session_id_;
@@ -826,7 +851,7 @@ private:
     // transcript itself is authoritative: the post-turn refresh re-fetches
     // the full persisted text (scrollback_refresh.hpp).
     std::string streaming_accumulated_;
-    // Live thinking accumulation (see Snapshot::streaming_thinking_text):
+    // Live thinking accumulation (mirrors streaming_accumulated_):
     // same cap-and-truncate budget as the flat text buffer, plus the turn
     // stamp the turn-aware clear sites need to retire it only when the
     // persisted page actually covers its turn.

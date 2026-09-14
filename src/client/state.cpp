@@ -104,9 +104,49 @@ SessionState::Snapshot SessionState::TakeLightSnapshot(bool include_tool_output)
     s.paused = paused_;
     s.context_window_tokens = context_window_tokens_;
     // Deliberately NOT copied (heavy, and only the focused tab renders them):
-    // scrollback_page, streaming_text, streaming_thinking_text,
-    // pending_permission/confirmation, latest_notice.
+    // scrollback_page, the streaming accumulations (has_streaming_text +
+    // live_segments' copy-on-publish views instead), pending_permission/
+    // confirmation, latest_notice.
     return s;
+}
+
+std::vector<LiveTurnSegment> SessionState::CopyLiveSegmentsLocked() const {
+    // Field-copy: the working `text` accumulation (the whole turn's O(text)
+    // state) never leaves SessionState. Each text-bearing segment's snapshot
+    // carries its copy-on-publish view, rebuilt -- one copy of that ONE
+    // segment's text -- only when the segment changed since the last deep
+    // snapshot, so settled segments share their view across every event and
+    // only the newest, actively-appending segment pays per delta.
+    std::vector<LiveTurnSegment> out;
+    out.reserve(live_segments_.size());
+    for (const auto& segment : live_segments_) {
+        LiveTurnSegment s;
+        s.kind = segment.kind;
+        s.turn_seq = segment.turn_seq;
+        s.text_truncated = segment.text_truncated;
+        s.tool_use_id = segment.tool_use_id;
+        if ((segment.kind == LiveTurnSegment::Kind::Text ||
+             segment.kind == LiveTurnSegment::Kind::Thinking) &&
+            !segment.text.empty()) {
+            if (segment.text_view == nullptr || segment.text_dirty) {
+                segment.text_view = std::make_shared<const std::string>(segment.text);
+                segment.text_dirty = false;
+            }
+            s.text_view = segment.text_view;
+        }
+        out.push_back(std::move(s));
+    }
+    return out;
+}
+
+std::string SessionState::FlatStreamingText() const {
+    std::lock_guard lk(mtx_);
+    return streaming_accumulated_;
+}
+
+std::string SessionState::FlatThinkingText() const {
+    std::lock_guard lk(mtx_);
+    return thinking_accumulated_;
 }
 
 void SessionState::SetBounds(int scrollback_max_messages, int tool_output_buffer_bytes) {
@@ -127,10 +167,15 @@ SessionState::Snapshot SessionState::TakeSnapshot() {
         pending_user_messages_.empty() ? std::string{} : pending_user_messages_.front().text;
     s.has_earlier_messages = has_earlier_;
     s.last_loaded_seq = last_loaded_seq_;
-    s.streaming_text = streaming_accumulated_;
-    s.streaming_thinking_text = thinking_accumulated_;
+    // The flat streaming/thinking accumulations are NOT copied here: they
+    // duplicate live_segments' text, they change on every delta, and the
+    // per-event deep copy of a growing stream was churn for consumers that
+    // only ask "is anything streaming" (has_streaming_text) or render the
+    // segments' own copy-on-publish views (live_segments below). See
+    // FlatStreamingText/FlatThinkingText for the test seam.
+    s.has_streaming_text = !streaming_accumulated_.empty();
     s.is_streaming_finalized = !is_streaming_;   // not streaming => finalized this turn
-    s.live_segments = live_segments_;
+    s.live_segments = CopyLiveSegmentsLocked();
     if (pending_permission_) {
         s.pending_permission = *pending_permission_;
     }
@@ -304,6 +349,10 @@ void SessionState::AppendStreamingText(std::string_view text) {
             live_segments_.back().text.append(kStreamingTruncationMarker);
             live_segments_.back().text_truncated = true;
         }
+        // Invalidate the copy-on-publish view (see LiveTurnSegment): the
+        // next deep snapshot republishes this segment -- once, on the next
+        // snapshot, not per consumer.
+        live_segments_.back().text_dirty = true;
     }
     // Segment-COUNT cap: a turn with hundreds of tool round trips would
     // otherwise grow live_segments_ (and the per-frame deep snapshot)
@@ -458,6 +507,8 @@ void SessionState::AppendStreamingThinking(std::string_view text) {
             live_segments_.back().text.append(kStreamingTruncationMarker);
             live_segments_.back().text_truncated = true;
         }
+        // Invalidate the copy-on-publish view (see LiveTurnSegment).
+        live_segments_.back().text_dirty = true;
     }
     // Segment-COUNT cap: same shared trimming as AppendStreamingText.
     TrimLiveSegmentsLocked();

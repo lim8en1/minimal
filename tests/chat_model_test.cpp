@@ -475,7 +475,7 @@ TEST_CASE("a turn-end version bump fetches even though streaming text is still h
     ScrollbackRefreshState state;
     state.rendered_version = 4;
     auto snap = SnapAt(5, 0);
-    snap.streaming_text = "the model's full reply, not yet swapped for rows";
+    snap.has_streaming_text = true;
     snap.turn_ended = true;
     CHECK(AdvanceScrollbackRefresh(state, snap) == ScrollbackRefreshAction::kSubmit);
     CHECK(state.refresh_from_version == 5);
@@ -493,7 +493,7 @@ TEST_CASE("a version bump mid-turn with live streaming text fetches anyway",
     ScrollbackRefreshState state;
     state.rendered_version = 4;
     auto snap = SnapAt(5, 0);
-    snap.streaming_text = "still streaming";
+    snap.has_streaming_text = true;
     snap.turn_ended = false;
     CHECK(AdvanceScrollbackRefresh(state, snap) == ScrollbackRefreshAction::kSubmit);
     CHECK(state.refresh_pending);

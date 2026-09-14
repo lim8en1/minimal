@@ -70,7 +70,7 @@ TEST_CASE("TextDelta moves Idle -> Thinking", "[session_state]") {
     SessionState state("s-1");
     state.AppendStreamingText("hello");
     REQUIRE(state.TakeSnapshot().state == SessionStateKind::Thinking);
-    REQUIRE(state.TakeSnapshot().streaming_text == "hello");
+    REQUIRE(state.FlatStreamingText() == "hello");
 }
 
 // Regression (the ESC-interrupt probe): a message stop with nothing pending
@@ -1030,7 +1030,7 @@ TEST_CASE("a mid-turn apply retires exactly the live segments the page proves pe
 
     snap = state.TakeSnapshot();
     CHECK(snap.live_segments.empty());
-    CHECK(snap.streaming_text.empty());
+    CHECK(snap.has_streaming_text == false);
     // The finished row stays in the panel's tools list until turn end
     // (OnTurnCompleted sweeps it); only its LIVE segment retires here.
     REQUIRE(snap.tools.size() == 1);
@@ -1058,8 +1058,8 @@ TEST_CASE("a mid-turn apply keeps what is still open or running",
     CHECK(snap.live_segments[0].kind == LiveTurnSegment::Kind::Tool);
     CHECK(snap.live_segments[0].tool_use_id == "t2");
     CHECK(snap.live_segments[1].kind == LiveTurnSegment::Kind::Text);
-    CHECK(snap.live_segments[1].text == "round two streaming");
-    CHECK(snap.streaming_text == "round two streaming");
+    CHECK(snap.live_segments[1].Text() == "round two streaming");
+    CHECK(state.FlatStreamingText() == "round two streaming");
     // Both panel rows survive until turn end's sweep; only t1's live
     // SEGMENT retired (its finish closed it, and its result is in the page).
     REQUIRE(snap.tools.size() == 2);
@@ -1109,7 +1109,7 @@ TEST_CASE("a finished round's text is not double-rendered after a mid-turn apply
     state.FinalizeStreamingText();
     state.AppendStreamingText("beta block");
     state.FinalizeStreamingText();
-    REQUIRE(state.TakeSnapshot().streaming_text == "alpha block\n\nbeta block");
+    REQUIRE(state.FlatStreamingText() == "alpha block\n\nbeta block");
 
     v1::GetMessagesResponse resp;
     *resp.add_messages() = AssistantText(11, "alpha block");
@@ -1117,8 +1117,8 @@ TEST_CASE("a finished round's text is not double-rendered after a mid-turn apply
 
     const auto snap = state.TakeSnapshot();
     REQUIRE(snap.live_segments.size() == 1);
-    CHECK(snap.live_segments[0].text == "beta block");
-    CHECK(snap.streaming_text == "beta block");
+    CHECK(snap.live_segments[0].Text() == "beta block");
+    CHECK(state.FlatStreamingText() == "beta block");
 }
 
 
@@ -1365,7 +1365,7 @@ TEST_CASE("OnSessionRewound trims the window to the active transcript and clears
     // "load older" round trip costs nothing; a missing one loses history).
     CHECK(snap.has_earlier_messages);
     // Live/pending-turn state goes with the discarded turn.
-    CHECK(snap.streaming_text.empty());
+    CHECK(snap.has_streaming_text == false);
     CHECK(snap.live_segments.empty());
     CHECK(snap.pending_user_text.empty());
     CHECK_FALSE(snap.cancel_requested);
@@ -1420,7 +1420,7 @@ TEST_CASE("OnSessionRewound REDO clears the whole window for a refetch",
     REQUIRE(snap.scrollback_page->empty());
     CHECK(snap.last_loaded_seq == -1);
     CHECK(snap.has_earlier_messages);
-    CHECK(snap.streaming_text.empty());
+    CHECK(snap.has_streaming_text == false);
 }
 
 // Track R2-5: the tool-output "ring buffer" caps AT APPEND (head 1/4 + marker +
@@ -1529,16 +1529,16 @@ TEST_CASE("AppendStreamingText separates blocks within a turn, not across turns"
     SessionState state("s-1");
 
     state.AppendStreamingText("block one");
-    CHECK(state.TakeSnapshot().streaming_text == "block one");
+    CHECK(state.FlatStreamingText() == "block one");
 
     state.FinalizeStreamingText();   // content_block_stop: block one ends
     state.AppendStreamingText("block two");   // same turn, a later block
-    CHECK(state.TakeSnapshot().streaming_text == "block one\n\nblock two");
+    CHECK(state.FlatStreamingText() == "block one\n\nblock two");
 
     // A THIRD block does not double up the separator against the second's.
     state.FinalizeStreamingText();
     state.AppendStreamingText("block three");
-    CHECK(state.TakeSnapshot().streaming_text == "block one\n\nblock two\n\nblock three");
+    CHECK(state.FlatStreamingText() == "block one\n\nblock two\n\nblock three");
 }
 
 // C4: live_segments records this turn's text and tool activity in ARRIVAL
@@ -1561,16 +1561,16 @@ TEST_CASE("live_segments records text and tool activity in arrival order",
     const auto snap = state.TakeSnapshot();
     REQUIRE(snap.live_segments.size() == 3);
     CHECK(snap.live_segments[0].kind == Kind::Text);
-    CHECK(snap.live_segments[0].text == "intro text");
+    CHECK(snap.live_segments[0].Text() == "intro text");
     CHECK(snap.live_segments[1].kind == Kind::Tool);
     CHECK(snap.live_segments[1].tool_use_id == "t-1");
     CHECK(snap.live_segments[2].kind == Kind::Text);
-    CHECK(snap.live_segments[2].text == "closing text");   // its OWN text, not the whole turn
+    CHECK(snap.live_segments[2].Text() == "closing text");   // its OWN text, not the whole turn
 
     // streaming_text (the flat convenience field) still carries everything,
     // separator-joined, for consumers that only need "is anything
     // streaming" or the total text as one string.
-    CHECK(snap.streaming_text == "intro text\n\nclosing text");
+    CHECK(state.FlatStreamingText() == "intro text\n\nclosing text");
 }
 
 // PARALLEL tool dispatch (ARCHITECTURE.md "Tool dispatch is parallel", width
@@ -1619,7 +1619,7 @@ TEST_CASE("live_segments clears alongside streaming_text, not before",
     state.AppendStreamingText("next turn");
     state.OnResyncRequired("test");
     CHECK(state.TakeSnapshot().live_segments.empty());
-    CHECK(state.TakeSnapshot().streaming_text.empty());
+    CHECK(state.FlatStreamingText().empty());
 }
 
 // The bug: the per-segment cap resized to a raw byte offset, which can land
@@ -1634,7 +1634,7 @@ TEST_CASE("a streaming-text truncation at the cap boundary never splits a UTF-8 
     const auto snap = state.TakeSnapshot();
     REQUIRE(snap.live_segments.size() == 1);
     CHECK(snap.live_segments[0].text_truncated);
-    CHECK(IsValidUtf8(snap.live_segments[0].text));
+    CHECK(IsValidUtf8(snap.live_segments[0].Text()));
 }
 
 // The bug: only the resize-and-mark step was guarded by text_truncated, not
@@ -1648,13 +1648,13 @@ TEST_CASE("a truncated live segment drops further deltas instead of still growin
     const auto first = state.TakeSnapshot();
     REQUIRE(first.live_segments.size() == 1);
     CHECK(first.live_segments[0].text_truncated);
-    const std::size_t capped_size = first.live_segments[0].text.size();
+    const std::size_t capped_size = first.live_segments[0].Text().size();
     CHECK(capped_size <= SessionState::kStreamingTextCapBytes + 200);   // cap + marker
 
     state.AppendStreamingText(std::string(10000, 'b'));
     const auto second = state.TakeSnapshot();
     REQUIRE(second.live_segments.size() == 1);
-    CHECK(second.live_segments[0].text.size() == capped_size);   // unchanged, not larger
+    CHECK(second.live_segments[0].Text().size() == capped_size);   // unchanged, not larger
 }
 
 // The bug: the FIRST overflow inserted a "[...truncated]" marker at index 0
@@ -1675,11 +1675,11 @@ TEST_CASE("the live-segment-count marker survives repeated overflows",
     using Kind = LiveTurnSegment::Kind;
     const auto marker_count =
         std::count_if(snap.live_segments.begin(), snap.live_segments.end(),
-                      [](const LiveTurnSegment& s) { return s.text == "[...truncated]"; });
+                      [](const LiveTurnSegment& s) { return s.Text() == "[...truncated]"; });
     CHECK(marker_count == 1);
     REQUIRE_FALSE(snap.live_segments.empty());
     CHECK(snap.live_segments.front().kind == Kind::Text);
-    CHECK(snap.live_segments.front().text == "[...truncated]");
+    CHECK(snap.live_segments.front().Text() == "[...truncated]");
     CHECK(snap.live_segments.size() <= SessionState::kMaxLiveSegments);
 }
 
@@ -1761,16 +1761,17 @@ TEST_CASE("thinking deltas become Thinking live segments in arrival order",
     const auto snap = state.TakeSnapshot();
     REQUIRE(snap.live_segments.size() == 3);
     CHECK(snap.live_segments[0].kind == Kind::Thinking);
-    CHECK(snap.live_segments[0].text == "pondering more");
+    CHECK(snap.live_segments[0].Text() == "pondering more");
     CHECK(snap.live_segments[1].kind == Kind::Text);
-    CHECK(snap.live_segments[1].text == "the answer");
+    CHECK(snap.live_segments[1].Text() == "the answer");
     CHECK(snap.live_segments[2].kind == Kind::Thinking);
-    CHECK(snap.live_segments[2].text == "second thought");
+    CHECK(snap.live_segments[2].Text() == "second thought");
     // Same turn stamp as everything else in the turn.
     CHECK(snap.live_segments[0].turn_seq == snap.turn_seq);
 
-    // The flat convenience accumulation still carries everything.
-    CHECK(snap.streaming_thinking_text == "pondering moresecond thought");
+    // The flat convenience accumulation still carries everything (test seam;
+    // the snapshot itself no longer carries the flat copies).
+    CHECK(state.FlatThinkingText() == "pondering moresecond thought");
 }
 
 TEST_CASE("thinking segments follow the shared live_segments lifecycle",
@@ -1793,12 +1794,12 @@ TEST_CASE("thinking segments follow the shared live_segments lifecycle",
     REQUIRE(state.TakeSnapshot().live_segments.size() == 2);
     CHECK(state.TakeSnapshot().live_segments[0].turn_seq == 1);
     CHECK(state.TakeSnapshot().live_segments[1].turn_seq == 2);
-    CHECK(state.TakeSnapshot().live_segments[1].text == "turn two reasoning");
+    CHECK(state.TakeSnapshot().live_segments[1].Text() == "turn two reasoning");
 
     // The turn-aware clear retires them like any other segment.
     state.ClearStreamingIfCurrentTurn(2);
     CHECK(state.TakeSnapshot().live_segments.empty());
-    CHECK(state.TakeSnapshot().streaming_thinking_text.empty());
+    CHECK(state.FlatThinkingText().empty());
 }
 
 // THE STALE-CLEAR REGRESSION: the newest refresh applied its page then cleared
@@ -1819,7 +1820,7 @@ TEST_CASE("the newest-page clear keeps a NEWER turn's live text", "[session_stat
         // A page captured at turn 1 applies; the live text is exactly what the
         // persisted rows replace. Keeping it here would double-render.
         state.ClearStreamingIfCurrentTurn(1);
-        CHECK(state.TakeSnapshot().streaming_text.empty());
+        CHECK(state.FlatStreamingText().empty());
         CHECK(state.TakeSnapshot().live_segments.empty());
     }
 
@@ -1834,13 +1835,13 @@ TEST_CASE("the newest-page clear keeps a NEWER turn's live text", "[session_stat
         REQUIRE(state.TakeSnapshot().turn_seq == 2);
 
         state.ClearStreamingIfCurrentTurn(1);   // the stale, turn-1 capture
-        CHECK(state.TakeSnapshot().streaming_text == "turn two opening deltas");
+        CHECK(state.FlatStreamingText() == "turn two opening deltas");
         REQUIRE(state.TakeSnapshot().live_segments.size() == 1);
-        CHECK(state.TakeSnapshot().live_segments[0].text == "turn two opening deltas");
+        CHECK(state.TakeSnapshot().live_segments[0].Text() == "turn two opening deltas");
 
         // A fetch captured at the CURRENT turn clears as before.
         state.ClearStreamingIfCurrentTurn(2);
-        CHECK(state.TakeSnapshot().streaming_text.empty());
+        CHECK(state.FlatStreamingText().empty());
         CHECK(state.TakeSnapshot().live_segments.empty());
     }
 }
