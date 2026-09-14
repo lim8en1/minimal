@@ -1,0 +1,283 @@
+diff --git a/src/ftxui/component/app.cpp b/src/ftxui/component/app.cpp
+index 238e123..a1e768e 100644
+--- a/src/ftxui/component/app.cpp
++++ b/src/ftxui/component/app.cpp
+@@ -262,6 +262,15 @@ struct App::Internal {
+   // identical-frame skip and the dirty-region write. Main thread only.
+   std::string previous_frame_;
+ 
++  // minimal-ftxui-event-loop patch: wakeup pipe (App::Post from any thread
++  // interrupts the blocked poll), EOF latch for the terminal fd, and the
++  // animation-task slot (the 15 ms self-repost is gated, see
++  // PostAnimationTask). All main-thread-owned except the pipe, whose write
++  // end is used cross-thread (a single byte write is atomic on POSIX).
++  int wakeup_pipe_[2] = {-1, -1};
++  bool input_eof_ = false;
++  bool animation_scheduled_ = false;
++
+   class ThrottledRequest {
+    public:
+     ThrottledRequest(App::Internal* internal, std::function<void()> send)
+@@ -654,6 +663,18 @@ void App::Internal::Install() {
+   // torn down and re-entered (blank) -- the first frame must be a full write.
+   previous_frame_.clear();
+ 
++  // minimal-ftxui-event-loop patch: (re)create the wakeup pipe. Both ends
++  // non-blocking: the writer must never block on a full pipe (a posted task
++  // is the authoritative signal; the byte is just the poll interrupt).
++  if (::pipe(wakeup_pipe_) != 0) {
++    wakeup_pipe_[0] = wakeup_pipe_[1] = -1;
++  } else {
++    for (const int fd : wakeup_pipe_) {
++      const int flags = ::fcntl(fd, F_GETFL, 0);
++      ::fcntl(fd, F_SETFL, flags | O_NONBLOCK);
++    }
++  }
++
+   // Flush the buffer for stdout to ensure whatever the user has printed before
+   // is fully applied before we start modifying the terminal configuration. This
+   // is important, because we are using two different channels (stdout vs
+@@ -799,6 +820,17 @@ void App::Internal::Uninstall() {
+   g_terminal_is_raw = false;
+   installed_ = false;
+ 
++  // minimal-ftxui-event-loop patch: the pipe belongs to the installed
++  // terminal session; close and re-create it on the next Install().
++  for (int& fd : wakeup_pipe_) {
++    if (fd != -1) {
++      ::close(fd);
++    }
++    fd = -1;
++  }
++  input_eof_ = false;
++  animation_scheduled_ = false;
++
+   // During shutdown, wait for all of the replies.
+   if (is_stdin_a_tty_ && is_stdout_a_tty_) {
+     auto closing_receiver =
+@@ -920,6 +952,48 @@ void App::Internal::RunOnce(const Component& component) {
+ }
+ 
+ void App::Internal::RunOnceBlocking(Component component) {
++#if !defined(_WIN32)
++  // minimal-ftxui-event-loop patch: BLOCK instead of poll-and-sleep. The
++  // upstream loop wakes at ~60 Hz no matter what -- the unconditional 15 ms
++  // animation self-repost keeps the task queue perpetually non-empty -- and
++  // that wake cycle costs a measurable constant CPU floor on an otherwise
++  // idle app (measured ~1.5% of one core whenever a session exists). Here:
++  //   - poll() on the terminal fd plus the wakeup pipe, with the timeout set
++  //     to the earliest due task, so nothing wakes until input arrives, a
++  //     task is posted (App::Post writes the pipe), or a delayed task is due;
++  //   - the 15 ms animation repost is gated (PostAnimationTask), so an app
++  //     that never requests animation has NO scheduled tasks at idle;
++  //   - a partial escape sequence caps the wait, so multi-key input (alt,
++  //     arrows, bracketed paste) resolves promptly via the parser's Timeout;
++  //   - EOF on the terminal fd caps the wait -- poll would otherwise return
++  //     immediately forever and spin.
++  // Upstream's contract ("wait for at least one task to execute") is
++  // preserved: return as soon as RunOnce has executed at least one task.
++  while (!HasQuitted()) {
++    const size_t executed_task = task_runner.ExecutedTasks();
++    auto wait = task_runner.NextWait();
++    int timeout_ms = -1;   // no scheduled task: block until input or Post
++    if (wait.has_value()) {
++      timeout_ms = static_cast<int>(
++          std::chrono::duration_cast<std::chrono::milliseconds>(*wait).count());
++      if (timeout_ms < 0) {
++        timeout_ms = 0;
++      }
++    }
++    if (input_eof_ || terminal_input_parser.has_pending()) {
++      timeout_ms = (timeout_ms < 0 || timeout_ms > 50) ? 50 : timeout_ms;
++    }
++    struct pollfd fds[2] = {
++        {tty_fd_, POLLIN, 0},
++        {wakeup_pipe_[0], POLLIN, 0},
++    };
++    ::poll(fds, 2, timeout_ms);
++    RunOnce(component);
++    if (executed_task != task_runner.ExecutedTasks()) {
++      return;
++    }
++  }
++#else
+   // Set FPS to 60 at most.
+   const auto time_per_frame = std::chrono::microseconds(16666);  // 1s / 60fps
+ 
+@@ -939,6 +1013,7 @@ void App::Internal::RunOnceBlocking(Component component) {
+       std::this_thread::sleep_for(sleep_duration);
+     }
+   }
++#endif
+ }
+ 
+ void App::Internal::HandleTask(Component component, Task& task) {
+@@ -1011,6 +1086,11 @@ void App::Internal::HandleTask(Component component, Task& task) {
+ 
+     // Handle Animation
+     if constexpr (std::is_same_v<T, AnimationTask>) {
++      // minimal-ftxui-event-loop patch: the scheduled-animation slot is free
++      // again. Nothing reschedules unless an animation is requested (see
++      // RequestAnimationFrame -> PostAnimationTask) -- this is what removes
++      // the perpetual 15 ms wake at idle.
++      animation_scheduled_ = false;
+       if (!animation_requested_) {
+         return;
+       }
+@@ -1503,6 +1583,15 @@ size_t App::Internal::FetchTerminalEvents() {
+   }
+   return (size_t)l;
+ #else  // POSIX (Linux & Mac)
++  // minimal-ftxui-event-loop patch: drain the wakeup pipe -- bytes written by
++  // App::Post from any thread to interrupt the blocked poll in
++  // RunOnceBlocking. The posted task itself is the signal; the bytes are
++  // disposable.
++  if (wakeup_pipe_[0] != -1) {
++    char ignored;
++    while (::read(wakeup_pipe_[0], &ignored, 1) > 0) {
++    }
++  }
+   struct pollfd pfd = {tty_fd_, POLLIN, 0};
+   const int poll_result = poll(&pfd, 1, 0);
+   if (poll_result <= 0) {
+@@ -1518,6 +1607,11 @@ size_t App::Internal::FetchTerminalEvents() {
+   std::array<char, 128> out{};
+   const ssize_t l = read(tty_fd_, out.data(), out.size());
+   if (l <= 0) {
++    // minimal-ftxui-event-loop patch: latch EOF -- poll() reports POLLHUP
++    // forever after, and an uncapped wait would turn into a busy spin.
++    if (l == 0) {
++      input_eof_ = true;
++    }
+     return 0;
+   }
+ 
+@@ -1530,12 +1624,18 @@ size_t App::Internal::FetchTerminalEvents() {
+ }
+ 
+ void App::Internal::PostAnimationTask() {
++  // minimal-ftxui-event-loop patch: upstream reposted this UNCONDITIONALLY
++  // every 15 ms, keeping the task queue perpetually non-empty -- which is
++  // what kept the event loop spinning at ~66 Hz even when the app was
++  // completely idle. Schedule only when no animation task is pending; the
++  // consumer (HandleTask's AnimationTask branch) re-arms on demand via
++  // RequestAnimationFrame. Frame pacing for real animations is unchanged:
++  // RequestAnimationFrame still throttles to ~30 fps via its hysteresis.
++  if (animation_scheduled_) {
++    return;
++  }
++  animation_scheduled_ = true;
+   public_->Post(AnimationTask());
+-
+-  // Repeat the animation task every 15ms. This correspond to a frame rate
+-  // of around 66fps.
+-  task_runner.PostDelayedTask([this] { PostAnimationTask(); },
+-                              std::chrono::milliseconds(15));
+ }
+ 
+ App::App(std::unique_ptr<Internal> internal, int dimx, int dimy)
+@@ -1643,6 +1743,15 @@ void App::Post(Task task) {
+       std::get<Closure>(task)();
+     }
+   });
++  // minimal-ftxui-event-loop patch: interrupt the event loop's blocked poll
++  // (see RunOnceBlocking). The posted task is the authoritative signal; this
++  // byte only wakes the poll. Non-blocking + disposable: a full pipe (64 KiB
++  // of unread wakeups) means the loop is already awake and will drain it.
++  if (internal_->wakeup_pipe_[1] != -1) {
++    const char c = 0;
++    const ssize_t ignored = ::write(internal_->wakeup_pipe_[1], &c, 1);
++    (void)ignored;
++  }
+ }
+ 
+ void App::PostEvent(Event event) {
+@@ -1673,6 +1782,10 @@ void App::RequestAnimationFrame() {
+   if (now - internal_->previous_animation_time_ >= time_histeresis) {
+     internal_->previous_animation_time_ = now;
+   }
++  // minimal-ftxui-event-loop patch: with the unconditional 15 ms repost gone
++  // (see PostAnimationTask), an animation request must schedule the task that
++  // consumes it -- otherwise the request sits unread forever.
++  internal_->PostAnimationTask();
+ }
+ 
+ CapturedMouse App::CaptureMouse() {
+diff --git a/src/ftxui/component/task_queue.cpp b/src/ftxui/component/task_queue.cpp
+index a6b75c6..6829805 100644
+--- a/src/ftxui/component/task_queue.cpp
++++ b/src/ftxui/component/task_queue.cpp
+@@ -64,4 +64,22 @@ auto TaskQueue::HasImmediateTasks() const -> bool {
+   return !immediate_tasks_.empty();
+ }
+ 
++// minimal-ftxui-event-loop patch: see task_queue.hpp.
++auto TaskQueue::NextWait() const
++    -> std::optional<std::chrono::steady_clock::duration> {
++  const std::lock_guard<std::mutex> lock(mutex_);
++  if (!immediate_tasks_.empty()) {
++    return std::chrono::steady_clock::duration::zero();
++  }
++  if (!delayed_tasks_.empty()) {
++    const auto& top = delayed_tasks_.top();
++    if (top.time.has_value()) {
++      const auto now = std::chrono::steady_clock::now();
++      return top.time.value() > now ? top.time.value() - now
++                                    : std::chrono::steady_clock::duration::zero();
++    }
++  }
++  return std::nullopt;
++}
++
+ }  // namespace ftxui::task
+diff --git a/src/ftxui/component/task_queue.hpp b/src/ftxui/component/task_queue.hpp
+index c23b0ec..4d3a217 100644
+--- a/src/ftxui/component/task_queue.hpp
++++ b/src/ftxui/component/task_queue.hpp
+@@ -27,6 +27,11 @@ struct TaskQueue {
+   auto HasImmediateTasks() const -> bool;
+   auto PostTask(PendingTask task) -> void;
+ 
++  // minimal-ftxui-event-loop patch: how long the caller may wait before a
++  // task becomes due. Zero when an immediate task is queued, the duration
++  // until the earliest delayed task, or nullopt when nothing is scheduled.
++  auto NextWait() const -> std::optional<std::chrono::steady_clock::duration>;
++
+  private:
+   mutable std::mutex mutex_;
+   std::queue<PendingTask> immediate_tasks_;
+diff --git a/src/ftxui/component/task_runner.hpp b/src/ftxui/component/task_runner.hpp
+index 11cf2fa..7d6d20b 100644
+--- a/src/ftxui/component/task_runner.hpp
++++ b/src/ftxui/component/task_runner.hpp
+@@ -28,6 +28,13 @@ class TaskRunner {
+   /// can be executed.
+   auto RunUntilIdle() -> std::optional<std::chrono::steady_clock::duration>;
+ 
++  // minimal-ftxui-event-loop patch: how long the caller may wait before a
++  // task becomes due -- zero when an immediate task is queued, the duration
++  // until the earliest delayed task, or nullopt when nothing is scheduled.
++  auto NextWait() const -> std::optional<std::chrono::steady_clock::duration> {
++    return queue_.NextWait();
++  }
++
+   // Runs the tasks in the queue, blocking until all tasks are executed.
+   auto Run() -> void;
+ 
+diff --git a/src/ftxui/component/terminal_input_parser.hpp b/src/ftxui/component/terminal_input_parser.hpp
+index 4f1f30c..eb6c7fe 100644
+--- a/src/ftxui/component/terminal_input_parser.hpp
++++ b/src/ftxui/component/terminal_input_parser.hpp
+@@ -20,6 +20,12 @@ class TerminalInputParser {
+   void Timeout(int time);
+   void Add(char c);
+ 
++  // minimal-ftxui-event-loop patch: whether a partial escape sequence is
++  // being parsed. While true, the event loop must not block for long -- the
++  // pending sequence resolves via Timeout() after a short delay, and the
++  // keys it encodes must not be delayed behind an idle wait.
++  bool has_pending() const { return !pending_.empty(); }
++
+  private:
+   unsigned char Current();
+   bool Eat();

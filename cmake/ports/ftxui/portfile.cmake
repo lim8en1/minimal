@@ -11,6 +11,11 @@ vcpkg_from_github(
     # requirement pass per frame instead of two. Switchable off at runtime
     # with MINIMAL_FTXUI_DIFF=0.
     PATCHES minimal-ftxui-frame-diff.patch
+        # minimal-ftxui-event-loop patch: block the event loop on poll until
+        # input / a posted task / a delayed task is actually due, and gate
+        # the perpetual 15 ms animation self-repost. Removes the constant
+        # ~60 Hz wake cycle. (Applies after the frame-diff patch.)
+        minimal-ftxui-event-loop.patch
 )
 
 vcpkg_cmake_configure(
