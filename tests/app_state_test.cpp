@@ -522,26 +522,53 @@ TEST_CASE("FindRewindTargetSeq refuses once the window is trimmed",
     const auto sid = SessionIdOf(app, tab);
     REQUIRE_FALSE(sid.empty());
 
-    // Settle the newest slice (capped to 3 rows by the fix under test).
+    // Settle the newest slice (capped to 3 rows by the fix under test) AND the
+    // persistence of all three turns: the trim below needs the window to hold
+    // the transcript's newest rows before an older-page load has anything to
+    // evict. Gated only on "non-empty", this loop could pass while turn 3 is
+    // still landing server-side -- the window then sits at the transcript's
+    // OLDEST rows with has_earlier false, every older request is a no-op
+    // (NextScrollbackCursor refuses), and the trim never fires. Under TSan's
+    // slowdown that is exactly the shape this test's one flake took.
+    const auto page_has_third_turn = [](const SessionState::Snapshot& details) {
+        if (!details.scrollback_page || details.scrollback_page->empty()) return false;
+        for (const auto& stored : *details.scrollback_page) {
+            if (stored.message().role() != v1::ROLE_USER) continue;
+            for (const auto& block : stored.message().content()) {
+                if (block.has_text() &&
+                    block.text().text().find("third message") != std::string::npos) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    };
     const auto deadline1 = std::chrono::steady_clock::now() + 5s;
-    while (std::chrono::steady_clock::now() < deadline1) {
+    while (!page_has_third_turn(app.GetDetails(tab)) && std::chrono::steady_clock::now() < deadline1) {
         app.RequestScrollback(sid, /*newest=*/true);
         std::this_thread::sleep_for(50ms);
-        if (!app.GetDetails(tab).scrollback_page->empty()) break;
     }
+    REQUIRE(page_has_third_turn(app.GetDetails(tab)));
     REQUIRE_FALSE(app.GetDetails(tab).scrollback_page->empty());
 
     // Load older until the sliding window's cap-triggered eviction flags
     // the trim (session_state_test.cpp's INVARIANT test covers the
     // mechanism directly; this proves FindRewindTargetSeq respects it on a
-    // live, AppState-owned session).
-    const auto deadline2 = std::chrono::steady_clock::now() + 5s;
-    while (!app.GetDetails(tab).scrollback_trimmed &&
-          std::chrono::steady_clock::now() < deadline2) {
+    // live, AppState-owned session). The exit condition is the CONTRACT,
+    // not just the flag: a newest refresh that catches the window back up
+    // clears scrollback_trimmed_ by design (state.cpp's delta branch), so
+    // sampling the flag alone after the loop can race a straggler refresh
+    // and read false. Refuse-when-trimmed is what the loop waits for.
+    const auto rewind_refused = [&] {
+        const auto& details = app.GetDetails(tab);
+        return details.scrollback_trimmed && !app.FindRewindTargetSeq(sid, 1).has_value();
+    };
+    const auto deadline2 = std::chrono::steady_clock::now() + 10s;
+    while (!rewind_refused() && std::chrono::steady_clock::now() < deadline2) {
         app.RequestScrollback(sid, /*newest=*/false);
         std::this_thread::sleep_for(50ms);
     }
-    REQUIRE(app.GetDetails(tab).scrollback_trimmed);
+    REQUIRE(rewind_refused());
 
     CHECK_FALSE(app.FindRewindTargetSeq(sid, 1).has_value());
 }

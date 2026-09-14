@@ -1656,7 +1656,12 @@ TEST_CASE("an explicit resume runs the seedless continuation from the persisted 
     REQUIRE(WaitForCallCount(*fixture.provider, 2));
 
     CHECK(fixture.provider->call_count() == 2);
-    const auto& stored = fixture.store->messages;
+    // The call count proves the continuation STARTED, not that its appends
+    // finished -- the assistant reply lands after the provider returns. Quiesce
+    // the worker, then read the store through its mutexed snapshot (the raw
+    // `messages` vector is exactly the race the fake's header warns about).
+    REQUIRE(fixture.session->WaitForIdleForTesting(5s));
+    const auto stored = fixture.store->Snapshot();
     REQUIRE(stored.size() == 4);
     CHECK(stored.back().role == llm::Role::Assistant);
     // The continuation's request carried the persisted tool results -- the
@@ -1722,7 +1727,10 @@ TEST_CASE("a paused session holds turns and wakes but still runs commands",
     // Unpause releases the held turn.
     fixture.session->SetPaused(false);
     REQUIRE(WaitForCallCount(*fixture.provider, 1));
-    CHECK(fixture.store->messages.size() == 2);
+    // The call count proves the turn STARTED, not that its appends finished --
+    // quiesce the worker, then read the store through its mutexed snapshot.
+    REQUIRE(fixture.session->WaitForIdleForTesting(5s));
+    CHECK(fixture.store->Snapshot().size() == 2);
 }
 
 TEST_CASE("cancel beats pause", "[session][pause]") {
@@ -1848,12 +1856,17 @@ TEST_CASE("a steering message that missed the flush is answered by a seedless co
     REQUIRE(WaitForCallCount(*fixture.provider, 3));
 
     CHECK(fixture.provider->call_count() == 3);
+    // The call count proves the continuation STARTED, not that its appends
+    // finished -- quiesce the worker, then read the store through its mutexed
+    // snapshot (the raw `messages` vector is the race the fake's header warns
+    // about).
+    REQUIRE(fixture.session->WaitForIdleForTesting(5s));
     const auto& request = fixture.provider->requests()[2];
     REQUIRE_FALSE(request.messages.empty());
     const auto* text = std::get_if<llm::TextBlock>(&request.messages.back().content.front());
     REQUIRE(text != nullptr);
     CHECK(text->text == "late steering");
-    const auto& stored = fixture.store->messages;
+    const auto stored = fixture.store->Snapshot();
     REQUIRE(stored.size() == 6);
     CHECK(stored.back().role == llm::Role::Assistant);
 }

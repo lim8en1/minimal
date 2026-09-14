@@ -1405,9 +1405,19 @@ void SessionState::ApplyScrollbackPage(const v1::GetMessagesResponse& resp, bool
             if (!resp.has_more()) scrollback_trimmed_ = false;
             // Sliding window, oldest end only: the same bound the
             // newest-slice assign applies, from the same direction.
+            bool evicted_earlier = false;
             while (static_cast<int>(scrollback_page_.size()) > scrollback_max_messages_) {
                 scrollback_page_.pop_back();
+                evicted_earlier = true;
             }
+            // Rows the cap just evicted from the oldest end are fetchable
+            // earlier pages -- exactly the conservative rule OnSessionRewound
+            // applies (true costs at most one empty load-older round trip).
+            // Without this, a window that grew up from the transcript's first
+            // rows keeps has_earlier_ false forever (the first assign saw
+            // has_more false; delta applies never revisit it) and "load
+            // older" is wedged for the life of the tab.
+            if (evicted_earlier) has_earlier_ = true;
         }
         // The shared-page rebuild, retirement, and bookkeeping below are
         // shared with the non-delta path.

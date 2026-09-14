@@ -293,20 +293,29 @@ TEST_CASE("OnMcpNotification: a full injection queue refuses delivery without cr
     agent::SignalRouter router;
     router.RegisterChannel(CiChannel());
     RouterSessionFixture gina;
-    gina.wake_on_injection = false;  // keep injections staged, never auto-flushed
+    gina.wake_on_injection = false;  // tool-result injections stay staged (a user
+                                     // text injection would wake the worker for a
+                                     // seedless continuation regardless)
     gina.Start("gina");
     std::string error;
     REQUIRE(router.Subscribe(gina.session, "ci/build.completed", error));
 
     // Fill the queue to exactly kMaxPending via the same entry point a
     // subagent completion or background task uses -- ground truth for "the
-    // queue is genuinely full", not an internals assumption.
+    // queue is genuinely full", not an internals assumption. The fillers are
+    // TOOL-RESULT-shaped, the shape those producers actually stage: a user
+    // TEXT injection would trip the wait predicate's HasUserText wake
+    // (session.cpp), which fires regardless of wake_on_injection, and the
+    // woken turn's boundary flush would drain the queue out from under this
+    // test.
+    const auto filler = [] {
+        return llm::Message{llm::Role::User,
+                            {llm::ToolResultBlock{"filler-tu", {llm::TextBlock{"filler"}}, false}}};
+    };
     for (std::size_t i = 0; i < agent::InjectionQueue::kMaxPending; ++i) {
-        REQUIRE(gina.session->QueueInjectedMessage(
-            llm::Message{llm::Role::User, {llm::TextBlock{"filler"}}}));
+        REQUIRE(gina.session->QueueInjectedMessage(filler()));
     }
-    REQUIRE_FALSE(gina.session->QueueInjectedMessage(
-        llm::Message{llm::Role::User, {llm::TextBlock{"one too many"}}}));
+    REQUIRE_FALSE(gina.session->QueueInjectedMessage(filler()));
 
     // The notification itself must not throw, and must not silently make
     // room -- the queue is still exactly full afterward (a probe push still
