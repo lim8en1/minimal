@@ -281,14 +281,13 @@ ftxui::Element FrameRenderer::Render() {
     }
 
     if (deps_.show_panel) {
-        // Rebuilt only when something the panel actually shows changed
-        // (DispatchToTab bumps UiVersion on every wire event) -- with the
-        // panel open, rebuilding unconditionally deep-copied every tab's
-        // buffered tool output (up to tool_output_buffer_bytes_ each) under
-        // AppState + session locks on every mouse move, blocking reader
-        // threads for no reason.
-        const uint64_t version = deps_.app.UiVersion();
-        if (!tools_panel_cache_valid_ || version != tools_panel_cache_version_) {
+        // Rebuilt only when something the panel actually shows changed --
+        // keyed on ToolsVersion/tab-count/theme-epoch, NOT UiVersion (which
+        // moves on every text delta; see frame_renderer.hpp for the key's
+        // rationale). With the key matching, the fetch is still cheap: the
+        // per-tool output views are copy-on-publish shared pointers.
+        const PanelCacheKey key{deps_.app.ToolsVersion(), tabs.size(), deps_.theme.epoch()};
+        if (!tools_panel_cache_valid_ || !(key == tools_panel_cache_key_)) {
             const auto panel_tabs = deps_.app.GetAllTabs(/*include_tool_output=*/true);
             // vscroll_indicator: every other scrollable yframe region in the
             // frame (chat, plugin panels below, the pickers) has one; this
@@ -296,7 +295,7 @@ ftxui::Element FrameRenderer::Render() {
             tools_panel_cache_ =
                 RenderToolsPanel(panel_tabs, deps_.tools_panel_stdout_buffer_lines, deps_.theme) |
                 yframe | size(HEIGHT, LESS_THAN, deps_.panel_height) | vscroll_indicator;
-            tools_panel_cache_version_ = version;
+            tools_panel_cache_key_ = key;
             tools_panel_cache_valid_ = true;
         }
         rows.push_back(tools_panel_cache_);

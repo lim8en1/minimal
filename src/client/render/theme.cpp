@@ -1,6 +1,7 @@
 #include "minimal/client/render/theme.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
@@ -117,6 +118,9 @@ Theme Theme::Parse(std::string_view json, ColorDepth depth,
     }
 
     Theme theme;
+    // Fresh generation per built theme (see Theme::epoch).
+    static std::atomic<uint64_t> next_epoch{1};
+    theme.epoch_ = next_epoch.fetch_add(1, std::memory_order_relaxed);
     theme.depth_ = depth;
     theme.name_ = doc.value("name", std::string{});
     if (!doc.contains("colors") || !doc.at("colors").is_object()) {

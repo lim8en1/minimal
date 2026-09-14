@@ -96,15 +96,30 @@ private:
 
     Dependencies deps_;
 
-    // Tools-panel render cache: RenderToolsPanel's input deep-copies every
-    // tab's buffered tool output, and naively rebuilding it on every
-    // Render() call redid that on every mouse move, not just on a real
-    // state change. Rebuilt only when UiVersion() has actually moved since
-    // the last build -- DispatchToTab bumps it on every wire event
-    // (state.cpp), including tool output deltas, so this never shows stale
-    // content.
+    // Tools-panel render cache: RenderToolsPanel's input fetches every tab's
+    // tool rows (state.hpp's copy-on-publish `buffered_output` -- cheap since
+    // the buffer became a shared pointer, but still an O(rows) rebuild), so
+    // it must not redo that on frames where nothing the panel shows moved.
+    // Keyed on what the panel ACTUALLY renders, not on UiVersion: UiVersion
+    // moves on every wire event -- every text/thinking delta included -- and
+    // with it the panel used to rebuild (and deep-copy tool output) on
+    // streaming frames that changed nothing here. The key:
+    //   - AppState::ToolsVersion(): any tab's tool-row/output/rename change;
+    //   - the tab count: rows appear/disappear with tabs, which bump no
+    //     per-session version;
+    //   - Theme::epoch(): the panel bakes colors into its Elements at build
+    //     time, so the /theme swap must force one rebuild.
+    // A missed-bump race (a change landing between key read and rebuild) is
+    // harmless: the key only gates a cache, and the next differing key
+    // rebuilds with the newer data.
+    struct PanelCacheKey {
+        uint64_t tools_version;
+        std::size_t tab_count;
+        uint64_t theme_epoch;
+        bool operator==(const PanelCacheKey&) const = default;
+    };
     ftxui::Element tools_panel_cache_;
-    uint64_t tools_panel_cache_version_ = 0;
+    PanelCacheKey tools_panel_cache_key_{};
     bool tools_panel_cache_valid_ = false;
 };
 

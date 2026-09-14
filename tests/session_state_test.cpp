@@ -467,17 +467,18 @@ TEST_CASE("tool tracking: start -> deltas -> finish, keyed by tool_use_id", "[se
     auto before_finish = state.TakeSnapshot();
     REQUIRE(before_finish.tools.size() == 1);
     // TakeSnapshot (the DEEP, focused-tab snapshot) deliberately does NOT
-    // carry buffered_output: its only tool consumer (ChatView::RenderLiveToolRow)
-    // reads name/started/is_error/summary, never the buffer -- the
-    // running-tools panel is what renders that, off TakeLightSnapshot(true)
-    // below (track B1: copying up to 64 KiB per tool on every deep snapshot
-    // for a consumer that ignores it was pure waste).
-    REQUIRE(before_finish.tools[0].buffered_output.empty());
+    // carry the tool output: its only tool consumer (ChatView::
+    // RenderLiveToolRow) reads name/started/is_error/summary, never the
+    // buffer -- the running-tools panel is what renders that, off
+    // TakeLightSnapshot(true) below (track B1: copying up to 64 KiB per tool
+    // on every deep snapshot for a consumer that ignores it was pure waste).
+    REQUIRE(before_finish.tools[0].buffered_output == nullptr);
     REQUIRE(before_finish.tools[0].started);
 
     auto light = state.TakeLightSnapshot(/*include_tool_output=*/true);
     REQUIRE(light.tools.size() == 1);
-    REQUIRE(light.tools[0].buffered_output == "line one\nline two\n");
+    REQUIRE(light.tools[0].buffered_output != nullptr);
+    REQUIRE(*light.tools[0].buffered_output == "line one\nline two\n");
 
     state.OnToolFinished("t-1", FinishTool(/*is_error=*/false));
     auto after_finish = state.TakeSnapshot();
@@ -487,8 +488,10 @@ TEST_CASE("tool tracking: start -> deltas -> finish, keyed by tool_use_id", "[se
     // A delta arriving after finish for the same id is dropped -- it is no
     // longer the active execution.
     state.OnToolOutputDelta("t-1", "late, must not append");
-    REQUIRE(state.TakeLightSnapshot(/*include_tool_output=*/true).tools[0].buffered_output ==
-           "line one\nline two\n");
+    REQUIRE(state.TakeLightSnapshot(/*include_tool_output=*/true).tools[0].buffered_output !=
+            nullptr);
+    REQUIRE(*state.TakeLightSnapshot(/*include_tool_output=*/true).tools[0].buffered_output ==
+            "line one\nline two\n");
 }
 
 // THE BUG this guards against: the server measured a call's wall time
@@ -1434,12 +1437,12 @@ TEST_CASE("INVARIANT: tool output deltas stay bounded, with marker and tail pres
     for (int i = 0; i < 16; ++i) {
         state.OnToolOutputDelta("t1", chunk);   // 16 KB total vs a 4 KB cap
     }
-    // The running-tools panel is the only renderer of buffered_output, and it
+    // The running-tools panel is the only renderer of the tool output, and it
     // reads the LIGHT snapshot (include_tool_output=true) -- see the "tool
     // tracking" test case above for why TakeSnapshot() no longer carries it.
     auto snap = state.TakeLightSnapshot(/*include_tool_output=*/true);
     REQUIRE(snap.tools.size() == 1);
-    const auto& out = snap.tools[0].buffered_output;
+    const std::string& out = *snap.tools[0].buffered_output;
     CHECK(out.size() <= 4096 + 256);   // bounded (small slack for the marker)
     CHECK(out.find("live output trimmed") != std::string::npos);   // marker present
     CHECK(out.find("xxx") != std::string::npos);   // head AND tail content preserved
@@ -1464,7 +1467,7 @@ TEST_CASE("a tool-output buffer trim at the cap boundary never splits a UTF-8 co
     }
     const auto snap = state.TakeLightSnapshot(/*include_tool_output=*/true);
     REQUIRE(snap.tools.size() == 1);
-    CHECK(IsValidUtf8(snap.tools[0].buffered_output));
+    CHECK(IsValidUtf8(*snap.tools[0].buffered_output));
 }
 
 // {tokens} liveness: usage events arrive at message start (input half) and

@@ -16,8 +16,8 @@ namespace {
 constexpr std::size_t kSessionColumn = 16;
 
 // The starting BYTE OFFSET of the last `max_lines` lines of `text` -- an
-// offset into the ORIGINAL string, not a copy of the tail. This function ran
-// over every tool's WHOLE buffered_output (up to tool_output_buffer_bytes_,
+// offset into the ORIGINAL buffer, not a copy of the tail. This function ran
+// over every tool's WHOLE buffered output (up to tool_output_buffer_bytes_,
 // 64 KiB default) on every render regardless of whether the panel was even
 // showing new output, first via this backward scan and then via a
 // text.substr() COPY of everything past it, which the caller then fed to an
@@ -25,7 +25,7 @@ constexpr std::size_t kSessionColumn = 16;
 // allocations of the tail's own size for content that render only ever reads
 // once. Returning an offset lets the caller walk the original buffer with a
 // string_view instead.
-std::size_t TailStart(const std::string& text, int max_lines) {
+std::size_t TailStart(std::string_view text, int max_lines) {
     if (max_lines <= 0) return text.size();
     int newlines = 0;
     for (std::size_t i = text.size(); i > 0; --i) {
@@ -98,14 +98,23 @@ ftxui::Element RenderToolsPanel(const std::vector<AppState::TabSnapshot>& tabs,
                 line.push_back(text("  " + FormatDuration(tool.duration.count())) | Muted(theme));
             }
             rows.push_back(hbox(std::move(line)));
-            const std::size_t tail_start = TailStart(tool.buffered_output, stdout_buffer_lines);
-            if (tail_start < tool.buffered_output.size()) {
+            // The published view (state.hpp): a shared, immutable string the
+            // snapshot carries by pointer -- SessionState republishes it only
+            // when the working buffer changed, so this render reads today's
+            // output without any copy having been made for it. Null = the
+            // snapshot carried no output (shouldn't happen for this caller,
+            // which always passes include_tool_output=true) -- render no tail.
+            const std::string_view buffered(
+                tool.buffered_output ? std::string_view(*tool.buffered_output)
+                                     : std::string_view{});
+            const std::size_t tail_start = TailStart(buffered, stdout_buffer_lines);
+            if (tail_start < buffered.size()) {
                 // Indent the live stdout under its row. A view over the
                 // ORIGINAL buffer (see TailStart) -- no substr copy of the
                 // tail, no istringstream; one std::string allocation per
                 // OUTPUT row, which is unavoidable (ftxui::text() needs one),
                 // not per byte of the buffer scanned to find them.
-                std::string_view tail(tool.buffered_output);
+                std::string_view tail(buffered);
                 tail.remove_prefix(tail_start);
                 // `pos < tail.size()`, NOT `<=`: matching std::getline's own
                 // behavior (which the istringstream version this replaces

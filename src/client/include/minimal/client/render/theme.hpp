@@ -50,6 +50,13 @@ public:
     // The depth the roles were downsampled to, for colors that arrive from
     // outside the theme (agent preset colors) and must be degraded the same way.
     ColorDepth depth() const { return depth_; }
+    // Process-wide generation counter: every Load/Parse stamps a fresh value.
+    // RunTui's /theme path swaps the LIVE Theme object's contents in place
+    // (`theme = std::move(loaded)`), so consumers holding a reference see a
+    // changed palette with no pointer change -- a per-frame cache keyed only
+    // on state would keep stale colors until an unrelated rebuild. An epoch
+    // in the cache key (frame_renderer's tools panel) detects the swap.
+    uint64_t epoch() const { return epoch_; }
 
 private:
     std::string name_;
@@ -68,6 +75,10 @@ private:
         bool operator()(std::string_view a, std::string_view b) const { return a == b; }
     };
     std::unordered_map<std::string, ftxui::Color, TransparentHash, TransparentEqual> colors_;
+    // See epoch(). Stamped by Load/Parse from a process-wide counter; a
+    // default-constructed Theme is epoch 0 (no consumer caches anything
+    // against it before bootstrap builds the real one).
+    uint64_t epoch_ = 0;
 };
 
 // The focused-row style for pickers and option lists: row_focused on

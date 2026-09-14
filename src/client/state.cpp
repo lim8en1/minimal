@@ -46,13 +46,18 @@ SessionState::SessionState(std::string session_id, std::string name)
     : session_id_(std::move(session_id)), display_name_(std::move(name)) {}
 
 std::vector<ToolExecutionState> SessionState::CopyToolsLocked(bool include_output) const {
-    if (include_output) return tools_;   // bounded (R2); the tools panel renders these
-    // Field-by-field, NOT `tool; tool.buffered_output.clear()` -- that would
-    // copy the (up to 64 KiB) buffer first and clear it after, paying exactly
-    // the cost this exists to avoid. Every other field is cheap (small
-    // strings, a timestamp, two bools).
-    std::vector<ToolExecutionState> light;
-    light.reserve(tools_.size());
+    // Field-by-field, ALWAYS: the working buffer (buffered_output_working, up
+    // to 64 KiB per tool) must never leave SessionState. With include_output,
+    // the snapshot carries `buffered_output` -- a shared, immutable view
+    // republished (one copy) only when the working buffer changed since the
+    // last publish, so repeated include-output fetches between deltas (the
+    // panel-cache-miss case) cost a refcount bump per tool, not a buffer
+    // copy. Without it, the pointer stays null -- the deep snapshot's only
+    // tool consumer (ChatView::RenderLiveToolRow) never reads the buffer
+    // (the running-tools panel is what renders it, off TakeLightSnapshot(true)).
+    // Every other field is cheap (small strings, a timestamp, two bools).
+    std::vector<ToolExecutionState> out;
+    out.reserve(tools_.size());
     for (const auto& tool : tools_) {
         ToolExecutionState t;
         t.tool_use_id = tool.tool_use_id;
@@ -64,9 +69,17 @@ std::vector<ToolExecutionState> SessionState::CopyToolsLocked(bool include_outpu
         t.started = tool.started;
         t.is_error = tool.is_error;
         t.is_background = tool.is_background;
-        light.push_back(std::move(t));
+        if (include_output) {
+            if (tool.buffered_output == nullptr || tool.output_dirty) {
+                tool.buffered_output =
+                    std::make_shared<const std::string>(tool.buffered_output_working);
+                tool.output_dirty = false;
+            }
+            t.buffered_output = tool.buffered_output;
+        }
+        out.push_back(std::move(t));
     }
-    return light;
+    return out;
 }
 
 SessionState::Snapshot SessionState::TakeLightSnapshot(bool include_tool_output) {
@@ -168,6 +181,11 @@ void SessionState::OnSessionCreated(std::string name) {
 void SessionState::OnSessionMetadata(const v1::SessionMetadataEvent& metadata) {
     std::lock_guard lk(mtx_);
     if (!metadata.name().empty()) {
+        if (display_name_ != metadata.name()) {
+            // The tools panel shows each row's session name -- a rename must
+            // invalidate its cache too (see ToolsVersion).
+            tools_version_.fetch_add(1, std::memory_order_release);
+        }
         display_name_ = metadata.name();
     }
     // The E5 metadata fields: the status bar's wire source. Empty/0 leaves the
@@ -535,11 +553,18 @@ void SessionState::OnTurnCompleted(const v1::TurnCompletedEvent& evt) {
     // row out from under the still-running task. A finished background row
     // (its own terminal event already closed it) is swept here exactly like
     // any other finished row -- only a LIVE one survives.
-    tools_.erase(std::remove_if(tools_.begin(), tools_.end(),
-                                [](const ToolExecutionState& t) {
-                                    return !(t.is_background && t.started);
-                                }),
-                tools_.end());
+    {
+        const std::size_t before = tools_.size();
+        tools_.erase(std::remove_if(tools_.begin(), tools_.end(),
+                                    [](const ToolExecutionState& t) {
+                                        return !(t.is_background && t.started);
+                                    }),
+                    tools_.end());
+        // Rows swept the panel showed (see ToolsVersion).
+        if (tools_.size() != before) {
+            tools_version_.fetch_add(1, std::memory_order_release);
+        }
+    }
     // A CANCELLED turn (or one that died at a prompt) ends WITHOUT a message
     // stop: the server denied the parked prompt on our behalf
     // (Session::Cancel's pending.CancelAll), so the answer never traveled
@@ -900,11 +925,18 @@ void SessionState::OnResyncRequired(const std::string& reason) {
     // exception MaybeGoIdleLocked and OnTurnCompleted both already draw:
     // their terminal BackgroundTaskEvent is a real, separate signal this
     // resync does not touch.
-    tools_.erase(std::remove_if(tools_.begin(), tools_.end(),
-                                [](const ToolExecutionState& t) {
-                                    return t.started && !t.is_background;
-                                }),
-                tools_.end());
+    {
+        const std::size_t before = tools_.size();
+        tools_.erase(std::remove_if(tools_.begin(), tools_.end(),
+                                    [](const ToolExecutionState& t) {
+                                        return t.started && !t.is_background;
+                                    }),
+                    tools_.end());
+        // Foreground rows swept the panel showed (see ToolsVersion).
+        if (tools_.size() != before) {
+            tools_version_.fetch_add(1, std::memory_order_release);
+        }
+    }
     // Nothing else re-derives state_ after a resync otherwise -- a resync
     // that arrived while the tab looked idle-but-actually-Working (or vice
     // versa) left it stuck reading that way until some unrelated event
@@ -1095,6 +1127,8 @@ void SessionState::OnToolStarted(const v1::ToolExecutionEvent& evt) {
         (state_ == SessionStateKind::Error && starting_new_turn)) {
         state_ = SessionStateKind::Working;
     }
+    // New row the panel must show (see ToolsVersion).
+    tools_version_.fetch_add(1, std::memory_order_release);
 }
 
 void SessionState::OnToolOutputDelta(const std::string& tool_use_id, const std::string& chunk) {
@@ -1102,7 +1136,7 @@ void SessionState::OnToolOutputDelta(const std::string& tool_use_id, const std::
     std::lock_guard lk(mtx_);
     for (auto it = tools_.rbegin(); it != tools_.rend(); ++it) {
         if (it->tool_use_id == tool_use_id && it->started) {   // the active execution, if any
-            it->buffered_output.append(chunk);
+            it->buffered_output_working.append(chunk);
             // Cap AT APPEND (track R2): the "ring buffer" the header promised.
             // Render-time truncation alone let a chatty tool (a build, a
             // `tail -f`) grow client memory for the whole turn. Head ¼ +
@@ -1121,7 +1155,8 @@ void SessionState::OnToolOutputDelta(const std::string& tool_use_id, const std::
             // marker+tail from three fresh strings) needs a shape change to
             // ToolExecutionState and is left as follow-up rather than risked
             // here against a passing invariant test.
-            if (it->buffered_output.size() > static_cast<std::size_t>(tool_output_buffer_bytes_)) {
+            if (it->buffered_output_working.size() >
+                static_cast<std::size_t>(tool_output_buffer_bytes_)) {
                 static const std::string kMarker =
                     "\n··· live output trimmed -- the full result is in the transcript ···\n";
                 const std::size_t head_bytes = static_cast<std::size_t>(tool_output_buffer_bytes_) / 4;
@@ -1142,19 +1177,24 @@ void SessionState::OnToolOutputDelta(const std::string& tool_use_id, const std::
                 if (head_bytes + kMarker.size() >= static_cast<std::size_t>(tool_output_buffer_bytes_)) {
                     const std::size_t keep = static_cast<std::size_t>(tool_output_buffer_bytes_);
                     const std::size_t start =
-                        it->buffered_output.size() > keep ? it->buffered_output.size() - keep : 0;
-                    it->buffered_output = it->buffered_output.substr(
-                        Utf8CeilToBoundary(it->buffered_output, start));
+                        it->buffered_output_working.size() > keep
+                            ? it->buffered_output_working.size() - keep
+                            : 0;
+                    it->buffered_output_working = it->buffered_output_working.substr(
+                        Utf8CeilToBoundary(it->buffered_output_working, start));
                 } else {
                     const std::size_t tail_budget = static_cast<std::size_t>(tool_output_buffer_bytes_) -
                                                     head_bytes - kMarker.size();
                     const std::size_t tail_start = Utf8CeilToBoundary(
-                        it->buffered_output, it->buffered_output.size() - tail_budget);
-                    it->buffered_output =
-                        TruncateUtf8(it->buffered_output, head_bytes) + kMarker +
-                        it->buffered_output.substr(tail_start);
+                        it->buffered_output_working, it->buffered_output_working.size() - tail_budget);
+                    it->buffered_output_working =
+                        TruncateUtf8(it->buffered_output_working, head_bytes) + kMarker +
+                        it->buffered_output_working.substr(tail_start);
                 }
             }
+            // The panel's live-tail rows changed (see ToolsVersion).
+            it->output_dirty = true;
+            tools_version_.fetch_add(1, std::memory_order_release);
             return;
         }
     }
@@ -1187,6 +1227,8 @@ void SessionState::OnToolFinished(const std::string& tool_use_id, const v1::Tool
                 // row retires nothing (the live row outlives the ack).
                 ++transcript_version_;
             }
+            // Row status/duration the panel shows changed (see ToolsVersion).
+            tools_version_.fetch_add(1, std::memory_order_release);
             return;
         }
     }
@@ -1213,6 +1255,8 @@ void SessionState::OnBackgroundTask(const v1::BackgroundTaskEvent& evt) {
         tool.started = !is_terminal;
         if (is_terminal) tool.is_error = is_error;
         if (!evt.command().empty()) tool.summary = evt.command();
+        // Promoted/updated row the panel shows (see ToolsVersion).
+        tools_version_.fetch_add(1, std::memory_order_release);
         return;
     }
 
@@ -1226,6 +1270,8 @@ void SessionState::OnBackgroundTask(const v1::BackgroundTaskEvent& evt) {
     tool.started = !is_terminal;
     tool.is_error = is_terminal && is_error;
     tools_.push_back(std::move(tool));
+    // Reopened row the panel must show (see ToolsVersion).
+    tools_version_.fetch_add(1, std::memory_order_release);
     // Same C4 marker OnToolStarted pushes -- a reopened background row (its
     // own STARTED never reached this client, or the row already finished
     // and was swept) is still live content for whatever turn is current now.
@@ -3072,6 +3118,15 @@ void AppState::RequestScrollback(const std::string& session_id, bool newest) {
         if (!newest) state->EndOlderFetch();
         BumpUiVersion();
     }, /*must_run=*/true);
+}
+
+uint64_t AppState::ToolsVersion() const {
+    std::lock_guard lk(mtx_);
+    uint64_t sum = 0;
+    for (const auto& tab : tabs_) {
+        sum += tab.info.state->ToolsVersion();
+    }
+    return sum;
 }
 
 std::vector<AppState::TabSnapshot> AppState::GetAllTabs(bool include_tool_output) const {

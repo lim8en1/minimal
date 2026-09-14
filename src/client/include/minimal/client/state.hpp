@@ -55,7 +55,28 @@ struct ToolExecutionState {
 
     // Accumulated chunks arrive here (lossy ring buffer). The final authoritative
     // record is the persisted ToolResultBlock, but this is what the panel shows.
-    std::string buffered_output;
+    //
+    // SESSIONSTATE-INTERNAL working buffer: appended in place by
+    // OnToolOutputDelta (O(delta)), never copied out to a snapshot. The
+    // published view snapshots carry is `buffered_output` below -- rebuilt
+    // lazily (copy-on-publish) only when this changed since the last publish.
+    std::string buffered_output_working;
+
+    // The published live-stdout view: WHAT SNAPSHOTS CARRY. Null unless the
+    // snapshot was taken with include_tool_output (only the running-tools
+    // panel renders it). Shared, immutable -- CopyToolsLocked(true) hands
+    // every consumer the SAME pointer until the buffer next changes, so a
+    // rebuild of the panel (or any other include-output fetch) no longer
+    // deep-copies up to tool_output_buffer_bytes_ (64 KiB default) per tool
+    // per fetch; it pays one refcount bump.
+    // mutable: publishing (rebuilding this pointer from the working buffer)
+    // happens inside CopyToolsLocked -- const, called from TakeLightSnapshot
+    // -- the same cache-write-on-read rule as output_dirty below.
+    mutable std::shared_ptr<const std::string> buffered_output;
+    // Copy-on-publish stamp: set by every buffered_output_working mutation,
+    // cleared when the pointer above is (re)published. mutable: publishing
+    // happens inside CopyToolsLocked (const, called from TakeLightSnapshot).
+    mutable bool output_dirty = true;
 
     bool started = false;      // true once we've seen a start event for this tool
     bool is_error = false;     // set by the finished ToolExecutionEvent (is_error)
@@ -403,15 +424,14 @@ public:
     // text, no pending-modal data. GetAllTabs() calls this per tab per frame;
     // the deep TakeSnapshot() runs for the FOCUSED tab only.
     //
-    // `include_tool_output`: each ToolExecutionState::buffered_output can hold
-    // up to tool_output_buffer_bytes_ (64 KiB default) of live stdout, and
-    // GetAllTabs() is called on nearly every event (the tab bar needs the
-    // list every render; the maintenance pass needs it every event just to
-    // find which tab is focused) -- copying every tool's full buffer on every
-    // one of those calls was pure waste when the caller only needed
-    // name/state/summary, which is the common case. false (the default)
-    // leaves buffered_output empty; only a caller that is actually about to
-    // render the running-tools panel's live tail passes true.
+    // `include_tool_output`: the running-tools panel's live stdout tail is
+    // the only consumer of ToolExecutionState::buffered_output (up to
+    // tool_output_buffer_bytes_ (64 KiB default) of live stdout per tool).
+    // Since the buffer became a copy-on-publish shared pointer (see the
+    // struct), a fetch is cheap either way -- but false (the default) still
+    // carries NO view (null), keeping the "only a caller that is actually
+    // about to render the panel's live tail publishes output" rule explicit;
+    // true hands out the current published view, one refcount bump per tool.
     Snapshot TakeLightSnapshot(bool include_tool_output = false);
 
     // The session's id ("" until SetSessionId) without a full snapshot --
@@ -514,6 +534,21 @@ public:
     // pump uses this to throttle its forced-repaint cadence to whatever the
     // displayed number can actually show instead of a flat 20Hz (app.cpp).
     std::optional<std::chrono::milliseconds> FastestRunningToolElapsedMs() const;
+
+    // Monotonic stamp of "what the running-tools panel renders changed":
+    // bumped by every tool-row mutation (OnToolStarted/OnToolOutputDelta/
+    // OnToolFinished/OnBackgroundTask, the turn-completed and resync sweeps,
+    // and a display rename -- the panel shows each row's session name).
+    // Deliberately NOT bumped by text/thinking deltas or other wire events
+    // the panel does not render, which is exactly what lets the panel's
+    // render cache skip its rebuild-and-deep-copy on those (frame_renderer).
+    // Atomic so the render thread can poll it without taking mtx_ (the
+    // bumps themselves run under mtx_ on the reader threads); a raced read
+    // is harmless -- the key only gates a cache, and a missed bump means
+    // the next bump's rebuild picks the change up.
+    uint64_t ToolsVersion() const {
+        return tools_version_.load(std::memory_order_acquire);
+    }
 
     // The user asked to interrupt the in-flight turn. A no-op unless the tab
     // is actually mid-turn (Thinking / Working / Waiting -- Waiting counts:
@@ -710,14 +745,15 @@ private:
     // mtx_ held by caller.
     void TrimLiveSegmentsLocked();
 
-    // Shared by TakeSnapshot/TakeLightSnapshot(include_tool_output=false):
-    // `buffered_output` can hold up to tool_output_buffer_bytes_ (64 KiB
-    // default) per tool, and ChatView::RenderLiveToolRow -- the deep snapshot's
-    // only tool consumer -- reads name/started/is_error/summary, never the
-    // buffer (the running-tools panel is what renders it, off the LIGHT
-    // snapshot with include_tool_output=true). TakeSnapshot used to copy the
-    // buffer anyway on every focused-tab deep snapshot; this is the one place
-    // that decision is made now. mtx_ held by caller.
+    // Shared by TakeSnapshot/TakeLightSnapshot: the single place a tool row
+    // is copied out to a snapshot. The working stdout buffer (up to
+    // tool_output_buffer_bytes_ (64 KiB default) per tool) never leaves
+    // SessionState; include_output=true publishes the copy-on-write view
+    // (see ToolExecutionState::buffered_output), false carries no view.
+    // ChatView::RenderLiveToolRow -- the deep snapshot's only tool consumer
+    // -- reads name/started/is_error/summary, never the buffer (the
+    // running-tools panel is what renders it, off the LIGHT snapshot with
+    // include_tool_output=true). mtx_ held by caller.
     std::vector<ToolExecutionState> CopyToolsLocked(bool include_output) const;
 
     mutable std::mutex mtx_;
@@ -819,6 +855,9 @@ private:
 
     // Tool executions (parallel dispatch; keyed by tool_use_id, not position)
     std::vector<ToolExecutionState> tools_;
+    // See ToolsVersion(). atomic: the render thread polls it lock-free while
+    // the reader threads bump it under mtx_.
+    std::atomic<uint64_t> tools_version_{0};
 
     int64_t input_tokens_ = 0;   // last turn occupancy
     int64_t output_tokens_ = 0;
@@ -1225,6 +1264,16 @@ public:
     uint64_t UiVersion() const {
         return ui_version_.load(std::memory_order_acquire);
     }
+
+    // Sum of every tab's SessionState::ToolsVersion -- "did anything the
+    // running-tools panel renders change on ANY tab". The panel's render
+    // cache keys on this (plus the tab count and the theme epoch, see
+    // frame_renderer.hpp) instead of UiVersion, so text/thinking deltas --
+    // which bump UiVersion once per wire event but change nothing the panel
+    // shows -- no longer trigger the panel's rebuild-and-fetch. Locks mtx_
+    // (the tabs vector), like GetAllTabs next to which the caller already
+    // runs; each per-tab read is a lock-free atomic load.
+    uint64_t ToolsVersion() const;
 
     // Joins the async RPC worker (rpc_queue.hpp; RequestScrollback and
     // friends). Call once, after the render pump stops posting frames and
